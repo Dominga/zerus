@@ -1239,6 +1239,39 @@ fn all_items(team: &Team) -> Vec<Item> {
             });
         }
     }
+    // Task #275: a sandboxed member's queued call the worker refused or that
+    // failed; the member is told as a team message and the lead reads why.
+    if active || finished {
+        let cutoff = crate::state::now() - 24.0 * 3600.0;
+        let failures: Vec<&Value> = team
+            .outbox_failures
+            .iter()
+            .filter(|failure| failure["at"].as_f64().unwrap_or(0.0) >= cutoff)
+            .collect();
+        if !failures.is_empty() {
+            let since = failures.iter().filter_map(|failure| failure["at"].as_f64()).fold(f64::INFINITY, f64::min);
+            let named: Vec<String> = failures
+                .iter()
+                .map(|failure| {
+                    let member = failure["member"].as_str().unwrap_or_default();
+                    let op = failure["op"].as_str().unwrap_or("call");
+                    let error = failure["error"].as_str().unwrap_or("no reason recorded");
+                    format!("{member}'s queued {op}: {error}")
+                })
+                .collect();
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "refused_queued_call",
+                key: format!("refused_queued_call:{since:.0}"),
+                task: None,
+                member: "Zerus".into(),
+                since,
+                summary: summary(&format!("A queued call was refused: {}", named.join("; "))),
+                command: "no action: the member was told at its next safe point; hgs team status --json shows the team".into(),
+                detail: named.join("; "),
+            });
+        }
+    }
     // Task #228: the scratch teams a QA member created for this team's tasks.
     // The lead reads each creation and stop here; a team whose sessions could
     // not be stopped is listed for the owner.

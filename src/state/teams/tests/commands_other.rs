@@ -2090,3 +2090,32 @@ fn look_reads_the_members_build_and_tool_call_from_the_live_listing() {
     assert!(!hooks.building && hooks.tool.is_empty());
     assert_eq!(hooks.limit, super::super::ops::stuck_minutes(&team) * 60.0);
 }
+/// Task #275: a queued call's answer names the request id, where its result
+/// stays and that a refusal or failure reaches the member as a team message.
+#[test]
+fn a_queued_call_says_where_its_result_arrives() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let folder = dir.path().join("work");
+        std::fs::create_dir_all(&folder).unwrap();
+        let (mut team, _, _) = review_team();
+        team.folder = folder.to_string_lossy().into_owned();
+        team.status = TeamStatus::Running;
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().session = Some(SessionRef {
+            name: "codex/x/dev".into(),
+            run_id: "r1".into(),
+            conversation_id: "dev-conversation".into(),
+            ..Default::default()
+        });
+        Store::open(true).unwrap().create("66666666-6666-4666-8666-666666666666", &json!({}), team.clone(), vec![]).unwrap();
+        set_test_caller_identities(Some((Some("dev-conversation".into()), None, None)));
+        let request_id = "77777777-7777-4777-8777-777777777777";
+        let queued = queue_write("ask", &json!({"request_id":request_id,"team":team.id,"text":"How?","attempt":""}), false).unwrap();
+        set_test_caller_identities(None);
+        assert_eq!(queued["status"], json!("queued"));
+        assert_eq!(queued["request_id"], json!(request_id));
+        assert!(queued["result"].as_str().unwrap().ends_with(&format!("{request_id}.result.json")), "{queued}");
+        assert!(queued["delivery"].as_str().unwrap().contains("team message"), "{queued}");
+        assert!(queued["note"].as_str().unwrap().contains("team message"), "{queued}");
+    });
+}

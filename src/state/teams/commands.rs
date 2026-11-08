@@ -4166,20 +4166,29 @@ fn queue_write(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         Some(_) => super::outbox::request_path(&folder, &request_id),
         None => super::outbox::push(&folder, &request)?,
     };
+    let result = super::outbox::result_path(&folder, &request_id);
+    // Task #275: the caller is told where the outcome is and that a refusal or
+    // failure also comes as a team message, not only to a file nobody reads.
+    let delivery = format!(
+        "The team worker applies it; its result stays at {} and a refusal or failure also reaches you as a team message at your next safe point (urgent for a question or a report).",
+        result.display()
+    );
     let queued = json!({
-        "status":"queued", "request_id":request_id, "path":path.to_string_lossy(),
+        "status":"queued", "request_id":request_id, "path":path.to_string_lossy(), "result":result.to_string_lossy(),
+        "delivery": delivery,
         "note": if existing.is_some() {
-            "This request is already queued; ask again with the same request_id (or --wait) to read the outcome."
+            format!("This request is already queued. {delivery}")
         } else {
-            "The sandbox blocks the team store: the request waits in the member's folder and the team worker applies it. Run it again with --wait to read the outcome."
+            format!("The sandbox blocks the team store: the request waits in the member's folder. {delivery}")
         }
     });
     if !wait {
         return Ok(queued);
     }
     Ok(super::outbox::wait(&folder, &request_id, 30.0).unwrap_or_else(|| json!({
-        "status":"queued", "request_id":request_id, "path":path.to_string_lossy(),
-        "note":"The team worker has not applied it in 30 s; it stays queued in the member's folder."
+        "status":"queued", "request_id":request_id, "path":path.to_string_lossy(), "result":result.to_string_lossy(),
+        "delivery": delivery,
+        "note":"The team worker has not applied it in 30 s; it stays queued in the member's folder and the worker will apply it. Its result stays at the path in `result`, and a refusal or failure also reaches you as a team message."
     })))
 }
 

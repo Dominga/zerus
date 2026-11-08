@@ -270,7 +270,7 @@ async function dismiss(item: TeamWaitingItem) {
 }
 
 /** One row: kind, title, team and age; Open team; the answer in place. */
-function Row(props: { item: TeamWaitingItem; compact?: boolean }) {
+function Row(props: { item: TeamWaitingItem; compact?: boolean; newest?: boolean }) {
   const [open, setOpen] = createSignal(false);
   const item = () => props.item;
   const changes = () => {
@@ -282,7 +282,8 @@ function Row(props: { item: TeamWaitingItem; compact?: boolean }) {
     if (outcome.outcome === "done") answeredWaiting(item());
   };
   return (
-    <div class="team-waiting-row" classList={{ compact: props.compact, open: open() }} data-item={item().id} data-kind={item().kind}
+    <div class="team-waiting-row" classList={{ compact: props.compact, newest: props.newest, open: open() }} data-item={item().id} data-kind={item().kind}
+      data-banner-item={props.newest ? "" : undefined}
       onClick={() => { if (!open()) openTeam(item()); }}>
       <div class="team-waiting-head">
         <span class="team-waiting-icon"><Icon name={waitingKindIcon(item().kind)} size={14} /></span>
@@ -421,28 +422,34 @@ export function WaitingPage() {
   );
 }
 
-/** The Team tab's banner: one item is one line; several fold into a count that opens to the newest rows. */
+/**
+ * Task 384 (owner, 2026-11-08): the strip above Activity keeps its count on one
+ * line and shows the newest item as a two-line row with its kind and its own
+ * answer, so a card's Allow/Deny is reachable without Show all. The row is the
+ * newest non-digest item; the lead-changes digest has its own row in the list.
+ */
 export function WaitingBanner() {
   onCleanup(showWaiting());
   const [open, setOpen] = createSignal(false);
   const items = () => waiting()?.items ?? [];
   createEffect(() => announce(items(), !waiting()?.more));
+  const newest = () => bannerHeadItem(items()) ?? items()[0];
+  const rest = () => items().filter((item) => item.id !== newest()?.id).slice(0, BANNER_ROWS - 1);
   return (
     <Show when={items().length > 0}>
       <div class="team-waiting-banner" role="region" aria-label={tr("Waiting for you")}>
-        <Show when={items().length > 1} fallback={<Row item={items()[0]} compact />}>
-          <div class="team-waiting-banner-head">
-            <Icon name="bell" size={14} />
-            <b>{tr("%1 wait for you", items().length)}</b>
-            {/* Task 304 (hgs #286): the lead-changes digest has its own row; the header does not repeat it. */}
-            <span class="dim ell">{bannerHeadItem(items())?.title ?? ""}</span>
-            <span class="grow" />
-            <button class="btn small ghost" onClick={() => setOpen(!open())}>{open() ? tr("Hide") : tr("Show all")}</button>
-          </div>
-          <Show when={open()}>
-            <For each={items().slice(0, BANNER_ROWS)}>{(item) => <Row item={item} compact />}</For>
-            <button class="btn small ghost" onClick={() => setPage("waiting")}>{tr("Open the waiting list (%1)", waiting()?.total ?? items().length)}</button>
+        <div class="team-waiting-banner-head">
+          <Icon name="bell" size={14} />
+          <b data-banner-count>{tr("%1 wait for you", items().length)}</b>
+          <span class="grow" />
+          <Show when={items().length > 1}>
+            <button class="btn small ghost" data-banner-all onClick={() => setOpen(!open())}>{open() ? tr("Hide") : tr("Show all")}</button>
           </Show>
+        </div>
+        <Show when={newest()}>{(item) => <Row item={item()} compact newest />}</Show>
+        <Show when={open()}>
+          <For each={rest()}>{(item) => <Row item={item} compact />}</For>
+          <button class="btn small ghost" onClick={() => setPage("waiting")}>{tr("Open the waiting list (%1)", waiting()?.total ?? items().length)}</button>
         </Show>
       </div>
     </Show>

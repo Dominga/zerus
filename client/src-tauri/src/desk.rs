@@ -204,7 +204,7 @@ pub struct DeskState {
     _attention_owner: attention_barrier::Owner,
     inbox: Mutex<Inbox>,
     /// Zerus is the active app: the tracker's foreground test.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     focused: Arc<AtomicBool>,
 }
 
@@ -360,7 +360,7 @@ pub fn start(app: &AppHandle, pump: &crate::pump::Pump, attention: Option<LoadAt
         sender: Mutex::new(sender),
         _attention_owner: owner,
         inbox: Mutex::new(Inbox::default()),
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         focused: Arc::clone(&focused),
     });
     let handle = app.clone();
@@ -377,8 +377,9 @@ pub fn sender(app: &AppHandle) -> Option<InputSender> {
 }
 
 /// Whether Zerus is the active app (`Qt::ApplicationActive`): an active
-/// Zerus consumes attention edges without banners.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+/// Zerus consumes attention edges without banners. Windows reports it from
+/// `active_app` (zerus-5wmh.13.14.1).
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub fn set_focused(app: &AppHandle, focused: bool) {
     if let Some(state) = app.try_state::<DeskState>() {
         state.focused.store(focused, Ordering::Relaxed);

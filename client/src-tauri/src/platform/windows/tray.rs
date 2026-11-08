@@ -122,8 +122,16 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                         .unwrap_or_else(PoisonError::into_inner)
                         .current_notice
                         .clicked();
-                    if let (Some(token), Some(sender)) = (token, crate::desk::sender(&state.app)) {
-                        let _ = sender.send(DeskInput::Clicked(token));
+                    match crate::windows_shell::balloon_click(token) {
+                        crate::windows_shell::BalloonClick::Updates => {
+                            crate::updates::open_page(&state.app)
+                        }
+                        crate::windows_shell::BalloonClick::Desk(token) => {
+                            if let Some(sender) = crate::desk::sender(&state.app) {
+                                let _ = sender.send(DeskInput::Clicked(token));
+                            }
+                        }
+                        crate::windows_shell::BalloonClick::Nothing => {}
                     }
                 }
                 _ => {}
@@ -439,6 +447,7 @@ pub fn deliver(app: &AppHandle, cleared: Vec<String>, raised: Vec<Notice>) {
     });
 }
 pub fn stop(app: &AppHandle) {
+    crate::active_app::stop();
     if let Some(worker) = app.try_state::<super::worker::Worker>() {
         worker.stop();
     }

@@ -921,7 +921,10 @@ pub fn start(app: &AppHandle) -> Updates {
             crate::platform::macos_notify::deliver(&app, Vec::new(), vec![notice]);
             #[cfg(target_os = "linux")]
             crate::platform::linux_notify::deliver(&app, Vec::new(), vec![notice]);
-            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            // Qt's tray balloon (`TrayAgent.cpp:164-175`, zerus-5wmh.13.14.1).
+            #[cfg(windows)]
+            crate::platform::windows::tray::deliver(&app, Vec::new(), vec![notice]);
+            #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
             let _ = (&app, notice);
         })
     };

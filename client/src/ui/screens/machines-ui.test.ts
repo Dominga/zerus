@@ -18,8 +18,8 @@ describe("machines page", () => {
     expect(peerState(row({ enabled: false }), at("live"), 2)).toEqual({ tile: "disabled", line: "Disabled", live: false });
     expect(peerState(row(), at("live"), 1)).toEqual({ tile: "online", line: "Connected, 1 session", live: true });
     expect(peerState(row(), at("live"), 3).line).toBe("Connected, 3 sessions");
-    expect(peerState(row(), at("reconnecting", 2), 3)).toEqual({ tile: "connecting", line: "Reconnecting", live: false });
-    expect(peerState(row(), at("probing"), 0)).toEqual({ tile: "connecting", line: "Connecting", live: false });
+    expect(peerState(row(), at("reconnecting", 2), 3)).toEqual({ tile: "connecting", line: "Not connected", live: false });
+    expect(peerState(row(), at("probing"), 0)).toEqual({ tile: "connecting", line: "Not connected", live: false });
     expect(peerState(row(), at("unsupported"), 0)).toEqual({ tile: "offline", line: "Update hgs", live: false });
     expect(peerState(row(), undefined, 0)).toEqual({ tile: "offline", line: "Not connected", live: false });
   });
@@ -36,6 +36,8 @@ describe("machines page", () => {
       origin: "This device runs Zerus. Add a remote machine to manage its agents over SSH.",
     });
     expect(localState(undefined, "workstation").name).toBe("workstation");
+    expect(localState(machineMeta("workstation"), "", 67).line).toBe("This machine, 67 sessions");
+    expect(localState(machineMeta("workstation"), "", 1).line).toBe("This machine, 1 session");
     const host = { state: "running", pid: 4120, protocol: 1, conpty: "bundled", integrity: "Medium", windows_session: 1, error: null };
     const console = localState(machineMeta("win-lab", {}, { platform: "windows", local_sessions: false, local_host: host }), "");
     expect(console).toMatchObject({

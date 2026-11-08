@@ -19,6 +19,7 @@ import { machineAppearance } from "../../store/machineAppearance";
 import { setSetting, settings, settingsLoaded } from "../../store/settings";
 import { setMachineFilter, setPage } from "../../store/ui";
 import { machineSetupEditor as setup } from "../../store/machineSetup";
+import { MachinesPhones } from "./settings/Mobile";
 import { LOCAL, hostTestLine, localState, peerState, placeholders, summary, testEnabled, type LocalState, type PeerState } from "./machines-ui";
 
 // Machines (MachinesPage.cpp), ported from design/webui/src/screens/Machines.tsx:
@@ -241,7 +242,7 @@ export function MachinesScreen() {
     }
     return per;
   });
-  const local = () => localState(machineCards[""], view().local);
+  const local = () => localState(machineCards[""], view().local, sessions()[""] ?? 0);
   const peers = createMemo(() => view().machines.map((row) => ({ row, state: peerState(row, catalog.computers[row.alias], sessions()[row.alias] ?? 0) })));
   // Another screen asked for a machine (Overview's Machine settings).
   createEffect(() => {
@@ -270,6 +271,7 @@ export function MachinesScreen() {
         </header>
         <p class="muted mach-summary">{summary({ console: local().console, live: ["live", "polled"].includes(catalog.computers[""]?.status ?? "") }, peers().map((p) => p.state))}</p>
         <Show when={view().error}>{(error) => <Status kind="error"><Lines text={error()} /></Status>}</Show>
+        <section class="mach-phones"><MachinesPhones /></section>
         <div class="mach-body">
           <div class="mach-list" role="list" aria-label={tr("Machines")}>
             <div role="listitem"><MachineCard selection={LOCAL} alias={local().name} line={local().line} tile={connectionOf(catalog.computers[""]?.status).tile} meta={machineCards[""]} showMeta={!local().console} offline={false} /></div>

@@ -2505,5 +2505,7 @@
   "%1 s ago": "%1 с назад",
   "Permissions: %1 allowed, %2 denied, last: %3, %4": "Разрешения: разрешено %1, запрещено %2, последнее: %3, %4",
   "%1 answers, click to expand them": "Ответов: %1, нажмите, чтобы раскрыть",
-  "%1 answers, click to fold them": "Ответов: %1, нажмите, чтобы свернуть"
+  "%1 answers, click to fold them": "Ответов: %1, нажмите, чтобы свернуть",
+  "This machine, 1 session": "Этот компьютер, 1 сеанс",
+  "This machine, %1 sessions": "Этот компьютер, %1 сеансов"
 }

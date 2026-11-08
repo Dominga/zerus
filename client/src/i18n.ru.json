@@ -4864,6 +4864,8 @@
   "This is the last activity received. It updates again when the machine reconnects.": "Это последняя полученная активность. Она снова обновится, когда компьютер переподключится.",
   "This key opens context menus.": "Эта клавиша открывает контекстные меню.",
   "This machine": "Эта машина",
+  "This machine, %1 sessions": "Этот компьютер, %1 сеансов",
+  "This machine, 1 session": "Этот компьютер, 1 сеанс",
   "This message may already have been sent. Check Activity or Terminal before sending again.": "Возможно, это сообщение уже было отправлено. Проверьте активность или терминал перед повторной отправкой.",
   "This mobile connection changed": "это подключение телефона изменилось",
   "This mobile connection changed. Refresh status before continuing.": "Это подключение телефона изменилось. Обновите состояние, прежде чем продолжать.",

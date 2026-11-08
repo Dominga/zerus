@@ -19,7 +19,9 @@ export function peerState(row: MachineRow, computer: ComputerState | undefined, 
   if (!row.enabled) return { tile: "disabled", line: "Disabled", live: false };
   const c = connectionOf(computer?.status);
   if (c.fresh) return { tile: "online", line: sessions === 1 ? "Connected, 1 session" : tr("Connected, %1 sessions", sessions), live: true };
-  return { tile: c.tile, line: c.text === "Offline" ? tr("Not connected") : c.text, live: false };
+  // Qt's MachinesPage calls every unreachable peer Not connected, including one
+  // that is still reconnecting; an hgs too old to report is the one exception.
+  return { tile: c.tile, line: computer?.status === "unsupported" ? tr("Update hgs") : tr("Not connected"), live: false };
 }
 
 export interface LocalState {
@@ -54,14 +56,16 @@ export function hostTestLine(test: HostTest): string {
 }
 
 /** This computer (loadSelection, MachinesPage.cpp:328-336); `listedName` is `machine ls .local`. */
-export function localState(meta: MachineMeta | undefined, listedName: string): LocalState {
+export function localState(meta: MachineMeta | undefined, listedName: string, sessions = 0): LocalState {
   const console = meta?.local_sessions === false;
   const windows = meta?.platform === "windows";
   const canEnable = console && windows && !!meta?.local_host;
+  const machineLine = sessions === 0 ? tr("This machine")
+    : sessions === 1 ? tr("This machine, 1 session") : tr("This machine, %1 sessions", sessions);
   return {
     name: meta?.host || listedName || tr("This machine"),
     console,
-    line: console ? tr("This computer: control console") : tr("This machine"),
+    line: console ? tr("This computer: control console") : machineLine,
     origin: console
       ? tr("This computer is a control console: agents run on the remote machines you add here, over SSH.%1", canEnable ? " Enable local sessions to run them on this computer too." : "")
       : tr("This device runs Zerus. Add a remote machine to manage its agents over SSH."),

@@ -1046,6 +1046,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 asking: found.asking,
                 background: found.background,
                 building: found.building,
+                build_label: found.build_label.clone(),
                 tool: found.tool.clone(),
                 tool_since: if in_tool { found.tool_started } else { None },
                 last_event_at: found.last_event_at,
@@ -7956,7 +7957,7 @@ fn check_dsh_silent(store: &mut Store, team: &Team, task_id: u32, listing_last: 
 
 /// #761: the member's last report or turn end, the progress a DeepSeek listing
 /// does not show once the turn is over.
-fn last_progress(team: &Team, member: &str) -> Option<f64> {
+pub(crate) fn last_progress(team: &Team, member: &str) -> Option<f64> {
     team.tasks
         .iter()
         .flat_map(|task| task.attempts.iter())

@@ -2045,3 +2045,48 @@ fn a_note_and_a_message_with_a_secret_are_stored_redacted() {
         assert!(messages.iter().all(|message| !message.text.contains(concat!("AKIA", "ABCDEFGHIJKLWXYZ"))), "{messages:?}");
     });
 }
+
+/// Task #269: `hgs team look` reads the member's own build (and a tool call)
+/// from the live listing, so a quiet build is named, not called uncertain.
+#[test]
+fn look_reads_the_members_build_and_tool_call_from_the_live_listing() {
+    use crate::state::teams::dispatcher::{tool_stuck_minutes, Seen};
+    use crate::state::teams::look;
+    let mut team = Team::default();
+    team.members.push(Member { id: "qa".into(), role: "QA".into(), agent: "kimi".into(), ..Default::default() });
+    let qa = team.member("qa").unwrap();
+    let at = 10_000.0;
+    let seen = Seen {
+        live: true,
+        activity: "busy".into(),
+        phase: "working".into(),
+        building: true,
+        build_label: "cargo-build".into(),
+        last_event_at: Some(at - 1500.0),
+        ..Default::default()
+    };
+    let hooks = look_hooks(&team, qa, Some(&seen), at);
+    assert!(hooks.building);
+    assert_eq!(hooks.build_label, "cargo-build");
+    assert_eq!(hooks.quiet, 1500.0);
+    assert_eq!(hooks.limit, super::super::ops::stuck_minutes(&team) * 60.0);
+    assert_eq!(look::waiting(&hooks).as_deref(), Some("its own Zerus build (cargo-build)"));
+    // A tool call in flight gets the dispatcher's longer tool bound and is named.
+    let seen = Seen {
+        live: true,
+        activity: "busy".into(),
+        phase: "tool".into(),
+        tool: "Bash".into(),
+        tool_started: Some(at - 3000.0),
+        turn_started: Some(at - 4000.0),
+        last_event_at: Some(at - 3000.0),
+        ..Default::default()
+    };
+    let hooks = look_hooks(&team, qa, Some(&seen), at);
+    assert_eq!(hooks.limit, tool_stuck_minutes(&team) * 60.0);
+    assert_eq!(look::waiting(&hooks).as_deref(), Some("a tool call (Bash)"));
+    // Without a listing the stored fields and the usual bound are used.
+    let hooks = look_hooks(&team, qa, None, at);
+    assert!(!hooks.building && hooks.tool.is_empty());
+    assert_eq!(hooks.limit, super::super::ops::stuck_minutes(&team) * 60.0);
+}

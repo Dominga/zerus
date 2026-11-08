@@ -48,13 +48,15 @@ export interface Page {
   /** The reply whose rows are shown, also while Archive changed is shown. */
   shownRequest: number;
   total: number;
+  /** The host counted only up to a cap: the total shows as "N+" (zerus-5wmh.13.17 (4)). */
+  capped: boolean;
   /** The window's first row in the whole archive, -1 when not reported. */
   position: number;
   loaded: boolean;
   newer: boolean;
 }
 
-export const emptyPage = (): Page => ({ rows: [], cursor: "", previous: "", error: "", request: 0, shownRequest: 0, total: 0, position: -1, loaded: false, newer: false });
+export const emptyPage = (): Page => ({ rows: [], cursor: "", previous: "", error: "", request: 0, shownRequest: 0, total: 0, capped: false, position: -1, loaded: false, newer: false });
 
 export interface ArchiveStatus {
   summary: string;
@@ -100,6 +102,9 @@ export function tipText(caption: string, count: number, pages: Pages, hosts: rea
   return `${caption} / ${count} loaded${partial ? "; more can be loaded in Archive" : ""}`;
 }
 
+/** A computer's total: "N+" when the host counted only up to a cap (zerus-080n8). */
+const totalText = (p: Page) => `${p.total}${p.capped ? "+" : ""}`;
+
 /** ArchiveBrowser::updateStatus. `valid`: the range's from is below its until. */
 export function statusOf(pages: Pages, hosts: readonly PagingComputer[], valid: boolean): ArchiveStatus {
   let busy = false, more = false, newer = false, single = "", shown = 0;
@@ -111,13 +116,13 @@ export function statusOf(pages: Pages, hosts: readonly PagingComputer[], valid: 
     newer ||= !!p.previous;
     if (p.error) errors.push(`${machineOf(hosts, id)}: ${p.error}`);
     if (p.loaded) {
-      single = p.position >= 0 && p.rows.length ? `${p.position + 1}–${p.position + p.rows.length} of ${p.total}` : `${p.rows.length} shown of ${p.total}`;
+      single = p.position >= 0 && p.rows.length ? `${p.position + 1}–${p.position + p.rows.length} of ${totalText(p)}` : `${p.rows.length} shown of ${totalText(p)}`;
       windows.push(`${machineOf(hosts, id)}: ${single}`);
     }
     shown += p.rows.length;
   }
   const summary = busy ? tr("Loading archive…") : !hosts.length ? tr("Loaded sessions") : hosts.length === 1 && single ? single
-    : totalsKnownOf(pages, hosts) ? `${shown} loaded of ${totalOf(pages)}` : `${shown} loaded`;
+    : totalsKnownOf(pages, hosts) ? `${shown} loaded of ${totalOf(pages)}${Object.values(pages).some((p) => p.capped) ? "+" : ""}` : `${shown} loaded`;
   const errorHint = errors.join("\n");
   return {
     summary, hint: windows.join("\n"), error: errorHint.slice(0, ERROR_CHARS), errorHint,
@@ -306,7 +311,7 @@ export function createArchive(deps: ArchiveDeps) {
     batch(() => {
       put(computer, {
         ...p, request: 0, shownRequest: id, error: "", loaded: true, rows, cursor: page.next_cursor ?? "", previous: page.previous_cursor ?? "",
-        total: page.total ?? 0, position: typeof page.position === "number" ? page.position : -1,
+        total: page.total ?? 0, capped: page.total_capped === true, position: typeof page.position === "number" ? page.position : -1,
       });
       setWindowChanges((n) => n + 1);
     });

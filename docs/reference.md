@@ -898,14 +898,17 @@ printf '%s' '{"from":0,"until":253402300800,"limit":50,"cursor":"","query":""}' 
 `limit` is 1–50. All fields are optional. `query` is literal case-insensitive
 archive metadata search (names, IDs, provider, folder and title), at most 256
 characters; this is distinct from the desktop's global public-message search.
-The result contains `version:1`, `sessions`, `total`, `next_cursor`, the additive
-`previous_cursor` and zero-based `position`, and the echoed range/query. Pass either
-opaque cursor with the same range/query to move older or newer. Both directions
-use date/ID keysets; no offset scan or retained client cursor stack is required.
-Ordering uses `(archived_at, archive_id)` descending, avoiding offset duplicates
-when an earlier page changes. Newer completions appear after Refresh. Deleted or
-restored instances disappear; all actions still recheck exact native identity.
-Cursors belong to one computer/catalog and cannot be reused after rebuilding it.
+The result contains `version:1`, `sessions`, `total`, `next_cursor`, the
+additive `previous_cursor` and zero-based `position`, and the echoed
+range/query. A host that counts only up to a cap may add `total_capped: true`;
+the desktop then shows the total as "N+" and accepts a window that starts past
+it. Pass either opaque cursor with the same range/query to move older or newer.
+Both directions use date/ID keysets; no offset scan or retained client cursor
+stack is required. Ordering uses `(archived_at, archive_id)` descending,
+avoiding offset duplicates when an earlier page changes. Newer completions
+appear after Refresh. Deleted or restored instances disappear; all actions still
+recheck exact native identity. Cursors belong to one computer/catalog and cannot
+be reused after rebuilding it.
 
 A rebuildable `archive-catalog-v1.sqlite3` indexes metadata beside the durable
 state. Archive JSON files remain authoritative. Its first use indexes existing

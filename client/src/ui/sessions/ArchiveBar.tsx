@@ -9,7 +9,9 @@ import {
 
 // The Archive bar above the list under the Archive filter (Qt's
 // ArchiveBrowser): the date range and Refresh, the status with Newer and
-// Older, then the errors by machine.
+// Older, then the errors by machine. A search keeps the status and paging
+// (ArchiveBrowser.cpp:58): the archive rows among its results are the
+// query's current page, so Newer and Older reach every match (zerus-5wmh.13.17 (4)).
 
 const [open, setOpen] = createSignal(false);
 /**
@@ -18,7 +20,7 @@ const [open, setOpen] = createSignal(false);
  */
 export const datePanelOpen = open;
 
-export function ArchiveBar(props: { contentSearch?: boolean } = {}) {
+export function ArchiveBar() {
   const [width, setWidth] = createSignal(0);
   const observe = (el: HTMLElement) => {
     const ro = new ResizeObserver(() => setWidth(el.clientWidth));
@@ -36,7 +38,7 @@ export function ArchiveBar(props: { contentSearch?: boolean } = {}) {
           <Icon name="refresh" size={16} />
         </button>
       </div>
-      <Show when={!props.contentSearch}><div class="archive-bar">
+      <div class="archive-bar">
         <span class="archive-status ell" title={status().hint} aria-description={status().hint}>{status().summary}</span>
         <Show when={status().newer.visible}>
           <button class="btn small archive-nav" title={tr("Newer sessions")} aria-label={tr("Newer sessions")} disabled={!status().newer.enabled} onClick={() => archive.newer()}>
@@ -49,8 +51,7 @@ export function ArchiveBar(props: { contentSearch?: boolean } = {}) {
           </button>
         </Show>
       </div>
-      </Show>
-      <Show when={status().error && !props.contentSearch}>
+      <Show when={status().error}>
         <div class="archive-error" title={status().errorHint}>{status().error}</div>
       </Show>
     </div>

@@ -139,6 +139,9 @@
 /* Task #314 (F10): New team fills the window; only the form body scrolls and
    the footer stays visible instead of a second page scrollbar. */
 .newteam-page, .newteam-page.embedded { width: 100%; max-width: none; box-sizing: border-box; overflow: hidden; }
+/* Task #328 (F10b): the rail page ends above the 28 px status bar, so its
+   footer is fully visible. */
+.newteam-page:not(.embedded) { padding-bottom: 34px; }
 .newteam-page .nt { width: 100%; max-width: none; }
 .newteam-page .nt-split { width: 100%; min-width: 0; }
 .newteam-page .nt-body, .newteam-page .nt-lead-pane { min-width: 0; }

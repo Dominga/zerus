@@ -490,6 +490,8 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
      * selection collapses to the cursor and their references go there.
      */
     attachDropped: (paths: string[]) => exclusive((h) => { const at = selection().end; return port.attach(h, paths, at, at); }),
+    /** Pasted copied files (Qt's insertFromMimeData): attached in place of the selection, as a pasted image. */
+    attachPasted: (paths: string[]) => exclusive((h) => { const s = ordered(); return port.attach(h, paths, s.start, s.end); }),
     async pasteImage(blob: Blob) {
       await exclusive(async (h) => {
         let png: Uint8Array;

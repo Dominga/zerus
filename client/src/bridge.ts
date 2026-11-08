@@ -434,6 +434,9 @@ export async function copyVerbatim(text: string): Promise<void> {
   await navigator.clipboard.writeText(text);
 }
 
+/** The files copied in a file manager, for a paste into the composer: null when the clipboard holds none (clipboard.rs `clipboard_files`). */
+export const clipboardFiles = (): Promise<string[] | null> => inTauri() ? invoke<string[] | null>("clipboard_files") : Promise.resolve(null);
+
 /** The clipboard's text for a paste into Terminal: from Rust in the app, the page's clipboard in a browser. */
 export async function pasteText(): Promise<string> {
   if (inTauri()) return invoke<string>("paste_text");

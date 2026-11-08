@@ -30,8 +30,8 @@ pub use store::load_count_for_test;
 #[cfg(test)]
 mod placement_tests;
 pub use store::{
-    Admitted, Changes, CopyReview, CopyReviewOutcome, Damaged, Keep, Placed, Placement, Position,
-    ProjectStore, DEPENDS_ON_INCOMING_COPY, MARK_FORMAT,
+    task_file, Admitted, Changes, CopyReview, CopyReviewOutcome, Damaged, Keep, Placed, Placement,
+    Position, ProjectStore, TaskFile, DEPENDS_ON_INCOMING_COPY, MARK_FORMAT,
 };
 pub use sync::{
     canonical_version, version_includes, Document, DoneEntry, DonePage, DoneRow, Imported,

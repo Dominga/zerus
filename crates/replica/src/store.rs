@@ -141,6 +141,35 @@ pub struct Changes {
     pub documents: Option<BTreeSet<String>>,
 }
 
+/// One of a task's files in the task folder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskFile {
+    /// `<uuid>.loro`
+    Snapshot,
+    /// `<uuid>.updates`, appended to the snapshot
+    Updates,
+    /// `<uuid>.managed`
+    Mark,
+}
+
+/// The task an entry of the task folder named `name` belongs to, and which
+/// of its files it is; None for any other entry. A mark alone is a task
+/// too: kept for review, never invisible.
+pub fn task_file(name: &std::ffi::OsStr) -> Option<(&str, TaskFile)> {
+    let path = Path::new(name);
+    let file = match path.extension().and_then(|e| e.to_str())? {
+        "loro" => TaskFile::Snapshot,
+        "updates" => TaskFile::Updates,
+        "managed" => TaskFile::Mark,
+        _ => return None,
+    };
+    let uuid = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| ids::is_uuid(s))?;
+    Some((uuid, file))
+}
+
 /// A task file that failed to load, or a document an import refused. It
 /// stays on disk and never blocks the others.
 ///
@@ -1133,17 +1162,9 @@ impl ProjectStore {
     pub fn uuids(&self) -> Result<Vec<String>> {
         let mut uuids = BTreeSet::new();
         for entry in fs::read_dir(self.dir.join("tasks"))? {
-            let path = entry?.path();
-            let extension = path.extension().and_then(|e| e.to_str());
-            // A mark alone is a task too: kept for review, never invisible.
-            if matches!(extension, Some("loro" | "updates" | "managed")) {
-                if let Some(stem) = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .filter(|s| ids::is_uuid(s))
-                {
-                    uuids.insert(stem.to_owned());
-                }
+            let name = entry?.file_name();
+            if let Some((uuid, _)) = task_file(&name) {
+                uuids.insert(uuid.to_owned());
             }
         }
         Ok(uuids.into_iter().collect())

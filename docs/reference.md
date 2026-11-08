@@ -3935,7 +3935,10 @@ opens, migrates or removes, so the two never rebuild each other's index. Each sa
 project's change journal (`changes`, a bounded hint that is only ever replaced,
 never written through), so a read decodes only changed tasks. Every task
 file's stamp (length, modification time, inode) is also checked at least every
-30 seconds for writers without the journal. A row is suspect when it was read
+30 seconds for writers without the journal: one listing of the task folder
+gives the files to stamp (a file it does not list is missing, and a file
+written after it is found by the next check), and only a task whose stamps
+changed is read again. A row is suspect when it was read
 from files modified within the last 2 seconds, before the journal last became
 unknown, more than 10 minutes ago, or at a time after now (a clock set back).
 A page reads its suspect rows from their documents again before it returns

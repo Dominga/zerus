@@ -11,7 +11,8 @@ import { machineEditor } from "../../store/machineEditor";
 import { onCommand } from "../../store/shortcuts";
 import { detailTab, page, peek, revealRow, search, selected, selectedKey, setPage, setPeek, setSelectedKey, stripMode, toast } from "../../store/ui";
 import { actionEntries } from "./ActionDialogs";
-import { listRows, listedSessionIgnoringCollapse, membersByGroup } from "./model";
+import { listRows, listedSessionIgnoringCollapse, membersByGroup, rowsWithTeamsOpen } from "./model";
+import { setTeamCollapsed, teamCollapsed } from "../../store/teamCollapse";
 import type { Session } from "./types";
 
 // The Sessions window's commands (Qt's SessionsWindow::runShortcut,
@@ -28,19 +29,33 @@ const wrap = (index: number, count: number) => ((index % count) + count) % count
 const attention = (s: Session | undefined) => !!s && s.state !== "archived" && countedAttention(s, computerFresh(s.computer));
 
 /**
- * The live list's sessions in list order, with the sessions of a collapsed
- * project at its header, as Qt's list keeps them as hidden rows.
+ * The live list's sessions in list order, as Qt's list keeps hidden rows:
+ * child sessions under a collapsed parent team in their place, and the
+ * sessions of a collapsed project at its header. `parents` names each
+ * nested card's parent row, to open the teams above a chosen child.
  */
-function attentionOrder(): Session[] {
+function attentionOrder(): { order: Session[]; parents: Map<string, string> } {
   const order: Session[] = [];
+  const parents = new Map<string, string>();
   const members = membersByGroup();
-  for (const row of listRows()) {
-    if (row.type === "card") order.push(catalog.rows[row.id] ?? row.session);
-    else if (row.type === "header" && row.collapsed) {
+  for (const row of rowsWithTeamsOpen()) {
+    if (row.type === "card") {
+      order.push(catalog.rows[row.id] ?? row.session);
+      if (row.parentKey) parents.set(row.id, row.parentKey);
+    } else if (row.type === "header" && row.collapsed) {
       for (const s of members.get(row.project) ?? []) if (listedSessionIgnoringCollapse(s.key)) order.push(s);
     }
   }
-  return order;
+  return { order, parents };
+}
+
+/** Opens every collapsed team above a session, so the list shows its row. */
+function openTeamsAbove(key: string, parents: ReadonlyMap<string, string>) {
+  const seen = new Set<string>();
+  for (let parent = parents.get(key); parent && !seen.has(parent); parent = parents.get(parent)) {
+    seen.add(parent);
+    if (teamCollapsed(parent)) setTeamCollapsed(parent, false);
+  }
 }
 
 function selectListed(id: string) {
@@ -95,13 +110,14 @@ export function stepSession(direction: Direction, needing: boolean) {
     if (next) selectListed(next.id);
     return;
   }
-  const order = attentionOrder();
+  const { order, parents } = attentionOrder();
   const count = order.length;
   const at = order.findIndex((s) => s.key === selectedKey());
   const start = at < 0 ? (direction > 0 ? -1 : count) : at;
   for (let step = 1; step <= count; step++) {
     const s = order[wrap(start + direction * step, count)];
     if (!attention(s)) continue;
+    openTeamsAbove(s.key, parents);
     openSession({ computer: s.computer, key: s.catalogKey, preserveFilters: true }, { keepFiltersIf: listedSessionIgnoringCollapse });
     return;
   }

@@ -867,6 +867,13 @@ export const worktreeCleanupPrepare = (id: string, revision: number, selected: n
 export const worktreeCleanupConfirm = (id: string, confirmation: string, consent: boolean) => desktop<import("./store/worktreeCleanup").WorktreeReview>("worktree_cleanup_confirm", { id, confirmation, consent });
 export const worktreeCleanupClose = (id: string) => desktop<void>("worktree_cleanup_close", { id });
 export const onWorktreeCleanupChanged = (changed: () => void) => inTauri() ? listen("worktree-cleanup-changed", changed) : Promise.resolve(() => {});
+/** Task 252: one folder's git status (`hgs git-status`), as the desktop read it. */
+export interface GitStatusAnswer { computer: ComputerId; path: string; status: Record<string, unknown> }
+/** Task 252: asks the desktop to read these folders' git status (throttled there); answers what it already has. */
+export const gitStatusRequest = (computer: ComputerId, paths: string[]) =>
+  inTauri() ? invoke<GitStatusAnswer[]>("git_status_request", { computer, paths }) : Promise.resolve([] as GitStatusAnswer[]);
+export const onGitStatus = (receive: (answer: GitStatusAnswer) => void) =>
+  inTauri() ? listen<GitStatusAnswer>("git-status", (event) => receive(event.payload)) : Promise.resolve(() => {});
 /**
  * Create worktree: the new checkout and `catalog` (the folder's catalog the dialog opened with, naming the repository)
  * listing it as verified; a rejection is Qt's text. Never retried.

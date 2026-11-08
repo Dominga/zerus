@@ -13,7 +13,7 @@ vi.mock("../../store/catalog", async (orig) => ({
   computerOffline: (computer: string) => !mocks.online(computer),
 }));
 
-import { agentsLabel, badgeKind, cardState, childStatus, chipTooltip, emphasis, lineThree, statusCaption } from "./SessionCard";
+import { agentsLabel, badgeKind, cardState, childStatus, chipTooltip, chipWidth, emphasis, fitChips, lineThree, statusCaption, type RowChip } from "./SessionCard";
 import { now } from "../../store/ui";
 import type { Session } from "./types";
 import { toSession } from "../../store/catalog";
@@ -150,5 +150,36 @@ describe("the chips on the card name what they count (SessionRowChips::tooltip)"
     expect(chipTooltip(s, "incoming")).toBe("3 incoming commits");
     expect(chipTooltip(s, "synced")).toBe("Clean and in sync with the checked upstream");
     expect(chipTooltip(s, "unchecked")).toBe("Not checked yet");
+  });
+});
+
+// Task 252 (Qt SessionRowChips::layout): when line 2 is full, git folds into
+// one More chip before services or background work go, then chips drop from
+// the end; the machine badge keeps its room.
+const chip = (kind: RowChip["kind"], icon: string, count?: string): RowChip => ({ kind, icon, count, tone: "muted", tip: icon });
+const chips = [chip("services", "settings", "2"), chip("background", "active", "1"), chip("git", "git-diff", "12"), chip("git", "git-push", "3"), chip("git", "git-unknown")];
+const width = (list: RowChip[]) => list.reduce((sum, c) => sum + chipWidth(c) + 4, 0) - 4;
+
+describe("line 2 chips (task 252)", () => {
+  it("shows every chip when they fit", () => {
+    expect(fitChips(chips, width(chips), { tip: "git" })).toEqual(chips);
+  });
+
+  it("folds git into one More chip with the git tooltip before dropping anything", () => {
+    const folded = fitChips(chips, width(chips) - 1, { tip: "Git status" });
+    expect(folded.map((c) => c.kind)).toEqual(["services", "background", "more"]);
+    expect(folded[2]).toMatchObject({ icon: "more", tip: "Git status" });
+    expect(folded[2].count).toBeUndefined();
+  });
+
+  it("drops chips from the end when even the folded ones do not fit", () => {
+    const folded = [chips[0], chips[1], { ...chip("more", "more"), tip: "g" }];
+    expect(fitChips(chips, width(folded) - 1, { tip: "g" }).map((c) => c.kind)).toEqual(["services", "background"]);
+    expect(fitChips(chips, 0, { tip: "g" })).toEqual([]);
+  });
+
+  it("sizes a chip as Qt does: icon and padding, plus its count", () => {
+    expect(chipWidth({})).toBe(24);
+    expect(chipWidth({ count: "12" })).toBe(41);
   });
 });

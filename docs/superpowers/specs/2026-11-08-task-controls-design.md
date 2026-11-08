@@ -18,6 +18,26 @@ The three leaves are:
 2. CLI plan/execute/status and `begin-attempt`, plus the gated prompt pin.
 3. Task Pause/Resume/yield and native Stop-hold wiring, still gated off.
 
+The second leaf is a closed CLI wire/data surface: `task control
+plan|execute|status --json` and strict `begin-attempt REF --attempt UUID`.
+Until the third leaf supplies a verified runtime, even a premature gate change
+must refuse with `task_control_native_path_unverified`. Parsed guards and
+capability text are never a substitute for native ownership proof. The dormant
+CLI emits `task_controls_inactive`/`attempted: false`; no caller can use it to
+write records or task history. The local record action `release_stop` names
+only explicit observed executor Stop facts and performs no continuation input.
+
+The desktop's existing Start plan remains untouched by that CLI wire leaf.
+Before native wiring/activation, its acknowledgement mode must be captured
+before hashing and checked against the final C3 managed/legacy decision: a
+positively legacy delivery must keep plain start, never a provisional managed
+begin command. No mutable native request may be rewritten after reservation.
+Another remaining boundary is startup: existing Start accepts an empty native
+conversation, while the dormant executor record currently requires one. A
+verified unbound run needs an explicit reservation/Stop-hold contract before
+activation; inventing a conversation ID is not a solution. Both boundaries
+require the native-wiring design check-in before their record/plan changes.
+
 Pause/Resume/Stop-hold activation is one owner-visible step with `.4.8`'s queue,
 after coordinator-owned Arch/Mac preview and isolated contract qualification
 against the latest supported native agents. No GUI scheduler is introduced.
@@ -42,8 +62,9 @@ For managed dispatch, the prompt's pinned command becomes
 `hgs task begin-attempt REF --attempt UUID`, **replacing** `hgs task start REF`.
 There is one acknowledgement. It requires the original attempt, current
 generation, exact executor and current native-turn proof. Plain `start` retains
-its legacy meaning and never binds a managed attempt. A managed direct start
-may bind only the attempt that exact call created. Unfloored starts remain
+its legacy meaning and never binds a managed native turn. A managed direct
+start exposes only the UUID that exact call created; native binding requires
+that original scoped acknowledgement, never a latest-attempt lookup. Unfloored starts remain
 legacy; no floor is activated. Legacy/unbound/pre-upgrade work gets an honest
 unsupported transition reason, never an invented binding.
 

@@ -3793,6 +3793,8 @@ hgs task attachment TASK_UUID --project orchard --file 1 [--entry ENTRY_ID]
 hgs task send orchard/T-a1b2c3 [--session codex/api [--host ALIAS]]
 hgs task handoff orchard/T-a1b2c3 --session codex/worker [--host ALIAS]
 hgs task start orchard/T-a1b2c3
+hgs task begin-attempt orchard/T-a1b2c3 --attempt ORIGINAL_UUID [--json]
+hgs task control plan|execute|status --json
 hgs task report orchard/T-a1b2c3 [--progress|--ready] [--considered REV] < summary.txt
 hgs task report-attempt orchard/T-a1b2c3 --attempt 00000000-0000-4000-8000-000000000001 [--progress|--ready] [--considered REV] < summary.txt
 hgs task cancel orchard/T-a1b2c3 [--reason "Wrong approach"]
@@ -3806,6 +3808,34 @@ hgs task worker orchard/T-a1b2c3 --subagent CHILD_ID --request-id SENT_REQUEST_I
 hgs task settings --project orchard [--set < settings.json]
 hgs task cutover --project orchard [--hold on|off [--confirm]]
 ```
+
+`begin-attempt` and `task control plan|execute|status` are currently inactive
+source interfaces (`zerus-cg5h.4.7`). Valid requests return exit 1,
+`code: task_controls_inactive` and `attempted: false`, before opening task or
+desktop stores. The `task-control-v1` help marker is absent while the gate is
+off. Existing prompts, send/handoff/reopen/direct-start/report behavior and
+plain `start` are unchanged. Native wiring and queue activation are later
+reviewed steps; a new CLI on disk does not qualify a resident adapter.
+
+The control interface takes strict schema-1 JSON on stdin, at most 16 KiB. Plan
+names the original task/attempt or, for Stop release, the exact executor and
+explicitly observed Stop IDs. Execute accepts the original plan, with exact
+task version, slot revision, caller scope, configuration/store/image and loaded
+adapter guards; these labels are data, not authority. The owning runtime must
+prove them again before any effect. Status names an original request UUID or
+uses an executor sequence cursor with a limit of 1–128. Unknown fields,
+duplicate fields/options, noncanonical IDs and oversized requests refuse.
+
+After activation, a fresh managed send/handoff/reopen supplies exactly one
+pinned `begin-attempt REF --attempt UUID` acknowledgement, replacing plain
+start. Feedback carries the existing report origin and requests no second
+acknowledgement. A semantic begin requires the immutable attempt to be current,
+delivered and owned by the exact executor; it cannot acknowledge a newer
+generation, clear a Pause or bind a native turn by itself. Legacy and direct
+start policy, structured report authority and considered revisions stay intact.
+The existing desktop Start plan is unchanged in this wire leaf; its final
+managed/legacy acknowledgement mode and startup-run reservation belong to the
+native-wiring check-in before activation.
 
 Plain `task get` retains the complete journal for existing clients. The optional
 `--history-limit` (1–80) returns only one chronological history page, the canonical

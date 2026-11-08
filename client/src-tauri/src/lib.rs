@@ -1920,6 +1920,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::send::local_inspect,
         composer::send::send_cancel,
         composer::send::send_interrupted,
+        composer::send::send_interrupt_failed,
         composer::send::clear_context,
         composer::questions::question_edit,
         composer::questions::question_page,

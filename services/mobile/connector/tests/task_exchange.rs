@@ -358,6 +358,29 @@ async fn task_exchange_runs_hgs_with_its_payload() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn a_done_fetch_uses_the_existing_empty_version_and_keeps_validation_strict() {
+    let harness = Harness::new("task-done-fetch", true);
+    harness.answer(&EXCHANGE, answer());
+    let mut fetch = request();
+    fetch["inventory"]["tasks"][TASK] = json!({});
+    assert_eq!(
+        harness
+            .exchange("7d2c4e8a-1b3f-4a5c-9d6e-0f1a2b3c4d60", "", fetch.clone())
+            .await["state"],
+        "completed"
+    );
+    assert_eq!(harness.calls(&EXCHANGE), [Some(fetch.clone())]);
+    fetch["shallow"] = json!(true);
+    assert_eq!(
+        harness
+            .exchange("7d2c4e8a-1b3f-4a5c-9d6e-0f1a2b3c4d61", "", fetch)
+            .await["state"],
+        "failed"
+    );
+    assert_eq!(harness.calls(&EXCHANGE).len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn a_refused_or_failing_exchange_fails_without_or_after_hgs() {
     let id = |n: u8| format!("7d2c4e8a-1b3f-4a5c-9d6e-0f1a2b3c4d{n:02x}");
     // Without the marker nothing runs.

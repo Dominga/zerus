@@ -714,7 +714,7 @@ fn a_bad_finding_is_refused_with_the_report_not_at_accept() {
             "report":{"summary":"Done","findings":[finding("high","Lost write")]}}))
         .unwrap_err()
         .to_string();
-        assert!(error.contains("A finding is critical, normal or later"), "{error}");
+        assert!(error.contains("A finding is critical (crit), normal (minor) or later"), "{error}");
         assert_eq!(stored().task(1).unwrap().attempts[0].report, None);
         let error = call("report", json!({"task":1,"attempt":attempt,"text":"Done",
             "report":{"summary":"Done","findings":[{"severity":"normal","title":"No scenario"}]}}))

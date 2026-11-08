@@ -30,6 +30,14 @@ const H264: [(&str, &str); 4] = [
     ("vah264enc", "vah264enc bitrate=700"),
     ("vaapih264enc", "vaapih264enc bitrate=700"),
 ];
+/// What the H.264 encoder is given (zerus-6ioin): limited-range BT.601. A
+/// webcam's MJPEG decodes to full range, whose flag WebKitGTK's on-screen
+/// video ignores, crushing shadows and clipping whites. videoconvert does not
+/// rescale range between YUV formats, so the frame passes through RGB. From
+/// RGB the converter would pick x264enc's 10-bit 4:4:4, so the formats stay
+/// 8-bit 4:2:0: I420, or NV12 for VA-API encoders.
+const H264_INPUT: &str = "videoconvert ! video/x-raw,format=RGBx ! videoconvert \
+    ! video/x-raw,format={I420,NV12},colorimetry=bt601";
 /// AAC encoders in order of preference, at 64 kbit/s.
 const AAC: [(&str, &str); 3] = [
     ("avenc_aac", "avenc_aac bitrate=64000"),
@@ -302,7 +310,7 @@ fn description(
         // The preview and poster sinks keep one frame nobody pulls once stopping
         // starts; waiting for it on EOS would hold back the pipeline's EOS.
         "capsfilter name=camcaps ! {decode}videoconvert ! videorate ! video/x-raw,framerate=24/1 ! tee name=t \
-         t. ! queue ! videoconvert ! {h264} ! h264parse ! queue ! mux. \
+         t. ! queue ! {H264_INPUT} ! {h264} ! h264parse ! queue ! mux. \
          t. ! queue leaky=downstream max-size-buffers=1 ! videorate drop-only=true max-rate={PREVIEW_FPS} \
             ! videocrop left={left} right={right} top={top} bottom={bottom} ! videoscale ! videoconvert \
             ! video/x-raw,format=I420,width={PREVIEW_SIDE},height={PREVIEW_SIDE} ! tee name=p \
@@ -906,5 +914,163 @@ mod tests {
                 "{caps}: {message:?}"
             );
         }
+    }
+
+    /// The encoder input stays 8-bit 4:2:0 for every encoder (zerus-6ioin
+    /// review): from RGB, an unrestricted converter picks x264enc's 10-bit
+    /// 4:4:4, a High 4:4:4 Predictive stream many players cannot play. Each
+    /// encoder's input formats stand in for it here, so no encoder is needed.
+    #[test]
+    fn the_encoder_input_is_8_bit_4_2_0_for_every_encoder() {
+        init().unwrap();
+        let encoders = [
+            (
+                "x264enc",
+                "video/x-raw, format=(string){ Y444, Y42B, I420, YV12, NV12, Y444_10LE, I422_10LE, I420_10LE }",
+                "I420",
+            ),
+            ("openh264enc", "video/x-raw, format=(string)I420", "I420"),
+            ("vah264enc", "video/x-raw, format=(string)NV12", "NV12"),
+        ];
+        for (name, accepts, expected) in encoders {
+            let pipeline = gst::parse::launch(&format!(
+                "videotestsrc num-buffers=2 ! video/x-raw,format=RGB,width=640,height=480 \
+                 ! videoconvert ! video/x-raw,format=I420,colorimetry=1:4:0:0 ! jpegenc ! jpegdec \
+                 ! videoconvert ! {H264_INPUT} ! capsfilter name=encoder ! fakesink"
+            ))
+            .unwrap()
+            .downcast::<gst::Pipeline>()
+            .unwrap();
+            let encoder = pipeline.by_name("encoder").unwrap();
+            encoder.set_property("caps", gst::Caps::from_str(accepts).unwrap());
+            pipeline.set_state(gst::State::Paused).unwrap();
+            let (result, _, _) = pipeline.state(gst::ClockTime::from_seconds(10));
+            result.unwrap();
+            let caps = encoder.static_pad("sink").unwrap().current_caps().unwrap();
+            pipeline.set_state(gst::State::Null).unwrap();
+            let structure = caps.structure(0).unwrap();
+            assert_eq!(
+                structure.get::<&str>("format").unwrap(),
+                expected,
+                "{name}: {caps}"
+            );
+            assert_eq!(
+                structure.get::<&str>("colorimetry").unwrap(),
+                "bt601",
+                "{name}: {caps}"
+            );
+        }
+    }
+
+    /// zerus-6ioin: a webcam's MJPEG decodes to full-range BT.601 samples,
+    /// which WebKitGTK's on-screen video path shows as TV range: crushed
+    /// shadows and clipped whites. The recording holds genuinely
+    /// limited-range samples, tagged as such, so a player that ignores the
+    /// full-range flag still shows the camera's levels.
+    #[test]
+    fn an_mjpeg_camera_is_recorded_in_limited_range() {
+        init().unwrap();
+        if let Some(reason) = missing() {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+        let Some(decoder) = ["avdec_h264", "openh264dec"]
+            .into_iter()
+            .find(|name| found(name))
+        else {
+            eprintln!("skipped: no H.264 decoder here");
+            return;
+        };
+        if !found("qtdemux") {
+            eprintln!("skipped: no qtdemux here");
+            return;
+        }
+        let folder = Folder::create().unwrap();
+        let path = folder.0.join("range.mp4");
+        let format = InputFormat {
+            sample_rate: 48_000,
+            channels: 1,
+            sample_format: SampleFormat::I16,
+        };
+        // The camera: a webcam's full-range JPEG of a frame that is white on
+        // the left half and black on the right.
+        let camera = "appsrc name=cam format=time \
+            caps=video/x-raw,format=RGB,width=640,height=480,framerate=30/1 \
+            ! videoconvert ! video/x-raw,format=I420,colorimetry=1:4:0:0 ! jpegenc ! ";
+        let recording = description(true, 640, 480, &audio_caps(format), &path).unwrap();
+        let pipeline = gst::parse::launch(&format!("{camera}{recording}"))
+            .unwrap()
+            .downcast::<gst::Pipeline>()
+            .unwrap();
+        let jpeg = gst::Caps::builder("image/jpeg")
+            .field("width", 640)
+            .field("height", 480)
+            .field("framerate", gst::Fraction::new(30, 1))
+            .build();
+        pipeline
+            .by_name("camcaps")
+            .unwrap()
+            .set_property("caps", &jpeg);
+        let cam: gst_app::AppSrc = element(&pipeline, "cam").unwrap();
+        let audio: gst_app::AppSrc = element(&pipeline, "audio").unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let mut frame = Vec::with_capacity(640 * 480 * 3);
+        for _ in 0..480 {
+            frame.extend(std::iter::repeat_n(255u8, 320 * 3));
+            frame.extend(std::iter::repeat_n(0u8, 320 * 3));
+        }
+        for index in 0..24u64 {
+            let mut buffer = gst::Buffer::from_slice(frame.clone());
+            let timing = buffer.get_mut().unwrap();
+            timing.set_pts(gst::ClockTime::from_mseconds(index * 1000 / 30));
+            timing.set_duration(gst::ClockTime::from_mseconds(33));
+            cam.push_buffer(buffer).unwrap();
+        }
+        cam.end_of_stream().unwrap();
+        audio
+            .push_buffer(gst::Buffer::from_slice(vec![0u8; 48_000 * 2]))
+            .unwrap();
+        audio.end_of_stream().unwrap();
+        let message = pipeline
+            .bus()
+            .unwrap()
+            .timed_pop_filtered(
+                gst::ClockTime::from_seconds(30),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            )
+            .expect("the recording ends");
+        pipeline.set_state(gst::State::Null).unwrap();
+        assert_eq!(message.type_(), gst::MessageType::Eos, "{message:?}");
+
+        // The decoder's own samples and caps, with no conversion after it.
+        let decode = gst::parse::launch(&format!(
+            "filesrc location=\"{}\" ! qtdemux ! h264parse ! {decoder} ! appsink name=out sync=false",
+            path.display()
+        ))
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        let out: gst_app::AppSink = element(&decode, "out").unwrap();
+        decode.set_state(gst::State::Playing).unwrap();
+        let sample = out
+            .try_pull_sample(gst::ClockTime::from_seconds(10))
+            .expect("a decoded frame");
+        let caps = sample.caps().unwrap().structure(0).unwrap().to_owned();
+        let luma: Vec<u8> = {
+            let map = sample.buffer().unwrap().map_readable().unwrap();
+            map[240 * 640..241 * 640].to_vec()
+        };
+        decode.set_state(gst::State::Null).unwrap();
+        assert_eq!(caps.get::<&str>("format").unwrap(), "I420", "{caps}");
+        let colorimetry = caps.get::<String>("colorimetry").unwrap_or_default();
+        assert!(
+            !colorimetry.starts_with("1:") && colorimetry != "jpeg",
+            "the stream is marked full range: {caps}"
+        );
+        let (white, black) = (i32::from(luma[160]), i32::from(luma[480]));
+        assert!(
+            (white - 235).abs() <= 4 && (black - 16).abs() <= 4,
+            "white {white} and black {black} are not limited range (235 and 16): {caps}"
+        );
     }
 }

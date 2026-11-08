@@ -97,6 +97,8 @@ export function createActivity(port: ActivityPort) {
   let olderFrom: number | undefined;
   let olderTimer: ReturnType<typeof setTimeout> | undefined;
   let subscribed: FollowTarget | undefined;
+  /** Each follow and Retry is one read attempt: a retired one's late timers, failures and steps are ignored. */
+  let attempt = 0;
   // One display-only bridge across a run change; routing always uses target().
   let resuming: { conversation: string; previous: Map<string, ActivityEvent>; incoming: Map<string, ActivityEvent>; page: boolean; confirmed: boolean } | undefined;
 
@@ -166,6 +168,7 @@ export function createActivity(port: ActivityPort) {
     // incoming page into the retained conversation or its resume cursor.
     const retained = resuming && !resuming.confirmed ? resuming.previous : byKey;
     const after = continuing ? newestSeq(retained) : undefined;
+    const mine = ++attempt;
     subscribed = undefined;
     if (prev) void port.unfollow(prev.computer, prev.key).catch(() => {});
     batch(() => {
@@ -180,6 +183,9 @@ export function createActivity(port: ActivityPort) {
         setEnded(false);
         setLoadingOlder(false);
         setError(undefined);
+        // The earlier run's stall is not this run's: its read has not started yet.
+        clearTimeout(firstPage);
+        setStalled(false);
       } else {
         reset();
         setDisplayKey(next?.id);
@@ -187,11 +193,11 @@ export function createActivity(port: ActivityPort) {
       setTarget(next);
     });
     const subscribe = () => {
-      if (!next || target() !== next) return;
+      if (!next || target() !== next || attempt !== mine) return;
       subscribed = next;
-      watchFirstPage(next);
+      watchFirstPage(next, mine);
       void port.follow(request(next, after)).catch((reason) => {
-        if (target() === next) batch(() => { setError(String(reason)); setLoaded(true); });
+        if (target() === next && attempt === mine) batch(() => { setError(String(reason)); setLoaded(true); });
       });
     };
     // A failed composer does not prevent read-only Activity. The await orders
@@ -201,22 +207,35 @@ export function createActivity(port: ActivityPort) {
   }
 
   /** A follow whose first answer does not come in time ends in a visible state, not in reading forever. */
-  function watchFirstPage(next: FollowTarget) {
+  function watchFirstPage(next: FollowTarget, mine: number) {
     clearTimeout(firstPage);
     setStalled(false);
-    firstPage = setTimeout(() => { if (target() === next && !loaded()) setStalled(true); }, FIRST_PAGE_MS);
+    firstPage = setTimeout(() => { if (target() === next && attempt === mine && !loaded()) setStalled(true); }, FIRST_PAGE_MS);
   }
 
-  /** Retry after a stalled first page: the same session, subscribed again. */
+  /**
+   * Retry after a stalled first page (zerus-lxt6o): one new attempt for the
+   * same session. Only a stalled subscription that passed its composer
+   * barrier retries; the native side may deduplicate an unchanged follow, so
+   * it subscribes again only once the earlier one's unfollow settled.
+   */
   function retry() {
     const t = target();
-    if (!t || loaded()) return;
-    void port.unfollow(t.computer, t.key).catch(() => {});
-    subscribed = t;
-    watchFirstPage(t);
-    void port.follow(request(t)).catch((reason) => {
-      if (target() === t) batch(() => { setError(String(reason)); setLoaded(true); });
-    });
+    if (!t || loaded() || !stalled() || subscribed !== t) return;
+    const mine = ++attempt;
+    const current = () => target() === t && attempt === mine;
+    subscribed = undefined;
+    clearTimeout(firstPage);
+    setStalled(false);
+    const again = () => {
+      if (!current()) return;
+      subscribed = t;
+      watchFirstPage(t, mine);
+      void port.follow(request(t)).catch((reason) => {
+        if (current()) batch(() => { setError(String(reason)); setLoaded(true); });
+      });
+    };
+    void port.unfollow(t.computer, t.key).then(again, again);
   }
 
   /** The finish of an older read: it either moved the oldest event back or doubles the reach. */

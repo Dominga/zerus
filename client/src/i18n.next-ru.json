@@ -746,6 +746,7 @@
   "Resumed; terminal not opened: Terminal is unavailable for this session now.": "Сессия возобновлена, но терминал не открыт: терминал сейчас недоступен для этой сессии.",
   "Resumed; terminal not opened: the session changed. Open its actions again.": "Сессия возобновлена, но терминал не открыт: сессия изменилась. Откройте её действия снова.",
   "Retry %1": "Повтор в %1",
+  "Retry at %1": "Повторить попытку в %1",
   "Retry checks the original report result. It does not publish another copy of an unconfirmed report.": "Повторная попытка проверяет результат исходного отчёта. Она не публикует ещё одну копию отчёта с неподтверждённым результатом.",
   "Retry imports the drafts from Qt. The earlier drafts stay unrecorded; Retry never records them later.": "Повторная попытка импортирует черновики из Qt. Прежние черновики остаются незаписанными: повторная попытка никогда не записывает их задним числом.",
   "Retry is available once the composer is ready.": "Повтор будет доступен, когда поле сообщения будет готово.",

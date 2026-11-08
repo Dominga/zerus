@@ -2356,6 +2356,7 @@
   "Retry": "Повторить попытку",
   "Retry %1": "Повтор в %1",
   "Retry after (seconds)": "Повторить попытку через (секунд)",
+  "Retry at %1": "Повторить попытку в %1",
   "Retry checks the original report result. It does not publish another copy of an unconfirmed report.": "Повторная попытка проверяет результат исходного отчёта. Она не публикует ещё одну копию отчёта с неподтверждённым результатом.",
   "Retry imports the drafts from Qt. The earlier drafts stay unrecorded; Retry never records them later.": "Повторная попытка импортирует черновики из Qt. Прежние черновики остаются незаписанными: повторная попытка никогда не записывает их задним числом.",
   "Retry in %1 s": "Повторить попытку через %1 сек.",

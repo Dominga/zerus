@@ -1092,10 +1092,10 @@ pub(crate) mod tests {
     #[cfg(windows)]
     fn local_low() -> Option<PathBuf> {
         use std::os::windows::ffi::OsStringExt;
-        use windows_sys::Win32::System::Com::CoTaskMemFree;
         use windows_sys::Win32::UI::Shell::{FOLDERID_LocalAppDataLow, SHGetKnownFolderPath};
         let mut path: windows_sys::core::PWSTR = std::ptr::null_mut();
-        // SAFETY: the out pointer is valid; on success the string is freed below.
+        // SAFETY: the out pointer is valid. The few bytes the shell allocates are
+        // left to the test process (hgs builds windows-sys without COM).
         let result = unsafe { SHGetKnownFolderPath(&FOLDERID_LocalAppDataLow, 0, std::ptr::null_mut(), &mut path) };
         if result != 0 || path.is_null() {
             return None;
@@ -1105,8 +1105,6 @@ pub(crate) mod tests {
             let len = (0..).take_while(|&n| *path.add(n) != 0).count();
             std::slice::from_raw_parts(path, len).to_vec()
         };
-        // SAFETY: the shell allocated it with the COM allocator.
-        unsafe { CoTaskMemFree(path.cast()) };
         Some(PathBuf::from(std::ffi::OsString::from_wide(&wide)))
     }
 

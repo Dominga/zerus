@@ -241,6 +241,8 @@ export interface ActivityItem {
   replies?: Reply[];
   /** History a fork began from, shown read-only and muted. */
   inherited?: boolean;
+  /** Task 248: the pictures a tool group worked with (Qt toolMedia), previewed under it. */
+  media?: string[];
   /** Task 208: a team message or Zerus notice pasted into the session (Qt's plaque), never the owner's. */
   notice?: import("./notices").SystemNotice;
 }

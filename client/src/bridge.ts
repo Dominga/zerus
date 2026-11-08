@@ -1171,6 +1171,12 @@ export const sessionFileAct = (id: number, action: "open_file" | "open_folder" |
 export const sessionFileClose = (id: number) => desktop<void>("session_file_close", { id });
 export const onSessionFileChanged = (listener: (view: SessionFileView) => void) => onEvent<SessionFileView>("session-file-changed", listener);
 export const onSessionFileNotice = (listener: (notice: { text: string; warn: boolean }) => void) => onEvent<{ text: string; warn: boolean }>("session-file-notice", listener);
+/** Task 248: a picture, animation or video an agent names (src-tauri session_files/media.rs). */
+export const sessionMedia = (request: number, computer: string, href: string, cwd: string, open: boolean) =>
+  desktop<import("./ui/sessions/media").MediaAnswer>("session_media", { request, computer, href, cwd, open });
+export const sessionMediaExternal = (token: string, remote: boolean) => desktop<void>("session_media_external", { token, remote });
+export const onSessionMedia = (listener: (answer: import("./ui/sessions/media").MediaAnswer) => void) =>
+  onEvent<import("./ui/sessions/media").MediaAnswer>("session-media", listener);
 
 // Saved drafts (src-tauri composer/saved.rs). Qt's and the dev app's stores
 // are only read; each page is one bounded read.

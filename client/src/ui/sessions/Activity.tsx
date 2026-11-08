@@ -39,6 +39,9 @@ import { openExternal, openSessionFile } from "./sessionFiles";
 import { SessionFileDialog } from "./SessionFileDialog";
 import { captionText, statusOf } from "./SessionCard";
 import { foldedBody, noticeBar, type SystemNotice } from "./notices";
+import { MediaStrip, MediaViewerDialog, VideoMessageDialog } from "./MediaViewer";
+import { mediaReferences } from "./media";
+import { onMediaNotice, type MediaScope } from "../../store/media";
 import type { ActivityItem, ItemAttachment, LocalItem, MediaMessage, Session, TranscriptItem } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -241,6 +244,31 @@ function blocks(list: MarkdownBlock[], session?: () => Session | undefined): JSX
   });
 }
 
+// Task 248: what Qt says in its notice line when a media file cannot be opened or loads from a peer.
+onMediaNotice((text) => toast(tr("Media"), text, "info", false));
+
+/** Task 248: where the Activity's session resolves the media its agent names. */
+function useMediaScope(): () => MediaScope | undefined {
+  const session = useContext(ActivitySession);
+  return () => {
+    const current = session?.();
+    return current ? { sessionKey: current.key, computer: current.computer, cwd: current.cwdPath || current.cwdCanonical || "", machine: current.machine } : undefined;
+  };
+}
+
+/** The pictures, animations and videos a reply names, previewed under it (Qt mediaTiles). */
+function ReplyMedia(props: { text: string }) {
+  const scope = useMediaScope();
+  const refs = createMemo(() => { markdownReady(); return mediaReferences(markdownTree(props.text)); }, [], { equals: (a, b) => a.join("\n") === b.join("\n") });
+  return <MediaStrip scope={scope()} refs={refs()} />;
+}
+
+/** The pictures a tool group worked with (Qt toolMedia), under the group. */
+function ToolMedia(props: { refs: readonly string[] }) {
+  const scope = useMediaScope();
+  return <MediaStrip scope={scope()} refs={props.refs} />;
+}
+
 export function Body(props: { text: string }) {
   const session = useContext(ActivitySession);
   // Rerenders once when the lazily loaded parser arrives; Activity places its
@@ -362,6 +390,24 @@ function MediaCard(props: { item: MediaMessage; scope?: AttachmentScope; sourceI
     finally { if (mine.current()) setLoading(false); }
   };
   const pause = () => { player?.pause(); setPlaying(false); };
+  // Task 248: Qt plays a round video message in its own "Video message" dialog (ActivityView::playVoice).
+  const [dialogUrl, setDialogUrl] = createSignal("");
+  const openDialog = async () => {
+    const current = target();
+    if (!current || loading()) return;
+    pause();
+    if (!objectUrl) {
+      setLoading(true);
+      try {
+        const bytes = await attachmentMedia(current.computer, current.ref, true);
+        if (target() !== current) return;
+        objectUrl = URL.createObjectURL(recordingBlob(bytes, true));
+        setUrl(objectUrl);
+      } catch (failure) { setError(tr("Could not play recording: %1", String(failure))); return; }
+      finally { setLoading(false); }
+    }
+    setDialogUrl(objectUrl);
+  };
   const loaded = (event: Event) => {
     if (!claim?.current() || !objectUrl) return;
     const media = event.currentTarget as HTMLMediaElement;
@@ -432,8 +478,10 @@ function MediaCard(props: { item: MediaMessage; scope?: AttachmentScope; sourceI
             </span>
             <span class="vm-time tabular">{position() > 0 ? `${mediaTime(position())} / ` : ""}{mediaTime(duration())}</span>
           </button>
+          <button class="icon-btn small vm-open" aria-label={tr("Video message")} title={tr("Video message")} data-video-dialog disabled={!target() || loading()} onClick={() => void openDialog()}><Icon name="maximize-2" size={14} /></button>
           <Show when={it.transcript}><TranscriptButton open={transcript()} onToggle={toggleTranscript} /></Show>
         </div>
+        <Show when={dialogUrl()}><VideoMessageDialog url={dialogUrl()} onClose={() => setDialogUrl("")} /></Show>
       </Show>
       <Show when={transcript() && it.transcript}><p class="vm-text">{it.transcript}</p></Show>
       <Show when={!video}><audio ref={(el) => { player = el; }} src={url() || undefined} preload="none"
@@ -680,6 +728,7 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope; sourceId?:
           <span class="act-time">{it.at}</span>
         </button>
         <Show when={it.kind === "tool"}><div class="act-tool-cmd mono">{it.body}</div></Show>
+        <Show when={it.media?.length}><ToolMedia refs={it.media!} /></Show>
         <Show when={open() && it.lines}>
           <div class="act-tool-lines mono"><For each={it.lines}>{(l) => <div>{l}</div>}</For></div>
         </Show>
@@ -699,6 +748,7 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope; sourceId?:
         </header>
         {/* A fork's inherited row belongs to its source: never this session's attachments. */}
         <EchoBody item={it} scope={rowScope(it, props.scope)} />
+        <Show when={it.kind === "agent" && !it.inherited && it.body}><ReplyMedia text={it.body!} /></Show>
       </article>
     </Show>
   );
@@ -1161,6 +1211,7 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
       </Show>
       <LocalDeleteDialog />
       <SessionFileDialog />
+      <MediaViewerDialog />
       <div class="act-scroll" ref={scroller} tabindex="-1" onContextMenu={activityMenu} onScroll={onScroll} style={{ "overflow-anchor": "none" }}
         onWheel={scrollIntent}
         onKeyDown={(e) => {

@@ -50,6 +50,7 @@ export async function followTasks(project: string | null): Promise<void> {
 }
 
 export const taskEditorOpen = (target: import("./store/taskEditor").TaskEditorTarget) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_open", { ...target });
+export const reviewTaskCopy = (project: string, uuid: string, fingerprint?: string) => desktop<import("./store/taskCopyReview").CopyReviewReply>("task_copy_review", { project, uuid, fingerprint: fingerprint ?? null });
 export const taskEditorEdit = (input: Pick<import("./store/taskEditor").TaskEditorView, "handle" | "rev" | "text" | "position" | "anchor">) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_edit", { input });
 export const taskEditorPick = (handle: number, start: number, end: number) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_pick", { handle, start, end });
 export const taskEditorRemove = (handle: number, index: number) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_files", { handle, change: { kind: "remove", index } });

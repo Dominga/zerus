@@ -33,6 +33,8 @@ export function createTasks(follow: (project: string | null) => Promise<void>, r
   const [error, setError] = createSignal("");
   const [truncated, setTruncated] = createSignal(false);
   const [damaged, setDamaged] = createSignal(0);
+  /** Only the first five kept entries from the server's bounded damaged page. */
+  const [keptDamaged, setKeptDamaged] = createSignal<{ uuid: string; error: string }[]>([]);
   const [windowed, setWindowed] = createSignal(false);
   const [totals, setTotals] = createSignal(none(0));
   /** The published rows of each stage: `total` and `remaining` track them through this signal. */
@@ -98,7 +100,7 @@ export function createTasks(follow: (project: string | null) => Promise<void>, r
   }
 
   return {
-    project, tasks, loaded, error, truncated, damaged, windowed, loading, pageError, session,
+    project, tasks, loaded, error, truncated, damaged, keptDamaged, windowed, loading, pageError, session,
     /** A task by UUID: a loaded row, else a row of the session view, else one read on its own. */
     find: (uuid: string) => tasks().find((t) => t.uuid === uuid) ?? session.find(uuid) ?? adopted().get(uuid),
     /**
@@ -117,6 +119,7 @@ export function createTasks(follow: (project: string | null) => Promise<void>, r
     remaining: (stage: Stage) => windowed() ? Math.max(0, totals()[stage] - shown()[stage]) : 0,
     follow(nextProject: string | undefined) {
       if (nextProject === project()) return;
+      setKeptDamaged([]);
       const mine = ++generation;
       setProject(nextProject); setTasks([]); setShown(none(0)); setLoaded(false); setError(""); setTruncated(false); setDamaged(0);
       setWindowed(false); setTotals(none(0)); setLoading(none(false)); setPageError(""); setAdopted(new Map());
@@ -149,6 +152,9 @@ export function createTasks(follow: (project: string | null) => Promise<void>, r
         const p = object(update.payload);
         if (update.kind === "list") {
           if (text(object(p.project).id) !== project() || !Array.isArray(p.tasks)) continue;
+          setKeptDamaged((Array.isArray(p.damaged) ? p.damaged : []).slice(0, 20)
+            .map(object).filter((row) => row.kept === true && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(text(row.uuid)))
+            .slice(0, 5).map((row) => ({ uuid: text(row.uuid), error: text(row.error).slice(0, 512) })));
           const summary = object(p.window), stages = object(object(summary.window).stages);
           if (Object.keys(stages).length) {
             // A window: each stage's first rows; extended stages keep their

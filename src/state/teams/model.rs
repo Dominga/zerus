@@ -3063,6 +3063,16 @@ pub(crate) struct Team {
     pub free_close_pending: Option<u32>,
     #[serde(default)]
     pub settings: Settings,
+    /// Task 270 (owner, 2026-11-08): the working-mode preset this project
+    /// follows (branch-pipeline, branch-per-task or shared-folder); empty for a
+    /// team created before the mode was proposed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub working_mode: String,
+    /// Task 270: the project's working-mode proposal (preset, title, reasons,
+    /// settings and profile), read once at planning or create and cached here;
+    /// {"preset":""} means "checked, no repository to profile".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_proposal: Option<serde_json::Value>,
     /// The member id of the lead.
     pub lead: String,
     #[serde(default)]

@@ -27,7 +27,8 @@ fn expanded(path: &str, home: Option<&Path>) -> std::result::Result<PathBuf, &'s
         return Err("enter a path without line breaks or control characters");
     }
     let target = if path == "~" {
-        home.ok_or("this computer has no home folder")?.to_path_buf()
+        home.ok_or("this computer has no home folder")?
+            .to_path_buf()
     } else if let Some(rest) = path.strip_prefix("~/") {
         let home = home.ok_or("this computer has no home folder")?;
         let rest = rest.trim_start_matches(std::path::is_separator);
@@ -35,7 +36,11 @@ fn expanded(path: &str, home: Option<&Path>) -> std::result::Result<PathBuf, &'s
             home.to_path_buf()
         } else {
             let mut joined = home.as_os_str().to_owned();
-            if !joined.as_encoded_bytes().last().is_some_and(|byte| std::path::is_separator(char::from(*byte))) {
+            if !joined
+                .as_encoded_bytes()
+                .last()
+                .is_some_and(|byte| std::path::is_separator(char::from(*byte)))
+            {
                 joined.push(std::path::MAIN_SEPARATOR_STR);
             }
             joined.push(rest);
@@ -110,21 +115,39 @@ mod tests {
     use super::*;
 
     fn home() -> PathBuf {
-        PathBuf::from(if cfg!(windows) { r"C:\Users\example" } else { "/home/example" })
+        PathBuf::from(if cfg!(windows) {
+            r"C:\Users\example"
+        } else {
+            "/home/example"
+        })
     }
 
     #[test]
     fn a_path_is_absolute_or_under_home() {
         let home = home();
         assert_eq!(expanded("~", Some(&home)), Ok(home.clone()));
-        assert_eq!(expanded("~/notes/plan.md", Some(&home)), Ok(home.join("notes/plan.md")));
-        assert_eq!(expanded("~//notes", Some(&home)), Ok(home.join("notes")), "further separators stay under home");
+        assert_eq!(
+            expanded("~/notes/plan.md", Some(&home)),
+            Ok(home.join("notes/plan.md"))
+        );
+        assert_eq!(
+            expanded("~//notes", Some(&home)),
+            Ok(home.join("notes")),
+            "further separators stay under home"
+        );
         // A drive or root after ~/ is text under home, never a new start (zerus-fqsli).
         let drive = expanded(r"~/C:\other", Some(&home)).unwrap();
         assert!(drive.starts_with(&home), "{drive:?}");
-        assert_eq!(drive.as_os_str(), format!("{}{}C:\\other", home.display(), std::path::MAIN_SEPARATOR).as_str());
+        assert_eq!(
+            drive.as_os_str(),
+            format!("{}{}C:\\other", home.display(), std::path::MAIN_SEPARATOR).as_str()
+        );
         let slash_home = PathBuf::from(if cfg!(windows) { r"C:\" } else { "/" });
-        assert_eq!(expanded("~/srv", Some(&slash_home)), Ok(slash_home.join("srv")), "no doubled separator after a root home");
+        assert_eq!(
+            expanded("~/srv", Some(&slash_home)),
+            Ok(slash_home.join("srv")),
+            "no doubled separator after a root home"
+        );
         assert!(expanded("notes/plan.md", Some(&home)).is_err());
         assert!(expanded("~user/plan.md", Some(&home)).is_err());
         assert!(expanded("", Some(&home)).is_err());
@@ -138,11 +161,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("plan.md");
         std::fs::write(&file, b"twelve bytes").unwrap();
-        assert_eq!(reply(&file), json!({"schema": 1, "exists": true, "kind": "file", "size": 12}));
-        assert_eq!(reply(dir.path()), json!({"schema": 1, "exists": true, "kind": "directory", "size": null}));
+        assert_eq!(
+            reply(&file),
+            json!({"schema": 1, "exists": true, "kind": "file", "size": 12})
+        );
+        assert_eq!(
+            reply(dir.path()),
+            json!({"schema": 1, "exists": true, "kind": "directory", "size": null})
+        );
         let missing = json!({"schema": 1, "exists": false, "kind": null, "size": null});
         assert_eq!(reply(&dir.path().join("gone.md")), missing);
-        assert_eq!(reply(&file.join("below-a-file")), missing, "a file is no folder");
+        assert_eq!(
+            reply(&file.join("below-a-file")),
+            missing,
+            "a file is no folder"
+        );
     }
 
     #[cfg(unix)]
@@ -158,14 +191,25 @@ mod tests {
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
         // Root can read anything; elsewhere the folder hides the file.
         if answer["exists"] != json!(true) {
-            assert_eq!(answer, json!({"schema": 1, "exists": null, "kind": null, "size": null}));
+            assert_eq!(
+                answer,
+                json!({"schema": 1, "exists": null, "kind": null, "size": null})
+            );
         }
     }
 
     #[test]
     fn the_call_takes_exactly_one_path() {
-        assert_eq!(path_argument(&["--path".into(), "/srv/a".into()]).unwrap(), "/srv/a");
-        for args in [vec![], vec!["/srv/a".to_owned()], vec!["--path".to_owned()], vec!["--path".into(), "/a".into(), "/b".into()]] {
+        assert_eq!(
+            path_argument(&["--path".into(), "/srv/a".into()]).unwrap(),
+            "/srv/a"
+        );
+        for args in [
+            vec![],
+            vec!["/srv/a".to_owned()],
+            vec!["--path".to_owned()],
+            vec!["--path".into(), "/a".into(), "/b".into()],
+        ] {
             assert_eq!(path_argument(&args).unwrap_err().code, 2, "{args:?}");
         }
     }

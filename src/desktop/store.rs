@@ -11,8 +11,10 @@ use zerus_desktop_migration::{canonical, configuration, HANDOFF_LOCK};
 
 #[path = "maintenance.rs"]
 pub(crate) mod maintenance;
+#[path = "rollback_backup.rs"]
+pub(super) mod rollback_backup;
 
-pub const SCHEMA: i64 = 34;
+pub const SCHEMA: i64 = super::creation_worktree::SLOTS_SCHEMA;
 pub struct HandoffLock {
     _lock: platform::FileLock,
     root: PathBuf,
@@ -332,19 +334,41 @@ pub struct Store {
     resume_custody: super::session_resume::Recovery,
 }
 impl Store {
+    /// The only production opener. Keep these SAME original exclusions from
+    /// the read-only version probe through rollback backup and migration.
+    pub fn open_owned(
+        location: &Location,
+        epoch: &str,
+        owner: &platform::FileLock,
+    ) -> Result<Self> {
+        let handoff = location.handoff_lock()?;
+        let original = rollback_backup::Original::new(location, owner, &handoff)?;
+        let store = Self::open_inner(location, epoch, Some(&original))?;
+        original.verify()?;
+        Ok(store)
+    }
+    // Unit fixtures without a service still exercise the migration itself;
+    // rollback controls use open_owned with both real original locks.
+    #[cfg(test)]
     pub fn open(location: &Location, epoch: &str) -> Result<Self> {
+        Self::open_inner(location, epoch, None)
+    }
+    fn open_inner(
+        location: &Location,
+        epoch: &str,
+        original: Option<&rollback_backup::Original<'_>>,
+    ) -> Result<Self> {
         let path = location.root.join("state.sqlite3");
         database_files(location)?;
         let flags = OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_NOFOLLOW;
         // A newer schema is probed read-only before any PRAGMA or migration write.
-        if path.try_exists()? {
-            let probe =
-                Connection::open_with_flags(&path, flags | OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-            let version: i64 = probe.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-            ensure!(
-                (0..=SCHEMA).contains(&version),
-                "desktop state requires a newer hgs version"
-            );
+        let previous = schema_before_write(&path, SCHEMA)?;
+        // The read-only connection and every statement above have dropped.
+        // Backup's raw DB/WAL handles also all close before the RW open below.
+        if let Some(original) = original {
+            original
+                .prepare(previous)
+                .context("preserve desktop rollback backup before schema 35")?;
         }
         // On Unix, closing any descriptor of this file drops this process's
         // POSIX locks on it, including those of every live SQLite connection
@@ -353,8 +377,9 @@ impl Store {
         #[cfg(unix)]
         let identity = {
             crate::sqlite_file::create(&path)?;
-            crate::sqlite_file::private(&path)
-                .map_err(|_| anyhow::anyhow!("desktop state must be private single-link regular files"))?
+            crate::sqlite_file::private(&path).map_err(|_| {
+                anyhow::anyhow!("desktop state must be private single-link regular files")
+            })?
         };
         // Windows locks belong to the handle that took them.
         #[cfg(not(unix))]
@@ -597,6 +622,18 @@ impl Store {
             let tx = db.transaction()?;
             super::session_resume::migrate(&tx)?;
             tx.pragma_update(None, "user_version", super::session_resume::SCHEMA)?;
+            tx.commit()?;
+        }
+        if version < super::creation_worktree::SLOTS_SCHEMA {
+            if let Some(original) = original {
+                original.verify()?;
+            }
+            let tx = db.transaction()?;
+            super::creation_worktree::migrate_slots(&tx)?;
+            tx.pragma_update(None, "user_version", super::creation_worktree::SLOTS_SCHEMA)?;
+            if let Some(original) = original {
+                original.verify()?;
+            }
             tx.commit()?;
         }
         // Opening Store follows acquisition of the real exclusive serve owner.
@@ -917,6 +954,26 @@ impl Store {
     }
 }
 
+// Kept separate so the schema-34 ceiling can be exercised against a real
+// migrated store. This is the same read-only refusal older binaries use.
+fn schema_before_write(path: &Path, maximum: i64) -> Result<Option<i64>> {
+    if !path.try_exists()? {
+        return Ok(None);
+    }
+    let probe = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW
+            | OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let version: i64 = probe.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    ensure!(
+        (0..=maximum).contains(&version),
+        "desktop state requires a newer hgs version"
+    );
+    Ok(Some(version))
+}
+
 /// The swap test's hook: runs after the private check (`false`) and after
 /// SQLite's open (`true`).
 #[cfg(all(test, unix))]
@@ -959,7 +1016,15 @@ mod tests {
         let aside = |name: &str| temp.path().join(name);
         AROUND_OPEN.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move |path: &Path, opened: bool| {
-                let aside = |name: &str| path.parent().unwrap().parent().unwrap().parent().unwrap().join(name);
+                let aside = |name: &str| {
+                    path.parent()
+                        .unwrap()
+                        .parent()
+                        .unwrap()
+                        .parent()
+                        .unwrap()
+                        .join(name)
+                };
                 if opened {
                     std::fs::rename(path, aside("b.sqlite3")).unwrap();
                     std::fs::rename(aside("a.sqlite3"), path).unwrap();
@@ -971,7 +1036,10 @@ mod tests {
         });
         let swapped = Store::open(&location, &epoch);
         AROUND_OPEN.with(|hook| hook.borrow_mut().take());
-        let error = format!("{:#}", swapped.err().expect("the swapped-in database is refused"));
+        let error = format!(
+            "{:#}",
+            swapped.err().expect("the swapped-in database is refused")
+        );
         assert!(error.contains("desktop state changed"), "{error}");
         // A is back at its path, unchanged, and opens again.
         assert!(aside("b.sqlite3").exists());
@@ -1001,12 +1069,21 @@ mod tests {
                 .db
                 .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))
                 .unwrap();
-            assert!(foreign_lock_refused(&path), "round {round}: the store holds its lock");
+            assert!(
+                foreign_lock_refused(&path),
+                "round {round}: the store holds its lock"
+            );
             drop(Store::open(&location, &epoch));
-            assert!(foreign_lock_refused(&path), "round {round}: another open kept the lock");
+            assert!(
+                foreign_lock_refused(&path),
+                "round {round}: another open kept the lock"
+            );
             live.db.execute_batch("COMMIT").unwrap();
             drop(live);
-            assert!(!foreign_lock_refused(&path), "round {round}: the lock went with the store");
+            assert!(
+                !foreign_lock_refused(&path),
+                "round {round}: the lock went with the store"
+            );
         }
     }
 

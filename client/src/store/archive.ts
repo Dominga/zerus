@@ -48,13 +48,23 @@ export interface Page {
   /** The reply whose rows are shown, also while Archive changed is shown. */
   shownRequest: number;
   total: number;
+  /** The host counted only up to a cap: the total shows as "N+" (zerus-5wmh.13.17 (4)). */
+  capped: boolean;
+  /** The position is a lower bound (zerus-080n8). */
+  positionCapped: boolean;
+  /** The host's scan stopped at its budget before a full page; Older or Newer continues it (zerus-080n8). */
+  partial: boolean;
+  /** Rows looked at by this run of partial pages in one direction. */
+  searched: number;
+  /** The direction of the shown reply: `newer` names the request in flight. */
+  shownNewer: boolean;
   /** The window's first row in the whole archive, -1 when not reported. */
   position: number;
   loaded: boolean;
   newer: boolean;
 }
 
-export const emptyPage = (): Page => ({ rows: [], cursor: "", previous: "", error: "", request: 0, shownRequest: 0, total: 0, position: -1, loaded: false, newer: false });
+export const emptyPage = (): Page => ({ rows: [], cursor: "", previous: "", error: "", request: 0, shownRequest: 0, total: 0, capped: false, positionCapped: false, partial: false, searched: 0, shownNewer: false, position: -1, loaded: false, newer: false });
 
 export interface ArchiveStatus {
   summary: string;
@@ -85,11 +95,14 @@ export const hasMoreOf = (pages: Pages, hosts: readonly PagingComputer[]) => hos
   return !p.loaded || !!p.cursor || !!p.previous || p.rows.length < p.total || !!p.error;
 });
 
+/** Some computer's scan stopped at its budget: the archive is still being searched (zerus-080n8). */
+export const partialOf = (pages: Pages) => Object.values(pages).some((p) => p.partial);
+
 /** The Archive filter's count (SessionsWindowRows.cpp 563-565): "…" until the totals are known with none counted, "+" while more remains. */
 export function countText(count: number, pages: Pages, hosts: readonly PagingComputer[]): string {
   const paged = hosts.length > 0;
   const known = totalsKnownOf(pages, hosts);
-  if (paged && !known && !count) return "…";
+  if (paged && ((!known && !count) || (!count && partialOf(pages)))) return "…";
   return `${count}${paged && (!known || hasMoreOf(pages, hosts)) ? "+" : ""}`;
 }
 
@@ -98,6 +111,18 @@ export function tipText(caption: string, count: number, pages: Pages, hosts: rea
   if (!hosts.length) return `${caption} / ${count}`;
   const partial = !totalsKnownOf(pages, hosts) || hasMoreOf(pages, hosts);
   return `${caption} / ${count} loaded${partial ? "; more can be loaded in Archive" : ""}`;
+}
+
+/** A computer's total: "N+" when the host counted only up to a cap, never below the rows it shows (zerus-080n8). */
+const totalText = (p: Page) => (p.capped ? `${Math.max(p.total, Math.max(p.position, 0) + p.rows.length)}+` : `${p.total}`);
+
+/** A partial scan's words: never "no matches" and never a lower-bound "0+" (zerus-080n8). */
+const searchedText = (shown: number, searched: number) => tr("%1 shown, %2 searched so far", shown, searched);
+
+/** One computer's window: its rows' place, or how far a partial scan got. */
+function windowText(p: Page): string {
+  if (p.partial || (p.capped && !p.rows.length && !p.total)) return searchedText(p.rows.length, p.searched);
+  return p.position >= 0 && p.rows.length && !p.positionCapped ? `${p.position + 1}–${p.position + p.rows.length} of ${totalText(p)}` : `${p.rows.length} shown of ${totalText(p)}`;
 }
 
 /** ArchiveBrowser::updateStatus. `valid`: the range's from is below its until. */
@@ -111,13 +136,14 @@ export function statusOf(pages: Pages, hosts: readonly PagingComputer[], valid: 
     newer ||= !!p.previous;
     if (p.error) errors.push(`${machineOf(hosts, id)}: ${p.error}`);
     if (p.loaded) {
-      single = p.position >= 0 && p.rows.length ? `${p.position + 1}–${p.position + p.rows.length} of ${p.total}` : `${p.rows.length} shown of ${p.total}`;
+      single = windowText(p);
       windows.push(`${machineOf(hosts, id)}: ${single}`);
     }
     shown += p.rows.length;
   }
   const summary = busy ? tr("Loading archive…") : !hosts.length ? tr("Loaded sessions") : hosts.length === 1 && single ? single
-    : totalsKnownOf(pages, hosts) ? `${shown} loaded of ${totalOf(pages)}` : `${shown} loaded`;
+    : partialOf(pages) ? searchedText(shown, Object.values(pages).reduce((n, p) => n + (p.partial ? p.searched : 0), 0))
+    : totalsKnownOf(pages, hosts) ? `${shown} loaded of ${totalOf(pages)}${Object.values(pages).some((p) => p.capped) ? "+" : ""}` : `${shown} loaded`;
   const errorHint = errors.join("\n");
   return {
     summary, hint: windows.join("\n"), error: errorHint.slice(0, ERROR_CHARS), errorHint,
@@ -302,11 +328,18 @@ export function createArchive(deps: ArchiveDeps) {
       const s = archivedSession(computer, machine, row);
       return Object.assign(s, pending?.get(s.catalogKey));
     });
-    if (!rows.length && p.rows.length) { put(computer, { ...p, request: 0, error: tr(ARCHIVE_CHANGED) }); return; }
+    // An exact page that comes back empty after rows means the archive changed under its cursor.
+    // A bounded page (zerus-080n8) may be empty while its scan goes on, or at the end of the
+    // range after a partial run or a full page stopped by the budget (zerus-bv0a7).
+    if (!rows.length && p.rows.length && page.bounded !== true) { put(computer, { ...p, request: 0, error: tr(ARCHIVE_CHANGED) }); return; }
     batch(() => {
       put(computer, {
         ...p, request: 0, shownRequest: id, error: "", loaded: true, rows, cursor: page.next_cursor ?? "", previous: page.previous_cursor ?? "",
-        total: page.total ?? 0, position: typeof page.position === "number" ? page.position : -1,
+        total: page.total ?? 0, capped: page.total_capped === true, position: typeof page.position === "number" ? page.position : -1,
+        positionCapped: page.position_capped === true, partial: page.partial === true,
+        // "So far" counts the run of partial pages in one direction.
+        searched: (p.partial && p.shownNewer === p.newer ? p.searched : 0) + (typeof page.searched === "number" ? page.searched : 0),
+        shownNewer: p.newer,
       });
       setWindowChanges((n) => n + 1);
     });
@@ -405,6 +438,12 @@ export function createArchive(deps: ArchiveDeps) {
     total: () => totalOf(pages()),
     totalsKnown: () => totalsKnownOf(pages(), hosts()),
     hasMore: () => hasMoreOf(pages(), hosts()),
+    /** Some computer's scan stopped at its budget; Older or Newer continues it (zerus-080n8). */
+    partial: () => partialOf(pages()),
+    /** Whether a partial scan continues Newer rather than Older. */
+    partialNewer: () => Object.values(pages()).some((p) => p.partial && p.newer),
+    /** Rows looked at so far by the partial scans. */
+    searched: () => Object.values(pages()).reduce((n, p) => n + (p.partial ? p.searched : 0), 0),
     /** Some computer pages its archive. */
     paged: () => hosts().length > 0,
     countText: (count: number) => countText(count, pages(), hosts()),

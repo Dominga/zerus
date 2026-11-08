@@ -1,4 +1,5 @@
 import { TextInput } from "../lib/TextField";
+import { steadyTitle } from "../lib/steady-title";
 import { inspectSession, windowVisibility } from "../../bridge";
 import { sessionTerminalEntry } from "../../store/sessionTerminal";
 import { groupOf } from "../../store/organization";
@@ -24,7 +25,7 @@ import { detailsFor, followedFor, notify, updating } from "../../store/actions";
 import { STATE_CHANGED } from "./actions-ui";
 import { running } from "../../store/batch";
 import { grouping, headerOf, moveProject, setProjectCollapsed, setProjectToShow, sortProject } from "../../store/organization";
-import { TOOL_WIDTH, clearArchiveMenuEntry, machineMenu, runSelection, selectedRows, selectionContextMenu, selectionCount } from "./selection-live";
+import { TOOL_WIDTH, clearArchiveMenuEntry, machineMenu, moveRefusal, runSelection, selectedRows, selectionContextMenu, selectionCount } from "./selection-live";
 import { anyUnmuted, barTools, splitTools, toolEntry } from "./selection-ui";
 import { actionEntries, copyEntries, freshActionEntry, muteEntry } from "./ActionDialogs";
 import { markAllEntry, markAllTip, markEntry, runMarkAll } from "./mark-entries";
@@ -407,7 +408,7 @@ function SelectionBar() {
     onCleanup(() => ro.disconnect());
   };
   const rows = createMemo(() => selectedRows(listRows()));
-  const tools = createMemo(() => barTools(selectionCount(rows()), rows().length, running(), anyUnmuted(rows())));
+  const tools = createMemo(() => barTools(selectionCount(rows()), rows().length, running(), anyUnmuted(rows()), moveRefusal()));
   const split = createMemo(() => splitTools(tools(), Math.max(1, Math.floor(width() / TOOL_WIDTH))));
   // Each tool keeps its button while the catalog refreshes (zerus-92hkz): the
   // list is keyed by action and the button reads its current tool, so a
@@ -738,7 +739,7 @@ export function SessionList() {
         <FilterChips />
         <Show when={folderFilter()}>{(folder) => <div class="filter-chips"><button class="fchip-sel" title={`${native(folder().path, folder().style)}${tr("\nClear folder filter")}`} onClick={clearFolderScope}>{tr("Folder: %1", leaf(folder().path, folder().style))}<Icon name="x" size={11} /></button></div>}</Show>
 
-        <Show when={stateFilter() === "archived"}><ArchiveBar contentSearch={!!search().trim()} /></Show>
+        <Show when={stateFilter() === "archived"}><ArchiveBar /></Show>
         <Show when={search().trim()} fallback={<>
           <Show when={catalog.order.length > 0 || creationCount() > 0 || stateFilter() === "archived"} fallback={<ListPlaceholder />}>
             <div class="sp-scroll" classList={{ organizing: !!dragItem() }} ref={list.ref} tabindex="0" onKeyDown={onKey} role="tree"
@@ -1075,9 +1076,10 @@ function StripTile(props: { row: Extract<Row, { type: "card" }> }) {
   const optionalCount = () => optionalQuestionCount(s(), computerFresh(s().computer));
   const kind = () => badgeKind(s());
   const frame = () => (emphasis(s()) === "draft" ? "draft" : kind() === "muted-attention" || kind() === "muted-unread" ? "muted" : kind() === "unread" ? "attention" : kind());
-  const tip = () => [`${s().name}: ${statusCaption(s())}`, s().summary, `${folderOf(s())}${s().branch ? ` / ${s().branch}` : ""} on ${s().machine}`, s().git ? gitTooltip(s(), now() * 1000) : "", optionalCount() ? `${optionalCount()} optional question(s) waiting` : ""].filter(Boolean).join("\n");
+  // A tooltip: no live seconds, and it holds still under the pointer (zerus-5ryrx).
+  const tip = steadyTitle(() => [`${s().name}: ${statusCaption(s(), false)}`, s().summary, `${folderOf(s())}${s().branch ? ` / ${s().branch}` : ""} on ${s().machine}`, s().git ? gitTooltip(s(), now() * 1000) : "", optionalCount() ? `${optionalCount()} optional question(s) waiting` : ""].filter(Boolean).join("\n"));
   return (
-    <button class="strip-tile" classList={{ selected: selectedKey() === s().key, "context-target": visibleMenu()?.sessionKey === s().key }} data-frame={frame()} title={tip()} onClick={() => selectSession(s().key)}
+    <button class="strip-tile" classList={{ selected: selectedKey() === s().key, "context-target": visibleMenu()?.sessionKey === s().key }} data-frame={frame()} title={tip.title()} onPointerEnter={tip.enter} onPointerLeave={tip.leave} onClick={() => selectSession(s().key)}
       onContextMenu={(e) => sessionContextMenu(e, s())}>
       <span class="st-block">
         <span class="st-top">

@@ -44,6 +44,7 @@ pub(super) const SCHEMA: i64 = 34;
 /// tables drops their triggers and indexes.
 #[cfg(test)]
 pub(super) fn remove_fixture(db: &rusqlite::Connection) {
+    super::creation_worktree::rewind_slots(db);
     db.execute_batch(
         "DROP TABLE desktop_session_resumes; DROP TABLE desktop_session_resume_budget;",
     )

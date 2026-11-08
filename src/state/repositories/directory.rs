@@ -2,11 +2,20 @@
 use super::*;
 use std::fs::{File, OpenOptions};
 
-pub(in crate::state) struct Directory {
+pub(crate) struct Directory {
     pub path: PathBuf,
     file: File,
     #[cfg(windows)]
     _ancestors: Vec<File>,
+}
+
+// Per-thread, exact-private-directory fault injection at the publication sync
+// boundary. It cannot affect a concurrent test or any production build.
+#[cfg(all(test, unix))]
+thread_local! { static SYNC_FAILURE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(all(test, unix))]
+pub(in crate::state) fn fail_publication_sync(path: Option<PathBuf>) {
+    SYNC_FAILURE.with(|slot| *slot.borrow_mut() = path);
 }
 
 impl Directory {
@@ -73,7 +82,7 @@ impl Directory {
 
     /// Native object identity, for metadata bindings. It is not a resource
     /// retirement, ownership, consent or effect permit.
-    pub(in crate::state) fn object(&self) -> Result<(u64, u64)> {
+    pub(crate) fn object(&self) -> Result<(u64, u64)> {
         crate::platform::FileIdentity::of(&self.file)
             .map(|id| (id.device, id.inode)).map_err(|e| e.to_string())
     }
@@ -110,11 +119,32 @@ impl Directory {
 
     /// Existing-directory reads share acquisition's pinned, no-link walk.
     /// No directory, lock or file is created by these methods.
-    pub(in crate::state) fn private(&self) -> Result<bool> {
+    pub(crate) fn private(&self) -> Result<bool> {
         crate::platform::verify_private_directory(&self.file).map_err(|e| e.to_string())
     }
 
-    pub(in crate::state) fn read_private(&self, name: &str) -> Result<File> {
+    /// Advisory worker locks also exist in legacy 0755 state directories.
+    /// Require owner-only POSIX write access to their entries without changing
+    /// that mode. This is weaker than `private()` and never a native root proof.
+    #[cfg(unix)]
+    pub(in crate::state) fn owner_controls_entries(&self) -> Result<bool> {
+        use std::os::unix::fs::MetadataExt;
+        self.verify()?;
+        let metadata = self.file.metadata().map_err(|e| e.to_string())?;
+        // SAFETY: geteuid only returns this process's effective user ID.
+        Ok(metadata.is_dir()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.mode() & 0o022 == 0)
+    }
+
+    pub(crate) fn read_private(&self, name: &str) -> Result<File> {
+        self.read_private_optional(name)?
+            .ok_or_else(|| "Missing private file".into())
+    }
+
+    /// Absence is observed relative to this SAME pinned directory. The caller
+    /// decides whether absence has any meaning; it never establishes history.
+    pub(crate) fn read_private_optional(&self, name: &str) -> Result<Option<File>> {
         if name.is_empty() || name.contains(['/', '\\', ':']) || name == "." || name == ".." {
             return Err("Invalid existing file name".into());
         }
@@ -135,19 +165,27 @@ impl Directory {
                 )
             };
             if fd < 0 {
-                return Err(std::io::Error::last_os_error().to_string());
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    return Ok(None);
+                }
+                return Err(error.to_string());
             }
             // SAFETY: this call owns the new descriptor.
             unsafe { File::from_raw_fd(fd) }
         };
         #[cfg(windows)]
-        let file = crate::platform::no_follow(OpenOptions::new().read(true))
+        let file = match crate::platform::no_follow(OpenOptions::new().read(true))
             .open(self.path.join(name))
-            .map_err(|e| e.to_string())?;
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.to_string()),
+        };
         if !crate::platform::verify_private_file(&file).map_err(|e| e.to_string())? {
             return Err("The existing file must be private and regular".into());
         }
-        Ok(file)
+        Ok(Some(file))
     }
 
     pub fn verify(&self) -> Result<()> {
@@ -310,7 +348,10 @@ impl Directory {
     /// Replace metadata under caller-held exclusion, through this original
     /// directory. This does not establish any action or consent authority.
     pub(in crate::state) fn replace_file(&self, name: &str, bytes: &[u8]) -> Result<()> {
-        self.publish_file(name, bytes, true).map(drop)
+        self.replace_file_retained(name, bytes).map(drop)
+    }
+    pub(in crate::state) fn replace_file_retained(&self, name: &str, bytes: &[u8]) -> Result<File> {
+        self.publish_file(name, bytes, true)
     }
 
     fn publish_file(&self, name: &str, bytes: &[u8], replace: bool) -> Result<File> {
@@ -360,7 +401,12 @@ impl Directory {
             written?;
             return Err(format!("Cannot publish {}: {error}", to.to_string_lossy()));
         }
-        self.file.sync_all().map_err(|e| e.to_string())?;
+        let synced = self.file.sync_all();
+        #[cfg(test)]
+        let synced = if SYNC_FAILURE.with(|slot| slot.borrow().as_ref() == Some(&self.path)) {
+            Err(std::io::Error::other("fixture directory sync failure"))
+        } else { synced };
+        synced.map_err(|e| e.to_string())?;
         self.verify()?;
         Ok(file)
     }
@@ -461,7 +507,10 @@ impl Directory {
     /// Replace metadata under caller-held exclusion, through this original
     /// directory. This does not establish any action or consent authority.
     pub(in crate::state) fn replace_file(&self, name: &str, bytes: &[u8]) -> Result<()> {
-        self.publish_file(name, bytes, true).map(drop)
+        self.replace_file_retained(name, bytes).map(drop)
+    }
+    pub(in crate::state) fn replace_file_retained(&self, name: &str, bytes: &[u8]) -> Result<File> {
+        self.publish_file(name, bytes, true)
     }
 
     fn publish_file(&self, name: &str, bytes: &[u8], replace: bool) -> Result<File> {

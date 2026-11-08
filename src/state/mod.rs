@@ -140,7 +140,7 @@ mod worktree_requests;
 // The creation worktree actor's only entry into the owned effect.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use {
-    worktree_requests::{create_owned as create_worktree_owned, original_receipt as worktree_request_receipt},
+    worktree_requests::{create_owned as create_worktree_owned, original_receipt as worktree_request_receipt, ReceiptRoot as WorktreeReceiptRoot},
     worktrees::{Control as WorktreeControl, Step as WorktreeStep},
 };
 mod worktree_cleanup;

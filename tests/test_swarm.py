@@ -260,6 +260,45 @@ class Swarm(unittest.TestCase):
         self.assertEqual(next(p for p in c['organization']['projects'] if p['id'] == 'a')['name'], 'Resolved')
         self.assertEqual(a['digest'], self.converge()[0]['digest'])
 
+    def test_a_selection_move_from_a_stale_base_conflicts_only_on_the_member_another_writer_moved(self):
+        # zerus-5wmh.18.1: Move to project for a selection is one apply with
+        # every member. A second writer moves one of them between this
+        # writer's get and its apply; hgs writes each member with its own
+        # observed heads, so only that member becomes a conflict for review.
+        before = self.call('a', 'get'); desired = copy.deepcopy(before['organization'])
+        desired['projects'] += [dict(id=p, name=p.title(), color='#123456', folders=[], sessions=[]) for p in ('left', 'right', 'middle')]
+        self.patch('a', before, desired)
+        x, y, z = (f'a\ncodex/example/{n}' for n in ('x', 'y', 'z'))
+
+        def assignment(snapshot, sessions, project_id):
+            desired = copy.deepcopy(snapshot['organization'])
+            desired['session_assignments_explicit'] = True
+            for project in desired['projects']:
+                project['sessions'] = [s for s in project['sessions'] if s not in sessions]
+                if project['id'] == project_id:
+                    project['sessions'] += sessions
+            return desired
+
+        def members(snapshot, project_id):
+            return next(p for p in snapshot['organization']['projects'] if p['id'] == project_id)['sessions']
+
+        start = self.call('a', 'get')
+        self.patch('a', start, assignment(start, [x, y, z], 'left'))
+        seen = self.call('a', 'get')                       # this writer's get
+        other = self.call('a', 'get')                      # the second writer's get
+        self.patch('a', other, assignment(other, [x], 'right'))
+        result = self.patch('a', seen, assignment(seen, [x, y, z], 'middle'))
+        self.assertTrue(result['written'])
+        after = self.call('a', 'get')
+        self.assertEqual(len(after['conflicts']), 1, after['conflicts'])
+        conflict = after['conflicts'][0]
+        self.assertIn('codex/example/x', conflict['key'])
+        self.assertEqual(len(conflict['variants']), 2)
+        # y and z land in the chosen project; nothing else changed.
+        self.assertTrue({y, z} <= set(members(after, 'middle')), members(after, 'middle'))
+        self.assertEqual(members(after, 'left'), [])
+        self.assertEqual({p['id'] for p in after['organization']['projects']}, {p['id'] for p in seen['organization']['projects']})
+
     def test_join_does_not_merge_names_without_explicit_mapping(self):
         self.join('a', 'b')
         self.assertEqual(len(self.call('a', 'get')['organization']['projects']), 2)

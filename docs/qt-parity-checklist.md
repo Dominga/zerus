@@ -42,19 +42,19 @@ Every partial, missing and unverified row names the bead that tracks it.
 
 | Area | done | partial | missing | other |
 | --- | --- | --- | --- | --- |
-| Sessions list, row actions and header | 27 | | 1 | 2 owner decisions, 1 intentional difference |
-| Archive and search | 14 | 1 | 0 | |
+| Sessions list, row actions and header | 28 | | | 2 owner decisions, 1 intentional difference |
+| Archive and search | 15 | 0 | 0 | |
 | Composer and sending | 35 | | | 1 intentional difference |
 | Activity | 17 | 0 | 0 | |
 | Questions and approvals | 12 | | | |
-| Notifications | 7 | 5 | | |
-| Tray, menu bar and Dock | 6 | 2 | 1 | 2 owner decisions |
+| Notifications | 9 | 3 | | |
+| Tray, menu bar and Dock | 7 | 1 | | 2 owner decisions, 1 intentional difference |
 | Shortcuts and navigation | 6 | | | |
-| Lifecycle and updates | 6 | 2 | 1 | |
+| Lifecycle and updates | 7 | 1 | 1 | |
 | Settings | 17 | | | 1 intentional difference |
 | Machines, accounts, projects, new session, tasks and worktrees | 18 | | | |
 | Terminal, processes and platform session support | 8 | | | |
-| Total (193 rows) | 173 | 10 | 3 | 7 |
+| Total (193 rows) | 179 | 5 | 1 | 8 |
 
 ## Owner decisions
 
@@ -71,11 +71,6 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Bead | Priority | Gap |
 | --- | --- | --- |
 | `zerus-5wmh.13.14` | P2 | Windows: focus-aware banners, update alert, tray theme, watchdog, startup note |
-| `zerus-5wmh.13.8` | P3 | Activity rendering: full tool output, View process, Markdown, inline-code links, empty state |
-| `zerus-5wmh.13.15` | P3 | Tray Refresh entry, Linux without a tray host, Linux launch during service start |
-| `zerus-5wmh.13.16` | P3 | Alert text language; the labeled rail's exact-count tooltip (`zerus-nfmh1`) |
-| `zerus-5wmh.13.17` | P3 | Search result refinements after the search port (`zerus-5wmh.66.2.2`) |
-| `zerus-5wmh.18` | existing | Selection Move to project, with project organisation |
 | `zerus-5wmh.66.10` | existing | Desktop presence for phone alerts |
 | `zerus-5wmh.13.11.4` | P4 | Deferred: batch Terminate folder removal, one confirmation holding every session's program manifest |
 
@@ -105,7 +100,7 @@ Keyboard commands for every area are listed once, under Shortcuts and navigation
 | Left and Right on a plain row collapse or expand its project; Home and End | done | `ui/sessions/SessionList.tsx:641-675`; Right reopens the project hiding the open row, and the arrows go on past it | `SessionList.cpp:623-627` |
 | Enter on a row jumps to the latest Activity | done (a focused button in the list keeps its own Enter) | `ui/sessions/SessionList.tsx:676-680`; `store/ui.ts:61-71`, taken by the mounted Activity: `ui/sessions/Activity.tsx:989` | `SessionsWindow.cpp:565,5499-5504` |
 | Selection bar and menu: Mark read, Mark needs attention, Compact, Expand, Pause, Resume or Restore, Archive, Forget and Terminate with confirmation | done | `ui/sessions/selection.ts:11-31,113-136`; `store/batch.ts:134-145`; `ui/sessions/ActionDialogs.tsx:326-345` | `SessionSelection.cpp:52-218,258-286` |
-| Selection Move to project | **missing** (`zerus-5wmh.18`) | disabled with "Arrives with project organisation." (`ui/sessions/selection.ts:19`; `ui/sessions/selection-ui.ts:59-66`); a single row can move | `SessionSelection.cpp:184-195` |
+| Selection Move to project | done; one move for the rows still listed, waits while a lifecycle batch runs | `ui/sessions/selection-ui.ts:76`; `ui/sessions/selection-live.ts:33-38`; `ui/sessions/organization-ui.ts:137-153` (`movedText`), `:177-215` (`openMoveSelection`, re-check, one move) | `SessionSelection.cpp:184-195` |
 | Selection Terminate: remove working folders after stopping | intentional difference (`zerus-5wmh.13.11.4`) | batch Terminate offers no folder removal in this pass (`ui/sessions/selection.ts:111-112`); per-session Terminate with its program manifest, ownership nonce, separate Force and removed, kept and unknown outcomes stays the way to remove folders, as the Terminate and Remove working folder rules in `AGENTS.md` set them for one session (design-tima2, 2026-11-08; the batch design is kept in the bead) | `SessionSelection.cpp:274-283` |
 | Footer: creation status, Mark all as read, Saved drafts | done | `ui/sessions/SessionList.tsx:702-712` | `SessionsWindow.cpp:459-489` |
 | Footer summary (N shown, N working, N attention) | removed by owner decision | dropped on owner feedback of 2026-11-07 (PR #1685) | `SessionsWindowRows.cpp:473-479` |
@@ -131,7 +126,7 @@ Keyboard commands for every area are listed once, under Shortcuts and navigation
 | Archive filter with count; date picker with presets and a checked custom range; Refresh | done | `ui/sessions/ArchiveBar.tsx:35,66-159`; `ui/sessions/archive-dates.ts:18,114` | `ArchiveDatePicker.cpp`; `ArchiveBrowser.cpp:17-19` |
 | Status, Newer and Older paging, per-machine errors | done | `ui/sessions/ArchiveBar.tsx:39-55`; `store/archive.ts:104-131` | `ArchiveBrowser.cpp:23-80` |
 | Archived rows grouped by project and filtered; archive counts in pickers | done | `store/archive.ts:182-196,446-449`; `ui/sessions/archive-filters.ts:5-27` | `SessionsWindowRows.cpp:266-300` |
-| Search archive names and IDs with paging | partial (`zerus-5wmh.13.17`) | the query reaches `hgs` (`store/archive.ts:373,440`), but while searching the status and Newer and Older are hidden (`ui/sessions/ArchiveBar.tsx:39,53`), so matches past the loaded page are unreachable | `SessionsWindow.cpp:386,410`; `ArchiveBrowser.cpp:58` |
+| Search archive names and IDs with paging | done; a total the host capped shows as N+ | the query reaches `hgs` (`store/archive.ts:378,445`); while searching the status and Newer and Older stay (`ui/sessions/ArchiveBar.tsx:41-55`) and the results' archive rows are the query's current page (`store/contentSearch.ts:52`); `store/archive.ts:106` | `SessionsWindow.cpp:386,410`; `ArchiveBrowser.cpp:58` |
 | Read-only recorded Activity for an archived session | done | `ui/sessions/SessionDetail.tsx:166-173`; `store/archiveActivity.ts:206` | `SessionsWindow.cpp:3434-3716` |
 | Restore, blocked when the name is live; copy restore command; rename; Forget; Clear archive | done | `ui/sessions/SessionDetail.tsx:141`; `store/restores.ts:195`; `ui/sessions/actions-ui.ts:154-247,355`; `ui/sessions/archive-entries.ts:14-45` | `SessionsWindow.cpp:371-373,618,1958-1966,3148-3154` |
 
@@ -249,8 +244,8 @@ In the default native alert mode the Zerus Next app posts alerts itself while it
 | Update available alert, once per release | Windows | partial (`zerus-5wmh.13.14`) | macOS and Linux post it (`tauri/updates.rs:739-761`); the Windows hook does nothing (`tauri/updates.rs:924-925`) | `TrayAgent.cpp:164-175` |
 | Short tray messages (a new session's terminal advisory, the terminal did not open) | Linux, Windows | done | `tauri/desk.rs:1183-1235`: a desktop notification on Linux and the tray balloon on Windows, the window's notice where the app does not own them; macOS keeps `osascript`; callers `tauri/creations.rs:1783,1792` | `TrayAgent.cpp:655-830` |
 | Phone alerts wait while the owner is at the desktop | Linux, macOS | partial (`zerus-5wmh.66.10`) | the app reports no presence; only the registered `hgs` service does (`src/desktop/presence_worker.rs`) | `TrayAgent.cpp:279-290`; `DesktopPresence.cpp` |
-| Alert text in the interface language | all | partial (`zerus-5wmh.13.16`) | English constants: `core/attention.rs:20-22,444-448`; `crates/freedesktop-notify/src/lib.rs:34` | `AttentionTracker.cpp:125-134`; `LinuxAttentionNotifier.cpp:52` |
-| In-window attention badge capped at 99+ | all | partial (`zerus-nfmh1`) | capped at 99+, the exact count in the Sessions button's name and icon-mode tooltip: `ui/components/Rail.tsx:46-51`, `ui/components/rail-badge.ts`; labeled skins show no tooltip, so no exact count on hover | `SessionsWindow.cpp:304-306,3374-3381` |
+| Alert text in the interface language | all | done (`zerus-5wmh.13.16`) | the tracker renders its titles and reasons through `Tracker::set_render` (`core/attention.rs:23-25,457-462,752`), which the desktop gives the interface-language renderer (`tauri/desk.rs:418`); the Linux open action is named in it too (`crates/freedesktop-notify/src/lib.rs:27-46`) | `AttentionTracker.cpp:125-134`; `LinuxAttentionNotifier.cpp:52` |
+| In-window attention badge capped at 99+ | all | done (`zerus-nfmh1`) | capped at 99+ (`ui/components/rail-badge.ts:2`), with the exact count in the Sessions button's name and its tooltip on every rail, labeled or not (`ui/components/Rail.tsx:46-53`) | `SessionsWindow.cpp:304-306,3374-3381` |
 
 ### Tray, menu bar and Dock
 
@@ -261,11 +256,11 @@ In the default native alert mode the Zerus Next app posts alerts itself while it
 | Left click opens Zerus, right click the menu; Open Zerus; Update available; Restart to finish update (macOS); machine state lines; Quit saving drafts | all | done | `core/menubar.rs:644-676`; `tauri/updates.rs:905-916,1305-1311`; `tauri/platform/linux_tray.rs:256-264,968-973`; `tauri/platform/windows/tray.rs:114-117,183,189` | `TrayMenu.cpp:162-245`; `QtTrayIcon.cpp`; `SniTrayIcon.cpp` |
 | Per-session rows in the tray menu | all | removed by owner decision | one count line per machine (`core/menubar.rs:639-678`, owner, 0.48.0) | `TrayMenu.cpp:23-31,168-234` |
 | Open in terminal-mode submenu | all | removed by owner decision | only read from files (`tauri/desk.rs:224-288`); see Terminal preferences | `TrayMenu.cpp:62-148`; `TrayAgent.cpp:832-873` |
-| Tray Refresh | all | **missing** (`zerus-5wmh.13.15`) | the entry type exists (`core/menubar.rs:378`) but the menu never adds it; the macOS handler does nothing (`tauri/platform/macos_menubar.rs:209`) | `TrayMenu.cpp:241-242` |
+| Tray Refresh | all | done | the core menu ends with Refresh and Quit on every platform (`core/menubar.rs:677`), pinned as each tray lays it out (`tauri/desk.rs:2773`); it reconnects every computer's stream: Linux `tauri/platform/linux_tray.rs:991`, macOS `tauri/platform/macos_menubar.rs:209`, Windows `tauri/platform/windows/tray.rs:185` | `TrayMenu.cpp:241-242` |
 | Menu not rebuilt while open | all | done | `core/menubar.rs:696-731`; `tauri/platform/windows/tray.rs:136-177` | `QuietTrayIcon.cpp`; `TrayMenu.h:40-43` |
 | Dock badge, Dock icon only with a window, Dock click restores; app menu | macOS | done | `tauri/platform/macos_menubar.rs:100-131`; `tauri/lifecycle.rs:19-53,196-243`; `tauri/exit_flush.rs:528-570` | `MacApplicationBadge.mm`; `MacAppVisibility.mm` |
 | StatusNotifierItem tray re-registering after panel restarts; launcher badge | Linux | done | `tauri/platform/linux_tray.rs:221-440,715-745`; `tauri/platform/linux_tray/badge.rs` | `SniTrayIcon.cpp`; `LinuxApplicationBadge.cpp` |
-| Desktop without a tray host | Linux | partial (`zerus-5wmh.13.15`) | the app runs without an icon (`tauri/platform/linux_tray.rs:740`); Qt refused to start so the service retried | `main.cpp:364-367` |
+| Desktop without a tray host | Linux | intentional difference (`zerus-5wmh.13.15`) | Zerus Next keeps running without an icon, registers it as soon as a tray host appears (`tauri/platform/linux_tray.rs`, NameOwnerChanged), opens from the applications menu (`--sessions` through the instance socket) and writes once per start "no tray host; open Zerus from the applications menu" (`tauri/platform/linux_tray.rs:790-805`). Qt exited 4 and `hgs-tray.service`'s RestartPreventExitStatus=4 kept it stopped, so such a desktop had no GUI at all (design-tima2, 2026-11-08) | `main.cpp:364-367`; `packaging/hgs-tray.service` |
 | Notification-area icon re-added after Explorer restarts; taskbar overlay badge; taskbar grouping | Windows | done | `tauri/platform/windows/tray.rs:107-110,260-406`; `tauri/platform/windows/startup.rs:105-109` | `QtTrayIcon.cpp`; `WindowsApplicationBadge.cpp`; `main.cpp:284` |
 
 ### Shortcuts and navigation
@@ -284,7 +279,7 @@ In the default native alert mode the Zerus Next app posts alerts itself while it
 | Capability | Platform | Status | Zerus Next evidence | Qt |
 | --- | --- | --- | --- | --- |
 | One instance per user handing over open or stay hidden | all | done | `tauri/instance.rs:1-45`; `tauri/instance_windows.rs:34-80,222-260` | `main.cpp:296-362`; `SingleInstance.cpp` |
-| A launch waits for the login service that is still starting | Linux | partial (`zerus-5wmh.13.15`) | macOS waits (`tauri/instance.rs:447-520`); on Linux the check reports no service (`tauri/instance.rs:681-687`) | `SingleInstance.cpp:107-140` |
+| A launch waits for the login service that is still starting | Linux | done | `systemctl --user show` of `hgs-tray.service`, read-only and bounded at 2 s with the child killed and reaped (`tauri/instance.rs:464-618`); Qt's states, and never on its own run: its MainPID or, through a wrapper, its InvocationID (`tauri/instance.rs:528-534`); macOS waits on launchd the same way | `SingleInstance.cpp:48-71,107-140` |
 | `--sessions` and `--background`; closing hides the window; show, raise and unminimise; window geometry remembered; keep above | all | done | `tauri/cli.rs:23-31`; `tauri/lifecycle.rs:13-168`; `tauri/window_geometry.rs`; `tauri/window_layer.rs` | `AppConfig.cpp:461-463`; `main.cpp:279`; `SessionsWindow.cpp:5831-5908` |
 | Start at login; macOS Fix login item | all | done | `packaging/linux/hgs-tray.service`; `tauri/login_item.rs:106-207`; `ui/screens/settings/Updates.tsx:18-70` | `tray/packaging`; `SessionsWindow.cpp:1775-1823` |
 | Quit saves drafts and clears badges | all | done | `tauri/exit_flush.rs`; `tauri/signals.rs`; `tauri/lifecycle.rs:253-283` | `main.cpp:380-382`; `TerminationSignals.cpp` |

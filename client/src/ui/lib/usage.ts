@@ -167,12 +167,19 @@ export const clock = (seconds: number) => clockOf(new Date(seconds * 1000));
 
 export const usageRetryWaiting = (u: Usage, now: number) => u.status === "rate_limited" && (u.retry_at ?? 0) > now;
 
-/** Shown beside retained meters in both the footer and account views. */
-export function rateLimitNotice(u: Usage, now: number) {
+/**
+ * Shown beside retained meters in both the footer and account views. A
+ * tooltip names clock times instead of ages and countdowns, so it never
+ * changes while it shows (zerus-5ryrx, zerus-f5gta).
+ */
+export function rateLimitNotice(u: Usage, now: number, tooltip = false) {
   if (u.status !== "rate_limited") return "";
   const age = u.checked_at === null ? tr("No saved limits, rate limited")
+    : tooltip ? tr("Limits from %1, rate limited", clock(u.checked_at))
     : tr("Limits %1 min ago, rate limited", Math.max(0, Math.floor((now - u.checked_at) / 60)));
-  return `${age}. ${usageRetryWaiting(u, now) ? tr("Retry in %1 s", Math.ceil(u.retry_at! - now)) : tr("Refresh to check limits.")}`;
+  const retry = !usageRetryWaiting(u, now) ? tr("Refresh to check limits.")
+    : tooltip ? tr("Retry at %1", clock(u.retry_at!)) : tr("Retry in %1 s", Math.ceil(u.retry_at! - now));
+  return `${age}. ${retry}`;
 }
 
 /** AccountUsage::tooltip (AccountUsage.h:197-219). */
@@ -197,7 +204,7 @@ export function accountTooltip(u: Usage, now: number) {
   if (u.refreshing) lines.push(tr("Updating… Previous values remain visible."));
   else if (u.refresh_error) lines.push(tr("Update failed. Showing the last available values."));
   if (u.offline) lines.push(tr("Machine is offline."));
-  if (u.status === "rate_limited") lines.push(rateLimitNotice(u, now));
+  if (u.status === "rate_limited") lines.push(rateLimitNotice(u, now, true));
   if (!u.windows.length && !u.balances.length) lines.push(stateText(u));
   lines.push(tr("Updates every 5 minutes. Open account details."));
   return lines.join("\n");

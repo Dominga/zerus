@@ -11,9 +11,11 @@
 //! stood; a plain exit would not be restarted. On Linux no unit supervises the
 //! client (`hgs-tray.service` runs the Qt GUI), so an abort only ends that run.
 //! On Windows the beat is a thread timer that the message loop and every modal
-//! loop dispatch, and Windows Error Reporting restarts the client after the
-//! abort with its registered command line (`platform/windows/startup.rs`,
-//! `RegisterApplicationRestart`, as Qt's `main.cpp:388-405`; zerus-5wmh.13.14.3).
+//! loop dispatch. After the abort Windows Error Reporting may offer to start
+//! the client again with its registered command line
+//! (`platform/windows/startup.rs`, `RegisterApplicationRestart`, as Qt's
+//! `main.cpp:388-405`; zerus-5wmh.13.14.3). That restart is not automatic: it
+//! needs the person's consent and at least 60 s of uptime before the abort.
 //!
 //! The clock stops while the machine sleeps ([`now_ms`]). Around sleep macOS
 //! leaves the main thread unscheduled for longer than the threshold while the

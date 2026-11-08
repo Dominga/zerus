@@ -148,12 +148,12 @@ os.execv(__HGS__, [__HGS__] + argv)
         self.assertIn('-c', json.loads((self.root / 'argv.jsonl').read_text().splitlines()[-1])['argv'])
 
     def test_an_uncertain_capability_probe_keeps_the_integer_launch_recipe(self):
-        marker = self.root / 'unexpected-helper-dispatch'
         for kind in ('overflow', 'timeout', 'replacement'):
             with self.subTest(kind=kind):
+                marker = self.root / ('helper-dispatch-' + kind)
                 helper = self.bin / ('capability-' + kind)
                 source = r'''#!/usr/bin/env python3
-import os, sys, pathlib, time
+import os, sys, pathlib, time, json
 if sys.argv[1:] == ['--help']:
     print('session-launch-identity-v1', flush=True)
     if __KIND__ == 'overflow':
@@ -167,7 +167,9 @@ if sys.argv[1:] == ['--help']:
         new.chmod(0o700)
         os.replace(new, path)
     sys.exit(0)
-pathlib.Path(__MARKER__).touch()
+if sys.argv[1:2] == ['--run']:
+    pathlib.Path(__MARKER__).write_text(json.dumps(dict(count=sys.argv[2], sid=os.environ.get('HGS_SESSION_ID'),
+                                                     declared=os.environ.get('HGS_LAUNCH_SESSION_ID'))))
 os.execv(__HGS__, [__HGS__] + sys.argv[1:])
 '''
                 helper.write_text(source.replace('__KIND__', repr(kind)).replace('__MARKER__', repr(str(marker)))
@@ -177,10 +179,13 @@ os.execv(__HGS__, [__HGS__] + sys.argv[1:])
                 name = 'codex/p/capability-' + kind
                 self.hgs('codex', 'p', '-n', 'capability-' + kind, '-d')
                 self.wait(lambda: self.binding(name).get('conversation_id'))
-                self.assertTrue(marker.exists())
+                delivered = json.loads(marker.read_text())
+                self.assertTrue(delivered['count'].isdigit(), delivered)
+                self.assertEqual(delivered['sid'], '', delivered)
+                self.assertEqual(delivered['declared'], '', delivered)
                 self.assertFalse((self.root / 'state' / 'sessions').exists())
-                self.wait(lambda: self.binding(name).get('activity') == 'idle')
-                self.hgs('pause', name)
+                # The fixture's original owned tmux teardown settles these
+                # children; this admission control needs no separate Pause.
 
     @unittest.skipUnless(os.environ.get('HGS_TEST_OLD_CLI'), 'requires the verified old CLI fixture')
     def test_an_old_selected_helper_keeps_the_integer_recipe_without_parent_id_markers(self):

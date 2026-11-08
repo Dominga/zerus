@@ -42,6 +42,7 @@
   "teams/leadNoticeSessions": "{}",
   "teams/leadNotices": "collapsed",
   "teams/planModes": "{}",
+  "teams/templateFavourites": [],
   "ui/catalogHideUnusedRoles": false,
   "updates/automatic": true,
   "updates/channel": "stable",

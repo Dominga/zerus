@@ -2,7 +2,11 @@
 //! independent of the UI lifetime. Native admission, the one original child
 //! and the original resource drain are separate; only the drain, through the
 //! CLI's own receipt, settles a send.
-use super::child::{self, Ended};
+// Only the Linux runner starts an original child; macOS refuses every
+// original at admission.
+#[cfg(target_os = "linux")]
+use super::child;
+use super::child::Ended;
 use super::receipt::{self, Evidence, Observed, Roots};
 use super::{consent::Consent, ledger, target};
 use crate::desktop::creation_clone::lease::{Lease, Machine};
@@ -56,6 +60,7 @@ enum Proof {
     Admitting,
 }
 /// The whole send, the CLI's own lock wait included (G1 condition 6).
+#[cfg(any(test, target_os = "linux"))]
 pub(super) const DEADLINE: Duration = Duration::from_secs(30);
 /// The one bounded deadline of the receipt read after the physical drain,
 /// never renewed: a later result is Unknown.

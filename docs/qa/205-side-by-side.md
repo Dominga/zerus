@@ -123,3 +123,37 @@ size, on the owner's data.
 - 195's project actions.
 - Qt's New team form with no team open.
 - Light skins.
+
+The items above that 205 did not cover were checked by task 319; see
+`docs/qa/319-side-by-side-2.md`.
+
+## Recheck after the fixes (tasks 317 and 322)
+
+F7, F8 and F13 were rechecked by 319 after 317: all pass. Task 322 rechecked
+the rest on the integration head 12c0fdb31, after 314, 315, 316 and 318 had
+landed:
+- **Tauri:** a dev build of 05a414aa8 (the same tree), clean, launched through
+  `scripts/tauri_template.py`.
+- **Qt:** `qt-build` with isolated settings in `.zerus-team/qa322`.
+- **Screenshots:** `.zerus-team/qa322/shots`.
+- **Cleanup:** both apps were stopped afterwards.
+
+| F | Fixed by | Result on the integration head |
+| --- | --- | --- |
+| F1 | 314 | **Pass**: no element of the lead's member rows passes the pane edge (0 overflowing) |
+| F2 | 315 | **Pass**: at the same moment both say 4 need attention, with the same sessions; General shows ●4 ●2 in both; work-9b8fda6a says New reply in both |
+| F3 | 315 | **Pass**: the lead's header and its row both say Waiting |
+| F4 | 316 | **Pass**: full phase titles and one summary per phase |
+| F5 | 316 | **Pass**: one Healthy count (115/116) |
+| F6 | 316 | **Pass**: "105 accepted … Show" folds the accepted tasks; 12 open tasks are drawn |
+| F9 | 315 | **Pass**: member cards carry their Permissions line; Frontend (DeepSeek) shows No report, as in Qt |
+| F10 | 314 | **Partial**: the page now fills the window. The footer (y 1485-1520 of 1530) sits partly under the status bar and has no Create team button; Qt shows "Start planning first" with a disabled Create team. Filed below as F10b |
+| F11 | 318 | **Pass**: the section order matches Qt's, and every section has its icon |
+| F12 | 318 | **Pass**: the Phones section, "This machine, 67 sessions" and msi-old "Not connected" |
+
+- **F10b (remaining).** Rail > New team at 2560x1530.
+  - Tauri's `.nt-foot` ("Nothing is created until you press Start planning.")
+    is at y 1485-1520, partly behind the status bar at the window's bottom.
+  - It has no Create team button.
+  - Qt's footer shows the same note, "Start planning first" and a disabled
+    Create team, all fully visible.

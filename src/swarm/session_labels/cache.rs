@@ -246,7 +246,17 @@ fn complete_after(
 }
 
 fn positive(value: &Value, node: &str) -> bool {
-    if value.as_object().is_none_or(|value| value.len() != 2) {
+    let Some(outer) = value.as_object() else {
+        return false;
+    };
+    if !(2..=3).contains(&outer.len())
+        || outer
+            .keys()
+            .any(|key| !matches!(key.as_str(), "context" | "connector" | "native_continuity"))
+        || outer
+            .get("native_continuity")
+            .is_some_and(|value| !value.is_boolean())
+    {
         return false;
     }
     let Some(raw) = value["context"].as_object().filter(|raw| raw.len() == 7) else {
@@ -329,6 +339,14 @@ fn current(dir: &Path, scope: &Scope, alias: &str, now: u64) -> Result<Value> {
 /// derive from the sorted configured aliases; scope/alias bindings reject
 /// reuse after a roster reorder. No lock or wait is needed on the hot path.
 pub(crate) fn cached(config: &Config) -> bool {
+    cached_mode(config, false)
+}
+
+pub(super) fn cached_for_writes(config: &Config) -> bool {
+    cached_mode(config, true)
+}
+
+fn cached_mode(config: &Config, require_native: bool) -> bool {
     (|| -> Result<bool> {
         let dir = directory(config, false)?;
         let scope = Scope::read(config)?;
@@ -337,7 +355,8 @@ pub(crate) fn cached(config: &Config) -> bool {
         }
         let now = now_millis()?;
         let local = current(&dir, &scope, LOCAL, now)?;
-        if local["context"] != serde_json::to_value(&scope.local)?
+        if (require_native && local["native_continuity"] != true)
+            || local["context"] != serde_json::to_value(&scope.local)?
             || local["connector"]["required"] != scope.connector.required()
             || (scope.connector.required()
                 && (local["connector"]["configuration"].as_str()
@@ -348,7 +367,10 @@ pub(crate) fn cached(config: &Config) -> bool {
             return Ok(false);
         }
         for alias in scope.peers.keys() {
-            current(&dir, &scope, &format!("peer:{alias}"), now)?;
+            let peer = current(&dir, &scope, &format!("peer:{alias}"), now)?;
+            if require_native && peer["native_continuity"] != true {
+                return Ok(false);
+            }
         }
         Ok(Scope::read(config)?.key == scope.key)
     })()
@@ -458,6 +480,63 @@ mod tests {
         drop(store);
         node.into()
     }
+    fn local_native(config: &Config, flag: Value) {
+        let token = begin(config, LOCAL, &context(config).unwrap().machine, until()).unwrap();
+        let mut observation = answer(config);
+        observation["native_continuity"] = flag;
+        complete(config, token, Some(observation)).unwrap();
+    }
+    #[test]
+    fn reader_only_and_untyped_answers_never_satisfy_the_writer_gate() {
+        let (_root, config) = fixture();
+        local(&config);
+        assert!(cached(&config));
+        assert!(!cached_for_writes(&config));
+        local_native(&config, json!(false));
+        assert!(cached(&config));
+        assert!(!cached_for_writes(&config));
+        for invalid in [Value::Null, json!("true"), json!(1), json!({"ready":true})] {
+            local_native(&config, invalid);
+            assert!(!cached(&config));
+            assert!(!cached_for_writes(&config));
+        }
+        local_native(&config, json!(true));
+        assert!(cached(&config));
+        assert!(cached_for_writes(&config));
+        // A fabricated positive cache cannot claim this build's unfinished
+        // floor: only the private cache decoder is simulated above.
+        assert!(!super::super::cached_for_writes(&config));
+    }
+    #[test]
+    fn every_peer_must_prove_native_continuity_in_its_same_fresh_answer() {
+        let (_root, mut config) = fixture();
+        let node = peer(&mut config);
+        local_native(&config, json!(true));
+        assert!(!cached_for_writes(&config));
+        for flag in [None, Some(json!(false)), Some(json!(true))] {
+            let mut observation = answer(&config);
+            observation["context"]["machine"] = json!(node);
+            if let Some(flag) = flag.clone() {
+                observation["native_continuity"] = flag;
+            }
+            let token = begin_peer(&config, "local", until());
+            finish_peer(
+                &config,
+                token,
+                &json!({"node_id":node,"session_labels":observation}),
+            );
+            assert!(cached(&config));
+            assert_eq!(cached_for_writes(&config), flag == Some(json!(true)));
+        }
+        let dir = directory(&config, false).unwrap();
+        let mut attempt: Attempt = read(&dir, "attempt", 1).unwrap();
+        attempt.at = now_millis().unwrap() - TTL;
+        publish(&dir, "attempt", 1, &attempt).unwrap();
+        assert!(!cached_for_writes(&config));
+        local_native(&config, json!(false));
+        assert!(!cached_for_writes(&config));
+    }
+
     #[test]
     fn cold_unknown_expired_and_future_caches_stay_closed() {
         let (_root, config) = fixture();

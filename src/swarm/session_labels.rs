@@ -16,6 +16,17 @@ mod cache;
 pub(super) use cache::{begin_peer, finish_peer};
 pub(crate) use cache::{cached, due_local, refresh_local, refresh_peer};
 
+// This CLI has not yet completed every storage/native writer transition.
+// Changing this requires the complete reviewed floor, not merely a marker.
+const NATIVE_CONTINUITY: bool = false;
+
+/// Dormant P3e writer gate. This is capability data, never native admission or
+/// consent. Earlier reader-only observations cannot satisfy it.
+#[allow(dead_code)]
+pub(crate) fn cached_for_writes(config: &Config) -> bool {
+    NATIVE_CONTINUITY && cache::cached_for_writes(config)
+}
+
 const CATALOG_BYTES: u64 = 128 * 1024 * 1024;
 const MEMBERS_BYTES: u64 = 1024 * 1024;
 
@@ -283,7 +294,7 @@ pub(crate) fn observe(config: &Config, deadline: Instant) -> Result<serde_json::
         &installer_units(config),
         deadline,
     )?;
-    Ok(json!({"context":context,"connector":connector}))
+    Ok(json!({"context":context,"connector":connector,"native_continuity":NATIVE_CONTINUITY}))
 }
 
 /// Ordinary/fence hello has no connector wait in its budget. A proven absent
@@ -297,7 +308,9 @@ pub(crate) fn observe_absent(config: &Config) -> Result<serde_json::Value> {
     );
     let inventory = Inventory::read(&connector_path(config), &installer_units(config))?;
     ensure!(!inventory.required(), "connector observation required");
-    Ok(json!({"context":context,"connector":{"required":false}}))
+    Ok(
+        json!({"context":context,"connector":{"required":false},"native_continuity":NATIVE_CONTINUITY}),
+    )
 }
 
 #[cfg(test)]
@@ -322,6 +335,20 @@ mod tests {
         drop(store);
         (dir, config)
     }
+    #[test]
+    fn reader_observation_never_claims_the_unfinished_native_writer_floor() {
+        let (_root, config) = fixture();
+        let value = observe_absent(&config).unwrap();
+        assert_eq!(value["native_continuity"], false);
+        assert!(!cached_for_writes(&config));
+        // The connector-facing Context schema has not changed.
+        assert_eq!(
+            serde_json::from_value::<wire::Context>(value["context"].clone()).unwrap(),
+            context(&config).unwrap()
+        );
+        assert_eq!(value["context"].as_object().unwrap().len(), 7);
+    }
+
     #[test]
     fn context_is_read_only_and_binds_the_actual_machine_configuration_and_routes() {
         let (_dir, mut config) = fixture();

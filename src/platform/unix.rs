@@ -29,6 +29,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod helper_group;
+
 pub fn prepare_environment() {
     let home = env::var("HOME").unwrap_or_default();
     env::set_var(
@@ -1147,14 +1150,18 @@ pub fn run_bounded(
     deadline: Instant,
     cancelled: &dyn Fn() -> bool,
 ) -> std::result::Result<(ExitStatus, Vec<u8>, Vec<u8>), RunError> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    helper_group::admit().map_err(RunError::Spawn)?;
     command
         .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = command.spawn().map_err(RunError::Spawn)?;
+    let mut child = spawn_in_turn(command).map_err(RunError::Spawn)?;
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let mut group = helper_group::Group::new(&mut child);
     for fd in [stdout.as_raw_fd(), stderr.as_raw_fd()] {
         // Both pipes must be drained while the child runs, including large outputs.
         unsafe {
@@ -1167,6 +1174,7 @@ pub fn run_bounded(
     }
     let mut out = Vec::new();
     let mut err = Vec::new();
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let mut status = None;
     let result = loop {
         let mut eof = true;
@@ -1199,12 +1207,21 @@ pub fn run_bounded(
         if out.len() > limits[0] || err.len() > limits[1] {
             break Err(RunError::TooLarge);
         }
-        if status.is_none() {
-            status = child.try_wait().map_err(RunError::Io)?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        match group.exited() {
+            Ok(Some(_)) if eof => break group.finish().map_err(RunError::Io),
+            Err(error) => break Err(RunError::Io(error)),
+            _ => {}
         }
-        if let Some(status) = status {
-            if eof {
-                break Ok(status);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            if status.is_none() {
+                status = child.try_wait().map_err(RunError::Io)?;
+            }
+            if let Some(status) = status {
+                if eof {
+                    break Ok(status);
+                }
             }
         }
         if cancelled() || Instant::now() >= deadline {
@@ -1212,15 +1229,22 @@ pub fn run_bounded(
         }
         std::thread::sleep(Duration::from_millis(3));
     };
-    if !result.as_ref().is_ok_and(ExitStatus::success) {
-        // A hook or filter can outlive the child. Stop the whole operation on
-        // timeout instead of leaving it writing after an error was reported.
-        unsafe {
-            libc::kill(-(child.id() as i32), libc::SIGKILL);
-        }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if result.is_err() {
+        let _ = group.stop();
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        if !result.as_ref().is_ok_and(ExitStatus::success) {
+            // A hook or filter can outlive the child. Stop the whole operation on
+            // timeout instead of leaving it writing after an error was reported.
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
     result.map(|status| (status, out, err))
 }
 

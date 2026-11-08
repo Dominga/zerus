@@ -246,4 +246,33 @@ describe("the plan's Graph, Board and Layers (task 197)", () => {
     const qa = render({ team, graph, problems, now, initialMode: "layers", member: "qa" });
     expect([...qa.matchAll(/class="pm-layer-row[^"]*"[^>]*data-task="(\d+)"/g)].map((match) => Number(match[1]))).toEqual([3]);
   });
+
+  it("keeps the title visible and folds a long dependency list (task 333)", () => {
+    const base = fixture().team;
+    const tasks: TeamTaskView[] = [];
+    for (let id = 1; id <= 18; id++) tasks.push(task(id, "accepted", { phase: 1, title: `Dep ${id}` }));
+    const deps = (ids: number[]) => ids.map((id) => ({ task: id, hard: true }));
+    tasks.push(task(204, "pending", { phase: 2, title: "Long dependency card", deps: deps(Array.from({ length: 18 }, (_, i) => i + 1)) }));
+    tasks.push(task(205, "pending", { phase: 2, title: "One dependency", deps: deps([1]) }));
+    tasks.push(task(206, "pending", { phase: 2, title: "Two dependencies", deps: deps([1, 2]) }));
+    const team = { ...base, tasks, phases: [{ ...base.phases[0], n: 1, title: "Deps", total: 18 }, { ...base.phases[1], n: 2, title: "Cards", total: 3 }] };
+    const graph: PlanGraph = {
+      team: "t1", layers: 2,
+      nodes: tasks.map((found) => ({ id: found.id, title: found.title, status: found.status, assignee: found.assignee, role: "", phase: found.phase,
+        layer: found.phase === 1 ? 0 : 1, ready: false, in_cycle: false })),
+      edges: tasks.flatMap((found) => found.deps.map((dep) => ({ from: dep.task, to: found.id, hard: dep.hard }))),
+    };
+    const html = render({ team, graph, problems: new Map(), now });
+    const card = plain(html.slice(html.indexOf('data-task="204"')));
+    expect(card).toContain("Long dependency card");
+    expect(card).toContain("↤#1 #2 +16");
+    expect(card.indexOf("Long dependency card")).toBeLessThan(card.indexOf("pt-deps"));
+    expect(card).toContain("#18");
+    const one = plain(html.slice(html.indexOf('data-task="205"')));
+    expect(one).toContain("↤#1");
+    expect(one).not.toContain("+0");
+    const two = plain(html.slice(html.indexOf('data-task="206"')));
+    expect(two).toContain("↤#1 #2");
+    expect(two).not.toContain("+0");
+  });
 });

@@ -105,4 +105,46 @@ describe("one session's view of the task board", () => {
     expect(store.session.error()).toContain("hgs stopped");
     expect([store.session.active(), order(store)]).toEqual([true, ["m1"]]);
   });
+
+  it("a reply read before the list changed never overwrites newer totals (zerus-0h8lg)", async () => {
+    const waiting: ((value: unknown) => void)[] = [];
+    const read = vi.fn().mockImplementation(() => new Promise((r) => { waiting.push(r); }));
+    const store = createTasks(vi.fn().mockResolvedValue(undefined), read); store.follow("p1");
+    store.apply([windowed([row("t1")])]);
+    const counted = (backlog: number, tasks: unknown[] = []) =>
+      ({ tasks, page: { next: null }, counts: { review: 0, active: 0, todo: 0, backlog, done: 0 } });
+    store.session.show("p1", mine, ["todo"]);
+    // The list changes while To do is read, then the board shows Backlog.
+    store.apply([windowed([row("t1")], "r2")]);
+    store.session.show("p1", mine, ["backlog"]);
+    waiting[1](counted(1, [row("b1", "backlog")])); await tick();
+    expect(store.session.total("backlog")).toBe(1);
+    // The To do read began before the change: its counts are older.
+    waiting[0](counted(0)); await tick();
+    expect(store.session.total("backlog")).toBe(1);
+    expect(store.session.rows("backlog").map((t) => t.uuid)).toEqual(["b1"]);
+  });
+
+  it("a board that stops showing the view stops its reads and keeps its rows (zerus-fgyiy)", async () => {
+    let finish!: (value: unknown) => void;
+    const read = vi.fn().mockResolvedValue(page([row("r1", "review")], null, 1));
+    const store = createTasks(vi.fn().mockResolvedValue(undefined), read); store.follow("p1");
+    store.apply([windowed([row("t1")])]);
+    store.session.show("p1", mine, ["review", "active"]); await tick();
+    expect(read).toHaveBeenCalledTimes(2);
+    // A read in flight when the board goes away is dropped.
+    read.mockImplementationOnce(() => new Promise((r) => { finish = r; }));
+    store.apply([windowed([row("t1")], "r2")]);
+    store.session.suspend();
+    expect(store.session.loading().review).toBe(false);
+    finish(page([row("late", "review")], null, 1)); await tick();
+    expect(store.session.rows("review").map((t) => t.uuid)).toEqual(["r1"]);
+    // Nothing is read while nothing shows the view; its rows stay for the write guards.
+    store.apply([windowed([row("t1")], "r3")]); await tick();
+    expect(read).toHaveBeenCalledTimes(4);
+    expect(store.find("r1")?.uuid).toBe("r1");
+    // Shown again: the stages are read afresh.
+    store.session.show("p1", mine, ["review", "active"]); await tick();
+    expect(read).toHaveBeenCalledTimes(6);
+  });
 });

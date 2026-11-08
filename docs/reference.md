@@ -4405,7 +4405,8 @@ cannot answer, they read the documents as before, with the same digest. The
 index reads a task as the inventory does: a task whose execution schema an
 older replica's merge lowered is repaired and saved first, so a phone receives
 the repair; an index whose rows a build without that rule read reads every
-row again once. The phone's Send now and Cancel run on the session's
+row again once, and rows such a build sharing the index stores later are read
+again at the next read here. The phone's Send now and Cancel run on the session's
 computer as `hgs task mobile-send --json` and `mobile-cancel --json`, which do
 what `send` and `cancel` do and answer only the task's stage (a refusal says
 `"uncertain": true` when the prompt was pasted but could not be recorded);

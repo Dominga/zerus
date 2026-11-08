@@ -263,13 +263,20 @@ fn held(task: &TaskDoc) -> Option<Held> {
     })
 }
 
+/// Whether this read emulates the build before the repair rule (tests).
+fn legacy() -> bool {
+    #[cfg(test)]
+    return LEGACY_DERIVE.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    false
+}
+
 /// A task's row and the stamps of its files, read as the store's inventory
 /// reads it (zerus-cg5h.21): a task whose execution schema an older
 /// replica's merged upgrade lowered is repaired and saved first, and the
 /// version read and the stamps taken are one observation.
 fn derive(store: &ProjectStore, uuid: &str, stamp: impl FnOnce() -> (String, bool)) -> (Derived, (String, bool)) {
-    #[cfg(test)]
-    if LEGACY_DERIVE.with(std::cell::Cell::get) {
+    if legacy() {
         return (derive_from(store.load(uuid)), stamp());
     }
     let (loaded, stamps) = store.observe(uuid, stamp);
@@ -595,8 +602,23 @@ impl<'a> Index<'a> {
         let quiet = changes.documents.as_ref().is_some_and(BTreeSet::is_empty);
         let periodic = now < checked || now - checked >= FULL_CHECK_MS;
         // An index whose rows a build without the repair rule read (#1724)
-        // reads every row again once.
-        let rederive = self.meta("derived")?.as_deref() != Some(DERIVED);
+        // reads every row again once. After that, a build without the rule
+        // that shares the file can still store rows: any row change this
+        // build did not make leaves "derived_revision" behind "revision", and
+        // the rows stored since this build's last write ("derived_at", by the
+        // checked index) are read again. A quiet read compares two values.
+        let ours = !legacy();
+        let mut rederive = ours && self.meta("derived")?.as_deref() != Some(DERIVED);
+        let mut foreign: BTreeSet<String> = BTreeSet::new();
+        if ours && !rederive && built && self.meta("revision")? != self.meta("derived_revision")? {
+            let since: i64 = self.meta("derived_at")?.and_then(|v| v.parse().ok()).unwrap_or(0);
+            let mut query = self.db.prepare_cached("SELECT uuid FROM tasks WHERE checked >= ?1")?;
+            for uuid in query.query_map([since], |r| r.get::<_, String>(0))? {
+                foreign.insert(uuid?);
+            }
+            // A clock set back can hide those rows: then every row is read again.
+            rederive = foreign.is_empty();
+        }
         let full = !built
             || rederive
             || changes.documents.is_none()
@@ -668,6 +690,10 @@ impl<'a> Index<'a> {
             let list: Vec<String> = suspect.iter().cloned().collect();
             self.refresh(&list, None, Some(&suspect))?;
         }
+        if !rederive && !foreign.is_empty() {
+            let list: Vec<String> = foreign.iter().cloned().collect();
+            self.refresh(&list, None, Some(&foreign))?;
+        }
         // The project document's version, as the phone's inventory holds it:
         // read again when the journal names it, and at a full check when its
         // file changed; kept apart from the rows and their revision.
@@ -685,6 +711,8 @@ impl<'a> Index<'a> {
             set.execute(params!["folder", folder])?;
             if full {
                 set.execute(params!["checked", now.to_string()])?;
+            }
+            if full && ours {
                 set.execute(params!["derived", DERIVED])?;
             }
             match project {
@@ -699,6 +727,11 @@ impl<'a> Index<'a> {
                 None => (),
             }
             tx.execute("INSERT OR IGNORE INTO meta VALUES('revision', ?1)", [ids::new_uuid()])?;
+            if ours {
+                // Every row is now as this build reads it.
+                tx.execute("INSERT OR REPLACE INTO meta SELECT 'derived_revision', value FROM meta WHERE key = 'revision'", [])?;
+                tx.execute("INSERT OR REPLACE INTO meta VALUES('derived_at', ?1)", [super::now().to_string()])?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -827,7 +860,19 @@ impl<'a> Index<'a> {
                 }
             }
             if changed {
-                tx.execute("INSERT OR REPLACE INTO meta VALUES('revision', ?1)", [ids::new_uuid()])?;
+                // This build's own change keeps the repair evidence current,
+                // unless another build changed rows since (see `sync`).
+                let clean: bool = !legacy()
+                    && tx.query_row(
+                        "SELECT (SELECT value FROM meta WHERE key = 'revision') IS (SELECT value FROM meta WHERE key = 'derived_revision')",
+                        [],
+                        |r| r.get(0),
+                    )?;
+                let revision = ids::new_uuid();
+                tx.execute("INSERT OR REPLACE INTO meta VALUES('revision', ?1)", [&revision])?;
+                if clean {
+                    tx.execute("INSERT OR REPLACE INTO meta VALUES('derived_revision', ?1)", [&revision])?;
+                }
             }
             tx.commit()?;
         }

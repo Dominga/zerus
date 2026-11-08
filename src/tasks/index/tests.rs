@@ -1407,3 +1407,29 @@ fn rows_an_older_build_held_are_read_again_with_the_repair() {
     assert!(!store.load(stale.uuid()).unwrap().needs_schema_repair());
     assert_holds_the_inventory(&store, &index);
 }
+
+#[test]
+fn a_row_an_older_build_writes_later_is_read_again_with_the_repair() {
+    // review-win-e R2 on #1736: this build's index is current, then an older
+    // build sharing the file reads a task without the repair and stores its
+    // row; the next read here must not serve that row.
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    drop(Index::open(&store).unwrap());
+    let stale = unrepaired(&store);
+    age(&store, stale.uuid());
+    LEGACY_DERIVE.with(|legacy| legacy.set(true));
+    let index = Index::open(&store).unwrap();
+    LEGACY_DERIVE.with(|legacy| legacy.set(false));
+    assert_eq!(held(&index).1.tasks[stale.uuid()], stale.inventory_version());
+    drop(index);
+    let mut index = Index::open(&store).unwrap();
+    assert_eq!(index.live_inventory().unwrap(), store.live_inventory().unwrap().0);
+    assert_holds_the_inventory(&store, &index);
+    // Once the repaired files settle, a read is quiet again: nothing is
+    // decoded and only the folder is stamped.
+    age(&store, stale.uuid());
+    index.live_inventory().unwrap();
+    let (_, decoded, stamped) = counted(|| index.live_inventory().unwrap());
+    assert_eq!((decoded, stamped), (0, 1));
+}

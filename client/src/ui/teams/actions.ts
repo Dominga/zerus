@@ -419,6 +419,14 @@ export interface MoreItem {
 /** A task that started: an attempt was made or it left Pending (Qt taskStarted). */
 const started = (task: ActTask) => task.attempts > 0 || !["pending", "draft"].includes(task.status);
 
+/** Task #296: the lead member of a team in a team list, once the list has it. */
+export function leadMemberOf(
+  list: { teams: readonly Pick<import("../../types").TeamSummary, "id" | "members">[] } | undefined,
+  id: string,
+): import("../../types").TeamSummary["members"][number] | undefined {
+  return list?.teams.find((team) => team.id === id)?.members.find((member) => member.lead);
+}
+
 /** Task #253: hgs answered a retry with `continue`: the attempt K is kept. */
 export function retryContinues(receipt: unknown): number | null {
   if (!receipt || typeof receipt !== "object") return null;

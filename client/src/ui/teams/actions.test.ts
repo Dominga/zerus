@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   TeamActions, allDecided, barActions, barChips, discardConfirmation, leadStall, finishSummary, formAction, formText, moreItems, moveTargets,
   openQuestions, pauseConfirmation, planApproval, questionClosed, retryConfirmation, retryContinues, retryContinueText, sendBackMessage, stageName, stopConfirmation, subtreeImpact, subteamQuestion, taskButtons,
+  leadMemberOf,
   type ActTask, type ActTeam,
 } from "./actions";
 import type { DecisionPort } from "./decisions";
@@ -255,6 +256,16 @@ describe("task card", () => {
     expect(moveTargets(t, 1)).toEqual([{ phase: 1, title: "Build", blocked: "" }, { phase: 2, title: "Polish", blocked: "" }]);
     // A started task does not move.
     expect(moveTargets(team(), 1)).toEqual([]);
+  });
+
+  it("Task #296: finds the next team's lead once its list arrives", () => {
+    const list = { teams: [{ id: "t9", members: [
+      { id: "dev", role: "Backend", agent: "codex", state: "active", computer: "", lead: false, session: { host: "", name: "codex/x/dev", run_id: "r", conversation_id: "c" } },
+      { id: "lead9", role: "Lead", agent: "claude", state: "active", computer: "", lead: true, session: { host: "", name: "claude/x/lead9", run_id: "r", conversation_id: "c" } },
+    ] }] };
+    expect(leadMemberOf(list, "t9")?.id).toBe("lead9");
+    expect(leadMemberOf({ teams: [] }, "t9")).toBeUndefined();
+    expect(leadMemberOf(undefined, "t9")).toBeUndefined();
   });
 
   it("Task 253: a retry that continues names the kept attempt", () => {

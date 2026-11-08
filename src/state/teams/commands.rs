@@ -32,6 +32,12 @@ const MUTATIONS: &[&str] = &[
     "revert-lead-change", "seen-lead-changes", "seen", "keep",
 ];
 
+/// Task #346: whether an operation changes a team, so a scratch lead's call for
+/// its own scratch team can be named in scope.
+pub(crate) fn is_mutation(op: &str) -> bool {
+    MUTATIONS.contains(&op)
+}
+
 /// Task 162: the operations the lead once did on the owner's typed word and
 /// that have a card now: the typed word is no longer taken for them.
 const CARD_WORD_OPS: &[&str] = &[
@@ -2606,6 +2612,17 @@ fn scratch_creator() -> anyhow::Result<Option<(Team, Member)>> {
 }
 
 fn create(input: &Value) -> anyhow::Result<Value> {
+    create_inner(input, None)
+}
+
+/// Task #346: the team worker applies a sandboxed member's scratch-team create
+/// with the member and its team already proven, so no caller identity is read
+/// here; the profile and the owner's standing rule are checked again.
+pub(crate) fn create_for_member(parent: &Team, member: &Member, input: &Value) -> anyhow::Result<Value> {
+    create_inner(input, Some((parent.clone(), member.clone())))
+}
+
+fn create_inner(input: &Value, scratch: Option<(Team, Member)>) -> anyhow::Result<Value> {
     let request = text(input, "request_id");
     ensure!(canonical_uuid(request), "A canonical request_id is required");
     // A replay returns the first receipt; a parent link is repaired first
@@ -2623,7 +2640,14 @@ fn create(input: &Value) -> anyhow::Result<Value> {
     // its session, inside the team's scratch root; every other create keeps
     // the sub-team or the lead/owner path below. A sub-team create (a parent
     // object) is never a scratch team.
-    let scratch = if input["parent"].is_object() { None } else { scratch_creator()? };
+    let scratch = if input["parent"].is_object() {
+        None
+    } else {
+        match scratch {
+            Some(found) => Some(found),
+            None => scratch_creator()?,
+        }
+    };
     let parent_link = if scratch.is_none() { parent_create(input, &mut filled)? } else { None };
     if let Some((parent, member)) = &scratch {
         filled = super::scratch::prepare(parent, member, input)?;
@@ -2783,6 +2807,32 @@ fn create(input: &Value) -> anyhow::Result<Value> {
         }
     }
     Ok(receipt)
+}
+
+/// Task #346 (owner, 2026-11-08): the worker applies the queued team call of a
+/// sandboxed member: the create of its scratch team, or an operation for the
+/// scratch team it leads. The member, its profile and the owner's standing rule
+/// are checked again on the current records, so a revoked right or rule refuses
+/// the queued call instead of applying it.
+pub(crate) fn apply_team_outbox(store: &mut Store, parent: &Team, member: &Member, request: &Value) -> anyhow::Result<Value> {
+    let op = request["command"].as_str().unwrap_or_default();
+    let input = &request["input"];
+    anyhow::ensure!(!op.is_empty() && (is_mutation(op) || op == "create"), "Unknown queued team call {op}");
+    if op == "create" {
+        super::sandbox_scope::scratch_create(parent, member, input)
+            .context("The queued scratch-team create is outside the member's own scope")?;
+        return create_for_member(parent, member, input);
+    }
+    let target = request["target"].as_str().unwrap_or_default();
+    let child = store.load(target)?.context("Unknown team")?;
+    super::sandbox_scope::scratch_child(parent, member, &child, op)
+        .context("The queued team call is outside the member's own scratch scope")?;
+    let request_id = request["request_id"].as_str().unwrap_or_default();
+    let actor = Actor::Member(member.id.clone());
+    let value = store.mutate(Some((request_id, input)), &child.id, None, |team, events| {
+        ops::apply(team, op, input, &actor, &BTreeSet::new(), events)
+    })?;
+    Ok(value)
 }
 
 /// The lead (or you) answers a member's question or permission request in the
@@ -4275,19 +4325,67 @@ fn queue_write(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
     let Actor::Member(member_id) = actor(&team, op, input)? else {
         bail!("Only a member queues this request; a sandbox does not block the lead");
     };
-    let request_id = text(input, "request_id").to_owned();
     let member = team.member(&member_id).context("Unknown member")?;
     let folder = member_outbox_folder(&team, member)?;
-    let request = json!({"op":op, "request_id":request_id, "team":team.id, "member":member_id,
+    let request = json!({"op":op, "request_id":text(input, "request_id"), "team":team.id, "member":member_id,
         "attempt":text(input, "attempt"), "input":input});
+    queue_request(&folder, request, wait)
+}
+
+/// Task #346 (owner, 2026-11-08): a sandboxed member's own-scope team call - a
+/// scratch team's create under the owner's standing rule, or an operation for
+/// the scratch team it leads - waits in its folder exactly as a report does;
+/// the worker applies it with the same identity, profile and rule checks. None
+/// when the call is outside that scope: the caller keeps the sandbox's own
+/// error, so the member asks the lead.
+fn queue_team_call(op: &str, input: &Value, wait: bool) -> anyhow::Result<Option<Value>> {
+    let store = Store::open(false)?;
+    let (parent, member, target) = if op == "create" {
+        let Some((parent, member)) = scratch_creator()? else { return Ok(None) };
+        if super::sandbox_scope::scratch_create(&parent, &member, input).is_none() {
+            return Ok(None);
+        }
+        (parent, member, String::new())
+    } else {
+        let id = text(input, "team");
+        let Some(child) = store.load(id)?.filter(|child| child.scratch_parent.is_some()) else { return Ok(None) };
+        let link = child.scratch_parent.clone().expect("checked");
+        let Some(parent) = store.load(&link.team)? else { return Ok(None) };
+        let Some(member) = parent.member(&link.member).cloned() else { return Ok(None) };
+        // The caller the CLI proved must be that member; another member's tool
+        // never queues here.
+        let Ok(Actor::Member(caller)) = actor(&child, op, input) else { return Ok(None) };
+        if caller != member.id || super::sandbox_scope::scratch_child(&parent, &member, &child, op).is_none() {
+            return Ok(None);
+        }
+        (parent, member, child.id.clone())
+    };
+    let folder = member_outbox_folder(&parent, &member)?;
+    let request = json!({"op":"team", "request_id":text(input, "request_id"), "team":parent.id, "member":member.id,
+        "attempt":text(input, "attempt"), "command":op, "target":target, "input":input});
+    queue_request(&folder, request, wait).map(Some)
+}
+
+/// A refused store write: queue the call when it is the member's own work, else
+/// keep the sandbox's error so only requests outside the scope ask the lead.
+fn queue_or_blocked(error: anyhow::Error, op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
+    match queue_team_call(op, input, wait) {
+        Ok(Some(value)) => Ok(value),
+        _ => Err(super::store::write_error(error)),
+    }
+}
+
+/// The queued request's own file and answer, shared by a report and a team call.
+fn queue_request(folder: &std::path::Path, request: Value, wait: bool) -> anyhow::Result<Value> {
+    let request_id = request["request_id"].as_str().unwrap_or_default().to_owned();
     // U42: a request already applied answers its outcome, and one still queued
-    // answers its state (or waits, with `--wait`); a different request under the
-    // same id is refused, so a placeholder can never replace the whole text that
-    // was queued first.
-    if let Some(result) = super::outbox::result(&folder, &request_id) {
+    // answers its state (or waits, with `--wait`); a different request under
+    // the same id is refused, so a placeholder can never replace the whole text
+    // that was queued first.
+    if let Some(result) = super::outbox::result(folder, &request_id) {
         return Ok(result);
     }
-    let existing = super::outbox::request(&folder, &request_id);
+    let existing = super::outbox::request(folder, &request_id);
     if let Some(queued) = &existing {
         ensure!(
             queued["op"] == request["op"] && queued["input"] == request["input"],
@@ -4295,10 +4393,10 @@ fn queue_write(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         );
     }
     let path = match &existing {
-        Some(_) => super::outbox::request_path(&folder, &request_id),
-        None => super::outbox::push(&folder, &request)?,
+        Some(_) => super::outbox::request_path(folder, &request_id),
+        None => super::outbox::push(folder, &request)?,
     };
-    let result = super::outbox::result_path(&folder, &request_id);
+    let result = super::outbox::result_path(folder, &request_id);
     // Task #275: the caller is told where the outcome is and that a refusal or
     // failure also comes as a team message, not only to a file nobody reads.
     let delivery = format!(
@@ -4317,7 +4415,7 @@ fn queue_write(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
     if !wait {
         return Ok(queued);
     }
-    Ok(super::outbox::wait(&folder, &request_id, 30.0).unwrap_or_else(|| json!({
+    Ok(super::outbox::wait(folder, &request_id, 30.0).unwrap_or_else(|| json!({
         "status":"queued", "request_id":request_id, "path":path.to_string_lossy(), "result":result.to_string_lossy(),
         "delivery": delivery,
         "note":"The team worker has not applied it in 30 s; it stays queued in the member's folder and the worker will apply it. Its result stays at the path in `result`, and a refusal or failure also reaches you as a team message."
@@ -5431,7 +5529,12 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         return test_config(input);
     }
     match op {
-        "create" => create(input),
+        // Task #346: a sandboxed member's scratch-team create waits in its own
+        // folder when the store refuses the write; anything else keeps the error.
+        "create" => match create(input) {
+            Err(error) if read_only(&error) => queue_or_blocked(error, "create", input, wait),
+            result => result,
+        },
         // Task 159: the owner's scratch-team rule, and its list and revoke.
         "scratch-rule" => scratch_rule(input),
         "scratch-rules" => scratch_rules(input),
@@ -5665,6 +5768,9 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 Err(error) if queues_instead(op) && read_only(&error) => {
                     return queue_write(op, input, wait)
                 }
+                // Task #346: a call for the member's own scratch team queues too;
+                // a call outside that scope keeps the sandbox's error.
+                Err(error) if read_only(&error) => return queue_or_blocked(error, op, input, wait),
                 // U20: a write the sandbox blocked says what to do, not a bare
                 // SQLite error.
                 Err(error) => return Err(super::store::write_error(error)),
@@ -5904,6 +6010,9 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 Err(error) if queues_instead(op) && read_only(&error) => {
                     return queue_write(op, input, wait)
                 }
+                // Task #346: a call for the member's own scratch team queues too;
+                // a call outside that scope keeps the sandbox's error.
+                Err(error) if read_only(&error) => return queue_or_blocked(error, op, input, wait),
                 Err(error) => return Err(super::store::write_error(error)),
             };
             // N7: discarding a draft stops the lead's session when the owner
@@ -6146,6 +6255,10 @@ mod commands_tools;
 #[cfg(test)]
 #[path = "tests/commands_scratch.rs"]
 mod commands_scratch;
+
+#[cfg(test)]
+#[path = "tests/commands_sandbox.rs"]
+mod commands_sandbox;
 
 #[cfg(test)]
 #[path = "tests/commands_waiting.rs"]

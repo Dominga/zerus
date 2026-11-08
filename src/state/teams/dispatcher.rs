@@ -7983,17 +7983,30 @@ fn safe_match(team: &Team, member: &Member, pending: &PendingQuestion) -> Option
     if !pending.approval || member.id == team.lead || card["subagent_confirmation"] == true || card["can_answer"] == false {
         return None;
     }
-    let command = card["tool_input"]["command"].as_str().filter(|command| !command.trim().is_empty())?;
+    // Task #346: the command may come from the tool input (Claude, Codex) or the
+    // process a DeepSeek approval names; a patch's file list is no command.
+    let command = card["tool_input"]["command"]
+        .as_str()
+        .or_else(|| card["command"].as_str())
+        .filter(|command| !command.trim().is_empty())?
+        .to_owned();
     let answer = permission_answer(card).filter(|answer| answer["allow"].is_string())?;
     let tool = card["tool"].as_str().or_else(|| card["questions"][0]["header"].as_str()).unwrap_or_default();
     let folder = member_folder_path(team, member).ok()?;
-    if let Some(action) = safe_actions::find(team, member, tool, command, Path::new(&folder)) {
+    if let Some(action) = safe_actions::find(team, member, tool, &command, Path::new(&folder)) {
+        return Some((action, answer));
+    }
+    // Task #346 (owner, 2026-11-08): ONE `hgs team <op> --json-file PATH` call in
+    // the member's own scope - its own work, or its scratch team under the
+    // owner's standing rule - is Zerus's to allow once, recorded in the lead's
+    // feed; a compound script, a wrapper or another scope still asks.
+    if let Some(action) = super::sandbox_scope::match_call(team, member, &command) {
         return Some((action, answer));
     }
     // Task #232: the owner's scratch rule trusts its folder at launch, and the
     // team's own CLI is what a member runs there: Codex's approval of an hgs
     // command is the rule's to allow once, without the lead.
-    if card["source"] == crate::state::codex_approval::SOURCE && command_is_hgs(command) {
+    if card["source"] == crate::state::codex_approval::SOURCE && command_is_hgs(&command) {
         if let Some(rule) = scratch_rule_trusting(team, &folder, &member.agent) {
             return Some((
                 json!({"id":"scratch-hgs","reason":format!(
@@ -8038,7 +8051,12 @@ fn allow_safe(store: &mut Store, team: &Team, member_id: &str, pending: &Pending
         Err(error) => Err(error.to_string()),
     };
     let role = team.role_of(member_id);
-    let by = format!("safe action {}", action["id"].as_str().unwrap_or_default());
+    // Task #346: an action Zerus answers by itself names how (e.g. its own-scope
+    // team call); a recorded safe action keeps its `safe action <id>` line.
+    let by = action["answer_by"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("safe action {}", action["id"].as_str().unwrap_or_default()));
     change(store, &team.id, |team, events| {
         let found = team.members.iter_mut().find(|m| m.id == member_id).context("unknown member")?;
         let question = pending.question_id.as_str();
@@ -10915,12 +10933,21 @@ fn announce_outbox(store: &mut Store, team: &Team, member: &Member, folder: &Pat
 /// (`expect`) has no attempt; the folder itself proves the member.
 fn apply_outbox(store: &mut Store, team: &Team, member: &Member, request: &Value) -> anyhow::Result<Value> {
     let op = request["op"].as_str().unwrap_or_default();
-    anyhow::ensure!(matches!(op, "report" | "ask" | "commit" | "reply" | "expect" | "messages-read"), "Unknown outbox request {op}");
+    anyhow::ensure!(
+        matches!(op, "report" | "ask" | "commit" | "reply" | "expect" | "messages-read" | "team"),
+        "Unknown outbox request {op}"
+    );
     anyhow::ensure!(request["team"] == team.id.as_str(), "a request for another team");
     anyhow::ensure!(request["member"] == member.id.as_str(), "the folder belongs to {}", team.name_of(&member.id));
     // The member's own request, unchanged: a replay keys the same store receipt.
     let input = request["input"].clone();
     let request_id = request["request_id"].as_str().unwrap_or_default().to_owned();
+    // Task #346: a sandboxed member's own-scope team call (a scratch team's
+    // create, or an operation for the scratch team it leads) is applied with the
+    // member's identity and checked again against its profile and the rule.
+    if op == "team" {
+        return super::commands::apply_team_outbox(store, team, member, request);
+    }
     // A request applied before the worker removed its file replays its receipt,
     // even after the attempt closed (the store's own idempotence, U20).
     if let Some(receipt) = store.receipt(&request_id, &input)? {

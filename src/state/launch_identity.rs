@@ -79,8 +79,8 @@ impl Allocation {
 
 /// A required private argv form, carried in the existing `--run` count
 /// slot. Older helpers parse only an integer and refuse BEFORE bootstrap.
-/// Nothing emits this in production until ID-layout writers are enabled.
-#[allow(dead_code)]
+/// Unix new/fork constructors emit it only for a positively capable helper.
+/// ID-layout publication and duplicate-label writers remain separately gated.
 pub(crate) fn required_count(session: &str, run: &str, count: usize) -> Result<String> {
     if !valid_id(session) || !valid_id(run) {
         return Err("The required launch identity is unavailable".into());

@@ -604,6 +604,27 @@ describe("terminal paste", () => {
       expect(f.pasted).toEqual(["a[201~b\nc"]);
     });
   });
+
+  it("a paste bound to an attach reaches only that attach (zerus-q4ayu)", async () => {
+    const f = rustLike();
+    await createRoot(async () => {
+      const t = createTerminal(f.port, f.timers, f.visibility);
+      await t.setTarget(target("run-1"), ok);
+      t.show(f.screen);
+      await tick();
+      const first = t.generation();
+      expect(first).toBeGreaterThan(0);
+      t.paste("current", first);
+      t.leaveSession();
+      await t.setTarget(target("run-2"), ok);
+      await tick(); await tick();
+      expect(t.connected()).toBe(true);
+      expect(t.generation()).not.toBe(first);
+      t.paste("stale", first);
+      t.paste("later", t.generation());
+      expect(f.pasted).toEqual(["current", "later"]);
+    });
+  });
 });
 
 describe("terminal store: Rust's attach and the view agree", () => {

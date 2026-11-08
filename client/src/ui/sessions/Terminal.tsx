@@ -76,16 +76,21 @@ export function TerminalTab() {
     const text = live()?.term.getSelection() ?? "";
     if (text) void copyVerbatim(text).catch((error) => toast(tr("Terminal"), tr("Could not copy: %1", String(error)), "error"));
   };
-  const pasteClipboard = () => {
-    void pasteText().then((text) => { terminal.paste(text); live()?.term.focus(); })
+  // The clipboard is read off the UI thread: its text goes only to the attach
+  // the menu opened on, never to a session the retained tab moved to since,
+  // before the click or during the read (zerus-q4ayu).
+  const pasteClipboard = (attach: number) => {
+    if (!attach) return;
+    void pasteText().then((text) => { terminal.paste(text, attach); live()?.term.focus(); })
       .catch((error) => toast(tr("Terminal"), tr("Could not paste: %1", String(error)), "error"));
   };
   const onContextMenu = (event: MouseEvent) => {
     event.preventDefault();
     const term = live()?.term;
     if (!term) return;
+    const attach = terminal.generation();
     const items = terminalMenu({ selection: term.hasSelection(), mouseApp: term.modes.mouseTrackingMode !== "none", shift: event.shiftKey, on: platform },
-      copySelection, pasteClipboard);
+      copySelection, () => pasteClipboard(attach));
     if (items) setMenu({ x: event.clientX, y: event.clientY, items });
   };
 

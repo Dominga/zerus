@@ -8,24 +8,26 @@ const fixture = vi.hoisted(() => ({
   paste: vi.fn(), input: vi.fn(), show: vi.fn(), hide: vi.fn(),
   copy: vi.fn(async (_text: string) => {}), clipboard: vi.fn(async () => "pasted from the menu"),
   selection: "", mouse: "none", keys: undefined as ((event: KeyboardEvent) => boolean) | undefined,
+  generation: (): number => 7,
 }));
 vi.mock("../../bridge", async (importOriginal) => ({ ...(await importOriginal<typeof import("../../bridge")>()), copyVerbatim: fixture.copy, pasteText: fixture.clipboard }));
 vi.mock("../../store/composer", () => ({ composer: { canAttach: fixture.canAttach, pasteImage: fixture.image, send: fixture.send } }));
 vi.mock("../../store/terminal", () => ({
   screenShowsLatest: () => true,
-  terminal: { paste: fixture.paste, input: fixture.input, show: fixture.show, hide: fixture.hide,
+  terminal: { paste: fixture.paste, input: fixture.input, show: fixture.show, hide: fixture.hide, generation: () => fixture.generation(),
     connected: () => false, ready: () => false, texts: () => undefined, status: () => "Fixture terminal", resized() {} },
 }));
 // Only xterm's canvas/OS renderer is inert. The actual tab and capture listener run.
 vi.mock("@xterm/xterm", () => ({ Terminal: class {
   cols = 80; rows = 24; options: Record<string, unknown>; textarea?: HTMLTextAreaElement;
   constructor(options: Record<string, unknown>) { this.options = options; }
-  loadAddon() {} onData() {} onBinary() {} onResize() {} write(_bytes: unknown, done?: () => void) { done?.(); }
+  data?: (text: string) => void;
+  loadAddon() {} onData(fn: (text: string) => void) { this.data = fn; } onBinary() {} onResize() {} write(_bytes: unknown, done?: () => void) { done?.(); }
   attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean) { fixture.keys = handler; }
   getSelection() { return fixture.selection; } hasSelection() { return !!fixture.selection; }
   get modes() { return { mouseTrackingMode: fixture.mouse }; }
   open(host: HTMLElement) { this.textarea = document.createElement("textarea"); host.append(this.textarea); }
-  focus() { this.textarea?.focus(); } dispose() { this.textarea?.remove(); } reset() {} paste() {}
+  focus() { this.textarea?.focus(); } dispose() { this.textarea?.remove(); } reset() {} paste(text: string) { this.data?.(text); }
 } }));
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} } }));
 
@@ -42,7 +44,11 @@ beforeEach(async () => {
   dispose = render(() => createComponent(TerminalTab, {}), host);
   await settle();
 });
-afterEach(() => { dispose?.(); dispose = undefined; document.body.replaceChildren(); vi.unstubAllGlobals(); setMenu(undefined); fixture.selection = ""; fixture.mouse = "none"; });
+afterEach(() => {
+  dispose?.(); dispose = undefined; document.body.replaceChildren(); vi.unstubAllGlobals(); setMenu(undefined);
+  fixture.selection = ""; fixture.mouse = "none"; fixture.generation = () => 7;
+  fixture.paste.mockReset(); fixture.input.mockReset(); fixture.clipboard.mockReset(); fixture.clipboard.mockImplementation(async () => "pasted from the menu");
+});
 
 function paste(data: Partial<DataTransfer>, target = host.querySelector(".term-host")!) {
   const event = new Event("paste", { bubbles: true, cancelable: true });
@@ -126,7 +132,7 @@ it("right-click offers Copy selection and Paste, copying the selection exactly a
   entry("Paste")!.action!();
   await settle();
   expect(fixture.clipboard).toHaveBeenCalledTimes(1);
-  expect(fixture.paste).toHaveBeenCalledExactlyOnceWith("pasted from the menu");
+  expect(fixture.paste).toHaveBeenCalledExactlyOnceWith("pasted from the menu", 7);
   expect(fixture.input).not.toHaveBeenCalled();
 });
 
@@ -150,4 +156,45 @@ it("Ctrl+Shift+C copies the selection without typing, and Ctrl+C stays the agent
   expect(fixture.copy).toHaveBeenCalledExactlyOnceWith("selected output");
   expect(press({ ctrlKey: true })).toBe(true);
   expect(fixture.copy).toHaveBeenCalledTimes(1);
+});
+
+it.each([["during the clipboard read", false], ["before Paste is clicked", true]] as const)(
+  "a menu Paste never reaches the session the retained tab moved to %s", async (_when, beforeClick) => {
+  // review-win-c's controls for PR #1773 (zerus-q4ayu), with the production terminal store.
+  await mounted();
+  const actual = await vi.importActual<typeof import("../../store/terminal")>("../../store/terminal");
+  const writes: { generation: number; text: string }[] = [];
+  let generation = 100;
+  const store = actual.createTerminal({
+    connect: async (_view, target) => ({ generation: ++generation, status: target.run_id, reused: false }),
+    write: async (_view, at, bytes) => { writes.push({ generation: at, text: new TextDecoder().decode(bytes) }); },
+    resize: async () => {}, ack() {}, disconnect: async () => null,
+    retarget: async () => true, shown() {},
+  }, undefined, { hidden: () => false, onChange: () => () => {} });
+  const screen = (fixture.show.mock.calls as unknown as [import("../../store/terminal").Screen][]).at(-1)![0];
+  fixture.generation = () => store.generation();
+  fixture.paste.mockImplementation((text: string, attach?: number) => store.paste(text, attach));
+  fixture.input.mockImplementation((bytes: Uint8Array, source: import("../../store/terminal").Screen) => store.input(bytes, source));
+  const ok = { supported: true, available: true, reason: "", idle: "idle", connecting: "connecting", disconnected: "disconnected" };
+  await store.setTarget({ computer: "fixture", name: "claude/project/alpha", run_id: "alpha", machine: "fixture" }, ok);
+  store.show(screen); await settle();
+  expect(store.connected()).toBe(true);
+  let complete!: (text: string) => void;
+  fixture.clipboard.mockImplementationOnce(() => new Promise<string>((resolve) => { complete = resolve; }));
+  rightClick();
+  const paste = entry("Paste")!.action!;
+  const beta = async () => {
+    await store.setTarget({ computer: "fixture", name: "claude/project/beta", run_id: "beta", machine: "fixture" }, ok);
+    await settle();
+    expect(store.generation()).toBe(102);
+  };
+  if (beforeClick) await beta();
+  paste();
+  if (!beforeClick) await beta();
+  if (complete) complete("alpha-only clipboard text");
+  await settle();
+  expect(writes).toEqual([]);
+  // A menu opened on the current attach still pastes into it.
+  rightClick(); entry("Paste")!.action!(); await settle();
+  expect(writes).toEqual([{ generation: 102, text: "pasted from the menu" }]);
 });

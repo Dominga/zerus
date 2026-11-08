@@ -340,6 +340,7 @@ impl Source {
         self: &Arc<Self>,
         invocation: &Invocation,
         resources: Arc<dyn Send + Sync>,
+        completion: Arc<run::Completion>,
     ) -> Exit {
         let Origin::Native(context) = self.context.as_ref() else {
             return Exit::StartFailed(UNCONFIRMED.into());
@@ -349,13 +350,13 @@ impl Source {
         }
         let selected = context.clone();
         let command = helper_invocation(invocation);
-        run::run_accounted_frozen(
+        run::run_accounted_frozen_with_completion(
             context.executable(),
             &command,
             context.environment(),
             NATIVE_RECEIPT_LIMIT,
             &context.cancel,
-            resources,
+            (resources, Some(completion)),
             move |command| selected.spawn(command).map(|(child, _)| child),
         )
         .unwrap_or_else(|_| Exit::StartFailed(UNCONFIRMED.into()))

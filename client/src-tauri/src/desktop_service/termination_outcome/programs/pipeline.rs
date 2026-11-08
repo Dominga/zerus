@@ -150,6 +150,7 @@ struct NativeDone {
     archive: String,
     confirmation: String,
     call: Weak<NativeCall>,
+    completion: Arc<run::Completion>,
 }
 impl Confirmation {
     pub(crate) fn target(&self) -> &Target {
@@ -228,9 +229,12 @@ impl Confirmation {
                     _source: self.source.clone(),
                 });
                 let original_call = Arc::downgrade(&call);
+                let completion = Arc::new(run::Completion::new());
                 // Moving this non-Clone Confirmation into run is its one-way
                 // dispatch boundary. No error can reconstruct another UUID.
-                let exit = self.source.run_native(&self.invocation, call);
+                let exit = self
+                    .source
+                    .run_native(&self.invocation, call, completion.clone());
                 let outcome = self.capture.completed(&self.invocation, exit);
                 let done = match &outcome {
                     Outcome::Done { receipt, cleanup } => self
@@ -251,6 +255,7 @@ impl Confirmation {
                                     .into(),
                                 confirmation: self.consent_id,
                                 call: original_call,
+                                completion,
                             })
                         }),
                     _ => None,
@@ -274,7 +279,9 @@ impl Continuation {
     pub(crate) fn original_call_joined(&self) -> bool {
         match &self.done {
             Done::Service(done) => done.original_call_joined(),
-            Done::Native(done) => done.call.upgrade().is_none(),
+            Done::Native(done) => {
+                done.completion.join() == run::Retirement::Retired && done.call.upgrade().is_none()
+            }
         }
     }
     pub(crate) fn close(&self) -> Result<(), String> {
@@ -327,6 +334,12 @@ impl Stopped {
                 .as_ref()
                 .is_ok_and(|report| report.state == State::Refused)
     }
+    pub(crate) fn reviewable_refusal(&self) -> bool {
+        self.normal_refusal()
+            && self
+                .report()
+                .is_ok_and(|report| report.valid(&self.attempt.input))
+    }
     pub(crate) fn identity(&self) -> (String, String, Capture) {
         (
             self.attempt.input.request_id.clone(),
@@ -358,10 +371,7 @@ impl Stopped {
         self.attempt.mutation.try_retire()
     }
     pub(crate) fn retirement(&self) -> run::Retirement {
-        if !self.normal_refusal()
-            || !self
-                .report()
-                .is_ok_and(|report| report.valid(&self.attempt.input))
+        if !self.reviewable_refusal()
             || !self.continuation.original_call_joined()
             || !self.attempt.mutation.settled()
         {
@@ -526,6 +536,7 @@ pub(super) fn assert_presentation_views(
     source: Arc<Source>,
     running: Arc<crate::actions::Running>,
     input: Input,
+    initial_completion: Arc<run::Completion>,
     mutation: super::source::Mutation,
 ) {
     let binding = input.manifest.binding();
@@ -558,6 +569,7 @@ pub(super) fn assert_presentation_views(
                 archive: String::new(),
                 confirmation: String::new(),
                 call: Weak::new(),
+                completion: initial_completion,
             }),
             outcome: Outcome::Failed {
                 detail: "inert display fixture".into(),
@@ -597,4 +609,8 @@ pub(super) fn assert_presentation_views(
     );
     assert_eq!(force.input.manifest.binding(), binding);
     assert_eq!(force.previous.attempt.input.manifest.binding(), binding);
+    let projection = crate::termination_cleanup::assert_real_refused_check(force.cancel());
+    assert_eq!(projection["rows"][0]["can_check"], true);
+    assert_eq!(projection["rows"][0]["can_force"], false);
+    assert_eq!(projection["rows"][0]["ready"], false);
 }

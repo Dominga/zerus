@@ -205,7 +205,8 @@ it("opens manual removal only through the original native row handle",async()=>{
 });
 
 it("runs Check again once with no automatic Force or removal", async () => {
- const original = row({ can_check: true, can_force: false });
+ // Matches the native valid-refusal projection exercised by assert_real_refused_check.
+ const original = row({ can_check: true, can_force: false, reason: "The program list changed or could not be checked. Review the working folder again." });
  applyCleanup({ ...emptyCleanup(), revision: ++revision, rows: [original], kept: 1 });
  native.check.mockResolvedValue({ ...emptyCleanup(), revision: ++revision, rows: [original], kept: 1 });
  const host = mount(); review(host).click();

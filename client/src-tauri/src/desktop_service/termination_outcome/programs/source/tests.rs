@@ -294,10 +294,27 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
                 actions.begin(key.clone(), &Action::Terminate).is_none(),
                 "the identified read-only source remains charged"
             );
+            let initial_completion = Arc::new(run::Completion::new());
+            let initial = run::run_accounted_frozen_with_completion(
+                &f.0.join("mutator"),
+                &inv,
+                source.context.environment(),
+                1024,
+                &AtomicBool::new(false),
+                (source.clone(), Some(initial_completion.clone())),
+                move |command| command.spawn(),
+            )
+            .unwrap();
+            assert!(matches!(initial, Exit::Code { code: 0, .. }));
+            eventually("initial native call I/O joined", || {
+                initial_completion.join() == run::Retirement::Retired
+            })
+            .await;
             super::super::pipeline::assert_presentation_views(
                 source.clone(),
                 hold,
                 input,
+                initial_completion,
                 mutation,
             );
             assert!(

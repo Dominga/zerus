@@ -90,6 +90,9 @@ impl ProgramJob {
     pub(super) fn normal_refusal(&self) -> bool {
         matches!(self, Self::Stopped(stopped) if stopped.normal_refusal())
     }
+    pub(super) fn reviewable_refusal(&self) -> bool {
+        matches!(self, Self::Stopped(stopped) if stopped.reviewable_refusal())
+    }
     pub(super) fn can_force(&self) -> bool {
         matches!(self, Self::Stopped(stopped) if stopped.can_force())
     }
@@ -216,7 +219,8 @@ fn publish(
     job.phase = "checking";
     let (detail, live) = match stopped {
         Ok(stopped) => {
-            if stopped.normal_refusal() {
+            if stopped.reviewable_refusal() {
+                job.cleanup = Cleanup::retained(std::mem::take(&mut job.cleanup.entries));
                 job.program_review_pending = false;
             }
             job.program_retirement = None;
@@ -264,8 +268,14 @@ fn watch_job(inner: &Arc<Inner>, app: AppHandle, id: String) {
                 return;
             };
             let Some(program) = &job.programs else {
+                if job.busy && job.reservation.is_some() && !job.dismissed {
+                    continue;
+                }
                 return;
             };
+            if !job.busy && job.program_review_pending && job.reservation.is_some() {
+                return;
+            }
             if program.current() {
                 // A finished control worker is observable failure data, never a
                 // physical-drain proof. Keep the original resources/expiry exactly

@@ -842,6 +842,27 @@ mod tests {
     }
 
     #[test]
+    fn refused_follow_up_review_keeps_explicit_removal_available() {
+        let mut entry = terminated("owner-1");
+        entry.status = Some(Status::Kept);
+        let mut cleanup = Cleanup::retained(vec![entry]);
+        cleanup.review_remaining();
+        let Step::Review {
+            host, common_dir, ..
+        } = cleanup.step()
+        else {
+            panic!("refused follow-up must review again")
+        };
+        let next = cleanup.reviewed(&host, &common_dir, Ok(&review_of(ready_row("owner-1"))));
+        assert_eq!(next, Step::Idle);
+        assert!(!cleanup.busy());
+        assert!(matches!(
+            cleanup.remove(Consents::default()),
+            Step::Remove { .. }
+        ));
+    }
+
+    #[test]
     fn terminate_offers_removal_with_qt_texts() {
         assert!(removal_offered(true, true, "claude", true, false));
         assert!(removal_offered(true, true, "codex", false, true));

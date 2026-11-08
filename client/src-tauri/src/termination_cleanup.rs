@@ -9,9 +9,9 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, State};
-use zerus_client_core::{
-    default_hgs, run, run_limited, ComputerId, Exit, Invocation, Outcome, Target,
-};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use zerus_client_core::run;
+use zerus_client_core::{default_hgs, run_limited, ComputerId, Exit, Invocation, Outcome, Target};
 use zerus_client_core::{
     termination_cleanup::{
         retained_notice, ArchiveIdentity, Capture, Cleanup, Consents, Entry, Status, Step,
@@ -128,6 +128,20 @@ impl Job {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             self.programs.is_some()
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            false
+        }
+    }
+    fn reviewable_refusal(&self) -> bool {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            self.reservation.is_none()
+                && self
+                    .programs
+                    .as_ref()
+                    .is_some_and(program_pipeline::ProgramJob::reviewable_refusal)
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
@@ -652,7 +666,7 @@ impl Model {
                     can_check: self.can_dismiss(job)
                         && !self.unknown_folder(job)
                         && !job.busy
-                        && !job.has_programs()
+                        && (!job.has_programs() || job.reviewable_refusal())
                         && job.cleanup.can_refresh()
                         && zerus_client_core::creation::canonical_uuid(&entry.machine),
                     ready: self.can_dismiss(job)
@@ -1344,7 +1358,20 @@ pub fn termination_cleanup_check(
     state: State<'_, TerminationCleanup>,
     id: String,
 ) -> Result<View, String> {
-    let mut m = lock(&state.0.model);
+    check_with_runtime(
+        &state.0,
+        id,
+        |model| changed(&app, model),
+        |inner, id, step| inner.drive(app.clone(), id, step, false),
+    )
+}
+fn check_with_runtime(
+    inner: &Arc<Inner>,
+    id: String,
+    emit: impl Fn(&mut Model) + Copy,
+    run_review: impl Fn(Arc<Inner>, String, Step) + Copy,
+) -> Result<View, String> {
+    let mut m = lock(&inner.model);
     if m.jobs
         .iter()
         .find(|j| j.id == id)
@@ -1352,6 +1379,7 @@ pub fn termination_cleanup_check(
     {
         return Err("An unknown result will not be retried.".into());
     }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let revision = m.revision.wrapping_add(1);
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let (step, program, reservation) = {
@@ -1364,11 +1392,7 @@ pub fn termination_cleanup_check(
             return Err("An unknown result will not be retried.".into());
         }
         let (program, reservation) = if j.has_programs() {
-            if !j
-                .programs
-                .as_ref()
-                .is_some_and(program_pipeline::ProgramJob::normal_refusal)
-            {
+            if !j.reviewable_refusal() {
                 return Err("An unknown result will not be retried.".into());
             }
             let reservation = match j.reservation.clone() {
@@ -1415,14 +1439,14 @@ pub fn termination_cleanup_check(
         j.phase = "checking";
         (step, None, None)
     };
-    changed(&app, &mut m);
+    emit(&mut m);
     drop(m);
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     if let Some(program) = program {
         let reservation = reservation.expect("program reservation");
         let retired = program.retirement();
-        let (drive, view) = {
-            let mut m = lock(&state.0.model);
+        let (start_review, view) = {
+            let mut m = lock(&inner.model);
             let j = m
                 .jobs
                 .iter_mut()
@@ -1432,9 +1456,15 @@ pub fn termination_cleanup_check(
                 || j.reservation.as_ref() != Some(&reservation)
                 || j.programs.is_some()
             {
+                if j.reservation.as_ref() == Some(&reservation) && j.programs.is_none() {
+                    j.programs = Some(program);
+                    j.busy = false;
+                    j.program_review_pending = true;
+                    emit(&mut m);
+                }
                 return Err(STATE_CHANGED.into());
             }
-            let drive = match retired {
+            let start_review = match retired {
                 run::Retirement::Retired => {
                     j.programs = None;
                     j.reservation = None;
@@ -1454,18 +1484,18 @@ pub fn termination_cleanup_check(
                     false
                 }
             };
-            changed(&app, &mut m);
+            emit(&mut m);
             let view = m.view();
-            (drive, view)
+            (start_review, view)
         };
-        if drive {
-            state.0.drive(app, id, step, false);
+        if start_review {
+            run_review(inner.clone(), id, step);
         }
         return Ok(view);
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let _ = (program, reservation);
-    let mut m = lock(&state.0.model);
+    let mut m = lock(&inner.model);
     let j = m
         .jobs
         .iter_mut()
@@ -1474,9 +1504,83 @@ pub fn termination_cleanup_check(
     j.manual_review = true;
     let view = m.view();
     drop(m);
-    state.0.drive(app, id, step, false);
+    run_review(inner.clone(), id, step);
     Ok(view)
 }
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn assert_real_refused_check(stopped: programs::Stopped) -> serde_json::Value {
+    assert!(stopped.reviewable_refusal());
+    let program = program_pipeline::ProgramJob::Stopped(Box::new(stopped));
+    let mut entry = Entry::terminated(
+        "studio",
+        "studio",
+        "/home/example/repo-work-1",
+        "/home/example/repo/.git",
+        "owner-1",
+        None,
+    )
+    .unwrap();
+    entry.machine = "11111111-1111-4111-8111-111111111111".into();
+    entry.offline = true;
+    entry.status = Some(Status::Kept);
+    let state = TerminationCleanup::default();
+    lock(&state.0.model).jobs.push_back(Job {
+        id: "job".into(),
+        cleanup: Cleanup::retained(vec![entry]),
+        busy: false,
+        phase: "checking",
+        manual_review: false,
+        dismissed: false,
+        program_review_pending: false,
+        program_retirement: None,
+        source: None,
+        archive: None,
+        restore_supported: true,
+        programs: Some(program),
+        reservation: None,
+    });
+    let projection = lock(&state.0.model).view();
+    assert!(projection.rows[0].can_check);
+    assert!(!projection.rows[0].ready);
+    assert!(!projection.rows[0].can_force);
+    let serialized = serde_json::to_value(&projection).unwrap();
+    let checked = check_with_runtime(
+        &state.0,
+        "job".into(),
+        |model| model.revision = model.revision.wrapping_add(1),
+        |inner, _, mut step| loop {
+            match step {
+                Step::Review {
+                    host, common_dir, ..
+                } => {
+                    let mut model = lock(&inner.model);
+                    let job = model.jobs.iter_mut().find(|job| job.id == "job").unwrap();
+                    step = job.cleanup.reviewed(
+                        &host,
+                        &common_dir,
+                        Err("offline synthetic review".into()),
+                    );
+                }
+                Step::Remove { .. } => panic!("Check again must not remove"),
+                Step::Idle | Step::Done => {
+                    lock(&inner.model).jobs[0].busy = false;
+                    break;
+                }
+            }
+        },
+    )
+    .unwrap();
+    assert!(checked.rows[0].busy);
+    assert!(!checked.rows[0].can_force);
+    let settled = lock(&state.0.model).view();
+    assert!(!settled.busy);
+    assert!(settled.rows[0].can_check);
+    assert!(!settled.rows[0].ready);
+    assert!(!settled.rows[0].can_force);
+    serialized
+}
+
 #[tauri::command]
 pub fn termination_cleanup_remove(
     app: AppHandle,

@@ -238,6 +238,11 @@ jobs:
       - name: Disk usage after watch tests
         if: ${{ !cancelled() }}
         run: python3 scripts/ci/ubuntu-disk.py report after-watch-tests
+      - name: Lore wrapper crate (format, lints, tests)
+        run: |
+          cargo +1.99.1 fmt --check --manifest-path crates/lore-bin/Cargo.toml
+          cargo +1.99.1 clippy --locked --manifest-path crates/lore-bin/Cargo.toml --target-dir target --all-targets -- -D warnings
+          cargo +1.99.1 test --locked --manifest-path crates/lore-bin/Cargo.toml --target-dir target
       - name: Desktop client core crate (format, lints, tests)
         run: |
           cargo +1.99.1 fmt --check --manifest-path client/core/Cargo.toml

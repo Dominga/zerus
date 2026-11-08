@@ -10,8 +10,11 @@ const VECTORS_SHA256: &str = "8afb2ee5536b5ec8f7aa4266695904070ea4abd610e8dee572
 
 #[test]
 fn zerus_secret_vectors_are_the_ones_codelore_pins() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/secret-scan-vectors.json");
-    let text = std::fs::read_to_string(&path).expect("Zerus's copy of the secret-scan vectors").replace("\r\n", "\n");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/secret-scan-vectors.json");
+    let text = std::fs::read_to_string(&path)
+        .expect("Zerus's copy of the secret-scan vectors")
+        .replace("\r\n", "\n");
     assert_eq!(
         format!("{:x}", Sha256::digest(text.as_bytes())),
         VECTORS_SHA256,
@@ -21,7 +24,13 @@ fn zerus_secret_vectors_are_the_ones_codelore_pins() {
 
 #[test]
 fn the_built_lore_reports_the_version_of_the_pinned_codelore() {
-    let output = Command::new(env!("CARGO_BIN_EXE_lore")).arg("--version").output().expect("lore starts");
+    let output = Command::new(env!("CARGO_BIN_EXE_lore"))
+        .arg("--version")
+        .output()
+        .expect("lore starts");
     assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), format!("lore {}", zerus_lore::VERSION));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        format!("lore {}", zerus_lore::VERSION)
+    );
 }

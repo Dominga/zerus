@@ -1359,6 +1359,8 @@ export type TeamAction =
   | { kind: "finish"; summary: string }
   | { kind: "reply"; question: string; text: string }
   | { kind: "reassign"; task: number; member: string; subteam?: string | null }
+  /** Task #218: a member moves to another agent/account/model or to an existing session. */
+  | { kind: "swap-member"; member: string; agent?: string; model?: string; effort?: string; account?: string; session?: TeamSessionView }
   | { kind: "take_over"; task: number }
   | { kind: "cancel"; task: number; subteam?: string | null }
   | { kind: "pause" }

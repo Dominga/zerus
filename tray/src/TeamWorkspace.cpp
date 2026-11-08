@@ -7,6 +7,7 @@
 
 #include <QSpinBox>
 #include <QPointer>
+#include <QSignalBlocker>
 #include "HgsClient.h"
 #include "TeamController.h"
 #include "TeamConversation.h"
@@ -17,6 +18,7 @@
 #include "TeamSettingsDialog.h"
 #include "TeamTaskCard.h"
 #include "TeamTreeIndent.h"
+#include "TeamModel.h"
 #include "TeamWidgets.h"
 #include "TeamPhaseScroll.h"
 #include "TeamStages.h"
@@ -4431,14 +4433,122 @@ void TeamWorkspace::swapDialog(const Team &team, const Member &member)
     auto *agent = new QComboBox; agent->setObjectName("teamSwapAgent");
     for (const auto &a : agentNames.keys()) agent->addItem(workspaceIcon(a, c.fg), agentNames.value(a), a);
     agent->setCurrentIndex(qMax(0, agent->findData(member.agent)));
-    auto *model = new QComboBox; model->setObjectName("teamSwapModel"); model->setEditable(true); model->setCurrentText(member.model);
+    auto *model = new QComboBox; model->setObjectName("teamSwapModel"); model->setEditable(true);
     model->lineEdit()->setPlaceholderText(tr("default model"));
-    auto *effort = new QComboBox; effort->setObjectName("teamSwapEffort"); effort->addItem(QStringLiteral("\u2014"), QString());
-    for (const auto *e : {"low", "medium", "high", "xhigh"}) effort->addItem(QString::fromLatin1(e), QString::fromLatin1(e));
-    effort->setCurrentIndex(qMax(0, effort->findData(member.effort)));
+    auto *effort = new QComboBox; effort->setObjectName("teamSwapEffort");
     auto *account = new QComboBox; account->setObjectName("teamSwapAccount"); account->setEditable(true);
-    account->addItem(tr("Default account"), QString());
-    if (!member.account.isEmpty()) { account->addItem(member.account, member.account); account->setCurrentIndex(1); }
+    // #218: the same source as New team's pickers: the agent's accounts, the
+    // account's model catalog (the agent's known models until it is read or
+    // when it has none), the model's efforts, and a typed model kept as it is.
+    constexpr int SwapEffortsRole = Qt::UserRole + 1;
+    const QString memberHost = member.computer;
+    const auto modelKey = [](const QString &agentId, const QString &host, const QString &accountId) {
+        return host + QLatin1Char('\n')
+             + (accountId.isEmpty() ? QStringLiteral("native-") + (agentId.isEmpty() ? QStringLiteral("claude") : agentId) : accountId);
+    };
+    const auto fillEfforts = [](QComboBox *box, const QString &current, const QStringList &efforts) {
+        const QSignalBlocker block(box);
+        box->clear();
+        box->addItem(QStringLiteral("\u2014"), QString());
+        for (const auto &level : efforts.isEmpty() ? QStringList{"low", "medium", "high", "xhigh"} : efforts) box->addItem(level, level);
+        box->setCurrentIndex(qMax(0, box->findData(current)));
+    };
+    auto models = std::make_shared<QHash<QString, QList<QPair<QString, QStringList>>>>();
+    auto profiles = std::make_shared<QList<QJsonObject>>();
+    auto pending = std::make_shared<QSet<QString>>();
+    auto requests = std::make_shared<QHash<quint64, QString>>();
+    const auto requestModels = [this, modelKey, models, pending, requests, memberHost](const QString &agentId, const QString &accountId) {
+        if (!(agentId == "claude" || agentId == "codex" || agentId == "kimi" || agentId == "dsh")) return;
+        const QString key = modelKey(agentId, memberHost, accountId);
+        if (models->contains(key) || pending->contains(key)) return;
+        pending->insert(key);
+        requests->insert(m_teams->client()->requestAccounts(memberHost, {QStringLiteral("model-settings"), key.section(QLatin1Char('\n'), 1), QStringLiteral("--json")}), key);
+    };
+    const auto fillModels = [model, effort, agent, account, modelKey, models, requestModels, fillEfforts, memberHost] {
+        const QString agentId = agent->currentData().toString();
+        const QString accountId = account->currentData().toString();
+        requestModels(agentId, accountId);
+        const QSignalBlocker block(model);
+        const QString keep = model->currentText().trimmed();
+        model->clear();
+        const auto options = models->value(modelKey(agentId, memberHost, accountId));
+        if (options.isEmpty()) for (const auto &id : Teams::knownModels(agentId)) model->addItem(id, id);
+        for (const auto &option : options) {
+            model->addItem(option.first, option.first);
+            model->setItemData(model->count() - 1, option.second, SwapEffortsRole);
+        }
+        // The model stays as chosen or typed; none keeps the agent's default.
+        model->setCurrentIndex(model->findText(keep));
+        if (model->currentIndex() < 0) model->setEditText(keep);
+        const int index = model->findText(model->currentText().trimmed());
+        fillEfforts(effort, effort->currentData().toString(), index >= 0 ? model->itemData(index, SwapEffortsRole).toStringList() : QStringList());
+    };
+    const auto fillAccounts = [this, profiles, account, agent](const QString &preferred) {
+        const QSignalBlocker block(account);
+        const QString keep = preferred.isEmpty() ? account->currentData().toString() : preferred;
+        account->clear();
+        account->addItem(tr("Default account"), QString());
+        for (const auto &profile : *profiles) {
+            if (profile.value("provider").toString() != agent->currentData().toString()) continue;
+            const auto status = profile.value("account_status").toObject().value("status").toString();
+            account->addItem(profile.value("label").toString(profile.value("id").toString()) + (status == "signed_out" ? tr(" (signed out)") : QString()),
+                             profile.value("id").toString());
+        }
+        // A typed account or the member's own stays offered.
+        if (!keep.isEmpty() && account->findData(keep) < 0) account->addItem(keep, keep);
+        account->setCurrentIndex(qMax(0, account->findData(keep)));
+    };
+    QObject::connect(m_teams->client(), &HgsClient::accountsReady, dialog,
+                     [models, profiles, pending, requests, modelKey, fillModels, fillAccounts, agent, account, memberHost](quint64 request, const QString &host, const QJsonObject &result) {
+        if (const QString key = requests->take(request); !key.isEmpty()) {
+            pending->remove(key);
+            QList<QPair<QString, QStringList>> options;
+            for (const auto &value : result.value("models").toArray()) {
+                const auto object = value.toObject();
+                const QString id = object.value("value").toString(object.value("id").toString());
+                if (id.isEmpty()) continue;
+                QStringList levels;
+                for (const auto &level : object.value("effort_options").toArray())
+                    if (const QString name = level.toString(); !name.isEmpty() && !levels.contains(name)) levels << name;
+                options.append({id, levels});
+            }
+            models->insert(key, options);
+            if (host == memberHost && key == modelKey(agent->currentData().toString(), memberHost, account->currentData().toString())) fillModels();
+            return;
+        }
+        if (host != memberHost || !result.contains("profiles")) return;
+        profiles->clear();
+        for (const auto &value : result.value("profiles").toArray()) {
+            auto profile = value.toObject();
+            profile["host"] = host;
+            profiles->append(profile);
+        }
+        fillAccounts(account->currentData().toString());
+        fillModels();
+    });
+    QObject::connect(m_teams->client(), &HgsClient::accountsFailed, dialog,
+                     [pending, requests, fillModels](quint64 request, const QString &, const QString &) {
+        if (const QString key = requests->take(request); !key.isEmpty()) {
+            pending->remove(key);
+            fillModels();
+        }
+    });
+    m_teams->client()->requestAccounts(memberHost);
+    fillAccounts(member.account);
+    model->setCurrentText(member.model);
+    fillEfforts(effort, member.effort, {});
+    fillModels();
+    QObject::connect(agent, &QComboBox::currentIndexChanged, dialog, [agent, model, fillAccounts, fillModels] {
+        const QString agentId = agent->currentData().toString();
+        fillAccounts(QString());
+        model->setCurrentText(Teams::knownModels(agentId).value(0));
+        fillModels();
+    });
+    QObject::connect(account, &QComboBox::currentIndexChanged, dialog, [fillModels] { fillModels(); });
+    QObject::connect(model, &QComboBox::currentTextChanged, dialog, [model, effort, fillEfforts] {
+        const int index = model->findText(model->currentText().trimmed());
+        fillEfforts(effort, effort->currentData().toString(), index >= 0 ? model->itemData(index, Qt::UserRole + 1).toStringList() : QStringList());
+    });
     grid->addWidget(label(tr("Agent"), c.muted, 11), 0, 0); grid->addWidget(agent, 0, 1);
     grid->addWidget(label(tr("Model"), c.muted, 11), 0, 2); grid->addWidget(model, 0, 3);
     grid->addWidget(label(tr("Effort"), c.muted, 11), 1, 0); grid->addWidget(effort, 1, 1);
@@ -4682,13 +4792,84 @@ void TeamWorkspace::addMember(const Team &team)
     auto *chips = new QGridLayout; chips->setSpacing(4);
     auto *agent = new QComboBox; agent->setObjectName("teamAddMemberAgent");
     for (const auto &a : agents) agent->addItem(workspaceIcon(a, c.fg), agentNames.value(a), a);
-    auto *model = new QLineEdit; model->setObjectName("teamAddMemberModel"); model->setPlaceholderText(tr("default model"));
-    auto *effort = new QComboBox; effort->setObjectName("teamAddMemberEffort"); effort->addItem(QStringLiteral("—"), QString());
-    for (const auto *e : {"low", "medium", "high", "xhigh"}) effort->addItem(QString::fromLatin1(e), QString::fromLatin1(e));
+    auto *model = new QComboBox; model->setObjectName("teamAddMemberModel"); model->setEditable(true);
+    model->lineEdit()->setPlaceholderText(tr("default model"));
+    auto *effort = new QComboBox; effort->setObjectName("teamAddMemberEffort");
     auto *account = new QComboBox; account->setObjectName("teamAddMemberAccount"); account->addItem(tr("Default account"), QString());
     auto *computer = new QComboBox; computer->setObjectName("teamAddMemberComputer");
     computer->addItem(tr("this computer"), QString());
     for (const auto &k : m_computers) if (!k.alias.isEmpty()) computer->addItem(k.label, k.alias);
+    // #218: the add-member card's model and efforts come from the chosen
+    // computer's account catalog, as New team's do, not a fixed effort list.
+    constexpr int AddEffortsRole = Qt::UserRole + 1;
+    auto addModels = std::make_shared<QHash<QString, QList<QPair<QString, QStringList>>>>();
+    auto addPending = std::make_shared<QSet<QString>>();
+    auto addRequests = std::make_shared<QHash<quint64, QString>>();
+    const auto addKey = [](const QString &agentId, const QString &host, const QString &accountId) {
+        return host + QLatin1Char('\n') + (accountId.isEmpty() ? QStringLiteral("native-") + (agentId.isEmpty() ? QStringLiteral("claude") : agentId) : accountId);
+    };
+    const auto fillEfforts = [](QComboBox *box, const QString &current, const QStringList &efforts) {
+        const QSignalBlocker block(box);
+        box->clear();
+        box->addItem(QStringLiteral("\u2014"), QString());
+        for (const auto &level : efforts.isEmpty() ? QStringList{"low", "medium", "high", "xhigh"} : efforts) box->addItem(level, level);
+        box->setCurrentIndex(qMax(0, box->findData(current)));
+    };
+    const auto requestModels = [this, addKey, addModels, addPending, addRequests](const QString &agentId, const QString &host, const QString &accountId) {
+        if (!(agentId == "claude" || agentId == "codex" || agentId == "kimi" || agentId == "dsh")) return;
+        const QString key = addKey(agentId, host, accountId);
+        if (addModels->contains(key) || addPending->contains(key)) return;
+        addPending->insert(key);
+        addRequests->insert(m_teams->client()->requestAccounts(host, {QStringLiteral("model-settings"), key.section(QLatin1Char('\n'), 1), QStringLiteral("--json")}), key);
+    };
+    const auto fillModels = [model, effort, agent, account, computer, addKey, addModels, requestModels, fillEfforts] {
+        const QString agentId = agent->currentData().toString(), host = computer->currentData().toString(), accountId = account->currentData().toString();
+        requestModels(agentId, host, accountId);
+        const QSignalBlocker block(model);
+        const QString keep = model->currentText().trimmed();
+        model->clear();
+        const auto options = addModels->value(addKey(agentId, host, accountId));
+        if (options.isEmpty()) for (const auto &id : Teams::knownModels(agentId)) model->addItem(id, id);
+        for (const auto &option : options) {
+            model->addItem(option.first, option.first);
+            model->setItemData(model->count() - 1, option.second, AddEffortsRole);
+        }
+        model->setCurrentIndex(model->findText(keep));
+        if (model->currentIndex() < 0) model->setEditText(keep);
+        const int index = model->findText(model->currentText().trimmed());
+        fillEfforts(effort, effort->currentData().toString(), index >= 0 ? model->itemData(index, AddEffortsRole).toStringList() : QStringList());
+    };
+    QObject::connect(m_teams->client(), &HgsClient::accountsReady, pop,
+                     [addModels, addPending, addRequests, addKey, fillModels, agent, account, computer](quint64 request, const QString &host, const QJsonObject &result) {
+        if (const QString key = addRequests->take(request); !key.isEmpty()) {
+            addPending->remove(key);
+            QList<QPair<QString, QStringList>> options;
+            for (const auto &value : result.value("models").toArray()) {
+                const auto object = value.toObject();
+                const QString id = object.value("value").toString(object.value("id").toString());
+                if (id.isEmpty()) continue;
+                QStringList levels;
+                for (const auto &level : object.value("effort_options").toArray())
+                    if (const QString name = level.toString(); !name.isEmpty() && !levels.contains(name)) levels << name;
+                options.append({id, levels});
+            }
+            addModels->insert(key, options);
+            if (key == addKey(agent->currentData().toString(), computer->currentData().toString(), account->currentData().toString())) fillModels();
+            return;
+        }
+        Q_UNUSED(host);
+    });
+    QObject::connect(m_teams->client(), &HgsClient::accountsFailed, pop,
+                     [addPending, addRequests, fillModels](quint64 request, const QString &, const QString &) {
+        if (const QString key = addRequests->take(request); !key.isEmpty()) {
+            addPending->remove(key);
+            fillModels();
+        }
+    });
+    QObject::connect(model, &QComboBox::currentTextChanged, pop, [model, effort, fillEfforts] {
+        const int index = model->findText(model->currentText().trimmed());
+        fillEfforts(effort, effort->currentData().toString(), index >= 0 ? model->itemData(index, Qt::UserRole + 1).toStringList() : QStringList());
+    });
     // Spec 5.6: "Reports to" the coordinator or one of its sub-leads.
     auto *reportsTo = new QComboBox; reportsTo->setObjectName("teamAddMemberReportsTo");
     for (const auto &node : team.memberTree()) {
@@ -4717,7 +4898,7 @@ void TeamWorkspace::addMember(const Team &team)
             const auto *role = m_teams->catalog().role(id);
             if (!role) return;
             agent->setCurrentIndex(qMax(0, agent->findData(role->agent.isEmpty() ? QStringLiteral("claude") : role->agent)));
-            model->setText(role->model);
+            model->setCurrentText(role->model);
             effort->setCurrentIndex(qMax(0, effort->findData(role->effort)));
             const QString mode = role->permissions == "auto" ? tr("Auto") : role->permissions == "bypass" ? tr("Bypass") : tr("Account's mode");
             const QString folder = role->folder == "read_only" ? tr("Read only") : role->folder == "shared" ? tr("Shared folder") : tr("Own worktree");
@@ -4749,8 +4930,8 @@ void TeamWorkspace::addMember(const Team &team)
     ok->setEnabled(false);
     // Accounts of the chosen computer and agent.
     const auto fillAccounts = [this, account, agent, computer] { m_teams->client()->requestAccounts(computer->currentData().toString()); Q_UNUSED(agent); Q_UNUSED(account); };
-    QObject::connect(m_teams->client(), &HgsClient::accountsReady, pop, [account, agent, computer](quint64, const QString &host, const QJsonObject &result) {
-        if (host != computer->currentData().toString()) return;
+    QObject::connect(m_teams->client(), &HgsClient::accountsReady, pop, [account, agent, computer, fillModels](quint64, const QString &host, const QJsonObject &result) {
+        if (host != computer->currentData().toString() || !result.contains("profiles")) return;
         const QString keep = account->currentData().toString();
         account->clear(); account->addItem(QCoreApplication::translate("TeamWorkspace", "Default account"), QString());
         for (const auto &value : result.value("profiles").toArray()) {
@@ -4760,16 +4941,20 @@ void TeamWorkspace::addMember(const Team &team)
             account->addItem(p.value("label").toString(p.value("id").toString()) + (out ? QCoreApplication::translate("TeamWorkspace", " (signed out)") : QString()), p.value("id").toString());
         }
         account->setCurrentIndex(qMax(0, account->findData(keep)));
+        fillModels();
     });
-    QObject::connect(agent, &QComboBox::activated, pop, fillAccounts);
-    QObject::connect(computer, &QComboBox::activated, pop, [this, fillAccounts, computer, offline] {
+    QObject::connect(agent, &QComboBox::currentIndexChanged, pop, [fillAccounts, fillModels] { fillAccounts(); fillModels(); });
+    QObject::connect(account, &QComboBox::currentIndexChanged, pop, fillModels);
+    QObject::connect(computer, &QComboBox::currentIndexChanged, pop, [this, fillAccounts, fillModels, computer, offline] {
         fillAccounts();
+        fillModels();
         QString warn;
         for (const auto &k : m_computers) if (k.alias == computer->currentData().toString() && !k.online) warn = tr("Computer %1 is offline; the member starts once it is back.").arg(k.label);
         offline->setText(warn); offline->setVisible(!warn.isEmpty());
         placePopover();
     });
     fillAccounts();
+    fillModels();
     QObject::connect(close, &QToolButton::clicked, pop, [this] { if (m_popover) { retire(m_popover); m_popover = nullptr; } });
     QObject::connect(cancel, &QPushButton::clicked, pop, [this] { if (m_popover) { retire(m_popover); m_popover = nullptr; } });
     QObject::connect(ok, &QPushButton::clicked, pop, [this, team, picked, agent, model, effort, account, computer, prompt, reportsTo] {
@@ -4779,7 +4964,7 @@ void TeamWorkspace::addMember(const Team &team)
         QString folder = QStringLiteral("shared");
         for (const auto &m : team.members) if (!m.lead && m.folder == "worktree" && role->folder != "read_only" && role->folder != "shared") folder = m.folder;
         QJsonObject member{{"id", nextMemberId(team, role->name)}, {"role", role->name}, {"agent", agent->currentData().toString()},
-                           {"model", model->text().trimmed()}, {"effort", effort->currentData().toString()}, {"account", account->currentData().toString()},
+                           {"model", model->currentText().trimmed()}, {"effort", effort->currentData().toString()}, {"account", account->currentData().toString()},
                            {"computer", computer->currentData().toString()}, {"permissions", role->permissions}, {"folder", folder},
                            {"prompt", prompt->toPlainText().trimmed()}};
         if (const QString parent = reportsTo->currentData().toString(); !parent.isEmpty()) member.insert("parent", parent);

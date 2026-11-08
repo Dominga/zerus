@@ -2546,5 +2546,12 @@
   "This video cannot be played.": "Это видео не удаётся воспроизвести.",
   "Video message": "Видеосообщение",
   "Loading %1 from %2…": "Загрузка %1 с %2…",
-  "Media": "Медиа"
+  "Media": "Медиа",
+  "The lead keeps its role and the team's plan; its open items stay in the inbox and the new session gets one brief.": "Лид сохраняет свою роль и план команды; его открытые элементы остаются во входящих, а новая сессия получает один бриф.",
+  "%1 keeps its id, role, tasks, folder and branch. An open task goes to the new session with what was done so far.": "%1 сохраняет id, роль, задачи, папку и ветку. Открытая задача переходит в новую сессию с тем, что уже сделано.",
+  "A new session": "Новая сессия",
+  "An existing session": "Существующая сессия",
+  "No other live session to adopt": "Нет другой живой сессии для перехода",
+  "Swap…": "Заменить…",
+  "Swap member…": "Заменить участника…"
 }

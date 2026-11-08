@@ -81,6 +81,27 @@ describe("pages", () => {
     t.dispose();
   });
 
+  it("continues a partial scan, adds up what was searched and never reads an empty partial page as a change (zerus-080n8)", async () => {
+    const t = setup();
+    await t.answer(pageOf([arow(1, 300)], { total: 1, total_capped: true, next_cursor: "c1", position: 0, partial: true, searched: 25_000 }));
+    expect(t.archive.status().summary).toBe("1 shown, 25000 searched so far");
+    t.archive.older();
+    await t.answer(pageOf([], { total: 0, total_capped: true, next_cursor: "c2", previous_cursor: "p1", position: 1, partial: true, searched: 25_000 }));
+    expect(t.archive.status().error).toBe("");
+    expect(t.archive.status().summary).toBe("0 shown, 50000 searched so far");
+    expect([t.archive.partial(), t.archive.partialNewer(), t.archive.searched()]).toEqual([true, false, 50_000]);
+    expect(t.archive.status().older).toEqual({ visible: true, enabled: true });
+    // Newer starts its own run.
+    t.archive.newer();
+    await t.answer(pageOf([], { total: 0, total_capped: true, next_cursor: "c3", previous_cursor: "p2", position: 1, partial: true, searched: 25_000 }));
+    expect([t.archive.partialNewer(), t.archive.searched()]).toEqual([true, 25_000]);
+    // The scan reaching the end of the range is an ordinary page again.
+    t.archive.older();
+    await t.answer(pageOf([arow(2, 100)], { total: 2, previous_cursor: "p3", position: 1, partial: false, searched: 900 }));
+    expect([t.archive.partial(), t.archive.status().summary]).toEqual([false, "2–2 of 2"]);
+    t.dispose();
+  });
+
   it("Older loads the cursor and Newer the previous cursor, each replacing the one bounded page", async () => {
     const t = setup();
     await t.answer(pageOf([arow(1, 300), arow(2, 200)], { total: 3, next_cursor: "c1", position: 0 }));
@@ -367,6 +388,21 @@ describe("the status text (ArchiveBrowser::updateStatus)", () => {
     expect(statusOf({ "": loaded(2, 10_000, { capped: true }) }, [LOCAL], true).summary).toBe("2 shown of 10000+");
     expect(statusOf({ "": loaded(2, 2), box: loaded(1, 10_000, { capped: true }) }, [LOCAL, BOX], true).summary).toBe("3 loaded of 10002+");
     expect(statusOf({ "": loaded(50, 10_000, { position: 0, cursor: "c", capped: true }), box: loaded(1, 2) }, [LOCAL, BOX], true).hint).toBe("Local: 1–50 of 10000+\nbox: 1 shown of 2");
+  });
+
+  it("words a partial scan as searched so far, never as 0+ or no matches (zerus-080n8)", () => {
+    expect(statusOf({ "": loaded(0, 0, { position: 0, cursor: "c", capped: true, partial: true, searched: 50_000 }) }, [LOCAL], true).summary).toBe("0 shown, 50000 searched so far");
+    expect(statusOf({ "": loaded(3, 3, { position: 0, cursor: "c", capped: true, partial: true, searched: 25_000 }) }, [LOCAL], true).summary).toBe("3 shown, 25000 searched so far");
+    const two = statusOf({ "": loaded(0, 0, { cursor: "c", capped: true, partial: true, searched: 25_000 }), box: loaded(2, 2) }, [LOCAL, BOX], true);
+    expect(two.summary).toBe("2 shown, 25000 searched so far");
+    expect(two.hint).toBe("Local: 0 shown, 25000 searched so far\nbox: 1–2 of 2".replace("1–2 of 2", "2 shown of 2"));
+    expect(two.older).toEqual({ visible: true, enabled: true });
+    // A total that is only a lower bound never reads lower than the rows shown.
+    expect(statusOf({ "": loaded(50, 40, { position: 100, capped: true }) }, [LOCAL], true).summary).toBe("101–150 of 150+");
+    // A capped position shows no range.
+    expect(statusOf({ "": loaded(50, 10_000, { position: 10_000, capped: true, positionCapped: true }) }, [LOCAL], true).summary).toBe("50 shown of 10050+");
+    // The Archive filter's count waits while nothing is shown yet.
+    expect(countText(0, { "": loaded(0, 0, { cursor: "c", capped: true, partial: true, searched: 25_000 }) }, [LOCAL])).toBe("…");
   });
 
   it("puts each computer's window in the hint and sets the buttons as Qt", () => {

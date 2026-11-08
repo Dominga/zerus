@@ -206,6 +206,18 @@ describe("an archive search keeps the archive status and paging (zerus-5wmh.13.1
     // The results list still shows the search (messages and the page's archive rows).
     expect(host.querySelector(".search-results, [role=listbox]")).not.toBeNull();
   });
+
+  it("never says no matches while the archive scan is still partial (zerus-080n8)", async () => {
+    vi.mocked(bridge.archivePage).mockResolvedValue({ rows: [], next_cursor: "c", previous_cursor: null, total: 0, total_capped: true, position: 0, partial: true, searched: 25_000 } as never);
+    put(fixtureRow());
+    setStateFilter("archived"); await flush();
+    setSearch("needle"); await flush();
+    await vi.waitFor(() => expect(host.querySelector(".archive-status")?.textContent).toBe("0 shown, 25000 searched so far"), { timeout: 3000 });
+    await vi.waitFor(() => expect(host.querySelector(".content-search .empty h3")?.textContent).toBe("0 shown, 25000 searched so far"), { timeout: 3000 });
+    expect(host.querySelector(".content-search .empty p")?.textContent).toBe("Older continues the search.");
+    expect(host.textContent).not.toContain("No matching sessions");
+    expect(host.textContent).not.toContain("0+");
+  });
 });
 
 describe("a shown tool search hit (zerus-tso9j, zerus-2r73y)", () => {

@@ -6,7 +6,8 @@ import { agentKind } from "../../store/catalog";
 import { computerOf } from "./creations-ui";
 import type { CreationCard } from "../../types";
 import { searchTooltip } from "../../store/content-search-model";
-import { search, selectedKey } from "../../store/ui";
+import { search, selectedKey, stateFilter } from "../../store/ui";
+import { archive } from "../../store/archive";
 import { Icon } from "../lib/icons";
 import { AgentBadge, MachineBadge } from "./SessionCard";
 
@@ -53,9 +54,14 @@ export function SearchResults() {
       <button class="icon-btn small" aria-label={tr("Search again")} title={tr("Search again")} disabled={contentSearch.busy() || [...search().trim()].length < 2} onClick={contentSearch.refresh}><Icon name="refresh-cw" size={12} /></button>
     </div>
     <div class="content-search-list sp-scroll" ref={(el) => { element = el; requestAnimationFrame(() => list._willUpdate()); }} role="listbox" aria-label={tr("Matching sessions and messages")} aria-activedescendant={current() ? `content-search-${rows().findIndex((row) => row.id === current())}` : undefined} tabindex="0" onKeyDown={key}>
-      <Show when={rows().length} fallback={<Show when={!contentSearch.busy() && !contentSearch.errors().length}>
-        <div class="empty"><Icon name="search" size={26} /><h3>{tr("No matching sessions")}</h3><p>Nothing matches “{search().trim()}” in names, IDs or messages with the current filters.</p></div>
-      </Show>}>
+      <Show when={rows().length} fallback={
+        // zerus-080n8: while the archive scan is partial, nothing is known to be missing yet.
+        <Show when={stateFilter() === "archived" && archive.partial()} fallback={<Show when={!contentSearch.busy() && !contentSearch.errors().length}>
+          <div class="empty"><Icon name="search" size={26} /><h3>{tr("No matching sessions")}</h3><p>Nothing matches “{search().trim()}” in names, IDs or messages with the current filters.</p></div>
+        </Show>}>
+          <div class="empty"><Icon name="search" size={26} /><h3>{tr("%1 shown, %2 searched so far", 0, archive.searched())}</h3><p>{archive.partialNewer() ? tr("Newer continues the search.") : tr("Older continues the search.")}</p></div>
+        </Show>
+      }>
         <div style={{ height: `${list.getTotalSize()}px`, position: "relative" }}>
           <For each={keys()}>{(id) => {
             const virtual = () => positions().get(id);

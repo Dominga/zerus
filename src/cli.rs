@@ -236,7 +236,8 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] dirs --create <path> [--request-id UUID]   create one folder (existing parent)
        hgs [@host] kill <session> [--archive <id>]
        hgs [@host] rename <session> <new-full-name> [--archive <id>]
-       hgs [@host] archives --json           date-filtered archive pages (JSON stdin)
+       hgs [@host] archives --json [--bounded]   date-filtered archive pages (JSON stdin); --bounded caps counts at 10,000 and each scan at 25,000 rows
+       archive-bounded-pages-v1
        hgs [@host] archive <session>          move a stopped conversation to Archive
        hgs [@host] pause <session>|--all       save and gracefully close idle agents
        hgs [@host] resume <session>|--all [-d] [--archive <id>]   restore exact conversations
@@ -1027,12 +1028,13 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
         "archives" => {
             let mobile = cfg!(windows) && args.last().map(String::as_str)==Some("--windows-mobile");
             let args = if mobile { &args[..args.len()-1] } else { args };
-            if (args != ["--json"] && args != ["lookup","--json"]) || dry { return Err(Error::new(1,"usage: hgs archives [lookup] --json (JSON query on stdin)")); }
+            let bounded = !mobile && args == ["--json","--bounded"];
+            if (args != ["--json"] && args != ["lookup","--json"] && !bounded) || dry { return Err(Error::new(1,"usage: hgs archives [lookup] --json [--bounded] (JSON query on stdin)")); }
             let query = state::archive_catalog::read_query().map_err(|e| Error::new(1,e))?;
             let result = if args.first().map(String::as_str) == Some("lookup") {
                 if mobile { state::archive_catalog::lookup_scoped(&query,true) } else { state::archive_catalog::lookup(&query) }
             } else if mobile { state::archive_catalog::page_scoped(&query,true) }
-            else { state::archive_catalog::page(&query) }.map_err(|e| Error::new(1,e))?;
+            else { state::archive_catalog::page_with(&query,bounded) }.map_err(|e| Error::new(1,e))?;
             println!("{result}"); Ok(0)
         },
         "reference" => {
@@ -1782,6 +1784,12 @@ fn remote_via(
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*session-parent-v1[[:space:]]*'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to change parent sessions' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "notifications" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*session-notifications-v1[[:space:]]*'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to change notification preferences' >&2; exit 1; fi",platform::join(&remote_args)))
+    } else if command == "archives" && has(&args, "--bounded") {
+        // zerus-080n8: an older peer rejects --bounded, so it serves the exact
+        // page it always did; the reply then carries no capped or partial fields.
+        let exact: Vec<String> = remote_args.iter().filter(|arg| *arg != "--bounded").cloned().collect();
+        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*{}[[:space:]]*'; then exec ~/.local/bin/hgs {}; else exec ~/.local/bin/hgs {}; fi",
+            state::archive_catalog::BOUNDED_MARKER, platform::join(&remote_args), platform::join(&exact)))
     } else if command == "keep-warm" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*session-keep-warm-v1[[:space:]]*'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to keep the prompt cache warm' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "hooks" {
@@ -1830,6 +1838,11 @@ fn remote_via(
         }
         if machine.is_some() { markers.push(("guarded-create-v1", false)); }
         let mut words = remote_args.clone();
+        // A non-POSIX peer runs the words without a shell probe: send --bounded only to one that lists it.
+        if command == "archives" && has(&args, "--bounded") && crate::remote_shell::windows(config, target).unwrap_or(false)
+            && !crate::remote_shell::supports(config, target, &[(state::archive_catalog::BOUNDED_MARKER, true)]).unwrap_or(false) {
+            words.retain(|arg| arg != "--bounded");
+        }
         if command == "analytics" { words.push("--read-only".into()); }
         crate::remote_shell::adapt(config, target, &words, &remote, &markers,
             "Update the selected computer before using this command; the required capability is missing")

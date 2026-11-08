@@ -50,17 +50,32 @@
   .ms-agent.on { border-color: var(--z-color-accent); }
   .ms-agent.off { opacity: 0.6; cursor: default; }
   .ms-summary { margin: 0; padding: 8px 12px; border: 1px solid var(--z-color-card-border); border-radius: 8px; font-size: 12px; white-space: pre-wrap; }
-  .ms-settings-body { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
-  .ms-server-list { list-style: none; margin: 0; padding: 0; width: 260px; max-width: 100%; display: flex; flex-direction: column; gap: 4px; }
+  /* Task #350: Qt's ModelServerSettings uses the window: the section is not
+     held to the settings column's 850 px, which left the editor a sliver. */
+  .set-content:has(> .ms-settings) { max-width: none; }
+  /* Task #350: the list keeps its 260 px as Qt's fixed-width list does, and the
+     editor takes the remaining width at every window size. A grid, not a
+     wrapping flex row, so the list can never shrink to a character per line. */
+  .ms-settings-body { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 16px; align-items: start; }
+  .ms-server-list { list-style: none; margin: 0; padding: 0; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
   .ms-server-list > li { padding: 8px 10px; border: 1px solid transparent; border-radius: 9px; cursor: pointer; overflow-wrap: anywhere; }
   .ms-server-list > li.on { border-color: var(--z-color-accent); }
-  .ms-form { flex: 1 1 420px; min-width: 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 14px; align-items: center; padding: 16px 18px; border: 1px solid var(--z-color-card-border); border-radius: 12px; }
-  .ms-form > label, .ms-form > span { text-align: right; color: var(--z-color-text-2); }
-  .ms-form .row { gap: 8px; align-items: center; min-width: 0; }
+  /* One labelled field per row, the control taking the editor's width as Qt's
+     row spans its grid; nothing depends on auto-placement across results. */
+  .ms-form { min-width: 0; display: flex; flex-direction: column; gap: 8px; padding: 16px 18px; border: 1px solid var(--z-color-card-border); border-radius: 12px; }
+  .ms-field { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 8px 14px; align-items: center; }
+  .ms-field > label, .ms-field > span { text-align: right; color: var(--z-color-text-2); }
+  .ms-control { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+  .ms-control > .field { flex: 1 1 220px; min-width: 0; }
   .ms-note { margin: 0; font-size: var(--fs-sm); color: var(--z-color-muted); white-space: pre-wrap; overflow-wrap: anywhere; }
-  .ms-control-title, .ms-formats, .ms-form > .ms-buttons, .ms-form > .ms-result:not(:empty):last-of-type { grid-column: 1 / -1; }
   .ms-control-title { margin: 6px 0 0; font-size: var(--fs-sm); color: var(--z-color-text-2); }
   .ms-formats { margin: 0; padding: 8px 10px; border: 1px solid var(--z-color-card-border); border-radius: 8px; font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .ms-buttons { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+  .ms-raw { margin: 0; max-height: 160px; overflow: auto; padding: 8px; border: 1px solid var(--z-color-card-border); border-radius: 8px; white-space: pre-wrap; font-size: 12px; }
+  @media (max-width: 720px) {
+    .ms-settings-body { grid-template-columns: minmax(0, 1fr); }
+    .ms-field { grid-template-columns: max-content minmax(0, 1fr); }
+  }
   .ms-result { margin: 0; font-size: var(--fs-sm); white-space: pre-wrap; }
   .ms-result.ok { color: var(--z-color-accent); }
   .ms-result.warn { color: var(--z-color-warn); }

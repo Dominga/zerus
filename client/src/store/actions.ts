@@ -9,6 +9,7 @@ import { bus as appBus, createNoticeBus, sessionNoticeKey, type NoticeBus } from
 import { copyState, sessionIdentity, detailsFromInspection, MUTE_PENDING, STATE_CHANGED, forgetsBindingOnly, notificationsStillAllowed, snapshotOf, terminates, type ActionRow, type ChildIdentity, type ForgetScope, type PendingNotifications } from "../ui/sessions/actions-ui";
 import type { Action, Details, Outcome, Target } from "../types";
 import type { Session } from "../ui/sessions/types";
+import type { MuteOutcome } from "../ui/sessions/selection";
 import { tr, trNoop } from "../i18n";
 
 // Guarded session actions. Every action is one call to the Rust side; a call
@@ -259,24 +260,39 @@ export function createActions(
    * is no longer the same run, conversation and `created` is dropped.
    */
   async function toggleMute(row: ActionRow): Promise<void> {
+    const out = await setMute(row, !row.muted);
+    if (out.outcome === "refused" && !out.silent) notify("error", out.detail, true);
+  }
+
+  /**
+   * One guarded Mute or Unmute write of `row` (toggleMute, and the selection's
+   * Mute or Unmute, zerus-qhtxf): the live row must still be the one shown,
+   * with the same shared setting, and the write carries its own revision. A
+   * refusal before the call is silent for the row menu, which only shows what
+   * still applies; a selection reports it.
+   */
+  async function setMute(row: ActionRow, muted: boolean): Promise<MuteOutcome> {
+    const unavailable = { outcome: "refused" as const, detail: tr(MUTE_CHANGED), silent: true };
     const live = stillListed(row);
-    if (!live) return;
+    if (!live) return { outcome: "refused", detail: tr(GONE), silent: true };
     const original = snapshotOf(live);
-    if (!notificationsStillAllowed(original, row, online(live.computer), untrack(() => pendingNotifications(live.computer, live.conversationId)))) return;
+    if (!notificationsStillAllowed(original, row, online(live.computer), untrack(() => pendingNotifications(live.computer, live.conversationId)))) return unavailable;
+    if (!!original.muted === muted) return unavailable;
     // The row's revision, or a higher confirmed override's (an Unmute before the next listing).
     const expected = notificationMarks.notificationRevisionOf(original);
-    if (expected === undefined) return;
+    if (expected === undefined) return unavailable;
     const target: Target = { computer: original.computer, name: original.name, run_id: original.runId ?? "", conversation_id: original.conversationId ?? "" };
     const entry = { id: nextChange++, computer: original.computer, conversation: original.conversationId ?? "" };
     setChanging((all) => [...all, entry]);
     let preferences: Record<string, unknown> | undefined;
     let detail = "";
-    try { preferences = await bridge.setNotifications(target, !original.muted, expected); } catch (error) { detail = errorText(error); if (detail === "busy") detail = MUTE_PENDING; } finally {
+    try { preferences = await bridge.setNotifications(target, muted, expected); } catch (error) { detail = errorText(error); if (detail === "busy") detail = MUTE_PENDING; } finally {
       setChanging((all) => all.filter((p) => p.id !== entry.id));
     }
-    if (!notificationMarks.currentNotificationRow(original)) return;
-    if (!preferences) { notify("error", detail, true); return; }
-    if (!notificationMarks.applyNotifications(original, preferences)) notify("error", tr(MUTE_CHANGED), true);
+    if (!notificationMarks.currentNotificationRow(original)) return { outcome: "refused", detail: tr(GONE), silent: true };
+    if (!preferences) return { outcome: "refused", detail };
+    if (!notificationMarks.applyNotifications(original, preferences)) return { outcome: "refused", detail: tr(MUTE_CHANGED) };
+    return { outcome: "changed" };
   }
 
   // Details: the followed session's Activity state value when it names the
@@ -421,7 +437,7 @@ export function createActions(
     return out;
   }
 
-  return { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copySessionId, copyIdentity, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices: list, dismiss, notify, clearNotice };
+  return { perform, performComputer, end, forget, toggleMute, setMute, stillListed, pendingNotifications, copy, copyName, copySessionId, copyIdentity, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices: list, dismiss, notify, clearNotice };
 }
 
 type FollowSource = { target(): { id: string } | undefined; summary(): Record<string, unknown> | undefined; loaded(): boolean; ended(): boolean; error(): unknown };
@@ -469,4 +485,4 @@ const app = createActions(withArchived(appCatalog, (key) => archivedRow(key) ?? 
       if (cleanupId) await bridge.terminationCleanupCancel(cleanupId).catch(() => {});
     }
   });
-export const { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copySessionId, copyIdentity, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices, dismiss, notify, clearNotice } = app;
+export const { perform, performComputer, end, forget, toggleMute, setMute, stillListed, pendingNotifications, copy, copyName, copySessionId, copyIdentity, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices, dismiss, notify, clearNotice } = app;

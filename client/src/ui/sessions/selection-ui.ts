@@ -13,6 +13,8 @@ import { tr } from "../../i18n";
 export const SELECTION_ICONS: Record<SelectionAction, string> = {
   mark_read: "read-all",
   review_later: "attention",
+  mute: "bell-off",
+  unmute: "bell",
   compact: "compact-row",
   expand: "expand-row",
   pause: "pause",
@@ -35,6 +37,9 @@ export function countable(s: Pick<SelectionRow, "state">, a: SelectionAction, ap
   return archiveBound || s.state !== "archived" || (a !== "resume" && a !== "forget");
 }
 
+/** Unmute shows only when no selected session can be muted: one bell tool, Mute while any is unmuted (zerus-qhtxf). */
+const hiddenUnmute = (a: SelectionAction, count: (a: SelectionAction) => number) => a === "unmute" && count("mute") > 0;
+
 /** Compact and Expand only change the presentation, so a running batch does not block them. */
 export const presentation = (a: SelectionAction) => a === "compact" || a === "expand";
 
@@ -55,7 +60,7 @@ export function barTools(count: (a: SelectionAction) => number, selected: number
   const tools: SelectionTool[] = [];
   for (const action of SELECTION_ACTIONS) {
     const n = count(action);
-    if (n <= 0) continue;
+    if (n <= 0 || hiddenUnmute(action, count)) continue;
     const move = action === "move";
     tools.push({
       action,

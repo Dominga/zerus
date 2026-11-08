@@ -14,9 +14,21 @@ describe("barTools", () => {
     expect(tools[3].text).toBe("Terminate (1)");
     expect(tools.every((t) => !/\.|Esc/.test(t.hint.replace("sessions", "")))).toBe(true);
   });
-  it("keeps the order of all ten actions", () => {
+  it("keeps the order of the actions", () => {
     const all = Object.fromEntries(SELECTION_ACTIONS.map((a) => [a, 1]));
-    expect(barTools(counts(all), 2, false).map((t) => t.action)).toEqual(["compact", "expand", "mark_read", "review_later", "pause", "resume", "archive", "move", "forget", "terminate"]);
+    expect(barTools(counts(all), 2, false).map((t) => t.action)).toEqual(["compact", "expand", "mark_read", "review_later", "mute", "pause", "resume", "archive", "move", "forget", "terminate"]);
+  });
+  it("offers Mute notifications while any selected session is unmuted, else Unmute (zerus-qhtxf)", () => {
+    const mixed = barTools(counts({ mute: 2, unmute: 1 }), 3, false);
+    expect(mixed.map((t) => [t.action, t.text, t.icon])).toEqual([["mute", "Mute notifications (2)", "bell-off"]]);
+    const muted = barTools(counts({ unmute: 3 }), 3, false);
+    expect(muted.map((t) => [t.action, t.text, t.icon])).toEqual([["unmute", "Unmute notifications (3)", "bell"]]);
+    expect(barTools(counts({}), 3, false)).toEqual([]);
+    expect(barTools(counts({ mute: 1 }), 3, true)[0].enabled).toBe(false);
+    const menu = (c: Partial<Record<SelectionAction, number>>) => selectionMenu(counts(c), 3, false, () => {}, () => {}).map((e) => ("label" in e ? e.label : ""));
+    expect(menu({ mute: 2, unmute: 1 })).toContain("Mute notifications (2)");
+    expect(menu({ mute: 2, unmute: 1 }).some((l) => l.startsWith("Unmute"))).toBe(false);
+    expect(menu({ unmute: 3 })).toContain("Unmute notifications (3)");
   });
   it("disables writes while a batch runs but not compact or expand", () => {
     const tools = barTools(counts({ compact: 1, expand: 1, mark_read: 1, pause: 1, forget: 1 }), 2, true);

@@ -10,6 +10,10 @@ sandbox, in the member's own folder, with a bounded time and output:
   qt-build {targets?}        cmake --build .ci-build/gui
   qt-test {suite, functions?, shots?}  a test binary from .ci-build/gui,
                              offscreen; shots go to .ci-build/shots
+  tauri-build {files?}       builds Zerus Next with 273's development identity
+  tauri-dev {files?}         runs Zerus Next's dev server with that identity
+  tauri-launch {files?}      launches the development build; refuses a
+                             switch-identity build outside the package
   android-test               mobile/android :app:testDebugUnitTest
   clean-build {paths}        removes build outputs (.ci-build, build, target)
   git-merge-lead             git merge --no-edit the lead's branch, in your
@@ -18,6 +22,11 @@ sandbox, in the member's own folder, with a bounded time and output:
   cmake-*, ctest, msbuild-build, vstest: hgs guide team-cpp
 On Windows the Qt templates load Visual Studio and Qt; do not wrap them in
 your own vcvars batch. Shots stay in your folder: name their path in the report.
+Tauri app builds, dev servers and launches go only through tauri-build,
+tauri-dev and tauri-launch: they use the development identity, own single-instance
+name, data and WebView2 folders, so they never raise or block the owner's Zerus.
+Never build or launch the app by hand, and never name tauri.windows.switch.conf.json
+in a member build. Only the release-candidate/package step builds the switch identity.
 Codex on Windows: .git is read-only; commit with git-commit, use powershell.exe.
 Ask for one as the member (identity as report; a sandbox needs no approval):
   {"request_id":"UUID","team":"ID","attempt":"ATTEMPT",

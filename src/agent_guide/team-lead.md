@@ -49,7 +49,10 @@ peer of its role; "hold":true keeps a reject back until hgs team release. No rep
 use-last-reply. Only hgs team report reports; a question comes by hgs team ask, answered
 with hgs team reply. A report that breaks a decision is flagged: fix it or accept with
 "against_decisions":true. Pipelines (review, test) pass or return; you decide at round 3.
-Never merge, build or test a member's work by hand (hgs guide team-tests). Watch with
+Never merge, build or test a member's work by hand (hgs guide team-tests), and
+never build or launch the Tauri app by hand: tauri-build, tauri-dev and
+tauri-launch carry the development identity, and only the release-candidate
+package step builds the switch identity. Watch with
 hgs team status --json. Stuck: retry, reassign (pins it) or
 cancel. hgs team answer takes a native question or permission: allow only what the task
 needs, else ask the owner.

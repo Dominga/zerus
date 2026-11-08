@@ -30,6 +30,14 @@ const H264: [(&str, &str); 4] = [
     ("vah264enc", "vah264enc bitrate=700"),
     ("vaapih264enc", "vaapih264enc bitrate=700"),
 ];
+/// What the H.264 encoder is given (zerus-6ioin): limited-range BT.601. A
+/// webcam's MJPEG decodes to full range, whose flag WebKitGTK's on-screen
+/// video ignores, crushing shadows and clipping whites. videoconvert does not
+/// rescale range between YUV formats, so the frame passes through RGB. From
+/// RGB the converter would pick x264enc's 10-bit 4:4:4, so the formats stay
+/// 8-bit 4:2:0: I420, or NV12 for VA-API encoders.
+const H264_INPUT: &str = "videoconvert ! video/x-raw,format=RGBx ! videoconvert \
+    ! video/x-raw,format={I420,NV12},colorimetry=bt601";
 /// AAC encoders in order of preference, at 64 kbit/s.
 const AAC: [(&str, &str); 3] = [
     ("avenc_aac", "avenc_aac bitrate=64000"),
@@ -301,13 +309,8 @@ fn description(
     Ok(format!(
         // The preview and poster sinks keep one frame nobody pulls once stopping
         // starts; waiting for it on EOS would hold back the pipeline's EOS.
-        // The encoder gets limited-range BT.601 (zerus-6ioin): a webcam's MJPEG
-        // decodes to full range, which WebKitGTK's on-screen video ignores the
-        // flag of, crushing shadows and clipping whites. videoconvert does not
-        // rescale range between YUV formats, so the frame passes through RGB.
         "capsfilter name=camcaps ! {decode}videoconvert ! videorate ! video/x-raw,framerate=24/1 ! tee name=t \
-         t. ! queue ! videoconvert ! video/x-raw,format=RGBx ! videoconvert ! video/x-raw,colorimetry=bt601 \
-            ! {h264} ! h264parse ! queue ! mux. \
+         t. ! queue ! {H264_INPUT} ! {h264} ! h264parse ! queue ! mux. \
          t. ! queue leaky=downstream max-size-buffers=1 ! videorate drop-only=true max-rate={PREVIEW_FPS} \
             ! videocrop left={left} right={right} top={top} bottom={bottom} ! videoscale ! videoconvert \
             ! video/x-raw,format=I420,width={PREVIEW_SIDE},height={PREVIEW_SIDE} ! tee name=p \
@@ -909,6 +912,52 @@ mod tests {
                 message.type_(),
                 gst::MessageType::Eos,
                 "{caps}: {message:?}"
+            );
+        }
+    }
+
+    /// The encoder input stays 8-bit 4:2:0 for every encoder (zerus-6ioin
+    /// review): from RGB, an unrestricted converter picks x264enc's 10-bit
+    /// 4:4:4, a High 4:4:4 Predictive stream many players cannot play. Each
+    /// encoder's input formats stand in for it here, so no encoder is needed.
+    #[test]
+    fn the_encoder_input_is_8_bit_4_2_0_for_every_encoder() {
+        init().unwrap();
+        let encoders = [
+            (
+                "x264enc",
+                "video/x-raw, format=(string){ Y444, Y42B, I420, YV12, NV12, Y444_10LE, I422_10LE, I420_10LE }",
+                "I420",
+            ),
+            ("openh264enc", "video/x-raw, format=(string)I420", "I420"),
+            ("vah264enc", "video/x-raw, format=(string)NV12", "NV12"),
+        ];
+        for (name, accepts, expected) in encoders {
+            let pipeline = gst::parse::launch(&format!(
+                "videotestsrc num-buffers=2 ! video/x-raw,format=RGB,width=640,height=480 \
+                 ! videoconvert ! video/x-raw,format=I420,colorimetry=1:4:0:0 ! jpegenc ! jpegdec \
+                 ! videoconvert ! {H264_INPUT} ! capsfilter name=encoder ! fakesink"
+            ))
+            .unwrap()
+            .downcast::<gst::Pipeline>()
+            .unwrap();
+            let encoder = pipeline.by_name("encoder").unwrap();
+            encoder.set_property("caps", gst::Caps::from_str(accepts).unwrap());
+            pipeline.set_state(gst::State::Paused).unwrap();
+            let (result, _, _) = pipeline.state(gst::ClockTime::from_seconds(10));
+            result.unwrap();
+            let caps = encoder.static_pad("sink").unwrap().current_caps().unwrap();
+            pipeline.set_state(gst::State::Null).unwrap();
+            let structure = caps.structure(0).unwrap();
+            assert_eq!(
+                structure.get::<&str>("format").unwrap(),
+                expected,
+                "{name}: {caps}"
+            );
+            assert_eq!(
+                structure.get::<&str>("colorimetry").unwrap(),
+                "bt601",
+                "{name}: {caps}"
             );
         }
     }

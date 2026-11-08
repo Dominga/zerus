@@ -113,6 +113,17 @@ fn token(args: &[String]) -> Result<String> {
     Ok(value)
 }
 
+/// Legacy non-receipt clients use opaque string IDs (including mobile API v1).
+/// They cannot name a canonical receipt UUID. Keep that original path intact;
+/// every spelling that CAN name one enters the common exclusion lane.
+pub(super) fn has_receipt_id(args: &[String]) -> bool {
+    args.windows(2).any(|pair| {
+        pair[0] == "--request-id"
+            && uuid::Uuid::parse_str(&pair[1])
+                .is_ok_and(|id| !id.is_nil() && id.to_string() == pair[1])
+    })
+}
+
 fn folder() -> PathBuf {
     root().join("worktree-requests")
 }
@@ -510,8 +521,9 @@ mod tests {
             fence,
             "delayed direct creator returns the original fence before checkout"
         );
-        assert!(
-            super::super::worktrees::create_with(&plan.arguments(), None).is_err(),
+        assert_eq!(
+            super::super::worktrees::create_with(&plan.arguments(), None).unwrap_err(),
+            "Missing original worktree receipt exclusion",
             "an ID-bearing in-process effect cannot bypass the receipt lane"
         );
         let lock_file = std::fs::OpenOptions::new()

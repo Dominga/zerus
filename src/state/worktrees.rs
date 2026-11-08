@@ -461,7 +461,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     {
         let value = match action {
             "create" if args.iter().any(|arg| arg == "--receipt") => super::worktree_requests::create(&args[1..])?,
-            "create" if args.iter().any(|arg| arg == "--request-id") => super::worktree_requests::create_direct(&args[1..])?,
+            "create" if super::worktree_requests::has_receipt_id(&args[1..]) => super::worktree_requests::create_direct(&args[1..])?,
             "create" => create(&args[1..])?,
             "status" | "cancel" => super::worktree_requests::control(action, &args[1..])?,
             "review" => super::worktree_cleanup::review_command(&args[1..])?,
@@ -770,7 +770,7 @@ pub(super) fn create(args: &[String]) -> Result<Value> {
 }
 
 pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Result<Value> {
-    if args.iter().any(|arg| arg == "--request-id") { super::worktree_requests::original_current(args)?; }
+    if super::worktree_requests::has_receipt_id(args) { super::worktree_requests::original_current(args)?; }
     let mobile = args.iter().any(|value| value == "--mobile");
     if mobile && control.is_some() {
         return Err("An owned worktree creation has no mobile form".into());

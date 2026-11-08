@@ -1,3 +1,4 @@
+import { shellSession } from "../ui/sessions/activity-empty";
 import { desktopService } from "./desktopService";
 import { batch, createEffect, createRoot, createSignal, on, untrack } from "solid-js";
 import { activityPort, composerTab, inspectSubagentActivity, processesFollow, processesShown, windowVisibility } from "../bridge";
@@ -105,7 +106,8 @@ createRoot(() => {
     // The first new-run frame may be its only state. Rust must bind the
     // composer's followed key before that frame can reach its observer.
     // Display/routing moves immediately; only the original subscribe waits.
-    activity.follow(s && !activityReadOnly(s.key) ? { id: s.key, computer: s.computer, key: s.catalogKey, name: s.name, runId: s.runId, conversationId: s.conversationId } : undefined, opened);
+    // A shell session records no activity: nothing to read (zerus-bz54l).
+    activity.follow(s && !activityReadOnly(s.key) && !shellSession(s) ? { id: s.key, computer: s.computer, key: s.catalogKey, name: s.name, runId: s.runId, conversationId: s.conversationId } : undefined, opened);
   }));
   // The detail tab that shows: behind Terminal a failed read waits Qt's
   // background interval (Settings > Processes), which Rust reads when told.

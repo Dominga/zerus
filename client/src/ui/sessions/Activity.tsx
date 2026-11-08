@@ -39,6 +39,7 @@ import { createInboxRemoveScope, InboxRemove, RemoveQueuedDialog, type InboxRemo
 import { emptyActivity } from "./activity-empty";
 import { markdownReady } from "./markdown";
 import { ActivitySession, Body } from "./MarkdownBody";
+import { ActivityPending } from "./ActivityPending";
 
 export { Body } from "./MarkdownBody";
 import { activityAll, activityFlow, activityRange, measureActivityRows, activitySelectionIndexes, activitySelectionText, activityText, activityTexts, activityVirtualOffset, selectActivityAll, selectionCoversActivity } from "./activity-virtual";
@@ -1150,7 +1151,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
             <div class="act-older hint">{tr("Older events have expired from the journal.")}</div>
           </Show>
           <Show when={!states().archived} fallback={<div class="notice"><Icon name="archive" size={14} /><div>{tr("This conversation is archived.")}</div></div>}>
-            <Show when={view.loaded || view.items.length} fallback={<div class="act-older hint">{tr("Reading activity…")}</div>}>
+            <Show when={view.loaded || view.items.length} fallback={<ActivityPending source={source()} session={s()} />}>
               <Show when={view.items.length} fallback={<div class="act-empty"><b>{empty().title}</b><p class="muted">{empty().text}</p></div>}>
                 {/* Reserve the current virtual extent through range swaps. Without
                     it, a synchronous layout between removing rows and updating

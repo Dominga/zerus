@@ -19,3 +19,6 @@ export function emptyActivity(summary: Record<string, unknown> | undefined, trac
     text: tracked ? tr("Messages, tools and approvals will appear as your agent works.") : tr("This session has no recorded activity. Open its terminal to see the agent."),
   };
 }
+
+/** A shell (`hgs sh`), which Zerus does not track: no agent activity is recorded for it (zerus-bz54l). */
+export const shellSession = (s: { agent: string; tracked: boolean }) => s.agent === "sh" && !s.tracked;

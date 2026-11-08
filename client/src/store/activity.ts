@@ -33,6 +33,13 @@ export interface ActivityPort {
   unfollow(computer: ComputerId, key: string): Promise<void>;
 }
 
+/**
+ * How long a follow may go without its first answer before the Activity says
+ * so and offers Retry, instead of reading forever (zerus-bz54l): a remote
+ * computer that stopped answering, for example.
+ */
+export const FIRST_PAGE_MS = 20_000;
+
 /** The newest events a subscription starts with (the server allows 100). */
 export const TAIL = 100;
 /** The first older read reaches this many journal rows back; empty reads double it. */
@@ -79,6 +86,9 @@ export function createActivity(port: ActivityPort) {
   const [olderDone, setOlderDone] = createSignal(false);
   /** Why the last follow failed (unknown computer, too many followed sessions, ...). */
   const [error, setError] = createSignal<string | undefined>();
+  /** The first answer did not come within FIRST_PAGE_MS; Retry subscribes again. */
+  const [stalled, setStalled] = createSignal(false);
+  let firstPage: ReturnType<typeof setTimeout> | undefined;
 
   let byKey = new Map<string, ActivityEvent>();
   let stateRev = -1;
@@ -123,7 +133,9 @@ export function createActivity(port: ActivityPort) {
     span = OLDER_SPAN;
     olderFrom = undefined;
     clearTimeout(olderTimer);
+    clearTimeout(firstPage);
     batch(() => {
+      setStalled(false);
       setEvents([]);
       setSummary(undefined);
       setTranscriptSummary(undefined);
@@ -177,6 +189,7 @@ export function createActivity(port: ActivityPort) {
     const subscribe = () => {
       if (!next || target() !== next) return;
       subscribed = next;
+      watchFirstPage(next);
       void port.follow(request(next, after)).catch((reason) => {
         if (target() === next) batch(() => { setError(String(reason)); setLoaded(true); });
       });
@@ -185,6 +198,25 @@ export function createActivity(port: ActivityPort) {
     // subscription delivery only; it supplies no native readiness or authority.
     if (opened) void opened.then(subscribe, subscribe);
     else subscribe();
+  }
+
+  /** A follow whose first answer does not come in time ends in a visible state, not in reading forever. */
+  function watchFirstPage(next: FollowTarget) {
+    clearTimeout(firstPage);
+    setStalled(false);
+    firstPage = setTimeout(() => { if (target() === next && !loaded()) setStalled(true); }, FIRST_PAGE_MS);
+  }
+
+  /** Retry after a stalled first page: the same session, subscribed again. */
+  function retry() {
+    const t = target();
+    if (!t || loaded()) return;
+    void port.unfollow(t.computer, t.key).catch(() => {});
+    subscribed = t;
+    watchFirstPage(t);
+    void port.follow(request(t)).catch((reason) => {
+      if (target() === t) batch(() => { setError(String(reason)); setLoaded(true); });
+    });
   }
 
   /** The finish of an older read: it either moved the oldest event back or doubles the reach. */
@@ -312,7 +344,7 @@ export function createActivity(port: ActivityPort) {
     return { computer: t.computer, name: t.name, conversation_id: conversation, archive_id: null };
   };
 
-  return { target, displayKey, events, summary, transcriptSummary, ended, loaded, loadingOlder, olderDone, error, follow, loadOlder, applyActivity, attachmentScope };
+  return { target, displayKey, events, summary, transcriptSummary, ended, loaded, loadingOlder, olderDone, error, stalled, retry, follow, loadOlder, applyActivity, attachmentScope };
 }
 
 export type ActivityStore = ReturnType<typeof createActivity>;

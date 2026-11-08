@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createRoot } from "solid-js";
-import { createActivity, type FollowRequest } from "./activity";
+import { FIRST_PAGE_MS, createActivity, type FollowRequest } from "./activity";
 import { buildTranscript, mergeProvider } from "../ui/sessions/transcript";
 import type { ActivityEvent, ActivityOut } from "../types";
 
@@ -437,5 +437,44 @@ describe("question replies in the transcript", () => {
     const prompt = items.find((i) => i.id === "prompt-snapshot") as { label?: string; replies?: unknown };
     expect(prompt.label).toBe("You (recorded answer)");
     expect(prompt.replies).toEqual([{ question: "Q", answer: "A" }]);
+  });
+});
+
+describe("a follow that never answers (zerus-bz54l)", () => {
+  it("says so after FIRST_PAGE_MS instead of reading forever, and Retry subscribes again", () => {
+    vi.useFakeTimers();
+    try {
+      const { store, calls, unfollows } = setup();
+      store.follow(target);
+      vi.advanceTimersByTime(FIRST_PAGE_MS - 1);
+      expect(store.stalled()).toBe(false);
+      vi.advanceTimersByTime(1);
+      expect(store.stalled()).toBe(true);
+      expect(store.loaded()).toBe(false);
+      store.retry();
+      expect(store.stalled(), "Retry reads again").toBe(false);
+      expect(unfollows).toEqual(["run:a"]);
+      expect(calls.map((call) => call.key)).toEqual(["run:a", "run:a"]);
+      store.applyActivity([out("events", { events: [ev(1)], cursor: 1 })]);
+      vi.advanceTimersByTime(FIRST_PAGE_MS);
+      expect(store.loaded()).toBe(true);
+      expect(store.stalled(), "an answer before the bound ends the wait").toBe(false);
+      store.follow(undefined);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("does not stall a session that answered, nor one the person left", () => {
+    vi.useFakeTimers();
+    try {
+      const { store } = setup();
+      store.follow(target);
+      store.applyActivity([out("replace", { events: [] })]);
+      vi.advanceTimersByTime(FIRST_PAGE_MS);
+      expect(store.stalled()).toBe(false);
+      store.follow({ ...target, id: "\nrun:b", key: "run:b" });
+      store.follow(undefined);
+      vi.advanceTimersByTime(FIRST_PAGE_MS);
+      expect(store.stalled()).toBe(false);
+    } finally { vi.useRealTimers(); }
   });
 });

@@ -2207,10 +2207,18 @@ impl<'a> InProgressOutputs<'a> {
         Self { members }
     }
 
-    pub(crate) fn blocks(&self, task: &Task) -> bool {
-        self.members.get(task.assignee.as_str()).is_some_and(|active| active.iter().any(|other| {
-            other.id != task.id && (task.output.is_empty() || task.output_overlaps(other))
+    /// Task 155/259: the task may not move to `member`, which already has
+    /// work in progress writing the same files. Task 259: a folder-level
+    /// output is advisory, so only files and module paths hold; a task
+    /// without declared outputs stays with a member that already has work.
+    pub(crate) fn blocks_for(&self, member: &str, task: &Task) -> bool {
+        self.members.get(member).is_some_and(|active| active.iter().any(|other| {
+            other.id != task.id && (task.output.is_empty() || task.narrow_output_overlaps(other))
         }))
+    }
+
+    pub(crate) fn blocks(&self, task: &Task) -> bool {
+        self.blocks_for(task.assignee.as_str(), task)
     }
 }
 
@@ -2499,6 +2507,28 @@ pub(crate) struct Lane {
     pub label: String,
 }
 
+/// Task 259: a top-level container of areas (`client/src`, `crates/replica`,
+/// `mobile/android`), as opposed to a module path (`src/state/teams`).
+const CONTAINER_AREAS: [&str; 6] = ["client", "crates", "mobile", "services", "tray", "packaging"];
+
+/// Task 259: dotless root files, which are files and not whole areas.
+const ROOT_FILES: [&str; 9] = ["Makefile", "Dockerfile", "Containerfile", "LICENSE", "VERSION", "DEV_VERSION", "hgs", "AUTHORS", "COPYING"];
+
+/// Task 259 (owner, 2026-11-08): roles that do the same kind of work share
+/// their first word ("Frontend SolidJS" and "Frontend DeepSeek"), so a ready
+/// task may pass between them. Within it the exact role is only the
+/// preference; an unrelated role is no candidate.
+pub(crate) fn related_roles(a: &str, b: &str) -> bool {
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    a.eq_ignore_ascii_case(b) || role_family(a) == role_family(b)
+}
+
+fn role_family(role: &str) -> String {
+    role.split(|c: char| !c.is_alphanumeric()).find(|part| !part.is_empty()).unwrap_or_default().to_lowercase()
+}
+
 impl Task {
     pub(crate) fn requests_fresh_retry(&self) -> bool {
         self.fresh_retry && self.failed_by(&self.assignee)
@@ -2518,6 +2548,41 @@ impl Task {
         let a: Vec<_> = a.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
         let b: Vec<_> = b.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
         a.starts_with(&b) || b.starts_with(&a)
+    }
+    /// Task 259 (owner, 2026-11-08): a whole area, not a file or a module.
+    /// `src`, `tray` and a top-level folder; or an area directly inside a
+    /// container of areas (`client/src`, `crates/replica`, `mobile/android`).
+    /// A folder-level output is advisory: it never holds another task, since
+    /// it would hold every task touching that area while it is open. Plan
+    /// validation warns and asks for the files or module paths instead.
+    pub(crate) fn broad_output(path: &str) -> bool {
+        let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
+        match parts.as_slice() {
+            // `.` covers the whole repository: the broadest area there is.
+            [] => true,
+            [area] => Self::folder_like(area) && !ROOT_FILES.contains(area),
+            [container, area] => CONTAINER_AREAS.contains(container) && Self::folder_like(area),
+            _ => false,
+        }
+    }
+    /// A path component that names a folder rather than a file: it has no
+    /// extension (`src`, `crates`; `.github` counts as a folder). A dotless
+    /// root file such as `Makefile` is excused in `broad_output`.
+    fn folder_like(component: &str) -> bool {
+        !component.rsplit_once('.').is_some_and(|(name, ext)| !name.is_empty() && !ext.is_empty())
+    }
+    /// The task's outputs that are files or module paths: the ones that hold.
+    pub(crate) fn narrow_outputs(&self) -> impl Iterator<Item = &str> + '_ {
+        self.output.iter().map(String::as_str).filter(|path| !Self::broad_output(path))
+    }
+    /// The task's folder-level outputs, for the plan's warning.
+    pub(crate) fn broad_outputs(&self) -> Vec<&str> {
+        self.output.iter().map(String::as_str).filter(|path| Self::broad_output(path)).collect()
+    }
+    /// Task 259: an overlap of two files or module paths; the only output
+    /// overlap that holds two tasks apart. A folder-level path only advises.
+    pub(crate) fn narrow_output_overlaps(&self, other: &Task) -> bool {
+        self.narrow_outputs().any(|a| other.narrow_outputs().any(|b| Self::paths_overlap(a, b)))
     }
 
     pub(crate) fn rework(&self) -> bool {

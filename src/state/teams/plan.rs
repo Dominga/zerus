@@ -438,9 +438,11 @@ pub(crate) fn phases_health(team: &Team) -> BTreeMap<String, Health> {
 
 /// Task 155 (owner, 2026-11-07): a task that reached a member and is not
 /// decided holds its outputs: its work sits on a branch nobody merged yet.
+/// Task 259 (owner, 2026-11-08): only files and module paths hold; a
+/// folder-level output is advisory, so it never holds a whole area.
 pub(crate) fn holds_outputs(task: &Task) -> bool {
     !task.status.finished()
-        && !task.output.is_empty()
+        && task.narrow_outputs().next().is_some()
         && (!matches!(task.status, TaskStatus::Pending | TaskStatus::Draft)
             || task.attempts.iter().any(|attempt| attempt.state != AttemptState::Refused))
 }
@@ -449,15 +451,15 @@ pub(crate) fn holds_outputs(task: &Task) -> bool {
 /// run, so `task` may not start beside them. A task with a member now always
 /// holds; when both only wait to be handed out again (a returned task), the
 /// lower number goes first, so two never wait on each other. A task without
-/// declared outputs is never held here.
+/// declared outputs, or with only folder-level ones, is never held here.
 pub(crate) fn output_holders(team: &Team, task: &Task) -> Vec<u32> {
-    if task.output.is_empty() || task.status.finished() {
+    if task.output.is_empty() || task.narrow_outputs().next().is_none() || task.status.finished() {
         return Vec::new();
     }
     let started = holds_outputs(task);
     team.tasks
         .iter()
-        .filter(|other| other.id != task.id && holds_outputs(other) && task.output_overlaps(other))
+        .filter(|other| other.id != task.id && holds_outputs(other) && task.narrow_output_overlaps(other))
         .filter(|other| !(started && matches!(other.status, TaskStatus::Pending | TaskStatus::Draft) && other.id > task.id))
         .map(|other| other.id)
         .collect()
@@ -1052,6 +1054,29 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
                 }
             }
         }
+        // Task 259 (owner, 2026-11-08): a folder-level output (`src`,
+        // `client/src`, `crates/replica`) is advisory - it never holds a whole
+        // area - and asks the lead for the files or module paths instead.
+        let broad = task.broad_outputs();
+        if !broad.is_empty() {
+            let mut shown: Vec<&str> = broad.iter().copied().take(3).collect();
+            let more = broad.len().saturating_sub(shown.len());
+            if more > 0 {
+                shown.push("...");
+            }
+            found.warnings.push(finding(
+                "outputs",
+                Some(task.id),
+                None,
+                format!(
+                    "#{} {} names whole areas ({}): a folder-level output is advisory and never holds another task; name the files or module paths it writes{}",
+                    task.id,
+                    task.title,
+                    shown.join(", "),
+                    if more > 0 { format!(" ({more} more)") } else { String::new() }
+                ),
+            ));
+        }
         for dep in &task.deps {
             if team.task(dep.task).is_none() {
                 found.errors.push(finding(
@@ -1076,9 +1101,29 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
     }
     // Task 155 (owner, 2026-11-07): open tasks whose outputs overlap never run
     // apart on separate branches; the lead chains them with a dependency.
+    // Task 259 (owner, 2026-11-08): an overlap of files or module paths is a
+    // real hold and stays an error; one that is only folder-level is advisory,
+    // so it suggests a soft order and asks for the files instead.
     for (first, second) in unchained_overlaps(team) {
         let (Some(a), Some(b)) = (team.task(first), team.task(second)) else { continue };
         let shared: Vec<&str> = a.output.iter().filter(|path| b.output.iter().any(|other| Task::paths_overlap(path, other))).map(String::as_str).collect();
+        let narrow: Vec<&str> = a
+            .narrow_outputs()
+            .filter(|path| b.narrow_outputs().any(|other| Task::paths_overlap(path, other)))
+            .collect();
+        if narrow.is_empty() {
+            found.warnings.push(Finding {
+                kind: "outputs",
+                task: Some(second),
+                member: None,
+                tasks: vec![first, second],
+                text: format!(
+                    "#{first} {} and #{second} {} both name the folder {}: a folder-level output is advisory, so it never holds #{second}. Prefer a soft dependency of #{second} on #{first} if their work may touch the same files, and name the files or module paths for a real hold",
+                    a.title, b.title, shared.join(", ")
+                ),
+            });
+            continue;
+        }
         found.errors.push(Finding {
             kind: "outputs",
             task: Some(second),
@@ -1086,7 +1131,7 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
             tasks: vec![first, second],
             text: format!(
                 "#{first} {} and #{second} {} both write {}: chain them (a hard dependency of #{second} on #{first}) so #{second} starts from #{first}'s accepted work",
-                a.title, b.title, shared.join(", ")
+                a.title, b.title, narrow.join(", ")
             ),
         });
     }

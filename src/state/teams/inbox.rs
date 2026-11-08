@@ -252,6 +252,55 @@ fn all_items(team: &Team) -> Vec<Item> {
             });
         }
     }
+    // Task 259 (owner, 2026-11-08): no idle member while ready work waits.
+    // Zerus moves a ready task with free outputs to an idle member itself; the
+    // one case it leaves to the lead is a task an explicit assignment keeps
+    // with its own member (pinned, keep_assignees or a rework). An idle member
+    // that may take such a task is named here with the task, so the lead can
+    // hand it over instead of leaving both waiting.
+    if active {
+        let ready = plan::dispatch_order(team, plan::ready(team));
+        let outputs = InProgressOutputs::new(team);
+        for member in team.members.iter().filter(|member| member.id != team.lead && member.state != MemberState::Removed) {
+            let Some(since) = member.starved_since else { continue };
+            let role = team.role_of(&member.id);
+            let mut best: Option<(u8, usize, &Task)> = None;
+            for (index, id) in ready.iter().enumerate() {
+                let Some(task) = team.task(*id) else { continue };
+                if task.assignee.is_empty() || task.assignee == member.id || task.assignee == team.lead { continue; }
+                if !team.requires_assignee(task) {
+                    // Zerus hands this one over on its own next tick.
+                    continue;
+                }
+                if !plan::output_holders(team, task).is_empty() || outputs.blocks_for(&member.id, task) { continue; }
+                if !super::rights::missing(task, member).is_empty() { continue; }
+                let found = team.role_of(&task.assignee);
+                // Task 259: a compatible role - the same one, or one doing the
+                // same kind of work - is what lets a member take the task.
+                if found != role && !related_roles(&role, &found) { continue; }
+                let rank = if found == role { 0 } else { 1 };
+                if best.is_none_or(|(best_rank, best_index, _)| (rank, index) < (best_rank, best_index)) {
+                    best = Some((rank, index, task));
+                }
+            }
+            let Some((_, _, task)) = best else { continue };
+            let why = if task.rework() { "a rework stays with the member that got it" } else { "an explicit assignment (pinned or keep_assignees) keeps it" };
+            let minutes = ((crate::state::now() - since).max(0.0) / 60.0).round() as u64;
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "idle_with_ready_work",
+                key: format!("idle_with_ready_work:{}:{}", member.id, task.id),
+                task: Some(task.id),
+                member: team.name_of(&member.id),
+                since,
+                summary: summary(&format!("#{} {} is ready and {} is idle {minutes} min: it may take it", task.id, task.title, team.name_of(&member.id))),
+                command: format!("{} | hgs team reassign --json",
+                    json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id,"member":member.id})),
+                detail: format!("{} has no ready task of its own while #{} waits for {}. {}; Zerus does not move it by itself. Its outputs are free for {} ({role}) and its launch can do it. Reassign it to hand the task over, or leave it with its member.",
+                    team.name_of(&member.id), task.id, team.name_of(&task.assignee), why, team.name_of(&member.id)).trim_end().to_owned(),
+            });
+        }
+    }
     // #752: two or more members in one folder build each other's half-done
     // edits; the lead proposes the build broker once (a switch card), and a
     // card the owner denied is not proposed again.

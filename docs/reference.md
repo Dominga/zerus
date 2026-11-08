@@ -2679,10 +2679,30 @@ redundant `.` components and duplicate paths, and retain this field in task
 status. A task has at most 128 paths, each at most 1024 characters and together
 at most 32 KiB. Absolute paths, parent (`..`) components, colons and control
 characters are refused; `.` covers the repository. Existing tasks without
-output remain valid. Rebalance keeps a queued task with its original member
-when its output overlaps that member's task in progress (equal paths or
-containment by path components). It also keeps a task without output whenever
-that member has work in progress. `src/api` does not overlap `src/apis`.
+output remain valid. Task 259 (owner, 2026-11-08): a path is a file or a module,
+not a whole area. A bare top-level folder (`src`, `tray`, `client`) or a whole
+area directly under a top-level container (`client/src`, `crates/replica`,
+`mobile/android`) is a folder-level output: it is advisory and never holds
+another task, since it would hold every task touching that area while it is
+open. Plan validation warns once per task and asks for the files or module
+paths; an overlap that only these folder-level paths cause suggests a soft
+order instead of a hard dependency. Rebalance keeps a queued task with its
+original member only when a file or module path overlaps that member's task in
+progress (equal paths or containment by path components); it also keeps a task
+without output whenever that member has work in progress. `src/api` does not
+overlap `src/apis`.
+
+Task 259 (owner, 2026-11-08): no idle member while a ready task with free
+outputs waits. Zerus hands such a task to a free member of a compatible role
+when its assignee cannot take it: the same role, or one doing the same kind of
+work (Frontend SolidJS and Frontend DeepSeek share "Frontend"), and only when
+that member's launch rights allow the task. The exact role and the planned
+member order the choice, never wall off a compatible one; a member Zerus has not
+started yet keeps its task. A pinned task, `keep_assignees` or a rework stays
+with its member; while an idle member could take one of those, the lead's inbox
+carries one `idle_with_ready_work` item naming the member, the task and the
+reassign command. Every move records a `rebalanced` event with its `cross_role`
+flag, and the lead gets one message that `hgs team reassign` reverts.
 
 A stage member may ask the lead with `hgs team ask` (its question belongs to the
 stage run and the lead answers it with `hgs team reply`), and the stage hand-off

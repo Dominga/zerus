@@ -47,3 +47,6 @@ mod dispatcher_outputs;
 
 #[path = "dispatcher_doorbell.rs"]
 mod dispatcher_doorbell;
+
+#[path = "dispatcher_cross_role.rs"]
+mod dispatcher_cross_role;

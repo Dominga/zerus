@@ -66,6 +66,9 @@ fn alias(original: &FreshExecution) -> FreshExecution {
     }
 }
 fn run(case: &str, home: &Path) -> (ExitStatus, Vec<u8>, Vec<u8>) {
+    // macOS temporary prefixes can contain aliases. Keep the common fixture
+    // home canonical; the root-alias controls deliberately add their own.
+    let home = fs::canonicalize(home).unwrap();
     let mut command = Command::new(std::env::current_exe().unwrap());
     let row = case == "physical-row";
     command
@@ -82,12 +85,17 @@ fn run(case: &str, home: &Path) -> (ExitStatus, Vec<u8>, Vec<u8>) {
         ])
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
-        .env("HOME", home)
+        .env("HOME", &home)
         .env("HGS_CONFIG_DIR", home.join("config"))
         .env("HGS_STATE_DIR", home.join("state"))
         .env("HGS_TEST_ACTION_CLAIM", case);
     if row {
         command.env("HGS_TEST_WRITER_IO", "echo");
+    }
+    if case.starts_with("gate-original-") {
+        // Independent test observer of the original known RootA lock only.
+        // The tested parent's configured alias remains retargeted/refused.
+        command.env("HGS_STATE_DIR", home.join("state.original-root"));
     }
     platform::run_bounded(
         &mut command,
@@ -114,6 +122,16 @@ fn probe(case: &str) {
 fn gate(held: bool) {
     reexec(
         if held { "gate-held" } else { "gate-free" },
+        storage::root().parent().unwrap(),
+    );
+}
+fn gate_original(held: bool) {
+    reexec(
+        if held {
+            "gate-original-held"
+        } else {
+            "gate-original-free"
+        },
         storage::root().parent().unwrap(),
     );
 }
@@ -251,10 +269,35 @@ fn actual_physical_writer_row_retirement_does_not_finalize_the_action_claim() {
 }
 
 #[test]
+fn configured_native_root_binding_keeps_a_stable_original_alias_usable() {
+    probe("alias-stable");
+}
+
+#[test]
+fn missing_unavailable_and_racing_root_referents_never_initialize_or_reselect() {
+    for case in [
+        "alias-missing",
+        "alias-file",
+        "alias-nonprivate",
+        "alias-race",
+    ] {
+        probe(case);
+    }
+}
+
+#[test]
+fn refused_root_rebinding_keeps_the_original_claim_and_existing_lock_loan() {
+    probe("alias-loan-kept");
+}
+
+#[test]
 #[ignore = "bounded private claim-resource reexec; no installed producer or agent"]
 fn private_probe() {
     let case = std::env::var("HGS_TEST_ACTION_CLAIM").unwrap();
-    if matches!(case.as_str(), "gate-held" | "gate-free") {
+    if matches!(
+        case.as_str(),
+        "gate-held" | "gate-free" | "gate-original-held" | "gate-original-free"
+    ) {
         let directory =
             Directory::open(&platform::canonical(storage::root().join("action_receipts")).unwrap())
                 .unwrap();
@@ -262,13 +305,126 @@ fn private_probe() {
             .existing_private_lock(&format!("{UUID}.lock"))
             .unwrap();
         let result = file.try_lock_exclusive();
-        assert_eq!(result.is_err(), case == "gate-held");
+        assert_eq!(result.is_err(), case.ends_with("held"));
         if let Err(error) = result {
             assert!(platform::lock_contended(&error));
         }
         return;
     }
     setup();
+
+    if matches!(
+        case.as_str(),
+        "review-root-alias-before" | "review-root-alias-after"
+    ) {
+        let selected = storage::root();
+        let original_path = selected.with_extension("original-root");
+        let foreign_path = selected.with_extension("other-root");
+        fs::rename(&selected, &original_path).unwrap();
+        platform::private_dir(&foreign_path).unwrap();
+        std::os::unix::fs::symlink(&original_path, &selected).unwrap();
+        let origin = fresh("pause", end());
+        assert_eq!(origin.bound.root.path, original_path);
+        let held = if case == "review-root-alias-after" {
+            Some(claim(origin).unwrap())
+        } else {
+            fs::remove_file(&selected).unwrap();
+            std::os::unix::fs::symlink(&foreign_path, &selected).unwrap();
+            assert!(claim(origin).is_err(), "claim admitted after the SAME configured-root path selected a different native root");
+            return;
+        };
+        fs::remove_file(&selected).unwrap();
+        std::os::unix::fs::symlink(&foreign_path, &selected).unwrap();
+        assert!(
+            held.unwrap().resources().is_err(),
+            "loan admitted after the SAME configured-root path selected a different native root"
+        );
+        return;
+    }
+    if matches!(
+        case.as_str(),
+        "alias-stable"
+            | "alias-missing"
+            | "alias-file"
+            | "alias-nonprivate"
+            | "alias-race"
+            | "alias-loan-kept"
+    ) {
+        let selected = storage::root();
+        let original_path = selected.with_extension("original-root");
+        let foreign_path = selected.with_extension("other-root");
+        fs::rename(&selected, &original_path).unwrap();
+        std::os::unix::fs::symlink(&original_path, &selected).unwrap();
+        let origin = fresh("pause", end());
+        let original_receipt = original_path
+            .join("action_receipts")
+            .join(format!("{UUID}.json"));
+        if case == "alias-stable" {
+            let held = claim(origin).unwrap();
+            let before = fs::read(&original_receipt).unwrap();
+            let loan = held.resources().unwrap();
+            held.recheck().unwrap();
+            drop(held);
+            gate_original(true);
+            drop(loan);
+            gate_original(false);
+            assert_eq!(fs::read(original_receipt).unwrap(), before);
+            return;
+        }
+        if case == "alias-loan-kept" {
+            let held = claim(origin).unwrap();
+            let before = fs::read(&original_receipt).unwrap();
+            let loan = held.resources().unwrap();
+            platform::private_dir(&foreign_path).unwrap();
+            fs::remove_file(&selected).unwrap();
+            std::os::unix::fs::symlink(&foreign_path, &selected).unwrap();
+            assert!(held.recheck().is_err() && held.resources().is_err());
+            drop(held);
+            gate_original(true);
+            assert_eq!(fs::read(&original_receipt).unwrap(), before);
+            assert_eq!(fs::read_dir(&foreign_path).unwrap().count(), 0);
+            drop(loan);
+            gate_original(false);
+            assert_eq!(fs::read(original_receipt).unwrap(), before);
+            return;
+        }
+        if case == "alias-file" {
+            storage::atomic(&foreign_path, "unavailable-directory").unwrap();
+        } else if matches!(case.as_str(), "alias-race" | "alias-nonprivate") {
+            platform::private_dir(&foreign_path).unwrap();
+            if case == "alias-nonprivate" {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&foreign_path, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        if case == "alias-race" {
+            let selected = selected.clone();
+            let foreign = foreign_path.clone();
+            AFTER_ROOT_REFERENT.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || {
+                    fs::remove_file(&selected).unwrap();
+                    std::os::unix::fs::symlink(&foreign, &selected).unwrap();
+                }))
+            });
+        } else {
+            fs::remove_file(&selected).unwrap();
+            std::os::unix::fs::symlink(&foreign_path, &selected).unwrap();
+        }
+        assert!(claim(origin).is_err());
+        assert!(!original_receipt.exists());
+        if case == "alias-missing" {
+            assert!(!foreign_path.exists());
+        } else if case == "alias-file" {
+            assert_eq!(fs::read(&foreign_path).unwrap(), b"unavailable-directory");
+        } else {
+            assert_eq!(fs::read_dir(&foreign_path).unwrap().count(), 0);
+        }
+        assert!(fs::read_dir(original_path.join("action_receipts"))
+            .unwrap()
+            .next()
+            .is_none());
+        return;
+    }
     let action = if ["pause", "resume", "rename", "fork"].contains(&case.as_str()) {
         case.as_str()
     } else {
@@ -624,4 +780,15 @@ fn private_probe() {
         return;
     }
     panic!("unknown private claim case");
+}
+
+#[test]
+fn review1929_configured_root_alias_cannot_be_retargeted_before_claim() {
+    let home = tempfile::tempdir().unwrap();
+    reexec("review-root-alias-before", home.path());
+}
+#[test]
+fn review1929_configured_root_alias_cannot_be_retargeted_before_loan() {
+    let home = tempfile::tempdir().unwrap();
+    reexec("review-root-alias-after", home.path());
 }

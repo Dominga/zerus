@@ -13,6 +13,9 @@ const MARKER: &str = "layout_transition";
 const JOB_BYTES: usize = 64 << 10;
 const JOURNAL_BYTES: usize = (18 << 20) + (1 << 10);
 
+// Dormant existing-only exclusion; no native driver calls this yet.
+pub(in crate::state) mod input_domain;
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Before {

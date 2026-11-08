@@ -465,3 +465,9 @@
 .pm-board-card.crit, .pm-layer-row.crit { border-color: var(--z-color-violet); }
 .pm-board-card.minor, .pm-layer-row.minor { border-style: dashed; }
 .pt-phase[data-phase-kind="minor"] .pt-phase-title { color: var(--z-color-text-2); }
+
+/* Task 316 (F4, F6): a readable phase title and the open phase's accepted fold. */
+.pt-phase-title { flex: 1 1 220px; min-width: 120px; white-space: nowrap; }
+.pt-free-accepted { display: flex; align-items: center; gap: 8px; padding: 4px 12px 6px 42px; font-size: var(--fs-sm); }
+.pt-free-accepted b { white-space: nowrap; }
+.pt-free-accepted-ids { color: var(--z-color-muted); font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

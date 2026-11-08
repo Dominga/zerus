@@ -2787,7 +2787,7 @@
   "Critical follow-up of #%1": "Критическое продолжение #%1",
   "Critical follow-up": "Критическое продолжение",
   "Crit": "Крит",
-  " · from #%1": " — от #%1",
+  "from #%1": "от #%1",
   "Seen": "Отмечено",
   "1 critical task open": "1 критическая задача открыта",
   "%1 critical tasks open": "%1 критических задач открыто",
@@ -2800,5 +2800,6 @@
   "Ask the owner": "Спросить владельца",
   "Copied for the lead's session": "Скопировано для сеанса ведущего",
   "Could not copy the command": "Не удалось скопировать команду",
-  "Copy a command and run it in the lead's session.": "Скопируйте команду и выполните её в сеансе ведущего."
+  "Copy a command and run it in the lead's session.": "Скопируйте команду и выполните её в сеансе ведущего.",
+  "and %1 more": "и ещё %1"
 }

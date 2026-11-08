@@ -199,8 +199,22 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     return !(hideFinished() && phaseFinished(phase.tasks));
   }));
   const finishedCount = createMemo(() => allPhases().filter((phase) => phaseFinished(phase.tasks)).length);
+  // Task 316 (F6): the open free phase folds its accepted tasks into one row
+  // (Qt's freeAcceptedFold), so the graph draws only the work still open.
+  const [unfoldedAccepted, setUnfoldedAccepted] = createSignal<Set<string>>(new Set());
+  const acceptedKey = (n: number) => `${props.team.id}/${n}`;
+  const acceptedTasks = (phase: PlanPhase) => phase.tasks.filter((task) => visibleTask(task) && task.status === "accepted");
+  const acceptedFolded = (phase: PlanPhase) => props.team.free_phase === phase.phase.n && !unfoldedAccepted().has(acceptedKey(phase.phase.n));
+  const toggleAccepted = (n: number) => {
+    const key = acceptedKey(n);
+    const next = new Set(unfoldedAccepted());
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    setUnfoldedAccepted(next);
+  };
   const layouts = createMemo(() => new Map(phases().map((phase) => {
-    const nodes = phase.nodes.filter((placed) => visibleTask(placed.task));
+    const folded = acceptedFolded(phase);
+    const nodes = phase.nodes.filter((placed) => visibleTask(placed.task) && !(folded && placed.task?.status === "accepted"));
     const ids = new Set(nodes.map((placed) => placed.node.id));
     const edges = phase.edges.filter((edge) => ids.has(edge.from) && ids.has(edge.to));
     const layout = placePhase(nodes.map((placed) => ({ id: placed.node.id, layer: placed.node.layer })), edges, 320);
@@ -240,7 +254,8 @@ export function PlanView(props: PlanViewProps): JSX.Element {
   const phaseHeight = (phase: PlanPhase) => {
     if (isCollapsed(phase.phase.n)) return COLLAPSED_H + 8;
     const layout = layouts().get(phase.phase.n)?.layout;
-    return HEADER_H + (layout ? Math.ceil(layout.height * zoom()) + SCROLLBAR : 0) + 8;
+    const fold = acceptedTasks(phase).length > 0 && props.team.free_phase === phase.phase.n ? 26 : 0;
+    return HEADER_H + fold + (layout ? Math.ceil(layout.height * zoom()) + SCROLLBAR : 0) + 8;
   };
   const virtualizer = createVirtualizer({
     get count() {
@@ -330,10 +345,8 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         <Show when={phase.phase.crit_gate}>{(gate) => <span class="pt-crit-gate" data-crit-gate title={gate()}>{short(gate(), 80)}</span>}</Show>
         <Show when={phase.phase.auto}><span class="pt-chip pt-chip-auto">{tr("Auto")}</span></Show>
         <Show when={phase.phase.barrier}><span class="pt-chip pt-chip-barrier">{tr("Barrier")}</span></Show>
-        <Show when={closed} fallback={<Show when={phase.phase.acceptance}><span class="pt-acceptance">{short(phase.phase.acceptance, 80)}</span></Show>}>
-          <span class="pt-inline" data-inline={phase.phase.n}>{tasks.slice(0, 12).map((task) => `#${task.id} ${task.title}`).join(", ")}</span>
-        </Show>
-        <For each={head.notes}>{(shown) => (
+        <Show when={!closed && phase.phase.acceptance}><span class="pt-acceptance">{short(phase.phase.acceptance, 80)}</span></Show>
+        <For each={head.notes.filter((shown) => shown.id !== "health")}>{(shown) => (
           <span class={`pt-phase-note pt-phase-note-${shown.tone}`} data-note={shown.id} title={shown.tip || shown.text}>{short(shown.text, 80)}</span>
         )}</For>
         <Show when={closed && head.summary}>
@@ -433,7 +446,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         <span class="pt-card-l1">
           <span class="pt-state"><Icon name={statusIcon(task, !!problem)} size={12} /></span>
           <span class="pt-id">#{task.id}</span>
-          <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit" title={task.origin ? tr("Critical follow-up of #%1", task.origin) : tr("Critical follow-up")}>Crit{task.origin ? ` · #${task.origin}` : ""}</span></Show>
+          <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit" title={task.origin ? tr("Critical follow-up of #%1", task.origin) : tr("Critical follow-up")}>Crit{task.origin ? ` #${task.origin}` : ""}</span></Show>
           <Show when={task.severity === "minor"}><span class="pt-chip pt-chip-minor" data-severity="minor">Minor</span></Show>
           <span class="pt-title">{task.title || tr("Task %1", task.id)}</span>
           <Show when={task.pipeline_run?.open}>{(stage) => <span class="pt-badge" data-stage={stage().kind}>{stageName(stage().kind)}</span>}</Show>
@@ -532,7 +545,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         <span class="pm-card-line">
           <span class="pt-state"><Icon name={statusIcon(task, !!problem)} size={13} /></span>
           <span class="pm-id">#{task.id}</span>
-          <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit">Crit{task.origin ? ` · #${task.origin}` : ""}</span></Show>
+          <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit">Crit{task.origin ? ` #${task.origin}` : ""}</span></Show>
           <Show when={task.severity === "minor"}><span class="pt-chip pt-chip-minor" data-severity="minor">Minor</span></Show>
           <Show when={task.deps.length > 0}><span class="pm-deps">←{task.deps.map((dep) => `#${dep.task}`).join(" ")}</span></Show>
           <b class="pm-title">{task.title}</b>
@@ -610,7 +623,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
                         <span class="pm-layer-label">{tr("L%1", (own.get(layer) ?? 0) + 1)}</span>
                         <span class="pt-state"><Icon name={statusIcon(task, !!problem)} size={12} /></span>
                         <span class="pm-id">#{task.id}</span>
-                        <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit">Crit{task.origin ? ` · #${task.origin}` : ""}</span></Show>
+                        <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit">Crit{task.origin ? ` #${task.origin}` : ""}</span></Show>
                         <Show when={task.severity === "minor"}><span class="pt-chip pt-chip-minor" data-severity="minor">Minor</span></Show>
                         <Show when={task.deps.length > 0}><span class="pm-deps">←{task.deps.map((dep) => `#${dep.task}`).join(" ")}</span></Show>
                         <span class="pm-layer-title">{task.title}</span>
@@ -655,7 +668,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           <span class="pt-chip">{taskState(task).text}</span>
           <span class="pt-chip">{tr("Phase %1", phase?.phase.n ?? task.phase)}</span>
           <span class="pt-chip">{task.assignee || tr("Unassigned")}</span>
-          <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit">{tr("Crit")}{task.origin ? tr(" · from #%1", task.origin) : ""}</span></Show>
+          <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit">{tr("Crit")}{task.origin ? ` ${tr("from #%1", task.origin)}` : ""}</span></Show>
           <Show when={task.severity === "minor"}><span class="pt-chip pt-chip-minor" data-severity="minor">{tr("Minor")}</span></Show>
           <Show when={task.origin}>{(origin) => (
             <button type="button" class="pt-chip pt-chip-origin" data-origin={origin()} title={tr("Open task %1", origin())}
@@ -830,6 +843,15 @@ export function PlanView(props: PlanViewProps): JSX.Element {
                         <div class="pt-row" style={{ top: `${item.start}px` }} data-phase={shown().phase.n}>
                           {header(shown(), true, actions)}
                           <Show when={!isCollapsed(shown().phase.n) && entry()}>
+                            <Show when={acceptedTasks(shown()).length > 0 && props.team.free_phase === shown().phase.n}>
+                              <div class="pt-free-accepted" data-accepted-fold={acceptedTasks(shown()).length}>
+                                <Icon name="check" size={12} />
+                                <b>{tr("%1 accepted", acceptedTasks(shown()).length)}</b>
+                                <span class="pt-free-accepted-ids">{acceptedTasks(shown()).slice(0, 12).map((task) => `#${task.id}`).join(" ")}{acceptedTasks(shown()).length > 12 ? ` ${tr("and %1 more", acceptedTasks(shown()).length - 12)}` : ""}</span>
+                                <button type="button" class="btn ghost small" data-accepted-toggle={acceptedFolded(shown()) ? "folded" : "open"}
+                                  onClick={() => toggleAccepted(shown().phase.n)}>{acceptedFolded(shown()) ? tr("Show") : tr("Hide")}</button>
+                              </div>
+                            </Show>
                             {graphBody(shown(), entry()!.layout, entry()!.routes, entry()!.originRoutes)}
                           </Show>
                         </div>

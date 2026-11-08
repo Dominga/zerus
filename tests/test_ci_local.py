@@ -232,6 +232,7 @@ assert pathlib.Path('/').stat().st_uid in (0,os.geteuid())
 inside_root = pathlib.Path('/').stat()
 assert (inside_root.st_dev, inside_root.st_ino) != HOST_ROOT
 assert not pathlib.Path(CANARY).exists()
+assert all(line.split()[4] != '/w' for line in pathlib.Path('/proc/self/mountinfo').read_text().splitlines())
 PY
 """.replace("HOST_ROOT", repr((host_root.st_dev, host_root.st_ino))).replace("CANARY", repr(str(canary)))
         row = dict(name="root permissions", index=0, body=body, directory=".", env={}, timeout=10)
@@ -242,6 +243,20 @@ PY
         # Only the namespace destination changes; the source stays in our private fixture.
         self.runner.rustup = Path("/w/fixture-private-toolchain")
         self.test_synthetic_root_is_trusted_without_mapping_host_root_or_reading_owner_files()
+
+    def test_synthetic_root_contract_refuses_a_broad_mount_under_w(self):
+        # Expose only synthetic fixture data, never the host's /w tree.
+        source = self.base / "unselected-w"
+        source.mkdir(mode=0o700)
+        (source / "unselected-file").write_text("Private synthetic mount")
+        original = self.runner.command
+        def broad_mount(*args, **kwargs):
+            command = original(*args, **kwargs)
+            index = command.index("--")
+            return command[:index] + ["--ro-bind", str(source), "/w"] + command[index:]
+        with patch.object(self.runner, "command", broad_mount):
+            with self.assertRaisesRegex(AssertionError, "'fail' != 'pass'"):
+                self.test_synthetic_root_is_trusted_without_mapping_host_root_or_reading_owner_files()
 
     def test_job_checkouts_do_not_share_mutable_files(self):
         self.runner.pristine.mkdir()

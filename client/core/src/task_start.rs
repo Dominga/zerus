@@ -349,10 +349,19 @@ fn start_inner(
     let result = run(&delivery);
     drop(delivery);
     let result = result.and_then(|reply| {
+        // Absence of the proof is unknown too. An explicitly scoped refusal
+        // cannot release this original merely by omitting the proof field.
+        // Only an absent mode field retains the ordinary unscoped A4 path.
+        let scoped_refusal = reply.get("state") == Some(&json!("refused"))
+            && record["intent"]["plan"]
+                .get("acknowledgement_mode")
+                .is_some();
         if controls
-            && reply.contains_key("refusal")
+            && (reply.contains_key("refusal") || scoped_refusal)
             && (reply.get("state") != Some(&json!("refused"))
-                || !refusal::matches(&reply["refusal"], id, &record["intent"]["plan"]))
+                || reply
+                    .get("refusal")
+                    .is_none_or(|proof| !refusal::matches(proof, id, &record["intent"]["plan"])))
         {
             return Err(RELEASE_FAILED.into());
         }
@@ -648,6 +657,122 @@ mod tests {
             } else {
                 assert_eq!(result.phase, "review");
             }
+        }
+    }
+
+    #[test]
+    fn review_missing_initial_mode_proof_keeps_original_pending() {
+        for mode in [
+            json!("managed"),
+            json!("legacy"),
+            Value::Null,
+            json!("future"),
+        ] {
+            let s = Scratch::new();
+            let mut original = Value::Null;
+            let result = start_inner(
+                &s.0,
+                "example",
+                TASK,
+                123,
+                &assignment(),
+                &selection(),
+                FIRST,
+                true,
+                |call| match call.args[0].as_str() {
+                    "get" => Ok(document()),
+                    "start-plan" => {
+                        let mut reply = plan(call);
+                        reply.get_mut("plan").unwrap()["acknowledgement_mode"] = mode.clone();
+                        Ok(reply)
+                    }
+                    "start-deliver" => {
+                        original = serde_json::from_str(&call.input).unwrap();
+                        let mut reply = delivered(FIRST, "refused");
+                        reply.insert("error".into(), json!(refusal::VISIBLE));
+                        assert!(!reply.contains_key("refusal"));
+                        Ok(reply)
+                    }
+                    _ => panic!("Unexpected call"),
+                },
+            )
+            .unwrap();
+            assert!(
+                result.pending,
+                "Missing {mode} refusal proof released original Start: phase={} outcome={:?}",
+                result.phase, result.outcome
+            );
+            assert_eq!(
+                (
+                    result.id.as_str(),
+                    result.phase.as_str(),
+                    result.outcome.as_deref()
+                ),
+                (FIRST, "review", Some("uncertain"))
+            );
+            let retained = load(&s.0, "example", TASK).unwrap().unwrap();
+            assert_eq!(retained["intent"]["plan"], original);
+            assert_eq!(retained["intent"]["retained_input"], original.to_string());
+            let reopened = open(&s.0, "example", TASK, None).unwrap();
+            assert!(reopened.pending);
+            let blocked = start_inner(
+                &s.0,
+                "example",
+                TASK,
+                123,
+                &assignment(),
+                &selection(),
+                SECOND,
+                true,
+                |_| panic!("An unproven original never prepares or sends again"),
+            )
+            .unwrap();
+            assert_eq!(blocked.id, FIRST);
+            assert!(blocked.pending);
+        }
+    }
+
+    #[test]
+    fn ordinary_initial_a4_refusals_keep_their_existing_outcomes() {
+        for (controls, scoped, state) in [
+            (false, true, "refused"),
+            (true, false, "refused"),
+            (true, true, "cutting_over"),
+        ] {
+            let s = Scratch::new();
+            let result = start_inner(
+                &s.0,
+                "example",
+                TASK,
+                123,
+                &assignment(),
+                &selection(),
+                FIRST,
+                controls,
+                |call| match call.args[0].as_str() {
+                    "get" => Ok(document()),
+                    "start-plan" => {
+                        let mut reply = plan(call);
+                        if scoped {
+                            reply.get_mut("plan").unwrap()["acknowledgement_mode"] =
+                                json!("managed");
+                        }
+                        Ok(reply)
+                    }
+                    "start-deliver" => Ok(delivered(FIRST, state)),
+                    _ => panic!("Unexpected call"),
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                (
+                    result.phase.as_str(),
+                    result.pending,
+                    result.outcome.as_deref()
+                ),
+                ("released", false, Some(state))
+            );
+            assert_eq!(result.error, "provider result");
         }
     }
 

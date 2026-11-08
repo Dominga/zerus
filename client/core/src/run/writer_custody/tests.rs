@@ -62,6 +62,113 @@ fn original_echo_releases_source_only_after_wait_eof_and_all_joins() {
 }
 
 #[test]
+fn auto_reaping_and_a_lost_wait_never_grant_pid_based_stop() {
+    const CASE: &str = "ZERUS_WRITER_WAIT_POLICY_CASE";
+    let _serial = TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Ok(case) = std::env::var(CASE) {
+        let source = Arc::new(());
+        let weak = Arc::downgrade(&source);
+        if case.starts_with("reaped") {
+            let span = if case == "reaped-expired" {
+                Duration::from_millis(20)
+            } else {
+                Duration::from_secs(3)
+            };
+            let reserved = admission(source, span);
+            let deadline = reserved.until;
+            let owned = child("exec /bin/true");
+            let pid = i32::try_from(owned.id()).unwrap();
+            let mut status = 0;
+            // Deliberately violate sole-waiter custody for this private child;
+            // Std Child never receives this real original's exit status.
+            assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+            if case == "reaped-expired" {
+                until(|| Instant::now() >= deadline);
+            }
+            let mut exchange = reserved.attach(owned);
+            if case == "reaped-cancelled" {
+                exchange.cancel();
+            }
+            assert!(exchange.poll().is_none());
+            exchange.cancel();
+            let original = exchange.0.as_ref().unwrap();
+            assert!(original.wait_failed && original.exit.is_none());
+            assert!(
+                !original.stopped,
+                "failed wait must suppress PID-based kill"
+            );
+            let first = match case.as_str() {
+                "reaped-expired" => Failure::Expired,
+                "reaped-cancelled" => Failure::Cancelled,
+                "reaped" => Failure::Unavailable,
+                _ => panic!("unknown private lost-wait case"),
+            };
+            assert_eq!(original.failure, Some(first));
+            drop(exchange);
+            assert!(weak.upgrade().is_some(), "unknown custody stays charged");
+        } else {
+            let mut policy: libc::sigaction = unsafe { std::mem::zeroed() };
+            policy.sa_sigaction = match case.as_str() {
+                "ignored" => libc::SIG_IGN,
+                "no-child-wait" => libc::SIG_DFL,
+                _ => panic!("unknown private wait-policy case"),
+            };
+            if case == "no-child-wait" {
+                policy.sa_flags = libc::SA_NOCLDWAIT;
+            }
+            // Only this exact-case reexec process changes its own disposition;
+            // no helper or admission has started, and the parent is unchanged.
+            assert_eq!(unsafe { libc::sigemptyset(&mut policy.sa_mask) }, 0);
+            assert_eq!(
+                unsafe { libc::sigaction(libc::SIGCHLD, &policy, std::ptr::null_mut()) },
+                0
+            );
+            assert!(matches!(
+                Admission::reserve(source, Instant::now() + Duration::from_secs(3)),
+                Err(Failure::Unavailable)
+            ));
+            assert_eq!(LIVE.load(Ordering::Acquire), 0);
+            assert!(weak.upgrade().is_none());
+        }
+        return;
+    }
+    let case = std::thread::current().name().unwrap().to_owned();
+    for policy in [
+        "ignored",
+        "no-child-wait",
+        "reaped",
+        "reaped-expired",
+        "reaped-cancelled",
+    ] {
+        let mut process = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &case, "--test-threads=1"])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env(CASE, policy)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let end = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = process.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= end {
+                let _ = process.kill(); // This exact owned test, normal parent policy.
+                let _ = process.wait();
+                panic!("private wait-policy child did not settle: {policy}");
+            }
+            thread::sleep(Duration::from_millis(2));
+        };
+        assert!(status.success(), "private wait-policy case {policy}");
+    }
+}
+
+#[test]
 fn source_refusal_and_second_handoff_never_start_another_writer() {
     let _serial = TESTS
         .lock()

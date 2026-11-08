@@ -17,6 +17,7 @@ use std::{
 };
 
 mod io_workers;
+mod wait_policy;
 use io_workers::{Drain, Writer};
 
 const LIMIT: usize = 16;
@@ -66,6 +67,9 @@ impl Admission {
         if until <= now || until.duration_since(now) > Duration::from_secs(30) {
             return Err(Failure::Invalid);
         }
+        if !wait_policy::waitable() {
+            return Err(Failure::Unavailable);
+        }
         // Start the one retirement poller BEFORE any owned helper can exist.
         // A host's busy/source charge must eventually drain without admitting
         // another call. The poller owns no pipe and cannot manufacture a join.
@@ -103,6 +107,7 @@ impl Admission {
             output,
             error,
             exit: None,
+            wait_failed: false,
             offered: false,
             stopped: false,
             failure: None,
@@ -131,6 +136,7 @@ impl Admission {
             output,
             error,
             exit: None,
+            wait_failed: false,
             offered: true,
             stopped: false,
             failure: Some(Failure::SourceChanged),
@@ -296,6 +302,7 @@ struct Original {
     output: Drain<ChildStdout>,
     error: Drain<ChildStderr>,
     exit: Option<ExitStatus>,
+    wait_failed: bool,
     offered: bool,
     stopped: bool,
     failure: Option<Failure>,
@@ -304,10 +311,18 @@ struct Original {
 }
 impl Original {
     fn wait(&mut self) {
-        if self.exit.is_none() {
+        if self.exit.is_none() && !self.wait_failed {
+            // Auto-reaping would release the PID before Child can prove exit.
+            // Never repair policy or adopt a replacement to recover custody.
+            if !wait_policy::waitable() {
+                self.wait_failed = true;
+                self.failure.get_or_insert(Failure::Unavailable);
+                return;
+            }
             match self.child.try_wait() {
                 Ok(exit) => self.exit = exit,
                 Err(_) => {
+                    self.wait_failed = true;
                     self.failure.get_or_insert(Failure::Unavailable);
                 }
             }
@@ -317,8 +332,15 @@ impl Original {
         self.failure.get_or_insert(reason);
         self.input.close_unoffered();
         self.wait();
-        if !self.stopped && self.exit.is_none() {
+        if !self.stopped && self.exit.is_none() && !self.wait_failed {
             self.stopped = true;
+            #[cfg(test)]
+            if self.wait_failed {
+                // Fault controls detect the attempted stop via `stopped`
+                // without signalling an already reaped/unidentified PID when
+                // a private mutation deliberately removes the guard above.
+                return;
+            }
             // This Child stays unreaped and owned here; never resolve a PID,
             // signal a group/descendant or adopt another process on failure.
             let _ = self.child.kill();

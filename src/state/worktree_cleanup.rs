@@ -225,7 +225,9 @@ pub(super) fn bindings() -> Result<Vec<Reference>> {
             } else if directory == "sessions" {
                 storage::read_id(stem)?
             } else {
-                read(string(&value, "name"))?
+                // Bounded as well: the label may route to another file in
+                // `bindings/` (zerus-zy12o).
+                storage::read_binding(string(&value, "name"))?
             };
             result.push(reference(&value));
         }

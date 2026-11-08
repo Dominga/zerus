@@ -288,6 +288,16 @@ pub(super) fn binding_bytes(path: &Path) -> io::Result<Vec<u8>> {
     )
 }
 
+/// [`read`] for a scan that decides whether a folder is still in use
+/// (zerus-zy12o): the record at the path `name` routes to, through
+/// `name_routes` too, is read like [`binding_bytes`] and verified. A link, a
+/// FIFO or an oversized file there is an error, never a wait.
+pub(super) fn read_binding(name: &str) -> Result<Value> {
+    let path = record_path(name);
+    let bytes = binding_bytes(&path).map_err(|e| not_found(name, e))?;
+    verify_at(&path, name, &bytes)
+}
+
 fn bounded_bytes(
     path: &Path,
     limit: u64,

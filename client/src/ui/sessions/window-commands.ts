@@ -11,7 +11,7 @@ import { machineEditor } from "../../store/machineEditor";
 import { onCommand } from "../../store/shortcuts";
 import { detailTab, page, peek, revealRow, search, selected, selectedKey, setPage, setPeek, setSelectedKey, stripMode, toast } from "../../store/ui";
 import { actionEntries } from "./ActionDialogs";
-import { listRows, listedSessionIgnoringCollapse, membersByGroup, rowsWithTeamsOpen } from "./model";
+import { listRows, listedSessionIgnoringCollapse, rowsAllOpen } from "./model";
 import { setTeamCollapsed, teamCollapsed } from "../../store/teamCollapse";
 import type { Session } from "./types";
 
@@ -30,21 +30,17 @@ const attention = (s: Session | undefined) => !!s && s.state !== "archived" && c
 
 /**
  * The live list's sessions in list order, as Qt's list keeps hidden rows:
- * child sessions under a collapsed parent team in their place, and the
- * sessions of a collapsed project at its header. `parents` names each
- * nested card's parent row, to open the teams above a chosen child.
+ * the sessions of a collapsed project, and child sessions under a collapsed
+ * parent team, in their places. `parents` names each nested card's parent
+ * row, to open the teams above a chosen child; openSession opens its project.
  */
 function attentionOrder(): { order: Session[]; parents: Map<string, string> } {
   const order: Session[] = [];
   const parents = new Map<string, string>();
-  const members = membersByGroup();
-  for (const row of rowsWithTeamsOpen()) {
-    if (row.type === "card") {
-      order.push(catalog.rows[row.id] ?? row.session);
-      if (row.parentKey) parents.set(row.id, row.parentKey);
-    } else if (row.type === "header" && row.collapsed) {
-      for (const s of members.get(row.project) ?? []) if (listedSessionIgnoringCollapse(s.key)) order.push(s);
-    }
+  for (const row of rowsAllOpen()) {
+    if (row.type !== "card") continue;
+    order.push(catalog.rows[row.id] ?? row.session);
+    if (row.parentKey) parents.set(row.id, row.parentKey);
   }
   return { order, parents };
 }

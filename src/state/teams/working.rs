@@ -260,12 +260,17 @@ pub(crate) fn mark_read(tx: &Transaction, team: &str, member: &str, ids: &[Strin
 pub(crate) fn summary(db: &Connection, team: &str, member: &str, before: Option<&Unread>, now: f64) -> anyhow::Result<Option<Unread>> {
     let list = unread(db, team, member, now)?;
     let Some(oldest) = list.first() else { return Ok(None) };
+    let urgent = list.iter().find(|message| message.urgent());
     let lead_told = before.filter(|before| before.oldest == oldest.id).map(|before| before.lead_told).unwrap_or(false);
     Ok(Some(Unread {
         count: list.len() as u32,
         urgent: list.iter().filter(|message| message.urgent()).count() as u32,
         oldest: oldest.id.clone(),
         oldest_at: oldest.at,
+        // Task 277: the oldest urgent message names the alarm's cause.
+        urgent_oldest: urgent.map(|message| message.id.clone()).unwrap_or_default(),
+        urgent_at: urgent.map(|message| message.at),
+        urgent_by: urgent.map(|message| message.by.clone()).unwrap_or_default(),
         rings: oldest.rings,
         rung_at: oldest.rung_at,
         lead_told,

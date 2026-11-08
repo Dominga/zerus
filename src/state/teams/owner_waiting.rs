@@ -155,6 +155,16 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
                 found["member"] = json!(member);
                 out.push(found);
             }
+            // Task 277 (owner, 2026-11-08): your own urgent message to a member
+            // that stayed unread; the button opens the team to see it.
+            "urgent_message" => {
+                let member_id = attention["member_id"].as_str().unwrap_or_default().to_owned();
+                let mut found = item(team, "urgent_message", &member_id, summary, at, "open_team");
+                found["member"] = attention["member"].clone();
+                found["member_id"] = attention["member_id"].clone();
+                found["minutes"] = attention["minutes"].clone();
+                out.push(found);
+            }
             // Task 95: the lead stalled while its decisions wait. The round is
             // part of the id, so each round (at most hourly) is notified once
             // by the desktops, which notify a waiting id once.

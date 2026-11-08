@@ -142,6 +142,11 @@ pub(crate) struct Settings {
     /// At most one inbox message reaches the lead per this many seconds (C2).
     #[serde(default = "default_inbox_interval")]
     pub inbox_interval_seconds: u64,
+    /// Task 277 (owner, 2026-11-08): minutes an urgent message may stay
+    /// unread before it is an alarm in the lead's inbox (and, for the owner's
+    /// own message, on the owner's Waiting list); 0 turns the alarm off.
+    #[serde(default = "default_urgent_alarm")]
+    pub urgent_alarm_minutes: u64,
     /// Minutes an undecided report waits before the lead is reminded once;
     /// 0 turns the reminder off (C4).
     #[serde(default = "default_remind_lead")]
@@ -303,6 +308,10 @@ fn default_blocked_timeout() -> u64 {
 fn default_inbox_interval() -> u64 {
     120
 }
+/// Task 277: an urgent message unread this long is an alarm; 3 minutes.
+fn default_urgent_alarm() -> u64 {
+    3
+}
 fn default_remind_lead() -> u64 {
     15
 }
@@ -345,6 +354,7 @@ impl Default for Settings {
             start_timeout_seconds: default_start_timeout(),
             blocked_timeout_seconds: default_blocked_timeout(),
             inbox_interval_seconds: default_inbox_interval(),
+            urgent_alarm_minutes: default_urgent_alarm(),
             remind_lead_minutes: default_remind_lead(),
             remind_owner_minutes: default_remind_owner(),
             remind_owner_permission_minutes: default_remind_owner_permission(),
@@ -443,6 +453,15 @@ pub(crate) struct Unread {
     pub urgent: u32,
     pub oldest: String,
     pub oldest_at: f64,
+    /// Task 277 (owner, 2026-11-08): the oldest unread urgent message, its
+    /// age and who sent it, so the lead's alarm and the owner's Waiting list
+    /// can name it without reading the working tier.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub urgent_oldest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub urgent_at: Option<f64>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub urgent_by: String,
     /// How often the doorbell rang for the oldest one.
     #[serde(default)]
     pub rings: u32,
@@ -451,6 +470,30 @@ pub(crate) struct Unread {
     /// The lead was told about the oldest one.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lead_told: bool,
+}
+
+/// Task 277 (owner, 2026-11-08): an urgent message interrupted (or tried to
+/// interrupt) the member's busy turn. After the native stop the message opens
+/// a new turn that continues the same attempt; the attempt itself is kept.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct UrgentInterrupt {
+    /// The unread urgent message ids the interrupt was requested for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ids: Vec<String>,
+    /// The oldest unread urgent message at the request, so a newer urgent
+    /// message may still interrupt after a failure.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub oldest: String,
+    #[serde(default)]
+    pub at: f64,
+    /// The turn the interrupt was pinned to (the session's `turn_started`).
+    #[serde(default)]
+    pub turn: f64,
+    /// requested, sent or failed.
+    #[serde(default)]
+    pub state: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -569,6 +612,10 @@ pub(crate) struct Member {
     /// status shows them ("unread: N"); None when it has read everything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unread: Option<Unread>,
+    /// Task 277: an urgent message that interrupted (or tried to interrupt)
+    /// this member's busy turn; cleared once the new turn carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub urgent: Option<UrgentInterrupt>,
     /// Task 98: the member's Terminal refuses hand-outs because its composer
     /// holds a draft, a dialog or a prompt Zerus does not know; cleared by the
     /// next delivery.

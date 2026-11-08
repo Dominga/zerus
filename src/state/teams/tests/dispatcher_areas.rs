@@ -53,3 +53,6 @@ mod dispatcher_cross_role;
 
 #[path = "dispatcher_holds.rs"]
 mod dispatcher_holds;
+
+#[path = "dispatcher_urgent.rs"]
+mod dispatcher_urgent;

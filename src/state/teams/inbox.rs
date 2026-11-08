@@ -15,7 +15,7 @@ const SUMMARY_CHARS: usize = 300;
 
 /// Task 134: items a member is blocked on make the lead's inbox message
 /// urgent: its doorbell says URGENT and rings at once.
-pub(crate) const URGENT_KINDS: [&str; 6] = ["question", "permission", "terminal_question", "crashed", "input_blocked", "member_stuck"];
+pub(crate) const URGENT_KINDS: [&str; 7] = ["question", "permission", "terminal_question", "crashed", "input_blocked", "member_stuck", "urgent_unread"];
 
 pub(crate) fn urgency<'a>(items: impl IntoIterator<Item = &'a Item>) -> super::working::Urgency {
     if items.into_iter().any(|item| URGENT_KINDS.contains(&item.kind)) {
@@ -301,6 +301,41 @@ fn all_items(team: &Team) -> Vec<Item> {
                 command,
                 detail: format!("#{} waits for #{}'s output; {}. {} is idle {minutes} min. Hold or reassign #{} to let #{} start, or wait for it.",
                     task_id, holder, note, team.name_of(&member.id), holder, task_id).trim_end().to_owned(),
+            });
+        }
+    }
+    // Task 277 (owner, 2026-11-08): an urgent message unread past the alarm
+    // bound is an alarm: the member has not acted on it and Zerus did not get
+    // its new turn through. Ordinary unread notices stay folded into the one
+    // "does not read" item; only an urgent one is shouted.
+    if active && team.settings.urgent_alarm_minutes > 0 {
+        let now = crate::state::now();
+        let bound = team.settings.urgent_alarm_minutes as f64 * 60.0;
+        for member in team.members.iter().filter(|member| member.id != team.lead && member.state != MemberState::Removed) {
+            let Some(unread) = member.unread.as_ref().filter(|unread| unread.urgent > 0) else { continue };
+            let Some(at) = unread.urgent_at else { continue };
+            let waited = (now - at).max(0.0);
+            if waited < bound {
+                continue;
+            }
+            let minutes = (waited / 60.0).round() as u64;
+            let who = if unread.urgent_by == "owner" { "you" } else { "the lead" };
+            let why = match member.urgent.as_ref().map(|urgent| urgent.state.as_str()).unwrap_or_default() {
+                "requested" => "its turn was interrupted and the message waits for the stop",
+                "sent" => "it was delivered in a new turn but not acted on",
+                "failed" => "Zerus could not interrupt its turn",
+                _ => "it waits for the member's turn to end",
+            };
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "urgent_unread",
+                key: format!("urgent_unread:{}:{}", member.id, unread.urgent_oldest),
+                task: None,
+                member: team.name_of(&member.id),
+                since: at,
+                summary: summary(&format!("{} has an urgent message from {who} unread {minutes} min: {why}", team.name_of(&member.id))),
+                command: format!("{} | hgs team look --json", json!({"team":team.id,"member":member.id})),
+                detail: format!("{} unread urgent message(s); {why}. The message is in the member's team inbox. Open its look to see the session, or stop it natively.", unread.urgent),
             });
         }
     }
@@ -1738,6 +1773,22 @@ pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
         out.push(json!({"kind":"phase_acceptance","phase":phase.n,"since":phase.awaiting_since.unwrap_or(team.updated),
             "summary":format!("{} is ready for your acceptance", phase_name(phase)),
             "outcome":acceptance_summary(team, phase, now)}));
+    }
+    // Task 277 (owner, 2026-11-08): your own urgent message to a member that
+    // stays unread past the alarm bound is on your Waiting list too.
+    if team.settings.urgent_alarm_minutes > 0 {
+        let bound = team.settings.urgent_alarm_minutes as f64 * 60.0;
+        for member in team.members.iter().filter(|member| member.id != team.lead && member.state != MemberState::Removed) {
+            let Some(unread) = member.unread.as_ref().filter(|unread| unread.urgent > 0 && unread.urgent_by == "owner") else { continue };
+            let Some(at) = unread.urgent_at else { continue };
+            let waited = (now - at).max(0.0);
+            if waited < bound {
+                continue;
+            }
+            let minutes = (waited / 60.0).round() as u64;
+            out.push(json!({"kind":"urgent_message","member":team.role_of(&member.id),"member_id":member.id,"since":at,"minutes":minutes,
+                "summary":format!("{} has your urgent message unread {minutes} min", team.name_of(&member.id))}));
+        }
     }
     out.sort_by(|a, b| a["since"].as_f64().unwrap_or_default().total_cmp(&b["since"].as_f64().unwrap_or_default()));
     out

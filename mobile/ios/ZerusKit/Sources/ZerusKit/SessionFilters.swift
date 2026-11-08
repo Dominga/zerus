@@ -398,8 +398,12 @@ public enum DesktopSessionPalette {
         let working = SessionFilters.working(session, online)
         let unread = SessionFilters.visibleUnreadReply(session, online)
         let kind = nativeKind(session, online)
-        // Muted, or quiet under a live parent (spec 2.1): gray instead of amber.
-        let displayKind: DesktopBadgeKind = ChildSessions.silenced(session) && [.attention,.unread].contains(kind) ? .neutral : kind
+        // Muted, or quiet under a live parent (spec 2.1): requests and replies gray instead of amber.
+        // A quiet child's error is its parent's to handle, gray too; an explicitly muted error stays
+        // red (desktop badgeKind, zerus-nlck0).
+        let muted = SessionNotificationPreferences.muted(session), quiet = ChildSessions.quiet(raw)
+        let displayKind: DesktopBadgeKind = (muted || quiet) && [.attention,.unread].contains(kind) || quiet && !muted && kind == .error
+            ? .neutral : kind
         let caption: String
         if working { caption = raw.string("phase") == "compacting" ? "Compacting" : (SessionFilters.backgroundIdle(session) ? "Background" : "Working") }
         else if kind == .waiting { caption = SessionFilters.waitingLabel(session, includeProducer: false, compact: true) }

@@ -119,6 +119,16 @@ class ChildSessionsTest {
         assertEquals(DesktopBadgeKind.Neutral, DesktopSessionPalette.badge(rows[2], true).kind)
         assertEquals(DesktopBadgeKind.Attention, DesktopSessionPalette.badge(rows[3], true).kind)
         assertEquals(DesktopBadgeKind.Attention, DesktopSessionPalette.nativeKind(rows[2], true))
+        // A quiet child's error is gray too; an explicitly muted error stays red, quiet or not (zerus-nlck0).
+        assertEquals(DesktopBadgeKind.Error, DesktopSessionPalette.nativeKind(rows[5], true))
+        assertEquals(DesktopBadgeKind.Neutral, DesktopSessionPalette.badge(rows[5], true).kind)
+        assertEquals(DesktopBadgeKind.Error, DesktopSessionPalette.badge(session(7, JSONObject().put("activity", "idle").put("phase", "error").put("tracked", true), link(1)), true).kind)
+        val mutedError = session(8, quiet(JSONObject().put("activity", "idle").put("phase", "error").put("tracked", true)), link(1))
+        mutedError.raw.put("notification_preferences", JSONObject().put("conversation_id", "conversation-8").put("muted", true).put("revision", 2)
+            .put("suppressed", JSONObject().put("reply_id", JSONObject.NULL).put("attention_signature", JSONObject.NULL)
+                .put("optional_question_ids", JSONArray()).put("main_attention", JSONObject.NULL).put("child_attention", JSONObject())))
+        assertTrue(SessionNotificationPreferences.muted(mutedError))
+        assertEquals(DesktopBadgeKind.Error, DesktopSessionPalette.badge(mutedError, true).kind)
         // It still needs attention, so it stays in Needs attention and Active (spec 2.1).
         assertTrue(SessionFilters.matches(rows[2], SessionFilter.Attention, true))
         assertTrue(SessionFilters.matches(rows[2], SessionFilter.Active, true))

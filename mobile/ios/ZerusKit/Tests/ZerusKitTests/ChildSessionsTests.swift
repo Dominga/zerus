@@ -117,6 +117,16 @@ final class ChildSessionsTests: XCTestCase {
         XCTAssertEqual(DesktopSessionPalette.badge(rows[2], true).kind, .neutral)
         XCTAssertEqual(DesktopSessionPalette.badge(rows[3], true).kind, .attention)
         XCTAssertEqual(DesktopSessionPalette.nativeKind(rows[2], true), .attention)
+        // A quiet child's error is gray too; an explicitly muted error stays red, quiet or not (zerus-nlck0).
+        XCTAssertEqual(DesktopSessionPalette.nativeKind(rows[5], true), .error)
+        XCTAssertEqual(DesktopSessionPalette.badge(rows[5], true).kind, .neutral)
+        XCTAssertEqual(DesktopSessionPalette.badge(session(7, row("error"), parent: link(1)), true).kind, .error)
+        var mutedError = session(8, quiet(row("error")), parent: link(1))
+        mutedError.raw["notification_preferences"] = .object(["conversation_id": .string("conversation-8"), "muted": .bool(true), "revision": .int(2),
+            "suppressed": .object(["reply_id": .null, "attention_signature": .null, "optional_question_ids": .array([]), "main_attention": .null,
+                                   "child_attention": .object([:])])])
+        XCTAssertTrue(SessionNotificationPreferences.muted(mutedError))
+        XCTAssertEqual(DesktopSessionPalette.badge(mutedError, true).kind, .error)
         // It still needs attention, so it stays in Needs attention and Active (spec 2.1).
         XCTAssertTrue(SessionFilters.matches(rows[2], .attention, true))
         XCTAssertTrue(SessionFilters.matches(rows[2], .active, true))

@@ -1,9 +1,10 @@
-import { For, Show, Switch, Match, Suspense, lazy, createEffect, createMemo, createSignal, onCleanup, on, type JSX } from "solid-js";
-import { isServer } from "solid-js/web";
+import { For, Show, Switch, Match, Suspense, lazy, createEffect, createMemo, createSignal, onCleanup, onMount, on, type JSX } from "solid-js";
+import { Portal, isServer } from "solid-js/web";
 import { Icon } from "../lib/icons";
 import { selected, setSubagentOpen, setDetailTab, setSelectedKey, subagentOpen, setMenu } from "../../store/ui";
 import { inspectorOpen, inspectorTab, inspectorWidth, inspectorClosed, setInspectorOpen, setInspectorTab, setInspectorWidth, toggleInspectorCard, panelGeometry, inspectorHint, INSPECTOR_TABS, type InspectorTab } from "../../store/inspector";
-import { followedFor, detailsFor, copyIdentity, copy } from "../../store/actions";
+import { followedFor, detailsFor, copyIdentity, copy, notify } from "../../store/actions";
+import { ironRuleCounts } from "../../store/ironRuleCounts";
 import { newSessionFromWorktree } from "./newsession-view";
 import { catalogStatus, catalogRoots } from "./worktree-dialogs";
 import { openWorktreeReview, worktreeReviewDialog } from "../../store/worktreeCleanup";
@@ -14,7 +15,7 @@ import { tasks } from "../../store/tasks";
 import { taskProject } from "../../store/taskContext";
 import "../styles/tasks.css";
 import { object, text } from "../screens/tasks-ui";
-import { cardKey, cardOpen, compactCount, contextUsage, homeShort, sessionAccount, sessionGoal, sessionPlan, sideTeam, usageRows } from "./inspector-data";
+import { cardKey, cardOpen, changesView, compactCount, contextUsage, diffOutcome, homeShort, pathParts, sessionAccount, sessionGoal, sessionPlan, sideTeam, usageRows, withRequest, type DiffOutcome } from "./inspector-data";
 import { skin } from "../../skin/runtime";
 import { selectedTeam, teams } from "../../store/teams";
 import { agentKind } from "../../store/catalog";
@@ -32,6 +33,7 @@ import { of, sameKey, native } from "./paths";
 import type { BoundRow } from "./scope-filters";
 import type { Session } from "./types";
 import { IronRulesPanel } from "./IronRulesPanel";
+import { KeepWarmRow } from "./KeepWarmRow";
 import { captionText, childStatus } from "./SessionCard";
 import { currentChildren, finishedFoldId, foldedChildren, workingChildren } from "./subagents";
 import { tr, trNoop } from "../../i18n";
@@ -106,9 +108,99 @@ function IronRulesCard(props: { session: Session; id?: string; folded?: boolean 
     project: project(),
     session: props.session.runId ? { name: props.session.name, run_id: props.session.runId, conversation_id: props.session.conversationId ?? "" } : undefined,
   });
+  // The composer's iron rules chip shows the same count (Qt's changed callback).
+  const counted = (n: number) => { setCount(n); ironRuleCounts.set(props.session.key, n); };
   return <Card id={props.id ?? "details-rules"} folded={props.folded} title={tr("Iron rules")} aside={<Show when={count()}><span class="dim tabular">{count()}</span></Show>}>
-    <IronRulesPanel context={context()} onCount={setCount} />
+    <IronRulesPanel context={context()} onCount={counted} />
   </Card>;
+}
+
+/** Open diff's dialog (Qt showDiff): non-modal, 820 by 600, the diff read-only, unwrapped and monospaced, and Close. */
+function DiffDialog(props: { diff: Extract<DiffOutcome, { title: string }>; onClose: () => void }) {
+  let dialog!: HTMLDialogElement;
+  onMount(() => { dialog.show(); dialog.querySelector<HTMLElement>(".diff-text")?.focus(); });
+  return <Portal><dialog ref={dialog} class="dlg diff-dlg" aria-labelledby="diff-dlg-title" onClose={() => props.onClose()}
+    onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); dialog.close(); } }}>
+    <div class="dlg-head"><h2 id="diff-dlg-title" class="ell" title={props.diff.title}>{props.diff.title}</h2></div>
+    <div class="dlg-body diff-body">
+      <textarea class="diff-text mono" readOnly wrap="off" spellcheck={false} aria-label={props.diff.title} value={props.diff.text} />
+      <Show when={props.diff.note}><div class="hint">{props.diff.note}</div></Show>
+    </div>
+    <div class="dlg-foot"><span class="spacer" /><button type="button" class="btn primary" onClick={() => dialog.close()}>{tr("Close")}</button></div>
+  </dialog></Portal>;
+}
+
+/**
+ * Qt parity (I3): the Changes card (SessionsWindow.cpp:1680-1707,
+ * 7503-7563), folded by default. The folder is the inspected one, else the
+ * session's; its status is read when the session changes, when the card
+ * opens and every 15 s while it is open (Rust reads a folder at most every
+ * 15 s). Commit changes… only puts a request into the composer; Open diff
+ * reads the diff into a dialog.
+ */
+function ChangesCard(props: { session: Session; id: string }) {
+  const online = () => !computerOffline(props.session.computer);
+  const target = createMemo(() => {
+    const cwd = detailsFor(props.session, online(), followedFor(props.session.key))?.cwd;
+    const path = typeof cwd === "string" ? cwd : props.session.cwdPath ?? "";
+    return { computer: props.session.computer, path, key: `${props.session.computer}\n${path}` };
+  }, undefined, { equals: (a, b) => a.key === b.key });
+  const [status, setStatus] = createSignal<unknown>();
+  const [diff, setDiff] = createSignal<Extract<DiffOutcome, { title: string }>>();
+  const [diffing, setDiffing] = createSignal(false);
+  const open = () => cardOpen(props.id, false, inspectorClosed());
+  let ticket = 0, disposed = false;
+  const read = async () => {
+    const at = target();
+    if (!at.path || computerOffline(at.computer)) return;
+    const mine = ++ticket;
+    let value: unknown;
+    try { value = await bridge.gitStatus(at.computer, at.path); } catch { value = { state: "unavailable" }; }
+    if (!disposed && mine === ticket && at.key === target().key) setStatus(value);
+  };
+  createEffect(on(() => target().key, () => { ++ticket; setStatus(undefined); void read(); }));
+  createEffect(on(open, (now) => { if (now) void read(); }, { defer: true }));
+  if (!isServer) { const timer = setInterval(() => { if (open()) void read(); }, 15_000); onCleanup(() => clearInterval(timer)); }
+  onCleanup(() => { disposed = true; ++ticket; });
+  const view = createMemo(() => changesView(status()));
+  const canDiff = () => view().known && !view().clean;
+  const canCommit = () => canDiff() && !subagentOpen();
+  const commit = () => {
+    if (!canCommit()) return;
+    const next = withRequest(composer.text(), tr("Commit the current changes with a short message."));
+    composer.input(next, next.length, next.length);
+    const field = document.querySelector<HTMLTextAreaElement>(".cmp-editor");
+    field?.focus();
+    try { field?.setSelectionRange(next.length, next.length); } catch { /* not rendered */ }
+  };
+  const openDiff = async () => {
+    const at = target();
+    if (!canDiff() || diffing() || !at.path) return;
+    setDiffing(true);
+    let outcome: DiffOutcome;
+    try { outcome = diffOutcome(await bridge.gitDiff(at.computer, at.path), ""); }
+    catch (error) { outcome = diffOutcome({}, typeof error === "string" ? error : error instanceof Error ? error.message : String(error)); }
+    finally { setDiffing(false); }
+    if ("notice" in outcome) notify("error", outcome.notice, true);
+    else if (!disposed) setDiff(outcome);
+  };
+  return <>
+    <Card id={props.id} folded title={tr("Changes")} aside={<Show when={view().aside}><span class="dim tabular">{view().aside}</span></Show>}>
+      <Show when={view().rows.length || view().more > 0}><div class="chg-list">
+        <For each={view().rows}>{(row) => { const [head, tail] = pathParts(row.path); return <div class="chg-row" title={row.path}>
+          <span class="chg-path mono"><span class="chg-head">{head}</span><span class="chg-tail">{tail}</span></span>
+          <span class="chg-added accent tabular">{row.added}</span><span class="chg-deleted danger tabular">{row.deleted}</span>
+        </div>; }}</For>
+        <Show when={view().more > 0}><div class="hint">{tr("%1 more files", view().more)}</div></Show>
+      </div></Show>
+      <Show when={view().empty}><div class="hint">{view().empty}</div></Show>
+      <div class="side-actions">
+        <button type="button" class="btn small" disabled={!canCommit()} title={tr("Ask this session's agent to commit: the request goes into the composer, not sent")} onClick={commit}>{tr("Commit changes…")}</button>
+        <button type="button" class="btn small ghost" disabled={!canDiff() || diffing()} onClick={() => void openDiff()}>{tr("Open diff")}</button>
+      </div>
+    </Card>
+    <Show when={diff()}>{(shown) => <DiffDialog diff={shown()} onClose={() => setDiff(undefined)} />}</Show>
+  </>;
 }
 
 function useDetails() {
@@ -145,8 +237,9 @@ function useDetails() {
 function Details() {
   const { s, details, identity, value, rows, usage, context, clear, account, accountText, home, profileId } = useDetails();
   return <div class="insp-body"><Card id="details-id" title={tr(identity().title)}><Row icon="key-round" mono title={tr(identity().title)} tail={<button class="icon-btn small" aria-label={tr(identity().caption)} title={tr(identity().caption)} disabled={!identity().value} onClick={() => void copyIdentity(snapshotOf(s()), details())}><Icon name="copy" size={13} /></button>}><span class="selectable">{value(identity().value)}</span></Row></Card>
-    <Card id="details-session" title={tr("Session")}><Row icon="message-square" label={tr("name")} mono title={s().name}>{s().name}</Row><Row icon="monitor" label={tr("machine")}>{s().machine}</Row><Row icon="folder" label={tr("directory")} mono title={s().cwdPath}>{value(s().cwdPath)}</Row><Row icon="git-branch" label={tr("branch")}>{value(s().branch)}</Row><Row icon="layers" label={tr("project")}>{grouping().headers.find((p) => p.id === groupOf(s().key))?.name ?? tr("Not reported")}</Row><Row icon="clock" label={tr("last event")}>{s().updatedAt ? eventTimeOf(new Date(s().updatedAt! * 1000)) : tr("Not reported")}</Row><div class="hint">{tr("Activity stays on %1. Closing this window does not stop your agent.", s().machine)}</div></Card>
+    <Card id="details-session" title={tr("Session")}><Row icon="message-square" label={tr("name")} mono title={s().name}>{s().name}</Row><Row icon="monitor" label={tr("machine")}>{s().machine}</Row><Row icon="folder" label={tr("directory")} mono title={s().cwdPath}>{value(s().cwdPath)}</Row><Row icon="git-branch" label={tr("branch")}>{value(s().branch)}</Row><Row icon="layers" label={tr("project")}>{grouping().headers.find((p) => p.id === groupOf(s().key))?.name ?? tr("Not reported")}</Row><Row icon="clock" label={tr("last event")}>{s().updatedAt ? eventTimeOf(new Date(s().updatedAt! * 1000)) : tr("Not reported")}</Row><KeepWarmRow session={s()} main={!subagentOpen()} /><div class="hint">{tr("Activity stays on %1. Closing this window does not stop your agent.", s().machine)}</div></Card>
     <IronRulesCard session={s()} />
+    <ChangesCard session={s()} id="changes" />
     <Card id="details-account" title={tr("Account")}><Row icon="user-round-cog" label={tr("account")} title={profileId() ? tr("Profile %1", profileId()) : undefined} tail={<Show when={account().tag}><span class="acct-pid tabular" title={tr("Profile %1", profileId())}>{account().tag}</span></Show>}>{accountText()}</Row><Row icon="hard-drive" label={tr("agent home")} mono title={home() || undefined}>{value(homeShort(home()))}</Row><Row icon="sparkles" label={tr("model")}>{value(s().model)} {s().effort}</Row></Card>
     <Card id="details-lead" title={tr("Session lead")}><SessionLeadPanel /></Card>
     <Card id="details-usage" title={tr("Session usage")}><Show when={rows().length} fallback={<div class="hint">{tr("No native usage reported for this conversation yet.")}</div>}><table class="usage"><tbody><For each={rows()}>{([label, val]) => <tr><td>{label}</td><td class="tabular">{val}</td></tr>}</For></tbody></table><Show when={usage().costNote}><div class="hint">{usage().costNote}</div></Show><div class="hint">{usage().footer}</div></Show></Card>
@@ -247,7 +340,6 @@ function Sections() {
   const plan = createMemo(() => sessionPlan(raw())), goal = createMemo(() => sessionGoal(raw()));
   const online = () => !computerOffline(s().computer);
   const window = createMemo(() => contextUsage(raw()));
-  const git = () => s().git;
   return <div class="insp-body insp-sections">
     <Card id="sec-environment" title={tr("Environment")}>
       <Row icon="key-round" mono title={tr(identity().title)} tail={<button class="icon-btn small" aria-label={tr(identity().caption)} title={tr(identity().caption)} disabled={!identity().value} onClick={() => void copyIdentity(snapshotOf(s()), details())}><Icon name="copy" size={13} /></button>}><span class="selectable">{value(identity().value)}</span></Row>
@@ -256,6 +348,7 @@ function Sections() {
       <Row icon="git-branch" label={tr("branch")}>{value(s().branch)}</Row>
       <Row icon="sparkles" label={tr("model")}>{value(s().model)} {s().effort}</Row>
       <Row icon="clock" label={tr("last event")}>{s().updatedAt ? eventTimeOf(new Date(s().updatedAt! * 1000)) : tr("Not reported")}</Row>
+      <KeepWarmRow session={s()} main={!subagentOpen()} />
     </Card>
     <Card id="sec-context" title={tr("Context")} aside={<Show when={window() && window()!.percent >= 0}><span class="dim tabular">{tr("%1%", window()!.percent)}</span></Show>}>
       <Show when={window()} fallback={<div class="hint">{tr("Context: %1", context()?.text || tr("Not reported"))}</div>}>{(w) => <>
@@ -279,12 +372,7 @@ function Sections() {
     </Card>
     <IronRulesCard session={s()} id="sec-rules" folded />
     <Card id="sec-worktrees" title={tr("Worktrees")} folded><Worktrees /></Card>
-    <Card id="sec-changes" title={tr("Changes")} folded aside={<Show when={git()?.changed}><span class="dim tabular">{git()!.changed}</span></Show>}>
-      <Show when={git() && git()!.state !== "unknown"} fallback={<div class="hint">{tr("Git status not reported for this folder.")}</div>}>
-        <Show when={git()!.changed} fallback={<div class="hint">{tr("Working tree is clean.")}</div>}><Row icon="git-compare-arrows" label={tr("files")}>{tr("%1 changed files", git()!.changed)}</Row></Show>
-        <Show when={git()!.ahead || git()!.behind}><Row icon="git-branch" label={tr("branch")}>{tr("%1 ahead, %2 behind", git()!.ahead, git()!.behind)}</Row></Show>
-      </Show>
-    </Card>
+    <ChangesCard session={s()} id="sec-changes" />
     <Card id="sec-projecttasks" title={tr("Project tasks")} folded aside={<TaskTabBadge />}><div class="side-tasks"><Suspense><TasksPanel /></Suspense></div></Card>
     <Show when={flag("extensions/socraticode") === true && !!s().cwdPath}><Card id="sec-socraticode" title={tr("SocratiCode")}><SocratiCodePanel /></Card></Show>
   </div>;

@@ -18,7 +18,7 @@ use zerus_client_core::swarm::grouping::{ArchivedRow, GroupOut, Grouping, SyncVi
 use zerus_client_core::swarm::layout::Layout;
 use zerus_client_core::views::FleetEntry;
 use zerus_client_core::{
-    Batch, Change, Coalescer, ComputerId, ComputerStatus, MachineMeta, ViewRow,
+    Batch, Change, Coalescer, ComputerId, ComputerStatus, MachineMeta, TeamsUpdate, ViewRow,
 };
 
 mod terminations;
@@ -63,6 +63,9 @@ struct Inner {
     first_live_logged: bool,
     first_rows_out_logged: bool,
     first_take_logged: bool,
+    /// Task 315: the desktop's team default mute (Qt's `FleetState::applyMute`)
+    /// from each computer's team list, applied to every row before the tap.
+    team_mutes: zerus_client_core::team_mutes::TeamMutes,
 }
 
 /// Task 8: receives a computer's stream team heads (None: poll).
@@ -338,10 +341,12 @@ impl Inner {
     /// either the tray tap or the webview sees an incoming row. The indexes
     /// name only service-scoped rows in this mirror.
     fn publish(&mut self, mut change: Change) {
+        let mut remuted = Vec::new();
         match &mut change {
             Change::Remove { .. } => self.cache_dirty = true,
             Change::Upsert { computer, row, .. } => {
                 self.cache_dirty = true;
+                self.team_mutes.apply(&computer.0, row);
                 if let Some(rows) = self.mirror.computers.get_mut(&computer.0) {
                     rows.keep_notifications(row);
                     rows.keep_questions(row);
@@ -360,11 +365,21 @@ impl Inner {
                     self.stale_rows.remove(&computer.0);
                     self.stale_out.insert(computer.0.clone(), None);
                 }
+                for (_, row) in incoming.iter_mut() {
+                    self.team_mutes.apply(&computer.0, row);
+                }
                 if let Some(rows) = self.mirror.computers.get_mut(&computer.0) {
                     for (_, row) in incoming {
                         rows.keep_notifications(row);
                         rows.keep_questions(row);
                     }
+                }
+            }
+            // Task 315: a team list that changes the muted members changes
+            // the rows already shown, after this change.
+            Change::Teams { computer, update: TeamsUpdate::List(list), .. } => {
+                if self.team_mutes.observe(&computer.0, &**list) {
+                    remuted = self.remuted();
                 }
             }
             _ => {}
@@ -375,6 +390,23 @@ impl Inner {
         self.mirror.observe(&change);
         self.grouping.observe(&change);
         self.coalescer.push(change);
+        for change in remuted {
+            self.publish(change);
+        }
+    }
+
+    /// Task 315: the rows whose team default mute changed, as upserts.
+    fn remuted(&self) -> Vec<Change> {
+        let mut out = Vec::new();
+        for (computer, rows) in &self.mirror.computers {
+            for (key, row) in &rows.rows {
+                let mut row = row.clone();
+                if self.team_mutes.apply(computer, &mut row) {
+                    out.push(Change::Upsert { computer: ComputerId::from(computer.as_str()), key: key.clone(), row });
+                }
+            }
+        }
+        out
     }
 }
 
@@ -1038,6 +1070,37 @@ impl Pump {
             == Some(ComputerStatus::Live)
     }
 
+    /// Keep cache warm's fleet poll: each computer whose listing is current
+    /// (streamed or polled, never cached or reconnecting), with the rows
+    /// `pick` keeps, under one lock. Rows `pick` leaves are not copied.
+    pub(crate) fn current_rows(
+        &self,
+        pick: impl Fn(&ViewRow) -> bool,
+    ) -> Vec<(String, Vec<ViewRow>)> {
+        let inner = self.lock();
+        inner
+            .mirror
+            .computers
+            .iter()
+            .filter(|(computer, rows)| {
+                matches!(
+                    rows.status,
+                    Some(ComputerStatus::Live | ComputerStatus::Polled)
+                ) && !inner.stale.contains_key(*computer)
+            })
+            .map(|(computer, rows)| {
+                (
+                    computer.clone(),
+                    rows.rows
+                        .values()
+                        .filter(|&row| pick(row))
+                        .cloned()
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
     /// Drains a change sink on its own thread until every sender is gone,
     /// running `observe` on each change just before it is queued.
     #[cfg_attr(
@@ -1411,6 +1474,68 @@ mod tests {
         assert!(pump.cache_snapshot(3.0).is_none(), "written only when something changed");
         pump.push(upsert("b", "claude/p/b"));
         assert_eq!(pump.cache_snapshot(4.0).unwrap()[0].rows.len(), 2);
+    }
+
+    /// Task 315 (F2): as Qt's FleetState, the members of a team that is not
+    /// archived (here a done one) are muted by the desktop's default: the rows
+    /// already shown change when the list arrives, later rows come muted, the
+    /// tap (notifications, menu bar) sees it, and the lead stays unmuted.
+    #[test]
+    fn a_team_list_mutes_its_members_in_shown_and_later_rows() {
+        use std::sync::Arc;
+        use zerus_client_core::teams::view::{ListedMember, SessionView, TeamList, TeamSummary};
+        let member = |id: &str, name: &str| ListedMember {
+            id: id.into(),
+            lead: id == "lead",
+            session: Some(SessionView { name: name.into(), ..SessionView::default() }),
+            ..ListedMember::default()
+        };
+        let list = |status: &str| TeamList {
+            teams: vec![TeamSummary {
+                status: status.into(),
+                lead: "lead".into(),
+                members: vec![member("lead", "claude/p/lead"), member("cook", "dsh/p/cook")],
+                ..TeamSummary::default()
+            }],
+            truncated: false,
+        };
+        let teams = |status: &str| Change::Teams {
+            computer: ComputerId(String::new()),
+            key: "list".into(),
+            update: TeamsUpdate::List(Arc::new(list(status))),
+        };
+        let pump = Pump::default();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        pump.tap(Box::new(move |change: &Change| {
+            if let Change::Upsert { row, .. } = change {
+                let _ = sender.send((row.name.clone(), row.muted));
+            }
+        }));
+        pump.push(Change::Replace {
+            computer: ComputerId(String::new()),
+            rows: vec![("lead".into(), row("claude/p/lead")), ("cook".into(), row("dsh/p/cook"))],
+        });
+        let muted = |key: &str| {
+            let inner = pump.lock();
+            let row = &inner.mirror.computers[""].rows[key];
+            (row.muted, row.team_muted)
+        };
+        assert_eq!(muted("cook"), (false, false));
+        pump.push(teams("done"));
+        assert_eq!(muted("cook"), (true, true));
+        assert_eq!(muted("lead"), (false, false), "the lead is never muted by the default");
+        assert_eq!(receiver.try_recv().ok(), Some(("dsh/p/cook".to_owned(), true)));
+        // The same list again changes nothing.
+        pump.push(teams("done"));
+        assert!(receiver.try_recv().is_err());
+        // A later listing of the member comes muted.
+        pump.push(upsert("cook", "dsh/p/cook"));
+        assert_eq!(muted("cook"), (true, true));
+        // Archived: the member is free again.
+        pump.push(teams("archived"));
+        assert_eq!(muted("cook"), (false, false));
+        let batch = pump.take(Duration::ZERO);
+        assert!(!batch.replaces.is_empty());
     }
 
     /// Task 235: a second `start` (or a reloaded webview) replays the mirror,

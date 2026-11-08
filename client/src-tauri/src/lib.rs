@@ -58,6 +58,8 @@ mod instance;
 #[cfg(windows)]
 #[path = "instance_windows.rs"]
 mod instance;
+#[cfg(feature = "live")]
+mod keep_warm;
 #[doc(hidden)]
 pub mod lifecycle;
 #[cfg(feature = "live")]
@@ -218,6 +220,7 @@ mod window_geometry;
 #[doc(hidden)]
 pub mod window_layer;
 pub mod window_chrome;
+pub mod git_status;
 #[doc(hidden)]
 pub mod window_theme;
 mod window_visibility;
@@ -764,7 +767,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
         .manage(window_visibility::Visibility::default())
         .manage(window_theme::Theme::default())
         .manage(lifecycle::Lifecycle { menu_bar })
-        .manage(exit_flush::ExitFlush::default());
+        .manage(exit_flush::ExitFlush::default())
+        .manage(git_status::GitStatus::default());
     #[cfg(target_os = "macos")]
     let builder = builder
         .menu(exit_flush::app_menu)
@@ -952,6 +956,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(content_search::Searches::default());
                 app.manage(native_ui::runtime::NativeUi::default());
                 app.manage(task_details::TaskReads::default());
+                app.manage(composer::changes::GitStatuses::default());
                 app.manage(task_details::TaskWrites::default());
                 app.manage(task_editor::TaskEditor::default());
                 app.manage(task_forms::TaskForms::default());
@@ -976,6 +981,12 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     catalog_cache_writer(pump.clone(), dir.clone());
                 }
                 app.manage(approvals::start(
+                    pump.clone(),
+                    app.state::<actions::Actions>().inner().clone(),
+                    app.state::<settings::Store>().0.clone(),
+                ));
+                // Keep cache warm runs with the window closed, as Qt's tray agent.
+                app.manage(keep_warm::start(
                     pump.clone(),
                     app.state::<actions::Actions>().inner().clone(),
                     app.state::<settings::Store>().0.clone(),
@@ -1181,6 +1192,34 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(task_executor::TaskExecutors::start(app.handle()));
                 let composers = app.state::<composer::Composers>();
                 app.state::<actions::Actions>().on_writes(composers.changed_hook());
+                // U35 Cancel and the Terminal draft (`hgs send-cancel`,
+                // `hgs terminal`): a replay without an explicit
+                // ZERUS_CLIENT_HGS never reaches the real CLI.
+                {
+                    let allowed = actions::actions_allowed(
+                        std::env::var("ZERUS_CLIENT_REPLAY").ok().as_deref(),
+                        std::env::var("ZERUS_CLIENT_HGS").ok().as_deref(),
+                    );
+                    let hgs = zerus_client_core::default_hgs();
+                    composers.set_hgs(std::sync::Arc::new(
+                        move |inv: &zerus_client_core::Invocation| {
+                            if !allowed {
+                                return zerus_client_core::Exit::StartFailed(
+                                    actions::REPLAY_NEEDS_HGS.to_owned(),
+                                );
+                            }
+                            zerus_client_core::run_limited(
+                                &hgs,
+                                inv,
+                                &[],
+                                zerus_client_core::held_input::REPLY_BYTES,
+                            )
+                            .unwrap_or_else(|_| zerus_client_core::Exit::Abnormal {
+                                stderr: "The reply was too large.".into(),
+                            })
+                        },
+                    ));
+                }
                 // Sends the desktop service takes (deferred_send) on Linux and
                 // macOS in desktop-service mode; every other Send stays direct.
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1827,6 +1866,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         window_layer::window_layer_state,
         window_chrome::window_chrome,
         window_chrome::window_control,
+        git_status::git_status_request,
         settings::hgs_version,
         settings::hgs_setting,
         settings::open_repository,
@@ -1847,6 +1887,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         analytics::analytics_save_review,
         approvals::approvals_list,
         approvals::approvals_detail,
+        keep_warm::keep_warm_set,
         worktree_policy::worktree_policy_view,
         worktree_policy::worktree_policy_read,
         worktree_policy::worktree_policy_choose,
@@ -2095,6 +2136,10 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::composer_refresh,
         composer::composer_clear_control,
         composer::composer_tab,
+        composer::changes::git_status,
+        composer::changes::git_diff,
+        composer::reference::reference_local_file,
+        composer::reference::pick_reference_file,
         drops::dropped_files,
         composer::fetch::attachment_fetch,
         composer::fetch::attachment_media,
@@ -2143,6 +2188,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::send::local_inspect,
         composer::send::send_cancel,
         composer::send::send_interrupted,
+        composer::held::held_cancel,
+        composer::held::terminal_draft_submit,
         composer::send::clear_context,
         composer::questions::question_edit,
         composer::questions::question_page,

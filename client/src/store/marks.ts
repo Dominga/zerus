@@ -255,6 +255,9 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
       ack = !signature ? localAck
         : !!s.localReadAttention || signature === (s.readAttentionSignature ?? "") || (sameRun && (queued!.attention_signature ?? "") === signature);
     }
+    // Task 315: a lead's quiet reply to the team's pastes stays read whatever
+    // the marks say (Qt's FleetState::quietTeamReply runs after the read state).
+    if (s.quietReply) unreadReply = false;
     // Shown unread once the reply is finished (Qt's visibleUnreadReply); a
     // projection without the field keeps the row's own value.
     const unread = s.unreadCandidate === undefined ? s.baseUnread : unreadReply && s.unreadCandidate;

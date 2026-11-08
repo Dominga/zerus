@@ -326,10 +326,28 @@ pub enum TeamAction {
         name: String,
         parent: Parent,
     },
+    /// Task #308: proposes a working mode; the owner allows it on its card.
+    ProposeWorkingMode {
+        preset: String,
+        #[serde(default)]
+        reason: String,
+    },
     /// Task #230: the owner marks the lead's plan changes seen, or reverts one.
     SeenLeadChanges,
     RevertLeadChange {
         change: String,
+    },
+    /// Task 304 (hgs task #246): the owner dismisses a Waiting row in its
+    /// current state; it returns when its state changes or on Restore.
+    WaitingDismiss {
+        id: String,
+        state: String,
+        #[serde(default)]
+        team: String,
+    },
+    /// Task 304: Show dismissed > Restore.
+    WaitingRestore {
+        id: String,
     },
     /// Task 40: parks a pending task with its reason until it is released.
     Hold {
@@ -688,8 +706,10 @@ impl TeamAction {
             Self::Finding { .. } => "finding",
             Self::NextGoal { .. } => "next-goal",
             Self::Create { .. } => "create",
+            Self::ProposeWorkingMode { .. } => "propose",
             Self::SeenLeadChanges => "seen-lead-changes",
             Self::RevertLeadChange { .. } => "revert-lead-change",
+            Self::WaitingDismiss { .. } | Self::WaitingRestore { .. } => "waiting",
             Self::Hold { .. } => "hold",
             Self::SkipStage { .. } => "skip-stage",
             Self::SendBack { .. } => "send-back",
@@ -750,6 +770,8 @@ impl TeamAction {
                 | Self::CatalogDiscard
                 | Self::CatalogSet { .. }
                 | Self::CatalogDesigner { .. }
+                | Self::WaitingDismiss { .. }
+                | Self::WaitingRestore { .. }
         )
     }
 
@@ -1145,6 +1167,21 @@ impl TeamAction {
             }
             Self::SeenLeadChanges => Ok(()),
             Self::RevertLeadChange { change } => word(change, "lead change id"),
+            Self::WaitingDismiss { id, state, team } => {
+                word(id, "Waiting item id")?;
+                if state.trim().is_empty() {
+                    return Err("Dismissing a Waiting row needs its state.".into());
+                }
+                plain(state, "A Waiting state", 400)?;
+                if team.is_empty() { Ok(()) } else { word(team, "team id") }
+            }
+            Self::WaitingRestore { id } => word(id, "Waiting item id"),
+            Self::ProposeWorkingMode { preset, reason } => {
+                if !matches!(preset.as_str(), "branch-pipeline" | "branch-per-task" | "shared-folder") {
+                    return Err("The working mode is branch-pipeline, branch-per-task or shared-folder.".into());
+                }
+                plain(reason, "A reason", 2000)
+            }
             Self::Release { task: id } | Self::Retry { task: id } => task(*id),
             Self::DecideProposal {
                 proposal,
@@ -1571,6 +1608,25 @@ impl TeamAction {
             Self::RevertLeadChange { change } => {
                 put("change", json!(change));
                 put("by", json!("human"));
+            }
+            Self::WaitingDismiss { id, state, team } => {
+                put("action", json!("dismiss"));
+                put("id", json!(id));
+                put("state", json!(state));
+                if !team.is_empty() {
+                    put("team", json!(team));
+                }
+            }
+            Self::WaitingRestore { id } => {
+                put("action", json!("undismiss"));
+                put("id", json!(id));
+            }
+            Self::ProposeWorkingMode { preset, reason } => {
+                put("kind", json!("working-mode"));
+                put("preset", json!(preset));
+                if !reason.trim().is_empty() {
+                    put("reason", json!(reason));
+                }
             }
             Self::Release { task } | Self::Retry { task } => put("task", json!(task)),
             Self::DecideProposal {
@@ -2056,6 +2112,31 @@ mod tests {
                 json!({"id": 4, "lane": null}),
             ],
         }
+    }
+
+    /// Task 304 (hgs #246): Dismiss and Restore are `hgs team waiting` calls
+    /// the owner makes; a row without a team (a tool offer, a drive) works too.
+    #[test]
+    fn dismiss_and_restore_are_owner_waiting_calls() {
+        let dismiss: TeamAction = serde_json::from_value(json!({"kind": "waiting_dismiss", "id": "t1/team_paused/1", "state": "paused:100.0", "team": "t1"})).unwrap();
+        assert_eq!(dismiss.op(), "waiting");
+        assert!(!dismiss.names_team());
+        assert!(dismiss.check().is_ok());
+        let call = TeamCall { computer: String::new(), team: String::new(), team_name: String::new(), action: dismiss, confirmed: false, request_id: Some("6f9619ff-8b86-4011-b42d-00c04fc964ff".into()) };
+        let (invocation, _) = prepare(&call).unwrap();
+        assert_eq!(invocation.args, ["team", "waiting", "--json"]);
+        let sent: Value = serde_json::from_slice(invocation.stdin.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            [&sent["action"], &sent["id"], &sent["state"], &sent["team"], &sent["by"]],
+            [&json!("dismiss"), &json!("t1/team_paused/1"), &json!("paused:100.0"), &json!("t1"), &json!("human")]
+        );
+        let restore: TeamAction = serde_json::from_value(json!({"kind": "waiting_restore", "id": "tools/offer/cmake"})).unwrap();
+        let input = restore.input();
+        assert_eq!([&input["action"], &input["id"]], [&json!("undismiss"), &json!("tools/offer/cmake")]);
+        assert!(input.get("team").is_none());
+        // A dismissal names the state it hides.
+        assert!(TeamAction::WaitingDismiss { id: "t1/x".into(), state: " ".into(), team: String::new() }.check().is_err());
+        assert!(TeamAction::WaitingRestore { id: String::new() }.check().is_err());
     }
 
     #[test]

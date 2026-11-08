@@ -2,10 +2,12 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, 
 import { Portal } from "solid-js/web";
 import { tr } from "../../i18n";
 import { Icon } from "../lib/icons";
-import { teams } from "../../store/teams";
+import { memberRow, teams } from "../../store/teams";
+import { setDetailTab, setPage, setSelectedKey } from "../../store/ui";
 import { useModel, windowPort } from "./ProposalCards";
 import {
   TeamActions, FINDING_LABELS, barActions, barChips, finishSummary, formText, moreItems, openQuestions, phaseModeChip, phaseModeState, phaseModeSwitch, questionClosed, teamModeBadge, stageName, subtreeImpact, taskButtons,
+  leadMemberOf,
   type ActTask, type ActTeam, type BarAction, type BarChip, type TaskForm,
 } from "./actions";
 import type { ComputerId, TeamFindingItem, TeamPhaseView } from "../../types";
@@ -104,7 +106,18 @@ export function NextGoalDialog(props: { computer: ComputerId; team: ActTeam; clo
   const submit = async () => {
     if (!goal().trim()) return;
     const outcome = await model.nextGoal(goal(), name());
-    if (outcome && outcome !== "cancelled" && outcome.outcome === "done") props.close();
+    if (!outcome || outcome === "cancelled" || outcome.outcome !== "done") return;
+    // Task #296: Qt opens the new team; select its lead session on the Team
+    // tab once the team list has it (the next-goal answer names its id).
+    const created = (outcome.receipt as { team?: string } | null)?.team;
+    if (created) {
+      for (let wait = 0; wait < 20; ++wait) {
+        const row = memberRow(props.computer, leadMemberOf(teams.list(props.computer), created));
+        if (row) { setPage("sessions"); setSelectedKey(row.key); setDetailTab("team"); break; }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+    props.close();
   };
   const running = () => props.team.members.filter((member) => member.session).length;
   return (

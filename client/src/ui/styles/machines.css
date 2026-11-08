@@ -219,3 +219,7 @@
   .atm-spin { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--z-color-accent); border-right-color: transparent; animation: spin 1s linear infinite; }
 
 .atm-row:focus-visible { outline: 2px solid var(--z-color-accent); outline-offset: -2px; }
+
+/* Task #318 (F12): the Phones section of Machines, above the machine cards. */
+.mach-phones { width: 100%; min-width: 0; padding: 4px 0 10px; border-bottom: 1px solid var(--z-color-divider); }
+.mach-phones .set-phones { margin: 0; }

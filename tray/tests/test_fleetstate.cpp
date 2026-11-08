@@ -28,7 +28,22 @@ static SessionInfo shared(const QString &reply = "7:100.5", const QString &signa
 
 class TestFleetState : public QObject {
     Q_OBJECT
+    QTemporaryDir m_settings;
 private slots:
+    // Task 311: the lead-notice test writes Settings, which needs an
+    // application with names: without one (QTEST_APPLESS_MAIN) no write
+    // reached QSettings, so Full never read back, and the Windows isolation
+    // (TestIsolation.cpp, a startup function of QCoreApplication) never ran.
+    void initTestCase()
+    {
+        QCoreApplication::setOrganizationName(QStringLiteral("hgs-tests"));
+        QCoreApplication::setApplicationName(QStringLiteral("fleetstate"));
+#ifndef Q_OS_WIN
+        QVERIFY(m_settings.isValid());
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_settings.path());
+#endif
+    }
     void aLeadsRepliesToTeamNoticesAreReadUnlessFull();
     void sumsAcrossBoxes();
     void attentionMarksFollowConversationAndRejectStaleActions();
@@ -665,5 +680,5 @@ void TestFleetState::aLeadsRepliesToTeamNoticesAreReadUnlessFull()
     Settings::set("teams/leadNoticeSessions", "{}");
 }
 
-QTEST_APPLESS_MAIN(TestFleetState)
+QTEST_GUILESS_MAIN(TestFleetState)
 #include "test_fleetstate.moc"

@@ -35,5 +35,39 @@ class LaunchIdentityTest(unittest.TestCase):
         self.assertIn("tauri.windows.switch.conf.json", package)
 
 
+class RunResolvesTheProgramTest(unittest.TestCase):
+    """Task 205: npm is npm.cmd on Windows; CreateProcess needs the full name."""
+
+    def test_the_program_is_resolved_like_the_shell_does(self):
+        calls = []
+        which, call = tauri_template.shutil.which, tauri_template.subprocess.call
+        tauri_template.shutil.which = lambda name: "C:/Program Files/nodejs/npm.cmd" if name == "npm" else None
+        tauri_template.subprocess.call = lambda argv, cwd=None: calls.append(argv) or 0
+        try:
+            self.assertEqual(tauri_template.run(["npm", "--prefix", "client", "run", "tauri"]), 0)
+            self.assertEqual(tauri_template.run(["not-on-path", "x"]), 0)
+        finally:
+            tauri_template.shutil.which, tauri_template.subprocess.call = which, call
+        self.assertEqual(calls, [["C:/Program Files/nodejs/npm.cmd", "--prefix", "client", "run", "tauri"], ["not-on-path", "x"]])
+
+
+class BinaryFollowsTheTargetDirTest(unittest.TestCase):
+    """Task 317: launch takes the binary of the build it follows."""
+
+    def test_the_default_and_an_explicit_target(self):
+        import os
+        saved = os.environ.pop("CARGO_TARGET_DIR", None)
+        try:
+            self.assertEqual(tauri_template.binary().parent, tauri_template.CLIENT / "src-tauri" / "target" / "release")
+            os.environ["CARGO_TARGET_DIR"] = str(Path("D:/build/target-317"))
+            self.assertEqual(tauri_template.binary().parent, Path("D:/build/target-317") / "release")
+            os.environ["CARGO_TARGET_DIR"] = "other-target"
+            self.assertEqual(tauri_template.binary().parent, tauri_template.CLIENT / "src-tauri" / "other-target" / "release")
+        finally:
+            os.environ.pop("CARGO_TARGET_DIR", None)
+            if saved is not None:
+                os.environ["CARGO_TARGET_DIR"] = saved
+
+
 if __name__ == "__main__":
     unittest.main()

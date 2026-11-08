@@ -163,7 +163,7 @@ export function LeadProposals() {
   }));
   return (
     <Show when={team()}>{(view) => (
-      <div class="cmp-col"><TeamProposals computer={row()!.computer} team={view()} /></div>
+      <div class="cmp-col lead-proposals"><TeamProposals computer={row()!.computer} team={view()} /></div>
     )}</Show>
   );
 }

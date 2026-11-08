@@ -13,7 +13,7 @@ vi.mock("../../store/catalog", async (orig) => ({
   computerOffline: (computer: string) => !mocks.online(computer),
 }));
 
-import { agentsLabel, badgeKind, cardState, childStatus, chipTooltip, emphasis, lineThree, statusCaption } from "./SessionCard";
+import { agentsLabel, badgeKind, cardState, childStatus, chipTooltip, chipWidth, emphasis, fitChips, headerState, lineThree, statusCaption, type RowChip } from "./SessionCard";
 import { now } from "../../store/ui";
 import type { Session } from "./types";
 import { toSession } from "../../store/catalog";
@@ -40,6 +40,18 @@ describe("session card unread presentation", () => {
     mocks.online.mockReturnValue(true);
     expect(badgeKind(row())).toBe("neutral");
     expect(emphasis(row())).toBeUndefined();
+  });
+
+  it("names a finished unread reply New reply over the state under it, as Qt's card (task 315)", () => {
+    mocks.online.mockReturnValue(true);
+    // 205 F2: work-9b8fda6a, stopped with a reply nobody read; the host's state is the user's reply.
+    const stopped = row({ state: "stopped", status: "paused", caption: "Stopped", unreadCandidate: true,
+      sessionState: "user", stateReason: { kind: "reply", text: "" } });
+    expect([badgeKind(stopped), statusCaption(stopped)]).toEqual(["unread", "New reply"]);
+    expect(statusCaption({ ...stopped, muted: true } as Session)).toBe("New reply");
+    // Attention and work keep their own words.
+    expect(statusCaption(row({ status: "attention", caption: "Needs input", unreadCandidate: true }))).toBe("Needs input");
+    expect(statusCaption(row({ status: "ready", caption: "Ready" }))).toBe("Ready");
   });
 });
 
@@ -124,6 +136,22 @@ describe("session states on the card (U30, SessionCardDelegate cardStatus)", () 
     expect(cardState(facts({ ...idle, draft: false })).kind).toBe("cooling");
   });
 
+  it("gives the detail header the card's state, as Qt's header pill (task 315 F3)", () => {
+    // 205 F3: the lead's row said Waiting for reports while its header said Ready.
+    const lead = facts({ status: "ready", caption: "Ready", sessionState: "deps",
+      stateReason: { kind: "team_reports", text: "Waiting for reports: Frontend (SolidJS) #205" } });
+    expect(statusCaption(lead)).toBe("Waiting");
+    expect(headerState(lead)).toEqual({ kind: "deps", caption: "Waiting", title: "Waiting for reports: Frontend (SolidJS) #205" });
+    expect(headerState(facts({ status: "ready", sessionState: "stopped" }))?.caption).toBe("Stopped");
+    expect(headerState(facts({ status: "ready", sessionState: "user", stateReason: { kind: "team_lead", text: "Approve the plan" } })))
+      .toEqual({ kind: "attention", caption: "Needs you", title: "Approve the plan" });
+    // A request that needs action, an archived row and a working agent keep the header's own status.
+    expect(headerState(facts({ status: "attention", needsAction: true, sessionState: "deps" }))).toBeUndefined();
+    expect(headerState(facts({ sessionState: "deps", state: "archived" }))).toBeUndefined();
+    expect(headerState(facts({ sessionState: "working" }))).toBeUndefined();
+    expect(headerState(facts({ status: "ready" }))).toBeUndefined();
+  });
+
   it("names the lead's Needs you as attention, with its reason on line 3", () => {
     const s = facts({ status: "ready", sessionState: "user", stateReason: { kind: "team_lead", text: "Approve the plan" } });
     expect([badgeKind(s), statusCaption(s)]).toEqual(["attention", "Needs you"]);
@@ -150,5 +178,36 @@ describe("the chips on the card name what they count (SessionRowChips::tooltip)"
     expect(chipTooltip(s, "incoming")).toBe("3 incoming commits");
     expect(chipTooltip(s, "synced")).toBe("Clean and in sync with the checked upstream");
     expect(chipTooltip(s, "unchecked")).toBe("Not checked yet");
+  });
+});
+
+// Task 252 (Qt SessionRowChips::layout): when line 2 is full, git folds into
+// one More chip before services or background work go, then chips drop from
+// the end; the machine badge keeps its room.
+const chip = (kind: RowChip["kind"], icon: string, count?: string): RowChip => ({ kind, icon, count, tone: "muted", tip: icon });
+const chips = [chip("services", "settings", "2"), chip("background", "active", "1"), chip("git", "git-diff", "12"), chip("git", "git-push", "3"), chip("git", "git-unknown")];
+const width = (list: RowChip[]) => list.reduce((sum, c) => sum + chipWidth(c) + 4, 0) - 4;
+
+describe("line 2 chips (task 252)", () => {
+  it("shows every chip when they fit", () => {
+    expect(fitChips(chips, width(chips), { tip: "git" })).toEqual(chips);
+  });
+
+  it("folds git into one More chip with the git tooltip before dropping anything", () => {
+    const folded = fitChips(chips, width(chips) - 1, { tip: "Git status" });
+    expect(folded.map((c) => c.kind)).toEqual(["services", "background", "more"]);
+    expect(folded[2]).toMatchObject({ icon: "more", tip: "Git status" });
+    expect(folded[2].count).toBeUndefined();
+  });
+
+  it("drops chips from the end when even the folded ones do not fit", () => {
+    const folded = [chips[0], chips[1], { ...chip("more", "more"), tip: "g" }];
+    expect(fitChips(chips, width(folded) - 1, { tip: "g" }).map((c) => c.kind)).toEqual(["services", "background"]);
+    expect(fitChips(chips, 0, { tip: "g" })).toEqual([]);
+  });
+
+  it("sizes a chip as Qt does: icon and padding, plus its count", () => {
+    expect(chipWidth({})).toBe(24);
+    expect(chipWidth({ count: "12" })).toBe(41);
   });
 });

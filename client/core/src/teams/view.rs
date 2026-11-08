@@ -379,6 +379,46 @@ pub struct MemberView {
     /// U45: the models Zerus may switch it to before a task ({model, effort}).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<Value>,
+    /// Task 315 (Qt U17/C4, `members[].permission_answers`): its answered
+    /// permission requests, oldest first, the last [`PERMISSION_ANSWERS_KEPT`].
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub permission_answers: Vec<PermissionAnswerView>,
+}
+
+/// Task 315: one answered permission request of a member (Qt's
+/// `PermissionAnswer`): what was decided (`allow` or `deny`), who decided it
+/// (`owner`, `lead`, `rule`, `timeout`), when, the tool and command it asked
+/// about and the deny text.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct PermissionAnswerView {
+    pub question_id: String,
+    pub decision: String,
+    pub by: String,
+    pub reason: String,
+    pub tool: String,
+    pub command: String,
+    pub at: f64,
+}
+
+/// hgs keeps a member's last 20 answers; so does the card.
+pub const PERMISSION_ANSWERS_KEPT: usize = 20;
+
+fn permission_answers(value: &Value) -> Vec<PermissionAnswerView> {
+    let answers: Vec<PermissionAnswerView> = array(value, "permission_answers")
+        .iter()
+        .map(|answer| PermissionAnswerView {
+            question_id: name(answer, "question_id"),
+            decision: name(answer, "decision"),
+            by: name(answer, "by"),
+            reason: text(answer, "reason", LINE_CHARS),
+            tool: name(answer, "tool"),
+            command: text(answer, "command", LINE_CHARS),
+            at: number(answer, "at"),
+        })
+        .filter(|answer| !answer.decision.is_empty())
+        .collect();
+    let skip = answers.len().saturating_sub(PERMISSION_ANSWERS_KEPT);
+    answers.into_iter().skip(skip).collect()
 }
 
 /// Task 209: a member's native context reading as the member card shows it.
@@ -855,6 +895,9 @@ pub struct TeamView {
     pub name: String,
     pub status: String,
     pub project: String,
+    /// Task #308: the team's working mode and the project proposal.
+    #[serde(skip_serializing_if = "Value::is_null")]
+    pub working_mode: Value,
     pub folder: String,
     pub goal: String,
     pub plan_mode: String,
@@ -978,6 +1021,7 @@ fn member(value: &Value, lead: &str) -> MemberView {
             .filter(|choice| choice.get("model").and_then(Value::as_str).is_some_and(|model| !model.is_empty()))
             .map(|choice| json!({"model": name(choice, "model"), "effort": name(choice, "effort")}))
             .collect(),
+        permission_answers: permission_answers(value),
         budget: value.get("budget").filter(|budget| budget.is_object()).map(|budget| BudgetView {
             label: text(budget, "label", LINE_CHARS),
             state: name(budget, "state"),
@@ -1216,6 +1260,7 @@ pub fn team(value: &Value) -> TeamView {
         name: name(value, "name"),
         status: name(value, "status"),
         project: name(value, "project"),
+        working_mode: value.get("working_mode").filter(|mode| mode.is_object()).map_or(Value::Null, |mode| bounded(Some(mode))),
         folder: text(value, "folder", LINE_CHARS),
         goal: text(value, "goal", TEXT_CHARS),
         plan_mode: name(value, "plan_mode"),
@@ -1434,6 +1479,9 @@ pub struct NewTeamView {
     pub addendum: String,
     pub folder: String,
     pub settings: Value,
+    /// Task #308: the proposed working mode, its reasons and the accepted preset.
+    #[serde(skip_serializing_if = "Value::is_null")]
+    pub working_mode: Value,
     pub members: Vec<DraftMember>,
     pub tasks: Vec<TaskView>,
     pub draft: DraftView,
@@ -1454,6 +1502,7 @@ pub fn new_team(value: &Value, view: &TeamView) -> Option<NewTeamView> {
         addendum: text(value, "lead_protocol", TEXT_CHARS),
         folder: view.folder.clone(),
         settings: view.settings.clone(),
+        working_mode: bounded(value.get("working_mode")),
         members: array(value, "members")
             .iter()
             .take(MEMBERS_KEPT)
@@ -1581,6 +1630,9 @@ pub struct WaitingItem {
     /// its phase, task, member, member id or tool offer, which an answer in
     /// place names.
     pub detail: Value,
+    /// Task 304 (hgs #246): the situation the row stands for; Dismiss names
+    /// it, and a changed state brings a dismissed row back.
+    pub state: String,
 }
 
 /// The first page of `team waiting`, with how many wait in all.
@@ -1592,25 +1644,32 @@ pub struct WaitingView {
     pub more: bool,
     /// The cursor the next older page sends, as hgs words it.
     pub next: Option<Value>,
+    /// Task 304 (hgs #246): the rows the owner dismissed, apart from the
+    /// count; a decision that still blocks work says so (`blocking`, `blocks`).
+    pub dismissed: Vec<WaitingItem>,
+    pub dismissed_total: u64,
+}
+
+fn waiting_item(item: &Value) -> WaitingItem {
+    WaitingItem {
+        id: name(item, "id"),
+        kind: name(item, "kind"),
+        team: name(item, "team"),
+        team_name: name(item, "team_name"),
+        title: text(item, "title", LINE_CHARS),
+        action: name(item, "action"),
+        since: number(item, "since"),
+        proposal: bounded(item.get("proposal")),
+        detail: bounded(Some(item)),
+        state: text(item, "state", LINE_CHARS),
+    }
 }
 
 pub fn waiting(value: &Value) -> WaitingView {
     WaitingView {
-        items: array(value, "items")
-            .iter()
-            .take(ITEMS_KEPT)
-            .map(|item| WaitingItem {
-                id: name(item, "id"),
-                kind: name(item, "kind"),
-                team: name(item, "team"),
-                team_name: name(item, "team_name"),
-                title: text(item, "title", LINE_CHARS),
-                action: name(item, "action"),
-                since: number(item, "since"),
-                proposal: bounded(item.get("proposal")),
-                detail: bounded(Some(item)),
-            })
-            .collect(),
+        items: array(value, "items").iter().take(ITEMS_KEPT).map(waiting_item).collect(),
+        dismissed: array(value, "dismissed").iter().take(ITEMS_KEPT).map(waiting_item).collect(),
+        dismissed_total: count(value, "dismissed_total"),
         total: count(value, "total"),
         more: value.get("next").is_some_and(|next| !next.is_null()),
         next: value
@@ -2297,5 +2356,27 @@ mod tests {
         );
         assert_eq!(task(&json!({"id":2,"title":"T","lane":{"n":0,"label":"x"}})).lane, None);
         assert_eq!(task(&json!({"id":3,"title":"T"})).lane, None);
+    }
+
+    #[test]
+    fn a_member_carries_its_answered_permissions_as_qt_reads_them() {
+        let mut answers: Vec<Value> = (0..23)
+            .map(|n| json!({"question_id": format!("q{n}"), "decision": "allow", "by": "lead", "at": 100.0 + n as f64,
+                "tool": "Bash", "command": "cargo build"}))
+            .collect();
+        answers.push(json!({"question_id": "q-no-decision", "by": "owner", "at": 200.0}));
+        answers.push(json!({"question_id": "q-last", "decision": "deny", "by": "owner", "reason": "Not in this folder",
+            "tool": "Write", "at": 300.0}));
+        let view = member(&json!({"id": "dev", "permission_answers": answers}), "lead");
+        assert_eq!(view.permission_answers.len(), PERMISSION_ANSWERS_KEPT, "the last 20 with a decision");
+        assert_eq!(view.permission_answers[0].question_id, "q4");
+        let last = view.permission_answers.last().unwrap();
+        assert_eq!(
+            (last.decision.as_str(), last.by.as_str(), last.reason.as_str(), last.tool.as_str(), last.at),
+            ("deny", "owner", "Not in this folder", "Write", 300.0)
+        );
+        assert!(member(&json!({"id": "dev"}), "lead").permission_answers.is_empty());
+        let shown = serde_json::to_value(member(&json!({"id": "dev"}), "lead")).unwrap();
+        assert!(shown.get("permission_answers").is_none(), "an empty list is not sent");
     }
 }

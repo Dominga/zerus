@@ -72,6 +72,9 @@ export interface ComposerPort {
   localRetry(handle: number, id: string): Promise<SendReply>;
   localDelete(handle: number, id: string): Promise<void>;
   localInspect(handle: number, id: string): Promise<Inspect | null>;
+  /** U35 Cancel on a held row, and Send it on the Terminal draft bar (src-tauri composer/held.rs): false when nothing started. */
+  heldCancel?(handle: number, requestId: string): Promise<boolean>;
+  draftSubmit?(handle: number): Promise<boolean>;
 }
 
 /** Image decoding for pastes that are not PNG; tests pass their own. */
@@ -222,6 +225,17 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
   const queue = () => opening() > 0 ? null : view()?.queue ?? null;
   /** The message a Compact and continue holds (zerus-pabah): like the queue, the open composer's own, never a successor's while it opens. */
   const heldNow = () => opening() > 0 ? null : view()?.held ?? null;
+  /** U35: what hgs holds for the open composer's session, never a successor's while it opens. */
+  const heldInputs = () => opening() > 0 ? [] : view()?.held_inputs ?? [];
+  /** The open run's Terminal draft, likewise. */
+  const terminalDraft = () => opening() > 0 ? null : view()?.terminal_draft ?? null;
+  /** A held-row Cancel or Send it under the composer it started on; a rejected call says why. */
+  async function heldCall(call: (h: number) => Promise<boolean> | undefined) {
+    const h = handle();
+    if (h === undefined || closing() || opening() > 0) return;
+    try { await call(h); }
+    catch (e) { notices("error", typeof e === "string" ? e : e instanceof Error ? e.message : String(e), true); }
+  }
 
   /** The composer goes or changes: its open question answers Cancel, as its modal dialog would. */
   function dropDialog() {
@@ -421,7 +435,11 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
   }
 
   return {
-    view, text, selection, dialog, locked, operationLocked, sendEnabled, pushEnabled, queue, held: heldNow, hint,
+    view, text, selection, dialog, locked, operationLocked, sendEnabled, pushEnabled, queue, held: heldNow, hint, heldInputs, terminalDraft,
+    /** Cancel on a held row: Rust disables it until hgs answers. */
+    cancelHeld: (requestId: string) => heldCall((h) => port.heldCancel?.(h, requestId)),
+    /** Send it: Enter in Terminal for the draft shown, once. */
+    submitDraft: () => heldCall((h) => port.draftSubmit?.(h)),
     /** The status line: Qt's order, with the composer's own error and the typed length. */
     status: (): StatusLine => statusLine(view(), error(), tooLong()),
     apply, receive,
@@ -458,6 +476,28 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
       if (s.start === start && s.end === end) return;
       setSelection({ start, end });
       if (!locked() && view()) changed();
+    },
+    /**
+     * Qt's offerDraft (MessageComposer.cpp:614-624, Send report): puts
+     * `draft` into the composer of draft key `key` once it is the open,
+     * loaded one, with the cursor at its end; nothing is sent. It waits at
+     * most `wait` ms for that composer to open. Refused (false) when the
+     * draft is empty, the composer never opened, or a draft the user started
+     * or a message on its way wins: text, attachments, a send, a recording,
+     * a wait, a blocking session status or any other lock.
+     */
+    async offer(key: string, draft: string, wait = 4000): Promise<boolean> {
+      if (!key || !draft.trim()) return false;
+      const deadline = timers.now() + wait;
+      while (view()?.key !== key || opening() > 0 || !view()?.loaded) {
+        if (closing() || timers.now() >= deadline) return false;
+        await new Promise<void>((done) => { timers.later(() => done(), 50); });
+      }
+      const v = view()!;
+      if (text().trim() || v.attachments.length > 0 || v.sending || v.recording || v.waiting || v.session_blocks_input || locked()) return false;
+      batch(() => { setText(draft); setSelection({ start: draft.length, end: draft.length }); });
+      changed();
+      return true;
     },
     flush, flushForExit,
     attachFiles: () => exclusive((h) => { const s = ordered(); return port.pick(h, s.start, s.end); }),
@@ -599,6 +639,8 @@ export const composer = createRoot(() => createComposer({
   send: bridge.sendMessage, push: (...args) => bridge.sendPush(...args), sendNow: (id) => bridge.queueSendNow(id), answer: bridge.sendAnswer, remove: bridge.composerRemove, undo: bridge.composerUndoRemove,
   allowRetry: bridge.composerAllowRetry, cancelSend: bridge.sendCancel, interrupted: bridge.sendInterrupted, clear: bridge.clearContext,
   refresh: bridge.composerRefresh, openAttachment: (path) => bridge.attachmentOpenDraft(path), localRetry: bridge.localRetry, localDelete: bridge.localDelete, localInspect: bridge.localInspect,
+  // Read at call time: a test's partial bridge mock need not define them.
+  heldCancel: (...args) => bridge.heldCancel(...args), draftSubmit: (...args) => bridge.terminalDraftSubmit(...args),
 }, realTimers, browserImages, appNotices, suggestions.dismiss, async (session, control, execute) => {
   const [{ endActions }, { catalog, rowId }, { captureEnd, sameEnd }] = await Promise.all([import("./endActions"), import("./catalog"), import("./endActionBusy")]);
   const row = session ? catalog.rows[rowId(session.computer, session.key)] : undefined;

@@ -1034,6 +1034,19 @@ QWidget *TeamWorkspace::headerActionsContent(const Team &team)
         });
         findings->setProperty("ghost", true);
     }
+    // Task #308: the project's working mode disagrees with the running team;
+    // switching asks for a proposal card, as the lead's other changes do.
+    if (team.workingMode.known && !team.workingMode.disagreeing.isEmpty()) {
+        auto *mode = add(tr("Working mode: switch…"), "teamWorkingMode", false, [this, team] {
+            if (!m_panel->confirm("teamWorkingModeConfirm", tr("Switch the working mode?"),
+                                  tr("Switch this team to \"%1\"? Its settings follow the project's proposal.").arg(team.workingMode.proposalPreset),
+                                  tr("Propose the switch"))) return;
+            m_panel->act("propose", QJsonObject{{"kind", "working-mode"}, {"preset", team.workingMode.proposalPreset},
+                                                {"reason", tr("The project suggests %1").arg(team.workingMode.title)}});
+        });
+        mode->setProperty("ghost", true);
+        mode->setToolTip(tr("Suggested: %1\n%2").arg(team.workingMode.title, team.workingMode.reasons.join(QStringLiteral("\n"))));
+    }
     // F7: the team a next goal came from, and the one it led to.
     for (const auto &[id, text, objectName] : {std::tuple{team.previous, tr("← Previous"), "teamBarPrevious"},
                                                std::tuple{team.next, tr("Next goal →"), "teamBarNext"}}) {
@@ -1575,7 +1588,8 @@ QWidget *TeamWorkspace::inboxStrip(const Team &team, const QList<InboxItem> &ite
         return item.kind == "report" ? tr("report") : item.kind == "question" ? tr("question")
              : item.kind == "permission" ? tr("permission") : item.kind == "lead_task" ? tr("lead task")
              : item.kind == "stalled" ? tr("stalled") : item.kind == "budget" ? tr("budget")
-             : item.kind == "interim_report" ? tr("interim") : item.kind == "merge_waiting" ? tr("merge waiting") : item.kind;
+             : item.kind == "interim_report" ? tr("interim") : item.kind == "merge_waiting" ? tr("merge waiting")
+             : item.kind == "attempt_recovered" ? tr("attempt recovered") : item.kind;
     };
     auto *head = row(6);
     auto *toggle = new QToolButton; toggle->setIcon(workspaceIcon(m_inboxOpen ? "chevron-down" : "chevron-right", c.fg)); toggle->setAutoRaise(true);

@@ -1,11 +1,11 @@
-import { For, Show, createEffect, createMemo, createSignal, onCleanup, type JSX } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, type JSX } from "solid-js";
 import { tr } from "../../i18n";
 import { AgentGlyph, Icon } from "../lib/icons";
 import { agentKind, computerOffline } from "../../store/catalog";
 import { coordinatorActivity, activity } from "../../store/session";
 import { memberRow, showCatalog, showTeam, teams } from "../../store/teams";
 import { SHARE, SIDE, dragShare, dragSide, teamLayout, type TeamLayout } from "../../store/teamLayout";
-import { selected, setDetailTab, setPage, setSelectedKey, toast } from "../../store/ui";
+import { selected, setDetailTab, setPage, setSelectedKey, subagentOpen, toast } from "../../store/ui";
 import { teamAction, teamBuilds, teamTests, teamTimeline, teamsProfile } from "../../bridge";
 import { AddMemberDialog, MemberCard, toComposer } from "./MemberCard";
 import { focusedTasks, memberTree } from "./members";
@@ -26,9 +26,11 @@ import { sendBackMessage } from "./actions";
 import { duration, memberProgress, memberStatus, progress, shownMembers, stateLabel, stateTone, teamState, type MemberLive, type MemberStatus } from "./team-model";
 import { roleStyle } from "./roles";
 import { TeamProposals } from "./ProposalCards";
+import { ledTeamOf, leadsTeam } from "./leadTeam";
 import { TeamReports } from "./TeamReports";
 import { WaitingBanner } from "./Waiting";
 import { Blockers, PhaseActions, TaskActions, TeamBarActions, TeamBarChips, TeamModeControl, TeamQuestions, createPlanEditing } from "./TeamActions";
+import { TeamActions as TeamActionModel } from "./actions";
 import { composer } from "../../store/composer";
 import type { ComputerId, TeamCall, TeamMemberView, TeamTaskView, TeamView } from "../../types";
 import type { Session } from "../sessions/types";
@@ -173,6 +175,24 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
         onCatalog={() => setCatalogOpen(true)} />
       <WaitingBanner />
       <TeamReports computer={props.computer} team={props.team} />
+      <Show when={props.team.working_mode?.disagreeing?.length ? props.team.working_mode.disagreeing : undefined}>
+        {(wrong) => (
+          <section class="team-working-mode" data-working-mode={props.team.working_mode!.preset}>
+            <b>{tr("Working mode: the project suggests %1", props.team.working_mode!.proposal?.title || props.team.working_mode!.proposal?.preset || props.team.working_mode!.preset)}</b>
+            <p>{tr("This team's settings differ: %1", wrong().join(", "))}</p>
+            <Show when={props.team.working_mode!.proposal?.reasons?.length}>
+              <ul><For each={props.team.working_mode!.proposal!.reasons}>{(reason) => <li>{reason}</li>}</For></ul>
+            </Show>
+            <button type="button" class="btn small" data-working-mode-switch
+              onClick={() => void new TeamActionModel(windowPort, () => ({ computer: props.computer, team: props.team }))
+                .proposeWorkingMode(props.team.working_mode!.proposal?.preset || props.team.working_mode!.preset,
+                  props.team.working_mode!.proposal?.title || "")}>
+              {tr("Propose the switch")}
+            </button>
+            <TeamProposals computer={props.computer} team={props.team} />
+          </section>
+        )}
+      </Show>
       <Show when={props.failure}><div class="team-strip danger" role="status"><Icon name="circle-alert" size={14} /><span class="ell">{props.failure}</span></div></Show>
       <Show when={state() === "stuck"}>
         <div class="team-strip warn" role="status">
@@ -329,6 +349,73 @@ function TeamBar(props: {
   );
 }
 
+/**
+ * Task 317 (F13): the lead's own session carries its team outside the Team tab
+ * too, as Qt's lead header does: the team bar (state, working mode, progress,
+ * problems, settings, catalog and the team actions) and a strip naming the team
+ * the session leads, with Open team panel. A member's session shows none; the
+ * Team tab has its own bar, so the host leaves this out there.
+ */
+export function LeadTeamHeader() {
+  const row = () => selected();
+  const led = createMemo(() => {
+    const now = row();
+    return now && now.state !== "archived" && !subagentOpen() ? ledTeamOf(teams.list(now.computer), now) : undefined;
+  });
+  // The team's own read, as LeadProposals follows it: only a different team re-subscribes.
+  createEffect(on(() => {
+    const now = row(), summary = led();
+    return now && summary && summary.status !== "draft" ? `${now.computer}\n${summary.id}` : "";
+  }, (key) => {
+    if (!key) return;
+    const at = key.indexOf("\n");
+    onCleanup(showTeam(key.slice(0, at), key.slice(at + 1)));
+  }));
+  const team = createMemo(() => {
+    const now = row(), summary = led();
+    if (!now || !summary || summary.status === "draft") return undefined;
+    const view = teams.team(now.computer, summary.id);
+    return view && leadsTeam(view, now) ? view : undefined;
+  });
+  return <Show when={team()}>{(view) => <LeadTeamBar computer={row()!.computer} team={view()} />}</Show>;
+}
+
+function LeadTeamBar(props: { computer: ComputerId; team: TeamView }) {
+  const live = (member: TeamMemberView) => liveOf(props.computer, member);
+  const state = createMemo(() => teamState(props.team, live));
+  const problemTasks = createMemo(() => {
+    const tasks = new Set<number>();
+    for (const member of shownMembers(props.team)) {
+      const status = memberStatus(props.team, member, live(member));
+      if (status.problem && status.task > 0) tasks.add(status.task);
+    }
+    return tasks;
+  });
+  const [settingsOpen, setSettingsOpen] = createSignal(false);
+  const [catalogOpen, setCatalogOpen] = createSignal(false);
+  createEffect(() => {
+    if (!catalogOpen()) return;
+    onCleanup(showCatalog(props.computer));
+  });
+  return (
+    <div class="lead-team" data-lead-team={props.team.id}>
+      <TeamBar computer={props.computer} team={props.team} state={state()} problemTasks={problemTasks()}
+        onPhase={() => setDetailTab("team")} onSettings={() => setSettingsOpen(true)} onCatalog={() => setCatalogOpen(true)} />
+      <div class="lead-team-strip" data-lead-team-strip>
+        <span>{tr("Team")}</span><b class="ell">{props.team.name}</b><span class="team-pill">{tr("Lead")}</span>
+        <span class="grow" />
+        <button type="button" class="btn ghost small" data-open-team-panel onClick={() => setDetailTab("team")}>{tr("Open team panel")}</button>
+      </div>
+      <Show when={settingsOpen()}>
+        <TeamSettingsDialog team={props.team} onClose={() => setSettingsOpen(false)} />
+      </Show>
+      <Show when={catalogOpen()}>
+        <TeamCatalogEditor onOpenDesigner={() => { setCatalogOpen(false); setPage("designer"); }} />
+      </Show>
+    </div>
+  );
+}
+
 /** The canvas until the plan view takes it: the phases with their progress. */
 function TeamPhases(props: { computer: ComputerId; team: TeamView; owner: boolean }) {
   return (
@@ -401,8 +488,9 @@ function openRow(row: Session | undefined) {
 }
 
 /**
- * Task 199 (Qt TeamWorkspace.cpp 3617-3700): Needs your attention, Needs your
- * answer and Plan problems; each row opens what it names.
+ * Task 199 (Qt TeamWorkspace.cpp 3617-3700): Plan problems; each row opens
+ * what it names. Task 345 removed Needs your attention and Needs your answer:
+ * each member's card carries its request.
  */
 function SideLists(props: { team: TeamView; onGo: (target: SideTarget) => void }) {
   const lists = createMemo(() => sideLists(props.team));

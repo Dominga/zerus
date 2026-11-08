@@ -183,6 +183,26 @@ describe("the plan's Graph, Board and Layers (task 197)", () => {
     expect(html).not.toContain('data-scroll="graph/t1/2"');
   });
 
+  it("gives a folded phase card its closing border and four round corners, with one frame when open (task 332)", async () => {
+    const { team, graph } = fixture();
+    team.phases[1].status = "done";
+    team.tasks[5].status = "accepted";
+    const html = render({ team, graph, problems, now });
+    // The folded header carries pt-phase-closed beside its state class; the open one does not.
+    expect(html).toMatch(/class="pt-phase pt-phase-done pt-phase-closed"[^>]*data-phase-head="2"/);
+    expect(html).toMatch(/class="pt-phase pt-phase-[a-z]+"[^>]*aria-expanded="true"[^>]*data-phase-head="1"/);
+    const fs = await import(/* @vite-ignore */ ["node", "fs"].join(":")) as { readFileSync(path: URL, encoding: "utf8"): string };
+    const css = fs.readFileSync(new URL("../styles/plan.css", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+    expect(css).toContain(".pt-phase.pt-phase-closed { border-bottom: 1px solid var(--z-color-card-border); border-radius: 10px; }");
+    // Wider content is clipped inside the padding, never against the right border.
+    expect(css).toContain(".pt-phase { overflow: clip; overflow-clip-margin: content-box; }");
+    // The open card's fold and body take the header's state border.
+    for (const state of ["done", "running", "draft", "rejected", "awaiting"]) {
+      expect(css).toContain(`.pt-row:has(> .pt-phase-${state}) > :is(.pt-free-accepted, .pt-phase-body)`);
+    }
+    expect(css).toMatch(/\.pt-row > \.pt-free-accepted \{ border: 1px solid var\(--z-color-card-border\); border-top: 0; border-bottom: 0;/);
+  });
+
   it("folds the open free phase's accepted tasks into one row (task 316 F6)", () => {
     const { team, graph } = fixture();
     team.free_phase = 1;

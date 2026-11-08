@@ -11,19 +11,27 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT = ROOT / "client"
+NPM = "npm.cmd" if sys.platform == "win32" else "npm"
 SWITCH_ID = "com.hgdev.hgs-tray"
 DEV_ID_PREFIX = "dev.zerus.next"
 
 
 def binary() -> Path:
     name = "zerus-client.exe" if sys.platform == "win32" else "zerus-client"
-    return CLIENT / "src-tauri" / "target" / "release" / name
+    # Task 317: a build into another CARGO_TARGET_DIR is launched from there,
+    # never the older binary left in the default target.
+    target = os.environ.get("CARGO_TARGET_DIR", "")
+    base = Path(target) if target else CLIENT / "src-tauri" / "target"
+    if not base.is_absolute():
+        base = CLIENT / "src-tauri" / base
+    return base / "release" / name
 
 
 def identity_allows_launch(info: dict) -> bool:
@@ -53,11 +61,14 @@ def read_info(executable: Path) -> dict:
 
 def run(command: list[str], cwd: Path = ROOT) -> int:
     print("+ " + " ".join(command), flush=True)
-    return subprocess.call(command, cwd=cwd)
+    # Task 205: on Windows npm is npm.cmd, which CreateProcess does not find
+    # by its bare name; resolve it the way the shell would.
+    program = shutil.which(command[0]) or command[0]
+    return subprocess.call([program, *command[1:]], cwd=cwd)
 
 
 def build() -> int:
-    result = run(["npm", "--prefix", "client", "run", "tauri", "--", "build", "--no-bundle"])
+    result = run([NPM, "--prefix", "client", "run", "tauri", "--", "build", "--no-bundle"])
     if result:
         return result
     return check_identity()
@@ -85,7 +96,7 @@ def check_identity() -> int:
 
 
 def dev() -> int:
-    return run(["npm", "--prefix", "client", "run", "tauri", "--", "dev"])
+    return run([NPM, "--prefix", "client", "run", "tauri", "--", "dev"])
 
 
 def launch() -> int:

@@ -321,8 +321,10 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     const running = status.kind === "running" || status.kind === "approved" || status.kind === "open";
     return (
       <div
-        class={`pt-phase pt-phase-${status.kind}`}
-        classList={{ "pt-phase-closed": closed }}
+        // Task 332: one class string. Solid's class and classList on one element
+        // overwrite each other, which dropped pt-phase-closed: a folded card lost
+        // its bottom border and its bottom corners.
+        class={`pt-phase pt-phase-${status.kind}${closed ? " pt-phase-closed" : ""}`}
         role={collapsible ? "button" : undefined}
         tabindex={collapsible ? "0" : undefined}
         aria-label={tr("Phase %1", phase.phase.n)}
@@ -906,11 +908,13 @@ export function PlanView(props: PlanViewProps): JSX.Element {
             <ProfileTime team={props.team} load={load()} profile={props.profile} statusName={runStatusLabel} onOpen={open} />
           )}</Show>
           <ProfilePanel profile={props.profile} team={props.team.id} />
+          {detail()}
         </div>
       </Show>
       <Show when={mode() === "tests"}>
         <TestsPanel tests={props.tests} onMore={() => props.onLoadTests?.(props.tests?.next ?? null)}
           builds={props.builds} buildsError={props.buildsError} onLoadBuilds={props.onLoadBuilds} onForce={props.onForceTest} />
+        {detail()}
       </Show>
     </section>
   );

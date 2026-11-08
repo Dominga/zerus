@@ -530,6 +530,37 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
     } else {
         serde_json::from_value(input["settings"].clone()).context("Invalid team settings")?
     };
+    let mut settings = settings;
+    // Task 270 (owner, 2026-11-08): the working mode follows the project. A
+    // request naming "working_mode" (a preset, "auto" for the proposal, or
+    // "none") gets the preset's settings; without one the proposal applies when
+    // the folder is a Git repository, and a settings field the owner named
+    // explicitly wins over it.
+    let mode = super::working_mode::requested_mode(input).unwrap_or_else(|| "auto".to_owned());
+    let mut working_mode = String::new();
+    let mode_proposal: Option<Value> = if mode == "none" {
+        // The owner keeps the settings as they are: nothing to propose later.
+        Some(json!({"preset":""}))
+    } else {
+        let folder = std::path::PathBuf::from(text(input, "folder"));
+        match super::working_mode::propose(&folder) {
+            Some(proposal) => {
+                let preset = if mode == "auto" { proposal.preset.clone() } else { mode.clone() };
+                ensure!(
+                    super::working_mode::PRESETS.contains(&preset.as_str()),
+                    "The working mode is auto, none or one of: {}",
+                    super::working_mode::PRESETS.join(", ")
+                );
+                if !super::working_mode::explicit(input, &preset) {
+                    super::working_mode::apply(&mut settings, &preset, &proposal.profile.branch)?;
+                    working_mode = preset;
+                }
+                Some(proposal.value())
+            }
+            None if mode == "auto" => Some(json!({"preset":""})),
+            None => bail!("The working mode needs a Git repository to profile: {}", folder.display()),
+        }
+    };
     validate_settings(&settings)?;
     // Section 9.1: a sub-team names the parent team and its open task; the
     // caller fills the parent lead and the assignee's session as the lead.
@@ -609,7 +640,7 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
         None => String::new(),
     };
     // A lead without a session is started first; an existing lead is briefed.
-    let team = Team {
+    let mut team = Team {
         id: id.to_owned(),
         name: name.clone(),
         goal: clean(text(input, "goal"), 20_000, "The goal")?,
@@ -619,6 +650,8 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
         template: clean(text(input, "template"), 120, "The template")?,
         status: TeamStatus::Planning,
         settings,
+        working_mode,
+        mode_proposal,
         lead: lead.id.clone(),
         members,
         tasks,
@@ -630,6 +663,11 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
         ..Default::default()
     };
     let events = vec![Event::new("created", json!({"by":"You","name":name}))];
+    // Task 271: a team whose working mode is recorded carries the lead
+    // playbook (and is briefed); a team with no mode keeps the plain flow.
+    if !team.working_mode.is_empty() {
+        team.playbook = Some(super::playbook::playbook(&team));
+    }
     Ok((team, events))
 }
 
@@ -5353,8 +5391,20 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                         }
                     }
                     "plan_mode_reason" => team.plan_mode_reason = clean(value.as_str().unwrap_or_default().trim(), 500, "A plan mode reason")?,
+                    // Task 270 (owner, 2026-11-08): the working mode New team
+                    // proposes for the project; "auto" is the proposal, "none"
+                    // keeps the settings as they are.
+                    "working_mode" => {
+                        let mode = value.as_str().unwrap_or_default().trim().to_lowercase();
+                        ensure!(
+                            mode == "auto" || mode == "none" || super::working_mode::PRESETS.contains(&mode.as_str()),
+                            "The working mode is auto, none or one of: {}",
+                            super::working_mode::PRESETS.join(", ")
+                        );
+                        team.working_mode = mode;
+                    }
                     other => bail!(
-                        "A draft sets name, goal, addendum, settings, members, tasks, phases, plan_mode or plan_mode_reason, not {other}"
+                        "A draft sets name, goal, addendum, settings, members, tasks, phases, plan_mode, plan_mode_reason or working_mode, not {other}"
                     ),
                 }
                 changed.push(field.clone());
@@ -5392,6 +5442,29 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
         }
         "create" => {
             ensure!(human, "Only you create the team from the draft");
+            // Task 270 (owner, 2026-11-08): the working mode the owner accepted
+            // (or the proposal for "auto") is written into the settings now,
+            // at Create team.
+            let folder = std::path::PathBuf::from(team.folder.trim());
+            match super::working_mode::propose(&folder) {
+                Some(proposal) => {
+                    team.mode_proposal = Some(proposal.value());
+                    let preset = match team.working_mode.trim() {
+                        "" | "auto" => proposal.preset.clone(),
+                        "none" => String::new(),
+                        mode => mode.to_owned(),
+                    };
+                    if !preset.is_empty() {
+                        super::working_mode::apply(&mut team.settings, &preset, &proposal.profile.branch)?;
+                        team.working_mode = preset;
+                    }
+                }
+                None => team.mode_proposal = Some(json!({"preset":""})),
+            }
+            // Task 271: the playbook is stored with a team that has a mode.
+            if !team.working_mode.is_empty() {
+                team.playbook = Some(super::playbook::playbook(team));
+            }
             let validation = plan::validate(team, offline);
             ensure!(
                 validation.errors.is_empty(),
@@ -5465,6 +5538,7 @@ pub(crate) fn next_team(team: &Team, goal: &str, name: &str, live: &[super::disp
         goal: goal.to_owned(),
         folder: team.folder.clone(),
         settings: team.settings.clone(),
+        working_mode: team.working_mode.clone(),
         lead: team.lead.clone(),
         previous: team.id.clone(),
         status: TeamStatus::Planning,
@@ -5562,9 +5636,10 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
     let kind = text(input, "kind").to_owned();
     ensure!(
         ["add-member", "remove-member", "swap-member", "next-goal", "switch-plan-mode",
-         "add-to-phase", "cancel-tasks", "discard-phase", "question", "switch-setting", "iron-rules", "install-tool"].contains(&kind.as_str())
+         "add-to-phase", "cancel-tasks", "discard-phase", "question", "switch-setting", "iron-rules", "install-tool",
+         "working-mode"].contains(&kind.as_str())
             || OWNER_OPS.contains(&kind.as_str()),
-        "A proposal is one of: add-member, remove-member, swap-member, next-goal, switch-plan-mode, add-to-phase, cancel-tasks, discard-phase, question, switch-setting, iron-rules, install-tool, {}",
+        "A proposal is one of: add-member, remove-member, swap-member, next-goal, switch-plan-mode, add-to-phase, cancel-tasks, discard-phase, question, switch-setting, iron-rules, install-tool, working-mode, {}",
         OWNER_OPS.join(", ")
     );
     let reason = clean(text(input, "reason").trim(), 2000, "A proposal reason")?;
@@ -5622,6 +5697,26 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
             Some(n) => json!({"phase":n}),
             None => Value::Null,
         },
+        // Task 270 (owner, 2026-11-08): the working mode follows the project;
+        // the card carries the preset, the settings it writes and its reasons.
+        "working-mode" => {
+            let preset = text(input, "preset").trim().to_lowercase();
+            ensure!(
+                super::working_mode::PRESETS.contains(&preset.as_str()),
+                "A working-mode proposal names one of: {}",
+                super::working_mode::PRESETS.join(", ")
+            );
+            ensure!(
+                matches!(team.status, TeamStatus::Running | TeamStatus::Paused | TeamStatus::Planning),
+                "The working mode changes while the team runs, is paused or is planned"
+            );
+            let folder = std::path::PathBuf::from(team.folder.trim());
+            let proposal = super::working_mode::propose(&folder)
+                .context("The project cannot be profiled: its folder is not a Git repository")?;
+            mode = preset.clone();
+            json!({"preset":preset,"settings":super::working_mode::settings_for(&preset, &proposal.profile),
+                "base_branch":proposal.profile.branch,"reasons":proposal.reasons})
+        }
         // Task #220: a tool the team's run found missing; the owner installs it
         // or denies the card, and the offer carries the outcome.
         "install-tool" => install_tool_change(team, input)?,
@@ -5810,7 +5905,7 @@ fn decide_proposal(team: &mut Team, input: &Value, actor: &Actor, offline: &BTre
 /// by the swap itself when it runs, so here only its members must still be on
 /// the team.
 fn trial(team: &Team, kind: &str, member: &Value, change: &Value, mode: &str) -> anyhow::Result<()> {
-    if matches!(kind, "add-member" | "remove-member" | "add-to-phase" | "cancel-tasks" | "discard-phase" | "switch-plan-mode" | "switch-setting") {
+    if matches!(kind, "add-member" | "remove-member" | "add-to-phase" | "cancel-tasks" | "discard-phase" | "switch-plan-mode" | "switch-setting" | "working-mode") {
         let mut copy = team.clone();
         run_proposal(&mut copy, kind, member, change, mode, "", "", &BTreeSet::new(), &mut Vec::new())?;
     }
@@ -5863,6 +5958,16 @@ pub(crate) fn inapplicable(team: &Team, proposal: &Value) -> Option<String> {
             return Some(format!("the offer of {} is {}", found.tool, found.state));
         }
         return None;
+    }
+    // Task 270 (owner, 2026-11-08): a working-mode card whose mode is already in
+    // force, or whose project now profiles to another mode, withdraws.
+    if kind == "working-mode" {
+        let preset = proposal["change"]["preset"].as_str().unwrap_or_default();
+        return match super::working_mode::cached_disagreement(team) {
+            Some((current, _)) if current == preset => None,
+            Some(_) => Some("the project's profile now points to another mode".into()),
+            None => Some("the team's settings already follow the project's mode".into()),
+        };
     }
     trial(team, kind, &proposal["member"], &proposal["change"], mode).err().map(|error| format!("{error:#}"))
 }
@@ -6023,6 +6128,15 @@ fn run_proposal(team: &mut Team, kind: &str, member: &Value, change: &Value, mod
             apply(team, "discard-phase", &json!({"phase":phase}), &Actor::Human, offline, events)?
         }
         "switch-plan-mode" => apply_mode_proposal(team, change, mode, id, reason, events)?,
+        // Task 270: the working-mode switch writes the preset's settings.
+        "working-mode" => {
+            let preset = change["preset"].as_str().unwrap_or_default().to_owned();
+            let base = change["base_branch"].as_str().unwrap_or_default();
+            super::working_mode::apply(&mut team.settings, &preset, base)?;
+            team.working_mode = preset.clone();
+            events.push(Event::new("working_mode_switched", json!({"preset":preset,"by":reason,"proposal":id})));
+            json!({"working_mode":preset})
+        }
         "switch-setting" if change["op"] == "settings" => {
             let mut value = change["input"].clone();
             value["team"] = json!(team.id);

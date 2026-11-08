@@ -192,6 +192,7 @@ export function inboxKind(kind: string): string {
     case "budget": return tr("budget");
     case "interim_report": return tr("interim");
     case "merge_waiting": return tr("merge waiting");
+    case "attempt_recovered": return tr("attempt recovered");
     default: return kind;
   }
 }

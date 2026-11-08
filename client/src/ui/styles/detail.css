@@ -14,6 +14,8 @@
   .dh-row1 { display: flex; align-items: center; gap: 4px; min-width: 0; }
   .dh-row1 h1 { font-size: calc(var(--fs-base) * 1.23); font-weight: 600; min-width: 0; }
   .busy-arc { width: 14px; height: 14px; flex: none; margin-left: 6px; border-radius: 50%; border: 2px solid var(--z-color-warn); border-right-color: transparent; animation: spin 1s linear infinite; }
+  /* Task 315 (F3): the host's state badge in the header, as the card draws it. */
+  .dh-state { flex: none; display: inline-flex; align-items: center; margin-right: 4px; }
   .hbadge { --t: var(--z-color-muted); flex: none; height: 24px; padding: 0 8px; margin-right: 4px; border-radius: 5px; display: inline-flex; align-items: center; font-size: calc(var(--fs-base) * .85); font-weight: 600; background: var(--z-color-hover); color: var(--t); }
   .hbadge.t-working { --t: var(--z-color-status-working); }
   .hbadge.t-attention { --t: var(--z-color-status-attention); }
@@ -193,6 +195,8 @@
   .act-tool-cmd { padding: 4px 0 0 18px; color: var(--z-color-muted); font-size: var(--fs-xs); }
   .act-tool-lines { padding: 6px 0 2px 18px; color: var(--z-color-text-3); font-size: var(--fs-xs); display: grid; gap: 2px; animation: fadeIn var(--z-motion-base) both; }
   .act-live { display: flex; align-items: center; gap: 8px; padding: 6px 2px; font-size: var(--fs-sm); color: var(--z-color-muted); }
+  .act-live b { font-weight: 500; color: var(--z-color-text); }
+  .act-live-time { flex: none; color: var(--z-color-dim); }
   .typing { display: inline-flex; gap: 3px; }
   .typing i { width: 5px; height: 5px; border-radius: 50%; background: var(--z-color-accent); animation: pulse 1.05s ease-in-out infinite; }
   .typing i:nth-child(2) { animation-delay: .15s; } .typing i:nth-child(3) { animation-delay: .3s; }
@@ -285,6 +289,15 @@
   .act-queue-message + .act-queue-message { padding-top: 8px; border-top: 1px dashed var(--z-color-border); }
   .act-held-files { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
   .act-held-note { margin: 8px 0 0; color: var(--z-color-muted); font-size: 12px; }
+  /* U35 held messages and the Terminal draft bar (Qt HeldInputBar, TerminalDraftBar). */
+  .held-inputs { display: flex; flex-direction: column; gap: 4px; padding: 6px 10px; }
+  .held-input, .terminal-draft { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12px; }
+  .terminal-draft { padding: 6px 10px; }
+  .held-input > svg, .terminal-draft > svg { color: var(--z-color-muted); flex-shrink: 0; }
+  .held-input-label { flex: 1 1 auto; min-width: 0; }
+  .held-input-preview { flex: 0 1 220px; min-width: 0; color: var(--z-color-muted); }
+  .terminal-draft-text { flex: 1 1 auto; min-width: 0; }
+  .held-input .btn, .terminal-draft .btn { flex-shrink: 0; }
 
   /* Composer: toolbar 34, editor 76, action row 34. */
   .cmp-col { width: min(var(--col), calc(100% - 32px)); margin: 0 auto 10px; }
@@ -346,7 +359,12 @@
   .cmp-editor { display: block; width: 100%; height: 76px; max-height: none; padding: 6px 14px; border: 0; background: transparent; resize: none; outline: none; color: var(--z-color-text); font-size: calc(var(--fs-base) * var(--content-scale, 1)); line-height: 1.45; }
   .cmp-editor::placeholder { color: var(--z-color-dim); }
   .cmp-actions { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 8px 6px 6px; }
-  .cmp-files { flex: none; display: inline-flex; gap: 2px; }
+  .cmp-files { flex: none; display: inline-flex; align-items: center; gap: 2px; }
+  .cmp-rules { margin-left: 4px; }
+  /* Qt parity (I5a): Reference file's path field with Browse… beside it. */
+  .file-ref-body { display: flex; flex-direction: column; gap: 10px; }
+  .file-ref-row { display: flex; align-items: center; gap: 8px; }
+  .file-ref-row .field { flex: 1 1 auto; min-width: 0; }
   .cmp-attach { width: 32px; height: 32px; }
   .cmp-status { font-size: var(--fs-xs); color: var(--z-color-dim); }
   .cmp-model { gap: 4px; max-width: 330px; font-size: var(--fs-xs); }

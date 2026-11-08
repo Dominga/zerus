@@ -776,6 +776,13 @@ mod tests {
         )
     }
 
+    /// Task #307: a file inside the cache root compared after canonicalizing
+    /// both sides: Windows' `\\?\` prefix, separators and drive case never
+    /// decide the check, and a file outside the root still fails it.
+    fn in_cache(path: &std::path::Path, root: &std::path::Path) -> bool {
+        crate::composer::files::canonical(path).starts_with(crate::composer::files::canonical(root))
+    }
+
     #[test]
     fn an_activity_attachment_opens_as_another_machines_file() {
         let root = dir("open-activity");
@@ -789,7 +796,7 @@ mod tests {
         assert_eq!(open_on(&fetcher, "studio", file("req-1"), &works), Ok(None));
         let (what, path) = asked.lock().unwrap()[0].clone();
         assert_eq!(what, "open");
-        assert!(path.starts_with(fetcher.cache().root()));
+        assert!(in_cache(&path, fetcher.cache().root()));
         assert_eq!(std::fs::read(&path).unwrap(), PNG);
         let (fails, _) = opener(false);
         assert_eq!(
@@ -843,7 +850,7 @@ mod tests {
         let (what, copy) = asked.lock().unwrap()[0].clone();
         assert_eq!(what, "open");
         assert!(
-            copy.starts_with(c.cache().root()),
+            in_cache(&copy, c.cache().root()),
             "the cache's copy, never the original"
         );
         assert_eq!(std::fs::read(&copy).unwrap(), b"draft notes");

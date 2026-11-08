@@ -48,6 +48,8 @@ protected:
     // Esc closes the card, as its back button does.
     void keyPressEvent(QKeyEvent *event) override;
 private:
+    // Task #253: a retry that hgs answered with "continue" says so on the card.
+    QString m_notice;
     void readRuns();
     struct TestRuns { int task = 0; qint64 at = 0; bool loading = false; QJsonArray runs; QString error; quint64 generation = 0; };
     TestRuns m_runs;

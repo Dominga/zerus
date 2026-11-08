@@ -1,5 +1,6 @@
-import { tr } from "../../i18n";
+import { tr, trNoop } from "../../i18n";
 import { withdrawnRefusal } from "../../teamRefusals";
+import { retryContinues, retryContinueText } from "./actions";
 import type { ComputerId, TeamAction, TeamCall, TeamChoice, TeamConfirmation, TeamInboxItem, TeamMemberQuestion, TeamMemberView, TeamOutcome, TeamProposalView, TeamView, TeamWaitingItem } from "../../types";
 
 // The owner's decisions on a team (task 11), ported from Qt's
@@ -68,6 +69,7 @@ export function proposalKindLabel(kind: string): string {
     case "swap-member": return tr("Swap");
     case "next-goal": return tr("Next goal");
     case "switch-plan-mode": return tr("Plan mode");
+    case "working-mode": return tr("Working mode");
     case "add-to-phase": return tr("Tasks");
     case "cancel-tasks": return tr("Cancel");
     case "question": return tr("Question");
@@ -150,6 +152,7 @@ export function proposalText(team: TeamView | undefined, proposal: TeamProposalV
       if (phase > 0) return proposal.mode === "standard" ? tr("Switch phase %1 to standard planning", phase) : tr("Switch phase %1 to free planning", phase);
       return proposal.mode === "standard" ? tr("Switch to standard planning") : tr("Switch to free planning");
     }
+    case "working-mode": return tr("Switch to %1", str(change.preset) || tr("the proposed working mode"));
     case "add-to-phase": {
       const count = arr(change.tasks).length;
       const phase = phaseName(team, num(change.phase));
@@ -210,6 +213,9 @@ export function proposalLines(team: TeamView | undefined, proposal: TeamProposal
       if (str(change.saves)) lines.push(tr("It saves %1", str(change.saves)));
       break;
     }
+    case "working-mode":
+      for (const reason of arr(change.reasons)) lines.push(str(reason));
+      break;
     case "add-to-phase":
       for (const value of arr(change.tasks)) {
         const task = obj(value);
@@ -505,8 +511,46 @@ export function waitingKindLabel(item: Pick<TeamWaitingItem, "kind" | "action">)
     case "team_paused": return tr("Team paused");
     // Task 186: an urgent team message the working lead has not received.
     case "lead_message_undelivered": return tr("Urgent message");
+    // Task 245 (hgs task 162): the lead's plan changes inside the approved goal, each revertible.
+    case "lead_changes": return tr("Lead's changes");
+    // Task 304 (hgs #286): a task wait the lead left unresolved, escalated once.
+    case "task_wait_escalated": return tr("Lead has not acted");
     default: return item.kind;
   }
+}
+
+/** Task 304 (hgs #286): one kind of the lead's changes, its count and its newest few. */
+export interface DigestGroup { kind: string; label: string; count: number; newest: string[] }
+
+const GROUP_LABELS: Record<string, string> = { added: trNoop("added"), moved: trNoop("moved"), cancelled: trNoop("cancelled"), "re-issued": trNoop("re-issued"), changed: trNoop("changed") };
+
+/** The lead-changes digest's groups (`groups`): "2 added", "1 moved"... with their newest summaries. */
+export function digestGroups(item: Pick<TeamWaitingItem, "kind" | "detail">): DigestGroup[] {
+  if (item.kind !== "lead_changes") return [];
+  const groups = (item.detail as { groups?: unknown } | null | undefined)?.groups;
+  if (!Array.isArray(groups)) return [];
+  return groups.flatMap((group: { kind?: unknown; count?: unknown; newest?: unknown }) => {
+    const kind = typeof group?.kind === "string" ? group.kind : "";
+    const count = typeof group?.count === "number" ? group.count : 0;
+    if (!kind || count <= 0) return [];
+    const newest = Array.isArray(group.newest) ? group.newest.flatMap((change: { summary?: unknown }) => (typeof change?.summary === "string" ? [change.summary] : [])) : [];
+    return [{ kind, label: tr("%1 %2", count, tr(GROUP_LABELS[kind] ?? GROUP_LABELS.changed)), count, newest }];
+  });
+}
+
+/**
+ * Task 304 (hgs #286): the item the strip's header names. The lead-changes
+ * digest has its own row, so the header names the newest other item; with
+ * only digests it names none.
+ */
+export function bannerHeadItem(items: readonly TeamWaitingItem[]): TeamWaitingItem | undefined {
+  return items.find((item) => item.kind !== "lead_changes");
+}
+
+/** Task 304 (hgs #246): what a dismissed row still blocks (`blocks`), when it blocks work. */
+export function stillBlocks(item: Pick<TeamWaitingItem, "detail">): string {
+  const detail = item.detail as { blocking?: unknown; blocks?: unknown } | null | undefined;
+  return detail?.blocking === true && typeof detail.blocks === "string" ? detail.blocks : "";
 }
 
 /** The item's icon (ui/lib/icons names). */
@@ -526,6 +570,8 @@ export function waitingKindIcon(kind: string): string {
     case "disk_low": return "hard-drive";
     case "team_paused": return "pause";
     case "lead_message_undelivered": return "message-square";
+    case "lead_changes": return "pencil";
+    case "task_wait_escalated": return "clock";
     default: return "triangle-alert";
   }
 }
@@ -771,7 +817,13 @@ export class WaitingAnswer {
     const outcome = await act(this.port, { computer: this.computer, team: this.item.team, team_name: this.item.team_name, action }, this.uncertain);
     this.sending = false;
     if (outcome === "cancelled") { this.changed(); return outcome; }
-    if (outcome.outcome === "done") { this.uncertain = undefined; this.finish(); return outcome; }
+    if (outcome.outcome === "done") {
+      // Task #253: a retry on the task a member is working on keeps attempt K
+      // and says so; the row stays, since nothing was revoked.
+      const continued = action.kind === "retry" ? retryContinues(outcome.receipt) : null;
+      if (continued !== null) { this.notice = retryContinueText(continued); this.changed(); return outcome; }
+      this.uncertain = undefined; this.finish(); return outcome;
+    }
     if (outcome.outcome === "uncertain") { this.uncertain = outcome.request_id; this.notice = tr("It may have been sent: %1", hgsWords(outcome.detail)); }
     else { this.uncertain = undefined; this.notice = hgsWords("detail" in outcome ? outcome.detail : ""); }
     this.changed();

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { decidedWaiting, leadToolMissing, toolMissingAction,
   ProposalCards, WaitingAnswer, WaitingNotices, acceptanceSummary, act, approvePhaseCall, noticeToken, proposalCards, proposalKindLabel, toolOffer,
   waitingActionLabel, waitingAge, waitingCount, waitingKindIcon, waitingKindLabel, deferredRequest, splitDeferred, approves, opensCard, type DecisionPort, type QuestionChoice,
+  bannerHeadItem, digestGroups, stillBlocks,
 } from "./decisions";
 import { choiceButtons, confirmButtons, createConfirmer } from "../../store/teamConfirm";
 import type { TeamAction, TeamCall, TeamConfirmation, TeamMemberView, TeamOutcome, TeamProposalView, TeamTaskView, TeamView, TeamWaitingItem } from "../../types";
@@ -612,6 +613,8 @@ describe("Waiting for you", () => {
     const accepted = item("1", "phase_acceptance", "accept_phase", "Phase 1 is ready for your acceptance", NOW - 60,
       { phase: 1, summary: { accepted: 3, rejected: 1, cancelled: 0, tests: "tests pass", minutes: 42 } });
     expect(waitingKindLabel(accepted)).toBe("Phase acceptance");
+    // Task 245: the lead's plan changes have their own label and icon.
+    expect([waitingKindLabel({ kind: "lead_changes", action: "open_team" }), waitingKindIcon("lead_changes")]).toEqual(["Lead's changes", "pencil"]);
     expect(acceptanceSummary(accepted.detail!.summary as Record<string, unknown>)).toBe("3 accepted, 1 rejected, 0 cancelled; tests pass; 42 min");
     const answered: string[] = [];
     let row = new WaitingAnswer(accepted, f.port, "", () => {}, (done) => answered.push(done.id));
@@ -943,5 +946,39 @@ describe("a permission that cannot be answered says why (task 198)", () => {
     const ok = new WaitingAnswer(answerItems().permission, fine.port, "", () => {});
     await ok.open();
     expect(ok.permissionBlocked()).toBe("");
+  });
+});
+
+// Task 304 (hgs #246, #286): the escalated wait, the grouped digest, the strip header and a dismissed row's blocks.
+describe("Waiting rows of tasks 246 and 286 (task 304)", () => {
+  const base = { team: "t1", team_name: "Orbit", action: "open_team", since: 1_800_000_000, proposal: null } as const;
+  it("labels the escalated wait, which names the lead", () => {
+    const escalated = { ...base, id: "t1/task_wait_escalated/escalated-4", kind: "task_wait_escalated", title: "#4 API still waits after 60 min: unknown model (Lead has not acted)" };
+    expect([waitingKindLabel(escalated), waitingKindIcon("task_wait_escalated")]).toEqual(["Lead has not acted", "clock"]);
+  });
+  it("reads the digest's groups: count and kind, the newest summaries", () => {
+    const digest = { ...base, id: "t1/lead_changes/digest", kind: "lead_changes", title: "The lead changed the plan 4 times", detail: { groups: [
+      { kind: "added", count: 2, newest: [{ summary: "added #9 API tests" }, { summary: "added #10 docs" }] },
+      { kind: "moved", count: 1, newest: [{ summary: "moved #3 to phase 2" }] },
+      { kind: "odd", count: 1, newest: [] }, { kind: "", count: 3 }, { kind: "cancelled", count: 0 },
+    ] } };
+    expect(digestGroups(digest)).toEqual([
+      { kind: "added", label: "2 added", count: 2, newest: ["added #9 API tests", "added #10 docs"] },
+      { kind: "moved", label: "1 moved", count: 1, newest: ["moved #3 to phase 2"] },
+      { kind: "odd", label: "1 changed", count: 1, newest: [] },
+    ]);
+    expect(digestGroups({ ...digest, kind: "team_paused" })).toEqual([]);
+    expect(digestGroups({ ...digest, detail: null })).toEqual([]);
+  });
+  it("the strip header names the newest item that is not the digest", () => {
+    const digest = { ...base, id: "d", kind: "lead_changes", title: "The lead changed the plan" };
+    const paused = { ...base, id: "p", kind: "team_paused", title: "Team paused" };
+    expect(bannerHeadItem([digest, paused])?.id).toBe("p");
+    expect(bannerHeadItem([digest])).toBeUndefined();
+  });
+  it("a dismissed decision says what it still blocks", () => {
+    expect(stillBlocks({ detail: { blocking: true, blocks: "Orbit/backend" } })).toBe("Orbit/backend");
+    expect(stillBlocks({ detail: { blocks: "Orbit" } })).toBe("");
+    expect(stillBlocks({ detail: null })).toBe("");
   });
 });

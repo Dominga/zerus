@@ -66,7 +66,7 @@ TeamTaskCard::TeamTaskCard(QWidget *parent) : QWidget(parent)
 
 void TeamTaskCard::setTask(const Team &team, int task, const LiveLookup &live, bool dark)
 {
-    if (task != m_task) { m_form.clear(); m_evidence.clear(); }
+    if (task != m_task) { m_form.clear(); m_evidence.clear(); m_notice.clear(); }
     m_team = team; m_task = task; m_live = live; m_dark = dark;
     if (m_runs.task != task) m_runs = {task, 0, false, {}, {}, m_runs.generation + 1};
     readRuns();
@@ -150,6 +150,11 @@ void TeamTaskCard::rebuild()
         head->addWidget(severity);
     }
     v->addLayout(head);
+    if (!m_notice.isEmpty()) {
+        auto *notice = label(m_notice, c.text2, 11, false, "teamTaskNotice");
+        notice->setWordWrap(true);
+        v->addWidget(notice);
+    }
     auto *meta = row(8);
     const QString statusText = problem && !status.problem ? memberState.text : status.shortText;
     // A1: the attempt's phase icon, with the tooltip that names the state, the
@@ -846,8 +851,14 @@ void TeamTaskCard::rebuild()
         act("cancel", input);
     };
     const auto retry = [this, id, n = task->last() ? task->last()->n : 0] {
-        if (n == 0 || !confirm || confirm("teamRetryConfirm", tr("Retry task?"), tr("Revoke attempt %1 and hand the task out again?").arg(n), tr("Retry")))
-            if (act) act("retry", {{"task", id}});
+        if (n == 0 || (confirm && !confirm("teamRetryConfirm", tr("Retry task?"), tr("Revoke attempt %1 and hand the task out again?").arg(n), tr("Retry")))) return;
+        const auto done = [this, n](bool ok, const QString &message) {
+            if (!ok) m_notice = message;
+            else if (message == QLatin1String("continue")) m_notice = tr("Continues attempt %1 - nothing was revoked").arg(n);
+            rebuild();
+        };
+        if (actThen) actThen("retry", {{"task", id}}, done);
+        else if (act) act("retry", {{"task", id}});
     };
     const auto holdForm = [this] { m_form = "hold"; rebuild(); };
     const auto releaseNow = [this, id] { if (act) act("release", {{"task", id}}); };

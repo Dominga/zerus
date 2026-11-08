@@ -10,7 +10,7 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|spawn|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|phase-mode|lead-changes|revert-lead-change|seen-lead-changes|seen|keep|integrate-build|full-tests|test|run|templates|safe-action|reports-to|sub-lead|deferred|answer-deferred|defer-session|disk|test-config --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|spawn|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|brief|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|phase-mode|lead-changes|revert-lead-change|seen-lead-changes|seen|keep|integrate-build|full-tests|test|run|templates|safe-action|reports-to|sub-lead|deferred|answer-deferred|defer-session|disk|test-config --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "move-task", "add-to-phase", "spawn", "approve-phase", "discard-phase", "return-to-draft", "reject-phase", "undo-reject-phase",
@@ -1412,12 +1412,25 @@ fn draft_get_in(store: &mut Store, input: &Value) -> anyhow::Result<Value> {
     }
     let draft = team.draft.clone().unwrap_or_default();
     let validation = super::plan::validate(&team, &BTreeSet::new());
+    // Task 270 (owner, 2026-11-08): New team shows the working mode Zeros
+    // proposes for the project, with its reasons, and the preset the owner
+    // accepted so far (empty: the proposal).
+    let proposal = super::working_mode::propose(std::path::Path::new(team.folder.trim()));
+    let working = super::working_mode::requested_mode(&json!({"working_mode":team.working_mode}));
+    let working = match (proposal.as_ref(), working) {
+        (Some(proposal), Some(mode)) if mode == "auto" => json!({"accepted":"auto","preset":proposal.preset,"proposal":proposal.value()}),
+        (Some(proposal), Some(mode)) => json!({"accepted":mode,"preset":mode,"proposal":proposal.value()}),
+        (Some(proposal), None) => json!({"accepted":"auto","preset":proposal.preset,"proposal":proposal.value()}),
+        (None, Some(mode)) => json!({"accepted":mode,"preset":mode,"proposal":Value::Null}),
+        (None, None) => json!({"accepted":"auto","preset":Value::Null,"proposal":Value::Null}),
+    };
     // Feedback 2026-11-04 (5): the answer carries what the draft holds, so the
     // lead and the owner can check what was saved.
     let fields = json!({"name":team.name,"goal":team.goal,"addendum":team.lead_protocol,"settings":team.settings,
         "members":team.members,"tasks":team.tasks,"phases":team.phases,"plan_mode":team.plan_mode,"plan_mode_offer":team.plan_mode_offer,
         "plan_mode_reason":team.plan_mode_reason});
-    Ok(json!({"draft":draft,"revision":draft.revision,"unseen":draft.unseen,"owner_edited":cleared,"preflight":validation,"fields":fields}))
+    Ok(json!({"draft":draft,"revision":draft.revision,"unseen":draft.unseen,"owner_edited":cleared,"preflight":validation,
+        "fields":fields,"working_mode":working}))
 }
 
 /// F5: the owner starts a draft team; the lead session is adopted when given,
@@ -3915,6 +3928,31 @@ fn message_command(input: &Value) -> anyhow::Result<Value> {
 /// Task 134: `hgs team inbox`: the lead's (or a sub-lead's) inbox items, and
 /// the caller's own unread team messages, marked read (a read receipt). Anyone
 /// else sees the messages without marking them (you, on the desktop).
+/// Task 271 (owner, 2026-11-08): the lead's brief on demand: the playbook (the
+/// working-mode preset and the rules a-(i)), the open breaches with their fix,
+/// the owner's standing decisions, the integration line's last landing and who
+/// idles. The same text reaches the lead at team start, at a phase start and
+/// after a compaction or a clear of its session.
+fn brief_command(input: &Value) -> anyhow::Result<Value> {
+    let store = Store::open(false)?;
+    let team = store.load(text(input, "team"))?.context("Unknown team")?;
+    ensure!(
+        matches!(team.status, TeamStatus::Running | TeamStatus::Paused | TeamStatus::Planning),
+        "The brief is for a team that runs or plans"
+    );
+    let breaches: Vec<Value> = super::playbook::breaches(&team)
+        .into_iter()
+        .map(|breach| json!({"rule":breach.rule,"title":breach.title,"detail":breach.detail,"fix":breach.fix,"owner":breach.owner}))
+        .collect();
+    Ok(json!({
+        "team": team.id,
+        "lead": team.lead,
+        "brief": super::playbook::brief(&team),
+        "playbook": team.playbook.clone().unwrap_or_else(|| super::playbook::playbook(&team)),
+        "breaches": breaches,
+    }))
+}
+
 fn inbox_command(input: &Value) -> anyhow::Result<Value> {
     let (team, caller) = if text(input, "team").is_empty() {
         let (team, member) = caller_member(input)?;
@@ -5474,6 +5512,15 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             // caller asks for them.
             let include_cancelled = input["include_cancelled"].as_bool() == Some(true);
             let mut value = view_with_cancelled(&team, &teams, sessions.as_deref(), include_cancelled);
+            // Task 270 (owner, 2026-11-08): the project's working mode: the
+            // preset the team follows, the cached proposal with its reasons, and
+            // what the settings still miss of it (no Git read on a poll).
+            let disagreeing = super::working_mode::cached_disagreement(&team).map(|(_, wrong)| wrong);
+            value["working_mode"] = json!({
+                "preset": team.working_mode,
+                "proposal": team.mode_proposal,
+                "disagreeing": disagreeing,
+            });
             // D2: the findings page takes a before cursor.
             value["findings"] = findings_page(&team, input["before"].as_u64());
             // U38: the profile only on request, as hgs team profile gives it.
@@ -5519,6 +5566,10 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             Ok(value)
         }
         "inbox" => inbox_command(input),
+        // Task 271 (owner, 2026-11-08): the lead's brief on demand: the
+        // playbook, the open breaches, the owner's standing decisions, the
+        // integration line and who idles.
+        "brief" => brief_command(input),
         // Task 162: the lead's recorded plan changes, newest first.
         "lead-changes" => {
             let team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
@@ -5970,6 +6021,13 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
         }
         let result = run("handoff", &input, false).map_err(|e| e.to_string())?;
         println!("{result}");
+        return Ok(0);
+    }
+    // Task 271: `hgs team brief --lead [--team ID]`, the lead's brief as text.
+    if args.first().map(String::as_str) == Some("brief") && file.is_none() && !args.iter().any(|arg| arg == "--json") {
+        let team = args.iter().position(|arg| arg == "--team").and_then(|index| args.get(index + 1)).cloned().unwrap_or_default();
+        let result = run("brief", &json!({"team":team}), false).map_err(|e| e.to_string())?;
+        println!("{}", result["brief"].as_str().unwrap_or_default());
         return Ok(0);
     }
     let catalog = args.first().map(String::as_str) == Some("catalog");

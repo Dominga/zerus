@@ -172,6 +172,8 @@ export interface Session {
   baseUnread: boolean;
   baseSummary: string;
   baseMuted: boolean;
+  /** Task 244: a lead's reply to the team's pastes, read unless its team notices show in full (catalog `quietTeamReply`). */
+  quietReply?: boolean;
   /** The host's read mark of this conversation. */
   readReplyId?: string;
   localReadReply?: boolean;

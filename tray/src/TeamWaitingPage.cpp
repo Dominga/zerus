@@ -8,6 +8,8 @@
 #include <QMouseEvent>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QPointer>
+#include <QToolButton>
 #include <QSet>
 #include <QVBoxLayout>
 #include <algorithm>
@@ -58,6 +60,8 @@ TeamWaitingPage::Item TeamWaitingPage::parse(const QJsonObject &item)
     out.deferred = item["deferred"].toString(); out.request = item["request"].toString(); out.text = item["text"].toString();
     out.session = item["session"].toString(); out.outcome = item["outcome"].toString(); out.questions = item["questions"].toArray();
     out.changes = item["changes"].toArray();
+    out.state = item["state"].toString(); out.groups = item["groups"].toArray();
+    out.blocking = item["blocking"].toBool(); out.blocks = item["blocks"].toString();
     if (item["summary"].isObject()) {
         const auto summary = item["summary"].toObject();
         out.summary.known = true;
@@ -98,7 +102,45 @@ QString TeamWaitingPage::kindLabel(const QString &kind)
     if (kind == "deferred") return tr("Deferred");   // task 97
     if (kind == "disk_low") return tr("Disk space");   // task 108
     if (kind == "team_paused") return tr("Team paused");   // task 112
+    if (kind == "lead_changes") return tr("Lead's changes");   // task 245 (hgs task 162)
+    if (kind == "task_wait_escalated") return tr("Lead has not acted");   // task 304 (hgs #286)
     return kind;
+}
+
+QString TeamWaitingPage::groupsText(const Item &item)
+{
+    QStringList parts;
+    for (const auto &value : item.groups) {
+        const auto group = value.toObject();
+        const QString kind = group["kind"].toString();
+        const int count = group["count"].toInt();
+        if (kind.isEmpty() || count <= 0) continue;
+        const QString name = kind == "added" ? tr("added") : kind == "moved" ? tr("moved") : kind == "cancelled" ? tr("cancelled")
+                           : kind == "re-issued" ? tr("re-issued") : tr("changed");
+        parts << tr("%1 %2").arg(count).arg(name);
+    }
+    return parts.join(QStringLiteral(", "));
+}
+
+QString TeamWaitingPage::groupsTip(const Item &item)
+{
+    QStringList lines;
+    for (const auto &value : item.groups)
+        for (const auto &change : value.toObject()["newest"].toArray())
+            if (const QString summary = change.toObject()["summary"].toString(); !summary.isEmpty()) lines << summary;
+    return lines.join(QLatin1Char('\n'));
+}
+
+void TeamWaitingPage::dismiss(TeamController *teams, const Item &item, const std::function<void(bool, const QString &)> &done)
+{
+    if (!teams || item.state.isEmpty()) { if (done) done(false, {}); return; }
+    teams->act(QStringLiteral("waiting"), QJsonObject{{"action", "dismiss"}, {"id", item.id}, {"team", item.team}, {"state", item.state}}, done);
+}
+
+void TeamWaitingPage::restore(TeamController *teams, const Item &item, const std::function<void(bool, const QString &)> &done)
+{
+    if (!teams) { if (done) done(false, {}); return; }
+    teams->act(QStringLiteral("waiting"), QJsonObject{{"action", "undismiss"}, {"id", item.id}, {"team", item.team}}, done);
 }
 
 QString TeamWaitingPage::kindIcon(const QString &kind)
@@ -118,6 +160,8 @@ QString TeamWaitingPage::kindIcon(const QString &kind)
     if (kind == "deferred") return QStringLiteral("clock");
     if (kind == "disk_low") return QStringLiteral("attention");
     if (kind == "team_paused") return QStringLiteral("pause");
+    if (kind == "lead_changes") return QStringLiteral("pencil");   // task 245
+    if (kind == "task_wait_escalated") return QStringLiteral("clock");   // task 304
     return QStringLiteral("warning");
 }
 
@@ -213,6 +257,8 @@ void TeamWaitingPage::refresh()
         }
         m_head = head;
         m_total = result["total"].toInt(m_head.size());
+        m_dismissed = parseItems(result["dismissed"].toArray());
+        m_dismissedTotal = result["dismissed_total"].toInt(int(m_dismissed.size()));
         if (m_older.isEmpty()) m_headNext = result["next"];
         if (countChanged) countChanged(m_total);
         render();
@@ -305,6 +351,12 @@ QWidget *TeamWaitingPage::rowFor(const Item &item)
     team->setToolTip(teamless ? tr("Project %1").arg(item.teamName) : tr("Team %1").arg(item.teamName));
     meta->addWidget(kind); meta->addWidget(team); meta->addStretch();
     text->addLayout(meta);
+    // Task 304 (hgs #286): the lead-changes digest as one grouped line.
+    if (const QString grouped = groupsText(item); !grouped.isEmpty()) {
+        auto *groups = label(grouped, c.text2, 11, false, "teamWaitingGroups");
+        groups->setToolTip(groupsTip(item));
+        text->addWidget(groups);
+    }
     h->addLayout(text, 1);
     const double now = double(QDateTime::currentSecsSinceEpoch());
     auto *since = label(agoText(item.since, now), c.muted, 11, false, "teamWaitingSince");
@@ -352,6 +404,8 @@ QWidget *TeamWaitingPage::rowFor(const Item &item)
         h->addWidget(seen);
         if (!item.changes.isEmpty()) {
             auto *revert = button(tr("Revert"), "teamWaitingRevert");
+            // Task 245: Revert undoes the newest change; its tooltip names it.
+            revert->setToolTip(tr("Revert the newest change: %1").arg(item.changes.first().toObject().value("summary").toString()));
             QObject::connect(revert, &QPushButton::clicked, frame, [this, item] {
                 const auto change = item.changes.first().toObject().value("id").toString();
                 if (!change.isEmpty()) m_teams->act(QStringLiteral("revert-lead-change"), QJsonObject{{"team", item.team}, {"change", change}});
@@ -363,6 +417,21 @@ QWidget *TeamWaitingPage::rowFor(const Item &item)
         auto *disk = button(tr("Open Build folders"), "teamWaitingOpenDisk");
         QObject::connect(disk, &QPushButton::clicked, frame, [this] { if (openDisk) openDisk(); });
         h->addWidget(disk);
+    }
+    // Task 304 (hgs #246): Dismiss hides the row until its state changes.
+    if (!item.state.isEmpty() && m_teams) {
+        auto *dismissButton = new QToolButton; dismissButton->setObjectName("teamWaitingDismiss"); dismissButton->setAutoRaise(true);
+        dismissButton->setIcon(workspaceIcon("close", c.muted)); dismissButton->setAccessibleName(tr("Dismiss"));
+        dismissButton->setToolTip(tr("Dismiss: the row leaves the list until it changes; Show dismissed brings it back"));
+        QObject::connect(dismissButton, &QToolButton::clicked, frame, [this, item] {
+            dismiss(m_teams, item, [guard = QPointer<TeamWaitingPage>(this), item](bool ok, const QString &) {
+                if (!guard || !ok) return;
+                guard->drop(item.id);
+                if (guard->answered) guard->answered(item);
+                guard->refresh();
+            });
+        });
+        h->addWidget(dismissButton);
     }
     if (!teamless) {
         auto *open = button(tr("Open team"), "teamWaitingOpen");
@@ -436,6 +505,42 @@ void TeamWaitingPage::render()
             m_rows->addWidget(note);
         }
         m_rows->addWidget(rowFor(item));
+    }
+    // Task 304 (hgs #246): the dismissed rows, behind Show dismissed: what
+    // each was, what a decision still blocks, and Restore.
+    if (!m_dismissed.isEmpty()) {
+        auto *toggle = button(m_showDismissed ? tr("Hide dismissed") : tr("Show dismissed (%1)").arg(qMax(m_dismissedTotal, int(m_dismissed.size()))), "teamWaitingShowDismissed");
+        toggle->setProperty("ghost", true);
+        QObject::connect(toggle, &QPushButton::clicked, this, [this] { m_showDismissed = !m_showDismissed; render(); });
+        auto *line = new QWidget; line->setObjectName("teamWaitingDismissedToggle");
+        auto *row = new QHBoxLayout(line); row->setContentsMargins(0, 6, 0, 0); row->addWidget(toggle); row->addStretch();
+        m_rows->addWidget(line);
+        if (m_showDismissed) {
+            for (const auto &item : std::as_const(m_dismissed)) {
+                auto *frame = new QFrame; frame->setObjectName("teamWaitingDismissedRow"); frame->setProperty("itemId", item.id);
+                frame->setProperty("kind", item.kind);
+                auto *h = new QHBoxLayout(frame); h->setContentsMargins(12, 6, 10, 6); h->setSpacing(10);
+                auto *icon = new QLabel; icon->setFixedSize(16, 16);
+                icon->setPixmap(workspaceIcon(kindIcon(item.kind), c.muted).pixmap(16, 16)); icon->setToolTip(kindLabel(item.kind));
+                h->addWidget(icon);
+                auto *title = elided(item.title, c.text2, 12); title->setObjectName("teamWaitingDismissedTitle");
+                h->addWidget(title, 1);
+                if (item.blocking && !item.blocks.isEmpty())
+                    h->addWidget(label(tr("still blocks %1").arg(item.blocks), c.warn, 11, false, "teamWaitingStillBlocks"));
+                h->addWidget(label(item.teamName, c.muted, 11, false, "teamWaitingDismissedTeam"));
+                auto *restoreButton = button(tr("Restore"), "teamWaitingRestore");
+                QObject::connect(restoreButton, &QPushButton::clicked, this, [this, item] {
+                    restore(m_teams, item, [guard = QPointer<TeamWaitingPage>(this), id = item.id](bool ok, const QString &) {
+                        if (!guard || !ok) return;
+                        guard->m_dismissed.erase(std::remove_if(guard->m_dismissed.begin(), guard->m_dismissed.end(), [&id](const Item &found) { return found.id == id; }), guard->m_dismissed.end());
+                        guard->m_lastHead = {};
+                        guard->refresh();
+                    });
+                });
+                h->addWidget(restoreButton);
+                m_rows->addWidget(frame);
+            }
+        }
     }
     const QJsonValue next = m_older.isEmpty() ? m_headNext : m_olderNext;
     if (next.isObject()) {

@@ -53,7 +53,7 @@ import { composer } from "../../store/composer";
 import { composerClearControl, composerOpen, copyText, inspectSession, runAction, sessionFolderOpen, sessionFolderStatus, sessionReference } from "../../bridge";
 import { detailTab, menu, visibleMenu, multi, peek, selectedKey, setDetailTab, setMenu, setMulti, setPeek, setSelectedKey, setStripMode, setSubagentOpen, subagentOpen, type MenuEntry } from "../../store/ui";
 import { clearMulti } from "./organize";
-import { setSetting } from "../../store/settings";
+import { setSetting, settings } from "../../store/settings";
 import { emptyBatch, type ComposerView, type ViewRow } from "../../types";
 
 const labels = (entries: MenuEntry[]) => entries.map((e) => ("separator" in e ? "---" : "heading" in e ? `# ${e.heading}` : e.label));
@@ -84,13 +84,36 @@ describe("the session menu (Qt showSessionMenu 5266-5382)", () => {
   it("a live row starts with Mark then Mute and keeps its terminal entry", () => {
     const live = toSession("", "run:run-live", { name: "codex/example/live", agent: "codex", state: "running", status: "ready", run_id: "run-live", conversation_id: "conv-live" });
     expect(labels(sessionMenu(live))).toEqual([
-      "Mark needs attention", "Mute", "---",
+      "Mark needs attention", "Mute", "Keep cache warm", "---",
       "Compact session row", "Expand all collapsed", "---",
       "Open terminal", "Open folder", "Open shell in session folder", "Copy connect command", "---",
       "Pause session", "Clear session…", "Rename…", "Fork session…", "Move to project…", "---",
       "Copy session name", "Copy session reference", "Copy folder path", "---",
       "Terminate session…",
     ]);
+  });
+
+  it("Keep cache warm is checked by the row's exact identity and toggles off or one hour", async () => {
+    const exact = "a".repeat(64), fallback = "b".repeat(64);
+    const row: ViewRow = { name: "codex/example/warm", agent: "codex", state: "running", status: "ready", run_id: "run-warm", conversation_id: "conv-warm", compact_keys: [exact, fallback] };
+    const entry = (s = toSession("", "run:run-warm", row)) => sessionMenu(s).find((e) => "label" in e && e.label === "Keep cache warm") as Extract<MenuEntry, { label: string }>;
+    await setSetting("workspace/cacheKeepWarm", "");
+    expect(entry()).toMatchObject({ checked: false, disabled: false, hint: "Send the idle agent a one-word service message before its prompt cache expires" });
+    // Turned on from the menu: one hour, under the exact identity (outside Tauri only kept).
+    entry().action?.();
+    await vi.waitFor(() => expect(JSON.parse(String(settings["workspace/cacheKeepWarm"]))).toEqual({ [exact]: 1 }));
+    expect(entry().checked).toBe(true);
+    // Hours set in Details stay until the menu turns it off.
+    await setSetting("workspace/cacheKeepWarm", JSON.stringify({ [exact]: 5, [fallback]: 3 }));
+    expect(entry().checked).toBe(true);
+    entry().action?.();
+    await vi.waitFor(() => expect(JSON.parse(String(settings["workspace/cacheKeepWarm"]))).toEqual({ [fallback]: 3 }));
+    expect(entry().checked).toBe(false);
+    // Only the exact identity counts, and a session without a conversation cannot keep warm.
+    await setSetting("workspace/cacheKeepWarm", JSON.stringify({ [fallback]: 3 }));
+    expect(entry().checked).toBe(false);
+    expect(entry(toSession("", "run:run-warm", { ...row, conversation_id: undefined })).disabled).toBe(true);
+    await setSetting("workspace/cacheKeepWarm", "");
   });
 
   it("Clear session checks an unselected row and opens the same dialog for it", async () => {

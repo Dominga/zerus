@@ -39,7 +39,7 @@ const QMap<QString, QString> agentNames{{"claude", "Claude Code"}, {"codex", "Co
 // The members read as a table from this settings column width, as cards below.
 constexpr int tableWidth = 720;
 // The draft's fields, in the order an update names them (spec 3).
-const QStringList draftFields{"name", "goal", "addendum", "settings", "members", "tasks"};
+const QStringList draftFields{"name", "goal", "addendum", "settings", "members", "tasks", "working_mode"};
 
 QComboBox *combo(const char *name)
 {
@@ -215,6 +215,18 @@ QWidget *TeamNewTab::buildSettings()
     grid->addWidget(fieldLabel(tr("Folders")), 2, 0); grid->addLayout(policyRow, 2, 1, 1, 2);
     grid->setColumnStretch(1, 1);
     v->addLayout(grid);
+    // Task #308: the project's working-mode proposal, with its reasons.
+    m_workingMode = new QComboBox; m_workingMode->setObjectName("teamNewWorkingMode");
+    m_workingMode->addItem(tr("Auto: follow the project"), QStringLiteral("auto"));
+    m_workingMode->addItem(tr("Branch pipeline"), QStringLiteral("branch-pipeline"));
+    m_workingMode->addItem(tr("Branch per task"), QStringLiteral("branch-per-task"));
+    m_workingMode->addItem(tr("One shared folder"), QStringLiteral("shared-folder"));
+    m_workingMode->addItem(tr("Keep the settings as they are"), QStringLiteral("none"));
+    connect(m_workingMode, &QComboBox::currentIndexChanged, this, [this] { if (!m_applying) touch("working_mode"); });
+    grid->addWidget(fieldLabel(tr("Working mode")), 3, 0); grid->addWidget(m_workingMode, 3, 1, 1, 2);
+    m_workingReasons = label(QString(), c.muted, 11, false, "teamNewWorkingReasons");
+    m_workingReasons->setWordWrap(true);
+    grid->addWidget(m_workingReasons, 4, 1, 1, 2);
     m_gitNote = new QLabel(tr("Folder is not a Git repository — members will share one folder. Worktrees are off."));
     m_gitNote->setObjectName("teamNewGitNote"); m_gitNote->setWordWrap(true);
     v->addWidget(m_gitNote);
@@ -1130,6 +1142,7 @@ QJsonValue TeamNewTab::fieldValue(const QString &field) const
     if (field == "settings") return settingsJson();
     if (field == "members") return membersJson();
     if (field == "tasks") return templateTasks();
+    if (field == "working_mode") return m_workingMode ? m_workingMode->currentData().toString() : QStringLiteral("auto");
     return {};
 }
 
@@ -1329,6 +1342,11 @@ void TeamNewTab::applyDraft(const Teams::Team &team, const QJsonObject &settings
         if (!m_dirty.contains("tasks")) { m_tasks = team.tasks; renderPlan(); }
         m_revision = qMax(m_revision, team.draftRevision);
         m_appliedRevision = team.draftRevision;
+        if (m_workingMode && team.workingMode.known && !m_dirty.contains("working_mode")) {
+            const int at = m_workingMode->findData(team.workingMode.preset);
+            m_workingMode->setCurrentIndex(at >= 0 ? at : 0);
+            if (m_workingReasons) m_workingReasons->setText(team.workingMode.reasons.join(QStringLiteral("; ")));
+        }
         m_applying = false;
     }
     m_unseen = team.draftUnseen;

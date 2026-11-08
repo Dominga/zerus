@@ -5,7 +5,7 @@
 //! newest first. Task #246: every item carries a `state` fingerprint and the
 //! owner may dismiss an item with the state they saw; it stays out of the list
 //! (and the count) until that state changes.
-use super::model::{PhaseState, TaskStatus, Team, TeamStatus};
+use super::model::{PhaseState, TaskStatus, TaskWait, Team, TeamStatus};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
@@ -94,6 +94,13 @@ fn blocks(item: &Value) -> String {
         Some(member) => format!("{team}/{member}"),
         None => team.to_owned(),
     }
+}
+
+/// Task #286: a merge conflict in an accepted predecessor's commit is the
+/// lead's or the merger's resolve task (#267), never the owner's.
+fn is_merge_conflict(wait: &TaskWait) -> bool {
+    wait.reason.contains("accepted commit")
+        && (wait.reason.contains("conflicts in") || wait.reason.contains("merge it into the member's branch"))
 }
 
 /// The live page plus the dismissed items apart, with their own count. The
@@ -312,6 +319,8 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
     // one digest that blocks nothing; each can be reverted.
     if let Some((title, at, changes)) = super::lead_plan::digest(team) {
         let mut found = item(team, "lead_changes", "digest", title, at, "open_team");
+        // Task #286: one grouped row: the counts per kind and the newest few.
+        found["groups"] = super::lead_plan::groups(changes.as_array().map(Vec::as_slice).unwrap_or_default());
         found["changes"] = changes;
         found["seen"] = json!(format!("{{\"team\":\"{}\",\"by\":\"human\"}} | hgs team seen-lead-changes --json", team.id));
         out.push(found);
@@ -390,19 +399,34 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
     // model, U46 context, U48 branch) waits for the lead or the owner, with
     // its reason and the retry that starts the step again, as in the lead's
     // inbox. A context action that still runs waits for nobody.
+    // Task #286 (owner, 2026-11-08): a task's wait for the lead or the merger
+    // is not the owner's. It is in the lead's inbox (spec 0's `task_waits`);
+    // only a wait the lead leaves unresolved for `owner_escalate_minutes`
+    // reaches the owner, as one item naming the lead. A merge-conflict wait
+    // never does: the lead's resolve task (#267) handles it.
     for task in team.tasks.iter().filter(|task| task.status == TaskStatus::Pending) {
         let Some(wait) = task.waits.as_ref().filter(|wait| !wait.running()) else { continue };
+        if is_merge_conflict(wait) {
+            continue;
+        }
+        let minutes = team.settings.owner_escalate_minutes;
+        if minutes == 0 || now - wait.at < minutes as f64 * 60.0 {
+            continue;
+        }
+        let lead = team.member(&team.lead).map(|lead| team.name_of(&lead.id)).unwrap_or_else(|| "the lead".into());
         let mut found = item(
             team,
-            "task_waits_owner",
-            &format!("waits-{}", task.id),
-            format!("#{} {} waits: {}", task.id, task.title, wait.reason),
+            "task_wait_escalated",
+            &format!("escalated-{}", task.id),
+            format!("#{} {} still waits after {minutes} min: {} ({lead} has not acted)", task.id, task.title, wait.reason),
             wait.at,
-            "retry_task",
+            "open_team",
         );
         found["task"] = json!(task.id);
+        found["lead"] = json!(lead);
         found["reason"] = json!(wait.reason);
         found["waits_for"] = json!(wait.waits_for);
+        found["minutes"] = json!(minutes);
         out.push(found);
     }
     // #718: the proposal of a full test run is the owner's call too, and a
@@ -580,33 +604,84 @@ mod tests {
         assert_eq!(kinds(&items(&[reported], 1000.0 + 31.0 * 60.0)), ["report_escalated"]);
     }
 
-    /// #581 N7: a task whose step Zerus could not take waits for the owner
-    /// too, with its reason and the retry; one whose context action still
-    /// runs, or that is no longer pending, does not.
+    /// Task #286: a task's wait is the lead's, not the owner's; after the
+    /// team's `owner_escalate_minutes` it reaches the owner as one item naming
+    /// the lead, and a merge-conflict wait never does.
     #[test]
-    fn a_waiting_task_is_listed_with_its_reason_and_the_retry() {
-        let wait = |state: &str, at: f64| TaskWait {
+    fn a_task_wait_belongs_to_the_lead_and_escalates_after_the_setting() {
+        let wait = |at: f64, reason: &str| TaskWait {
             waits_for: "zerus".into(),
             on: vec!["model".into()],
-            reason: "hgs: unknown model gpt-5.5 for this account".into(),
+            reason: reason.into(),
             at,
-            state: state.into(),
+            state: "refused".into(),
             ..Default::default()
         };
         let mut waiting = team("t", TeamStatus::Running);
-        waiting.tasks[0].waits = Some(wait("refused", 700.0));
-        waiting.tasks.push(Task { id: 2, title: "Docs".into(), waits: Some(wait("waiting", 800.0)), ..Default::default() });
-        waiting.tasks.push(Task { id: 3, title: "Old".into(), status: TaskStatus::Accepted, waits: Some(wait("uncertain", 900.0)), ..Default::default() });
+        waiting.tasks[0].waits = Some(wait(700.0, "hgs: unknown model gpt-5.5 for this account"));
         waiting.tasks[0].hold = Some(Hold { by: "You".into(), at: 600.0, ..Default::default() });
-        let list = items(&[waiting], 1000.0);
-        assert_eq!(kinds(&list), ["task_waits_owner", "task_waits_owner"], "{list:#?}");
-        let found = &list[0];
-        assert_eq!((found["id"].as_str(), found["task"].as_u64(), found["action"].as_str()), (Some("t/task_waits_owner/waits-1"), Some(1), Some("retry_task")));
-        assert_eq!((found["since"].as_f64(), found["waits_for"].as_str()), (Some(700.0), Some("zerus")));
-        assert_eq!(found["reason"], "hgs: unknown model gpt-5.5 for this account");
-        assert_eq!(found["title"], "#1 API waits: hgs: unknown model gpt-5.5 for this account");
-        // The owner's hold on the same task stays its own item.
-        assert_eq!((list[1]["id"].as_str(), list[1]["action"].as_str()), (Some("t/task_waits_owner/1"), Some("release_task")));
+        assert_eq!(waiting.settings.owner_escalate_minutes, 60);
+        // Within the setting: only the owner's own hold is listed.
+        let young = items(&[waiting.clone()], 700.0 + 59.0 * 60.0);
+        assert_eq!(kinds(&young), ["task_waits_owner"], "{young:#?}");
+        // Past it: one escalation item naming the lead, beside the hold.
+        let old = items(&[waiting.clone()], 700.0 + 61.0 * 60.0);
+        let escalated: Vec<&Value> = old.iter().filter(|item| item["kind"] == "task_wait_escalated").collect();
+        assert_eq!(escalated.len(), 1, "{old:#?}");
+        let found = escalated[0];
+        assert_eq!((found["task"].as_u64(), found["lead"].as_str()), (Some(1), Some("Lead")));
+        assert_eq!(found["minutes"], 60);
+        assert!(found["title"].as_str().unwrap().contains("Lead has not acted"), "{}", found["title"]);
+        assert!(found["reason"].as_str().unwrap().contains("unknown model"));
+        // Still one, however long it stays unresolved: it escalates once.
+        let later = items(&[waiting], 700.0 + 600.0 * 60.0);
+        assert_eq!(later.iter().filter(|item| item["kind"] == "task_wait_escalated").count(), 1, "{later:#?}");
+        // A merge conflict is the lead's/merger's resolve task: never, however old.
+        let mut conflict = team("c", TeamStatus::Running);
+        conflict.tasks[0].waits = Some(wait(
+            700.0,
+            "#229's accepted commit abcdef conflicts in src/x.rs; merge it into the member's branch (folder) and resolve it, or reassign the task, then retry",
+        ));
+        assert!(!kinds(&items(&[conflict], 700.0 + 600.0 * 60.0)).contains(&"task_wait_escalated"));
+        // The setting at 0 never escalates.
+        let mut off = team("o", TeamStatus::Running);
+        off.settings.owner_escalate_minutes = 0;
+        off.tasks[0].waits = Some(wait(700.0, "hgs: unknown model"));
+        assert!(items(&[off], 700.0 + 600.0 * 60.0).is_empty());
+    }
+
+    /// Task #286: the lead-changes digest is one grouped row (added, moved,
+    /// cancelled, ...) with counts and the newest few; Seen clears it.
+    #[test]
+    fn the_lead_changes_digest_is_one_grouped_row_that_seen_clears() {
+        use crate::state::teams::model::LeadChange;
+        let mut team = team("t", TeamStatus::Running);
+        for (id, op, summary, at) in [
+            ("lc1", "add-to-phase", "added #5 X to phase 1", 100.0),
+            ("lc2", "move-task", "moved #6 Y from phase 1 to 2", 110.0),
+            ("lc3", "add-to-phase", "added #7 Z to phase 2", 120.0),
+            ("lc4", "cancel", "cancelled #8 W", 130.0),
+        ] {
+            team.lead_changes.push(LeadChange {
+                id: id.into(), op: op.into(), summary: summary.into(), by: "Lead".into(), at, ..Default::default()
+            });
+        }
+        let list = items(&[team.clone()], 200.0);
+        let digest: Vec<&Value> = list.iter().filter(|item| item["kind"] == "lead_changes").collect();
+        assert_eq!(digest.len(), 1, "one row: {list:#?}");
+        let groups = digest[0]["groups"].as_array().expect("the groups");
+        assert_eq!(groups.len(), 3, "{groups:?}");
+        let counts: std::collections::BTreeMap<&str, u64> = groups
+            .iter()
+            .map(|group| (group["kind"].as_str().unwrap_or_default(), group["count"].as_u64().unwrap_or_default()))
+            .collect();
+        assert_eq!((counts.get("added"), counts.get("moved"), counts.get("cancelled")), (Some(&2), Some(&1), Some(&1)), "{groups:?}");
+        let added = groups.iter().find(|group| group["kind"] == "added").expect("the added group");
+        assert_eq!(added["newest"].as_array().unwrap().len(), 2, "the newest few of the kind");
+        // Seen clears the row.
+        let mut events = Vec::new();
+        super::super::lead_plan::seen(&mut team, &json!({}), &crate::state::teams::ops::Actor::Human, &mut events).unwrap();
+        assert!(!items(&[team], 400.0).iter().any(|item| item["kind"] == "lead_changes"));
     }
 
     #[test]

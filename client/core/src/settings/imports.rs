@@ -27,6 +27,8 @@ const FAMILIES: &[&str] = &[
     // Task 103.
     "teams-view-preferences",
     "inspector-panel",
+    // WhiteWh fork: Keep cache warm's hours per session.
+    "cache-keep-warm",
     // Report only: which NO_CONSUMER keys the Qt store had. Imports nothing.
     "no-consumer",
 ];
@@ -311,6 +313,7 @@ fn matches(family: &str, key: &str) -> bool {
                 || key.starts_with("teams/planMode/")
         }
         "no-consumer" => NO_CONSUMER.contains(&key),
+        "cache-keep-warm" => key == crate::cache_keepalive::KEY,
         "inspector-panel" => matches!(
             key,
             "workspace/inspectorVisible" | "workspace/inspectorWidth" | "workspace/inspectorTab"
@@ -356,6 +359,11 @@ fn converted(key: &str, value: &QtValue) -> Result<Value, &'static str> {
     }
     if key == crate::row_preferences::KEY {
         return crate::row_preferences::from_qt(value).ok_or("invalid packed row-density keys");
+    }
+    // Qt's compact JSON object of session identity -> hours; Null when no
+    // session keeps its cache warm.
+    if key == crate::cache_keepalive::KEY {
+        return crate::cache_keepalive::from_qt(value).ok_or("invalid cache keep-warm hours");
     }
     if key == "sessions/geometry" {
         return super::qt_layout::geometry(value)

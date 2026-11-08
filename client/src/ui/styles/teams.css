@@ -127,6 +127,16 @@
   /* Task 11: the lead's proposal cards, the reports the owner decides and
      Waiting for you (page, rows, banner). Parts sit apart through layout. */
   .team-proposals { display: flex; flex-direction: column; gap: 6px; padding: 6px 10px; max-height: 50%; overflow-y: auto; flex: none; }
+  /* Task 317 (F7): the lead's cards above its composer show in full, as Qt's
+     mainProposalCards do; only past 60% of the column do they scroll, in one
+     place, and the column never shrinks them into a short inner scroll. */
+  .activity-wrap > .lead-proposals { flex: none; max-height: 60%; overflow-y: auto; }
+  .lead-proposals .team-proposals { max-height: none; overflow: visible; padding-inline: 0; }
+  /* Task 317 (F13): the lead's session carries its team bar and a strip naming the team. */
+  .lead-team { flex: none; }
+  .lead-team-strip { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 4px 14px; border-bottom: 1px solid var(--z-color-divider);
+    background: color-mix(in srgb, var(--z-color-accent) 8%, transparent); }
+  .lead-team-strip > b { min-width: 0; }
   .team-proposal { display: flex; flex-direction: column; gap: 3px; padding: 6px 8px; border-radius: 7px;
     background: color-mix(in srgb, var(--z-color-warn) 10%, transparent); border: 1px solid color-mix(in srgb, var(--z-color-warn) 40%, transparent); }
   .team-proposal.stale { opacity: .8; }
@@ -160,6 +170,15 @@
   .team-waiting-row { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: 8px; background: var(--z-color-card); border: 1px solid var(--z-color-card-border); cursor: pointer; }
   .team-waiting-row.open { cursor: default; }
   .team-waiting-row.compact { padding: 4px 8px; background: transparent; border: 0; border-radius: 0; }
+  /* Task 304: Dismiss per row, the dismissed section with Restore, and the lead-changes digest's groups. */
+  .team-waiting-dismiss { flex: none; color: var(--z-color-muted); }
+  .team-waiting-dismiss:hover { color: var(--z-color-text); }
+  .team-waiting-row.dismissed { cursor: default; opacity: .8; border-style: dashed; }
+  .team-waiting-blocks { flex: none; font-size: var(--fs-xs); color: var(--z-color-warn); }
+  .team-waiting-dismissed { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+  .team-waiting-show-dismissed { align-self: flex-start; }
+  .team-waiting-groups { display: flex; flex-wrap: wrap; gap: 6px; padding-left: 22px; }
+  .team-waiting-group-chip { font-size: var(--fs-xs); padding: 1px 8px; border-radius: 9px; background: var(--z-color-raised); color: var(--z-color-text-2); border: 1px solid var(--z-color-card-border); }
   .team-waiting-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .team-waiting-icon { display: grid; place-items: center; color: var(--z-color-warn); flex: none; }
   .team-waiting-kind { font-weight: 600; flex: none; }
@@ -173,6 +192,10 @@
   .team-waiting-output { margin: 0; max-height: 8em; overflow: auto; padding: 4px 6px; border-radius: 5px; background: var(--z-color-field); white-space: pre-wrap; }
   .team-waiting-banner { display: flex; flex-direction: column; gap: 2px; padding: 4px 14px; border-bottom: 1px solid var(--z-color-divider); background: var(--z-color-warn-bg); }
   .team-waiting-banner-head { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--z-color-warn); }
+  /* Task 317 (F8): the count and the button keep their line; only the newest
+     title gives way, to an ellipsis (Qt keeps "7 wait for you" on one line). */
+  .team-waiting-banner-head > b, .team-waiting-banner-head > .btn { flex: none; white-space: nowrap; }
+  .team-waiting-banner-head > .ell { flex: 0 1 auto; min-width: 0; }
   .team-confirm-text { white-space: pre-line; }
 
   /* Task 55: members' questions the owner answers (task card and side). */
@@ -211,6 +234,11 @@
   .team-member-queue-row { display: flex; gap: 6px; min-width: 0; padding: 1px 4px; border-radius: 4px; font-size: 11px; text-align: left; color: var(--z-color-text-2); }
   .team-member-queue-row.current { color: var(--z-color-text); font-weight: 600; }
   .team-member-queue-row:hover { background: var(--z-color-hover); }
+  /* Task 315: the answered permissions under the member, as Qt's U17 rows. */
+  .team-member-answers { max-width: 100%; min-width: 0; text-align: left; }
+  .team-member-answer { display: flex; flex-direction: column; min-width: 0; padding: 1px 4px; font-size: 11px; color: var(--z-color-text-2); }
+  .team-member-answer .warn { color: var(--z-color-warn, var(--z-color-text)); }
+  .team-member-answer .accent { color: var(--z-color-accent, var(--z-color-text)); }
   .team-member-permission { display: flex; flex-direction: column; gap: 4px; padding: 5px 8px 6px; border-radius: 7px; cursor: default;
     background: color-mix(in srgb, var(--z-color-warn) 10%, transparent); border: 1px solid color-mix(in srgb, var(--z-color-warn) 40%, transparent); }
   .team-member-permission .field { min-width: 0; height: 24px; font-size: 11px; }

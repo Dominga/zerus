@@ -1,4 +1,4 @@
-import { For, Show } from "solid-js";
+import { For, Show, createSignal, onCleanup } from "solid-js";
 import { tr, trNoop } from "../../i18n";
 import { AGENT_LABEL, AgentLogo, Icon } from "../lib/icons";
 import { computerFresh, computerOffline } from "../../store/catalog";
@@ -11,6 +11,7 @@ import type { AgentKind, Session, Status, Subagent } from "./types";
 import type { TeamSummary } from "../../types";
 import { currentChildren, workingChildren } from "./subagents";
 import { presentState, stateFacts, STATE_GLYPH, type Shown, type StateIcon } from "./session-states";
+import { keepWarmHours } from "../../store/keepWarm";
 
 // Card anatomy follows tray/src/SessionCardDelegate.h paintCard() at the
 // compact density (94 px rows, the only density in the web client):
@@ -48,6 +49,10 @@ export function statusCaption(s: Session): string {
   const state = cardState(s);
   if (state.kind && state.caption) return state.caption;
   if (s.status === "ready" && s.draft) return tr("Draft");
+  // Task 315 (F2): the unread badge reads "New reply", as Qt's card says it
+  // (SessionCardDelegate::statusOf), not the state under it ("Stopped").
+  const kind = badgeKind(s);
+  if (kind === "unread" || kind === "muted-unread") return tr("New reply");
   const seconds = elapsed(s);
   if (seconds === undefined) return captionText(s.caption);
   const h = Math.floor(seconds / 3600), m = Math.floor((seconds % 3600) / 60), sec = seconds % 60;
@@ -80,13 +85,31 @@ export const isStateKind = (kind: BadgeKind | undefined): kind is StateKind =>
 export interface CardState { shown: Shown; kind?: BadgeKind; caption?: string }
 export function cardState(s: Session): CardState {
   const online = !computerOffline(s.computer);
-  const shown = presentState(stateFacts(s, online, visibleUnreadReply(s, computerFresh(s.computer))), now());
+  // Keep cache warm stretches Cooling to its hours (SessionsWindow.cpp:4936).
+  const shown = presentState(stateFacts(s, online, visibleUnreadReply(s, computerFresh(s.computer)), keepWarmHours(s) * 3600), now());
   const blocked = s.status === "attention" || s.status === "error";
   const key = shown.key;
   if ((key === "deps" || key === "build" || key === "cooling" || key === "cold" || key === "stopped")
     && !blocked && s.state !== "archived" && !(s.draft && (key === "cooling" || key === "cold"))) return { shown, kind: key, caption: shown.badge };
   if (key === "user" && shown.badge === tr("Needs you") && !blocked) return { shown, kind: "attention", caption: shown.badge };
   return { shown };
+}
+
+/**
+ * Task 315 (F3): the detail header's pill (SessionsWindow.cpp:4932-4959) shows
+ * the card's state: Waiting for dependencies, Building, Cooling, Cold and
+ * Stopped unless the session needs action or is archived, and the lead's
+ * "Needs you" unless it needs action. Undefined: the header keeps its status.
+ */
+export function headerState(s: Session): { kind: BadgeKind; caption: string; title: string } | undefined {
+  const online = !computerOffline(s.computer);
+  const shown = presentState(stateFacts(s, online, visibleUnreadReply(s, computerFresh(s.computer)), keepWarmHours(s) * 3600), now());
+  const key = shown.key;
+  const needsYou = key === "user" && shown.badge === tr("Needs you") && !s.needsAction;
+  if (needsYou) return { kind: "attention", caption: shown.badge, title: shown.reason };
+  if ((key === "deps" || key === "build" || key === "cooling" || key === "cold" || key === "stopped") && !s.needsAction && s.state !== "archived")
+    return { kind: key, caption: shown.badge, title: shown.reason };
+  return undefined;
 }
 
 export function badgeKind(s: Session): BadgeKind {
@@ -253,34 +276,64 @@ export function chipTooltip(s: Session, kind: "services" | "background" | "chang
 const GIT_CHIP: Record<string, "changes" | "outgoing" | "incoming" | "synced" | "unchecked"> =
   { "git-diff": "changes", "git-push": "outgoing", "git-pull": "incoming", "git-synced": "synced", "git-unknown": "unchecked" };
 
+/** One chip of line 2: what it is, its icon, count and tone (SessionRowChips::Chip). */
+export interface RowChip { kind: "services" | "background" | "git" | "more"; icon: string; count?: string; tone: string; tip: string }
+
+/** Qt SessionRowChips::width: the icon, the count and the padding, at the chips' 11 px. */
+export const chipWidth = (chip: Pick<RowChip, "count">) => 4 + 16 + (chip.count ? 3 + chip.count.length * 7 : 0) + 4;
+
+/**
+ * Task 252 (Qt SessionRowChips::layout): the chips that fit `room`. When all
+ * do not fit, git folds into one More chip before services or background
+ * work go; then chips are dropped from the end until the rest fit.
+ */
+export function fitChips(chips: readonly RowChip[], room: number, more: Omit<RowChip, "kind" | "icon" | "tone">): RowChip[] {
+  const total = (list: readonly RowChip[]) => Math.max(0, list.reduce((sum, chip) => sum + chipWidth(chip) + 4, 0) - 4);
+  let shown = [...chips];
+  if (total(shown) > room) {
+    const folded: RowChip[] = [];
+    let added = false;
+    for (const chip of shown) {
+      if (chip.kind !== "git") folded.push(chip);
+      else if (!added) { folded.push({ kind: "more", icon: "more", tone: "muted", ...more }); added = true; }
+    }
+    shown = folded;
+  }
+  while (shown.length && total(shown) > room) shown.pop();
+  return shown;
+}
+
+/** The chips of a row in Qt's order: services, background commands, then git. */
+export function rowChips(s: Session): RowChip[] {
+  const chips: RowChip[] = [];
+  const services = s.services?.length ?? 0;
+  if (services) chips.push({ kind: "services", icon: "settings", count: String(services), tone: "muted", tip: chipTooltip(s, "services") });
+  const jobs = (s.backgroundJobs ?? 0) > 0 ? s.backgroundJobs! : 0;
+  if (jobs) chips.push({ kind: "background", icon: "active", count: countText(jobs), tone: "bg", tip: chipTooltip(s, "background") });
+  if (s.git && s.status !== "ended") {
+    for (const mark of gitMarks(s.git)) chips.push({ kind: "git", icon: mark.icon, count: mark.count, tone: mark.tone, tip: chipTooltip(s, GIT_CHIP[mark.icon] ?? "unchecked") });
+  }
+  return chips;
+}
+
 /**
  * The chips right of the folder (SessionRowChips): services, background commands, then
  * git (changed files, outgoing, incoming, in sync or not checked). Each names what it
- * counts and a click opens where it lives.
+ * counts and a click opens where it lives. Task 252: in a narrow line they fit as
+ * Qt's do: git folds into one More chip (the full git tooltip) before the machine
+ * badge is squeezed.
  */
-export function RowChips(props: { session: Session; onChip?: (kind: "services" | "background" | "git") => void }) {
+export function RowChips(props: { session: Session; room?: number; onChip?: (kind: "services" | "background" | "git") => void }) {
   const s = () => props.session;
-  const click = (kind: "services" | "background" | "git") => (e: MouseEvent) => { e.stopPropagation(); props.onChip?.(kind); };
-  const services = () => s().services?.length ?? 0;
-  const jobs = () => ((s().backgroundJobs ?? 0) > 0 ? s().backgroundJobs! : 0);
-  const git = () => (s().git && s().status !== "ended" ? gitMarks(s().git!) : []);
+  const click = (kind: RowChip["kind"]) => (e: MouseEvent) => { e.stopPropagation(); props.onChip?.(kind === "more" ? "git" : kind); };
+  const chips = () => fitChips(rowChips(s()), props.room ?? Infinity, { tip: s().git ? gitTooltip(s()) : "" });
   return (
-    <Show when={services() || jobs() || git().length}>
+    <Show when={chips().length}>
       <span class="gmarks">
-        <Show when={services()}>
-          <button type="button" class="gmark chip counted t-muted" title={chipTooltip(s(), "services")} onClick={click("services")} onDblClick={(e) => e.stopPropagation()}>
-            <Icon name="settings" size={16} /><span>{services()}</span>
-          </button>
-        </Show>
-        <Show when={jobs()}>
-          <button type="button" class="gmark chip counted t-bg" title={chipTooltip(s(), "background")} onClick={click("background")} onDblClick={(e) => e.stopPropagation()}>
-            <Icon name="active" size={16} /><span>{countText(jobs())}</span>
-          </button>
-        </Show>
-        <For each={git()}>{(m) => (
-          <button type="button" class={`gmark chip t-${m.tone}`} classList={{ counted: !!m.count }} title={chipTooltip(s(), GIT_CHIP[m.icon] ?? "unchecked")} onClick={click("git")} onDblClick={(e) => e.stopPropagation()}>
-            <Icon name={m.icon} size={16} />
-            <Show when={m.count}><span>{m.count}</span></Show>
+        <For each={chips()}>{(chip) => (
+          <button type="button" class={`gmark chip t-${chip.tone}`} classList={{ counted: !!chip.count }} data-chip={chip.kind} title={chip.tip} onClick={click(chip.kind)} onDblClick={(e) => e.stopPropagation()}>
+            <Icon name={chip.icon} size={16} />
+            <Show when={chip.count}><span>{chip.count}</span></Show>
           </button>
         )}</For>
       </span>
@@ -442,6 +495,18 @@ export function SessionCard(props: {
   const kind = () => badgeKind(s());
   const state = () => cardState(s());
   const line = () => lineThree(s());
+  // Task 252 (Qt SessionRowChips::layout): the chips' room on line 2, between
+  // the folder (its icon and 48 px of text, as Qt keeps) and the machine badge.
+  const [chipRoom, setChipRoom] = createSignal(Infinity);
+  const measureLine = (el: HTMLDivElement) => {
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      const badge = el.querySelector<HTMLElement>(".mbadge");
+      setChipRoom(Math.max(0, el.clientWidth - (badge?.offsetWidth ?? 0) - 18 - 48 - 8));
+    });
+    observer.observe(el);
+    onCleanup(() => observer.disconnect());
+  };
   return (
     <div class="scard" classList={{ selected: props.selected, offline: statusOf(s()) === "offline", muted: !!s().muted,
       "team-lead": !!props.team, "team-member": !!props.depth, "team-first": !!props.teamFirst, "team-last": !!props.teamLast }}
@@ -461,11 +526,11 @@ export function SessionCard(props: {
         <span class="grow" />
         <AgentBadge agent={s().agent} />
       </div>
-      <div class="sc-l2">
+      <div class="sc-l2" ref={measureLine}>
         <Icon name={s().branch ? "git-branch" : "folder"} size={14} class="sc-meta-ico" />
         <span class="sc-meta ell">{folderOf(s())}{s().branch ? ` / ${s().branch}` : ""}</span>
         <span class="grow" />
-        <RowChips session={s()} onChip={props.onChip} />
+        <RowChips session={s()} room={chipRoom()} onChip={props.onChip} />
         <MachineBadge alias={s().machine} computer={s().computer} offline={statusOf(s()) === "offline"} />
       </div>
       <div class="sc-l3" classList={{ "s-deps": line().tone === "deps" }}>

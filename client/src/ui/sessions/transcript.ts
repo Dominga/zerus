@@ -6,6 +6,7 @@ import { messageTimeOf } from "../lib/dates";
 import { tr, trNoop } from "../../i18n";
 import { systemNotice } from "./notices";
 import { toolMedia } from "./media";
+import { isKeepalive } from "./keep-warm";
 
 // A Symbol cannot arrive from a provider's JSON. Only our own local send
 // supplies these immutable-cache preview paths and oriented dimensions.
@@ -69,7 +70,7 @@ export function messageRole(e: ActivityEvent): Role {
   if (e.source === "zerus_task" && e.type === "TaskEntry") return e.task_role === "person" ? "user" : e.task_role === "agent" ? "assistant" : "";
   if (e.source === "hgs_voice" && e.voice && typeof e.voice === "object") return "user";
   if (childEvent(e) || (!e.detail && !(e.attachments?.length))) return "";
-  if (e.origin === "task_notification" || e.origin === "subagent_report" || e.origin === "peer_message") return "notice";
+  if (e.origin === "task_notification" || e.origin === "subagent_report" || e.origin === "peer_message" || e.origin === "cache_keepalive") return "notice";
   switch (e.type) {
     case "UserPromptSubmit": case "UserPromptQueued": case "UserMessage": case "TurnStarted": case "QuestionAnswered": case "LocalMessage": return "user";
     case "Stop": case "AgentMessage": return "assistant";
@@ -489,6 +490,18 @@ function transcriptItems(events: readonly ActivityEvent[], summary?: Record<stri
     if (e.type === "AgentThinking") {
       if ((e.detail ?? "").trim()) items.push({ id, kind: "thinking", at, body: e.detail });
       i++; continue;
+    }
+    // Keep cache warm (ActivityView.cpp:1239-1251, 1367-1370): one quiet line
+    // without the one-word replies; keepalives in a row share it, at the last one's time.
+    if (isKeepalive(e, role)) {
+      let count = 0, last = e;
+      while (i < events.length && isKeepalive(events[i], messageRole(events[i]))) {
+        last = events[i++];
+        count++;
+        while (i < events.length && messageRole(events[i]) === "assistant") i++;
+      }
+      items.push({ id, kind: "context", at: timeText(last.at), body: count > 1 ? tr("Cache warmed %1 times while idle", count) : tr("Cache warmed while idle") });
+      continue;
     }
     if (role === "notice") {
       const report = typeof e.report === "string" ? e.report : "";

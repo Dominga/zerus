@@ -30,5 +30,7 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["src/**/*.test.ts"],
+    // Task 245: numbers and dates read the same on every machine's locale.
+    setupFiles: ["src/test-locale.ts"],
   },
 });

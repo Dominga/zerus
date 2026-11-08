@@ -25,6 +25,7 @@ describe("the lead's proposal cards' place in the Activity", () => {
   it("draws the cards and the question card in one column width, as Qt's input column does", async () => {
     const fs = await import(/* @vite-ignore */ ["node", "fs"].join(":")) as { readFileSync(path: URL, encoding: "utf8"): string };
     const cards = fs.readFileSync(new URL("../teams/ProposalCards.tsx", import.meta.url), "utf8").replace(/\r\n/g, "\n");
-    expect(cards).toContain('<div class="cmp-col"><TeamProposals computer={row()!.computer} team={view()} /></div>');
+    // Task 317 (F7): lead-proposals keeps them out of the column's shrink.
+    expect(cards).toContain('<div class="cmp-col lead-proposals"><TeamProposals computer={row()!.computer} team={view()} /></div>');
   });
 });

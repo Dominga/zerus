@@ -44,24 +44,31 @@ bool nativeEvent(QWidget *window, const WindowTitleBar *bar, void *message, qint
     if (msg->message == WM_NCHITTEST) {
         POINT point{GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam)};
         RECT frame; GetWindowRect(hwnd, &frame);
-        if (!IsZoomed(hwnd)) {
-            const int edge = qMax(4, qRound(5 * window->devicePixelRatioF()));
-            const bool left = point.x < frame.left + edge, right = point.x >= frame.right - edge;
-            const bool top = point.y < frame.top + edge, bottom = point.y >= frame.bottom - edge;
-            const LRESULT edges = top ? (left ? HTTOPLEFT : right ? HTTOPRIGHT : HTTOP)
-                                : bottom ? (left ? HTBOTTOMLEFT : right ? HTBOTTOMRIGHT : HTBOTTOM)
-                                : left ? HTLEFT : right ? HTRIGHT : HTNOWHERE;
-            if (edges != HTNOWHERE) { *result = edges; return true; }
-        }
+        const QPoint screen(point.x, point.y);
         ScreenToClient(hwnd, &point);
         const qreal ratio = window->devicePixelRatioF();
         const QPoint logical(qRound(point.x / ratio), qRound(point.y / ratio));
-        *result = bar && bar->isVisible() && bar->dragsAt(bar->mapFrom(window, logical)) ? HTCAPTION : HTCLIENT;
+        const bool drags = bar && bar->isVisible() && bar->dragsAt(bar->mapFrom(window, logical));
+        *result = hitTest(QRect(QPoint(frame.left, frame.top), QPoint(frame.right - 1, frame.bottom - 1)), screen, IsZoomed(hwnd),
+                          qMax(4, qRound(5 * ratio)), drags);
         return true;
     }
     return false;
 }
+qintptr hitTest(const QRect &frame, const QPoint &point, bool zoomed, int edge, bool barDrags)
+{
+    if (!zoomed) {
+        const bool left = point.x() < frame.left() + edge, right = point.x() > frame.right() - edge;
+        const bool top = point.y() < frame.top() + edge, bottom = point.y() > frame.bottom() - edge;
+        const LRESULT edges = top ? (left ? HTTOPLEFT : right ? HTTOPRIGHT : HTTOP)
+                            : bottom ? (left ? HTBOTTOMLEFT : right ? HTBOTTOMRIGHT : HTBOTTOM)
+                            : left ? HTLEFT : right ? HTRIGHT : HTNOWHERE;
+        if (edges != HTNOWHERE) return edges;
+    }
+    return barDrags ? HTCAPTION : HTCLIENT;
+}
 #else
+qintptr hitTest(const QRect &, const QPoint &, bool, int, bool) { return 0; }
 void apply(QWidget *) {}
 bool nativeEvent(QWidget *, const WindowTitleBar *, void *, qintptr *) { return false; }
 #endif

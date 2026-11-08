@@ -340,7 +340,8 @@ fn render(
     if pin {
         view.target = Target::Session(to.clone());
     }
-    let (prompt, attachments) = super::dispatch_content(settings, &view, project_name, subagent)?;
+    let (mut prompt, attachments) = super::dispatch_content(settings, &view, project_name, subagent)?;
+    super::reports::pin(&mut prompt, project_name, &view.id, id);
     crate::state::prepare_task_reply(to, "", id, &prompt, &attachments).map_err(fail)
 }
 
@@ -548,7 +549,7 @@ pub(super) fn reopen_request(
     to: &SessionKey,
     dispatch: &str,
 ) -> Result<Value> {
-    let prompt = super::messages::prompt(
+    let mut prompt = super::messages::prompt(
         project_name,
         &view.id,
         id,
@@ -556,6 +557,7 @@ pub(super) fn reopen_request(
         text,
         view.worker.as_ref(),
     );
+    super::reports::pin(&mut prompt, project_name, &view.id, id);
     let attachments = files
         .iter()
         .map(serde_json::to_value)

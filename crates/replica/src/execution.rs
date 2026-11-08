@@ -977,6 +977,7 @@ mod tests {
             delivery: None,
             stale: None,
             considered: None,
+            reported_attempt: None,
             reviews: None,
             of: None,
         }

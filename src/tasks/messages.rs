@@ -212,6 +212,11 @@ pub(super) fn execute(config: &Config, args: &[String]) -> Result<Value> {
             settings.check_agent(&who, to, true, starts).map_err(fail)?;
         }
         delivery.prompt = prompt(&r.project.1, &before.id, id, mode, &content.text, before.worker.as_ref());
+        // Feedback addresses this captured execution; a reopen's new attempt
+        // is handled by attempts::reopen_request before its request is hashed.
+        if let Some(origin) = before.execution.as_ref().and_then(|e| e.current.as_ref()).filter(|a| !a.legacy) {
+            super::reports::pin(&mut delivery.prompt, &r.project.1, &before.id, &origin.id);
+        }
         let attachments = files
             .iter()
             .map(serde_json::to_value)

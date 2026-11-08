@@ -3779,6 +3779,7 @@ hgs task send orchard/T-a1b2c3 [--session codex/api [--host ALIAS]]
 hgs task handoff orchard/T-a1b2c3 --session codex/worker [--host ALIAS]
 hgs task start orchard/T-a1b2c3
 hgs task report orchard/T-a1b2c3 [--progress|--ready] [--considered REV] < summary.txt
+hgs task report-attempt orchard/T-a1b2c3 --attempt 00000000-0000-4000-8000-000000000001 [--progress|--ready] [--considered REV] < summary.txt
 hgs task cancel orchard/T-a1b2c3 [--reason "Wrong approach"]
 hgs task stage orchard/T-a1b2c3 backlog|todo|done
 hgs task move orchard/T-a1b2c3 --top|--before REF|--after REF
@@ -3950,31 +3951,56 @@ renumbered, the whole write reads the documents as before.
 
 Send pastes the task prompt into its session through the same input path as
 `hgs send`; the task becomes In progress, and Zerus does not
-check that the agent received it. The prompt asks the agent to report with
-`hgs task report`, which moves the task to In review. Cancel moves a task In
+check that the agent received it. A managed dispatch pins its exact
+`hgs task report-attempt REF --attempt UUID` command before the native request
+is hashed. Its result can move that execution to In review; an explicitly
+legacy execution uses ordinary `hgs task report`. Cancel moves a task In
 progress to In review and pastes the cancel message without stopping the turn;
 its reason is kept as a comment and never pasted. A task this computer already
 shows In progress is not sent again.
 
-`hgs task report` always adds the report to the history. A result (the default,
-or `--ready`) moves a task In progress to In review, with the report as its
-summary, only when the current execution's executor (`execution.current.executor`)
-or the person reports it; the person's result is an explicit action. A result
-from any other session, such as the previous executor after a handoff, is kept
-with `stale` naming why: `other_executor`, or `conflict` while two executions
-claim the task. `other_attempt` and `finished` are reserved for recorded
-attempts. `--progress` records an update as a `progress` entry and never moves
-the task; from outside the current execution it carries `stale` too.
-`--considered REV` records the requirement revision (from 1) that the report
-considered; nothing uses it yet. Outside In progress a report only adds to the
-history, as before, and a report by the task's pinned agent while it is To do or
-Backlog still starts it first. With `--json` the reply adds `moved_to_review`,
-`report` (`ready` or `progress`) and, for a stale report, `stale`. The desktop
-inspector labels progress entries and marks stale reports. The guard decides
-from this computer's copy of the task. `stale`, `considered` and the `progress`
-kind are additions to task schema 5 that older readers ignore: an older hgs
-elsewhere can still move a task on a stale report until it updates, and older
-views show a progress entry as its text. Run inside a session (`HGS_SESSION` and
+Both report commands add the report to history. For a managed execution an
+agent uses `hgs task report-attempt REF --attempt UUID`, with the UUID supplied
+by its original dispatch or start acknowledgement. The named immutable attempt
+must be current, its generation and verified executor must match, and the
+existing conflict, phase and unknown-delivery guards still apply. A result
+(default or `--ready`) can then move In progress to In review; `--progress`
+records progress without moving the task. The report retains its declared
+origin as optional `reported_attempt` log metadata. A stale origin records
+`stale: "other_attempt"` and creates no Ready/Progress fact for the current
+attempt. A different executor, a conflicting execution and unconfirmed delivery
+retain their existing guards. Explicit human reports retain their existing
+rules. `--considered REV` still only records the positive requirement revision;
+this change does not gate actionable-clarification acknowledgement.
+
+A plain report by a managed agent has no origin proof. It succeeds as a history
+write (exit 0) with `history_saved: true`, `outcome: "not_applied"` and
+`moved_to_review: false`. Text and JSON say that the task did not move and refer
+to the command in the original task prompt or a person's acceptance/resend.
+They do not supply the current attempt UUID or a newly retargeted command.
+Never replace an original UUID with one from a later task lookup or retry the
+history write as a duplicate. The new action is deliberate: older CLIs reject
+`report-attempt`, while older `report` parsers can ignore an unknown option.
+The CLI help marker `report-attempt-v1` lets coordinators check support.
+
+Direct `add --start`, `start REF` and an active task's start acknowledgement
+return `reporting`, `report_command` and, for an actual managed attempt,
+`report_attempt` in JSON. The text prints the same pinned command. A positively
+unfloored legacy direct start creates no attempt: it explicitly reports
+`reporting: "legacy"`, prints the ordinary command and invents no UUID.
+Creating managed attempts for every first direct start is separate work; this
+change activates no new C3 admission or floor path. Legacy plain reports keep
+the documented pinned-agent rule for never-sent queued work. A floor or a
+recorded attempt never authorizes an implicit legacy start.
+
+This is an updated-writer boundary, with no task/exchange schema, event shape,
+C3 or floor change. Older writer binaries still apply their older unscoped
+policy. Prompts for attempts started before this change have no pinned command;
+explicit human acceptance or a resend creating a new attempt covers them.
+There is no silent upgrade or latest-attempt inference. Older readers may
+ignore the optional report metadata while retaining it in the Loro document.
+
+Run inside a session (`HGS_SESSION` and
 `HGS_RUN_ID`), `hgs task` acts as that session's agent: `add` files the task
 for that session, and the project settings can keep agents to their own
 session or limit how many tasks they start per hour. `settings --set` reads a

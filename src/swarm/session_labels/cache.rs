@@ -425,24 +425,8 @@ pub(crate) fn due_local(config: &Config) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn fixture() -> (tempfile::TempDir, Config) {
-        let root = tempfile::tempdir().unwrap();
-        let config = Config {
-            home: root.path().to_str().unwrap().into(),
-            dir: root.path().join("config"),
-            state: root.path().join("state"),
-            selves: vec!["fixture".into()],
-            peers: vec![],
-            base_peers: vec![],
-            peers_from_environment: false,
-            machines: BTreeMap::new(),
-            tab: false,
-            tab_colors: String::new(),
-        };
-        let mut store = store::LockedStore::load(&config).unwrap();
-        store.save().unwrap();
-        drop(store);
-        (root, config)
+    fn fixture() -> (test_fixture::Fixture, Config) {
+        test_fixture::fixture()
     }
     fn until() -> Instant {
         Instant::now() + Duration::from_secs(2)

@@ -47,6 +47,8 @@ function show(need: TeamsNeed): () => void {
 }
 /** Shows Waiting for you (this computer's list); the returned function hides it again. */
 export const showWaiting = (): (() => void) => show({ computer: "", waiting: true });
+/** Task 200: shows a computer's team list (New team's drafts); the returned function hides it again. */
+export const showTeamList = (computer: ComputerId = ""): (() => void) => show({ computer, list: true });
 /** Shows a computer's catalog page; the returned function hides it again. */
 export const showCatalog = (computer: ComputerId = ""): (() => void) => show({ computer, catalog: true });
 /** Shows one team outside the selected session (New team, the Plan view); the returned function hides it again. */

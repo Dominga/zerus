@@ -823,6 +823,139 @@ fn verify_scan(
     )
 }
 
+/// Task #279 (owner, 2026-11-08): an owner message judged as the owner typing,
+/// with its time and text: a main `UserPromptSubmit` of the lead's session,
+/// never an injected policy or a team notification. Shared by the citation
+/// check and the message list.
+fn owner_message(event: &Value) -> Option<(f64, String)> {
+    if event["type"] != "UserPromptSubmit" {
+        return None;
+    }
+    if !matches!(event["agent_id"].as_str().unwrap_or_default(), "" | "main") {
+        return None;
+    }
+    if event["origin"].as_str().is_some_and(|origin| !origin.is_empty())
+        || event["turn_origin"].as_str().is_some_and(|origin| !origin.is_empty())
+    {
+        return None;
+    }
+    let at = event["at"].as_f64().unwrap_or(0.0);
+    if at <= 0.0 {
+        return None;
+    }
+    let detail = event["detail"].as_str().unwrap_or_default().trim();
+    let detail = if detail.starts_with("[Iron rules") {
+        match detail.find("\n[/Iron rules]") {
+            Some(found) if found <= 65536 => detail[found + "\n[/Iron rules]".len()..].trim(),
+            _ => "",
+        }
+    } else {
+        detail
+    };
+    if detail.is_empty() || detail.starts_with("[Zerus") || detail.starts_with("[attachment") || detail.starts_with('<') {
+        return None;
+    }
+    Some((at, detail.to_owned()))
+}
+
+/// The owner's words with every run of white space one space and lowercased.
+fn flat(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+/// Task #279 (owner, 2026-11-08): an owner message cited by its id and quote,
+/// at any age. The lead finds the rule in the lead session's journal
+/// (`hgs team decisions --json {"action":"owner-messages"}` lists the messages
+/// and their ids) and quotes it; Zerus verifies that message is the owner's and
+/// that the quote is in it. A negation is not refused here: a standing rule
+/// often says "no push" or "never touch".
+pub(crate) fn verify_cited(team: &Team, message: &Value) -> anyhow::Result<OwnerWord> {
+    let lead = team.member(&team.lead).context("The team has no lead")?;
+    let session = lead.session.as_ref().context("The lead has no session to check the owner's message in")?;
+    let earlier = earlier_name(session);
+    let db = super::super::journal::event_db().map_err(|error| anyhow::anyhow!("The session events are unavailable: {error}"))?;
+    verify_cited_in(&db, &session.name, &session.conversation_id, &earlier, message)
+}
+
+/// The fixture-testable citation check.
+pub(crate) fn verify_cited_in(db: &Connection, name: &str, conversation: &str, earlier: &str, message: &Value) -> anyhow::Result<OwnerWord> {
+    let id = message["id"]
+        .as_i64()
+        .or_else(|| message["id"].as_str().and_then(|text| text.trim().parse().ok()))
+        .filter(|id| *id > 0)
+        .context("owner_message.id is the owner message's id in the lead session's journal (hgs team decisions --json {\"action\":\"owner-messages\"} lists them)")?;
+    let quote = message["quote"].as_str().map(str::trim).filter(|quote| !quote.is_empty()).context("owner_message.quote is the owner's own words from that message")?;
+    anyhow::ensure!(quote.chars().count() <= 2000, "An owner message quote is at most 2000 characters");
+    let mut names: Vec<&str> = vec![name];
+    if !earlier.is_empty() && !conversation.is_empty() {
+        names.push(earlier);
+    }
+    let wanted = flat(quote);
+    for row_name in names {
+        let mut statement = db.prepare("SELECT conversation, payload FROM events WHERE seq = ?1 AND name = ?2").context("The session events cannot be read")?;
+        let rows = statement.query_map(rusqlite::params![id, row_name], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)));
+        let Ok(rows) = rows else { continue };
+        for row in rows {
+            let (event_conversation, payload) = row.context("The session events cannot be read")?;
+            if !conversation.is_empty() && event_conversation != conversation {
+                continue;
+            }
+            let Ok(event) = serde_json::from_str::<Value>(&payload) else { continue };
+            let Some((at, detail)) = owner_message(&event) else { continue };
+            if flat(&detail).contains(&wanted) {
+                return Ok(OwnerWord { text: detail, at, event: id });
+            }
+            anyhow::bail!("The owner message {id} does not contain that quote: quote its own words (the message says \"{}\")", clip_chars(&flat(&detail), 200));
+        }
+    }
+    anyhow::bail!("The owner message {id} is not in the lead session's journal: hgs team decisions --json {{\"action\":\"owner-messages\"}} lists the owner's messages with their ids")
+}
+
+/// A bounded one-line quote for a refusal.
+fn clip_chars(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        text.to_owned()
+    } else {
+        format!("{}…", text.chars().take(limit.saturating_sub(1)).collect::<String>())
+    }
+}
+
+/// Task #279: the lead session's owner messages, newest first, read-only: the
+/// ids and words a decision cites.
+pub(crate) fn messages(team: &Team, limit: usize) -> anyhow::Result<Vec<Value>> {
+    let lead = team.member(&team.lead).context("The team has no lead")?;
+    let session = lead.session.as_ref().context("The lead has no session to read the owner's messages from")?;
+    let earlier = earlier_name(session);
+    let db = super::super::journal::event_db().map_err(|error| anyhow::anyhow!("The session events are unavailable: {error}"))?;
+    let names: Vec<&str> = if earlier.is_empty() || session.conversation_id.is_empty() {
+        vec![session.name.as_str()]
+    } else {
+        vec![session.name.as_str(), earlier.as_str()]
+    };
+    let mut found: Vec<(i64, f64, String)> = Vec::new();
+    for row_name in names {
+        let mut statement = db
+            .prepare("SELECT seq, payload FROM events WHERE name = ?1 AND conversation = ?2 ORDER BY seq DESC LIMIT 500")
+            .context("The session events cannot be read")?;
+        let rows = statement.query_map(rusqlite::params![row_name, session.conversation_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)));
+        let Ok(rows) = rows else { continue };
+        for row in rows.flatten() {
+            let (seq, payload) = row;
+            let Ok(event) = serde_json::from_str::<Value>(&payload) else { continue };
+            if let Some((at, text)) = owner_message(&event) {
+                found.push((seq, at, text));
+            }
+        }
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.dedup_by_key(|(seq, _, _)| *seq);
+    Ok(found
+        .into_iter()
+        .take(limit.clamp(1, 200))
+        .map(|(id, at, text)| serde_json::json!({"id":id,"at":at,"text":clip_chars(&text, 400)}))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1289,3 +1422,5 @@ mod tests {
         verify_roster_in(&db, "claude/x/lead", "c1", "relaunch hgs", &member_rule(RELAUNCH_VERBS, "hgs", "Frontend"), 2010.0).unwrap();
     }
 }
+
+

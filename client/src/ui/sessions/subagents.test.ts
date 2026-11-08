@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { toSession } from "../../store/catalog";
 import { groupRows, type ListInput } from "./group-rows";
-import { childInactive, childRows, rosterFor } from "./subagents";
+import { childInactive, childRows, finishedFoldId, foldedChildren, rosterFor } from "./subagents";
 import type { GroupingOut } from "../../types";
 
 const grouping: GroupingOut = { loaded: true, default_project: "ungrouped", headers: [], ready: true, reason: null, busy: false, status: "", status_error: false, conflicts: 0 };
@@ -76,5 +76,28 @@ describe("native child presentation", () => {
     expect(ids({ selected: { key: row.key, subagent: "done", conversation: "conv" } })).toEqual(["done", "working"]);
     expect(ids({ childDraft: (_parent, child) => child.id === "done" })).toEqual(["done", "working"]);
     expect(ids({ includeCompleted: true })).toEqual(["done", "working"]);
+  });
+});
+
+// Task 262: Qt's side panel folds finished children into "N finished, show".
+describe("finished subagents fold (task 262)", () => {
+  const child = (id: string, state: "working" | "attention" | "ready" | "ended" | "error", group = false) => ({ id, name: id, state, summary: "", group });
+  const roster = [child("a", "ready"), child("b", "working"), child("g", "ended", true), child("c", "attention"), child("d", "error")];
+  it("shows what works now, running first, and counts the finished ones", () => {
+    const fold = foldedChildren(roster, true, false);
+    expect(fold.shown.map((c) => c.id)).toEqual(["b", "c", "g"]);
+    expect(fold.finished).toBe(2);
+  });
+  it("lists every child, running first, once opened", () => {
+    const fold = foldedChildren(roster, true, true);
+    expect(fold.shown.map((c) => c.id)).toEqual(["b", "c", "a", "g", "d"]);
+    expect(fold.finished).toBe(2);
+  });
+  it("keeps a recorded roster as it is: nothing works now, nothing folds", () => {
+    expect(foldedChildren(roster, false, false)).toEqual({ shown: roster, finished: 0 });
+    expect(foldedChildren([], true, false)).toEqual({ shown: [], finished: 0 });
+  });
+  it("remembers the fold per session", () => {
+    expect(finishedFoldId("arch\nrun:1")).not.toBe(finishedFoldId("\nrun:1"));
   });
 });

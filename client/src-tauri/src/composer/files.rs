@@ -485,12 +485,69 @@ fn answer(
     }
 }
 
-/// Answers one `zerus-file` request for webview `webview`.
+/// Answers one `zerus-file` request for webview `webview`, without media
+/// files (the tests' entry; the app serves through `respond_with`).
+#[cfg(test)]
 pub fn respond(
     composers: &Composers,
     webview: &str,
     request: &Request<Vec<u8>>,
     poster: impl FnOnce(&str, &str, &str) -> Option<Arc<[u8]>>,
+) -> Response<Vec<u8>> {
+    respond_with(composers, webview, request, poster, |_| None)
+}
+
+/// Task 248: a media file served whole up to this size; a larger one only by ranges.
+pub const MEDIA_WHOLE: usize = 64 * 1024 * 1024;
+/// The most bytes one range answer of a media file carries; a media element asks on.
+const MEDIA_PART: usize = 8 * 1024 * 1024;
+
+/// `media/{token}`: the one file `session_media` granted to the token
+/// (`session_files/media.rs`), whole up to `MEDIA_WHOLE` or by ranges of at
+/// most `MEDIA_PART`, typed from its head.
+fn media_answer(request: &Request<Vec<u8>>, file: &Path) -> Response<Vec<u8>> {
+    let Ok(mut handle) = File::open(file) else {
+        return status(StatusCode::NOT_FOUND);
+    };
+    let Some(len) = handle.metadata().ok().filter(|m| m.is_file()).and_then(|m| usize::try_from(m.len()).ok()) else {
+        return status(StatusCode::NOT_FOUND);
+    };
+    let part = match wanted(request.headers(), len) {
+        Wanted::Whole if len > MEDIA_WHOLE => return status(StatusCode::PAYLOAD_TOO_LARGE),
+        Wanted::Whole => None,
+        Wanted::Part(start, end) => Some((start, end.min(start.saturating_add(MEDIA_PART - 1)))),
+        Wanted::Unsatisfiable => return unsatisfiable(len),
+    };
+    let mut head = Vec::new();
+    if (&mut handle).take(HEAD_BYTES as u64).read_to_end(&mut head).is_err() {
+        return status(StatusCode::NOT_FOUND);
+    }
+    let (start, count) = part.map_or((0, len), |(start, end)| (start, end - start + 1));
+    let mut body = Vec::with_capacity(count);
+    if handle.seek(SeekFrom::Start(start as u64)).is_err() || handle.take(count as u64).read_to_end(&mut body).is_err() || body.len() != count {
+        return status(StatusCode::NOT_FOUND);
+    }
+    let builder = guarded(Response::builder())
+        .header(header::CONTENT_TYPE, served_type(&head))
+        .header(header::ACCEPT_RANGES, "bytes");
+    match part {
+        Some((start, end)) => finish(
+            builder
+                .status(StatusCode::PARTIAL_CONTENT)
+                .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{len}")),
+            body,
+        ),
+        None => finish(builder.status(StatusCode::OK), body),
+    }
+}
+
+/// `respond`, with the media files `session_media` granted, by token.
+pub fn respond_with(
+    composers: &Composers,
+    webview: &str,
+    request: &Request<Vec<u8>>,
+    poster: impl FnOnce(&str, &str, &str) -> Option<Arc<[u8]>>,
+    media: impl FnOnce(&str) -> Option<PathBuf>,
 ) -> Response<Vec<u8>> {
     if webview != crate::MAIN_WINDOW {
         return status(StatusCode::FORBIDDEN);
@@ -551,6 +608,11 @@ pub fn respond(
                 None => (mime, bytes.to_vec()),
             })
         })
+    } else if let Some(token) = path.strip_prefix("media/") {
+        let Some(file) = media(token) else {
+            return status(StatusCode::NOT_FOUND);
+        };
+        media_answer(request, &file)
     } else if let Some(relative) = path.strip_prefix("cache/") {
         let copy = composers.cache().copy(relative).and_then(|file| {
             attachments::touch(&file);
@@ -750,6 +812,36 @@ mod tests {
             request = request.header("range", range);
         }
         request.body(Vec::new()).unwrap()
+    }
+
+    #[test]
+    fn media_tokens_serve_only_their_granted_file_whole_or_by_ranges() {
+        // Task 248: `media/{token}` reads the file `session_media` granted, never a named path.
+        let root = dir("media-route");
+        let (c, _) = hub(&root);
+        let file = root.join("shot.png");
+        let mut bytes = vec![137, 80, 78, 71, 13, 10, 26, 10];
+        bytes.extend((0..200u8).collect::<Vec<_>>());
+        std::fs::write(&file, &bytes).unwrap();
+        let token = "a".repeat(32);
+        let lookup = |asked: &str| (asked == token).then(|| file.clone());
+        let whole = respond_with(&c, "main", &get(&format!("media/{token}"), None), |_, _, _| None, lookup);
+        assert_eq!(whole.status(), 200);
+        assert_eq!(whole.body(), &bytes);
+        assert_eq!(whole.headers()["content-type"], "image/png");
+        assert_eq!(whole.headers()["accept-ranges"], "bytes");
+        let part = respond_with(&c, "main", &get(&format!("media/{token}"), Some("bytes=8-11")), |_, _, _| None, lookup);
+        assert_eq!(part.status(), 206);
+        assert_eq!(part.body(), &[0, 1, 2, 3]);
+        assert_eq!(part.headers()["content-range"], format!("bytes 8-11/{}", bytes.len()));
+        for path in ["media/unknown", "media/../shot.png", "media/"] {
+            assert_eq!(respond_with(&c, "main", &get(path, None), |_, _, _| None, lookup).status(), 404, "{path}");
+        }
+        assert_eq!(respond_with(&c, "native-ui", &get(&format!("media/{token}"), None), |_, _, _| None, lookup).status(), 403);
+        // Without a media lookup (the plain `respond`) nothing is served.
+        assert_eq!(respond(&c, "main", &get(&format!("media/{token}"), None)).status(), 404);
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(respond_with(&c, "main", &get(&format!("media/{token}"), None), |_, _, _| None, lookup).status(), 404);
     }
 
     #[test]

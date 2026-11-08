@@ -1,11 +1,11 @@
 import { withdrawnRefusal } from "../../teamRefusals";
 import { describe, expect, it } from "vitest";
 import { decidedWaiting,
-  ProposalCards, WaitingAnswer, WaitingNotices, acceptanceSummary, act, noticeToken, proposalCards, proposalKindLabel, toolOffer,
+  ProposalCards, WaitingAnswer, WaitingNotices, acceptanceSummary, act, approvePhaseCall, noticeToken, proposalCards, proposalKindLabel, toolOffer,
   waitingActionLabel, waitingAge, waitingCount, waitingKindIcon, waitingKindLabel, deferredRequest, splitDeferred, approves, opensCard, type DecisionPort, type QuestionChoice,
 } from "./decisions";
 import { choiceButtons, confirmButtons, createConfirmer } from "../../store/teamConfirm";
-import type { TeamAction, TeamCall, TeamConfirmation, TeamMemberView, TeamProposalView, TeamTaskView, TeamView, TeamWaitingItem } from "../../types";
+import type { TeamAction, TeamCall, TeamConfirmation, TeamMemberView, TeamOutcome, TeamProposalView, TeamTaskView, TeamView, TeamWaitingItem } from "../../types";
 
 // Every owner decision path of Qt's tray/tests/test_teamsui_waiting.cpp, on
 // the pure model the Team tab and Waiting for you draw (task 11). Each test
@@ -278,6 +278,88 @@ describe("proposal cards", () => {
     cards.setReason("p99", "keep six");
     await cards.answer("p99", false);
     expect(f.sent.at(-1)!.action).toEqual({ kind: "decide_proposal", proposal: "p99", accept: false, expected_hash: "h99", reason: "keep six" });
+  });
+
+  it("everyProposalKindTheCoreOpensRendersAndDecides: the hgs team propose kinds, the owner operations and a phase card", async () => {
+    // src/state/teams/ops.rs:5144-5149 and 5607-5629: every kind a lead may
+    // propose, with the change hgs stores; op cards carry their own summary
+    // and lines, the other kinds the client words from the change.
+    const note = "Each open task goes to the new session with what was done so far; the old session is paused and kept under Saved as <name>-replaced.";
+    const broker = "Each member builds its own snapshot of the folder, one build at a time per build folder; an unchanged tree builds once, and a failure in another member's file goes to that member.";
+    const rows: { kind: string; what: string; lines: string[]; change?: unknown; member?: unknown; goal?: string; mode?: string;
+      question?: boolean; options?: string[]; recommended?: string }[] = [
+      { kind: "add-member", what: "Add Designer (claude, sonnet, default account)", lines: [],
+        change: { members: [{ id: "designer", role: "Designer", agent: "claude", model: "sonnet" }] } },
+      { kind: "remove-member", what: "Remove Tester", lines: ["Its session keeps running; it gets no more tasks."], member: { id: "tester" } },
+      { kind: "swap-member", what: "Swap Backend to codex, gpt-5.5", lines: [note],
+        change: { members: [{ id: "backend", agent: "codex", model: "gpt-5.5" }] }, member: { id: "backend", agent: "codex", model: "gpt-5.5" } },
+      { kind: "next-goal", what: "Next goal: Ship v2", lines: ["Ship v2\nthen rest"], goal: "Ship v2\nthen rest" },
+      { kind: "switch-plan-mode", what: "Switch to free planning", lines: [], mode: "free" },
+      { kind: "switch-plan-mode", what: "Switch phase 2 to standard planning", lines: [], mode: "standard", change: { phase: 2 } },
+      { kind: "add-to-phase", what: "Add 1 task to phase 2 (Release)", lines: ["Late fix, for Backend, ~30 min"],
+        change: { phase: 2, tasks: [{ title: "Late fix", assignee: "backend", estimate_minutes: 30 }] } },
+      { kind: "cancel-tasks", what: "Cancel 1 task", lines: ["#4 Unit tests (In progress)"], change: { tasks: [4] } },
+      { kind: "discard-phase", what: "Discard phase 3 (Polish)", lines: ["#5 Code review (Pending)"], change: { phase: 3 } },
+      { kind: "question", what: "Which cache size?", lines: [], options: ["10 GB", "20 GB"], recommended: "20 GB", question: true,
+        change: { question: "Which cache size?", options: ["10 GB", "20 GB"], recommended: "20 GB" } },
+      { kind: "switch-setting", what: "Turn on the build broker", lines: ["Backend share /work/p", broker],
+        change: { setting: "build_broker", value: true, shared: [{ folder: "/work/p", members: ["backend"] }] } },
+      { kind: "switch-setting", what: "Team limits", lines: ["max_members: 6 → 8"],
+        change: { op: "settings", setting: "max_members", value: 8, summary: "Team limits", lines: ["max_members: 6 → 8"] } },
+      { kind: "iron-rules", what: "Set the project's iron rules (p)", lines: ["Never push"],
+        change: { op: "iron-rules", input: { scope: "project", project: "p" }, summary: "Set the project's iron rules (p)", lines: ["Never push"] } },
+      { kind: "relaunch", what: "Relaunch Backend", lines: [], change: { op: "relaunch", input: { member: "backend" }, summary: "Relaunch Backend", lines: [] } },
+      { kind: "scale", what: "Add 2 × Tester", lines: ["claude"], change: { op: "scale", summary: "Add 2 × Tester", lines: ["claude"] } },
+      { kind: "drain", what: "Drain Tester", lines: ["It finishes its open work, takes nothing new, then its session is paused and it leaves the team."],
+        change: { op: "drain", summary: "Drain Tester", lines: ["It finishes its open work, takes nothing new, then its session is paused and it leaves the team."] } },
+      { kind: "approve", what: "Approve the plan and run it", lines: ["5 tasks, 2 members"], change: { op: "approve", summary: "Approve the plan and run it", lines: ["5 tasks, 2 members"] } },
+      { kind: "approve-phase", what: "Approve phase 2 (Release)", lines: [], change: { op: "approve-phase", summary: "Approve phase 2 (Release)", lines: [] } },
+      { kind: "return-to-draft", what: "Return phase 2 (Release) to a draft", lines: [], change: { op: "return-to-draft", summary: "Return phase 2 (Release) to a draft", lines: [] } },
+      { kind: "edit-draft", what: "Change phase 3 (Polish)", lines: ["1 task changes"], change: { op: "edit-draft", summary: "Change phase 3 (Polish)", lines: ["1 task changes"] } },
+      { kind: "move-phase", what: "Move phase 3 (Polish) before 2", lines: [], change: { op: "move-phase", summary: "Move phase 3 (Polish) before 2", lines: [] } },
+      { kind: "unpause-phase", what: "Remove the pause of phase 2 (Release)", lines: [], change: { op: "unpause-phase", summary: "Remove the pause of phase 2 (Release)", lines: [] } },
+      { kind: "phase-acceptance", what: "phase 3 (Polish) is accepted by owner", lines: [], change: { op: "phase-acceptance", summary: "phase 3 (Polish) is accepted by owner", lines: [] } },
+      { kind: "accept-phase", what: "Accept phase 2 (Release)", lines: [], change: { op: "accept-phase", summary: "Accept phase 2 (Release)", lines: [] } },
+      { kind: "extend", what: "Add a phase of 1 tasks", lines: ["Load test"], change: { op: "extend", summary: "Add a phase of 1 tasks", lines: ["Load test"] } },
+      { kind: "settings", what: "Change the team's settings", lines: ["max_members: 6 → 8"], change: { op: "settings", summary: "Change the team's settings", lines: ["max_members: 6 → 8"] } },
+      { kind: "full-tests", what: "Allow one full test run for v1.2", lines: [], change: { op: "full-tests", summary: "Allow one full test run for v1.2", lines: [] } },
+      { kind: "rights", what: "Give Backend the rights profile-x, allow", lines: ["Zerus relaunches it in its conversation with these rights."],
+        change: { op: "rights", summary: "Give Backend the rights profile-x, allow", lines: ["Zerus relaunches it in its conversation with these rights."] } },
+      { kind: "switch-memory-mode", what: "Switch the team's memory from plain to team", lines: ["The team keeps its own memory."],
+        change: { op: "switch-memory-mode", summary: "Switch the team's memory from plain to team", lines: ["The team keeps its own memory."] } },
+      { kind: "scratch-rule", what: "Let the lead's scratch teams in /work/p start at once, the folder trusted for claude",
+        lines: ["Scratch teams a lead creates there start without your per-plan approval; you can revoke the rule in Settings > Teams (hgs team scratch-rules)."],
+        change: { op: "scratch-rule", summary: "Let the lead's scratch teams in /work/p start at once, the folder trusted for claude",
+          lines: ["Scratch teams a lead creates there start without your per-plan approval; you can revoke the rule in Settings > Teams (hgs team scratch-rules)."] } },
+    ];
+    const proposals = rows.map((row, n) => proposal({ id: `p${n + 1}`, kind: row.kind, summary: row.what, lines: row.lines,
+      change: row.change ?? null, member: row.member ?? null, goal: row.goal ?? "", mode: row.mode ?? "" }));
+    const f = fake(answerTeam({ proposals }));
+    const cards = cardsOf(f);
+    rows.forEach((row, n) => {
+      const state = card(cards, `p${n + 1}`)!;
+      expect(state.card.kind, `p${n + 1}`).toBe(row.kind);
+      expect(state.card.what, `p${n + 1} ${row.kind}`).toBe(row.what);
+      expect(state.card.lines, `p${n + 1} ${row.kind}`).toEqual(row.lines);
+      expect(state.card.hash).toBe(`h${n + 1}`);
+      expect(state.card.options).toEqual(row.options ?? []);
+      expect(state.card.recommended).toBe(row.recommended ?? "");
+    });
+    // Allow is one decide-proposal bound to the card's hash, for every kind.
+    for (const [n, row] of rows.entries()) {
+      if (row.question) continue;
+      const before = f.sent.length;
+      await cards.answer(`p${n + 1}`, true);
+      expect(f.sent, row.kind).toHaveLength(before + 1);
+      expect(f.sent.at(-1)!.action).toEqual({ kind: "decide_proposal", proposal: `p${n + 1}`, accept: true, expected_hash: `h${n + 1}` });
+      expect(card(cards, `p${n + 1}`)).toBeUndefined();
+    }
+    expect(f.asked.map((asked) => asked.title)).toEqual(["Remove member?", "Swap member?", "Cancel tasks?", "Discard phase?", "Drain member?"]);
+    // A question is answered with the picked option, the recommendation marked on its card.
+    const question = rows.findIndex((row) => row.question) + 1;
+    cards.pick(`p${question}`, "20 GB");
+    await cards.answerQuestion(`p${question}`);
+    expect(f.sent.at(-1)!.action).toEqual({ kind: "decide_proposal", proposal: `p${question}`, accept: true, expected_hash: `h${question}`, answer: "20 GB" });
   });
 
   it("aRefusedDecisionSaysWhyOnItsCard: in the team view and in Waiting for you; a later Deny goes through and the row leaves", async () => {
@@ -693,6 +775,45 @@ describe("confirmations", () => {
   });
 });
 
+describe("the Team tab's draft-phase approval", () => {
+  const confirmation: TeamConfirmation = {
+    name: "teamApprovePhaseConfirm", title: "Approve phase?",
+    text: "Hand phase 2's 3 tasks to the members?", action: "Approve phase",
+  };
+  function fake(yes: boolean) {
+    const sent: TeamCall[] = [], asked: TeamConfirmation[] = [];
+    const port: Pick<DecisionPort, "send" | "confirm"> = {
+      async send(call: TeamCall): Promise<TeamOutcome> {
+        sent.push(call);
+        if (!call.confirmed) return { outcome: "confirm", confirmation };
+        return { outcome: "done", receipt: { status: "approved" }, request_id: "r1" };
+      },
+      async confirm(askedFor: TeamConfirmation) {
+        asked.push(askedFor);
+        return yes;
+      },
+    };
+    return { sent, asked, port };
+  }
+
+  it("Cancel sends nothing after the core's question", async () => {
+    const f = fake(false);
+    expect(await approvePhaseCall(f.port, { computer: "", team: "t", teamName: "Team" }, 2)).toBe("cancelled");
+    // The dialog shows the core's own text; the first call went out alone.
+    expect(f.asked).toEqual([confirmation]);
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]).toMatchObject({ confirmed: false, action: { kind: "approve", phase: 2 } });
+  });
+
+  it("the confirm button sends the call again, confirmed", async () => {
+    const f = fake(true);
+    expect(await approvePhaseCall(f.port, { computer: "", team: "t", teamName: "Team" }, 2)).toMatchObject({ outcome: "done" });
+    expect(f.asked).toEqual([confirmation]);
+    expect(f.sent).toHaveLength(2);
+    expect(f.sent[1]).toMatchObject({ confirmed: true, action: { kind: "approve", phase: 2 } });
+  });
+});
+
 describe("reports", () => {
   it("an escalated report is accepted or rejected with a comment; a missing one takes the last reply", async () => {
     const { ReportDecision, reportRows, reportLine } = await import("./decisions");
@@ -773,5 +894,27 @@ describe("a confirmed decision leaves at once (task 107)", () => {
     expect(decided({ kind: "hold", task: 2, reason: "later" } as TeamAction)).toEqual([]);
     expect(decided({ kind: "accept_phase", phase: 9 })).toEqual([]);
     expect(decided({ kind: "decide_proposal", proposal: "p1", accept: true, expected_hash: "h1" }, "t3")).toEqual([]);
+  });
+});
+
+// Task 198 (W3): Allow and Deny never fail silently: a card without the
+// question's hash or its answer ids says why (Qt TeamWaitingAnswer C4).
+describe("a permission that cannot be answered says why (task 198)", () => {
+  it("names the missing hash, the missing answer ids, or nothing when it can answer", async () => {
+    const noIds = fake(answerTeam({ members: [member({ id: "lead", role: "Lead", lead: true }), member({ id: "backend", permission: { ...QUESTION, answer: undefined } })] }));
+    const row = new WaitingAnswer(answerItems().permission, noIds.port, "", () => {});
+    await row.open();
+    expect(row.permissionBlocked()).toBe("This hgs sends no answer ids for the question; answer it in the session.");
+    expect(await row.answerPermission(true)).toBeUndefined();
+    expect(noIds.sent).toEqual([]);
+    expect(row.notice).toBe("This hgs sends no answer ids for the question; answer it in the session.");
+    const noHash = fake(answerTeam({ members: [member({ id: "lead", role: "Lead", lead: true }), member({ id: "backend", permission: { ...QUESTION, question_hash: "" } })] }));
+    const hashless = new WaitingAnswer(answerItems().permission, noHash.port, "", () => {});
+    await hashless.open();
+    expect(hashless.permissionBlocked()).toBe("This hgs sends no question hash in status; answer it in the session.");
+    const fine = fake(answerTeam());
+    const ok = new WaitingAnswer(answerItems().permission, fine.port, "", () => {});
+    await ok.open();
+    expect(ok.permissionBlocked()).toBe("");
   });
 });

@@ -9,7 +9,10 @@ import { nativeUi } from "../../store/native-ui";
 import { pageHidden } from "../../store/visibility";
 import { ProcessesTab } from "./Processes";
 import { TeamTab } from "../teams/TeamTab";
+import { NewTeamPage } from "../teams/NewTeamPage";
 import { WaitingBanner } from "../teams/Waiting";
+import { LeadProposals } from "../teams/ProposalCards";
+import { teamAnswers } from "../teams/leadTeam";
 import { selectedTeam } from "../../store/teams";
 import { drops } from "../../store/drops";
 import { processes, processesTab } from "../../store/processes";
@@ -218,7 +221,8 @@ const tabs = () => {
     processesTab(flag("processes/enabled"), count),
     { id: "taskview" as const, label: tr("Task View"), show: detailTab() === "taskview" && !!selectedTask() },
     // Task 9: the selected session's team (its lead's or a member's session).
-    { id: "team" as const, label: tr("Team"), show: !!selectedTeam() && !subagentOpen() },
+    // Task 200 (Qt F5): a draft is not a team yet; its lead's tab is New team, which shows the draft again.
+    { id: "team" as const, label: selectedTeam()?.status === "draft" ? tr("New team") : tr("Team"), show: !!selectedTeam() && !subagentOpen() },
   ];
   const s = selected();
   return s ? detailTabs(s.key, all) : all;
@@ -260,7 +264,7 @@ export function SessionDetail() {
           <div class="work-main">
             <div class="detail-tabs tabs" role="tablist">
               <For each={tabs().filter((t) => t.show)}>{(t) => (
-                <button class="tab" role="tab" classList={{ on: detailTab() === t.id }} aria-selected={detailTab() === t.id} onClick={() => { if (t.id === "terminal") terminal.opened(); setDetailTab(t.id); }}>{t.label}<Show when={t.id === "team" && (selectedTeam()?.attention ?? 0) > 0}><span class="tab-count" data-tip={tr("Needs your answer")}>?{selectedTeam()!.attention}</span></Show></button>
+                <button class="tab" role="tab" classList={{ on: detailTab() === t.id }} aria-selected={detailTab() === t.id} onClick={() => { if (t.id === "terminal") terminal.opened(); setDetailTab(t.id); }}>{t.label}<Show when={t.id === "team" && teamAnswers(selectedTeam()) > 0}><span class="tab-count" data-tip={tr("Needs your answer")}>?{teamAnswers(selectedTeam())}</span></Show></button>
               )}</For>
               <span class="grow" />
               <Show when={!inspectorOpen()}><button class="icon-btn small" data-cmd="show-side-panel" aria-label={tr("Show side panel")} data-tip={inspectorHint(tr("Show tasks, plan, agents, details and worktrees"))} data-tip-pos="left" onClick={() => setInspectorOpen(true)}><Icon name="panel-right" size={15} /></button></Show>
@@ -282,7 +286,7 @@ export function SessionDetail() {
                         <p class="qcard-body">{tr("Sign in to DeepSeek to start using this session. Complete sign-in in the official DeepSeek UI, then return here.")}</p>
                         <div class="qcard-actions"><button class="btn small" onClick={() => nativeRoute(selected())()}>{tr("Sign in to DeepSeek…")}</button></div>
                       </div></div></Show>
-                      <HeldMessage /><QueuePanel /><QuestionCard />
+                      <HeldMessage /><QueuePanel /><LeadProposals /><QuestionCard />
                     </Show>
                     <div class="cmp-col"><Composer /></div>
                   </div>
@@ -291,6 +295,7 @@ export function SessionDetail() {
                 <Match when={detailTab() === "terminal"}><TerminalTab /></Match>
                 <Match when={detailTab() === "native"}><NativeUiTab /></Match>
                 <Match when={detailTab() === "processes"}><ProcessesTab /></Match>
+                <Match when={detailTab() === "team" && selectedTeam()?.status === "draft" && selected()!.computer === "" && selectedTeam()}>{(team) => <NewTeamPage embedded draft={team().id} />}</Match>
                 <Match when={detailTab() === "team" && selectedTeam()}>{(team) => <TeamTab computer={selected()!.computer} team={team().id} />}</Match>
               </Switch>
             </div>

@@ -18,9 +18,22 @@ class ReviewedMonorepoLicense(unittest.TestCase):
 
     def test_exact_revision_carries_the_complete_retained_license(self):
         text, entry = collector.reviewed_monorepo_notice(self.package())
-        self.assertEqual(text, (ROOT / "docs/licenses/canonicalpath-LICENSE.txt").read_bytes())
+        self.assertEqual(text, (ROOT / "docs/licenses/canonicalpath-LICENSE.txt").read_bytes().replace(b"\r\n", b"\n"))
         self.assertIn(b"Copyright (c) 2026 Roman Ilyin", text)
         self.assertEqual(entry["license"], "MIT")
+
+    def test_a_crlf_checkout_ships_the_reviewed_lf_bytes(self):
+        # Task 192: core.autocrlf on Windows writes CRLF; the review is git's LF form.
+        lf = (ROOT / "docs/licenses/canonicalpath-LICENSE.txt").read_bytes().replace(b"\r\n", b"\n")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "docs/licenses/canonicalpath-LICENSE.txt"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(lf.replace(b"\n", b"\r\n"))
+            with patch.object(collector, "ROOT", root):
+                text, _ = collector.reviewed_monorepo_notice(self.package())
+        self.assertEqual(text, lf)
+        self.assertNotIn(b"\r", text)
 
     def test_unreviewed_version_or_source_cannot_reuse_the_exception(self):
         for key, value in [("version", "2027.1.1"), ("source", "registry+example.invalid"),

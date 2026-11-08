@@ -147,6 +147,9 @@ pub const KEYS: &[Key] = &[
     key("workspace/showCompletedSubagents", Kind::Flag(false)),
     key("workspace/reduceMotion", Kind::Flag(false)),
     key("notifications/optionalQuestions", Kind::Flag(false)),
+    // Machines (SettingsPage.h:251-258): keep a Windows session host running
+    // for other computers. Off by default.
+    key("machines/residentHost", Kind::Flag(false)),
     // A remembered Terminate checkbox, never maintenance/removal consent.
     Key {
         name: "workspace/removeWorktreeAfterTermination",
@@ -310,6 +313,8 @@ pub const KEYS: &[Key] = &[
     Key { name: "workspace/inspectorClosed", kind: Kind::Text("[]"), seeded: true },
     // New G3 families use the family journal, not the original switch seed.
     client("client/windowGeometry", Kind::Text("")),
+    // Task 243: the sessions list hidden (Qt's SessionPanelDock Collapsed, the same key).
+    client("workspace/sessionsCollapsed", Kind::Flag(false)),
     client(
         "workspace/sessionsWidth",
         Kind::Whole {
@@ -353,7 +358,18 @@ pub const KEYS: &[Key] = &[
     // finished" and the catalog's unused-role switch as plain flags; its heat
     // mode is per team, so the imported map holds team -> "time" | "tokens".
     key("teams/hideFinished", Kind::Flag(false)),
+    // Task 244: how a lead session shows the team's notices (Full, Collapsed
+    // by default, Hidden), and each lead session's own choice by its row key.
+    key("teams/leadNotices", Kind::Choice(&["collapsed", "full", "silent"])),
+    Key {
+        name: "teams/leadNoticeSessions",
+        kind: Kind::Text("{}"),
+        seeded: false,
+    },
     key("ui/catalogHideUnusedRoles", Kind::Flag(false)),
+    // Task 200 (Qt TeamTemplateList, F6): New team's favourite templates by
+    // id, a string list as Qt keeps it, starred first in the template list.
+    key("teams/templateFavourites", Kind::Chords),
     Key {
         name: "teams/heatModes",
         kind: Kind::Text("{}"),
@@ -361,6 +377,14 @@ pub const KEYS: &[Key] = &[
     },
     Key {
         name: "teams/planModes",
+        kind: Kind::Text("{}"),
+        seeded: false,
+    },
+    // W2 (Qt's `teams/attentionNotified`): the team-waiting notices already
+    // shown, as a JSON object of item id -> notice token, so a restart or a
+    // reopened window does not raise them again.
+    Key {
+        name: "teams/attentionNotified",
         kind: Kind::Text("{}"),
         seeded: false,
     },

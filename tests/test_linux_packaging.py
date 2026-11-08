@@ -35,15 +35,17 @@ class LinuxPackaging(unittest.TestCase):
         for size in (16, 24, 32, 48, 64, 128, 256, 512, 1024):
             self.file(f"source/tray/resources/icons/hgs-zerus-{size}.png")
         self.file("source/VERSION", "1.2.3\n")
-        for name in ("Cargo.toml", "services/mobile/connector/Cargo.toml"):
+        for name in ("Cargo.toml", "services/mobile/connector/Cargo.toml", "crates/lore-bin/Cargo.toml"):
             self.file("source/" + name, '[package]\nversion = "1.2.3"\n')
+        # The lore the package ships is the codelore package its wrapper's lock pins.
+        self.file("source/crates/lore-bin/Cargo.lock", '[[package]]\nname = "codelore"\nversion = "1.2.3"\n')
         licenses = self.file("licenses/inventory.json", '{"packages": [{"name": "tauri"}]}').parent
-        binaries = [self.file("bin/" + name) for name in ("hgs", "hgs-tray", "connector")]
+        binaries = [self.file("bin/" + name) for name in ("hgs", "lore", "hgs-tray", "connector")]
         dest = self.root / "package"
         main = runpy.run_path(str(ROOT / "scripts/package-linux.py"))["main"]
         main.__globals__["ROOT"] = self.root / "source"
-        args = ["package-linux.py", "--destdir", str(dest), "--cli", str(binaries[0]),
-                "--gui", str(binaries[1]), "--connector", str(binaries[2]), "--licenses", str(licenses)]
+        args = ["package-linux.py", "--destdir", str(dest), "--cli", str(binaries[0]), "--lore", str(binaries[1]),
+                "--gui", str(binaries[2]), "--connector", str(binaries[3]), "--licenses", str(licenses)]
         with patch.object(sys, "argv", args), \
                 patch("subprocess.check_output", return_value=json.dumps({"version": "1.2.3", "ZerusGUI": gui})), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):

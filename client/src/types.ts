@@ -35,6 +35,9 @@ export interface ViewRow {
   /** `approval` or `question` while the session asks for one. */
   attention?: string | boolean | null;
   unread?: boolean;
+  /** Task 175 / 244: the session leads its team; hgs says only the team's pastes opened its reply's turn. */
+  team_lead?: boolean;
+  reply_team_notice?: boolean;
   muted?: boolean;
   /** The row's notification preferences pass Qt's validation, and their revision. */
   shared_notifications?: boolean;
@@ -81,6 +84,16 @@ export interface ViewRow {
   process_state?: string;
   /** `process_work.count`, -1 when unknown. */
   background?: number;
+  /** The host's session state (working, build, user, deps, cooling, cold, stopped) and what it rests on (task 195). */
+  session_state?: string;
+  state_reason?: { kind: string; text: string };
+  build?: { label: string; command: string; since: number };
+  last_active?: number;
+  reply_at?: number;
+  cache_ttl?: { seconds: number; kept_warm: boolean };
+  /** `process_work.services` and `process_work.command`. */
+  services?: { name: string; command: string; since: number }[];
+  background_command?: string;
   /** Listed optional-question count; null while unknown, retained by Rust for the same conversation. */
   optional_question_count?: number | null;
   archive_id?: string | null;
@@ -267,6 +280,8 @@ export interface Batch {
   composer_events?: ComposerEvent[];
   /** The Teams views that changed (core batch.rs `TeamsOut`), at most one per computer and key. */
   teams?: TeamsOut[];
+  /** Task 235: computers whose rows came from the last list on disk (saved at, epoch seconds), or null once their live listing replaced them. */
+  stale?: Record<string, number | null>;
 }
 
 /** A row of the Processes tab (processes.rs `RowView`). */
@@ -520,15 +535,43 @@ export interface AccountsView {
   /** Accounts left out by the per-view bound. */
   truncated: number;
 }
-export interface MachineRow { alias: string; enabled: boolean; source: string; inherited: boolean; hostname: string; user: string; port: number | null; identity_file: string; origin: string }
-export interface MachineConnection { hostname: string; user: string; port: number | null; identity_file: string; enabled: boolean }
+/** A local WSL connection's explicit fields (MachinesPage.cpp:232-238). */
+export interface WslProfile { distribution: string; user: string; hgs_path: string }
+export interface MachineRow {
+  alias: string; enabled: boolean; source: string; inherited: boolean;
+  /** "ssh" or "wsl-local" (MachinesPage.cpp:229-231). */
+  transport: "ssh" | "wsl-local";
+  wsl: WslProfile | null;
+  /** The platform class this machine serves as a test runner, "" for none. */
+  test_runner: string;
+  hostname: string; user: string; port: number | null; identity_file: string; origin: string;
+}
+export interface MachineConnection {
+  transport: "ssh" | "wsl-local";
+  wsl: WslProfile | null;
+  test_runner: string;
+  hostname: string; user: string; port: number | null; identity_file: string; enabled: boolean;
+}
 export type MachineChange = { kind: "set"; connection: MachineConnection; create: boolean } | { kind: "reset" | "remove" };
 export interface MachineReference { alias: string; revision: string }
 export type MachineSetupRequest = { kind: "install"; reference: MachineReference; source: string } | { kind: "enable"; machine_id: string };
 export interface MachineSetupOutcome { success: boolean; uncertain: boolean; text: string; output: string }
 export interface MachineChangeRequest { alias: string; revision: string; change: MachineChange }
-export interface Effective { alias: string; pending: boolean; error: boolean; text: string; hostname: string; user: string; port: string; key: string }
+export interface Effective {
+  alias: string; pending: boolean; error: boolean; text: string;
+  /** "ssh" or "wsl-local". */
+  transport: "ssh" | "wsl-local";
+  hostname: string; user: string; port: string; key: string;
+  /** The WSL distribution and its Linux hgs, on a wsl-local machine. */
+  distribution: string; hgs_path: string;
+}
 export interface CheckResult { alias: string; pending: boolean; error: boolean; text: string }
+/** What "Test session host" read (`machine_test_host`). */
+export interface HostTest {
+  host: LocalHost;
+  sessions: number | null;
+  clients: number | null;
+}
 export interface MachinesView {
   /** Computation order from the screens hub; absent on older snapshots. */
   revision?: number;
@@ -537,6 +580,14 @@ export interface MachinesView {
   connection_revision?: string;
   machines: MachineRow[]; effective: Effective | null; check: CheckResult | null; busy: boolean;
 }
+
+/** The hgs-owned settings Settings > Sessions reads (SettingsPage.h:242-250). */
+export type HgsSettingName = "subagents-confirm" | "session-upload-block";
+export interface HgsSettingView { setting: HgsSettingName; value: boolean }
+/** A read or write of one hgs-owned setting; `failed` changes nothing. */
+export type HgsSettingOutcome =
+  | { outcome: "done"; view: HgsSettingView; request_id?: string | null }
+  | { outcome: "failed"; detail: string; request_id?: string | null };
 export interface Folder {
   /** The catalog's id, "" when it has none. */
   id: string;
@@ -828,7 +879,10 @@ export interface CardView { heading: Text; progress: Text | null; pending: Text 
   page: number; forms: FormView[]; status: Text; status_error: boolean; available: boolean; locked: boolean;
   /** Only Terminal can answer it: the options are a plain list and Open Terminal is the primary action. */
   read_only: boolean; review: boolean; created_at: number;
-  submit: ButtonView; approve: ButtonView; deny: ButtonView; skip: ButtonView; previous: ButtonView; next: ButtonView; retry: boolean; skip_tip: Text; retry_tip: Text }
+  submit: ButtonView; approve: ButtonView; deny: ButtonView;
+  /** Task 198 (W5): a subagent card's "Allow all, don't ask again" and the subagents it would start. */
+  always?: ButtonView; subagents?: { kind: string; model: string; effort: string; task: string }[];
+  skip: ButtonView; previous: ButtonView; next: ButtonView; retry: boolean; skip_tip: Text; retry_tip: Text }
 /**
  * `revision` grows when the card is built again (a new card, a changed form,
  * a restored answer): the review starts again and the fields reset. `epoch`
@@ -1006,6 +1060,12 @@ export interface TeamSessionView { host: string; name: string; run_id: string; c
 
 export interface TeamListedMember { id: string; role: string; agent: string; state: string; lead: boolean; session: TeamSessionView | null }
 
+/** Task 198: one feed event (core FeedEvent), its feed (core FeedView) and the lead's inbox (core InboxView). */
+export interface TeamFeedEvent { seq: number; at: number; kind: string; detail: unknown }
+export interface TeamFeedView { team: string; events: TeamFeedEvent[]; more: boolean; capped: boolean }
+export interface TeamInboxItem { kind: string; member: string; task: number | null; summary: string; since: number; command: string; detail: unknown }
+export interface TeamInboxView { team: string; items: TeamInboxItem[]; truncated: boolean }
+
 export interface TeamSummary {
   id: string; name: string; status: string; project: string; folder: string; plan_mode: string; lead: string;
   members: TeamListedMember[]; tasks: number; accepted: number; submitted: number; in_review: number; in_test: number;
@@ -1040,11 +1100,32 @@ export interface TeamMemberView {
   permission?: TeamMemberQuestion | null;
   /** Task 133: the member's latest pulse: what it did, does next and is blocked on; null without one. */
   pulse?: TeamPulseView | null;
+  /** Task 199 (Qt member card): who it reports to (the lead when empty), whether it is a sub-lead, a drain. */
+  parent?: string; sub?: boolean; draining?: boolean;
+  /** H1: stopped at a usage limit, and whether Zerus continues it after the reset. */
+  limited?: { at: number; resets_at: number; detail: string } | null; limit_resume?: boolean;
+  /** U54: the account its session really runs on (absent from an hgs that does not say). */
+  session_account?: string | null;
+  /** G7: the services its session runs; C12: its job budget; U45: the models it may switch to. */
+  services?: { name: string; since: number; command: string }[];
+  budget?: { label: string; state: string; minutes: number; red_minutes: number; elapsed_minutes: number } | null;
+  models?: { model: string; effort: string }[];
 }
 
 /** Task 133: a member's pulse (`members[].pulse`), its own note or Zerus's summary of its last turn. */
 export interface TeamPulseView {
   task: number | null; done: string; next: string; blocked: string; at: number; source: string;
+}
+
+
+/** Task 199: the Tests tab's Builds (`hgs team builds`, core BuildsView). */
+export interface TeamBuildItem {
+  member: string; template: string; at: number; seconds: number; usual_ms: number; snapshot: boolean; hit: boolean; by: string;
+  ms: number; exit: number | null; timed_out: boolean; error: string; coalesced_with: string; waiting_for: string[];
+}
+export interface TeamBuildsView {
+  team: string; enabled: boolean;
+  folders: { folder: string; members: string[]; build_folders: { name: string; usual_ms: number; hit_rate: number | null; running: TeamBuildItem[]; queue: TeamBuildItem[]; recent: TeamBuildItem[] }[] }[];
 }
 
 /** A member's pending question (`members[].question`): its id and hash, what it asks and the card's allow and deny ids. */
@@ -1053,6 +1134,12 @@ export interface TeamMemberQuestion {
   asked_at?: number; answered_at?: number; answer?: { question_id?: string; allow?: string; deny?: string } | string;
   questions?: { id: string; header?: string; question?: string; multi_select?: boolean; allow_other?: boolean; options?: { id: string; label: string; description?: string }[] }[];
   subagent_confirmation?: boolean;
+}
+
+/** Task #226: a plan lane (U27): a number above 0 and the label its tasks carry. */
+export interface TeamLaneView {
+  n: number;
+  label: string;
 }
 
 export interface TeamTaskView {
@@ -1068,11 +1155,33 @@ export interface TeamTaskView {
   subteam_team?: string;
   /** Task 55: the newest attempt's open questions to the lead; the owner answers them too. */
   questions?: { id: string; text: string; at: number }[];
+  /** Task #226: the plan lane the task is in (U27); absent or null for lane 0 ("no lane"). */
+  lane?: TeamLaneView | null;
   /** Task #60: the task this follow-up was spawned from; never a dependency. */
   origin?: number | null;
   /** Task 160: "parked until <condition>, ETA HH:MM (in N min)"; absent when not parked. */
   parked?: string;
+  /** Task 196: a task not yet handed out: its description and criteria, for the plan's task editor. */
+  description?: string; criteria?: string[];
+  /** Task 197: the estimate's source (lead, role, team); absent from an older hgs. */
+  estimate_source?: string;
+  /** Task 197: the minutes hgs counted for the open attempt. */
+  estimate_spent?: number | null;
+  /** Task 197: the running attempt's start and the worked seconds (U37). */
+  running_since?: number;
+  worked_s?: number;
+  /** Task 197: what an open task waits for (deps, owner, member) and on whom. */
+  wait_for?: string;
+  wait_on?: string[];
+  /** Task 197: the newest attempt began (started, or its turn ended). */
+  attempt_begun?: boolean;
 }
+
+/** Task 196: one edit of the plan while the team plans (core plan_edit.rs `PlanChange`). */
+export type TeamPlanChange =
+  | { edit: "link"; dependency: number; task: number; add: boolean; soft?: boolean }
+  | { edit: "task"; task: Record<string, unknown> }
+  | { edit: "remove_task"; task: number };
 
 /** A task's pipeline run (core PipelineRunView). */
 export interface TeamPipelineRun {
@@ -1158,13 +1267,26 @@ export interface TeamPhaseView {
   acceptance: string; paused: boolean; health: string;
   /** Task #58: the mode the phase plans in, "standard" or "free"; "" from an older hgs. */
   mode?: string;
+  /** Task 196: the header's details from the phase record (core PhaseView). */
+  note?: string; rejection?: string; reworked?: boolean; added_by?: string; added_at?: number; accepted_by_auto?: boolean;
+  start_ahead?: boolean; waiting?: string; pause_by?: string; pause_reason?: string; pause_owner?: boolean; changes?: number;
+  owner_accepts?: boolean;
 }
 
 export interface TeamFinding { kind: string; text: string; task: number | null; member: string }
 
+/** D2: one finding on the owner's Findings page, with its state and replan proposal. */
+export interface TeamFindingItem {
+  id: string; from_task: string; severity: string; title: string; file: string; line: number; scenario: string;
+  task: string; state: string; by: string; at: number; note: string; proposal: string; phase: number;
+}
+export interface TeamFindingsPage { items: TeamFindingItem[]; next_cursor?: string }
+
 export interface TeamView {
   id: string; name: string; status: string; project: string; folder: string; goal: string; plan_mode: string; lead: string;
   revision: number; created: number; updated: number; waiting_for_lead: boolean; pending_phase: number | null;
+  /** F7: the team a next goal came from, and the one it led to. */
+  previous?: string; next?: string;
   /** Task #58: the phase that takes tasks as they come, and whether hgs sends each phase's mode. */
   free_phase?: number | null; phase_modes_known?: boolean;
   /** Task 112: a paused team's pause: since when, by whom and why (null otherwise). */
@@ -1177,7 +1299,11 @@ export interface TeamView {
   /** Task 40: permission widenings Approve & Run confirms, and the direct sub-teams. */
   widenings?: { member?: string; role?: string; from?: string; to?: string }[];
   children?: { team: string; name?: string; status?: string }[];
+  /** Task 199 (U51): the team's intake keys, never their secrets. */
+  intakes?: { id: string; label: string; created: number }[];
   validation: { errors: TeamFinding[]; warnings: TeamFinding[] };
+  /** D2: the first page of the team's findings, when hgs sends it. */
+  findings?: TeamFindingsPage;
   health: { critical_path: number; parallelism: number; warnings: string[] };
   ready: number[]; cycle: number[]; draft: { revision: number; unseen: string[]; owner_edited: string[] } | null; truncated: boolean;
 }
@@ -1194,6 +1320,10 @@ export interface TeamAddition { id: string; phase?: number; by?: string; request
 /** One thing that waits for the owner (`hgs team waiting`); `detail` is the whole item as hgs lists it. */
 export interface TeamWaitingItem {
   id: string; kind: string; team: string; team_name: string; title: string; action: string; since: number; proposal: unknown;
+  /** False while the server holds this card for the owner's return (task 258). */
+  notify?: boolean;
+  /** Cards that arrived together share this batch; one notice covers them. */
+  batch?: string;
   detail?: Record<string, unknown> | null;
 }
 
@@ -1218,7 +1348,32 @@ export type TeamAction =
   | { kind: "decide_proposal"; proposal: string; accept: boolean; expected_hash: string; reason?: string; answer?: string }
   | { kind: "use_last_reply"; task: number; attempt: string }
   | { kind: "answer"; member: string; question_id: string; expected_question_hash: string; answers: unknown[] }
-  | { kind: "add_to_phase"; phase: number; confirm: string; confirmation?: string; decline?: boolean }
+  | { kind: "add_to_phase"; phase: number; confirm?: string; confirmation?: string; decline?: boolean; tasks?: Record<string, unknown>[] }
+  /** Task 196: the phase header's actions (Qt TeamWorkspace phase header) and the plan's edits. */
+  | { kind: "reject_phase"; phase: number; comment: string; revision?: number | null }
+  | { kind: "undo_reject_phase"; phase: number }
+  | { kind: "discard_phase"; phase: number; tasks?: number; accepted?: boolean }
+  | { kind: "return_to_draft"; phase: number }
+  | { kind: "move_phase"; phase: number; to: number; position: "before" | "after" }
+  | { kind: "pause_phase"; phase: number; reason?: string }
+  | { kind: "unpause_phase"; phase: number }
+  | { kind: "phase_acceptance"; phase: number; owner: boolean }
+  | { kind: "edit_draft"; phase: number; revision?: number | null; title?: string; barrier?: boolean; tasks_update?: Record<string, unknown>[] }
+  | { kind: "plan_edit"; revision: number; change: TeamPlanChange }
+  /** Task 199: the member menu, "+ Member", Force run and intake keys. */
+  | { kind: "pause_member"; member: string }
+  | { kind: "resume_member"; member: string }
+  | { kind: "relaunch"; member: string }
+  | { kind: "drain"; member: string; role?: string; cancel?: boolean }
+  | { kind: "remove_member"; member: string; role?: string }
+  | { kind: "reports_to"; member: string; parent: string }
+  | { kind: "sub_lead"; member: string; sub: boolean }
+  | { kind: "scale"; role: string; agent: string; count: number; model?: string; effort?: string; account?: string }
+  | { kind: "swap_member"; member: string; agent?: string; model?: string; effort?: string; account?: string; fresh?: boolean }
+  | { kind: "move_account"; provider: string; from_account: string; to_account: string }
+  | { kind: "add_member"; member: Record<string, unknown> }
+  | { kind: "force_test"; suite: string }
+  | { kind: "intake_key"; label?: string; revoke?: string }
   | { kind: "accept_phase"; phase: number }
   | { kind: "phase_mode"; phase: number; mode: "free" | "standard"; reason?: string }
   | { kind: "send_back_phase"; phase: number; comment: string }
@@ -1235,6 +1390,14 @@ export type TeamAction =
   | { kind: "finish"; summary: string }
   | { kind: "reply"; question: string; text: string }
   | { kind: "reassign"; task: number; member: string; subteam?: string | null }
+  /** D2: the owner's answer to one finding; a replan carries its proposal. */
+  | { kind: "finding"; finding: string; action: "fixed" | "dropped" | "defer" | "reopen" | "urgent" | "replan"; note?: string; proposal?: string; task?: number }
+  /** F7: a Done team starts the next goal with the same people. */
+  | { kind: "next_goal"; goal: string; name?: string }
+  /** G1: creates a sub-team from a task; its lead is the assignee. */
+  | { kind: "create"; name: string; parent: { team: string; task: number } }
+  /** Task #218: a member moves to another agent/account/model or to an existing session. */
+  | { kind: "swap-member"; member: string; agent?: string; model?: string; effort?: string; account?: string; session?: TeamSessionView }
   | { kind: "take_over"; task: number }
   | { kind: "cancel"; task: number; subteam?: string | null }
   | { kind: "pause" }
@@ -1246,6 +1409,8 @@ export type TeamAction =
   | { kind: "skip_stage"; task: number; reason: string }
   | { kind: "send_back"; task: number; reason: string }
   | { kind: "move_task"; task: number; phase: number; revision?: number | null }
+  /** Task #226: a task's lane in a draft or planning phase (`edit-draft`'s tasks_update); null takes it out. */
+  | { kind: "edit_tasks"; phase: number; tasks: { id: number; lane: { n: number; label: string } | null }[] }
   | { kind: "draft_start"; folder: string; name?: string; lead: DraftMember; project?: string; project_id?: string; template?: string }
   | { kind: "draft_update"; revision: number; set: Record<string, unknown> }
   | { kind: "draft_seen"; fields: string[] }

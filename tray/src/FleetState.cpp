@@ -1,5 +1,6 @@
 #include "FleetState.h"
 #include "SessionNotifications.h"
+#include "LeadNotices.h"
 
 #include <QStringList>
 #include <QJsonDocument>
@@ -128,6 +129,15 @@ bool settled(const ReadMark &mark, const SessionInfo &s) {
     return reply && attention;
 }
 }
+// WhiteWh fork, task 244: a lead's reply to a turn only the team's pastes
+// opened is read unless the lead shows its team notices in full: no unread
+// mark, count, badge or notification (AttentionTracker reads unreadReply).
+void FleetState::quietTeamReply(const QString &host, SessionInfo &s)
+{
+    if (s.teamLead && s.replyTeamNotice && LeadNotices::mode(LeadNotices::sessionKey(host, s.runId, s.name)) != QLatin1String("full"))
+        s.unreadReply = false;
+}
+
 void FleetState::updateUnread(const QString &host, BoxState &box)
 {
     QSet<QString> listed;
@@ -144,6 +154,7 @@ void FleetState::updateUnread(const QString &host, BoxState &box)
             // Hosts with an older hgs keep this device's own read state.
             s.unreadReply = s.state != "archived" && !s.conversationId.isEmpty() && !s.replyId.isEmpty()
                 && m_readReplies.value(replyKey(host, s)).toString() != s.replyId;
+            quietTeamReply(host, s);
             s.attentionAcknowledged = localAcknowledged;
             continue;
         }
@@ -156,6 +167,7 @@ void FleetState::updateUnread(const QString &host, BoxState &box)
         const bool sameRun = !queued.runId.isEmpty() && queued.runId == s.runId && queued.conversationId == s.conversationId;
         const bool replyRead = s.readReplyId == s.replyId || (sameRun && queued.replyId == s.replyId);
         s.unreadReply = s.state != "archived" && !s.conversationId.isEmpty() && !s.replyId.isEmpty() && !replyRead;
+        quietTeamReply(host, s);
         // Recovery-only attention has no host signature and stays a local choice.
         s.attentionAcknowledged = s.attentionSignature.isEmpty() ? localAcknowledged
             : s.attentionSignature == s.readAttentionSignature || (sameRun && queued.attentionSignature == s.attentionSignature);

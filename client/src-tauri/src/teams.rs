@@ -15,7 +15,7 @@ use zerus_client_core::teams::catalog_edit::{
     IMPORT_BYTES,
 };
 use zerus_client_core::teams::read::TeamRead;
-use zerus_client_core::teams::view::{tests as tests_view, TestsView};
+use zerus_client_core::teams::view::{builds as builds_view, tests as tests_view, BuildsView, TestsView};
 use zerus_client_core::teams::Heads;
 use zerus_client_core::{default_hgs, ComputerId, TeamCall, TeamOutcome, TeamsFollow, TeamsPoller};
 
@@ -242,6 +242,23 @@ pub async fn team_tests(computer: String, team: String, before: Option<f64>) -> 
         )
         .map_err(|error| error.to_string())?;
         Ok(tests_view(&team, &queue, &results))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Task 199: the Tests tab's Builds (`hgs team builds`), read on request off
+/// the UI thread while the tab shows them.
+#[tauri::command]
+pub async fn team_builds(computer: String, team: String) -> Result<BuildsView, String> {
+    if !valid_team(&team) {
+        return Err("Not a team id.".into());
+    }
+    let target = self::computer(&computer)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let value = zerus_client_core::teams::read::read(&default_hgs(), &target, &TeamRead::Builds { team: team.clone() })
+            .map_err(|error| error.to_string())?;
+        Ok(builds_view(&team, &value))
     })
     .await
     .map_err(|error| error.to_string())?

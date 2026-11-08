@@ -158,6 +158,33 @@ pub(crate) const BUILTIN: &[Template] = &[
         params: &[optional("sources", Kind::Paths), optional("project", Kind::Path)],
         timeout_secs: 1800,
     },    // Owner, 2026-10-28: QA ran the Android tests by hand, a permission each.
+    // Task #280: the Tauri app's only build/dev/launch path. The templates
+    // carry 273's development identity; the release-candidate/package step is
+    // the only place that builds the switch identity.
+    Template {
+        id: "tauri-build",
+        summary: "builds Zerus Next with the development identity (npm --prefix client run tauri -- build --no-bundle); the package step alone builds the switch identity",
+        program: "python",
+        args: &["scripts/tauri_template.py", "build"],
+        params: &[optional("files", Kind::Paths)],
+        timeout_secs: 1800,
+    },
+    Template {
+        id: "tauri-dev",
+        summary: "runs Zerus Next's dev server with the development identity (npm --prefix client run tauri -- dev)",
+        program: "python",
+        args: &["scripts/tauri_template.py", "dev"],
+        params: &[optional("files", Kind::Paths)],
+        timeout_secs: 1800,
+    },
+    Template {
+        id: "tauri-launch",
+        summary: "launches the development build after checking its identity; a switch-identity build is refused outside the package",
+        program: "python",
+        args: &["scripts/tauri_template.py", "launch"],
+        params: &[optional("files", Kind::Paths)],
+        timeout_secs: 1800,
+    },
     Template {
         id: "android-test",
         summary: "the Android unit tests (gradlew :app:testDebugUnitTest) with Gradle's home and cache in your folder",
@@ -173,10 +200,16 @@ pub(crate) const BUILTIN: &[Template] = &[
     // runner leg stays the owner's step by hand (docs/release-candidate.md).
     Template {
         id: "release-candidate",
-        summary: "the fork release candidate's local leg on a Windows worker: Qt offscreen suites, fork handoff/update, Tauri build, portable zip self-test, recorded for the commit",
+        summary: "the fork release candidate's local leg on a Windows worker: Qt offscreen suites, fork handoff/update, the Tauri build and portable zip self-test with the fork build and feed, recorded for the commit",
         program: "python",
-        args: &["scripts/release-candidate.py", "--commit={commit}"],
-        params: &[optional("commit", Kind::Identifier)],
+        args: &["scripts/release-candidate.py", "--commit={commit}", "--fork-build={fork_build}", "--fork-feed={fork_feed}"],
+        params: &[
+            optional("commit", Kind::Identifier),
+            // Task 213: the local leg has no tag, so the fork identity the
+            // workflow takes from it is passed explicitly; both or neither.
+            optional("fork_build", Kind::Identifier),
+            optional("fork_feed", Kind::Text),
+        ],
         timeout_secs: 10800,
     },
     // Owner, 2026-10-28: a stale generated build folder (an AAPT intermediate)
@@ -1994,6 +2027,14 @@ fn template_environment(plan: &Plan, folder: &Path) -> Vec<(String, String)> {
     if plan.template == "android-test" {
         env.push(("GRADLE_USER_HOME".into(), folder.join(".zerus-team").join("gradle").join("home").display().to_string()));
     }
+    // Task #280: every app path goes through these templates, and each names
+    // its action and 273's development identity in the environment.
+    if let Some(action) = plan.template.strip_prefix("tauri-") {
+        if matches!(action, "build" | "dev" | "launch") {
+            env.push(("ZERUS_TAURI_ACTION".into(), action.to_owned()));
+            env.push(("ZERUS_TAURI_IDENTITY".into(), "development".into()));
+        }
+    }
     // Task #239: the web project's npm cache lives in the member's folder, so a
     // sandboxed member never reads or writes the person's own cache (the
     // EPERM ui3 met) and two members never share one download.
@@ -2515,7 +2556,7 @@ mod tests {
         // The set the owner asked for, by id.
         let ids: Vec<&str> = BUILTIN.iter().map(|template| template.id).collect();
         // Task 85: the CMake and MSBuild templates of any project after them; task 86: the Python and Cython ones; task 87: Unreal.
-        assert_eq!(ids, ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test", "py-test", "cython-build", "android-test", "release-candidate",
+        assert_eq!(ids, ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test", "py-test", "cython-build", "tauri-build", "tauri-dev", "tauri-launch", "android-test", "release-candidate",
                          "clean-build", "git-merge-lead", "git-commit", "ue-build", "ue-test", "cmake-configure", "cmake-build", "ctest", "msbuild-build", "vstest", "web-test"]);
     }
 
@@ -2725,6 +2766,28 @@ mod tests {
         assert_eq!(plan("qt-build", &json!({"targets":["hgs-tray"]}), dir.path()).unwrap().argv, ["--build", ".ci-build/gui", "--target", "hgs-tray"]);
         // An absent filter adds no argument at all.
         assert_eq!(plan("cargo-build", &json!({}), dir.path()).unwrap().argv, ["build", "--locked"]);
+    }
+
+    /// Task 213: the release candidate takes the fork identity as two explicit
+    /// inputs (the workflow takes them from its tag and run number), so a local
+    /// leg embeds and packages the same build and feed.
+    #[test]
+    fn the_release_candidate_takes_the_fork_identity() {
+        let dir = temp();
+        let feed = "https://github.com/WhiteWh/zerus/releases/latest/download/zerus-fork-feed.json";
+        let full = plan("release-candidate", &json!({"commit":"abc1234","fork_build":"41","fork_feed":feed}), dir.path()).unwrap();
+        assert_eq!(
+            full.argv,
+            ["scripts/release-candidate.py", "--commit=abc1234", "--fork-build=41", "--fork-feed=https://github.com/WhiteWh/zerus/releases/latest/download/zerus-fork-feed.json"]
+        );
+        // Both are optional: an experimental leg (neither) passes no flag, and
+        // one alone is the script's own refusal (both or neither).
+        assert_eq!(plan("release-candidate", &json!({}), dir.path()).unwrap().argv, ["scripts/release-candidate.py"]);
+        assert_eq!(
+            plan("release-candidate", &json!({"fork_build":"41"}), dir.path()).unwrap().argv,
+            ["scripts/release-candidate.py", "--fork-build=41"]
+        );
+        assert!(plan("release-candidate", &json!({"fork_build":"41 42"}), dir.path()).is_err(), "a build number is one word");
     }
 
     #[test]
@@ -3685,6 +3748,23 @@ kind = "path"
     #[cfg(not(windows))]
     fn visual_studio_generator() -> Option<String> {
         None
+    }
+
+    #[test]
+    fn tauri_templates_carry_the_development_identity_and_never_the_switch() {
+        let dir = temp();
+        for (template, action) in [("tauri-build", "build"), ("tauri-dev", "dev"), ("tauri-launch", "launch")] {
+            let planned = plan(template, &json!({}), dir.path()).unwrap();
+            assert_eq!(planned.program, "python", "{template}");
+            assert_eq!(planned.argv, ["scripts/tauri_template.py", action], "{template}");
+            assert!(!planned.argv.iter().any(|arg| arg.contains("switch")), "{template}");
+            let env = template_environment(&planned, dir.path());
+            assert!(env.contains(&("ZERUS_TAURI_ACTION".to_owned(), action.to_owned())), "{template}: {env:?}");
+            assert!(env.contains(&("ZERUS_TAURI_IDENTITY".to_owned(), "development".to_owned())), "{template}: {env:?}");
+        }
+        // Only the release candidate/package leg names the switch identity.
+        assert!(builtin("release-candidate").is_some());
+        assert!(builtin("tauri-build").is_some());
     }
 
     #[test]

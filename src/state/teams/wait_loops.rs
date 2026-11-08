@@ -28,10 +28,6 @@ fn any(text: &str, words: &[&str]) -> bool {
     words.iter().any(|word| text.contains(word))
 }
 
-/// Words that name waiting.
-const WAIT: [&str; 14] = [
-    "wait", "keep polling", "poll", "check again", "check back", "until", "sleep", "re-check", "recheck", "ожида", "жди", "подожд", "дождись", "пока не",
-];
 /// Words that name an event outside the task.
 const OUTSIDE: [&str; 28] = [
     "install", "version", "release", "ci ", "ci.", "ci,", "ci run", "pipeline", "workflow", "card", "approval", "approve", "the owner",
@@ -39,10 +35,113 @@ const OUTSIDE: [&str; 28] = [
     "установ", "сборк", "релиз", "владел",
 ];
 
-/// The lead's text that tells a member to wait for an outside event.
-pub(crate) fn lead_wait_instruction(text: &str) -> bool {
-    let text = lower(text);
-    any(&text, &WAIT) && any(&text, &OUTSIDE)
+/// Task #276 (owner, 2026-11-08): the detector judges an *instruction* to wait,
+/// never the co-occurrence of a wait word and an event word. The lead's
+/// ordinary answers ("held until #5 is accepted", "the owner allows card p77")
+/// describe state and pass; "wait for the owner to answer", "check again in 5
+/// minutes" or "poll the CI until it is green" are instructions, and their
+/// phrase comes back to be quoted with the park command.
+pub(crate) fn lead_wait_instruction(text: &str) -> Option<String> {
+    for clause in clauses(text) {
+        if let Some(phrase) = wait_instruction_phrase(&clause) {
+            return Some(shorten(&phrase));
+        }
+    }
+    None
+}
+
+/// The clauses of a text, so an instruction is judged apart from the state
+/// beside it: sentences, and what follows a comma, a semicolon or a colon.
+fn clauses(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let chars: Vec<char> = text.chars().collect();
+    for (index, ch) in chars.iter().enumerate() {
+        // A dot ends a sentence only before a space or the end: "1.58.0" is a
+        // version, not three clauses.
+        let end = matches!(ch, '!' | '?' | '\n' | ';' | ':') || (*ch == '.' && chars.get(index + 1).is_none_or(|next| next.is_whitespace()));
+        if end {
+            if !current.trim().is_empty() {
+                out.push(current.trim().to_owned());
+            }
+            current.clear();
+        } else {
+            current.push(*ch);
+        }
+    }
+    if !current.trim().is_empty() {
+        out.push(current.trim().to_owned());
+    }
+    out
+}
+
+/// The imperative forms that tell a member to wait. A bare "check", "watch" or
+/// "hold" is ordinary work unless it names a repetition or a condition.
+const WAIT_VERBS: [&str; 22] = [
+    "wait", "keep waiting", "keep polling", "keep checking", "keep trying", "poll", "sleep", "retry", "recheck", "re-check",
+    "check again", "check back", "hold on", "hold off", "hold the task", "monitor", "watch for", "watch until", "loop",
+    "подожди", "жди", "дождись",
+];
+/// Words that make a wait a condition on an outside event (the park's).
+const CONDITION: [&str; 25] = [
+    "install", "version", "release", "ci ", "ci.", "ci,", "ci run", "pipeline", "workflow", "card", "approval", "approve", "the owner",
+    "deploy", "tomorrow", "minute", "hour", "second", "day", "o'clock", "nightly", "dev build", "new build", "build number", "пока",
+];
+/// A duration names a time condition without any other word.
+fn duration(text: &str) -> bool {
+    let has_number = text.split_whitespace().any(|word| {
+        let word = word.trim_matches(|ch: char| !ch.is_ascii_digit() && ch != '.');
+        word.parse::<f64>().is_ok_and(|number| number > 0.0)
+    });
+    let unit = any(text, &["min", "hour", "sec", "day", "minute", "hour"]);
+    let short = text.split_whitespace().any(|word| word.chars().any(|ch| ch.is_ascii_digit()) && word.chars().any(|ch| matches!(ch, 's' | 'm' | 'h' | 'd')));
+    (has_number && unit) || short
+}
+
+/// The phrase of one clause that tells a member to wait, or None for state,
+/// work and ordinary direction.
+fn wait_instruction_phrase(clause: &str) -> Option<String> {
+    let lower = clause.to_lowercase().trim().to_owned();
+    if lower.is_empty() {
+        return None;
+    }
+    // An instruction begins the clause, or follows a conjunction, a
+    // politeness or a comma inside it ("Keep 138 and wait for X").
+    let mut candidates: Vec<&str> = vec![lower.as_str()];
+    for marker in [" and ", " then ", " please ", " just ", " now ", " also ", " kindly ", ", ", "; ", " so "] {
+        if let Some(at) = lower.find(marker) {
+            candidates.push(lower[at + marker.len()..].trim_start());
+        }
+    }
+    for candidate in candidates {
+        let mut rest = candidate.trim_start();
+        for prefix in ["please ", "just ", "now ", "also ", "kindly ", "you should ", "you need to ", "you must ", "you ", "so "] {
+            if let Some(stripped) = rest.strip_prefix(prefix) {
+                rest = stripped.trim_start();
+            }
+        }
+        // A negation is not an instruction to wait.
+        if ["don't ", "do not ", "never ", "no need to ", "there is no need to "].iter().any(|negation| rest.starts_with(negation)) {
+            continue;
+        }
+        let Some(verb) = WAIT_VERBS.iter().filter(|verb| {
+            rest.strip_prefix(*verb).is_some_and(|after| after.is_empty() || !after.starts_with(|ch: char| ch.is_alphabetic()))
+        }).max_by_key(|verb| verb.len()) else { continue };
+        let phrase = rest.to_owned();
+        // A loop instruction is waiting by itself; any other wait needs a
+        // condition (an outside event, a time, "until"/"after"/"in").
+        let loopish = matches!(*verb, "keep waiting" | "keep polling" | "keep checking" | "keep trying" | "loop" | "sleep");
+        if loopish || any(&phrase, &CONDITION) || duration(&phrase) || phrase.contains("until") || phrase.contains("till") || phrase.contains("after") || phrase.contains(" in ") {
+            return Some(phrase);
+        }
+    }
+    None
+}
+
+/// The quoted trigger: one line, bounded.
+fn shorten(phrase: &str) -> String {
+    let line: String = phrase.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() > 140 { format!("{}...", line.chars().take(137).collect::<String>()) } else { line }
 }
 
 /// A job name or command whose purpose is waiting, with why; None for real
@@ -147,11 +246,14 @@ pub(crate) fn park_command(team: &str, task: Option<u32>, attempt: &str) -> Stri
     )
 }
 
-/// The refusal of a wait the lead tells a member to do.
-pub(crate) fn lead_refusal(team: &str, task: Option<u32>, attempt: &str) -> String {
+/// The refusal of a wait the lead tells a member to do: it quotes the phrase
+/// that triggered it (task #276) and offers the park of the condition it names.
+pub(crate) fn lead_refusal(team: &str, task: Option<u32>, attempt: &str, phrase: &str) -> String {
+    let (condition, what) = guess_condition(phrase, super::super::now());
+    let task = task.map_or("N".to_owned(), |id| id.to_string());
+    let attempt = if attempt.is_empty() { "ATTEMPT" } else { attempt };
     format!(
-        "Waiting is a park, never an instruction: park the task on its condition and Zerus watches it, frees the member and tells you the outcome: {}",
-        park_command(team, task, attempt)
+        "Waiting is a park, never an instruction: \"{phrase}\" tells a member to wait. Park the task on its condition and Zerus watches it, frees the member and tells you the outcome: {{\"team\":\"{team}\",\"task\":{task},\"attempt\":\"{attempt}\",\"condition\":{condition},\"eta_minutes\":60,\"note\":\"...\"}} | hgs team park --json (conditions: ci, build, task, card, time; hgs guide team-park). The condition this phrase names: {what}."
     )
 }
 
@@ -166,9 +268,9 @@ pub(crate) fn job_refusal(why: &str, team: &str, task: Option<u32>, attempt: &st
 /// `hgs send` from the lead's session to a member of its team: a wait
 /// instruction is refused with the park of the member's open task.
 pub(crate) fn lead_send_check(target: &str, text: &str) -> anyhow::Result<()> {
-    if !lead_wait_instruction(text) {
+    let Some(phrase) = lead_wait_instruction(text) else {
         return Ok(());
-    }
+    };
     let Some(record) = super::super::session_graph::caller_record() else { return Ok(()) };
     let Ok(store) = super::store::Store::open(false) else { return Ok(()) };
     for team in store.active_teams(1000).unwrap_or_default() {
@@ -179,7 +281,7 @@ pub(crate) fn lead_send_check(target: &str, text: &str) -> anyhow::Result<()> {
             continue;
         };
         let open = team.tasks.iter().find_map(|task| task.open_attempt().filter(|attempt| attempt.member == member.id).map(|attempt| (task.id, attempt.id.clone())));
-        anyhow::bail!("{}", lead_refusal(&team.id, open.as_ref().map(|found| found.0), open.as_ref().map_or("", |found| found.1.as_str())));
+        anyhow::bail!("{}", lead_refusal(&team.id, open.as_ref().map(|found| found.0), open.as_ref().map_or("", |found| found.1.as_str()), &phrase));
     }
     Ok(())
 }
@@ -233,3 +335,4 @@ pub(crate) fn caller_job_refusal(why: &str) -> String {
 #[cfg(test)]
 #[path = "tests/wait_loops.rs"]
 mod tests;
+

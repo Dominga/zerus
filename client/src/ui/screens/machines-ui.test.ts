@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { LOCAL, localState, machineKey, peerState, placeholders, sessionHostLine, summary, testEnabled } from "./machines-ui";
+import { LOCAL, hostTestLine, localState, machineKey, peerState, placeholders, sessionHostLine, summary, testEnabled } from "./machines-ui";
 import { machineMeta } from "../../store/testing";
-import { emptyMachines, type MachineRow } from "../../types";
+import { emptyMachines, type Effective, type MachineRow } from "../../types";
 
 const row = (extra: Partial<MachineRow> = {}): MachineRow => ({
-  alias: "studio", enabled: true, source: "local", inherited: false, hostname: "", user: "", port: null, identity_file: "", origin: "", ...extra,
+  alias: "studio", enabled: true, source: "local", inherited: false, transport: "ssh", wsl: null, test_runner: "", hostname: "", user: "", port: null, identity_file: "", origin: "", ...extra,
 });
 const at = (status: string, attempt = 0) => ({ id: "studio", status, attempt });
 
@@ -48,7 +48,7 @@ describe("machines page", () => {
   });
 
   it("shows inherited values once the effective connection is known, and tests only an idle saved peer", () => {
-    const e = { alias: "studio", pending: false, error: false, text: "", hostname: "studio.example", user: "person", port: "2222", key: "/home/example/.ssh/id_ed25519" };
+    const e: Effective = { alias: "studio", pending: false, error: false, text: "", transport: "ssh", hostname: "studio.example", user: "person", port: "2222", key: "/home/example/.ssh/id_ed25519", distribution: "", hgs_path: "" };
     expect(placeholders(e, "studio")).toEqual({
       hostname: "Inherited: studio.example", user: "Inherited: person", port: "Inherited: 2222", key: "Inherited: /home/example/.ssh/id_ed25519",
     });
@@ -62,5 +62,13 @@ describe("machines page", () => {
     expect(testEnabled(LOCAL, view)).toBe(false);
     expect(testEnabled("studio", { ...view, busy: true })).toBe(false);
     expect(testEnabled("gone", view)).toBe(false);
+  });
+
+  it("answers Test session host with the host's facts and its sessions", () => {
+    const host = { state: "running", pid: 4120, protocol: 1, conpty: "bundled", integrity: "Medium", windows_session: 1, error: null };
+    expect(hostTestLine({ host, sessions: 3, clients: 1 })).toBe("Session host: running, PID 4120, bundled ConPTY, Medium integrity, Windows session 1, 3 sessions");
+    expect(hostTestLine({ host: { ...host, state: "stopped" }, sessions: null, clients: null })).toBe("Session host: stopped, PID 4120, bundled ConPTY, Medium integrity, Windows session 1");
+    expect(localState(machineMeta("win", {}, { platform: "windows", local_host: host }), "").testHost).toBe(true);
+    expect(localState(machineMeta("linux", {}, { platform: "linux" }), "").testHost).toBe(false);
   });
 });

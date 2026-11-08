@@ -177,6 +177,17 @@
       },
       "review_label": null
     },
+    "always": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Allow all, don't ask again"
+      },
+      "review_label": {
+        "source": "Allow all, don't ask again"
+      }
+    },
+    "subagents": [],
     "skip": {
       "visible": false,
       "enabled": false,
@@ -393,6 +404,17 @@
       },
       "review_label": null
     },
+    "always": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Allow all, don't ask again"
+      },
+      "review_label": {
+        "source": "Allow all, don't ask again"
+      }
+    },
+    "subagents": [],
     "skip": {
       "visible": false,
       "enabled": false,
@@ -670,6 +692,17 @@
       },
       "review_label": null
     },
+    "always": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Allow all, don't ask again"
+      },
+      "review_label": {
+        "source": "Allow all, don't ask again"
+      }
+    },
+    "subagents": [],
     "skip": {
       "visible": true,
       "enabled": true,
@@ -880,6 +913,17 @@
       },
       "review_label": null
     },
+    "always": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Allow all, don't ask again"
+      },
+      "review_label": {
+        "source": "Allow all, don't ask again"
+      }
+    },
+    "subagents": [],
     "skip": {
       "visible": true,
       "enabled": false,
@@ -1044,6 +1088,17 @@
       },
       "review_label": null
     },
+    "always": {
+      "visible": false,
+      "enabled": true,
+      "label": {
+        "source": "Allow all, don't ask again"
+      },
+      "review_label": {
+        "source": "Allow all, don't ask again"
+      }
+    },
+    "subagents": [],
     "skip": {
       "visible": false,
       "enabled": false,
@@ -1214,6 +1269,17 @@
       },
       "review_label": null
     },
+    "always": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Allow all, don't ask again"
+      },
+      "review_label": {
+        "source": "Allow all, don't ask again"
+      }
+    },
+    "subagents": [],
     "skip": {
       "visible": false,
       "enabled": false,
@@ -1679,6 +1745,17 @@
       },
       "review_label": null
     },
+    "always": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Allow all, don't ask again"
+      },
+      "review_label": {
+        "source": "Allow all, don't ask again"
+      }
+    },
+    "subagents": [],
     "skip": {
       "visible": false,
       "enabled": false,
@@ -1889,6 +1966,17 @@
       },
       "review_label": null
     },
+    "always": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Allow all, don't ask again"
+      },
+      "review_label": {
+        "source": "Allow all, don't ask again"
+      }
+    },
+    "subagents": [],
     "skip": {
       "visible": false,
       "enabled": false,
@@ -2099,6 +2187,17 @@
       },
       "review_label": null
     },
+    "always": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Allow all, don't ask again"
+      },
+      "review_label": {
+        "source": "Allow all, don't ask again"
+      }
+    },
+    "subagents": [],
     "skip": {
       "visible": false,
       "enabled": false,
@@ -2309,6 +2408,17 @@
       },
       "review_label": null
     },
+    "always": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Allow all, don't ask again"
+      },
+      "review_label": {
+        "source": "Allow all, don't ask again"
+      }
+    },
+    "subagents": [],
     "skip": {
       "visible": false,
       "enabled": false,
@@ -2519,6 +2629,17 @@
       },
       "review_label": null
     },
+    "always": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Allow all, don't ask again"
+      },
+      "review_label": {
+        "source": "Allow all, don't ask again"
+      }
+    },
+    "subagents": [],
     "skip": {
       "visible": false,
       "enabled": false,
@@ -2729,6 +2850,17 @@
       },
       "review_label": null
     },
+    "always": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Allow all, don't ask again"
+      },
+      "review_label": {
+        "source": "Allow all, don't ask again"
+      }
+    },
+    "subagents": [],
     "skip": {
       "visible": false,
       "enabled": false,
@@ -2953,6 +3085,17 @@
       },
       "review_label": null
     },
+    "always": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Allow all, don't ask again"
+      },
+      "review_label": {
+        "source": "Allow all, don't ask again"
+      }
+    },
+    "subagents": [],
     "skip": {
       "visible": false,
       "enabled": false,

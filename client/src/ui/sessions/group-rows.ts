@@ -20,6 +20,10 @@ export interface ListInput {
   members: Map<string, Session[]>;
   /** The state, machine and search filters. */
   visible: (s: Session) => boolean;
+  /** Whether some filter or search is active: an empty project is then always hidden (SessionsWindowRows.cpp:559). */
+  filtering?: boolean;
+  /** "Hide projects without active sessions" (SettingsPage.h:232), on by default. */
+  hideEmpty?: boolean;
   /** The window's online state of a row's computer (Qt's `entry.online`). */
   online: (s: Session) => boolean;
   /** The project filter's project ids; empty is every project. */
@@ -108,8 +112,10 @@ export function groupRows(input: ListInput): Row[] {
     if (!wanted(h.id)) continue;
     const all = input.members.get(h.id) ?? [];
     const list = all.filter(input.visible);
-    // A project without visible members stays hidden (323; "Hide projects without active sessions" defaults on, 109).
-    if (!list.length) continue;
+    // A project without visible members stays hidden while filtering, when
+    // the owner asked to hide empty projects (the default), and when the
+    // organization cannot reach it (SessionsWindowRows.cpp:559, 323).
+    if (!list.length && (input.filtering || input.hideEmpty !== false || !h.accessible)) continue;
     // The counters cover members the filters hide; muted members never count as attention or unread (398-404).
     // A computer that is not online counts only Review later as attention and nothing as working.
     let attention = 0, unread = 0, working = 0;

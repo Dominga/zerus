@@ -567,6 +567,9 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
     // Bounds question indexing for the whole listing.
     let shared = Shared { marks: &marks, preferences: notification_preferences.as_ref(), budget: read_marks::question_budget() };
     let mut process_work = processes::WorkSample::default();
+    // Task 234: the rows loop's parts, summed over its rows.
+    let (mut live_ms, mut probe_ms, mut saved_ms, mut saved_rows) = (0u64, 0u64, 0u64, 0u64);
+    let ms = |at: std::time::Instant| at.elapsed().as_millis() as u64;
     for record in bindings {
         if archive::equivalent(&record, &archived) {
             continue;
@@ -580,7 +583,9 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
             if matches(&record, panes_of(&snapshot, &record)) {
                 label_row(&mut sessions[*index], &record);
                 workspace::relabel(&mut names, terminal_name(&record), name);
+                let at = std::time::Instant::now();
                 live_row(&mut sessions[*index], record, &shared, &mut process_work)?;
+                live_ms += ms(at);
                 continue;
             }
         }
@@ -590,9 +595,13 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
         // Only the session's own launch still starting keeps its saved row
         // out; a terminal another session holds under its terminal name never
         // hides it (#1445 review), nor does one that cannot be read.
-        if terminal_live(&snapshot, &record).unwrap_or(false) {
+        let at = std::time::Instant::now();
+        let starting = terminal_live(&snapshot, &record).unwrap_or(false);
+        probe_ms += ms(at);
+        if starting {
             continue;
         }
+        let at = std::time::Instant::now();
         let parts: Vec<&str> = name.splitn(3, '/').collect();
         let mut session = json!({"name": name, "cmd": record["agent"],
             "project": parts.get(1), "tag": parts.get(2), "attached": 0, "clients": [],
@@ -607,7 +616,13 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
         read_marks::enrich_listing(&mut session, &marks, journal::journal_name(&record), Ok(Some(Vec::new())));
         notifications::enrich(&mut session, notification_preferences.as_ref(), journal::journal_name(&record));
         sessions.push(session);
+        saved_ms += ms(at);
+        saved_rows += 1;
     }
+    phases.note("rows_live", live_ms);
+    phases.note("rows_terminal_probe", probe_ms);
+    phases.note("rows_saved", saved_ms);
+    phases.note("rows_saved_count", saved_rows);
     for record in archived {
         let name = string(&record, "name");
         let parts: Vec<&str> = name.splitn(3, '/').collect();
@@ -627,8 +642,9 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
     }
     phases.mark("rows");
     sessions.extend(dsh::snapshots()?);
+    phases.mark("dsh");
     sessions.extend(opencode::snapshots()?);
-    phases.mark("snapshots");
+    phases.mark("opencode");
     finish_rows(sessions, &marks, &names);
     phases.mark("finish_rows");
     // Task 193: a listing over SLOW_MS is one slow-calls line with its phases.
@@ -674,6 +690,8 @@ fn live_row(session: &mut Value, record: Value, shared: &Shared, process_work: &
     let summary = journal::summary(&record, true);
     phases.mark("summary");
     session["process_work"] = process_work.summary(&record, summary["activity"] == "idle" && summary["phase"] == "idle");
+    // Task 278: the background jobs its hooks registered, whatever its activity.
+    session["background_jobs"] = process_work.registered(&record, true);
     session
         .as_object_mut()
         .ok_or("invalid session")?
@@ -692,6 +710,8 @@ fn live_row(session: &mut Value, record: Value, shared: &Shared, process_work: &
 /// The last steps of every listed row. `names` holds the session names of the
 /// pane snapshot by session ID.
 fn finish_rows(sessions: &mut [Value], marks: &Value, names: &BTreeMap<String, String>) {
+    // Task 234: the parts of the listing's last pass, named in slow-calls.
+    let mut phases = slow_calls::Phases::start();
     // DeepSeek and untracked live sessions are owned by their names.
     for session in sessions.iter_mut() {
         if session.get("attention_signature").is_none() {
@@ -700,6 +720,7 @@ fn finish_rows(sessions: &mut [Value], marks: &Value, names: &BTreeMap<String, S
             read_marks::enrich_listing(session, marks, &owner, Ok(Some(questions)));
         }
     }
+    phases.mark("marks");
 
     for session in sessions.iter_mut() {
         if session.get("notification_preferences").is_none() {
@@ -709,6 +730,7 @@ fn finish_rows(sessions: &mut [Value], marks: &Value, names: &BTreeMap<String, S
 
     // U53: every row names its account, label included; the catalog is read once.
     let labels = crate::config::Config::load().ok().map(|config| crate::accounts::labels(&config));
+    phases.mark("account_labels");
     for session in sessions.iter_mut() {
         if session.get("account_label").is_none() && session.get("account_id").is_some() {
             let id = string(session, "account_id").to_owned();
@@ -719,10 +741,17 @@ fn finish_rows(sessions: &mut [Value], marks: &Value, names: &BTreeMap<String, S
     // The pane folders are read after the lock is released, when a session may
     // have been renamed since `snapshot`. They go by the session IDs, which a
     // rename keeps, to the names that `snapshot` listed (zerus-18u1).
-    workspace::enrich(sessions, &workspace::snapshot_cwds(names));
+    phases.mark("labels");
+    let cwds = workspace::snapshot_cwds(names);
+    phases.mark("cwds");
+    workspace::enrich(sessions, &cwds);
+    phases.mark("workspace");
     waits::decorate(sessions);
+    phases.mark("waits");
     // U30: after the waits, which name a coordination reason.
     session_state::decorate(sessions);
+    phases.mark("session_state");
+    phases.finish_at("ls-finish", "", 100);
 }
 
 /// The rows a terminal listing starts from, before `merge_listing` adds what

@@ -55,7 +55,7 @@ npm --prefix client ci --ignore-scripts --no-audit --no-fund
 (cd client && npm run tauri -- build --debug --no-bundle)
 cargo build --locked --bin hgs
 mkdir -p artifacts/zerus-next-windows-shell
-cp "$CARGO_TARGET_DIR/debug/hgs-tray.exe" "$CARGO_TARGET_DIR/debug/hgs.exe" artifacts/zerus-next-windows-shell/
+cp "$CARGO_TARGET_DIR/debug/zerus-client.exe" "$CARGO_TARGET_DIR/debug/hgs.exe" artifacts/zerus-next-windows-shell/
 # Keep exact native fixture bytes/drivers for the same private real-PC checks.
 cp "$HGS_WINDOWS_FRONTEND_FIXTURE" artifacts/zerus-next-windows-shell/windows-frontend-tests.exe
 python - "$CARGO_TARGET_DIR" <<'PYTHON'

@@ -1627,6 +1627,15 @@ fn track(name: String, token: String, mut event: Value, output: &mut impl std::i
             agent_hint::output_event(output, &context, "UserPromptSubmit")?;
         }
     }
+    // Task 186 (docs/lore.md 11.11): a tool boundary is a safe point for an
+    // urgent team message: Claude Code's PostToolUse hook returns it as added
+    // context, never typed into the working composer. One file check per
+    // tool call until such a message waits.
+    if kind == "PostToolUse" && string(&event, "agent_id").is_empty() && agent == "claude" {
+        if let Some(context) = teams::working::tool_context_for(string(&record, "name"), string(&record, "run_id")) {
+            agent_hint::output_event(output, &context, "PostToolUse")?;
+        }
+    }
     // The ready conversation and its proof become visible in the same atomic
     // record update; hook() performs no later proof-only binding write.
     write(&mut record)?;

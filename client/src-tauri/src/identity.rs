@@ -30,17 +30,39 @@ impl Platform {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Identity {
     pub bundle_id: String,
+    /// A development build's folder hash: its own data, WebView2 and
+    /// single-instance names, so member and test builds never share (or
+    /// reach) the installed app's folders. The switch never carries one.
+    dev_suffix: Option<String>,
 }
 
 impl Identity {
     pub fn new(bundle_id: &str) -> Self {
         Self {
             bundle_id: bundle_id.to_owned(),
+            dev_suffix: None,
+        }
+    }
+
+    /// A non-switch build of one source folder (`dev.zerus.next.<hash>`).
+    pub fn development(bundle_id: &str, folder_hash: &str) -> Self {
+        Self {
+            bundle_id: bundle_id.to_owned(),
+            dev_suffix: (!folder_hash.is_empty()).then(|| folder_hash.to_owned()),
         }
     }
 
     pub fn is_switch(&self) -> bool {
         self.bundle_id == SWITCH_ID
+    }
+
+    /// The identifier `--build-info` and the data folders name: the switch's
+    /// own, else the development one with this folder's hash.
+    pub fn build_identifier(&self) -> String {
+        match (&self.dev_suffix, self.is_switch()) {
+            (Some(hash), false) => format!("{}.{hash}", self.bundle_id),
+            _ => self.bundle_id.clone(),
+        }
     }
 
     /// Only the installed switch imports Qt state. A replay uses isolated
@@ -56,15 +78,13 @@ impl Identity {
     }
 
     /// The single-instance name: Qt's `hgs-tray` for the switch bundle; any
-    /// other build only on request (`ZERUS_CLIENT_SINGLE_INSTANCE=1`), under
-    /// its own name, so parallel dev runs and Qt's socket stay apart.
-    pub fn instance_name(&self, requested: bool) -> Option<String> {
+    /// other build always claims its own development name, so a member or test
+    /// build can never reach the owner's Zerus.
+    pub fn instance_name(&self, _requested: bool) -> Option<String> {
         if self.is_switch() {
             Some("hgs-tray".to_owned())
-        } else if requested {
-            Some(format!("zerus-client-{}", self.bundle_id))
         } else {
-            None
+            Some(format!("zerus-client-{}", self.build_identifier()))
         }
     }
 
@@ -98,19 +118,18 @@ impl Identity {
         xdg_data_home: Option<&Path>,
         appdata: Option<&Path>,
     ) -> PathBuf {
+        let identifier = self.build_identifier();
         match platform {
-            Platform::Mac => home
-                .join("Library/Application Support")
-                .join(&self.bundle_id),
+            Platform::Mac => home.join("Library/Application Support").join(identifier),
             Platform::Linux => xdg_data_home
                 .filter(|path| path.is_absolute())
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| home.join(".local/share"))
-                .join(&self.bundle_id),
+                .join(identifier),
             Platform::Windows => appdata
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| home.join("AppData/Roaming"))
-                .join(&self.bundle_id),
+                .join(identifier),
         }
     }
 
@@ -132,17 +151,18 @@ impl Identity {
         xdg_cache_home: Option<&Path>,
         local_appdata: Option<&Path>,
     ) -> PathBuf {
+        let identifier = self.build_identifier();
         match platform {
-            Platform::Mac => home.join("Library/Caches").join(&self.bundle_id),
+            Platform::Mac => home.join("Library/Caches").join(identifier),
             Platform::Linux => xdg_cache_home
                 .filter(|path| path.is_absolute())
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| home.join(".cache"))
-                .join(&self.bundle_id),
+                .join(identifier),
             Platform::Windows => local_appdata
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| home.join("AppData/Local"))
-                .join(&self.bundle_id),
+                .join(identifier),
         }
     }
 
@@ -178,7 +198,15 @@ pub fn current(config_identifier: &str) -> Identity {
     if let Some(id) = crate::platform::macos::bundle_identifier() {
         return Identity::new(&id);
     }
-    Identity::new(config_identifier)
+    let mut identity = Identity::new(config_identifier);
+    if !identity.is_switch() {
+        // `build.rs` hashes the source folder: member, test and local builds
+        // of different checkouts never share data, WebView2 or an instance.
+        identity.dev_suffix = option_env!("ZERUS_DEV_FOLDER_HASH")
+            .filter(|hash| !hash.is_empty())
+            .map(str::to_owned);
+    }
+    identity
 }
 
 /// Whether the notifier runs: the build posts (`Identity::notifications`)
@@ -233,13 +261,31 @@ mod tests {
         for other in ["dev.zerus.next", "com.hgdev.hgs-tray.local"] {
             let identity = Identity::new(other);
             assert!(!identity.is_switch());
-            assert_eq!(identity.instance_name(false), None);
+            assert_eq!(
+                identity.instance_name(false),
+                Some(format!("zerus-client-{other}"))
+            );
             assert_eq!(
                 identity.instance_name(true),
-                Some(format!("zerus-client-{other}"))
+                Some(format!("zerus-client-{other}")),
+                "a development build always claims its own name"
             );
             assert_eq!(identity.launchd_label(), None);
         }
+        // A member or test build of one folder carries that folder's hash in
+        // its identity, data folders and instance name; the switch never does.
+        let scoped = Identity::development("dev.zerus.next", "abc123");
+        assert_eq!(scoped.build_identifier(), "dev.zerus.next.abc123");
+        assert_eq!(
+            scoped.instance_name(false).as_deref(),
+            Some("zerus-client-dev.zerus.next.abc123")
+        );
+        assert_eq!(scoped.launchd_label(), None);
+        assert_eq!(
+            Identity::development("com.hgdev.hgs-tray", "abc123").build_identifier(),
+            SWITCH_ID,
+            "packaging is never scoped to a folder"
+        );
     }
 
     #[test]
@@ -281,14 +327,14 @@ mod tests {
             dev.data_dir(Platform::Linux, linux, None, None),
             Path::new("/home/example/.local/share/dev.zerus.next")
         );
+        let absolute_data = if cfg!(windows) {
+            Path::new("C:/data/example")
+        } else {
+            Path::new("/data/example")
+        };
         assert_eq!(
-            dev.data_dir(
-                Platform::Linux,
-                linux,
-                Some(Path::new("/data/example")),
-                None
-            ),
-            Path::new("/data/example/dev.zerus.next")
+            dev.data_dir(Platform::Linux, linux, Some(absolute_data), None),
+            absolute_data.join("dev.zerus.next")
         );
         assert_eq!(
             dev.data_dir(
@@ -308,6 +354,12 @@ mod tests {
                 Some(Path::new("C:/Users/example/AppData/Roaming"))
             ),
             Path::new("C:/Users/example/AppData/Roaming/dev.zerus.next")
+        );
+        let scoped = Identity::development("dev.zerus.next", "abc123");
+        assert_eq!(
+            scoped.data_dir(Platform::Windows, Path::new("C:/Users/example"), None, None),
+            Path::new("C:/Users/example/AppData/Roaming/dev.zerus.next.abc123"),
+            "each source folder keeps its own data"
         );
     }
 
@@ -338,14 +390,14 @@ mod tests {
             dev.cache_dir(Platform::Linux, linux, None, None),
             Path::new("/home/example/.cache/dev.zerus.next")
         );
+        let absolute_cache = if cfg!(windows) {
+            Path::new("C:/cache/example")
+        } else {
+            Path::new("/cache/example")
+        };
         assert_eq!(
-            dev.cache_dir(
-                Platform::Linux,
-                linux,
-                Some(Path::new("/cache/example")),
-                None
-            ),
-            Path::new("/cache/example/dev.zerus.next")
+            dev.cache_dir(Platform::Linux, linux, Some(absolute_cache), None),
+            absolute_cache.join("dev.zerus.next")
         );
         assert_eq!(
             dev.cache_dir(
@@ -370,6 +422,12 @@ mod tests {
         assert_eq!(
             dev.cache_dir(Platform::Windows, windows, None, None),
             Path::new("C:/Users/example/AppData/Local/dev.zerus.next")
+        );
+        let scoped = Identity::development("dev.zerus.next", "abc123");
+        assert_eq!(
+            scoped.cache_dir(Platform::Windows, windows, None, None),
+            Path::new("C:/Users/example/AppData/Local/dev.zerus.next.abc123"),
+            "WebView2 and the cache stay with the folder"
         );
     }
 }

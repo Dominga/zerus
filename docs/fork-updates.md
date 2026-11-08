@@ -15,7 +15,7 @@ manual dispatch, only in `WhiteWh/zerus`. On a standard `windows-2025` runner it
 3. runs the Tauri desktop's fork update tests and the Qt-to-Tauri handoff
    (`client/core/tests/fork_handoff.rs`), then builds the Tauri desktop as
    upstream does (`npm ci`, `tauri build --no-bundle` with
-   `tauri.windows.conf.json` and the `video` feature) as `hgs-tray.exe`;
+   `tauri.windows.switch.conf.json` and the `video` feature) as `hgs-tray.exe`;
 4. packages the zip with `scripts/package-windows.py --fork` (the fork
    identity, the relay, the fork README section and the Qt fallback) and
    self-tests it (`scripts/check-windows-portable.py --run --selftest`, which

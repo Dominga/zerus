@@ -17,6 +17,7 @@ import { designerChoices, designerProjects, designerRow, sessionContext, type De
 import { parseCatalog, proposalCounts } from "./catalog";
 import { TeamCatalog } from "./TeamCatalog";
 import { TeamCatalogEditor } from "./TeamCatalogEditor";
+import { DESIGNER_AGENTS, designerEfforts, designerModelLabel, effortAllowed, effortLabel, modelSections } from "./designerModels";
 
 // Task #44: Qt's TeamDesignerPage. The designer's conversation (the running
 // "…/team-designer" session) shows here and follows the selected local
@@ -25,7 +26,7 @@ import { TeamCatalogEditor } from "./TeamCatalogEditor";
 // `hgs team catalog designer`. Its draft's proposals are kept or rejected
 // here; the catalog editor sits beside it.
 
-const AGENTS: [string, string][] = [["claude", "Claude"], ["codex", "Codex"], ["kimi", "Kimi"], ["dsh", "DeepSeek"], ["opencode", "OpenCode"]];
+const AGENTS = DESIGNER_AGENTS;
 /** Qt waits this long for a started designer to reach the session list. */
 const START_WAIT_MS = 30_000;
 
@@ -63,6 +64,8 @@ export function TeamDesigner(props: { onClose?: () => void }): JSX.Element {
   const [agent, setAgent] = createSignal("claude");
   const [model, setModel] = createSignal("");
   const [effort, setEffort] = createSignal("");
+  const [modelMenu, setModelMenu] = createSignal(false);
+  const [effortMenu, setEffortMenu] = createSignal(false);
   const [goal, setGoal] = createSignal("");
   const [starting, setStarting] = createSignal(false);
   const [startError, setStartError] = createSignal("");
@@ -155,13 +158,64 @@ export function TeamDesigner(props: { onClose?: () => void }): JSX.Element {
               <p class="dim">{tr("Choose a project and describe the work. The designer reads the project and the existing catalog, then proposes roles, templates and rules; nothing changes until you keep and apply them.")}</p>
               <div class="designer-agent">
                 <label><span>{tr("Agent")}</span>
-                  <select value={agent()} onChange={(event) => setAgent(event.currentTarget.value)}>
+                  <select value={agent()} onChange={(event) => { setAgent(event.currentTarget.value); setModel(""); setEffort(""); }}>
                     <For each={AGENTS}>{([id, name]) => <option value={id}>{name}</option>}</For>
                   </select>
                 </label>
-                <label><span>{tr("Model")}</span><input value={model()} placeholder={tr("Default model")} onInput={(event) => setModel(event.currentTarget.value)} /></label>
-                <label><span>{tr("Effort")}</span><input value={effort()} placeholder={tr("Default")} onInput={(event) => setEffort(event.currentTarget.value)} /></label>
-                <span class="dim">{tr("Runs on this computer")}</span>
+                <div class="designer-model">
+                  <button type="button" class="btn small designer-model-button" data-action="designer-model"
+                    aria-haspopup="menu" aria-expanded={modelMenu()}
+                    title={tr("The designer's agent, model and effort")}
+                    onClick={() => { setModelMenu(!modelMenu()); setEffortMenu(false); }}>
+                    <span>{designerModelLabel(agent(), model(), effort())}</span>
+                    <Icon name="chevron-down" size={12} />
+                  </button>
+                  <Show when={modelMenu()}>
+                    <div class="designer-model-menu" role="menu" aria-label={tr("Agent, model and effort")}>
+                      <Show when={!effortMenu()} fallback={
+                        <>
+                          <button type="button" role="menuitem" class="designer-model-back" data-action="designer-effort-back"
+                            onClick={() => setEffortMenu(false)}>‹ {effortLabel(effort())}</button>
+                          <For each={designerEfforts(agent(), effort())}>
+                            {(choice) => (
+                              <button type="button" role="menuitem" classList={{ on: effort() === choice }} data-designer-effort={choice}
+                                onClick={() => { setEffort(choice); setModelMenu(false); setEffortMenu(false); }}>
+                                {choice}
+                              </button>
+                            )}
+                          </For>
+                        </>
+                      }>
+                        <For each={modelSections()}>
+                          {(section) => (
+                            <>
+                              <div class="designer-model-section">{section.label}</div>
+                              <For each={section.models}>
+                                {(id) => (
+                                  <button type="button" role="menuitem" classList={{ on: agent() === section.agent && model() === id }}
+                                    data-designer-agent={section.agent} data-designer-model={id}
+                                    onClick={() => {
+                                      setAgent(section.agent);
+                                      setModel(id);
+                                      if (!effortAllowed(section.agent)) setEffort("");
+                                      setModelMenu(false);
+                                    }}>
+                                    {id || tr("Default model")}
+                                  </button>
+                                )}
+                              </For>
+                            </>
+                          )}
+                        </For>
+                        <button type="button" role="menuitem" class="designer-model-effort" data-action="designer-effort"
+                          disabled={!effortAllowed(agent())} onClick={() => setEffortMenu(true)}>
+                          {effortLabel(effort())}
+                        </button>
+                        <div class="designer-model-note">{tr("Runs on this computer")}</div>
+                      </Show>
+                    </div>
+                  </Show>
+                </div>
               </div>
               <textarea rows={5} value={goal()} placeholder={chosen()?.folder ? tr("Describe the project tasks…") : tr("Choose a project above…")} onInput={(event) => setGoal(event.currentTarget.value)} />
               <div class="designer-start">

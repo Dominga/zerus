@@ -17,21 +17,24 @@ import { visibleUnreadReply } from "../../store/attention";
 import { optionalQuestionCount } from "./optional-questions";
 import { currentChildren } from "./subagents";
 import { runningCommandsEntry } from "../../store/processes";
-import { flag } from "../../store/settings";
+import { flag, setSetting, settings, settingsReady } from "../../store/settings";
+import { sessionsToggleTick, unifiedChrome } from "../../store/ui";
+import { compactSessionRows, expandSessionsOnHover } from "./session-prefs";
 import { archiveCount, archiveTip } from "../../store/archive";
 import { ArchiveBar, datePanelOpen } from "./ArchiveBar";
 import { detailsFor, followedFor, notify, updating } from "../../store/actions";
 import { STATE_CHANGED } from "./actions-ui";
 import { running } from "../../store/batch";
 import { grouping, headerOf, moveProject, setProjectCollapsed, setProjectToShow, sortProject } from "../../store/organization";
-import { TOOL_WIDTH, clearArchiveMenuEntry, machineMenu, runSelection, selectedRows, selectionContextMenu, selectionCount } from "./selection-live";
+import { TOOL_WIDTH, clearArchiveMenuEntry, machineMenu, moveState, runSelection, selectedRows, selectionContextMenu, selectionCount } from "./selection-live";
 import { barTools, splitTools, toolEntry } from "./selection-ui";
 import { actionEntries, copyEntries, freshActionEntry, forkEntry, muteEntry } from "./ActionDialogs";
 import { markAllEntry, markAllTip, markEntry, runMarkAll } from "./mark-entries";
 import { moveEntry, openCreateProjectDialog, openDeleteProjectDialog, openRenameProjectDialog } from "./OrganizationDialogs";
 import { backgroundEntries } from "./background-menu";
 import { chipColor, headerEntries, projectColor, type FilterChip } from "./organization-ui";
-import { newSessionForProject, newSessionFromPanel } from "./newsession-view";
+import { newSessionForProject, newSessionFromCold, newSessionFromPanel } from "./newsession-view";
+import { openChip, openTerminal, terminalAvailable } from "./row-actions";
 import { CreationCard, CreationTile } from "./CreationCard";
 import { creationCount, creationFooter, creationStatusMenu } from "../../store/creations";
 import {
@@ -59,9 +62,6 @@ import { nativeEntry } from "./native-entry";
 import "../styles/content-search.css";
 
 const SavedDraftsDialog = lazy(() => import("./SavedDrafts").then((m) => ({ default: m.SavedDraftsDialog })));
-
-/** Actions that go through guarded `hgs` calls arrive in phase 2; their menu entries show disabled. */
-const LATER = true;
 
 // Five state filters, in SessionsWindow order, then the scope filters.
 const FILTERS: { id: StateFilter; icon: string; tip: string; count: () => string; tipText?: () => string }[] = [
@@ -247,7 +247,7 @@ export function sessionMenu(s: Session, folderStatus?: { request: ReturnType<typ
     { label: tr("Expand all collapsed"), icon: "expand-row", disabled: !hasCompactRows(), action: expandCompactRows },
     { separator: true },
     // An archived row has no terminal, and no Mute or Mark group (Qt's `if (!archived)`).
-    ...(archived ? [] : [nativeEntry(s) ?? { label: tr("Open terminal"), icon: "square-terminal", disabled: LATER }]),
+    ...(archived ? [] : [nativeEntry(s) ?? { label: tr("Open terminal"), icon: "square-terminal", disabled: !terminalAvailable(s), action: () => openTerminal(s) }]),
     ...(commands ? [commands] : []),
     folders.folder,
     { ...folders.shell, icon: "terminal" },
@@ -300,6 +300,19 @@ export function sessionContextMenu(e: MouseEvent, s: Session) {
   openSessionMenu(e, s);
 }
 
+/**
+ * A cold card's buttons (SessionsWindow.cpp:1749): "+ New" starts a session in the same
+ * folder and machine, with its agent and the name "<name>-2"; "Resume" selects the card
+ * and puts the cursor in the composer, since the first message rebuilds the cache.
+ */
+function coldAction(s: Session, action: "new" | "resume") {
+  if (action === "new") { void newSessionFromCold(s.accountProvider || s.cmd, groupOf(s.key), s.computer, s.cwdPath, `${s.title}-2`); return; }
+  setSelectedKey(s.key);
+  setSubagentOpen(undefined);
+  notify("info", tr("Continuing %1, the first message rebuilds the cache", s.title));
+  queueMicrotask(() => document.querySelector<HTMLTextAreaElement>(".cmp-editor")?.focus());
+}
+
 /** The project header's menu (SessionsWindow.cpp:2568-2616); its rules are organization-ui.ts's. */
 function headerMenu(project: string): MenuEntry[] {
   return headerEntries(grouping(), project, {
@@ -328,6 +341,7 @@ function Header(props: { row: Extract<Row, { type: "header" }>; list?: RowSource
   const name = () => props.row.name;
   const open = () => !props.row.collapsed;
   return (
+    <>
     <button onDragOver={(e) => taskDragOver(e, props.row.project)} onDrop={(e) => taskDrop(e, props.row.project)} class="group-band entity" style={{ "--entity": projectColor(props.row) }} draggable={POINTER_DRAG ? undefined : "true"} onDragStart={(e) => startDrag(e, { kind: "group", id: props.row.project })}
       onPointerDown={(e) => { if (props.list) pointerOrganize(e, { kind: "group", id: props.row.project }, props.list); }}
       aria-expanded={open()} onClick={() => setProjectCollapsed(props.row.project, !props.row.collapsed)}
@@ -343,6 +357,10 @@ function Header(props: { row: Extract<Row, { type: "header" }>; list?: RowSource
       <Show when={props.row.attention}><span class="gb-count hot">! {props.row.attention}</span></Show>
       <span class="gb-count total">{props.row.total}</span>
     </button>
+    {/* U25 (spec 2.1): a project's '+' opens New session for that project. */}
+    <button type="button" class="gb-add icon-btn small" title={tr("New session in %1", name())} aria-label={tr("New session in %1", name())}
+      onClick={(e) => { e.stopPropagation(); void newSessionForProject(props.row.project); }} onDblClick={(e) => e.stopPropagation()}><Icon name="plus" size={14} /></button>
+    </>
   );
 }
 
@@ -427,7 +445,7 @@ function SelectionBar() {
     onCleanup(() => ro.disconnect());
   };
   const rows = createMemo(() => selectedRows(listRows()));
-  const tools = createMemo(() => barTools(selectionCount(rows()), rows().length, running()));
+  const tools = createMemo(() => barTools(selectionCount(rows()), rows().length, running(), moveState()));
   const split = createMemo(() => splitTools(tools(), Math.max(1, Math.floor(width() / TOOL_WIDTH))));
   return (
     <Show when={rows().length > 1}>
@@ -563,6 +581,8 @@ export function SessionList() {
     openSavedDrafts(from, handle);
   };
 
+  // Task 243: the Compact skins' title bar hides the list completely (no strip), as Qt.
+  const unified = unifiedChrome;
   // Docked <-> strip: the conversation resizes once; the panel animates above it.
   const toggleDock = () => {
     Object.keys(multi).forEach((k) => setMulti(k, false));
@@ -576,7 +596,14 @@ export function SessionList() {
       setPanelVisible(true);
       slideOpenLater(() => panel, sessionsWidth);
     }
+    // Remembered as Qt's SessionPanelDock does (the same key).
+    void setSetting("workspace/sessionsCollapsed", stripMode());
   };
+  // The saved state, without sliding into it (Qt SessionPanelDock::restore).
+  void settingsReady.then(() => {
+    if (settings["workspace/sessionsCollapsed"] === true && !stripMode()) { setStripMode(true); setPanelVisible(false); }
+  }).catch(() => {});
+  createEffect(on(sessionsToggleTick, () => toggleDock(), { defer: true }));
   // Peek: the full panel lies over the conversation; the strip stays put.
   createEffect(on(peek, (open, was) => {
     if (!stripMode() || open === was) return;
@@ -584,14 +611,15 @@ export function SessionList() {
     else slide(panel, sessionsWidth(), false, () => { if (!peek() && stripMode()) setPanelVisible(false); });
   }, { defer: true }));
 
-  // Hover expand: opens after 150 ms of rest on the strip; closes once the
-  // pointer has been outside for 350 ms. Menus and an active search keep it open.
+  // Hover expand (Settings > Sessions, "Expand the collapsed session list on
+  // hover"): opens after 150 ms of rest on the strip; closes once the pointer
+  // has been outside for 350 ms. Menus and an active search keep it open.
   let enterTimer: number | undefined, leaveTimer: number | undefined;
   let hoverOpened = false;
   const keepOpen = () => !!menu() || searchFocused() || search().length > 0 || datePanelOpen();
   const onStripEnter = () => {
     clearTimeout(leaveTimer);
-    if (!stripMode() || peek()) return;
+    if (!stripMode() || peek() || !expandSessionsOnHover()) return;
     enterTimer = setTimeout(() => { if (stripMode() && !peek()) { hoverOpened = true; setPeek(true); } }, 150);
   };
   const onSectionEnter = () => clearTimeout(leaveTimer);
@@ -610,6 +638,9 @@ export function SessionList() {
   addEventListener("keydown", onKeyEsc);
   const outside = (e: PointerEvent) => { if (peek() && section && !section.contains(e.target as Node) && !(e.target as Element).closest?.(".menu")) { hoverOpened = false; setPeek(false); } };
   addEventListener("pointerdown", outside);
+  // Turning hover expansion off closes a peek it opened, keeping one the
+  // owner opened by hand.
+  createEffect(() => { if (!expandSessionsOnHover() && hoverOpened && peek()) { hoverOpened = false; setPeek(false); } });
   onCleanup(() => { removeEventListener("keydown", onKeyEsc); removeEventListener("pointerdown", outside); clearTimeout(enterTimer); clearTimeout(leaveTimer); });
 
   const onKey = (e: KeyboardEvent) => {
@@ -637,9 +668,10 @@ export function SessionList() {
 
   return (
     <section class="sessions-pane" ref={section} classList={{ strip: stripMode(), peek: stripMode() && peek() }} aria-label={tr("Sessions")}
-      style={{ "--pane-w": stripMode() ? `${STRIP_WIDTH}px` : `${sessionsWidth()}px`, "--panel-w": `${sessionsWidth()}px` }}
+      style={{ "--pane-w": stripMode() ? (unified() ? "0px" : `${STRIP_WIDTH}px`) : `${sessionsWidth()}px`, "--panel-w": `${sessionsWidth()}px` }}
+      data-hidden={stripMode() && unified() ? "" : undefined}
       onPointerEnter={onSectionEnter} onPointerLeave={onSectionLeave}>
-      <Show when={stripMode()}><Strip onEnter={onStripEnter} onToggle={toggleDock} /></Show>
+      <Show when={stripMode() && !unified()}><Strip onEnter={onStripEnter} onToggle={toggleDock} /></Show>
       <div class="sp-panel" ref={panel} classList={{ overlay: stripMode() }} hidden={!panelVisible()}
         onContextMenu={(e) => { if ((e.target as Element).closest("input,textarea")) return; openMenu(e, backgroundEntries({ newSession: newSessionFromPanel, newProject: openCreateProjectDialog })); }}>
         <header class="sp-head">
@@ -681,7 +713,7 @@ export function SessionList() {
         <Show when={stateFilter() === "archived"}><ArchiveBar contentSearch={!!search().trim()} /></Show>
         <Show when={search().trim()} fallback={<>
           <Show when={catalog.order.length > 0 || creationCount() > 0 || stateFilter() === "archived"} fallback={<ListPlaceholder />}>
-            <div class="sp-scroll" classList={{ organizing: !!dragItem() }} ref={list.ref} tabindex="0" onKeyDown={onKey} role="tree"
+            <div class="sp-scroll" data-density={compactSessionRows() ? "compact" : "normal"} classList={{ organizing: !!dragItem() }} ref={list.ref} tabindex="0" onKeyDown={onKey} role="tree"
               onDragOver={(e) => organizeOver(e, list)} onDrop={(e) => organizeDrop(e)} onDragLeave={(e) => { if (!(e.currentTarget as Element).contains(e.relatedTarget as Node)) setDrop(undefined); }}
               aria-label={tr("Agent sessions; Ctrl-click to select several; drag to organize, left/right to collapse or expand a group")}>
               <Show when={list.rows().length} fallback={<NoMatches />}>
@@ -819,7 +851,7 @@ function ListRow(props: { id: string; list: RowSource }) {
       <Show when={row()?.type === "creation" ? (row() as Extract<Row, { type: "creation" }>) : undefined}>{(v) => <CreationCard card={v().creation} />}</Show>
       <Show when={row()?.type === "card" ? (row() as Extract<Row, { type: "card" }>) : undefined}>
         {(v) => (
-          <div onDragOver={(e) => taskDragOver(e, groupOf(v().session.key), v().session)} onDrop={(e) => taskDrop(e, groupOf(v().session.key), v().session)} class="rowhit" classList={{ "has-kids-open": v().expanded && !v().compactRow, multi: !!multi[v().session.key], dragged: dragItem()?.id === v().session.key, "context-target": visibleMenu()?.sessionKey === v().session.key }}
+          <div onDragOver={(e) => taskDragOver(e, groupOf(v().session.key), v().session)} onDrop={(e) => taskDrop(e, groupOf(v().session.key), v().session)} class="rowhit" classList={{ "has-kids-open": v().expanded && !v().compactRow, stale: catalog.stale[v().session.computer] !== undefined, multi: !!multi[v().session.key], dragged: dragItem()?.id === v().session.key, "context-target": visibleMenu()?.sessionKey === v().session.key }}
             draggable={POINTER_DRAG ? undefined : "true"} onDragStart={(e) => startDrag(e, { kind: "session", id: v().session.key })}
             onPointerDown={(e) => pointerOrganize(e, { kind: "session", id: v().session.key }, props.list)}
             onMouseDown={(e) => { if (e.shiftKey) e.preventDefault(); }} onClick={(e) => selectSession(v().session.key, e)}
@@ -829,6 +861,7 @@ function ListRow(props: { id: string; list: RowSource }) {
               <SessionCard session={v().session} selected={(selectedKey() === v().session.key && !subagentOpen()) || !!multi[v().session.key]} expandable={v().expandable}
                 expanded={v().team ? !teamsCollapsed(v().team!.id) : !!expandedChildren[v().session.key]}
                 onToggleChildren={() => v().team ? setTeamCollapsed(v().team!.id, !teamsCollapsed(v().team!.id)) : setExpandedChildren(v().session.key, !expandedChildren[v().session.key])}
+                onCold={(action) => coldAction(v().session, action)} onChip={(kind) => openChip(v().session, kind)}
                 team={v().team} depth={v().depth} teamFirst={v().teamFirst} teamLast={v().teamLast} />
             </Show>
           </div>

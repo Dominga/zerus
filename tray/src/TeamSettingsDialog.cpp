@@ -1,5 +1,6 @@
 #include "TeamSettingsDialog.h"
 #include "IronRulesEditor.h"
+#include "HgsClient.h"
 #include "NewSessionDense.h"
 #include "TeamController.h"
 #include "TeamWidgets.h"
@@ -9,6 +10,7 @@
 #include <QComboBox>
 #include <QDateTime>
 #include <QDialogButtonBox>
+#include <QHash>
 #include <QJsonDocument>
 #include <QJsonParseError>
 #include <QHBoxLayout>
@@ -19,9 +21,11 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSet>
 #include <QSignalBlocker>
 #include <QVBoxLayout>
 #include <algorithm>
+#include <memory>
 
 using namespace TeamUi;
 
@@ -157,6 +161,62 @@ TeamSettingsDialog::TeamSettingsDialog(TeamController *teams, const Teams::Team 
     v->addWidget(label(tr("Member models"), c.text2, 12, true));
     v->addWidget(note(tr("Before a task that names one of these, Zerus switches the member to it. None: only the model it launched with. "
                          "A change applies from the member's next task."), c.muted));
+    // #218: each member's model menu is its account's catalog, with that
+    // model's efforts, as New team's pickers read them (not a fixed list).
+    constexpr int SettingsEffortsRole = Qt::UserRole + 1;
+    auto settingsModels = std::make_shared<QHash<QString, QList<QPair<QString, QStringList>>>>();
+    auto settingsPending = std::make_shared<QSet<QString>>();
+    auto settingsRequests = std::make_shared<QHash<quint64, QString>>();
+    auto settingsAgents = std::make_shared<QHash<QString, QString>>();
+    auto settingsRows = std::make_shared<QHash<QString, QList<QPair<QComboBox *, QComboBox *>>>>();
+    const auto fillSettingsRow = [settingsModels](QComboBox *model, QComboBox *effort, const QString &agent, const QString &key, const QString &keepEffort) {
+        const QSignalBlocker block(model);
+        const QString keep = model->currentText().trimmed();
+        model->clear();
+        const auto options = settingsModels->value(key);
+        if (options.isEmpty()) for (const auto &id : Teams::knownModels(agent)) model->addItem(id, id);
+        for (const auto &option : options) {
+            model->addItem(option.first, option.first);
+            model->setItemData(model->count() - 1, option.second, SettingsEffortsRole);
+        }
+        model->setCurrentIndex(model->findText(keep));
+        if (model->currentIndex() < 0) model->setEditText(keep);
+        const int index = model->findText(keep);
+        const QStringList efforts = index >= 0 ? model->itemData(index, SettingsEffortsRole).toStringList() : QStringList();
+        const QSignalBlocker blockEffort(effort);
+        effort->clear();
+        effort->addItem(TeamSettingsDialog::tr("its effort"), QString());
+        for (const auto &level : efforts.isEmpty() ? QStringList{"low", "medium", "high", "xhigh"} : efforts) effort->addItem(level, level);
+        effort->setCurrentIndex(qMax(0, effort->findData(keepEffort)));
+    };
+    QObject::connect(m_teams->client(), &HgsClient::accountsReady, this,
+                     [settingsModels, settingsPending, settingsRequests, settingsAgents, settingsRows, fillSettingsRow](quint64 request, const QString &host, const QJsonObject &result) {
+        const QString key = settingsRequests->take(request);
+        if (key.isEmpty()) return;
+        settingsPending->remove(key);
+        QList<QPair<QString, QStringList>> options;
+        for (const auto &value : result.value("models").toArray()) {
+            const auto object = value.toObject();
+            const QString id = object.value("value").toString(object.value("id").toString());
+            if (id.isEmpty()) continue;
+            QStringList levels;
+            for (const auto &level : object.value("effort_options").toArray())
+                if (const QString name = level.toString(); !name.isEmpty() && !levels.contains(name)) levels << name;
+            options.append({id, levels});
+        }
+        settingsModels->insert(key, options);
+        const QString agent = settingsAgents->value(key);
+        for (const auto &row : settingsRows->value(key)) fillSettingsRow(row.first, row.second, agent, key, row.second->currentData().toString());
+    });
+    QObject::connect(m_teams->client(), &HgsClient::accountsFailed, this,
+                     [settingsPending, settingsRequests, settingsModels, settingsAgents, settingsRows, fillSettingsRow](quint64 request, const QString &, const QString &) {
+        const QString key = settingsRequests->take(request);
+        if (key.isEmpty()) return;
+        settingsPending->remove(key);
+        settingsModels->insert(key, {});
+        const QString agent = settingsAgents->value(key);
+        for (const auto &row : settingsRows->value(key)) fillSettingsRow(row.first, row.second, agent, key, row.second->currentData().toString());
+    });
     for (const auto &member : team.members) {
         if (member.lead || member.state == QLatin1String("removed")) continue;
         MemberModels entry{member.id, team.roleOf(member.id), member.agent, member.model, member.models, member.models};
@@ -170,11 +230,27 @@ TeamSettingsDialog::TeamSettingsDialog(TeamController *teams, const Teams::Team 
         mv->addWidget(entry.chipsBox);
         auto *add = new QHBoxLayout; add->setSpacing(6);
         auto *model = new QComboBox; model->setObjectName("teamSettingsMemberModelAdd"); model->setEditable(true); model->setInsertPolicy(QComboBox::NoInsert);
-        model->addItems(Teams::knownModels(member.agent));
         model->setCurrentIndex(-1); model->lineEdit()->setPlaceholderText(tr("+ model")); model->setFixedWidth(220);
         auto *effort = new QComboBox; effort->setObjectName("teamSettingsMemberModelEffort");
-        effort->addItem(tr("its effort"), QString());
-        for (const char *level : {"low", "medium", "high", "xhigh"}) effort->addItem(QString::fromLatin1(level), QString::fromLatin1(level));
+        const QString modelKey = member.computer + QLatin1Char('\n')
+                               + (member.account.isEmpty() ? QStringLiteral("native-") + member.agent : member.account);
+        settingsRows->operator[](modelKey).append(std::make_pair(model, effort));
+        settingsAgents->insert(modelKey, member.agent);
+        fillSettingsRow(model, effort, member.agent, modelKey, QString());
+        if (!settingsModels->contains(modelKey) && !settingsPending->contains(modelKey)) {
+            settingsPending->insert(modelKey);
+            settingsRequests->insert(m_teams->client()->requestAccounts(member.computer, {QStringLiteral("model-settings"), modelKey.section(QLatin1Char('\n'), 1), QStringLiteral("--json")}), modelKey);
+        }
+        QObject::connect(model, &QComboBox::currentTextChanged, this, [model, effort](const QString &text) {
+            const int index = model->findText(text.trimmed());
+            QStringList levels = index >= 0 ? model->itemData(index, Qt::UserRole + 1).toStringList() : QStringList();
+            const QSignalBlocker block(effort);
+            const QString keep = effort->currentData().toString();
+            effort->clear();
+            effort->addItem(TeamSettingsDialog::tr("its effort"), QString());
+            for (const auto &level : levels.isEmpty() ? QStringList{"low", "medium", "high", "xhigh"} : levels) effort->addItem(level, level);
+            effort->setCurrentIndex(qMax(0, effort->findData(keep)));
+        });
         auto *addButton = button(tr("Add"), "teamSettingsMemberModelAddButton"); addButton->setProperty("ghost", true);
         add->addWidget(model); add->addWidget(effort); add->addWidget(addButton); add->addStretch();
         mv->addLayout(add);

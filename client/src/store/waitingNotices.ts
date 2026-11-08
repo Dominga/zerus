@@ -1,11 +1,14 @@
 import type { TeamWaitingItem } from "../types";
 import { tr } from "../i18n";
-import { teamWaitingNotify } from "../bridge";
+import { inTauri, teamWaitingNotify } from "../bridge";
+import { setSetting, text } from "./settings";
 
 // Task 51: one desktop notification for each Waiting item seen for the first
 // time, withdrawn when it is answered or no longer waits (Qt's
 // TeamWaitingNotices). The browser's Notification API is the client's OS
-// notification module; a test injects a fake port.
+// notification module; a test injects a fake port. W2: the shown set is saved
+// under `teams/attentionNotified` (Qt's own key), so a restart or a window
+// opened again does not raise the same item twice.
 
 export interface WaitingNotice {
   token: string;
@@ -23,26 +26,41 @@ export const waitingToken = (item: Pick<TeamWaitingItem, "id">) => `team-waiting
 // Task 159: hgs holds the owner's cards while the owner is away
 // (`notify: false`) and gives the ones shown together one `batch`.
 const detailOf = (item: TeamWaitingItem) => (item.detail ?? {}) as Record<string, unknown>;
-const held = (item: TeamWaitingItem) => detailOf(item).notify === false;
+// hgs stores these on the item itself; an older fixture may carry them in detail.
+const held = (item: TeamWaitingItem) => item.notify === false || detailOf(item).notify === false;
 const batchOf = (item: TeamWaitingItem) => {
-  const batch = detailOf(item).batch;
+  const batch = item.batch ?? detailOf(item).batch;
   return typeof batch === "string" ? batch : "";
 };
 
-/** The client's native notifier; no-ops outside the desktop app. */
+/**
+ * The client's native notifier; no-ops outside the desktop app. Task 258: the
+ * app's own Team Waiting watcher posts the OS notice (also with the window
+ * closed), so the page does not post it a second time; answering still
+ * withdraws it at once through the same native command.
+ */
 export const desktopNotifications: WaitingNotificationPort = {
-  post(notice) {
-    void teamWaitingNotify([notice], []).catch(() => undefined);
-  },
+  post() {},
   withdraw(token) {
-    void teamWaitingNotify([], [token]).catch(() => undefined);
+    if (inTauri()) void teamWaitingNotify([], [token]).catch(() => undefined);
   },
 };
 
 /** The ids seen and the notices they posted. */
 export class WaitingNotices {
-  private posted = new Map<string, string>();
-  constructor(private readonly port: WaitingNotificationPort) {}
+  private posted: Map<string, string>;
+  constructor(
+    private readonly port: WaitingNotificationPort,
+    initial: Iterable<[string, string]> = [],
+    /** Called after every change to the shown set (W2's settings key). */
+    private readonly persist: (posted: Map<string, string>) => void = () => {},
+  ) {
+    this.posted = new Map(initial);
+  }
+
+  private changed() {
+    this.persist(this.posted);
+  }
 
   /** A notice for each new item; `complete` drops ids that no longer wait. */
   observe(items: readonly TeamWaitingItem[], complete: boolean): WaitingNotice[] {
@@ -75,13 +93,17 @@ export class WaitingNotices {
       fresh.push(notice);
     }
     if (complete) {
+      let dropped = false;
       for (const [id, token] of this.posted) {
         if (present.has(id)) continue;
         this.posted.delete(id);
+        dropped = true;
         // A batch's notice stays while any of its cards still waits.
         if (![...this.posted.values()].includes(token)) this.port.withdraw(token);
       }
+      if (dropped) this.changed();
     }
+    if (fresh.length) this.changed();
     return fresh;
   }
 
@@ -91,6 +113,7 @@ export class WaitingNotices {
     if (!token) return;
     this.posted.delete(id);
     if (![...this.posted.values()].includes(token)) this.port.withdraw(token);
+    this.changed();
   }
 
   known(): string[] {
@@ -99,8 +122,25 @@ export class WaitingNotices {
 }
 
 /** The window's one notice set, shared by the banner, page and answers. */
+const NOTIFIED = "teams/attentionNotified";
+
+/** The saved item id -> token pairs; malformed or older values read as none. */
+function savedNotices(): [string, string][] {
+  try {
+    const value: unknown = JSON.parse(text(NOTIFIED));
+    if (!value || Array.isArray(value) || typeof value !== "object") return [];
+    return Object.entries(value).flatMap(([id, token]) => typeof token === "string" ? [[id, token] as [string, string]] : []);
+  } catch {
+    return [];
+  }
+}
+
 let shared: WaitingNotices | undefined;
 export function waitingNotices(): WaitingNotices {
-  shared ??= new WaitingNotices(desktopNotifications);
+  shared ??= new WaitingNotices(desktopNotifications, savedNotices(), (posted) => {
+    // Task 258: in the app the native Team Waiting watcher owns this shared
+    // map. Browser dev has no desktop watcher and keeps its own.
+    if (!inTauri()) void setSetting(NOTIFIED, JSON.stringify(Object.fromEntries(posted)));
+  });
   return shared;
 }

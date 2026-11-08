@@ -1,10 +1,10 @@
 use super::*;
-use crate::state::teams::model::{Attempt, Member, MemberState, PlanMode, Report, TeamStatus};
+use crate::state::teams::model::{Attempt, Member, MemberFolder, MemberState, PlanMode, Report, TeamStatus};
 use crate::state::teams::ops::{self, Actor};
 use crate::state::teams::test_queue::run_due;
 use crate::state::teams::test_runners::Runner;
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn run_git(dir: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
@@ -787,7 +787,7 @@ fn a_failed_merge_names_the_suites_not_run_here() {
 }
 
 #[test]
-fn a_conflict_goes_back_to_its_author_with_the_files() {
+fn a_conflict_becomes_one_resolve_task_and_later_landings_wait() {
     let repo = repo();
     write(&repo.member, "a.txt", "member\n");
     run_git(&repo.member, &["commit", "-q", "-am", "member"]);
@@ -795,17 +795,224 @@ fn a_conflict_goes_back_to_its_author_with_the_files() {
     run_git(&repo.lead, &["commit", "-q", "-am", "lead"]);
     let before = head(&repo);
     let mut team = team(&repo);
-    accept(&mut team);
+    team.settings.integration_folder = repo.lead.to_string_lossy().into_owned();
+    let queued = accept(&mut team);
+    assert_eq!(queued["landing"]["state"], "queued", "{queued}");
+    assert_eq!(queued["landing"]["line"], "master", "{queued}");
+    // A second landing accepted behind it (its commit is this same work).
+    let member_head = run_git(&repo.member, &["rev-parse", "HEAD"]);
+    team.tasks.push(Task { id: 2, title: "Second".into(), assignee: "dev".into(), status: TaskStatus::Submitted,
+        attempts: vec![Attempt { n: 1, id: "A2".into(), member: "dev".into(), state: AttemptState::Reported,
+            folder_head: member_head, folder_branch: "task/1".into(), report: Some(Report { text: "done".into(), at: 1.0, ..Default::default() }), ..Default::default() }], ..Default::default() });
+    let mut second = Vec::new();
+    ops::apply(&mut team, "accept", &json!({"task":2}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut second).unwrap();
     let database = database(&repo);
     let mut events = Vec::new();
     assert!(step_here(&mut team, &database, 100.0, &mut events).unwrap());
-    assert_eq!(head(&repo), before);
+    assert_eq!(head(&repo), before, "nothing landed");
     assert!(!repo.lead.join(".git/MERGE_HEAD").exists(), "the merge was aborted");
-    let task = team.task(1).unwrap();
+    let entry = team.task(1).unwrap().merge.clone().unwrap();
+    assert_eq!((entry.state.as_str(), entry.conflict_files.clone()), ("conflict", vec!["a.txt".to_owned()]));
+    let resolve = entry.resolve_task.expect("a resolve task");
+    let task = team.task(resolve).expect("the resolve task");
+    assert_eq!((task.assignee.as_str(), task.origin), ("lead", Some(1)), "no reviewer member: the lead resolves");
     assert_eq!(task.status, TaskStatus::Pending);
-    assert!(task.decision_reason.contains("conflicts in: a.txt") && task.decision_reason.contains("git-merge-lead"), "{}", task.decision_reason);
-    assert_eq!(events.iter().find(|event| event.kind == "merge_conflict").unwrap().payload["files"], json!(["a.txt"]));
-    assert!(database.queued("t1").unwrap().is_empty(), "nothing to test");
+    assert!(task.description.contains("a.txt") && task.description.contains(&entry.commit[..9]) && task.description.contains(&before[..9]), "{}", task.description);
+    assert_eq!(team.task(1).unwrap().status, TaskStatus::Submitted, "the accepted work stays undecided");
+    assert!(database.queued("t1").unwrap().is_empty(), "nothing to test yet");
+    // One resolve task per conflict: another step makes no second one.
+    step_here(&mut team, &database, 101.0, &mut events).unwrap();
+    assert_eq!(team.tasks.iter().filter(|task| task.title.starts_with("Resolve the integration conflict")).count(), 1);
+    assert_eq!(events.iter().find(|event| event.kind == "merge_resolve_task").unwrap().payload["files"], json!(["a.txt"]));
+    // The later landing waits behind the conflict instead of meeting it again.
+    step_here(&mut team, &database, 102.0, &mut events).unwrap();
+    assert_eq!(team.task(2).unwrap().merge.as_ref().unwrap().state, "queued", "the later landing waits");
+    assert_eq!(head(&repo), before, "still nothing landed");
+}
+
+#[test]
+fn the_landing_retries_once_its_resolve_task_is_decided() {
+    let repo = repo();
+    write(&repo.member, "a.txt", "member\n");
+    run_git(&repo.member, &["commit", "-q", "-am", "member"]);
+    write(&repo.lead, "a.txt", "lead\n");
+    run_git(&repo.lead, &["commit", "-q", "-am", "lead"]);
+    let mut team = team(&repo);
+    team.settings.integration_folder = repo.lead.to_string_lossy().into_owned();
+    accept(&mut team);
+    let database = database(&repo);
+    let mut events = Vec::new();
+    step_here(&mut team, &database, 100.0, &mut events).unwrap();
+    let resolve = team.task(1).unwrap().merge.as_ref().unwrap().resolve_task.unwrap();
+    // The reviewer resolves the conflict on the integration line itself: the
+    // accepted commit is merged there and the resolution committed.
+    let accepted = run_git(&repo.member, &["rev-parse", "HEAD"]);
+    run_git(&repo.lead, &["merge", "--no-edit", "-q", "-X", "ours", &accepted]);
+    let resolved = run_git(&repo.lead, &["rev-parse", "HEAD"]);
+    ops::apply(&mut team, "cancel", &json!({"task":resolve,"reason":"resolved on the integration line"}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+    // The landing is back in the queue; its commit is on the line now, so the
+    // queue accepts it without merging again.
+    let events = settle(&mut team, &database, &repo.lead);
+    assert_eq!(team.task(1).unwrap().status, TaskStatus::Accepted);
+    assert!(run_git(&repo.lead, &["merge-base", "--is-ancestor", &accepted, "HEAD"]).is_empty());
+    assert_eq!(head(&repo), resolved);
+    assert!(events.iter().any(|event| event.kind == "merged"), "{events:?}");
+}
+
+#[test]
+fn a_clean_new_task_starts_from_the_integration_head() {
+    let repo = repo();
+    // The integration line moved after the member's worktree was made.
+    write(&repo.lead, "later.txt", "later\n");
+    run_git(&repo.lead, &["add", "."]);
+    run_git(&repo.lead, &["commit", "-q", "-m", "later"]);
+    let mut team = team(&repo);
+    team.settings.integration_folder = repo.lead.to_string_lossy().into_owned();
+    team.members[1].folder = MemberFolder::Worktree;
+    team.members[1].session = Some(crate::state::teams::model::SessionRef { name: "codex/x/dev".into(), ..Default::default() });
+    team.settings.branch_per_task = Some(crate::state::teams::model::BranchPerTask { template: "work/{id}".into() });
+    let step = crate::state::teams::dispatcher::prepare_branch(&team, 2, "dev").expect("the branch step");
+    assert_eq!(step.result, "done", "{step:?}");
+    assert!(step.reason.contains("from master"), "{step:?}");
+    assert_eq!(run_git(&repo.member, &["rev-parse", "HEAD"]), head(&repo), "the task branch starts from the integration head");
+    assert_eq!(run_git(&repo.member, &["rev-parse", "--abbrev-ref", "HEAD"]), "work/2");
+}
+
+#[test]
+fn a_dirty_folder_is_committed_before_it_starts_from_the_integration_head() {
+    let repo = repo();
+    write(&repo.lead, "later.txt", "later\n");
+    run_git(&repo.lead, &["add", "."]);
+    run_git(&repo.lead, &["commit", "-q", "-m", "later"]);
+    // Unfinished work on the member's old branch, not committed.
+    write(&repo.member, "a.txt", "unfinished\n");
+    let mut team = team(&repo);
+    team.settings.integration_folder = repo.lead.to_string_lossy().into_owned();
+    let dev = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+    dev.folder = MemberFolder::Worktree;
+    dev.session = Some(crate::state::teams::model::SessionRef { name: "codex/x/dev".into(), ..Default::default() });
+    team.tasks[0].attempts.clear();
+    team.tasks[0].status = TaskStatus::Pending;
+    let step = crate::state::teams::dispatcher::prepare_integration_base(&team, 1, "dev").expect("the base step");
+    assert_eq!(step.result, "done", "{step:?}");
+    assert!(step.reason.contains("starts from the integration head"), "{step:?}");
+    // The old work is committed on the old branch first, then the folder is at
+    // the integration head.
+    assert_eq!(run_git(&repo.member, &["rev-parse", "HEAD"]), head(&repo));
+    assert_eq!(run_git(&repo.member, &["log", "-1", "--format=%s", "task/1@{1}"]), "Zerus: dev's unfinished work before task #1");
+    assert_eq!(run_git(&repo.member, &["show", "HEAD:a.txt"]), "one", "the head is the integration line's");
+    // A folder already at the head is left alone.
+    let step = crate::state::teams::dispatcher::prepare_integration_base(&team, 1, "dev").expect("the base step again");
+    assert_eq!(step.result, "skipped", "{step:?}");
+}
+
+#[test]
+fn a_dependent_waits_while_its_predecessors_work_is_not_on_the_line() {
+    let repo = repo();
+    write(&repo.member, "b.txt", "work\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "work"]);
+    let mut team = team(&repo);
+    team.settings.integration_folder = repo.lead.to_string_lossy().into_owned();
+    // Task 1 was accepted without a landing (an old forgotten merge).
+    team.task_mut(1).unwrap().status = TaskStatus::Accepted;
+    team.tasks.push(Task { id: 2, title: "Dependent".into(), assignee: "dev".into(), status: TaskStatus::Pending,
+        deps: vec![crate::state::teams::model::Dependency { task: 1, kind: crate::state::teams::model::DependencyKind::Hard }], ..Default::default() });
+    let step = crate::state::teams::dispatcher::prepare_dependencies(&team, 2, "dev").expect("the dependencies step");
+    assert_eq!(step.result, "refused", "{step:?}");
+    assert!(step.reason.contains("not on the integration line yet") && step.reason.contains("#1"), "{step:?}");
+    // Once the work is on the line, the step no longer merges anything.
+    let commit = run_git(&repo.member, &["rev-parse", "HEAD"]);
+    run_git(&repo.lead, &["merge", "--no-edit", "-q", &commit]);
+    let step = crate::state::teams::dispatcher::prepare_dependencies(&team, 2, "dev").expect("the dependencies step");
+    assert_eq!(step.result, "skipped", "{step:?}");
+    assert!(step.reason.contains("lands on the integration line"), "{step:?}");
+}
+
+#[test]
+fn status_and_the_lead_inbox_name_accepted_work_that_is_not_landed() {
+    let repo = repo();
+    write(&repo.member, "b.txt", "work\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "work"]);
+    let mut team = team(&repo);
+    team.settings.integration_folder = repo.lead.to_string_lossy().into_owned();
+    // Accepted work the queue never landed (the old forgotten merges).
+    team.task_mut(1).unwrap().status = TaskStatus::Accepted;
+    team.task_mut(1).unwrap().attempts[0].state = AttemptState::Reported;
+    let view = crate::state::teams::commands::view_with_cancelled(&team, &[], None, false);
+    assert_eq!(view["integration"]["branch"], "master");
+    assert_eq!(view["integration"]["head"], head(&repo));
+    assert_eq!(view["integration"]["unlanded"][0]["task"], 1);
+    assert!(view["integration"]["unlanded"][0]["why"].as_str().unwrap().contains("no landing is queued"), "{}", view["integration"]);
+    assert!(view["integration"]["landed"].as_array().unwrap().is_empty());
+    let inbox = crate::state::teams::inbox::items(&team);
+    let item = inbox.iter().find(|item| item.kind == "unlanded").expect("the lead's item");
+    assert!(item.summary.contains("#1 is accepted but not on the integration line"), "{}", item.summary);
+    assert!(item.command.contains("hgs team retry"));
+    // Once the queue lands its commit, it is on the line and the item leaves.
+    let commit = run_git(&repo.member, &["rev-parse", "HEAD"]);
+    run_git(&repo.lead, &["merge", "--no-edit", "-q", &commit]);
+    let view = crate::state::teams::commands::view_with_cancelled(&team, &[], None, false);
+    assert_eq!(view["integration"]["landed"], json!([{"task":1,"commit":commit}]), "{}", view["integration"]);
+    assert!(view["integration"]["unlanded"].as_array().unwrap().is_empty());
+    assert!(crate::state::teams::inbox::items(&team).iter().all(|item| item.kind != "unlanded"));
+}
+
+/// Git runs merge drivers through its shell. A sandboxed member's test runner
+/// (low integrity) cannot start MSYS sh, so the driver is exercised where that
+/// shell works: CI and Zerus's own merge paths outside the member sandbox.
+fn merge_driver_available() -> bool {
+    Command::new("git")
+        .args(["-c", "alias.zerus-shell-probe=!exit 0", "zerus-shell-probe"])
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
+#[test]
+fn the_catalog_merge_driver_joins_disjoint_keys_through_the_queue() {
+    // Task 272: .gitattributes names the `i18n` driver; the queue passes it with
+    // `-c` at merge time, so both sides adding different supplement keys is not
+    // a text conflict.
+    if !merge_driver_available() {
+        eprintln!("skipped: this sandbox cannot start Git's shell, which runs merge drivers");
+        return;
+    }
+    let repo = repo();
+    let script = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/i18n-merge.py"))
+        .expect("scripts/i18n-merge.py");
+    let base = "{\n  \"shared key\": \"shared text\"\n}\n";
+    std::fs::create_dir_all(repo.lead.join("client/src")).unwrap();
+    std::fs::create_dir_all(repo.lead.join("scripts")).unwrap();
+    write(&repo.lead, ".gitattributes", "client/src/i18n.next-ru.json merge=i18n\n");
+    write(&repo.lead, "scripts/i18n-merge.py", &script);
+    write(&repo.lead, "client/src/i18n.next-ru.json", base);
+    run_git(&repo.lead, &["add", "."]);
+    run_git(&repo.lead, &["commit", "-q", "-m", "catalogs and driver"]);
+    // The member starts from that base (its branch has no commit yet).
+    run_git(&repo.member, &["merge", "-q", "--no-edit", &head(&repo)]);
+    write(&repo.member, "client/src/i18n.next-ru.json",
+          "{\n  \"member key\": \"member text\",\n  \"shared key\": \"shared text\"\n}\n");
+    run_git(&repo.member, &["commit", "-q", "-am", "member key"]);
+    write(&repo.lead, "client/src/i18n.next-ru.json",
+          "{\n  \"lead key\": \"lead text\",\n  \"shared key\": \"shared text\"\n}\n");
+    run_git(&repo.lead, &["commit", "-q", "-am", "lead key"]);
+
+    let mut team = team(&repo);
+    accept(&mut team);
+    let database = database(&repo);
+    settle(&mut team, &database, &repo.lead);
+
+    let task = team.task(1).unwrap();
+    let merge = task.merge.as_ref().map(|entry| format!("{}: {}", entry.state, entry.note)).unwrap_or_default();
+    let current = std::fs::read_to_string(repo.lead.join("client/src/i18n.next-ru.json")).unwrap_or_default();
+    assert_eq!(task.status, TaskStatus::Accepted, "decision: {} / merge: {merge} / file: {current}", task.decision_reason);
+    let merged = std::fs::read_to_string(repo.lead.join("client/src/i18n.next-ru.json")).unwrap();
+    assert!(!merged.contains("<<<<<<<"), "{merged}");
+    let catalog: serde_json::Value = serde_json::from_str(&merged).unwrap();
+    assert_eq!(catalog["member key"], "member text");
+    assert_eq!(catalog["lead key"], "lead text");
+    assert_eq!(catalog["shared key"], "shared text");
 }
 
 #[test]
@@ -1170,3 +1377,9 @@ fn an_unusable_integration_folder_holds_the_queue_with_its_note() {
     assert_eq!(head(&repo), lead_before, "nothing was merged anywhere");
     assert!(database.queued(&team.id).unwrap().is_empty(), "nor tested");
 }
+
+
+
+
+
+

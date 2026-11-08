@@ -13,8 +13,9 @@ FALLBACK = ROOT / "packaging/rust-licenses"
 
 
 # WhiteWh fork: reviewed crates that publish no license file, each offered
-# under Apache-2.0 among others (the relay's sqlx needs crc-catalog).
-APACHE_WITHOUT_TEXT = {"crc-catalog"}
+# under Apache-2.0 among others (the relay's sqlx needs crc-catalog; lore's built-in
+# embeddings need candle-nn and candle-transformers, MIT OR Apache-2.0).
+APACHE_WITHOUT_TEXT = {"crc-catalog", "candle-nn", "candle-transformers"}
 
 
 CANONICALPATH_REV = "50b390675a146874b1555f361e491d1efeb393a7"
@@ -33,7 +34,9 @@ def reviewed_monorepo_notice(package):
         return None
     if package["source"] != CANONICALPATH_SOURCE or package["version"] != "2026.5.18-2":
         raise SystemExit("Review the CanonicalPath source revision and root license before distribution.")
-    text = (ROOT / "docs/licenses/canonicalpath-LICENSE.txt").read_bytes()
+    # Task 192: a Windows checkout with core.autocrlf has CRLF line ends; the
+    # reviewed bytes are git's LF form, which is also what ships.
+    text = (ROOT / "docs/licenses/canonicalpath-LICENSE.txt").read_bytes().replace(b"\r\n", b"\n")
     if hashlib.sha256(text).hexdigest() != CANONICALPATH_LICENSE_SHA256:
         raise SystemExit("The retained CanonicalPath license differs from the reviewed revision.")
     inventory = {"name": package["name"], "version": package["version"], "license": "MIT",

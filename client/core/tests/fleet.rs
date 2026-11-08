@@ -123,10 +123,10 @@ fn an_offline_legacy_refresh_retries_the_existing_listing_now() {
         assert!(!fleet.reconnect(&ComputerId::local()));
     }
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    while fake.runs("", &["ls", "--json"]).len() < 2 && std::time::Instant::now() < deadline {
+    while fake.runs("", &["ls", "--json", "--local", "--no-archives"]).len() < 2 && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(fake.runs("", &["ls", "--json"]).len(), 2);
+    assert_eq!(fake.runs("", &["ls", "--json", "--local", "--no-archives"]).len(), 2);
     seen.until("online polling", |c| {
         is_status(c, "", ComputerStatus::Polled)
     });
@@ -163,7 +163,7 @@ fn an_offline_legacy_refresh_still_works_after_a_periodic_capability_probe() {
     });
     let probes = fake.runs("", &["-h"]).len();
     assert_eq!(
-        fake.runs("", &["ls", "--json"]).len(),
+        fake.runs("", &["ls", "--json", "--local", "--no-archives"]).len(),
         2,
         "next listing is not due"
     );
@@ -187,7 +187,7 @@ fn an_offline_legacy_refresh_still_works_after_a_periodic_capability_probe() {
     seen.until_from(failed + 1, "listing recovered", |c| {
         is_status(c, "", ComputerStatus::Polled)
     });
-    assert_eq!(fake.runs("", &["ls", "--json"]).len(), 3);
+    assert_eq!(fake.runs("", &["ls", "--json", "--local", "--no-archives"]).len(), 3);
     assert_eq!(
         fake.runs("", &["-h"]).len(),
         probes,
@@ -219,7 +219,7 @@ fn a_scheduled_legacy_listing_in_flight_coalesces_refresh_without_an_extra_read(
             .iter()
             .any(|entry| entry["listing_wait"] == "release-listing")
     });
-    let reads = fake.runs("", &["ls", "--json"]).len();
+    let reads = fake.runs("", &["ls", "--json", "--local", "--no-archives"]).len();
     let probes = fake.runs("", &["-h"]).len();
     std::fs::write(
         fake.dir.join("ls-local.json"),
@@ -238,7 +238,7 @@ fn a_scheduled_legacy_listing_in_flight_coalesces_refresh_without_an_extra_read(
     // can be mistaken for a redundant Refresh read on a descheduled runner.
     fleet.stop();
     assert_eq!(reads, 2, "one failed read and its scheduled retry");
-    assert_eq!(fake.runs("", &["ls", "--json"]).len(), reads);
+    assert_eq!(fake.runs("", &["ls", "--json", "--local", "--no-archives"]).len(), reads);
     assert_eq!(fake.runs("", &["-h"]).len(), probes);
 }
 

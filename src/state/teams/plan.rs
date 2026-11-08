@@ -1,7 +1,7 @@
 //! WhiteWh fork: pure rules of a team's task graph, as the prototype
 //! (design/agent-teams/index.html: cycleNodes, layersOf, chainOf, readyTasks,
 //! planErrors) defines them. Edges run from a dependency to its dependent.
-use super::model::{AttemptState, DependencyKind, Member, MemberState, Phase, PhaseAcceptance, PhasePause, PhaseState, Task, TaskStatus, Team};
+use super::model::{AttemptState, DependencyKind, Member, MemberState, Phase, PhaseAcceptance, PhaseKind, PhasePause, PhaseState, Task, TaskStatus, Team};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
@@ -187,7 +187,12 @@ pub(crate) fn waiting_on(team: &Team, id: u32) -> Vec<u32> {
 
 /// #759: the cancelled dependencies of a task, which no longer hold it.
 pub(crate) fn cancelled_deps(team: &Team, task: &Task) -> Vec<u32> {
-    task.deps.iter().filter(|dep| team.task(dep.task).is_some_and(|found| found.status == TaskStatus::Cancelled)).map(|dep| dep.task).collect()
+    task.deps
+        .iter()
+        .filter(|dep| !task.kept_cancelled.contains(&dep.task))
+        .filter(|dep| team.task(dep.task).is_some_and(|found| found.status == TaskStatus::Cancelled))
+        .map(|dep| dep.task)
+        .collect()
 }
 
 /// Every task that depends on `id`, directly or through another task (C6).
@@ -438,9 +443,11 @@ pub(crate) fn phases_health(team: &Team) -> BTreeMap<String, Health> {
 
 /// Task 155 (owner, 2026-11-07): a task that reached a member and is not
 /// decided holds its outputs: its work sits on a branch nobody merged yet.
+/// Task 259 (owner, 2026-11-08): only files and module paths hold; a
+/// folder-level output is advisory, so it never holds a whole area.
 pub(crate) fn holds_outputs(task: &Task) -> bool {
     !task.status.finished()
-        && !task.output.is_empty()
+        && task.narrow_outputs().next().is_some()
         && (!matches!(task.status, TaskStatus::Pending | TaskStatus::Draft)
             || task.attempts.iter().any(|attempt| attempt.state != AttemptState::Refused))
 }
@@ -449,18 +456,108 @@ pub(crate) fn holds_outputs(task: &Task) -> bool {
 /// run, so `task` may not start beside them. A task with a member now always
 /// holds; when both only wait to be handed out again (a returned task), the
 /// lower number goes first, so two never wait on each other. A task without
-/// declared outputs is never held here.
+/// declared outputs, or with only folder-level ones, is never held here.
 pub(crate) fn output_holders(team: &Team, task: &Task) -> Vec<u32> {
-    if task.output.is_empty() || task.status.finished() {
+    if task.output.is_empty() || task.narrow_outputs().next().is_none() || task.status.finished() {
         return Vec::new();
     }
     let started = holds_outputs(task);
     team.tasks
         .iter()
-        .filter(|other| other.id != task.id && holds_outputs(other) && task.output_overlaps(other))
+        .filter(|other| other.id != task.id && holds_outputs(other) && task.narrow_output_overlaps(other))
         .filter(|other| !(started && matches!(other.status, TaskStatus::Pending | TaskStatus::Draft) && other.id > task.id))
         .map(|other| other.id)
         .collect()
+}
+
+/// Task 263 (owner, 2026-11-08): the ready tasks of `member` that another
+/// open task's outputs hold, with that holder: `(task, holder)`. A queued
+/// task that cannot start because its member is busy no longer claims its
+/// files (the dispatcher claims only what it hands out), but a task that runs
+/// or waits for its member after an attempt still holds them. Naming the
+/// holder keeps the idle member from waiting silently.
+pub(crate) fn held_ready(team: &Team, member: &str) -> Vec<(u32, u32)> {
+    ready(team)
+        .into_iter()
+        .filter(|id| team.task(*id).is_some_and(|task| task.assignee == member && task.open_attempt().is_none()))
+        .filter_map(|id| {
+            let task = team.task(id)?;
+            output_holders(team, task).first().map(|holder| (id, *holder))
+        })
+        .collect()
+}
+
+/// Task 263: whether `holder` only waits for its own member, so the lead can
+/// free the tasks it holds (hold or reassign it); a running holder finishes
+/// on its own, and a held or parked one waits for its own release or event.
+pub(crate) fn holder_waits_for_member(team: &Team, holder: u32) -> bool {
+    team.task(holder).is_some_and(|task| {
+        task.status == TaskStatus::Pending
+            && task.open_attempt().is_none()
+            && task.hold.is_none()
+            && task.park.is_none()
+            && !task.assignee.is_empty()
+            && task.assignee != team.lead
+    })
+}
+
+/// Task 263: one line naming why a holder has not started: "#198 waits for
+/// ui2 (Frontend)", "#198 is held", or "#198 runs now".
+pub(crate) fn holder_note(team: &Team, holder: u32) -> String {
+    let Some(task) = team.task(holder) else { return format!("#{holder}") };
+    if holder_waits_for_member(team, holder) {
+        format!("#{holder} waits for {}", team.name_of(&task.assignee))
+    } else if task.hold.is_some() {
+        format!("#{holder} is held")
+    } else if task.park.is_some() {
+        format!("#{holder} is parked")
+    } else {
+        format!("#{holder} runs now")
+    }
+}
+
+/// Task 263: the action that frees a task its holder keeps: hold or reassign
+/// a waiting holder; a held one is released, a parked one waits for its
+/// event, and a running one only finishes.
+pub(crate) fn holder_unblock(team: &Team, holder: u32) -> String {
+    let Some(task) = team.task(holder) else { return format!("wait for #{holder}") };
+    if holder_waits_for_member(team, holder) {
+        format!("{}: hold or reassign #{holder}", holder_note(team, holder))
+    } else if task.hold.is_some() {
+        format!("wait for #{holder} to be released")
+    } else if task.park.is_some() {
+        format!("wait for #{holder}'s event")
+    } else {
+        format!("wait for #{holder} to finish")
+    }
+}
+
+/// Task 295 (owner, 2026-11-08): ui4 sat idle 70 minutes while its ready
+/// #226 waited for #219 and then #225, which wrote the same files, and every
+/// view said it waited for the lead to hand it out. The open tasks a ready
+/// `task` waits for because they write the same files: the ones that already
+/// run (`output_holders`) and the ready ones the dispatch order starts before
+/// it (a lower number), lowest first. Empty when nothing of the kind holds it.
+pub(crate) fn output_queue(team: &Team, task: &Task) -> Vec<u32> {
+    let mut found = output_holders(team, task);
+    if task.output.is_empty() || task.status.finished() {
+        return found;
+    }
+    let ready = ready(team);
+    for other in &team.tasks {
+        if other.id < task.id
+            && !found.contains(&other.id)
+            && other.status == TaskStatus::Pending
+            && other.hold.is_none()
+            && other.waits.is_none()
+            && ready.contains(&other.id)
+            && task.output_overlaps(other)
+        {
+            found.push(other.id);
+        }
+    }
+    found.sort_unstable();
+    found
 }
 
 /// Every task `id` waits for through dependencies that hold it until they are
@@ -766,6 +863,8 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
                 "running"
             };
             let health = phase_health(team, n);
+            // Task #229: a phase's kind, and the critical tasks holding it.
+            let crit = open_crits(team, n);
             // A phase with no open tasks has nothing to schedule: no line.
             let mut line = if open == 0 {
                 String::new()
@@ -793,8 +892,46 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
                 "pause": pause,
                 "acceptance": record.map_or(PhaseAcceptance::Lead, |phase| phase.acceptance),
                 "health_line": line,
+                // Task #229: the phase's kind, its open critical tasks and the
+                // gate they hold (the lead's own change, shown to every client).
+                "kind": record.map_or(PhaseKind::Plan, |phase| phase.kind).as_str(),
+                "crit": crit,
+                "crit_gate": crit_gate(team, n),
             })
         })
+        .collect()
+}
+
+/// Task #229: the critical tasks of a phase that are still open. While one is,
+/// the phase cannot be accepted or closed, and no release candidate starts.
+pub(crate) fn open_crits(team: &Team, phase: u32) -> Vec<u32> {
+    team.tasks
+        .iter()
+        .filter(|task| task.phase == phase && task.severity == "crit" && !task.status.finished())
+        .map(|task| task.id)
+        .collect()
+}
+
+/// Task #229: why a phase is held by its critical tasks, in one line, or None.
+pub(crate) fn crit_gate(team: &Team, phase: u32) -> Option<String> {
+    let open = open_crits(team, phase);
+    if open.is_empty() {
+        return None;
+    }
+    let ids = open.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(", ");
+    Some(if open.len() == 1 {
+        format!("critical task {ids} in phase {phase} is open")
+    } else {
+        format!("critical tasks {ids} in phase {phase} are open")
+    })
+}
+
+/// Task #229: every open critical task in the team, with its phase.
+pub(crate) fn open_crits_all(team: &Team) -> Vec<(u32, u32)> {
+    team.tasks
+        .iter()
+        .filter(|task| task.severity == "crit" && !task.status.finished())
+        .map(|task| (task.phase, task.id))
         .collect()
 }
 
@@ -1012,6 +1149,29 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
                 }
             }
         }
+        // Task 259 (owner, 2026-11-08): a folder-level output (`src`,
+        // `client/src`, `crates/replica`) is advisory - it never holds a whole
+        // area - and asks the lead for the files or module paths instead.
+        let broad = task.broad_outputs();
+        if !broad.is_empty() {
+            let mut shown: Vec<&str> = broad.iter().copied().take(3).collect();
+            let more = broad.len().saturating_sub(shown.len());
+            if more > 0 {
+                shown.push("...");
+            }
+            found.warnings.push(finding(
+                "outputs",
+                Some(task.id),
+                None,
+                format!(
+                    "#{} {} names whole areas ({}): a folder-level output is advisory and never holds another task; name the files or module paths it writes{}",
+                    task.id,
+                    task.title,
+                    shown.join(", "),
+                    if more > 0 { format!(" ({more} more)") } else { String::new() }
+                ),
+            ));
+        }
         for dep in &task.deps {
             if team.task(dep.task).is_none() {
                 found.errors.push(finding(
@@ -1036,9 +1196,29 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
     }
     // Task 155 (owner, 2026-11-07): open tasks whose outputs overlap never run
     // apart on separate branches; the lead chains them with a dependency.
+    // Task 259 (owner, 2026-11-08): an overlap of files or module paths is a
+    // real hold and stays an error; one that is only folder-level is advisory,
+    // so it suggests a soft order and asks for the files instead.
     for (first, second) in unchained_overlaps(team) {
         let (Some(a), Some(b)) = (team.task(first), team.task(second)) else { continue };
         let shared: Vec<&str> = a.output.iter().filter(|path| b.output.iter().any(|other| Task::paths_overlap(path, other))).map(String::as_str).collect();
+        let narrow: Vec<&str> = a
+            .narrow_outputs()
+            .filter(|path| b.narrow_outputs().any(|other| Task::paths_overlap(path, other)))
+            .collect();
+        if narrow.is_empty() {
+            found.warnings.push(Finding {
+                kind: "outputs",
+                task: Some(second),
+                member: None,
+                tasks: vec![first, second],
+                text: format!(
+                    "#{first} {} and #{second} {} both name the folder {}: a folder-level output is advisory, so it never holds #{second}. Prefer a soft dependency of #{second} on #{first} if their work may touch the same files, and name the files or module paths for a real hold",
+                    a.title, b.title, shared.join(", ")
+                ),
+            });
+            continue;
+        }
         found.errors.push(Finding {
             kind: "outputs",
             task: Some(second),
@@ -1046,7 +1226,7 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
             tasks: vec![first, second],
             text: format!(
                 "#{first} {} and #{second} {} both write {}: chain them (a hard dependency of #{second} on #{first}) so #{second} starts from #{first}'s accepted work",
-                a.title, b.title, shared.join(", ")
+                a.title, b.title, narrow.join(", ")
             ),
         });
     }

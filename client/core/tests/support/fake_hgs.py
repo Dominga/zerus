@@ -184,7 +184,8 @@ def main():
     if args == ["watch", "--json"]:
         return watch(host, spec, config)
     reply = os.path.join(HERE, "%s-" + (host or "local") + ".json")
-    if args == ["ls", "--json"]:
+    # Task 235: the legacy listing names --local --no-archives.
+    if args in (["ls", "--json"], ["ls", "--json", "--local", "--no-archives"]):
         if spec.get("listing_wait_file") and previous_runs(host, args) >= spec.get("listing_wait_after", 0):
             log({"host": host, "listing_wait": spec["listing_wait_file"]})
             while not os.path.exists(os.path.join(HERE, spec["listing_wait_file"])):

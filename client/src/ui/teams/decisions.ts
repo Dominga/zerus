@@ -45,7 +45,7 @@ export function hgsWords(message: string): string {
  * gives `cancelled` and sends nothing; the confirming button sends it again,
  * confirmed. `requestId` repeats an earlier request whose outcome was unknown.
  */
-export async function act(port: DecisionPort, call: Omit<TeamCall, "confirmed">, requestId?: string): Promise<TeamOutcome | "cancelled"> {
+export async function act(port: Pick<DecisionPort, "send" | "confirm">, call: Omit<TeamCall, "confirmed">, requestId?: string): Promise<TeamOutcome | "cancelled"> {
   const sent: TeamCall = { ...call, confirmed: false, request_id: requestId ?? null };
   let outcome: TeamOutcome;
   try { outcome = await port.send(sent); } catch (reason) { return { outcome: "failed", detail: String(reason instanceof Error ? reason.message : reason), request_id: requestId ?? "" }; }
@@ -486,6 +486,8 @@ export function waitingKindLabel(item: Pick<TeamWaitingItem, "kind" | "action">)
     case "deferred": return tr("Deferred");
     case "disk_low": return tr("Disk space");
     case "team_paused": return tr("Team paused");
+    // Task 186: an urgent team message the working lead has not received.
+    case "lead_message_undelivered": return tr("Urgent message");
     default: return item.kind;
   }
 }
@@ -506,6 +508,7 @@ export function waitingKindIcon(kind: string): string {
     case "deferred": return "clock";
     case "disk_low": return "hard-drive";
     case "team_paused": return "pause";
+    case "lead_message_undelivered": return "message-square";
     default: return "triangle-alert";
   }
 }
@@ -584,6 +587,24 @@ export function nativeAnswer(question: TeamMemberQuestion): { question_id: strin
 export function phaseApproval(team: TeamView, phase: number): TeamConfirmation {
   const count = team.tasks.filter((task) => task.phase === phase).length;
   return { name: "teamApprovePhaseConfirm", title: tr("Approve phase?"), text: tr("Hand phase %1's %2 tasks to the members?", phase, count), action: tr("Approve phase") };
+}
+
+/**
+ * The plan's Approve on a draft phase (the Team tab): the same call Waiting
+ * for you makes, so the core's confirmation is asked in the app's own dialog
+ * and only a yes sends it again, confirmed.
+ */
+export function approvePhaseCall(
+  port: Pick<DecisionPort, "send" | "confirm">,
+  where: { computer: ComputerId; team: string; teamName: string },
+  phase: number,
+): Promise<TeamOutcome | "cancelled"> {
+  return act(port, {
+    computer: where.computer,
+    team: where.team,
+    team_name: where.teamName,
+    action: { kind: "approve", phase },
+  });
 }
 
 /** Why an item no longer waits, read from the team as it is now; "" while it still does. */
@@ -746,12 +767,27 @@ export class WaitingAnswer {
     return this.send(this.item.action === "approve_phase" ? { kind: "approve", phase: fields.phase } : { kind: "approve" });
   }
 
+  /**
+   * Task 198 (W3): why Allow and Deny cannot answer, or "" (Qt
+   * TeamWaitingAnswer C4): without the question's hash, or without the card's
+   * answer ids, nothing could be sent, so the buttons say so instead.
+   */
+  permissionBlocked(): string {
+    const question = this.question();
+    if (!question || !this.member()) return tr("The question is no longer shown; answer it in the session.");
+    if (!question.question_id || !questionHash(question)) return tr("This hgs sends no question hash in status; answer it in the session.");
+    if (!nativeAnswer(question)) return tr("This hgs sends no answer ids for the question; answer it in the session.");
+    return "";
+  }
+
   /** A permission request: Allow or Deny with the card's own ids and the question's hash. */
   answerPermission(allow: boolean, reason = "") {
     const question = this.question();
     const member = this.member();
     const native = question && nativeAnswer(question);
-    if (!question || !member || !native) return Promise.resolve(undefined);
+    // Never silent: a click that cannot answer says why on the card.
+    const blocked = this.permissionBlocked();
+    if (blocked || !question || !member || !native) { this.notice = blocked; this.changed(); return Promise.resolve(undefined); }
     const text = allow ? "" : reason.trim();
     return this.send({ kind: "answer", member: member.id, question_id: question.question_id ?? "", expected_question_hash: questionHash(question),
       answers: [{ question_id: native.question_id, selected_option_ids: [allow ? native.allow : native.deny], text }] });

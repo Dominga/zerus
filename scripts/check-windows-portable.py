@@ -125,6 +125,10 @@ def main():
             for program, expected in ((hgs, f"hgs {cli_version}"), (tray, f"Zerus {version}")):
                 reported = run(program, ["--version"], environment, base)
                 require(reported == expected, f"{program.name} --version: {reported!r}, expected {expected!r}.")
+            lore_report = run(bundle / "lore.exe", ["--version"], environment, base)
+            require(lore_report == f"lore {manifest.get('lore_version')}",
+                    f"lore.exe --version: {lore_report!r}, expected 'lore {manifest.get('lore_version')}'.")
+            print(f"lore.exe {manifest.get('lore_version')} starts from the extracted bundle.")
             if manifest.get("mobile_connector_bundled"):
                 connector_version = run(bundle / "zerus-mobile-connector.exe", ["--version"], environment, base)
                 require(connector_version.startswith("zerus-mobile-connector "), "Bundled connector does not start.")

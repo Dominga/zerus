@@ -168,11 +168,11 @@ fn older_listing_uses_typed_bounded_pages_and_preserves_raw_facts() {
     assert_eq!((rows, page_index), (100_000, 782));
     handle.stop();
     drain(&tx);
-    assert_eq!(fake.runs("studio", &["ls", "--json"]).len(), 1);
+    assert_eq!(fake.runs("studio", &["ls", "--json", "--local", "--no-archives"]).len(), 1);
     assert!(fake
         .log()
         .iter()
-        .all(|e| e["args"] == json!(["-h"]) || e["args"] == json!(["ls", "--json"])));
+        .all(|e| e["args"] == json!(["-h"]) || e["args"] == json!(["ls", "--json", "--local", "--no-archives"])));
     println!("legacy source executed rows={rows} pages={page_index} ingress_high_bytes={} ingress_high_items={}", tx.usage().high_bytes, tx.usage().high_items);
 }
 
@@ -255,7 +255,7 @@ fn explicit_legacy_resnapshot_is_single_flight_with_a_generation_gap() {
     }
     handle.stop();
     drain(&tx);
-    let starts = fake.runs("", &["ls", "--json"]);
+    let starts = fake.runs("", &["ls", "--json", "--local", "--no-archives"]);
     assert_eq!(starts.len(), 3);
     for pair in starts.windows(2) {
         assert!(pair[1] - pair[0] >= 0.9);
@@ -298,7 +298,7 @@ fn reprobe_upgrades_the_same_alias_to_watch_without_parallel_listing() {
     }
     handle.stop();
     drain(&tx);
-    assert_eq!(fake.runs("", &["ls", "--json"]).len(), 1);
+    assert_eq!(fake.runs("", &["ls", "--json", "--local", "--no-archives"]).len(), 1);
     assert_eq!(fake.runs("", &["watch", "--json"]).len(), 1);
 }
 
@@ -320,7 +320,7 @@ fn private_factory_failures_refuse_before_listing_spawn() {
             _ => {}
         }
     }
-    assert!(fake.runs("", &["ls", "--json"]).is_empty());
+    assert!(fake.runs("", &["ls", "--json", "--local", "--no-archives"]).is_empty());
     handle.stop();
     drain(&tx);
 }
@@ -384,7 +384,7 @@ fn receiver_drop_cancels_a_legacy_listing_child_and_releases_its_file() {
         .spawn(&fake.path(), &ComputerId::local(), timing())
         .unwrap();
     eventually("owned listing started", || {
-        !fake.runs("", &["ls", "--json"]).is_empty()
+        !fake.runs("", &["ls", "--json", "--local", "--no-archives"]).is_empty()
     });
     assert_eq!(tx.usage().legacy_spools, 1);
     let began = Instant::now();
@@ -417,11 +417,11 @@ fn periodic_listings_reuse_the_schedule_and_increment_replacement_generation() {
     }
     handle.stop();
     drain(&tx);
-    assert_eq!(fake.runs("", &["ls", "--json"]).len(), 3);
+    assert_eq!(fake.runs("", &["ls", "--json", "--local", "--no-archives"]).len(), 3);
     assert!(fake
         .log()
         .iter()
-        .all(|e| e["args"] == json!(["-h"]) || e["args"] == json!(["ls", "--json"])));
+        .all(|e| e["args"] == json!(["-h"]) || e["args"] == json!(["ls", "--json", "--local", "--no-archives"])));
 }
 
 #[test]

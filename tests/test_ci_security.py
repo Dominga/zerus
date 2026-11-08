@@ -330,7 +330,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn("uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1", windows)
         self.assertIn("package-manager-cache: false", windows)
         self.assertIn("npm ci </dev/null", windows)
-        self.assertIn("npm run tauri -- build --ci --no-bundle --config src-tauri/tauri.windows.conf.json --features video </dev/null", windows)
+        self.assertIn("npm run tauri -- build --ci --no-bundle --config src-tauri/tauri.windows.switch.conf.json --features video </dev/null", windows)
         self.assertIn("CARGO_BUILD_JOBS: 4", windows)
         self.assertIn("timeout-minutes: 25", windows)
         self.assertIn("--gui target/windows-next/release/hgs-tray.exe", windows)
@@ -658,7 +658,9 @@ class WorkflowSecurityTests(unittest.TestCase):
                      "cargo +1.99.1 fmt --check --manifest-path crates/watch-protocol/Cargo.toml",
                      "cargo +1.99.1 clippy --locked --manifest-path crates/watch-protocol/Cargo.toml --target-dir target --all-targets -- -D warnings",
                      "cargo +1.99.1 test --locked --manifest-path crates/watch-protocol/Cargo.toml --target-dir target",
-                     'run: python3 scripts/collect-licenses.py "$RUNNER_TEMP/rust-licenses"'):
+                     'cargo fetch --locked --manifest-path crates/lore-bin/Cargo.toml',
+                     'python3 scripts/collect-licenses.py "$RUNNER_TEMP/rust-licenses" --manifest-path Cargo.toml '
+                     "--manifest-path crates/lore-bin/Cargo.toml"):
             self.assertIn(line, quick)
         for name in ("quick", "relay", "connector", "connector-macos", "android", "client-native-linux", "client-native-macos-core",
                      "client-native-macos-tauri", "client-native-windows", "cli", "cli-macos-debug", "arch-package", "windows-desktop", "windows-host"):

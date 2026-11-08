@@ -71,7 +71,9 @@ fixture_home="${RUNNER_TEMP:?}/zerus-home"
 mkdir -p "$fixture_home"
 HOME="$fixture_home" "$(brew --prefix)/bin/zerus-setup"
 test "$(readlink "$fixture_home/.local/bin/hgs")" = "$app/Contents/MacOS/hgs"
+test "$(readlink "$fixture_home/.local/bin/lore")" = "$app/Contents/MacOS/lore"
 HOME="$fixture_home" "$fixture_home/.local/bin/hgs" --version
+HOME="$fixture_home" "$fixture_home/.local/bin/lore" --version
 HOME="$fixture_home" "$fixture_home/.local/bin/hgs" ls --json --local > /dev/null
 HOME="$fixture_home" "$(brew --prefix)/bin/zerus-setup" --remove
 test ! -e "$fixture_home/.local/bin/hgs"

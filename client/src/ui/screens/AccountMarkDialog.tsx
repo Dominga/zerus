@@ -1,7 +1,8 @@
 import { TextInput } from "../lib/TextField";
 import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 import { Icon } from "../lib/icons";
-import { accountMark, accountAppearance, saveAccountAppearance, validEmoji, MARK_STYLE } from "../../store/accountMarks";
+import { accountMark, accountAppearance, saveAccountAppearance, validEmoji, MARK_STYLE, MARK_NOT_SAVED } from "../../store/accountMarks";
+import { accountEditApply, accountEditOpen } from "../../bridge";
 import { settings } from "../../store/settings";
 import { toast } from "../../store/notices";
 import { AccountMarkCircle } from "../sessions/SessionCard";
@@ -11,7 +12,7 @@ import { tr } from "../../i18n";
 // The same swatches as machine label colors (MachineColorDialog).
 const SWATCHES = ["#ffcf33", "#ff9234", "#f85c63", "#e45dbf", "#a96bf5", "#6677ff", "#2b97ff", "#23c5dd", "#00aa7f", "#41c86b", "#a6cc38", "#8796aa"];
 
-/** Color and emoji mark of one account on this desktop (spec section 3.2). */
+/** Color and emoji mark of one account, kept on its computers (spec section 3.2, zerus-sa9qn.6). */
 export default function AccountMarkDialog(props: { account: Account; origin?: HTMLElement; close: () => void }) {
   let dialog!: HTMLDialogElement;
   const origin = props.origin ?? document.activeElement;
@@ -24,17 +25,13 @@ export default function AccountMarkDialog(props: { account: Account; origin?: HT
   const emojiValid = () => emoji().trim() === "" || validEmoji(emoji());
   const valid = () => colorValid() && emojiValid();
   const tabColor = () => SWATCHES.find((color) => color === hex().toLowerCase()) ?? SWATCHES[0];
-  // The preview applies the dialog's values over the stored ones.
+  // The preview shows the dialog's values as the account's mark.
   const preview = () => {
-    const token = (m: { host: string; id: string }) => encodeURIComponent(`${m.host}${String.fromCharCode(31)}${m.id}`);
     // What session cards will show: the emoji only with emoji account marks.
-    const values: Record<string, string | boolean | number | string[]> = { [MARK_STYLE]: settings[MARK_STYLE] ?? "letter" };
+    const values = { [MARK_STYLE]: settings[MARK_STYLE] ?? "letter" };
     const first = props.account.members[0];
-    if (first) {
-      if (colorValid() && hex()) values[`accounts/color/${token(first)}`] = hex().toLowerCase();
-      if (emojiValid() && emoji().trim()) values[`accounts/mark/${token(first)}`] = emoji().trim();
-    }
-    return accountMark({ ...props.account, members: first ? [first] : [] }, values);
+    const shown = first ? [{ ...first, marks_supported: true, mark_color: colorValid() ? hex().toLowerCase() : "", mark_emoji: emojiValid() ? emoji().trim() : "" }] : [];
+    return accountMark({ ...props.account, members: shown }, values);
   };
   const stepSwatch = (event: KeyboardEvent & { currentTarget: HTMLDivElement }) => {
     if (busy() || event.altKey || event.ctrlKey || event.metaKey) return;
@@ -51,8 +48,10 @@ export default function AccountMarkDialog(props: { account: Account; origin?: HT
     if (busy()) return;
     setBusy(true);
     try {
-      if (await saveAccountAppearance(props.account, color, mark, hide)) props.close();
-      else toast(tr("Color and mark"), tr("The account appearance could not be saved. Try again."), "warn", true);
+      const errors = await saveAccountAppearance(props.account, color, mark, hide, { open: accountEditOpen, apply: accountEditApply });
+      if (!errors.length) props.close();
+      // Errors from hgs carry its own text.
+      else toast(tr("Color and mark"), errors.map((error) => error === MARK_NOT_SAVED ? tr("The account appearance could not be saved. Try again.") : error).join("\n"), "warn", true);
     } finally { setBusy(false); }
   };
   const apply = () => valid() && void save(hex() ? hex().toLowerCase() : null, emoji().trim() ? emoji().trim() : null, hidden());

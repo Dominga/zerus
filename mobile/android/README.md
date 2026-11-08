@@ -346,7 +346,8 @@ the desktop's compact active subagent count, such as `3`, `2+` or `?`. A child
 supervised by a live parent shows an arrow before its title and stays quiet:
 no notification and gray badges unless only the person can answer it
 (`client/core/tests/fixtures/supervised-attention.json`). Cards show the
-recorded account's mark and label next to the machine. A running session with pending
+recorded account's mark and label next to the machine, in the color the
+session's computer keeps for that account (`account_mark`). A running session with pending
 optional Codex questions, which the agent keeps working without, shows an
 amber question-mark chip with their count (`99+` above 99) right after its
 status badge, as on the desktop; its spoken description says how many are

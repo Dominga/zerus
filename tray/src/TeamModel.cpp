@@ -609,6 +609,7 @@ Team parse(const QJsonObject &v)
         for (const auto &d : t.value("deps").toArray()) task.deps.append({d.toObject().value("task").toInt(), str(d.toObject(), "kind") == "soft"});
         task.phaseBuild = t.value("phase_build").toBool();
         task.origin = qMax(0, t.value("origin").toInt());
+        task.severity = str(t, "severity");
         if (t.value("hold").isObject()) {
             // A5: parked by the lead or by you until `release`.
             const auto h = t.value("hold").toObject();
@@ -827,6 +828,9 @@ Team parse(const QJsonObject &v)
         const auto p = value.toObject();
         Phase phase;
         phase.n = p.value("n").toInt(); phase.title = str(p, "title"); phase.barrier = p.value("barrier").toBool();
+        phase.kind = str(p, "kind");
+        for (const auto &id : p.value("crit").toArray()) phase.crit.append(id.toInt());
+        phase.critGate = str(p, "crit_gate");
         phase.approval = str(p, "approval"); phase.state = str(p, "state");
         phase.addedBy = str(p, "added_by"); phase.decidedBy = str(p, "decided_by");
         phase.pause = readPhasePause(p.value("pause"));
@@ -975,6 +979,9 @@ Team parse(const QJsonObject &v)
             summary.done = entry.value("done").toInt();
             summary.total = entry.value("total").toInt();
             summary.barrier = entry.value("barrier").toBool();
+            summary.kind = str(entry, "kind");
+            for (const auto &id : entry.value("crit").toArray()) summary.crit.append(id.toInt());
+            summary.critGate = str(entry, "crit_gate");
             summary.pause = readPhasePause(entry.value("pause"));
             summary.acceptance = str(entry, "acceptance");
             if (summary.n > 0) team.phaseSummary.append(summary);
@@ -1643,6 +1650,9 @@ QList<PhaseGroup> phaseGroups(const Team &team)
             group.title = record->title;
             group.barrier = record->barrier;
             group.draft = record->draft();
+            group.kind = record->kind;
+            group.crit = record->crit;
+            group.critGate = record->critGate;
         }
         groups.append(group);
     }

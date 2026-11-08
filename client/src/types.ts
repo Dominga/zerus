@@ -1159,6 +1159,8 @@ export interface TeamTaskView {
   lane?: TeamLaneView | null;
   /** Task #60: the task this follow-up was spawned from; never a dependency. */
   origin?: number | null;
+  /** Task #229: `crit` or `minor`; absent for ordinary work. */
+  severity?: string;
   /** Task 160: "parked until <condition>, ETA HH:MM (in N min)"; absent when not parked. */
   parked?: string;
   /** Task 196: a task not yet handed out: its description and criteria, for the plan's task editor. */
@@ -1267,6 +1269,8 @@ export interface TeamPhaseView {
   acceptance: string; paused: boolean; health: string;
   /** Task #58: the mode the phase plans in, "standard" or "free"; "" from an older hgs. */
   mode?: string;
+  /** Task #229: `plan` or `minor`, the open critical tasks holding it and why. */
+  kind?: string; crit?: number[]; crit_gate?: string;
   /** Task 196: the header's details from the phase record (core PhaseView). */
   note?: string; rejection?: string; reworked?: boolean; added_by?: string; added_at?: number; accepted_by_auto?: boolean;
   start_ahead?: boolean; waiting?: string; pause_by?: string; pause_reason?: string; pause_owner?: boolean; changes?: number;
@@ -1396,6 +1400,9 @@ export type TeamAction =
   | { kind: "next_goal"; goal: string; name?: string }
   /** G1: creates a sub-team from a task; its lead is the assignee. */
   | { kind: "create"; name: string; parent: { team: string; task: number } }
+  /** Task #230: the owner marks the lead's plan changes seen, or reverts one. */
+  | { kind: "seen_lead_changes" }
+  | { kind: "revert_lead_change"; change: string }
   /** Task #218: a member moves to another agent/account/model or to an existing session. */
   | { kind: "swap-member"; member: string; agent?: string; model?: string; effort?: string; account?: string; session?: TeamSessionView }
   | { kind: "take_over"; task: number }

@@ -313,6 +313,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         aria-label={tr("Phase %1", phase.phase.n)}
         aria-expanded={collapsible ? !closed : undefined}
         data-phase-head={phase.phase.n}
+        data-phase-kind={phase.phase.kind || undefined}
         onClick={() => { if (collapsible) toggle(phase.phase.n); }}
         onKeyDown={(event) => {
           if (collapsible && (event.key === "Enter" || event.key === " ")) {
@@ -325,6 +326,8 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         <span class="pt-pn">{phase.phase.n}</span>
         <b class="pt-phase-title">{phase.phase.title || tr("Phase %1", phase.phase.n)}</b>
         <span class={`pt-chip pt-chip-${status.kind}`}>{statusLabel(status.kind)}</span>
+        <Show when={phase.phase.kind === "minor"}><span class="pt-chip pt-chip-minor" data-phase-kind="minor">{tr("Minor")}</span></Show>
+        <Show when={phase.phase.crit_gate}>{(gate) => <span class="pt-crit-gate" data-crit-gate title={gate()}>{short(gate(), 80)}</span>}</Show>
         <Show when={phase.phase.auto}><span class="pt-chip pt-chip-auto">{tr("Auto")}</span></Show>
         <Show when={phase.phase.barrier}><span class="pt-chip pt-chip-barrier">{tr("Barrier")}</span></Show>
         <Show when={closed} fallback={<Show when={phase.phase.acceptance}><span class="pt-acceptance">{short(phase.phase.acceptance, 80)}</span></Show>}>
@@ -397,6 +400,8 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     const litNow = lit();
     const problem = problems().get(task.id);
     const classes = ["pt-card", `pt-card-${tone(task)}`];
+    if (task.severity === "crit") classes.push("pt-card-crit");
+    if (task.severity === "minor") classes.push("pt-card-minor");
     if (litNow) classes.push(litNow.has(task.id) ? (hover() === task.id ? "pt-card-on" : "pt-card-lit") : "pt-card-dim");
     if (!matchesTask(task)) classes.push("pt-card-off");
     if (problem) classes.push("pt-card-problem");
@@ -428,6 +433,8 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         <span class="pt-card-l1">
           <span class="pt-state"><Icon name={statusIcon(task, !!problem)} size={12} /></span>
           <span class="pt-id">#{task.id}</span>
+          <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit" title={task.origin ? tr("Critical follow-up of #%1", task.origin) : tr("Critical follow-up")}>Crit{task.origin ? ` · #${task.origin}` : ""}</span></Show>
+          <Show when={task.severity === "minor"}><span class="pt-chip pt-chip-minor" data-severity="minor">Minor</span></Show>
           <span class="pt-title">{task.title || tr("Task %1", task.id)}</span>
           <Show when={task.pipeline_run?.open}>{(stage) => <span class="pt-badge" data-stage={stage().kind}>{stageName(stage().kind)}</span>}</Show>
           <Show when={external.length > 0}>
@@ -450,15 +457,16 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     );
   };
 
-  const routeClass = (route: Route, litNow: ReadonlySet<number> | null) => {
+  const routeClass = (route: Route, litNow: ReadonlySet<number> | null, crit: ReadonlySet<number>) => {
     const state = !litNow ? "" : litNow.has(route.from) && litNow.has(route.to) ? "lit" : "dim";
-    return `pt-edge ${state}${route.back ? " back" : ""}`;
+    return `pt-edge ${state}${route.back ? " back" : ""}${crit.has(route.from) || crit.has(route.to) ? " pt-edge-crit" : ""}`;
   };
 
   /** One expanded phase's graph: one SVG for every link of the phase, its
    * cards over it, scrolled sideways on its own. */
   const graphBody = (phase: PlanPhase, layout: PhaseLayout, routes: Route[], originRoutes: Route[]) => {
     const litNow = lit();
+    const crit = new Set(phase.tasks.filter((task) => task.severity === "crit").map((task) => task.id));
     const marker = `pt-origin-arrow-${props.team.id}-${phase.phase.n}`;
     return (
       <PhaseScroll key={`graph/${props.team.id}/${phase.phase.n}`} class="pt-phase-body" style={{ height: `${Math.ceil(layout.height * zoom()) + SCROLLBAR}px` }}>
@@ -485,7 +493,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
                 </marker>
               </defs>
               <For each={routes}>
-                {(route) => <path d={orthoPath(route.points)} class={routeClass(route, litNow)} marker-end={`url(#${marker}-dep)`} data-edge={`${route.from}-${route.to}`} />}
+                {(route) => <path d={orthoPath(route.points)} class={routeClass(route, litNow, crit)} marker-end={`url(#${marker}-dep)`} data-edge={`${route.from}-${route.to}`} />}
               </For>
               <Show when={props.editing}>
                 <For each={routes.filter((route) => props.editing!.canLink(route.to))}>
@@ -517,13 +525,15 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     const problem = problems().get(task.id);
     const taskHeatNow = heat(task.id);
     return (
-      <button type="button" class={`pm-card pm-board-card pt-tone-${tone(task)}`} classList={{ problem: !!problem, draft: task.status === "draft" }}
+      <button type="button" class={`pm-card pm-board-card pt-tone-${tone(task)}`} classList={{ problem: !!problem, draft: task.status === "draft", crit: task.severity === "crit", minor: task.severity === "minor" }}
         style={taskHeatNow ? { "--heat": String(taskHeatNow.tint) } : undefined}
-        data-task={task.id} title={[`#${task.id} ${task.title}`, problem?.text ?? taskState(task).text, taskHeatNow?.tip ?? ""].filter(Boolean).join("\n")}
+        data-task={task.id} data-severity={task.severity || undefined} title={[`#${task.id} ${task.title}`, problem?.text ?? taskState(task).text, taskHeatNow?.tip ?? ""].filter(Boolean).join("\n")}
         onClick={() => open(task.id)}>
         <span class="pm-card-line">
           <span class="pt-state"><Icon name={statusIcon(task, !!problem)} size={13} /></span>
           <span class="pm-id">#{task.id}</span>
+          <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit">Crit{task.origin ? ` · #${task.origin}` : ""}</span></Show>
+          <Show when={task.severity === "minor"}><span class="pt-chip pt-chip-minor" data-severity="minor">Minor</span></Show>
           <Show when={task.deps.length > 0}><span class="pm-deps">←{task.deps.map((dep) => `#${dep.task}`).join(" ")}</span></Show>
           <b class="pm-title">{task.title}</b>
         </span>
@@ -593,12 +603,15 @@ export function PlanView(props: PlanViewProps): JSX.Element {
                     const activity = activityText(task, working(task));
                     const taskHeatNow = heat(task.id);
                     return (
-                      <button type="button" class={`pm-layer-row pt-tone-${tone(task)}`} classList={{ problem: !!problem }} data-task={task.id}
+                      <button type="button" class={`pm-layer-row pt-tone-${tone(task)}`} classList={{ problem: !!problem, crit: task.severity === "crit", minor: task.severity === "minor" }} data-task={task.id}
+                        data-severity={task.severity || undefined}
                         style={taskHeatNow ? { "--heat": String(taskHeatNow.tint) } : undefined}
                         title={[problem?.text ?? taskState(task).text, taskHeatNow?.tip ?? ""].filter(Boolean).join("\n")} onClick={() => open(task.id)}>
                         <span class="pm-layer-label">{tr("L%1", (own.get(layer) ?? 0) + 1)}</span>
                         <span class="pt-state"><Icon name={statusIcon(task, !!problem)} size={12} /></span>
                         <span class="pm-id">#{task.id}</span>
+                        <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit">Crit{task.origin ? ` · #${task.origin}` : ""}</span></Show>
+                        <Show when={task.severity === "minor"}><span class="pt-chip pt-chip-minor" data-severity="minor">Minor</span></Show>
                         <Show when={task.deps.length > 0}><span class="pm-deps">←{task.deps.map((dep) => `#${dep.task}`).join(" ")}</span></Show>
                         <span class="pm-layer-title">{task.title}</span>
                         <Show when={problem} fallback={<span class="pm-layer-activity">{activity}</span>}>
@@ -642,6 +655,8 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           <span class="pt-chip">{taskState(task).text}</span>
           <span class="pt-chip">{tr("Phase %1", phase?.phase.n ?? task.phase)}</span>
           <span class="pt-chip">{task.assignee || tr("Unassigned")}</span>
+          <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit">{tr("Crit")}{task.origin ? tr(" · from #%1", task.origin) : ""}</span></Show>
+          <Show when={task.severity === "minor"}><span class="pt-chip pt-chip-minor" data-severity="minor">{tr("Minor")}</span></Show>
           <Show when={task.origin}>{(origin) => (
             <button type="button" class="pt-chip pt-chip-origin" data-origin={origin()} title={tr("Open task %1", origin())}
               onClick={() => open(origin())}>{tr("Spawned from #%1", origin())}</button>

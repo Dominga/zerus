@@ -191,10 +191,14 @@ it.each([["during the clipboard read", false], ["before Paste is clicked", true]
   if (beforeClick) await beta();
   paste();
   if (!beforeClick) await beta();
+  // The person moved on to another field while the clipboard was read (zerus-mp3c9).
+  const newer = document.createElement("input"); document.body.append(newer); newer.focus();
   if (complete) complete("alpha-only clipboard text");
   await settle();
   expect(writes).toEqual([]);
-  // A menu opened on the current attach still pastes into it.
+  expect(document.activeElement).toBe(newer);
+  // A menu opened on the current attach still pastes into it and focuses Terminal.
   rightClick(); entry("Paste")!.action!(); await settle();
   expect(writes).toEqual([{ generation: 102, text: "pasted from the menu" }]);
+  expect(document.activeElement).toBe(host.querySelector(".term-host textarea"));
 });

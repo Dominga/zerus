@@ -1248,6 +1248,45 @@ jobs:
               raise SystemExit('The selected macOS CLI producer, integration/release and native jobs must all succeed.')
           PY
 
+  # Root CLI Clippy for the macOS binary, check only (zerus-3ldf4). The macOS
+  # CLI jobs build and test the root hgs but never lint it, so macOS-only
+  # unused items reached main unseen (zerus-snrs7). It restores the CLI
+  # producer's cache and never saves one; it publishes and admits nothing.
+  clippy-macos:
+    name: macOS CLI Clippy (check only)
+    needs: source
+    if: needs.source.outputs.run_macos == 'true'
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.source.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install 1.99.1 --profile minimal --component clippy
+      - name: Rust cache identity
+        id: rust
+        run: |
+          echo "rustc=$(rustc +1.99.1 -Vv | git hash-object --stdin | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+      - name: Restore the CLI cache (never saved here)
+        id: rust-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}debug
+          restore-keys: |
+            cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}complete
+            cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}
+            cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
+      - name: Root CLI Clippy for the macOS binary
+        run: cargo +1.99.1 clippy --locked --bin hgs -- -D warnings
+
   # Compiler caches use one entry per saving run and restore the newest by
   # prefix. A save follows a successful build that compiled something, keeping
   # only the entries this build used. Cache directories stay outside the
@@ -1733,7 +1772,7 @@ jobs:
   gate:
     name: Suite results
     if: always() && (github.event.repository.private == false || github.event_name == 'workflow_dispatch')
-    needs: [source, quick, client-frontend, relay, connector, connector-macos, ios, android, client-native-linux, client-native-macos-core, client-native-macos-tauri, client-native-windows, cli, cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, arch-package, windows-tests, windows-desktop, windows-host]
+    needs: [source, quick, client-frontend, relay, connector, connector-macos, ios, android, client-native-linux, client-native-macos-core, client-native-macos-tauri, client-native-windows, cli, cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, clippy-macos, arch-package, windows-tests, windows-desktop, windows-host]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -1764,6 +1803,7 @@ jobs:
               'cli-macos-core': json.loads(os.environ['RUN_MACOS']),
               'cli-macos-native': json.loads(os.environ['RUN_MACOS']),
               'cli-macos': json.loads(os.environ['RUN_MACOS']),
+              'clippy-macos': json.loads(os.environ['RUN_MACOS']),
               'arch-package': json.loads(os.environ['RUN_ARCH']),
               'connector-macos': json.loads(os.environ['RUN_MACOS']),
               'ios': json.loads(os.environ['RUN_IOS']),

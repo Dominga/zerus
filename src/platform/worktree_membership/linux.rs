@@ -317,9 +317,10 @@ struct Task {
 /// is read only while the leader has `exited`, to find the live ones. A live
 /// leader's tasks are all taken as live: an exited one has no fs context or
 /// descriptor table for kcmp to match, so it is read itself, and its missing
-/// cwd is uncertainty. A task gone between the listing and its state read is
-/// not in the observation; any other read error is uncertainty.
-fn task_set(process: &Path, exited: bool, deadline: Instant) -> io::Result<Vec<Task>> {
+/// cwd is uncertainty. None: a listed task was gone before its state could be
+/// read. It may have handed its context to a task the listing missed, so the
+/// observation proves nothing. Any other read error is uncertainty.
+fn task_set(process: &Path, exited: bool, deadline: Instant) -> io::Result<Option<Vec<Task>>> {
     let mut ids = Vec::new();
     for (count, entry) in fs::read_dir(process.join("task"))?.enumerate() {
         bounded(count, deadline)?;
@@ -332,6 +333,8 @@ fn task_set(process: &Path, exited: bool, deadline: Instant) -> io::Result<Vec<T
         }
     }
     ids.sort_unstable();
+    #[cfg(test)]
+    roster::after_list();
     let mut tasks = Vec::with_capacity(ids.len());
     for (count, id) in ids.into_iter().enumerate() {
         bounded(count, deadline)?;
@@ -342,11 +345,11 @@ fn task_set(process: &Path, exited: bool, deadline: Instant) -> io::Result<Vec<T
         let task = process.join("task").join(id.to_string());
         match identity(&task) {
             Ok((_, exited, _)) => tasks.push(Task { id, exited }),
-            Err(e) if e.kind() == io::ErrorKind::NotFound && !task.exists() => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound && !task.exists() => return Ok(None),
             Err(e) => return Err(e),
         }
     }
-    Ok(tasks)
+    Ok(Some(tasks))
 }
 
 /// Whether two observations list the same task IDs.
@@ -408,13 +411,14 @@ const ATTEMPTS: usize = 4;
 
 /// Reads one process through its tasks (zerus-lo8o1, zerus-lo8o1.1). The
 /// task set, by ID, and the plan's kcmp sharing decisions are observed
-/// before and after the reads, and only an unchanged observation lets the
-/// reads stand. A task gone during them may have handed
-/// its context to a task created since; a task left out as sharing the
-/// reference may have unshared and kept a context the reference then left.
-/// A changed observation is read again, within ATTEMPTS and the deadline,
-/// and is never absence. None: the leader exited and no task of its group
-/// lives.
+/// before and after the reads, and only an unchanged, settled observation
+/// lets the reads stand. A task gone during them may have handed its context
+/// to a task created since; a task left out as sharing the reference may
+/// have unshared and kept a context the reference then left. An exited group
+/// needs the same second observation: a live task the first listing missed
+/// may still hold a context. A changed or unsettled observation is read
+/// again, within ATTEMPTS and the deadline, and is never absence. None: the
+/// leader exited and no task of its group lives.
 fn inspect<T>(
     process: &Path,
     pid: u32,
@@ -423,28 +427,27 @@ fn inspect<T>(
     mut read: impl FnMut(&Tasks) -> io::Result<T>,
 ) -> io::Result<Option<T>> {
     for _ in 0..ATTEMPTS {
-        let set = task_set(process, exited, deadline)?;
-        let Some(tasks) = task_plan(process, pid, exited, &set, deadline)? else {
-            return Ok(None);
+        let Some(set) = task_set(process, exited, deadline)? else {
+            continue;
         };
+        let tasks = task_plan(process, pid, exited, &set, deadline)?;
         #[cfg(test)]
         roster::after_plan();
-        let result = read(&tasks);
-        let after = task_set(process, exited, deadline)?;
-        if same_tasks(&set, &after)
-            && task_plan(process, pid, exited, &after, deadline)?.as_ref() == Some(&tasks)
-        {
-            return result.map(Some);
+        let result = tasks.as_ref().map(&mut read);
+        let Some(after) = task_set(process, exited, deadline)? else {
+            continue;
+        };
+        if same_tasks(&set, &after) && task_plan(process, pid, exited, &after, deadline)? == tasks {
+            return result.transpose();
         }
     }
     Err(limit())
 }
 
-/// Whether a group whose leader exited has no live task left.
+/// Whether a group whose leader exited has no live task left, from one
+/// unchanged, settled observation like any other.
 fn group_exited(process: &Path, pid: u32, deadline: Instant) -> io::Result<bool> {
-    Ok(!task_set(process, true, deadline)?
-        .iter()
-        .any(|task| task.id != pid && !task.exited))
+    Ok(inspect(process, pid, true, deadline, |_| Ok(()))?.is_none())
 }
 
 /// The process ID an entry names: its own number, or /proc/self's target.
@@ -685,6 +688,19 @@ pub(crate) mod roster {
     thread_local! {
         static OWNED: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
         static AFTER_PLAN: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+        static AFTER_LIST: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+    }
+
+    /// Runs this thread's hook, once, between a task listing and the state
+    /// reads of its tasks (zerus-lo8o1.1).
+    pub(crate) fn after_list() {
+        let hook = AFTER_LIST.with(|hook| hook.borrow_mut().take());
+        if let Some(mut hook) = hook {
+            hook();
+        }
+    }
+    pub(crate) fn on_list(hook: impl FnMut() + 'static) {
+        AFTER_LIST.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
     }
 
     /// Runs this thread's hook, once, between a process's task plan and its
@@ -722,6 +738,7 @@ pub(crate) mod roster {
         fn drop(&mut self) {
             OWNED.with(|owned| *owned.borrow_mut() = None);
             AFTER_PLAN.with(|hook| *hook.borrow_mut() = None);
+            AFTER_LIST.with(|hook| *hook.borrow_mut() = None);
         }
     }
 
@@ -1553,6 +1570,136 @@ for op in sys.stdin:
         churn(entry.clone(), pid - 1000);
         assert!(sample(soon()).is_err(), "sample");
         roster::on_plan(|| {});
+        drop(owned);
+    }
+
+    /// A synthetic live task whose cwd is in the checkout.
+    fn occupant(task: &Path, root: &Path) {
+        synthetic(task, 'S');
+        std::os::unix::fs::symlink(root, task.join("cwd")).unwrap();
+        std::os::unix::fs::symlink("/", task.join("root")).unwrap();
+    }
+
+    /// Arms the next listings in turn: after each, the task it listed hands
+    /// its checkout context to the next task of `chain` and is gone before
+    /// its state is read.
+    fn hand_on(entry: PathBuf, root: PathBuf, chain: Vec<u32>) {
+        roster::on_list(move || {
+            occupant(&entry.join("task").join(chain[1].to_string()), &root);
+            fs::remove_dir_all(entry.join("task").join(chain[0].to_string())).unwrap();
+            if chain.len() > 2 {
+                hand_on(entry.clone(), root.clone(), chain[1..].to_vec());
+            }
+        });
+    }
+
+    /// zerus-lo8o1.1, review-win-e on #1869 e2bf7043: an exited leader's task
+    /// that hands its checkout context to a new task and is gone before its
+    /// state is read leaves an observation that proves nothing, in the first
+    /// listing or the second. The group is read again and its live occupant
+    /// found by the census, member() and sample(), never reported exited.
+    #[test]
+    fn a_task_gone_before_its_state_is_read_never_proves_an_exited_group() {
+        let (_dir, root, _scope, inventory) = checkout();
+        let owned = roster::owned(&[]);
+        let pid = i32::MAX as u32;
+        let entry = owned.path().join(pid.to_string());
+        synthetic(&entry, 'Z');
+        let chain = vec![pid - 3, pid - 2, pid - 1];
+        let arm = || {
+            for tid in &chain {
+                let _ = fs::remove_dir_all(entry.join("task").join(tid.to_string()));
+            }
+            occupant(&entry.join("task").join(chain[0].to_string()), &root);
+            hand_on(entry.clone(), root.clone(), chain.clone());
+        };
+        arm();
+        assert!(
+            programs(&inventory, soon())
+                .unwrap()
+                .iter()
+                .any(|p| p.pid == pid),
+            "census"
+        );
+        arm();
+        assert!(member_with_holder(&entry, &inventory, None, soon()).unwrap());
+        arm();
+        assert!(sampled(pid, &root), "sample");
+        drop(owned);
+    }
+
+    /// zerus-lo8o1.1: an exited group needs an unchanged second listing too.
+    /// A live task listed after the first observation found none is read,
+    /// never reported exited.
+    #[test]
+    fn a_live_task_listed_after_an_exited_observation_is_read() {
+        let (_dir, root, _scope, inventory) = checkout();
+        let owned = roster::owned(&[]);
+        let pid = i32::MAX as u32;
+        let entry = owned.path().join(pid.to_string());
+        synthetic(&entry, 'Z');
+        synthetic(&entry.join("task").join((pid - 2).to_string()), 'Z');
+        let late = entry.join("task").join((pid - 1).to_string());
+        let arm = || {
+            let _ = fs::remove_dir_all(&late);
+            let (late, root) = (late.clone(), root.clone());
+            roster::on_plan(move || occupant(&late, &root));
+        };
+        assert!(programs(&inventory, soon()).unwrap().is_empty(), "exited");
+        arm();
+        assert!(
+            programs(&inventory, soon())
+                .unwrap()
+                .iter()
+                .any(|p| p.pid == pid),
+            "census"
+        );
+        arm();
+        assert!(member_with_holder(&entry, &inventory, None, soon()).unwrap());
+        arm();
+        assert!(sampled(pid, &root), "sample");
+        drop(owned);
+    }
+
+    /// zerus-lo8o1.1: a leader that exits during the reads leaves an exited
+    /// group only by a settled observation. A task that hands its context on
+    /// and is gone before its state is read, in the listing that decides,
+    /// keeps the census and sample() uncertain.
+    #[test]
+    fn a_leader_exiting_during_the_reads_is_exited_only_by_a_settled_observation() {
+        let (_dir, root, _scope, inventory) = checkout();
+        let owned = roster::owned(&[]);
+        let pid = i32::MAX as u32;
+        let entry = owned.path().join(pid.to_string());
+        synthetic(&entry, 'S');
+        fs::create_dir(entry.join("task")).unwrap();
+        for link in ["cwd", "root"] {
+            std::os::unix::fs::symlink("/", entry.join(link)).unwrap();
+        }
+        let (worker, next) = (pid - 2, pid - 1);
+        let arm = || {
+            synthetic(&entry, 'S');
+            let _ = fs::remove_dir_all(entry.join("task").join(next.to_string()));
+            let task = entry.join("task").join(worker.to_string());
+            synthetic(&task, 'S');
+            for link in ["cwd", "root"] {
+                let _ = fs::remove_file(task.join(link));
+                std::os::unix::fs::symlink("/", task.join(link)).unwrap();
+            }
+            // The leader exits during the reads; the reads' own second
+            // listing passes, and the listing that decides whether the group
+            // has exited loses the worker to its replacement.
+            let (entry, root) = (entry.clone(), root.clone());
+            roster::on_plan(move || {
+                synthetic(&entry, 'Z');
+                let (entry, root) = (entry.clone(), root.clone());
+                roster::on_list(move || hand_on(entry.clone(), root.clone(), vec![worker, next]));
+            });
+        };
+        arm();
+        assert!(programs(&inventory, soon()).is_err(), "census");
+        arm();
+        assert!(sample(soon()).is_err(), "sample");
         drop(owned);
     }
 }

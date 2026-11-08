@@ -92,6 +92,42 @@ fn production_open_keeps_one_complete_backup_and_later_starts_never_overwrite_it
 }
 
 #[test]
+fn a_changed_original_during_copy_is_refused_and_its_incomplete_backup_is_retained() {
+    let temp = tempfile::tempdir().unwrap();
+    let location = make_old(&temp.path().canonicalize().unwrap().join("state/desktop"));
+    let path = location.root.join(DATABASE);
+    let changed = path.clone();
+    let owner = location.lock().unwrap();
+    DURING_SOURCE_COPY.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            // Deliberate external-writer fault in this private fixture. Its final
+            // close checkpoints the WAL while the original copy is in flight.
+            let writer = Connection::open(&changed).unwrap();
+            writer
+                .execute_batch("INSERT INTO rollback_sentinel VALUES('external change')")
+                .unwrap();
+        }))
+    });
+    let error = Store::open_owned(&location, &epoch(), &owner)
+        .err()
+        .unwrap();
+    DURING_SOURCE_COPY.with(|slot| slot.borrow_mut().take());
+    assert!(format!("{error:#}").contains("input changed"), "{error:#}");
+    assert_eq!(schema(&Connection::open(&path).unwrap()), 34);
+    assert!(!location.root.join(BACKUP).join(MANIFEST).exists());
+    let before = backup_bytes(&location);
+    assert!(Store::open_owned(&location, &epoch(), &owner).is_err());
+    assert_eq!(backup_bytes(&location), before);
+    assert_eq!(
+        Connection::open(&path)
+            .unwrap()
+            .query_row::<i64, _, _>("SELECT count(*) FROM rollback_sentinel", [], |r| r.get(0))
+            .unwrap(),
+        2
+    );
+}
+
+#[test]
 fn the_schema_34_preflight_refuses_35_without_rewriting_its_database_or_columns() {
     let temp = tempfile::tempdir().unwrap();
     let location = make_old(&temp.path().canonicalize().unwrap().join("state/desktop"));

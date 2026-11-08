@@ -476,6 +476,23 @@ pub(crate) fn sync(shared: &Path, member: &str, edits: &[String], others: &BTree
         known &= contents.is_some();
         manifest.insert(format!("link:{folder}"), contents.unwrap_or_else(|| "unknown".into()));
     }
+    // Task 374 (owner, 2026-11-08): installed dependencies are ignored by Git,
+    // so a snapshot that copies only tracked files has no node_modules and a
+    // web suite cannot start. Link them from the shared folder like an asset,
+    // never copy them.
+    for folder in dependency_folders(shared) {
+        let source = shared.join(&folder);
+        let target = tree.join(&folder);
+        if fs::symlink_metadata(&target).is_err() {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            if link_dir(&source, &target).is_ok() {
+                linked += 1;
+            }
+        }
+        manifest.insert(format!("link:{folder}"), "dependencies".into());
+    }
     fs::write(&manifest_path, serde_json::to_vec(&manifest)?)?;
     // Every stamp names content (a blob, a digest or a folder listing), so an
     // untouched tree hashes the same and any changed byte changes it.
@@ -487,6 +504,18 @@ pub(crate) fn sync(shared: &Path, member: &str, edits: &[String], others: &BTree
         hasher.update([0]);
     }
     Ok(Snapshot { tree, hash: format!("{:x}", hasher.finalize()), others: taken, copied, linked, large, known })
+}
+
+/// Task 374: the dependency folders a snapshot links from the shared folder: a
+/// `node_modules` at the repository root or in the web client.
+fn dependency_folders(shared: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    for name in ["node_modules", "client/node_modules"] {
+        if shared.join(name).is_dir() {
+            found.push(name.to_owned());
+        }
+    }
+    found
 }
 
 /// A folder link: a junction on Windows (no privilege needed), a symlink

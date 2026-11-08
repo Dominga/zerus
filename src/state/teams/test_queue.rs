@@ -321,6 +321,13 @@ impl TestStore {
     }
 
     /// #760: the result a request produced, once the runner wrote it.
+    /// Task 374: one result record by its exact id, the way a test card names
+    /// it (its log and excerpt stay here, never on the card).
+    pub(crate) fn record_by_id(&self, id: &str) -> anyhow::Result<Option<Record>> {
+        let mut statement = self.db.prepare(&format!("SELECT {RECORD_COLUMNS} FROM results WHERE id = ?1 LIMIT 1"))?;
+        Ok(statement.query_row(params![id], Self::record).optional()?)
+    }
+
     pub(crate) fn result_of(&self, request: &str) -> anyhow::Result<Option<Record>> {
         let mut statement = self.db.prepare(&format!(
             "SELECT {RECORD_COLUMNS} FROM results WHERE id LIKE ?1 || '-%' ORDER BY seq DESC LIMIT 1"
@@ -1065,7 +1072,11 @@ mod tests {
             "{}",
             item.summary
         );
-        assert!(item.command.contains("test results"), "{}", item.command);
+        // Task 374: the card prints a command that reads the record (the
+        // action in its JSON), never a usage error.
+        assert!(item.command.contains("hgs team test --json"), "{}", item.command);
+        assert!(item.command.contains("\"action\":\"results\"") || item.command.contains("\"action\": \"results\""), "{}", item.command);
+        assert!(item.command.contains("\"record\":\"r1\"") || item.command.contains("\"record\": \"r1\""), "{}", item.command);
         assert!(item.detail.contains("r1") && item.detail.contains("dev"), "{}", item.detail);
         assert!(!item.detail.contains("the log"), "the card links the record, never the log");
         // The notice list is bounded.

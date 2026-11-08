@@ -725,12 +725,13 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
                 if flags.is_empty() { base } else { format!("{base}: {flags}") }
             }),
             command: format!(
-                "{} | hgs team test results --json",
-                json!({"request_id":PLACEHOLDER,"team":team.id,"record":notice.record})
+                "{} | hgs team test --json",
+                json!({"request_id":PLACEHOLDER,"team":team.id,"action":"results","record":notice.record})
             ),
             detail: format!(
-                "Asked by {}. The log and excerpt stay in record {}; read them with hgs team test results --json, not from this card.",
+                "Asked by {}. The log and excerpt stay in record {}; read them with hgs team test --json and action results, record {}, not from this card.",
                 if notice.asked_by.is_empty() { "an unknown caller" } else { notice.asked_by.as_str() },
+                notice.record,
                 notice.record
             ),
         });

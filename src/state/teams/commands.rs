@@ -3474,6 +3474,16 @@ fn test_command(input: &Value) -> anyhow::Result<Value> {
             store.mutate(None, &team_id, None, |team, _| super::test_results::settle(team, action, input, super::super::now()))
         }
         "results" => {
+            // Task 374: the card names a record: read that one, with its log
+            // and excerpt (the card itself never carries them).
+            let record = text(input, "record");
+            if !record.is_empty() {
+                let found = database.record_by_id(&record)?;
+                return match found {
+                    Some(record) => Ok(json!({"status":"record","record":record})),
+                    None => anyhow::bail!("Unknown test record {record}"),
+                };
+            }
             let limit = input["limit"].as_u64().map_or(20, |n| n as usize);
             let before = input["before"].as_f64();
             // #719: a task's drawer reads its own runs; the profiler its window.

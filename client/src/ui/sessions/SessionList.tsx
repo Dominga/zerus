@@ -63,6 +63,7 @@ import { pageHidden } from "../../store/visibility";
 import { page } from "../../store/ui";
 import "../styles/content-search.css";
 import { lazyView } from "../lazy-view";
+import { LazyBoundary } from "../lazy-boundary";
 // The search results replace the list only while searching (zerus-ycycu).
 const SearchResults = lazyView(() => import("./SearchResults"), (m) => m.SearchResults);
 
@@ -745,7 +746,7 @@ export function SessionList() {
             </div>
           </Show>
         </>}>
-          <Suspense><SearchResults /></Suspense>
+          <LazyBoundary loading={<div class="lazy-waiting">{tr("Loading…")}</div>}><SearchResults /></LazyBoundary>
         </Show>
         <Show when={!search().trim()}><SelectionBar /></Show>
         <footer class="sp-foot">

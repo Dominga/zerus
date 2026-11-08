@@ -6,7 +6,7 @@ import { activityReadingRows, createActivityAnchor } from "./activity-anchor";
 import { ActivityHeights, activityMeasureWindow, activityOverscan, createActivityResize, syncActivityHeights } from "./activity-heights";
 import { searchPreview, clearSearchPreview } from "../../store/searchSelection";
 import { SearchHighlight } from "./SearchHighlight";
-import { For, Show, Suspense, batch, createContext, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack, useContext, type JSX } from "solid-js";
+import { For, Show, batch, createContext, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack, useContext, type JSX } from "solid-js";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { createImageHandoff, fittedImage } from "./attachment-image";
 import { attachmentFetch, attachmentMedia, attachmentOpen, attachmentPin, attachmentUnpin, copyVerbatim, inTauri } from "../../bridge";
@@ -45,6 +45,7 @@ import { activityAll, activityFlow, activityRange, measureActivityRows, activity
 import { captionText, statusOf } from "./SessionCard";
 import type { ActivityItem, ItemAttachment, LocalItem, MediaMessage, Session, TranscriptItem } from "./types";
 import { lazyView } from "../lazy-view";
+import { LazyBoundary } from "../lazy-boundary";
 // The File reference dialog opens on demand, outside the entry chunk (zerus-ycycu).
 const SessionFileDialog = lazyView(() => import("./SessionFileDialog"), (m) => m.SessionFileDialog);
 
@@ -1094,7 +1095,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
       </Show>
       <LocalDeleteDialog />
       <RemoveQueuedDialog scope={inboxScope} />
-      <Suspense><SessionFileDialog /></Suspense>
+      <LazyBoundary floating><SessionFileDialog /></LazyBoundary>
       <div class="act-scroll" ref={scroller} tabindex="-1" onContextMenu={activityMenu} onScroll={onScroll} style={{ "overflow-anchor": "none" }}
         onWheel={scrollIntent}
         onKeyDown={(e) => {

@@ -1,5 +1,5 @@
 import { DesktopServiceStatus } from "../../components/DesktopServiceStatus";
-import { Show, Suspense, createSignal, onMount } from "solid-js";
+import { Show, createSignal, onMount } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { inTauri } from "../../../bridge";
 import { Icon } from "../../lib/icons";
@@ -12,6 +12,7 @@ import { installedAppName } from "./about-version";
 import { appBuildInfo, refreshAppBuildInfo } from "../../../store/buildInfo";
 import { tr, trNoop } from "../../../i18n";
 import { lazyView } from "../../lazy-view";
+import { LazyBoundary } from "../../lazy-boundary";
 const MigrationReportDialog = lazyView(() => import("../../components/MigrationReportDialog"), (m) => m.MigrationReportDialog);
 
 // Settings > About (tray/src/SettingsPage.h:146-155): the installed Zerus
@@ -62,7 +63,7 @@ export function AboutSection() {
           <Icon name="github" size={16} />ufna/zerus
         </button>
       </div>
-      <Show when={reportOrigin()}>{(origin) => <Suspense><MigrationReportDialog origin={origin()} close={() => setReportOrigin(undefined)} /></Suspense>}</Show>
+      <Show when={reportOrigin()}>{(origin) => <LazyBoundary floating><MigrationReportDialog origin={origin()} close={() => setReportOrigin(undefined)} /></LazyBoundary>}</Show>
     </>
   );
 }

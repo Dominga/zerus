@@ -40,9 +40,9 @@ import { expandedEntries } from "./session-extra-entries";
 import { folderEntries, folderRequest } from "../../store/sessionFolders";
 import { watchDetailRemoval } from "./detail-removal";
 import { lazyView } from "../lazy-view";
+import { LazyBoundary } from "../lazy-boundary";
+import { ComposerDialogsSlot, QuestionSlot } from "./lazy-slots";
 // Opened on demand, outside the entry chunk and preloaded on idle (zerus-ycycu).
-const QuestionCard = lazyView(() => import("./QuestionCard"), (m) => m.QuestionCard);
-const ComposerDialogs = lazyView(() => import("./ComposerDialogs"), (m) => m.ComposerDialogs);
 const ProcessesTab = lazyView(() => import("./Processes"), (m) => m.ProcessesTab);
 const TerminalTab = lazyView(() => import("./Terminal"), (m) => m.TerminalTab);
 
@@ -306,15 +306,15 @@ export function SessionDetail() {
                           <p class="qcard-body">{tr("Sign in to DeepSeek to start using this session. Complete sign-in in the official DeepSeek UI, then return here.")}</p>
                           <div class="qcard-actions"><button class="btn small" onClick={() => nativeRoute(selected())()}>{tr("Sign in to DeepSeek…")}</button></div>
                         </div></div></Show>
-                        <HeldMessage /><QueuePanel /><Suspense><QuestionCard /></Suspense>
+                        <HeldMessage /><QueuePanel /><QuestionSlot />
                       </Show>
                       <div class="cmp-col"><Composer /></div>
                     </div>
                   </Match>
                   <Match when={detailTab() === "taskview"}><Suspense><TaskView /></Suspense></Match>
-                  <Match when={detailTab() === "terminal"}><Suspense><TerminalTab /></Suspense></Match>
+                  <Match when={detailTab() === "terminal"}><LazyBoundary loading={<div class="lazy-waiting">{tr("Loading…")}</div>}><TerminalTab /></LazyBoundary></Match>
                   <Match when={detailTab() === "native"}><NativeUiTab /></Match>
-                  <Match when={detailTab() === "processes"}><Suspense><ProcessesTab /></Suspense></Match>
+                  <Match when={detailTab() === "processes"}><LazyBoundary loading={<div class="lazy-waiting">{tr("Loading…")}</div>}><ProcessesTab /></LazyBoundary></Match>
                 </Switch>
               </div>
             </div>
@@ -323,7 +323,7 @@ export function SessionDetail() {
         </div>
       </Show>
         {/* The composer's questions and Clear session, also from the header on another tab; the field takes the focus back. */}
-        <Suspense><ComposerDialogs onClosed={() => { if (document.activeElement === document.body) document.querySelector<HTMLTextAreaElement>(".cmp-editor")?.focus(); }} /></Suspense>
+        <ComposerDialogsSlot onClosed={() => { if (document.activeElement === document.body) document.querySelector<HTMLTextAreaElement>(".cmp-editor")?.focus(); }} />
     </section>
   );
 }

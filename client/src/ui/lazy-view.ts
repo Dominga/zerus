@@ -1,9 +1,10 @@
-import { lazy, type Component } from "solid-js";
+import { createComponent, createMemo, createResource, untrack, type Component, type JSX } from "solid-js";
 
 // Rarely opened views live outside the entry chunk (zerus-ycycu): each loads on
 // first use, and once the window has loaded and is idle they are fetched one
 // at a time, so a first open shows no delay. Render each inside its own
-// <Suspense>, so a view still loading never suspends the page around it.
+// LazyBoundary (lazy-boundary.tsx): a view still loading never suspends the
+// page around it, and a failed load shows a visible Retry.
 
 type Loader = () => Promise<unknown>;
 const pending: Loader[] = [];
@@ -40,19 +41,25 @@ function start() {
 }
 
 /**
- * `lazy(load)`, preloaded when the window is idle after it loaded. `pick`
- * chooses a named export; the module's default export is used without it.
+ * A view loaded on first use, and earlier when the window is idle after it
+ * loaded. `pick` chooses a named export; the module's default export is used
+ * without it. While it loads it suspends the nearest <Suspense>; a failed
+ * load throws to the nearest error boundary and is forgotten, so rendering
+ * the view again (LazyBoundary's Retry) loads it again.
  */
 export function lazyView<P extends Record<string, unknown>, M>(load: () => Promise<M>, pick?: (module: M) => Component<P>): Component<P> & { preload: () => Promise<{ default: Component<P> }> } {
-  // One load shared by the idle preload and first use; a failed one is
-  // forgotten, so first use loads again instead of keeping the failure.
-  let loading: Promise<{ default: Component<P> }> | undefined;
+  let loaded: Component<P> | undefined;
+  let loading: Promise<Component<P>> | undefined;
   const once = () => loading ??= load().then(
-    (module) => ({ default: pick ? pick(module) : (module as { default: Component<P> }).default }),
+    (module) => (loaded = pick ? pick(module) : (module as { default: Component<P> }).default),
     (error: unknown) => { loading = undefined; throw error; },
   );
-  const view = lazy(once);
+  const view = (props: P): JSX.Element => {
+    if (loaded) { const ready = loaded; return untrack(() => createComponent(ready, props)); }
+    const [component] = createResource(once);
+    return createMemo(() => { const ready = component(); return ready ? untrack(() => createComponent(ready, props)) : undefined; }) as unknown as JSX.Element;
+  };
   pending.push(once);
   start();
-  return view;
+  return Object.assign(view, { preload: () => once().then((ready) => ({ default: ready })) });
 }

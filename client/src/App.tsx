@@ -33,6 +33,7 @@ import { SessionUsageStrip } from "./ui/components/SessionUsageStrip";
 import type { BridgeMode } from "./bridge";
 import { installUiLanguage, tr, uiLanguage } from "./i18n";
 import { lazyView } from "./ui/lazy-view";
+import { LazyBoundary } from "./ui/lazy-boundary";
 const ParentDialogs = lazyView(() => import("./ui/sessions/ParentDialogs"), (m) => m.ParentDialogs);
 
 // The client shell: the rail, the pages and the status bar.
@@ -165,7 +166,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
       <Show when={shortcutHelpOrigin()}><Suspense><ShortcutHelpDialog /></Suspense></Show>
       <Show when={newSessionOpened()}><Suspense><NewSessionDialog /></Suspense></Show>
       <OrganizationDialogs />
-      <Suspense><ParentDialogs /></Suspense>
+      <LazyBoundary floating><ParentDialogs /></LazyBoundary>
       <Suspense><PerfHost /></Suspense>
     </div>
   );

@@ -149,6 +149,7 @@ mod window_geometry;
 #[doc(hidden)]
 pub mod window_layer;
 pub mod window_chrome;
+pub mod git_status;
 #[doc(hidden)]
 pub mod window_theme;
 mod window_visibility;
@@ -695,7 +696,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
         .manage(window_visibility::Visibility::default())
         .manage(window_theme::Theme::default())
         .manage(lifecycle::Lifecycle { menu_bar })
-        .manage(exit_flush::ExitFlush::default());
+        .manage(exit_flush::ExitFlush::default())
+        .manage(git_status::GitStatus::default());
     #[cfg(target_os = "macos")]
     let builder = builder
         .menu(exit_flush::app_menu)
@@ -1755,6 +1757,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         window_layer::window_layer_state,
         window_chrome::window_chrome,
         window_chrome::window_control,
+        git_status::git_status_request,
         settings::hgs_version,
         settings::hgs_setting,
         settings::open_repository,

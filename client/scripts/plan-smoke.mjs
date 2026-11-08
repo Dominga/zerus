@@ -8,7 +8,7 @@
 // headless Chrome of its own (a new, empty profile under the output folder),
 // drives it over CDP only (Page.captureScreenshot; no OS input, no screen
 // capture), and closes both. No CLI, session or owner data is opened.
-//   node scripts/plan-smoke.mjs <output folder> [chrome.exe] [plan|side-panel|activity-notices|agent-media|subagent-card|lead-notices|title-bar|new-team|hotkeys]
+//   node scripts/plan-smoke.mjs <output folder> [chrome.exe] [plan|side-panel|activity-notices|agent-media|subagent-card|lead-notices|title-bar|new-team|hotkeys|git-chips]
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -71,8 +71,10 @@ try {
     : page === "title-bar" ? { width: 1440, height: 640, deviceScaleFactor: 1, mobile: false }
     : page === "new-team" ? { width: 1280, height: 860, deviceScaleFactor: 1, mobile: false }
     : page === "hotkeys" ? { width: 1100, height: 640, deviceScaleFactor: 1, mobile: false }
+    : page === "git-chips" ? { width: 900, height: 700, deviceScaleFactor: 1, mobile: false }
     : { width: 1180, height: 900, deviceScaleFactor: 1, mobile: false });
-  const cases = page === "hotkeys" ? [["hotkeys-dark", "skin=whitewh-dark"], ["hotkeys-light", "skin=zerus-light"]]
+  const cases = page === "git-chips" ? [["git-chips-dark", "skin=whitewh-dark"], ["git-chips-light", "skin=zerus-light"], ["git-chips-narrow-dark", "skin=whitewh-dark&width=250"]]
+    : page === "hotkeys" ? [["hotkeys-dark", "skin=whitewh-dark"], ["hotkeys-light", "skin=zerus-light"]]
     : page === "new-team" ? [["new-dark", "case=new&skin=whitewh-dark"], ["new-search-dark", "case=new&search=engineer&pick=feature&skin=whitewh-dark"],
       ["project-memory-dark", "case=project&skin=whitewh-dark"], ["no-git-light", "case=new&git=0&skin=whitewh-light"],
       ["draft-chat-dark", "case=draft&skin=whitewh-dark"], ["draft-goal-dark", "case=draft&tab=goal&skin=whitewh-dark"], ["draft-plan-light", "case=draft&tab=plan&skin=whitewh-light"]]
@@ -98,7 +100,9 @@ try {
     if (!title.endsWith(": ready")) throw new Error(`${name}: the page never said it was ready (${title})`);
     await sleep(600);
     const errors = (await cdp.send("Runtime.evaluate", {
-      expression: page === "hotkeys"
+      expression: page === "git-chips"
+        ? "JSON.stringify(window.__git)"
+        : page === "hotkeys"
         ? "JSON.stringify(window.__hotkeys)"
         : page === "new-team"
         ? "JSON.stringify({templates: [...document.querySelectorAll('.nt-template-row')].map((row) => row.dataset.template), memory: [...document.querySelectorAll('input[name=nt-memory]')].map((input) => input.value), page: document.querySelector('.nt-lead-tabs [aria-selected=true]')?.dataset.leadPage, plan: document.querySelectorAll('[data-plan-task]').length, start: !!document.querySelector('[data-start-planning]'), draftName: document.querySelector('.nt-body input[maxlength]')?.value})"

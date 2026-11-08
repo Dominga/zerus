@@ -1,3 +1,4 @@
+import { followVisibleGit } from "../../store/gitFeed";
 import { inspectSession, sessionFolderStatus } from "../../bridge";
 import { folderEntries, folderRequest, type FolderStatus } from "../../store/sessionFolders";
 import { groupOf } from "../../store/organization";
@@ -559,6 +560,8 @@ export function SessionList() {
   onCleanup(cancelFilterAccountReads);
   const accountChoices = createMemo(() => filterAccounts().map((a) => ({ ...a, count: a.bindings.reduce((n, b) => n + (pickerCounts().account.get(b) ?? 0), 0) })));
   const list = useRows(false);
+  // Task 252: the visible cards' folders get their git status (Qt gitReads).
+  followVisibleGit(() => list.keys().flatMap((key) => { const row = list.byId().get(key); return row?.type === "card" ? [row.session] : []; }));
   // A row the menu bar or a notification opened (Qt's revealRow): scrolled to
   // once the list has it; another selection drops the request.
   createEffect(on([revealing, list.rows, selectedKey], ([id, rows, selected]) => {

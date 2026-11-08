@@ -7638,6 +7638,17 @@ writes, and the team worker applies what it leaves there on its next tick
 (about three seconds):
 
 - `hgs team report`, `ask`, `commit` and `hgs team run` wait there as before.
+- `hgs team create` of its own scratch team under the owner's standing rule
+  (task #228), and its `hgs team` calls for a scratch team it leads (plan,
+  approve, relaunch and the other team operations), wait there the same way: the
+  worker applies them with the member's identity and checks its profile and the
+  rule again. A call outside that scope is not queued - it keeps the sandbox's
+  error, so the member asks the lead (task #346).
+- An approval request that escalates a sandbox for ONE
+  `hgs team <op> --json-file PATH` call in that scope is answered by Zerus once,
+  recorded in the lead's feed; another command, a wrapper, a pipe or a call
+  outside the scope still reaches the lead. A sandboxed member calls `hgs team`
+  directly, one command per call with `--json-file`, never wrapped in a script.
 - `hgs run` waits there too. The worker records the run as the member
   session's work, so the session is Building, and starts it at Low integrity
   with its temporary files in `<folder>/.zerus-team/tmp`: a member's run never
@@ -7657,8 +7668,9 @@ may write none of it, and may not read the owner's configuration
 (`~/.config/hgs`), which stays the owner's only. hgs recognizes such a process
 because the state belongs to another user and the configuration is unreadable.
 It then loads no configuration (no peers) and takes the same ways as a DeepSeek
-sandbox: team calls, `hgs run` and the reads above wait in the member's folder
-for the team worker. The member is the session its inherited `HGS_SESSION` and
+sandbox: the calls above (a scratch team's create and its operations included),
+`hgs run` and the reads above wait in the member's folder for the team worker.
+The member is the session its inherited `HGS_SESSION` and
 `HGS_RUN_ID` name; only the folder the request is written to proves it. A Codex
 member's `hgs run` runs in `codex sandbox` on its own folder, never above it:
 the command must start in that folder. Codex keeps `.git` read-only, so its

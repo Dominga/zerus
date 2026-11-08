@@ -332,7 +332,7 @@ pub(crate) fn write_error(error: impl std::fmt::Display) -> anyhow::Error {
     let text = error.to_string();
     if text.contains("readonly database") || text.contains("read-only database") {
         return anyhow::anyhow!(
-            "the sandbox blocks the team store: ask for permission to run hgs team report (or ask/commit), then retry"
+            "the sandbox blocks the team store: your own hgs team report, ask, run, commit and your scratch team's calls (under the owner's standing rule) queue in your folder by themselves; anything else asks the lead"
         );
     }
     anyhow::anyhow!(text)
@@ -2328,7 +2328,7 @@ mod tests {
     fn a_sandbox_blocked_write_says_what_to_do() {
         let error = write_error("attempt to write a readonly database").to_string();
         assert!(error.contains("the sandbox blocks the team store"), "{error}");
-        assert!(error.contains("hgs team report"), "{error}");
+        assert!(error.contains("hgs team report") && error.contains("scratch team"), "{error}");
         assert_eq!(write_error("disk I/O error").to_string(), "disk I/O error");
     }
 

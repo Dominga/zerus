@@ -81,7 +81,8 @@ export function TerminalTab() {
   // before the click or during the read (zerus-q4ayu).
   const pasteClipboard = (attach: number) => {
     if (!attach) return;
-    void pasteText().then((text) => { terminal.paste(text, attach); live()?.term.focus(); })
+    // Only a delivered paste takes the focus: a refused one leaves it where the person moved it (zerus-mp3c9).
+    void pasteText().then((text) => { if (terminal.paste(text, attach)) live()?.term.focus(); })
       .catch((error) => toast(tr("Terminal"), tr("Could not paste: %1", String(error)), "error"));
   };
   const onContextMenu = (event: MouseEvent) => {

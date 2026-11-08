@@ -20,7 +20,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
-use zerus_replica::{ids, Inventory};
+use zerus_replica::{ids, Inventory, TaskFile};
 
 /// v2 (ROWS 5): rows carry their owner session for session-filtered pages
 /// (zerus-cg5h.26). A new file, not a new version of v1: an older hgs keeps
@@ -113,11 +113,16 @@ impl From<zerus_replica::Error> for Failure {
 
 type Outcome<T> = std::result::Result<T, Failure>;
 
+/// A task's stored files' stamps, row, error and what a phone holds of it.
+type Stored = (String, Option<String>, Option<String>, Option<Held>);
+
 #[cfg(test)]
 thread_local! {
     /// Task documents decoded and task files stamped, for the bounded-work tests.
     pub(super) static DECODED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static STAMPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Stored rows read to compare with a task read again.
+    pub(super) static STORED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Task histories read from their documents into the index.
     pub(super) static MATERIALIZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Reads rows as the build before the repair rule did, without it.
@@ -177,6 +182,51 @@ fn stamped(dir: &Path, uuid: &str, now: i64) -> (String, bool) {
 
 fn files(dir: &Path, uuid: &str) -> String {
     stamped(dir, uuid, 0).0
+}
+
+/// `stamped`'s stamps of every task in the task folder, as one listing of
+/// the folder found its files (zerus-cg5h.30): a file it did not list is
+/// missing without a lookup. A file written after the listing is found by a
+/// later check.
+fn listed(dir: &Path) -> Outcome<BTreeMap<String, String>> {
+    let mut parts: BTreeMap<String, [String; 3]> = BTreeMap::new();
+    for entry in fs::read_dir(dir.join("tasks"))? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some((uuid, file)) = zerus_replica::task_file(&name) else {
+            continue;
+        };
+        let (stamp, _) = entry_stamp(listed_metadata(&entry, file), 0);
+        let slot = match file {
+            TaskFile::Snapshot => 0,
+            TaskFile::Updates => 1,
+            TaskFile::Mark => 2,
+        };
+        parts.entry(uuid.to_owned()).or_insert_with(|| [MISSING.into(), MISSING.into(), MISSING.into()])[slot] = stamp;
+    }
+    Ok(parts.into_iter().map(|(uuid, [snapshot, updates, mark])| (uuid, format!("{snapshot}|{updates}|{mark}"))).collect())
+}
+
+/// A listed task file's metadata as `stamped` reads it: the mark's own
+/// entry, and what the snapshot and updates link to. On Unix a file that is
+/// no link is read through the folder's handle, without a path lookup;
+/// elsewhere the listing's own metadata may lag a write, so it is not used.
+fn listed_metadata(entry: &fs::DirEntry, file: TaskFile) -> std::io::Result<fs::Metadata> {
+    #[cfg(unix)]
+    if file == TaskFile::Mark || entry.file_type().is_ok_and(|t| !t.is_symlink()) {
+        return entry.metadata();
+    }
+    match file {
+        TaskFile::Mark => fs::symlink_metadata(entry.path()),
+        _ => fs::metadata(entry.path()),
+    }
+}
+
+/// What a full check compares each task with: the stamps its stored row
+/// holds and those the folder listing found.
+struct Known {
+    stamps: HashMap<String, String>,
+    listed: BTreeMap<String, String>,
 }
 
 /// Whether stamps from `stamped` say every file of the task is gone.
@@ -719,18 +769,7 @@ impl<'a> Index<'a> {
             self.db.execute("INSERT OR REPLACE INTO meta VALUES('suspect', ?1)", [now.to_string()])?;
         }
         if full {
-            let mut known: HashMap<String, String> = HashMap::new();
-            {
-                let mut query = self.db.prepare("SELECT uuid, files FROM tasks")?;
-                let rows = query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-                for row in rows {
-                    let (uuid, files) = row?;
-                    known.insert(uuid, files);
-                }
-            }
-            let mut uuids: BTreeSet<String> = self.store.uuids()?.into_iter().collect();
-            uuids.extend(known.keys().cloned());
-            let uuids: Vec<String> = uuids.into_iter().collect();
+            let (known, uuids) = self.known()?;
             let every: BTreeSet<String>;
             let noted = if rederive {
                 every = uuids.iter().cloned().collect();
@@ -864,16 +903,12 @@ impl<'a> Index<'a> {
     }
 
     /// Indexes again each of `uuids` whose files changed (`known` holds the
-    /// stamps already read, for a full check), and every one the journal
-    /// names (`noted`) whatever its stamps: Windows has no inode and coarse
-    /// file times, so a rewrite of the same length can keep its stamp. Short
-    /// transactions; any change gives the index a new revision.
-    fn refresh(
-        &mut self,
-        uuids: &[String],
-        known: Option<&HashMap<String, String>>,
-        noted: Option<&BTreeSet<String>>,
-    ) -> Outcome<()> {
+    /// stamps already read and the folder listing, for a full check), and
+    /// every one the journal names (`noted`) whatever its stamps: Windows has
+    /// no inode and coarse file times, so a rewrite of the same length can
+    /// keep its stamp. Short transactions; any change gives the index a new
+    /// revision.
+    fn refresh(&mut self, uuids: &[String], known: Option<&Known>, noted: Option<&BTreeSet<String>>) -> Outcome<()> {
         let dir = self.store.dir().to_owned();
         let read_at = now();
         // The repair epoch rows read here are marked with; an emulated older
@@ -888,28 +923,22 @@ impl<'a> Index<'a> {
                 // A task the journal names is read whatever its stamps, and
                 // stamped only with that read.
                 let forced = noted.is_some_and(|noted| noted.contains(uuid));
-                #[allow(clippy::type_complexity)]
-                let stored: Option<(String, Option<String>, Option<String>, Option<Held>)> = self
-                    .db
-                    .query_row("SELECT files, row, error, version, done FROM tasks WHERE uuid=?1", [uuid], |r| {
-                        let held = match (r.get::<_, Option<String>>(3)?, r.get::<_, Option<bool>>(4)?) {
-                            (Some(version), Some(done)) => Some(Held { version, done }),
-                            _ => None,
-                        };
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, held))
-                    })
-                    .optional()?;
                 if !forced {
-                    let (now, _) = stamped(&dir, uuid, read_at);
-                    let stamps = match known {
-                        Some(known) => known.get(uuid).cloned(),
-                        None => stored.as_ref().map(|s| s.0.clone()),
+                    // A full check compares with the listing and reads the
+                    // stored row only of a task whose stamps changed.
+                    let (stamps, now) = match known {
+                        Some(known) => (
+                            known.stamps.get(uuid).cloned(),
+                            known.listed.get(uuid).cloned().unwrap_or_else(|| format!("{MISSING}|{MISSING}|{MISSING}")),
+                        ),
+                        None => (self.stored(uuid)?.map(|s| s.0), stamped(&dir, uuid, read_at).0),
                     };
                     let unchanged = stamps.as_deref() == Some(now.as_str()) || (stamps.is_none() && gone(&now));
                     if unchanged {
                         continue;
                     }
                 }
+                let stored = self.stored(uuid)?;
                 // A repair saves the task: its row keeps the stamps taken
                 // with that read, and a task whose files are gone has none.
                 let (derived, (now, trusted)) = derive(self.store, uuid, || stamped(&dir, uuid, read_at));
@@ -1001,6 +1030,41 @@ impl<'a> Index<'a> {
         Ok(())
     }
 
+    /// What a full check compares with, and every task it checks: each one
+    /// the index holds or the task folder lists.
+    fn known(&self) -> Outcome<(Known, Vec<String>)> {
+        let mut stamps: HashMap<String, String> = HashMap::new();
+        {
+            let mut query = self.db.prepare_cached("SELECT uuid, files FROM tasks")?;
+            let rows = query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            for row in rows {
+                let (uuid, files) = row?;
+                stamps.insert(uuid, files);
+            }
+        }
+        let listed = listed(self.store.dir())?;
+        let mut uuids: BTreeSet<&String> = listed.keys().collect();
+        uuids.extend(stamps.keys());
+        let uuids: Vec<String> = uuids.into_iter().cloned().collect();
+        Ok((Known { stamps, listed }, uuids))
+    }
+
+    /// A task's stored row: its stamps, row or error, and what a phone holds.
+    fn stored(&self, uuid: &str) -> Outcome<Option<Stored>> {
+        #[cfg(test)]
+        STORED.with(|n| n.set(n.get() + 1));
+        let mut query = self.db.prepare_cached("SELECT files, row, error, version, done FROM tasks WHERE uuid=?1")?;
+        Ok(query
+            .query_row([uuid], |r| {
+                let held = match (r.get::<_, Option<String>>(3)?, r.get::<_, Option<bool>>(4)?) {
+                    (Some(version), Some(done)) => Some(Held { version, done }),
+                    _ => None,
+                };
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, held))
+            })
+            .optional()?)
+    }
+
     /// Whether the index may place tasks (zerus-cg5h.24): certified current
     /// under the repair epoch (no row change by another build pending) and
     /// holding no damaged task, whose document may still name a short ID or
@@ -1020,18 +1084,7 @@ impl<'a> Index<'a> {
     /// changed and vanished task files are read again; no other task is
     /// decoded.
     pub(super) fn check_files(&mut self) -> Outcome<()> {
-        let mut known: HashMap<String, String> = HashMap::new();
-        {
-            let mut query = self.db.prepare_cached("SELECT uuid, files FROM tasks")?;
-            let rows = query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-            for row in rows {
-                let (uuid, files) = row?;
-                known.insert(uuid, files);
-            }
-        }
-        let mut uuids: BTreeSet<String> = self.store.uuids()?.into_iter().collect();
-        uuids.extend(known.keys().cloned());
-        let uuids: Vec<String> = uuids.into_iter().collect();
+        let (known, uuids) = self.known()?;
         // The periodic full check keeps its own clock: it also reads the
         // project document again, which this check does not (zerus-k2388).
         self.refresh(&uuids, Some(&known), None)?;

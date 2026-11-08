@@ -382,6 +382,8 @@ export interface ActivityEvent {
   sender?: string;
   activity_key?: string;
   message_id?: string;
+  /** OpenCode's inbox: a waiting message is `queued`, and after Stop it stays `not_delivered` until it is sent or removed. */
+  delivery_state?: string;
   attachments?: EventAttachment[];
   voice?: Record<string, unknown>;
   /** Codex's question replies of a user event, parsed in Rust (R7's annotate_replies). */
@@ -843,6 +845,9 @@ export interface LocalMessage {
 }
 /** The native queue (core input_queue::QueueView), kept separate from local messages. */
 export interface QueueView { id: string; text: string; hint: string; can_send_now: boolean; enabled: boolean; label: string; run_id?: string; conversation_id?: string }
+/** What one Remove of a not-delivered OpenCode message came to (src-tauri composer/inbox.rs). */
+export type InboxRemoveReply = { outcome: "removed" | "changed" | "busy" } | { outcome: "failed" | "uncertain"; detail: string };
+
 /** A held message: the request of its local row, its exact text and its file names. */
 export interface HeldMessageView { request_id: string; text: string; attachments: string[] }
 export interface ComposerView {
@@ -865,6 +870,9 @@ export interface ComposerView {
   /** False while a required card stands in for the editor and the action row (Qt's setInputVisible). */
   input_visible: boolean;
   queue: QueueView | null;
+  /** The not-delivered OpenCode message of this session whose removal runs, and whether any removal runs (no other Remove can be clicked). */
+  inbox_removing?: string | null;
+  inbox_busy?: boolean;
   /** The interrupted prompt Rust offers an empty field (zerus-5wmh.13.4): taken once, only while this field is still empty and nothing typed is on its way. */
   offer?: { id: number; text: string } | null;
 }

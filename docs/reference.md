@@ -1613,10 +1613,13 @@ the mouse, a right-click goes to the agent; hold Shift for the menu.
 Use **Reference an existing file** (the link button beside Attach, or its Files
 menu in a narrow column) when the file
 already exists on the agent's computer, including very large files. Locally,
-choose a file or enter its absolute path. For a remote session, enter an absolute
-path (including Windows drive or UNC paths) or `~/` path on the named remote
-computer; a file on your desktop is not uploaded
-or made accessible to that computer. Zerus inserts an editable, quoted path into
+choose a file or enter its absolute path (or a `~/` path); Zerus checks that it
+names an existing file. If that check cannot answer within a few seconds, for
+example on an unresponsive network mount, the dialog says so and offers Retry.
+For a remote session, enter an absolute path (including Windows drive or UNC
+paths on a Windows computer) or `~/` path on the named remote computer; only its
+form is checked, not whether the file exists. A file on your desktop is not
+uploaded or made accessible to that computer. Zerus inserts an editable, quoted path into
 the draft and saves it as ordinary message text. Review it and press Send when
 ready. This action does not read, copy or Base64-encode the file and has no file
 size limit. It refers to the existing file, whose contents may change; the agent
@@ -3932,7 +3935,10 @@ opens, migrates or removes, so the two never rebuild each other's index. Each sa
 project's change journal (`changes`, a bounded hint that is only ever replaced,
 never written through), so a read decodes only changed tasks. Every task
 file's stamp (length, modification time, inode) is also checked at least every
-30 seconds for writers without the journal. A row is suspect when it was read
+30 seconds for writers without the journal: one listing of the task folder
+gives the files to stamp (a file it does not list is missing, and a file
+written after it is found by the next check), and only a task whose stamps
+changed is read again. A row is suspect when it was read
 from files modified within the last 2 seconds, before the journal last became
 unknown, more than 10 minutes ago, or at a time after now (a clock set back).
 A page reads its suspect rows from their documents again before it returns
@@ -3992,6 +3998,13 @@ Creating managed attempts for every first direct start is separate work; this
 change activates no new C3 admission or floor path. Legacy plain reports keep
 the documented pinned-agent rule for never-sent queued work. A floor or a
 recorded attempt never authorizes an implicit legacy start.
+
+If managed history remains but the current execution falls back to legacy
+(for example, after its first managed handoff is refused), a successful start
+acknowledgement returns `reporting: "history_only"` and an explicit `report_hint`,
+without `report_command` or `report_attempt`. It creates no attempt UUID and
+explains that reports stay in history without moving the task. The person can
+accept the result or resend the task as a new attempt.
 
 This is an updated-writer boundary, with no task/exchange schema, event shape,
 C3 or floor change. Older writer binaries still apply their older unscoped

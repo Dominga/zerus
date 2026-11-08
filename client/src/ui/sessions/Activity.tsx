@@ -33,6 +33,8 @@ import { animationFrames, createActivityEnd, newLocalSends } from "./activity-en
 import { replyVisible } from "../../store/viewedReply";
 import { buildTranscript, createActivityProjections, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
 import { DELETE_TEXT, DELETE_TITLE, retryReason, routeInspect } from "./local-actions";
+import { NOT_DELIVERED_HINT } from "./inbox-actions";
+import { createInboxRemoveScope, InboxRemove, RemoveQueuedDialog, type InboxRemovePorts, type InboxRemoveScope } from "./InboxRemove";
 import { markdownReady, markdownTree, type Inline, type MarkdownBlock } from "./markdown";
 import { activityAll, activityFlow, activityRange, measureActivityRows, activitySelectionIndexes, activitySelectionText, activityText, activityTexts, activityVirtualOffset, selectActivityAll, selectionCoversActivity } from "./activity-virtual";
 import { openExternal, openSessionFile } from "./sessionFiles";
@@ -560,6 +562,17 @@ function LocalDeleteDialog() {
   );
 }
 
+/** The open Activity's Remove (zerus-5i2e5): its review lives and ends with that Activity. */
+const InboxScope = createContext<InboxRemoveScope>();
+
+/** Remove for a not-delivered OpenCode message: the composer's view and its Rust command (zerus-5wmh.13.6). */
+const inboxPorts: InboxRemovePorts = {
+  view: () => composer.view(),
+  remove: (handle, run, conversation, messageId) => composer.inboxRemove(handle, run, conversation, messageId),
+  notify: (tone, text, sticky) => { notify(tone, text, sticky); },
+  done: () => { focusTranscript(); },
+};
+
 /** The native queue shares the outgoing Markdown/attachment renderer and its
  * guarded file-reference context, without adding sent/delivery actions. */
 export function OutgoingMessage(props: { item: ActivityItem; scope?: AttachmentScope; session?: Session }) {
@@ -568,6 +581,7 @@ export function OutgoingMessage(props: { item: ActivityItem; scope?: AttachmentS
 
 function ItemBody(props: { item: ActivityItem; scope?: AttachmentScope }) {
   const it = () => props.item;
+  const inboxScope = useContext(InboxScope);
   return (
     <div class="act-body">
       <Show when={it().kind === "user"} fallback={<Body text={it().body ?? ""} />}>
@@ -594,6 +608,9 @@ function ItemBody(props: { item: ActivityItem; scope?: AttachmentScope }) {
         </div>
       </Show>
       <Show when={it().local?.actions.length}><LocalActions local={it().local!} /></Show>
+      {/* Not delivered is not a refusal: OpenCode keeps the message and runs it first; Zerus never resends it. */}
+      <Show when={it().inbox?.state === "not_delivered"}><p class="act-inbox-hint">{tr(NOT_DELIVERED_HINT)}</p></Show>
+      <Show when={inboxScope && it().inbox?.removable ? it().inbox : undefined}>{(item) => <InboxRemove item={item()} scope={inboxScope!} />}</Show>
     </div>
   );
 }
@@ -1111,7 +1128,10 @@ export function ActivityView(props: { source?: ActivitySource }) {
     const id = source().target()?.id;
     return orderedRows().find((row) => row.key === id);
   };
+  // This Activity's Remove review: retired with it (zerus-5i2e5).
+  const inboxScope = createInboxRemoveScope(inboxPorts);
   return (
+    <InboxScope.Provider value={inboxScope}>
     <ActivitySession.Provider value={fileSession}>
     <ActivityLayoutHeld.Provider value={layoutHeld}>
     <div class="activity" style={{ position: "relative" }}>
@@ -1122,6 +1142,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
         </div>
       </Show>
       <LocalDeleteDialog />
+      <RemoveQueuedDialog scope={inboxScope} />
       <SessionFileDialog />
       <div class="act-scroll" ref={scroller} tabindex="-1" onContextMenu={activityMenu} onScroll={onScroll} style={{ "overflow-anchor": "none" }}
         onWheel={scrollIntent}
@@ -1233,5 +1254,6 @@ export function ActivityView(props: { source?: ActivitySource }) {
     </div>
     </ActivityLayoutHeld.Provider>
     </ActivitySession.Provider>
+    </InboxScope.Provider>
   );
 }

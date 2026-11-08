@@ -45,6 +45,7 @@ pub mod entry;
 mod exit_flush;
 #[cfg(feature = "live")]
 mod external_open;
+mod file_reference;
 #[cfg(feature = "live")]
 mod files;
 mod identity;
@@ -1757,6 +1758,9 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         clipboard::copy_text,
         clipboard::copy_verbatim,
         clipboard::paste_text,
+        clipboard::clipboard_files,
+        file_reference::file_reference_check,
+        file_reference::file_reference_pick,
         organization::move_to_project,
         organization::create_project,
         organization::rename_project,
@@ -1917,6 +1921,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::send::send_answer,
         composer::send::local_retry,
         composer::send::local_delete,
+        composer::inbox::inbox_remove,
         composer::send::local_inspect,
         composer::send::send_cancel,
         composer::send::send_interrupted,
@@ -1996,6 +2001,9 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         clipboard::copy_text,
         clipboard::copy_verbatim,
         clipboard::paste_text,
+        clipboard::clipboard_files,
+        file_reference::file_reference_check,
+        file_reference::file_reference_pick,
         desk_take_pending,
     ]
 }

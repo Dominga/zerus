@@ -419,6 +419,13 @@ export async function copyText(text: string): Promise<void> {
   await navigator.clipboard.writeText(text);
 }
 
+/** Reference an existing file's local check (zerus-5wmh.13.5): one bounded metadata call in Rust, per dialog. */
+export type FileReferenceCheck = { status: "file"; path: string } | { status: "missing" } | { status: "busy" };
+export const fileReferenceCheck = (dialog: number, path: string): Promise<FileReferenceCheck> =>
+  inTauri() ? invoke<FileReferenceCheck>("file_reference_check", { dialog, path }) : Promise.resolve({ status: "missing" });
+/** Browse… for an existing local file: only its path, null when none was chosen. */
+export const fileReferencePick = (): Promise<string | null> => inTauri() ? invoke<string | null>("file_reference_pick") : Promise.resolve(null);
+
 /** Copies `text` exactly as it is (a process's command, as Qt's ProcessView copies it); refuses only an empty text. */
 export async function copyVerbatim(text: string): Promise<void> {
   if (inTauri()) return invoke<void>("copy_verbatim", { text });
@@ -426,6 +433,9 @@ export async function copyVerbatim(text: string): Promise<void> {
   if (!navigator.clipboard) throw "The clipboard is unavailable.";
   await navigator.clipboard.writeText(text);
 }
+
+/** The files copied in a file manager, for a paste into the composer: null when the clipboard holds none (clipboard.rs `clipboard_files`). */
+export const clipboardFiles = (): Promise<string[] | null> => inTauri() ? invoke<string[] | null>("clipboard_files") : Promise.resolve(null);
 
 /** The clipboard's text for a paste into Terminal: from Rust in the app, the page's clipboard in a browser. */
 export async function pasteText(): Promise<string> {
@@ -964,6 +974,9 @@ export const clearContext = (handle: number, run: string, conversation: string, 
   desktop<SendReply>("clear_context", { handle, run, conversation, dismiss, delay });
 export const localRetry = (handle: number, id: string) => desktop<SendReply>("local_retry", { handle, id });
 export const localDelete = (handle: number, id: string) => desktop<void>("local_delete", { handle, id });
+/** Remove one not-delivered OpenCode message after the person confirmed it (src-tauri composer/inbox.rs); Rust checks it again first. */
+export const inboxRemove = (handle: number, run: string, conversation: string, messageId: string) =>
+  desktop<import("./types").InboxRemoveReply>("inbox_remove", { handle, run_id: run, conversation_id: conversation, message_id: messageId });
 export const localInspect = (handle: number, id: string) => desktop<Inspect | null>("local_inspect", { handle, id });
 /** Reads an Activity attachment into the private cache, after the reads ahead of it (composer/fetch.rs). */
 export async function attachmentFetch(computer: string, file: AttachmentRef): Promise<Fetched> {

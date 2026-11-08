@@ -34,7 +34,7 @@ vi.mock("../../bridge", () => ({
   composerOpen: vi.fn(async () => null), composerVisibility: vi.fn(async () => {}), composerEdit: vi.fn(async () => {}), composerPick: vi.fn(async () => {}), composerPasteImage: vi.fn(async () => {}),
   composerRemove: vi.fn(async () => {}), composerUndoRemove: vi.fn(async () => {}), composerAllowRetry: vi.fn(async () => {}), composerRefresh: vi.fn(async () => {}),
   composerTab: vi.fn(async () => {}), sendMessage: vi.fn(), sendAnswer: vi.fn(), sendCancel: vi.fn(async () => {}), sendInterrupted: vi.fn(async () => {}), sendInterruptFailed: vi.fn(async () => {}), clearContext: vi.fn(),
-  localRetry: vi.fn(), localDelete: vi.fn(async () => {}), localInspect: vi.fn(async () => null),
+  localRetry: vi.fn(), localDelete: vi.fn(async () => {}), localInspect: vi.fn(async () => null), inboxRemove: vi.fn(async () => ({ outcome: "removed" as const })),
   savedDrafts: vi.fn(), draftConflicts: vi.fn(), savedDraft: vi.fn(), draftRecover: vi.fn(), draftRestore: vi.fn(),
   composerClearControl: vi.fn(async () => null),
   sessionFolderStatus: vi.fn(async () => ({ folder: false, shell: false, folder_hint: "Unavailable" })),

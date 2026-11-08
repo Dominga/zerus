@@ -43,8 +43,8 @@ Every partial, missing and unverified row names the bead that tracks it.
 | --- | --- | --- | --- | --- |
 | Sessions list, row actions and header | 22 | 2 | 5 | 2 owner decisions |
 | Archive and search | 10 | 4 | 1 | |
-| Composer and sending | 30 | 4 | 1 | |
-| Activity | 10 | 5 | 2 | |
+| Composer and sending | 31 | 4 | | |
+| Activity | 11 | 5 | 1 | |
 | Questions and approvals | 12 | | | |
 | Notifications | 7 | 5 | | |
 | Tray, menu bar and Dock | 6 | 2 | 1 | 2 owner decisions |
@@ -53,7 +53,7 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Settings | 17 | | 1 | |
 | Machines, accounts, projects, new session, tasks and worktrees | 18 | | | |
 | Terminal, processes and platform session support | 8 | | | |
-| Total (192 rows) | 152 | 24 | 12 | 4 |
+| Total (192 rows) | 154 | 24 | 10 | 4 |
 
 ## Owner decisions
 
@@ -69,8 +69,6 @@ Every partial, missing and unverified row names the bead that tracks it.
 
 | Bead | Priority | Gap |
 | --- | --- | --- |
-| `zerus-5wmh.13.5` | P2 | Reference an existing file from the composer |
-| `zerus-5wmh.13.6` | P2 | OpenCode queued-message stamps, waiting hint and Remove |
 | `zerus-5wmh.13.14` | P2 | Windows: focus-aware banners, update alert, tray theme, watchdog, startup note |
 | `zerus-5wmh.13.7` | P3 | Composer and voice small controls |
 | `zerus-5wmh.13.8` | P3 | Activity rendering: full tool output, View process, Markdown, inline-code links, empty state |
@@ -177,7 +175,7 @@ Keyboard commands for every area are listed once, under Shortcuts and navigation
 | Paste an image (32-megapixel limit) | done | `ui/sessions/Composer.tsx:230-237`; `store/composer.ts:471-485` | `MessageComposer.cpp:197-202,393-398` |
 | Paste files copied in a file manager; drop raw image data on the editor | partial (`zerus-5wmh.13.7`) | paste accepts image blobs only (`ui/sessions/Composer.tsx:230-237`); drops carry file paths only (`store/drops.ts:158-164`) | `MessageComposer.cpp:186-196,230-246` |
 | Drag and drop on the session panel: attach, or paste paths into Terminal, with an overlay hint | done | `store/drops.ts:9-49,158-164`; `ui/sessions/SessionDetail.tsx:282` | `SessionFileDrop.h`; `SessionsWindow.cpp:1595-1610,2618-2660` |
-| Reference an existing file (path only; browse locally or check a remote path) | **missing** (`zerus-5wmh.13.5`) | the button is always disabled: `ui/sessions/Composer.tsx:322` ("Arrives with file references.") | `MessageComposer.cpp:297-303,865-959` |
+| Reference an existing file (path only; browse locally or check a remote path) | done (a remote file's existence is not checked, as in Qt; `zerus-5wmh.13.18`) | `ui/sessions/FileReferenceDialog.tsx`; `ui/sessions/file-reference.ts`; bounded local check `tauri/file_reference.rs:54-98`; inserted as an ordinary edit into the draft it opened on: `ui/sessions/Composer.tsx:173-193` | `MessageComposer.cpp:297-303,865-959` |
 | The agent's suggested next message as placeholder; Tab inserts it | done | `ui/sessions/Composer.tsx:183-190,217-225,311`; `store/suggestions.ts` | `MessageComposer.cpp:209-215,556-570,822-825` |
 | Model and effort chip: Apply, Save for resume, provider notice, Open Terminal, OpenCode picker with favorites | done | `ui/sessions/ModelSettingsDialog.tsx:30-66`; `ui/sessions/ModelPicker.tsx:82-159` | `MessageComposer.cpp:317-363,1389-1667`; `OpenCodeModelPicker.cpp` |
 | Voice message: record, Space or Esc stops, preview, provider choice, Discard with confirmation, Send voice, permission and cold-cache dialogs | done | `ui/sessions/VoiceControls.tsx:15-158`; `core/voice_composer.rs:2063-2141` | `speech/SpeechComposer.cpp:60-99,426-533` |
@@ -207,9 +205,9 @@ Keyboard commands for every area are listed once, under Shortcuts and navigation
 | Tool calls grouped and expandable to each event's full output | partial (`zerus-5wmh.13.8`) | expanded rows show a 110-character preview per event (`ui/sessions/transcript.ts:197-201,568`) | `ActivityView.cpp:1105-1140` |
 | View process link from a tool event to its recorded process | **missing** (`zerus-5wmh.13.8`) | no such link in the client UI | `ActivityView.cpp:1129-1134` |
 | Thinking and subagent reports as Markdown | partial (`zerus-5wmh.13.8`) | plain text: `ui/sessions/Activity.tsx:636-642` (peer and background cards do render Markdown) | `ActivityView.cpp:942-975` |
-| Session cleared marker; Question and Your answer blocks; queued and sent stamps | done | `ui/sessions/transcript.ts:512,543-549`; `ui/sessions/Activity.tsx:575-583,667` | `ActivityView.cpp:347-363,934-940,1029-1046` |
+| Session cleared marker; Question and Your answer blocks; queued and sent stamps | done | `ui/sessions/transcript.ts:512,554-560`; `ui/sessions/Activity.tsx:585-593,680` | `ActivityView.cpp:347-363,934-940,1029-1046` |
 | Local message stamps: Sending, Not sent, Submitted to terminal, Delivery not confirmed | done | `ui/sessions/transcript.ts:226-251` | `ActivityView.cpp:1053-1055` |
-| OpenCode queue: Queued or Not delivered stamp, waiting hint, Remove queued message with confirmation | **missing** (`zerus-5wmh.13.6`) | `core/input_queue.rs:546-558` (`inbox_removable`) has no caller; no UI reads `delivery_state` | `ActivityView.cpp:1036-1038,1072-1087`; `SessionsWindow.cpp:4433-4467` |
+| OpenCode queue: Queued or Not delivered stamp, waiting hint, Remove queued message with confirmation | done | `ui/sessions/transcript.ts:538-547`; `ui/sessions/Activity.tsx:608-609`; `ui/sessions/InboxRemove.tsx:21,43`; `tauri/composer/inbox.rs:53` | `ActivityView.cpp:1036-1038,1072-1087`; `SessionsWindow.cpp:4433-4467` |
 | Attachment, voice and video cards: play, seek, transcript; playback stops when hidden | done | `ui/sessions/Activity.tsx:254-490`; `store/mediaPlayback.ts` | `ActivityView.cpp:759-782,979-1028,2153-2187` |
 | Recorded-context fallback; Older events have expired | done | `ui/sessions/transcript.ts:212-216`; `ui/sessions/Activity.tsx:1176-1178` | `ActivityView.cpp:753-757,905-916` |
 | A message search hit opens in Activity with the query highlighted | partial (`zerus-5wmh.13.17`) | shown as plain highlighted text, without Markdown, links or Copy as Markdown; the jump caption does not become Back to latest activity (`ui/sessions/Activity.tsx:1158-1162`) | `SessionsWindow.cpp:382-392,436-458`; `ActivityView.cpp:1592-1605` |

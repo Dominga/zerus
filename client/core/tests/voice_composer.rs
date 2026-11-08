@@ -822,6 +822,8 @@ fn a_denied_microphone_offers_its_settings() {
     let shown = driver.shown();
     assert_eq!(shown.notice_label, "Microphone access");
     assert_eq!(shown.notice_detail, "Microphone access was denied.");
+    // Its chip reopens the recovery, not the notice text (Qt's showResult).
+    assert!(shown.notice_permission);
     assert_eq!(
         microphone_settings_url(Platform::Macos),
         Some("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
@@ -846,6 +848,9 @@ fn recordings_are_checked() {
         driver.composer.notice().1,
         "The voice recording is invalid."
     );
+    let shown = driver.shown();
+    assert!(shown.notice_visible && !shown.notice_permission);
+    assert_eq!(shown.notice_label, "Voice notice");
     assert_eq!(driver.composer.state(), State::Idle);
     // A saved draft that is not a WAV recording is reported, not loaded.
     let next = Arc::new(AtomicU64::new(1));

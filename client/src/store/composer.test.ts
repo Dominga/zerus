@@ -56,6 +56,7 @@ function fakes(reply: SendReply = { kind: "sending" }, opened: ComposerView | nu
     localRetry: async (h, id) => { calls.push(`retry ${h} ${id}`); return retryReply; },
     localDelete: async (h, id) => { calls.push(`delete ${h} ${id}`); },
     localInspect: async (h, id) => { calls.push(`inspect ${h} ${id}`); return { kind: "terminal" }; },
+    inboxRemove: async (h, run, conversation, id) => { calls.push(`inbox ${h} ${run} ${conversation} ${id}`); return { outcome: "removed" }; },
   };
   const notify: Notices = (tone, text, sticky) => { notices.push(`${tone} ${sticky ? "sticky" : "timed"} ${text}`); };
   let clock = 0;
@@ -1017,6 +1018,23 @@ describe("dropped files (MessageComposer::attachDroppedFiles, 961-967)", () => {
   });
 });
 
+describe("pasted copied files (MessageComposer insertFromMimeData, 186-196)", () => {
+  it("attach in place of the selection, as a pasted image, after the typing is saved", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view());
+      c.input("hello world", 11, 6);
+      await c.attachPasted(["/srv/home/example/notes.txt", "/srv/home/example/plan.png"]);
+      expect(f.calls.slice(-2)).toEqual(["edit 1 hello world", "attach /srv/home/example/notes.txt,/srv/home/example/plan.png 6-11"]);
+      c.apply(view({ sending: true }));
+      const before = f.calls.length;
+      await c.attachPasted(["/srv/a.txt"]);
+      expect(f.calls.length, "nothing attaches while the composer is locked").toBe(before);
+    });
+  });
+});
+
 describe("opening a draft attachment (MessageComposer::openAttachment, 1067-1085)", () => {
   const shot = { name: "shot.png", mime: "image/png", reference: "[Image #1]", bytes: 8, path: "draft/1/2/0", excerpt: null };
 
@@ -1101,6 +1119,30 @@ describe("the batch envelope", () => {
     expect(isEmptyBatch(normalize({ composer_events: events }))).toBe(false);
     expect(normalize({ composer_events: events }).composer_events).toEqual(events);
     expect(normalize({ draft_keys: [KEY] }).draft_keys).toEqual([KEY]);
+  });
+
+  describe("Remove of a not-delivered OpenCode message (zerus-5wmh.13.6)", () => {
+    it("asks Rust for exactly the composer, run, conversation and message the dialog opened for", async () => {
+      const f = fakes();
+      await createRoot(async () => {
+        const c = createComposer(f.port, f.timers, images(1, 1), f.notify);
+        c.apply(view({}));
+        expect(await c.inboxRemove(1, "run-1", "conv-1", "msg_queued01")).toEqual({ outcome: "removed" });
+        expect(f.calls).toEqual(["inbox 1 run-1 conv-1 msg_queued01"]);
+      });
+    });
+
+    it("a call that failed in transport may have removed it: uncertain, never retried", async () => {
+      const f = fakes();
+      let calls = 0;
+      const port: ComposerPort = { ...f.port, inboxRemove: () => { calls++; return Promise.reject(new Error("ipc closed")); } };
+      await createRoot(async () => {
+        const c = createComposer(port, f.timers, images(1, 1), f.notify);
+        c.apply(view({}));
+        expect(await c.inboxRemove(1, "run-1", "conv-1", "msg_queued01")).toEqual({ outcome: "uncertain", detail: "ipc closed" });
+        expect(calls).toBe(1);
+      });
+    });
   });
 
   describe("local rows (Task 7)", () => {

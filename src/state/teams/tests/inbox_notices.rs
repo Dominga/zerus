@@ -61,6 +61,7 @@ fn screenshot_team() -> Team {
         rings: 2,
         rung_at: Some(crate::state::now() - 4000.0),
         lead_told: true,
+        ..Default::default()
     });
     team
 }

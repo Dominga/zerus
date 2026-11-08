@@ -1,7 +1,7 @@
 //! "Resume and send" past the capability probe, against the real
 //! service fixture with a fake `hgs` that records every session resume
 //! request.
-use super::tests::{original, receipt};
+use super::tests::{original, receipt, RESUMED};
 use super::*;
 use crate::desktop_service::{
     task_message::fixture_tests::{connected, private_case},
@@ -90,9 +90,13 @@ async fn offer_handing(
     .unwrap()
 }
 fn settled_as(answer: SendAnswer) -> ResumeAnswer {
-    ResumeAnswer::Settled(answer)
+    ResumeAnswer::Settled(answer, None)
 }
-async fn checked(service: &Arc<Service>, plan: &wire::Plan) -> Checked {
+/// Settled after a recorded resume: with the run its receipt returned.
+fn resumed_as(answer: SendAnswer) -> ResumeAnswer {
+    ResumeAnswer::Settled(answer, Some(RESUMED.into()))
+}
+async fn checked(service: &Arc<Service>, plan: &wire::Plan) -> (Checked, Option<String>) {
     let (service, plan) = (service.clone(), plan.clone());
     tauri::async_runtime::spawn_blocking(move || check(Some(service), &plan))
         .await
@@ -208,9 +212,10 @@ fn the_admission_or_the_lookup_settles_and_an_unsettled_one_is_pending() {
         let v = verified(&service, &sent).await;
         let recorded = receipt(&v, Recorded, Recorded, true);
         answers(&f.0, Some(admit(&v, Some(&recorded), true)), &[]);
+        // Recorded, with the run its resume returned (zerus-5wmh.66.4.9.3).
         assert!(matches!(
             offer(service.clone(), SESSION, sent).await,
-            ResumeAnswer::Settled(SendAnswer::Recorded(_))
+            ResumeAnswer::Settled(SendAnswer::Recorded(_), Some(run)) if run == RESUMED
         ));
         // Resuming, then the wait, then a send that never started after a
         // recorded resume whose agent never became ready, through the lookup.
@@ -226,7 +231,7 @@ fn the_admission_or_the_lookup_settles_and_an_unsettled_one_is_pending() {
         );
         assert_eq!(
             offer(service.clone(), SESSION, waited).await,
-            settled_as(SendAnswer::Unsent(NOT_READY.into()))
+            resumed_as(SendAnswer::Unsent(NOT_READY.into()))
         );
         // A resume the CLI refused before launching anything.
         let refused_resume = original("refused resume");
@@ -258,11 +263,17 @@ fn the_admission_or_the_lookup_settles_and_an_unsettled_one_is_pending() {
             offer(service.clone(), SESSION, slow).await,
             ResumeAnswer::Pending(v.plan.clone())
         );
-        assert_eq!(checked(&service, &v.plan).await, Checked::InProgress);
+        assert_eq!(
+            checked(&service, &v.plan).await,
+            (Checked::InProgress, None)
+        );
         answers(&f.0, None, &[json!(receipt(&v, Recorded, Unknown, true))]);
         assert_eq!(
             checked(&service, &v.plan).await,
-            Checked::Settled(SendAnswer::Unconfirmed(UNCONFIRMED.into()))
+            (
+                Checked::Settled(SendAnswer::Unconfirmed(UNCONFIRMED.into())),
+                Some(RESUMED.into())
+            )
         );
         assert_eq!(
             count(&f.0, "session_resume"),
@@ -273,7 +284,10 @@ fn the_admission_or_the_lookup_settles_and_an_unsettled_one_is_pending() {
         // A check against a service without the kind knows nothing.
         let f = fixture(json!({"resume_no_abi": true}));
         let (service, _cache) = connected(&f).await;
-        assert_eq!(checked(&service, &v.plan).await, Checked::Unavailable);
+        assert_eq!(
+            checked(&service, &v.plan).await,
+            (Checked::Unavailable, None)
+        );
         assert!(calls(&f.0).is_empty());
         service.join().await.unwrap();
     });

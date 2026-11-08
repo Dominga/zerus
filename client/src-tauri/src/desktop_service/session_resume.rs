@@ -46,7 +46,10 @@ pub(crate) enum ResumeAnswer {
     ///   service, neither child started, the resume was refused, or the
     ///   agent never became ready in time; the text says which);
     /// - Unconfirmed, the send may have started and is never sent again.
-    Settled(SendAnswer),
+    ///
+    /// With the run the resume's own receipt returned, once it recorded the
+    /// resume: the message's row belongs to that run (zerus-5wmh.66.4.9.3).
+    Settled(SendAnswer, Option<String>),
     /// The service still reports it in progress after the wait: it is
     /// checked again, read-only, with this plan.
     Pending(wire::Plan),
@@ -67,6 +70,16 @@ pub(crate) fn settled(receipt: &wire::Receipt, plan: &wire::Plan) -> Option<Send
         wire::Settled::NotSent { .. } => SendAnswer::Unsent(NOT_READY.into()),
         wire::Settled::Unknown => SendAnswer::Unconfirmed(UNCONFIRMED.into()),
     })
+}
+
+/// The run the resume's own exact receipt returned: the run the send is
+/// bound to. `None` until the resume is recorded.
+pub(crate) fn resumed_run(receipt: &wire::Receipt) -> Option<String> {
+    receipt
+        .resume
+        .outcome
+        .as_ref()
+        .map(|resumed| resumed.result_target.run_id.clone())
 }
 
 /// The exact stdins of the two calls: `hgs session-action` resuming the
@@ -200,19 +213,22 @@ pub(crate) fn call(
             .as_ref()
             .filter(|a| a.matches(&intent))
             .and_then(|a| a.receipt.as_ref())
-            .and_then(|receipt| settled(receipt, &plan))
+            .and_then(|receipt| Some((settled(receipt, &plan)?, resumed_run(receipt))))
         {
-            return Ok(ResumeAnswer::Settled(answer));
+            return Ok(ResumeAnswer::Settled(answer.0, answer.1));
         }
         Ok(wait(&read, &plan, shutdown))
     })();
     result.unwrap_or_else(|()| {
-        ResumeAnswer::Settled(if sent.get() {
-            SendAnswer::Unconfirmed(UNCONFIRMED.into())
-        } else {
-            // Nothing reached the service: never Unknown.
-            SendAnswer::Unsent(NOT_SENT.into())
-        })
+        ResumeAnswer::Settled(
+            if sent.get() {
+                SendAnswer::Unconfirmed(UNCONFIRMED.into())
+            } else {
+                // Nothing reached the service: never Unknown.
+                SendAnswer::Unsent(NOT_SENT.into())
+            },
+            None,
+        )
     })
 }
 
@@ -222,7 +238,7 @@ pub(crate) fn call(
 fn wait(read: &Arc<Read>, plan: &wire::Plan, shutdown: &AtomicBool) -> ResumeAnswer {
     let until = Instant::now() + SETTLE;
     let mut delay = Duration::from_millis(250);
-    let unconfirmed = || ResumeAnswer::Settled(SendAnswer::Unconfirmed(UNCONFIRMED.into()));
+    let unconfirmed = || ResumeAnswer::Settled(SendAnswer::Unconfirmed(UNCONFIRMED.into()), None);
     loop {
         if shutdown.load(Ordering::Acquire) || !read.current() {
             return unconfirmed();
@@ -232,7 +248,7 @@ fn wait(read: &Arc<Read>, plan: &wire::Plan, shutdown: &AtomicBool) -> ResumeAns
             return unconfirmed();
         };
         if let Some(answer) = settled(&receipt, plan) {
-            return ResumeAnswer::Settled(answer);
+            return ResumeAnswer::Settled(answer, resumed_run(&receipt));
         }
         if Instant::now() >= until {
             return ResumeAnswer::Pending(plan.clone());
@@ -267,20 +283,21 @@ fn lookup(read: &Arc<Read>, plan: &wire::Plan) -> Option<wire::Receipt> {
 }
 
 /// The read-only check of an original this client handed to the service
-/// earlier, by its exact plan. It never resumes or sends anything.
-pub(crate) fn check(service: Option<Arc<Service>>, plan: &wire::Plan) -> Checked {
+/// earlier, by its exact plan, with the run its resume returned once
+/// recorded. It never resumes or sends anything.
+pub(crate) fn check(service: Option<Arc<Service>>, plan: &wire::Plan) -> (Checked, Option<String>) {
     let Ok(read) = Read::new(service) else {
-        return Checked::Unavailable;
+        return (Checked::Unavailable, None);
     };
     if !read.supports(wire::HELP_MARKER).unwrap_or(false) {
-        return Checked::Unavailable;
+        return (Checked::Unavailable, None);
     }
     let Some(receipt) = lookup(&read, plan) else {
-        return Checked::Unavailable;
+        return (Checked::Unavailable, None);
     };
     match settled(&receipt, plan) {
-        Some(answer) => Checked::Settled(answer),
-        None => Checked::InProgress,
+        Some(answer) => (Checked::Settled(answer), resumed_run(&receipt)),
+        None => (Checked::InProgress, None),
     }
 }
 

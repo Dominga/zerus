@@ -482,6 +482,15 @@
   .term-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; font-size: var(--fs-xs); color: var(--z-color-muted); }
   .term-host { flex: 1; min-height: 0; margin: 0 10px 10px; padding: 8px; border-radius: var(--z-radius-lg); background: var(--z-color-terminal-bg); border: 1px solid var(--z-color-divider); }
   .term-host .xterm { height: 100%; }
+  /* Task 360: a team-notice turn folded to one row over the xterm buffer. */
+  .term-fold { padding: 0; }
+  .term-fold-btn { display: flex; align-items: center; gap: 6px; width: 100%; height: 100%; padding: 0 6px;
+    border: 0; border-left: 2px solid var(--z-color-accent); background: var(--z-color-terminal-bg);
+    color: var(--z-color-terminal-fg); font: inherit; text-align: left; cursor: pointer; white-space: nowrap; overflow: hidden; }
+  .term-fold-btn:hover { background: var(--z-color-hover); }
+  .term-fold-chev { color: var(--z-color-muted); font-size: 1.1em; }
+  .term-fold-label { overflow: hidden; text-overflow: ellipsis; opacity: .85; }
+  .term-notice-mode { display: flex; align-items: center; gap: 6px; margin-left: 8px; }
   .proc-summary { display: flex; align-items: center; gap: 8px; padding: 8px 12px; font-size: var(--fs-sm); color: var(--z-color-muted); }
   .proc-table { width: calc(100% - 24px); margin: 0 12px; border-collapse: collapse; font-size: var(--fs-sm); table-layout: fixed; }
   .proc-table th { text-align: left; font-weight: 600; color: var(--z-color-label); font-size: var(--fs-xs); padding: 4px 8px; border-bottom: 1px solid var(--z-color-divider); }

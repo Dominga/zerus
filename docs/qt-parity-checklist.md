@@ -43,7 +43,7 @@ Every partial, missing and unverified row names the bead that tracks it.
 | --- | --- | --- | --- | --- |
 | Sessions list, row actions and header | 22 | 2 | 5 | 2 owner decisions |
 | Archive and search | 10 | 4 | 1 | |
-| Composer and sending | 29 | 4 | 2 | |
+| Composer and sending | 30 | 4 | 1 | |
 | Activity | 10 | 5 | 2 | |
 | Questions and approvals | 12 | | | |
 | Notifications | 6 | 6 | | |
@@ -53,11 +53,10 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Settings | 17 | | 1 | |
 | Machines, accounts, projects, new session, tasks and worktrees | 18 | | | |
 | Terminal, processes and platform session support | 8 | | | |
-| Total (192 rows) | 150 | 25 | 13 | 4 |
+| Total (192 rows) | 151 | 25 | 12 | 4 |
 
-The gaps a person is likely to meet first in daily use are the interrupted
-prompt that does not come back after Stop (`zerus-5wmh.13.4`) and short tray
-messages that never appear on Linux and Windows (`zerus-5wmh.13.13`).
+The gap a person is likely to meet first in daily use is short tray messages
+that never appear on Linux and Windows (`zerus-5wmh.13.13`).
 
 ## Owner decisions
 
@@ -73,7 +72,6 @@ messages that never appear on Linux and Windows (`zerus-5wmh.13.13`).
 
 | Bead | Priority | Gap |
 | --- | --- | --- |
-| `zerus-5wmh.13.4` | P2 | After Stop, return the interrupted prompt to an empty message field |
 | `zerus-5wmh.13.5` | P2 | Reference an existing file from the composer |
 | `zerus-5wmh.13.6` | P2 | OpenCode queued-message stamps, waiting hint and Remove |
 | `zerus-5wmh.13.13` | P2 | Short tray messages call `osascript` on Linux and Windows |
@@ -173,7 +171,7 @@ Keyboard commands for every area are listed once, under Shortcuts and navigation
 | Send while the agent works: queue panel, Send now (button, Ctrl+Shift+Enter) | done | `ui/sessions/QueuePanel.tsx:12-39`; `ui/sessions/SessionDetail.tsx:276`; `core/input_queue.rs` | `ActivityView.cpp:1281-1305,1895`; `SessionsWindow.cpp:1859,1868` |
 | Send and push now; with an empty field it sends the queue now | done | `ui/sessions/Composer.tsx:255-260`; `store/composer.ts:381-421` | `MessageComposer.cpp:830-854` |
 | Stop (interrupt) with its result notices | done | `ui/sessions/Composer.tsx:337-340`; `store/actions.ts:77-80` | `MessageComposer.cpp:315-316,550-554`; `SessionsWindow.cpp:1187-1215` |
-| After Stop, the interrupted turn's prompt returns to an empty message field | **missing** (`zerus-5wmh.13.4`) | `tauri/composer/send.rs:3252` only cancels a waiting send; no UI offers the interrupted prompt | `SessionsWindow.cpp:1194-1197,2279-2307` |
+| After Stop, the interrupted turn's prompt returns to an empty message field | done (a started draft or unsent typing wins) | kept at Stop and dropped on a refused interrupt: `tauri/composer/send.rs:3254-3299`, `tauri/composer/interrupted.rs:68-135`; offered once the turn reads interrupted: `tauri/composer/mod.rs:1677-1720`; taken only into an empty field: `store/composer.ts:284-292` | `SessionsWindow.cpp:1194-1197,2279-2307` |
 | Status line: block reasons, disabled-Send hint, Refresh this session | done | `ui/sessions/Composer.tsx:315,324-331`; `store/composer.ts:124-134,390-395` | `MessageComposer.cpp:308-311,811-819,1141-1227` |
 | 64 KiB message limit | done | `store/composer.ts:35-38,193-198` | `MessageComposer.cpp:1146,1204` |
 | Duplicate safeguard: an unconfirmed delivery locks Send until Allow retry | done | `ui/sessions/Composer.tsx:332-335`; `ui/sessions/composer-ui.ts:42-43` | `MessageComposer.cpp:306-307,412-417,1185,1193` |

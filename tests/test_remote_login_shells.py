@@ -135,6 +135,31 @@ class RemoteLoginShells(unittest.TestCase):
                     self.assertEqual(self.received(), (['path-info', '--path', tilde], ''))
                 self.assertNotIn('-t', json.loads((self.root / 'ssh-args.json').read_text()))
 
+    def test_a_guarded_path_info_needs_both_markers_and_keeps_its_tilde(self):
+        # --expect-machine wraps the actual command; guarded-create-v1 alone
+        # never authorizes path-info (zerus-3skhm), and the wrapped path's
+        # ~ arrives as written too (zerus-ie12o).
+        machine = '22222222-2222-4222-8222-222222222222'
+        executable = self.peer / '.local/bin/hgs'
+        for name, shell in login_shells().items():
+            with self.subTest(shell=name):
+                executable.write_text(PEER_HGS.replace("'hooks-health-v1'", "'hooks-health-v1' 'guarded-create-v1'"))
+                old = self.hgs(shell, '@peer', '--expect-machine', machine, 'path-info', '--path', '~/plan.md')
+                self.assertNotEqual(old.returncode, 0)
+                self.assertIn('update the selected computer', old.stderr.lower())
+                self.assertFalse((self.peer / 'argv.json').exists())
+                executable.write_text(PEER_HGS.replace("'hooks-health-v1'", "'hooks-health-v1' 'hgs [@host] path-info --path <path>'"))
+                unguarded = self.hgs(shell, '@peer', '--expect-machine', machine, 'path-info', '--path', '~/plan.md')
+                self.assertNotEqual(unguarded.returncode, 0, "a peer without guarded-create-v1 cannot check the machine")
+                self.assertFalse((self.peer / 'argv.json').exists())
+                executable.write_text(PEER_HGS.replace("'hooks-health-v1'", "'hooks-health-v1' 'guarded-create-v1' 'hgs [@host] path-info --path <path>'"))
+                for path in ('~/plan.md', "~/plan's notes.md", '~other/plan.md', '/srv/' + TRICKY):
+                    result = self.hgs(shell, '@peer', '--expect-machine', machine, 'path-info', '--path', path)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    argv = self.received()[0]
+                    self.assertEqual((argv[:2], argv[-3:]), (['--expect-machine', machine], ['path-info', '--path', path]))
+                self.assertNotIn('-t', json.loads((self.root / 'ssh-args.json').read_text()))
+
     def test_plain_commands_deliver_quotes_and_backslashes_exactly(self):
         for name, shell in login_shells().items():
             with self.subTest(shell=name):

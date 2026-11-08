@@ -1754,10 +1754,20 @@ fn remote_via(
         Some(machine) => ["--expect-machine".to_owned(), machine.to_owned()].into_iter().chain(remote_args).collect(),
         None => remote_args,
     };
+    let wrapped_path_info = command == "--expect-machine" && args.get(1).is_some_and(|actual| actual == "path-info");
     let remote = if let Some(markers) = selector_markers(command, &args)? {
         // An older peer would read the flag as a session name; it must
         // advertise the selector, and what the command needs already, first.
         gated(&markers, &remote_args)
+    } else if command == "path-info" || wrapped_path_info {
+        // An older peer would read an unknown command as an agent launch, so
+        // the actual command's marker gates it, wrapped by --expect-machine
+        // too (zerus-3skhm). A path's ~ reaches the peer's hgs as written:
+        // hgs expands ~/ itself and refuses ~user, which the peer's shell
+        // would expand (zerus-ie12o).
+        let words = remote_args.iter().map(|word| if word.starts_with('~') { format!("'{}'", word.replace('\'', "'\\''")) } else { platform::join(&[word]) }).collect::<Vec<_>>().join(" ");
+        let guarded = if wrapped_path_info || machine.is_some() { "~/.local/bin/hgs --help 2>/dev/null | grep -qF 'guarded-create-v1' && " } else { "" };
+        platform::remote_sh(&format!("if {guarded}~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] path-info --path'; then exec ~/.local/bin/hgs {words}; else echo 'hgs: update the selected computer to check file paths' >&2; exit 1; fi"))
     } else if command == "--expect-machine" && args.get(1).is_some_and(|actual| actual=="session-action-status") {
         // Probe the same executable, without reading the JSON stream. An old
         // peer must never interpret this reader's name as a program to launch.
@@ -1789,12 +1799,6 @@ fn remote_via(
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF '{}'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to stream events (watch-v1)' >&2; exit 1; fi",zerus_watch_protocol::HELP_MARKER,platform::join(&remote_args)))
     } else if command == "guide" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] guide'; then exec ~/.local/bin/hgs {}; else echo 'hgs: the selected computer has no agent guide; check hgs @host -h' >&2; exit 1; fi",platform::join(&remote_args)))
-    } else if command == "path-info" {
-        // An older peer would read an unknown command as an agent launch. A
-        // path's ~ reaches the peer's hgs as written: hgs expands ~/ itself
-        // and refuses ~user, which the peer's shell would expand.
-        let words = remote_args.iter().map(|word| if word.starts_with('~') { format!("'{}'", word.replace('\'', "'\\''")) } else { platform::join(&[word]) }).collect::<Vec<_>>().join(" ");
-        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] path-info --path'; then exec ~/.local/bin/hgs {words}; else echo 'hgs: update the selected computer to check file paths' >&2; exit 1; fi"))
     } else if let Some(link) = (matches!(command, "claude" | "codex" | "kimi" | "fork") && machine.is_none())
         .then(state::parent_link::forwarded_argument)
         .flatten()
@@ -1813,6 +1817,7 @@ fn remote_via(
     let remote = if global_dry || has(&args, "--dry-run") { remote } else {
         let mut markers: Vec<(&str, bool)> = match command {
             "--expect-machine" if args.get(1).is_some_and(|v| v == "session-action-status") => vec![("guarded-create-v1", false), ("lifecycle-receipt-status-v1", true)],
+            "--expect-machine" if wrapped_path_info => vec![("guarded-create-v1", false), ("hgs [@host] path-info --path", false)],
             "--expect-machine" => vec![("guarded-create-v1", false)],
             "subagent" => vec![("Subagent retirement ABI: subagent-retire-v1", false)],
             "repository" => vec![("repository-clone-v1", false)],

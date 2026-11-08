@@ -20,7 +20,8 @@ pub const USAGE: &str = "usage: hgs [@host] path-info --path <path>";
 
 /// `~` is the home folder, `~/rest` a path under it (the remaining
 /// separators stay under home, as Qt's `homePath() + path.mid(1)`); any
-/// other path must be absolute.
+/// other path must be absolute. The rest is appended as text: `join` would
+/// let a drive or root in it replace home (zerus-fqsli).
 fn expanded(path: &str, home: Option<&Path>) -> std::result::Result<PathBuf, &'static str> {
     if path.is_empty() || path.len() > MAX_PATH || path.chars().any(char::is_control) {
         return Err("enter a path without line breaks or control characters");
@@ -30,7 +31,16 @@ fn expanded(path: &str, home: Option<&Path>) -> std::result::Result<PathBuf, &'s
     } else if let Some(rest) = path.strip_prefix("~/") {
         let home = home.ok_or("this computer has no home folder")?;
         let rest = rest.trim_start_matches(std::path::is_separator);
-        if rest.is_empty() { home.to_path_buf() } else { home.join(rest) }
+        if rest.is_empty() {
+            home.to_path_buf()
+        } else {
+            let mut joined = home.as_os_str().to_owned();
+            if !joined.as_encoded_bytes().last().is_some_and(|byte| std::path::is_separator(char::from(*byte))) {
+                joined.push(std::path::MAIN_SEPARATOR_STR);
+            }
+            joined.push(rest);
+            PathBuf::from(joined)
+        }
     } else {
         PathBuf::from(path)
     };
@@ -109,6 +119,12 @@ mod tests {
         assert_eq!(expanded("~", Some(&home)), Ok(home.clone()));
         assert_eq!(expanded("~/notes/plan.md", Some(&home)), Ok(home.join("notes/plan.md")));
         assert_eq!(expanded("~//notes", Some(&home)), Ok(home.join("notes")), "further separators stay under home");
+        // A drive or root after ~/ is text under home, never a new start (zerus-fqsli).
+        let drive = expanded(r"~/C:\other", Some(&home)).unwrap();
+        assert!(drive.starts_with(&home), "{drive:?}");
+        assert_eq!(drive.as_os_str(), format!("{}{}C:\\other", home.display(), std::path::MAIN_SEPARATOR).as_str());
+        let slash_home = PathBuf::from(if cfg!(windows) { r"C:\" } else { "/" });
+        assert_eq!(expanded("~/srv", Some(&slash_home)), Ok(slash_home.join("srv")), "no doubled separator after a root home");
         assert!(expanded("notes/plan.md", Some(&home)).is_err());
         assert!(expanded("~user/plan.md", Some(&home)).is_err());
         assert!(expanded("", Some(&home)).is_err());

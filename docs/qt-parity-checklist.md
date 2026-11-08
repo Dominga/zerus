@@ -44,7 +44,7 @@ Every partial, missing and unverified row names the bead that tracks it.
 | --- | --- | --- | --- | --- |
 | Sessions list, row actions and header | 27 | | 1 | 2 owner decisions, 1 intentional difference |
 | Archive and search | 14 | 1 | 0 | |
-| Composer and sending | 34 | 1 | | |
+| Composer and sending | 35 | | | 1 intentional difference |
 | Activity | 17 | 0 | 0 | |
 | Questions and approvals | 12 | | | |
 | Notifications | 7 | 5 | | |
@@ -54,7 +54,7 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Settings | 17 | | | 1 intentional difference |
 | Machines, accounts, projects, new session, tasks and worktrees | 18 | | | |
 | Terminal, processes and platform session support | 8 | | | |
-| Total (192 rows) | 172 | 11 | 3 | 6 |
+| Total (193 rows) | 173 | 10 | 3 | 7 |
 
 ## Owner decisions
 
@@ -71,7 +71,6 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Bead | Priority | Gap |
 | --- | --- | --- |
 | `zerus-5wmh.13.14` | P2 | Windows: focus-aware banners, update alert, tray theme, watchdog, startup note |
-| `zerus-5wmh.13.7.5` | P3 | Drop image data (no file path) into the composer |
 | `zerus-5wmh.13.8` | P3 | Activity rendering: full tool output, View process, Markdown, inline-code links, empty state |
 | `zerus-5wmh.13.15` | P3 | Tray Refresh entry, Linux without a tray host, Linux launch during service start |
 | `zerus-5wmh.13.16` | P3 | Alert text language; the labeled rail's exact-count tooltip (`zerus-nfmh1`) |
@@ -173,7 +172,8 @@ Keyboard commands for every area are listed once, under Shortcuts and navigation
 | Attach from a file picker (8 files, 10 MiB each, 20 MiB total), `[File #n]` and `[Image #n]` at the cursor | done | `ui/sessions/Composer.tsx:318-321`; `core/attachments.rs:143-149` | `MessageComposer.cpp:856-863,969-1000` |
 | Attachment chips: thumbnails, size, preview, guarded open, remove with its reference, keyboard use | done (adds Undo) | `ui/sessions/Attachments.tsx:26-131` | `MessageComposer.cpp:1008-1124` |
 | Paste an image (32-megapixel limit) | done | `ui/sessions/Composer.tsx:230-237`; `store/composer.ts:471-485` | `MessageComposer.cpp:197-202,393-398` |
-| Paste files copied in a file manager; drop raw image data on the editor | partial (`zerus-5wmh.13.7.5`) | copied local files attach on paste, before an image or the text: `ui/sessions/Composer.tsx:211-234`, `ui/sessions/paste-files.ts`, bounded native file list `tauri/clipboard.rs:75-128`; dropped image data is not taken, as drops carry file paths only (`store/drops.ts:158-164`), and on Windows the native drag-drop never passes it to the page | `MessageComposer.cpp:186-196,230-246` |
+| Paste files copied in a file manager | done | copied local files attach on paste, before an image or the text: `ui/sessions/Composer.tsx:211-234`, `ui/sessions/paste-files.ts`, bounded native file list `tauri/clipboard.rs:75-128` | `MessageComposer.cpp:186-196` |
+| Drop raw image data (no file path) on the editor, for example an image dragged out of a browser | intentional difference (`zerus-5wmh.13.7.5`) | the image data never reaches the page on any platform: tauri-runtime-wry 2.12.3's drag-drop handler takes every native drop; wry 0.57.1 on macOS then never passes it to the web view and reports only file URLs, on Linux it reports other URLs as paths, and on Windows it accepts file drops only; WebKitGTK's GTK3 drop target registers no image target at all. A drop on the panel that names no file says to copy the image and paste it, which attaches it (`store/drops.ts`, `NO_FILES_NOTICE`); a mixed drop attaches its files. No drop target of our own and no wry fork (design-tima2, 2026-11-08) | `MessageComposer.cpp:230-246` |
 | Drag and drop on the session panel: attach, or paste paths into Terminal, with an overlay hint | done | `store/drops.ts:9-49,158-164`; `ui/sessions/SessionDetail.tsx:282` | `SessionFileDrop.h`; `SessionsWindow.cpp:1595-1610,2618-2660` |
 | Reference an existing file (path only; browse locally or check a remote path) | done (a remote file's existence is not checked, as in Qt; `zerus-5wmh.13.18`) | `ui/sessions/FileReferenceDialog.tsx`; `ui/sessions/file-reference.ts`; bounded local check `tauri/file_reference.rs:54-98`; inserted as an ordinary edit into the draft it opened on: `ui/sessions/Composer.tsx:173-193` | `MessageComposer.cpp:297-303,865-959` |
 | The agent's suggested next message as placeholder; Tab inserts it | done | `ui/sessions/Composer.tsx:183-190,217-225,311`; `store/suggestions.ts` | `MessageComposer.cpp:209-215,556-570,822-825` |

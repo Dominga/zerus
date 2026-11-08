@@ -115,28 +115,35 @@ pub(in crate::platform) fn sample(
                 fs::read_link(task.join("root")),
             ]
         };
+        // Each planned task's reads, the reference's and those of further
+        // tasks with an fs context or descriptor table of their own. Only an
+        // actual denial is kept as such; any other failed read, a task gone
+        // meanwhile included, leaves the observation unsettled (None).
         let reads = inspect(&path, pid, before.1, deadline, |tasks| {
-            let mut contexts = Vec::from(links(&tasks.reference));
-            let image = fs::read_link(tasks.reference.join("exe"));
-            let files = files(&tasks.reference, deadline);
-            // Further tasks with an fs context or descriptor table of their
-            // own; a task gone meanwhile has none.
-            for task in &tasks.fs {
+            let mut contexts = Vec::new();
+            for task in std::iter::once(&tasks.reference).chain(&tasks.fs) {
                 for link in links(task) {
-                    match link {
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !task.exists() => {}
-                        other => contexts.push(other),
+                    if link.as_ref().is_err_and(unsettled) {
+                        return Ok(None);
                     }
+                    contexts.push(link);
                 }
             }
+            let image = fs::read_link(tasks.reference.join("exe"));
+            if image.as_ref().is_err_and(unsettled) {
+                return Ok(None);
+            }
+            let Some(files) = files(&tasks.reference, deadline)? else {
+                return Ok(None);
+            };
             let mut tables = Vec::new();
             for task in &tasks.files {
-                match self::files(task, deadline) {
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound && !task.exists() => {}
-                    other => tables.push(other),
-                }
+                let Some(table) = self::files(task, deadline)? else {
+                    return Ok(None);
+                };
+                tables.push(table);
             }
-            Ok((contexts, image, files, tables))
+            Ok(Some((contexts, image, files, tables)))
         });
         let (contexts, image, files, tables) = match reads {
             Ok(Some(reads)) => reads,
@@ -175,9 +182,8 @@ pub(in crate::platform) fn sample(
         {
             return Err(error());
         }
-        let mut files = files.map_err(|_| error())?;
+        let mut files = files;
         for table in tables {
-            let table = table.map_err(|_| error())?;
             files.denied |= table.denied;
             for path in table.paths {
                 files.push(path).map_err(|_| error())?;
@@ -225,27 +231,67 @@ pub(in crate::platform) fn sample(
     Ok(rows)
 }
 
-fn files(process: &Path, deadline: std::time::Instant) -> io::Result<Files> {
+/// One task's descriptor paths. None: the table could not be read for a
+/// reason other than a denial, so its observation is unsettled.
+fn files(process: &Path, deadline: std::time::Instant) -> io::Result<Option<Files>> {
     let mut out = Files::default();
     let entries = match fs::read_dir(process.join("fd")) {
         Ok(entries) => entries,
         Err(error) if denied(&error) => {
             out.denied = true;
-            return Ok(out);
+            return Ok(Some(out));
         }
+        Err(error) if unsettled(&error) => return Ok(None),
         Err(error) => return Err(error),
     };
     for (count, entry) in entries.enumerate() {
         bounded(count, deadline)?;
-        match fs::read_link(entry?.path()) {
+        let Some(entry) = settled(entry)? else {
+            return Ok(None);
+        };
+        match fs::read_link(entry.path()) {
             Ok(path) if path.is_absolute() => out.push(path)?,
             Ok(_) => {} // Pipes, sockets and anonymous descriptors have no filesystem path.
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {} // This FD closed.
+            Err(error) if closed(&error, process) => {}
             Err(error) if denied(&error) => out.denied = true,
+            Err(error) if unsettled(&error) => return Ok(None),
             Err(error) => return Err(error),
         }
     }
-    Ok(out)
+    Ok(Some(out))
+}
+
+/// The read budget's own error, from bounded(): it ends the inspection.
+fn budget(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::TimedOut && error.raw_os_error().is_none()
+}
+
+/// Whether a failed read of a planned task leaves its observation unsettled
+/// (zerus-lo8o1.1, design-tima2's ruling), classified by the read's actual
+/// error. An EACCES/EPERM denial keeps the existing per-read denial policy,
+/// and the read budget ends the inspection. Any other failure (the task gone
+/// with ENOENT or ESRCH, caught mid-exit, an I/O error, short or malformed
+/// content) proves nothing about the task, and no conclusion of absence may
+/// rest on it.
+fn unsettled(error: &io::Error) -> bool {
+    !denied(error) && !budget(error)
+}
+
+/// One read of a planned task, classified: None when it leaves the
+/// observation unsettled, the error itself for a denial or the budget.
+fn settled<T>(result: io::Result<T>) -> io::Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if unsettled(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// A descriptor closed between the table's listing and its own read: ENOENT
+/// for it while the task's entry is still there. This per-descriptor rule
+/// predates zerus-lo8o1; a task gone meanwhile is unsettled instead.
+fn closed(error: &io::Error, task: &Path) -> bool {
+    error.kind() == io::ErrorKind::NotFound && task.exists()
 }
 
 /// Unlike the generic review's display paths, native object observations can
@@ -317,9 +363,10 @@ struct Task {
 /// is read only while the leader has `exited`, to find the live ones. A live
 /// leader's tasks are all taken as live: an exited one has no fs context or
 /// descriptor table for kcmp to match, so it is read itself, and its missing
-/// cwd is uncertainty. None: a listed task was gone before its state could be
-/// read. It may have handed its context to a task the listing missed, so the
-/// observation proves nothing. Any other read error is uncertainty.
+/// cwd unsettles the observation. None: a listed task's state could not be
+/// read, for a reason other than a denial, the task gone meanwhile included.
+/// It may have handed its context to a task the listing missed, so the
+/// observation proves nothing.
 fn task_set(process: &Path, exited: bool, deadline: Instant) -> io::Result<Option<Vec<Task>>> {
     let mut ids = Vec::new();
     for (count, entry) in fs::read_dir(process.join("task"))?.enumerate() {
@@ -343,10 +390,9 @@ fn task_set(process: &Path, exited: bool, deadline: Instant) -> io::Result<Optio
             continue;
         }
         let task = process.join("task").join(id.to_string());
-        match identity(&task) {
-            Ok((_, exited, _)) => tasks.push(Task { id, exited }),
-            Err(e) if e.kind() == io::ErrorKind::NotFound && !task.exists() => return Ok(None),
-            Err(e) => return Err(e),
+        match settled(identity(&task))? {
+            Some((_, exited, _)) => tasks.push(Task { id, exited }),
+            None => return Ok(None),
         }
     }
     Ok(Some(tasks))
@@ -354,12 +400,21 @@ fn task_set(process: &Path, exited: bool, deadline: Instant) -> io::Result<Optio
 
 /// Whether two observations list the same task IDs.
 ///
-/// An ID alone identifies a task here (zerus-lo8o1.1). The kernel allocates
-/// task IDs cyclically up to pid_max (4194304 with systemd's 64-bit default,
-/// 32768 by kernel default), so a task replaced under its own ID inside one
-/// read window would need a wraparound of the whole ID space within that
-/// window. Same-UID processes are the trust boundary anyway. The leader keeps
-/// its pid and start-time identity, which the callers check around the reads.
+/// An ID alone identifies a task here; per-task start times are not read
+/// (zerus-lo8o1.1, design-tima2's ruling). No conclusion rests on a task
+/// whose read failed: such a read leaves its observation unsettled (see
+/// `unsettled`), however the ID looks by the second listing.
+///
+/// The accepted residual: a task read successfully as outside the checkout
+/// exits, and a sibling in the checkout takes its ID before the second
+/// listing. The kernel allocates task IDs with idr_alloc_cyclic, whose cursor
+/// persists across calls, so near the wrap at pid_max a freed low ID can come
+/// back after only a few allocations. The case needs a thread exit and a
+/// near-wrap reuse of that exact ID inside one read window, in the same
+/// thread group. Only a stable thread identity (a start time or a thread
+/// pidfd) would close it, and the census deliberately reads none. Same UID is
+/// the trust boundary. The leader keeps its pid and start-time identity,
+/// which the callers check around the reads.
 fn same_tasks(before: &[Task], after: &[Task]) -> bool {
     before
         .iter()
@@ -424,7 +479,7 @@ fn inspect<T>(
     pid: u32,
     exited: bool,
     deadline: Instant,
-    mut read: impl FnMut(&Tasks) -> io::Result<T>,
+    mut read: impl FnMut(&Tasks) -> io::Result<Option<T>>,
 ) -> io::Result<Option<T>> {
     for _ in 0..ATTEMPTS {
         let Some(set) = task_set(process, exited, deadline)? else {
@@ -433,7 +488,14 @@ fn inspect<T>(
         let tasks = task_plan(process, pid, exited, &set, deadline)?;
         #[cfg(test)]
         roster::after_plan();
-        let result = tasks.as_ref().map(&mut read);
+        let result = match tasks.as_ref().map(&mut read) {
+            Some(Ok(None)) => continue,
+            Some(Ok(Some(value))) => Some(Ok(value)),
+            Some(Err(e)) => Some(Err(e)),
+            None => None,
+        };
+        #[cfg(test)]
+        roster::after_read();
         let Some(after) = task_set(process, exited, deadline)? else {
             continue;
         };
@@ -447,7 +509,7 @@ fn inspect<T>(
 /// Whether a group whose leader exited has no live task left, from one
 /// unchanged, settled observation like any other.
 fn group_exited(process: &Path, pid: u32, deadline: Instant) -> io::Result<bool> {
-    Ok(inspect(process, pid, true, deadline, |_| Ok(()))?.is_none())
+    Ok(inspect(process, pid, true, deadline, |_| Ok(Some(())))?.is_none())
 }
 
 /// The process ID an entry names: its own number, or /proc/self's target.
@@ -491,71 +553,86 @@ fn member_with_holder(
 /// Membership through every task `tasks` names. The holder exclusion
 /// applies to the leader's own descriptor table only; a holder whose leader
 /// exited is never proven.
+/// One process's membership from its planned tasks. None: a planned task's
+/// read failed for a reason other than a denial, the task gone meanwhile
+/// included, so the observation is unsettled and the process is read again.
 fn member_tasks(
     tasks: &Tasks,
     inventory: &objects::Inventory,
     root: Option<HolderRoot>,
     deadline: Instant,
-) -> io::Result<bool> {
+) -> io::Result<Option<bool>> {
     bounded(0, deadline)?;
     let strict = root.is_some();
     if strict && !tasks.leader {
         return Err(limit());
     }
-    let mut found = fs_member(&tasks.reference, inventory, strict)?;
-    found |= files_member(&tasks.reference, inventory, root, strict, deadline)?;
+    let Some(mut found) = fs_member(&tasks.reference, inventory, strict)? else {
+        return Ok(None);
+    };
+    let Some(files) = files_member(&tasks.reference, inventory, root, strict, deadline)? else {
+        return Ok(None);
+    };
+    found |= files;
     for task in &tasks.fs {
-        found |= vanished_or(task, fs_member(task, inventory, strict))?;
+        let Some(member) = fs_member(task, inventory, strict)? else {
+            return Ok(None);
+        };
+        found |= member;
     }
     for task in &tasks.files {
-        found |= vanished_or(task, files_member(task, inventory, None, strict, deadline))?;
+        let Some(member) = files_member(task, inventory, None, strict, deadline)? else {
+            return Ok(None);
+        };
+        found |= member;
     }
-    Ok(found)
-}
-
-/// A further task's result: a task gone meanwhile has no membership of its
-/// own; the changed task set then has the process read again. A missing
-/// read while its entry still exists stays uncertainty.
-fn vanished_or(task: &Path, result: io::Result<bool>) -> io::Result<bool> {
-    match result {
-        Err(e) if e.kind() == io::ErrorKind::NotFound && !task.exists() => Ok(false),
-        other => other,
-    }
+    Ok(Some(found))
 }
 
 /// One task's fs context: whether its cwd or its root is in the checkout. A
 /// chroot or bwrap root inside the checkout uses it as much as a cwd does.
-fn fs_member(task: &Path, inventory: &objects::Inventory, strict: bool) -> io::Result<bool> {
+/// None: a read failed for a reason other than a denial.
+fn fs_member(
+    task: &Path,
+    inventory: &objects::Inventory,
+    strict: bool,
+) -> io::Result<Option<bool>> {
     let mut found = false;
     for link in ["cwd", "root"] {
-        match native_object(&task.join(link)) {
-            Ok(id) => found |= inventory.contains(id),
+        match settled(native_object(&task.join(link))) {
+            Ok(Some(id)) => found |= inventory.contains(id),
+            Ok(None) => return Ok(None),
             Err(e) if denied(&e) && !strict => {}
             Err(e) => return Err(e),
         }
     }
-    Ok(found)
+    Ok(Some(found))
 }
 
 /// One task's descriptor table. `root` is the holder's exact root pin, which
 /// is excluded once and must be found; `strict` makes a denial an error.
+/// None: a read failed for a reason other than a denial or a closed
+/// descriptor.
 fn files_member(
     task: &Path,
     inventory: &objects::Inventory,
     root: Option<HolderRoot>,
     strict: bool,
     deadline: Instant,
-) -> io::Result<bool> {
+) -> io::Result<Option<bool>> {
     let mut found = false;
     let mut skipped = false;
-    let fds = match fs::read_dir(task.join("fd")) {
-        Ok(fds) => fds,
-        Err(e) if denied(&e) && !strict => return Ok(false),
+    let fds = match settled(fs::read_dir(task.join("fd"))) {
+        Ok(Some(fds)) => fds,
+        Ok(None) => return Ok(None),
+        Err(e) if denied(&e) && !strict => return Ok(Some(false)),
         Err(e) => return Err(e),
     };
     for (count, fd) in fds.enumerate() {
         bounded(count, deadline)?;
-        let fd = fd?;
+        let Some(fd) = settled(fd)? else {
+            return Ok(None);
+        };
         match native_object(&fd.path()) {
             Ok(id)
                 if root.is_some_and(|root| {
@@ -585,14 +662,15 @@ fn files_member(
                 skipped = true;
             }
             Ok(id) => found |= inventory.contains(id),
-            Err(e) if (denied(&e) && !strict) || e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) if (denied(&e) && !strict) || closed(&e, task) => {}
+            Err(e) if unsettled(&e) => return Ok(None),
             Err(e) => return Err(e),
         }
     }
     if root.is_some() && !skipped {
         return Err(limit());
     }
-    Ok(found)
+    Ok(Some(found))
 }
 
 /// Account only for THIS Scope's actual native borrowed FD. Its descriptor
@@ -689,6 +767,19 @@ pub(crate) mod roster {
         static OWNED: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
         static AFTER_PLAN: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
         static AFTER_LIST: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+        static AFTER_READ: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+    }
+
+    /// Runs this thread's hook, once, between a process's reads and its
+    /// second listing (zerus-lo8o1.1).
+    pub(crate) fn after_read() {
+        let hook = AFTER_READ.with(|hook| hook.borrow_mut().take());
+        if let Some(mut hook) = hook {
+            hook();
+        }
+    }
+    pub(crate) fn on_read(hook: impl FnMut() + 'static) {
+        AFTER_READ.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
     }
 
     /// Runs this thread's hook, once, between a task listing and the state
@@ -739,6 +830,7 @@ pub(crate) mod roster {
             OWNED.with(|owned| *owned.borrow_mut() = None);
             AFTER_PLAN.with(|hook| *hook.borrow_mut() = None);
             AFTER_LIST.with(|hook| *hook.borrow_mut() = None);
+            AFTER_READ.with(|hook| *hook.borrow_mut() = None);
         }
     }
 
@@ -997,7 +1089,8 @@ for op in sys.stdin:
             Path::new("/proc/self"),
             std::time::Instant::now() + std::time::Duration::from_secs(2),
         )
-        .unwrap();
+        .unwrap()
+        .expect("a settled descriptor table");
         assert!(!sample.denied);
         assert!(
             sample.paths.contains(&path),
@@ -1090,8 +1183,10 @@ for op in sys.stdin:
 
     /// zerus-89pkd: an owned roster never hides uncertainty. An entry that
     /// still exists but whose cwd cannot be read, as a process caught while it
-    /// exits, fails the census NotFound exactly as /proc does; it is never an
-    /// empty roster. A real owned occupant is still listed.
+    /// exits, fails the census exactly as /proc does; it is never an empty
+    /// roster. Since zerus-lo8o1.1 that read leaves each observation
+    /// unsettled, so the bounded re-reads end in limit. A real owned occupant
+    /// is still listed.
     #[test]
     fn an_owned_roster_keeps_a_missing_read_in_an_existing_entry_uncertain() {
         use std::process::{Command, Stdio};
@@ -1119,7 +1214,7 @@ for op in sys.stdin:
             fs::write(entry.join(name), fs::read(real.join(name)).unwrap()).unwrap();
         }
         let error = programs(&inventory, until()).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
         drop(owned);
         occupant.kill().unwrap();
         occupant.wait().unwrap();
@@ -1339,21 +1434,42 @@ for op in sys.stdin:
             "both outside"
         );
         // A live task whose entry still exists without a readable cwd is
-        // uncertainty, whether it is the first live task or a further one.
+        // uncertainty, whether it is the first live task or a further one:
+        // each observation is unsettled, and the re-reads end in limit.
         let later = entry.join("task").join(further.to_string());
         synthetic(&later, 'S');
         link(Path::new("/"), later.join("root"));
         assert_eq!(
             programs(&inventory, soon()).unwrap_err().kind(),
-            io::ErrorKind::NotFound,
+            io::ErrorKind::InvalidData,
             "a further live task without a cwd"
+        );
+        assert!(
+            sample(soon()).is_err(),
+            "sample: a further task without a cwd"
+        );
+        // The same for its descriptor table.
+        link(Path::new("/"), later.join("cwd"));
+        fs::remove_dir(later.join("fd")).unwrap();
+        assert_eq!(
+            programs(&inventory, soon()).unwrap_err().kind(),
+            io::ErrorKind::InvalidData,
+            "a further live task without a descriptor table"
+        );
+        assert!(
+            sample(soon()).is_err(),
+            "sample: a further task without a descriptor table"
         );
         fs::remove_dir_all(&later).unwrap();
         fs::remove_file(task.join("cwd")).unwrap();
         assert_eq!(
             programs(&inventory, soon()).unwrap_err().kind(),
-            io::ErrorKind::NotFound,
+            io::ErrorKind::InvalidData,
             "the first live task without a cwd"
+        );
+        assert!(
+            sample(soon()).is_err(),
+            "sample: the first task without a cwd"
         );
         drop(owned);
     }
@@ -1700,6 +1816,98 @@ for op in sys.stdin:
         assert!(programs(&inventory, soon()).is_err(), "census");
         arm();
         assert!(sample(soon()).is_err(), "sample");
+        drop(owned);
+    }
+
+    /// zerus-lo8o1.1, design-tima2's ruling: a failed read is classified by
+    /// its own errno. A denial (EACCES, EPERM) keeps the existing per-read
+    /// policy; a task gone (ENOENT, ESRCH), an I/O error or unreadable content
+    /// is unsettled and never a denial; the read budget ends the inspection.
+    #[test]
+    fn failed_reads_are_classified_by_their_own_errno() {
+        let os = io::Error::from_raw_os_error;
+        for errno in [libc::EACCES, libc::EPERM] {
+            assert!(!unsettled(&os(errno)), "{errno}");
+            let error = settled::<()>(Err(os(errno))).unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(errno));
+        }
+        for errno in [libc::ENOENT, libc::ESRCH, libc::EIO, libc::EINVAL] {
+            assert!(!denied(&os(errno)), "{errno}");
+            assert!(unsettled(&os(errno)), "{errno}");
+            assert!(settled::<()>(Err(os(errno))).unwrap().is_none(), "{errno}");
+        }
+        assert!(unsettled(&io::Error::other("malformed content")));
+        let budget = bounded(0, Instant::now()).unwrap_err();
+        assert!(!unsettled(&budget));
+        assert!(settled::<()>(Err(budget)).is_err());
+        // A descriptor's ENOENT is a closed descriptor only while its task's
+        // entry is still there; with the task gone it is unsettled.
+        let task = tempfile::tempdir().unwrap();
+        assert!(closed(&os(libc::ENOENT), task.path()));
+        assert!(!closed(&os(libc::EIO), task.path()));
+        assert!(!closed(&os(libc::EACCES), task.path()));
+        assert!(!closed(&os(libc::ENOENT), &task.path().join("gone")));
+    }
+
+    /// zerus-lo8o1.1, design-tima2's ruling, the B to C to B' variant: a live
+    /// leader's further task B, in the checkout, hands its context to C and is
+    /// gone at its read; C hands it on to B', which takes B's ID near the
+    /// allocator's wrap, and exits before the second listing. That listing
+    /// names the same IDs and the same plan, but B's failed read proves
+    /// nothing: the process is read again and B' found by the census,
+    /// member() and sample(). The vanished read never takes the denial
+    /// branch: sample() reports no unreadable process for it.
+    #[test]
+    fn a_task_gone_at_its_read_is_never_absence_even_when_its_id_returns() {
+        let (_dir, root, _scope, inventory) = checkout();
+        let owned = roster::owned(&[]);
+        let pid = i32::MAX as u32;
+        let entry = owned.path().join(pid.to_string());
+        synthetic(&entry, 'S');
+        fs::create_dir(entry.join("task")).unwrap();
+        for link in ["cwd", "root"] {
+            std::os::unix::fs::symlink("/", entry.join(link)).unwrap();
+        }
+        let b = entry.join("task").join((pid - 2).to_string());
+        let c = entry.join("task").join((pid - 1).to_string());
+        let arm = || {
+            for task in [&b, &c] {
+                let _ = fs::remove_dir_all(task);
+            }
+            occupant(&b, &root);
+            let (from, to, root_) = (b.clone(), c.clone(), root.clone());
+            roster::on_plan(move || {
+                occupant(&to, &root_);
+                fs::remove_dir_all(&from).unwrap();
+            });
+            let (from, to, root_) = (c.clone(), b.clone(), root.clone());
+            roster::on_read(move || {
+                occupant(&to, &root_);
+                fs::remove_dir_all(&from).unwrap();
+            });
+        };
+        arm();
+        assert!(
+            programs(&inventory, soon())
+                .unwrap()
+                .iter()
+                .any(|p| p.pid == pid),
+            "census"
+        );
+        arm();
+        assert!(member_with_holder(&entry, &inventory, None, soon()).unwrap());
+        arm();
+        let rows = sample(soon()).unwrap();
+        assert!(
+            rows.paths
+                .iter()
+                .any(|(p, path, _)| *p == pid && path.starts_with(&root)),
+            "sample"
+        );
+        assert!(
+            !rows.unreadable.iter().any(|row| row.pid == pid),
+            "a vanished read is not a denial"
+        );
         drop(owned);
     }
 }

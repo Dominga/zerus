@@ -251,10 +251,17 @@ impl BadgeService {
 
 #[derive(Clone)]
 struct ItemService(Arc<Mutex<Tray>>);
-/// SNI descriptions may be parsed as XHTML; numeric line-feed references keep
-/// newlines without adding markup tags.
+/// Ordinary text stays plain. When escaping is needed, an empty supported tag
+/// selects styled text and U+2028 references preserve the original line breaks.
 fn tooltip_description(text: &str) -> String {
-    zerus_client_core::linux_notify::escape_body(text).replace('\n', "&#10;")
+    if text.chars().any(|c| matches!(c, '&' | '<' | '>' | '"')) {
+        format!(
+            "<b></b>{}",
+            zerus_client_core::linux_notify::escape_body(text).replace('\n', "&#8232;")
+        )
+    } else {
+        text.to_owned()
+    }
 }
 
 #[zbus::interface(name = "org.kde.StatusNotifierItem")]
@@ -1120,16 +1127,55 @@ mod tests {
     use std::sync::mpsc;
 
     #[test]
+    fn ordinary_tooltip_descriptions_preserve_plain_bytes() {
+        for body in [
+            "new tooltip",
+            "0 active, 0 need attention, 0 sessions total\n0 here\n1 on mac",
+            "0 активных, 0 требуют внимания, 0 всего\n0 здесь",
+            "Zerus: reconnecting to hgs on this computer",
+        ] {
+            assert_eq!(tooltip_description(body), body);
+        }
+    }
+
+    #[test]
     fn tooltip_descriptions_keep_literal_markup_and_multiline_text() {
         let body = "1 active, 1 needs attention, 3 sessions total\n<b>studio</b> & <i>peer</i>: not polled yet\n\"quoted\" &amp;";
         let escaped = tooltip_description(body);
         assert_eq!(
             escaped,
-            "1 active, 1 needs attention, 3 sessions total&#10;&lt;b&gt;studio&lt;/b&gt; &amp; &lt;i&gt;peer&lt;/i&gt;: not polled yet&#10;&quot;quoted&quot; &amp;amp;"
+            "<b></b>1 active, 1 needs attention, 3 sessions total&#8232;&lt;b&gt;studio&lt;/b&gt; &amp; &lt;i&gt;peer&lt;/i&gt;: not polled yet&#8232;&quot;quoted&quot; &amp;amp;"
         );
+        assert!(escaped.starts_with("<b></b>"));
+        assert_eq!(escaped.matches("&#8232;").count(), 2);
+        assert!(!escaped.contains("&#10;"));
+        assert!(!escaped.contains("&#8233;"));
         assert!(!escaped.contains('\n'));
         assert!(!escaped.contains("<br"));
-        assert_eq!(tooltip_description("new tooltip"), "new tooltip");
+    }
+
+    #[test]
+    fn every_escaped_character_selects_styled_mode_once() {
+        for (body, expected) in [
+            (
+                "first & second\nthird",
+                "<b></b>first &amp; second&#8232;third",
+            ),
+            (
+                "first \"second\"\nthird",
+                "<b></b>first &quot;second&quot;&#8232;third",
+            ),
+            (
+                "first > second\nthird",
+                "<b></b>first &gt; second&#8232;third",
+            ),
+            ("&lt;\nгость", "<b></b>&amp;lt;&#8232;гость"),
+        ] {
+            let escaped = tooltip_description(body);
+            assert_eq!(escaped, expected);
+            assert_eq!(escaped.matches("<b></b>").count(), 1);
+            assert_eq!(escaped.matches("&#8232;").count(), 1);
+        }
     }
 
     fn badge_updates(connection: &Connection, owner: &str) -> zbus::MessageStream {
@@ -1576,7 +1622,7 @@ mod tests {
         assert_eq!(tooltip.2, crate::desk::tooltip_title());
         assert_eq!(
             tooltip.3,
-            "1 needs attention&#10;1 here&#10;&lt;b&gt;studio&lt;/b&gt; &amp; &lt;i&gt;peer&lt;/i&gt;: not polled yet"
+            "<b></b>1 needs attention&#8232;1 here&#8232;&lt;b&gt;studio&lt;/b&gt; &amp; &lt;i&gt;peer&lt;/i&gt;: not polled yet"
         );
         item.call::<_, _, ()>("ProvideXdgActivationToken", &("fixture-activation",))
             .unwrap();

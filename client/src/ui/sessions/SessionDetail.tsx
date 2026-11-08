@@ -2,12 +2,10 @@ import { For, Match, Show, Suspense, Switch, createEffect, createMemo, createRoo
 import { tr } from "../../i18n";
 import * as bridge from "../../bridge";
 import { terminal } from "../../store/terminal";
-import { TerminalTab } from "./Terminal";
 import { NativeUiTab } from "./NativeUi";
 import { nativeBinding, nativeEntry, nativeRoute } from "./native-entry";
 import { nativeUi } from "../../store/native-ui";
 import { pageHidden } from "../../store/visibility";
-import { ProcessesTab } from "./Processes";
 import { drops } from "../../store/drops";
 import { processes, processesTab } from "../../store/processes";
 import { flag } from "../../store/settings";
@@ -27,8 +25,6 @@ import { snapshotOf } from "./actions-ui";
 import { markEntry } from "./mark-entries";
 import { followViewedReplies } from "./viewed-reply";
 import { Composer } from "./Composer";
-import { ComposerDialogs } from "./ComposerDialogs";
-import { QuestionCard } from "./QuestionCard";
 import { QueuePanel } from "./QueuePanel";
 import { HeldMessage } from "./HeldMessage";
 import { onCommand } from "../../store/shortcuts";
@@ -43,6 +39,12 @@ import { PausedServiceDetail, servicePausedEmpty } from "../components/DesktopSe
 import { expandedEntries } from "./session-extra-entries";
 import { folderEntries, folderRequest } from "../../store/sessionFolders";
 import { watchDetailRemoval } from "./detail-removal";
+import { lazyView } from "../lazy-view";
+// Opened on demand, outside the entry chunk and preloaded on idle (zerus-ycycu).
+const QuestionCard = lazyView(() => import("./QuestionCard"), (m) => m.QuestionCard);
+const ComposerDialogs = lazyView(() => import("./ComposerDialogs"), (m) => m.ComposerDialogs);
+const ProcessesTab = lazyView(() => import("./Processes"), (m) => m.ProcessesTab);
+const TerminalTab = lazyView(() => import("./Terminal"), (m) => m.TerminalTab);
 
 const Inspector = lazy(() => import("./Inspector").then((m) => ({ default: m.Inspector })));
 const TaskView = lazy(() => import("../screens/TaskView"));
@@ -304,15 +306,15 @@ export function SessionDetail() {
                           <p class="qcard-body">{tr("Sign in to DeepSeek to start using this session. Complete sign-in in the official DeepSeek UI, then return here.")}</p>
                           <div class="qcard-actions"><button class="btn small" onClick={() => nativeRoute(selected())()}>{tr("Sign in to DeepSeek…")}</button></div>
                         </div></div></Show>
-                        <HeldMessage /><QueuePanel /><QuestionCard />
+                        <HeldMessage /><QueuePanel /><Suspense><QuestionCard /></Suspense>
                       </Show>
                       <div class="cmp-col"><Composer /></div>
                     </div>
                   </Match>
                   <Match when={detailTab() === "taskview"}><Suspense><TaskView /></Suspense></Match>
-                  <Match when={detailTab() === "terminal"}><TerminalTab /></Match>
+                  <Match when={detailTab() === "terminal"}><Suspense><TerminalTab /></Suspense></Match>
                   <Match when={detailTab() === "native"}><NativeUiTab /></Match>
-                  <Match when={detailTab() === "processes"}><ProcessesTab /></Match>
+                  <Match when={detailTab() === "processes"}><Suspense><ProcessesTab /></Suspense></Match>
                 </Switch>
               </div>
             </div>
@@ -321,7 +323,7 @@ export function SessionDetail() {
         </div>
       </Show>
         {/* The composer's questions and Clear session, also from the header on another tab; the field takes the focus back. */}
-        <ComposerDialogs onClosed={() => { if (document.activeElement === document.body) document.querySelector<HTMLTextAreaElement>(".cmp-editor")?.focus(); }} />
+        <Suspense><ComposerDialogs onClosed={() => { if (document.activeElement === document.body) document.querySelector<HTMLTextAreaElement>(".cmp-editor")?.focus(); }} /></Suspense>
     </section>
   );
 }

@@ -138,12 +138,25 @@ pub const DATA_ENV: &str = "HGS_PROJECT_LAUNCH_DATA";
 // apply only to this new process; no machine policy or user profile is changed.
 // PowerShell's $null binds to ""; .NET 9 retains empty environment entries.
 // https://learn.microsoft.com/en-us/dotnet/core/compatibility/core-libraries/9.0/empty-env-variable
+// Fixed Utility loading avoids cold 5.1 command discovery under env_clear.
+// Restore autoload presence/value before running the person's project script.
 #[cfg(any(windows, test))]
 pub const BOOTSTRAP: &str = r#"try {
+    $autoload = $ExecutionContext.SessionState.PSVariable.Get('PSModuleAutoLoadingPreference')
+    $autoloadPresent = $null -ne $autoload
+    $autoloadValue = $null
+    if ($autoloadPresent) { $autoloadValue = $autoload.Value }
+    $PSModuleAutoLoadingPreference = 'None'
+    Import-Module -Name "$PSHOME\Modules\Microsoft.PowerShell.Utility" -ErrorAction Stop
     $launch = [Environment]::GetEnvironmentVariable('HGS_PROJECT_LAUNCH_DATA', 'Process') | ConvertFrom-Json
     [Environment]::SetEnvironmentVariable('HGS_PROJECT_LAUNCH_DATA', [NullString]::Value, 'Process')
     [string]$script = $launch.script
     [string[]]$arguments = $launch.arguments
+    if ($autoloadPresent) {
+        $ExecutionContext.SessionState.PSVariable.Set('PSModuleAutoLoadingPreference', $autoloadValue)
+    } else {
+        $ExecutionContext.SessionState.PSVariable.Remove('PSModuleAutoLoadingPreference')
+    }
     & $script @arguments
     exit $LASTEXITCODE
 } catch {

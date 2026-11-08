@@ -1567,6 +1567,15 @@ jobs:
           python -m unittest discover -s tests -p test_outside_job.py -v </dev/null 2>&1 | tee artifacts/test-results/outside-job.log
           python -m unittest discover -s tests -p test_windows_client.py -v </dev/null 2>&1 | tee artifacts/test-results/windows-client.log
           python -m unittest discover -s tests -p test_repositories.py -v </dev/null 2>&1 | tee artifacts/test-results/windows-repositories.log
+      - name: Native Windows bootstrap and framed transport
+        timeout-minutes: 6
+        run: |
+          HGS_TEST_FAKE_AGENT=$(cygpath -w "$PWD/target/debug/examples/fake_agent.exe")
+          export HGS_TEST_FAKE_AGENT
+          cd tests
+          python ../scripts/ci/outside-job.py --custody-only --timeout 300 \
+            --log ../artifacts/test-results/windows-native-transport.log -- \
+            python -m unittest -v test_windows_bootstrap test_remote_windows.WindowsNativeTransport </dev/null
       # Microsoft's ConPTY pair (spec D6) from the NuGet package pinned in
       # packaging/windows/conpty.json: the package's SHA-256 is checked before it
       # is opened, then each of the two files'. Nothing from it runs here; the

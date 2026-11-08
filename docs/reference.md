@@ -2670,6 +2670,29 @@ two ready ones only the first in dispatch order starts; it never goes to
 another member to run beside it. Two returned tasks never wait on each other:
 the lower number goes first. A task without `output` is not held by this rule.
 
+Every view names such a wait (task 295, owner, 2026-11-08: ui4 sat idle while
+its ready #226 waited for #219 and then #225, and the session state, status and
+look all said it waited for the lead to hand #226 out). It names the task that
+holds the files, the ones that run and the ready ones before it, lowest first
+(`plan::output_queue`):
+
+- The member's session state is `deps` with kind `team_output`: "Waiting for #225
+  <title>: it writes the same files as #226", with `holders`.
+- The task's status `waits` is `{"for":"deps","on":[225],"unblock":"finish #225"}`.
+- Look's next action is "Its task #226 waits for #225, which writes the same
+  files; Zerus hands it out when #225 ends".
+
+A ready task whose hand-out step was refused or never confirmed (an accepted
+dependency's merge conflicted in the member's folder, a context action) is
+named the same way. The session state has kind `team_task_waits`: "Waiting for
+Lead to retry or reassign #N: <reason>", or "Waiting for Zerus to prepare #N"
+while it runs. Look gives that reason too. Only a ready task nothing else holds
+waits for the lead's hand-out, and the dispatcher hands it out at its next
+tick. The lead may propose a relaunch for any member, also an idle one that
+never takes its task. The owner's click runs the relaunch, a fresh
+conversation with the handoff brief, without asking whether the session failed
+to start.
+
 Before a hand-out, after its task branch, Zerus merges the accepted work of the
 task's dependencies (direct or through another dependency) into the member's
 branch: for each accepted task, the commit its accepted report named

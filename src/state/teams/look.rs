@@ -343,9 +343,35 @@ pub(crate) fn next_action(team: &Team, member: &Member, state: &str) -> String {
             format!("Waits for its report on #{}; marks it stuck after the stuck bound without an event.", task.id)
         }
         (Some((task, _)), _) => format!("Waits for its report on #{}; reminds it when its turn ended without one.", task.id),
-        (None, _) if member.state == MemberState::Active => "Hands it the next ready task, if one is ready for it.".into(),
+        (None, _) if member.state == MemberState::Active => match held_task(team, member) {
+            Some(why) => why,
+            None => "Hands it the next ready task, if one is ready for it.".into(),
+        },
         _ => "Nothing: the member is not active.".into(),
     }
+}
+
+/// Task 295: why the member's own ready task is not handed out, when
+/// something other than the lead holds it: another open task writing the same
+/// files, or a hand-out step that was refused.
+fn held_task(team: &Team, member: &Member) -> Option<String> {
+    let ready = super::plan::ready(team);
+    let task = team
+        .tasks
+        .iter()
+        .filter(|task| task.assignee == member.id && task.status == super::model::TaskStatus::Pending && task.hold.is_none())
+        .filter(|task| task.waits.is_some() || ready.contains(&task.id))
+        .min_by_key(|task| task.id)?;
+    if let Some(wait) = task.waits.as_ref() {
+        return Some(if wait.running() {
+            format!("Its task #{} is being prepared; it is handed out once that is confirmed.", task.id)
+        } else {
+            format!("Its task #{} waits: {} (retry or reassign it).", task.id, wait.reason.chars().take(200).collect::<String>())
+        });
+    }
+    let queue = super::plan::output_queue(team, task);
+    let first = queue.first()?;
+    Some(format!("Its task #{} waits for #{first}, which writes the same files; Zerus hands it out when #{first} ends.", task.id))
 }
 
 /// The compact snapshot `hgs team look` returns and the lead is told.

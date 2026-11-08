@@ -1522,6 +1522,16 @@ pub(crate) fn waits(team: &Team, task: &Task, ready: bool) -> Option<Value> {
             }));
         }
     }
+    // Task 295: a ready task whose files another open task writes waits for
+    // that task, not for its member.
+    if ready && task.status == TaskStatus::Pending {
+        let queue = plan::output_queue(team, task);
+        if let Some(first) = queue.first() {
+            return Some(json!({"for":"deps","on":queue,
+                "reason":format!("#{first} writes the same files; tasks writing the same files never run side by side"),
+                "unblock":format!("finish #{first}")}));
+        }
+    }
     let role = team.name_of(&task.assignee);
     Some(json!({"for":"member","on":[role],"unblock":format!("wait for {role}")}))
 }

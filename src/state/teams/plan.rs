@@ -463,6 +463,34 @@ pub(crate) fn output_holders(team: &Team, task: &Task) -> Vec<u32> {
         .collect()
 }
 
+/// Task 295 (owner, 2026-11-08): ui4 sat idle 70 minutes while its ready
+/// #226 waited for #219 and then #225, which wrote the same files, and every
+/// view said it waited for the lead to hand it out. The open tasks a ready
+/// `task` waits for because they write the same files: the ones that already
+/// run (`output_holders`) and the ready ones the dispatch order starts before
+/// it (a lower number), lowest first. Empty when nothing of the kind holds it.
+pub(crate) fn output_queue(team: &Team, task: &Task) -> Vec<u32> {
+    let mut found = output_holders(team, task);
+    if task.output.is_empty() || task.status.finished() {
+        return found;
+    }
+    let ready = ready(team);
+    for other in &team.tasks {
+        if other.id < task.id
+            && !found.contains(&other.id)
+            && other.status == TaskStatus::Pending
+            && other.hold.is_none()
+            && other.waits.is_none()
+            && ready.contains(&other.id)
+            && task.output_overlaps(other)
+        {
+            found.push(other.id);
+        }
+    }
+    found.sort_unstable();
+    found
+}
+
 /// Every task `id` waits for through dependencies that hold it until they are
 /// accepted (hard ones, or all with `all_hard`).
 fn hard_ancestors(tasks: &[Task], id: u32, all_hard: bool) -> BTreeSet<u32> {

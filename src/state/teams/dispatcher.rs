@@ -10507,6 +10507,9 @@ mod dispatcher_crash;
 #[path = "tests/dispatcher_pause_cold.rs"]
 mod dispatcher_pause_cold;
 #[cfg(test)]
+#[path = "tests/dispatcher_idle_handout.rs"]
+mod dispatcher_idle_handout;
+#[cfg(test)]
 #[path = "tests/dispatcher_store_locks.rs"]
 mod dispatcher_store_locks;
 

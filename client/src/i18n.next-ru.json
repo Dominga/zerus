@@ -1108,6 +1108,7 @@
   "Used with the Dark theme": "Используется с тёмной темой",
   "Used with the Light theme": "Используется со светлой темой",
   "Valid skin. Every value matched its token type.": "Оформление корректно. Каждое значение соответствует типу своего токена.",
+  "Voice message": "Голосовое сообщение",
   "Voice provider": "Голосовой провайдер",
   "Wait for background work to finish, then retry.": "Дождитесь завершения фоновой работы, затем повторите попытку.",
   "Wait for the current action to finish.": "Дождитесь завершения текущего действия.",

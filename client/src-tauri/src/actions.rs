@@ -2049,6 +2049,8 @@ pub struct ArchivePageOut {
     pub next_cursor: String,
     pub previous_cursor: Option<String>,
     pub total: u64,
+    /// The host counted only up to a cap: the webview shows "N+" (zerus-5wmh.13.17 (4)).
+    pub total_capped: bool,
     pub position: Option<u64>,
 }
 
@@ -2084,6 +2086,7 @@ fn grouped_archive_page(
         next_cursor: page.next_cursor,
         previous_cursor: page.previous_cursor,
         total: page.total,
+        total_capped: page.total_capped,
         position: page.position,
     })
 }
@@ -4134,6 +4137,7 @@ mod tests {
             next_cursor: "older".into(),
             previous_cursor: Some("newer".into()),
             total: 12,
+            total_capped: true,
             position: Some(3),
         }
     }
@@ -4171,6 +4175,8 @@ mod tests {
             "placement identities never enter the session-content mirror"
         );
         let json = serde_json::to_value(&page).unwrap();
+        // zerus-j5ic3: the capped flag reaches the webview with the page.
+        assert_eq!((json["total"].as_u64(), json["total_capped"].as_bool()), (Some(12), Some(true)));
         assert_eq!(json["rows"][0]["name"], "codex/sample-project/review");
         assert_eq!(json["rows"][0]["group"], "alpha");
         assert_eq!(json["rows"][0]["rank"], page.rows[0].rank);

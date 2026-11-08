@@ -546,6 +546,14 @@ mod tests {
         control("review_shared_opencode");
     }
 
+    #[test]
+    fn independent_provider_lock_alias_never_creates_foreign_entries() {
+        control("independent_provider_alias");
+    }
+    #[test]
+    fn a_provider_lock_fifo_refuses_promptly_without_changing_the_binding() {
+        control_within("provider_fifo",std::time::Duration::from_secs(5));
+    }
     fn git(dir: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
             .args(args)
@@ -638,6 +646,37 @@ mod tests {
             assert_eq!(intents_left(), 0);
         };
         match case.as_str() {
+            "independent_provider_alias" | "provider_fifo" => {
+                let _writer=storage::lock(None).unwrap();
+                let mut legacy=record.clone();
+                let legacy_id=uuid::Uuid::new_v4().to_string();
+                legacy["session_id"]=json!(legacy_id);
+                legacy["run_id"]=json!("legacy-run");
+                legacy["name"]=json!("dsh/example/legacy");
+                legacy["backend"]=json!("dsh");
+                legacy["conversation_id"]=json!("session-native");
+                let binding=root().join("dsh/bindings").join(format!("{}.json",storage::label_key(string(&legacy,"name"))));
+                atomic(&binding,&legacy.to_string()).unwrap();
+                let mut candidate=record.clone();candidate["layout"]=json!("id");
+                storage::publish_new_id(&mut candidate).unwrap();
+                storage::remove_record(&candidate).unwrap();
+                let foreign=base.join("foreign-provider-locks");fs::create_dir(&foreign).unwrap();
+                let aux=root().join("dsh/bindings.lock");
+                assert!(!aux.exists());
+                if case == "provider_fifo" {
+                    let name=std::ffi::CString::new(aux.to_str().unwrap()).unwrap();
+                    // SAFETY: this fixture owns this absent NUL-free entry.
+                    assert_eq!(unsafe{libc::mkfifo(name.as_ptr(),0o600)},0);
+                } else {
+                    std::os::unix::fs::symlink(foreign.join("created.lock"),&aux).unwrap();
+                }
+                let result=release_locked(&candidate);
+                let entries=fs::read_dir(&foreign).unwrap().count();
+                assert_eq!(entries,0,"provider exclusion followed a lock alias: {result:?}");
+                assert_eq!(fs::read_to_string(&lock).unwrap(),format!("{own}\n"));
+                assert_eq!(serde_json::from_slice::<Value>(&fs::read(&binding).unwrap()).unwrap(),legacy);
+            }
+
             "review_receipt_alias" => {
                 let _writer = storage::lock(None).unwrap();
                 let foreign = base.join("foreign-protection");

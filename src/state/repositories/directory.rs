@@ -36,6 +36,36 @@ impl Directory {
             .map(|id| (id.device, id.inode)).map_err(|e| e.to_string())
     }
 
+    /// One auxiliary exclusion file in this original directory. Opening it
+    /// never follows a link or waits on a FIFO; the caller must try the lock.
+    pub(in crate::state) fn open_private_lock(&self, name: &str) -> Result<File> {
+        if name.is_empty() || name.contains(['/', '\\', ':']) || name == "." || name == ".." {
+            return Err("Invalid private lock filename".into());
+        }
+        self.verify()?;
+        #[cfg(unix)]
+        let file = {
+            use std::os::fd::{AsRawFd, FromRawFd};
+            let name = c_name(std::ffi::OsStr::new(name))?;
+            // SAFETY: a single NUL-free entry under this held parent. Opening
+            // RDWR is nonblocking even for a FIFO; its kind is then refused.
+            let fd = unsafe { libc::openat(self.file.as_raw_fd(), name.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC,
+                0o600 as libc::c_uint) };
+            if fd < 0 { return Err(std::io::Error::last_os_error().to_string()); }
+            // SAFETY: this call exclusively owns the descriptor just returned.
+            unsafe { File::from_raw_fd(fd) }
+        };
+        #[cfg(windows)]
+        let file = crate::platform::no_follow(OpenOptions::new().read(true).write(true).create(true).truncate(false))
+            .open(self.path.join(name)).map_err(|e|e.to_string())?;
+        if !crate::platform::verify_private_file(&file).map_err(|e|e.to_string())? {
+            return Err("The exclusion file must be private, regular and singly linked".into());
+        }
+        self.verify()?;
+        Ok(file)
+    }
+
     /// Existing-directory reads share acquisition's pinned, no-link walk.
     /// No directory, lock or file is created by these methods.
     pub(in crate::state) fn private(&self) -> Result<bool> {

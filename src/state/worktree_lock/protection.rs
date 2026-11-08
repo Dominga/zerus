@@ -20,6 +20,25 @@ pub(in crate::state) struct Protection {
     reason: String,
 }
 
+/// Retain the provider's original exclusion through the whole reason transfer,
+/// not just its negative metadata write. A changed name is never a new lock.
+struct ProviderLock {
+    directories: Vec<Directory>,
+    file: fs::File,
+}
+impl ProviderLock {
+    fn verify(&self) -> Result<()> {
+        for directory in &self.directories {
+            directory.verify()?;
+        }
+        let current = self.directories[0].read_private("bindings.lock")?;
+        if object(&current)? != object(&self.file)? {
+            return Err("The shared holder's original exclusion file changed".into());
+        }
+        Ok(())
+    }
+}
+
 fn object(file: &fs::File) -> Result<Value> {
     let id = crate::platform::FileIdentity::of(file).map_err(|e| e.to_string())?;
     Ok(json!([id.device, id.inode]))
@@ -331,14 +350,14 @@ impl Protection {
     /// reason of a protected lock. Losing the receipt must not restore that
     /// holder's old text-only release path. The exact census snapshot is used;
     /// a label lookup could select a different same-label session.
-    fn mark_legacy(&self, holder: &worktree_cleanup::Reference) -> Result<()> {
+    fn mark_legacy(&self, holder: &worktree_cleanup::Reference) -> Result<Option<ProviderLock>> {
         use sha2::{Digest, Sha256};
         let binding = holder
             .binding
             .as_ref()
             .ok_or("The shared holder has no saved binding")?;
         let provider = match binding.directory.as_str() {
-            "sessions" | "dsh/sessions" | "opencode/sessions" => return Ok(()),
+            "sessions" | "dsh/sessions" | "opencode/sessions" => return Ok(None),
             "" | "bindings" => None,
             "dsh/bindings" => Some("dsh"),
             "opencode/bindings" => Some("opencode"),
@@ -352,21 +371,25 @@ impl Protection {
         let directory = directories.last().unwrap_or(&self.state);
         // Native bindings have their own writer. Never wait in reverse lock
         // order: a contended provider keeps the original veto for review.
-        let _provider = provider
-            .map(|name| {
-                storage::lock_until(
-                    &self.state.path.join(name).join("bindings.lock"),
-                    std::time::Instant::now(),
-                )?
-                .ok_or_else(|| {
+        let provider = provider
+            .map(|_| {
+                let directory = &directories[0];
+                let file = directory.open_private_lock("bindings.lock")?;
+                file.try_lock_exclusive().map_err(|_| {
                     "The shared native holder is busy; the original lock stays".to_owned()
-                })
+                })?;
+                Ok::<_, String>(file)
             })
             .transpose()?;
         let verify = || -> Result<()> {
             self.verify()?;
             for dir in &directories {
                 dir.verify()?;
+            }
+            if let Some(file) = &provider {
+                if object(&directories[0].read_private("bindings.lock")?)? != object(file)? {
+                    return Err("The shared holder's original exclusion file changed".into());
+                }
             }
             Ok(())
         };
@@ -391,11 +414,11 @@ impl Protection {
             return Err("The shared holder's original binding changed".into());
         }
         if let Some(marker) = record.get("worktree_protection") {
-            return if marker == &self.owner["id"] {
-                verify()
-            } else {
-                Err("The shared holder's protection marker is inconsistent".into())
-            };
+            if marker != &self.owner["id"] {
+                return Err("The shared holder's protection marker is inconsistent".into());
+            }
+            verify()?;
+            return Ok(provider.map(|file| ProviderLock { directories, file }));
         }
         record["worktree_protection"] = self.owner["id"].clone();
         let encoded = record.to_string();
@@ -405,7 +428,8 @@ impl Protection {
         verify()?;
         storage::cut_write()?;
         directory.replace_file(&binding.file, encoded.as_bytes())?;
-        verify()
+        verify()?;
+        Ok(provider.map(|file| ProviderLock { directories, file }))
     }
 
     /// Keep the same regular Git lock present throughout a shared handoff.
@@ -416,8 +440,11 @@ impl Protection {
             return Err("A shared holder has no stable session identity".into());
         }
         self.verify()?;
-        self.mark_legacy(holder)?;
+        let provider = self.mark_legacy(holder)?;
         self.verify()?;
+        if let Some(provider) = &provider {
+            provider.verify()?;
+        }
         storage::cut_write()?;
         self.lock
             .seek(SeekFrom::Start(0))
@@ -427,7 +454,11 @@ impl Protection {
             .map_err(|e| e.to_string())?;
         self.lock.sync_all().map_err(|e| e.to_string())?;
         self.reason = id.into();
-        self.verify()
+        self.verify()?;
+        if let Some(provider) = &provider {
+            provider.verify()?;
+        }
+        Ok(())
     }
 
     pub(super) fn released(&self) -> Result<()> {

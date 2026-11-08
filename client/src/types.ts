@@ -1092,12 +1092,19 @@ export interface TeamSummary {
 
 export interface TeamList { teams: TeamSummary[]; truncated: boolean }
 
+/** Task 315: one answered permission request of a member (core `PermissionAnswerView`). */
+export interface TeamPermissionAnswer {
+  question_id: string; decision: string; by: string; reason: string; tool: string; command: string; at: number;
+}
+
 export interface TeamMemberView {
   id: string; role: string; agent: string; model: string; effort: string; account: string; computer: string; folder: string;
   /** `not_created`, `active`, `paused`, `removed`... */
   state: string;
   /** What its session does now (`busy`, `idle`...), and the hand-off phase (`working`, `asking`...). */
   activity: string; phase: string; error: string; lead: boolean; session: TeamSessionView | null;
+  /** Task 315: its answered permission requests, oldest first (the last 20); absent when none. */
+  permission_answers?: TeamPermissionAnswer[];
   /** Seen live at the last listing; null: never seen. */
   live: boolean | null; stuck: boolean; question: boolean;
   /** Its open task first, then the tasks returned to it. */

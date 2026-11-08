@@ -149,8 +149,8 @@ describe("the plan's Graph, Board and Layers (task 197)", () => {
     expect(html).toContain("~45 min");
     expect(html).toContain("accepted");
     expect(html).toContain("40 of ~45 min");
-    // The phase header's health: four of five tasks have no problem.
-    expect(html).toContain("Healthy 4/5");
+    // The phase header's health: four of five tasks have no problem, once.
+    expect(html.match(/Healthy 4\/5/g)).toHaveLength(1);
     // A draft task keeps its card, dashed.
     expect(html).toContain("pt-card-draft");
   });
@@ -176,9 +176,25 @@ describe("the plan's Graph, Board and Layers (task 197)", () => {
     team.phases[1].status = "done";
     team.tasks[5].status = "accepted";
     const html = render({ team, graph, problems, now });
-    expect(html).toContain('data-inline="2"');
+    expect(html).toContain('data-summary="1"');
     expect(html).toContain("#6 Release");
+    // One summary per phase, not the same list twice.
+    expect(html).not.toContain('data-inline=');
     expect(html).not.toContain('data-scroll="graph/t1/2"');
+  });
+
+  it("folds the open free phase's accepted tasks into one row (task 316 F6)", () => {
+    const { team, graph } = fixture();
+    team.free_phase = 1;
+    team.phases[0].state = "running";
+    const html = render({ team, graph, problems, now });
+    expect(html).toContain('data-accepted-fold="1"');
+    expect(plain(html)).toContain("1 accepted");
+    expect(plain(html)).toContain("#1");
+    expect(plain(html)).toContain("Show");
+    // The accepted card is folded away; the open ones stay.
+    expect(html).not.toContain('data-task="1"');
+    expect(html).toContain('data-task="2"');
   });
 
   it("shows the Board inside each phase with Qt's columns, so assigned and draft tasks stay", () => {

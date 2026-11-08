@@ -14,6 +14,8 @@
   .dh-row1 { display: flex; align-items: center; gap: 4px; min-width: 0; }
   .dh-row1 h1 { font-size: calc(var(--fs-base) * 1.23); font-weight: 600; min-width: 0; }
   .busy-arc { width: 14px; height: 14px; flex: none; margin-left: 6px; border-radius: 50%; border: 2px solid var(--z-color-warn); border-right-color: transparent; animation: spin 1s linear infinite; }
+  /* Task 315 (F3): the host's state badge in the header, as the card draws it. */
+  .dh-state { flex: none; display: inline-flex; align-items: center; margin-right: 4px; }
   .hbadge { --t: var(--z-color-muted); flex: none; height: 24px; padding: 0 8px; margin-right: 4px; border-radius: 5px; display: inline-flex; align-items: center; font-size: calc(var(--fs-base) * .85); font-weight: 600; background: var(--z-color-hover); color: var(--t); }
   .hbadge.t-working { --t: var(--z-color-status-working); }
   .hbadge.t-attention { --t: var(--z-color-status-attention); }

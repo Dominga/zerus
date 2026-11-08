@@ -459,10 +459,11 @@ describe("Settings texts", () => {
     qtOrder.splice(qtOrder.indexOf("Automatic approvals"), 0, "Worktrees");
     // The fork's Extensions page (SettingsPage.h:146, 300) is in the nav list
     // already, so the client shows it there too.
-    // The fork appends Teams and Model servers after the nav list (SessionsWindow.cpp:2235, 2241).
+    // The fork inserts Teams, Model servers and Build folders before Voice
+    // input (SessionsWindow.cpp:2235, 2269, 2273).
     const sessionsWindow = fs.readFileSync(new URL("tray/src/SessionsWindow.cpp", repo), "utf8");
-    const appended = [...sessionsWindow.matchAll(/addSection\(tr\("([^"]+)"\)/g)].map((match) => match[1]);
-    qtOrder.push(...appended);
+    const inserted = [...sessionsWindow.matchAll(/addSection\(tr\("([^"]+)"\)/g)].map((match) => match[1]);
+    qtOrder.splice(qtOrder.indexOf("Voice input"), 0, ...inserted);
     expect(labels).toEqual(qtOrder);
   });
 });

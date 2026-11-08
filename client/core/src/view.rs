@@ -56,6 +56,11 @@ pub struct ViewRow {
     /// revision with other preferences (`FleetState.cpp:112-117`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notification_error: Option<String>,
+    /// Task 315: muted only by the desktop's team default (Qt's `teamMuted`,
+    /// `team_mutes`): a member other than the lead of a listed team that is
+    /// not archived, whose session made no choice of its own.
+    #[serde(skip_serializing_if = "is_false")]
+    pub team_muted: bool,
     /// `created`, truncated to whole seconds.
     pub created: i64,
     /// Qt-compatible exact/fallback row-density hashes, filled only with the
@@ -1303,6 +1308,7 @@ pub fn row(value: &Value) -> ViewRow {
         notification_revision: notifications
             .and_then(|preferences| notifications::revision(preferences.get("revision"))),
         notification_error: None,
+        team_muted: false,
         created: number(value, "created").unwrap_or(0.0) as i64,
         attention_fingerprint: session.attention_fingerprint(),
         compact_keys: None,

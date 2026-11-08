@@ -2402,7 +2402,6 @@
   "1 critical task open": "1 критическая задача открыта",
   "%1 critical tasks open": "%1 критических задач открыто",
   "The phase's result waits for the critical follow-up": "Результат фазы ждёт критического продолжения",
-  " from #%1": " от #%1",
   "Continues attempt %1 - nothing was revoked": "Продолжает попытку %1 — ничего не отменено",
   "attempt recovered": "попытка восстановлена",
   "Lead's changes": "Изменения лида",
@@ -2501,5 +2500,12 @@
   "Propose switching this team to %1? Its settings follow the project's proposal.": "Предложить переключить команду на %1? Её настройки последуют предложению проекта.",
   "Switch to %1": "Переключить на %1",
   "the proposed working mode": "предложенный режим работы",
-  "Open team panel": "Открыть панель команды"
+  "Open team panel": "Открыть панель команды",
+  "and %1 more": "и ещё %1",
+  "%1 s ago": "%1 с назад",
+  "Permissions: %1 allowed, %2 denied, last: %3, %4": "Разрешения: разрешено %1, запрещено %2, последнее: %3, %4",
+  "%1 answers, click to expand them": "Ответов: %1, нажмите, чтобы раскрыть",
+  "%1 answers, click to fold them": "Ответов: %1, нажмите, чтобы свернуть",
+  "This machine, 1 session": "Этот компьютер, 1 сеанс",
+  "This machine, %1 sessions": "Этот компьютер, %1 сеансов"
 }

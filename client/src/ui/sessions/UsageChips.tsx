@@ -41,6 +41,8 @@ export function AccountUsageChip(props: { session: Session }) {
   };
   // The account tooltip holds still under the pointer (zerus-5ryrx).
   const accountTip = steadyTitle(() => accountTooltip(u(), now()));
+  const refreshTip = steadyTitle(() => (usageRetryWaiting(u(), now()) ? rateLimitNotice(u(), now(), true)
+    : u().refreshing ? tr("Updating account usage…") : tr("Refresh usage")));
   return (
     <Show when={props.session.tracked && !props.session.archiveId}>
       <span class="session-usage-strip">
@@ -50,7 +52,7 @@ export function AccountUsageChip(props: { session: Session }) {
           <Show when={rateLimitNotice(u(), now())}><span class="dim">{rateLimitNotice(u(), now())}</span></Show>
         </button>
         <button type="button" class="icon-btn small usage-refresh" disabled={!online() || u().refreshing || usageRetryWaiting(u(), now())} aria-label={tr("Refresh usage")}
-          title={usageRetryWaiting(u(), now()) ? rateLimitNotice(u(), now(), true) : u().refreshing ? tr("Updating account usage…") : tr("Refresh usage")} onClick={() => void refreshSessionUsage(true)}>
+          title={refreshTip.title()} onPointerEnter={refreshTip.enter} onPointerLeave={refreshTip.leave} onClick={() => void refreshSessionUsage(true)}>
           <Show when={!u().refreshing} fallback={<span class="su-spin"><Icon name="refresh-cw" size={12} /></span>}><Icon name="refresh-cw" size={12} /></Show>
         </button>
       </span>

@@ -169,12 +169,13 @@ export const usageRetryWaiting = (u: Usage, now: number) => u.status === "rate_l
 
 /**
  * Shown beside retained meters in both the footer and account views. A
- * tooltip names the retry's clock time instead of counting its seconds down
- * (zerus-5ryrx).
+ * tooltip names clock times instead of ages and countdowns, so it never
+ * changes while it shows (zerus-5ryrx, zerus-f5gta).
  */
 export function rateLimitNotice(u: Usage, now: number, tooltip = false) {
   if (u.status !== "rate_limited") return "";
   const age = u.checked_at === null ? tr("No saved limits, rate limited")
+    : tooltip ? tr("Limits from %1, rate limited", clock(u.checked_at))
     : tr("Limits %1 min ago, rate limited", Math.max(0, Math.floor((now - u.checked_at) / 60)));
   const retry = !usageRetryWaiting(u, now) ? tr("Refresh to check limits.")
     : tooltip ? tr("Retry at %1", clock(u.retry_at!)) : tr("Retry in %1 s", Math.ceil(u.retry_at! - now));

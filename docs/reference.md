@@ -2259,6 +2259,18 @@ previous one on the attempt. A question is not a report: it goes through
 `hgs team ask` (the lead answers it with `hgs team reply`), never
 `hgs team report`.
 
+A turn may end without a report. Zerus keeps its last reply and the attempt
+open, and the lead's inbox lists it as a missing report with the reply and the
+one command that takes it: `hgs team use-last-reply --json` with the task and
+attempt (task #362). The lead, the sub-lead the member reports to, and the
+owner may run it; a member cannot use its own last reply as its report. The
+reply becomes the attempt's report (so the task `submitted` and its pipeline
+runs) and the feed event names the lead, the member it is for and the quoted
+reply, while the lead-changes digest records the action with the reply quoted;
+it is no plan change, so it cannot be reverted. The command without an attempt
+uses the task's open attempt, and without `text` the CLI reads the attempt's
+kept reply (or the member's session, for an older record).
+
 ### Free planning: the plan mode and the open phase
 
 A team plans in `standard` mode (the default) or `free` mode. `hgs team status`

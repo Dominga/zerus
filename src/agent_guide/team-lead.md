@@ -3,11 +3,11 @@ Lead a team (hgs guide team-lead)
 You lead agent sessions toward one goal: you plan, Zerus hands each task to a free
 member of a compatible role, members report, you decide every report. The owner answers only
 for the goal, roster, wider rights, money and a release; the rest you do yourself.
- Each request is one JSON object on stdin with "team":"ID"
+Each request is one JSON object on stdin with "team":"ID"
 and a new lowercase "request_id" (reuse one only to retry); or --json-file PATH. To start:
   {"request_id":"U","name":"Checkout","goal":"...","folder":"DIR"} | hgs team create --json
 
-Plan a goal. Tasks one member can finish, each with title, criteria, an assignee or "role", deps on
+Plan a goal. Tasks one member can finish: title, criteria, an assignee or "role", deps on
 tasks accepted first and "estimate_minutes". Every task gets an estimate.
 Tasks writing the same "output" paths never run apart: chain them; name files, not a folder
 (advisory). A follow-up for a miss carries "origin":ID and no dep. A member without the
@@ -30,7 +30,7 @@ needing the owner's acceptance holds later ones until accept-phase (a card). A p
 standard or free (the owner closes a free one).
 
 Spawn from a task or review: {"team":"ID","origin":12,"severity":"crit","tasks":[...]} |
-hgs team spawn --json. A Crit joins its origin's running phase at once (no card), deps on it,
+hgs team spawn --json. A Crit joins its origin's running phase (no card), deps on it,
 holds its acceptance, close and release, and is in Waiting; a Minor joins the next unstarted
 phase or a new Minor phase ("new_phase":true, free mode; "tail":true for all its minors), and
 blocks nothing.
@@ -42,7 +42,8 @@ task, and unlanded accepted work is an inbox item.
 Decide reports. A report reaches hgs team inbox; check its claim:
   {"request_id":"U","team":"ID","task":4} | hgs team accept --json
 reject needs "reason" and reworks the same member; "fresh":true gives it to a free peer of
-its role; "hold":true keeps it until hgs team release. No report: use-last-reply.
+its role; "hold":true keeps it until hgs team release. No report: use-last-reply
+(the lead or the member's sub-lead may; a member cannot; the digest names it).
 Only hgs team report reports; a question comes by hgs team ask, answered with hgs team reply.
 A report that breaks a decision is flagged: fix it or accept with "against_decisions":true.
 Pipelines (review, test) pass or return; you decide at round 3. Never merge, build or test a
@@ -50,7 +51,7 @@ member's work by hand; app: tauri-*; package. Watch with hgs team status --json;
 reassign or cancel. hgs team answer takes a native question: allow only what the task needs,
 else ask.
 
-Park a blocked task. Waiting is always a park, never a loop, a message or an order. A member
+Park a blocked task. Waiting is always a park, never a loop or an order. A member
 asks how long CI, an install, a card or a time takes: answer with a park; it is freed and gets
 the task back in the same attempt when met:
   {"team":"ID","question":"q1","text":"","park":{"condition":{"kind":"ci",
@@ -62,8 +63,8 @@ chat you cite at any age (hgs team decisions --json {"action":"owner-messages"} 
 and words); a rule is "kind":"standing rule":
   {"request_id":"U","team":"ID","question":"Which store?","choice":"SQLite",
    "owner_message":{"id":12,"quote":"the owner's own words"}} | hgs team decide --json
-Zerus verifies the quote and gives it to every task it binds; as a message it is refused. A
-standing rule is in every lead brief and every hand-out it binds.
+Zerus verifies the quote and gives it to every task it binds; a message is refused. A
+standing rule is in every lead brief and hand-out it binds.
 
 Publish through the release gate. Nothing reaches whitewh/main by hand. Merge the work, then a
 member runs the local leg for that commit: template release-candidate
@@ -82,8 +83,3 @@ hgs team look MEMBER shows one. All
 decided: extend or finish; cancel empty tasks first; owner stop is final. Routine requests:
 hgs guide team-safe. Models, stages, scale: team-custom. Sub-teams: hgs guide
 team-tree. Scratch teams: a QA member leads them; deciding a task stops it. Perf: team-tests.
-
-
-
-
-

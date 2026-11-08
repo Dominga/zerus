@@ -49,6 +49,12 @@ impl Actor {
             Actor::ParentLead | Actor::Intake(_) => false,
         }
     }
+    /// Task #362 (owner, 2026-11-08): whether this caller may use `member`'s
+    /// last reply as that member's report: the lead, or the sub-lead the member
+    /// reports to; never the member itself.
+    pub(crate) fn uses_reply_of(&self, team: &Team, member: &str) -> bool {
+        matches!(self, Actor::Member(id) if !member.is_empty() && *id != member && (*id == team.lead || team.reviewer_of(member) == *id))
+    }
 }
 
 /// Spec 5.6: every parent is the lead or a sub-lead of the team, never the
@@ -127,6 +133,40 @@ fn text<'a>(input: &'a Value, key: &str) -> &'a str {
 
 fn task_id(input: &Value) -> anyhow::Result<u32> {
     input["task"].as_u64().and_then(|id| u32::try_from(id).ok()).filter(|id| *id > 0).context("A task number is required")
+}
+
+/// Task #362: the member whose attempt `input["attempt"]` names, for the
+/// last-reply rule; empty when the request names none.
+fn attempt_member_of(team: &Team, input: &Value) -> String {
+    let id = text(input, "attempt");
+    team.tasks
+        .iter()
+        .flat_map(|task| &task.attempts)
+        .find(|attempt| attempt.id == id)
+        .map(|attempt| attempt.member.clone())
+        .unwrap_or_default()
+}
+
+/// Task #362: whether this attempt is the one a lead's last-reply report will
+/// land on: still open, or the newest reported one it replaces.
+fn will_report(team: &Team, id: u32, attempt: &str, member: &str) -> bool {
+    let Some(task) = team.task(id) else { return false };
+    if task.open_attempt().is_some_and(|found| found.id == attempt && found.member == member) {
+        return true;
+    }
+    let newest = task.attempts.iter().rev().find(|found| found.state == AttemptState::Reported);
+    task.status.reported() && newest.is_some_and(|found| found.id == attempt && found.member == member)
+}
+
+/// A quoted reply in a feed event or the digest: one line, at most `limit`
+/// characters.
+fn quoted(text: &str, limit: usize) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() > limit {
+        format!("{}...", line.chars().take(limit.saturating_sub(3)).collect::<String>())
+    } else {
+        line
+    }
 }
 
 fn clean(value: &str, max: usize, what: &str) -> anyhow::Result<String> {
@@ -4311,7 +4351,13 @@ fn checked_finding(team: &Team, finding: &Value) -> anyhow::Result<CheckedFindin
 }
 
 fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
-    report_with(team, input, actor, false, events)
+    report_with(team, input, actor, false, false, events)
+}
+
+/// Task #362: the member's last reply becomes the report; the lead, or the
+/// member's sub-lead, may do it for the member.
+fn use_last_reply(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    report_with(team, input, actor, false, true, events)
 }
 
 /// #684 N1, #718: a member's report records its folder's HEAD and branch, so a
@@ -4348,18 +4394,29 @@ fn report_git(team: &Team, id: u32, by_member: &str) -> (String, String, Option<
 /// transaction, for `dispatcher::with_git_answers` to serve inside it: a
 /// report's folder HEAD, branch and test delta (`report_git`).
 pub(crate) fn prefetch_git(team: &Team, op: &str, input: &Value, actor: &Actor) {
-    if op != "report" || input["interim"].as_bool() == Some(true) {
+    if !matches!(op, "report" | "use-last-reply") || input["interim"].as_bool() == Some(true) {
         return;
     }
     let Ok(id) = task_id(input) else { return };
-    if let Actor::Member(member) = actor {
-        let _ = report_git(team, id, member);
+    // Task #362: a use-last-reply reports a member's attempt: its folder is the
+    // member's, not the lead's or the owner's.
+    let named = attempt_member_of(team, input);
+    let member = if named.is_empty() {
+        match actor {
+            Actor::Member(member) => member.clone(),
+            _ => String::new(),
+        }
+    } else {
+        named
+    };
+    if !member.is_empty() {
+        let _ = report_git(team, id, &member);
     }
 }
 
 /// `captured`: Zerus records the member's last reply (A2); it never enters the
 /// pipeline's stages (#538 C1).
-fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, from_reply: bool, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     let id = task_id(input)?;
     // U36: a stage member's verdict names its stage run as the attempt.
     if let Some(result) = super::pipeline::stage_report(team, input, actor, events)? {
@@ -4441,7 +4498,27 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
         ));
         return Ok(json!({"status":"interim","task":id,"attempt":n}));
     }
-    let (folder_head, folder_branch, test_delta) = report_git(team, id, &by_member);
+    // Task #362 (owner, 2026-11-08): the lead, or the sub-lead the member
+    // reports to, uses that member's last reply as the report. The attempt is
+    // the member's; the lead is its author, and the report stays on it.
+    let target = team
+        .task(id)
+        .and_then(|task| task.attempts.iter().find(|attempt| attempt.id == attempt_id))
+        .map(|attempt| attempt.member.clone())
+        .unwrap_or_default();
+    let delegated = from_reply && !by_member.is_empty() && !target.is_empty() && target != by_member && actor.reviews(team, &target);
+    // The report is the attempt's: its folder's HEAD, branch and test delta are
+    // the member's, whoever takes the last reply.
+    let git_member = if target.is_empty() { by_member.as_str() } else { target.as_str() };
+    let (folder_head, folder_branch, test_delta) = report_git(team, id, git_member);
+    // Task #362: the owner also sees the lead's action in the lead-changes
+    // digest, with the reply quoted. It is recorded before the task borrow
+    // below; a stale attempt records nothing.
+    if delegated && will_report(team, id, attempt_id, &target) {
+        let role = team.role_of(&target);
+        let quote = quoted(&body, 400);
+        super::lead_plan::report_recorded(team, id, &role, &quote, &label);
+    }
     // C1: the lead reports its own task and accepts it in one step; nobody
     // else accepts on a report.
     if accept {
@@ -4450,7 +4527,7 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(task.attempts.iter().any(|a| a.id == attempt_id), "Task #{id} has no attempt {attempt_id}");
     let current = task.open_attempt().map(|a| (a.id.clone(), a.member.clone(), a.n));
-    let open = current.filter(|(open, member, _)| open == attempt_id && (by_member.is_empty() || *member == by_member));
+    let open = current.filter(|(open, member, _)| open == attempt_id && (by_member.is_empty() || *member == by_member || (delegated && *member == target)));
     if let Some((open_id, member, n)) = open {
         if accept {
             ensure!(member == team_lead, "Task #{id} is not the lead's own task: accept it with hgs team accept");
@@ -4472,6 +4549,7 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
         };
         let attempt = task.attempts.iter_mut().find(|a| a.id == open_id).unwrap();
         attempt.state = AttemptState::Reported;
+        let quote = if delegated { Some(quoted(&body, 400)) } else { None };
         attempt.report = Some(Report { text: body, at: now(), structured: structured.clone(), unstructured: structured.is_none(), captured, tests: test_delta.clone(), ..Default::default() });
         attempt.interim = None;
         attempt.folder_head = folder_head.clone();
@@ -4479,7 +4557,7 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
         attempt.no_report = false;
         attempt.check = check_result;
         // The lead hears of a report unless it wrote it.
-        attempt.notice = if member == team_lead { Notice::None } else { Notice::Pending };
+        attempt.notice = if member == team_lead || delegated { Notice::None } else { Notice::Pending };
         task.status = TaskStatus::Submitted;
         task.decided_by = None;
         let title = task.title.clone();
@@ -4487,7 +4565,13 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
         // Spec 5.6: "Report to QA lead" when a sub-lead reviews it.
         let reviewer = team.reviewer_of(&member);
         let to = if reviewer.is_empty() { String::new() } else { team.role_of(&reviewer) };
-        events.push(Event::new("reported", json!({"by":role,"to":to,"task":id,"title":title,"attempt":n,"human":by_member.is_empty()})));
+        if delegated {
+            // Task #362: the feed names the lead as the author, the member it
+            // is for, and quotes the reply it took.
+            events.push(Event::new("reported", json!({"by":label,"for":role,"to":to,"task":id,"title":title,"attempt":n,"human":false,"text":quote})));
+        } else {
+            events.push(Event::new("reported", json!({"by":role,"to":to,"task":id,"title":title,"attempt":n,"human":by_member.is_empty()})));
+        }
         if accept {
             let decided = decide(team, input, actor, true, events)?;
             let status = decided["status"].clone();
@@ -4525,7 +4609,7 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
     let replaceable = task.status.reported()
         && attempt.state == AttemptState::Reported
         && newest.as_deref() == Some(attempt.id.as_str())
-        && (by_member.is_empty() || attempt.member == by_member);
+        && (by_member.is_empty() || attempt.member == by_member || (delegated && attempt.member == target));
     if replaceable {
         let n = attempt.n;
         let member = attempt.member.clone();
@@ -4536,6 +4620,7 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
         if report.replaced.len() > 3 {
             report.replaced.remove(0);
         }
+        let quote = if delegated { Some(quoted(&body, 400)) } else { None };
         report.text = body;
         report.structured = structured.clone();
         report.unstructured = structured.is_none();
@@ -4552,16 +4637,24 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
         attempt.interim = None;
         // The lead hears the real report as a report, not as the captured one;
         // U36: a stage still reading it tells the lead after the last stage.
-        if member != team_lead && task.status == TaskStatus::Submitted {
+        if member != team_lead && !delegated && task.status == TaskStatus::Submitted {
             attempt.notice = Notice::Pending;
         }
         let (in_stage, submitted) = (task.status.in_stage(), task.status == TaskStatus::Submitted);
         let title = task.title.clone();
         let role = team.role_of(&member);
-        events.push(Event::new(
-            "report_replaced",
-            json!({"by":role,"task":id,"title":title,"attempt":n,"human":by_member.is_empty()}),
-        ));
+        if delegated {
+            // Task #362: the lead's action, its member and the reply it took.
+            events.push(Event::new(
+                "report_replaced",
+                json!({"by":label,"for":role,"task":id,"title":title,"attempt":n,"human":false,"text":quote}),
+            ));
+        } else {
+            events.push(Event::new(
+                "report_replaced",
+                json!({"by":role,"task":id,"title":title,"attempt":n,"human":by_member.is_empty()}),
+            ));
+        }
         // #538 C1: the real report that replaces a captured one enters the
         // stages; #595 N4: one replaced while a stage reads it starts that
         // stage again on the new text.
@@ -7268,9 +7361,22 @@ fn apply_with_checks(team: &mut Team, op: &str, input: &Value, actor: &Actor, of
             Ok(set_status(team, TeamStatus::Archived, "archived", actor, events))
         }
         "report" | "use-last-reply" => {
-            ensure!(op == "report" || matches!(actor, Actor::Human), "Only you use a last reply as the report");
+            // Task #362 (owner, 2026-11-08): the lead, and the sub-lead a
+            // member reports to, may use that member's last reply as the
+            // report; a member still cannot do it for itself.
+            if op == "use-last-reply" {
+                let member = attempt_member_of(team, input);
+                ensure!(
+                    matches!(actor, Actor::Human) || actor.uses_reply_of(team, &member),
+                    "Only the lead or you use a last reply as the report"
+                );
+            }
             ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
-            report(team, input, actor, events)
+            if op == "use-last-reply" {
+                use_last_reply(team, input, actor, events)
+            } else {
+                report(team, input, actor, events)
+            }
         }
         "ask" => ask(team, input, actor, events),
         "reply" => reply(team, input, actor, events),

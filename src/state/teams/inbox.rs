@@ -166,7 +166,9 @@ fn reviewer_of(team: &Team, item: &Item) -> String {
         // #538 N3: a report a sub-lead may not accept is the lead's.
         ("report", Some(task)) if super::pipeline::lead_accepts_only(task) => team.lead.clone(),
         // The lead's own task has no reviewer: it stays the lead's.
-        ("report" | "question" | "stalled" | "interim_report", Some(task)) if !task.assignee.is_empty() && task.assignee != team.lead => {
+        // Task #362: a member's missing report is its reviewer's, so the lead
+        // or the sub-lead it reports to can use the member's last reply.
+        ("report" | "question" | "stalled" | "interim_report" | "no_report", Some(task)) if !task.assignee.is_empty() && task.assignee != team.lead => {
             team.reviewer_of(&task.assignee)
         }
         _ => team.lead.clone(),
@@ -1290,7 +1292,8 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             since: ended,
             summary: summary(&format!("{role} ended its turn {minutes} min ago on #{} without a report: {}", task.id, task.title)),
             // One action: this reply as the report. The CLI reads the attempt's
-            // kept reply (or its session's last one); the lead decides.
+            // kept reply (or its session's last one); the lead, or the member's
+            // sub-lead, decides (task #362: the lead may run it too).
             command: format!(
                 "{} | hgs team use-last-reply --json",
                 json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id,"attempt":attempt.id})

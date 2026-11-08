@@ -6012,8 +6012,9 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 && text(&filled, "action") == "discard"
                 && store.receipt(request, input)?.is_some();
             // Task 287: a report's git reads run before the store's lock and are
-            // served inside it.
-            let reporting = if op == "report" && !parent_lead { store.load(team_id).ok().flatten() } else { None };
+            // served inside it; task #362: a lead's use-last-reply reads the
+            // member's folder the same way.
+            let reporting = if matches!(op, "report" | "use-last-reply") && !parent_lead { store.load(team_id).ok().flatten() } else { None };
             let prefetch = || {
                 if let Some(team) = reporting.as_ref() {
                     if let Ok(caller) = actor(team, op, &filled) {

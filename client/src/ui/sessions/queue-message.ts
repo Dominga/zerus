@@ -5,6 +5,11 @@ import type { ActivityItem, Session } from "./types";
 import { attachments } from "./transcript";
 import { draftKey } from "../../store/draftKeys";
 
+/** Task #247: Qt's queuedMessageRemovable: an online OpenCode session with a queue id. */
+export function queuedMessageRemovable(session: Pick<Session, "agent" | "status"> | undefined, queue: QueueView | null | undefined, offline = false): boolean {
+  return !!session && session.agent === "opencode" && session.status !== "offline" && !offline && !!queue?.id;
+}
+
 interface Entry { text: string; exact: boolean }
 const plainTerminal = (text: string) => text
   .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")

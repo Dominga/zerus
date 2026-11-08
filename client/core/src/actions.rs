@@ -60,6 +60,14 @@ pub enum Action {
     },
     Pause,
     Resume,
+    /// `hgs resume NAME [--with-lost-dialogue|--accept-stale] -d`: the
+    /// transcript-behind confirmation's two answers (SessionsWindow::resumeBehind).
+    ResumeStale {
+        #[serde(default)]
+        with_lost_dialogue: bool,
+        #[serde(default)]
+        accept_stale: bool,
+    },
     /// `hgs resume NAME --fresh [--expected-run-id RUN] -d`
     /// (`startFreshSession`): a new conversation in the same folder, with the
     /// same account and model.
@@ -477,6 +485,19 @@ pub fn invocation(
             30,
             None,
         ),
+        Action::ResumeStale {
+            with_lost_dialogue,
+            accept_stale,
+        } => {
+            let mut args = vec!["resume".to_owned(), name];
+            if *with_lost_dialogue {
+                args.push("--with-lost-dialogue".to_owned());
+            } else if *accept_stale {
+                args.push("--accept-stale".to_owned());
+            }
+            args.push("-d".to_owned());
+            (args, None, 30, 30, None)
+        }
         Action::StartFresh => {
             let mut args = vec!["resume".to_owned(), name, "--fresh".to_owned()];
             if !target.run_id.is_empty() {
@@ -3143,6 +3164,60 @@ mod tests {
             Outcome::Failed {
                 detail: "timed out".into()
             }
+        );
+    }
+
+    #[test]
+    fn resume_behind_sends_the_chosen_hgs_flag() {
+        let t = target("");
+        let lost = invocation(
+            &t,
+            &Action::ResumeStale {
+                with_lost_dialogue: true,
+                accept_stale: false,
+            },
+            "u",
+        )
+        .unwrap();
+        assert_eq!(
+            lost.args,
+            [
+                "resume",
+                "claude/sample-project/review",
+                "--with-lost-dialogue",
+                "-d"
+            ]
+        );
+        let stale = invocation(
+            &t,
+            &Action::ResumeStale {
+                with_lost_dialogue: false,
+                accept_stale: true,
+            },
+            "u",
+        )
+        .unwrap();
+        assert_eq!(
+            stale.args,
+            [
+                "resume",
+                "claude/sample-project/review",
+                "--accept-stale",
+                "-d"
+            ]
+        );
+        let plain = invocation(
+            &t,
+            &Action::ResumeStale {
+                with_lost_dialogue: false,
+                accept_stale: false,
+            },
+            "u",
+        )
+        .unwrap();
+        assert_eq!(
+            plain.args,
+            ["resume", "claude/sample-project/review", "-d"]
         );
     }
 

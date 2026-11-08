@@ -21,7 +21,7 @@ import { UsageMeters } from "../components/UsageMeter";
 import { accountManagement } from "../../store/accountManagement";
 import { accountSetup } from "../../store/accountSetup";
 import {accountDistribution} from "../../store/accountDistribution";
-import { creditsText, loginLabel, memberStateLabel, memberStateText, memberOf, panelWindow, profileTags, summaryLine, tone, visibleAccounts, visibleMembers } from "./accounts-ui";
+import { creditsText, identityFields, loginLabel, memberStateLabel, memberStateText, memberOf, panelWindow, profileTags, summaryLine, tone, visibleAccounts, visibleMembers } from "./accounts-ui";
 import { tr } from "../../i18n";
 import { trText } from "../../text";
 
@@ -124,8 +124,17 @@ function UsagePanel(props: { a: Account }) {
   );
 }
 
+function MetadataValue(props: { kind: string; label: string; value: string }) {
+  return <span class="acct-meta-value ell" classList={{ muted: !props.value }} data-meta={props.kind} title={props.value || tr("Unavailable")} aria-label={`${props.label}: ${props.value || tr("Unavailable")}`}>{props.value || "—"}</span>;
+}
+
 function Detail(props: { a: Account }) {
   const m = () => memberOf(props.a, selectedProfile(), accountMachine())!;
+  const fields = createMemo(() => identityFields(props.a));
+  const identityNote = createMemo(() => {
+    const f = fields();
+    return !f.name && !f.email && !f.organization && !f.plan && !f.signIn && props.a.identity_note ? trText(props.a.identity_note) : "";
+  });
   const [moreOpen, setMoreOpen] = createSignal(false);
   const [moreQuery, setMoreQuery] = createSignal("");
   let moreButton: HTMLButtonElement | undefined, moreInput: HTMLInputElement | undefined;
@@ -167,19 +176,27 @@ function Detail(props: { a: Account }) {
     <div class="acct-detail">
       <div class="acct-title">
         <AccountMarkCircle mark={accountMark(props.a, settings)} size={22} />
-        <h2 class="ell">{props.a.label}</h2>
-        <Show when={accountAppearance(settings, props.a.members).hidden}><span class="dim am-hidden">{tr("Hidden on session cards")}</span></Show>
+        <h2 class="ell" title={props.a.label}>{props.a.label}</h2>
+        <AgentBadge agent={agentKind(props.a.provider)} />
+        <Show when={accountAppearance(settings, props.a.members).hidden}><span class="dim am-hidden" title={tr("Hidden on session cards")}>{tr("Hidden on session cards")}</span></Show>
         <span class="grow" />
-        <button class="btn" onClick={event=>setMarkEditor({ origin: event.currentTarget })}><Icon name="palette" size={13} />{tr("Color and mark…")}</button>
-        <button class="btn" disabled={managementBusy()} onClick={event=>void openCatalog("rename",props.a.key,m().key,event.currentTarget)}><Icon name="pencil" size={13} />{tr("Rename…")}</button>
+        <div class="acct-title-actions">
+          <button class="btn" onClick={event=>setMarkEditor({ origin: event.currentTarget })}><Icon name="palette" size={13} />{tr("Color and mark…")}</button>
+          <button class="btn" disabled={managementBusy()} onClick={event=>void openCatalog("rename",props.a.key,m().key,event.currentTarget)}><Icon name="pencil" size={13} />{tr("Rename…")}</button>
+        </div>
       </div>
       <Show when={markEditor()}>{(editor) => <Suspense><AccountMarkDialog account={props.a} origin={editor().origin} close={() => setMarkEditor(undefined)} /></Suspense>}</Show>
-      <div class="row acct-identity">
-        <AgentBadge agent={agentKind(props.a.provider)} />
-        <div class="col selectable">
-          <For each={props.a.identity_lines}>{(line) => <span>{trText(line)}</span>}</For>
-          <Show when={props.a.identity_note}>{(note) => <span class="muted">{trText(note())}</span>}</Show>
+      <div class="acct-identity selectable">
+        <div class="acct-meta-identity">
+          <span class="acct-meta-label">{tr("Identity")}</span>
+          <Show when={identityNote()} fallback={<>
+            <MetadataValue kind="name" label={tr("Name")} value={fields().name} />
+            <MetadataValue kind="email" label={tr("Email")} value={fields().email} />
+            <MetadataValue kind="organization" label={tr("Organization")} value={fields().organization} />
+          </>}>{(note) => <span class="acct-meta-value acct-meta-note muted ell" data-meta="note" title={note()} aria-label={`${tr("Identity")}: ${note()}`}>{note()}</span>}</Show>
         </div>
+        <div class="acct-meta-field"><span class="acct-meta-label">{tr("Plan")}</span><MetadataValue kind="plan" label={tr("Plan")} value={fields().plan} /></div>
+        <div class="acct-meta-field"><span class="acct-meta-label">{tr("Sign-in")}</span><MetadataValue kind="sign-in" label={tr("Sign-in")} value={fields().signIn} /></div>
       </div>
 
       <section class="acct-card box">

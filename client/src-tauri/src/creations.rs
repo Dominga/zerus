@@ -3165,6 +3165,56 @@ mod tests {
         fake.stop(host);
     }
     #[test]
+    fn explicit_stop_of_a_service_unknown_uses_its_native_lane_without_direct_fallback() {
+        let fake = Fake::new();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut services = service_worktree_probe(&fake, calls.clone());
+        let stops = Arc::new(Mutex::new(Vec::new()));
+        let observed = stops.clone();
+        services.service_worktree_cancel = Some(Arc::new(move |id, operation, fresh, wait, _| {
+            assert!(!fresh && !wait);
+            assert_eq!(operation["stop_requested"], true);
+            let plan =
+                zerus_client_core::desktop::creation_worktree::Plan::from_operation(id, operation)
+                    .unwrap();
+            lock(&observed).push(plan.worktree_request_id.clone());
+            Some(creation::Answer {
+                ok: true,
+                data: json!({"schema":1,"request_id":plan.worktree_request_id,
+                "fingerprint":plan.request_fingerprint().unwrap(),"status":"fenced","future_starts_fenced":true,"past_outcome":"unknown"}),
+                error: String::new(),
+            })
+        }));
+        let host = CreationHost::new(fake.dir.join("creations.json"), services);
+        let id = admitted(&host, worktree_plan());
+        state(&host, &id, "unknown");
+        let original = operation(&host, &id)["worktree_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        host.action(id.clone(), CreationAction::Stop).unwrap();
+        state(&host, &id, "stopped");
+        let card = host.view().into_iter().find(|c| c.id == id).unwrap();
+        assert!(card.worktree_fenced && card.worktree_pending && card.can_edit);
+        assert!(!card.can_resume);
+        assert!(card.error.contains("outcome is unknown"));
+        assert_eq!(operation(&host, &id)["worktree_id"], original);
+        assert_eq!(*lock(&stops), [original]);
+        assert!(
+            fake.log()
+                .iter()
+                .all(|args| !args.iter().any(|a| a == "cancel")),
+            "a sent service request never falls back to default_hgs cancel"
+        );
+        host.action(id.clone(), CreationAction::Resume).unwrap();
+        assert!(host.arrange_for_test(|| {}));
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        host.action(id.clone(), CreationAction::Hide).unwrap();
+        assert!(!operation(&host, &id)["show_pending"].as_bool().unwrap());
+        fake.stop(host);
+    }
+
+    #[test]
     fn a_definitely_unsent_service_worktree_fails_and_frees_its_request() {
         let fake = Fake::new();
         let mut services = fake.services();

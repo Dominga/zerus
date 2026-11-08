@@ -747,7 +747,8 @@ impl Validated {
         };
         Ok(*intent)
     }
-    /// The connection a deferred send or session resume was made for, read
+    /// The connection a deferred-input request (send, answer, compact-to-send
+    /// or session resume) was made for, read
     /// before its admission. It grants and consumes nothing: the actor still
     /// consumes this permit after BEGIN IMMEDIATE. A refusal before that
     /// transaction reads it only to tell this epoch's own request from
@@ -759,6 +760,8 @@ impl Validated {
     ) -> Option<&zerus_client_core::desktop::creation_clone::Scope> {
         match &self.0 {
             Request::DeferredSend { intent } => Some(&intent.scope),
+            Request::DeferredAnswer { intent } => Some(&intent.scope),
+            Request::CompactToSend { intent } => Some(&intent.scope),
             Request::SessionResume { intent } => Some(&intent.scope),
             _ => None,
         }

@@ -12,6 +12,7 @@ use super::slot::{self, Slot};
 use super::{consent::Consent, target};
 use crate::desktop::creation_clone::lease::{Lease, Machine};
 use crate::desktop::custody::Observation;
+use crate::desktop::not_admitted;
 use crate::{
     config::Config,
     desktop::{
@@ -43,6 +44,22 @@ use zerus_desktop_ledger::operations::{
 
 /// The refusal of every macOS original until a qualified child seam exists.
 pub(super) const MAC_UNAVAILABLE: &str = "compact_to_send_native_image_unavailable";
+/// The conservative refusal: the request may have been admitted.
+const UNAVAILABLE: &str = "compact_to_send_unavailable";
+/// How far one admission got before it ended (zerus-tlb9q).
+#[derive(Clone, Copy)]
+enum Proof {
+    /// Before the writer transaction: nothing read yet.
+    Before,
+    /// In the writer transaction, before the ledger's read succeeded.
+    Unprovable,
+    /// The ledger has no row for this request, read in this transaction.
+    NoRow,
+    /// The ledger has a row for this request.
+    Existing,
+    /// The admission itself was entered.
+    Admitting,
+}
 /// Each whole child, the CLI's own lock wait included.
 pub(super) const DEADLINE: Duration = Duration::from_secs(30);
 /// The one bounded deadline of the receipt read after the physical drain,
@@ -159,6 +176,9 @@ pub(in crate::desktop) struct Runtime {
     charges: Option<u64>,
     /// macOS refuses every original (see [`MAC_UNAVAILABLE`]).
     mac_fence: bool,
+    /// This epoch's sealed negatives: they outlive this runtime
+    /// ([`crate::desktop::not_admitted`], zerus-tlb9q).
+    fences: Arc<crate::desktop::not_admitted::Fences>,
     /// This service's own running image, pinned once from the kernel's
     /// `/proc/self/exe`. Each child executes that pinned image; without it (a
     /// test image, or an image already gone) no child starts.
@@ -185,7 +205,12 @@ pub(in crate::desktop) struct Runtime {
     slot_hook: Option<Hook>,
 }
 impl Runtime {
-    pub fn new(config: &Config, epoch: &str, owner: Arc<platform::FileLock>) -> Result<Self> {
+    pub fn new(
+        config: &Config,
+        epoch: &str,
+        owner: Arc<platform::FileLock>,
+        fences: Arc<crate::desktop::not_admitted::Fences>,
+    ) -> Result<Self> {
         let location = Location::new(config)?;
         Ok(Self {
             #[cfg(test)]
@@ -205,6 +230,7 @@ impl Runtime {
             failed: false,
             charges: None,
             mac_fence: cfg!(target_os = "macos"),
+            fences,
             #[cfg(target_os = "linux")]
             image: crate::self_exec::ensure()
                 .and_then(|()| Pin::open(std::path::Path::new("/proc/self/exe")))
@@ -302,12 +328,21 @@ impl Runtime {
         exclusion: Option<Arc<HandoffLock>>,
     ) -> Value {
         let id = authority.id().to_owned();
+        // Only this epoch's own request is ever answered not admitted or
+        // sealed; another connection's stays unavailable (zerus-tlb9q).
+        let ours = authority.deferred_input_scope() == Some(&self.scope);
+        // A request this epoch answered not admitted never admits: a copy of
+        // it queued behind that refusal gets the same answer.
+        if ours && self.fences.compact_to_send.sealed(&id) {
+            return self.refusal(id, wire::NOT_ADMITTED);
+        }
         // No qualified seam yet attests the code a macOS child runs before it
         // receives private input: refuse before any row or child.
         if self.mac_fence {
             return self.refusal(id, MAC_UNAVAILABLE);
         }
         self.refresh(store, exclusion);
+        let mut proof = Proof::Before;
         let result = (|| -> Result<wire::Admission> {
             ensure!(
                 !self.stopping && !self.failed && store.creation_recovery_ok(),
@@ -322,9 +357,19 @@ impl Runtime {
                 .as_ref()
                 .context("compact-to-send lease unavailable")?
                 .clone();
+            proof = Proof::Unprovable;
             let tx = store
                 .db
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            // The ledger's word on this request, read first in this writer
+            // transaction: only a successful empty read lets a refusal
+            // before the admission settle as never started.
+            let original = ledger::load(&tx, &id)?;
+            proof = if original.is_none() {
+                Proof::NoRow
+            } else {
+                Proof::Existing
+            };
             // The original opaque permit, consumed AFTER the writer lock.
             let intent = authority.compact_to_send()?;
             ensure!(
@@ -338,8 +383,9 @@ impl Runtime {
                 self.machine.as_ref(),
                 self.exclusion.as_ref(),
             )?;
-            let original = ledger::load(&tx, &id)?;
             let consent = Consent::admitted(verified, lease.clone(), self.chain)?;
+            // From here on nothing proves the request was not admitted.
+            proof = Proof::Admitting;
             let row = ledger::admit(
                 &tx,
                 &consent.original,
@@ -362,9 +408,27 @@ impl Runtime {
                 receipt: Some(row.receipt),
             })
         })();
-        match result {
-            Ok(value) => json!(value),
-            Err(_) => self.refusal(id, "compact_to_send_unavailable"),
+        match (result, proof) {
+            (Ok(value), _) => json!(value),
+            // Refused before the admission, with no row in this transaction.
+            (Err(_), Proof::NoRow) if ours => self.not_admitted(id),
+            // Refused before the transaction: a fresh writer transaction on
+            // the same held store proves the absence first.
+            (Err(_), Proof::Before)
+                if ours && not_admitted::no_row(&mut store.db, |tx| ledger::load(tx, &id)) =>
+            {
+                self.not_admitted(id)
+            }
+            (Err(_), _) => self.refusal(id, UNAVAILABLE),
+        }
+    }
+    /// The closed refusal of a request proven never admitted, sealed for the
+    /// epoch before the reply; a full fence mints none (zerus-tlb9q).
+    fn not_admitted(&self, id: String) -> Value {
+        if self.fences.compact_to_send.seal(&id) {
+            self.refusal(id, wire::NOT_ADMITTED)
+        } else {
+            self.refusal(id, UNAVAILABLE)
         }
     }
     fn check(

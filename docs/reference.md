@@ -2601,6 +2601,16 @@ is there, in one click.
   roster and their folders stay inside the root. A create outside the root,
   without the QA right, or before the standing rule is granted is refused;
   `scratch_parent` names the parent team, the creating task and the member.
+  - Task #231 (owner, 2026-11-08, on task 170's F2): a scratch team's members
+  get their own folders like a normal team. When the scratch team's folder is
+  a git repository (or inside one), `Create team` gives each member a worktree
+  or clone of it, cut as a sibling of the scratch team's folder - inside the
+  rule's folder, trusted by the same rule - and the `git-commit` template,
+  member branches, the predecessor's commit for a dependent task and the merge
+  queue work there. A lead's scratch team (rule 159) and a QA member's both
+  get this. A scratch folder that is not a git repository keeps today's shared
+  team folder, and the commit refusal says why: make the scratch folder a git
+  repository so each member gets its own folder.
   The parent lead sees each scratch team as `scratch_team_created` and
   `scratch_teams_stopped` in its feed and a `scratch_team` inbox item
   (created, stopped, or listed). When the creating task is accepted, rejected
@@ -2683,6 +2693,27 @@ the right work by relevance.
 - The lead's message to a member that hands down an owner decision ("the
   owner decided ...") is refused by `hgs send` and `hgs team message`, naming
   `hgs team decide`.
+
+Task 279 (owner, 2026-11-08): the owner's standing rules are kept with their
+words and source, so the lead records them at any age.
+- Every owner message of the lead's session is indexed already: it is a
+  `UserPromptSubmit` event of the lead's conversation in the events journal
+  (content search and lore history read it read-only).
+  `hgs team decisions --json {"team":"ID","action":"owner-messages","limit":40}`
+  lists them newest first with `id` (the journal's event id), `at` and `text`.
+- `hgs team decide --json` takes `owner_message: {"id":N,"quote":"..."}` for a
+  lead caller instead of `owner_word`: the message may be any age, Zerus checks
+  it is the owner's own `UserPromptSubmit` in the lead's conversation (never an
+  injected policy, a team message or a scheduled turn) and that the quote is in
+  it (case and spacing ignored); a wrong quote, a quote from another message or
+  an unknown id is refused with the message it names. The decision records
+  `owner_message` (id, quote, at), and `by` says "the lead on your message N".
+  The 30-minute `owner_word` path stays for a fresh sentence.
+- `"kind":"standing rule"` (or `"rule"`) makes it a standing rule: a decision
+  kind of its own, recalled in every lead brief ("Your standing rules ...") and
+  in the hand-out of every task it binds, each line carrying its source
+  (`From your message N: "..."`). It is superseded like any decision, and with a
+  `spec` it reaches the project's lore section too.
 
 A reassign, a take-over or a cancel of a task whose attempt its member is still
 working on (sent or delivered, not reported) tells that member at once: one
@@ -2770,6 +2801,29 @@ not decided (assigned, in progress, reported, in a stage, or sent back), and of
 two ready ones only the first in dispatch order starts; it never goes to
 another member to run beside it. Two returned tasks never wait on each other:
 the lower number goes first. A task without `output` is not held by this rule.
+
+Every view names such a wait (task 295, owner, 2026-11-08: ui4 sat idle while
+its ready #226 waited for #219 and then #225, and the session state, status and
+look all said it waited for the lead to hand #226 out). It names the task that
+holds the files, the ones that run and the ready ones before it, lowest first
+(`plan::output_queue`):
+
+- The member's session state is `deps` with kind `team_output`: "Waiting for #225
+  <title>: it writes the same files as #226", with `holders`.
+- The task's status `waits` is `{"for":"deps","on":[225],"unblock":"finish #225"}`.
+- Look's next action is "Its task #226 waits for #225, which writes the same
+  files; Zerus hands it out when #225 ends".
+
+A ready task whose hand-out step was refused or never confirmed (an accepted
+dependency's merge conflicted in the member's folder, a context action) is
+named the same way. The session state has kind `team_task_waits`: "Waiting for
+Lead to retry or reassign #N: <reason>", or "Waiting for Zerus to prepare #N"
+while it runs. Look gives that reason too. Only a ready task nothing else holds
+waits for the lead's hand-out, and the dispatcher hands it out at its next
+tick. The lead may propose a relaunch for any member, also an idle one that
+never takes its task. The owner's click runs the relaunch, a fresh
+conversation with the handoff brief, without asking whether the session failed
+to start.
 
 Before a hand-out, after its task branch, Zerus merges the accepted work of the
 task's dependencies (direct or through another dependency) into the member's

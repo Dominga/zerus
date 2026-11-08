@@ -3039,6 +3039,9 @@ fn brief_text_rules(team: &Team, rules: &str) -> String {
                 bounded(&previous["transcript"]),
             );
         }
+        // Task #279: the owner's standing rules, cited from the owner's own
+        // messages, are recalled in every lead brief.
+        text += &super::decisions::rules_block(team);
         return text;
     }
     let members: Vec<Value> = team
@@ -11116,6 +11119,9 @@ mod dispatcher_crash;
 #[cfg(test)]
 #[path = "tests/dispatcher_pause_cold.rs"]
 mod dispatcher_pause_cold;
+#[cfg(test)]
+#[path = "tests/dispatcher_idle_handout.rs"]
+mod dispatcher_idle_handout;
 #[cfg(test)]
 #[path = "tests/dispatcher_store_locks.rs"]
 mod dispatcher_store_locks;

@@ -41,6 +41,10 @@ pub(crate) struct NewDecision {
     pub tasks: Vec<u32>,
     pub forbids: Vec<String>,
     pub supersedes: String,
+    /// Task #279: "rule" for a standing rule, empty for an ordinary decision.
+    pub kind: String,
+    /// Task #279: the cited owner message {id, quote, at}.
+    pub owner_message: Option<serde_json::Value>,
 }
 
 fn clip(text: &str, limit: usize) -> String {
@@ -85,7 +89,27 @@ pub(crate) fn from_input(team: &Team, input: &Value) -> anyhow::Result<NewDecisi
     anyhow::ensure!(!choice.is_empty() && choice.chars().count() <= 600, "A decision names the owner's choice (1 to 600 characters)");
     let why = input["why"].as_str().unwrap_or_default().trim().to_owned();
     anyhow::ensure!(why.chars().count() <= 800, "A decision's why is at most 800 characters");
-    let mut decision = NewDecision { question, choice, why, supersedes: input["supersedes"].as_str().unwrap_or_default().to_owned(), ..NewDecision::default() };
+    // Task #279: a standing rule is a decision kind of its own, recalled in
+    // every lead brief and in the hand-out of every task it binds; it may cite
+    // the owner's message it came from.
+    let kind = match input["kind"].as_str().unwrap_or_default().trim().to_ascii_lowercase().replace(' ', "-").as_str() {
+        "rule" | "standing-rule" => "rule",
+        _ => "",
+    };
+    let owner_message = input["owner_message"].as_object().map(|message| {
+        serde_json::json!({"id":message.get("id").cloned().unwrap_or_default(),
+            "quote":message.get("quote").cloned().unwrap_or_default(),
+            "at":message.get("at").cloned().unwrap_or_default()})
+    });
+    let mut decision = NewDecision {
+        question,
+        choice,
+        why,
+        supersedes: input["supersedes"].as_str().unwrap_or_default().to_owned(),
+        kind: kind.into(),
+        owner_message,
+        ..NewDecision::default()
+    };
     refs_from(team, input, &mut decision)?;
     if !decision.supersedes.is_empty() {
         anyhow::ensure!(team.decisions.iter().any(|found| found.id == decision.supersedes), "Unknown decision {}", decision.supersedes);
@@ -127,6 +151,8 @@ pub(crate) fn from_card(card: &Value, state: &str, answer: &str, reason: &str) -
         tasks,
         forbids: strings("forbids"),
         supersedes: String::new(),
+        kind: String::new(),
+        owner_message: None,
     }
 }
 
@@ -164,9 +190,12 @@ pub(crate) fn record(team: &mut Team, new: NewDecision, at: f64, events: &mut Ve
         forbids: new.forbids,
         superseded_by: String::new(),
         topic: key,
+        kind: new.kind,
+        owner_message: new.owner_message,
     };
     events.push(super::store::Event::new("decision_recorded", json!({"id":id,"question":decision.question,"choice":decision.choice,
-        "by":decision.by,"card":decision.card,"spec":decision.spec,"files":decision.files,"tasks":decision.tasks,"supersedes":superseded})));
+        "by":decision.by,"card":decision.card,"spec":decision.spec,"files":decision.files,"tasks":decision.tasks,"supersedes":superseded,
+        "kind":decision.kind,"owner_message":decision.owner_message})));
     team.decisions.push(decision);
     while team.decisions.len() > KEPT {
         let Some(oldest) = team.decisions.iter().position(|found| !found.superseded_by.is_empty()) else { break };
@@ -247,9 +276,11 @@ fn date(at: f64) -> String {
     chrono::DateTime::from_timestamp(at as i64, 0).map(|time| time.format("%Y-%m-%d").to_string()).unwrap_or_default()
 }
 
-/// One decision as a line: its id, question, choice, why and refs.
+/// One decision as a line: its id, question, choice, why and refs. A standing
+/// rule (#279) says so and quotes the owner's message it was verified against.
 pub(crate) fn line(decision: &Decision) -> String {
-    let mut text = format!("- {} ({}, {}): {} -> {}", decision.id, decision.by, date(decision.at), decision.question, decision.choice);
+    let what = if decision.kind == "rule" { format!("standing rule {}", decision.id) } else { decision.id.clone() };
+    let mut text = format!("- {} ({}, {}): {} -> {}", what, decision.by, date(decision.at), decision.question, decision.choice);
     if !decision.why.is_empty() {
         text += &format!(". Why: {}", decision.why);
     }
@@ -258,6 +289,39 @@ pub(crate) fn line(decision: &Decision) -> String {
     }
     if !decision.spec.is_empty() {
         text += &format!(". Amends {}", decision.spec);
+    }
+    if let Some(message) = &decision.owner_message {
+        let id = message["id"].as_i64().or_else(|| message["id"].as_str().and_then(|text| text.parse().ok())).unwrap_or_default();
+        let quote = message["quote"].as_str().unwrap_or_default();
+        if !quote.is_empty() {
+            text += &format!(". From your message {id}: \"{}\"", clip(quote, 300));
+        }
+    }
+    text
+}
+
+/// Task #279: the owner's standing rules, newest first: recalled in every lead
+/// brief.
+pub(crate) fn rules(team: &Team) -> Vec<&Decision> {
+    let mut found: Vec<&Decision> = current(team).filter(|decision| decision.kind == "rule").collect();
+    found.sort_by(|a, b| b.at.total_cmp(&a.at));
+    found
+}
+
+/// Task #279: the standing rules as the lead brief shows them.
+pub(crate) fn rules_block(team: &Team) -> String {
+    let found = rules(team);
+    if found.is_empty() {
+        return String::new();
+    }
+    let mut text = "\nYour standing rules (the owner's, cited; they bind every plan and hand-out, and hgs team ask if one seems wrong):\n".to_owned();
+    for decision in found {
+        let next = format!("{}\n", line(decision));
+        if text.len() + next.len() > BLOCK_BYTES {
+            text += "- (more: hgs team decisions --json)\n";
+            break;
+        }
+        text += &next;
     }
     text
 }
@@ -404,3 +468,4 @@ pub(crate) fn refusal(team: &str) -> String {
 #[cfg(test)]
 #[path = "tests/decisions.rs"]
 mod tests;
+

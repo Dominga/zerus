@@ -63,8 +63,9 @@ fn a_qa_member_prepares_a_scratch_team_at_the_team_root() {
     // The QA member's own session leads the scratch team.
     assert_eq!(filled["lead"]["id"], json!("qa"));
     assert_eq!(filled["lead"]["session"]["name"], json!("kimi/x/qa"));
-    // The other member works in the scratch folder, which the standing rule trusts.
-    assert_eq!(filled["members"][0]["folder"], json!("shared"));
+    // The other member's folder is the shared scratch folder for a folder that
+    // is not a git repository (task #231), decided by ops::create.
+    assert!(filled["members"][0].get("folder").is_none(), "the create decides the folder");
     // The plan needs no card, and the parent's caps hold.
     assert_eq!(filled["settings"]["approval"], json!("auto"));
     assert_eq!(filled["settings"]["phase_approval"], json!("auto"));
@@ -82,6 +83,142 @@ fn a_qa_member_prepares_a_scratch_team_at_the_team_root() {
     assert_eq!(created.lead, "qa");
     assert!(created.members.iter().any(|member| member.id == "probe" && member.folder == MemberFolder::Shared));
     templates::settings_override(None);
+}
+
+/// Task #231: a scratch folder that is a git repository gives each member its
+/// own worktree or clone, at a path inside the rule's folder: the commit
+/// template, the member branch and a dependent's base work there.
+#[test]
+fn a_git_scratch_folder_gives_its_members_their_own_folders_inside_the_root() {
+    let dir = work();
+    templates::settings_override(Some(dir.path().join("templates.json")));
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let status = std::process::Command::new("git").args(["init", "-q"]).current_dir(&project).status().unwrap();
+    assert!(status.success());
+    let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&project).status().unwrap();
+    git(&["config", "user.name", "Zerus Test"]);
+    git(&["config", "user.email", "test@example.com"]);
+    std::fs::write(project.join("README.md"), "scratch\n").unwrap();
+    git(&["add", "-A"]);
+    assert!(git(&["commit", "-qm", "Base"]).success());
+    let team = team(&project.to_string_lossy());
+    grant(&team);
+    let qa = team.member("qa").unwrap();
+    let inside = format!("{}/check-1", root(&team));
+    std::fs::create_dir_all(&inside).unwrap();
+    let filled = prepare(&team, qa, &json!({
+        "name": "Live check",
+        "folder": inside,
+        "members": [{"id":"probe","role":"Backend","agent":"dsh"}],
+    }))
+    .unwrap();
+    let created = ops::create("scratch-2", &filled).unwrap().0;
+    let probe = created.member("probe").unwrap();
+    assert_eq!(probe.folder, MemberFolder::Clone, "a dsh member gets its own clone");
+    let destination = super::super::dispatcher::member_folder_path(&created, probe).unwrap();
+    assert_ne!(destination, created.folder, "never the scratch team's own folder");
+    assert!(owner_steps::inside(&destination, &root(&team)), "{destination} is inside {}", root(&team));
+    // The destination is the member's own folder; a repository there (what the
+    // dispatcher's clone makes) lets the commit template's path (hgs team
+    // commit) work and record the attempt.
+    crate::state::with_test_state_root(dir.path(), || {
+        std::fs::create_dir_all(&destination).unwrap();
+        let init = std::process::Command::new("git").args(["init", "-q"]).current_dir(&destination).status().unwrap();
+        assert!(init.success(), "the member's own folder is a repository");
+        let clone_git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&destination).status().unwrap();
+        clone_git(&["config", "user.name", "Zerus Test"]);
+        clone_git(&["config", "user.email", "test@example.com"]);
+        // A base commit, then the member's work: the commit template records it.
+        std::fs::write(std::path::Path::new(&destination).join("README.md"), "base\n").unwrap();
+        clone_git(&["add", "-A"]);
+        assert!(clone_git(&["commit", "-qm", "Base"]).success());
+        // The member's own branch, as the dispatcher cuts it.
+        assert!(clone_git(&["checkout", "-q", "-b", "team/scratch-/probe"]).success());
+        std::fs::write(std::path::Path::new(&destination).join("probe.txt"), "probe\n").unwrap();
+        let mut team = created.clone();
+        team.status = TeamStatus::Running;
+        team.tasks.push(Task {
+            id: 1,
+            title: "Probe".into(),
+            assignee: "probe".into(),
+            status: TaskStatus::InProgress,
+            attempts: vec![Attempt { n: 1, id: "a1".into(), member: "probe".into(), state: AttemptState::Delivered, ..Default::default() }],
+            ..Default::default()
+        });
+        let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+        store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team.clone(), vec![]).unwrap();
+        let committed = commands::commit_in_team(
+            &team,
+            "probe",
+            &json!({"request_id": uuid::Uuid::new_v4().to_string(), "attempt": "a1", "message": "Probe work"}),
+        )
+        .unwrap();
+        assert_eq!(committed["status"], json!("committed"), "{committed}");
+        let saved = store.load("scratch-2").unwrap().unwrap();
+        let attempt = saved.task(1).unwrap().attempts[0].clone();
+        assert!(
+            attempt.commits.iter().any(|commit| Some(commit.sha.as_str()) == committed["sha"].as_str()),
+            "the commit is recorded on the attempt: {attempt:?}"
+        );
+    });
+    templates::settings_override(None);
+}
+
+/// Task #231: a lead's scratch team (rule 159, no scratch_parent) gets its
+/// members their own folders too.
+#[test]
+fn a_leads_scratch_team_gets_its_members_their_own_folders() {
+    let dir = work();
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&project).status().unwrap();
+    assert!(git(&["init", "-q"]).success());
+    git(&["config", "user.name", "Zerus Test"]);
+    git(&["config", "user.email", "test@example.com"]);
+    std::fs::write(project.join("README.md"), "scratch\n").unwrap();
+    git(&["add", "-A"]);
+    assert!(git(&["commit", "-qm", "Base"]).success());
+    let root = project.join(".qa-scratch");
+    let inside = root.join("lead-check");
+    std::fs::create_dir_all(&inside).unwrap();
+    let created = ops::create(
+        "lead-scratch",
+        &json!({
+            "name": "Lead check",
+            "folder": inside.to_string_lossy(),
+            "lead": {"id":"lead","role":"Lead","agent":"dsh"},
+            "members": [{"id":"dev1","role":"Backend","agent":"codex"}],
+            "scratch_rule": "rule-1",
+        }),
+    )
+    .unwrap()
+    .0;
+    let dev1 = created.member("dev1").unwrap();
+    assert_eq!(dev1.folder, MemberFolder::Worktree, "the lead's scratch member gets its own worktree");
+    let destination = super::super::dispatcher::member_folder_path(&created, dev1).unwrap();
+    assert!(owner_steps::inside(&destination, &root.to_string_lossy()), "{destination} is inside {}", root.display());
+}
+
+/// Task #231: a scratch folder that is not a git repository keeps the shared
+/// folder, and the commit refusal says why.
+#[test]
+fn a_commit_in_a_non_repository_scratch_team_says_why_it_has_no_member_folder() {
+    let dir = work();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut team = team("D:/work/core");
+        team.scratch_rule = "rule-1".into();
+        let mut store = Store::open_at(&super::super::store::path(), true).unwrap();
+        store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team.clone(), vec![]).unwrap();
+        let error = commands::commit_in_team(
+            &team,
+            "dev",
+            &json!({"request_id": uuid::Uuid::new_v4().to_string(), "message": "work"}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("scratch team's folder is not a git repository"), "{error}");
+    });
 }
 
 #[test]

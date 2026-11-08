@@ -261,6 +261,28 @@ fn member_reason(team: &Team, member: &Member) -> Option<Value> {
         return reason(team, "team_dependency", format!("Waiting for #{}{title}{role}", dep.task),
             json!({"task":next.id,"dependency":dep.task}));
     }
+    // Task 295: a ready task whose hand-out step was refused or never
+    // confirmed waits for that, named; one Zerus still prepares waits for it.
+    if let Some(wait) = next.waits.as_ref().filter(|_| next.hold.is_none()) {
+        let text = if wait.running() {
+            format!("Waiting for Zerus to prepare #{}", next.id)
+        } else {
+            let why: String = wait.reason.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(160).collect();
+            format!("Waiting for {} to retry or reassign #{}: {why}", role_of(team, parent), next.id)
+        };
+        return reason(team, "team_task_waits", text, json!({"task":next.id,"for":wait.waits_for,"on":wait.on,"state":wait.state}));
+    }
+    // Task 295: a ready task whose files another open task writes waits for
+    // that task, never for the lead; it is handed out when that one ends.
+    if next.hold.is_none() && ready.contains(&next.id) {
+        let queue = plan::output_queue(team, next);
+        if let Some(first) = queue.first() {
+            let title = team.task(*first).map(|task| task.title.clone()).unwrap_or_default();
+            let title = if title.is_empty() { String::new() } else { format!(" {title}") };
+            return reason(team, "team_output", format!("Waiting for #{first}{title}: it writes the same files as #{}", next.id),
+                json!({"task":next.id,"holders":queue}));
+        }
+    }
     // Ready, held or between hand-outs: the lead hands it out.
     reason(team, "team_hand_out", format!("Waiting for {} to hand out #{}", role_of(team, parent), next.id),
         json!({"task":next.id,"by":parent,"held":next.hold.is_some()}))

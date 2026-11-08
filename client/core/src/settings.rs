@@ -138,6 +138,9 @@ pub const KEYS: &[Key] = &[
     key("workspace/alwaysOnTop", Kind::Flag(false)),
     // Sessions (SettingsPage.h:97-107, QuestionNotificationSettings.h).
     key("workspace/compact", Kind::Flag(false)),
+    // Qt's workspace/collapsedTeams: the team ids whose members are folded
+    // under the lead (SessionsWindowRows.cpp).
+    key("workspace/collapsedTeams", Kind::Chords),
     key("workspace/expandSessionsOnHover", Kind::Flag(true)),
     key("workspace/hideEmptyProjects", Kind::Flag(true)),
     key("workspace/animateActivity", Kind::Flag(true)),
@@ -310,6 +313,8 @@ pub const KEYS: &[Key] = &[
     Key { name: "workspace/inspectorClosed", kind: Kind::Text("[]"), seeded: true },
     // New G3 families use the family journal, not the original switch seed.
     client("client/windowGeometry", Kind::Text("")),
+    // Task 243: the sessions list hidden (Qt's SessionPanelDock Collapsed, the same key).
+    client("workspace/sessionsCollapsed", Kind::Flag(false)),
     client(
         "workspace/sessionsWidth",
         Kind::Whole {
@@ -353,6 +358,14 @@ pub const KEYS: &[Key] = &[
     // finished" and the catalog's unused-role switch as plain flags; its heat
     // mode is per team, so the imported map holds team -> "time" | "tokens".
     key("teams/hideFinished", Kind::Flag(false)),
+    // Task 244: how a lead session shows the team's notices (Full, Collapsed
+    // by default, Hidden), and each lead session's own choice by its row key.
+    key("teams/leadNotices", Kind::Choice(&["collapsed", "full", "silent"])),
+    Key {
+        name: "teams/leadNoticeSessions",
+        kind: Kind::Text("{}"),
+        seeded: false,
+    },
     key("ui/catalogHideUnusedRoles", Kind::Flag(false)),
     Key {
         name: "teams/heatModes",

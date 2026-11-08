@@ -228,6 +228,41 @@ pub(super) fn event_db() -> Result<Connection> {
     event_db_at(&root())
 }
 
+/// A shared read connection to the events database (task 193). The writer keeps
+/// opening its own connection (a write needs `&mut`); a read reuses this
+/// process's connection instead of opening the database once per row, which
+/// cost about 50 ms a row in `hgs ls`.
+pub(super) struct EventDb(std::rc::Rc<Connection>);
+
+impl std::ops::Deref for EventDb {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.0
+    }
+}
+
+thread_local! {
+    /// The read connection and the journal it belongs to: a test (or a command)
+    /// that switches state roots gets its own, never a connection to the other.
+    static READ_DB: std::cell::RefCell<Option<(PathBuf, std::rc::Rc<Connection>)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The shared read connection of this thread, opened once per state root.
+pub(super) fn event_db_shared() -> Result<EventDb> {
+    let root = root();
+    let path = root.join("events.sqlite3");
+    READ_DB.with(|slot| {
+        if let Some((cached, db)) = slot.borrow().as_ref() {
+            if *cached == path {
+                return Ok(EventDb(db.clone()));
+            }
+        }
+        let db = std::rc::Rc::new(event_db_at(&root)?);
+        *slot.borrow_mut() = Some((path, db.clone()));
+        Ok(EventDb(db))
+    })
+}
+
 fn event_db_at(root: &Path) -> Result<Connection> {
     private_dir(root)?;
     let path = root.join("events.sqlite3");
@@ -375,11 +410,90 @@ pub(super) fn normalized_activity(record: &Value, live_pane: bool) -> Value {
 // missed between polls. Child stops and initial SessionStart are not replies.
 // Reading the retained journal also covers sessions created before this feature.
 fn latest_reply(record: &Value, recurring_schedules: Option<u64>) -> Result<Value> {
+    let mut found = latest_reply_of(record, recurring_schedules)?;
+    // WhiteWh fork, task 244: a reply to a turn only Zerus's team pastes opened.
+    let seq = found["reply_id"].as_str().and_then(|id| id.split(':').next()).and_then(|seq| seq.parse::<i64>().ok());
+    if let Some(seq) = seq {
+        let db = event_db_shared()?;
+        if team_notice_turn(&db, record, seq)? {
+            found["reply_team_notice"] = json!(true);
+        }
+    }
+    Ok(found)
+}
+
+/// WhiteWh fork, task 244: a prompt Zerus pasted for the team, as the clients'
+/// notices read it (client notices.ts, Qt ActivityView teamMessage): a
+/// session's envelope (`peer_message`), a "[Zerus team, from: X ...]" header
+/// (with Zerus's middle dot) other than the owner's own "from: You", or
+/// Zerus's sender-less "[Zerus team]" / "[Zerus task N]" pastes. The owner's
+/// words never match: the header must open the prompt.
+pub(super) fn team_notice_prompt(event: &Value) -> bool {
+    if event["origin"] == "peer_message" {
+        return true;
+    }
+    let mut text = string(event, "detail").trim_start();
+    if let Some(rest) = text.strip_prefix("<zerus-message") {
+        text = rest.split_once('>').map_or("", |(_, body)| body).trim_start();
+    }
+    if let Some(rest) = text.strip_prefix("[Zerus team \u{00b7} from: ") {
+        let sender = rest.split(['\u{00b7}', ']']).next().unwrap_or("").trim();
+        return !sender.is_empty() && sender != "You";
+    }
+    let Some(rest) = text.strip_prefix("[Zerus ").and_then(|rest| rest.strip_prefix("team").or_else(|| rest.strip_prefix("task"))) else {
+        return false;
+    };
+    rest.starts_with(']') || (rest.starts_with(' ') && rest.split('\n').next().is_some_and(|line| line.contains(']')))
+}
+
+/// WhiteWh fork, task 244: whether only team pastes opened the turn of the
+/// main Stop `stop`. A turn with any prompt of the owner's is the owner's;
+/// a turn whose opening is not in the journal is not a notice turn.
+fn team_notice_turn(db: &Connection, record: &Value, stop: i64) -> Result<bool> {
+    let mut statement = db
+        .prepare(
+            "SELECT json_extract(payload, '$.type'), payload FROM events
+         WHERE name = ? AND conversation = ?
+           AND COALESCE(json_extract(payload, '$.agent_id'), '') IN ('', 'main')
+           AND json_extract(payload, '$.type') IN ('UserPromptSubmit','UserPromptQueued','UserMessage','TurnStarted','QuestionAnswered','AgentMessage','Stop')
+           AND seq < ?
+         ORDER BY seq DESC LIMIT 64",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map(params![journal_name(record), string(record, "conversation_id"), stop], |row| {
+            Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut prompts = 0;
+    for row in rows {
+        let (kind, payload) = row.map_err(|e| e.to_string())?;
+        match kind.as_deref() {
+            Some("Stop") => break,
+            Some("UserPromptSubmit" | "UserPromptQueued" | "UserMessage" | "QuestionAnswered") => {
+                let event: Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
+                // Kimi's empty submit carries no prompt; its TurnStarted does.
+                if string(&event, "detail").is_empty() && event["origin"].is_null() {
+                    continue;
+                }
+                if kind.as_deref() == Some("QuestionAnswered") || !team_notice_prompt(&event) {
+                    return Ok(false);
+                }
+                prompts += 1;
+            }
+            _ => {}
+        }
+    }
+    Ok(prompts > 0)
+}
+
+fn latest_reply_of(record: &Value, recurring_schedules: Option<u64>) -> Result<Value> {
     let conversation = string(record, "conversation_id");
     if conversation.is_empty() {
         return Ok(json!({}));
     }
-    let db = event_db()?;
+    // Task 193: one read connection for every row of a listing.
+    let db = event_db_shared()?;
     let reply = |seq: i64, at: Value, scheduled: bool| {
         json!({"reply_id":format!("{}:{}", seq, at), "reply_at":at, "reply_scheduled":scheduled})
     };
@@ -2438,6 +2552,47 @@ mod attention_regressions {
         assert_eq!(real_reply(&db, &only, stop).unwrap(), None);
     }
     #[test]
+    fn a_reply_to_a_turn_only_team_pastes_opened_is_a_team_notice_reply() {
+        // Task 244: the clients do not notify the owner of these replies.
+        let prompt = |detail: &str| json!({"type":"UserPromptSubmit","agent_id":"","detail":detail});
+        assert!(team_notice_prompt(&prompt("[Zerus team \u{00b7} from: Zerus \u{00b7} inbox]\nReport for task #185")));
+        assert!(team_notice_prompt(&prompt("<zerus-message from=\"a\">[Zerus team \u{00b7} from: Lead \u{00b7} task: #2]\nGo</zerus-message>")));
+        assert!(team_notice_prompt(&prompt("[Zerus team] 1 new message for you: hgs team inbox")));
+        assert!(team_notice_prompt(&prompt("[Zerus task 12] Fix the build")));
+        assert!(team_notice_prompt(&json!({"type":"UserPromptSubmit","origin":"peer_message","detail":"Message from claude/p/qa"})));
+        for owner in ["Please fix the build", "[Zerus team \u{00b7} from: You \u{00b7} task: #3]\nYour turn ended", "What does [Zerus team] mean?", "[Zerus teams] are great", "[zerus team] lower"] {
+            assert!(!team_notice_prompt(&prompt(owner)), "{owner}");
+        }
+
+        let db = message_db();
+        let lead = json!({"agent":"claude","name":"lead","conversation_id":"conversation"});
+        let main = |event: Value| insert_message(&db, "lead", Some("conversation"), event);
+        main(prompt("Plan the next phase"));
+        let owner = main(json!({"type":"Stop","agent_id":"","at":1.0}));
+        assert!(!team_notice_turn(&db, &lead, owner).unwrap());
+        main(prompt("[Zerus team \u{00b7} from: Zerus \u{00b7} inbox]\nReport for task #185"));
+        main(json!({"type":"PreToolUse","agent_id":"","tool":"Bash"}));
+        main(json!({"type":"AgentMessage","agent_id":""}));
+        let notice = main(json!({"type":"Stop","agent_id":"","at":2.0}));
+        assert!(team_notice_turn(&db, &lead, notice).unwrap());
+        // A doorbell and the owner's message in one turn: the owner's.
+        main(prompt("[Zerus team] 1 new message"));
+        main(json!({"type":"UserPromptQueued","agent_id":"","detail":"And check the light theme"}));
+        let mixed = main(json!({"type":"Stop","agent_id":"","at":3.0}));
+        assert!(!team_notice_turn(&db, &lead, mixed).unwrap());
+        // An answered question is the owner's; a Stop without its opening is not a notice turn.
+        main(json!({"type":"QuestionAnswered","agent_id":"","detail":"Yes"}));
+        let answered = main(json!({"type":"Stop","agent_id":"","at":4.0}));
+        assert!(!team_notice_turn(&db, &lead, answered).unwrap());
+        let orphan = main(json!({"type":"Stop","agent_id":"","at":5.0}));
+        assert!(!team_notice_turn(&db, &lead, orphan).unwrap());
+        // A child's prompt never decides.
+        main(json!({"type":"UserPromptSubmit","agent_id":"child","detail":"do it"}));
+        main(prompt("[Zerus team \u{00b7} from: Tester \u{00b7} task: #4]\nDone"));
+        let member = main(json!({"type":"Stop","agent_id":"","at":6.0}));
+        assert!(team_notice_turn(&db, &lead, member).unwrap());
+    }
+    #[test]
     fn kimi_scheduled_ticks_are_not_replies_while_a_recurring_job_remains() {
         let kimi = json!({"agent":"kimi","name":"example","conversation_id":"conversation"});
         let started = |origin: Value| json!({"hook_event_name":"TurnStarted","agent_id":"main","origin_kind":origin});
@@ -2964,5 +3119,28 @@ mod lock_regressions {
         }
         let mode = std::fs::symlink_metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "created owner-only");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Task 193: one shared read connection per thread and state root: a write
+    /// from a fresh connection is seen on the next read, and a second call reuses
+    /// the connection instead of opening the events database again.
+    #[test]
+    fn a_shared_read_connection_sees_a_write() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let shared = event_db_shared().unwrap();
+            let writer = event_db().unwrap();
+            writer.execute("INSERT INTO events(name, conversation, payload) VALUES ('n','c','{}')", []).unwrap();
+            let count: i64 = shared.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0)).unwrap();
+            assert_eq!(count, 1);
+            let again = event_db_shared().unwrap();
+            let count: i64 = again.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0)).unwrap();
+            assert_eq!(count, 1);
+        });
     }
 }

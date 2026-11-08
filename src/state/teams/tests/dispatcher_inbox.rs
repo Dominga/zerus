@@ -210,14 +210,15 @@ fn a_lead_with_its_own_background_work_still_gets_the_inbox_and_the_reminder() {
     let late = 5.0 + report_team.settings.remind_lead_minutes as f64 * 60.0 + 60.0;
     let found = steps(&report_team, &[lead.clone()], late);
     assert!(found.iter().any(|step| matches!(step, Step::RemindReport { task: 1 })), "{found:?}");
-    // A lead in its own turn gets the inbox (it takes queued input between
-    // tool calls), not the reminder; one asking on its screen gets neither.
+    // A lead in its own turn gets the inbox stored, never typed (task 186:
+    // its hooks take it at a safe point), not the reminder; one asking on
+    // its screen gets neither.
     let mut busy = lead;
     busy.background = false;
     busy.activity = "busy".into();
     busy.phase = "working".into();
     let found = steps(&report_team, &[busy.clone()], late);
-    assert!(found.iter().any(|step| matches!(step, Step::Inbox)), "{found:?}");
+    assert!(found.iter().any(|step| matches!(step, Step::InboxWaits)) && !found.iter().any(|step| matches!(step, Step::Inbox)), "{found:?}");
     assert!(!found.iter().any(|step| matches!(step, Step::RemindReport { .. })), "{found:?}");
     // Task 112: a Kimi lead sends a pasted message only after its turn: the
     // list would be read long after it was composed (task #26's accepted
@@ -226,12 +227,12 @@ fn a_lead_with_its_own_background_work_still_gets_the_inbox_and_the_reminder() {
     let lead_id = kimi.lead.clone();
     kimi.members.iter_mut().find(|member| member.id == lead_id).unwrap().agent = "kimi".into();
     let found = steps(&kimi, &[busy.clone()], late);
-    assert!(!found.iter().any(|step| matches!(step, Step::Inbox)), "{found:?}");
+    assert!(!found.iter().any(|step| matches!(step, Step::Inbox | Step::InboxWaits)), "{found:?}");
     assert!(super::super::dispatcher::takes_input_mid_turn("claude") && super::super::dispatcher::takes_input_mid_turn("codex"));
     assert!(!super::super::dispatcher::takes_input_mid_turn("kimi"));
     busy.asking = true;
     let found = steps(&report_team, &[busy], late);
-    assert!(!found.iter().any(|step| matches!(step, Step::Inbox | Step::RemindReport { .. })), "{found:?}");
+    assert!(!found.iter().any(|step| matches!(step, Step::Inbox | Step::InboxWaits | Step::RemindReport { .. })), "{found:?}");
 }
 
 #[test]

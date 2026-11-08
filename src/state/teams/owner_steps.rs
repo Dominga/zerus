@@ -84,6 +84,36 @@ pub(crate) fn add(mut rule: ScratchRule) -> anyhow::Result<ScratchRule> {
     Ok(rule)
 }
 
+/// Task #228: one standing rule per team, at its scratch root. A new grant
+/// replaces the team's earlier one, so a team never has two.
+pub(crate) fn add_standing(mut rule: ScratchRule) -> anyhow::Result<ScratchRule> {
+    anyhow::ensure!(!rule.team.is_empty(), "A standing scratch rule names its team");
+    let mut settings = super::templates::read_settings();
+    let mut list: Vec<ScratchRule> = serde_json::from_value(settings["scratch_rules"].clone()).unwrap_or_default();
+    // The same grant is kept once, even when it names a wider folder or agents
+    // (a re-grant changes nothing); a different grant replaces the team's rule.
+    if let Some(found) = list.iter().find(|found| found.team == rule.team && same_folder(&found.folder, &rule.folder) && found.agents == rule.agents) {
+        return Ok(found.clone());
+    }
+    list.retain(|found| found.team != rule.team);
+    anyhow::ensure!(list.len() < RULES_MAX, "You keep at most {RULES_MAX} scratch rules; revoke one first");
+    if rule.granted_at == 0.0 {
+        rule.granted_at = super::super::now();
+    }
+    let digest = Sha256::digest(format!("{}|{}|{}|{}", rule.team, rule.folder, rule.agents.join(","), rule.granted_at).as_bytes());
+    rule.id = format!("s{}", digest.iter().take(4).map(|byte| format!("{byte:02x}")).collect::<String>());
+    list.push(rule.clone());
+    settings["scratch_rules"] = json!(list);
+    super::templates::write_settings(&settings)?;
+    Ok(rule)
+}
+
+/// Task #228: the standing rule of a team, when the owner granted one at this
+/// exact root.
+pub(crate) fn standing(team_id: &str, root: &str) -> Option<ScratchRule> {
+    rules().into_iter().find(|rule| rule.team == team_id && same_folder(&rule.folder, root))
+}
+
 /// Revokes a rule; teams created under it keep what they were given.
 pub(crate) fn revoke(id: &str) -> anyhow::Result<bool> {
     let mut settings = super::templates::read_settings();

@@ -115,6 +115,10 @@ export function createTeams(port: TeamsPort) {
     team: (computer: ComputerId, id: string) => view<TeamView>(computer, `team:${id}`, "team"),
     /** The dependency graph of the same team (`graph:${id}`). */
     graph: (computer: ComputerId, id: string) => view<import("../ui/teams/types").PlanGraph>(computer, `graph:${id}`, "graph"),
+    /** Task 198: the watched team's feed, newest first (`feed:${id}`, core FeedView); Load older asks the core for the page before it. */
+    feed: (computer: ComputerId, id: string) => view<import("../types").TeamFeedView>(computer, `feed:${id}`, "feed"),
+    /** Task 198: what waits for the lead (`inbox:${id}`, core InboxView), oldest first. */
+    inbox: (computer: ComputerId, id: string) => view<import("../types").TeamInboxView>(computer, `inbox:${id}`, "inbox"),
     /** The team's profile, read on request (`profile:${id}`). */
     profile: (computer: ComputerId, id: string) => view<import("../types").TeamProfileView>(computer, `profile:${id}`, "profile"),
     /** Task 42: an open draft as New team shows it (`new:<id>`, kind `new_team`). */

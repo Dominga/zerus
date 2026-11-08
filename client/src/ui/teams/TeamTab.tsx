@@ -6,26 +6,31 @@ import { coordinatorActivity, activity } from "../../store/session";
 import { memberRow, showCatalog, showTeam, teams } from "../../store/teams";
 import { SHARE, SIDE, dragShare, dragSide, teamLayout, type TeamLayout } from "../../store/teamLayout";
 import { selected, setDetailTab, setSelectedKey, toast } from "../../store/ui";
-import { teamTests, teamTimeline, teamsProfile } from "../../bridge";
+import { teamAction, teamBuilds, teamTests, teamTimeline, teamsProfile } from "../../bridge";
+import { AddMemberDialog, MemberCard, toComposer } from "./MemberCard";
+import { focusedTasks, memberTree } from "./members";
+import { sideLists, type SideTarget } from "./sideLists";
+import { TeamActions as TeamActionsModel } from "./actions";
+import { useModel, windowPort } from "./ProposalCards";
 import { PlanView } from "./PlanView";
+import { TeamFeed, TeamInbox } from "./TeamDrawers";
+import { problemTasks as planProblemTasks } from "./planTasks";
 import { TeamCatalogEditor } from "./TeamCatalogEditor";
 import { TeamSettingsDialog } from "./TeamSettingsDialog";
-import type { TeamTestsView } from "../../types";
+import type { TeamBuildsView, TeamTestsView } from "../../types";
 import { ActivityView } from "../sessions/Activity";
 import { Composer } from "../sessions/Composer";
 import { QuestionCard } from "../sessions/QuestionCard";
 import { QueuePanel } from "../sessions/QueuePanel";
 import { sendBackMessage } from "./actions";
-import { duration, memberProgress, memberStatus, progress, shownMembers, stateLabel, stateTone, teamState, unreadBadge, type MemberLive, type MemberStatus } from "./team-model";
+import { duration, memberProgress, memberStatus, progress, shownMembers, stateLabel, stateTone, teamState, type MemberLive, type MemberStatus } from "./team-model";
 import { roleStyle } from "./roles";
-import { TeamProposals, windowPort } from "./ProposalCards";
-import { approvePhaseCall } from "./decisions";
-import { SwapMemberDialog } from "./SwapMemberDialog";
+import { TeamProposals } from "./ProposalCards";
 import { TeamReports } from "./TeamReports";
 import { WaitingBanner } from "./Waiting";
-import { Blockers, PhaseModeControl, TaskActions, TeamBarActions, TeamBarChips, TeamModeControl, TeamQuestions } from "./TeamActions";
+import { Blockers, PhaseActions, TaskActions, TeamBarActions, TeamBarChips, TeamModeControl, TeamQuestions, createPlanEditing } from "./TeamActions";
 import { composer } from "../../store/composer";
-import type { ComputerId, TeamMemberView, TeamPulseView, TeamView } from "../../types";
+import type { ComputerId, TeamCall, TeamMemberView, TeamTaskView, TeamView } from "../../types";
 import type { Session } from "../sessions/types";
 
 // The Team tab (Qt's TeamWorkspace, design D3, HANDOFF §14): the team bar and
@@ -64,26 +69,33 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
   const statuses = createMemo(() => new Map(props.team.members.map((member) => [member.id, memberStatus(props.team, member, live(member))])));
   const problems = createMemo(() => shownMembers(props.team).filter((member) => statuses().get(member.id)?.problem));
   const problemTasks = createMemo(() => new Set(problems().map((member) => statuses().get(member.id)!.task).filter((task) => task > 0)));
+  // Task 197 (P2): the plan tints each problem task with its reason (Qt
+  // problemTasks/problemTexts): the members' problems, then each task's own.
+  const planProblems = createMemo(() => planProblemTasks(props.team, statuses()));
+  // Task 197 (P8): a click on a member's card shows only its tasks.
+  const workingOn = (task: TeamTaskView) => {
+    const member = props.team.members.find((candidate) => candidate.id === task.assignee);
+    return !!member && (live(member).working || member.activity === "busy");
+  };
+  // Task 197 (P6): only the switch's own field; the server merges it.
+  const setAutoAccept = async (on: boolean) => {
+    try {
+      const outcome = await teamAction({ computer: props.computer, team: props.team.id, team_name: props.team.name,
+        action: { kind: "settings", settings: { auto_accept: on } } as TeamCall["action"] });
+      if (outcome.outcome === "failed" || outcome.outcome === "uncertain") toast(tr("Auto-accept drafts"), outcome.detail, "error", true);
+    } catch (cause) {
+      toast(tr("Auto-accept drafts"), String(cause), "error", true);
+    }
+  };
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [catalogOpen, setCatalogOpen] = createSignal(false);
   const [tests, setTests] = createSignal<TeamTestsView | null>(null);
   const graph = () => teams.graph(props.computer, props.team.id);
   const profile = () => teams.profile(props.computer, props.team.id);
-  // The plan's "Approve" on a draft phase (the owner, 2026-11-07: the button
-  // was never wired, so a phase could not be approved from the Teams tab).
-  // The same call Waiting for you sends; a confirmation the core asks for is
-  // shown and sent again only on the owner's yes.
-  const approvePhase = async (n: number) => {
-    try {
-      // The same confirmed call Waiting for you sends: the core's
-      // confirmation text is asked in the app's dialog, Cancel sends nothing.
-      const outcome = await approvePhaseCall(windowPort, { computer: props.computer, team: props.team.id, teamName: props.team.name }, n);
-      if (outcome === "cancelled") return;
-      if (outcome.outcome === "failed" || outcome.outcome === "uncertain") toast(tr("Approve phase"), outcome.detail, "error", true);
-    } catch (cause) {
-      toast(tr("Approve phase"), String(cause), "error", true);
-    }
-  };
+  // Task 196: the phase header's actions (PhaseActions) replace the plan's
+  // lone Approve (0706a4dc4); editing the plan (Qt planning mode, a draft's
+  // links) goes through core's plan edit and edit-draft.
+  const plan = createPlanEditing(() => ({ computer: props.computer, team: props.team }));
   let body!: HTMLDivElement;
   createEffect(() => {
     const hide = showTeam(props.computer, props.team.id);
@@ -94,12 +106,49 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
     const hide = showCatalog(props.computer);
     onCleanup(hide);
   });
+  // Task 199: Load older appends the next page; the first page replaces.
   const loadTests = async (before: number | null) => {
     try {
-      setTests(await teamTests(props.computer, props.team.id, before));
+      const page = await teamTests(props.computer, props.team.id, before);
+      const shown = tests();
+      setTests(before !== null && shown ? { ...page, runs: [...shown.runs, ...page.runs.filter((run) => !shown.runs.some((old) => old.id === run.id))] } : page);
     } catch {
       // The panel keeps what it showed; the follow error strip names reads.
     }
+  };
+  const [builds, setBuilds] = createSignal<TeamBuildsView | null>(null);
+  const [buildsError, setBuildsError] = createSignal("");
+  const loadBuilds = async () => {
+    try { setBuilds(await teamBuilds(props.computer, props.team.id)); setBuildsError(""); }
+    catch (cause) { setBuildsError(String(cause instanceof Error ? cause.message : cause)); }
+  };
+  const { model: actions } = useModel((changed) => new TeamActionsModel(windowPort, () => ({ computer: props.computer, team: props.team }), changed));
+  const forceTest = async (suite: string) => {
+    const outcome = await actions.forceTest(suite);
+    if (outcome && outcome !== "cancelled" && outcome.outcome === "done") void loadTests(null);
+    return outcome && outcome !== "cancelled" && outcome.outcome !== "done" ? actions.notice : "";
+  };
+  // Task 199: a member card's click shows only its tasks; the side column
+  // opens a task in the plan (Needs your answer, a member's queue).
+  const [focus, setFocus] = createSignal<string | null>(null);
+  const [opened, setOpened] = createSignal<{ task: number } | null>(null);
+  const openTask = (task: number) => setOpened({ task });
+  const shownTeam = createMemo(() => {
+    const id = focus();
+    return id ? { ...props.team, tasks: focusedTasks(props.team.tasks, id) } : props.team;
+  });
+  const shownGraph = (graph: NonNullable<ReturnType<typeof teams.graph>>) => {
+    const id = focus();
+    if (!id) return graph;
+    const keep = new Set(focusedTasks(props.team.tasks, id).map((task) => task.id));
+    return { ...graph, nodes: graph.nodes.filter((node) => keep.has(node.id)), edges: graph.edges.filter((edge) => keep.has(edge.from) && keep.has(edge.to)) };
+  };
+  const goTo = (target: SideTarget) => {
+    if (!target) return;
+    if ("task" in target) return openTask(target.task);
+    if ("phase" in target) return body?.querySelector<HTMLElement>(`[data-phase="${target.phase}"]`)?.scrollIntoView({ block: "nearest" });
+    const row = memberRow(props.computer, props.team.members.find((member) => member.id === target.member));
+    if (row) { setSelectedKey(row.key); setDetailTab("activity"); }
   };
   return (
     <>
@@ -115,7 +164,7 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
           <Icon name="triangle-alert" size={14} />
           <b>{tr("Nothing can move without you")}</b>
           <For each={problems()}>{(member) => <span class="team-strip-item">{member.role}: {statuses().get(member.id)?.text}</span>}</For>
-          <Blockers team={props.team} />
+          <Blockers team={props.team} onTask={openTask} />
         </div>
       </Show>
       <Show when={props.team.status === "planning" && props.team.validation.errors.length > 0}>
@@ -126,12 +175,35 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
         </div>
       </Show>
       <div class="team-body" ref={body}>
+        <div class="team-main">
         <div class="team-canvas">
+          <Show when={plan.planning()}>
+            <div class="team-plan-tools" role="toolbar" aria-label={tr("Plan editing")}>
+              <button type="button" class="btn small" data-action="plan-add-task" title={tr("Add a task to the plan")} onClick={plan.addTask}>
+                <Icon name="plus" size={12} />{tr("Task")}
+              </button>
+              <span class="dim">{tr("Click a task to edit it; drag from a node's right edge onto a task to connect them; click a dependency to remove it.")}</span>
+              <Show when={plan.notice()}><span class="danger" role="status">{plan.notice()}</span></Show>
+            </div>
+          </Show>
+          {plan.dialog()}
+          <Show when={focus()}>{(id) => (
+            <div class="team-focus-strip" role="status">
+              <button type="button" class="team-chip accent" data-action="focus-clear" title={tr("Show every member")} onClick={() => setFocus(null)}>
+                {tr("Only %1's tasks", props.team.members.find((member) => member.id === id())?.role || id())} <Icon name="x" size={11} />
+              </button>
+            </div>
+          )}</Show>
           <Show when={graph()} fallback={<TeamPhases computer={props.computer} team={props.team} owner={props.owner} />}>
             {(shown) => (
               <PlanView
-                team={props.team}
-                graph={shown()}
+                team={shownTeam()}
+                graph={shownGraph(shown())}
+                openTask={opened()}
+                builds={builds()}
+                buildsError={buildsError()}
+                onLoadBuilds={() => void loadBuilds()}
+                onForceTest={forceTest}
                 profile={profile()}
                 tests={tests()}
                 onLoadProfile={() => { void teamsProfile(props.computer); }}
@@ -141,11 +213,20 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
                   const task = props.team.tasks.find((candidate) => candidate.id === id);
                   return task ? <TaskActions computer={props.computer} team={props.team} task={task} /> : <></>;
                 }}
-                phaseActions={(n) => <PhaseModeControl computer={props.computer} team={props.team} phase={n} owner={props.owner} />}
-                onApprovePhase={(n) => void approvePhase(n)}
+                phaseActions={(n) => <PhaseActions computer={props.computer} team={props.team} phase={n} owner={props.owner} />}
+                editing={plan.editing()}
+                problems={planProblems()}
+                working={workingOn}
+                member={focus() ?? ""}
+                onMember={(id) => setFocus(id || null)}
+                onAutoAccept={(on) => void setAutoAccept(on)}
               />
             )}
           </Show>
+        </div>
+        {/* Task 198 (W1): the lead's inbox and the team's feed under the plan, as Qt. */}
+        <TeamInbox computer={props.computer} team={props.team} />
+        <TeamFeed computer={props.computer} team={props.team} focusRole={props.team.members.find((member) => member.id === focus())?.role} />
         </div>
         <Divider orientation="vertical" label={tr("Side column width")} layout={teamLayout}
           value={teamLayout.sideWidth()} min={SIDE.min} max={SIDE.max}
@@ -153,7 +234,8 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
           start={() => teamLayout.sideWidth()} onCommit={teamLayout.commitSide} onReset={teamLayout.resetSide}
           onStep={(direction) => teamLayout.stepSide(-direction)} />
         <aside class="team-side" style={{ width: `${teamLayout.sideWidth()}px` }} aria-label={tr("Members and coordinator")}>
-          <SideColumn computer={props.computer} team={props.team} statuses={statuses()} />
+          <SideColumn computer={props.computer} team={props.team} statuses={statuses()} focus={focus()}
+            onFocus={(id) => setFocus(focus() === id ? null : id)} onTask={openTask} onGo={goTo} />
         </aside>
       </div>
       <Show when={settingsOpen()}>
@@ -173,22 +255,8 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
  * message waits in its composer for the owner's Send.
  */
 function toCoordinator(computer: ComputerId, team: TeamView, text: string) {
-  const row = memberRow(computer, team.members.find((member) => member.lead));
-  if (!row) return;
-  if (selected()?.key !== row.key) { setSelectedKey(row.key); setDetailTab("team"); }
-  let tries = 0;
-  const put = () => {
-    const view = composer.view();
-    if (selected()?.key === row.key && view && !composer.locked()) {
-      // A draft already typed stays; the message follows it.
-      const draft = composer.text();
-      const next = draft.trim() ? `${draft}\n${text}` : text;
-      composer.input(next, next.length, next.length);
-      return;
-    }
-    if (++tries < 40) setTimeout(put, 50);
-  };
-  put();
+  // A draft already typed stays; the message follows it (MemberCard toComposer).
+  toComposer(computer, team.members.find((member) => member.lead), text);
 }
 
 function TeamBar(props: {
@@ -253,7 +321,7 @@ function TeamPhases(props: { computer: ComputerId; team: TeamView; owner: boolea
         <div class="team-phase" data-phase={phase.n} classList={{ draft: phase.state === "draft", running: phase.state === "running", done: phase.state === "done" }}>
           <span class="team-phase-n mono">{phase.n}</span>
           <b class="ell">{phase.title || tr("Phase %1", phase.n)}</b>
-          <PhaseModeControl computer={props.computer} team={props.team} phase={phase.n} owner={props.owner} />
+          <PhaseActions computer={props.computer} team={props.team} phase={phase.n} owner={props.owner} />
           <span class="grow" />
           <span class="team-phase-bar"><i style={{ width: phase.total ? `${(phase.done / phase.total) * 100}%` : "0%" }} /></span>
           <span class="mono dim">{phase.done}/{phase.total}</span>
@@ -263,18 +331,42 @@ function TeamPhases(props: { computer: ComputerId; team: TeamView; owner: boolea
   );
 }
 
-function SideColumn(props: { computer: ComputerId; team: TeamView; statuses: Map<string, MemberStatus> }) {
+function SideColumn(props: {
+  computer: ComputerId; team: TeamView; statuses: Map<string, MemberStatus>;
+  focus: string | null; onFocus: (id: string) => void; onTask: (id: number) => void; onGo: (target: SideTarget) => void;
+}) {
   const members = createMemo(() => shownMembers(props.team));
   const lead = createMemo(() => props.team.members.find((member) => member.lead));
+  // Spec 5.6: the members as a tree; a folded sub-lead hides its reports.
+  const [folded, setFolded] = createSignal<Set<string>>(new Set());
+  const tree = createMemo(() => {
+    const shown = new Set(members().map((member) => member.id));
+    return memberTree(props.team, folded()).filter((node) => !node.hidden && shown.has(node.member.id));
+  });
+  const fold = (id: string) => { const next = new Set(folded()); if (!next.delete(id)) next.add(id); setFolded(next); };
+  const [adding, setAdding] = createSignal(false);
+  const { model } = useModel((changed) => new TeamActionsModel(windowPort, () => ({ computer: props.computer, team: props.team }), changed));
+  const canAdd = () => ["planning", "running", "paused"].includes(props.team.status);
   let column!: HTMLDivElement;
   return (
     <div class="team-side-inner" ref={column}>
+      <SideLists team={props.team} onGo={props.onGo} />
       <TeamQuestions computer={props.computer} team={props.team} />
       <section class="team-members" style={{ height: `${teamLayout.membersShare()}%` }} aria-label={tr("Members")}>
-        <div class="team-section-head"><b>{tr("Members")}</b><span class="dim mono">{members().length}</span></div>
-        <div class="team-members-list">
-          <For each={members()}>{(member) => <MemberRow computer={props.computer} team={props.team} member={member} status={props.statuses.get(member.id)!} />}</For>
+        <div class="team-section-head"><b>{tr("Members")}</b><span class="dim mono">{members().length}</span>
+          <span class="grow" />
+          <Show when={canAdd()}>
+            <button type="button" class="btn ghost small" data-action="add-member" title={tr("Add a member; it starts with the first task it gets")} onClick={() => setAdding(true)}>{tr("+ Member")}</button>
+          </Show>
         </div>
+        <div class="team-members-list">
+          <For each={tree()}>{(node) => (
+            <MemberCard computer={props.computer} team={props.team} member={node.member as TeamMemberView} status={props.statuses.get(node.member.id)!}
+              depth={node.depth} focused={props.focus === node.member.id} onFocus={() => props.onFocus(node.member.id)}
+              folded={folded().has(node.member.id)} onFold={() => fold(node.member.id)} onTask={props.onTask} />
+          )}</For>
+        </div>
+        <Show when={adding()}><AddMemberDialog close={() => setAdding(false)} submit={(member) => void model.addMember(member)} /></Show>
       </section>
       <Divider orientation="horizontal" label={tr("Members and coordinator")} layout={teamLayout}
         value={teamLayout.membersShare()} min={SHARE.min} max={SHARE.max}
@@ -292,66 +384,35 @@ function openRow(row: Session | undefined) {
   setDetailTab("activity");
 }
 
-/** Task 133: a pulse's lines as the member row shows them, at most three. */
-export function pulseLines(pulse: TeamPulseView): string[] {
-  return [
-    pulse.done ? `${tr("Done")}: ${pulse.done}` : "",
-    pulse.next ? `${tr("Next")}: ${pulse.next}` : "",
-    pulse.blocked ? `${tr("Blocked")}: ${pulse.blocked}` : "",
-  ].filter(Boolean);
-}
-
-function pulseText(pulse: TeamPulseView): string {
-  const by = pulse.source === "note" ? tr("the member's own note") : tr("Zerus's summary of its last turn");
-  return [...pulseLines(pulse), by].join("\n");
-}
-
-function MemberRow(props: { computer: ComputerId; team: TeamView; member: TeamMemberView; status: MemberStatus }) {
-  const row = () => memberRow(props.computer, props.member);
-  const own = createMemo(() => memberProgress(props.team, props.member));
-  const model = () => [props.member.model, props.member.effort].filter(Boolean).join(" ");
-  const [menu, setMenu] = createSignal(false);
-  const [swap, setSwap] = createSignal(false);
+/**
+ * Task 199 (Qt TeamWorkspace.cpp 3617-3700): Needs your attention, Needs your
+ * answer and Plan problems; each row opens what it names.
+ */
+function SideLists(props: { team: TeamView; onGo: (target: SideTarget) => void }) {
+  const lists = createMemo(() => sideLists(props.team));
+  const [open, setOpen] = createSignal<Record<string, boolean>>({});
+  const shown = (id: string, initial: boolean) => open()[id] ?? initial;
   return (
-    <div class="team-member" classList={{ problem: props.status.problem, [`tone-${props.status.tone}`]: true, lead: props.member.lead, planned: props.status.kind === "not_created" }}
-      data-kind={props.status.kind}>
-      <span class="team-tile" title={props.member.agent}><AgentGlyph agent={agentKind(props.member.agent)} size={14} /></span>
-      <div class="team-member-main">
-        <div class="team-member-line">
-          <span class="role-badge ell" style={roleStyle(props.member.role, props.member.lead)}>{props.member.role || props.member.id}</span>
-          <Show when={props.member.question}><span class="team-q" title={tr("Needs your answer")}>?1</span></Show>
-          <Show when={unreadBadge(props.member)}>{(badge) => (
-            <span class="team-unread mono" classList={{ urgent: badge().urgent }} title={badge().tip}>{badge().text}</span>
-          )}</Show>
-          <Show when={model()}><span class="dim ell team-model">{model()}</span></Show>
-          <span class="grow" />
-          <span class={`team-status tone-${props.status.tone}`} title={props.status.text}><Icon name={props.status.icon} size={12} />{props.status.short}</span>
-        </div>
-        <Show when={props.member.pulse}>{(pulse) => (
-          <div class="team-member-pulse" classList={{ blocked: !!pulse().blocked }} title={pulseText(pulse())}>
-            <For each={pulseLines(pulse())}>{(line) => <span class="ell">{line}</span>}</For>
-          </div>
-        )}</Show>
-        <div class="team-member-line sub">
-          <span class="ell team-member-text" title={props.member.error || props.status.text}>{props.member.error || props.status.text}</span>
-          <span class="grow" />
-          <Show when={own().total > 0}>
-            <span class="team-mini-bar" title={tr("%1 of %2 tasks accepted", own().accepted, own().total)}><i style={{ width: `${(own().accepted / own().total) * 100}%` }} /></span>
-            <span class="mono dim">{own().accepted}/{own().total}</span>
-          </Show>
-        </div>
-      </div>
-      <button class="icon-btn small" disabled={!row()} aria-label={tr("Open session")} data-tip={row() ? tr("Open session") : tr("No session yet")}
-        onClick={() => openRow(row())}><Icon name="external-link" size={13} /></button>
-      <button class="icon-btn small" aria-label={tr("Member actions")} aria-expanded={menu()} data-tip={tr("Member actions")}
-        onClick={() => setMenu((shown) => !shown)}><Icon name="ellipsis" size={13} /></button>
-      <Show when={menu()}>
-        <div class="menu team-member-menu" role="menu">
-          <button type="button" class="menu-item" role="menuitem" onClick={() => { setMenu(false); setSwap(true); }}>{tr("Swap member…")}</button>
-        </div>
-      </Show>
-      <Show when={swap()}><SwapMemberDialog computer={props.computer} team={props.team} member={props.member} close={() => setSwap(false)} /></Show>
-    </div>
+    <For each={lists()}>{(list) => (
+      <section class={`team-side-list team-side-${list.id}`} data-list={list.id}>
+        <button type="button" class="team-section-head team-side-toggle" aria-expanded={shown(list.id, list.open)}
+          onClick={() => setOpen({ ...open(), [list.id]: !shown(list.id, list.open) })}>
+          <Icon name={shown(list.id, list.open) ? "chevron-down" : "chevron-right"} size={11} />
+          <b>{list.title}</b><span class={`team-side-note ${list.id === "plan" && props.team.validation.errors.length ? "danger" : "warn"}`}>{list.note}</span>
+        </button>
+        <Show when={shown(list.id, list.open)}>
+          <For each={list.rows}>{(row) => (
+            <div class={`team-side-row tone-${row.tone}`} data-row={row.key}>
+              <Show when={row.role}><span class="role-badge ell" style={roleStyle(row.role, false)}>{row.role}</span></Show>
+              <span class="ell grow" title={row.text}>{row.text}</span>
+              <Show when={row.target && row.action}>
+                <button type="button" class="btn ghost small" data-action="side-go" onClick={() => props.onGo(row.target)}>{row.action}</button>
+              </Show>
+            </div>
+          )}</For>
+        </Show>
+      </section>
+    )}</For>
   );
 }
 
@@ -384,13 +445,34 @@ function Coordinator(props: { computer: ComputerId; team: TeamView; lead?: TeamM
         <div class="activity-wrap team-conversation" style={{ "--col": "100%" } as JSX.CSSProperties}>
           <ActivityView source={source()} session={row} />
           <TeamProposals computer={props.computer} team={props.team} />
-          <Show when={own()}>
+          <Show when={own()} fallback={<CoordinatorDraft computer={props.computer} team={props.team} />}>
             <QueuePanel /><QuestionCard />
             <div class="cmp-col"><Composer /></div>
           </Show>
         </div>
       </Show>
     </section>
+  );
+}
+
+/**
+ * Task 198 (W4): Qt's coordinator conversation always has its input
+ * (TeamConversation.cpp:117-163). The Tauri client sends a session message
+ * only from that session's composer, one at a time, so while another session
+ * is selected this field takes the text and Write to coordinator carries it
+ * into the coordinator's own composer (the Team tab stays), where it is sent
+ * as any message, with its attachments, queue and question card.
+ */
+function CoordinatorDraft(props: { computer: ComputerId; team: TeamView }) {
+  const [text, setText] = createSignal("");
+  const carry = () => { const value = text().trim(); toCoordinator(props.computer, props.team, value); setText(""); };
+  return (
+    <div class="cmp-col team-coordinator-draft">
+      <textarea class="field" rows={2} data-coordinator-draft aria-label={tr("Message the coordinator")} placeholder={tr("Message the coordinator…")} value={text()}
+        onInput={(event) => setText(event.currentTarget.value)}
+        onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); carry(); } }} />
+      <button class="btn small primary" data-coordinator-send onClick={carry}>{tr("Write to coordinator")}</button>
+    </div>
   );
 }
 

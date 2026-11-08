@@ -90,7 +90,41 @@ enum Input {
     Organization(organization::Done),
     /// A read of the team heads finished on its worker.
     Team(team::Done),
+    /// Task 235: a whole listing finished on its own thread.
+    Listing(ListingDone),
     End,
+}
+
+/// Task 235: a whole listing, built off the loop so Activity, controls and
+/// pulses keep flowing while it runs (it took seconds every ~28 s).
+struct ListingDone {
+    started: Instant,
+    result: std::result::Result<Value, String>,
+}
+
+/// Task 235: at most one listing runs; one asked for meanwhile runs after it.
+#[derive(Default)]
+struct ListingGate {
+    running: bool,
+    again: bool,
+}
+
+impl ListingGate {
+    /// True when a listing should start now; otherwise it is remembered.
+    fn start(&mut self) -> bool {
+        if self.running {
+            self.again = true;
+            return false;
+        }
+        self.running = true;
+        true
+    }
+
+    /// The running listing ended; true when another was asked for meanwhile.
+    fn done(&mut self) -> bool {
+        self.running = false;
+        std::mem::take(&mut self.again)
+    }
 }
 
 /// Control lines read but not yet handled; beyond it lines are dropped, so a
@@ -157,6 +191,7 @@ pub(crate) fn run(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             Ok(Input::Tasks(done)) => watch.tasks_done(done),
             Ok(Input::Organization(done)) => watch.organization_done(done),
             Ok(Input::Team(done)) => watch.team_done(done),
+            Ok(Input::Listing(done)) => watch.listing_done(done),
             Ok(Input::End) | Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(0),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
@@ -351,6 +386,8 @@ struct Watch<'a> {
     listing_due: Option<Instant>,
     listed_at: Option<Instant>,
     listing_cost: Duration,
+    /// Task 235: the listing thread's gate.
+    listing: ListingGate,
     // Row refreshes between listings.
     stale: BTreeSet<String>,
     stale_native: bool,
@@ -410,6 +447,7 @@ impl<'a> Watch<'a> {
             listing_due: None,
             listed_at: None,
             listing_cost: Duration::ZERO,
+            listing: ListingGate::default(),
             stale: BTreeSet::new(),
             stale_native: false,
             refresh_due: None,
@@ -498,9 +536,15 @@ impl<'a> Watch<'a> {
         self.refresh_due = Some(self.refresh_due.map_or(due, |current| current.min(due)));
     }
 
-    /// Re-runs the `ls --json --local --no-archives` builder.
+    /// Re-runs the `ls --json --local --no-archives` builder on its own
+    /// thread (task 235): the loop keeps serving Activity and controls; the
+    /// rows arrive as [`Input::Listing`]. One asked for while one runs
+    /// follows it.
     fn list(&mut self, now: Instant) {
         self.listing_due = None;
+        if !self.listing.start() {
+            return;
+        }
         self.listed_at = Some(now);
         // The listing covers every row refresh and probe asked for so far.
         self.probed_at = Some(now);
@@ -509,7 +553,20 @@ impl<'a> Watch<'a> {
         self.refresh_due = None;
         // The structure is taken first: a change during the listing lists again.
         self.structure = source::structure_now().ok();
-        match crate::cli::local_listing(self.config) {
+        let config = self.config.clone();
+        let results = self.git_results.clone();
+        let spawned = std::thread::Builder::new().name("hgs-watch-listing".into()).spawn(move || {
+            let result = crate::cli::local_listing(&config).map_err(|error| error.message);
+            let _ = results.send(Input::Listing(ListingDone { started: now, result }));
+        });
+        if let Err(error) = spawned {
+            self.listing_done(ListingDone { started: now, result: Err(format!("cannot start the listing: {error}")) });
+        }
+    }
+
+    /// A listing's rows replace what the loop holds.
+    fn listing_done(&mut self, done: ListingDone) {
+        match done.result {
             Ok(listing) => {
                 let (rows, meta) = catalog::split(listing);
                 self.digests = rows.iter().map(|(_, row)| catalog::row_digest(row)).collect();
@@ -518,9 +575,12 @@ impl<'a> Watch<'a> {
                 self.listed = true;
                 self.pending = true;
             }
-            Err(error) => self.out.failure("listing_failed", &error.message, Some(topic::CATALOG), None),
+            Err(error) => self.out.failure("listing_failed", &error, Some(topic::CATALOG), None),
         }
-        self.listing_cost = now.elapsed();
+        self.listing_cost = done.started.elapsed();
+        if self.listing.done() {
+            self.schedule(Instant::now());
+        }
     }
 
     /// Derives again the rows whose inputs changed since they were listed; a
@@ -1859,9 +1919,24 @@ mod tests {
                 Input::Tasks(done) => format!("<tasks {}>", done.key),
                 Input::Organization(_) => "<organization>".into(),
                 Input::Team(_) => "<team>".into(),
+                Input::Listing(_) => "<listing>".into(),
                 Input::End => "<end>".into(),
             })
             .collect()
+    }
+
+    /// Task 235: one listing runs at a time; one asked for meanwhile runs
+    /// once after it, never twice and never lost.
+    #[test]
+    fn a_listing_asked_for_while_one_runs_follows_it_once() {
+        let mut gate = ListingGate::default();
+        assert!(gate.start(), "the first listing starts");
+        assert!(!gate.start(), "a second waits");
+        assert!(!gate.start(), "and a third is the same one");
+        assert!(gate.done(), "it follows the running one");
+        assert!(gate.start());
+        assert!(!gate.done(), "nothing else was asked for");
+        assert!(gate.start(), "the gate is free again");
     }
 
     fn lines(input: &[u8]) -> Vec<String> {

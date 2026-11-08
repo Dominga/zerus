@@ -173,10 +173,16 @@ pub(crate) const BUILTIN: &[Template] = &[
     // runner leg stays the owner's step by hand (docs/release-candidate.md).
     Template {
         id: "release-candidate",
-        summary: "the fork release candidate's local leg on a Windows worker: Qt offscreen suites, fork handoff/update, Tauri build, portable zip self-test, recorded for the commit",
+        summary: "the fork release candidate's local leg on a Windows worker: Qt offscreen suites, fork handoff/update, the Tauri build and portable zip self-test with the fork build and feed, recorded for the commit",
         program: "python",
-        args: &["scripts/release-candidate.py", "--commit={commit}"],
-        params: &[optional("commit", Kind::Identifier)],
+        args: &["scripts/release-candidate.py", "--commit={commit}", "--fork-build={fork_build}", "--fork-feed={fork_feed}"],
+        params: &[
+            optional("commit", Kind::Identifier),
+            // Task 213: the local leg has no tag, so the fork identity the
+            // workflow takes from it is passed explicitly; both or neither.
+            optional("fork_build", Kind::Identifier),
+            optional("fork_feed", Kind::Text),
+        ],
         timeout_secs: 10800,
     },
     // Owner, 2026-10-28: a stale generated build folder (an AAPT intermediate)
@@ -285,6 +291,17 @@ pub(crate) const BUILTIN: &[Template] = &[
         program: "vstest.console",
         args: &["{tests}", "/TestCaseFilter:{filter}"],
         params: &[param("tests", Kind::Paths), optional("filter", Kind::Text), optional("files", Kind::Paths)],
+        timeout_secs: 1800,
+    },
+    // Task #239: the web client's tests (vitest) run through the worker from
+    // the project's own node_modules, installing them first when they are
+    // missing; the JUnit report gives one count and failure per test file.
+    Template {
+        id: "web-test",
+        summary: "vitest run in the web project (default client/), from its own node_modules; npm ci through the worker when they are missing; a JUnit report per test file",
+        program: "npx",
+        args: &[],
+        params: &[optional("project", Kind::Path), optional("paths", Kind::Paths), optional("files", Kind::Paths)],
         timeout_secs: 1800,
     },
 ];
@@ -493,8 +510,8 @@ pub(crate) fn cache_use(template: &str, folder: &Path) -> CacheUse {
             }
             None => {
                 // #742: the owner is offered it in Waiting for you, once.
-                crate::test_discipline::tools::offer_missing(folder, "sccache");
-                used.note = "build cache: sccache was not found; this run built without it. Zerus offers it to the owner in Waiting for you; never install it yourself".into();
+                let offer = crate::test_discipline::tools::offer_missing(folder, "sccache");
+                used.note = format!("build cache: sccache was not found; this run built without it. {}; never install it yourself", offer_waits(offer.as_ref()));
             }
         }
     }
@@ -515,12 +532,21 @@ pub(crate) fn cache_use(template: &str, folder: &Path) -> CacheUse {
             }
             None => {
                 used.launcher = Some(String::new());
-                crate::test_discipline::tools::offer_missing(folder, "ccache");
-                used.note = "build cache: ccache was not found; this run built without it. Zerus offers it to the owner in Waiting for you; never install it yourself".into();
+                let offer = crate::test_discipline::tools::offer_missing(folder, "ccache");
+                used.note = format!("build cache: ccache was not found; this run built without it. {}; never install it yourself", offer_waits(offer.as_ref()));
             }
         }
     }
     used
+}
+
+/// Task #220: where a run's missing tool waits for its decision: the team's
+/// lead's inbox when a team's session raised the offer, else the owner.
+fn offer_waits(offer: Option<&crate::test_discipline::tools::Offer>) -> &'static str {
+    match offer {
+        Some(offer) if !offer.team.is_empty() => "Zerus offers it to your lead's inbox",
+        _ => "Zerus offers it to the owner in Waiting for you",
+    }
 }
 
 /// The compiler launcher a Qt build folder was configured with ("" for none),
@@ -843,6 +869,53 @@ fn unreal_engine(project: &Path, override_path: Option<&str>, registry: &dyn Eng
     }
     bail!("No Unreal engine for EngineAssociation {association}: looked in {root}\\{key} (value {name}), ZERUS_UE_ENGINE, and the engine override")
 }
+
+/// Task 87/210: the two Unreal templates. Both take the project as an absolute
+/// path: Build.bat changes into Engine/Build/BatchFiles and UnrealEditor-Cmd
+/// resolves against the engine, so a path relative to the member's folder finds
+/// nothing (the merger's task 189 report: exit 6 "Unable to find project file",
+/// exit 1 with an empty tail). The test's saved folder, log and report stay in
+/// the member's `.zerus-team`, absolute for the same reason.
+fn unreal(template: &Template, args: &Value, folder: &Path) -> anyhow::Result<Plan> {
+    let id = template.id;
+    let project = one(template, args, "project", folder)?.context("The template needs a project")?;
+    let project = folder.join(&project).display().to_string();
+    let engine = unreal_engine(Path::new(&project), one(template, args, "engine", folder)?.as_deref(), &SystemRegistry)?;
+    let ue = folder.join(".zerus-team").join("ue");
+    if id == "ue-build" {
+        let target = one(template, args, "target", folder)?.context("The template ue-build needs a target")?;
+        let mut argv = vec![project.clone(), target];
+        if let Some(platform) = one(template, args, "platform", folder)? {
+            argv.push(platform);
+        }
+        if let Some(config) = one(template, args, "config", folder)? {
+            argv.push(config);
+        }
+        argv.push(format!("-Project={project}"));
+        let program = format!("{}/Engine/Build/BatchFiles/Build.bat", engine.trim_end_matches(['/', '\\']));
+        return Ok(Plan { template: id.to_owned(), program, argv, commit: None, more: Vec::new(), cwd: None });
+    }
+    // Task 90: -ExecCmds takes `;`-separated console commands, so the filter is
+    // one filter: no `;` and no line break. The engine must hold the editor.
+    let filters = one(template, args, "filters", folder)?.unwrap_or_default();
+    ensure!(!filters.contains(';') && !filters.contains(['\n', '\r']), "The template's \"filters\" is one automation filter: no ';' and no line break");
+    let bin = Path::new(&engine).join("Engine").join("Binaries").join("Win64");
+    let name = ["UnrealEditor-Cmd.exe", "UE4Editor-Cmd.exe"].into_iter().find(|name| bin.join(name).is_file());
+    let Some(name) = name else { bail!("The Unreal engine {engine} holds no Engine/Binaries/Win64/UnrealEditor-Cmd.exe (or UE4Editor-Cmd.exe)") };
+    let mut argv = vec![
+        project,
+        "-nullrhi".to_owned(),
+        "-unattended".to_owned(),
+        format!("-saveddir={}", ue.join("Saved").display()),
+        format!("-abslog={}", ue.join("Unreal.log").display()),
+    ];
+    if !filters.is_empty() {
+        argv.push(format!("-ExecCmds=Automation RunTests {filters};Quit"));
+    }
+    argv.push(format!("-ReportExportPath={}", folder.join(".zerus-team").join("results").join("unreal").display()));
+    let program = format!("{}/Engine/Binaries/Win64/{name}", engine.trim_end_matches(['/', '\\']));
+    Ok(Plan { template: id.to_owned(), program, argv, commit: None, more: Vec::new(), cwd: None })
+}
 /// Validates a run request and builds the exact program and argv (U21). Nothing
 /// here reads a shell: every value is one argv element, or spliced as whole
 /// elements for the list placeholders.
@@ -868,36 +941,20 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
     let Some(template) = builtin(id) else { bail!("Unknown template {id}") };
     ensure!(enabled(), "The built-in command templates are turned off in Settings > Teams");
     let mut args = args.clone();
-    let mut editor: Option<String> = None;
-    if matches!(template.id, "ue-build" | "ue-test") {
-        let project = args["project"].as_str().unwrap_or_default();
-        if project.is_empty() { bail!("The template {id} needs a project"); }
-        let engine = unreal_engine(&folder.join(project), args["engine"].as_str(), &SystemRegistry)?;
-        if template.id == "ue-test" {
-            // Task 90: -ExecCmds takes `;`-separated console commands, so the filter
-            // is one filter: no `;` and no line break. The engine, wherever it is
-            // named from, must hold the editor Zerus runs (4.x names it UE4Editor-Cmd).
-            let filters = args["filters"].as_str().unwrap_or_default();
-            ensure!(!filters.contains(';') && !filters.contains(['\n', '\r']), "The template's \"filters\" is one automation filter: no ';' and no line break");
-            let bin = Path::new(&engine).join("Engine").join("Binaries").join("Win64");
-            let name = ["UnrealEditor-Cmd.exe", "UE4Editor-Cmd.exe"].into_iter().find(|name| bin.join(name).is_file());
-            let Some(name) = name else { bail!("The Unreal engine {engine} holds no Engine/Binaries/Win64/UnrealEditor-Cmd.exe (or UE4Editor-Cmd.exe)") };
-            editor = Some(format!("{}/Engine/Binaries/Win64/{name}", engine.trim_end_matches(['/', '\\'])));
-        }
-        args["engine"] = json!(engine);
-    }
-    let args = &args;
+    let args = &mut args;
     for (key, _) in args.as_object().into_iter().flatten() {
         ensure!(template.params.iter().any(|param| param.name == key), "The template {id} has no \"{key}\"");
     }
-    // Task 85: the CMake and MSBuild templates build their argv themselves;
-    // qt-configure and qt-build are the CMake ones with their fixed values.
+    // Task 85: the CMake, MSBuild, Unreal and Python templates build their own
+    // argv; qt-configure and qt-build are the CMake ones with fixed values.
     match template.id {
+        "ue-build" | "ue-test" => return unreal(template, args, folder),
         "cmake-configure" | "qt-configure" => return cmake_configure(template, args, folder),
         "cmake-build" | "qt-build" => return cmake_build(template, args, folder),
         "ctest" => return ctest(template, args, folder),
         "msbuild-build" => return msbuild_build(template, args, folder),
         "vstest" => return vstest(template, args, folder),
+        "web-test" => return web_test(template, args, folder),
         _ => {}
     }
     if template.id == "git-commit" {
@@ -968,9 +1025,6 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
             bail!("The template {id} needs a single \"{placeholder}\" for its program");
         };
         program = program.replace(&format!("{{{placeholder}}}"), &word);
-    }
-    if let Some(editor) = editor {
-        program = editor;
     }
     let mut more = Vec::new();
     if template.id == "cargo-test" {
@@ -1213,6 +1267,8 @@ pub(crate) fn report_path(folder: &Path, template: &str) -> Option<(PathBuf, sup
     match template {
         "ctest" => Some((results.join("ctest.xml"), Format::Junit)),
         "vstest" => Some((results.join("vstest.trx"), Format::Trx)),
+        // Task #239: vitest's own JUnit report, one suite per test file.
+        "web-test" => Some((results.join("vitest.xml"), Format::Junit)),
         _ => project_report(folder, template),
     }
 }
@@ -1287,6 +1343,79 @@ fn vstest(template: &Template, args: &Value, folder: &Path) -> anyhow::Result<Pl
 /// Task 85: the MSBuild the templates run, for the broker's version line.
 pub(crate) fn msbuild_path() -> String {
     msbuild_program()
+}
+
+/// Task #239: the web project's vitest run. The project (default the member's
+/// folder, `client` for this repository) must carry package.json; its own
+/// node_modules run the tests, and a project without them installs first
+/// through the worker (`npm ci`, or `npm install` without a lock file), so a
+/// sandboxed member never needs npm. The run writes a JUnit report: one
+/// suite per test file, each failure by name.
+fn web_test(template: &Template, args: &Value, folder: &Path) -> anyhow::Result<Plan> {
+    let project = one(template, args, "project", folder)?
+        .map(|project| project.replace('\\', "/").trim_end_matches('/').to_owned())
+        .filter(|project| project != ".");
+    let dir = project.as_ref().map_or_else(|| folder.to_path_buf(), |project| folder.join(project));
+    if let Some(project) = &project {
+        let real = std::fs::canonicalize(&dir).with_context(|| format!("The template's project {project} is not a folder in your folder"))?;
+        let base = std::fs::canonicalize(folder).context("Your folder cannot be read")?;
+        ensure!(real.starts_with(&base), "The template's project {project} leads outside your folder");
+    }
+    ensure!(dir.join("package.json").is_file(), "The web project has no package.json ({})", dir.display());
+    let (report, _) = report_path(folder, template.id).context("the vitest report")?;
+    if let Some(parent) = report.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let (program, mut argv) = match local_vitest(&dir) {
+        // The project's own vitest, run by node: no npm lookup, no PATH, and
+        // the same binary the member's own editor uses.
+        Some(script) => ("node".to_owned(), vec![script.display().to_string()]),
+        // A project whose vitest comes from a parent node_modules (a workspace)
+        // resolves it through npx without installing anything.
+        #[cfg(windows)]
+        None => ("cmd".to_owned(), vec!["/C".into(), "npx".to_owned(), "--no-install".to_owned(), "vitest".to_owned()]),
+        #[cfg(not(windows))]
+        None => ("npx".to_owned(), vec!["--no-install".to_owned(), "vitest".to_owned()]),
+    };
+    argv.push("run".to_owned());
+    argv.push("--reporter=default".to_owned());
+    argv.push("--reporter=junit".to_owned());
+    argv.push(format!("--outputFile.junit={}", report.display()));
+    for path in many(template, args, "paths", folder)? {
+        argv.push(folder.join(&path).display().to_string());
+    }
+    if dir.join("node_modules").is_dir() {
+        return Ok(Plan { template: template.id.to_owned(), program, argv, commit: None, more: Vec::new(), cwd: project });
+    }
+    let (install, install_argv) = web_install(&dir);
+    Ok(Plan { template: template.id.to_owned(), program: install, argv: install_argv, commit: None, more: vec![(program, argv)], cwd: project })
+}
+
+/// The vitest script of a project's own node_modules, or None when they do not
+/// carry one (npx resolves it instead).
+fn local_vitest(dir: &Path) -> Option<PathBuf> {
+    let script = dir.join("node_modules").join("vitest").join("vitest.mjs");
+    script.is_file().then_some(script)
+}
+
+/// The install a missing node_modules needs: `npm ci`, or `npm install` when
+/// the project has no lock file.
+fn web_install(dir: &Path) -> (String, Vec<String>) {
+    let ci = if dir.join("package-lock.json").is_file() || dir.join("npm-shrinkwrap.json").is_file() { "ci" } else { "install" };
+    let fixed = ["--no-audit", "--no-fund", "--loglevel", "error"];
+    #[cfg(windows)]
+    {
+        // npm is a .cmd; cmd is what runs it, with fixed words only.
+        let mut argv = vec!["/C".to_owned(), "npm".to_owned(), ci.to_owned()];
+        argv.extend(fixed.iter().map(|word| (*word).to_owned()));
+        ("cmd".to_owned(), argv)
+    }
+    #[cfg(not(windows))]
+    {
+        let mut argv = vec![ci.to_owned()];
+        argv.extend(fixed.iter().map(|word| (*word).to_owned()));
+        ("npm".to_owned(), argv)
+    }
 }
 
 /// Visual Studio's MSBuild, as vswhere names it; `msbuild` on PATH otherwise.
@@ -1871,6 +2000,17 @@ fn template_environment(plan: &Plan, folder: &Path) -> Vec<(String, String)> {
     if plan.template == "android-test" {
         env.push(("GRADLE_USER_HOME".into(), folder.join(".zerus-team").join("gradle").join("home").display().to_string()));
     }
+    // Task #239: the web project's npm cache lives in the member's folder, so a
+    // sandboxed member never reads or writes the person's own cache (the
+    // EPERM ui3 met) and two members never share one download.
+    if plan.template == "web-test" {
+        let npm = folder.join(".zerus-team").join("npm");
+        let _ = std::fs::create_dir_all(&npm);
+        env.push(("npm_config_cache".into(), npm.display().to_string()));
+        env.push(("npm_config_fund".into(), "false".into()));
+        env.push(("npm_config_audit".into(), "false".into()));
+        env.push(("CI".into(), "1".into()));
+    }
     env
 }
 
@@ -2053,6 +2193,12 @@ pub(crate) fn execute_as(plan: &Plan, folder: &Path, timeout: Duration, env: &[(
             let _ = std::fs::create_dir_all(parent);
         }
     }
+    // Task 210: UnrealEditor-Cmd writes the run to its own log; an earlier
+    // run's log is never read as this run's.
+    let unreal_log = (plan.template == "ue-test").then(|| folder.join(".zerus-team").join("ue").join("Unreal.log"));
+    if let Some(log) = &unreal_log {
+        let _ = std::fs::remove_file(log);
+    }
     let stdin = plan.commit.as_ref().map(|payload| serde_json::to_vec(payload).unwrap_or_default());
     let before = isolated.as_ref().map(super::isolation::Run::fingerprint);
     let attempt = |command: &mut Command| {
@@ -2080,6 +2226,18 @@ pub(crate) fn execute_as(plan: &Plan, folder: &Path, timeout: Duration, env: &[(
             );
         }
     }
+    // Task 261: a cargo build the shared sccache server could not write (it
+    // was started in a restricted token) runs once more after the worker
+    // restarted the server.
+    if matches!(plan.template.as_str(), "cargo-build" | "cargo-test" | "cargo-clippy")
+        && super::super::build_cache_server::worth_restart(outcome.exit, &format!("{}\n{}", outcome.tail, outcome.excerpt))
+        && !timeout.saturating_sub(started.elapsed()).is_zero()
+        && super::super::build_cache_server::restart().is_ok()
+    {
+        outcome = attempt(&mut build(&plan.program, &plan.argv));
+        // At the end: a long output's tail keeps it, and the dispatcher reads it.
+        outcome.tail = last_chars(&format!("{}\n{}", outcome.tail, super::super::build_cache_server::RESTART_NOTE), TAIL_BYTES);
+    }
     outcome.ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     if !cache.note.is_empty() {
         outcome.tail = last_chars(&format!("{}
@@ -2087,6 +2245,15 @@ pub(crate) fn execute_as(plan: &Plan, folder: &Path, timeout: Duration, env: &[(
     }
     if let (Some(run), Some(before)) = (&isolated, before) {
         checked(&mut outcome, run, &before, folder);
+    }
+    // Task 210: a failed ue-test says why from the log the editor wrote, since
+    // its own output goes to the file, not the pipe.
+    if let Some(log) = &unreal_log {
+        if outcome.exit != Some(0) {
+            if let Ok(text) = std::fs::read_to_string(log) {
+                outcome.tail = last_chars(&format!("{}\n== Unreal.log\n{}", outcome.tail, last_chars(&text, TAIL_BYTES)), TAIL_BYTES);
+            }
+        }
     }
     if let Some((path, format)) = report {
         let read = super::run_results::read(&path, format);
@@ -2355,7 +2522,7 @@ mod tests {
         let ids: Vec<&str> = BUILTIN.iter().map(|template| template.id).collect();
         // Task 85: the CMake and MSBuild templates of any project after them; task 86: the Python and Cython ones; task 87: Unreal.
         assert_eq!(ids, ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test", "py-test", "cython-build", "android-test", "release-candidate",
-                         "clean-build", "git-merge-lead", "git-commit", "ue-build", "ue-test", "cmake-configure", "cmake-build", "ctest", "msbuild-build", "vstest"]);
+                         "clean-build", "git-merge-lead", "git-commit", "ue-build", "ue-test", "cmake-configure", "cmake-build", "ctest", "msbuild-build", "vstest", "web-test"]);
     }
 
     // Run by hand on a Windows machine with Visual Studio (cargo test -- --ignored).
@@ -2564,6 +2731,28 @@ mod tests {
         assert_eq!(plan("qt-build", &json!({"targets":["hgs-tray"]}), dir.path()).unwrap().argv, ["--build", ".ci-build/gui", "--target", "hgs-tray"]);
         // An absent filter adds no argument at all.
         assert_eq!(plan("cargo-build", &json!({}), dir.path()).unwrap().argv, ["build", "--locked"]);
+    }
+
+    /// Task 213: the release candidate takes the fork identity as two explicit
+    /// inputs (the workflow takes them from its tag and run number), so a local
+    /// leg embeds and packages the same build and feed.
+    #[test]
+    fn the_release_candidate_takes_the_fork_identity() {
+        let dir = temp();
+        let feed = "https://github.com/WhiteWh/zerus/releases/latest/download/zerus-fork-feed.json";
+        let full = plan("release-candidate", &json!({"commit":"abc1234","fork_build":"41","fork_feed":feed}), dir.path()).unwrap();
+        assert_eq!(
+            full.argv,
+            ["scripts/release-candidate.py", "--commit=abc1234", "--fork-build=41", "--fork-feed=https://github.com/WhiteWh/zerus/releases/latest/download/zerus-fork-feed.json"]
+        );
+        // Both are optional: an experimental leg (neither) passes no flag, and
+        // one alone is the script's own refusal (both or neither).
+        assert_eq!(plan("release-candidate", &json!({}), dir.path()).unwrap().argv, ["scripts/release-candidate.py"]);
+        assert_eq!(
+            plan("release-candidate", &json!({"fork_build":"41"}), dir.path()).unwrap().argv,
+            ["scripts/release-candidate.py", "--fork-build=41"]
+        );
+        assert!(plan("release-candidate", &json!({"fork_build":"41 42"}), dir.path()).is_err(), "a build number is one word");
     }
 
     #[test]
@@ -2945,6 +3134,96 @@ mod tests {
     fn project(folder: &Path, text: &str) {
         std::fs::create_dir_all(folder.join(".zerus")).unwrap();
         std::fs::write(folder.join(".zerus").join("tests.toml"), text).unwrap();
+    }
+
+    /// Task #239: a web project's vitest runs from its own node_modules, writes
+    /// the JUnit report the counts and failures are read from, and installs
+    /// through the worker first when node_modules are missing.
+    #[test]
+    fn a_web_project_runs_its_own_vitest_and_reports_each_file() {
+        let dir = temp();
+        let app = dir.path().join("client");
+        std::fs::create_dir_all(app.join("node_modules").join("vitest")).unwrap();
+        std::fs::create_dir_all(app.join("src")).unwrap();
+        std::fs::write(app.join("package.json"), r#"{"scripts":{"test":"vitest"}}"#).unwrap();
+        std::fs::write(app.join("package-lock.json"), "{}").unwrap();
+        std::fs::write(app.join("src").join("app.test.ts"), "// fake").unwrap();
+        // A fake vitest: it writes the report the template asks for and says
+        // what it ran, so a test never needs a real web toolchain.
+        std::fs::write(
+            app.join("node_modules").join("vitest").join("vitest.mjs"),
+            r#"
+import fs from 'node:fs';
+const out = process.argv.find((arg) => arg.startsWith('--outputFile.junit='));
+const text = '<?xml version="1.0"?><testsuites><testsuite name="src/app.test.ts" tests="3" failures="1">' +
+  '<testcase name="adds" classname="src/app.test.ts"/>' +
+  '<testcase name="fails" classname="src/app.test.ts"><failure message="expected 1 to be 2"/></testcase>' +
+  '<testcase name="skips" classname="src/app.test.ts"><skipped/></testcase></testsuite></testsuites>';
+if (out) fs.writeFileSync(out.slice(out.indexOf('=') + 1), text);
+console.log(' Test Files  1 failed | 1 passed (2)');
+console.log(' FAIL  src/app.test.ts > fails');
+"#,
+        )
+        .unwrap();
+        let first = plan("web-test", &json!({"project":"client","paths":["client/src/app.test.ts"]}), dir.path()).unwrap();
+        assert_eq!((first.program.as_str(), first.cwd.as_deref()), ("node", Some("client")), "{first:?}");
+        let report = dir.path().join(".zerus-team").join("results").join("vitest.xml");
+        assert!(first.argv.iter().any(|arg| arg == "--reporter=junit"), "{first:?}");
+        assert!(first.argv.iter().any(|arg| *arg == format!("--outputFile.junit={}", report.display())), "{first:?}");
+        assert!(first.argv.iter().any(|arg| arg.ends_with("app.test.ts")), "{first:?}");
+        let outcome = execute(&first, dir.path(), Duration::from_secs(60), &[]);
+        assert_eq!(outcome.exit, Some(0), "{outcome:?}");
+        assert!(outcome.tail.contains("Test Files"), "{}", outcome.tail);
+        let read = outcome.report.expect("the report is read");
+        assert_eq!((read.passed, read.failed, read.skipped), (1, 1, 1), "{read:?}");
+        assert!(read.results.iter().all(|result| result.suite == "src/app.test.ts"), "{read:?}");
+        assert!(outcome.failures.iter().any(|name| name.contains("fails")), "{:?}", outcome.failures);
+        assert_eq!(report_path(dir.path(), "web-test").map(|(path, format)| (path, format)), Some((report.clone(), super::super::run_results::Format::Junit)));
+        // Two files, one failing: the run's exit, its counts and the failing
+        // name come back per file, not as one blob.
+        std::fs::write(
+            app.join("node_modules").join("vitest").join("vitest.mjs"),
+            r#"
+import fs from 'node:fs';
+const out = process.argv.find((arg) => arg.startsWith('--outputFile.junit='));
+const text = '<?xml version="1.0"?><testsuites>' +
+  '<testsuite name="src/app.test.ts" tests="2" failures="1">' +
+  '<testcase name="adds" classname="src/app.test.ts"/>' +
+  '<testcase name="fails" classname="src/app.test.ts"><failure message="expected 1 to be 2"/></testcase>' +
+  '</testsuite>' +
+  '<testsuite name="src/util.test.ts" tests="1" failures="0"><testcase name="parses" classname="src/util.test.ts"/></testsuite>' +
+  '</testsuites>';
+if (out) fs.writeFileSync(out.slice(out.indexOf('=') + 1), text);
+console.log(' Test Files  1 failed | 1 passed (2)');
+console.log(' FAIL  src/app.test.ts > fails');
+process.exit(1);
+"#,
+        )
+        .unwrap();
+        let failed = execute(&first, dir.path(), Duration::from_secs(60), &[]);
+        assert_eq!(failed.exit, Some(1), "{failed:?}");
+        let read = failed.report.expect("the report is read");
+        assert_eq!((read.passed, read.failed), (2, 1), "{read:?}");
+        let files: std::collections::BTreeSet<&str> = read.results.iter().map(|result| result.suite.as_str()).collect();
+        assert_eq!(files.len(), 2, "one suite per file: {read:?}");
+        assert!(failed.failures.iter().any(|name| name.contains("fails")), "{:?}", failed.failures);
+        // Without node_modules the worker installs them first, then runs the
+        // same tests: the request is npm ci with the vitest run behind it.
+        std::fs::remove_dir_all(app.join("node_modules")).unwrap();
+        let install = plan("web-test", &json!({"project":"client"}), dir.path()).unwrap();
+        assert_eq!(install.more.len(), 1, "{install:?}");
+        assert!(install.more[0].1.iter().any(|arg| arg == "--reporter=junit"), "{install:?}");
+        assert!(install.argv.contains(&"ci".to_owned()), "{install:?}");
+        assert!(install.argv.iter().any(|arg| arg == "npm"), "{install:?}");
+        // A project that leads outside the member's folder is refused.
+        let outside = temp();
+        let error = plan("web-test", &json!({"project": outside.path().display().to_string()}), dir.path()).unwrap_err().to_string();
+        assert!(error.contains("stays inside your folder") || error.contains("leads outside"), "{error}");
+        // A folder with no package.json is named, never run.
+        let empty = temp();
+        std::fs::create_dir_all(empty.path().join("client")).unwrap();
+        let error = plan("web-test", &json!({"project":"client"}), empty.path()).unwrap_err().to_string();
+        assert!(error.contains("package.json"), "{error}");
     }
 
     // U62 (#721): the build cache is the project's choice. Without
@@ -3526,23 +3805,58 @@ kind = "path"
         assert!(tail.trim_end().ends_with("services/app"), "{tail}");
     }
 
+    /// Task 87/210: the project and the three `.zerus-team` paths are absolute:
+    /// Build.bat and UnrealEditor-Cmd resolve after changing into the engine, so
+    /// a member-relative path finds nothing.
     #[test]
-    fn unreal_templates_are_typed_argv() {
+    fn unreal_templates_pass_absolute_paths() {
         let dir = temp();
         std::fs::write(dir.path().join("Game.uproject"), "{}").unwrap();
+        let project = dir.path().join("Game.uproject").display().to_string();
         let build = plan("ue-build", &json!({"engine":"UE_5.5","project":"Game.uproject","target":"Game","platform":"Win64","config":"Development"}), dir.path()).unwrap();
         assert!(build.program.ends_with("Engine/Build/BatchFiles/Build.bat"));
-        assert!(build.argv.contains(&"-Project=Game.uproject".to_owned()));
-        assert_eq!(&build.argv[..4], ["Game.uproject", "Game", "Win64", "Development"]);
+        assert!(build.argv.contains(&format!("-Project={project}")), "{:?}", build.argv);
+        let expected: Vec<String> = vec![project.clone(), "Game".into(), "Win64".into(), "Development".into(), format!("-Project={project}")];
+        assert_eq!(build.argv, expected);
         let engine = fake_engine("UnrealEditor-Cmd.exe");
         let root = engine.path().to_string_lossy().into_owned();
         let test = plan("ue-test", &json!({"engine":root,"project":"Game.uproject","filters":"Project.Game"}), dir.path()).unwrap();
         assert!(test.program.ends_with("Engine/Binaries/Win64/UnrealEditor-Cmd.exe"), "{}", test.program);
+        assert_eq!(test.argv[0], project);
         assert!(test.argv.contains(&"-ExecCmds=Automation RunTests Project.Game;Quit".to_owned()));
         assert!(test.argv.contains(&"-nullrhi".to_owned()) && test.argv.contains(&"-unattended".to_owned()));
-        assert!(test.argv.contains(&"-saveddir=.zerus-team/ue/Saved".to_owned()));
-        assert!(test.argv.contains(&"-abslog=.zerus-team/ue/Unreal.log".to_owned()));
+        let ue = dir.path().join(".zerus-team").join("ue");
+        assert!(test.argv.contains(&format!("-saveddir={}", ue.join("Saved").display())), "{:?}", test.argv);
+        assert!(test.argv.contains(&format!("-abslog={}", ue.join("Unreal.log").display())), "{:?}", test.argv);
+        assert!(test.argv.contains(&format!("-ReportExportPath={}", dir.path().join(".zerus-team").join("results").join("unreal").display())), "{:?}", test.argv);
         assert!(plan("ue-build", &json!({"engine":"UE_5.5","project":"Game.uproject","target":"Game"}), dir.path()).is_ok());
+        // A shell-style path is refused as before.
+        let error = plan("ue-build", &json!({"engine":"UE_5.5","project":"../Game.uproject","target":"Game"}), dir.path()).unwrap_err().to_string();
+        assert!(error.contains("stays inside your folder"), "{error}");
+    }
+
+    /// Task 210: UnrealEditor-Cmd writes its run to `-abslog`, so a failed
+    /// ue-test reports that log's tail; a passing one never shows a stale log.
+    #[test]
+    fn a_failed_ue_test_reports_its_unreal_log() {
+        let dir = temp();
+        let ue = dir.path().join(".zerus-team").join("ue");
+        std::fs::create_dir_all(&ue).unwrap();
+        std::fs::write(ue.join("Unreal.log"), "STALE-LOG-LINE\n").unwrap();
+        let mut passing = shell_plan("exit 0", "exit 0");
+        passing.template = "ue-test".into();
+        let outcome = execute(&passing, dir.path(), Duration::from_secs(60), &[]);
+        assert_eq!(outcome.exit, Some(0), "{outcome:?}");
+        assert!(!outcome.tail.contains("STALE-LOG-LINE"), "{}", outcome.tail);
+        let (windows, unix) = (
+            "echo LogAutomation: Error: Test Game.Core failed > .zerus-team\\ue\\Unreal.log & exit /b 1",
+            "echo 'LogAutomation: Error: Test Game.Core failed' > .zerus-team/ue/Unreal.log; exit 1",
+        );
+        let mut failing = shell_plan(windows, unix);
+        failing.template = "ue-test".into();
+        let outcome = execute(&failing, dir.path(), Duration::from_secs(60), &[]);
+        assert_eq!(outcome.exit, Some(1), "{outcome:?}");
+        assert!(outcome.tail.contains("Test Game.Core failed") && outcome.tail.contains("Unreal.log"), "{}", outcome.tail);
     }
 
     /// An engine folder holding the named editor.
@@ -3635,3 +3949,7 @@ kind = "path"
         assert!(error.contains("HKCU") && error.contains("ZERUS_UE_ENGINE"), "{error}");
     }
 }
+
+
+
+

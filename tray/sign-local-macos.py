@@ -181,6 +181,9 @@ def source_layout(app, *, paired=False):
     expected = {executable}
     if paired:
         expected.add(app / "Contents/MacOS/hgs")
+        # Task 182: newer local bundles carry lore beside hgs; older ones stay valid.
+        if (app / "Contents/MacOS/lore").exists():
+            expected.add(app / "Contents/MacOS/lore")
         if (app / PAIR_RECORD).exists() or (app / PAIR_RECORD).is_symlink():
             raise ValueError("The source already has pair metadata; prepare a fresh unsigned copy.")
         for path in expected:
@@ -188,7 +191,7 @@ def source_layout(app, *, paired=False):
                     or not os.access(path, os.X_OK)):
                 raise ValueError("Paired code must be independent regular executable files.")
             if regular_bytes(path, 4) not in MACH_O:
-                raise ValueError("Paired code must contain exactly the two expected Mach-O executables.")
+                raise ValueError("Paired code must contain exactly the expected Mach-O executables.")
     # Single-code mode stays the default. Paired mode adds only the fixed hgs
     # leaf, never general deep signing or links into Homebrew installations.
     for path in paths:
@@ -248,6 +251,7 @@ def sign(app, installed, requested="", *, paired=False):
     info = source_layout(app, paired=paired)
     current = installed_identity(installed)
     service = app / "Contents/MacOS/hgs"
+    lore_service = app / "Contents/MacOS/lore"
     previous_service = installed / "Contents/MacOS/hgs"
     paired_previous = False
     if paired and current:
@@ -275,6 +279,10 @@ def sign(app, installed, requested="", *, paired=False):
             sign_code(service, identity, "hgs")
             genuine_signature(service, "hgs")
             record = {"schema": 1, "build_sha256": build_hash, "signed_sha256": sha256(service)}
+            if lore_service.exists():
+                record["lore_sha256"] = sha256(lore_service)
+                sign_code(lore_service, identity, "lore")
+                genuine_signature(lore_service, "lore")
             record_path = app / PAIR_RECORD
             record_path.parent.mkdir(parents=True, exist_ok=True)
             record_path.write_text(json.dumps(record, sort_keys=True) + "\n")
@@ -293,11 +301,16 @@ def sign(app, installed, requested="", *, paired=False):
             if (application["TeamIdentifier"] != cli["TeamIdentifier"]
                     or application["CDHash"] == cli["CDHash"]):
                 raise ValueError("The paired app and distinct CLI must have the same signing team.")
+            if lore_service.exists():
+                lore = genuine_signature(lore_service, "lore")
+                if application["TeamIdentifier"] != lore["TeamIdentifier"]:
+                    raise ValueError("The paired lore must have the same signing team.")
             if paired_previous:
                 verify_continuity(service, previous_service)
             if (json.loads(regular_bytes(app / PAIR_RECORD, 4096, complete=True)) != record
-                    or sha256(service) != record["signed_sha256"]):
-                raise ValueError("The signed CLI or sealed pair metadata changed during preparation.")
+                    or sha256(service) != record["signed_sha256"]
+                    or (lore_service.exists() and sha256(lore_service) != record.get("lore_sha256"))):
+                raise ValueError("The signed CLI, lore or sealed pair metadata changed during preparation.")
             # Last check covers both nested code and the new resource seal.
             run("codesign", "--verify", "--deep", "--strict", "--all-architectures", app)
         if current:

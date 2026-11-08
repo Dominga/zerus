@@ -47,6 +47,9 @@ pub struct TestsConfig {
     /// U62 (#717): the night window in which long suites may run.
     #[serde(default)]
     pub schedule: Schedule,
+    /// Task #281: how a performance run checks the machine first.
+    #[serde(default)]
+    pub performance: Performance,
     /// Resource classes by name: what a suite needs of the machine.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub resources: std::collections::BTreeMap<String, Resources>,
@@ -170,6 +173,46 @@ impl Default for Schedule {
     }
 }
 
+/// Task #281 (owner, 2026-11-08): a performance measurement looks at the
+/// machine first. Above a threshold a perf run waits for a quiet window,
+/// bounded; past the bound it runs marked `loaded` with the numbers.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Performance {
+    /// Busy CPU above this share of the machine (percent) means not quiet.
+    #[serde(default = "perf_cpu")]
+    pub cpu_percent: u32,
+    /// A disk fuller than this (percent used) means not quiet.
+    #[serde(default = "perf_disk")]
+    pub disk_percent: u32,
+    /// More Zerus builds running than this means not quiet.
+    #[serde(default = "perf_builds")]
+    pub builds: u32,
+    /// The longest wait for a quiet window, in seconds; past it the run runs
+    /// marked loaded.
+    #[serde(default = "perf_wait")]
+    pub wait_seconds: f64,
+}
+
+fn perf_cpu() -> u32 {
+    70
+}
+fn perf_disk() -> u32 {
+    90
+}
+fn perf_builds() -> u32 {
+    1
+}
+fn perf_wait() -> f64 {
+    600.0
+}
+
+impl Default for Performance {
+    fn default() -> Self {
+        Self { cpu_percent: perf_cpu(), disk_percent: perf_disk(), builds: perf_builds(), wait_seconds: perf_wait() }
+    }
+}
+
 /// Whether `hour` (local, 0-23) is inside the night window.
 pub fn is_night(hour: u32, schedule: &Schedule) -> bool {
     let (start, end) = (schedule.night_start % 24, schedule.night_end % 24);
@@ -196,6 +239,7 @@ impl Default for TestsConfig {
             build_cache: BuildCache::default(),
             merge_queue: MergeQueue::default(),
             schedule: Schedule::default(),
+            performance: Performance::default(),
             resources: std::collections::BTreeMap::new(),
             providers: Vec::new(),
             tools: Vec::new(),
@@ -543,6 +587,10 @@ pub struct Provider {
     /// into one result per test.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub results: Option<TemplateResults>,
+    /// Task #281: this provider's suites are performance measurements: a run
+    /// checks the machine's load first and records it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub performance: bool,
 }
 
 fn rule_build() -> Rule {

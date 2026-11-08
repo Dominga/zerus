@@ -6,7 +6,8 @@ import { catalog, computerFresh, hasDraftKey, orderedRows } from "../../store/ca
 import { machineCards } from "../../store/machines";
 import { archiveMachineChoices, archiveProjectChoices } from "./archive-filters";
 import { defaultProject, grouping, groups } from "../../store/organization";
-import { stateFilter, matchesFilter, listedByFilter, search,machineFilter, projectFilter, accountFilter, folderFilter, expandedChildren, compactRows, selected, selectedKey, subagentOpen } from "../../store/ui";
+import { teams } from "../../store/teams";
+import { stateFilter, matchesFilter, listedByFilter, search,machineFilter, projectFilter, accountFilter, folderFilter, expandedChildren, compactRows, selected, selectedKey, subagentOpen, teamsCollapsed } from "../../store/ui";
 import { compileScopes, scopeCounts } from "./scope-filters";
 import { withCreations } from "../../store/creations";
 import { isWorking, needsAttention } from "../../store/attention";
@@ -35,7 +36,8 @@ export function rowHeight(row: Row, strip = false): number {
   if (row.type === "child") return ROW_HEIGHT.child;
   if (row.type === "creation") return cardHeight();
   if (row.compactRow && !strip) return ROW_HEIGHT.collapsedRow;
-  return cardHeight();
+  // The lead's card carries Qt's 26 px team strip below its footer.
+  return cardHeight() + (row.team ? 26 : 0);
 }
 
 export function sessionMatchesSearch(s: Session, q: string): boolean {
@@ -107,6 +109,8 @@ export const listRows = createMemo<Row[]>(() => {
     selected: { key: selectedKey(), subagent: subagentOpen(), conversation: selected()?.conversationId },
     roster: (s: Session) => rosterFor(s, s.key === selectedKey() ? followedFor(s.key).value : undefined),
     childDraft: (s: Session, child: { id: string }) => hasDraftKey(`${s.computer}\n${s.name}\n${s.conversationId ?? ""}\n${child.id}`),
+    teamOf: (s: Session) => teams.teamOf(s),
+    teamCollapsed: (id: string) => teamsCollapsed(id),
   };
   const out = groupRows(scope);
   return withCreations(out, scope);
@@ -153,3 +157,5 @@ export const projectChoices = createMemo(() => {
   const g = grouping();
   return archiveProjectChoices(g, pickerCounts().project, projectFilter());
 });
+
+

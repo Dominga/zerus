@@ -432,8 +432,20 @@ fn team_steps(provider: &Provider, section: &ProviderMap, group: Option<&str>, i
             });
             (build, Some(request("py-test", test)))
         }
-        Kind::Msbuild => {
-            // One project per group: its own file builds; the whole set
+        // Task #239: the web client's vitest run goes through the worker, from
+        // the project's own node_modules, so a sandboxed member needs no npm.
+        Kind::Npm => {
+            let mut test = Map::new();
+            if !provider.root.is_empty() && provider.root != "." {
+                test.insert("project".into(), provider.root.trim_end_matches('/').to_owned().into());
+            }
+            let paths: Vec<String> = if whole || runs.len() > 64 { Vec::new() } else { runs.iter().map(|path| in_project(provider, path)).collect() };
+            if !paths.is_empty() {
+                test.insert("paths".into(), json!(paths));
+            }
+            (None, Some(request("web-test", test)))
+        }
+        Kind::Msbuild => {            // One project per group: its own file builds; the whole set
             // builds the provider's manifest.
             let project = match group {
                 Some(group) if !group.is_empty() => group.to_owned(),
@@ -808,6 +820,31 @@ affected = "all"
         let root = tempfile::tempdir().unwrap();
         let changed: Vec<String> = files.iter().map(|file| (*file).to_owned()).collect();
         select(root.path(), &config(), &map(), &durations(), &changed, hunks, false)
+    }
+
+    /// Task #239: a web test's change names the worker's web-test request with
+    /// its project and file, so a sandboxed member never needs npx itself.
+    #[test]
+    fn a_web_change_names_its_vitest_run_for_the_worker() {
+        let root = tempfile::tempdir().unwrap();
+        let mut map = map();
+        let mut web = ProviderMap::empty(Kind::Npm);
+        web.rule = Rule::Build;
+        web.targets.insert("web/src/app.test.ts".into(), target("app", &["src/app.test.ts"], 3));
+        web.files.insert("web/src/app.test.ts".into(), vec!["web/src/app.test.ts".into()]);
+        map.providers.insert("web".into(), web);
+        let selection = select(root.path(), &config(), &map, &durations(), &["web/src/app.test.ts".to_owned()], &Hunks::new(), false);
+        let run = selection.runs.iter().find(|run| run.provider == "web").expect("the web run");
+        assert_eq!(
+            run.team_run,
+            Some(serde_json::json!({"template":"web-test","args":{"project":"web","paths":["web/src/app.test.ts"]}})),
+            "{run:?}"
+        );
+        assert!(text(&selection).contains("\"template\":\"web-test\""), "{}", text(&selection));
+        // A web change the map does not know runs the project's whole set.
+        let whole = select(root.path(), &config(), &map, &durations(), &["web/src/other.ts".to_owned()], &Hunks::new(), false);
+        let run = whole.runs.iter().find(|run| run.provider == "web").expect("the whole web run");
+        assert_eq!(run.team_run, Some(serde_json::json!({"template":"web-test","args":{"project":"web"}})), "{run:?}");
     }
 
     #[test]

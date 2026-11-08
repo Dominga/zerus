@@ -43,6 +43,25 @@ export function childRows(map: SubagentMap | undefined, countsComplete = false):
     });
 }
 
+/** Task 262: a child that works now (Qt's inspector: working, active members or an approval). */
+const running = (child: Subagent) => child.state === "working" || child.state === "attention";
+
+/**
+ * Qt's side panel (SessionsWindow::renderDetails, owner 2026-10-28): while the
+ * children are current, the finished ones fold into a count ("N finished,
+ * show") unless the owner opened them; profile groups keep their rows.
+ * Running children list first, each part in its own order.
+ */
+export function foldedChildren(children: readonly Subagent[], current: boolean, open: boolean): { shown: Subagent[]; finished: number } {
+  const ordered = [...children.filter(running), ...children.filter((child) => !running(child))];
+  if (!current) return { shown: [...children], finished: 0 };
+  const finished = ordered.filter((child) => !running(child) && !child.group).length;
+  return { shown: open ? ordered : ordered.filter((child) => running(child) || child.group), finished };
+}
+
+/** The side panel's fold of a session's finished children (one entry per session in `workspace/inspectorClosed`). */
+export const finishedFoldId = (sessionKey: string) => `finished:${sessionKey}`;
+
 /** Qt's selected-inspection roster override, only for the same fresh conversation. */
 export function rosterFor(row: Session, details?: Record<string, unknown>): Subagent[] {
   const inspected = details?.subagents;

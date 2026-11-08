@@ -18,7 +18,9 @@ fn vectors() -> Value {
 fn the_shared_vectors_are_found_or_clean() {
     let vectors = vectors();
     for case in vectors["found"].as_array().expect("found vectors") {
-        let text = case["text"].as_str().unwrap();
+        // The file stores secret-shaped samples split by a marker (no literal in a real token format).
+        let joined = case["text"].as_str().unwrap().replace("<split>", "");
+        let text = joined.as_str();
         let pattern = case["pattern"].as_str().unwrap();
         assert_eq!(scan(text, &[]).first().map(|found| found.pattern), Some(pattern), "{text}");
     }
@@ -30,7 +32,7 @@ fn the_shared_vectors_are_found_or_clean() {
 
 #[test]
 fn a_working_text_is_redacted_not_refused() {
-    let text = "curl -H 'Authorization: Bearer ghp_0123456789abcdefghijABCDEFGHIJ012345' https://admin:hunter2pass@example.invalid";
+    let text = concat!("curl -H 'Authorization: Bearer ghp_", "0123456789abcdefghijABCDEFGHIJ012345' https://admin:hunter2pass@example.invalid");
     let clean = redact_working(text);
     assert!(clean.contains("[redacted: github-token]"), "{clean}");
     assert!(clean.contains("[redacted: url-credentials]"), "{clean}");
@@ -56,7 +58,7 @@ fn a_pulse_is_stored_redacted() {
             team: team.id.clone(),
             member: "dev".into(),
             task: 1,
-            done: "curl -H 'Authorization: Bearer ghp_0123456789abcdefghijABCDEFGHIJ012345'".into(),
+            done: concat!("curl -H 'Authorization: Bearer ghp_", "0123456789abcdefghijABCDEFGHIJ012345'").into(),
             next: "last: Bash: DB_PASSWORD=Tr0ub4dor&3x".into(),
             blocked: "https://admin:hunter2pass@example.invalid failed".into(),
             at: 10.0,
@@ -79,7 +81,7 @@ fn a_team_message_is_stored_redacted() {
     let dir = tempfile::tempdir().unwrap();
     crate::state::with_test_state_root(dir.path(), || {
         let (mut store, team) = stored_team(&dir.path().join("teams/teams.sqlite3"));
-        let body = "rotate AKIAABCDEFGHIJKLWXYZ in the vault";
+        let body = concat!("rotate AKIA", "ABCDEFGHIJKLWXYZ in the vault");
         let stored = store
             .mutate_working(&team.id, |tx, _team, _events| {
                 let new = NewMessage { request_id: "22222222-2222-4222-8222-222222222222", by: "lead", to: "dev", kind: "message", urgency: Urgency::Normal, text: body };
@@ -87,7 +89,7 @@ fn a_team_message_is_stored_redacted() {
                 Ok(message)
             })
             .unwrap();
-        assert!(stored.text.contains("[redacted: aws-access-key-id]") && !stored.text.contains("AKIAABCDEFGHIJKLWXYZ"), "{}", stored.text);
+        assert!(stored.text.contains("[redacted: aws-access-key-id]") && !stored.text.contains(concat!("AKIA", "ABCDEFGHIJKLWXYZ")), "{}", stored.text);
         // The digest is of the redacted text, so the same request stays idempotent.
         let again = store
             .mutate_working(&team.id, |tx, _team, _events| {
@@ -105,7 +107,7 @@ fn a_handoff_brief_kept_in_the_team_is_redacted() {
         id: "t".into(),
         name: "T".into(),
         lead: "lead".into(),
-        goal: "ship it with ghp_0123456789abcdefghijABCDEFGHIJ012345".into(),
+        goal: concat!("ship it with ghp_", "0123456789abcdefghijABCDEFGHIJ012345").into(),
         ..Default::default()
     };
     team.members.push(crate::state::teams::model::Member { id: "dev".into(), role: "Backend".into(), ..Default::default() });

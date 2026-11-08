@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ARCHIVE_ACTIONS_BOUND, barTools, countable, selectionMenu, splitTools, SELECTION_ICONS } from "./selection-ui";
-import { MOVE_LATER, SELECTION_ACTIONS, type SelectionAction } from "./selection";
+import { SELECTION_ACTIONS, type SelectionAction } from "./selection";
 import { resolveIcon } from "../lib/icons";
 
 const counts = (c: Partial<Record<SelectionAction, number>>) => (a: SelectionAction) => c[a] ?? 0;
@@ -23,11 +23,17 @@ describe("barTools", () => {
     expect(Object.fromEntries(tools.map((t) => [t.action, t.enabled]))).toEqual({ compact: true, expand: true, mark_read: false, pause: false, forget: false });
     expect(barTools(counts({ pause: 1 }), 2, false)[0].enabled).toBe(true);
   });
-  it("shows Move to project with its count, disabled, with the later hint", () => {
+  it("shows Move to project with its count, enabled while the organization is editable and even during a batch", () => {
     const [move] = barTools(counts({ move: 3 }), 3, false);
     expect(move.text).toBe("Move to project (3)");
+    expect(move.enabled).toBe(true);
+    expect(move.hint).toBe("Move to project — 3 of 3 selected sessions");
+    expect(barTools(counts({ move: 3 }), 3, true)[0].enabled).toBe(true);
+  });
+  it("disables Move to project with the organization's own reason", () => {
+    const [move] = barTools(counts({ move: 3 }), 3, false, { enabled: false, reason: "Projects are being read." });
     expect(move.enabled).toBe(false);
-    expect(move.hint).toBe(MOVE_LATER);
+    expect(move.hint).toBe("Projects are being read.");
   });
   it("marks Forget and Terminate dangerous and gives every action a known icon", () => {
     const all = Object.fromEntries(SELECTION_ACTIONS.map((a) => [a, 1]));
@@ -65,9 +71,15 @@ describe("selectionMenu", () => {
     expect(items[0]).toEqual({ heading: "4 selected sessions" });
     const labels = items.map((e) => ("label" in e ? e.label : "separator" in e ? "-" : e.heading));
     expect(labels).toEqual(["4 selected sessions", "Pause (2)", "Move to project (4)", "Forget (1)", "-", "Deselect all"]);
-    const move = items[2] as { disabled?: boolean; hint?: string };
-    expect(move.disabled).toBe(true);
-    expect(move.hint).toBe(MOVE_LATER);
+    const move = items[2] as { disabled?: boolean; hint?: string; action(): void };
+    expect(move.disabled).toBe(false);
+    expect(move.hint).toBeUndefined();
+    move.action();
+    expect(run).toHaveBeenCalledWith("move");
+    run.mockClear();
+    const refused = selectionMenu(counts({ move: 4 }), 4, false, run, deselect, { enabled: false, reason: "Projects are being read." })[1] as { disabled?: boolean; hint?: string };
+    expect(refused.disabled).toBe(true);
+    expect(refused.hint).toBe("Projects are being read.");
     (items[1] as { action(): void }).action();
     expect(run).toHaveBeenCalledWith("pause");
     (items[5] as { action(): void }).action();

@@ -38,7 +38,8 @@ function summary(id: string, members: TeamListedMember[], over: Partial<TeamSumm
   return {
     id, name: id, status: "running", project: "", folder: "/work/p", plan_mode: "standard", lead: "lead",
     members, tasks: 0, accepted: 0, submitted: 0, in_review: 0, in_test: 0,
-    attention: 0, open_proposals: 0, waiting_for_lead: false, pending_phase: null, updated: 1, revision: 1, ...over,
+    attention: 0, open_proposals: 0, waiting_for_lead: false, pending_phase: null, updated: 1, revision: 1,
+    phase: 0, phase_done: 0, phase_total: 0, phases_done: 0, phases_total: 0, ...over,
   };
 }
 

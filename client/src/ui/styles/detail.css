@@ -83,7 +83,52 @@
   .act-col [id^="item-"] { scroll-margin-top: 10px; }
   .act-msg { border-radius: var(--z-radius-lg); padding: 9px 14px 11px; background: var(--z-color-tile); border-left: 3px solid var(--z-color-border); animation: rise var(--z-motion-slow) var(--ease) both; }
   .act-msg.k-user { background: var(--z-color-bubble); border-left-color: var(--z-color-accent-muted); white-space: pre-wrap; }
-  .act-msg.k-agent { border-left-color: var(--z-color-accent); }
+  /* Task 208, as Qt: the model's reply is plain text on the page, no card and no bar;
+     left bars belong to system notices (team, member, Zerus), never to replies. */
+  .act-msg.k-agent { background: transparent; border-left: 0; border-radius: 0; padding-left: 2px; padding-right: 2px; }
+  .act-msg.k-system { background: var(--z-color-tile); border-left: 3px solid var(--bar-dark, var(--z-color-border)); }
+  :root[data-appearance="light"] .act-msg.k-system { border-left-color: var(--bar-light, var(--z-color-border)); }
+  .act-msg.k-system header b { color: var(--z-color-text); }
+  .act-plaque header { flex-wrap: wrap; row-gap: 4px; }
+  .act-plaque-chip { padding: 0 7px; border-radius: 9px; background: var(--z-color-hover); color: var(--z-color-text-3); font-size: var(--fs-xs); white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+  .act-plaque-chip.task { color: var(--z-color-accent); }
+  .act-plaque-body { margin: 2px 0 0; color: var(--z-color-text); }
+  .act-plaque-foot { display: flex; align-items: center; gap: 8px; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--z-color-divider); font-size: var(--fs-2xs); color: var(--z-color-muted); min-width: 0; }
+  .act-plaque-foot .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  /* Task 244: a folded team notice or reply (Qt's tool-call row), and the lead's mode control. */
+  .act-folded .act-tools-head .muted { flex: 1; min-width: 0; }
+  .act-folded.reply .act-tools-head b { color: var(--z-color-accent); }
+  .act-folded-body { display: flex; flex-direction: column; gap: 8px; padding: 6px 4px 4px 18px; }
+  .act-notice-mode { display: flex; align-items: center; gap: 6px; flex: none; font-size: var(--fs-xs); }
+  .act-notice-mode select { height: 24px; padding: 0 6px; font-size: var(--fs-xs); }
+  /* Task 248: Qt's media tiles (ActivityMedia: 320 x 180, rounded, the name on a dark strip, a play mark on a video). */
+  .media-strip { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .media-tile { position: relative; flex: none; max-width: 100%; border-radius: 8px; overflow: hidden; background: #1b1f26; border: 1px solid #39404a; padding: 0; cursor: pointer; }
+  .media-tile img, .media-tile video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+  .media-tile:hover { border-color: var(--z-color-accent); }
+  .media-tile:focus-visible { outline: 2px solid var(--z-color-accent); outline-offset: 2px; }
+  .media-name { position: absolute; left: 0; right: 0; bottom: 0; height: 24px; line-height: 24px; padding: 0 9px; text-align: left; font-size: 11px; color: #e6e8eb; background: rgba(0, 0, 0, .59); }
+  .media-tile.empty .media-name { background: transparent; }
+  .media-note { position: absolute; left: 9px; right: 9px; top: 0; bottom: 24px; display: flex; align-items: center; justify-content: center; text-align: center; font-size: 11px; color: #9aa3ad; }
+  .media-tile.video .media-note { top: auto; bottom: 30px; height: 20px; }
+  .media-play { position: absolute; left: 50%; top: calc(50% - 7px); translate: -50% -50%; width: 44px; height: 44px; border-radius: 50%; background: rgba(0, 0, 0, .59); display: grid; place-items: center; }
+  .media-play svg { fill: #f2f4f6; }
+  /* The viewer (Qt MediaViewer): a picture up to 1280 x 860, or a player. */
+  dialog.media-viewer { width: auto; max-width: min(1320px, 96vw); max-height: 96vh; }
+  .media-body { display: flex; align-items: center; justify-content: center; min-width: min(640px, 90vw); }
+  .media-picture { max-width: min(1280px, 92vw); max-height: min(860px, 76vh); object-fit: contain; image-rendering: auto; }
+  .media-broken { padding: 48px 24px; color: var(--z-color-text-3); }
+  .media-player { display: flex; flex-direction: column; gap: 10px; width: min(960px, 90vw); }
+  .media-video { width: 100%; min-height: 360px; max-height: 70vh; background: #000; border-radius: 6px; }
+  .media-controls { display: flex; align-items: center; gap: 10px; }
+  .media-position { flex: 1; min-width: 0; accent-color: var(--z-color-accent); }
+  .media-time { color: var(--z-color-text-3); font-size: var(--fs-xs); white-space: nowrap; }
+  /* Qt's "Video message" dialog: the round video at a larger size, Play / pause under it. */
+  .video-message-body { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  .video-message-round { position: relative; width: 320px; height: 320px; border-radius: 50%; overflow: hidden; background: #000; }
+  .video-message-round video { width: 100%; height: 100%; object-fit: cover; }
+  .video-message-round .vm-ring { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .vm-row.video .vm-open { align-self: flex-end; }
   /* A fork's history from the session it began from: read-only, muted. */
   .act-msg.inherited, .act-tools.inherited, .act-thinking.inherited, .act-notice.inherited { opacity: .72; }
   .act-msg.k-receipt { background: transparent; border-left-color: var(--z-color-violet); padding: 6px 12px; font-size: var(--fs-sm); color: var(--z-color-text-3); }
@@ -503,6 +548,11 @@
 .qcard-head > svg { flex: none; }
 .qcard-title { font-weight: 600; }
 .qcard-dim, .qcard-mode { color: var(--z-color-muted); font-size: 11px; }
+/* Task 198 (W5): a subagent card's rows (Qt questionSubagent). */
+.qcard-subagents { display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow-y: auto; }
+.qcard-subagent { padding: 7px 10px 8px; border: 1px solid var(--z-color-card-border); border-radius: 8px; background: var(--z-color-card); }
+.qcard-subagent-top { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.qcard-subagent-task { margin-top: 3px; color: var(--z-color-text-2); font-size: var(--fs-sm); user-select: text; }
 .qcard-head .qcard-dim { flex: none; }
 .qcard-page { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
 .qcard-scroll { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; min-height: 40px; }

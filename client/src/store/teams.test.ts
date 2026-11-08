@@ -10,7 +10,7 @@ const list = (status = "running"): TeamList => ({
   truncated: false,
   teams: [{
     id: "t1", name: "Checkout", status, project: "", folder: "/work/p", plan_mode: "standard", lead: "lead", tasks: 4, accepted: 1,
-    submitted: 0, in_review: 0, in_test: 0, attention: 2, open_proposals: 0, waiting_for_lead: false, pending_phase: null, updated: 1, revision: 3,
+    submitted: 0, in_review: 0, in_test: 0, attention: 2, open_proposals: 0, waiting_for_lead: false, pending_phase: null, updated: 1, revision: 3, phase: 1, phase_done: 1, phase_total: 4, phases_done: 0, phases_total: 1,
     members: [
       { id: "lead", role: "Lead", agent: "claude", state: "active", lead: true, session: { host: "", name: "claude/p/lead", run_id: "r", conversation_id: "c" } },
       { id: "dev", role: "Backend", agent: "codex", state: "active", lead: false, session: { host: "studio", name: "codex/p/dev", run_id: "r", conversation_id: "c" } },
@@ -121,3 +121,4 @@ describe("Teams views", () => {
     expect(store.followed().size).toBe(0);
   });
 });
+

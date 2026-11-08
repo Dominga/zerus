@@ -3,7 +3,7 @@ import type { Reply } from "../../types";
 // catalog store's row: the Rust view row plus the presentation fields derived
 // from it once per upsert (store/catalog.ts `toSession`).
 
-export type AgentKind = "claude" | "codex" | "kimi" | "deepseek" | "opencode" | "sh";
+export type AgentKind = "claude" | "codex" | "kimi" | "deepseek" | "opencode" | "ollama" | "sh";
 
 /** Presentation status, in the existing precedence order (design/webui). */
 export type Status =
@@ -68,6 +68,16 @@ export interface Session {
   attention?: "question" | "approval" | "reply";
   scheduleNext?: string;
   backgroundJobs?: number;
+  /** The host's state of the session and the facts its card turns into a badge and line 3 (session-states.ts). */
+  sessionState?: string;
+  stateReason?: { kind: string; text: string };
+  build?: { label: string; command: string; since: number };
+  lastActive?: number;
+  replyAt?: number;
+  cacheTtl?: { seconds: number; kept_warm: boolean };
+  /** What the session runs apart from its jobs; never Background work. */
+  services?: { name: string; command: string; since: number }[];
+  backgroundCommand?: string;
   subagents?: Subagent[];
   subagentCountsComplete?: boolean;
   reviewLater?: boolean;
@@ -209,7 +219,7 @@ export interface LocalItem {
 
 export interface ActivityItem {
   id: string;
-  kind: "user" | "agent" | "tool" | "tools" | "question" | "approval" | "system" | "receipt" | "thinking" | "report" | "voice" | "cleared" | "context";
+  kind: "user" | "agent" | "tool" | "tools" | "question" | "approval" | "system" | "receipt" | "thinking" | "report" | "voice" | "cleared" | "context" | "folded";
   at: string;
   title?: string;
   body?: string;
@@ -231,6 +241,15 @@ export interface ActivityItem {
   replies?: Reply[];
   /** History a fork began from, shown read-only and muted. */
   inherited?: boolean;
+  /** Task 248: the pictures a tool group worked with (Qt toolMedia), previewed under it. */
+  media?: string[];
+  /** Task 244: a prompt Zerus pasted for the team (a notice or a member's message), never the owner's. */
+  teamNotice?: boolean;
+  /** Task 244: a folded notice or the lead's folded reply to one, and what it holds. */
+  folded?: TranscriptItem[];
+  foldKind?: "notice" | "reply";
+  /** Task 208: a team message or Zerus notice pasted into the session (Qt's plaque), never the owner's. */
+  notice?: import("./notices").SystemNotice;
 }
 
 export type VoiceState =

@@ -21,3 +21,19 @@ export function statusSummary(computers: readonly ComputerState[], label: (id: s
   const base = tr("%1 of %2 machines connected", live, computers.length);
   return connecting.length ? base + tr(", %1 connecting", connecting.join(", ")) : base;
 }
+
+/**
+ * Task 235: the status bar's note while rows from the last list on disk are
+ * shown: "Last list from 14:05, updating…" with the oldest save time, or
+ * nothing once every computer's live listing replaced them.
+ */
+export function staleNote(stale: Record<string, number>, format: (at: number) => string = clockTime): string {
+  const saved = Object.values(stale).filter((at) => typeof at === "number" && Number.isFinite(at));
+  if (saved.length === 0) return "";
+  return tr("Last list from %1, updating…", format(Math.min(...saved)));
+}
+
+function clockTime(at: number): string {
+  const date = new Date(at * 1000);
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}

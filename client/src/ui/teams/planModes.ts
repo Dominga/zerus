@@ -126,12 +126,25 @@ export function testsRows(tests: TeamTestsView | null | undefined): TestsRows {
   };
 }
 
-export function testStatus(status: string): "passed" | "failed" | "timed-out" | "reused" | "queued" {
+export function testStatus(status: string): "passed" | "flaky" | "failed" | "timed-out" | "reused" | "queued" {
   if (status === "passed") return "passed";
+  // Task 199 (Qt TeamTests statusName): a run that passed on a retry is not a failure.
+  if (status === "flaky") return "flaky";
   if (status === "timed_out" || status === "timed-out") return "timed-out";
   if (status === "reused") return "reused";
   if (status === "queued" || status === "waiting" || status === "running") return "queued";
   return "failed";
+}
+
+/** A run's status in words (Qt TeamTests statusName). */
+export function runStatusLabel(status: string): string {
+  const kind = testStatus(status);
+  if (kind === "passed") return tr("Passed");
+  if (kind === "flaky") return tr("Passed on retry");
+  if (kind === "timed-out") return tr("Timed out");
+  if (kind === "reused") return tr("Reused");
+  if (kind === "queued") return tr("Queued");
+  return tr("Failed");
 }
 
 /** Qt's run time: 45s, 3m 05s, 1h 20m. */
@@ -141,6 +154,21 @@ export function runTime(ms: number): string {
   if (seconds < 60) return `${seconds}s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${(seconds % 60).toString().padStart(2, "0")}s`;
   return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60).toString().padStart(2, "0")}m`;
+}
+
+/** Task 197: the heat mode a team starts with: this browser's own stored
+ * choice ("time", "tokens", "off"; "1" from before task 197 is lateness),
+ * else Qt's imported mode (`teams/heatModes`), else Off. Tokens stays Tokens. */
+export function heatModeSeed(team: string, stored: string | null, modes: string): "off" | "time" | "tokens" {
+  if (stored === "1" || stored === "time") return "time";
+  if (stored === "tokens" || stored === "off") return stored;
+  if (stored !== null) return "off";
+  try {
+    const mode = (JSON.parse(modes) as Record<string, unknown>)[team];
+    return mode === "time" || mode === "tokens" ? mode : "off";
+  } catch {
+    return "off";
+  }
 }
 
 /** Task 103: what a team's Lateness switch starts with: this browser's own
@@ -170,6 +198,22 @@ export function reportCounts(report: { passed: number; failed: number; skipped: 
 /** Task 88: a test's name as the Tests mode shows it: suite::name unless the name already starts with its suite. */
 export function caseName(test: { suite: string; name: string }): string {
   return !test.suite || test.name.startsWith(test.suite) ? test.name : `${test.suite}::${test.name}`;
+}
+
+/** Task 199 (Qt TeamTests): the suites seen in the queue and the history, by name. */
+export function testSuites(tests: TeamTestsView | null | undefined): string[] {
+  if (!tests) return [];
+  return [...new Set([...tests.queue.map((item) => item.suite), ...tests.runs.map((run) => run.suite)].filter(Boolean))].sort();
+}
+
+/** A suite's latest run and its last ten statuses, newest first. */
+export function suiteRuns(tests: TeamTestsView | null | undefined, suite: string): TeamTestsView["runs"] {
+  return (tests?.runs ?? []).filter((run) => run.suite === suite).slice(0, 10);
+}
+
+/** Force run's state for a suite: queued as forced already, or free to force. */
+export function forcedWaiting(tests: TeamTestsView | null | undefined, suite: string): boolean {
+  return !!tests?.queue.some((item) => item.suite === suite && item.forced);
 }
 
 /** Task 88: whether a test failed (a failure or an error). */

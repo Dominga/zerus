@@ -123,7 +123,18 @@ function Card(props: { arrived: boolean }) {
           )}</Index>
         </div>
       </Show>
-      <Show when={formId()} keyed>{(id) => <Form id={id} onKey={onKey} />}</Show>
+      {/* Task 198 (W5): a subagent card lists what it would start, one row each; Allow all and Deny answer it (QuestionCard.cpp:627-655). */}
+      <Show when={c().subagents?.length} fallback={<Show when={formId()} keyed>{(id) => <Form id={id} onKey={onKey} />}</Show>}>
+        <div class="qcard-subagents">
+          <Index each={c().subagents}>{(call) => (
+            <div class="qcard-subagent" data-subagent-type={call().kind}>
+              <div class="qcard-subagent-top"><b>{call().kind || tr("Subagent")}</b>
+                <span class="qcard-dim ell">{[call().model ? tr("model %1", call().model) : "", call().effort ? tr("effort %1", call().effort) : ""].filter(Boolean).join(", ")}</span></div>
+              <Show when={call().task}><div class="qcard-subagent-task wrap-pre">{call().task}</div></Show>
+            </div>
+          )}</Index>
+        </div>
+      </Show>
       {/* The hint on the left, the actions on the right; they wrap under it when the column is narrow. */}
       <div class="qcard-actions">
         <p class="qcard-status" classList={{ error: c().status_error }} title={trText(c().status)} role="status" aria-live="polite">{trText(c().status)}</p>
@@ -137,6 +148,8 @@ function Card(props: { arrived: boolean }) {
         <Show when={c().next.visible}><button type="button" class="btn small ghost accent" disabled={!c().next.enabled} onClick={() => void questions.page(c().page + 1)}>{trText(c().next.label)}</button></Show>
         <Show when={c().submit.visible}><button type="button" class="btn small primary" disabled={!questions.enabled(c().submit)} onClick={() => void questions.submit()}>{questions.label(c().submit)}</button></Show>
         <Show when={c().deny.visible}><button type="button" class="btn small ghost" disabled={!questions.enabled(c().deny)} onClick={() => void questions.decide(false)}>{trText(c().deny.label)}</button></Show>
+        <Show when={c().always?.visible}><button type="button" class="btn small ghost" data-question-always title={tr("Starts every subagent listed and stops asking before later subagents in this session.")}
+          disabled={!questions.enabled(c().always!)} onClick={() => void questions.always()}>{questions.label(c().always!)}</button></Show>
         <Show when={c().approve.visible}><button type="button" class="btn small primary" disabled={!questions.enabled(c().approve)} onClick={() => void questions.decide(true)}>{questions.label(c().approve)}</button></Show>
       </div>
     </div></div>

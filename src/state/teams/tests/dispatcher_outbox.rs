@@ -1,6 +1,37 @@
 use super::*;
 use super::support::*;
 
+/// Task #239: a queued run whose runner died is answered where the member
+/// polls, with the worker log's tail - never "running" forever, never silence.
+#[test]
+fn a_run_whose_runner_died_is_an_outcome_with_the_worker_log() {
+    use crate::state::teams::outbox;
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let folder = dir.path().join("member");
+        std::fs::create_dir_all(&folder).unwrap();
+        let log = worker_dir().join("worker.log");
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(&log, "start pid=1\nhgs team worker: run 2222: the runner ended while vitest started\n").unwrap();
+        let id = "22222222-2222-4222-8222-222222222222";
+        let marker = serde_json::json!({"request_id":id,"started":crate::state::now(),"timeout_secs":1800,"pid":4294967290u32});
+        outbox::write_running(&folder, id, &marker).unwrap();
+        let team = Team { id: "t".into(), name: "T".into(), ..Default::default() };
+        settle_stale_runs(&folder, &team);
+        let result = outbox::result(&folder, id).expect("the run is answered");
+        assert_eq!(result["status"], "refused", "{result}");
+        let error = result["error"].as_str().unwrap();
+        assert!(error.contains("Zerus's worker log") && error.contains("the runner ended while vitest started"), "{error}");
+        assert!(outbox::running(&folder, id).is_none());
+        // A runner that still lives is not answered.
+        let live = "33333333-3333-4333-8333-333333333333";
+        let marker = serde_json::json!({"request_id":live,"started":crate::state::now(),"timeout_secs":1800,"pid":std::process::id()});
+        outbox::write_running(&folder, live, &marker).unwrap();
+        settle_stale_runs(&folder, &team);
+        assert!(outbox::result(&folder, live).is_none() && outbox::running(&folder, live).is_some());
+    });
+}
+
 #[test]
 fn terminal_members_start_with_a_short_first_turn() {
     let team = team();
@@ -370,9 +401,42 @@ fn the_runner_takes_only_the_workers_claim() {
     assert!(error.contains("not from an agent session"), "{error}");
 }
 
+/// Task #229: a Crit in the team holds the release: a queued release-candidate
+/// run is refused, naming the crit, until it is decided.
 #[test]
-fn a_queued_run_of_an_unknown_template_is_refused() {
-    // U21: the same argument validation guards the worker's queue.
+fn the_release_candidate_is_refused_while_a_crit_is_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+    let mut t = team();
+    t.status = TeamStatus::Running;
+    let mut crit = t.tasks.iter().find(|t| t.assignee == "dev").unwrap().clone();
+    crit.id = 9;
+    crit.title = "Fix the crash".into();
+    crit.severity = "crit".into();
+    crit.origin = Some(2);
+    crit.status = TaskStatus::Pending;
+    t.tasks.push(crit);
+    let task = t.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
+    task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+    task.status = TaskStatus::InProgress;
+    store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+    let folder = dir.path().join("work");
+    let request = json!({"op":"run","request_id":"99999999-9999-4999-8999-999999999999",
+        "team":t.id,"member":"dev","attempt":"A1","template":"release-candidate","args":{"commit":"abc"},
+        "input":{"request_id":"99999999-9999-4999-8999-999999999999","team":t.id,"attempt":"A1","template":"release-candidate","args":{"commit":"abc"}}});
+    super::super::outbox::push(&folder, &request).unwrap();
+    let mut member = session("codex/x/dev", "r1", true);
+    member.cwd = folder.to_string_lossy().into_owned();
+    let current = store.load(&t.id).unwrap().unwrap();
+    take_outbox(&mut store, &current, &[member]).unwrap();
+    let result = super::super::outbox::result(&folder, "99999999-9999-4999-8999-999999999999").unwrap();
+    assert_eq!(result["status"], "refused", "{result}");
+    let error = result["error"].as_str().unwrap_or_default();
+    assert!(error.contains("critical task") && error.contains("#9 in phase 1") && error.contains("release candidate"), "{error}");
+}
+
+#[test]
+fn a_queued_run_of_an_unknown_template_is_refused() {    // U21: the same argument validation guards the worker's queue.
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
     let mut t = team();
@@ -483,7 +547,13 @@ fn the_worker_answers_a_sandboxed_members_read_and_starts_its_run_at_low_integri
         let answered = super::super::outbox::result(&folder, read).unwrap();
         assert_eq!((answered["status"].as_str(), answered["exit"].as_i64()), (Some("ran"), Some(0)), "{answered}");
         assert!(answered["stdout"].as_str().unwrap().contains("claude/x/lead"), "{answered}");
-        assert_eq!(*calls.borrow(), vec![vec!["ls".to_owned(), "--json".to_owned()]], "only the read reached hgs");
+        assert_eq!(calls.borrow().first(), Some(&vec!["ls".to_owned(), "--json".to_owned()]), "the read ran outside the sandbox");
+        // Task #275: the refused queued read reaches the member as a message.
+        assert!(
+            calls.borrow().iter().any(|call| call == &vec!["send".to_owned(), "codex/x/dev".to_owned(), "--json".to_owned()]),
+            "the refused queued read reached the member: {:?}",
+            calls.borrow()
+        );
         let refused = super::super::outbox::result(&folder, send).unwrap();
         assert_eq!(refused["status"], "refused", "{refused}");
         assert!(refused["error"].as_str().unwrap().contains("only for hgs ls, inspect and task reads"), "{refused}");
@@ -492,4 +562,66 @@ fn the_worker_answers_a_sandboxed_members_read_and_starts_its_run_at_low_integri
         assert_eq!((claim["integrity"].as_str(), claim["session"]["name"].as_str()), (Some("low"), Some("codex/x/dev")), "{claim}");
         assert!(super::super::outbox::request(&folder, run).is_none(), "the request left the queue");
     });
+}
+
+/// Task #275: a sandboxed member's refused queued call is a team message at its
+/// next safe point, with the reason, the limit and how to send a long text, and
+/// the lead's inbox reads it too; a failed outcome is told the same way.
+#[test]
+fn a_refused_queued_question_reaches_the_member_and_the_lead() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+    let mut t = team();
+    t.status = TeamStatus::Running;
+    let task = t.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap();
+    task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+    task.status = TaskStatus::InProgress;
+    let id = task.id;
+    store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+    let folder = dir.path().join("work");
+    let request_id = "44444444-4444-4444-8444-444444444444";
+    let request = json!({"op":"ask","request_id":request_id,"team":t.id,"member":"dev","attempt":"A1",
+        "input":{"request_id":request_id,"team":t.id,"text":"x".repeat(5000),"attempt":"A1"}});
+    super::super::outbox::push(&folder, &request).unwrap();
+    let mut member = session("codex/x/dev", "r1", true);
+    member.cwd = folder.to_string_lossy().into_owned();
+    let told: std::rc::Rc<std::cell::RefCell<Vec<String>>> = Default::default();
+    let heard = told.clone();
+    set_fake_hgs(Some(Box::new(move |_, args, input| {
+        if args == ["--help"] {
+            return Ok(fake_output(0, "", ""));
+        }
+        if let Some(input) = input {
+            heard.borrow_mut().push(crate::state::teams::doorbell::posted_text(input));
+        }
+        Ok(fake_output(0, r#"{"status":"submitted"}"#, ""))
+    })));
+    let current = store.load(&t.id).unwrap().unwrap();
+    take_outbox(&mut store, &current, &[member]).unwrap();
+    // A failed outcome is told the same way; the report is urgent.
+    let failed_id = "55555555-5555-4555-8555-555555555555";
+    let failed = json!({"status":"failed","request_id":failed_id,"error":"the runner died"});
+    let team_now = store.load(&t.id).unwrap().unwrap();
+    let member = team_now.member("dev").unwrap().clone();
+    announce_outbox(&mut store, &team_now, &member, &folder,
+        &json!({"op":"report","request_id":failed_id}), &failed);
+    set_fake_hgs(None);
+    // The member heard the refusal with the limit and the file hint, then the failed report.
+    let messages = told.borrow();
+    assert!(messages.iter().any(|text| text.contains("Your queued ask") && text.contains("NOT applied")), "{messages:?}");
+    let ask = messages.iter().find(|text| text.contains("Your queued ask")).unwrap();
+    assert!(ask.contains(request_id) && ask.contains("4000"), "{ask}");
+    assert!(ask.to_lowercase().contains("file"), "{ask}");
+    let report = messages.iter().find(|text| text.contains("Your queued report")).unwrap();
+    assert!(report.contains("failed") && report.contains(failed_id), "{report}");
+    // The result file keeps the refusal, and the lead's inbox names both.
+    let result = super::super::outbox::result(&folder, request_id).unwrap();
+    assert_eq!(result["status"], "refused");
+    assert!(result["error"].as_str().unwrap().contains("A question is too long"), "{result}");
+    let saved = store.load(&t.id).unwrap().unwrap();
+    let record = saved.outbox_failures.iter().find(|failure| failure["request_id"] == request_id).unwrap();
+    assert_eq!(record["urgent"], json!(true));
+    assert!(saved.outbox_failures.iter().any(|failure| failure["request_id"] == failed_id));
+    let items = super::inbox::items(&saved);
+    assert!(items.iter().any(|item| item.kind == "refused_queued_call"), "{:?}", items.iter().map(|item| item.kind).collect::<Vec<_>>());
 }

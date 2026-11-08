@@ -181,6 +181,70 @@ fn left_units(value: &str, limit: usize) -> String {
         .collect()
 }
 
+/// Task 198 (W5): one subagent a confirmation card would start (Qt
+/// `SubagentRequest::Call`): its type, model, effort and task.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct SubagentCall {
+    pub kind: String,
+    pub model: String,
+    pub effort: String,
+    pub task: String,
+}
+
+/// The card's subagents: its `subagents` list, else the rows of its question
+/// text, "Start N subagents: type (model M, effort E): task; ..." (Qt
+/// `SubagentRequest::calls`).
+pub fn subagent_calls(raw: &Value, question: &str) -> Vec<SubagentCall> {
+    if let Some(list) = raw.get("subagents").and_then(Value::as_array).filter(|list| !list.is_empty()) {
+        return list
+            .iter()
+            .take(64)
+            .map(|call| SubagentCall {
+                kind: text(call, "type").to_owned(),
+                model: text(call, "model").to_owned(),
+                effort: text(call, "effort").to_owned(),
+                task: text(call, "description").to_owned(),
+            })
+            .collect();
+    }
+    let first = question.split("\n\n").next().unwrap_or("").trim();
+    let Some(rest) = first.strip_prefix("Start ").and_then(|rest| {
+        let (count, rest) = rest.split_once(' ')?;
+        count.bytes().all(|b| b.is_ascii_digit()).then_some(rest)
+    }).and_then(|rest| rest.strip_prefix("subagents: ").or_else(|| rest.strip_prefix("subagent: "))) else {
+        return Vec::new();
+    };
+    // A new item starts after "; " where a "type (model " follows.
+    let mut parts: Vec<String> = Vec::new();
+    for piece in rest.split("; ") {
+        let starts = piece.split_once(" (model ").is_some_and(|(kind, _)| !kind.contains(['(', ')', ';']));
+        match parts.last_mut() {
+            Some(last) if !starts => { last.push_str("; "); last.push_str(piece); }
+            _ => parts.push(piece.to_owned()),
+        }
+    }
+    parts
+        .iter()
+        .take(64)
+        .map(|part| {
+            let part = part.trim();
+            let Some((kind, after)) = part.split_once(" (model ") else {
+                return SubagentCall { kind: part.to_owned(), ..Default::default() };
+            };
+            let Some((inside, task)) = after.split_once(')') else {
+                return SubagentCall { kind: part.to_owned(), ..Default::default() };
+            };
+            let (model, effort) = inside.split_once(", effort ").unwrap_or((inside, ""));
+            SubagentCall {
+                kind: kind.trim().to_owned(),
+                model: model.trim().to_owned(),
+                effort: effort.trim().to_owned(),
+                task: task.trim_start_matches(':').trim().to_owned(),
+            }
+        })
+        .collect()
+}
+
 /// One option of an item.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Choice {
@@ -231,6 +295,8 @@ pub struct Question {
     pub approval_choices: bool,
     pub trust_request: bool,
     pub plan_review: bool,
+    /// Task 198 (W5): a card that starts subagents (`subagent_confirmation`).
+    pub subagents: bool,
     pub unavailable_reason: String,
     pub items: Vec<Item>,
     pub raw: Value,
@@ -329,6 +395,7 @@ impl Question {
             approval_choices: flag(raw, "approval_choices"),
             trust_request: flag(raw, "trust_request"),
             plan_review: flag(raw, "plan_review"),
+            subagents: flag(raw, "subagent_confirmation"),
             unavailable_reason,
             items,
             raw: raw.clone(),
@@ -1123,12 +1190,42 @@ pub fn skip_answers(question: &Question) -> Vec<AnswerItem> {
         .collect()
 }
 
-/// Approve once (`allow`) or Deny (`deny`) of an approval card.
+/// Approve once (`allow`) or Deny (`deny`) of an approval card. A subagent
+/// card is answered by its own one-time Yes or No (Qt `SubagentRequest::optionId`).
 pub fn decision(question: &Question, allow: bool) -> Option<Vec<AnswerItem>> {
     let item = question.items.first().filter(|_| question.approval)?;
+    let option = if question.subagents {
+        let label = if allow { "yes" } else { "no" };
+        item.options.iter().find(|option| option.label.to_lowercase() == label)?.id.clone()
+    } else {
+        if allow { "allow" } else { "deny" }.to_owned()
+    };
     Some(vec![AnswerItem::Choice {
         question_id: item.id.clone(),
-        selected_option_ids: vec![if allow { "allow" } else { "deny" }.to_owned()],
+        selected_option_ids: vec![option],
+        text: String::new(),
+    }])
+}
+
+/// A subagent card's option that allows every subagent and stops asking: a
+/// broader Yes that says "don't ask again" (Qt `SubagentRequest::alwaysOptionId`).
+pub fn always_option(question: &Question) -> Option<String> {
+    if !question.approval || !question.subagents {
+        return None;
+    }
+    question.items.first()?.options.iter().find(|option| {
+        let label = option.label.split_whitespace().collect::<Vec<_>>().join(" ").replace('\u{2019}', "'");
+        option.broader && label.starts_with("Yes") && label.contains("don't ask again")
+    }).map(|option| option.id.clone())
+}
+
+/// "Allow all, don't ask again" on a subagent card.
+pub fn always_decision(question: &Question) -> Option<Vec<AnswerItem>> {
+    let option = always_option(question)?;
+    let item = question.items.first()?;
+    Some(vec![AnswerItem::Choice {
+        question_id: item.id.clone(),
+        selected_option_ids: vec![option],
         text: String::new(),
     }])
 }
@@ -1293,6 +1390,10 @@ pub struct CardView {
     pub submit: ButtonView,
     pub approve: ButtonView,
     pub deny: ButtonView,
+    /// Task 198 (W5): "Allow all, don't ask again" on a subagent card; its first click asks to Confirm.
+    pub always: ButtonView,
+    /// Task 198 (W5): the subagents the card would start, one row each.
+    pub subagents: Vec<SubagentCall>,
     pub skip: ButtonView,
     pub previous: ButtonView,
     pub next: ButtonView,
@@ -1458,7 +1559,17 @@ pub fn card(question: &Question, draft: &AnswerDraft, ctx: &CardContext) -> Card
             }
         },
     );
-    let heading = if question.approval || question.trust_request || question.plan_review {
+    let starting = if question.approval && question.subagents {
+        let first = question.items.first().map(|item| item.question.as_str()).unwrap_or("");
+        let calls = subagent_calls(&question.raw, first);
+        let count = calls.len().max(question.raw.get("subagent_calls").and_then(Value::as_array).map_or(0, Vec::len));
+        Some((calls, count))
+    } else {
+        None
+    };
+    let heading = if let Some((_, count)) = &starting {
+        if *count == 1 { crate::text!("Start 1 subagent") } else { crate::text!("Start %1 subagents", *count) }
+    } else if question.approval || question.trust_request || question.plan_review {
         crate::text!("Agent needs your approval")
     } else if question.optional && nav.is_some() {
         crate::text!(
@@ -1534,7 +1645,9 @@ pub fn card(question: &Question, draft: &AnswerDraft, ctx: &CardContext) -> Card
         ));
     }
     let notice = notice.unwrap_or_else(|| {
-        if question.approval {
+        if question.approval && question.subagents {
+            crate::text!("Allow all starts every subagent listed; Deny stops them all.")
+        } else if question.approval {
             crate::text!("Approval applies only to this command. Review it before continuing.")
         } else if question.optional {
             crate::text!("The agent can continue. Answer when ready or skip this question.")
@@ -1565,6 +1678,9 @@ pub fn card(question: &Question, draft: &AnswerDraft, ctx: &CardContext) -> Card
             .first()
             .is_some_and(|item| !item.options.is_empty());
     let can_approve = buttons && ctx.available && supported && !locked && !draft.uncertain;
+    let always = if buttons { always_option(question) } else { None };
+    let confirming_always = always.as_deref().is_some_and(|option| draft.confirm == option);
+    let subagent_card = starting.is_some();
     CardView {
         heading,
         progress,
@@ -1592,9 +1708,16 @@ pub fn card(question: &Question, draft: &AnswerDraft, ctx: &CardContext) -> Card
         approve: ButtonView {
             visible: buttons,
             enabled: can_approve,
-            label: crate::text!("Approve once"),
-            review_label: Some(crate::text!("Approve once")),
+            label: if subagent_card { crate::text!("Allow all") } else { crate::text!("Approve once") },
+            review_label: Some(if subagent_card { crate::text!("Allow all") } else { crate::text!("Approve once") }),
         },
+        always: ButtonView {
+            visible: always.is_some(),
+            enabled: can_approve,
+            label: if confirming_always { crate::text!("Confirm") } else { crate::text!("Allow all, don't ask again") },
+            review_label: Some(crate::text!("Allow all, don't ask again")),
+        },
+        subagents: starting.map(|(calls, _)| calls).unwrap_or_default(),
         deny: ButtonView {
             visible: buttons,
             enabled: can_approve,

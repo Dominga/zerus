@@ -73,6 +73,9 @@ pub enum TeamRead {
         from: Option<f64>,
         before: Option<f64>,
     },
+    /// Task 199: `team builds` with `{team}`: the build broker's folders,
+    /// their build folders, what builds and waits, and recent builds.
+    Builds { team: String },
 }
 
 impl TeamRead {
@@ -88,6 +91,7 @@ impl TeamRead {
             Self::Profile { .. } | Self::ScopedProfile { .. } => "profile",
             Self::Catalog | Self::CatalogRoute { .. } => "catalog",
             Self::TestQueue { .. } | Self::TestResults { .. } | Self::TestWindow { .. } => "test",
+            Self::Builds { .. } => "builds",
         }
     }
 
@@ -99,7 +103,7 @@ impl TeamRead {
             | Self::Inbox { team }
             | Self::Spans { team, .. }
             | Self::Profile { team } => Some(team),
-            Self::TestQueue { team } | Self::TestResults { team, .. } => Some(team),
+            Self::TestQueue { team } | Self::TestResults { team, .. } | Self::Builds { team } => Some(team),
             Self::ScopedProfile { team, .. }
             | Self::ScopedSpans { team, .. }
             | Self::TestWindow { team, .. } => Some(team),
@@ -134,6 +138,7 @@ impl TeamRead {
             Self::Catalog => json!({}),
             Self::CatalogRoute { goal } => json!({"goal": goal}),
             Self::TestQueue { team } => json!({"team": team, "action": "queue"}),
+            Self::Builds { team } => json!({"team": team}),
             Self::TestResults { team, before } => {
                 let mut request = json!({"team": team, "action": "results", "limit": 20});
                 if let Some(before) = before {
@@ -185,6 +190,7 @@ impl TeamRead {
             Self::TestQueue { .. } | Self::TestResults { .. } | Self::TestWindow { .. } => {
                 &[("items", true)]
             }
+            Self::Builds { .. } => &[("folders", true)],
         }
     }
 }

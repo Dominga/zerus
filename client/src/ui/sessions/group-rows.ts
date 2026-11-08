@@ -2,11 +2,15 @@ import { headerAttention, isWorking, visibleUnreadReply } from "../../store/atte
 import type { CreationCard, GroupingOut } from "../../types";
 import type { Session, Subagent } from "./types";
 import { currentChildren } from "./subagents";
+import { sessionIs } from "../../store/teamsView";
+import type { TeamSummary } from "../../types";
 
 export type Row =
   /** `project` is the project's id; `name` and the colour come from the organization's header. */
   | { type: "header"; id: string; project: string; name: string; color: string | null; palette: number; collapsed: boolean; total: number; attention: number; unread: number; working: number }
-  | { type: "card"; id: string; session: Session; expandable: boolean; expanded: boolean; compactRow: boolean }
+  | { type: "card"; id: string; session: Session; expandable: boolean; expanded: boolean; compactRow: boolean;
+      /** A team member under its lead: 22 px per level, a connector when it follows a lead. */
+      depth?: number; team?: TeamSummary; teamFirst?: boolean; teamLast?: boolean }
   | { type: "child"; id: string; parent: Session; child: Subagent; first: boolean; last: boolean }
   | { type: "creation"; id: string; creation: CreationCard };
 
@@ -32,13 +36,44 @@ export interface ListInput {
   selected?: { key?: string; subagent?: string; conversation?: string };
   roster?: (s: Session) => Subagent[];
   childDraft?: (parent: Session, child: Subagent) => boolean;
+  /** The team a row belongs to, when its computer's team list is loaded. */
+  teamOf?: (s: Session) => TeamSummary | undefined;
+  /** Whether this team's members are folded (workspace/collapsedTeams). */
+  teamCollapsed?: (team: string) => boolean;
 }
 
 /** Qt's grouped rows (SessionsWindowRows.cpp:289-338, header counts 393-411). */
 export function groupRows(input: ListInput): Row[] {
   const out: Row[] = [];
-  const cards = (list: readonly Session[]) => {
+  // A team's members are not separate list rows: they sit under their lead
+  // (Qt's SessionRoles::TeamMember tree). Only a visible lead takes them, so a
+  // member filtered into view on its own still lists normally.
+  const all = [...input.members.values()].flat();
+  const teamFor = new Map<string, TeamSummary>();
+  for (const s of all) {
+    const team = input.teamOf?.(s);
+    if (team) teamFor.set(s.key, team);
+  }
+  const leadOf = new Map<string, Session>();
+  const membersOf = new Map<string, Session[]>();
+  for (const team of new Set(teamFor.values())) {
+    const leadMember = team.members.find((m) => m.lead);
+    const lead = leadMember ? all.find((s) => sessionIs(leadMember.session, s.computer, s)) : undefined;
+    if (!lead) continue;
+    leadOf.set(team.id, lead);
+    membersOf.set(team.id, team.members.filter((m) => !m.lead)
+      .map((m) => all.find((s) => sessionIs(m.session, s.computer, s)))
+      .filter((s): s is Session => !!s));
+  }
+  const nested = new Set<string>();
+  for (const [team, lead] of leadOf) {
+    if (!teamFor.has(lead.key)) continue;
+    const visibleLead = [...input.members.values()].some((list) => list.some((s) => s.key === lead.key && input.visible(s)));
+    if (visibleLead) for (const member of membersOf.get(team) ?? []) nested.add(member.key);
+  }
+  const cards = (list: readonly Session[], depth = 0) => {
     for (const s of list) {
+      if (nested.has(s.key)) continue;
       const current = currentChildren(s, input.online(s));
       const roster = input.children === false ? [] : (input.roster?.(s) ?? s.subagents ?? []);
       const kids = roster.filter((child) =>
@@ -50,8 +85,20 @@ export function groupRows(input: ListInput): Row[] {
       const expanded = kids.length > 0 && input.expanded(s.key);
       const changed = kids.length !== roster.length || kids.some((child, index) => child !== roster[index]);
       const shown = changed ? { ...s, subagents: kids } : s;
-      out.push({ type: "card", id: s.key, session: shown, expandable: kids.length > 0, expanded, compactRow: input.compact(s.key) });
+      const team = teamFor.get(s.key);
+      const teamMembers = team ? membersOf.get(team.id) ?? [] : [];
+      const teamExpanded = teamMembers.length > 0 && !(input.teamCollapsed?.(team!.id) ?? false);
+      const isLead = !!team && leadOf.get(team.id)?.key === s.key;
+      out.push({ type: "card", id: s.key, session: shown, expandable: kids.length > 0 || (isLead && teamMembers.length > 0),
+                 expanded: expanded || teamExpanded, compactRow: input.compact(s.key), depth,
+                 team: isLead ? team : undefined });
       if (expanded) kids.forEach((child, i) => out.push({ type: "child", id: `${s.key}/${child.id}`, parent: shown, child, first: i === 0, last: i === kids.length - 1 }));
+      if (isLead && teamExpanded) {
+        teamMembers.forEach((member, i) => out.push({
+          type: "card", id: member.key, session: member, expandable: false, expanded: false,
+          compactRow: false, depth: depth + 1, teamFirst: i === 0, teamLast: i === teamMembers.length - 1,
+        }));
+      }
     }
   };
   const wanted = (id: string) => !input.projects.length || input.projects.includes(id);

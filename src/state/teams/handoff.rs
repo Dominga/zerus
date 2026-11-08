@@ -35,6 +35,9 @@ pub(crate) enum Why<'a> {
     /// A swap: the new session of a seat that was handed to another agent,
     /// model or account.
     Swap(&'a HandoffNeed),
+    /// Task 209: the owner or the lead relaunched the seat in a fresh
+    /// conversation (not only after a failed start).
+    Relaunch(&'a HandoffNeed),
     /// A compaction or a clear: the same seat, its context gone.
     Compaction,
 }
@@ -235,6 +238,13 @@ pub(crate) fn build(team: &Team, member: &str, why: Why<'_>, pulses: &[String], 
             }
             head += ".\n";
         }
+        Why::Relaunch(need) => {
+            head += "Why you are reading this: this seat was relaunched in a fresh conversation";
+            if !need.from.is_empty() {
+                head += &format!(", its old session {}", one(&need.from, 120));
+            }
+            head += ".\n";
+        }
         Why::Compaction => head += "Why you are reading this: your context was compacted or cleared.\n",
     }
     head += "It is built from the team's own record, not from the old session. Use it before you act, and do not ask the owner what it answers.\n";
@@ -245,7 +255,7 @@ pub(crate) fn build(team: &Team, member: &str, why: Why<'_>, pulses: &[String], 
         format!("Last pulses:\n{}\n", pulses.iter().take(PULSES).map(|line| format!("- {}", one(line, 160))).collect::<Vec<_>>().join("\n"))
     };
     let start = match why {
-        Why::Swap(_) => "Next: your task follows this brief; do it as it says and report as it says.\n".to_owned(),
+        Why::Swap(_) | Why::Relaunch(_) => "Next: your task follows this brief; do it as it says and report as it says.\n".to_owned(),
         Why::Compaction => format!(
             "Next: {{\"team\":\"{}\"}} | hgs team current --json shows your task and attempt; {}.\n",
             team.id,
@@ -303,15 +313,31 @@ pub(crate) fn pulse_lines(team: &Team, member: &str, items: &[Value], now: f64) 
         let detail = &item["detail"];
         let named = ["member", "to", "by"].iter().any(|key| detail[*key].as_str() == Some(role.as_str()));
         let task = detail["task"].as_u64();
-        if !named && !task.is_some_and(|task| mine.contains(&task)) {
+        let kind = item["kind"].as_str().unwrap_or_default();
+        // Task 278: the lead's brief names what every member waits on.
+        let job = matches!(kind, "job_started" | "job_ended");
+        if !named && !task.is_some_and(|task| mine.contains(&task)) && !(job && member == team.lead) {
             continue;
         }
-        let kind = item["kind"].as_str().unwrap_or_default();
         if kind.is_empty() {
             continue;
         }
         let minutes = ((now - item["at"].as_f64().unwrap_or(now)) / 60.0).max(0.0) as u64;
         let ago = if minutes < 120 { format!("{minutes} min ago") } else if minutes < 2880 { format!("{} h ago", minutes / 60) } else { format!("{} d ago", minutes / 1440) };
+        if job {
+            let who = detail["member"].as_str().unwrap_or_default();
+            let what = detail["what"].as_str().unwrap_or_default();
+            let since = super::look::clock(detail["since"].as_f64().unwrap_or(0.0));
+            lines.push(if kind == "job_started" {
+                format!("{ago} {who} started waiting for {what}{}", if since.is_empty() { String::new() } else { format!(" (since {since})") })
+            } else {
+                format!("{ago} {who}: {what} ended")
+            });
+            if lines.len() == PULSES {
+                break;
+            }
+            continue;
+        }
         lines.push(match task {
             Some(task) => format!("{ago} {} #{task}", kind.replace('_', " ")),
             None => format!("{ago} {}", kind.replace('_', " ")),

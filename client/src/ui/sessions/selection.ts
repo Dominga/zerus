@@ -15,9 +15,6 @@ export type WriteAction = Extract<SelectionAction, "pause" | "resume" | "archive
 /** The bar's and the selection menu's order (SessionSelection.cpp 121-122). */
 export const SELECTION_ACTIONS: readonly SelectionAction[] = ["compact", "expand", "mark_read", "review_later", "pause", "resume", "archive", "move", "forget", "terminate"];
 
-/** Move to project waits for the organisation stream's move (zerus-5wmh.18). */
-export const MOVE_LATER = trNoop("Arrives with project organisation.");
-
 const TEXT: Record<SelectionAction, string> = {
   mark_read: trNoop("Mark as read"),
   review_later: trNoop("Mark needs attention"),

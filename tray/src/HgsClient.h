@@ -41,6 +41,9 @@ struct SessionInfo {
     // The reply came from a provider-scheduled turn. Jobs the agent scheduled
     // for itself, -1 when unknown or unsupported; their earliest next run.
     bool replyScheduled = false;
+    // WhiteWh fork, task 244: the session leads its team (`team_lead`), and
+    // only the team's pastes opened its reply's turn (`reply_team_notice`).
+    bool teamLead = false, replyTeamNotice = false;
     int scheduledJobs = -1, recurringSchedules = -1;
     double nextScheduledAt = 0;
     int backgroundProcesses = -1;

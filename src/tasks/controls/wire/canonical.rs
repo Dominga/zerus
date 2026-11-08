@@ -6,7 +6,10 @@ use sha2::{Digest, Sha256};
 const DOMAIN: &[u8] = b"zerus-task-control-admission-v1\0";
 
 pub(super) fn digest(value: &Value) -> Result<String, String> {
-    let mut bytes = DOMAIN.to_vec();
+    tagged_digest(DOMAIN, value)
+}
+pub(crate) fn tagged_digest(domain: &[u8], value: &Value) -> Result<String, String> {
+    let mut bytes = domain.to_vec();
     encode(value, &mut bytes)?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }

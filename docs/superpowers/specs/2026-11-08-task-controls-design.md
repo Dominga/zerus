@@ -211,6 +211,33 @@ only. A matching digest never supplies caller, adapter or native authority;
 those proofs are independently revalidated at execute. A future canonical
 encoding needs a new schema/domain version.
 
+Server-only native Stop import uses the existing `Action::Stop` records, with
+no public execute operation or invented caller. Its admission digest instead
+covers the closed `{schema:1, fact, configuration, store_identity}` guard under
+`zerus-task-control-stop-import-v1` followed by NUL, using the same canonical
+encoding. Service image and epoch are excluded: an unchanged retained fact
+survives service replacement. The exact fact ID and guard are immutable;
+changed fact/configuration/store bindings refuse. Import only adds or retains
+holds, and never reactivates a settled identity or grants input authority.
+
+The native writer captures a sealed bounded file identity, size and SHA-256
+digest. After that writer drops, the actor imports the captured page in one
+immediate transaction and rechecks the retained no-follow file inside that
+transaction before commit. It takes no native lock there. Missing, changed,
+oversized or overflowed evidence and any failed import refuse admission; a
+caller cannot skip reconciliation and treat the absence of imported holds as
+permission. A failure rolls back the page, including request reservations and
+holds. Already-retained reservations can be completed by exact import after
+restart; this does not replay native input. Native fact files remain retained.
+
+Scoped begin resolves its exact original attempt with a partial active-attempt
+index and at most two bounded rows; ambiguity refuses. The index is part of
+canonical v2 creation only. **No DDL runs against an existing task-control
+store in this leaf:** an earlier prototype missing it refuses without repair,
+migration or a full-scan fallback. A future existing-store migration requires
+its own reviewed backup and one-way handling. These helpers remain inactive;
+the service route, actor/effect wiring and activation are subsequent work.
+
 Requests are at most 16 KiB; records reserve 32 KiB to retain outcome details.
 Status pages contain at most 128 rows and 64 KiB of stored payload. Sequence
 cursors use indexes; no complete journal is loaded. There are at most 64 active
@@ -317,6 +344,12 @@ observed versus unseen Pause/Stop facts, person Stop crossing versus agent or
 automatic dispatch, non-crossable holds, restart, strict bounds, stable pages
 and atomic capacity refusal. Gate-off native-fixture admission must retain its
 existing bytes and allow another managed task for a working executor.
+
+Gate-enabled private fixture checkouts use a separate Cargo target directory.
+They never share artifacts with gate-off builds. Before any debug CLI is used
+as evidence or installed, rebuild it, freeze the candidate, and check that its
+capability marker and actual inactive response agree with the intended gate.
+Source text alone does not qualify a previously built shared-cache artifact.
 
 Later leaves add actor/attempt/generation/native-turn substitution, real CLI
 legacy/managed acknowledgement output, prompt hashing and the 2400-byte guide

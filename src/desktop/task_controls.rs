@@ -5,6 +5,7 @@
 mod args_macos;
 mod authority;
 mod client;
+mod stop_import;
 #[cfg(target_os = "linux")]
 mod peer_linux;
 #[cfg(target_os = "macos")]

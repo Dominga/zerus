@@ -212,3 +212,90 @@ fn unexpected_links_special_files_and_replaced_writer_refuse() {
     let _replacement = writer(dir.path());
     assert!(Publisher::open_enabled(dir.path(), &guard, &executor(), true).is_err());
 }
+
+#[test]
+fn captured_stop_evidence_rechecks_retained_bytes_without_acquiring_the_native_writer() {
+    let dir = fixture();
+    let guard = writer(dir.path());
+    let publisher = Publisher::open_enabled(dir.path(), &guard, &executor(), true).unwrap();
+    publisher.publish(&fact(2)).unwrap();
+    let captured = publisher.capture().unwrap();
+    drop(guard);
+    assert_eq!(captured.facts(), &[fact(2)]);
+    assert_eq!(captured.executor(), &executor());
+    // Rechecking is a bounded read, not a second native exclusion. A future
+    // writer holding that exclusion cannot deadlock the actor's transaction.
+    let held = writer(dir.path());
+    captured.verify().unwrap();
+    drop(held);
+    let record = dir.path().join("run.json");
+    storage::atomic(&record, r#"{"state":"live"}"#).unwrap();
+    captured.verify().unwrap(); // rollback/run-record rewrites cannot erase it
+    let file = path(dir.path(), &executor());
+    let original = fs::read(&file).unwrap();
+    let mut changed = original.clone();
+    let at = changed.iter().position(|b| *b == b'2').unwrap();
+    changed[at] = b'3';
+    fs::write(&file, &changed).unwrap(); // same-size in-place change
+    assert!(captured.verify().is_err());
+    assert_eq!(fs::read(file).unwrap(), changed);
+}
+
+#[test]
+fn removed_oversized_replaced_or_overflowed_capture_refuses_for_review_without_repair() {
+    for mode in ["removed", "oversized", "replaced", "overflow", "writer"] {
+        let dir = fixture();
+        let guard = writer(dir.path());
+        let publisher = Publisher::open_enabled(dir.path(), &guard, &executor(), true).unwrap();
+        publisher.publish(&fact(2)).unwrap();
+        if mode == "overflow" {
+            for n in 3..=66 {
+                publisher.publish(&fact(n)).unwrap();
+            }
+        }
+        let captured = publisher.capture().unwrap();
+        drop(guard);
+        let file = path(dir.path(), &executor());
+        match mode {
+            "removed" => fs::remove_file(&file).unwrap(),
+            "oversized" => fs::write(&file, vec![b' '; BYTES + 1]).unwrap(),
+            "replaced" => {
+                let bytes = fs::read(&file).unwrap();
+                fs::rename(&file, file.with_extension("kept")).unwrap();
+                platform::private_open(OpenOptions::new().write(true).create_new(true))
+                    .open(&file)
+                    .unwrap();
+                fs::write(&file, bytes).unwrap();
+            }
+            "writer" => {
+                fs::rename(dir.path().join(".lock"), dir.path().join(".old-lock")).unwrap();
+                drop(writer(dir.path()));
+            }
+            _ => (),
+        }
+        let bytes = fs::read(&file).ok();
+        assert!(captured.verify().is_err(), "{mode}");
+        assert_eq!(
+            fs::read(&file).ok(),
+            bytes,
+            "{mode}: recheck must not repair"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_captured_fact_replaced_with_a_link_is_never_followed() {
+    let dir = fixture();
+    let guard = writer(dir.path());
+    let publisher = Publisher::open_enabled(dir.path(), &guard, &executor(), true).unwrap();
+    let captured = publisher.capture().unwrap();
+    drop(guard);
+    let file = path(dir.path(), &executor());
+    let kept = dir.path().join("keep");
+    fs::write(&kept, b"untouched").unwrap();
+    fs::remove_file(&file).unwrap();
+    std::os::unix::fs::symlink(&kept, &file).unwrap();
+    assert!(captured.verify().is_err());
+    assert_eq!(fs::read(&kept).unwrap(), b"untouched");
+}

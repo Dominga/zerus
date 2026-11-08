@@ -3,6 +3,7 @@
 //! the native writer. A detached bounded snapshot is imported after release.
 use crate::{platform, state::repositories::directory::Directory, state::storage};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{io::Read, path::Path};
 use zerus_desktop_ledger::task_controls::{Executor, EXECUTOR_HOLDS, TASK_CONTROLS};
 
@@ -11,7 +12,7 @@ const BYTES: usize = 256 << 10;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum Source {
+pub(crate) enum Source {
     PersonStop,
     VerifiedExternalInterrupt,
 }
@@ -20,7 +21,7 @@ pub(super) enum Source {
 /// A normal provider Stop hook cannot be represented as an interrupt source.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Fact {
+pub(crate) struct Fact {
     pub id: String,
     pub executor: Executor,
     pub source: Source,
@@ -174,12 +175,13 @@ impl<'a> Publisher<'a> {
         verify_writer(&self.root, self.writer)
     }
 
-    fn read(&self) -> Result<(Snapshot, platform::FileIdentity)> {
+    fn read(&self) -> Result<(Snapshot, platform::FileIdentity, Vec<u8>)> {
         self.verify()?;
         let file = self.directory.read_private(&self.name)?;
         let identity = platform::FileIdentity::of(&file).map_err(err)?;
         let mut bytes = Vec::new();
-        file.take(BYTES as u64 + 1)
+        (&file)
+            .take(BYTES as u64 + 1)
             .read_to_end(&mut bytes)
             .map_err(err)?;
         if bytes.len() > BYTES {
@@ -188,11 +190,33 @@ impl<'a> Publisher<'a> {
         let snapshot: Snapshot = serde_json::from_slice(&bytes).map_err(err)?;
         snapshot.validate(&self.executor)?;
         self.verify()?;
-        Ok((snapshot, identity))
+        let current = self.directory.read_private(&self.name)?;
+        if platform::FileIdentity::of(&current).map_err(err)? != identity {
+            return Err("Stop facts changed during capture; review required".into());
+        }
+        Ok((snapshot, identity, bytes))
     }
 
     pub fn snapshot(&self) -> Result<Snapshot> {
-        self.read().map(|(s, _)| s)
+        self.read().map(|(s, _, _)| s)
+    }
+
+    /// Consume the publisher but not its caller's native lock. The caller
+    /// drops that lock before passing this sealed read-only evidence to the
+    /// service actor. Its retained file is rechecked inside the DB transaction.
+    pub fn capture(self) -> Result<Captured> {
+        let (snapshot, identity, bytes) = self.read()?;
+        let writer = self.writer.identity().map_err(err)?;
+        Ok(Captured {
+            root: self.root,
+            directory: self.directory,
+            name: self.name,
+            snapshot,
+            identity,
+            writer,
+            bytes: bytes.len(),
+            digest: Sha256::digest(&bytes).into(),
+        })
     }
 
     /// Called with the original native writer, before an explicit Stop effect
@@ -204,7 +228,7 @@ impl<'a> Publisher<'a> {
         {
             return Err("The Stop fact belongs to another run/birth/child".into());
         }
-        let (mut snapshot, identity) = self.read()?;
+        let (mut snapshot, identity, _) = self.read()?;
         if let Some(old) = snapshot.facts.iter().find(|f| f.id == fact.id).or_else(|| {
             snapshot
                 .overflow
@@ -243,6 +267,65 @@ impl<'a> Publisher<'a> {
         self.directory.replace_file(&self.name, &bytes)?;
         self.verify()?;
         Ok(snapshot)
+    }
+}
+
+/// No Deserialize/Clone/public constructor: only the original native writer
+/// can capture this bounded evidence. It holds no lock and cannot authorize
+/// input or a Person. A failed recheck must block admission, never be skipped.
+pub(crate) struct Captured {
+    root: Directory,
+    directory: Directory,
+    name: String,
+    snapshot: Snapshot,
+    identity: platform::FileIdentity,
+    writer: platform::FileIdentity,
+    bytes: usize,
+    digest: [u8; 32],
+}
+impl Captured {
+    pub fn executor(&self) -> &Executor {
+        &self.snapshot.executor
+    }
+    pub fn facts(&self) -> &[Fact] {
+        &self.snapshot.facts
+    }
+    /// Bounded no-follow read only: never takes the native writer under a DB
+    /// transaction. Even equal bytes in a replaced object require review.
+    pub fn verify(&self) -> Result<()> {
+        self.root.verify()?;
+        self.directory.verify()?;
+        if !self.root.private()? || !self.directory.private()? {
+            return Err("The original Stop fact directories changed".into());
+        }
+        let lock = self.root.read_private(".lock")?;
+        let file = self.directory.read_private(&self.name)?;
+        if platform::FileIdentity::of(&lock).map_err(err)? != self.writer
+            || platform::FileIdentity::of(&file).map_err(err)? != self.identity
+        {
+            return Err("The captured Stop fact or original writer changed".into());
+        }
+        let mut bytes = Vec::new();
+        (&file)
+            .take(BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(err)?;
+        if bytes.len() > BYTES
+            || bytes.len() != self.bytes
+            || <[u8; 32]>::from(Sha256::digest(&bytes)) != self.digest
+        {
+            return Err("The captured Stop fact bytes changed; admission held for review".into());
+        }
+        let current = self.directory.read_private(&self.name)?;
+        if platform::FileIdentity::of(&current).map_err(err)? != self.identity {
+            return Err("The captured Stop fact was replaced; admission held for review".into());
+        }
+        self.root.verify()?;
+        self.directory.verify()?;
+        if self.snapshot.held_unknown() {
+            return Err("Stop fact overflow; admission held for explicit review".into());
+        }
+        Ok(())
     }
 }
 

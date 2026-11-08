@@ -6,6 +6,8 @@ use serde::de::DeserializeOwned;
 const PREFIX: &str = "desktop_task_control_";
 const PAGE_BYTES: usize = 64 << 10;
 
+mod schema;
+
 /// Created only by the activation-gated entry point. Holding this object does
 /// not grant native authority. Its transaction must remain inside the owning
 /// CLI/service's original, revalidated admission and custody boundary.
@@ -50,10 +52,7 @@ pub(super) fn open_enabled(db: &mut Connection) -> Result<Store<'_>> {
             version == 1,
             "task-control records require a different writer version"
         );
-        // Missing/replaced tables fail closed; never repair an admitted ledger.
-        for table in ["slots", "requests", "holds", "budget"] {
-            tx.prepare(&format!("SELECT * FROM {PREFIX}{table} LIMIT 0"))?;
-        }
+        schema::validate(&tx)?;
     } else {
         let existing: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE substr(name,1,21)='desktop_task_control_')", [], |r| r.get(0),

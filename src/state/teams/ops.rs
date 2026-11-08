@@ -6136,6 +6136,8 @@ fn run_proposal(team: &mut Team, kind: &str, member: &Value, change: &Value, mod
             let base = change["base_branch"].as_str().unwrap_or_default();
             super::working_mode::apply(&mut team.settings, &preset, base)?;
             team.working_mode = preset.clone();
+            // The settings now follow this preset: a former Keep is spent.
+            team.mode_kept = None;
             events.push(Event::new("working_mode_switched", json!({"preset":preset,"by":reason,"proposal":id})));
             json!({"working_mode":preset})
         }
@@ -6927,6 +6929,21 @@ fn apply_op(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &B
         "settings" => settings(team, input, actor, events),
         "rights" => rights(team, input, actor, events),
         "switch-memory-mode" => switch_memory_mode(team, input, actor, events),
+        // Task 336 (owner, 2026-11-08): the owner keeps the team's settings for
+        // the project's profile as it is now; the block stays away until the
+        // profile changes materially.
+        "keep-working-mode" => {
+            ensure!(matches!(actor, Actor::Human), "Only you keep the team's settings");
+            let kept = super::working_mode::keep(team, super::super::now())?;
+            events.push(Event::new("working_mode_kept", kept.clone()));
+            Ok(kept)
+        }
+        "forget-working-mode" => {
+            ensure!(matches!(actor, Actor::Human), "Only you forget the kept working mode");
+            let had = team.mode_kept.take().is_some();
+            events.push(Event::new("working_mode_kept_forgotten", json!({"had":had})));
+            Ok(json!({"forgotten":had}))
+        }
         // Task 159: checked and journaled here; `hgs team scratch-rule` keeps it.
         "scratch-rule" => {
             ensure!(matches!(actor, Actor::Human), "Only you grant the scratch-team rule: the lead proposes it, {{\"kind\":\"scratch-rule\",\"folder\":\"D:/scratch\",\"agents\":[\"claude\"],\"reason\":\"...\"}} | hgs team propose --json");

@@ -76,7 +76,7 @@ export function CreationTile(props: { card: Card }) {
       <span class="st-block">
         <span class="st-top">
           <span class="st-status"><StatusBadge kind="neutral" caption="" iconOnly /></span>
-          <span class="st-provider"><Show when={ACTIVE.has(c().state)} fallback={<AgentBadge agent={agentKind(c().cmd)} narrow />}><Spinner size={12} /></Show></span>
+          <span class="st-provider" classList={{ "creation-progress": ACTIVE.has(c().state) }}><Show when={ACTIVE.has(c().state)} fallback={<AgentBadge agent={agentKind(c().cmd)} narrow />}><Spinner size={12} /></Show></span>
         </span>
         <span class="st-name">{c().tag}</span>
         <span class="st-state" data-tone="neutral">{c().caption}</span>

@@ -74,6 +74,7 @@ describe("creation card geometry and progress", () => {
     expect(full).toContain("Confirming session…");
     expect(full).toContain("/fixture/next");
     expect(strip).toContain("st-provider");
+    expect(strip).toContain("creation-progress");
     expect(strip).toContain("set-spinner");
     expect(strip).toContain("Confirming session…");
   });
@@ -83,6 +84,7 @@ describe("creation card geometry and progress", () => {
       const { full, strip } = render(card({ state }));
       expect(full).not.toContain("set-spinner");
       expect(strip).not.toContain("set-spinner");
+      expect(strip).not.toContain("creation-progress");
       expect(full).toContain("scard tiled");
       expect(full).toContain("agent-tile");
       expect(strip).toContain("agent-badge");

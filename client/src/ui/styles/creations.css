@@ -9,6 +9,8 @@
 @layer components {
   /* The row's accessible text (SessionsWindowRows.cpp:390), for the list item's name. */
   .cr-a11y { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  /* Keep the narrow provider badge's 26x18 slot and center the loader in it. */
+  .creation-progress { width: 26px; height: 18px; display: inline-grid; place-items: center; }
 
   .cr-detail { padding: 12px; gap: 8px; }
   .cr-head { display: flex; flex-direction: column; gap: 2px; min-width: 0; }

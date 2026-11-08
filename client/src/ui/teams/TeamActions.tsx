@@ -60,15 +60,15 @@ export function FindingsDialog(props: { computer: ComputerId; team: ActTeam; clo
   return (
     <>
       <dialog ref={dialog} class="dlg team-findings-dialog" aria-labelledby="team-findings-title" onCancel={(event) => { event.preventDefault(); props.close(); }}>
-        <div class="dlg-head"><h2 id="team-findings-title">{tr("Findings · %1", props.team.name)}</h2></div>
+        <div class="dlg-head"><h2 id="team-findings-title">{tr("Findings: %1", props.team.name)}</h2></div>
         <div class="dlg-body team-findings-list">
           <Show when={items().length > 0} fallback={<p class="dim">{tr("No findings on this page.")}</p>}>
             <For each={items()}>{(finding) => (
               <div class="team-finding-row" data-finding={finding.id}>
-                <b class={`team-finding-${finding.severity}`}>{finding.severity.toUpperCase()} · {finding.title}</b>
+                <b class={`team-finding-${finding.severity}`}>{finding.severity.toUpperCase()}: {finding.title}</b>
                 <Show when={finding.scenario}><p>{finding.scenario}</p></Show>
                 <Show when={finding.file}><span class="dim mono">{finding.file}{finding.line > 0 ? `:${finding.line}` : ""}</span></Show>
-                <Show when={finding.state}><span class="dim">{tr("state: %1", finding.state)}{finding.phase > 0 ? tr(" · phase %1", finding.phase) : ""}{finding.note ? tr(" — %1", finding.note) : ""}</span></Show>
+                <Show when={finding.state}><span class="dim">{tr("state: %1", finding.state)}{finding.phase > 0 ? tr(", phase %1", finding.phase) : ""}{finding.note ? tr(" — %1", finding.note) : ""}</span></Show>
                 <Show when={finding.proposal}><p class="dim">{tr("Proposal: %1", finding.proposal)}</p></Show>
                 <div class="team-finding-actions">
                   <For each={Object.entries(FINDING_LABELS) as [keyof typeof FINDING_LABELS, string][]}>{(entry) => (
@@ -109,7 +109,7 @@ export function NextGoalDialog(props: { computer: ComputerId; team: ActTeam; clo
   const running = () => props.team.members.filter((member) => member.session).length;
   return (
     <dialog ref={dialog} class="dlg team-next-goal-dialog" aria-labelledby="team-next-goal-title" onCancel={(event) => { event.preventDefault(); props.close(); }}>
-      <div class="dlg-head"><h2 id="team-next-goal-title">{tr("Next goal · %1", props.team.name)}</h2></div>
+      <div class="dlg-head"><h2 id="team-next-goal-title">{tr("Next goal: %1", props.team.name)}</h2></div>
       <div class="dlg-body">
         <p class="team-confirm-text">{tr("A new team takes the next goal with this folder, its settings, the lead and the members. %1 of %2 sessions are still running and keep their context; the others start with their first task. This team stays Done.", running(), props.team.members.length)}</p>
         <label class="nt-field">{tr("Goal")}<textarea class="field" rows={5} placeholder={tr("What the team delivers next, and what done means")} value={goal()} onInput={(event) => setGoal(event.currentTarget.value)} /></label>

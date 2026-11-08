@@ -24,6 +24,11 @@ impl Clock {
     pub fn deadline(&self) -> Instant {
         *self.started.get_or_init(|| Instant::now() + self.length)
     }
+    /// Observe clock ownership without starting or renewing the operation.
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    pub(in crate::desktop) fn fixture_started(&self) -> Option<Instant> {
+        self.started.get().copied()
+    }
 }
 
 #[cfg(test)]

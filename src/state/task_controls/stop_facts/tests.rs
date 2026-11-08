@@ -35,7 +35,7 @@ fn writer(root: &Path) -> storage::Guard {
     platform::FileLock::exclusive(file).unwrap()
 }
 fn fixture() -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir_in(platform::canonical(std::env::temp_dir()).unwrap()).unwrap();
     platform::private_dir(dir.path()).unwrap();
     platform::restrict_dir(dir.path()).unwrap();
     dir

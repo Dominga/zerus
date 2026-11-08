@@ -33,7 +33,8 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let root = tempfile::tempdir().unwrap();
+        let root =
+            tempfile::tempdir_in(platform::canonical(std::env::temp_dir()).unwrap()).unwrap();
         platform::restrict_dir(root.path()).unwrap();
         platform::private_open(OpenOptions::new().create_new(true).write(true))
             .open(root.path().join(".lock"))

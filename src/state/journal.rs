@@ -446,9 +446,11 @@ pub(super) fn team_notice_prompt(event: &Value) -> bool {
     rest.starts_with(']') || (rest.starts_with(' ') && rest.split('\n').next().is_some_and(|line| line.contains(']')))
 }
 
-/// WhiteWh fork, task 244: whether only team pastes opened the turn of the
-/// main Stop `stop`. A turn with any prompt of the owner's is the owner's;
-/// a turn whose opening is not in the journal is not a notice turn.
+/// WhiteWh fork, tasks 244/#366: whether only team pastes made up the turn of
+/// the main Stop `stop`. A turn with any prompt of the owner's is the owner's:
+/// the opening prompt, a prompt the agent reports mid-turn, or the owner's
+/// message sent into the running turn (see `owner_prompt_in_turn`). A turn
+/// whose opening is not in the journal is not a notice turn.
 fn team_notice_turn(db: &Connection, record: &Value, stop: i64) -> Result<bool> {
     let mut statement = db
         .prepare(
@@ -466,10 +468,15 @@ fn team_notice_turn(db: &Connection, record: &Value, stop: i64) -> Result<bool> 
         })
         .map_err(|e| e.to_string())?;
     let mut prompts = 0;
+    let mut opened: Option<f64> = None;
+    let mut stopped: Option<f64> = None;
     for row in rows {
         let (kind, payload) = row.map_err(|e| e.to_string())?;
         match kind.as_deref() {
-            Some("Stop") => break,
+            Some("Stop") => {
+                stopped = serde_json::from_str::<Value>(&payload).ok().and_then(|event| event["at"].as_f64());
+                break;
+            }
             Some("UserPromptSubmit" | "UserPromptQueued" | "UserMessage" | "QuestionAnswered") => {
                 let event: Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
                 // Kimi's empty submit carries no prompt; its TurnStarted does.
@@ -479,12 +486,50 @@ fn team_notice_turn(db: &Connection, record: &Value, stop: i64) -> Result<bool> 
                 if kind.as_deref() == Some("QuestionAnswered") || !team_notice_prompt(&event) {
                     return Ok(false);
                 }
+                // Scanning backwards, the last prompt seen opens the turn.
+                if let Some(at) = event["at"].as_f64() {
+                    opened = Some(at);
+                }
                 prompts += 1;
             }
             _ => {}
         }
     }
-    Ok(prompts > 0)
+    if prompts == 0 {
+        return Ok(false);
+    }
+    // #366: the agent reports a message that came into its running turn only
+    // when the turn ends, so the journal alone cannot see it; hgs's receipt can.
+    let opened = opened.unwrap_or(0.0);
+    let end = stopped.filter(|end| *end >= opened).unwrap_or(f64::MAX);
+    if owner_prompt_in_turn(record, opened, end) {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// #366: whether hgs delivered a prompt of the owner's into the running turn
+/// between its opening (`from`) and the Stop (`to`). Claude and Codex queue a
+/// message sent while they work and report its `UserPromptSubmit` only at the
+/// turn's end, so the turn would otherwise fold as a team-notice reply. The
+/// last receipt names what was sent; a team paste queued the same way stays a
+/// notice.
+fn owner_prompt_in_turn(record: &Value, from: f64, to: f64) -> bool {
+    let sent = record["input_pending_at"].as_f64().unwrap_or(0.0);
+    if from <= 0.0 || sent <= from || sent > to {
+        return false;
+    }
+    let request = string(record, "input_pending_request");
+    if uuid::Uuid::parse_str(&request).is_err() {
+        return false;
+    }
+    let Ok(root) = super::storage::absolute_root() else { return false };
+    let Ok(contents) = std::fs::read_to_string(root.join("input_receipts").join(format!("{request}.json"))) else {
+        return false;
+    };
+    let receipt: Value = serde_json::from_str(&contents).unwrap_or_default();
+    let text = string(&receipt, "submitted_text");
+    !text.trim().is_empty() && !team_notice_prompt(&json!({"type":"UserPromptSubmit","detail":text}))
 }
 
 fn latest_reply_of(record: &Value, recurring_schedules: Option<u64>) -> Result<Value> {
@@ -2591,6 +2636,42 @@ mod attention_regressions {
         main(prompt("[Zerus team \u{00b7} from: Tester \u{00b7} task: #4]\nDone"));
         let member = main(json!({"type":"Stop","agent_id":"","at":6.0}));
         assert!(team_notice_turn(&db, &lead, member).unwrap());
+    }
+    #[test]
+    fn a_team_notice_turn_that_took_the_owners_message_mid_turn_is_the_owners() {
+        // #366: a notice opened the turn, the owner's message came into the
+        // running turn (hgs's receipt), and the agent reports that prompt only
+        // when the turn ends; the reply must still show in full.
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let db = message_db();
+            let lead = json!({"agent":"claude","name":"lead","conversation_id":"conversation"});
+            let main = |event: Value| insert_message(&db, "lead", Some("conversation"), event);
+            main(json!({"type":"UserPromptSubmit","agent_id":"","at":10.0,
+                "detail":"[Zerus team \u{00b7} from: Zerus \u{00b7} inbox]\nReport for task #185"}));
+            let request = "00000000-0000-4000-8000-000000000001";
+            let folder = dir.path().join("input_receipts");
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join(format!("{request}.json")), json!({"status":"submitted",
+                "submitted_text":"Where do hundreds of GB come from?","submitted_at":20.0}).to_string()).unwrap();
+            let mut record = lead.clone();
+            record["input_pending_at"] = json!(20.0);
+            record["input_pending_request"] = json!(request);
+            let mixed = main(json!({"type":"Stop","agent_id":"","at":30.0}));
+            assert!(!team_notice_turn(&db, &record, mixed).unwrap());
+            // The team's own paste queued the same way leaves a notice turn.
+            std::fs::write(folder.join(format!("{request}.json")), json!({"status":"submitted",
+                "submitted_text":"[Zerus team] 1 new message for you: hgs team inbox","submitted_at":40.0}).to_string()).unwrap();
+            record["input_pending_at"] = json!(40.0);
+            main(json!({"type":"UserPromptSubmit","agent_id":"","at":40.0,"detail":"[Zerus team] 1 new message"}));
+            let only = main(json!({"type":"Stop","agent_id":"","at":50.0}));
+            assert!(team_notice_turn(&db, &record, only).unwrap());
+            // A send before the turn opened belongs to the previous turn.
+            record["input_pending_at"] = json!(5.0);
+            main(json!({"type":"UserPromptSubmit","agent_id":"","at":60.0,"detail":"[Zerus team] 1 new message"}));
+            let earlier = main(json!({"type":"Stop","agent_id":"","at":70.0}));
+            assert!(team_notice_turn(&db, &record, earlier).unwrap());
+        });
     }
     #[test]
     fn kimi_scheduled_ticks_are_not_replies_while_a_recurring_job_remains() {

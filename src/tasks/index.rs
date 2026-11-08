@@ -330,6 +330,37 @@ fn derive_from(loaded: zerus_replica::Result<TaskDoc>) -> Derived {
     }
 }
 
+/// The task index as the place a write puts a task and the short IDs it
+/// avoids (zerus-cg5h.24): it answers only while it may place tasks
+/// (`Index::placeable`), and declines on any failure, so the whole write
+/// reads the documents instead. The replica checks the chosen neighbours
+/// against their documents.
+pub(super) struct IndexPlacement<'i, 'a> {
+    index: &'i Index<'a>,
+}
+
+impl<'i, 'a> IndexPlacement<'i, 'a> {
+    pub(super) fn new(index: &'i Index<'a>) -> Self {
+        Self { index }
+    }
+}
+
+impl zerus_replica::Placement for IndexPlacement<'_, '_> {
+    fn order(&self, stage: Stage) -> zerus_replica::Result<Option<Vec<zerus_replica::Placed>>> {
+        Ok(match self.index.placeable() {
+            Ok(true) => self.index.stage_order(stage).ok(),
+            _ => None,
+        })
+    }
+
+    fn short_id_used(&self, id: &str) -> zerus_replica::Result<Option<bool>> {
+        Ok(match self.index.placeable() {
+            Ok(true) => self.index.short_id_used(id).ok(),
+            _ => None,
+        })
+    }
+}
+
 /// Where a page is: the first rows, after or before a row's key, or the last rows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Anchor {
@@ -968,6 +999,54 @@ impl<'a> Index<'a> {
             tx.commit()?;
         }
         Ok(())
+    }
+
+    /// Whether the index may place tasks (zerus-cg5h.24): certified current
+    /// under the repair epoch (no row change by another build pending) and
+    /// holding no damaged task, whose document may still name a short ID or
+    /// a place the index does not have.
+    fn placeable(&self) -> Outcome<bool> {
+        if self.meta("uncertified")?.is_some() {
+            return Ok(false);
+        }
+        let damaged: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM tasks WHERE error IS NOT NULL)", [], |r| r.get(0))?;
+        Ok(!damaged)
+    }
+
+    /// Reads the tasks whose files the index has no row for, and the rows
+    /// whose files are gone, before it places a task (zerus-cg5h.24): a
+    /// writer without the journal may have added a task while the journal
+    /// named others, which no stamp of the task folder tells apart from
+    /// their saves. One listing of the folder and of the rows; only those
+    /// tasks are decoded.
+    pub(super) fn admit_unseen(&mut self) -> Outcome<()> {
+        let on_disk: BTreeSet<String> = self.store.uuids()?.into_iter().collect();
+        let indexed: BTreeSet<String> = {
+            let mut query = self.db.prepare_cached("SELECT uuid FROM tasks")?;
+            let rows = query.query_map([], |r| r.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let unseen: BTreeSet<String> = on_disk.symmetric_difference(&indexed).cloned().collect();
+        if !unseen.is_empty() {
+            let list: Vec<String> = unseen.iter().cloned().collect();
+            self.refresh(&list, None, Some(&unseen))?;
+        }
+        Ok(())
+    }
+
+    /// The loadable tasks of `stage` in (rank, UUID) order.
+    fn stage_order(&self, stage: Stage) -> Outcome<Vec<zerus_replica::Placed>> {
+        let mut query = self
+            .db
+            .prepare_cached("SELECT uuid, short_id, rank FROM tasks WHERE stage = ?1 AND row IS NOT NULL ORDER BY rank, uuid")?;
+        let rows = query.query_map([stage.as_str()], |r| {
+            Ok(zerus_replica::Placed { uuid: r.get(0)?, id: r.get(1)?, rank: r.get(2)? })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    fn short_id_used(&self, id: &str) -> Outcome<bool> {
+        Ok(self.db.query_row("SELECT EXISTS(SELECT 1 FROM tasks WHERE short_id = ?1)", [id], |r| r.get(0))?)
     }
 
     /// What a phone holds of this project (zerus-cg5h.21), as

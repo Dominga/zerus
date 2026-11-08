@@ -25,9 +25,13 @@ pub use schema::{
     Actor, LogEntry, SessionKey, Stage, Target, TaskDelivery, TaskView, TaskWorker, MAX_DOCUMENT,
     MAX_TEXT, SCHEMA,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use store::load_count_for_test;
+#[cfg(test)]
+mod placement_tests;
 pub use store::{
-    Admitted, Changes, CopyReview, CopyReviewOutcome, Damaged, Keep, Position, ProjectStore,
-    DEPENDS_ON_INCOMING_COPY, MARK_FORMAT,
+    Admitted, Changes, CopyReview, CopyReviewOutcome, Damaged, Keep, Placed, Placement, Position,
+    ProjectStore, DEPENDS_ON_INCOMING_COPY, MARK_FORMAT,
 };
 pub use sync::{
     canonical_version, version_includes, Document, DonePage, DoneRow, Imported, Inventory, Update,

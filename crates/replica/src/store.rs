@@ -220,6 +220,39 @@ pub enum Position {
     After(String),
 }
 
+/// One task of a stage as a placement source has it (zerus-cg5h.24).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Placed {
+    pub uuid: String,
+    /// Its short ID.
+    pub id: String,
+    pub rank: String,
+}
+
+/// A stage's order and the short IDs in use, from a source that answers
+/// without reading every task document (hgs's task index, zerus-cg5h.24).
+/// An answer must be what the documents say: the loadable tasks only, in
+/// (rank, UUID) order. `None` declines, and the whole write then reads the
+/// documents as before.
+pub trait Placement {
+    /// The loadable tasks of `stage` in their order.
+    fn order(&self, stage: Stage) -> Result<Option<Vec<Placed>>>;
+    /// Whether a loadable task uses short ID `id`.
+    fn short_id_used(&self, id: &str) -> Result<Option<bool>>;
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static LOADS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Task documents this thread loaded so far (tests of this and other crates).
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn load_count_for_test() -> usize {
+    LOADS.with(std::cell::Cell::get)
+}
+
 /// One load or save at a time through a store, in turn. An untimed entry
 /// waits for its turn; a timed one waits until its deadline and is refused
 /// then, before anything is read or written. A panic inside releases it.
@@ -1175,6 +1208,8 @@ impl ProjectStore {
     }
 
     fn load_admitted(&self, uuid: &str) -> Result<TaskDoc> {
+        #[cfg(any(test, feature = "test-support"))]
+        LOADS.with(|n| n.set(n.get() + 1));
         let mut task = TaskDoc::from_bytes(&read_regular(&self.snapshot_path(uuid))?)?;
         if task.uuid() != uuid {
             return Err(Error::failed("the task file does not match its name"));
@@ -1469,6 +1504,101 @@ impl ProjectStore {
         let (mut tasks, damaged) = self.tasks()?;
         tasks.sort_by(|a, b| (a.rank(), a.uuid()).cmp(&(b.rank(), b.uuid())));
         Ok((tasks, damaged))
+    }
+
+    /// The rank for `position` in `stage` (leaving out `moving`) and, with
+    /// `need_id`, an unused short ID: from `placement` when its answer holds,
+    /// else from the documents as `rank_for` and `unused_short_id` give them,
+    /// for the whole write (zerus-cg5h.24).
+    pub(crate) fn place(
+        &self,
+        placement: Option<&dyn Placement>,
+        stage: Stage,
+        position: &Position,
+        moving: Option<&str>,
+        need_id: bool,
+    ) -> Result<(String, Option<String>)> {
+        if let Some(placement) = placement {
+            if let Some(placed) = self.place_from(placement, stage, position, moving, need_id)? {
+                return Ok(placed);
+            }
+        }
+        let rank = self.rank_for(stage, position, moving)?;
+        let id = need_id.then(|| self.unused_short_id()).transpose()?;
+        Ok((rank, id))
+    }
+
+    /// `place` from `placement`, or None when it declines or its answer may
+    /// not hold: a reference it does not know, a rank that needs the stage
+    /// renumbered (read from the documents, with its schema rule), or a
+    /// chosen neighbour whose document is not in `stage` with the rank given.
+    /// Only those neighbours are read.
+    fn place_from(
+        &self,
+        placement: &dyn Placement,
+        stage: Stage,
+        position: &Position,
+        moving: Option<&str>,
+        need_id: bool,
+    ) -> Result<Option<(String, Option<String>)>> {
+        let Some(order) = placement.order(stage)? else {
+            return Ok(None);
+        };
+        let list: Vec<&Placed> = order
+            .iter()
+            .filter(|t| Some(t.uuid.as_str()) != moving)
+            .collect();
+        let at = |reference: &str| {
+            list.iter()
+                .position(|t| t.id == reference || t.uuid == reference)
+        };
+        let index = match position {
+            Position::Top => 0,
+            Position::End => list.len(),
+            Position::Index(index) => (*index).min(list.len()),
+            Position::Before(reference) => match at(reference) {
+                Some(index) => index,
+                None => return Ok(None),
+            },
+            Position::After(reference) => match at(reference) {
+                Some(index) => index + 1,
+                None => return Ok(None),
+            },
+        };
+        let low = index.checked_sub(1).map(|i| list[i]);
+        // As `rank_for`: aim below the first rank higher than the one before.
+        let high = list[index..]
+            .iter()
+            .copied()
+            .find(|t| low.is_none_or(|l| t.rank > l.rank));
+        let Ok(rank) = rank::between(low.map(|t| t.rank.as_str()), high.map(|t| t.rank.as_str()))
+        else {
+            return Ok(None);
+        };
+        if rank.len() > RENUMBER_AT {
+            return Ok(None);
+        }
+        for neighbour in [low, high].into_iter().flatten() {
+            let holds = self.load(&neighbour.uuid).is_ok_and(|task| {
+                task.stage().ok() == Some(stage) && task.rank() == neighbour.rank
+            });
+            if !holds {
+                return Ok(None);
+            }
+        }
+        let id = if need_id {
+            loop {
+                let id = ids::short_id();
+                match placement.short_id_used(&id)? {
+                    None => return Ok(None),
+                    Some(false) => break Some(id),
+                    Some(true) => {}
+                }
+            }
+        } else {
+            None
+        };
+        Ok(Some((rank, id)))
     }
 
     /// The rank that puts a task at `position` in `stage`, leaving out the

@@ -1452,6 +1452,19 @@ fn paste_shown(screen: &str, pasted: &str) -> bool {
     !shown.is_empty() && squeeze(screen).contains(&shown)
 }
 
+/// The sends carrying --observe that `state::dispatch` refuses before
+/// provider routing (zerus-5wmh.66.4.10.1): a DeepSeek, an OpenCode and a
+/// Codex session's, in either flag order. Shared with the Windows
+/// control-console probe, which admits them in an isolated profile
+/// (zerus-be8zv).
+#[cfg(test)]
+pub(crate) const OBSERVE_SENDS: [[&str; 4]; 4] = [
+    ["send", "dsh/example/session", "--observe", "--json"],
+    ["send", "opencode/example/session", "--observe", "--json"],
+    ["send", "codex/example/session", "--observe", "--json"],
+    ["send", "codex/example/session", "--json", "--observe"],
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1459,15 +1472,13 @@ mod tests {
     /// zerus-5wmh.66.4.10.1: a send carrying --observe that reaches the state
     /// dispatch by any route but the CLI's first gate (`cli::observe_gate`)
     /// refuses there, before the OpenCode and DeepSeek routing whose own
-    /// sends would ignore the flag.
+    /// sends would ignore the flag. Unix always admits local sessions. On
+    /// Windows that depends on the profile, so `state`'s control-console
+    /// probe checks the same sends in an isolated one (zerus-be8zv).
+    #[cfg(unix)]
     #[test]
     fn a_send_with_observe_refuses_before_provider_routing() {
-        for args in [
-            ["send", "dsh/example/session", "--observe", "--json"],
-            ["send", "opencode/example/session", "--observe", "--json"],
-            ["send", "codex/example/session", "--observe", "--json"],
-            ["send", "codex/example/session", "--json", "--observe"],
-        ] {
+        for args in OBSERVE_SENDS {
             let args: Vec<String> = args.map(str::to_owned).into();
             let refusal = crate::state::dispatch(&args).unwrap_err();
             assert!(refusal.contains("is taken only as"), "{args:?}: {refusal}");

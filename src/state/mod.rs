@@ -1424,6 +1424,11 @@ mod control_console_tests {
             return;
         }
         assert_eq!(dispatch(&["list".into()]).unwrap_err(), UNSUPPORTED);
+        // A send carrying --observe refuses at admission here, before any
+        // provider routing (zerus-be8zv).
+        for refusal in observe_refusals() {
+            assert_eq!(refusal, UNSUPPORTED);
+        }
         assert_eq!(
             merge_snapshot(json!({"sessions":[]})).unwrap_err(),
             UNSUPPORTED
@@ -1453,6 +1458,11 @@ mod control_console_tests {
         std::fs::create_dir_all(&state).unwrap();
         assert_eq!(hook(), Ok(0));
         assert_eq!(session_operations(), Ok(()));
+        // Admitted, a send carrying --observe meets dispatch's own refusal,
+        // still before provider routing (zerus-5wmh.66.4.10.1, zerus-be8zv).
+        for refusal in observe_refusals() {
+            assert!(refusal.contains("is taken only as"), "{refusal}");
+        }
         assert_eq!(local_sessions().unwrap_err(), UNSUPPORTED);
         assert_eq!(
             merge_snapshot(json!({"sessions":[]})).unwrap_err(),
@@ -1475,6 +1485,18 @@ mod control_console_tests {
         let layout = crate::host::staging::Layout::current().unwrap();
         assert!(crate::host::staging::enable(&layout.marker).unwrap());
         assert_eq!(local_sessions(), Ok(()));
+        for refusal in observe_refusals() {
+            assert!(refusal.contains("is taken only as"), "{refusal}");
+        }
+    }
+
+    /// `dispatch`'s refusal of each send carrying --observe that its unit
+    /// test covers on Unix (`input::OBSERVE_SENDS`, zerus-be8zv).
+    fn observe_refusals() -> Vec<String> {
+        input::OBSERVE_SENDS
+            .into_iter()
+            .map(|send| dispatch(&send.map(str::to_owned)).unwrap_err())
+            .collect()
     }
 
     #[test]

@@ -4,6 +4,14 @@ use zerus_desktop_ledger::task_controls::{
 };
 mod canonical;
 
+/// Binds the complete frozen Start plan, including its acknowledgement mode.
+/// This digest never supplies caller, floor, attempt or delivery authority.
+pub(crate) fn start_plan_digest(plan: &impl Serialize) -> Result<String, String> {
+    zerus_client_core::task_start::refusal::plan_digest(
+        &serde_json::to_value(plan).map_err(|e| e.to_string())?,
+    )
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Begin {

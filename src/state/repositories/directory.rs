@@ -19,6 +19,65 @@ pub(in crate::state) fn fail_publication_sync(path: Option<PathBuf>) {
 }
 
 impl Directory {
+    /// Namespace durability, rather than the platform's compatibility no-op.
+    /// A caller requiring this proof must retain Unknown when unavailable.
+    pub(in crate::state) fn sync(&self) -> Result<()> {
+        self.verify()?;
+        #[cfg(unix)]
+        {
+            self.file.sync_all().map_err(|e| e.to_string())?;
+            #[cfg(test)]
+            if SYNC_FAILURE.with(|slot| slot.borrow().as_ref() == Some(&self.path)) {
+                return Err("fixture directory sync failure".into());
+            }
+            self.verify()
+        }
+        #[cfg(windows)]
+        Err("Native namespace durability is unverified on this computer".into())
+    }
+
+    /// The native writer already exists. Task-control admission must not
+    /// create it or follow an alias while trying to acquire its exclusion.
+    pub(in crate::state) fn existing_private_lock(&self, name: &str) -> Result<File> {
+        if name.is_empty() || name.contains(['/', '\\', ':']) || name == "." || name == ".." {
+            return Err("Invalid existing exclusion filename".into());
+        }
+        self.verify()?;
+        #[cfg(unix)]
+        let file = {
+            use std::os::fd::{AsRawFd, FromRawFd};
+            let name = c_name(std::ffi::OsStr::new(name))?;
+            // SAFETY: one fixed component below the held original parent;
+            // no create, links, FIFO wait or inherited descriptor.
+            let fd = unsafe {
+                libc::openat(
+                    self.file.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDWR
+                        | libc::O_NOFOLLOW
+                        | libc::O_NONBLOCK
+                        | libc::O_NOCTTY
+                        | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+            unsafe { File::from_raw_fd(fd) }
+        };
+        #[cfg(windows)]
+        let file = crate::platform::no_follow(OpenOptions::new().read(true).write(true))
+            .open(self.path.join(name))
+            .map_err(|e| e.to_string())?;
+        if !crate::platform::verify_private_file(&file).map_err(|e| e.to_string())?
+            || file.metadata().map_err(|e| e.to_string())?.len() != 0
+        {
+            return Err("The original native exclusion file is unexpected".into());
+        }
+        self.verify()?;
+        Ok(file)
+    }
+
     /// One existing or newly created child under this original directory.
     /// A descendant alias is never resolved before the no-follow open, and
     /// creation uses the held parent rather than a second pathname walk.

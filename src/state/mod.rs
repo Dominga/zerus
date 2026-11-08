@@ -35,6 +35,7 @@ mod goals;
 mod hooks;
 pub(crate) mod hook_health;
 mod input;
+pub(crate) use input::task_refusal;
 pub(crate) use input::{Lookup as ReceiptLookup, Submission};
 // The session resume actor's readiness rule (zerus-5wmh.66.4.9), on its
 // platforms only.

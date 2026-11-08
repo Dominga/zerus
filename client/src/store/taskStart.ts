@@ -99,6 +99,7 @@ export async function releaseTaskStart(review: StartReview): Promise<boolean> {
     const answer = await taskStarts.release(review.view);
     if (answer.outcome === "submitted") toast(tr("Delivery receipt found"), tr("The task reached its executor. Nothing was sent again."));
     else if (answer.outcome === "released") toast(tr("Start record released"), tr("Another start is allowed. Nothing was stopped or sent again."));
+    else if (answer.outcome === "refused" && !answer.pending) notify("error", answer.error, true);
     else throw new Error("Unconfirmed release");
     return true;
   } catch { notify("error", tr("Could not release the start record."), true); return false; }

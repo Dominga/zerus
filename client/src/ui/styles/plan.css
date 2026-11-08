@@ -454,3 +454,14 @@
 .pm-lane-note { margin: 0; font-size: var(--fs-sm); }
 .pm-lane-note.danger { color: var(--z-color-danger); }
 .pm-profile-head { display: flex; align-items: center; gap: 8px; padding: 0 0 6px; }
+
+/* Task #230: a Crit task's node border and links are violet; Minor is quiet. */
+.pt-card.pt-card-crit { border-color: var(--z-color-violet); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--z-color-violet) 45%, transparent); }
+.pt-card.pt-card-crit.pt-card-problem { border-color: var(--z-color-violet); }
+.pt-edge.pt-edge-crit { stroke: var(--z-color-violet); opacity: 1; }
+.pt-chip-crit { color: var(--z-color-violet); border-color: color-mix(in srgb, var(--z-color-violet) 55%, var(--z-color-border)); }
+.pt-chip-minor { color: var(--z-color-text-3); border-color: var(--z-color-border); background: transparent; }
+.pt-crit-gate { color: var(--z-color-violet); font-size: var(--fs-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pm-board-card.crit, .pm-layer-row.crit { border-color: var(--z-color-violet); }
+.pm-board-card.minor, .pm-layer-row.minor { border-style: dashed; }
+.pt-phase[data-phase-kind="minor"] .pt-phase-title { color: var(--z-color-text-2); }

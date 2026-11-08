@@ -35,6 +35,8 @@ export interface ActTeam {
 export interface ActTask {
   id: number; title: string; status: string; assignee: string; phase: number; deps: { task: number; hard: boolean }[];
   attempts: number; held?: boolean; pipeline?: string; subteam?: boolean; subteam_team?: string;
+  /** Task #229: `crit` or `minor` for a follow-up; its origin task. */
+  severity?: string; origin?: number | null;
   /** What it waits for, as hgs words it. */
   waits?: string;
   /** Task 55: the newest attempt's open questions to the lead. */
@@ -192,7 +194,7 @@ export function stageName(kind: string): string {
 // ---------------------------------------------------------------------------
 // The team bar
 
-export interface BarChip { id: "pendingPhase" | "finishWaits" | "waitingForLead" | "leadStalled" | "teamPaused"; text: string; tip: string; phase?: number }
+export interface BarChip { id: "pendingPhase" | "finishWaits" | "waitingForLead" | "leadStalled" | "teamPaused" | "critOpen"; text: string; tip: string; phase?: number }
 
 /**
  * Task 112: "Team paused since 09:12 by You: members get no tasks" (the date
@@ -257,6 +259,8 @@ export function barChips(team: ActTeam): BarChip[] {
   if (allDecided(team) && (team.status === "running" || team.status === "paused"))
     chips.push({ id: "finishWaits", text: tr("Waiting for you to finish"), tip: tr("Every task is decided") });
   if (team.waiting_for_lead) chips.push({ id: "waitingForLead", text: tr("waiting for the lead"), tip: "" });
+  const crits = team.tasks.filter((task) => task.severity === "crit" && !finished(task));
+  if (crits.length > 0) chips.push({ id: "critOpen", text: crits.length === 1 ? tr("1 critical task open") : tr("%1 critical tasks open", crits.length), tip: tr("The phase's result waits for the critical follow-up") });
   return chips;
 }
 

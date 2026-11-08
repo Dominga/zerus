@@ -318,6 +318,11 @@ pub enum TeamAction {
         name: String,
         parent: Parent,
     },
+    /// Task #230: the owner marks the lead's plan changes seen, or reverts one.
+    SeenLeadChanges,
+    RevertLeadChange {
+        change: String,
+    },
     /// Task 40: parks a pending task with its reason until it is released.
     Hold {
         task: u64,
@@ -674,6 +679,8 @@ impl TeamAction {
             Self::Finding { .. } => "finding",
             Self::NextGoal { .. } => "next-goal",
             Self::Create { .. } => "create",
+            Self::SeenLeadChanges => "seen-lead-changes",
+            Self::RevertLeadChange { .. } => "revert-lead-change",
             Self::Hold { .. } => "hold",
             Self::SkipStage { .. } => "skip-stage",
             Self::SendBack { .. } => "send-back",
@@ -1113,6 +1120,8 @@ impl TeamAction {
                 word(&parent.team, "parent team")?;
                 task(parent.task)
             }
+            Self::SeenLeadChanges => Ok(()),
+            Self::RevertLeadChange { change } => word(change, "lead change id"),
             Self::Release { task: id } | Self::Retry { task: id } => task(*id),
             Self::DecideProposal {
                 proposal,
@@ -1523,6 +1532,11 @@ impl TeamAction {
             Self::Create { name, parent } => {
                 put("name", json!(name));
                 put("parent", json!({"team": parent.team, "task": parent.task}));
+            }
+            Self::SeenLeadChanges => put("by", json!("human")),
+            Self::RevertLeadChange { change } => {
+                put("change", json!(change));
+                put("by", json!("human"));
             }
             Self::Release { task } | Self::Retry { task } => put("task", json!(task)),
             Self::DecideProposal {

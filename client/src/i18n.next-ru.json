@@ -2752,5 +2752,14 @@
   "This plan has no tasks yet.": "В этом плане пока нет задач.",
   "Lanes": "Полосы",
   "Findings: %1": "Находки: %1",
-  ", phase %1": ", фаза %1"
+  ", phase %1": ", фаза %1",
+"Minor": "Мелкое",
+"Critical follow-up of #%1": "Критическое продолжение #%1",
+"Critical follow-up": "Критическое продолжение",
+"Crit": "Крит",
+" · from #%1": " — от #%1",
+"Seen": "Отмечено",
+"1 critical task open": "1 критическая задача открыта",
+"%1 critical tasks open": "%1 критических задач открыто",
+"The phase's result waits for the critical follow-up": "Результат фазы ждёт критического продолжения"
 }

@@ -14,9 +14,8 @@ the failure or the conflicting files. Nobody merges, builds or tests a
 member's work by hand. A merger reviews the diff and the findings and
 resolves the conflicts the queue returns; a phase integration reads the
 queue's results (hgs test affected MERGE_TESTED..HEAD) and the release
-candidate. Tauri app builds and launches go through tauri-build, tauri-dev and
-tauri-launch, never by hand; only the release-candidate/package step builds the
-switch identity. The full run happens only before a release: ask the owner
+candidate. Tauri: tauri-*; release-candidate.
+The full run happens only before a release: ask the owner
 first with the estimate; the owner sets the full_tests policy in the team
 settings (never, ask, allowed) or grants one run for a release.
 

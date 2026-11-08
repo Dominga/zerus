@@ -132,6 +132,7 @@ private slots:
     void freePhaseReadsIdleBuildsAndClosesOnConfirmation();
     void ownerSwitchesOnePhaseThroughItsDialog();
     void phaseHeadersShowTheirModeLiveAndLockFromTheirHeader();
+    void phaseModeToggleAppearsInEveryPlanMode();
     void planEditKeepsTheRoadmap();
     void planEditsWaitForTheFullPlan();
     void noWorkAheadSwitchOrBadge();
@@ -1595,6 +1596,52 @@ void TestTeamsUiPlan::switchToFreeOpensOneDialogBoundToTheRequest()
 // the badge follows hgs: a standard running phase reads Standard, the same
 // phase reads Free once hgs says so. The free phase locks back from its own
 // header through the same dialog (Cancel focused, Cancel sends nothing).
+void TestTeamsUiPlan::phaseModeToggleAppearsInEveryPlanMode()
+{
+    auto running = phasedTeam();
+    running["plan_mode"] = "standard";
+    running["phase_modes"] = QJsonObject{{"1", "standard"}, {"2", "standard"}, {"3", "standard"}};
+    setTeam(running);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1400, 860); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceView"));
+    const auto view = [&](const QString &name) {
+        for (auto *button : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>())
+            if (button->property("segment") == name) { button->click(); break; }
+    };
+    // Graph, Board and Layers share the phase header with its two segments.
+    for (const auto &name : {QStringLiteral("graph"), QStringLiteral("board"), QStringLiteral("layers")}) {
+        view(name);
+        QTRY_VERIFY(phaseScrollOf(&workspace, 2) && phaseScrollOf(&workspace, 2)->findChild<QWidget *>("teamPhaseMode"));
+        auto *toggle = phaseScrollOf(&workspace, 2)->findChild<QWidget *>("teamPhaseMode");
+        QCOMPARE(toggle->property("mode").toString(), QStringLiteral("standard"));
+        QVERIFY(toggle->findChild<QPushButton *>("teamPhaseModeStandard"));
+        QVERIFY(toggle->findChild<QPushButton *>("teamPhaseModeFree"));
+    }
+    // Profile and Tests carry the same phase headers in a strip above the view.
+    for (const auto &name : {QStringLiteral("profile"), QStringLiteral("tests")}) {
+        view(name);
+        QTRY_VERIFY(workspace.findChild<QWidget *>("teamPhaseModeStrip"));
+        auto *strip = workspace.findChild<QWidget *>("teamPhaseModeStrip");
+        QVERIFY(strip->findChild<QWidget *>("teamPhaseMode"));
+    }
+    // The draft phase shows the mode it will start in and says why it cannot switch.
+    view("graph");
+    QTRY_VERIFY(phaseScrollOf(&workspace, 3) && phaseScrollOf(&workspace, 3)->findChild<QWidget *>("teamPhaseMode"));
+    auto *draft = phaseScrollOf(&workspace, 3)->findChild<QWidget *>("teamPhaseMode");
+    QCOMPARE(draft->property("mode").toString(), QStringLiteral("standard"));
+    QVERIFY(draft->toolTip().contains("draft phase starts in Standard"));
+    QVERIFY(!draft->findChild<QPushButton *>("teamPhaseModeFree")->isEnabled());
+    shot(&workspace, "219-phase-mode-toggle");
+}
+
 void TestTeamsUiPlan::phaseHeadersShowTheirModeLiveAndLockFromTheirHeader()
 {
     auto running = phasedTeam();
@@ -1624,9 +1671,9 @@ void TestTeamsUiPlan::phaseHeadersShowTheirModeLiveAndLockFromTheirHeader()
     QTRY_VERIFY(([&] { controller.refresh(); return modeOf(2) == QLatin1String("free"); })());
     QVERIFY(workspace.findChild<QWidget *>("teamHeaderPlanMode"));
     // Its own header offers the lock; the dialog asks first and Cancel sends nothing.
-    QTRY_VERIFY(phaseScrollOf(&workspace, 2)->findChild<QPushButton *>("teamPhaseLock"));
+    QTRY_VERIFY(phaseScrollOf(&workspace, 2)->findChild<QPushButton *>("teamPhaseModeStandard"));
     const auto lockFromHeader = [&] {
-        auto *lock = phaseScrollOf(&workspace, 2)->findChild<QPushButton *>("teamPhaseLock");
+        auto *lock = phaseScrollOf(&workspace, 2)->findChild<QPushButton *>("teamPhaseModeStandard");
         QVERIFY(lock);
         lock->click();
     };
@@ -1757,8 +1804,8 @@ void TestTeamsUiPlan::freePhaseReadsIdleBuildsAndClosesOnConfirmation()
     // The header: Free, the last build and what was accepted since.
     QCOMPARE(workspace.findChild<QWidget *>("teamHeaderPlanMode")->property("mode").toString(), QStringLiteral("free"));
     QCOMPARE(workspace.findChild<QLabel *>("teamHeaderBuild")->text(), QStringLiteral("Last build 10:00, 1 accepted since"));
-    // The phases: the closed one Standard, the open one Free and running.
-    QCOMPARE(modeOf(1), QStringLiteral("standard"));
+    // Task #219: every phase header names its mode, the closed one included.
+    QCOMPARE(modeOf(1), QStringLiteral("free"));
     QCOMPARE(modeOf(2), QStringLiteral("free"));
     QCOMPARE(badgeOf(2), QStringLiteral("Open, running"));
     QCOMPARE(phaseScrollOf(&workspace, 2)->property("state").toString(), QStringLiteral("running"));

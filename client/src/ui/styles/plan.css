@@ -414,3 +414,18 @@
 .pm-layer-agent { flex: none; width: 18px; display: inline-flex; }
 .team-member.focused { box-shadow: 0 0 0 1px var(--z-color-accent) inset; }
 .team-member { cursor: pointer; }
+
+/* Task #219: every phase header's Standard | Free toggle. */
+.team-phase-toggle { display: inline-flex; align-items: stretch; border: 1px solid var(--z-color-card-border); border-radius: 7px; overflow: hidden; background: var(--z-color-field); }
+.team-phase-toggle button { border: 0; background: transparent; color: var(--z-color-muted); font-size: var(--fs-2xs); padding: 2px 7px; cursor: pointer; }
+.team-phase-toggle button + button { border-left: 1px solid var(--z-color-card-border); }
+.team-phase-toggle button.on { background: var(--z-color-accent); color: var(--z-color-accent-text, #fff); font-weight: 600; cursor: default; }
+.team-phase-toggle button:disabled { opacity: .62; cursor: default; }
+.team-phase-toggle button.on:disabled { opacity: 1; }
+.team-phase-toggle button:not(:disabled):hover { color: var(--z-color-text); }
+.team-phase-proposed { margin-left: 5px; padding: 1px 5px; border-radius: 5px; font-size: var(--fs-2xs); color: var(--z-color-warn); border: 1px solid color-mix(in srgb, var(--z-color-warn) 45%, transparent); }
+.team-phase-mode-notice { margin-left: 6px; font-size: var(--fs-xs); }
+.pm-phase-strip { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 10px; border-bottom: 1px solid var(--z-color-divider); overflow-x: auto; }
+.pm-phase-head { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid var(--z-color-card-border); border-radius: 8px; background: var(--z-color-card); white-space: nowrap; }
+.pm-phase-n { display: grid; place-items: center; min-width: 17px; height: 17px; border-radius: 5px; background: var(--z-color-field); color: var(--z-color-muted); font-size: var(--fs-2xs); }
+.pm-phase-name { max-width: 24ch; overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-xs); }

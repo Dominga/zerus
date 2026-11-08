@@ -2108,9 +2108,16 @@ QWidget *TeamWorkspace::canvas(const Team &team)
 {
     const Colors c = colorsFor(m_dark);
     // U38 (#665): the Profile view stays across renders; it reads in the background.
-    if (m_view == "profile") return profileView(team);
-    // U62 (#719): the Tests view too; it reads the team's test database.
-    if (m_view == "tests") return testsView(team);
+    // Task #219: its phase headers carry the Standard | Free toggle too.
+    if (m_view == "profile" || m_view == "tests") {
+        QWidget *content = m_view == "profile" ? profileView(team) : testsView(team);
+        auto *host = new QWidget; host->setObjectName("teamPhaseModeHost");
+        auto *v = new QVBoxLayout(host); v->setContentsMargins(0, 0, 0, 0); v->setSpacing(0);
+        v->addWidget(phaseModeStrip(team));
+        if (content->parentWidget() != host) content->setParent(host);
+        v->addWidget(content, 1); content->show();
+        return host;
+    }
     // U25: a team with phases shows each phase as its own scroll, in every view.
     if (!phaseGroups(team).isEmpty()) return phaseColumn(team);
     if (m_view == "board") return board(team);
@@ -2749,22 +2756,9 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
     badge->setObjectName("teamPhaseBadge"); badge->setProperty("state", state); badge->setProperty("auto", autoDraft);
     if (autoDraft) badge->setToolTip(autoDraftTip());
     h->addWidget(badge);
-    // Task #59: the phase's own mode, live from hgs, for a phase a switch
-    // reaches: the free one, or a running one (Standard).
-    if (team.phaseModesKnown && (freeOpen || state == QLatin1String("running") || team.phaseMode(group.n) == QLatin1String("free"))) {
-        const bool phaseFree = freeOpen || (team.freeMode() && team.freePhase.phase == group.n) || team.phaseMode(group.n) == QLatin1String("free");
-        if (phaseFree || state == QLatin1String("running")) {
-            auto *mode = new PhaseBadge(phaseFree ? tr("Free") : tr("Standard"), phaseFree ? c.violet : c.text3,
-                                        phaseFree ? QStringLiteral("plan_free") : QStringLiteral("plan_standard"), false);
-            mode->setObjectName("teamPhaseMode"); mode->setProperty("phase", group.n); mode->setProperty("mode", phaseFree ? "free" : "standard");
-            mode->setToolTip(phaseFree ? tr("Free planning: the phase stays open and takes tasks as they come until you close it")
-                                       : tr("Standard planning: the phase is planned, approved and closed with its build"));
-            mode->setAttribute(Qt::WA_TransparentForMouseEvents);
-            h->addWidget(mode);
-        }
-    }
+    // Task #219: every phase header carries the Standard | Free toggle.
+    if (auto *mode = phaseModeBadge(team, group.n)) h->addWidget(mode);
     // U63 (owner, 2026-10-31): a paused accepted phase does not start until
-    // the pause is removed; who paused it and why.
     const PhasePause pause = freeOpen ? PhasePause{} : phasePauseOf(team, group.n);
     QString pauseText, pauseTip;
     if (pause.on) {
@@ -2782,7 +2776,6 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         auto *byAuto = label(tr("accepted by Auto"), c.dim, 11, false, "teamPhaseByAuto");
         byAuto->setToolTip(tr("Auto accepted this phase once its plan had no blocker")); h->addWidget(byAuto);
     }
-    if (auto *mode = phaseModeBadge(team, group.n)) h->addWidget(mode);
     // A cancelled task is not work the phase still owes: a Done phase with one
     // cancelled task reads 7/7, not 7/8 (owner, 2026-10-28).
     int accepted = 0, owed = 0;
@@ -2965,16 +2958,6 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         const QString text = record && !record->waiting.text.isEmpty() ? record->waiting.text : tr("Starts after phase %1").arg(group.n - 1);
         auto *waits = label(text, c.dim, 11, false, "teamPhaseQueued"); waits->setAttribute(Qt::WA_TransparentForMouseEvents);
         h->addWidget(waits);
-    }
-    // Task #59: the open free phase locks back to standard from its own
-    // header (it has no phase menu), through the same dialog.
-    if (freeOpen && team.phaseModesKnown && (team.status == "running" || team.status == "paused")) {
-        auto *lock = button(tr("Switch to standard…"), "teamPhaseLock"); lock->setProperty("ghost", true); lock->setProperty("phase", group.n);
-        lock->setToolTip(tr("Switch phase %1 to standard planning: its tasks stay, new work is planned in a new phase").arg(group.n));
-        QObject::connect(lock, &QPushButton::clicked, this, [this, id = team.id, phase = group.n] {
-            QTimer::singleShot(0, this, [this, id, phase] { if (const auto *t = currentTeam(id)) phaseModeDialog(*t, phase, false); });
-        });
-        h->addWidget(lock);
     }
     // U39 (owner, 2026-10-28): an accepted phase can be discarded, or (U42)
     // returned to a draft, while its work has not started; hgs refuses it

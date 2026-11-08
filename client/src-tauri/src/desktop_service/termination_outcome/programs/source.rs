@@ -401,6 +401,12 @@ impl Source {
             .close()
             .map_err(|_| UNCONFIRMED.into())
     }
+    pub(super) fn retirement(&self) -> run::Retirement {
+        self.owner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .join()
+    }
 }
 
 impl Source {
@@ -546,13 +552,13 @@ impl Source {
         let invocation = run::rendezvous::prepare(&invocation);
         // Linux must keep the exact closed argv; its handler already waits for
         // input. Machine identity is checked by that own-helper before effects.
-        let exit = run::run_accounted_frozen(
+        let exit = run::run_accounted_frozen_with_completion(
             self.context.executable(),
             &invocation,
             self.context.environment(),
             zerus_client_core::worktree_programs::MAX_BYTES,
             &stop,
-            resource,
+            (resource, Some(mutation.completion.clone())),
             move |command| {
                 let (mut child, native) = selected
                     .context
@@ -681,6 +687,7 @@ pub(super) struct Mutation {
     descendants: super::descendants::Probe,
     retired: bool,
     armed: Arc<AtomicBool>,
+    completion: Arc<run::Completion>,
 }
 impl Mutation {
     /// A private native call obtains this while arming its ORIGINAL helper;
@@ -711,12 +718,21 @@ impl Mutation {
             descendants,
             retired: false,
             armed: Arc::new(AtomicBool::new(true)),
+            completion: Arc::new(run::Completion::new()),
         };
         Ok((mutation, charge))
+    }
+    pub(super) fn settled(&self) -> bool {
+        self.retired
     }
     pub(super) fn try_retire(&mut self) -> Result<bool, String> {
         if self.retired {
             return Ok(true);
+        }
+        match self.completion.join() {
+            run::Retirement::Retired => {}
+            run::Retirement::Pending => return Ok(false),
+            run::Retirement::Failed => return Err(UNCONFIRMED.into()),
         }
         // A parsed result, process exit, socket close or release ACK cannot
         // bypass these actual owned pipe/worker/loan resource references.

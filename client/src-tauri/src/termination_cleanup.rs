@@ -9,7 +9,9 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, State};
-use zerus_client_core::{default_hgs, run_limited, ComputerId, Exit, Invocation, Outcome, Target};
+use zerus_client_core::{
+    default_hgs, run, run_limited, ComputerId, Exit, Invocation, Outcome, Target,
+};
 use zerus_client_core::{
     termination_cleanup::{
         retained_notice, ArchiveIdentity, Capture, Cleanup, Consents, Entry, Status, Step,
@@ -86,6 +88,8 @@ struct Job {
     restore_supported: bool,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     programs: Option<program_pipeline::ProgramJob>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    reservation: Option<program_pipeline::ProgramReservation>,
 }
 impl Job {
     fn has_launch_owner(&self) -> bool {
@@ -498,6 +502,8 @@ impl Model {
             restore_supported,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             programs: None,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            reservation: None,
         });
         Some(RetainedCapture {
             id: Some(id),
@@ -903,7 +909,7 @@ pub async fn termination_cleanup_restore(
     result
 }
 impl Inner {
-    fn drive(self: &Arc<Self>, app: AppHandle, id: String, mut step: Step) {
+    fn drive(self: &Arc<Self>, app: AppHandle, id: String, mut step: Step, allow_remove: bool) {
         let own = Arc::clone(self);
         tauri::async_runtime::spawn_blocking(move || {
             loop {
@@ -954,6 +960,15 @@ impl Inner {
                         changed(&app, &mut m);
                     }
                     Step::Remove { host, removal, .. } => {
+                        if !allow_remove {
+                            let mut m = lock(&own.model);
+                            let Some(j) = m.jobs.iter_mut().find(|j| j.id == id) else {
+                                return;
+                            };
+                            j.busy = false;
+                            changed(&app, &mut m);
+                            break;
+                        }
                         let request = uuid::Uuid::new_v4().to_string();
                         let mut inv = review::remove_invocation(
                             &ComputerId(host.clone()),
@@ -1301,6 +1316,8 @@ pub async fn termination_cleanup_confirm(
                 restore_supported: true,
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 programs: None,
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                reservation: None,
                 archive: Some(ArchiveIdentity {
                     version: 1,
                     archive_id: receipt["result_target"]["archive_id"]
@@ -1316,7 +1333,7 @@ pub async fn termination_cleanup_confirm(
             });
             changed(&app, &mut m);
             drop(m);
-            state.0.drive(app, id, step);
+            state.0.drive(app, id, step, true);
         }
     }
     outcome
@@ -1335,23 +1352,129 @@ pub fn termination_cleanup_check(
     {
         return Err("An unknown result will not be retried.".into());
     }
+    let revision = m.revision.wrapping_add(1);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let (step, program, reservation) = {
+        let j = m
+            .jobs
+            .iter_mut()
+            .find(|j| j.id == id)
+            .ok_or(STATE_CHANGED)?;
+        if j.busy || !j.cleanup.can_refresh() {
+            return Err("An unknown result will not be retried.".into());
+        }
+        let (program, reservation) = if j.has_programs() {
+            if !j
+                .programs
+                .as_ref()
+                .is_some_and(program_pipeline::ProgramJob::normal_refusal)
+            {
+                return Err("An unknown result will not be retried.".into());
+            }
+            let reservation = match j.reservation.clone() {
+                Some(reservation) if reservation.revision == revision => reservation,
+                Some(_) => return Err(STATE_CHANGED.into()),
+                None => {
+                    let (request_id, binding, capture) =
+                        j.programs.as_ref().expect("retained program").identity();
+                    program_pipeline::ProgramReservation {
+                        revision,
+                        request_id,
+                        binding,
+                        capture,
+                    }
+                }
+            };
+            j.reservation = Some(reservation.clone());
+            let program = j.programs.take();
+            (program, Some(reservation))
+        } else {
+            (None, None)
+        };
+        j.manual_review = false;
+        j.cleanup.review_remaining();
+        let step = j.cleanup.step();
+        j.busy = true;
+        j.phase = "checking";
+        (step, program, reservation)
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let (step, program, reservation): (_, Option<()>, Option<()>) = {
+        let j = m
+            .jobs
+            .iter_mut()
+            .find(|j| j.id == id)
+            .ok_or(STATE_CHANGED)?;
+        if j.busy || !j.cleanup.can_refresh() {
+            return Err("An unknown result will not be retried.".into());
+        }
+        j.manual_review = false;
+        j.cleanup.review_remaining();
+        let step = j.cleanup.step();
+        j.busy = true;
+        j.phase = "checking";
+        (step, None, None)
+    };
+    changed(&app, &mut m);
+    drop(m);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(program) = program {
+        let reservation = reservation.expect("program reservation");
+        let retired = program.retirement();
+        let (drive, view) = {
+            let mut m = lock(&state.0.model);
+            let j = m
+                .jobs
+                .iter_mut()
+                .find(|j| j.id == id)
+                .ok_or(STATE_CHANGED)?;
+            if !program.matches(&reservation)
+                || j.reservation.as_ref() != Some(&reservation)
+                || j.programs.is_some()
+            {
+                return Err(STATE_CHANGED.into());
+            }
+            let drive = match retired {
+                run::Retirement::Retired => {
+                    j.programs = None;
+                    j.reservation = None;
+                    j.program_review_pending = false;
+                    j.manual_review = true;
+                    true
+                }
+                run::Retirement::Pending => {
+                    j.programs = Some(program);
+                    j.program_review_pending = true;
+                    false
+                }
+                run::Retirement::Failed => {
+                    j.programs = Some(program);
+                    j.busy = false;
+                    j.program_review_pending = true;
+                    false
+                }
+            };
+            changed(&app, &mut m);
+            let view = m.view();
+            (drive, view)
+        };
+        if drive {
+            state.0.drive(app, id, step, false);
+        }
+        return Ok(view);
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = (program, reservation);
+    let mut m = lock(&state.0.model);
     let j = m
         .jobs
         .iter_mut()
         .find(|j| j.id == id)
         .ok_or(STATE_CHANGED)?;
-    if j.busy || j.has_programs() || !j.cleanup.can_refresh() {
-        return Err("An unknown result will not be retried.".into());
-    }
     j.manual_review = true;
-    j.cleanup.review_remaining();
-    let step = j.cleanup.step();
-    j.busy = true;
-    j.phase = "checking";
-    changed(&app, &mut m);
     let view = m.view();
     drop(m);
-    state.0.drive(app, id, step);
+    state.0.drive(app, id, step, false);
     Ok(view)
 }
 #[tauri::command]
@@ -1394,7 +1517,7 @@ pub fn termination_cleanup_remove(
     let view = m.view();
     drop(m);
     for (id, step) in calls {
-        state.0.drive(app.clone(), id, step)
+        state.0.drive(app.clone(), id, step, true)
     }
     Ok(view)
 }
@@ -1815,6 +1938,8 @@ mod tests {
             restore_supported: false,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             programs: None,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            reservation: None,
         }
     }
     #[test]

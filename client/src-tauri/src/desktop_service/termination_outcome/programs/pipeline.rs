@@ -327,6 +327,13 @@ impl Stopped {
                 .as_ref()
                 .is_ok_and(|report| report.state == State::Refused)
     }
+    pub(crate) fn identity(&self) -> (String, String, Capture) {
+        (
+            self.attempt.input.request_id.clone(),
+            self.attempt.input.binding(),
+            self.attempt.input.manifest.capture.clone(),
+        )
+    }
     pub(crate) fn remaining_millis(&self) -> u64 {
         self.continuation.source.remaining_millis()
     }
@@ -349,6 +356,30 @@ impl Stopped {
     }
     pub(crate) fn try_retire(&mut self) -> Result<bool, String> {
         self.attempt.mutation.try_retire()
+    }
+    pub(crate) fn retirement(&self) -> run::Retirement {
+        if !self.normal_refusal()
+            || !self
+                .report()
+                .is_ok_and(|report| report.valid(&self.attempt.input))
+            || !self.continuation.original_call_joined()
+            || !self.attempt.mutation.settled()
+        {
+            return run::Retirement::Failed;
+        }
+        if self.current()
+            && self
+                .continuation
+                .source
+                .observe(std::time::Instant::now() + Duration::from_secs(5))
+                .is_err()
+        {
+            return run::Retirement::Failed;
+        }
+        if self.current() {
+            let _ = self.continuation.close();
+        }
+        self.continuation.source.retirement()
     }
     /// Read-only discovery is allowed only after the EXACT previous mutator,
     /// readers and loan have physically settled. It is not a Force permit.
@@ -416,6 +447,9 @@ pub(crate) struct ForceOffer {
     input: Input,
 }
 impl ForceOffer {
+    pub(crate) fn identity(&self) -> (String, String, Capture) {
+        self.previous.identity()
+    }
     pub(crate) fn remaining_millis(&self) -> u64 {
         self.previous.remaining_millis()
     }
@@ -485,8 +519,8 @@ impl Removal {
     }
 }
 
-/// Fixture-only display control, called with already retired original I/O. No
-/// confirmation/effect method is invoked; the inert outcome grants nothing.
+/// Fixture-only display and retirement control with settled mutator I/O. No
+/// stop, confirmation or removal is invoked; the inert outcome grants nothing.
 #[cfg(test)]
 pub(super) fn assert_presentation_views(
     source: Arc<Source>,
@@ -509,7 +543,13 @@ pub(super) fn assert_presentation_views(
     assert_eq!(source.manifest().programs.len(), 4);
     assert_eq!(source.manifest().binding(), binding);
     drop(offer);
-    let previous = Stopped {
+    let report = |state| Report {
+        request_id: input.request_id.clone(),
+        binding: input.binding(),
+        state,
+        members: Vec::new(),
+    };
+    let mut previous = Stopped {
         continuation: Continuation {
             source,
             capture,
@@ -525,10 +565,29 @@ pub(super) fn assert_presentation_views(
         },
         attempt: StopAttempt {
             input: input.clone(),
-            result: Err("inert display fixture".into()),
+            result: Ok(report(State::Refused)),
             mutation,
         },
     };
+    previous.attempt.result = Err("unknown original stop".into());
+    assert_eq!(previous.retirement(), run::Retirement::Failed);
+    previous.attempt.result = Ok(report(State::Incomplete));
+    assert_eq!(previous.retirement(), run::Retirement::Failed);
+    previous.attempt.result = Ok(Report {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        ..report(State::Refused)
+    });
+    assert_eq!(previous.retirement(), run::Retirement::Failed);
+    previous.attempt.result = Ok(report(State::Refused));
+    previous.attempt.input.stop = Kind::Force {
+        previous_request_id: input.request_id.clone(),
+        previous_binding: input.binding(),
+    };
+    assert_eq!(previous.retirement(), run::Retirement::Failed);
+    assert!(previous.current(), "rejected provenance closes no original");
+    previous.attempt.input.stop = Kind::Normal;
+    assert_eq!(previous.retirement(), run::Retirement::Retired);
+    assert_eq!(previous.retirement(), run::Retirement::Retired);
     let force = ForceOffer { previous, input };
     // Force must consult its complete ORIGINAL survivor manifest, never the
     // Source's initial presentation projection, even for the selected pair.

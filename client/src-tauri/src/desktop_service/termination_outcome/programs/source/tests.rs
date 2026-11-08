@@ -17,7 +17,7 @@ use zerus_client_core::{
 };
 
 const OWNER: &str = r#"#!/usr/bin/python3
-import json,os,pathlib,sys
+import json,os,pathlib,sys,uuid
 root=pathlib.Path(__file__).parent
 args=sys.argv[1:]
 assert args.pop(0)=='--desktop-helper-rendezvous-v1'
@@ -37,6 +37,9 @@ while True:
         binding=json.loads((root/'program-binding').read_text())
         print(json.dumps(dict(op='armed',binding=binding)),flush=True)
     elif op=='joined':print(json.dumps(dict(op='retired',binding=frame['binding'])),flush=True)
+    elif op=='observe':
+        current=dict(manifest);current['id']=str(uuid.uuid4())
+        print(json.dumps(dict(op='observed',pipeline=first['pipeline'],observation=frame['observation'],manifest=current)),flush=True)
     elif op=='close':
         print(json.dumps(dict(op='closed',pipeline=first['pipeline'])),flush=True);break
     else:raise AssertionError(op)
@@ -223,13 +226,13 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
                 request_id: None,
             };
             // The actual runner, not a Boolean/read receipt, owns these references.
-            let result = run::run_accounted_frozen(
+            let result = run::run_accounted_frozen_with_completion(
                 &f.0.join("mutator"),
                 &inv,
                 source.context.environment(),
                 1024,
                 &AtomicBool::new(false),
-                resources,
+                (resources, Some(mutation.completion.clone())),
                 move |command| {
                     inherited.inherit(command)?;
                     command.spawn()
@@ -291,16 +294,15 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
                 actions.begin(key.clone(), &Action::Terminate).is_none(),
                 "the identified read-only source remains charged"
             );
-            source.close().unwrap();
-            assert!(
-                !source.current(),
-                "closed original custody cannot become current again"
-            );
             super::super::pipeline::assert_presentation_views(
                 source.clone(),
                 hold,
                 input,
                 mutation,
+            );
+            assert!(
+                !source.current(),
+                "closed original custody cannot become current again"
             );
             drop(source);
             assert!(actions.begin(key, &Action::Terminate).is_some());

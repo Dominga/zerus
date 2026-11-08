@@ -291,6 +291,12 @@ describe("external terminal availability", () => {
     expect(() => menuItem("Open terminal", items)).toThrow();
     expect(menuItem("Resume and open terminal", items)).toBeDefined();
   });
+  it.each(["paused", "stopped"])("enables Resume and open terminal for a %s row, which the CLI reports without a live pane (zerus-5o1ns)", (state) => {
+    const row = toSession("", `run:saved-${state}`, { name: `codex/context/${state}`, agent: "codex", state, status: "ready", run_id: `run-${state}`,
+      conversation_id: `conversation-${state}`, session_id: `session-${state}`, tracked: true, resumable: true, terminal_supported: false } as ViewRow);
+    expect(row.terminalSupported).toBe(false);
+    expect(menuItem("Resume and open terminal", sessionMenu(row))).toMatchObject({ disabled: false });
+  });
   it("does not open a replacement run after the menu opened", () => {
     const [, target] = contextRows();
     const item = menuItem("Open terminal", sessionMenu(target));

@@ -10,6 +10,7 @@
 //! this device's marks to (`menubar::overlay`), as Qt's tracker reads
 //! `FleetState`'s rows.
 use crate::menubar::{Computer, Desk};
+use crate::text::Text;
 use crate::{ComputerId, ViewRow};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -17,9 +18,11 @@ use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-pub const NEEDS_ATTENTION: &str = "Zerus \u{2014} Needs attention";
-pub const NEW_REPLY: &str = "Zerus \u{2014} New reply";
-pub const OPTIONAL_QUESTION: &str = "Zerus \u{2014} Optional question";
+// Catalog sources: the app renders notices in the interface language
+// (`Tracker::set_render`), Qt's QObject::tr (AttentionTracker.cpp:125-235).
+pub const NEEDS_ATTENTION: &str = crate::source!("Zerus — Needs attention");
+pub const NEW_REPLY: &str = crate::source!("Zerus — New reply");
+pub const OPTIONAL_QUESTION: &str = crate::source!("Zerus — Optional question");
 /// Question IDs remembered per conversation (`AttentionTracker.cpp:28`).
 pub const SEEN_QUESTIONS: usize = 64;
 /// A failed delivery is retried this many seconds later (`AttentionTracker.cpp:262`).
@@ -337,9 +340,19 @@ struct Pass<'a, 'n> {
     now: i64,
     focused: bool,
     notice_id: &'n mut dyn FnMut() -> String,
+    /// Notice text in the interface language; English by default.
+    render: fn(&Text) -> String,
+}
+
+fn english(text: &Text) -> String {
+    text.english()
 }
 
 impl Pass<'_, '_> {
+    fn text(&self, text: Text) -> String {
+        (self.render)(&text)
+    }
+
     fn body(&self, row: &ViewRow, reason: &str) -> String {
         format!(
             "{} / {}\n{reason}",
@@ -429,7 +442,7 @@ impl Pass<'_, '_> {
             let body = self.body(row, &edge.reason);
             self.raised.push(Notice {
                 token,
-                title: title.to_owned(),
+                title: self.text(Text::new(title)),
                 body,
             });
         }
@@ -441,11 +454,12 @@ impl Pass<'_, '_> {
         let baseline = baseline(row);
         if facts.needs_action {
             let reason = match row.phase.as_deref() {
-                Some("approval") => "Approval needed".to_owned(),
-                Some("input") => "Input needed".to_owned(),
+                Some("approval") => self.text(crate::text!("Approval needed")),
+                Some("input") => self.text(crate::text!("Input needed")),
+                // The agent's own words stay as written.
                 _ if !facts.recovery_reason.is_empty() => concise(&facts.recovery_reason, 240),
                 _ if !facts.activity_detail.is_empty() => concise(&facts.activity_detail, 240),
-                _ => "Agent needs attention".to_owned(),
+                _ => self.text(crate::text!("Agent needs attention")),
             };
             let request = match baseline {
                 Some(_) => request_json(&facts.attention_id, Some(facts.attention_started)),
@@ -504,7 +518,8 @@ impl Pass<'_, '_> {
             {
                 self.notice(row, edge("", true));
             } else if idle && (!facts.reply_scheduled || facts.recurring_schedules == 0) {
-                self.notice(row, edge("Agent has a new reply", false));
+                let reason = self.text(crate::text!("Agent has a new reply"));
+                self.notice(row, edge(&reason, false));
             } else if let Some(kept) = previous
                 .get(&key)
                 .filter(|old| old.get("request").and_then(Value::as_str) == Some(reply))
@@ -526,17 +541,23 @@ impl Pass<'_, '_> {
                 None => child.request.clone(),
             };
             let kind = if child.phase == "approval" {
-                "Approval needed"
+                crate::text!("Approval needed")
             } else {
-                "Input needed"
+                crate::text!("Input needed")
             };
+            // The subagent's label stays as written.
+            let reason = self.text(crate::text!(
+                "Subagent %1: %2",
+                concise(&child.label, 100),
+                kind
+            ));
             self.notice(
                 row,
                 Edge {
                     key: format!("child:{}:{}", identity(row), child.id),
                     phase: child.phase.clone(),
                     request,
-                    reason: format!("Subagent {}: {kind}", concise(&child.label, 100)),
+                    reason,
                     reply: false,
                     silent: facts.acknowledged
                         || baseline.is_some_and(|b| suppressed_child(b, child)),
@@ -682,13 +703,13 @@ impl Pass<'_, '_> {
                     entry.insert("token".into(), Value::from(token.as_str()));
                     let count = row.notify.optional_count.max(item.ids.len() as i64);
                     let reason = if count == 1 {
-                        "Optional question waiting".to_owned()
+                        self.text(crate::text!("Optional question waiting"))
                     } else {
-                        format!("{count} optional questions waiting")
+                        self.text(crate::text!("%1 optional questions waiting", count))
                     };
                     questions.push(Notice {
                         token,
-                        title: OPTIONAL_QUESTION.to_owned(),
+                        title: self.text(Text::new(OPTIONAL_QUESTION)),
                         body: self.body(row, &reason),
                     });
                 } else if !token.is_empty() {
@@ -711,6 +732,8 @@ pub struct Tracker {
     optional_questions: bool,
     /// The state changed since [`Tracker::take_changed`] last asked.
     changed: bool,
+    /// Renders notice text in the interface language; English when unset.
+    render: Option<fn(&Text) -> String>,
 }
 
 impl Tracker {
@@ -719,7 +742,15 @@ impl Tracker {
             hosts: saved,
             optional_questions: false,
             changed: false,
+            render: None,
         }
+    }
+
+    /// Notice titles and fixed reasons in the interface language (Qt's
+    /// QObject::tr in AttentionTracker.cpp); an agent's own words and names
+    /// stay as written. The tracker's state never holds rendered text.
+    pub fn set_render(&mut self, render: fn(&Text) -> String) {
+        self.render = Some(render);
     }
 
     /// Banners for new optional questions (off by default). Without them
@@ -765,6 +796,7 @@ impl Tracker {
             now,
             focused,
             notice_id,
+            render: self.render.unwrap_or(english),
         };
         for row in host.rows.values() {
             pass.session(row);
@@ -1061,6 +1093,58 @@ mod tests {
         fn observe(&mut self, list: Vec<ViewRow>) -> Changes {
             self.observe_at(list, 1000, false, true)
         }
+    }
+
+    /// A stand-in catalog: marked sources in brackets, arguments as given.
+    fn bracketed(text: &Text) -> String {
+        let args: Vec<String> = text
+            .args
+            .iter()
+            .map(|arg| match arg {
+                crate::text::Arg::Text(nested) => bracketed(nested),
+                crate::text::Arg::Verbatim(value) => value.clone(),
+                crate::text::Arg::Number(value) => value.to_string(),
+            })
+            .collect();
+        let mut out = format!("[{}]", text.source);
+        for (n, arg) in args.iter().enumerate().rev() {
+            out = out.replace(&format!("%{}", n + 1), arg);
+        }
+        out
+    }
+
+    #[test]
+    fn notice_text_is_rendered_but_agent_words_and_names_stay_as_written() {
+        // Qt's QObject::tr in AttentionTracker.cpp:125-235 (zerus-5wmh.13.16.2).
+        let mut fixture = Fixture::new();
+        fixture.tracker.set_render(bracketed);
+        let approval = fixture.observe(vec![asking("claude/p/a", "approval", "req-1")]);
+        assert_eq!(approval.raised[0].title, "[Zerus — Needs attention]");
+        assert_eq!(
+            approval.raised[0].body,
+            "claude/p/a / arch\n[Approval needed]"
+        );
+        let mut recovery = asking("claude/p/b", "working", "req-2");
+        recovery.notify.recovery_reason = "Provider failed".into();
+        let words = fixture.observe(vec![recovery]);
+        assert_eq!(
+            words.raised[0].body, "claude/p/b / arch\nProvider failed",
+            "the agent's own words"
+        );
+        let child = fixture.observe(vec![asking_child("claude/p/c", "input", "child-1")]);
+        assert_eq!(
+            child.raised[0].body, "claude/p/c / arch\n[Subagent Reviewer: [Input needed]]",
+            "the label stays as written"
+        );
+        let reply = fixture.observe(vec![replied("claude/p/d", "reply-1")]);
+        assert_eq!(titles(&reply), vec!["[Zerus — New reply]"]);
+        assert!(reply.raised[0].body.ends_with("\n[Agent has a new reply]"));
+        // The tracker's state never holds rendered text.
+        let state = serde_json::to_string(&fixture.tracker.hosts).unwrap();
+        assert!(
+            !state.contains("[Zerus") && !state.contains("[Approval") && !state.contains("[Agent"),
+            "{state}"
+        );
     }
 
     #[test]

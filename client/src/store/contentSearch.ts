@@ -11,6 +11,7 @@ import { pageHidden } from "./visibility";
 import { notify, bindSearchActionRow } from "./actions";
 import { createContentSearch, identityMatches, matchedIdentity, metadataMatches, mergeSessionMatch, searchCount, SEARCH_ROWS, type FoundHit, type SearchReply } from "./content-search-model";
 import { clearSearchPreview, setSearchPreview } from "./searchSelection";
+import { searchCards } from "./creations";
 import type { Session } from "../ui/sessions/types";
 import { trNoop, tr } from "../i18n";
 
@@ -64,7 +65,7 @@ export const { contentSearch, searchItems, searchStatus, activateSearchItem, sea
   const searchItems = () => built().items;
   const searchStatus = createMemo(() => {
     const items = searchItems();
-    let text = [...search().trim()].length < 2 ? "Type 2+ characters to search message contents" : searchCount(items.filter((item) => item.found).length, items.length);
+    let text = [...search().trim()].length < 2 ? "Type 2+ characters to search message contents" : searchCount(items.filter((item) => item.found).length, items.length, searchCards().length);
     if (contentSearch.busy()) text += " — Searching…";
     if (contentSearch.limited() || built().limited) text += " — Limited history searched";
     const errors = new Set(contentSearch.errors());

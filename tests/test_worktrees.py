@@ -297,7 +297,7 @@ class Cleanup(Repository,unittest.TestCase):
             identity=str(uuid.uuid4());path=state/'archives'/(identity+'.json')
             record={'version':1,'name':name,'agent':'codex','archive_id':identity,'cwd':str(cwd),'archived_at':time.time()}
         elif backend=='dsh':
-            path=state/'dsh/bindings'/(hashlib.sha256(name.encode()).hexdigest()+'.json');record={'backend':'dsh','name':name,'agent':'dsh','cwd':str(cwd)}
+            path=state/'dsh/bindings'/(hashlib.sha256(name.encode()).hexdigest()+'.json');record={'backend':'dsh','name':name,'agent':'dsh','conversation_id':'session-'+str(uuid.uuid4()),'cwd':str(cwd)}
         else:
             path=state/(hashlib.sha256(name.encode()).hexdigest()+'.json');record={'version':1,'name':name,'agent':'codex','launch_dir':str(cwd),'cwd':str(self.root)}
         path.parent.mkdir(parents=True,exist_ok=True);path.write_text(json.dumps(record))

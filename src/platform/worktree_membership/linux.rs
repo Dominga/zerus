@@ -351,7 +351,68 @@ pub(super) fn programs_with_holder(
     holder: Option<&Custody<'_>>,
     deadline: Instant,
 ) -> io::Result<Vec<zerus_client_core::worktree_programs::Program>> {
-    collect_programs(inventory, holder, deadline, || fs::read_dir("/proc"))
+    #[cfg(not(test))]
+    return collect_programs(inventory, holder, deadline, || fs::read_dir("/proc"));
+    #[cfg(test)]
+    return collect_programs(inventory, holder, deadline, || {
+        fs::read_dir(roster::current())
+    });
+}
+
+/// Test builds only (zerus-89pkd): the process roster this thread's census
+/// lists. It is /proc unless a test owns a roster of its own subjects, so a
+/// unit test's assertions about its own processes do not depend on every
+/// other process of this user on a shared host staying inspectable while it
+/// exits. The classifier, identity checks and uncertainty rules are the
+/// production ones; production builds always list /proc.
+#[cfg(test)]
+pub(crate) mod roster {
+    use std::{
+        cell::RefCell,
+        path::{Path, PathBuf},
+    };
+
+    thread_local! {
+        static OWNED: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    }
+
+    /// The directory this thread's census lists.
+    pub(crate) fn current() -> PathBuf {
+        OWNED
+            .with(|owned| owned.borrow().clone())
+            .unwrap_or_else(|| PathBuf::from("/proc"))
+    }
+
+    /// While alive, this thread's census lists only these processes, each
+    /// through its own real /proc entry.
+    pub(crate) struct Owned {
+        dir: tempfile::TempDir,
+    }
+    impl Owned {
+        /// The roster directory, for a control's synthetic entry.
+        pub(crate) fn path(&self) -> &Path {
+            self.dir.path()
+        }
+    }
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            OWNED.with(|owned| *owned.borrow_mut() = None);
+        }
+    }
+
+    pub(crate) fn owned(pids: &[u32]) -> Owned {
+        let dir = tempfile::tempdir().unwrap();
+        for pid in pids {
+            std::os::unix::fs::symlink(format!("/proc/{pid}"), dir.path().join(pid.to_string()))
+                .unwrap();
+        }
+        OWNED.with(|owned| {
+            let mut owned = owned.borrow_mut();
+            assert!(owned.is_none(), "one owned roster per test thread");
+            *owned = Some(dir.path().to_path_buf());
+        });
+        Owned { dir }
+    }
 }
 
 // The production entry always supplies the complete fixed kernel roster.
@@ -631,5 +692,56 @@ for op in sys.stdin:
         let inventory = scope.inventory(until()).unwrap();
         drop(scope);
         assert!(!member(Path::new("/proc/self"), &inventory, until()).unwrap());
+    }
+
+    /// zerus-89pkd: the census of a test build lists /proc unless a test owns
+    /// a roster, and an owned roster ends with its guard.
+    #[test]
+    fn the_default_census_roster_is_proc() {
+        assert_eq!(roster::current(), PathBuf::from("/proc"));
+        let owned = roster::owned(&[std::process::id()]);
+        assert_eq!(roster::current(), owned.path());
+        assert_eq!(
+            fs::read_link(owned.path().join(std::process::id().to_string())).unwrap(),
+            PathBuf::from(format!("/proc/{}", std::process::id()))
+        );
+        drop(owned);
+        assert_eq!(roster::current(), PathBuf::from("/proc"));
+    }
+
+    /// zerus-89pkd: an owned roster never hides uncertainty. An entry that
+    /// still exists but whose cwd cannot be read, as a process caught while it
+    /// exits, fails the census NotFound exactly as /proc does; it is never an
+    /// empty roster. A real owned occupant is still listed.
+    #[test]
+    fn an_owned_roster_keeps_a_missing_read_in_an_existing_entry_uncertain() {
+        use std::process::{Command, Stdio};
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let mut occupant = Command::new("/bin/sleep")
+            .arg("20")
+            .current_dir(&root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let until = || Instant::now() + std::time::Duration::from_secs(5);
+        let scope = objects::Scope::open(&root, until()).unwrap();
+        let inventory = scope.inventory(until()).unwrap();
+        let owned = roster::owned(&[occupant.id()]);
+        let rows = programs(&inventory, until()).unwrap();
+        assert!(rows.iter().any(|row| row.pid == occupant.id()));
+        // The occupant's own status and identity, without a cwd or fds.
+        let real = PathBuf::from(format!("/proc/{}", occupant.id()));
+        let entry = owned.path().join(u32::MAX.to_string());
+        fs::create_dir(&entry).unwrap();
+        for name in ["status", "stat"] {
+            fs::write(entry.join(name), fs::read(real.join(name)).unwrap()).unwrap();
+        }
+        let error = programs(&inventory, until()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        drop(owned);
+        occupant.kill().unwrap();
+        occupant.wait().unwrap();
     }
 }

@@ -1150,7 +1150,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
             <Show when={p().hit.content_truncated}><div class="hint">{tr("Excerpt around the match. This message is too long to display in full.")}</div></Show>
             {/* The message as Activity shows it, Markdown and links with the query marked (ActivityView.cpp:664, 1592-1605). */}
             <div class="search-preview-body">
-              <HighlightQuery.Provider value={p().query}>
+              <HighlightQuery.Provider value={() => p().query}>
                 <For each={searchHitItems(p().hit)}>{(item) => <Item item={item} scope={scope()} sourceId={source().target()?.id} postersEnabled={false} expanded={item.kind === "tool" || item.kind === "tools"}
                   shown={(index) => hitMore()[outputKey(item.id, index)]} onMore={(index) => moreHit(item.id, index)} />}</For>
               </HighlightQuery.Provider>

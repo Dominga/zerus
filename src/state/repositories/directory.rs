@@ -81,6 +81,20 @@ impl Directory {
         crate::platform::verify_private_directory(&self.file).map_err(|e| e.to_string())
     }
 
+    /// Advisory worker locks also exist in legacy 0755 state directories.
+    /// Require owner-only POSIX write access to their entries without changing
+    /// that mode. This is weaker than `private()` and never a native root proof.
+    #[cfg(unix)]
+    pub(in crate::state) fn owner_controls_entries(&self) -> Result<bool> {
+        use std::os::unix::fs::MetadataExt;
+        self.verify()?;
+        let metadata = self.file.metadata().map_err(|e| e.to_string())?;
+        // SAFETY: geteuid only returns this process's effective user ID.
+        Ok(metadata.is_dir()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.mode() & 0o022 == 0)
+    }
+
     pub(in crate::state) fn read_private(&self, name: &str) -> Result<File> {
         self.read_private_optional(name)?
             .ok_or_else(|| "Missing private file".into())

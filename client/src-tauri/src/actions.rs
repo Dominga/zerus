@@ -2052,6 +2052,12 @@ pub struct ArchivePageOut {
     /// The host counted only up to a cap: the webview shows "N+" (zerus-5wmh.13.17 (4)).
     pub total_capped: bool,
     pub position: Option<u64>,
+    /// The position is a lower bound (zerus-080n8).
+    pub position_capped: bool,
+    /// The host's scan stopped at its budget before a full page; it continues (zerus-080n8).
+    pub partial: bool,
+    /// Rows the host looked at for this page (zerus-080n8).
+    pub searched: u64,
 }
 
 struct ArchiveContext {
@@ -2088,6 +2094,9 @@ fn grouped_archive_page(
         total: page.total,
         total_capped: page.total_capped,
         position: page.position,
+        position_capped: page.position_capped,
+        partial: page.partial,
+        searched: page.searched,
     })
 }
 
@@ -4139,6 +4148,9 @@ mod tests {
             total: 12,
             total_capped: true,
             position: Some(3),
+            position_capped: false,
+            partial: true,
+            searched: 25000,
         }
     }
 
@@ -4176,7 +4188,19 @@ mod tests {
         );
         let json = serde_json::to_value(&page).unwrap();
         // zerus-j5ic3: the capped flag reaches the webview with the page.
-        assert_eq!((json["total"].as_u64(), json["total_capped"].as_bool()), (Some(12), Some(true)));
+        assert_eq!(
+            (json["total"].as_u64(), json["total_capped"].as_bool()),
+            (Some(12), Some(true))
+        );
+        // zerus-080n8: so do a bounded page's partial scan and capped position.
+        assert_eq!(
+            (
+                json["partial"].as_bool(),
+                json["searched"].as_u64(),
+                json["position_capped"].as_bool()
+            ),
+            (Some(true), Some(25000), Some(false))
+        );
         assert_eq!(json["rows"][0]["name"], "codex/sample-project/review");
         assert_eq!(json["rows"][0]["group"], "alpha");
         assert_eq!(json["rows"][0]["rank"], page.rows[0].rank);

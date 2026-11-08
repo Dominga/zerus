@@ -224,6 +224,8 @@ const tabs = () => {
     // Task 9: the selected session's team (its lead's or a member's session).
     // Task 200 (Qt F5): a draft is not a team yet; its lead's tab is New team, which shows the draft again.
     { id: "team" as const, label: selectedTeam()?.status === "draft" ? tr("New team") : tr("Team"), show: !!selectedTeam() && !subagentOpen() },
+    // Task #326 (N2): Qt also offers "+ New team" on a session that has no team.
+    { id: "newteam" as const, label: tr("+ New team"), show: !selectedTeam() && !subagentOpen() && selected()?.computer === "" && selected()?.state !== "archived" },
   ];
   const s = selected();
   return s ? detailTabs(s.key, all) : all;
@@ -373,6 +375,7 @@ export function SessionDetail() {
                 <Match when={detailTab() === "processes"}><ProcessesTab /></Match>
                 <Match when={detailTab() === "team" && selectedTeam()?.status === "draft" && selected()!.computer === "" && selectedTeam()}>{(team) => <NewTeamPage embedded draft={team().id} />}</Match>
                 <Match when={detailTab() === "team" && selectedTeam()}>{(team) => <TeamTab computer={selected()!.computer} team={team().id} />}</Match>
+                <Match when={detailTab() === "newteam" && !selectedTeam() && selected()?.computer === ""}><NewTeamPage embedded /></Match>
               </Switch>
             </div>
           </div>

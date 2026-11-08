@@ -141,7 +141,7 @@ createRoot(() => {
   // background interval (Settings > Processes), which Rust reads when told.
   createEffect(on(() => [detailTab(), num("processes/backgroundSeconds"), num("processes/activeSeconds")] as const, ([tab]) => {
     // The Team tab shows the coordinator's conversation (and, for the lead, its composer).
-    void composerTab(tab === "taskview" ? "native" : tab === "team" ? "activity" : tab).catch(() => {});
+    void composerTab(tab === "taskview" ? "native" : tab === "team" || tab === "newteam" ? "activity" : tab).catch(() => {});
   }));
 });
 

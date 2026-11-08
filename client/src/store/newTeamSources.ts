@@ -2,6 +2,8 @@ import { tr } from "../i18n";
 import { parseCatalog, type Catalog, type CatalogTemplate } from "../ui/teams/catalog";
 import type { AccountsView, ComputerId, TeamList, TeamSummary } from "../types";
 import type { Session } from "../ui/sessions/types";
+import { AGENT_LABEL } from "../ui/lib/icons";
+import type { AgentKind } from "../ui/sessions/types";
 import type { ComputerChoice } from "./teamsNew";
 
 // Task 56: what New team offers, wherever it opens (the rail's page, a Team
@@ -52,9 +54,18 @@ export function accountChoices(view: Pick<AccountsView, "accounts"> | undefined,
 }
 
 /** The selected local, live session that may lead (Qt's coordinator); none for a peer's or an archived one. */
-export function coordinatorOf(row: Pick<Session, "computer" | "name" | "model" | "status" | "state"> | undefined) {
+export function coordinatorOf(row: Pick<Session, "computer" | "name" | "model" | "status" | "state" | "accountId"> | undefined) {
   if (!row || row.computer !== "" || row.state === "archived" || !row.name) return undefined;
-  return { name: row.name, agent: row.name.split("/")[0] || "claude", model: row.model || undefined, busy: row.status === "working" };
+  return { name: row.name, agent: row.name.split("/")[0] || "claude", model: row.model || undefined,
+    ...(row.accountId ? { account: row.accountId } : {}), busy: row.status === "working" };
+}
+
+/** Task #326 (N2): the lead pane names the session, agent, model and account. */
+export function coordinatorLine(coordinator: { name: string; agent: string; model?: string; account?: string },
+  accounts: readonly { id: string; label: string }[] = []): string {
+  const agent = coordinator.agent === "claude" ? "Claude Code" : AGENT_LABEL[coordinator.agent as AgentKind] ?? coordinator.agent;
+  const account = accounts.find((choice) => choice.id === coordinator.account)?.label || coordinator.account;
+  return [coordinator.name, agent, coordinator.model, account].filter(Boolean).join(", ");
 }
 
 /**

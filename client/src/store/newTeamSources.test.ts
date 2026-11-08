@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { accountChoices, catalogOf, computerChoices, coordinatorOf, draftLedBy, draftsOf, projectOfRow, shownTemplates, templateSeats, templateTaskCount, toggledFavourite } from "./newTeamSources";
+import { accountChoices, catalogOf, computerChoices, coordinatorLine, coordinatorOf, draftLedBy, draftsOf, projectOfRow, shownTemplates, templateSeats, templateTaskCount, toggledFavourite } from "./newTeamSources";
 import { memberRoles } from "./newTeamForm";
 import type { AccountsView, TeamSummary } from "../types";
 
@@ -85,6 +85,12 @@ describe("New team sources", () => {
       templates: [{ id: "feature", name: "Feature", roster: [{ role: "backend", count: 1 }] }] });
     expect(memberRoles(catalog).map((role) => role.name)).toEqual(["Backend"]);
     expect(catalog!.templates.map((template) => template.id)).toEqual(["feature"]);
+  });
+
+  it("Task #326: the lead pane names the session, agent, model and account", () => {
+    expect(coordinatorLine({ name: "claude/XP/XP_Start", agent: "claude", model: "claude-opus-4", account: "work" },
+      [{ id: "work", label: "Work" }])).toBe("claude/XP/XP_Start, Claude Code, claude-opus-4, Work");
+    expect(coordinatorLine({ name: "codex/XP/XP_Start", agent: "codex" })).toBe("codex/XP/XP_Start, Codex");
   });
 
   it("the selected local session may lead; a peer's or archived one may not", () => {

@@ -329,8 +329,7 @@ fn a_version_one_prototype_refuses_without_migration_or_reset() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("prototype.sqlite3");
     let mut db = Connection::open(&path).unwrap();
-    let store = store::open_enabled(&mut db).unwrap();
-    drop(store);
+    let _ = store::open_enabled(&mut db).unwrap();
     db.execute(
         "UPDATE desktop_task_control_meta SET version=1 WHERE id=1",
         [],
@@ -900,7 +899,7 @@ fn every_required_named_index_and_trigger_is_checked_without_repair() {
     let objects = db.prepare("SELECT type,name FROM sqlite_schema WHERE substr(name,1,21)='desktop_task_control_' AND type IN('index','trigger') ORDER BY name LIMIT 33").unwrap()
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).unwrap()
         .collect::<rusqlite::Result<Vec<_>>>().unwrap();
-    assert_eq!(objects.len(), 11);
+    assert_eq!(objects.len(), 12);
     for (kind, name) in objects {
         let mut db = connection();
         let _ = store::open_enabled(&mut db).unwrap();
@@ -1007,3 +1006,69 @@ fn executor_stop_release_requires_observed_facts_and_does_not_resume_a_task() {
         Admission::Held(_)
     ));
 }
+
+#[test]
+fn exact_attempt_lookup_uses_its_index_and_never_selects_a_newer_or_ambiguous_slot() {
+    let mut db = connection();
+    let mut store = store::open_enabled(&mut db).unwrap();
+    let first = slot(1);
+    store.claim(&first).unwrap();
+    assert_eq!(
+        store.slot_for_attempt(&first.attempt.attempt).unwrap(),
+        Some(first.clone())
+    );
+    assert!(store.slot_for_attempt(&id(999)).unwrap().is_none());
+    let mut other = slot(2);
+    other.executor.run = "other-run".into();
+    store.claim(&other).unwrap();
+    assert_eq!(
+        store.slot_for_attempt(&first.attempt.attempt).unwrap(),
+        Some(first.clone())
+    );
+    store.release(&first.guard()).unwrap();
+    assert!(store
+        .slot_for_attempt(&first.attempt.attempt)
+        .unwrap()
+        .is_none());
+    let mut collision = slot(3);
+    collision.executor.run = "third-run".into();
+    collision.attempt.project = "other-project".into();
+    collision.attempt.attempt = other.attempt.attempt.clone();
+    store.claim(&collision).unwrap();
+    assert!(store.slot_for_attempt(&other.attempt.attempt).is_err());
+    assert!(store.slot(&other.executor).unwrap().is_some());
+    assert!(store.slot(&collision.executor).unwrap().is_some());
+    let plan:String = db.query_row("EXPLAIN QUERY PLAN SELECT payload FROM desktop_task_control_slots INDEXED BY desktop_task_control_attempt WHERE json_extract(payload,'$.attempt.attempt')=?1 AND active=1 LIMIT 2",[&other.attempt.attempt],|r|r.get(3)).unwrap();
+    assert!(
+        plan.contains("SEARCH") && plan.contains("desktop_task_control_attempt"),
+        "{plan}"
+    );
+}
+
+#[test]
+fn a_removed_attempt_index_refuses_at_lookup_without_a_scan_or_schema_repair() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.sqlite");
+    let mut db = Connection::open(&path).unwrap();
+    let mut store = store::open_enabled(&mut db).unwrap();
+    let original = slot(1);
+    store.claim(&original).unwrap();
+    let other = Connection::open(path).unwrap();
+    other
+        .execute_batch("DROP INDEX desktop_task_control_attempt")
+        .unwrap();
+    assert!(store.slot_for_attempt(&original.attempt.attempt).is_err());
+    assert_eq!(store.slot(&original.executor).unwrap(), Some(original));
+    assert_eq!(
+        other
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name='desktop_task_control_attempt'",
+                [],
+                |row| row.get::<_, usize>(0)
+            )
+            .unwrap(),
+        0
+    );
+}
+
+mod stop_import;

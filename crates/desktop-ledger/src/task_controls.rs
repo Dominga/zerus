@@ -189,7 +189,8 @@ pub enum Action {
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub id: String,
-    /// Digest of the complete validated Plan's guards, never actor authority.
+    /// Digest of the complete validated Plan's guards, or the server-only
+    /// Stop-import guard in its separate domain. Neither is actor authority.
     pub admission: String,
     pub action: Action,
     pub executor: Executor,

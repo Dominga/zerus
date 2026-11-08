@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use zerus_desktop_ledger::task_controls::{
     Executor, Request, EXECUTOR_HOLDS, PAGE_ROWS, REQUEST_BYTES,
 };
-mod canonical;
+pub(crate) mod canonical;
 
 /// Binds the complete frozen Start plan, including its acknowledgement mode.
 /// This digest never supplies caller, floor, attempt or delivery authority.

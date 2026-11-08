@@ -348,7 +348,9 @@ fn a_changed_checkout_name_cannot_be_reopened_as_the_original_holder() {
 
 /// zerus-89pkd: an owned roster never hides uncertainty from an observation.
 /// An entry that still exists without a cwd, as a process caught while it
-/// exits, fails the observation NotFound; it is never an empty list.
+/// exits, fails the observation; it is never an empty list. Since
+/// zerus-lo8o1.1 that read leaves each observation unsettled, so the bounded
+/// re-reads end in limit.
 #[cfg(target_os = "linux")]
 #[test]
 fn an_observation_keeps_a_missing_read_in_an_existing_entry_uncertain() {
@@ -356,6 +358,7 @@ fn an_observation_keeps_a_missing_read_in_an_existing_entry_uncertain() {
     let roster = crate::platform::worktree_membership::test_roster::owned(&[]);
     let entry = roster.path().join(u32::MAX.to_string());
     std::fs::create_dir(&entry).unwrap();
+    std::fs::create_dir(entry.join("task")).unwrap();
     for name in ["status", "stat"] {
         std::fs::write(
             entry.join(name),
@@ -364,5 +367,5 @@ fn an_observation_keeps_a_missing_read_in_an_existing_entry_uncertain() {
         .unwrap();
     }
     let error = holder.observe(1001, until()).unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{error}");
 }

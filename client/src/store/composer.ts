@@ -492,9 +492,15 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
      * selection collapses to the cursor and their references go there.
      */
     attachDropped: (paths: string[]) => exclusive((h) => { const at = selection().end; return port.attach(h, paths, at, at); }),
-    /** Pasted copied files (Qt's insertFromMimeData): attached in place of the selection, as a pasted image. */
-    attachPasted: (paths: string[]) => exclusive((h) => { const s = ordered(); return port.attach(h, paths, s.start, s.end); }),
+    /**
+     * Pasted copied files (Qt's insertFromMimeData): attached in place of the
+     * selection the paste was accepted at, taken before the typing is saved,
+     * as the read-only field still lets a selection change (zerus-ptyzp).
+     */
+    attachPasted: (paths: string[]) => { const s = ordered(); return exclusive((h) => port.attach(h, paths, s.start, s.end)); },
+    /** A pasted image, in place of the selection at the paste (zerus-ptyzp). */
     async pasteImage(blob: Blob) {
+      const s = ordered();
       await exclusive(async (h) => {
         let png: Uint8Array;
         try {
@@ -505,7 +511,6 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
             png = await images.png(blob);
           }
         } catch { setError(tr(UNREADABLE)); return; }
-        const s = ordered();
         await port.pasteImage(h, png, s.start, s.end);
       });
     },

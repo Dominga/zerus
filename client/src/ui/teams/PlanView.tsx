@@ -4,8 +4,8 @@ import { Icon } from "../lib/icons";
 import { tr } from "../../i18n";
 import type { PlanGraph, TeamView } from "./types";
 import type { TeamBuildsView, TeamProfileView, TeamTaskView, TeamTestsView, TeamTimelineView } from "../../types";
-import { HeatLegend, HeatLine, PlanModeBar, ProfilePanel, TestsPanel, runStatusLabel, stageLabel } from "./plan-panels";
-import { ProfileTime } from "./TimeView";
+import { HeatLegend, HeatLine, PlanModeBar, TestsPanel, runStatusLabel, stageLabel } from "./plan-panels";
+import { ProfilePage } from "./profile-page";
 import { LanesView, type LaneEdit } from "./LanesView";
 import { spawnedFrom, heatModeSeed, stageChips, type PlanMode } from "./planModes";
 import { settings, settingsReady } from "../../store/settings";
@@ -905,10 +905,8 @@ export function PlanView(props: PlanViewProps): JSX.Element {
       </Show>
       <Show when={mode() === "profile"}>
         <div class="pm-profile-scroll">
-          <Show when={props.loadTimeline}>{(load) => (
-            <ProfileTime team={props.team} load={load()} profile={props.profile} statusName={runStatusLabel} onOpen={open} />
-          )}</Show>
-          <ProfilePanel profile={props.profile} team={props.team.id} />
+          <ProfilePage team={props.team} profile={props.profile} loadTimeline={props.loadTimeline}
+            statusName={runStatusLabel} onOpen={open} />
           {detail()}
         </div>
       </Show>

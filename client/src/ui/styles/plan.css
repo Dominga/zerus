@@ -248,15 +248,19 @@
 .pm-origin { color: var(--z-color-violet); font-size: var(--fs-2xs); }
 
 /* Task 92: the profile's Time view (Qt's TeamProfileTimeline), one canvas. */
-.pm-profile-scroll { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
-.pm-profile-scroll > .pm-profile { flex: none; overflow: visible; }
+.pm-profile-scroll { flex: 1; min-height: 0; overflow: auto; }
+/* Task #339: the totals, the lanes and the Top losses in Qt's order. */
+.pm-profile-summary { flex: none; overflow: visible; }
+.pm-profile-details { flex: none; overflow: visible; }
 .tl-section { padding: 12px 14px 0; }
 .tl-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .tl-head h3 { font-size: var(--fs-sm); color: var(--z-color-text-2); margin: 0; }
 .tl-scope { max-width: 100%; font-size: var(--fs-xs); }
 .tl { margin-top: 8px; border: 1px solid var(--z-color-card-border); border-radius: var(--z-radius-md); background: var(--z-color-card); }
 .tl-zoom { display: flex; align-items: center; gap: 6px; padding: 6px 8px 0; }
-.tl-host { position: relative; overflow: hidden; max-height: 70vh; overflow-y: auto; }
+/* Task #339: as tall as its lanes, as Qt's card; the page scrolls, and the
+   legend follows the last lane with no band between them. */
+.tl-host { position: relative; overflow: hidden; }
 .tl-host canvas { display: block; cursor: default; }
 .tl-host.panning canvas { cursor: grab; }
 .tl-host.panning canvas:active { cursor: grabbing; }
@@ -264,6 +268,8 @@
   background: var(--z-color-surface); border: 1px solid var(--z-color-card-border); color: var(--z-color-text); font-size: var(--fs-xs);
   box-shadow: 0 4px 14px rgb(0 0 0 / 0.25); white-space: pre-wrap; }
 .tl-tip-head { font-weight: 600; }
+/* Task #339: the legend hugs the lanes card it explains, as Qt's legend. */
+.tl-section .pm-legend { margin: 8px 0 0; }
 .tl-estimates { margin: 10px 0 0; padding: 8px 10px; border: 1px solid var(--z-color-card-border); border-radius: var(--z-radius-md); font-size: var(--fs-xs); }
 .tl-estimates-head { display: flex; align-items: center; gap: 8px; color: var(--z-color-muted); }
 .tl-estimates-table { width: 100%; border-collapse: collapse; margin-top: 6px; }

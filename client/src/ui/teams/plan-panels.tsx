@@ -291,7 +291,12 @@ export function ProfileLegend(): JSX.Element {
   );
 }
 
-export function ProfilePanel(props: { profile?: TeamProfileView | null; team?: string; scope?: string }): JSX.Element {
+/**
+ * Task #339: the totals come first, above the lanes, as Qt's summaryTiles sits
+ * before the timeline card in TeamProfile::timePage; the export button stays
+ * in the same bar.
+ */
+export function ProfileSummary(props: { profile?: TeamProfileView | null; team?: string; scope?: string }): JSX.Element {
   const [status, setStatus] = createSignal("");
   const exportJson = () => {
     const team = props.team ?? "";
@@ -305,7 +310,7 @@ export function ProfilePanel(props: { profile?: TeamProfileView | null; team?: s
     }
   };
   return (
-    <div class="pm-profile">
+    <div class="pm-profile pm-profile-summary">
       <div class="pm-profile-head">
         <span class="grow" />
         <Show when={props.team}>
@@ -315,13 +320,29 @@ export function ProfilePanel(props: { profile?: TeamProfileView | null; team?: s
       </div>
       <Show when={props.profile} fallback={<p class="pm-empty">{tr("Reading the profile…")}</p>}>
         {(profile) => (
+          <div class="pm-tiles">
+            <div class="pm-tile"><span>{tr("Elapsed")}</span><b>{formatSeconds(profile().elapsed_s ?? 0)}</b></div>
+            <div class="pm-tile"><span>{tr("Worked")}</span><b>{formatSeconds(profile().worked_s ?? 0)}</b></div>
+            <div class="pm-tile"><span>{tr("Accepted")}</span><b>{profile().accepted}/{profile().tasks}</b></div>
+            <div class="pm-tile"><span>{tr("Tokens")}</span><b>{formatTokens(profile().tokens)}</b><Show when={profile().tokens_partial}><i class="pm-note">{tr("partial")}</i></Show></div>
+          </div>
+        )}
+      </Show>
+    </div>
+  );
+}
+
+/**
+ * Task #339: the Top losses and the roles follow the lanes and their legend,
+ * as Qt's losses column follows the timeline card; the legend itself moved to
+ * the Time section, directly under the lanes it explains.
+ */
+export function ProfileDetails(props: { profile?: TeamProfileView | null }): JSX.Element {
+  return (
+    <div class="pm-profile pm-profile-details">
+      <Show when={props.profile}>
+        {(profile) => (
           <>
-            <div class="pm-tiles">
-              <div class="pm-tile"><span>{tr("Elapsed")}</span><b>{formatSeconds(profile().elapsed_s ?? 0)}</b></div>
-              <div class="pm-tile"><span>{tr("Worked")}</span><b>{formatSeconds(profile().worked_s ?? 0)}</b></div>
-              <div class="pm-tile"><span>{tr("Accepted")}</span><b>{profile().accepted}/{profile().tasks}</b></div>
-              <div class="pm-tile"><span>{tr("Tokens")}</span><b>{formatTokens(profile().tokens)}</b><Show when={profile().tokens_partial}><i class="pm-note">{tr("partial")}</i></Show></div>
-            </div>
             <h3>{tr("Top losses")}</h3>
             <Show when={profile().losses.length > 0} fallback={<p class="pm-empty">{tr("No losses recorded")}</p>}>
               <For each={profile().losses.slice(0, 20)}>
@@ -337,7 +358,6 @@ export function ProfilePanel(props: { profile?: TeamProfileView | null; team?: s
                 )}
               </For>
             </Show>
-            <ProfileLegend />
             <h3>{tr("Roles")}</h3>
             <For each={profile().roles.slice(0, 50)}>
               {(role) => (

@@ -1818,6 +1818,7 @@
   "Nothing matches": "Ничего не найдено",
   "Nothing queued can be sent now": "Из очереди сейчас нечего отправить",
   "Nothing to review": "Нечего проверять",
+  "Nothing was attached: this drop has no files. To attach an image from another app, copy it and paste it into the message.": "Ничего не прикреплено: перетащенные данные не содержат файлов. Чтобы прикрепить изображение из другого приложения, скопируйте его и вставьте в сообщение.",
   "Nothing was sent.": "Ничего не отправлено.",
   "Nothing yet": "Пока ничего",
   "Notification settings are unavailable from the desktop service.": "Настройки уведомлений недоступны в фоновой службе.",

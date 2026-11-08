@@ -987,7 +987,7 @@ fn all_items(team: &Team) -> Vec<Item> {
                     ),
                     // Task 161: a member blocked on an outside event is
                     // answered with a park until its condition, with an ETA.
-                    detail: if super::wait_loops::waiting_reply(&question.text) || super::wait_loops::lead_wait_instruction(&question.text) {
+                    detail: if super::wait_loops::waiting_reply(&question.text) || super::wait_loops::lead_wait_instruction(&question.text).is_some() {
                         let (condition, what) = super::wait_loops::guess_condition(&question.text, question.at);
                         format!(
                             "Blocked on an outside event? Answer with a park until {what}, ETA: {} | hgs team reply --json",

@@ -2613,12 +2613,18 @@ Task 161 (owner, 2026-11-07): neither the lead nor a member turns a task into a
 waiting loop; waiting on an outside event is always a park.
 - The lead's `hgs team reply` (and a parent lead's), `hgs team message` to
   members and `hgs send` from the lead's session to a member are refused when
-  the text tells the member to wait for an outside event (a wait word with an
-  install, a build or version, CI, a card or approval, a time); the refusal
+  the text tells the member to wait for an outside event: a wait word with an
+  install, a build or version, CI, a card or approval, a time. The refusal
   is the park request for the member's open task. A reply with
   `"park":{condition, eta_minutes, note}` answers the question and parks the
   task at once; the lead's inbox item for a question that says the member is
   blocked or waiting carries that reply, with a guessed condition.
+  Task #276 (owner, 2026-11-08): the detector judges the *instruction*, not a
+  wait word beside an event word, one clause at a time: "held until #5 is
+  accepted" or "the owner allows card p77" describe state and pass, while an
+  imperative to the member ("wait for the owner to answer", "check again in 5
+  minutes", "poll the CI until it is green") is refused, quotes the phrase that
+  triggered it, and offers the park of the condition that phrase names.
 - `hgs run` refuses a job whose purpose is waiting: its label says it waits
   ("wait", "poll", "watch for", "until"), or its command (and the .cmd, .bat,
   .ps1, .sh or .py script it names, first 64 KB) loops (`while`, `until`,

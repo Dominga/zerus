@@ -4839,8 +4839,10 @@ fn reply(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>)
         AskedWhere::Attempt(attempt) => Some(team.tasks[task].attempts[attempt].id.clone()),
         AskedWhere::Stage(_) => None,
     };
-    if lead && !parks && super::wait_loops::lead_wait_instruction(&body) {
-        bail!("{}", super::wait_loops::lead_refusal(&team.id, Some(task_id), open.as_deref().unwrap_or_default()));
+    if lead && !parks {
+        if let Some(phrase) = super::wait_loops::lead_wait_instruction(&body) {
+            bail!("{}", super::wait_loops::lead_refusal(&team.id, Some(task_id), open.as_deref().unwrap_or_default(), &phrase));
+        }
     }
     ensure!(!parks || open.is_some(), "A stage's question is answered, not parked");
     let label = actor.label(team);

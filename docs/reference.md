@@ -1527,7 +1527,7 @@ confirmation. Changes apply at once and are stored on this device.
 Enter and Shift+Enter in the message field, Escape, Tab and Shift+Tab, Tab to take
 a suggestion, list navigation keys, Menu and Shift+F10, Ctrl/Command-click,
 Space and Escape during voice capture, Ctrl+Shift+C/V (⌘C/⌘V on macOS) and
-Shift+PgUp/PgDn in Terminal, and Alt+↑/↓ in the Projects dialog's list.
+Shift+PgUp/PgDn in Terminal, and Alt+↑/↓ in the project list on the Projects page.
 
 <a id="activity"></a>
 
@@ -1604,6 +1604,11 @@ Activity so you can review it and send your message. It never sends automaticall
 or writes image data to the terminal. If the message field is not ready to accept
 attachments, Terminal shows an Open Activity action and asks you to paste again
 when it is ready. Text-only terminal pastes keep their normal behavior.
+
+In Terminal, Ctrl+Shift+C (⌘C on macOS) copies the selection exactly as shown,
+and Ctrl+Shift+V or Shift+Insert (⌘V) pastes; Ctrl+C and Ctrl+V stay the agent's
+keys. Right-click opens **Copy selection** and **Paste**. While the agent reads
+the mouse, a right-click goes to the agent; hold Shift for the menu.
 
 Use **Reference an existing file** (the link button beside Attach, or its Files
 menu in a narrow column) when the file

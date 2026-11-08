@@ -1756,6 +1756,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::reset_archive_pages,
         clipboard::copy_text,
         clipboard::copy_verbatim,
+        clipboard::paste_text,
         organization::move_to_project,
         organization::create_project,
         organization::rename_project,
@@ -1993,6 +1994,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         window_theme::window_theme,
         clipboard::copy_text,
         clipboard::copy_verbatim,
+        clipboard::paste_text,
         desk_take_pending,
     ]
 }

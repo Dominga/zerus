@@ -307,10 +307,14 @@ export function createTerminal(port: TerminalPort, timers: Timers = realTimers, 
       writes = writes.then(() => port.write(VIEW, gen, bytes)).catch((error) => { setStatus(message(error)); });
     },
     resized,
-    /** A paste, cleaned as Qt does, through xterm's bracketed paste. */
-    paste(text: string) {
+    /**
+     * A paste, cleaned as Qt does, through xterm's bracketed paste. `attach`,
+     * when given, is the attach the paste began on (`generation`): a later
+     * attach, another session's or a reconnect, never receives it.
+     */
+    paste(text: string, attach?: number) {
       const clean = cleanPaste(text);
-      if (phase() !== "connected" || !clean) return;
+      if (phase() !== "connected" || !clean || (attach !== undefined && attach !== generation)) return;
       screen?.paste?.(clean);
     },
   };

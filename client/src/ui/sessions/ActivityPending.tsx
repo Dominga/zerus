@@ -1,7 +1,6 @@
 import { Show } from "solid-js";
 import { setDetailTab } from "../../store/ui";
-import type { ActivitySource } from "../../store/activitySource";
-import { shellSession } from "./activity-empty";
+import { shellSession, type ActivitySource } from "../../store/activitySource";
 import type { Session } from "./types";
 import { tr } from "../../i18n";
 

@@ -1,4 +1,3 @@
-import { shellSession } from "../ui/sessions/activity-empty";
 import { desktopService } from "./desktopService";
 import { batch, createEffect, createRoot, createSignal, on, untrack } from "solid-js";
 import { activityPort, composerTab, inspectSubagentActivity, processesFollow, processesShown, windowVisibility } from "../bridge";
@@ -15,7 +14,7 @@ import { createActivity } from "./activity";
 import { createSubagentActivity } from "./subagentActivity";
 import { archive } from "./archive";
 import { applyGrouping } from "./organization";
-import { activityReadOnly } from "./activitySource";
+import { activityReadOnly, shellSession } from "./activitySource";
 import { compactRows, detailTab, page, selected, selectedKey, setCompactRows, setDetailTab, setReadSelectionKey, setSelectedKey, subagentOpen } from "./ui";
 import { startScreens } from "./screens";
 import { documentVisibility, pageHidden } from "./visibility";

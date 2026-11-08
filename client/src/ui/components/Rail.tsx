@@ -7,6 +7,7 @@ import { expandAllCollapsedEntry } from "../sessions/background-menu";
 import { windowLayer, setWindowLayer } from "../../store/windowLayer";
 import { skin } from "../../skin/runtime";
 import { newSessionFromRail } from "../sessions/newsession-view";
+import { attentionBadgeText } from "./rail-badge";
 import { shortcutTooltip } from "../../store/shortcuts";
 import { openAbout } from "../../store/desk";
 import { trNoop, tr } from "../../i18n";
@@ -42,12 +43,12 @@ export function Rail() {
       <For each={ITEMS}>
         {(item) => (
           <button class="rail-btn" classList={{ on: page() === item.id }} aria-current={page() === item.id ? "page" : undefined}
-            aria-label={tr(item.label)}
-            data-tip={labeled() ? undefined : shortcutTooltip(tr(item.tip), item.command)} data-tip-pos="right" onClick={() => setPage(item.id)}
+            aria-label={item.id === "sessions" && counts().attention > 0 ? tr("Sessions — %1 need attention", counts().attention) : tr(item.label)}
+            data-tip={labeled() ? undefined : shortcutTooltip(item.id === "sessions" && counts().attention > 0 ? tr("Sessions — %1 need attention", counts().attention) : tr(item.tip), item.command)} data-tip-pos="right" onClick={() => setPage(item.id)}
             onContextMenu={(e) => { if (item.id !== "sessions") return; e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, items: [markAllEntry(), expandAllCollapsedEntry()] }); }}>
             <Icon name={item.icon} size={24} />
             <Show when={item.id === "sessions" && counts().attention > 0}>
-              <span class="rail-badge">{counts().attention}</span>
+              <span class="rail-badge" aria-hidden="true">{attentionBadgeText(counts().attention)}</span>
             </Show>
             <Show when={labeled()}><span>{tr(item.label)}</span></Show>
           </button>

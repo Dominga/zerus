@@ -20,7 +20,7 @@ vi.mock("./catalog", () => ({ catalog: { order: [], rows: {} }, computerOffline:
 vi.mock("./notices", () => ({ toast: vi.fn() }));
 vi.mock("../bridge", () => ({ sessionTerminalOpen: fixture.open }));
 
-import { STATE_CHANGED } from "../ui/sessions/actions-ui";
+import { STATE_CHANGED, detailsFromInspection } from "../ui/sessions/actions-ui";
 import { RESUMED_CHANGED, RESUMED_NOT_RUNNING, bindResumeTerminalConfirm, resumeAndOpenTerminal, resumedRow, sessionTerminalEntry, waitForResumed } from "./sessionTerminal";
 import type { Session } from "../ui/sessions/types";
 import type { ActionRow } from "../ui/sessions/actions-ui";
@@ -151,4 +151,34 @@ it("a confirmed Resume acts on the snapshot the question showed", async () => {
   const passed = fixture.change.mock.calls[0][0] as ActionRow;
   expect(passed).not.toBe(live);
   expect(passed).toMatchObject({ state: "paused", runId: "old", sessionId: "session-1" });
+});
+
+// review-win-c's controls on #1835.
+it("a saved OpenCode row follows fresh attach details over the row's", () => {
+  const row = { ...saved, cmd: "opencode", terminalAttachReported: true, terminalAttachSupported: true } as unknown as Session;
+  expect(sessionTerminalEntry(row, detailsFromInspection({ terminal_attach_supported: false }))).toMatchObject({ disabled: true });
+  expect(sessionTerminalEntry({ ...row, terminalAttachSupported: false }, detailsFromInspection({ terminal_attach_supported: true }))).toMatchObject({ disabled: false });
+  expect(sessionTerminalEntry({ ...row, terminalAttachReported: false, terminalAttachSupported: true })).toMatchObject({ disabled: true });
+});
+
+it("a resumed row still needs its newly reported live terminal", async () => {
+  const noPane = resumed({ terminalSupported: false, terminalReported: true });
+  await resumeAndOpenTerminal(saved, () => Promise.resolve(noPane));
+  expect(fixture.change).toHaveBeenCalledExactlyOnceWith(saved);
+  expect(fixture.open).not.toHaveBeenCalled();
+  expect(fixture.notify).toHaveBeenCalledWith("info", expect.stringContaining("Terminal is unavailable"), true);
+});
+
+it("a row changed between the match and the handoff never retargets the terminal (zerus-1gima)", async () => {
+  const [live, setLive] = createStore<ActionRow>(resumed());
+  const [rows, setRows] = createSignal<ActionRow[]>([saved]);
+  const pending = resumeAndOpenTerminal(saved, (row) => waitForResumed(row, 30_000, rows));
+  await vi.advanceTimersByTimeAsync(0);
+  setRows([live]);
+  queueMicrotask(() => setLive("conversationId", "replacement-conversation"));
+  await vi.advanceTimersByTimeAsync(0);
+  await pending;
+  expect(fixture.open).not.toHaveBeenCalledWith(expect.objectContaining({ conversation_id: "replacement-conversation" }));
+  // The matched identity goes to Rust, which compares it with the live row before attaching.
+  expect(fixture.open).toHaveBeenCalledExactlyOnceWith({ computer: "", name: saved.name, run_id: "new", conversation_id: "conversation-1" });
 });

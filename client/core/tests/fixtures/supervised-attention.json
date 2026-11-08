@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "about": "Supervised child attention (zerus-sa9qn.3, spec docs/superpowers/specs/2026-11-07-account-labels-child-sessions-design.md section 2). Each row is an hgs ls --json session row; quiet is whether its attention is its parent's. Shared by the desktop core and Android (mobile/android ChildSessionsTest).",
+  "about": "Supervised child attention (zerus-sa9qn.3, spec docs/superpowers/specs/2026-11-07-account-labels-child-sessions-design.md section 2). Each row is an hgs ls --json session row; quiet is whether its attention is its parent's. Shared by the desktop core, Android (mobile/android ChildSessionsTest) and iOS (ZerusKit ChildSessionsTests).",
   "cases": [
     {
       "name": "A child of a live parent with a new reply is quiet",

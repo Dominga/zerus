@@ -174,7 +174,7 @@ jobs:
         # ZERUS_FORK_BUILD and ZERUS_FORK_FEED_URL (job env) are embedded by
         # client/src-tauri/build.rs, as the Qt build embedded them.
         run: |
-          npm run tauri -- build --ci --no-bundle --config src-tauri/tauri.windows.conf.json --features video </dev/null \
+          npm run tauri -- build --ci --no-bundle --config src-tauri/tauri.windows.switch.conf.json --features video </dev/null \
             2>&1 | tee ../artifacts/test-results/windows-next-build.log
           test -f ../target/windows-next/release/hgs-tray.exe
       - name: Frontend runtime license notices

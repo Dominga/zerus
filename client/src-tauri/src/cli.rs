@@ -267,6 +267,12 @@ pub fn build_info(facts: &BuildFacts) -> Value {
 pub fn build_info_for(facts: &BuildFacts, identifier: &str) -> Value {
     let mut info = build_info(facts);
     info["CFBundleIdentifier"] = Value::from(identifier);
+    // What the binary carries: only release packaging uses the switch identity.
+    info["buildKind"] = Value::from(if identifier == crate::identity::SWITCH_ID {
+        "switch"
+    } else {
+        "development"
+    });
     info["ZerusGUI"] = Value::from("tauri");
     // WhiteWh fork, task #65: the fork build and feed this build embeds (the
     // ones crate::fork_updates reads), so the packaged zip can be checked
@@ -656,13 +662,30 @@ mod tests {
         );
         assert_eq!(build_info(&preview)["previewLabel"], "task-board");
         assert_eq!(build_info(&preview)["devBuildNumber"], 0);
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         {
             let identified = build_info_for(&dev, "com.hgdev.hgs-tray");
             assert_eq!(identified["CFBundleIdentifier"], "com.hgdev.hgs-tray");
+            assert_eq!(identified["buildKind"], "switch");
             assert_eq!(identified["ZerusGUI"], "tauri");
             assert_eq!(identified["localWebKitChildEnvironment"], 1);
+            let development = build_info_for(&dev, "dev.zerus.next.abc123");
+            assert_ne!(development["CFBundleIdentifier"], "com.hgdev.hgs-tray");
+            assert_eq!(development["buildKind"], "development");
         }
+    }
+
+    #[test]
+    fn windows_platform_builds_default_to_development_and_packaging_is_the_switch() {
+        let dev: Value = serde_json::from_str(include_str!("../tauri.windows.conf.json"))
+            .expect("the Windows development config");
+        let switch: Value = serde_json::from_str(include_str!("../tauri.windows.switch.conf.json"))
+            .expect("the Windows packaging config");
+        assert_eq!(dev["identifier"], "dev.zerus.next");
+        assert_ne!(dev["identifier"], crate::identity::SWITCH_ID);
+        assert_eq!(dev["mainBinaryName"], "zerus-client");
+        assert_eq!(switch["identifier"], crate::identity::SWITCH_ID);
+        assert_eq!(switch["mainBinaryName"], "hgs-tray");
     }
 
     #[test]

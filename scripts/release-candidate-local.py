@@ -58,7 +58,7 @@ def main() -> int:
     run(["npm", "ci"], cwd=client, dry=args.dry_run)
     run(
         ["npm", "run", "tauri", "--", "build", "--ci", "--no-bundle",
-         "--config", "src-tauri/tauri.windows.conf.json", "--features", "video"],
+         "--config", "src-tauri/tauri.windows.switch.conf.json", "--features", "video"],
         cwd=client,
         env={"CARGO_TARGET_DIR": str(target), "CARGO_BUILD_JOBS": "4",
              "ZERUS_FORK_BUILD": "1",

@@ -915,7 +915,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: bash scripts/ci/windows-next-shell.sh
       - name: Retain disposable Windows shell
-        if: ${{ !cancelled() && hashFiles('artifacts/zerus-next-windows-shell/hgs-tray.exe') != '' }}
+        if: ${{ !cancelled() && hashFiles('artifacts/zerus-next-windows-shell/zerus-client.exe') != '' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: zerus-next-windows-shell
@@ -1548,7 +1548,7 @@ jobs:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/windows-next
           CARGO_BUILD_JOBS: 4
         run: |
-          npm run tauri -- build --ci --no-bundle --config src-tauri/tauri.windows.conf.json --features video </dev/null \
+          npm run tauri -- build --ci --no-bundle --config src-tauri/tauri.windows.switch.conf.json --features video </dev/null \
             2>&1 | tee ../artifacts/test-results/windows-next-build.log
           test -f ../target/windows-next/release/hgs-tray.exe
       - name: Save Rust cache

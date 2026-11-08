@@ -590,7 +590,7 @@ exits after using one (the fake client refuses it), so steps that start `hgs.exe
 `ssh` or the desktop app read stdin from `/dev/null`.
 
 The Windows desktop is Zerus Next, built from the locked frontend and Tauri
-Rust package with `tauri.windows.conf.json` and the `video` feature. The output
+Rust package with `tauri.windows.switch.conf.json` and the `video` feature. The output
 is `target/windows-next/release/hgs-tray.exe`, with the installed identity
 `com.hgdev.hgs-tray`. This job does not install Qt, run `windeployqt` or cache a
 Qt/C++ desktop build. Native Windows shell contracts also run in the dedicated

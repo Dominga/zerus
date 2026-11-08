@@ -294,7 +294,10 @@ pub fn run() {
             #[cfg(any(target_os = "linux", windows))]
             let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
             #[cfg(any(target_os = "linux", windows))]
-            let info = cli::build_info_for(&cli::BUILD, &context.config().identifier);
+            let info = {
+                let identity = identity::current(&context.config().identifier);
+                cli::build_info_for(&cli::BUILD, &identity.build_identifier())
+            };
             #[cfg(not(any(target_os = "linux", windows)))]
             let info = cli::build_info(&cli::BUILD);
             println!("{info}");

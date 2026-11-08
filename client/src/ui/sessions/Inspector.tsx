@@ -33,7 +33,7 @@ import type { BoundRow } from "./scope-filters";
 import type { Session } from "./types";
 import { IronRulesPanel } from "./IronRulesPanel";
 import { captionText, childStatus } from "./SessionCard";
-import { currentChildren, workingChildren } from "./subagents";
+import { currentChildren, finishedFoldId, foldedChildren, workingChildren } from "./subagents";
 import { tr, trNoop } from "../../i18n";
 import { accountsPage } from "../../store/accounts";
 import { openFilterAccounts } from "../../store/accountFilters";
@@ -66,6 +66,25 @@ function Card(props: { id: string; title: JSX.Element; aside?: JSX.Element; clas
 function Row(props: { icon: string; label?: string; mono?: boolean; title?: string; tail?: JSX.Element; children: JSX.Element }) {
   return <div class="irow" title={props.title}><span class="irow-ico"><Icon name={props.icon} size={16} /></span><span class="irow-val ell" classList={{ mono: props.mono }}>{props.children}</span>{props.tail}<Show when={props.label}><span class="irow-label">{props.label}</span></Show></div>;
 }
+/** Task 262: the session's subagents, finished ones folded into "N finished, show" as in Qt; the fold is remembered per session. */
+function SubagentRows(props: { session: Session; online: boolean; summaries?: boolean; empty?: JSX.Element }) {
+  const current = () => currentChildren(props.session, props.online);
+  const id = () => finishedFoldId(props.session.key);
+  const open = () => cardOpen(id(), false, inspectorClosed());
+  const fold = createMemo(() => foldedChildren((props.session.subagents ?? []).slice(0, 100), current(), open()));
+  return <>
+    <For each={fold().shown} fallback={fold().finished ? undefined : props.empty}>{(child) => <Row icon="circle" label={childStatus(child, current()).caption} title={child.summary}><button class="link" onClick={() => { setSubagentOpen(child.id); setDetailTab("activity"); }}>{child.name} →</button><Show when={props.summaries}><span class="dim"> {child.summary}</span></Show></Row>}</For>
+    <Show when={fold().finished || (open() && current() && (props.session.subagents ?? []).some((child) => child.state !== "working" && child.state !== "attention" && !child.group))}>
+      <div class="side-finished" data-finished={fold().finished}>
+        <Show when={!open()} fallback={<button class="link" onClick={() => toggleInspectorCard(cardKey(id(), false))}>{tr("hide finished")}</button>}>
+          <span class="dim">{fold().finished === 1 ? tr("1 finished") : tr("%1 finished", fold().finished)}</span>
+          <button class="link" onClick={() => toggleInspectorCard(cardKey(id(), false))}>{tr("show")}</button>
+        </Show>
+      </div>
+    </Show>
+  </>;
+}
+
 function PlanAgents() {
   const s = selected, plan = createMemo(() => sessionPlan(raw())), goal = createMemo(() => sessionGoal(raw()));
   const online = () => !!s() && !computerOffline(s()!.computer);
@@ -74,7 +93,7 @@ function PlanAgents() {
     <Show when={goal().objective}><Card id="plan-goal" title={tr("Goal")} aside={<span class="muted">{goal().status === "active" ? tr("Pursuing goal") : goal().status}</span>}><p class="icard-text">{goal().objective}</p><Show when={goal().completion}><div class="hint">{tr("Reported by the agent. Completion: %1", goal().completion!)}</div></Show></Card></Show>
     <Show when={plan().length}><Card id="plan-tasks" title={tr("Tasks")} aside={<span class="dim">{tr("%1 of %2 completed (last recorded)", plan().filter((p) => p.status === "completed").length, plan().length)}</span>}><For each={plan()}>{(p) => <Row icon={p.status === "completed" ? "check" : "circle-dot"} label={p.status === "completed" ? tr("Done") : p.status === "in_progress" ? tr("In progress") : tr("To do")}>{p.title}</Row>}</For></Card></Show>
     <Card id="plan-agents" title={tr("Subagents")} aside={<span class="dim">{tr("%1 active / %2 total", s() ? workingChildren(s()!, online()) : 0, s()?.subagents?.length ?? 0)}</span>}>
-      <For each={s()?.subagents?.slice(0, 100)} fallback={<div class="hint">{tr("No subagent activity has been reported yet.")}</div>}>{(child) => <Row icon="circle" label={childStatus(child, !!s() && currentChildren(s()!, online())).caption} title={child.summary}><button class="link" onClick={() => { setSubagentOpen(child.id); setDetailTab("activity"); }}>{child.name} →</button><span class="dim"> {child.summary}</span></Row>}</For>
+      <Show when={s()} fallback={<div class="hint">{tr("No subagent activity has been reported yet.")}</div>}>{(row) => <SubagentRows session={row()} online={online()} summaries empty={<div class="hint">{tr("No subagent activity has been reported yet.")}</div>} />}</Show>
     </Card>
   </div>;
 }
@@ -255,7 +274,7 @@ function Sections() {
       <Show when={goal().objective}><p class="icard-text">{goal().objective}</p></Show>
       <For each={plan()}>{(p) => <Row icon={p.status === "completed" ? "check" : "circle-dot"} label={p.status === "completed" ? tr("Done") : p.status === "in_progress" ? tr("In progress") : tr("To do")}>{p.title}</Row>}</For>
       <div class="side-members-head"><b>{tr("Subagents")}</b><span class="dim tabular">{tr("%1 active / %2 total", workingChildren(s(), online()), s().subagents?.length ?? 0)}</span></div>
-      <For each={s().subagents?.slice(0, 100)}>{(child) => <Row icon="circle" label={childStatus(child, currentChildren(s(), online())).caption} title={child.summary}><button class="link" onClick={() => { setSubagentOpen(child.id); setDetailTab("activity"); }}>{child.name} →</button></Row>}</For>
+      <SubagentRows session={s()} online={online()} />
       <SessionLeadPanel />
     </Card>
     <IronRulesCard session={s()} id="sec-rules" folded />

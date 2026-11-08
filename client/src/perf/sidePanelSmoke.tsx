@@ -38,7 +38,15 @@ const row = {
   branch: "feat/checkout-v2", model: "gpt-5.5", effort: "high", state: "running", tracked: true, run_id: "run-1",
   conversation_id: "5f0c2a1e-7d3b-4c8e-9a61-2b7e4d9c0f13", created: 1793040000, status: "working", phase: "working", activity: "busy",
   turn_started: 1793050500, updated_at: 1793050800, summary: "Wiring the saved cards API into the dashboard",
-} as ViewRow;
+  // Task 262: two running children and three finished ones.
+  subagents: {
+    "agent-1": { label: "Explore the payments service", state: "finished", detail: "Read 14 files" },
+    "agent-2": { label: "Write the cards API tests", state: "working", detail: "Running pnpm test cards" },
+    "agent-3": { label: "Check the migration", state: "ended", detail: "No changes needed" },
+    "agent-4": { label: "Review the form states", state: "approval", detail: "Wants to run pnpm lint" },
+    "agent-5": { label: "Summarize the old checkout", state: "idle", detail: "Done" },
+  },
+} as unknown as ViewRow;
 
 const task = (id: number, phase: number, title: string, assignee: string, status: string): TeamTaskView =>
   ({ id, title, status, assignee, phase, deps: [], estimate_minutes: 0, attempts: 0, attempt_state: "", decided_by: "", pinned: false, output: [], waits: "" });
@@ -89,6 +97,15 @@ async function run() {
     ] } },
   } } }] as never);
   await sleep(400);
+  // Task 262: "N finished, show" opened by its link.
+  if (new URLSearchParams(location.search).get("finished") === "1") {
+    document.querySelector<HTMLButtonElement>(".side-finished .link")?.click();
+    await sleep(300);
+  }
+  if (new URLSearchParams(location.search).get("tasks") === "1") {
+    document.querySelector('[data-section="sec-tasks"]')?.scrollIntoView({ block: "start" });
+    await sleep(200);
+  }
   // Qt's ux-6-inspector-collapsed: Environment, Context and Team folded by their headers.
   if (new URLSearchParams(location.search).get("fold") === "1") {
     for (const id of ["sec-environment", "sec-context", "sec-team"]) document.querySelector<HTMLButtonElement>(`[data-section="${id}"] .icard-toggle`)?.click();

@@ -2553,5 +2553,9 @@
   "An existing session": "Существующая сессия",
   "No other live session to adopt": "Нет другой живой сессии для перехода",
   "Swap…": "Заменить…",
-  "Swap member…": "Заменить участника…"
+  "Swap member…": "Заменить участника…",
+  "1 finished": "1 завершён",
+  "%1 finished": "Завершено: %1",
+  "show": "показать",
+  "hide finished": "скрыть завершённые"
 }

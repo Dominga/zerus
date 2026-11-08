@@ -100,6 +100,7 @@
   .side-member { display: flex; align-items: center; gap: 6px; min-width: 0; min-height: 24px; font-size: var(--fs-xs); }
   .side-member .role-badge { max-width: 45%; }
   .side-actions { display: flex; align-items: center; gap: 8px; margin: 2px 0 4px; }
+  .side-finished { display: flex; align-items: center; gap: 6px; padding: 2px 0 2px 30px; font-size: var(--fs-xs); }
   .side-tasks { height: 440px; display: flex; flex-direction: column; min-height: 0; }
 }
 @keyframes insp-in { from { opacity: 0; translate: 24px 0; } }

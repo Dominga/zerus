@@ -71,7 +71,7 @@ try {
   const cases = page === "agent-media" ? [["media-dark", "skin=whitewh-dark"], ["media-light", "skin=whitewh-light"], ["media-viewer-dark", "skin=whitewh-dark&viewer=1"]]
     : page === "activity-notices" ? [["activity-dark", "skin=whitewh-dark"], ["activity-light", "skin=whitewh-light"]] : page === "side-panel" ? [
     ["sections-dark", "skin=whitewh-dark"], ["sections-light", "skin=whitewh-light"], ["sections-folded-dark", "skin=whitewh-dark&fold=1"],
-    ["tabs-dark", "skin=zerus-dark"],
+    ["tabs-dark", "skin=zerus-dark"], ["sections-finished-dark", "skin=whitewh-dark&finished=1&tasks=1"], ["tabs-finished-dark", "skin=zerus-dark&finished=1"],
   ] : [
     ["graph-dark", "mode=graph"], ["board-dark", "mode=board"], ["layers-dark", "mode=layers"],
     ["graph-light", "mode=graph&skin=whitewh-light"], ["board-light", "mode=board&skin=whitewh-light"], ["layers-light", "mode=layers&skin=whitewh-light"],

@@ -39,8 +39,8 @@ import {
   now, selectedKey, setSelectedKey, setExpandedChildren, expandedChildren,
   setCompactRows, compactRows, expandCompactRows, stateFilter, setStateFilter, search, setSearch, stripMode, setStripMode,
   setMenu, visibleMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter, accountFilterSet, setAccountFilter, folderFilter, setPage,
-  multi, setMulti, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, commitSessionsWidth, menu, subagentOpen,
-  revealing, setRevealing, setDetailTab,
+  multi, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, commitSessionsWidth, menu, subagentOpen,
+  revealing, setRevealing, setDetailTab, showLatestActivity,
   type StateFilter, type MenuEntry,
 } from "../../store/ui";
 import type { Session } from "./types";
@@ -55,7 +55,7 @@ import type { ClearControl, SessionRef } from "../../types";
 import { motionReduced } from "../motion";
 import { composer } from "../../store/composer";
 import { composerClearControl } from "../../bridge";
-import { bulkSelect, clearMulti, multiCount, setAnchor, dragItem, setDragItem, drop, setDrop, endDrag, placement, applyDrop, SESSION_MIME, type DragItem, type Drop } from "./organize";
+import { bulkSelect, clearMulti, multiCount, rangeStep, setAnchor, type RangeKey, dragItem, setDragItem, drop, setDrop, endDrag, placement, applyDrop, SESSION_MIME, type DragItem, type Drop } from "./organize";
 import { POINTER_DRAG, pointerDrag } from "../lib/pointerDrag";
 
 import { SearchResults } from "./SearchResults";
@@ -564,7 +564,7 @@ export function SessionList() {
 
   // Docked <-> strip: the conversation resizes once; the panel animates above it.
   const toggleDock = () => {
-    Object.keys(multi).forEach((k) => setMulti(k, false));
+    clearMulti();
     if (!stripMode()) {
       setStripMode(true);
       setPanelVisible(true);
@@ -611,28 +611,75 @@ export function SessionList() {
   addEventListener("pointerdown", outside);
   onCleanup(() => { removeEventListener("keydown", onKeyEsc); removeEventListener("pointerdown", outside); clearTimeout(enterTimer); clearTimeout(leaveTimer); });
 
+  // Qt's SessionList::keyPressEvent (SessionList.cpp:585-632) and its Enter (SessionsWindow.cpp:565,5499-5504).
   const onKey = (e: KeyboardEvent) => {
-    const nav = list.rows().filter((r) => r.type !== "header");
+    if ((e.target as Element).closest?.("input,textarea,[contenteditable]")) return;
+    const rows = list.rows();
+    const nav = rows.filter((r) => r.type !== "header");
     const i = nav.findIndex((r) => r.id === selectedKey());
-    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    const scrollTo = (row: Row) => list.virtualizer.scrollToIndex(rows.indexOf(row), { align: "auto" });
+    // The project header of a session whose collapsed project hides its row.
+    const hiddenBy = (key: string | undefined) => {
+      if (!key) return undefined;
+      const project = groupOf(key);
+      return rows.find((r): r is Extract<Row, { type: "header" }> => r.type === "header" && r.project === project && r.collapsed);
+    };
+    const move = (next: Row | undefined) => {
+      if (!next) return;
+      const key = next.type === "child" ? next.parent.key : next.id;
+      setSelectedKey(key);
+      // A plain move on a card starts the next Shift range there (SessionList.cpp:629-631).
+      if (next.type === "card") setAnchor(key);
+      scrollTo(next);
+    };
+    const vertical = e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Home" || e.key === "End";
+    if (vertical && e.shiftKey) {
       e.preventDefault();
-      const next = nav[Math.max(0, Math.min(nav.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)))];
-      if (next) {
-        setSelectedKey(next.type === "child" ? next.parent.key : next.id);
-        list.virtualizer.scrollToIndex(list.rows().indexOf(next), { align: "auto" });
-      }
-    } else if ((e.key === "ArrowRight" || e.key === "ArrowLeft") && i >= 0) {
-      const r = nav[i];
+      const reached = rangeStep(e.key as RangeKey, e.ctrlKey || e.metaKey);
+      const row = reached === undefined ? undefined : rows.find((r) => r.id === reached);
+      if (row) scrollTo(row);
+    } else if (e.key === "Home" || e.key === "End") {
+      e.preventDefault();
+      move(e.key === "Home" ? nav[0] : nav[nav.length - 1]);
+    } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const down = e.key === "ArrowDown";
+      const header = i < 0 ? hiddenBy(selectedKey()) : undefined;
+      if (header) {
+        // From a row its collapsed project hides: the next row past the project, as Qt's hidden current item.
+        const at = rows.indexOf(header);
+        move(down ? rows.slice(at + 1).find((r) => r.type !== "header") : rows.slice(0, at).reverse().find((r) => r.type !== "header"));
+      } else move(nav[Math.max(0, Math.min(nav.length - 1, i + (down ? 1 : -1)))]);
+    } else if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
       const right = e.key === "ArrowRight";
-      if (r.type === "card" && r.compactRow && right) setRowCompact(r.session.key, false);
-      else if (r.type === "card" && r.expandable && (right ? !expandedChildren[r.session.key] : !!expandedChildren[r.session.key])) setExpandedChildren(r.session.key, right);
-      // Child sessions (zerus-sa9qn.2): Right expands, Left collapses, then moves to the parent.
-      else if (r.type === "card" && r.team && r.team.collapsed === right) setTeamCollapsed(r.session.key, !right);
-      else if (r.type === "card" && !right && r.parentKey) setSelectedKey(r.parentKey);
-      else if (r.type === "card" && r.expandable) setExpandedChildren(r.session.key, right);
-      else if (r.type === "child" && !right) setSelectedKey(r.parent.key);
+      // A plain row's project (SessionList.cpp:623-627): Left collapses it, Right expands it.
+      const project = (key: string) => {
+        const header = rows.find((r): r is Extract<Row, { type: "header" }> => r.type === "header" && r.project === groupOf(key));
+        if (header && header.collapsed === right) setProjectCollapsed(header.project, !right);
+      };
+      if (i < 0) {
+        // Right reopens the project that hides the open conversation's row.
+        const header = right ? hiddenBy(selectedKey()) : undefined;
+        if (header) { e.preventDefault(); setProjectCollapsed(header.project, false); }
+        return;
+      }
+      const r = nav[i];
+      if (r.type === "child") { if (!right) setSelectedKey(r.parent.key); }
+      else if (r.type === "card") {
+        if (r.compactRow && right) setRowCompact(r.session.key, false);
+        else if (r.expandable && (right ? !expandedChildren[r.session.key] : !!expandedChildren[r.session.key])) setExpandedChildren(r.session.key, right);
+        // Child sessions (zerus-sa9qn.2): Right expands, Left collapses, then moves to the parent.
+        else if (r.team && r.team.collapsed === right) setTeamCollapsed(r.session.key, !right);
+        else if (!right && r.parentKey) setSelectedKey(r.parentKey);
+        else if (!r.expandable && !r.team) project(r.session.key);
+      }
+    } else if (e.key === "Enter" && e.target === e.currentTarget && i >= 0 && nav[i].type !== "creation" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      // Qt's itemActivated: the Activity tab at its latest message. A focused
+      // button in the list (a project header) keeps its own Enter.
+      e.preventDefault();
+      showLatestActivity();
     } else if (e.key === "Escape") {
-      Object.keys(multi).forEach((k) => setMulti(k, false));
+      clearMulti();
     }
   };
 

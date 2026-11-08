@@ -12,12 +12,40 @@ import { nestable, setParentDialog } from "../../store/parentLinks";
 
 // --- Bulk selection --------------------------------------------------------
 
-let anchor: string | undefined;
+/** Where a Shift range starts, and its far end, which Shift+arrows move (Qt's m_rangeAnchor, m_rangeCursor). */
+let anchor: string | undefined, cursor: string | undefined;
 const cardKeys = () => listRows().filter((r) => r.type === "card").map((r) => r.id);
 
 export const multiCount = () => Object.values(multi).filter(Boolean).length;
-export const clearMulti = () => batch(() => { for (const k of Object.keys(multi)) if (multi[k]) setMulti(k, false); });
-export const setAnchor = (key: string) => { anchor = key; };
+/** Ends a bulk selection, and its range: the next Shift key starts again from the open conversation (Qt's clearBulkSelection, zerus-m0dem). */
+export const clearMulti = () => batch(() => { anchor = cursor = undefined; for (const k of Object.keys(multi)) if (multi[k]) setMulti(k, false); });
+/** A plain click or arrow on a card: a later range starts there. */
+export const setAnchor = (key: string) => { anchor = cursor = key; };
+
+export type RangeKey = "ArrowUp" | "ArrowDown" | "Home" | "End";
+
+/**
+ * The card a Shift key extends the range to (SessionList.cpp:589-602): from
+ * the range's far end, else the open conversation; Home and End go to the
+ * first and last card; past either end, none.
+ */
+export function rangeTarget(keys: readonly string[], from: string | undefined, open: string | undefined, key: RangeKey): number | undefined {
+  if (!keys.length) return undefined;
+  let at = from === undefined ? -1 : keys.indexOf(from);
+  if (at < 0 && open !== undefined) at = keys.indexOf(open);
+  const target = key === "Home" ? 0 : key === "End" ? keys.length - 1
+    : key === "ArrowDown" ? (at < 0 ? 0 : at + 1) : (at < 0 ? keys.length - 1 : at - 1);
+  return target >= 0 && target < keys.length ? target : undefined;
+}
+
+/** Shift+Up, Down, Home or End (with Ctrl/Cmd, added to the selection): the card the range reached, if any. */
+export function rangeStep(key: RangeKey, additive: boolean): string | undefined {
+  const keys = cardKeys();
+  const target = rangeTarget(keys, cursor, selectedKey(), key);
+  if (target === undefined) return undefined;
+  bulkSelect(keys[target], additive, true);
+  return keys[target];
+}
 
 /** Ctrl/Cmd toggles one card; Shift selects the range from the anchor (with
  *  Ctrl/Cmd, added to the current selection). The open conversation stays. */
@@ -31,14 +59,16 @@ export function bulkSelect(key: string, additive: boolean, range: boolean) {
       const span = new Set(keys.slice(Math.min(i, j), Math.max(i, j) + 1));
       if (!additive) for (const k of Object.keys(multi)) if (multi[k] && !span.has(k)) setMulti(k, false);
       span.forEach((k) => setMulti(k, true));
-      anchor = from;
+      // Qt: an anchor that is no longer listed restarts at the target.
+      anchor = i >= 0 ? keys[i] : from;
+      cursor = key;
       return;
     }
     // A toggle starts from the open conversation, which is already selected.
     const open = selectedKey();
     if (!multiCount() && open && open !== key) setMulti(open, true);
     setMulti(key, !multi[key]);
-    anchor = key;
+    anchor = cursor = key;
   });
 }
 

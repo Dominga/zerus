@@ -7,7 +7,6 @@ import { ActivityHeights, activityMeasureWindow, activityOverscan, createActivit
 import { searchPreview, clearSearchPreview } from "../../store/searchSelection";
 import { SearchHighlight } from "./SearchHighlight";
 import { For, Show, batch, createContext, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack, useContext, type JSX } from "solid-js";
-import { Dynamic } from "solid-js/web";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { createImageHandoff, fittedImage } from "./attachment-image";
 import { attachmentFetch, attachmentMedia, attachmentOpen, attachmentPin, attachmentUnpin, copyVerbatim, inTauri } from "../../bridge";
@@ -21,8 +20,10 @@ import { recordingBlob } from "./voice-playback";
 import { cardTarget, createOpen, readCards, rowScope } from "./attachment-card";
 import { createStore, reconcile } from "solid-js/store";
 import { Icon } from "../lib/icons";
-import { selected, toast, contentScale, subagentOpen, setSubagentOpen, setMenu, setDetailTab, type MenuEntry } from "../../store/ui";
-import { activity } from "../../store/session";
+import { ToolRow, TOOL_OUTPUT, outputKey, type ProcessLinks } from "./ToolEvents";
+import { processes, processViewKey, recordedProcess } from "../../store/processes";
+import { selected, toast, contentScale, subagentOpen, setSubagentOpen, setMenu, setDetailTab, takeLatestRequest, type MenuEntry } from "../../store/ui";
+import { activity, processesTarget } from "../../store/session";
 import { orderedRows } from "../../store/catalog";
 import { flag, num, setSetting } from "../../store/settings";
 import type { ActivitySource, AttachmentScope } from "../../store/activitySource";
@@ -36,9 +37,11 @@ import { DELETE_TEXT, DELETE_TITLE, retryReason, routeInspect } from "./local-ac
 import { NOT_DELIVERED_HINT } from "./inbox-actions";
 import { createInboxRemoveScope, InboxRemove, RemoveQueuedDialog, type InboxRemovePorts, type InboxRemoveScope } from "./InboxRemove";
 import { emptyActivity } from "./activity-empty";
-import { markdownReady, markdownTree, type Inline, type MarkdownBlock } from "./markdown";
+import { markdownReady } from "./markdown";
+import { ActivitySession, Body } from "./MarkdownBody";
+
+export { Body } from "./MarkdownBody";
 import { activityAll, activityFlow, activityRange, measureActivityRows, activitySelectionIndexes, activitySelectionText, activityText, activityTexts, activityVirtualOffset, selectActivityAll, selectionCoversActivity } from "./activity-virtual";
-import { openExternal, openSessionFile } from "./sessionFiles";
 import { SessionFileDialog } from "./SessionFileDialog";
 import { captionText, statusOf } from "./SessionCard";
 import type { ActivityItem, ItemAttachment, LocalItem, MediaMessage, Session, TranscriptItem } from "./types";
@@ -166,10 +169,6 @@ const copyText = (text: string, what: string) => {
   void copyVerbatim(text).then(() => toast(tr("Copied"), what), () => toast(tr("Not copied"), tr("The clipboard is unavailable"), "error"));
 };
 
-// Inline Markdown stays text except its links: HTTP(S) uses the system
-// opener, and local/file references open the session's File reference dialog.
-
-const ActivitySession = createContext<() => Session | undefined>();
 const ActivityLayoutHeld = createContext<() => boolean>(() => false);
 
 /** Keep disclosure geometry while a gesture or persistent selection owns
@@ -185,70 +184,6 @@ function layoutDisclosure(expanded: () => boolean | undefined = () => undefined,
     onExpanded?.(next);
   };
   return [open, toggle] as const;
-}
-
-function inlines(parts: Inline[], session?: () => Session | undefined): JSX.Element[] {
-  return parts.map((part): JSX.Element => {
-    switch (part.kind) {
-      case "text": return part.text;
-      case "code": return <code>{part.text}</code>;
-      case "br": return <br />;
-      case "bold": return <b>{inlines(part.children, session)}</b>;
-      case "em": return <em>{inlines(part.children, session)}</em>;
-      case "del": return <del>{inlines(part.children, session)}</del>;
-      default: {
-        const link = part;
-        return <a href={link.href} title={link.href} draggable={false} onAuxClick={(event) => event.preventDefault()} onDragStart={(event) => event.preventDefault()} onClick={(event) => {
-          event.preventDefault();
-          if (link.kind === "external") openExternal(link.href);
-          else {
-            const current = session?.();
-            if (current) openSessionFile(current, link.href);
-          }
-        }}>{inlines(link.children, session)}</a>;
-      }
-    }
-  });
-}
-
-const HEADINGS = ["h1", "h2", "h3", "h4", "h5", "h6"] as const;
-
-function blocks(list: MarkdownBlock[], session?: () => Session | undefined): JSX.Element[] {
-  return list.map((b): JSX.Element => {
-    switch (b.kind) {
-      case "code": return <pre class="act-code mono">{b.text}</pre>;
-      case "text": return <>{inlines(b.inline, session)}</>;
-      case "heading": return <Dynamic component={HEADINGS[b.level - 1]} class="md-heading">{inlines(b.inline, session)}</Dynamic>;
-      case "hr": return <hr class="md-rule" />;
-      case "quote": return <blockquote class="md-quote">{blocks(b.blocks, session)}</blockquote>;
-      case "list": {
-        const items = b.items.map((item) => (
-          <li classList={{ "md-task": item.task }}>
-            <Show when={item.task}><input type="checkbox" class="md-check" checked={item.checked} disabled aria-label={item.checked ? tr("Done") : tr("Not done")} /></Show>
-            {blocks(item.blocks, session)}
-          </li>
-        ));
-        return b.ordered ? <ol class="md-list" start={b.start}>{items}</ol> : <ul class="md-list">{items}</ul>;
-      }
-      case "table": return (
-        <div class="act-table-wrap" role="region" aria-label={tr("Message table")} tabindex="0">
-          <table class="act-table" style={{ "--table-columns": b.header.length }}>
-            <thead><tr>{b.header.map((cell, column) => <th scope="col" style={{ "text-align": b.align[column] }}>{inlines(cell, session)}</th>)}</tr></thead>
-            <Show when={b.rows.length}><tbody>{b.rows.map((row) => <tr>{row.map((cell, column) => <td style={{ "text-align": b.align[column] }}>{inlines(cell, session)}</td>)}</tr>)}</tbody></Show>
-          </table>
-        </div>
-      );
-      default: return <p>{inlines(b.inline, session)}</p>;
-    }
-  });
-}
-
-export function Body(props: { text: string }) {
-  const session = useContext(ActivitySession);
-  // Rerenders once when the lazily loaded parser arrives; Activity places its
-  // rows only after that, so placed rows keep their height.
-  const tree = createMemo(() => { markdownReady(); return markdownTree(props.text); });
-  return <>{blocks(tree(), session)}</>;
 }
 
 // ---------------------------------------------------------------------------
@@ -646,34 +581,29 @@ function EchoBody(props: { item: ActivityItem; scope?: AttachmentScope }) {
   return <ItemBody {...props} item={shown()} />;
 }
 
-function Item(props: { item: TranscriptItem; scope?: AttachmentScope; sourceId?: string; postersEnabled?: boolean; expanded?: boolean; onExpanded?: (open: boolean) => void }) {
+function Item(props: {
+  item: TranscriptItem; scope?: AttachmentScope; sourceId?: string; postersEnabled?: boolean; expanded?: boolean; onExpanded?: (open: boolean) => void;
+  /** A tool row's Show more state per event, and View process links. */
+  shown?: (index: number) => number | undefined; onMore?: (index: number) => void; process?: ProcessLinks;
+}) {
   const [open, toggleOpen] = layoutDisclosure(() => props.expanded, props.onExpanded);
   const it = props.item;
   if (it.kind === "media") return <MediaCard item={it} scope={rowScope(it, props.scope)} sourceId={props.sourceId} postersEnabled={props.postersEnabled} expanded={props.expanded} onExpanded={props.onExpanded} />;
   if (it.kind === "context") return <div class="act-label eyebrow" id={`item-${it.id}`}>{it.body}</div>;
-  if (it.kind === "thinking") return <div class="act-thinking" id={`item-${it.id}`} classList={{ inherited: !!it.inherited }}><span class="eyebrow">{tr("Thinking")}</span><p>{it.body}</p></div>;
+  // Thinking and subagent reports are Markdown, as in Qt (ActivityView.cpp:942-975).
+  if (it.kind === "thinking") return <div class="act-thinking" id={`item-${it.id}`} classList={{ inherited: !!it.inherited }}><span class="eyebrow">{tr("Thinking")}</span><div class="act-thinking-body act-body"><Body text={it.body ?? ""} /></div></div>;
   if (it.kind === "report")
     return (
       <div class="act-notice" id={`item-${it.id}`} classList={{ open: open(), inherited: !!it.inherited }}>
         <div class="row"><Icon name="bot" size={13} /><b>{it.title}</b><Show when={it.sender}><span class="muted">{tr("from %1", it.sender!)}</span></Show><span class="grow" /><span class="act-time">{it.at}</span></div>
         <button class="link" onClick={toggleOpen}>{open() ? tr("▾ Hide report") : tr("▸ Show report")}</button>
-        <Show when={open()}><p class="act-notice-body">{it.body}</p></Show>
+        <Show when={open()}><div class="act-notice-body act-body"><Body text={it.body ?? ""} /></div></Show>
       </div>
     );
   return (
     <Show when={it.kind !== "tools" && it.kind !== "tool" && it.kind !== "warm"} fallback={
-      <div class="act-tools" id={`item-${it.id}`} classList={{ open: open(), warn: !!it.warn, warm: it.kind === "warm", inherited: !!it.inherited }}>
-        <button class="act-tools-head" onClick={toggleOpen} aria-expanded={open()}>
-          <Icon name="chevron-right" size={12} class="chev" />
-          <b>{it.title}</b>
-          <Show when={it.kind === "tools"}><span class="muted">/ {it.body}</span></Show>
-          <span class="act-time">{it.at}</span>
-        </button>
-        <Show when={it.kind === "tool"}><div class="act-tool-cmd mono">{it.body}</div></Show>
-        <Show when={open() && it.lines}>
-          <div class="act-tool-lines mono"><For each={it.lines}>{(l) => <div>{l}</div>}</For></div>
-        </Show>
-      </div>
+      <ToolRow item={it} open={open()} onToggle={toggleOpen} shown={(index) => props.shown?.(index)}
+        onMore={(index) => props.onMore?.(index)} process={props.process} />
     }>
       <article class={`act-msg k-${it.kind}`} id={`item-${it.id}`} classList={{ inherited: !!it.inherited }}>
         <header>
@@ -825,12 +755,25 @@ export function ActivityView(props: { source?: ActivitySource }) {
       for (const key of virtualizer.itemSizeCache.keys()) if (!content.has(String(key))) virtualizer.itemSizeCache.delete(key);
       const disclosures = Object.fromEntries(Object.entries(expanded).filter(([key]) => content.has(key)));
       setExpanded(reconcile(disclosures));
+      setMore(reconcile(Object.fromEntries(Object.entries(more).filter(([key]) => content.has(key.slice(0, key.lastIndexOf("#")))))));
       setView("items", reconcile(items, { key: "id" }));
       setView({ expired, loaded, pane, tool });
       reading.changed(); end.changed();
     }));
   });
   const [expanded, setExpanded] = createStore<Record<string, boolean>>({});
+  /** Show more per tool event (`outputKey`), kept while its row is loaded so a row scrolled back keeps its height. */
+  const [more, setMore] = createStore<Record<string, number>>({});
+  /**
+   * View process from the live main Activity while Processes is on
+   * (ActivityView.cpp:1129-1134): only in the Processes view of the session
+   * the tab follows now, checked when offered and again when used (zerus-u81tf).
+   */
+  const processView = () => { const target = processesTarget(); return target ? processViewKey(target) : undefined; };
+  const processLinks = (): ProcessLinks | undefined => source() === activity && !subagentOpen() && flag("processes/enabled") ? {
+    linkable: (process) => recordedProcess(processes.view(), process, processView()),
+    open: (process) => { if (processes.reveal(process, processView())) setDetailTab("processes"); },
+  } : undefined;
   /** The guidance an empty Activity shows (ActivityView.cpp:1145-1150). */
   const empty = createMemo(() => emptyActivity(source().summary(), !!s()?.tracked));
   let olderQueued = false;
@@ -988,6 +931,8 @@ export function ActivityView(props: { source?: ActivitySource }) {
       offset: (id) => rows.offset(id),
     }, reply, shown.events(), shown.summary());
   };
+  // Enter on a session row: this view jumps, once per request, even if it mounted after it.
+  createEffect(() => { if (takeLatestRequest()) queueMicrotask(jumpToLatest); });
   onMount(() => {
     liveScroller = scroller;
     liveLatest = latest;
@@ -995,7 +940,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
     const pointerEnded = () => motion.release();
     window.addEventListener("pointerup", pointerEnded); window.addEventListener("pointercancel", pointerEnded); window.addEventListener("blur", pointerEnded);
     onCleanup(() => { window.removeEventListener("pointerup", pointerEnded); window.removeEventListener("pointercancel", pointerEnded); window.removeEventListener("blur", pointerEnded); });
-    activityTexts.set(scroller, () => activityText(view.items, expanded));
+    activityTexts.set(scroller, () => activityText(view.items, expanded, more));
     const selectionChanged = () => {
       if (!selectionCoversActivity(scroller)) activityAll.delete(scroller);
       const inside = selectionInside();
@@ -1093,6 +1038,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
     motion.reset(); setLayoutHeld(false); latestAfterScroll = false;
     activityAll.delete(scroller);
     setExpanded(reconcile({}));
+    setMore(reconcile({}));
     measuredContent.clear(); setMeasuring([]); setSelectionIndexes([]);
     heights.clear();
     virtualizer.measure();
@@ -1223,7 +1169,10 @@ export function ActivityView(props: { source?: ActivitySource }) {
                           virtualizer.measureElement(node);
                         }}
                         style={{ "margin-top": `${flow().margins.get(id) ?? 0}px` }}>
-                        <Show when={item()}>{(it) => <Item item={it()} scope={scope()} sourceId={source().target()?.id} postersEnabled={placed() && !pageHidden()} expanded={!!expanded[id]} onExpanded={(open) => { heights.invalidate(id); setExpanded(id, open); }} />}</Show>
+                        <Show when={item()}>{(it) => <Item item={it()} scope={scope()} sourceId={source().target()?.id} postersEnabled={placed() && !pageHidden()} expanded={!!expanded[id]} onExpanded={(open) => { heights.invalidate(id); setExpanded(id, open); }}
+                          shown={(index) => more[outputKey(id, index)]}
+                          onMore={(index) => { heights.invalidate(id); setMore(outputKey(id, index), (more[outputKey(id, index)] ?? TOOL_OUTPUT.first) + TOOL_OUTPUT.step); }}
+                          process={processLinks()} />}</Show>
                       </div>
                     );
                   }}</For>

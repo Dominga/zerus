@@ -19,7 +19,7 @@ import { compactRows, detailTab, page, selected, selectedKey, setCompactRows, se
 import { startScreens } from "./screens";
 import { documentVisibility, pageHidden } from "./visibility";
 import { processes, trackFollow, trackShown } from "./processes";
-import type { Batch, ComposerEvent } from "../types";
+import type { Batch, ComposerEvent, ProcessTarget } from "../types";
 
 // Wires the stores together: batches go to the catalog, the grouping, the
 // followed Activity and the open composer, the selected session is the
@@ -137,6 +137,9 @@ createRoot(() => {
 
 // The Processes tab follows the selected session while Settings > Processes
 // is on (Qt polls nothing while it is off); output reads and the busy
+/** The session the Processes tab follows, as last sent to the hub; null while it follows none. */
+const [processesTarget, setProcessesTarget] = createSignal<ProcessTarget | null>(null);
+export { processesTarget };
 // indicator run only while the tab shows in a shown window.
 const [windowHidden, setWindowHidden] = createSignal(windowVisibility.hidden());
 windowVisibility.onChange(() => setWindowHidden(windowVisibility.hidden()));
@@ -152,7 +155,7 @@ createRoot(() => {
         inspectFailed: activity.target()?.id === s.key && !!activity.error(),
       };
     },
-    follow: processesFollow,
+    follow: (target) => { setProcessesTarget(target); processesFollow(target); },
   });
   trackShown({ enabled, selected: () => !!selected(), page, tab: detailTab, hidden: windowHidden, shown: processesShown });
 });

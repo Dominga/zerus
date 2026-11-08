@@ -12,7 +12,9 @@ import { suggestions, suggestedInput } from "../../store/suggestions";
 import { contentScale, selected } from "../../store/ui";
 import { computerFresh, computerOffline } from "../../store/catalog";
 import { detailsFor, followedFor } from "../../store/actions";
-import { onCommand } from "../../store/shortcuts";
+import { onCommand, platform } from "../../store/shortcuts";
+import { clipboardFiles } from "../../bridge";
+import { pasteNative, pasteRoute, samePaste, type PasteBinding } from "./paste-files";
 import { actionEntries } from "./ActionDialogs";
 import { snapshotOf } from "./actions-ui";
 import { markReadChip, runMarkRead } from "./mark-entries";
@@ -206,13 +208,30 @@ export function Composer() {
     // Like Escape in Terminal: stop a working turn, otherwise leave the field (ComposeEdit::keyPressEvent).
     if (e.key === "Escape") { e.preventDefault(); if (!stopTurn()) editor.blur(); }
   };
+  /**
+   * Qt's insertFromMimeData (MessageComposer.cpp 186-196): copied local files
+   * are attached, otherwise an image is pasted, otherwise the text. A paste
+   * without files stays the webview's own. Files without their paths ask the
+   * native clipboard (bounded, off the UI thread); its answer applies only to
+   * the draft the paste was made in.
+   */
   const onPaste = (e: ClipboardEvent) => {
-    const items = [...(e.clipboardData?.items ?? [])];
-    const file = items.find((i) => i.kind === "file" && i.type.startsWith("image/"))?.getAsFile()
-      ?? [...(e.clipboardData?.files ?? [])].find((f) => f.type.startsWith("image/"));
-    if (!file) return;
+    if (!e.clipboardData) return;
+    const route = pasteRoute(e.clipboardData, platform === "windows");
+    if (route.kind === "text") return;
     e.preventDefault();
-    void composer.pasteImage(file);
+    if (route.kind === "paths") { void composer.attachPasted(route.paths); return; }
+    const view = v();
+    if (!view) return;
+    const at = composer.selection();
+    const bound: PasteBinding = { handle: view.handle, key: view.key, epoch: view.text_epoch, text: composer.text(), start: at.start, end: at.end };
+    void pasteNative(route, {
+      native: clipboardFiles,
+      current: () => samePaste(composer.view(), bound, composer.locked(), composer.text(), composer.selection()),
+      attach: (paths) => { void composer.attachPasted(paths); },
+      image: (file) => { void composer.pasteImage(file); },
+      text: (text) => { if (document.activeElement === editor) document.execCommand("insertText", false, text); },
+    });
   };
 
   onMount(() => {

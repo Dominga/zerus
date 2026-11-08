@@ -1,7 +1,8 @@
 import { defaultRangeExtractor, type Range, type VirtualItem } from "@tanstack/solid-virtual";
 import { markdownTree, type Inline, type MarkdownBlock } from "./markdown";
 import { tr } from "../../i18n";
-import type { TranscriptItem } from "./types";
+import type { ActivityItem, TranscriptItem } from "./types";
+import { TOOL_OUTPUT, outputKey, shownOutput } from "./tool-output";
 
 export const activityTexts = new WeakMap<HTMLDivElement, () => string>();
 export const activityAll = new WeakMap<HTMLDivElement, boolean>();
@@ -66,22 +67,28 @@ const markdownText = (text: string) => blocksText(markdownTree(text));
 
 const lines = (values: (string | undefined)[]) => values.filter((value): value is string => !!value).join("\n");
 
-export function activityText(items: TranscriptItem[], expanded: Record<string, boolean> = {}): string {
+/** An expanded tool row's events as they show: each heading and the part of its output that shows. */
+const toolText = (item: ActivityItem, more: Record<string, number>) => item.events
+  ? item.events.map((event, index) => lines([`${event.label}  ${event.at}`,
+    shownOutput(event.detail(), more[outputKey(item.id, index)] ?? TOOL_OUTPUT.first)])).join("\n")
+  : item.lines?.join("\n");
+
+export function activityText(items: TranscriptItem[], expanded: Record<string, boolean> = {}, more: Record<string, number> = {}): string {
   return items.map((item) => {
     if (item.kind === "media") return lines([
       item.media === "video" ? tr("You (video)") : tr("You (voice)"), item.at,
       expanded[item.id] ? item.transcript : undefined, item.error,
     ]);
     if (item.kind === "context") return item.body ?? "";
-    if (item.kind === "thinking") return lines([tr("Thinking"), item.body]);
+    if (item.kind === "thinking") return lines([tr("Thinking"), item.body ? markdownText(item.body) : undefined]);
     if (item.kind === "report") return lines([
       item.title, item.sender ? tr("from %1", item.sender) : undefined, item.at,
-      expanded[item.id] ? item.body : undefined,
+      expanded[item.id] && item.body ? markdownText(item.body) : undefined,
     ]);
     if (item.kind === "tool" || item.kind === "tools") return lines([
       item.title, item.kind === "tools" ? item.body : undefined, item.at,
-      item.kind === "tool" ? item.body : undefined,
-      expanded[item.id] ? item.lines?.join("\n") : undefined,
+      item.kind === "tool" && !expanded[item.id] ? item.body : undefined,
+      expanded[item.id] ? toolText(item, more) : undefined,
     ]);
     const body = item.replies?.length
       ? item.replies.map((reply) => lines([tr("Question"), reply.question, tr("Your answer"), reply.answer])).join("\n")

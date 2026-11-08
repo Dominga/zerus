@@ -16,7 +16,8 @@ param(
     [double]$ScrollPercent,
     [switch]$Collapse,
     [switch]$Close,
-    [switch]$Maximize
+    [switch]$Maximize,
+    [switch]$Select
 )
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
@@ -70,13 +71,15 @@ if ($Press) {
             $kind = $c.ControlType.ProgrammaticName -replace '^ControlType\.', ''
             # A name, its first line (list rows add details below it) or an
             # object name (the AutomationId is the dotted object path).
-            $named = $c.Name -eq $Press -or ($c.Name -split "`n")[0] -eq $Press -or $c.AutomationId -eq $Press -or $c.AutomationId.EndsWith(".$Press")
+            $named = $c.Name -eq $Press -or ("$($c.Name)" -split "`n")[0] -eq $Press -or $c.AutomationId -eq $Press -or "$($c.AutomationId)".EndsWith(".$Press")
             if ($named -and (-not $Type -or $kind -eq $Type)) { $found += $e }
         }
     }
     if ($found.Count -le $Index) { throw "no control '$Press' ($Type) number $Index; found $($found.Count)" }
     $e = $found[$Index]
     $pattern = $null
+    # -Select: SelectionItem first (a Qt tab's Invoke may not switch to it).
+    if ($Select -and $e.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$pattern)) { $pattern.Select(); "selected $Press"; return }
     if ($Collapse) {
         if (-not $e.TryGetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern, [ref]$pattern)) {
             $names = ($e.GetSupportedPatterns() | ForEach-Object { $_.ProgrammaticName }) -join ', '

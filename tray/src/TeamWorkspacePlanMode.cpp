@@ -15,8 +15,10 @@
 #include <QDateTime>
 #include <QDialog>
 #include <QGridLayout>
+#include <QHBoxLayout>
 #include <QLineEdit>
 #include <QPointer>
+#include <QPushButton>
 #include <QRadioButton>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -92,21 +94,103 @@ QString TeamWorkspace::freeBuildLine(const Team &team) const
 
 QWidget *TeamWorkspace::phaseModeBadge(const Team &team, int phase)
 {
-    if (!team.planModeKnown) return nullptr;
     const Colors c = colorsFor(m_dark);
-    QString mode = QStringLiteral("standard");
-    if (team.status == "planning") {
+    const Phase *record = team.phase(phase);
+    const QString state = record ? record->state : QStringLiteral("approved");
+    const bool draft = record && record->draft();
+    QString mode = team.phaseMode(phase);
+    // While the plan waits for approval, the mode the owner chose is the one
+    // the planned phase will start in (U59's card), not the team's old mode.
+    if (team.status == QLatin1String("planning")) {
         const QString chosen = m_panel->planModeChoice(team.id);
         if (!chosen.isEmpty()) mode = chosen;
-    } else if (freeOpenPhase(team, phase)) {
-        mode = QStringLiteral("free");
     }
-    const bool free = mode == "free";
-    auto *badge = new PhaseBadge(free ? tr("Free") : tr("Standard"), free ? c.violet : c.text3, free ? QStringLiteral("plan_free") : QStringLiteral("plan_standard"), false);
-    badge->setObjectName("teamPhaseMode"); badge->setProperty("mode", mode);
-    badge->setToolTip(free ? tr("Free planning: the phase stays open and takes tasks as they come until you close it")
-                           : tr("Standard planning: the phase closes with its integration and build"));
-    return badge;
+    if (freeOpenPhase(team, phase)) mode = QStringLiteral("free");
+    if (mode != QLatin1String("free")) mode = QStringLiteral("standard");
+    // Task #219: the lead's open switch-plan-mode proposal marks the phase.
+    QString proposed;
+    for (const auto &proposal : team.proposals) {
+        if (proposal.kind != QLatin1String("switch-plan-mode")) continue;
+        const int named = proposal.change.toObject().value("phase").toInt();
+        if (named == phase || (named == 0 && state == QLatin1String("running"))) proposed = proposal.mode;
+    }
+    bool can = team.phaseModesKnown && (team.status == QLatin1String("running") || team.status == QLatin1String("paused"));
+    QString why;
+    if (!team.phaseModesKnown) why = tr("This hgs does not report phase modes");
+    else if (!can) why = tr("Only a running or paused team switches a phase's mode");
+    else if (draft) {
+        can = false;
+        why = mode == QLatin1String("free")
+            ? tr("A draft phase starts free here; only an approved phase can open for tasks as they come")
+            : tr("A draft phase starts in Standard; it can switch when the team runs and the phase is approved");
+    } else if (mode == QLatin1String("standard")
+               && !(state == QLatin1String("approved") || state == QLatin1String("queued") || state == QLatin1String("running"))) {
+        can = false; why = tr("Phase %1 is not running: only a running phase opens for tasks as they come").arg(phase);
+    } else if (mode == QLatin1String("free")
+               && !(state == QLatin1String("approved") || state == QLatin1String("queued") || state == QLatin1String("running")
+                    || state == QLatin1String("awaiting_acceptance") || state == QLatin1String("done"))) {
+        can = false; why = tr("Phase %1 is not accepted: it has no mode to lock").arg(phase);
+    } else if (mode == QLatin1String("standard") && team.freeMode() && team.freePhase.known && team.freePhase.phase != phase) {
+        can = false; why = tr("Phase %1 already takes tasks as they come; switch it to standard first").arg(team.freePhase.phase);
+    }
+    QString tip = mode == QLatin1String("free")
+        ? tr("Free: the phase stays open and takes tasks as they come until you close it")
+        : tr("Standard: the phase is planned, approved and closed with its build");
+    if (!proposed.isEmpty()) tip += QLatin1Char('\n') + tr("The lead proposes %1").arg(proposed == QLatin1String("free") ? tr("Free") : tr("Standard"));
+    if (!why.isEmpty()) tip += QLatin1Char('\n') + why;
+    auto *box = new QWidget; box->setObjectName("teamPhaseMode");
+    box->setProperty("phase", phase); box->setProperty("mode", mode); box->setProperty("proposed", proposed);
+    box->setToolTip(tip);
+    auto *h = new QHBoxLayout(box); h->setContentsMargins(0, 0, 0, 0); h->setSpacing(0);
+    const auto segment = [this, box, team, phase, mode, can](const QString &text, const QString &value) {
+        auto *button = new QPushButton(text);
+        button->setObjectName(value == QLatin1String("free") ? "teamPhaseModeFree" : "teamPhaseModeStandard");
+        button->setProperty("mode", value); button->setProperty("phase", phase);
+        button->setCheckable(true); button->setChecked(mode == value); button->setFlat(true);
+        button->setCursor(Qt::PointingHandCursor); button->setFocusPolicy(Qt::NoFocus);
+        button->setFixedHeight(20);
+        button->setStyleSheet(QStringLiteral(
+            "QPushButton{background:transparent;border:0;padding:1px 7px;font-size:11px;color:%1;}"
+            "QPushButton:checked{background:%2;color:%3;font-weight:600;}"
+            "QPushButton:disabled{color:%4;}")
+            .arg(colorsFor(m_dark).muted.name(), colorsFor(m_dark).accent.name(), colorsFor(m_dark).accentText.name(),
+                 colorsFor(m_dark).dim.name()));
+        button->setEnabled(can);
+        QObject::connect(button, &QPushButton::clicked, box, [this, team, phase, mode, value, can] {
+            if (!can || mode == value) return;
+            phaseModeDialog(team, phase, value == QLatin1String("free"));
+        });
+        return button;
+    };
+    auto *seg = new QWidget; auto *sh = new QHBoxLayout(seg); sh->setContentsMargins(1, 1, 1, 1); sh->setSpacing(0);
+    sh->addWidget(segment(tr("Standard"), QStringLiteral("standard")));
+    sh->addWidget(segment(tr("Free"), QStringLiteral("free")));
+    seg->setObjectName("teamPhaseModeSegments");
+    seg->setStyleSheet(QStringLiteral("QWidget#teamPhaseModeSegments{background:%1;border:1px solid %2;border-radius:6px;}")
+                           .arg(c.card.name(), c.cardBorder.name()));
+    seg->setFixedHeight(24);
+    h->addWidget(seg);
+    if (!proposed.isEmpty()) {
+        auto *mark = label(tr("proposed"), c.warn, 10, true, "teamPhaseProposed");
+        mark->setToolTip(tr("The lead proposes %1").arg(proposed == QLatin1String("free") ? tr("Free") : tr("Standard")));
+        h->addWidget(mark);
+    }
+    return box;
+}
+
+QWidget *TeamWorkspace::phaseModeStrip(const Team &team)
+{
+    const Colors c = colorsFor(m_dark);
+    auto *strip = new QWidget; strip->setObjectName("teamPhaseModeStrip");
+    auto *h = new QHBoxLayout(strip); h->setContentsMargins(10, 5, 10, 5); h->setSpacing(10);
+    for (const auto &group : phaseGroups(team)) {
+        auto *line = new QWidget; auto *lh = new QHBoxLayout(line); lh->setContentsMargins(0, 0, 0, 0); lh->setSpacing(5);
+        lh->addWidget(label(group.title.isEmpty() ? tr("Phase %1").arg(group.n) : tr("Phase %1 · %2").arg(group.n).arg(group.title), c.muted, 11));
+        if (auto *badge = phaseModeBadge(team, group.n)) lh->addWidget(badge);
+        h->addWidget(line);
+    }
+    h->addStretch();
+    return strip;
 }
 
 QWidget *TeamWorkspace::planModeCard(const Team &team)

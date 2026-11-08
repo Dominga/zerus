@@ -44,7 +44,7 @@ function liveOf(computer: ComputerId, member: TeamMemberView): MemberLive {
   };
 }
 
-export function TeamTab(props: { computer: ComputerId; team: string }) {
+export function TeamTab(props: { computer: ComputerId; team: string; owner?: boolean }) {
   const team = () => teams.team(props.computer, props.team);
   const failure = () => teams.failure(props.computer, `team:${props.team}`) ?? teams.followError(props.computer);
   return (
@@ -53,12 +53,12 @@ export function TeamTab(props: { computer: ComputerId; team: string }) {
         <div class="team-loading" role="status">
           <Show when={failure()} fallback={<span class="dim">{tr("Reading the team…")}</span>}>{(text) => <span class="error-text">{text()}</span>}</Show>
         </div>
-      }>{(shown) => <TeamWorkspace computer={props.computer} team={shown()} failure={failure()} />}</Show>
+      }>{(shown) => <TeamWorkspace computer={props.computer} team={shown()} owner={props.owner ?? true} failure={failure()} />}</Show>
     </div>
   );
 }
 
-function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: string }) {
+function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boolean; failure?: string }) {
   const live = (member: TeamMemberView) => liveOf(props.computer, member);
   const state = createMemo(() => teamState(props.team, live));
   const statuses = createMemo(() => new Map(props.team.members.map((member) => [member.id, memberStatus(props.team, member, live(member))])));
@@ -127,7 +127,7 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
       </Show>
       <div class="team-body" ref={body}>
         <div class="team-canvas">
-          <Show when={graph()} fallback={<TeamPhases computer={props.computer} team={props.team} />}>
+          <Show when={graph()} fallback={<TeamPhases computer={props.computer} team={props.team} owner={props.owner} />}>
             {(shown) => (
               <PlanView
                 team={props.team}
@@ -141,7 +141,7 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
                   const task = props.team.tasks.find((candidate) => candidate.id === id);
                   return task ? <TaskActions computer={props.computer} team={props.team} task={task} /> : <></>;
                 }}
-                phaseActions={(n) => <PhaseModeControl computer={props.computer} team={props.team} phase={n} />}
+                phaseActions={(n) => <PhaseModeControl computer={props.computer} team={props.team} phase={n} owner={props.owner} />}
                 onApprovePhase={(n) => void approvePhase(n)}
               />
             )}
@@ -246,14 +246,14 @@ function TeamBar(props: {
 }
 
 /** The canvas until the plan view takes it: the phases with their progress. */
-function TeamPhases(props: { computer: ComputerId; team: TeamView }) {
+function TeamPhases(props: { computer: ComputerId; team: TeamView; owner: boolean }) {
   return (
     <div class="team-phases">
       <For each={props.team.phases} fallback={<p class="dim team-empty">{tr("No phases yet")}</p>}>{(phase) => (
         <div class="team-phase" data-phase={phase.n} classList={{ draft: phase.state === "draft", running: phase.state === "running", done: phase.state === "done" }}>
           <span class="team-phase-n mono">{phase.n}</span>
           <b class="ell">{phase.title || tr("Phase %1", phase.n)}</b>
-          <PhaseModeControl computer={props.computer} team={props.team} phase={phase.n} />
+          <PhaseModeControl computer={props.computer} team={props.team} phase={phase.n} owner={props.owner} />
           <span class="grow" />
           <span class="team-phase-bar"><i style={{ width: phase.total ? `${(phase.done / phase.total) * 100}%` : "0%" }} /></span>
           <span class="mono dim">{phase.done}/{phase.total}</span>

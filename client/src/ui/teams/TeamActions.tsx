@@ -4,7 +4,7 @@ import { Icon } from "../lib/icons";
 import { teams } from "../../store/teams";
 import { useModel, windowPort } from "./ProposalCards";
 import {
-  TeamActions, barActions, barChips, finishSummary, formText, moreItems, openQuestions, phaseModeChip, phaseModeSwitch, questionClosed, teamModeBadge, stageName, subtreeImpact, taskButtons,
+  TeamActions, barActions, barChips, finishSummary, formText, moreItems, openQuestions, phaseModeChip, phaseModeState, phaseModeSwitch, questionClosed, teamModeBadge, stageName, subtreeImpact, taskButtons,
   type ActTask, type ActTeam, type BarAction, type BarChip, type TaskForm,
 } from "./actions";
 import type { ComputerId } from "../../types";
@@ -40,23 +40,38 @@ function TextDialog(props: {
   );
 }
 
-/** Task #58: a phase's mode chip and its switch (free <-> standard), confirmed first. */
-export function PhaseModeControl(props: { computer: ComputerId; team: ActTeam; phase: number }) {
+/** Task #219: every phase header's Standard | Free segmented toggle (task #58's switch and confirmation). */
+export function PhaseModeControl(props: { computer: ComputerId; team: ActTeam; phase: number; owner?: boolean }) {
   const { model, tick } = useModel((changed) => new TeamActions(windowPort, () => ({ computer: props.computer, team: props.team }), changed));
   const read = () => (tick(), model);
-  // Task #59: the phase's own mode, live from hgs: Free, or Standard for a running phase.
-  const chip = createMemo(() => phaseModeChip(props.team, props.phase));
-  const switching = createMemo(() => phaseModeSwitch(props.team, props.phase));
+  const state = createMemo(() => phaseModeState(props.team, props.phase, props.owner ?? true));
+  const choose = (mode: "free" | "standard") => {
+    const shown = state();
+    if (!shown || !shown.canSwitch || shown.mode === mode) return;
+    void model.phaseMode(props.phase, mode);
+  };
   return (
-    <span class="team-phase-mode" data-phase-mode={chip()?.mode ?? ""} onClick={(event) => event.stopPropagation()}>
-      <Show when={chip()}>{(shown) => <span class={`pt-chip pt-chip-${shown().mode}`} title={shown().tip}>{shown().text}</span>}</Show>
-      <Show when={switching()}>{(shown) => (
-        <button type="button" class="btn ghost small" data-action="phase-mode" data-mode={shown().mode}
-          disabled={!shown().enabled || read().busy} title={shown().why || undefined}
-          onClick={(event) => { event.stopPropagation(); void model.phaseMode(shown().phase, shown().mode); }}>{shown().text}</button>
-      )}</Show>
-      <Show when={read().notice}><span class="danger team-phase-mode-notice" role="status">{read().notice}</span></Show>
-    </span>
+    <Show when={state()}>{(shown) => (
+      <span class="team-phase-mode" data-phase-mode={shown().mode} data-proposed={shown().proposed ?? ""}
+        onClick={(event) => event.stopPropagation()}>
+        <span class="team-phase-toggle" role="group" aria-label={tr("Phase mode")} title={shown().why || shown().tip}>
+          <button type="button" data-mode="standard" aria-pressed={shown().mode === "standard"}
+            classList={{ on: shown().mode === "standard" }}
+            disabled={!shown().canSwitch || shown().mode === "standard" || read().busy}
+            title={shown().mode === "standard" ? shown().tip : shown().why || shown().tip}
+            onClick={(event) => { event.stopPropagation(); choose("standard"); }}>{tr("Standard")}</button>
+          <button type="button" data-mode="free" aria-pressed={shown().mode === "free"}
+            classList={{ on: shown().mode === "free" }}
+            disabled={!shown().canSwitch || shown().mode === "free" || read().busy}
+            title={shown().mode === "free" ? shown().tip : shown().why || shown().tip}
+            onClick={(event) => { event.stopPropagation(); choose("free"); }}>{tr("Free")}</button>
+        </span>
+        <Show when={shown().proposed}>{(proposed) => (
+          <span class="team-phase-proposed" title={tr("The lead's open proposal: %1", proposed() === "free" ? tr("Free") : tr("Standard"))}>{tr("proposed")}</span>
+        )}</Show>
+        <Show when={read().notice}><span class="danger team-phase-mode-notice" role="status">{read().notice}</span></Show>
+      </span>
+    )}</Show>
   );
 }
 

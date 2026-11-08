@@ -21,6 +21,8 @@ export interface ActTeam {
   phases: { n: number; title: string; state: string; status: string; mode?: string }[];
   /** Task #58: the free phase, and whether hgs sends each phase's mode. */
   free_phase?: number | null; phase_modes_known?: boolean;
+  /** Task #219: the lead's open proposals; a switch-plan-mode one marks its phase. */
+  proposals?: { kind: string; mode?: string; change?: unknown }[];
   widenings?: { member?: string; role?: string; from?: string; to?: string }[];
   children?: { team: string; name?: string; status?: string }[];
 }
@@ -83,6 +85,64 @@ export function phaseModeChip(team: ActTeam, n: number): ModeChip | undefined {
   if (free) return { mode: "free", text: tr("Free mode"), tip: tr("Free planning: the phase stays open and takes tasks as they come until you close it") };
   if (!team.phase_modes_known || phase.state !== "running") return undefined;
   return { mode: "standard", text: tr("Standard mode"), tip: tr("Standard planning: the phase is planned, approved and closed with its build") };
+}
+
+/**
+ * Task #219: the segmented Standard | Free toggle of every phase header, in
+ * every plan mode. It names the phase's current mode, the lead's open proposal
+ * beside it, and whether this viewer may switch it: only the owner does
+ * (`phase-mode`); a lead or member session sees the same state read-only. A
+ * draft shows the mode it will start in and says on hover why the core cannot
+ * switch it yet.
+ */
+export interface PhaseModeState {
+  phase: number;
+  mode: "free" | "standard";
+  /** The lead's open switch-plan-mode proposal for this phase, if any. */
+  proposed?: "free" | "standard";
+  /** The mode the other segment asks for. */
+  target: "free" | "standard";
+  /** The mode's one-line explanation, shown as the toggle's tooltip. */
+  tip: string;
+  /** Why it cannot be switched now; "" when it can. */
+  why: string;
+  canSwitch: boolean;
+  /** A draft phase: the mode it will start in, not one it runs in yet. */
+  draft: boolean;
+  /** The viewer is a lead or member session, not the owner. */
+  readOnly: boolean;
+}
+
+export function phaseModeState(team: ActTeam, n: number, owner = true): PhaseModeState | undefined {
+  const phase = team.phases.find((found) => found.n === n);
+  if (!phase) return undefined;
+  const free = (team.free_phase ?? 0) === n || phase.mode === "free"
+    || (!phase.mode && !team.phase_modes_known && team.plan_mode === "free");
+  const mode: "free" | "standard" = free ? "free" : "standard";
+  const target: "free" | "standard" = free ? "standard" : "free";
+  const draft = phase.state === "draft";
+  const proposal = team.proposals?.find((found) => {
+    if (found.kind !== "switch-plan-mode") return false;
+    const change = found.change && typeof found.change === "object" ? found.change as { phase?: number } : {};
+    return change.phase === n || (!change.phase && phase.state === "running");
+  });
+  const proposed = proposal?.mode === "free" ? "free" as const : proposal?.mode === "standard" ? "standard" as const : undefined;
+  const tip = (mode === "free"
+    ? tr("Free: the phase stays open and takes tasks as they come until you close it")
+    : tr("Standard: the phase is planned, approved and closed with its build"))
+    + (proposed ? `\n${tr("The lead proposes %1", proposed === "free" ? tr("Free") : tr("Standard"))}` : "");
+  let why = "";
+  if (!owner) why = tr("Only the owner switches a phase's mode; the lead proposes it");
+  else if (!["running", "paused"].includes(team.status)) why = tr("Only a running or paused team switches a phase's mode");
+  else if (draft) why = mode === "free"
+    ? tr("A draft phase starts free here; only an approved phase can open for tasks as they come")
+    : tr("A draft phase starts in Standard; it can switch when the team runs and the phase is approved");
+  else if (target === "free" && !["approved", "running"].includes(phase.state)) why = tr("Phase %1 is not running: only a running phase opens for tasks as they come", n);
+  else if (target === "standard" && !["approved", "running", "awaiting_acceptance", "done", "accepted"].includes(phase.state))
+    why = tr("Phase %1 is not accepted: a draft has no mode to lock", n);
+  else if (target === "free" && (team.free_phase ?? 0) > 0 && (team.free_phase ?? 0) !== n)
+    why = tr("Phase %1 already takes tasks as they come; switch it to standard first", team.free_phase ?? 0);
+  return { phase: n, mode, proposed, target, tip, why, canSwitch: !why, draft, readOnly: !owner };
 }
 
 /** Task #59: the team bar's mode badge (Qt teamHeaderPlanMode), with the free phase it names. */

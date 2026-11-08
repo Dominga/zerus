@@ -2254,5 +2254,19 @@
 "No other live session to adopt": "Нет другой живой сессии для перехода",
 "Swap…": "Заменить…",
 "Member actions": "Действия участника",
-"Swap member…": "Заменить участника…"
+"Swap member…": "Заменить участника…",
+"Phase mode": "Режим фазы",
+"Standard": "Стандартный",
+"The lead's open proposal: %1": "Открытое предложение лида: %1",
+"proposed": "предложено",
+"Free: the phase stays open and takes tasks as they come until you close it": "Свободный режим: фаза остаётся открытой и принимает задачи по мере поступления, пока вы её не закроете",
+"Standard: the phase is planned, approved and closed with its build": "Стандартный режим: фаза планируется, утверждается и закрывается вместе со своей сборкой",
+"The lead proposes %1": "Лид предлагает: %1",
+"Only the owner switches a phase's mode; the lead proposes it": "Только владелец переключает режим фазы; лид может предложить его",
+"Only a running or paused team switches a phase's mode": "Режим фазы переключается только у запущенной или приостановленной команды",
+"A draft phase starts free here; only an approved phase can open for tasks as they come": "Черновик фазы начнётся свободным; открыть фазу для задач по мере поступления можно только после утверждения",
+"A draft phase starts in Standard; it can switch when the team runs and the phase is approved": "Черновик фазы начнётся в стандартном режиме; переключить его можно, когда команда запущена и фаза утверждена",
+"Phase %1 is not running: only a running phase opens for tasks as they come": "Фаза %1 не выполняется: только выполняющуюся фазу можно открыть для задач по мере поступления",
+"Phase %1 is not accepted: a draft has no mode to lock": "Фаза %1 не принята: у неё нет режима для блокировки",
+"Phase %1 already takes tasks as they come; switch it to standard first": "Фаза %1 уже принимает задачи по мере поступления; сначала переключите её на стандартный режим"
 }

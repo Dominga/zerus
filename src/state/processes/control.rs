@@ -109,6 +109,48 @@ pub(crate) struct WorkSample {
     rows: Option<Result<BTreeMap<u32, Process>>>,
 }
 impl WorkSample {
+    /// Task 278: the background jobs the agent's own hooks registered (a
+    /// Claude `run_in_background` Bash, a Codex exec session) that still run:
+    /// what the session waits on, whatever its activity says. A Claude job is
+    /// confirmed against the agent's processes when the table is readable.
+    /// They are never counted as the session's Background work
+    /// (`process_work`); the team's look and stuck rule read them.
+    pub(crate) fn registered(&mut self, record: &Value, live: bool) -> Value {
+        if !live || !process_alive(record) || string(record, "run_id").is_empty() {
+            return json!([]);
+        }
+        let jobs: Jobs = serde_json::from_value(record["shell_jobs"].clone()).unwrap_or_default();
+        let mut running: Vec<&Value> = jobs
+            .values()
+            .filter(|job| {
+                job["background"] == true
+                    && job["run_id"] == record["run_id"]
+                    && matches!(string(job, "status"), "starting" | "running" | "stopping")
+                    && !string(job, "command").trim().is_empty()
+            })
+            .collect();
+        if running.is_empty() {
+            return json!([]);
+        }
+        if string(record, "agent") == "claude" {
+            if let Ok(rows) = self.rows.get_or_insert_with(process_table).clone().and_then(|rows| verified_table(record, rows)) {
+                let lines: Vec<String> = candidates(record, &rows).iter().map(|pid| rows[pid].command.clone()).collect();
+                running.retain(|job| {
+                    // Claude runs `bash -c ... eval '<command>'`.
+                    let probe: String = string(job, "command").trim().replace('\'', "'\"'\"'").chars().take(200).collect();
+                    lines.iter().any(|line| line.contains(&probe))
+                });
+            }
+        }
+        running.sort_by(|a, b| a["started_at"].as_f64().unwrap_or(0.0).total_cmp(&b["started_at"].as_f64().unwrap_or(0.0)));
+        json!(running
+            .iter()
+            .take(crate::state::session_state::MAX_JOBS)
+            .map(|job| json!({"id":job["native_id"],"command":journal::clipped(&job["command"],240),
+                "description":journal::clipped(&job["description"],160),"started_at":job["started_at"],"provider":job["provider"]}))
+            .collect::<Vec<_>>())
+    }
+
     pub(crate) fn summary(&mut self, record: &Value, live: bool) -> Value {
         let unavailable = || json!({"count":null,"started_at":null,"command":"","sampled_at":now()});
         if !live || !process_alive(record) || string(record, "run_id").is_empty()

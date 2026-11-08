@@ -28,7 +28,56 @@ pub(crate) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS working_messages(
     safe_point TEXT NOT NULL DEFAULT '', injected_at REAL, read_at REAL, read_via TEXT NOT NULL DEFAULT '',
     read_request TEXT NOT NULL DEFAULT '', expires REAL NOT NULL);
     CREATE INDEX IF NOT EXISTS working_messages_to ON working_messages(team,to_member,state,at);
-    CREATE INDEX IF NOT EXISTS working_messages_expires ON working_messages(expires);";
+    CREATE INDEX IF NOT EXISTS working_messages_expires ON working_messages(expires);
+    CREATE TABLE IF NOT EXISTS working_jobs(team TEXT NOT NULL, member TEXT NOT NULL, key TEXT NOT NULL,
+    kind TEXT NOT NULL, what TEXT NOT NULL, command TEXT NOT NULL, started_at REAL NOT NULL, ended_at REAL,
+    PRIMARY KEY(team, member, key));
+    CREATE INDEX IF NOT EXISTS working_jobs_team ON working_jobs(team, ended_at, started_at);";
+
+/// Task 278: ended job rows kept per team; older ones go.
+pub(crate) const JOBS_KEPT: i64 = 500;
+
+/// Task 278: a member's job started: its kind, what it is, its command and
+/// start. A job already recorded keeps its row.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn job_started(tx: &Transaction, team: &str, member: &str, key: &str, kind: &str, what: &str, command: &str, started_at: f64) -> anyhow::Result<()> {
+    tx.execute(
+        "INSERT OR IGNORE INTO working_jobs(team,member,key,kind,what,command,started_at,ended_at) VALUES(?1,?2,?3,?4,?5,?6,?7,NULL)",
+        params![team, member, key, kind, super::secrets::redact_working(what), super::secrets::redact_working(command), started_at],
+    )?;
+    Ok(())
+}
+
+/// Task 278: a member's job ended (it is no longer listed).
+pub(crate) fn job_ended(tx: &Transaction, team: &str, member: &str, key: &str, at: f64) -> anyhow::Result<()> {
+    tx.execute("UPDATE working_jobs SET ended_at=?4 WHERE team=?1 AND member=?2 AND key=?3 AND ended_at IS NULL", params![team, member, key, at])?;
+    Ok(())
+}
+
+/// Task 278: keeps at most `JOBS_KEPT` ended rows of the team.
+pub(crate) fn prune_jobs(tx: &Transaction, team: &str) -> anyhow::Result<()> {
+    tx.execute(
+        "DELETE FROM working_jobs WHERE team=?1 AND ended_at IS NOT NULL AND rowid NOT IN
+            (SELECT rowid FROM working_jobs WHERE team=?1 AND ended_at IS NOT NULL ORDER BY ended_at DESC LIMIT ?2)",
+        params![team, JOBS_KEPT],
+    )?;
+    Ok(())
+}
+
+/// Task 278: the team's jobs, the running ones first, then the latest ended,
+/// at most `limit`: what each member waits on, for the lead and its playbook.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn jobs(db: &Connection, team: &str, limit: i64) -> anyhow::Result<Vec<serde_json::Value>> {
+    let mut statement = db.prepare(
+        "SELECT member,kind,what,command,started_at,ended_at FROM working_jobs WHERE team=?1
+         ORDER BY ended_at IS NOT NULL, COALESCE(ended_at, started_at) DESC LIMIT ?2",
+    )?;
+    let rows = statement.query_map(params![team, limit], |row| {
+        Ok(json!({"member":row.get::<_, String>(0)?,"kind":row.get::<_, String>(1)?,"what":row.get::<_, String>(2)?,
+            "command":row.get::<_, String>(3)?,"started_at":row.get::<_, f64>(4)?,"ended_at":row.get::<_, Option<f64>>(5)?}))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
 
 /// A Zerus team message (a hand-out with its dependencies' reports may be
 /// long); a member's own message keeps lore's 2,000 characters.

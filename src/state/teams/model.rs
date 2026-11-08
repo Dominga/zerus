@@ -639,6 +639,10 @@ pub(crate) struct Member {
     /// the session and are not Background work (G7).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub services: Vec<MemberService>,
+    /// Task 278: what the member waits on now: the build Zerus runs for it, a
+    /// background job its hooks registered, Background work under a budget.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jobs: Vec<MemberJob>,
     /// The conversation whose notifications the dispatcher muted: a member
     /// works for the lead, so its replies do not call the owner. Muted once
     /// per conversation; the owner may unmute it.
@@ -1127,6 +1131,19 @@ fn is_zero_u32(value: &u32) -> bool {
 
 fn is_zero_f64(value: &f64) -> bool {
     *value == 0.0
+}
+
+/// Task 278: a job a member waits on, with its start: `kind` build (a Zerus
+/// build), shell (a background job its hooks registered) or job (Background
+/// work under a declared budget).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct MemberJob {
+    pub kind: String,
+    pub what: String,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub since: f64,
 }
 
 /// An MCP server or service a member's session runs (G7): shown on the member

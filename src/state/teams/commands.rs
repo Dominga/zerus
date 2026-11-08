@@ -1134,6 +1134,12 @@ fn session_account(member: &Member) -> String {
 /// A team as the session list shows it: members with their sessions and each
 /// task's state, without descriptions, reports or the feed. The list never
 /// reads the live session listing: the desktop polls it often (C1).
+/// Tests: the status summary of a team.
+#[cfg(test)]
+pub(crate) fn summary_for_test(team: &Team) -> Value {
+    summary(team, false)
+}
+
 fn summary(team: &Team, include_cancelled: bool) -> Value {
     let count = |status: TaskStatus| team.tasks.iter().filter(|task| task.status == status).count();
     // U58: the dashboard hides cancelled tasks and the phases whose tasks are
@@ -1153,7 +1159,9 @@ fn summary(team: &Team, include_cancelled: bool) -> Value {
                 "account":m.account,"session_account":session_account(m),
                 "session":m.session,"state":m.state,"error":m.error,"queue":member_queue(team, &m.id),
                 "stage_queue":super::stages::queue(team, &m.id),
-                "services":m.services,"question":m.permission});
+                "services":m.services,"question":m.permission,
+                // Task 278: what it waits on, with each job's start.
+                "jobs":m.jobs,"waiting_for":super::look::job_words(&m.jobs.iter().map(|job| super::look::WaitJob { what: job.what.clone(), since: job.since }).collect::<Vec<_>>())});
             // Task 115: the state contract's own state, so the session list's
             // member card says Waiting for you rather than busy.
             let (state, reason) = crate::state::session_state::member_state(m);
@@ -3289,6 +3297,11 @@ fn look_hooks(team: &Team, member: &Member, seen: Option<&super::dispatcher::See
         background: seen.is_some_and(|seen| seen.background) || member.background_since.is_some(),
         building: seen.is_some_and(|seen| seen.building),
         build_label: seen.map(|seen| seen.build_label.clone()).unwrap_or_default(),
+        // Task 278: the jobs it waits on, from the live listing, else as recorded.
+        jobs: match seen {
+            Some(seen) => seen.jobs.iter().map(|job| super::look::WaitJob { what: job.what.clone(), since: job.since }).collect(),
+            None => member.jobs.iter().map(|job| super::look::WaitJob { what: job.what.clone(), since: job.since }).collect(),
+        },
         tool: seen.map(|seen| seen.tool.clone()).unwrap_or_default(),
         last_event_at: last.or(member.seen_event_at),
         quiet,

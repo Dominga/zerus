@@ -110,6 +110,26 @@ class Tree:
                 # Keep the original pidfd; unreadable never means exited.
                 pass
 
+    def reap_adopted(self, original_pid):
+        """Reap only retained descendants adopted by this subreaper.
+
+        A dead orphan still keeps its process group present until it is reaped.
+        The original Popen child owns the test's exit status: never consume it,
+        and never use waitpid(-1) while that original test is running.
+        """
+        for pid, (_, fd) in list(self.owned.items()):
+            if pid == original_pid:
+                continue
+            try:
+                result = os.waitid(os.P_PIDFD, fd, os.WEXITED | os.WNOHANG)
+            except ChildProcessError:
+                continue  # Still belongs to its live original parent.
+            if result is not None:
+                if result.si_pid != pid:
+                    raise RuntimeError('adopted descendant identity changed')
+                os.close(fd)
+                del self.owned[pid]
+
     def cleanup(self):
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
@@ -139,8 +159,9 @@ class Tree:
 
 
 def supervise(command, seconds, limit):
-    if not sys.platform.startswith('linux') or not hasattr(os, 'pidfd_open') or not hasattr(signal, 'pidfd_send_signal'):
-        raise RuntimeError('bounded fixture requires Linux pidfds')
+    if not sys.platform.startswith('linux') or not hasattr(os, 'pidfd_open') \
+            or not hasattr(os, 'P_PIDFD') or not hasattr(signal, 'pidfd_send_signal'):
+        raise RuntimeError('bounded fixture requires Linux pidfds and waitid')
     if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
         raise OSError(ctypes.get_errno(), 'cannot establish private fixture subreaper')
     tree = Tree(limit)
@@ -154,6 +175,7 @@ def supervise(command, seconds, limit):
         while True:
             tree.prune()
             tree.collect()
+            tree.reap_adopted(child.pid)
             if len(tree.owned) > limit:
                 print('bounded fixture: process budget exceeded', file=sys.stderr)
                 return 125

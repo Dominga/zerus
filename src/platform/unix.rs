@@ -1157,7 +1157,29 @@ pub fn run_bounded(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = spawn_in_turn(command).map_err(RunError::Spawn)?;
+    let mut child = {
+        // Keep the original budget while another thread owns the spawn turn.
+        let _turn = loop {
+            if cancelled() || Instant::now() >= deadline {
+                return Err(RunError::Stopped);
+            }
+            match SPAWN.try_lock() {
+                Ok(turn) => break turn,
+                Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(
+                    Duration::from_millis(2)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                ),
+            }
+        };
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        helper_group::admit().map_err(RunError::Spawn)?;
+        // The turn, policy query or cancellation check can consume time.
+        if cancelled() || Instant::now() >= deadline {
+            return Err(RunError::Stopped);
+        }
+        command.spawn().map_err(RunError::Spawn)?
+    };
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
     #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -1038,6 +1038,37 @@ impl Pump {
             == Some(ComputerStatus::Live)
     }
 
+    /// Keep cache warm's fleet poll: each computer whose listing is current
+    /// (streamed or polled, never cached or reconnecting), with the rows
+    /// `pick` keeps, under one lock. Rows `pick` leaves are not copied.
+    pub(crate) fn current_rows(
+        &self,
+        pick: impl Fn(&ViewRow) -> bool,
+    ) -> Vec<(String, Vec<ViewRow>)> {
+        let inner = self.lock();
+        inner
+            .mirror
+            .computers
+            .iter()
+            .filter(|(computer, rows)| {
+                matches!(
+                    rows.status,
+                    Some(ComputerStatus::Live | ComputerStatus::Polled)
+                ) && !inner.stale.contains_key(*computer)
+            })
+            .map(|(computer, rows)| {
+                (
+                    computer.clone(),
+                    rows.rows
+                        .values()
+                        .filter(|&row| pick(row))
+                        .cloned()
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
     /// Drains a change sink on its own thread until every sender is gone,
     /// running `observe` on each change just before it is queued.
     #[cfg_attr(

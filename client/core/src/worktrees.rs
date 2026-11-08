@@ -41,7 +41,7 @@ pub(crate) fn catalog_shape(value: &Value) -> bool {
         && value.get("state").is_some_and(Value::is_string)
 }
 
-fn hgs_args(computer: &ComputerId, words: &[&str]) -> Vec<String> {
+pub(crate) fn hgs_args(computer: &ComputerId, words: &[&str]) -> Vec<String> {
     let mut args: Vec<String> = computer
         .alias()
         .map(|alias| format!("@{alias}"))

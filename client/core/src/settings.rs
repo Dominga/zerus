@@ -179,6 +179,13 @@ pub const KEYS: &[Key] = &[
     },
     // Task 74: Qt's SessionLeads JSON object, by session identity.
     key("workspace/sessionLeads", Kind::Text("")),
+    // WhiteWh fork: Keep cache warm, Qt's compact JSON object of session
+    // identity -> hours (CacheKeepalive.cpp); its family imports it once.
+    Key {
+        name: crate::cache_keepalive::KEY,
+        kind: Kind::Text(""),
+        seeded: false,
+    },
     // A first-G3 family import handles this separately from the old seed.
     Key {
         name: "workspace/allSwarmProjects",

@@ -35,6 +35,7 @@ const FAMILY_LABELS: Record<string, () => string> = {
   "session-splitter": () => tr("Sessions list width"),
   "project-folder-splitter": () => tr("Project folders width"),
   "inspector-panel": () => tr("Side panel"),
+  "cache-keep-warm": () => tr("Keep cache warm"),
 };
 
 /** The section's lines: imported keys, keys that kept a Zerus choice, families

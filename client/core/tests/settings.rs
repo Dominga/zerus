@@ -1800,3 +1800,43 @@ fn the_explicit_sessions_dock_width_wins_over_the_legacy_splitter() {
         "invalid sessions width"
     );
 }
+
+/// WhiteWh fork: Qt's Keep cache warm hours (`workspace/cacheKeepWarm`, its
+/// compact JSON as a QByteArray) import once with only the sessions that are
+/// on, under the same identities; a choice already made in Next wins.
+#[test]
+fn keep_cache_warm_hours_import_once_from_qt() {
+    use zerus_client_core::cache_keepalive::{self, KEY};
+    let (a, b) = ("a".repeat(64), "b".repeat(64));
+    let ini = format!(
+        "[workspace]\ncacheKeepWarm=\"@ByteArray({{\\\"{a}\\\":3,\\\"{b}\\\":0,\\\"short\\\":2}})\"\n"
+    );
+    let mut on = serde_json::Map::new();
+    on.insert(a, json!(3));
+    for (existing, expected) in [(None, on), (Some("{}"), serde_json::Map::new())] {
+        let scratch = Scratch::new("cache-keep-warm");
+        let qt = scratch.0.join("qt.ini");
+        fs::write(&qt, &ini).unwrap();
+        let path = scratch.0.join("settings.json");
+        legacy_switch(
+            &path,
+            existing.map_or(json!({}), |value| json!({ KEY: value })),
+        );
+        let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+        assert!(settings.flush_within(FLUSH));
+        assert_eq!(cache_keepalive::parse(&settings.text(KEY)), expected);
+        drop(settings);
+        let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            saved["g3"]["families"]["cache-keep-warm"]["keys"],
+            json!([KEY])
+        );
+        let outcome = &saved["g3_outcome"]["cache-keep-warm"];
+        let (imported, kept) = if existing.is_none() {
+            (json!([KEY]), json!([]))
+        } else {
+            (json!([]), json!([KEY]))
+        };
+        assert_eq!((&outcome["imported"], &outcome["kept"]), (&imported, &kept));
+    }
+}

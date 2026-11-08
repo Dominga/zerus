@@ -13,7 +13,7 @@ import { createImageHandoff, fittedImage } from "./attachment-image";
 import { attachmentFetch, attachmentMedia, attachmentOpen, attachmentPin, attachmentUnpin, copyVerbatim, inTauri } from "../../bridge";
 import { posterUrl, visiblePoster } from "./video-poster";
 import { createVirtualizer, elementScroll, type Range } from "@tanstack/solid-virtual";
-import { notify } from "../../store/actions";
+import { followedFor, notify } from "../../store/actions";
 import { previews } from "../../store/attachments";
 import { mediaPlayback, retainedMediaId, setRetainedMediaId } from "../../store/mediaPlayback";
 import { pageHidden } from "../../store/visibility";
@@ -23,7 +23,7 @@ import { createStore, reconcile } from "solid-js/store";
 import { Icon } from "../lib/icons";
 import { selected, toast, contentScale, subagentOpen, setSubagentOpen, setMenu, setDetailTab, type MenuEntry } from "../../store/ui";
 import { activity } from "../../store/session";
-import { orderedRows } from "../../store/catalog";
+import { computerOffline, orderedRows } from "../../store/catalog";
 import { flag, num, setSetting } from "../../store/settings";
 import type { ActivitySource, AttachmentScope } from "../../store/activitySource";
 import { composer, draftKey } from "../../store/composer";
@@ -38,6 +38,7 @@ import { activityAll, activityFlow, activityRange, measureActivityRows, activity
 import { openExternal, openSessionFile } from "./sessionFiles";
 import { SessionFileDialog } from "./SessionFileDialog";
 import { captionText, statusOf } from "./SessionCard";
+import { formatElapsed, workingLine } from "./inspector-data";
 import { foldedBody, noticeBar, type SystemNotice } from "./notices";
 import { NOTICE_MODES, foldNoticeTurns, sessionNoticeMode, withSessionNoticeMode, type NoticeMode } from "./leadNotices";
 import { teams, sessionIs } from "../../store/teams";
@@ -744,7 +745,8 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope; sourceId?:
   if (it.kind === "folded") return <FoldedItem item={it} open={open()} toggle={toggleOpen} scope={props.scope} sourceId={props.sourceId} />;
   if (it.kind === "system" && it.notice) return <NoticeCard item={it} notice={it.notice} open={open()} toggle={toggleOpen} />;
   if (it.kind === "media") return <MediaCard item={it} scope={rowScope(it, props.scope)} sourceId={props.sourceId} postersEnabled={props.postersEnabled} expanded={props.expanded} onExpanded={props.onExpanded} />;
-  if (it.kind === "context") return <div class="act-label eyebrow" id={`item-${it.id}`}>{it.body}</div>;
+  // A context line with a time (a kept-warm cache) shows it apart, never after a dot.
+  if (it.kind === "context") return <div class="act-label eyebrow" id={`item-${it.id}`}>{it.body}<Show when={it.at}><span class="act-time"> {it.at}</span></Show></div>;
   if (it.kind === "thinking") return <div class="act-thinking" id={`item-${it.id}`} classList={{ inherited: !!it.inherited }}><span class="eyebrow">{tr("Thinking")}</span><p>{it.body}</p></div>;
   if (it.kind === "report")
     return (
@@ -1232,8 +1234,25 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
   }));
 
   const scope = createMemo(() => source().attachmentScope?.(), undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
-  const liveTool = () => view.tool;
   const states = () => view.pane;
+  // Qt parity (I5d): the working line (WorkingLine) while the selected live
+  // session works: what it does now and how long the turn has run.
+  const working = createMemo(() => {
+    const row = s();
+    if (!row || source().readOnly || subagentOpen() || props.session) return undefined;
+    const details = followedFor(row.key).value;
+    const line = workingLine(details, { online: !computerOffline(row.computer), state: row.state, processState: row.processState }, !!composer.view()?.inspect_error);
+    const started = Number(details?.turn_started);
+    return line === undefined ? undefined : { line, started: Number.isFinite(started) && started > 0 ? started : 0 };
+  });
+  // The turn's clock ticks each second only while the line shows a start.
+  const [now, setNow] = createSignal(Date.now() / 1000);
+  createEffect(on(() => !!working()?.started, (ticking) => {
+    if (!ticking) return;
+    setNow(Date.now() / 1000);
+    const timer = setInterval(() => setNow(Date.now() / 1000), 1000);
+    onCleanup(() => clearInterval(timer));
+  }));
   const fileSession = () => {
     const id = source().target()?.id;
     return orderedRows().find((row) => row.key === id);
@@ -1345,9 +1364,12 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
                 </div>
               </Show>
             </Show>
-            <Show when={states().working && liveTool()}>
-              <div class="act-live"><span class="typing"><i /><i /><i /></span>{tr("Agent is running")} <b class="mono ell">{liveTool()}</b></div>
-            </Show>
+            <Show when={working()}>{(shown) => (
+              <div class="act-live" role="status" title={shown().line} aria-label={tr("Working: %1", shown().line)}>
+                <span class="typing"><i /><i /><i /></span><b class="ell">{shown().line}</b>
+                <Show when={shown().started}><span class="act-live-time tabular">{formatElapsed(now() - shown().started)}</span></Show>
+              </div>
+            )}</Show>
             <Show when={states().attention}>
               <div class="notice warn"><Icon name="circle-alert" size={14} /><div><b>{captionText(s()?.caption ?? "")}.</b> {tr("Answer it in the agent's terminal or in the Zerus app; answering here arrives with the session actions.")}</div></div>
             </Show>

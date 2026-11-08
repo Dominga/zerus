@@ -1,4 +1,5 @@
 import { Show, createMemo, createSignal, onCleanup } from "solid-js";
+import { steadyTitle } from "../lib/steady-title";
 import { Icon } from "../lib/icons";
 import { followedFor } from "../../store/actions";
 import { headerKeepWarm } from "./keep-warm";
@@ -19,9 +20,11 @@ export function KeepWarmChip(props: { session: Session }) {
   onCleanup(() => clearInterval(timer));
   const inspected = () => followedFor(props.session.key).value;
   const view = createMemo(() => (props.session.state === "archived" ? undefined : headerKeepWarm(currentKeepWarm(props.session, inspected()), now(), contextTokensOf(inspected()))));
+  // Its time left changes each minute; the tooltip holds still under the pointer (zerus-5ryrx).
+  const tip = steadyTitle(() => view()?.tooltip);
   return (
     <Show when={!!view()}>
-      <button type="button" class="dh-warm" title={view()?.tooltip} aria-label={view()?.label} onClick={revealKeepWarm}>
+      <button type="button" class="dh-warm" title={tip.title()} onPointerEnter={tip.enter} onPointerLeave={tip.leave} aria-label={view()?.label} onClick={revealKeepWarm}>
         <Icon name="zap" size={12} /><span>{view()?.mark}</span>
       </button>
     </Show>

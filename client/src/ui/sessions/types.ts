@@ -268,6 +268,8 @@ export interface ActivityItem {
   replies?: Reply[];
   /** History a fork began from, shown read-only and muted. */
   inherited?: boolean;
+  /** A search hit's excerpt of a longer message: no Copy as Markdown of the whole reply. */
+  excerpt?: boolean;
 }
 
 export type VoiceState =

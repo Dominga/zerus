@@ -417,7 +417,14 @@ fn held_checks_back_off_from_two_to_thirty_seconds() {
     };
     let mut delays = Vec::new();
     for _ in 0..6 {
-        c.checked(&key, handle, &plan, Basis::Handed, Checked::InProgress);
+        c.checked(
+            &key,
+            handle,
+            &plan,
+            Basis::Handed,
+            Checked::InProgress,
+            None,
+        );
         delays.push(
             c.lock()
                 .composers
@@ -817,6 +824,8 @@ struct Resume {
     offered: Mutex<Vec<ResumeOffer>>,
     checks: Mutex<VecDeque<Checked>>,
     checked: Mutex<Vec<ResumePlan>>,
+    /// The run a settled check names as its resume's.
+    resumed: Mutex<Option<String>>,
 }
 fn resume_route(c: &Composers, service: &Arc<Resume>) {
     let (offer, look) = (service.clone(), service.clone());
@@ -834,7 +843,7 @@ fn resume_route(c: &Composers, service: &Arc<Resume>) {
             let plan =
                 session_resume::plan(name, checkpoint, resume, stdin).expect("a valid original");
             if !handing(&plan) {
-                return ResumeAnswer::Settled(SendAnswer::Unsent(NOT_SENT.into()));
+                return ResumeAnswer::Settled(SendAnswer::Unsent(NOT_SENT.into()), None);
             }
             offer.handed.fetch_add(1, Ordering::SeqCst);
             if let Some(hold) = lock(&offer.hold).take() {
@@ -844,9 +853,13 @@ fn resume_route(c: &Composers, service: &Arc<Resume>) {
         }),
         check: Arc::new(move |plan| {
             lock(&look.checked).push(plan.clone());
-            lock(&look.checks)
+            let checked = lock(&look.checks)
                 .pop_front()
-                .unwrap_or(Checked::InProgress)
+                .unwrap_or(Checked::InProgress);
+            let resumed = matches!(checked, Checked::Settled(_))
+                .then(|| lock(&look.resumed).clone())
+                .flatten();
+            (checked, resumed)
         }),
     });
 }
@@ -857,11 +870,14 @@ fn resume_answer(
     *lock(&service.answer) = Some(Box::new(answer));
 }
 fn resume_recorded(plan: &ResumePlan) -> ResumeAnswer {
-    ResumeAnswer::Settled(SendAnswer::Recorded(Settled {
-        request_id: plan.send_request_id.clone(),
-        status: "submitted".into(),
-        input_sha256: String::new(),
-    }))
+    ResumeAnswer::Settled(
+        SendAnswer::Recorded(Settled {
+            request_id: plan.send_request_id.clone(),
+            status: "submitted".into(),
+            input_sha256: String::new(),
+        }),
+        None,
+    )
 }
 /// `session`, stopped and resumable, open on this computer.
 fn open_stopped(c: &Composers, fake: &send::tests::Fake, session: SessionRef) -> ComposerView {
@@ -989,7 +1005,7 @@ fn a_handed_resume_and_send_ends_as_its_send_ended() {
         resume_route(&c, &service);
         let settled = Mutex::new(Some(answer));
         resume_answer(&service, move |_| {
-            ResumeAnswer::Settled(lock(&settled).take().expect("answered once"))
+            ResumeAnswer::Settled(lock(&settled).take().expect("answered once"), None)
         });
         let view = open_stopped(&c, &fake, local());
         start_and_send(
@@ -1074,7 +1090,10 @@ fn a_resume_and_send_the_service_does_not_take_starts_directly() {
     let (c, fake) = send_hub_on(&drafts(&root));
     let service = Arc::new(Resume::default());
     resume_route(&c, &service);
-    *lock(&service.early) = Some(ResumeAnswer::Settled(SendAnswer::Unsent(NOT_SENT.into())));
+    *lock(&service.early) = Some(ResumeAnswer::Settled(
+        SendAnswer::Unsent(NOT_SENT.into()),
+        None,
+    ));
     let view = open_stopped(&c, &fake, local());
     start_and_send(
         &c,
@@ -1182,4 +1201,82 @@ fn a_reloaded_resume_and_send_is_only_looked_up() {
     assert_eq!(view.held, None);
     assert_eq!(lock(&looked.checked)[0].resume_request_id, id);
     assert!(lock(&looked.offered).is_empty());
+}
+
+/// The open session shows `run` now, in the same conversation.
+fn observe_run(c: &Composers, run: &str) {
+    let mut details = ready();
+    details["run_id"] = serde_json::json!(run);
+    let mut batch = state(details);
+    batch.activity[0].computer = zerus_client_core::ComputerId::from("");
+    c.observe(&batch);
+}
+
+/// zerus-5wmh.66.4.9.3, review-win-e's control on #1762: after the session
+/// shows the resumed run, with no native event of the message yet, a handed
+/// resume's recorded message stays as its Sent row, now the resumed run's,
+/// instead of vanishing with the stopped run's rows; the draft clears as for
+/// every recorded send. Through the offer's own answer and through a later
+/// check alike.
+#[test]
+fn a_handed_resume_keeps_its_sent_row_across_the_resumed_run() {
+    for path in ["offer", "check"] {
+        let root = dir(&format!("handed-resume-row-{path}"));
+        let (c, fake) = send_hub_on(&drafts(&root));
+        let service = Arc::new(Resume::default());
+        resume_route(&c, &service);
+        let (release, hold) = std::sync::mpsc::channel();
+        *lock(&service.hold) = Some(hold);
+        if path == "offer" {
+            resume_answer(&service, |plan| {
+                ResumeAnswer::Settled(
+                    SendAnswer::Recorded(Settled {
+                        request_id: plan.send_request_id.clone(),
+                        status: "submitted".into(),
+                        input_sha256: String::new(),
+                    }),
+                    Some("run-2".into()),
+                )
+            });
+        } else {
+            resume_answer(&service, |plan| ResumeAnswer::Pending(plan.clone()));
+            *lock(&service.resumed) = Some("run-2".into());
+        }
+        let view = open_stopped(&c, &fake, local());
+        start_and_send(
+            &c,
+            &view,
+            "after resume",
+            zerus_client_core::send::StartChoice::Resume,
+        );
+        let view = until(&c, |v| v.cancel_locked);
+        assert_eq!(view.local.len(), 1, "{path}");
+        assert_eq!(view.local[0].run_id, "run-1", "{path}: the stopped run");
+        // The resumed run's inspection arrives while the service holds it.
+        observe_run(&c, "run-2");
+        release.send(()).unwrap();
+        let view = if path == "offer" {
+            until(&c, |v| !v.sending && !v.cancel_send)
+        } else {
+            until(&c, |v| v.delivery_pending);
+            lock(&service.checks).push_back(Checked::Settled(SendAnswer::Recorded(Settled {
+                request_id: String::new(),
+                status: "submitted".into(),
+                input_sha256: String::new(),
+            })));
+            ticks(&c, &fake, LONGEST, |v| !v.delivery_pending)
+        };
+        assert!(view.text.is_empty(), "{path}: the draft clears");
+        assert_eq!(view.local.len(), 1, "{path}: the message stays shown");
+        assert_eq!(view.local[0].status, Status::Sent, "{path}");
+        assert_eq!(view.local[0].run_id, "run-2", "{path}: the resumed run's");
+        // Another inspection of the resumed run, or a stale one of the
+        // stopped run, still keeps it until the history shows it.
+        observe_run(&c, "run-2");
+        observe_run(&c, "run-1");
+        observe_run(&c, "run-2");
+        let view = until(&c, |v| v.loaded);
+        assert_eq!(view.local.len(), 1, "{path}: kept");
+        assert!(direct_calls(&fake).is_empty(), "{path}");
+    }
 }

@@ -3,7 +3,7 @@ use zerus_client_core::operation_recovery::deferred_input::{self as checkpoint, 
 
 const SESSION: &str = "claude/private-resume";
 const EPOCH: &str = "33333333-3333-4333-8333-333333333333";
-const RESUMED: &str = "00000000-0000-4000-8000-0000000000b1";
+pub(super) const RESUMED: &str = "00000000-0000-4000-8000-0000000000b1";
 
 fn scope() -> wire::Scope {
     wire::Scope {
@@ -206,5 +206,5 @@ fn without_a_live_service_it_stays_direct_and_a_check_knows_nothing() {
         ),
         ResumeAnswer::Direct
     );
-    assert_eq!(check(None, &verified().plan), Checked::Unavailable);
+    assert_eq!(check(None, &verified().plan), (Checked::Unavailable, None));
 }

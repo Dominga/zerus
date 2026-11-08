@@ -39,7 +39,7 @@ import {
   now, selectedKey, setSelectedKey, setExpandedChildren, expandedChildren,
   setCompactRows, compactRows, expandCompactRows, stateFilter, setStateFilter, search, setSearch, stripMode, setStripMode,
   setMenu, visibleMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter, accountFilterSet, setAccountFilter, folderFilter, setPage,
-  multi, setMulti, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, commitSessionsWidth, menu, subagentOpen,
+  multi, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, commitSessionsWidth, menu, subagentOpen,
   revealing, setRevealing, setDetailTab, showLatestActivity,
   type StateFilter, type MenuEntry,
 } from "../../store/ui";
@@ -564,7 +564,7 @@ export function SessionList() {
 
   // Docked <-> strip: the conversation resizes once; the panel animates above it.
   const toggleDock = () => {
-    Object.keys(multi).forEach((k) => setMulti(k, false));
+    clearMulti();
     if (!stripMode()) {
       setStripMode(true);
       setPanelVisible(true);
@@ -679,7 +679,7 @@ export function SessionList() {
       e.preventDefault();
       showLatestActivity();
     } else if (e.key === "Escape") {
-      Object.keys(multi).forEach((k) => setMulti(k, false));
+      clearMulti();
     }
   };
 

@@ -2,12 +2,26 @@ import type { MenuEntry } from "../../store/ui";
 import type { Row } from "./model";
 import type { Session } from "./types";
 import { MOVE_WAIT, SELECTION_ACTIONS, selectionText, type SelectionAction, type SelectionRow } from "./selection";
-import { tr } from "../../i18n";
+import { translate, tr, trNoop, type TranslationArgument } from "../../i18n";
 
 // The selection bar and the selection context menu, after Qt's
 // SessionsWindow::setupSelectionActions, updateSelectionActions and
 // populateSelectionMenu (SessionSelection.cpp 110-218). Pure models: the
 // components in SessionList.tsx render them, store/batch.ts runs the actions.
+
+// "%2 — %3 of %n": the action, its count and the selection, which sets the plural form (zerus-wi352).
+const TOOL_HINT = trNoop("%2 — %3 of %n selected session(s)");
+const HEADING = trNoop("%n selected session(s)");
+
+/**
+ * A text about `selected` sessions in the interface language: Russian takes
+ * its plural form from `selected`; English says "1 selected session" and
+ * "2 selected sessions". `rest` fills %2 onwards.
+ */
+function selectedText(source: string, one: string, many: string, selected: number, ...rest: TranslationArgument[]): string {
+  const text = tr(source, selected, ...rest);
+  return text === translate("en", source, selected, ...rest) ? translate("en", selected === 1 ? one : many, selected, ...rest) : text;
+}
 
 /** Qt's selectionActionIcon, as client icon names (all are in the Qt glyph set). */
 export const SELECTION_ICONS: Record<SelectionAction, string> = {
@@ -78,7 +92,7 @@ export function barTools(count: (a: SelectionAction) => number, selected: number
       action,
       icon: SELECTION_ICONS[action],
       text: `${selectionText(action)} (${n})`,
-      hint: blocked ?? `${selectionText(action)} — ${n} of ${selected} selected sessions`,
+      hint: blocked ?? selectedText(TOOL_HINT, "%2 — %3 of %n selected session", "%2 — %3 of %n selected sessions", selected, selectionText(action), n),
       count: n,
       enabled: action === "move" ? !blocked : presentation(action) || !batchRunning,
       danger: action === "forget" || action === "terminate",
@@ -102,7 +116,7 @@ export function toolEntry(t: SelectionTool, run: (a: SelectionAction) => void): 
 /** The selection menu: a section, the applicable actions, a separator and Deselect all. */
 export function selectionMenu(count: (a: SelectionAction) => number, selected: number, batchRunning: boolean, run: (a: SelectionAction) => void, deselect: () => void, unmuted = true, moveRefusal?: string): MenuEntry[] {
   return [
-    { heading: `${selected} selected sessions` },
+    { heading: selectedText(HEADING, "%n selected session", "%n selected sessions", selected) },
     ...barTools(count, selected, batchRunning, unmuted, moveRefusal).map((t) => toolEntry(t, run)),
     { separator: true },
     { label: tr("Deselect all"), action: deselect },

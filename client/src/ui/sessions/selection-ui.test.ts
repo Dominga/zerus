@@ -67,6 +67,11 @@ describe("barTools", () => {
     expect(move.enabled).toBe(true);
     expect(move.hint).toBe("Move to project — 3 of 3 selected sessions");
   });
+  it("says one selected session in English, and more than one in the plural (zerus-wi352)", () => {
+    expect(barTools(counts({ pause: 1 }), 1, false)[0].hint).toBe("Pause — 1 of 1 selected session");
+    expect(barTools(counts({ pause: 1 }), 2, false)[0].hint).toBe("Pause — 1 of 2 selected sessions");
+    expect(selectionMenu(counts({ pause: 1 }), 1, false, () => {}, () => {})[0]).toEqual({ heading: "1 selected session" });
+  });
   it("marks Forget and Terminate dangerous and gives every action a known icon", () => {
     const all = Object.fromEntries(SELECTION_ACTIONS.map((a) => [a, 1]));
     expect(barTools(counts(all), 2, false).filter((t) => t.danger).map((t) => t.action)).toEqual(["forget", "terminate"]);

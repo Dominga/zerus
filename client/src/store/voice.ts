@@ -8,6 +8,8 @@ import { tr } from "../i18n";
 export type VoiceState = "idle" | "starting" | "recording" | "saving" | "preview" | "submitting" | "uncertain";
 export interface VoiceShown {
   key: string; id: string; state: VoiceState; recording: boolean; hint: string | null;
+  /** Recording: Stop and preview keeps the recording for review (Qt's voiceStopPreview). */
+  stop_preview?: boolean;
   video_preview: boolean; voice_enabled: boolean; voice_icon: string; voice_label: string; voice_detail: string;
   mode_visible: boolean; mode_enabled: boolean; mode_icon: string; mode_label: string;
   cancel_visible: boolean; preview: string | null; play_label: string; play_enabled: boolean;

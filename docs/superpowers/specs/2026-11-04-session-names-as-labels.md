@@ -374,6 +374,15 @@ Native constructor/transition continuity and the required outer CLI writer bit
 remain prerequisites before P3e activation; the canonical connector deployment
 is still owner-approved separately.
 
+The outer CLI observation also carries a typed `native_continuity` capability,
+separate from the connector-facing Context schema. Reader-only two-field answers
+remain valid for readers; writer admission requires an explicit `true` from the
+same fresh answer of every enrolled CLI and all existing cache/configuration/
+connector checks. Missing, false, mistyped, stale or incomplete evidence stays
+closed. This build advertises `false`, and its dormant public writer gate stays
+closed even for a simulated positive cache. The bit can become positive only
+after the complete reviewed storage/native floor; it is never native consent.
+
 ### Acceptance controls (desktop-u G1)
 
 Each PR lists which of these it covers, and every one is covered by P3e at the latest:

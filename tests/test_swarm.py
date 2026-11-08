@@ -178,6 +178,16 @@ class Swarm(unittest.TestCase):
         self.assertEqual(len({s['digest'] for s in snapshots}), 1)
         return snapshots
 
+    def test_the_cli_observation_keeps_the_unfinished_native_writer_floor_off(self):
+        self.env['XDG_CONFIG_HOME'] = str(self.root / 'xdg')
+        (self.root / 'a/config').write_text('HGS_SELF="a"\nHGS_PEERS=""\n')
+        (self.root / 'a/machines.local.json').write_text('{"machines":{}}')
+        context = self.call('a', 'session-labels-context', '--json')
+        observation = self.call('a', 'session-labels', '--json')
+        self.assertIs(observation.get('native_continuity'), False)
+        self.assertEqual(observation['context'], context)
+        self.assertNotIn('native_continuity', context, 'connector Context stays unchanged')
+
     def test_label_gate_needs_every_fresh_cli_and_actual_connector(self):
         self.env['XDG_CONFIG_HOME'] = str(self.root / 'xdg')
         # Only A and B join this swarm. C is not part of its declared roster.

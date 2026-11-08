@@ -247,6 +247,7 @@ impl Default for TestsConfig {
             performance: Performance::default(),
             resources: std::collections::BTreeMap::new(),
             providers: Vec::new(),
+            generated: Vec::new(),
             tools: Vec::new(),
             tool_paths: std::collections::BTreeMap::new(),
             templates: Vec::new(),

@@ -671,8 +671,8 @@ where
     // another checkout lands nothing and says so, instead of merging the task
     // into a work branch.
     if let Some(line) = integration_branch(team) {
-        let folder = team.integration_folder();
-        let on = git_text(folder, &["symbolic-ref", "--quiet", "--short", "HEAD"]).unwrap_or_default();
+        let folder = team.integration_folder().to_owned();
+        let on = git_text(&folder, &["symbolic-ref", "--quiet", "--short", "HEAD"]).unwrap_or_default();
         if !on.is_empty() && on != line {
             let note = format!(
                 "The integration folder is on {on}, not the line {line}: check out {line} there and the queue lands this task (hgs team status shows the line)."

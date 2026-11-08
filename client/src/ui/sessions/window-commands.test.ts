@@ -113,6 +113,36 @@ describe("window commands from the keyboard", () => {
     }
   });
 
+  it("Alt+Shift+Down reaches an approval under a collapsed parent team and opens the team", async () => {
+    // review-win-c's counterexample for PR #1770 (zerus-wfajl).
+    const { listRows } = await import("./model");
+    const { setTeamCollapsed, teamCollapsed } = await import("../../store/teamCollapse");
+    const { machineMeta } = await import("../../store/testing");
+    const machine = "11111111-1111-4111-8111-111111111111";
+    const parentId = "00000000-0000-4000-8000-000000000001";
+    const childId = "00000000-0000-4000-8000-000000000002";
+    const changed = rows.map((r) => ({ ...r, row: { ...r.row, status: "ready" } }));
+    changed[0].row = { ...changed[0].row, session_id: parentId, conversation_id: "c1" };
+    changed[1].row = { ...changed[1].row, status: "attention", phase: "approval", session_id: childId, conversation_id: "c2",
+      parent: { machine, session_id: parentId, name: changed[0].row.name, conversation_id: "c1", run_id: "1", state: "live" } };
+    applyBatch({ ...emptyBatch(), computers: [{ computer: "", status: "live", attempt: 0 }],
+      machines: [{ computer: "", machine: machineMeta("", {}, { machine_id: machine }) }], upserts: changed });
+    setTeamCollapsed(id(1), true);
+    setSelectedKey(id(1));
+    const cards = () => listRows().filter((r) => r.type === "card").map((r) => r.id);
+    try {
+      expect(cards()).not.toContain(id(2));
+      expect(listRows().find((r) => r.type === "card" && r.id === id(1))).toMatchObject({ team: { collapsed: true, needsYou: 1 } });
+      press({ ...ALT_DOWN, shift: true });
+      expect(selectedKey()).toBe(id(2));
+      expect(teamCollapsed(id(1))).toBe(false);
+      expect(cards()).toContain(id(2));
+    } finally {
+      setTeamCollapsed(id(1), false);
+      applyBatch({ ...emptyBatch(), upserts: rows });
+    }
+  });
+
   it("Alt+Down steps through search results while they are shown", () => {
     setSearch("t3");
     press(ALT_DOWN);

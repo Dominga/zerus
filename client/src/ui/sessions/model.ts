@@ -109,13 +109,13 @@ export function parentIndex(rows: Iterable<Session>, machineOf: (computer: strin
 /** A listed row's parent key: set only when its parent row is listed too (a child session). */
 export const parentKeyOf = createMemo(() => parentIndex(orderedRows(), (computer) => machineCards[computer]?.machine_id));
 
-export const listRows = createMemo<Row[]>(() => {
-  if (stateFilter() === "archived") return archiveRows();
+/** The live list's inputs: the filters, grouping and row state the list reads. */
+function listScope() {
   const f = stateFilter();
   const q = search().trim();
   const hosts = machineFilter();
   const visible = (s: Session) => matchesLiveFilters(s, f, hosts, q);
-  const scope = {
+  return {
     grouping: grouping(), members: membersByGroup(), visible, online, projects: projectFilter(),
     expanded: (k: string) => !!expandedChildren[k], compact: (k: string) => !!compactRows[k], filter: f, hosts, query: q,
     accounts: accountFilter(), folder: folderFilter(),
@@ -125,9 +125,24 @@ export const listRows = createMemo<Row[]>(() => {
     childDraft: (s: Session, child: { id: string }) => hasDraftKey(`${s.computer}\n${s.name}\n${s.conversationId ?? ""}\n${child.id}`),
     parentKey: parentKeyOf(), teamCollapsed,
   };
+}
+
+export const listRows = createMemo<Row[]>(() => {
+  if (stateFilter() === "archived") return archiveRows();
+  const scope = listScope();
   const out = groupRows(scope);
   return withCreations(out, scope);
 });
+
+/**
+ * The live list's rows with every parent team open: the logical order that
+ * attention navigation searches, including child sessions a collapsed team
+ * hides (window-commands.ts). Computed on demand, never kept.
+ */
+export function rowsWithTeamsOpen(): Row[] {
+  if (stateFilter() === "archived") return [];
+  return groupRows({ ...listScope(), teamCollapsed: () => false });
+}
 
 /** The list footer's counts of the cards shown (SessionsWindowRows.cpp:468-474). */
 export function summarize(rows: readonly Row[], up: (s: Session) => boolean) {

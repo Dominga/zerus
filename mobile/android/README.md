@@ -47,6 +47,9 @@ activity and history reads first poll their retained receipt after 100 ms,
 then at 200 ms through the first eight polls, returning to the ordinary 800 ms
 cadence. The maximum
 poll count remains bounded; a pending receipt never resubmits its request.
+An advertised WebSocket readiness stream runs alongside these receipt checks.
+A readiness hint can wake a check early; a connected silent stream never delays
+the ordinary polling cadence. The watcher ends with its retained request.
 Encrypted receipt HTTP overlaps a fresh signed membership check, but the app
 requires the original protected request and active enrollment before fetching,
 and verifies current membership before decrypting or settling any result.
@@ -221,13 +224,16 @@ background reads instead of returning to the initial placeholder. Opening cached
 messages immediately shows a pinned status beneath the session tools, distinguishing
 saved messages from checking activity and loading history. The status remains outside
 the scrolling transcript; its two lines and indicator slot retain their geometry as
-reads settle. The Refresh action remains in place. Opening starts exact-target
-inspection and canonical history independently instead of serializing their relay
-round trips. Either may finish first; a complete page already covered by the opening
-inspection is not immediately fetched again. Cached messages remain readable, and
-only the fresh inspection permits actions. The periodic loop does not start another
-inspection while that verified opening is still waiting for its first history page;
-explicit refresh remains available. Later background reads
+reads settle. The Refresh action remains in place. Opening recent Activity uses
+the exact-target inspection's bounded recent messages, independently of complete
+history indexing and exact unread totals. Earlier messages load when requested;
+an actual saved older reading position may also restore its canonical page.
+Returning to the latest messages reads a fresh inspection and leaves the older
+window. Saved positions distinguish following the latest messages from reading
+an older page; older saved data retains its original reading semantics.
+An incomplete earlier-history read keeps recent messages available and offers
+an explicit retry. Cached messages remain readable, and only the fresh inspection
+permits actions. Later background reads
 show progress only after five seconds; manual refresh shows it immediately and
 reuses any matching in-flight read. Catalogs retain their thin progress bar.
 Pulling a conversation up past its newest

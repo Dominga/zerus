@@ -1,5 +1,13 @@
 // U62 (#712): Settings pages, appearance, the rail, window layer and previews, from test_sessionswindow.
 #include "SessionsWindowFixture.h"
+#include "WindowTitleBar.h"
+#include <QVBoxLayout>
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 class TestSessionsWindow : public SessionsWindowFixture {
     Q_OBJECT
@@ -9,6 +17,7 @@ private slots:
     void colorPickerUsesWorkspaceThemeAndCancelsOutside();
     void whiteWhWorkspaceView();
     void compactSkinStartsWithACollapsedList();
+    void framelessTitleBarHitTestsKeepTheButtonsClientArea();
     void socratiCodeIsAnOptionalExtension();
     void readmeScreenshots();
     void contentScaleLeavesWorkspaceChrome();
@@ -141,6 +150,46 @@ void TestSessionsWindow::whiteWhWorkspaceView()
 
 // WhiteWh fork: a list collapsed when Zerus quit restores while the window is
 // still being built, before its pages and status bar exist.
+// WhiteWh fork, task 297: the frameless title bar's hit test. The edges
+// resize, the bar's empty space and its name move the window (HTCAPTION),
+// and its own buttons, the maximize button included, stay client area
+// (HTCLIENT): Qt answers no HTMAXBUTTON, so Windows 11 shows no snap layouts
+// on it. The Tauri bar keeps this parity (src-tauri window_chrome.rs).
+void TestSessionsWindow::framelessTitleBarHitTestsKeepTheButtonsClientArea()
+{
+#ifndef Q_OS_WIN
+    QSKIP("The frameless title bar is drawn on Windows only.");
+#else
+    QWidget window; window.resize(900, 600);
+    auto *column = new QVBoxLayout(&window); column->setContentsMargins(0, 0, 0, 0);
+    auto *bar = new WindowTitleBar; column->addWidget(bar); column->addStretch(1);
+    window.show(); QVERIFY(QTest::qWaitForWindowExposed(&window));
+    const auto centre = [&](const char *name) {
+        auto *child = bar->findChild<QWidget *>(QLatin1String(name)); return child ? child->mapTo(bar, child->rect().center()) : QPoint(-1, -1);
+    };
+    // The window buttons and the search are the bar's own: no drag there.
+    for (const char *name : {"windowMaximize", "windowMinimize", "windowClose", "windowTitleSearch"}) QVERIFY2(!bar->dragsAt(centre(name)), name);
+    // The name and the bar's empty space move the window.
+    QVERIFY(bar->dragsAt(centre("windowTitleName")));
+    const QRect search = bar->findChild<QWidget *>("windowTitleSearch")->geometry(), minimize = bar->findChild<QWidget *>("windowMinimize")->geometry();
+    QVERIFY(minimize.left() - search.right() > 8);
+    QVERIFY(bar->dragsAt(QPoint((search.right() + minimize.left()) / 2, bar->height() / 2)));
+    // The mapping nativeEvent answers: never HTMAXBUTTON, so no snap layouts.
+    const QRect frame(100, 50, 900, 600);
+    const QPoint inside(550, 70);
+    QCOMPARE(FramelessWindow::hitTest(frame, inside, false, 5, false), qintptr(HTCLIENT));
+    QCOMPARE(FramelessWindow::hitTest(frame, inside, false, 5, true), qintptr(HTCAPTION));
+    QCOMPARE(FramelessWindow::hitTest(frame, QPoint(101, 300), false, 5, false), qintptr(HTLEFT));
+    QCOMPARE(FramelessWindow::hitTest(frame, QPoint(998, 300), false, 5, false), qintptr(HTRIGHT));
+    QCOMPARE(FramelessWindow::hitTest(frame, QPoint(550, 51), false, 5, true), qintptr(HTTOP));
+    QCOMPARE(FramelessWindow::hitTest(frame, QPoint(101, 51), false, 5, false), qintptr(HTTOPLEFT));
+    QCOMPARE(FramelessWindow::hitTest(frame, QPoint(998, 648), false, 5, false), qintptr(HTBOTTOMRIGHT));
+    // A maximized window has no resize edges.
+    QCOMPARE(FramelessWindow::hitTest(frame, QPoint(101, 51), true, 5, true), qintptr(HTCAPTION));
+    QCOMPARE(FramelessWindow::hitTest(frame, QPoint(998, 300), true, 5, false), qintptr(HTCLIENT));
+#endif
+}
+
 void TestSessionsWindow::compactSkinStartsWithACollapsedList()
 {
     QSettings().setValue("workspace/skin", "whitewh"); QSettings().setValue("workspace/sessionsCollapsed", true);

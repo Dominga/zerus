@@ -464,14 +464,14 @@ class WorkflowSecurityTests(unittest.TestCase):
     def test_checks_gate_requires_exactly_the_selected_suites(self):
         gate = job((ROOT / ".github/workflows/checks.yml").read_text(), "gate")
         self.assertIn("needs: [source, quick, client-frontend, relay, connector, connector-macos, ios, android, client-native-linux, client-native-macos-core, client-native-macos-tauri, client-native-windows, cli, "
-                      "cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, arch-package, windows-tests, windows-desktop, windows-host]", gate)
+                      "cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, clippy-macos, arch-package, windows-tests, windows-desktop, windows-host]", gate)
         self.assertIn("RUN_WINDOWS: ${{ needs.source.outputs.run_windows == 'true' }}", gate)
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
         base = {"source": "success", "quick": "success", "client-frontend": "success", "relay": "success", "connector": "success",
                 "android": "success", "client-native-linux": "success", "client-native-macos-core": "success",
                 "client-native-macos-tauri": "success", "cli": "success", "cli-macos-debug": "success", "cli-macos-core": "success",
-                "cli-macos-native": "success", "cli-macos": "success", "arch": "success", "arch-package": "success",
+                "cli-macos-native": "success", "cli-macos": "success", "clippy-macos": "success", "arch": "success", "arch-package": "success",
                 "mac-desktop": "success", "connector-macos": "success", "ios": "success"}
         # All Windows jobs are selected together, and each must pass on its own.
         windows = ("client-native-windows", "windows-tests", "windows-desktop", "windows-host")
@@ -506,6 +506,9 @@ class WorkflowSecurityTests(unittest.TestCase):
             ({**base, "client-native-linux": "failure"}, "true", False),
             ({**base, "client-native-macos-core": "failure"}, "true", False),
             ({**base, "client-native-macos-tauri": "failure"}, "true", False),
+            ({**base, "clippy-macos": "failure"}, "true", False),
+            ({**base, "clippy-macos": "skipped"}, "true", False),
+            ({**base, "clippy-macos": "cancelled"}, "true", False),
             ({**base, "arch-package": "failure"}, "true", False), ({**base, "arch-package": "skipped"}, "true", False),
             ({**base, "arch-package": "cancelled"}, "true", False), (arch_skipped, "false", True),
             ({**arch_skipped, "arch-package": "success"}, "false", False),
@@ -816,7 +819,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
         names = ("source", "quick", "client-frontend", "relay", "connector", "connector-macos", "ios", "android", "client-native-linux", "client-native-macos-core", "client-native-macos-tauri", "client-native-windows",
-                 "cli", "cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos", "arch-package",
+                 "cli", "cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos", "clippy-macos", "arch-package",
                  "windows-tests", "windows-desktop", "windows-host")
         for run_macos, smoke_result, success in [("true", "success", True), ("true", "failure", False),
                                                  ("true", "skipped", False), ("false", "skipped", True),
@@ -827,7 +830,7 @@ class WorkflowSecurityTests(unittest.TestCase):
                 results["client-native-macos-tauri"] = "skipped"
                 results["mac-desktop"] = "skipped"
                 results["ios"] = "skipped"
-                for name in ("cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos"):
+                for name in ("cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos", "clippy-macos"):
                     results[name] = "skipped"
             results["connector-macos"] = smoke_result
             environment = {"RESULTS": json.dumps({name: {"result": value} for name, value in results.items()}),
@@ -860,7 +863,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
         names = ("source", "quick", "client-frontend", "relay", "connector", "connector-macos", "ios", "android", "client-native-linux", "client-native-macos-core", "client-native-macos-tauri", "client-native-windows",
-                 "cli", "cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos", "arch-package",
+                 "cli", "cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos", "clippy-macos", "arch-package",
                  "windows-tests", "windows-desktop", "windows-host")
         for run_ios, ios_result, success in [("true", "success", True), ("true", "failure", False),
                                                ("true", "skipped", False), ("true", "cancelled", False),
@@ -932,7 +935,8 @@ class WorkflowSecurityTests(unittest.TestCase):
                          {"actions/cache/restore", "actions/cache/save"})
         names = re.findall(r"(?m)^  ([a-z][\w-]*):\n", checks.split("\njobs:\n", 1)[1])
         # Restore-only consumers never save: two jobs saving one key would race.
-        read_only = {"windows-tests": {"rust-cache"}, "windows-host": {"rust-cache"}, "client-native-macos-core": {"rust-cache"}}
+        read_only = {"windows-tests": {"rust-cache"}, "windows-host": {"rust-cache"}, "client-native-macos-core": {"rust-cache"},
+                     "clippy-macos": {"rust-cache"}}
         saves = 0
         for name in names:
             restores, saved = {}, []

@@ -804,6 +804,8 @@ export interface ArchivePage {
   next_cursor: string;
   previous_cursor: string | null;
   total: number;
+  /** The host counted only up to a cap (zerus-080n8): the total shows as "N+". */
+  total_capped?: boolean;
   position: number | null;
 }
 

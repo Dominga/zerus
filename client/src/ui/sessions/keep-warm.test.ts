@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { durationLabel, keepWarmOf, mergeKeepWarm, positionOf, remainingText, statusLine, tooltipLines } from "./keep-warm";
+import { ALWAYS, choiceAt, durationLabel, durationMark, headerKeepWarm, keepWarmOf, mergeKeepWarm, positionOf, remainingText, statusLine, tooltipLines } from "./keep-warm";
 import type { KeepWarmState } from "../../types";
 
 const NOW = 1_794_000_000;
@@ -38,6 +38,38 @@ describe("keep cache warm presentation", () => {
     expect(positionOf(state({ until: NOW + 20 * 3600 }), NOW)).toBe(7);
     expect(positionOf(undefined, NOW)).toBe(2);
     expect([durationLabel(1), durationLabel(7), durationLabel(8)]).toEqual(["1 h", "7 h", "Always"]);
+  });
+
+  it("keeps a fresh choice at its hours with a clock read up to 30 s old or a host clock a few minutes ahead (zerus-ua4bi)", () => {
+    for (let hours = 1; hours <= 7; hours++) {
+      expect(positionOf(state({ until: NOW + hours * 3600 }), NOW - 30)).toBe(hours);
+      expect(positionOf(state({ until: NOW + hours * 3600 + 120 }), NOW)).toBe(hours);
+    }
+    // Past those first minutes the hours left still round up.
+    expect(positionOf(state({ until: NOW + 3600 + 20 * 60 }), NOW)).toBe(2);
+  });
+
+  it("offers exactly the choices the host accepts: 1 to 7 hours or Always (zerus-ua4bi)", () => {
+    const positions = Array.from({ length: ALWAYS }, (_, i) => i + 1);
+    expect(positions.map(choiceAt)).toEqual([1, 2, 3, 4, 5, 6, 7].map((hours) => ({ kind: "hours", hours })).concat([{ kind: "always" } as never]));
+  });
+
+  it("marks Always with an infinity sign, keeping Always as its name (zerus-ua4bi)", () => {
+    expect([durationMark(1), durationMark(7), durationMark(ALWAYS)]).toEqual(["1 h", "7 h", "\u221e"]);
+    expect(durationLabel(ALWAYS)).toBe("Always");
+  });
+
+  it("sums the header mark up: nothing while off, an infinity sign for Always, else the time left (zerus-yacns)", () => {
+    expect(headerKeepWarm(undefined, NOW, 0)).toBeUndefined();
+    expect(headerKeepWarm(state({ enabled: false, until: null, state: "off" }), NOW, 0)).toBeUndefined();
+    const always = headerKeepWarm(state({ until: null }), NOW, 0)!;
+    expect([always.mark, always.label]).toEqual(["\u221e", "Keep cache warm: Always"]);
+    const timed = headerKeepWarm(state({ until: NOW + 2 * 3600 + 14 * 60 + 5, next_at: NOW + 600 }), NOW, 0)!;
+    expect([timed.mark, timed.label]).toEqual(["2 h 14 m", "Keep cache warm: 2 h 14 m left"]);
+    expect(timed.tooltip.split("\n")).toEqual(["Keep cache warm: 2 h 14 m left", "Next ping in 10 m", "Each ping reads the whole cached context from this account's usage.", "Click to change it in Details."]);
+    expect(headerKeepWarm(state({ until: NOW + 3 * 3600 }), NOW, 0)!.mark).toBe("3 h");
+    expect(headerKeepWarm(state({ until: NOW + 45 * 60 + 30 }), NOW, 0)!.mark).toBe("45 m");
+    expect(headerKeepWarm(state({ until: NOW + 30 }), NOW, 0)!.mark).toBe("<1 m");
   });
 
   it("says how long is left without dot separators", () => {

@@ -898,14 +898,17 @@ printf '%s' '{"from":0,"until":253402300800,"limit":50,"cursor":"","query":""}' 
 `limit` is 1–50. All fields are optional. `query` is literal case-insensitive
 archive metadata search (names, IDs, provider, folder and title), at most 256
 characters; this is distinct from the desktop's global public-message search.
-The result contains `version:1`, `sessions`, `total`, `next_cursor`, the additive
-`previous_cursor` and zero-based `position`, and the echoed range/query. Pass either
-opaque cursor with the same range/query to move older or newer. Both directions
-use date/ID keysets; no offset scan or retained client cursor stack is required.
-Ordering uses `(archived_at, archive_id)` descending, avoiding offset duplicates
-when an earlier page changes. Newer completions appear after Refresh. Deleted or
-restored instances disappear; all actions still recheck exact native identity.
-Cursors belong to one computer/catalog and cannot be reused after rebuilding it.
+The result contains `version:1`, `sessions`, `total`, `next_cursor`, the
+additive `previous_cursor` and zero-based `position`, and the echoed
+range/query. A host that counts only up to a cap may add `total_capped: true`;
+the desktop then shows the total as "N+" and accepts a window that starts past
+it. Pass either opaque cursor with the same range/query to move older or newer.
+Both directions use date/ID keysets; no offset scan or retained client cursor
+stack is required. Ordering uses `(archived_at, archive_id)` descending,
+avoiding offset duplicates when an earlier page changes. Newer completions
+appear after Refresh. Deleted or restored instances disappear; all actions still
+recheck exact native identity. Cursors belong to one computer/catalog and cannot
+be reused after rebuilding it.
 
 A rebuildable `archive-catalog-v1.sqlite3` indexes metadata beside the durable
 state. Archive JSON files remain authoritative. Its first use indexes existing
@@ -1617,9 +1620,13 @@ choose a file or enter its absolute path (or a `~/` path); Zerus checks that it
 names an existing file. If that check cannot answer within a few seconds, for
 example on an unresponsive network mount, the dialog says so and offers Retry.
 For a remote session, enter an absolute path (including Windows drive or UNC
-paths on a Windows computer) or `~/` path on the named remote computer; only its
-form is checked, not whether the file exists. A file on your desktop is not
-uploaded or made accessible to that computer. Zerus inserts an editable, quoted path into
+paths on a Windows computer) or `~/` path on the named remote computer. When
+that computer's hgs has `path-info`, Insert asks it whether a file is there
+(one metadata read, no content) and refuses a folder or a missing path; if it
+does not answer in time, the dialog offers Retry, and closing the dialog ends
+the call. On a computer with an older hgs, only the path's form is checked, as
+the dialog then says. A file on your desktop is not uploaded or made accessible
+to that computer. Zerus inserts an editable, quoted path into
 the draft and saves it as ordinary message text. Review it and press Send when
 ready. This action does not read, copy or Base64-encode the file and has no file
 size limit. It refers to the existing file, whose contents may change; the agent
@@ -2611,19 +2618,31 @@ an earlier finished recovery episode is kept: keep-warm stops
 until the next real turn, and the provider failure stays visible as usual.
 
 In the desktop app, **Details** shows **Keep cache warm** in the **Session**
-card of every live, paused or stopped session. Its switch (accessible name
-"Keep cache warm") turns it on for the chosen duration; while it is on, a
-slider picks 1 to 7 hours or Always (its last position) and the row shows the
-remaining time, such as **2 h 14 m left**, and what keep-warm is doing: the
-next ping, **Warming the cache now**, a cold cache or the host's reason. Its
-tooltip states the cache lifetime and its source, the ping interval, the pings
-per hour and that each ping is a cached read of the whole context. When the
-agent or account is not eligible the switch is disabled and the host's reason
-is shown under it; a computer whose `hgs` lacks `session-keep-warm-v1` shows an
-update hint. While a ping runs, the session reads **Ready** with **Warming
-cache** and counts in neither Active nor Working. Activity folds the ping, its
-reply and its Stop into one dim **Cache kept warm** row that expands to show
-both.
+card of every live, paused or stopped session. Its switch (accessible name "Keep
+cache warm") turns it on for the chosen duration; while it is on, a slider picks
+1 to 7 hours or Always (its last position, shown as an infinity sign in a
+fixed-width value so the slider never moves; its accessible value is "Always")
+and the row shows the remaining time, such as **2 h 14 m left**, and what
+keep-warm is doing: the next ping, **Warming the cache now**, a cold cache or
+the host's reason. Its tooltip states the cache lifetime and its source, the
+ping interval, the pings per hour and that each ping is a cached read of the
+whole context. A change shows at once and the controls stay enabled and in place
+while the computer confirms it; a choice made meanwhile is sent next with the
+confirmed revision (the newest one wins), and a refusal returns the row to the
+confirmed state. The slider rounds the time left up to whole hours but ignores
+the first five minutes past an hour, so a fresh choice keeps its position
+although the host's clock may run slightly ahead. When the agent or account is
+not eligible the switch is disabled and the host's reason is shown under it; a
+computer whose `hgs` lacks `session-keep-warm-v1` shows an update hint. While it
+is on, the session header also shows it on its chip row beside the model: a bolt
+with the time left, such as **2 h 14 m**, or an infinity sign for Always, at the
+chip row's height so the header never grows. Its tooltip gives the same state
+and lines as the Details row, and a click opens **Details** at the control. It
+reads only the listing, the followed session's Details summary and a change
+confirmed in this window. While a ping runs, the session reads **Ready** with
+**Warming cache** and counts in neither Active nor Working. Activity folds the
+ping, its reply and its Stop into one dim **Cache kept warm** row that expands
+to show both.
 
 Android follows the same status rule: while a ping runs the session reads
 **Warming cache**, is neither Working nor Active, and holds no reply in progress,
@@ -2709,6 +2728,18 @@ It creates one directory and returns the canonical path plus the exact request
 identity as JSON. It never creates missing parents or repeats an uncertain
 operation. Local creation rejects `--dry-run`; remote dry runs only print the
 transport command.
+
+`hgs [@host] path-info --path <path>` answers whether a path exists on that
+computer, with one metadata read: no content is read and nothing changes. The
+path is absolute (a Windows drive or UNC path on Windows) or starts with `~/`
+for the home folder. The reply is one line of JSON, versioned and closed:
+`{"schema": 1, "exists": true, "kind": "file", "size": 1234}`, where `kind` is
+`file`, `directory` or `other` and `size` is given for a file only. A path that
+does not exist reads `exists: false`; one this account cannot inspect reads
+`exists: null`, with `kind` and `size` null. A relative path or one with control
+characters exits 1; a malformed call exits 2. A peer call runs only when the
+peer's `hgs --help` names the command, as an older hgs would read an unknown
+command as a session launch; the path's `~` reaches the peer's hgs as written.
 
 The desktop folder
 list starts in alphabetical name order, ignoring case; column headings change
@@ -3796,6 +3827,8 @@ hgs task attachment TASK_UUID --project orchard --file 1 [--entry ENTRY_ID]
 hgs task send orchard/T-a1b2c3 [--session codex/api [--host ALIAS]]
 hgs task handoff orchard/T-a1b2c3 --session codex/worker [--host ALIAS]
 hgs task start orchard/T-a1b2c3
+hgs task begin-attempt orchard/T-a1b2c3 --attempt ORIGINAL_UUID [--json]
+hgs task control plan|execute|status --json
 hgs task report orchard/T-a1b2c3 [--progress|--ready] [--considered REV] < summary.txt
 hgs task report-attempt orchard/T-a1b2c3 --attempt 00000000-0000-4000-8000-000000000001 [--progress|--ready] [--considered REV] < summary.txt
 hgs task cancel orchard/T-a1b2c3 [--reason "Wrong approach"]
@@ -3809,6 +3842,34 @@ hgs task worker orchard/T-a1b2c3 --subagent CHILD_ID --request-id SENT_REQUEST_I
 hgs task settings --project orchard [--set < settings.json]
 hgs task cutover --project orchard [--hold on|off [--confirm]]
 ```
+
+`begin-attempt` and `task control plan|execute|status` are currently inactive
+source interfaces (`zerus-cg5h.4.7`). Valid requests return exit 1,
+`code: task_controls_inactive` and `attempted: false`, before opening task or
+desktop stores. The `task-control-v1` help marker is absent while the gate is
+off. Existing prompts, send/handoff/reopen/direct-start/report behavior and
+plain `start` are unchanged. Native wiring and queue activation are later
+reviewed steps; a new CLI on disk does not qualify a resident adapter.
+
+The control interface takes strict schema-1 JSON on stdin, at most 16 KiB. Plan
+names the original task/attempt or, for Stop release, the exact executor and
+explicitly observed Stop IDs. Execute accepts the original plan, with exact
+task version, slot revision, caller scope, configuration/store/image and loaded
+adapter guards; these labels are data, not authority. The owning runtime must
+prove them again before any effect. Status names an original request UUID or
+uses an executor sequence cursor with a limit of 1–128. Unknown fields,
+duplicate fields/options, noncanonical IDs and oversized requests refuse.
+
+After activation, a fresh managed send/handoff/reopen supplies exactly one
+pinned `begin-attempt REF --attempt UUID` acknowledgement, replacing plain
+start. Feedback carries the existing report origin and requests no second
+acknowledgement. A semantic begin requires the immutable attempt to be current,
+delivered and owned by the exact executor; it cannot acknowledge a newer
+generation, clear a Pause or bind a native turn by itself. Legacy and direct
+start policy, structured report authority and considered revisions stay intact.
+The existing desktop Start plan is unchanged in this wire leaf; its final
+managed/legacy acknowledgement mode and startup-run reservation belong to the
+native-wiring check-in before activation.
 
 Plain `task get` retains the complete journal for existing clients. The optional
 `--history-limit` (1–80) returns only one chronological history page, the canonical

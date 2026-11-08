@@ -6,9 +6,13 @@ import { render } from "solid-js/web";
 const bridge = vi.hoisted(() => ({
   check: vi.fn(async (_dialog: number, _path: string): Promise<unknown> => ({ status: "missing" })),
   pick: vi.fn(async (): Promise<string | null> => null),
+  support: vi.fn(async (_dialog: number, _computer: string): Promise<boolean | null> => null),
+  checkRemote: vi.fn(async (_dialog: number, _computer: string, _path: string): Promise<unknown> => ({ status: "unchecked" })),
+  cancel: vi.fn(async (_dialog: number): Promise<void> => {}),
 }));
 vi.mock("../../bridge", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../bridge")>()), fileReferenceCheck: bridge.check, fileReferencePick: bridge.pick,
+  fileReferenceRemoteSupport: bridge.support, fileReferenceCheckRemote: bridge.checkRemote, fileReferenceCancel: bridge.cancel,
 }));
 
 import { FileReferenceDialog, type ReferenceTarget } from "./FileReferenceDialog";
@@ -75,8 +79,11 @@ describe("Reference an existing file dialog", () => {
     expect(d.insert).not.toHaveBeenCalled();
   });
 
-  it("checks a remote path's form only and says its existence is not checked", async () => {
+  it("checks an older computer's path for its form only and says its existence is not checked", async () => {
+    bridge.support.mockResolvedValueOnce(false);
     const d = open(remote);
+    await settle();
+    expect(bridge.support).toHaveBeenCalledWith(expect.any(Number), "studio");
     expect(d.host.querySelector("h2")?.textContent).toBe("Reference file — Studio");
     expect(d.host.textContent).toContain("on Studio (studio), not on this computer. Only the path is added; its existence is not checked here.");
     expect(d.button("Browse…")).toBeUndefined();
@@ -87,16 +94,88 @@ describe("Reference an existing file dialog", () => {
     d.type("/srv/a\u0007b");
     d.button("Insert reference")!.click();
     expect(d.error()).toBe("Enter a file path without line breaks or control characters.");
+    expect(bridge.checkRemote).not.toHaveBeenCalled();
     d.type("~/report.pdf");
     d.button("Insert reference")!.click();
+    await settle();
     expect(bridge.check).not.toHaveBeenCalled();
+    // Rust answers "unchecked" for a computer without path-info: inserted as before.
+    expect(bridge.checkRemote).toHaveBeenCalledExactlyOnceWith(expect.any(Number), "studio", "~/report.pdf");
     expect(d.insert).toHaveBeenCalledExactlyOnceWith("Use the existing file at \"~/report.pdf\".");
   });
 
-  it("keeps the dialog open with the composer's refusal", () => {
+  // zerus-5wmh.13.18: a computer whose hgs has path-info is asked first.
+  it("asks a computer that checks paths, says so, and refuses what is not a file there", async () => {
+    bridge.support.mockResolvedValueOnce(true);
+    const d = open(remote);
+    await settle();
+    expect(d.host.textContent).toContain("Enter the path of an existing file on Studio (studio), not on this computer. Only the path is added; the file is not read or uploaded.");
+    expect(d.host.textContent).not.toContain("its existence is not checked here");
+    bridge.checkRemote.mockResolvedValueOnce({ status: "missing" });
+    d.type("~/notes");
+    d.button("Insert reference")!.click();
+    expect(d.button("Insert reference")!.disabled, "Insert waits for the answer").toBe(true);
+    await settle();
+    expect(d.error()).toBe("Choose an existing file on Studio.");
+    bridge.checkRemote.mockResolvedValueOnce({ status: "unreadable" });
+    d.button("Insert reference")!.click();
+    await settle();
+    expect(d.error()).toBe("This path cannot be inspected on Studio.");
+    expect(d.insert).not.toHaveBeenCalled();
+    bridge.checkRemote.mockResolvedValueOnce({ status: "file" });
+    d.type("~/notes/plan.md");
+    d.button("Insert reference")!.click();
+    await settle();
+    // The path is inserted as typed: the computer's hgs expands ~/ itself.
+    expect(d.insert).toHaveBeenCalledExactlyOnceWith("Use the existing file at \"~/notes/plan.md\".");
+  });
+
+  it("offers Retry while the computer cannot answer, and learns it checks paths from an answer", async () => {
+    const d = open(remote);
+    await settle();
+    expect(d.host.textContent, "unknown until the computer answered").toContain("its existence is not checked here");
+    bridge.checkRemote.mockResolvedValueOnce({ status: "busy" });
+    d.type("/srv/report.pdf");
+    d.button("Insert reference")!.click();
+    await settle();
+    expect(d.error()).toBe("Cannot check this path now.");
+    bridge.checkRemote.mockResolvedValueOnce({ status: "missing" });
+    d.button("Retry")!.click();
+    await settle();
+    expect(d.error()).toBe("Choose an existing file on Studio.");
+    expect(d.host.textContent).toContain("Only the path is added; the file is not read or uploaded.");
+    expect(bridge.checkRemote.mock.calls[0][0]).toBe(bridge.checkRemote.mock.calls[1][0]);
+    expect(d.insert).not.toHaveBeenCalled();
+  });
+
+  it("cancels the computer's calls when it closes and drops their late answer", async () => {
+    let answer!: (value: unknown) => void;
+    bridge.checkRemote.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    const d = open(remote);
+    d.type("/srv/report.pdf");
+    d.button("Insert reference")!.click();
+    const id = bridge.checkRemote.mock.calls[0][0];
+    expect(bridge.support).toHaveBeenCalledWith(id, "studio");
+    d.button("Cancel")!.click();
+    expect(bridge.cancel).toHaveBeenCalledExactlyOnceWith(id);
+    answer({ status: "file" });
+    await settle();
+    expect(d.insert).not.toHaveBeenCalled();
+  });
+
+  it("never asks about a local path's computer", async () => {
+    const d = open(local);
+    await settle();
+    d.button("Cancel")!.click();
+    expect(bridge.support).not.toHaveBeenCalled();
+    expect(bridge.cancel).not.toHaveBeenCalled();
+  });
+
+  it("keeps the dialog open with the composer's refusal", async () => {
     const d = open(remote, vi.fn(() => "Message exceeds 64 KiB."));
     d.type("/srv/report.pdf");
     d.button("Insert reference")!.click();
+    await settle();
     expect(d.error()).toBe("Message exceeds 64 KiB.");
     expect(d.close).not.toHaveBeenCalled();
   });

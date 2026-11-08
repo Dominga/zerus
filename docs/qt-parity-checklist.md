@@ -43,9 +43,9 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Area | done | partial | missing | other |
 | --- | --- | --- | --- | --- |
 | Sessions list, row actions and header | 27 | | 1 | 2 owner decisions, 1 intentional difference |
-| Archive and search | 12 | 3 | 0 | |
-| Composer and sending | 34 | 1 | | |
-| Activity | 16 | 1 | 0 | |
+| Archive and search | 15 | 0 | 0 | |
+| Composer and sending | 35 | | | 1 intentional difference |
+| Activity | 17 | 0 | 0 | |
 | Questions and approvals | 12 | | | |
 | Notifications | 7 | 5 | | |
 | Tray, menu bar and Dock | 6 | 2 | 1 | 2 owner decisions |
@@ -54,7 +54,7 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Settings | 17 | | | 1 intentional difference |
 | Machines, accounts, projects, new session, tasks and worktrees | 18 | | | |
 | Terminal, processes and platform session support | 8 | | | |
-| Total (192 rows) | 169 | 14 | 3 | 6 |
+| Total (193 rows) | 174 | 9 | 3 | 7 |
 
 ## Owner decisions
 
@@ -71,7 +71,6 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Bead | Priority | Gap |
 | --- | --- | --- |
 | `zerus-5wmh.13.14` | P2 | Windows: focus-aware banners, update alert, tray theme, watchdog, startup note |
-| `zerus-5wmh.13.7.5` | P3 | Drop image data (no file path) into the composer |
 | `zerus-5wmh.13.8` | P3 | Activity rendering: full tool output, View process, Markdown, inline-code links, empty state |
 | `zerus-5wmh.13.15` | P3 | Tray Refresh entry, Linux without a tray host, Linux launch during service start |
 | `zerus-5wmh.13.16` | P3 | Alert text language; the labeled rail's exact-count tooltip (`zerus-nfmh1`) |
@@ -132,7 +131,7 @@ Keyboard commands for every area are listed once, under Shortcuts and navigation
 | Archive filter with count; date picker with presets and a checked custom range; Refresh | done | `ui/sessions/ArchiveBar.tsx:35,66-159`; `ui/sessions/archive-dates.ts:18,114` | `ArchiveDatePicker.cpp`; `ArchiveBrowser.cpp:17-19` |
 | Status, Newer and Older paging, per-machine errors | done | `ui/sessions/ArchiveBar.tsx:39-55`; `store/archive.ts:104-131` | `ArchiveBrowser.cpp:23-80` |
 | Archived rows grouped by project and filtered; archive counts in pickers | done | `store/archive.ts:182-196,446-449`; `ui/sessions/archive-filters.ts:5-27` | `SessionsWindowRows.cpp:266-300` |
-| Search archive names and IDs with paging | partial (`zerus-5wmh.13.17`) | the query reaches `hgs` (`store/archive.ts:373,440`), but while searching the status and Newer and Older are hidden (`ui/sessions/ArchiveBar.tsx:39,53`), so matches past the loaded page are unreachable | `SessionsWindow.cpp:386,410`; `ArchiveBrowser.cpp:58` |
+| Search archive names and IDs with paging | done; a total the host capped shows as N+ | the query reaches `hgs` (`store/archive.ts:378,445`); while searching the status and Newer and Older stay (`ui/sessions/ArchiveBar.tsx:41-55`) and the results' archive rows are the query's current page (`store/contentSearch.ts:52`); `store/archive.ts:106` | `SessionsWindow.cpp:386,410`; `ArchiveBrowser.cpp:58` |
 | Read-only recorded Activity for an archived session | done | `ui/sessions/SessionDetail.tsx:166-173`; `store/archiveActivity.ts:206` | `SessionsWindow.cpp:3434-3716` |
 | Restore, blocked when the name is live; copy restore command; rename; Forget; Clear archive | done | `ui/sessions/SessionDetail.tsx:141`; `store/restores.ts:195`; `ui/sessions/actions-ui.ts:154-247,355`; `ui/sessions/archive-entries.ts:14-45` | `SessionsWindow.cpp:371-373,618,1958-1966,3148-3154` |
 
@@ -144,9 +143,9 @@ Keyboard commands for every area are listed once, under Shortcuts and navigation
 | Matching on name, machine, model, effort, folder, branch, worktree, session, run and archive IDs | done | `store/content-search-model.ts:85-90` | `SessionSearch.cpp:239,274-275` |
 | Child conversation IDs match and the result says which ID matched | done | `store/content-search-model.ts:98,127`; `ui/sessions/subagents.ts:37`; `ui/sessions/SearchResults.tsx:56` | `SessionSearch.cpp:239-268` |
 | Message content search across machines, honoring the filters, with status and Search again | done | `store/contentSearch.ts:22-71`; `store/content-search-model.ts:27-79` | `SessionSearch.cpp:75-213,309-314` |
-| One result row per matching message | partial (`zerus-5wmh.13.17`) | one row per session with the newest excerpt only (`store/content-search-model.ts:94-104`) | `SessionSearch.cpp:276-282` |
+| One result row per matching message | done; at most 20 messages per session | `store/content-search-model.ts:120`; `store/contentSearch.ts:64` | `SessionSearch.cpp:276-282` |
 | Result rows with highlights, badges, author and time; keyboard navigation; opening a hit shows the saved message | done | `ui/sessions/SearchResults.tsx:26-55`; `store/contentSearch.ts:72-84` | `SessionSearch.cpp:132,253-262`; `SessionsWindow.cpp:434-456` |
-| Back to latest activity while a search result is shown | partial (`zerus-5wmh.13.17`) | the button appears only when not following (`ui/sessions/Composer.tsx:288`); otherwise the preview ends when the search is cleared | `ActivityView.cpp:1631-1636` |
+| Back to latest activity while a search result is shown | done | `ui/sessions/search-hit.ts` (`jumpButton`); `ui/sessions/Composer.tsx:267`; `ui/sessions/Activity.tsx:666` | `ActivityView.cpp:1631-1636` |
 | Pending session creations in search results | done | `store/creations.ts:303`; `ui/sessions/SearchResults.tsx:21`; `store/content-search-model.ts` (`searchCount`) | `SessionSearch.cpp:119,287-305` |
 | Go to popup (Ctrl+K) | done | `App.tsx:121`; `ui/sessions/GoToDialog.tsx:37` | `SessionsWindowGoTo.cpp` |
 
@@ -173,9 +172,10 @@ Keyboard commands for every area are listed once, under Shortcuts and navigation
 | Attach from a file picker (8 files, 10 MiB each, 20 MiB total), `[File #n]` and `[Image #n]` at the cursor | done | `ui/sessions/Composer.tsx:318-321`; `core/attachments.rs:143-149` | `MessageComposer.cpp:856-863,969-1000` |
 | Attachment chips: thumbnails, size, preview, guarded open, remove with its reference, keyboard use | done (adds Undo) | `ui/sessions/Attachments.tsx:26-131` | `MessageComposer.cpp:1008-1124` |
 | Paste an image (32-megapixel limit) | done | `ui/sessions/Composer.tsx:230-237`; `store/composer.ts:471-485` | `MessageComposer.cpp:197-202,393-398` |
-| Paste files copied in a file manager; drop raw image data on the editor | partial (`zerus-5wmh.13.7.5`) | copied local files attach on paste, before an image or the text: `ui/sessions/Composer.tsx:211-234`, `ui/sessions/paste-files.ts`, bounded native file list `tauri/clipboard.rs:75-128`; dropped image data is not taken, as drops carry file paths only (`store/drops.ts:158-164`), and on Windows the native drag-drop never passes it to the page | `MessageComposer.cpp:186-196,230-246` |
+| Paste files copied in a file manager | done | copied local files attach on paste, before an image or the text: `ui/sessions/Composer.tsx:211-234`, `ui/sessions/paste-files.ts`, bounded native file list `tauri/clipboard.rs:75-128` | `MessageComposer.cpp:186-196` |
+| Drop raw image data (no file path) on the editor, for example an image dragged out of a browser | intentional difference (`zerus-5wmh.13.7.5`) | the image data never reaches the page on any platform: tauri-runtime-wry 2.12.3's drag-drop handler takes every native drop; wry 0.57.1 on macOS then never passes it to the web view and reports only file URLs, on Linux it reports other URLs as paths, and on Windows it accepts file drops only; WebKitGTK's GTK3 drop target registers no image target at all. A drop on the panel that names no file says to copy the image and paste it, which attaches it (`store/drops.ts`, `NO_FILES_NOTICE`); a mixed drop attaches its files. No drop target of our own and no wry fork (design-tima2, 2026-11-08) | `MessageComposer.cpp:230-246` |
 | Drag and drop on the session panel: attach, or paste paths into Terminal, with an overlay hint | done | `store/drops.ts:9-49,158-164`; `ui/sessions/SessionDetail.tsx:282` | `SessionFileDrop.h`; `SessionsWindow.cpp:1595-1610,2618-2660` |
-| Reference an existing file (path only; browse locally or check a remote path) | done (a remote file's existence is not checked, as in Qt; `zerus-5wmh.13.18`) | `ui/sessions/FileReferenceDialog.tsx`; `ui/sessions/file-reference.ts`; bounded local check `tauri/file_reference.rs:54-98`; inserted as an ordinary edit into the draft it opened on: `ui/sessions/Composer.tsx:173-193` | `MessageComposer.cpp:297-303,865-959` |
+| Reference an existing file (path only; browse locally or check a remote path) | done (Next also checks that a remote file exists, through `hgs path-info` on a computer that has it; older computers keep Qt's unchecked insert; `zerus-5wmh.13.18`) | `ui/sessions/FileReferenceDialog.tsx`; `ui/sessions/file-reference.ts`; bounded local check and cancellable remote check `tauri/file_reference.rs`; `core/reads.rs` `path_info`; inserted as an ordinary edit into the draft it opened on: `ui/sessions/Composer.tsx:173-193` | `MessageComposer.cpp:297-303,865-959` |
 | The agent's suggested next message as placeholder; Tab inserts it | done | `ui/sessions/Composer.tsx:183-190,217-225,311`; `store/suggestions.ts` | `MessageComposer.cpp:209-215,556-570,822-825` |
 | Model and effort chip: Apply, Save for resume, provider notice, Open Terminal, OpenCode picker with favorites | done | `ui/sessions/ModelSettingsDialog.tsx:30-66`; `ui/sessions/ModelPicker.tsx:82-159` | `MessageComposer.cpp:317-363,1389-1667`; `OpenCodeModelPicker.cpp` |
 | Voice message: record, Space or Esc stops, preview, provider choice, Discard with confirmation, Send voice, permission and cold-cache dialogs | done | `ui/sessions/VoiceControls.tsx:15-158`; `core/voice_composer.rs:2063-2141` | `speech/SpeechComposer.cpp:60-99,426-533` |
@@ -210,7 +210,7 @@ Keyboard commands for every area are listed once, under Shortcuts and navigation
 | OpenCode queue: Queued or Not delivered stamp, waiting hint, Remove queued message with confirmation | done | `ui/sessions/transcript.ts:538-547`; `ui/sessions/Activity.tsx:608-609`; `ui/sessions/InboxRemove.tsx:21,43`; `tauri/composer/inbox.rs:53` | `ActivityView.cpp:1036-1038,1072-1087`; `SessionsWindow.cpp:4433-4467` |
 | Attachment, voice and video cards: play, seek, transcript; playback stops when hidden | done | `ui/sessions/Activity.tsx:254-490`; `store/mediaPlayback.ts` | `ActivityView.cpp:759-782,979-1028,2153-2187` |
 | Recorded-context fallback; Older events have expired | done | `ui/sessions/transcript.ts:212-216`; `ui/sessions/Activity.tsx:1176-1178` | `ActivityView.cpp:753-757,905-916` |
-| A message search hit opens in Activity with the query highlighted | partial (`zerus-5wmh.13.17`) | shown as plain highlighted text, without Markdown, links or Copy as Markdown; the jump caption does not become Back to latest activity (`ui/sessions/Activity.tsx:1158-1162`) | `SessionsWindow.cpp:382-392,436-458`; `ActivityView.cpp:1592-1605` |
+| A message search hit opens in Activity with the query highlighted | done; an excerpt of a longer message offers no Copy; a tool hit's output is marked too and its Show more steps work as in Activity | `ui/sessions/search-hit.ts` (`searchHitItems`); `ui/sessions/Activity.tsx:1147-1150`; `ui/sessions/SearchHighlight.tsx` (`HighlightQuery`); `ui/sessions/ToolEvents.tsx:15,50` | `SessionsWindow.cpp:382-392,436-458`; `ActivityView.cpp:1592-1605` |
 | Empty-state guidance (ready for the first message, sign in first, open the terminal) | done | `ui/sessions/activity-empty.ts:9-21`; `ui/sessions/Activity.tsx:1151` | `ActivityView.cpp:1145-1150` |
 | Subagent activity with a way back to the main activity | done | `ui/sessions/Activity.tsx:1151-1157` | `SessionsWindow.cpp:1041-1062` |
 

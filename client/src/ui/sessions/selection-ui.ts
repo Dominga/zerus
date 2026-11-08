@@ -13,6 +13,8 @@ import { tr } from "../../i18n";
 export const SELECTION_ICONS: Record<SelectionAction, string> = {
   mark_read: "read-all",
   review_later: "attention",
+  mute: "bell-off",
+  unmute: "bell",
   compact: "compact-row",
   expand: "expand-row",
   pause: "pause",
@@ -35,6 +37,16 @@ export function countable(s: Pick<SelectionRow, "state">, a: SelectionAction, ap
   return archiveBound || s.state !== "archived" || (a !== "resume" && a !== "forget");
 }
 
+/**
+ * One bell tool: Mute while any selected session is unmuted, else Unmute
+ * (zerus-qhtxf). The direction comes from every selected row's muted flag,
+ * whether or not its setting can change now (zerus-qhtxf.1).
+ */
+const hiddenBell = (a: SelectionAction, anyUnmuted: boolean) => (a === "unmute" && anyUnmuted) || (a === "mute" && !anyUnmuted);
+
+/** Whether any selected session is unmuted: the bell tool's direction. */
+export const anyUnmuted = (rows: readonly Pick<SelectionRow, "muted">[]) => rows.some((s) => !s.muted);
+
 /** Compact and Expand only change the presentation, so a running batch does not block them. */
 export const presentation = (a: SelectionAction) => a === "compact" || a === "expand";
 
@@ -50,12 +62,15 @@ export interface SelectionTool {
   danger: boolean;
 }
 
-/** The bar's visible tools in Qt's order: a tool shows when its count is above 0. */
-export function barTools(count: (a: SelectionAction) => number, selected: number, batchRunning: boolean): SelectionTool[] {
+/**
+ * The bar's visible tools in Qt's order: a tool shows when its count is above
+ * 0. `unmuted` says whether any selected session is unmuted (`anyUnmuted`).
+ */
+export function barTools(count: (a: SelectionAction) => number, selected: number, batchRunning: boolean, unmuted = true): SelectionTool[] {
   const tools: SelectionTool[] = [];
   for (const action of SELECTION_ACTIONS) {
     const n = count(action);
-    if (n <= 0) continue;
+    if (n <= 0 || hiddenBell(action, unmuted)) continue;
     const move = action === "move";
     tools.push({
       action,
@@ -83,10 +98,10 @@ export function toolEntry(t: SelectionTool, run: (a: SelectionAction) => void): 
 }
 
 /** The selection menu: a section, the applicable actions, a separator and Deselect all. */
-export function selectionMenu(count: (a: SelectionAction) => number, selected: number, batchRunning: boolean, run: (a: SelectionAction) => void, deselect: () => void): MenuEntry[] {
+export function selectionMenu(count: (a: SelectionAction) => number, selected: number, batchRunning: boolean, run: (a: SelectionAction) => void, deselect: () => void, unmuted = true): MenuEntry[] {
   return [
     { heading: `${selected} selected sessions` },
-    ...barTools(count, selected, batchRunning).map((t) => toolEntry(t, run)),
+    ...barTools(count, selected, batchRunning, unmuted).map((t) => toolEntry(t, run)),
     { separator: true },
     { label: tr("Deselect all"), action: deselect },
   ];

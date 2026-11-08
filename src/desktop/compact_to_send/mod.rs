@@ -24,7 +24,9 @@ pub(crate) use child::adopt_custody;
 pub(super) use recovery::{Owned, Recovery};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod slot;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+// Checked last before each child: by the Linux runner, and by the test
+// executor that stands in for it.
+#[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
 mod target;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) use runtime::Runtime;

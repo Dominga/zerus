@@ -615,12 +615,15 @@ pub fn check_archive_page(
     if data.get("previous_cursor").is_some() || data.get("position").is_some() {
         let previous = data.get("previous_cursor").and_then(Value::as_str);
         let position = data.get("position").and_then(Value::as_f64);
+        // A capped total (zerus-080n8) counts only up to its cap, so a later
+        // window may start past it.
+        let capped = data.get("total_capped").and_then(Value::as_bool) == Some(true);
         let window = previous
             .is_some_and(|previous| previous.chars().count() <= ARCHIVE_CURSOR_CHARS)
             && position.is_some_and(|position| {
                 position >= 0.0
                     && position == position.floor()
-                    && position + rows.len() as f64 <= total.unwrap_or(0.0)
+                    && (capped || position + rows.len() as f64 <= total.unwrap_or(0.0))
             });
         if !window {
             error = Some(ARCHIVE_WINDOW_INVALID);
@@ -654,6 +657,8 @@ pub struct ArchivePage {
     pub next_cursor: String,
     pub previous_cursor: Option<String>,
     pub total: u64,
+    /// The host counted only up to a cap: show the total as "N+" (zerus-5wmh.13.17 (4)).
+    pub total_capped: bool,
     pub position: Option<u64>,
 }
 
@@ -760,6 +765,7 @@ fn page(data: &Value) -> ArchivePage {
         next_cursor: text("next_cursor").unwrap_or_default(),
         previous_cursor: text("previous_cursor"),
         total: data["total"].as_f64().unwrap_or(0.0) as u64,
+        total_capped: data.get("total_capped").and_then(Value::as_bool) == Some(true),
         position: data
             .get("position")
             .and_then(Value::as_f64)
@@ -1019,8 +1025,167 @@ pub fn attachment_message(error: &ReadError) -> String {
     }
 }
 
+/// `hgs [@host] path-info --path P`: the marker a computer's help names it by.
+/// An older hgs would read the unknown command as a session launch.
+pub const PATH_INFO_MARKER: &str = "hgs [@host] path-info --path";
+/// The longest path a check sends, as the reference dialog's.
+const PATH_INFO_PATH: usize = 32 << 10;
+
+/// What `hgs path-info` says of a path on a computer (schema 1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PathInfo {
+    File {
+        size: u64,
+    },
+    Directory,
+    Other,
+    Missing,
+    /// The computer's account cannot inspect the path.
+    Unknown,
+}
+
+fn cancellable(
+    hgs: &Path,
+    invocation: &Invocation,
+    limit: usize,
+    cancel: &AtomicBool,
+) -> Result<Exit, ReadError> {
+    run_cancellable(hgs, invocation, &[], limit, cancel).map_err(|stopped| match stopped {
+        Stopped::TooLarge(TooLarge { cap, .. }) => ReadError::TooLarge { limit: cap },
+        Stopped::Cancelled => ReadError::Superseded,
+    })
+}
+
+/// The `path-info` call for `path` on `computer`.
+pub fn path_info_invocation(computer: &ComputerId, path: &str) -> Result<Invocation, ReadError> {
+    if computer.alias().is_some_and(|alias| !valid_alias(alias)) {
+        return Err(bad("not a computer alias"));
+    }
+    if path.is_empty() || path.len() > PATH_INFO_PATH || path.chars().any(char::is_control) {
+        return Err(bad("not a path to check"));
+    }
+    Ok(Invocation {
+        args: arguments(computer, &["path-info", "--path", path]),
+        stdin: None,
+        timeout: timeout(5, 15, computer),
+        request_id: None,
+    })
+}
+
+/// The reply of schema 1, and nothing else.
+pub fn decode_path_info(stdout: &[u8]) -> Result<PathInfo, ReadError> {
+    let value: Value =
+        serde_json::from_slice(stdout).map_err(|_| invalid("path-info reply is not JSON"))?;
+    if value.get("schema").and_then(Value::as_u64) != Some(1) {
+        return Err(invalid("unknown path-info schema"));
+    }
+    let kind = value.get("kind").and_then(Value::as_str);
+    match (value.get("exists"), kind) {
+        (Some(Value::Bool(true)), Some("file")) => value
+            .get("size")
+            .and_then(Value::as_u64)
+            .map(|size| PathInfo::File { size })
+            .ok_or_else(|| invalid("a file without its size")),
+        (Some(Value::Bool(true)), Some("directory")) => Ok(PathInfo::Directory),
+        (Some(Value::Bool(true)), Some("other")) => Ok(PathInfo::Other),
+        (Some(Value::Bool(false)), None) => Ok(PathInfo::Missing),
+        (Some(Value::Null), None) => Ok(PathInfo::Unknown),
+        _ => Err(invalid("unexpected path-info reply")),
+    }
+}
+
+/// Whether `computer`'s hgs names `path-info` in its help; ends at `cancel`.
+pub fn path_info_supported(
+    hgs: &Path,
+    computer: &ComputerId,
+    cancel: &AtomicBool,
+) -> Result<bool, ReadError> {
+    if computer.alias().is_some_and(|alias| !valid_alias(alias)) {
+        return Err(bad("not a computer alias"));
+    }
+    let probe = Invocation {
+        args: arguments(computer, &["--help"]),
+        stdin: None,
+        timeout: timeout(10, 20, computer),
+        request_id: None,
+    };
+    let help = output(cancellable(hgs, &probe, HELP_LIMIT, cancel)?)?;
+    Ok(String::from_utf8_lossy(&help).contains(PATH_INFO_MARKER))
+}
+
+/// One `path-info` read within [`READ_LIMIT`]; ends at `cancel`. The caller
+/// checks [`path_info_supported`] first.
+pub fn path_info(
+    hgs: &Path,
+    computer: &ComputerId,
+    path: &str,
+    cancel: &AtomicBool,
+) -> Result<PathInfo, ReadError> {
+    let invocation = path_info_invocation(computer, path)?;
+    decode_path_info(&output(cancellable(hgs, &invocation, READ_LIMIT, cancel)?)?)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn path_info_reads_only_schema_one_replies() {
+        let decode = |text: &str| decode_path_info(text.as_bytes());
+        assert_eq!(
+            decode(r#"{"schema":1,"exists":true,"kind":"file","size":12}"#),
+            Ok(PathInfo::File { size: 12 })
+        );
+        assert_eq!(
+            decode(r#"{"schema":1,"exists":true,"kind":"directory","size":null}"#),
+            Ok(PathInfo::Directory)
+        );
+        assert_eq!(
+            decode(r#"{"schema":1,"exists":true,"kind":"other","size":null}"#),
+            Ok(PathInfo::Other)
+        );
+        assert_eq!(
+            decode(r#"{"schema":1,"exists":false,"kind":null,"size":null}"#),
+            Ok(PathInfo::Missing)
+        );
+        assert_eq!(
+            decode(r#"{"schema":1,"exists":null,"kind":null,"size":null}"#),
+            Ok(PathInfo::Unknown)
+        );
+        for bad in [
+            r#"{"schema":2,"exists":true,"kind":"file","size":1}"#,
+            r#"{"exists":true,"kind":"file","size":1}"#,
+            r#"{"schema":1,"exists":true,"kind":"file"}"#,
+            r#"{"schema":1,"exists":true,"kind":"socket"}"#,
+            r#"{"schema":1,"exists":false,"kind":"file"}"#,
+            "not json",
+        ] {
+            assert!(
+                matches!(decode(bad), Err(ReadError::Invalid { .. })),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn path_info_asks_the_named_computer_with_the_path_as_one_argument() {
+        let peer = ComputerId::from("studio");
+        let call = path_info_invocation(&peer, "~/plan's notes.md").unwrap();
+        assert_eq!(
+            call.args,
+            ["@studio", "path-info", "--path", "~/plan's notes.md"]
+        );
+        assert_eq!(call.timeout, Duration::from_secs(15));
+        assert_eq!(
+            path_info_invocation(&ComputerId::local(), "/srv/a")
+                .unwrap()
+                .args,
+            ["path-info", "--path", "/srv/a"]
+        );
+        assert!(path_info_invocation(&peer, "").is_err());
+        assert!(path_info_invocation(&peer, "/srv/a\nb").is_err());
+        assert!(path_info_invocation(&ComputerId::from("bad alias"), "/srv/a").is_err());
+    }
+
     use super::*;
 
     fn peer() -> ComputerId {
@@ -1596,6 +1761,31 @@ mod tests {
             decode(&read, code(&inventory.to_string())).unwrap(),
             inventory
         );
+    }
+
+    #[test]
+    fn a_capped_total_is_kept_and_a_window_past_it_passes() {
+        // zerus-5wmh.13.17 (4): an hgs that counts only up to a cap (zerus-080n8)
+        // says so with `total_capped`; its later windows may start past that count.
+        let capped = page_with(|p| {
+            p["total"] = json!(3);
+            p["total_capped"] = json!(true);
+            p["previous_cursor"] = json!("p");
+            p["position"] = json!(10);
+        });
+        assert_eq!(verdict("", capped.clone()), None);
+        let typed = page(&capped);
+        assert!(typed.total_capped);
+        assert_eq!((typed.total, typed.position), (3, Some(10)));
+        // Without the flag the window still has to fit inside the total.
+        let uncapped = page_with(|p| {
+            p["previous_cursor"] = json!("p");
+            p["position"] = json!(10);
+        });
+        assert_eq!(verdict("", uncapped).as_deref(), Some(ARCHIVE_WINDOW_INVALID));
+        assert!(!page(&page_with(|_| {})).total_capped);
+        // The flag is a boolean; anything else is not a capped total.
+        assert!(!page(&page_with(|p| p["total_capped"] = json!("yes"))).total_capped);
     }
 
     #[test]

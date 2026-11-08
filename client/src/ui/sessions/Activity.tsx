@@ -38,7 +38,9 @@ import { NOT_DELIVERED_HINT } from "./inbox-actions";
 import { createInboxRemoveScope, InboxRemove, RemoveQueuedDialog, type InboxRemovePorts, type InboxRemoveScope } from "./InboxRemove";
 import { emptyActivity } from "./activity-empty";
 import { markdownReady } from "./markdown";
-import { ActivitySession, Body } from "./MarkdownBody";
+import { ActivitySession, Body, HighlightQuery } from "./MarkdownBody";
+import { searchHitItems } from "./search-hit";
+import { ActivityPending } from "./ActivityPending";
 
 export { Body } from "./MarkdownBody";
 import { activityAll, activityFlow, activityRange, measureActivityRows, activitySelectionIndexes, activitySelectionText, activityText, activityTexts, activityVirtualOffset, selectActivityAll, selectionCoversActivity } from "./activity-virtual";
@@ -617,7 +619,7 @@ function Item(props: {
           </Show>
           <Show when={it.kind === "user" && it.receipt}><span class="act-receipt"><Icon name="check" size={11} />{it.receipt}</span></Show>
           <span class="grow" />
-          <Show when={it.kind === "agent"}><button class="icon-btn small act-copy" title={tr("Copy as Markdown")} onClick={() => copyText(it.body ?? "", tr("The reply is on the clipboard"))}><Icon name="copy" size={12} /></button></Show>
+          <Show when={it.kind === "agent" && !it.excerpt}><button class="icon-btn small act-copy" title={tr("Copy as Markdown")} onClick={() => copyText(it.body ?? "", tr("The reply is on the clipboard"))}><Icon name="copy" size={12} /></button></Show>
         </header>
         {/* A fork's inherited row belongs to its source: never this session's attachments. */}
         <EchoBody item={it} scope={rowScope(it, props.scope)} />
@@ -661,7 +663,16 @@ export function focusTranscript(): boolean {
   return true;
 }
 
-/** Scrolls to the newest item and follows it again. */
+/**
+ * The search hit Activity shows instead of the session's history: the one
+ * chosen for the selected row, its run and conversation, outside a subagent.
+ */
+export function shownSearchPreview() {
+  const p = searchPreview(), row = selected();
+  return p && row && p.key === row.key && p.run === (row.runId ?? "") && p.conversation === (row.conversationId ?? "") && !subagentOpen() ? p : undefined;
+}
+
+/** Scrolls to the newest item and follows it again; a shown search hit gives way to the latest activity. */
 export function jumpToLatest() {
   if (searchPreview()) { clearSearchPreview(); return; }
   setFollowing(true);
@@ -717,10 +728,7 @@ export function paneStates(source: ActivitySource, s: Session | undefined) {
 
 export function ActivityView(props: { source?: ActivitySource }) {
   const s = () => selected();
-  const preview = () => {
-    const p = searchPreview(), row = s();
-    return p && row && p.key === row.key && p.run === (row.runId ?? "") && p.conversation === (row.conversationId ?? "") && !subagentOpen() ? p : undefined;
-  };
+  const preview = shownSearchPreview;
   /** The live follow unless the detail passes another source (an archived row's). */
   const source = (): ActivitySource => props.source ?? activity;
   let scroller!: HTMLDivElement;
@@ -767,6 +775,10 @@ export function ActivityView(props: { source?: ActivitySource }) {
   const [expanded, setExpanded] = createStore<Record<string, boolean>>({});
   /** Show more per tool event (`outputKey`), kept while its row is loaded so a row scrolled back keeps its height. */
   const [more, setMore] = createStore<Record<string, number>>({});
+  /** Show more per event of the shown search hit (zerus-tso9j): the same steps, kept only for that hit. */
+  const [hitMore, setHitMore] = createSignal<Record<string, number>>({});
+  createEffect(on(() => preview()?.hit, () => setHitMore({}), { defer: true }));
+  const moreHit = (id: string, index: number) => setHitMore((m) => { const key = outputKey(id, index); return { ...m, [key]: (m[key] ?? TOOL_OUTPUT.first) + TOOL_OUTPUT.step }; });
   /**
    * View process from the live main Activity while Processes is on
    * (ActivityView.cpp:1129-1134): only in the Processes view of the session
@@ -1088,9 +1100,14 @@ export function ActivityView(props: { source?: ActivitySource }) {
     <ActivityLayoutHeld.Provider value={layoutHeld}>
     <div class="activity" style={{ position: "relative" }}>
       <Show when={!placed()}>
-        <div class="act-col" style={{ position: "absolute", inset: "0", "min-height": "0", "pointer-events": "none" }} role="status">
+        <div class="act-col" style={{ position: "absolute", inset: "0", "min-height": "0", "pointer-events": "none", "z-index": "1" }} role="status">
           <div class="act-label eyebrow">{tr("Recorded activity — messages and tool excerpts")}</div>
-          <div class="act-older hint">{tr("Reading activity…")}</div>
+          {/* Placement waits for a first page, which a shell session and a
+              stalled read never have: their states show here, above the
+              hidden column and its scroller, and take clicks (zerus-soudn). */}
+          <Show when={!states().archived && !view.loaded && !view.items.length} fallback={<div class="act-older hint">{tr("Reading activity…")}</div>}>
+            <div style={{ "pointer-events": "auto" }}><ActivityPending source={source()} session={s()} /></div>
+          </Show>
         </div>
       </Show>
       <LocalDeleteDialog />
@@ -1131,7 +1148,13 @@ export function ActivityView(props: { source?: ActivitySource }) {
           <Show when={preview()}>{(p) => <section class="search-preview" aria-label={tr("Search result")}>
             <div class="act-label eyebrow">{tr("SEARCH RESULT — Saved message")}</div>
             <Show when={p().hit.content_truncated}><div class="hint">{tr("Excerpt around the match. This message is too long to display in full.")}</div></Show>
-            <div class="search-preview-body"><SearchHighlight text={String(p().hit.event.detail ?? "")} query={p().query} /></div>
+            {/* The message as Activity shows it, Markdown and links with the query marked (ActivityView.cpp:664, 1592-1605). */}
+            <div class="search-preview-body">
+              <HighlightQuery.Provider value={p().query}>
+                <For each={searchHitItems(p().hit)}>{(item) => <Item item={item} scope={scope()} sourceId={source().target()?.id} postersEnabled={false} expanded={item.kind === "tool" || item.kind === "tools"}
+                  shown={(index) => hitMore()[outputKey(item.id, index)]} onMore={(index) => moreHit(item.id, index)} />}</For>
+              </HighlightQuery.Provider>
+            </div>
           </section>}</Show>
           <Show when={!preview()}>
           <div class="act-history-header">
@@ -1150,7 +1173,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
             <div class="act-older hint">{tr("Older events have expired from the journal.")}</div>
           </Show>
           <Show when={!states().archived} fallback={<div class="notice"><Icon name="archive" size={14} /><div>{tr("This conversation is archived.")}</div></div>}>
-            <Show when={view.loaded || view.items.length} fallback={<div class="act-older hint">{tr("Reading activity…")}</div>}>
+            <Show when={view.loaded || view.items.length} fallback={<ActivityPending source={source()} session={s()} />}>
               <Show when={view.items.length} fallback={<div class="act-empty"><b>{empty().title}</b><p class="muted">{empty().text}</p></div>}>
                 {/* Reserve the current virtual extent through range swaps. Without
                     it, a synchronous layout between removing rows and updating

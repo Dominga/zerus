@@ -28,6 +28,9 @@ export interface ActivitySource {
   loadOlder(): void;
   /** Why the last read failed; a read-only source shows it as a notice while set. */
   error(): string | undefined;
+  /** The first answer did not come in time (the live follow only); `retry` asks again. */
+  stalled?(): boolean;
+  retry?(): void;
   /**
    * Recorded Activity that is only read: no live states, send or interrupt.
    * Its separate composer may still edit the archived draft. The live follow leaves it out.
@@ -62,3 +65,6 @@ export type LiveIsSource = Holds<ActivityStore extends ActivitySource ? true : f
 export function activityReadOnly(key: string): boolean {
   return key.slice(key.lastIndexOf("\n") + 1).startsWith("archive:");
 }
+
+/** A shell (`hgs sh`), which Zerus does not track: no agent activity is recorded for it (zerus-bz54l). */
+export const shellSession = (s: { agent: string; tracked: boolean }) => s.agent === "sh" && !s.tracked;

@@ -93,9 +93,11 @@ impl Runtime {
         let send =
             super::deferred_send::Runtime::new(config, epoch, owner.clone(), fences.clone())?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let answer = super::deferred_answer::Runtime::new(config, epoch, owner.clone())?;
+        let answer =
+            super::deferred_answer::Runtime::new(config, epoch, owner.clone(), fences.clone())?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let compact = super::compact_to_send::Runtime::new(config, epoch, owner.clone())?;
+        let compact =
+            super::compact_to_send::Runtime::new(config, epoch, owner.clone(), fences.clone())?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let resume =
             super::session_resume::Runtime::new(config, epoch, owner.clone(), fences.clone())?;

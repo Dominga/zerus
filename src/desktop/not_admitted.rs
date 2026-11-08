@@ -56,6 +56,8 @@ impl Fence {
 pub(crate) struct Fences {
     pub(super) deferred_send: Fence,
     pub(super) session_resume: Fence,
+    pub(super) deferred_answer: Fence,
+    pub(super) compact_to_send: Fence,
 }
 
 /// Whether the kind's ledger provably holds no row for the request: a strict

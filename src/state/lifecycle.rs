@@ -744,6 +744,7 @@ fn resume_spec(
     record: &Value,
     run_id: &str,
     archive_id: Option<&str>,
+    dry: bool,
 ) -> Result<backend::LaunchSpec> {
     let argv = recipes::resume_argv(
         string(record, "agent"),
@@ -756,6 +757,7 @@ fn resume_spec(
         run_id,
         archive_id,
         None,
+        dry,
     )
 }
 
@@ -853,6 +855,7 @@ fn session_spec(
     run_id: &str,
     archive_id: Option<&str>,
     replaces: Option<&str>,
+    dry: bool,
 ) -> Result<backend::LaunchSpec> {
     let name = string(record, "name");
     if !(Path::new(string(record, "launch_dir")).is_dir() || archive_id.is_some() && super::worktree_lifecycle::restorable(record)) {
@@ -864,7 +867,16 @@ fn session_spec(
     let terminal = pick_terminal(record, &live()?)?;
     let executable = runner_executable()?;
     let hint_environment = crate::config::agent_hint_environment(string(record, "agent"));
-    let launch = supervisor_command(record, &executable, argv, &hint_environment);
+    // This observation precedes the final state writer. Legacy/restore
+    // recipes and dry inspection do not query a helper. An ID-only original
+    // cannot safely fall back to a helper that reads the label's holder.
+    let launch = if cfg!(unix) && !dry && storage::in_id_layout(record) {
+        let count = launch_identity::helper::Observed::probe(&executable)
+            .saved_count(string(record, "session_id"), run_id)?;
+        supervisor_command_with_count(record, &executable, argv, &hint_environment, &count)
+    } else {
+        supervisor_command(record, &executable, argv, &hint_environment)
+    };
     let mut environment = BTreeMap::from([
         ("HGS_SESSION", name.to_owned()),
         ("HGS_SESSION_ID", string(record, "session_id").to_owned()),
@@ -969,7 +981,7 @@ fn resume_archive(name: &str, id: &str, dry: bool, scope: Option<&session_action
     }
     if !dry { super::worktree_lifecycle::restore(&archived)?; }
     let run_id = uuid::Uuid::new_v4().to_string();
-    let spec = resume_spec(&archived, &run_id, Some(id))?;
+    let spec = resume_spec(&archived, &run_id, Some(id), dry)?;
     let _guard = lock(None)?;
     if live()?.contains_key(name) || storage::label_taken(name) {
         return Err(format!("{name}: a live or saved session already uses this name; finish or archive it before restoring"));
@@ -1030,6 +1042,19 @@ fn resume_archive(name: &str, id: &str, dry: bool, scope: Option<&session_action
 
 pub(super) fn resume(names: &[String], dry: bool) -> Result<i32> { resume_scoped(names,dry,None) }
 
+// A legacy-to-ID move or rename can preserve both run and conversation.
+// Keep the prepared recipe bound to the same selected storage and terminal.
+fn saved_binding(record: &Value) -> Value {
+    json!([
+        record["run_id"],
+        record["conversation_id"],
+        record["session_id"],
+        record["layout"],
+        record["name"],
+        record["terminal_name"]
+    ])
+}
+
 pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_action::Scope>) -> Result<i32> {
     if scope.is_none() {archive::reconcile()?;}
     if names.len() == 3 && names[1] == "--archive" {
@@ -1077,11 +1102,11 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
         recipes::verify_history(&record, true)?;
         let restore_id = nonempty_value(&record, "restore_archive_id");
         let new_run=uuid::Uuid::new_v4().to_string();
-        let spec = resume_spec(&record, &new_run, restore_id.as_deref())?;
-        recipes.push((name, spec, record["run_id"].clone(), record["conversation_id"].clone(),new_run));
+        let spec = resume_spec(&record, &new_run, restore_id.as_deref(), dry)?;
+        recipes.push((name, spec, saved_binding(&record), new_run));
     }
     let _guard = lock(None)?;
-    for (name, spec, original_run, original_conversation,new_run) in recipes {
+    for (name, spec, original_binding, new_run) in recipes {
         let current_snapshot = live()?;
         let current = read(&name)?;
         refuse_unsettled_clear(&current)?;
@@ -1096,7 +1121,7 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
         if current_snapshot.contains_key(&spec.name) {
             return Err(format!("{name}: terminal {} was taken before the resume; retry", spec.name));
         }
-        if current["run_id"] != original_run || current["conversation_id"] != original_conversation {
+        if saved_binding(&current) != original_binding {
             return Err(format!("{name}: saved binding changed; retry resume"));
         }
         if dry {
@@ -1133,6 +1158,7 @@ pub(super) fn fresh(args: &[String], dry: bool) -> Result<i32> {
         &run_id,
         None,
         Some(string(&record, "run_id")),
+        dry,
     )?;
     let _guard = lock(None)?;
     let current = read(name)?;
@@ -1145,8 +1171,7 @@ pub(super) fn fresh(args: &[String], dry: bool) -> Result<i32> {
         return Err(format!("{name}: terminal {} was taken before the fresh start; retry", spec.name));
     }
     if expected_run.is_some_and(|run| run != string(&current, "run_id"))
-        || current["run_id"] != record["run_id"]
-        || current["conversation_id"] != record["conversation_id"]
+        || saved_binding(&current) != saved_binding(&record)
     {
         return Err(format!("{name}: saved binding changed; refresh before starting fresh"));
     }

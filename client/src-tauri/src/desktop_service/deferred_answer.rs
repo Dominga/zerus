@@ -103,9 +103,10 @@ pub(crate) fn intent(
 /// the selected live desktop service; without one the answer stays direct.
 ///
 /// An answer refused before its request, or one that stops before its
-/// admission request is written, was never sent: `Unsent`. Only a
-/// completed probe without the kind, or a definite refusal of the original
-/// before any offer, routes it to the direct path.
+/// admission request is written, was never sent: `Unsent`, as is one the
+/// service answers exactly not admitted. Only a completed probe without the
+/// kind, or a definite refusal of the original before any offer, routes it
+/// to the direct path.
 pub(crate) fn call(
     service: Option<Arc<Service>>,
     session: &str,
@@ -171,8 +172,16 @@ pub(crate) fn call(
             )
             .ok()
             .and_then(|bytes| serde_json::from_slice::<wire::Admission>(&bytes).ok());
-        // Only an accepted admission of this exact original is a reply; a
-        // refusal, like a lost reply, leaves only the read-only lookup.
+        // The service's exact closed refusal of this original before its
+        // admission: its ledger proved no row and it sealed the request for
+        // its epoch, so it never started and no copy of it ever admits
+        // (zerus-tlb9q). The card keeps the choice; nothing is looked up or
+        // resent.
+        if admission.as_ref().is_some_and(|a| a.not_admitted(&intent)) {
+            return Ok(AnswerResult::Unsent(NOT_STARTED.into()));
+        }
+        // Only an accepted admission of this exact original is a reply; any
+        // other refusal, like a lost reply, leaves only the read-only lookup.
         if let Some(admission) = admission.as_ref().filter(|a| a.matches(&intent)) {
             if let Some(answer) = admission
                 .receipt

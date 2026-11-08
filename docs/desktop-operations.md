@@ -273,8 +273,10 @@ client takes it only from a completed exchange whose reply is exactly that
 refusal: this kind's ABI, the original's request and scope, not accepted,
 not durable, no receipt and the closed code. The send then settles as never
 started ("the desktop service could not start it"): the draft stays and its
-identity is released, with no lookup, direct path or resend. The session
-resume follows the same rule with `session_resume_not_admitted`.
+identity is released, with no lookup, direct path or resend. The deferred
+answer (`deferred_answer_not_admitted`, the card keeping its choice), the
+compact-to-send (`compact_to_send_not_admitted`) and the session resume
+(`session_resume_not_admitted`) follow the same rule, each with its own seals.
 
 The second kind, `deferred_answer` (`desktop::deferred_answer`, ABI
 `desktop-deferred-answer-v1`), defines its closed wire for one `hgs answer

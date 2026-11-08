@@ -313,6 +313,8 @@ pub const KEYS: &[Key] = &[
     Key { name: "workspace/inspectorClosed", kind: Kind::Text("[]"), seeded: true },
     // New G3 families use the family journal, not the original switch seed.
     client("client/windowGeometry", Kind::Text("")),
+    // Task 243: the sessions list hidden (Qt's SessionPanelDock Collapsed, the same key).
+    client("workspace/sessionsCollapsed", Kind::Flag(false)),
     client(
         "workspace/sessionsWidth",
         Kind::Whole {

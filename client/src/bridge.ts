@@ -1089,6 +1089,10 @@ export const questionPage = (card: string, page: number) => desktop<void>("quest
 export const questionNavigate = (direction: number) => desktop<void>("question_navigate", { direction });
 export const questionAllowRetry = (card: string) => desktop<void>("question_allow_retry", { card });
 export const questionSubmit = (card: string) => desktop<QuestionReply>("question_submit", { card });
+/** Task 243: the main window without its native title bar (the Compact skins' unified chrome), and its buttons. */
+export const windowChrome = (unified: boolean) => inTauri() ? invoke<void>("window_chrome", { unified }) : Promise.resolve();
+export const windowControl = (action: "minimize" | "maximize" | "close" | "state") =>
+  inTauri() ? invoke<boolean>("window_control", { action }) : Promise.resolve(false);
 export const questionDecide = (card: string, allow: boolean) => desktop<QuestionReply>("question_decide", { card, allow });
 /** Task 198 (W5): "Allow all, don't ask again" on a subagent card; the first call asks to Confirm. */
 export const questionAlways = (card: string) => desktop<QuestionReply>("question_always", { card });

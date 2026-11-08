@@ -222,7 +222,7 @@ fn validate(v: &Value) -> Result<(), String> {
         ),
         (
             "layout",
-            json!({"rail":["icons","labeled"],"sessions-pane":["left","right"],"inspector":["docked","collapsed"],"activity-column":["centered","full"],"side-panel":["tabs","sections"]}),
+            json!({"rail":["icons","labeled"],"sessions-pane":["left","right"],"inspector":["docked","collapsed"],"activity-column":["centered","full"],"side-panel":["tabs","sections"],"chrome":["system","unified"]}),
         ),
     ] {
         if let Some(values) = f.get(field) {
@@ -510,6 +510,12 @@ mod tests {
         for (value, ok) in [("tabs", true), ("sections", true), ("drawer", false)] {
             let mut v = sample();
             v["layout"] = json!({ "side-panel": value });
+            assert_eq!(validate(&v).is_ok(), ok, "{value}");
+        }
+        // Task 243: the system chrome or the Compact skins' one title bar.
+        for (value, ok) in [("system", true), ("unified", true), ("frameless", false)] {
+            let mut v = sample();
+            v["layout"] = json!({ "chrome": value });
             assert_eq!(validate(&v).is_ok(), ok, "{value}");
         }
         assert!(easing("cubic-bezier(.2,.8,.2,1)"));

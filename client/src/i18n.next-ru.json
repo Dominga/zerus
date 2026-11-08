@@ -2658,5 +2658,12 @@
   "Collapsed shows each notice and the lead's reply to it as one folded line and never notifies you; Hidden shows neither. The lead still receives everything, and what waits for you is never hidden.": "«Свёрнуто» показывает каждое уведомление и ответ лида на него одной свёрнутой строкой и никогда не оповещает вас; «Скрыто» не показывает ни то, ни другое. Лид всё равно получает всё, а то, что ждёт вас, никогда не скрывается.",
   "Full": "Полностью",
   "Collapsed": "Свёрнуто",
-  "Hidden": "Скрыто"
+  "Hidden": "Скрыто",
+  "Window title bar": "Заголовок окна",
+  "Show the session list": "Показать список сессий",
+  "Hide the session list": "Скрыть список сессий",
+  "Search sessions, IDs and messages": "Поиск по сессиям, идентификаторам и сообщениям",
+  "Minimize": "Свернуть",
+  "Maximize": "Развернуть",
+  "Close window": "Закрыть окно"
 }

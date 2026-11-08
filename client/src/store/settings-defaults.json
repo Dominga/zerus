@@ -68,6 +68,7 @@
   "workspace/reduceMotion": false,
   "workspace/removeWorktreeAfterTermination": false,
   "workspace/sessionLeads": "",
+  "workspace/sessionsCollapsed": false,
   "workspace/sessionsWidth": 310,
   "workspace/showCompletedSubagents": false,
   "workspace/skin": "zerus",

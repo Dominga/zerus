@@ -23,4 +23,12 @@ describe("bundled skins", () => {
     const odd = { ...(whitewhDark as SkinFile), id: "odd", layout: { "side-panel": "drawer" } } as unknown as SkinFile;
     expect(() => resolveSkins([zerusDark as SkinFile, odd])).toThrow(/side-panel/);
   });
+  it("give the Compact skins Qt's one title bar and keep the system chrome for the others (task 243)", () => {
+    const files = [zerusDark, zerusLight, fjord, paper, whitewhDark, whitewhLight] as SkinFile[];
+    expect(Object.fromEntries(resolveSkins(files).map((skin) => [skin.id, skin.layout.chrome]))).toEqual({
+      "zerus-dark": "system", "zerus-light": "system", fjord: "system", paper: "system", "whitewh-dark": "unified", "whitewh-light": "unified",
+    });
+    const odd = { ...(whitewhDark as SkinFile), id: "odd", layout: { chrome: "frameless" } } as unknown as SkinFile;
+    expect(() => resolveSkins([zerusDark as SkinFile, odd])).toThrow(/chrome/);
+  });
 });

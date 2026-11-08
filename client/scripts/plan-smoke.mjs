@@ -8,7 +8,7 @@
 // headless Chrome of its own (a new, empty profile under the output folder),
 // drives it over CDP only (Page.captureScreenshot; no OS input, no screen
 // capture), and closes both. No CLI, session or owner data is opened.
-//   node scripts/plan-smoke.mjs <output folder> [chrome.exe] [plan|side-panel|activity-notices|agent-media|subagent-card|lead-notices]
+//   node scripts/plan-smoke.mjs <output folder> [chrome.exe] [plan|side-panel|activity-notices|agent-media|subagent-card|lead-notices|title-bar]
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -68,8 +68,10 @@ try {
     : page === "activity-notices" || page === "lead-notices" ? { width: 760, height: 1100, deviceScaleFactor: 1, mobile: false }
     : page === "agent-media" ? { width: 760, height: 1000, deviceScaleFactor: 1, mobile: false }
     : page === "subagent-card" ? { width: 760, height: 520, deviceScaleFactor: 1, mobile: false }
+    : page === "title-bar" ? { width: 1440, height: 640, deviceScaleFactor: 1, mobile: false }
     : { width: 1180, height: 900, deviceScaleFactor: 1, mobile: false });
-  const cases = page === "lead-notices" ? [["lead-full-dark", "skin=whitewh-dark&mode=full"], ["lead-collapsed-dark", "skin=whitewh-dark&mode=collapsed"], ["lead-silent-dark", "skin=whitewh-dark&mode=silent"], ["lead-collapsed-light", "skin=whitewh-light&mode=collapsed"]]
+  const cases = page === "title-bar" ? [["unified-dark", "skin=whitewh-dark"], ["unified-hidden-dark", "skin=whitewh-dark&strip=1"], ["unified-light", "skin=whitewh-light"], ["system-dark", "skin=zerus-dark"], ["system-collapsed-dark", "skin=zerus-dark&strip=1"]]
+    : page === "lead-notices" ? [["lead-full-dark", "skin=whitewh-dark&mode=full"], ["lead-collapsed-dark", "skin=whitewh-dark&mode=collapsed"], ["lead-silent-dark", "skin=whitewh-dark&mode=silent"], ["lead-collapsed-light", "skin=whitewh-light&mode=collapsed"]]
     : page === "subagent-card" ? [["subagents-dark", "skin=whitewh-dark"], ["subagents-light", "skin=whitewh-light"], ["subagents-confirm-dark", "skin=whitewh-dark&confirm=1"]]
     : page === "agent-media" ? [["media-dark", "skin=whitewh-dark"], ["media-light", "skin=whitewh-light"], ["media-viewer-dark", "skin=whitewh-dark&viewer=1"]]
     : page === "activity-notices" ? [["activity-dark", "skin=whitewh-dark"], ["activity-light", "skin=whitewh-light"]] : page === "side-panel" ? [
@@ -90,7 +92,9 @@ try {
     if (!title.endsWith(": ready")) throw new Error(`${name}: the page never said it was ready (${title})`);
     await sleep(600);
     const errors = (await cdp.send("Runtime.evaluate", {
-      expression: page === "lead-notices"
+      expression: page === "title-bar"
+        ? "JSON.stringify({bar: !!document.querySelector('.titlebar'), rail: !!document.querySelector('.rail'), paneWidth: Math.round(document.querySelector('.sessions-pane')?.getBoundingClientRect().width ?? -1), cards: document.querySelectorAll('.sessions-pane [data-key], .sessions-pane .sc').length})"
+        : page === "lead-notices"
         ? "JSON.stringify({rows: [...document.querySelectorAll('.act-msg, .act-tools')].map((e) => e.className.replace(/^act-(msg|tools) ?/, '') + ': ' + (e.querySelector('header b, .act-tools-head b')?.textContent ?? '')), mode: document.querySelector('[data-notice-mode]')?.value ?? 'none'})"
         : page === "subagent-card"
         ? "JSON.stringify({rows: document.querySelectorAll('.qcard-subagent').length, buttons: [...document.querySelectorAll('.qcard-actions button')].map((b) => b.textContent)})"

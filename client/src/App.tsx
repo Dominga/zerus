@@ -1,4 +1,3 @@
-import { showQtUpgradeNotice } from "./store/qtUpgrade";
 import { DesktopServiceStatus } from "./ui/components/DesktopServiceStatus";
 import { desktopService, serviceStatus, servicePaused, firstChoicePending } from "./store/desktopService";
 import { CleanupChip } from "./ui/screens/CleanupChip";
@@ -143,7 +142,6 @@ function zoom(scale: number) {
 }
 
 export function App(props: { mode: () => BridgeMode | "starting" }) {
-  createEffect(() => { if (props.mode() === "tauri") void showQtUpgradeNotice(); });
   installUiLanguage();
   createEffect(() => { document.documentElement.lang = uiLanguage(); });
   createEffect(() => applySkin(skin()));

@@ -517,7 +517,9 @@ pub(crate) fn next_action(team: &Team, member: &Member, state: &str) -> String {
                 let more = if held.len() > 1 { format!(" and {} more task(s)", held.len() - 1) } else { String::new() };
                 format!("Its ready task #{task}{more} is held by #{holder}'s outputs; {}.", plan::holder_unblock(team, holder))
             } else {
-                "Hands it the next ready task, if one is ready for it.".into()
+                // Task 295: a refused or running hand-out, or a task queued behind
+                // another that writes the same files, is named too.
+                held_task(team, member).unwrap_or_else(|| "Hands it the next ready task, if one is ready for it.".into())
             }
         }
         (None, _) if member.state == MemberState::Active => match held_task(team, member) {

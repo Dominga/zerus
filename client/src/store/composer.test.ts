@@ -1018,6 +1018,23 @@ describe("dropped files (MessageComposer::attachDroppedFiles, 961-967)", () => {
   });
 });
 
+describe("pasted copied files (MessageComposer insertFromMimeData, 186-196)", () => {
+  it("attach in place of the selection, as a pasted image, after the typing is saved", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view());
+      c.input("hello world", 11, 6);
+      await c.attachPasted(["/srv/home/example/notes.txt", "/srv/home/example/plan.png"]);
+      expect(f.calls.slice(-2)).toEqual(["edit 1 hello world", "attach /srv/home/example/notes.txt,/srv/home/example/plan.png 6-11"]);
+      c.apply(view({ sending: true }));
+      const before = f.calls.length;
+      await c.attachPasted(["/srv/a.txt"]);
+      expect(f.calls.length, "nothing attaches while the composer is locked").toBe(before);
+    });
+  });
+});
+
 describe("opening a draft attachment (MessageComposer::openAttachment, 1067-1085)", () => {
   const shot = { name: "shot.png", mime: "image/png", reference: "[Image #1]", bytes: 8, path: "draft/1/2/0", excerpt: null };
 

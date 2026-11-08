@@ -122,6 +122,8 @@ export const teamsOlder = (computer: ComputerId) => inTauri() ? invoke<boolean>(
 export const sandboxCheck = () => inTauri() ? invoke<string | null>("sandbox_check") : Promise.resolve(null);
 /** Task #247: the sandbox warning's Quit Zerus (the same draft flush as a menu quit). */
 export const quitApp = () => inTauri() ? invoke<void>("app_quit") : Promise.resolve();
+/** Task #323: the Windows regional format, so usage numbers group as Qt's QLocale::system. */
+export const systemLocale = () => inTauri() ? invoke<string>("system_locale") : Promise.resolve("");
 /** Task #247: Qt's `hgs sandbox-folder grant FOLDER --json [--elevated]` (creation panel, Fix folder rights). */
 export const sandboxFolderGrant = (folder: string, elevated: boolean) =>
   inTauri() ? invoke<{ ok: boolean; error?: string; receipt?: unknown }>("sandbox_folder_grant", { folder, elevated })

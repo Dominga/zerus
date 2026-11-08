@@ -1,9 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { footerUsageSummary, sessionUsageView, usageStripVisible } from "./session-usage-ui";
 import { toSession } from "../../store/catalog";
 import { emptyUsage } from "../../types";
+import { setSystemLocale } from "./usage-number";
 
 describe("SessionUsage::html projection", () => {
+  beforeEach(() => setSystemLocale("en-US"));
   it("keeps the footer visible for Qt's tracked current sessions only", () => {
     const s = toSession("", "run:r1", { name: "codex/sample-project/a", tracked: true, state: "running", run_id: "r1" });
     expect(usageStripVisible("sessions", s, undefined)).toBe(true);

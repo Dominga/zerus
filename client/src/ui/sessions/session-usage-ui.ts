@@ -4,6 +4,7 @@ import type { Session } from "./types";
 import type { Usage } from "../../types";
 import { summaryText } from "../lib/usage";
 import { tr, trNoop } from "../../i18n";
+import { numberText } from "./usage-number";
 
 /** SessionsWindow::renderAccountUsage, including saved live-catalog sessions. */
 export function usageStripVisible(page: string, session: Session | undefined, subagent: string | undefined): boolean {
@@ -15,8 +16,8 @@ export const footerUsageSummary = (usage: Usage) => !usage.status || usage.statu
 export type UsageObject = Record<string, unknown>;
 const object = (value: unknown): UsageObject => value && typeof value === "object" && !Array.isArray(value) ? value as UsageObject : {};
 const valid = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0;
-const integer = (value: unknown) => valid(value) ? Math.trunc(value as number).toLocaleString() : tr("Not reported");
-const fixed = (value: number, digits: number) => value.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
+const integer = (value: unknown) => valid(value) ? numberText(Math.trunc(value as number)) : tr("Not reported");
+const fixed = (value: number, digits: number) => numberText(value, { minimumFractionDigits: digits, maximumFractionDigits: digits });
 
 export interface SessionUsageView {
   status: string;

@@ -255,8 +255,9 @@ PY
             index = command.index("--")
             return command[:index] + ["--ro-bind", str(source), "/w"] + command[index:]
         with patch.object(self.runner, "command", broad_mount):
-            with self.assertRaisesRegex(AssertionError, "'fail' != 'pass'"):
+            with self.assertRaisesRegex(AssertionError, "'fail' != 'pass'") as refusal:
                 self.test_synthetic_root_is_trusted_without_mapping_host_root_or_reading_owner_files()
+        self.assertIn("Traceback (most recent call last)", str(refusal.exception))
 
     def test_job_checkouts_do_not_share_mutable_files(self):
         self.runner.pristine.mkdir()

@@ -1329,9 +1329,15 @@ export interface TeamWaitingItem {
   /** Cards that arrived together share this batch; one notice covers them. */
   batch?: string;
   detail?: Record<string, unknown> | null;
+  /** Task 304 (hgs #246): the situation the row stands for; Dismiss names it. */
+  state?: string;
 }
 
-export interface TeamWaitingView { items: TeamWaitingItem[]; total: number; more: boolean; next?: Record<string, unknown> | null }
+export interface TeamWaitingView {
+  items: TeamWaitingItem[]; total: number; more: boolean; next?: Record<string, unknown> | null;
+  /** Task 304: the rows the owner dismissed, apart from the count; `detail.blocking` / `detail.blocks` say what one still blocks. */
+  dismissed?: TeamWaitingItem[]; dismissed_total?: number;
+}
 
 /** The owner's confirmation of a team action, worded by the core. */
 export interface TeamConfirmation { name: string; title: string; text: string; action: string }
@@ -1403,6 +1409,9 @@ export type TeamAction =
   /** Task #230: the owner marks the lead's plan changes seen, or reverts one. */
   | { kind: "seen_lead_changes" }
   | { kind: "revert_lead_change"; change: string }
+  /** Task 304 (hgs #246): the owner dismisses a Waiting row in its state, or restores one. */
+  | { kind: "waiting_dismiss"; id: string; state: string; team?: string }
+  | { kind: "waiting_restore"; id: string }
   /** Task #218: a member moves to another agent/account/model or to an existing session. */
   | { kind: "swap-member"; member: string; agent?: string; model?: string; effort?: string; account?: string; session?: TeamSessionView }
   | { kind: "take_over"; task: number }

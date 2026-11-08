@@ -815,6 +815,17 @@ elif a[:2]==['team','waiting']:
  import os
  if os.path.exists(__file__+'.waitingrefuse'):print(open(__file__+'.waitingrefuse').read(),file=sys.stderr);sys.exit(1)
  items=json.load(open(__file__+'.waiting')) if os.path.exists(__file__+'.waiting') else []
+ # Task 304 (hgs #246): Dismiss moves a row to `.dismissed`, Restore moves it back.
+ gone=json.load(open(__file__+'.dismissed')) if os.path.exists(__file__+'.dismissed') else []
+ if body.get('action') in ('dismiss','undismiss'):
+  if body['action']=='dismiss':
+   found=[i for i in items if i['id']==body.get('id') and i.get('state')==body.get('state')]
+   gone+=found;items=[i for i in items if i not in found]
+  else:
+   found=[i for i in gone if i['id']==body.get('id')]
+   items+=found;gone=[i for i in gone if i not in found]
+  json.dump(items,open(__file__+'.waiting','w'));json.dump(gone,open(__file__+'.dismissed','w'))
+  print(json.dumps({'dismissed' if body['action']=='dismiss' else 'restored':body.get('id')}));sys.exit(0)
  # Task 107: `.waitingslow` (seconds) answers late with the list as it was read.
  if os.path.exists(__file__+'.waitingslow'):
   import time
@@ -824,7 +835,7 @@ elif a[:2]==['team','waiting']:
  if c:start=next((n for n,i in enumerate(items) if i['since']<c['since'] or (i['since']==c['since'] and i['id']>c['id'])),len(items))
  page=items[start:start+min(body.get('limit',50),200)]
  nxt={'since':page[-1]['since'],'id':page[-1]['id']} if page and start+len(page)<len(items) else None
- print(json.dumps({'items':page,'next':nxt,'total':len(items)}))
+ print(json.dumps({'items':page,'next':nxt,'total':len(items),'dismissed':gone,'dismissed_total':len(gone)}))
 elif a[:3]==['team','catalog','get']:sys.stdout.write(open(__file__+'.catalog').read())
 elif a[:2]==['team','add-to-phase']:
  # U29: the first call warns and keeps the addition pending; the second adds it.

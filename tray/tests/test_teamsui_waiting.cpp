@@ -148,6 +148,7 @@ private slots:
     void aLowDriveOpensBuildFoldersAndItsNoticeNamesTheDrive();
     void aPausedTeamWaitsWithResumeTeamAndIsNeverNotified();
     void theLeadsChangesHaveTheirLabelSeenAndRevert();
+    void rowsAreDismissedAndRestoredAndTheDigestIsGrouped();
     void initTestCase()
     {
         setUpCase();
@@ -2780,6 +2781,86 @@ void TestTeamsUiWaiting::theLeadsChangesHaveTheirLabelSeenAndRevert()
     page.findChild<QPushButton *>("teamWaitingSeen")->click();
     QTRY_COMPARE(calls(script(), "seen-lead-changes").size(), 1);
     QCOMPARE(calls(script(), "seen-lead-changes").first()["team"].toString(), QStringLiteral("team-1"));
+}
+
+// Task 304 (hgs #246, #286): a row with a state is dismissed and leaves the
+// list; Show dismissed lists it with what a decision still blocks, and
+// Restore brings it back. The lead-changes digest reads as one grouped line,
+// the escalated wait is one row naming the lead, and the strip's header does
+// not repeat the digest.
+void TestTeamsUiWaiting::rowsAreDismissedAndRestoredAndTheDigestIsGrouped()
+{
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    const QJsonObject paused{{"id", "team-1/team_paused/1"}, {"team", "team-1"}, {"team_name", "Checkout"}, {"kind", "team_paused"}, {"since", now - 600},
+                             {"title", "Team paused since 09:12 by You: members get no tasks"}, {"action", "resume_team"}, {"state", "paused:100.0"}};
+    const QJsonObject digest{{"id", "team-1/lead_changes/digest"}, {"team", "team-1"}, {"team_name", "Checkout"}, {"kind", "lead_changes"}, {"since", now - 60},
+                             {"title", "The lead changed the plan 3 times inside the approved goal, newest: added #9"}, {"action", "open_team"}, {"state", "digest:1"},
+                             {"changes", QJsonArray{QJsonObject{{"id", "lc3"}, {"summary", "added #9"}}}},
+                             {"groups", QJsonArray{QJsonObject{{"kind", "added"}, {"count", 2}, {"newest", QJsonArray{QJsonObject{{"summary", "added #9"}}, QJsonObject{{"summary", "added #8"}}}}},
+                                                   QJsonObject{{"kind", "moved"}, {"count", 1}, {"newest", QJsonArray{QJsonObject{{"summary", "moved #3 to phase 2"}}}}}}}};
+    const QJsonObject escalated{{"id", "team-1/task_wait_escalated/escalated-4"}, {"team", "team-1"}, {"team_name", "Checkout"}, {"kind", "task_wait_escalated"},
+                                {"since", now - 300}, {"title", "#4 API still waits after 60 min: unknown model (Lead has not acted)"}, {"action", "open_team"},
+                                {"state", "escalated:4"}, {"lead", "Lead"}, {"task", 4}};
+    const QJsonObject plan{{"id", "team-2/plan_draft/plan"}, {"team", "team-2"}, {"team_name", "Orbit"}, {"kind", "plan_draft"}, {"since", now - 900},
+                           {"title", "Plan of 3 tasks waits for Approve & Run"}, {"action", "approve_plan"}, {"state", "plan:7"}, {"blocking", true}, {"blocks", "Orbit"}};
+    QVERIFY(writeWaiting(script() + ".waiting", QJsonArray{digest, escalated, paused}));
+    QVERIFY(writeWaiting(script() + ".dismissed", QJsonArray{plan}));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamWaitingPage page(&controller);
+    page.resize(980, 620); page.show();
+    // One list per check: begin and end of the same calls.
+    const auto sent = [this](const char *action) { const auto all = calls(script(), "waiting"); return std::any_of(all.cbegin(), all.cend(), [action](const QJsonObject &call) { return call["action"] == QLatin1String(action); }); };
+    WAIT_VERIFY(page.findChild<QToolButton *>("teamWaitingDismiss"));
+    QCOMPARE(page.findChildren<QToolButton *>("teamWaitingDismiss").size(), 3);
+    // The digest as one grouped line; the newest few in its tooltip.
+    auto *groups = page.findChild<QLabel *>("teamWaitingGroups");
+    QVERIFY(groups);
+    QCOMPARE(groups->text(), QStringLiteral("2 added, 1 moved"));
+    QCOMPARE(groups->toolTip(), QStringLiteral("added #9\nadded #8\nmoved #3 to phase 2"));
+    // The escalation is one row with its label.
+    QCOMPARE(TeamWaitingPage::kindLabel("task_wait_escalated"), QStringLiteral("Lead has not acted"));
+    int escalations = 0;
+    for (auto *row : page.findChildren<QWidget *>("teamWaitingRow")) if (row->property("kind") == "task_wait_escalated") ++escalations;
+    QCOMPARE(escalations, 1);
+    // Dismiss the paused team: it leaves, the call names its state.
+    QWidget *pausedRow = nullptr;
+    for (auto *row : page.findChildren<QWidget *>("teamWaitingRow")) if (row->property("kind") == "team_paused") pausedRow = row;
+    QVERIFY(pausedRow);
+    pausedRow->findChild<QToolButton *>("teamWaitingDismiss")->click();
+    QTRY_VERIFY(sent("dismiss"));
+    QJsonObject dismissed;
+    for (const auto &call : calls(script(), "waiting")) if (call["action"] == "dismiss") dismissed = call;
+    QCOMPARE(dismissed["id"].toString(), QStringLiteral("team-1/team_paused/1"));
+    QCOMPARE(dismissed["state"].toString(), QStringLiteral("paused:100.0"));
+    QCOMPARE(dismissed["by"].toString(), QStringLiteral("human"));
+    QTRY_VERIFY([&] { for (auto *row : page.findChildren<QWidget *>("teamWaitingRow")) if (row->property("kind") == "team_paused") return false; return true; }());
+    // Show dismissed: both, the plan still blocking Orbit; Restore brings the pause back.
+    QTRY_VERIFY(page.findChild<QPushButton *>("teamWaitingShowDismissed"));
+    QTRY_COMPARE(page.findChild<QPushButton *>("teamWaitingShowDismissed")->text(), QStringLiteral("Show dismissed (2)"));
+    page.findChild<QPushButton *>("teamWaitingShowDismissed")->click();
+    QTRY_COMPARE(page.findChildren<QFrame *>("teamWaitingDismissedRow").size(), 2);
+    auto *blocks = page.findChild<QLabel *>("teamWaitingStillBlocks");
+    QVERIFY(blocks);
+    QCOMPARE(blocks->text(), QStringLiteral("still blocks Orbit"));
+    QFrame *pausedDismissed = nullptr;
+    for (auto *row : page.findChildren<QFrame *>("teamWaitingDismissedRow")) if (row->property("kind") == "team_paused") pausedDismissed = row;
+    QVERIFY(pausedDismissed);
+    pausedDismissed->findChild<QPushButton *>("teamWaitingRestore")->click();
+    QTRY_VERIFY(sent("undismiss"));
+    QTRY_VERIFY([&] { for (auto *row : page.findChildren<QWidget *>("teamWaitingRow")) if (row->property("kind") == "team_paused") return true; return false; }());
+    shot(&page, "task304-waiting-dismissed-dark");
+    // The strip: its header names the newest item that is not the digest.
+    TeamWaitingFeed feed(&controller);
+    QWidget host;
+    auto *v = new QVBoxLayout(&host); v->setContentsMargins(0, 0, 0, 0);
+    auto *banner = new TeamWaitingBanner(&feed); banner->setDark(true);
+    v->addWidget(banner); v->addStretch();
+    host.resize(900, 200); host.show();
+    feed.setActive(true);
+    QTRY_VERIFY(banner->findChild<QLabel *>("teamWaitingBannerNewest"));
+    QCOMPARE(banner->findChild<QLabel *>("teamWaitingBannerNewest")->text(), escalated["title"].toString());
+    shot(banner, "task304-banner-dark");
 }
 
 #include "test_teamsui_waiting.moc"

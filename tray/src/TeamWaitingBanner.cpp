@@ -8,6 +8,9 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QSet>
+#include <QPointer>
+#include <QToolButton>
+#include <algorithm>
 #include <utility>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -245,6 +248,25 @@ QWidget *TeamWaitingBanner::rowFor(const TeamWaitingPage::Item &item, bool first
         QObject::connect(open, &QToolButton::clicked, this, [this, item] { if (openItem) openItem(item); });
         h->addWidget(open);
     }
+    // Task 304 (hgs #246): Dismiss hides the row until its state changes.
+    if (!item.state.isEmpty() && m_feed && m_feed->teams()) {
+        auto *dismiss = new QToolButton; dismiss->setObjectName("teamWaitingBannerDismiss"); dismiss->setAutoRaise(true);
+        dismiss->setIcon(workspaceIcon("close", c.muted)); dismiss->setAccessibleName(tr("Dismiss"));
+        dismiss->setToolTip(tr("Dismiss: the row leaves the list until it changes; Show dismissed brings it back"));
+        QObject::connect(dismiss, &QToolButton::clicked, this, [this, item] {
+            TeamWaitingPage::dismiss(m_feed ? m_feed->teams() : nullptr, item, [guard = QPointer<TeamWaitingBanner>(this), item](bool ok, const QString &) {
+                if (guard && ok && guard->m_feed) guard->m_feed->answered(item);
+            });
+        });
+        h->addWidget(dismiss);
+    }
+    // Task 304 (hgs #286): the lead-changes digest's groups in one line.
+    if (const QString grouped = TeamWaitingPage::groupsText(item); !grouped.isEmpty()) {
+        auto *groups = label(grouped, c.text2, 11, false, "teamWaitingBannerGroups");
+        groups->setToolTip(TeamWaitingPage::groupsTip(item));
+        groups->setContentsMargins(24, 0, 0, 0);
+        box->addWidget(groups);
+    }
     if (shown) {
         shown->setContentsMargins(24, 0, 0, 2);
         box->addWidget(shown);
@@ -285,10 +307,13 @@ void TeamWaitingBanner::render()
     h->addWidget(icon);
     auto *count = label(tr("%1 wait for you").arg(total), c.fg, 12, true, "teamWaitingBannerCount");
     h->addWidget(count);
-    const auto &newest = items.first();
-    auto *title = elided(newest.title, c.text2, 12); title->setObjectName("teamWaitingBannerNewest");
+    // Task 304 (hgs #286): the lead-changes digest has its own row; the
+    // header names the newest other item, or none.
+    const auto newest = std::find_if(items.cbegin(), items.cend(), [](const TeamWaitingPage::Item &item) { return item.kind != QLatin1String("lead_changes"); });
+    auto *title = elided(newest != items.cend() ? newest->title : QString(), c.text2, 12); title->setObjectName("teamWaitingBannerNewest");
     h->addWidget(title, 1);
-    h->addWidget(label(agoText(newest.since, double(QDateTime::currentSecsSinceEpoch())), c.muted, 11, false, "teamWaitingBannerAge"));
+    if (newest != items.cend())
+        h->addWidget(label(agoText(newest->since, double(QDateTime::currentSecsSinceEpoch())), c.muted, 11, false, "teamWaitingBannerAge"));
     auto *toggle = button(m_expanded ? tr("Hide") : tr("Show all"), "teamWaitingBannerToggle");
     toggle->setProperty("ghost", true);
     toggle->setIcon(workspaceIcon(m_expanded ? "chevron-down" : "chevron-right", c.text2));

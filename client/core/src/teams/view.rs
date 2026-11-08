@@ -1581,6 +1581,9 @@ pub struct WaitingItem {
     /// its phase, task, member, member id or tool offer, which an answer in
     /// place names.
     pub detail: Value,
+    /// Task 304 (hgs #246): the situation the row stands for; Dismiss names
+    /// it, and a changed state brings a dismissed row back.
+    pub state: String,
 }
 
 /// The first page of `team waiting`, with how many wait in all.
@@ -1592,25 +1595,32 @@ pub struct WaitingView {
     pub more: bool,
     /// The cursor the next older page sends, as hgs words it.
     pub next: Option<Value>,
+    /// Task 304 (hgs #246): the rows the owner dismissed, apart from the
+    /// count; a decision that still blocks work says so (`blocking`, `blocks`).
+    pub dismissed: Vec<WaitingItem>,
+    pub dismissed_total: u64,
+}
+
+fn waiting_item(item: &Value) -> WaitingItem {
+    WaitingItem {
+        id: name(item, "id"),
+        kind: name(item, "kind"),
+        team: name(item, "team"),
+        team_name: name(item, "team_name"),
+        title: text(item, "title", LINE_CHARS),
+        action: name(item, "action"),
+        since: number(item, "since"),
+        proposal: bounded(item.get("proposal")),
+        detail: bounded(Some(item)),
+        state: text(item, "state", LINE_CHARS),
+    }
 }
 
 pub fn waiting(value: &Value) -> WaitingView {
     WaitingView {
-        items: array(value, "items")
-            .iter()
-            .take(ITEMS_KEPT)
-            .map(|item| WaitingItem {
-                id: name(item, "id"),
-                kind: name(item, "kind"),
-                team: name(item, "team"),
-                team_name: name(item, "team_name"),
-                title: text(item, "title", LINE_CHARS),
-                action: name(item, "action"),
-                since: number(item, "since"),
-                proposal: bounded(item.get("proposal")),
-                detail: bounded(Some(item)),
-            })
-            .collect(),
+        items: array(value, "items").iter().take(ITEMS_KEPT).map(waiting_item).collect(),
+        dismissed: array(value, "dismissed").iter().take(ITEMS_KEPT).map(waiting_item).collect(),
+        dismissed_total: count(value, "dismissed_total"),
         total: count(value, "total"),
         more: value.get("next").is_some_and(|next| !next.is_null()),
         next: value

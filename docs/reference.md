@@ -2611,19 +2611,25 @@ an earlier finished recovery episode is kept: keep-warm stops
 until the next real turn, and the provider failure stays visible as usual.
 
 In the desktop app, **Details** shows **Keep cache warm** in the **Session**
-card of every live, paused or stopped session. Its switch (accessible name
-"Keep cache warm") turns it on for the chosen duration; while it is on, a
-slider picks 1 to 7 hours or Always (its last position) and the row shows the
-remaining time, such as **2 h 14 m left**, and what keep-warm is doing: the
-next ping, **Warming the cache now**, a cold cache or the host's reason. Its
-tooltip states the cache lifetime and its source, the ping interval, the pings
-per hour and that each ping is a cached read of the whole context. When the
-agent or account is not eligible the switch is disabled and the host's reason
-is shown under it; a computer whose `hgs` lacks `session-keep-warm-v1` shows an
-update hint. While a ping runs, the session reads **Ready** with **Warming
-cache** and counts in neither Active nor Working. Activity folds the ping, its
-reply and its Stop into one dim **Cache kept warm** row that expands to show
-both.
+card of every live, paused or stopped session. Its switch (accessible name "Keep
+cache warm") turns it on for the chosen duration; while it is on, a slider picks
+1 to 7 hours or Always (its last position, shown as an infinity sign in a
+fixed-width value so the slider never moves; its accessible value is "Always")
+and the row shows the remaining time, such as **2 h 14 m left**, and what
+keep-warm is doing: the next ping, **Warming the cache now**, a cold cache or
+the host's reason. Its tooltip states the cache lifetime and its source, the
+ping interval, the pings per hour and that each ping is a cached read of the
+whole context. A change shows at once and the controls stay enabled and in place
+while the computer confirms it; a choice made meanwhile is sent next with the
+confirmed revision (the newest one wins), and a refusal returns the row to the
+confirmed state. The slider rounds the time left up to whole hours but ignores
+the first five minutes past an hour, so a fresh choice keeps its position
+although the host's clock may run slightly ahead. When the agent or account is
+not eligible the switch is disabled and the host's reason is shown under it; a
+computer whose `hgs` lacks `session-keep-warm-v1` shows an update hint. While a
+ping runs, the session reads **Ready** with **Warming cache** and counts in
+neither Active nor Working. Activity folds the ping, its reply and its Stop into
+one dim **Cache kept warm** row that expands to show both.
 
 Android follows the same status rule: while a ping runs the session reads
 **Warming cache**, is neither Working nor Active, and holds no reply in progress,

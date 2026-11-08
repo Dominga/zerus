@@ -5,6 +5,7 @@
  * presents it. Values are never separated with dots.
  */
 import { tr, trNoop, uiLanguage } from "../../i18n";
+import type { KeepWarmChoice } from "../../bridge";
 import type { KeepWarmState } from "../../types";
 
 /** The slider's last position: Always. */
@@ -98,14 +99,28 @@ export function mergeKeepWarm(listing?: KeepWarmState, inspected?: KeepWarmState
   };
 }
 
-/** The slider position: the hours left (rounded up, 1 to 7), or Always. */
+/**
+ * How far past a whole hour the time left may be and still show that hour
+ * (zerus-ua4bi): the host sets `until` from its own clock, and the row reads
+ * its clock every 30 s, so a fresh 1 h choice can be a little over an hour away.
+ */
+export const POSITION_SLACK_SECONDS = 5 * 60;
+
+/** The slider position: the hours left (rounded up past the slack, 1 to 7), or Always. */
 export function positionOf(state: KeepWarmState | undefined, now: number): number {
   if (!state?.enabled) return 2;
   if (state.until === null) return ALWAYS;
-  return Math.min(7, Math.max(1, Math.ceil((state.until - now) / 3600)));
+  return Math.min(7, Math.max(1, Math.ceil((state.until - now - POSITION_SLACK_SECONDS) / 3600)));
 }
 
+/** What a slider position asks the host for: exactly its accepted 1 to 7 hours, or Always. */
+export const choiceAt = (position: number): KeepWarmChoice => (position >= ALWAYS ? { kind: "always" } : { kind: "hours", hours: Math.min(7, Math.max(1, Math.round(position))) });
+
+/** A position's name: "3 h" or "Always" (the slider's value text and the mark's tooltip). */
 export const durationLabel = (position: number) => (position >= ALWAYS ? tr("Always") : tr("%1 h", position));
+
+/** A position as the row shows it: "3 h", or an infinity sign for Always. */
+export const durationMark = (position: number) => (position >= ALWAYS ? "\u221e" : tr("%1 h", position));
 
 /** "1 h", "48 m", "1 h 30 m". */
 export function durationText(seconds: number): string {

@@ -1013,24 +1013,27 @@ impl<'a> Index<'a> {
         Ok(!damaged)
     }
 
-    /// Reads the tasks whose files the index has no row for, and the rows
-    /// whose files are gone, before it places a task (zerus-cg5h.24): a
-    /// writer without the journal may have added a task while the journal
-    /// named others, which no stamp of the task folder tells apart from
-    /// their saves. One listing of the folder and of the rows; only those
-    /// tasks are decoded.
-    pub(super) fn admit_unseen(&mut self) -> Outcome<()> {
-        let on_disk: BTreeSet<String> = self.store.uuids()?.into_iter().collect();
-        let indexed: BTreeSet<String> = {
-            let mut query = self.db.prepare_cached("SELECT uuid FROM tasks")?;
-            let rows = query.query_map([], |r| r.get::<_, String>(0))?;
-            rows.collect::<rusqlite::Result<_>>()?
-        };
-        let unseen: BTreeSet<String> = on_disk.symmetric_difference(&indexed).cloned().collect();
-        if !unseen.is_empty() {
-            let list: Vec<String> = unseen.iter().cloned().collect();
-            self.refresh(&list, None, Some(&unseen))?;
+    /// Checks every task file's stamp before the index places a task
+    /// (zerus-cg5h.24), as the periodic full check does: a writer without the
+    /// journal may have added or moved a task while the journal named other
+    /// saves, which no stamp of the task folder tells apart from them. New,
+    /// changed and vanished task files are read again; no other task is
+    /// decoded.
+    pub(super) fn check_files(&mut self) -> Outcome<()> {
+        let mut known: HashMap<String, String> = HashMap::new();
+        {
+            let mut query = self.db.prepare_cached("SELECT uuid, files FROM tasks")?;
+            let rows = query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            for row in rows {
+                let (uuid, files) = row?;
+                known.insert(uuid, files);
+            }
         }
+        let mut uuids: BTreeSet<String> = self.store.uuids()?.into_iter().collect();
+        uuids.extend(known.keys().cloned());
+        let uuids: Vec<String> = uuids.into_iter().collect();
+        self.refresh(&uuids, Some(&known), None)?;
+        self.db.execute("INSERT OR REPLACE INTO meta VALUES('checked', ?1)", [super::now().to_string()])?;
         Ok(())
     }
 

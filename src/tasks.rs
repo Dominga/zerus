@@ -428,9 +428,9 @@ fn label_view(mut value: Value, project_name: &str, with_log: bool, files: &[Val
 /// (zerus-cg5h.24); the index closes before the caller saves.
 fn placed<T>(store: &ProjectStore, write: impl FnOnce(Option<&dyn zerus_replica::Placement>) -> Result<T>) -> Result<T> {
     let mut index = index::Index::open(store);
-    // Tasks a writer without the journal added are read first; an index
-    // that cannot read them does not place.
-    if let Some(failure) = index.as_mut().and_then(|i| i.admit_unseen().err()) {
+    // Every task file is checked first, for writers without the journal; an
+    // index that cannot check them does not place.
+    if let Some(failure) = index.as_mut().and_then(|i| i.check_files().err()) {
         if let Some(index) = index.take() {
             index.discard(&failure);
         }

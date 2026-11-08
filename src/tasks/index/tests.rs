@@ -1622,7 +1622,7 @@ fn an_older_repair_build_cannot_mask_an_unrepaired_row_from_the_epoch() {
 /// (zerus-cg5h.24).
 fn add_placed(store: &ProjectStore, position: &Position) -> TaskDoc {
     let mut index = Index::open(store).unwrap();
-    index.admit_unseen().unwrap();
+    index.check_files().unwrap();
     let placement = IndexPlacement::new(&index);
     let mut task = store
         .new_task_placed(Some(&placement), "Placed", Stage::Todo, Target::Any, Actor::Person, position, "example", 1)
@@ -1711,3 +1711,30 @@ fn an_uncertified_or_damaged_index_leaves_the_whole_write_to_the_documents() {
     assert!(IndexPlacement::new(&index).order(Stage::Todo).unwrap().is_none());
 }
 
+
+#[test]
+fn an_older_journalless_move_never_places_from_a_stale_stage() {
+    // review-win-d on #1767 (zerus-j0os4): an older writer moves an existing
+    // task without the journal while a save here keeps the journal busy;
+    // the next add must still go after the actual last task.
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let a = new_task(&store, "T-000001", Stage::Todo, "V", "A");
+    let mut b = new_task(&store, "T-000002", Stage::Todo, "U", "B");
+    write_plain(&store, &a);
+    write_plain(&store, &b);
+    drop(Index::open(&store).unwrap());
+    b.set_rank("z").unwrap();
+    write_plain(&store, &b);
+    let mut a = store.load(a.uuid()).unwrap();
+    a.comment("Saved here", &Actor::Person, 2).unwrap();
+    store.save(&mut a).unwrap();
+    let mut index = Index::open(&store).unwrap();
+    index.check_files().unwrap();
+    let expected = store.rank_for(Stage::Todo, &Position::End, None).unwrap();
+    let placement = IndexPlacement::new(&index);
+    let task = store
+        .new_task_placed(Some(&placement), "New", Stage::Todo, Target::Any, Actor::Person, &Position::End, "example", 3)
+        .unwrap();
+    assert_eq!(task.rank(), expected, "the next add must still go after the actual last task");
+}

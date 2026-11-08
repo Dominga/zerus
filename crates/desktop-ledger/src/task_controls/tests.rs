@@ -688,3 +688,42 @@ fn disk_schema_refusal_keeps_original_database_bytes() {
     }
     assert_eq!(std::fs::read(path).unwrap(), before);
 }
+
+#[test]
+fn executor_stop_release_requires_observed_facts_and_does_not_resume_a_task() {
+    let mut db = connection();
+    let mut records = store::open_enabled(&mut db).unwrap();
+    let stopped = request(1);
+    records.reserve(&stopped).unwrap();
+    let old = hold(1, HoldKind::Stop, &stopped);
+    records.hold(&old).unwrap();
+    let mut release = request(2);
+    release.action = Action::ReleaseStop;
+    release.turn = None;
+    assert!(release.validate().is_err());
+    release.observed_stops = vec![old.id.clone()];
+    records.reserve(&release).unwrap();
+    let new = hold(2, HoldKind::Stop, &stopped);
+    records.hold(&new).unwrap();
+    let permission = hold(3, HoldKind::Permission, &stopped);
+    records.hold(&permission).unwrap();
+    records
+        .settle(&release.id, Outcome::Confirmed, None)
+        .unwrap();
+    records.settle_observed(&release.id).unwrap();
+    let active = records
+        .holds(&executor(), None, 64)
+        .unwrap()
+        .rows
+        .into_iter()
+        .map(|r| r.value.id)
+        .collect::<Vec<_>>();
+    assert_eq!(active, vec![new.id, permission.id]);
+    assert!(records.slot(&executor()).unwrap().is_none());
+    assert!(matches!(
+        records
+            .dispatch(&executor(), Dispatch::Automatic, &[])
+            .unwrap(),
+        Admission::Held(_)
+    ));
+}

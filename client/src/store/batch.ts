@@ -145,10 +145,11 @@ export function createBatch(deps: BatchDeps) {
     }
     if (a === "mute" || a === "unmute") {
       // zerus-qhtxf: one row at a time through the guarded Mute path, each with
-      // its own revision; rows already in that state are skipped, and rows that
-      // cannot change now or changed meanwhile are refused with their reason.
+      // its own revision; rows already in that state are skipped (even when
+      // their setting cannot change now), and rows that cannot change now or
+      // changed meanwhile are refused with their reason.
       const muted = a === "mute";
-      const unavailable = rows.filter((r) => !deps.notifications(r));
+      const unavailable = rows.filter((r) => !!r.muted !== muted && !deps.notifications(r));
       const skipped = rows.length - unavailable.length - targets.length;
       setRunning(true);
       let changed = 0, refused = unavailable.length;

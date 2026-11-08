@@ -222,6 +222,22 @@ describe("the app's archived Activity", () => {
     expect(reads.length).toBe(2);
   });
 
+  it("never follows a shell session's Activity, which records none (zerus-bz54l)", async () => {
+    applyBatch({ ...emptyBatch(), computers: [{ computer: "", status: "live", attempt: 0 }], upserts: [
+      { computer: "", key: "shell:work-1", row: { name: "sh/kinder/work-1", agent: "sh", state: "running", status: "unavailable", tracked: false } },
+      { computer: "", key: "run:run-agent", row: { name: "codex/example/agent", agent: "codex", state: "running", status: "ready", tracked: true, run_id: "run-agent", conversation_id: "conv-agent" } },
+    ] });
+    setStateFilter("all");
+    vi.mocked(mocked.activityPort.follow).mockClear();
+    setSelectedKey("\nshell:work-1");
+    await flush();
+    expect(mocked.activityPort.follow).not.toHaveBeenCalled();
+    expect(activity.target()).toBeUndefined();
+    setSelectedKey("\nrun:run-agent");
+    await flush();
+    expect(mocked.activityPort.follow).toHaveBeenCalledWith(expect.objectContaining({ key: "run:run-agent" }));
+  });
+
   it("keeps reading a restore's archived row while the archive reloads, as Qt's selected() keeps its source (3136-3139)", async () => {
     const pages: ((p: ArchivePage) => void)[] = [];
     mocked.archivePage.mockImplementation(() => new Promise((resolve) => { pages.push(resolve); }));

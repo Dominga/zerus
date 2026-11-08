@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
 
@@ -35,6 +35,8 @@ import { openCleanup, closeCleanup } from "../../store/terminationCleanup";
 import { machineMeta } from "../../store/testing";
 import { listRows } from "./model";
 import { archive } from "../../store/archive";
+import { clearSearchPreview, setSearchPreview } from "../../store/searchSelection";
+import type { SearchHit } from "../../store/content-search-model";
 import { emptyBatch, type ViewRow } from "../../types";
 
 const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
@@ -188,4 +190,86 @@ it("keeps the moved row actions in the real session header menu", async () => {
   for (const label of ["Expand all collapsed", "Open folder", "Open shell in session folder", "Pause session", "Fork session…", "Set parent…", "Copy session name", "Copy session reference", "Copy folder path"]) {
     expect(labels, label).toContain(label);
   }
+});
+
+describe("a shown tool search hit (zerus-tso9j, zerus-2r73y)", () => {
+  const toolHit = (row: ViewRow, detail: string): SearchHit => ({ name: row.name!, run_id: row.run_id!, conversation_id: row.conversation_id!, archive_id: "", message_id: "m",
+    at: 1_793_000_000, role: "tool", snippet: "", event: { seq: 1, type: "PostToolUse", tool: "Bash", at: 1_793_000_000, detail }, content_truncated: false, session: null, group: "" });
+  const show = async (detail: string) => {
+    const row = fixtureRow(); const key = await open(row);
+    setSearchPreview({ key, run: row.run_id!, conversation: row.conversation_id!, query: "needle", hit: toolHit(row, detail) }); await flush();
+    return () => host.querySelector(".search-preview .act-tool-detail");
+  };
+  afterEach(() => clearSearchPreview());
+
+  it("Show more reveals a match past the first 2,000 characters", async () => {
+    const detail = await show(`${"x".repeat(2_200)}needle${"y".repeat(1_000)}`);
+    expect(detail()!.textContent).toHaveLength(2_000);
+    [...host.querySelectorAll<HTMLButtonElement>(".search-preview button")].find((b) => b.textContent === "Show more")!.click(); await flush();
+    expect(detail()!.textContent).toHaveLength(3_206);
+    expect([...detail()!.querySelectorAll("mark")].map((m) => m.textContent)).toEqual(["needle"]);
+  });
+
+  it("marks the query in a tool hit's output, and only inside the hit", async () => {
+    const detail = await show("a needle tool output with NEEDLE twice");
+    expect([...detail()!.querySelectorAll("mark")].map((m) => m.textContent)).toEqual(["needle", "NEEDLE"]);
+    clearSearchPreview(); await flush();
+    expect(host.querySelector(".search-preview")).toBeNull();
+    expect(host.querySelector(".act-scroll mark")).toBeNull();
+  });
+});
+
+describe("the header's keep-warm mark (zerus-yacns)", () => {
+  const warmRow = (keep_warm: Record<string, unknown> | undefined) => ({ ...fixtureRow("Warm"), keep_warm }) as ViewRow;
+  const now = () => Date.now() / 1000;
+  const on = (until: number | null, revision = 2) => ({ enabled: true, until, revision, state: "waiting", next_at: null, reason: "", turn_active: false });
+  const mark = () => host.querySelector<HTMLButtonElement>(".detail-head .dh-row2 .dh-warm");
+
+  it("shows the bolt and the time left, or an infinity sign for Always, next to the model label", async () => {
+    const row = warmRow(on(now() + 2 * 3600 - 30)); await open(row);
+    const shown = mark()!;
+    expect(shown.textContent).toBe("1 h 59 m");
+    expect(shown.getAttribute("aria-label")).toBe("Keep cache warm: 1 h 59 m left");
+    expect(shown.title.split("\n")[0]).toBe("Keep cache warm: 1 h 59 m left");
+    expect(shown.nextElementSibling?.classList.contains("dh-model")).toBe(true);
+    put({ ...row, keep_warm: on(null, 3) }); await flush();
+    expect(mark()).toBe(shown);
+    expect([mark()!.textContent, mark()!.getAttribute("aria-label")]).toEqual(["∞", "Keep cache warm: Always"]);
+  });
+
+  it("shows nothing while keep-warm is off or not reported", async () => {
+    const row = warmRow({ ...on(null), enabled: false, state: "off" }); await open(row);
+    expect(mark()).toBeNull();
+    put({ ...row, keep_warm: undefined }); await flush();
+    expect(mark()).toBeNull();
+  });
+
+  it("keeps the same mark node through refreshes and clock ticks", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    try {
+      const row = warmRow(on(now() + 3 * 3600)); await open(row);
+      const shown = mark()!, removed: Node[] = [];
+      expect(shown).not.toBeNull();
+      const observer = new MutationObserver((records) => records.forEach((record) => removed.push(...record.removedNodes)));
+      observer.observe(host, { subtree: true, childList: true });
+      for (let tick = 0; tick < 3; tick++) {
+        vi.advanceTimersByTime(30_000);
+        put({ ...row, summary: `Refresh ${tick}`, keep_warm: on(now() + 3 * 3600 - tick, 2 + tick) }); await flush();
+      }
+      observer.disconnect();
+      expect(mark()).toBe(shown);
+      expect(removed.filter((node) => node === shown || node.contains(shown))).toEqual([]);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("opens Details at the Keep cache warm control when clicked", async () => {
+    await setSetting("workspace/inspectorOpen", false, { persist: false });
+    await setSetting("workspace/inspectorClosed", JSON.stringify(["details-session"]), { persist: false });
+    vi.mocked(bridge.inspectSession).mockResolvedValue(null);
+    const key = put(warmRow(on(null))); setSelectedKey(key); setDetailTab("activity"); await flush();
+    mark()!.click(); await vi.dynamicImportSettled(); await flush();
+    await vi.waitFor(() => expect(host.querySelector(".kw-row button[role=switch]")).not.toBeNull());
+    expect(inspectorTab()).toBe("details");
+    await vi.waitFor(() => expect(document.activeElement).toBe(host.querySelector(".kw-row button[role=switch]")));
+  });
 });

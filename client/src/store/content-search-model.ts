@@ -1,7 +1,7 @@
 import { batch, createSignal } from "solid-js";
 import type { Session } from "../ui/sessions/types";
 import type { ActivityEvent, ViewRow } from "../types";
-import { tr, trNoop } from "../i18n";
+import { tr, trNoop, type TranslationArgument } from "../i18n";
 
 export const SEARCH_DELAY = 350;
 export const SEARCH_HOSTS = 32;
@@ -105,19 +105,42 @@ export function matchedIdentity(row: Session, query: string): string | undefined
   return found ? `${tr(found[1])}: ${found[0]}` : undefined;
 }
 
-/** A session keeps its position and row identity as metadata and host replies
- * arrive. The newest matching message supplies its single excerpt. */
-export function mergeSessionMatch<T extends { id: string; session: Session; found?: FoundHit; matched?: string }>(items: T[], positions: Map<string, number>, item: T, cap: number): boolean {
-  const index = positions.get(item.session.key);
-  if (index !== undefined) {
-    const previous = items[index];
-    // The identity that matched stays with the row a message hit refreshes.
-    if (item.found && (!previous.found || item.found.hit.at > previous.found.hit.at)) items[index] = { ...item, id: previous.id, matched: item.matched ?? previous.matched };
-    else if (!previous.matched && item.matched) items[index] = { ...previous, matched: item.matched };
-    return true;
+/** At most this many message rows per session (zerus-5wmh.13.17.1). */
+export const SESSION_MESSAGES = 20;
+
+/**
+ * One row per matching message (SessionSearch.cpp:276-282, zerus-5wmh.13.17.1).
+ * A session's rows stay together: its metadata row when its metadata or IDs
+ * matched, then its message rows newest first, at most `perSession`; sessions
+ * keep the order they were first seen in, so a later host reply only adds
+ * rows to its sessions' groups and every row keeps its id. A message listed
+ * twice shows once, and a session's message rows carry its matched identity
+ * for their tooltip. `limited` says a cap left rows out.
+ */
+export function searchRows<T extends { id: string; session: Session; found?: FoundHit; matched?: string }>(
+  entries: readonly T[], caps: { rows: number; perSession: number } = { rows: SEARCH_ROWS, perSession: SESSION_MESSAGES },
+): { rows: T[]; limited: boolean } {
+  const groups = new Map<string, { metadata?: T; messages: T[]; ids: Set<string> }>();
+  for (const entry of entries) {
+    let group = groups.get(entry.session.key);
+    if (!group) { group = { messages: [], ids: new Set() }; groups.set(entry.session.key, group); }
+    if (!entry.found) { group.metadata ??= entry; continue; }
+    if (group.ids.has(entry.id)) continue;
+    group.ids.add(entry.id);
+    group.messages.push(entry);
   }
-  if (items.length >= cap) return false;
-  positions.set(item.session.key, items.length); items.push(item); return true;
+  const rows: T[] = [];
+  let limited = false;
+  for (const group of groups.values()) {
+    const messages = [...group.messages].sort((a, b) => b.found!.hit.at - a.found!.hit.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    if (messages.length > caps.perSession) { limited = true; messages.length = caps.perSession; }
+    const matched = group.metadata?.matched;
+    for (const row of [...(group.metadata ? [group.metadata] : []), ...messages.map((m) => (matched && !m.matched ? { ...m, matched } : m))]) {
+      if (rows.length >= caps.rows) return { rows, limited: true };
+      rows.push(row);
+    }
+  }
+  return { rows, limited };
 }
 /**
  * A result row's tooltip, as Qt's (SessionSearch.cpp:257-262): the session's
@@ -133,7 +156,18 @@ export function searchTooltip(item: { session: Session; found?: FoundHit; matche
   if (item.found?.hit.snippet) lines.push(item.found.hit.snippet);
   return lines.join("\n");
 }
-export function searchCount(messages: number, sessions: number, creations = 0): string {
-  const text = `${messages} ${messages === 1 ? "message" : "messages"}, ${sessions} ${sessions === 1 ? "session" : "sessions"}`;
-  return creations ? `${text}, ${creations} ${creations === 1 ? "creation" : "creations"}` : text;
+type Translate = (source: string, ...args: TranslationArgument[]) => string;
+const MESSAGES = trNoop("%n message(s)"), SESSIONS = trNoop("%n session(s)"), CREATIONS = trNoop("%n creation(s)");
+
+/** One count in the interface language with its plural form; English keeps "1 message" and "2 messages". */
+function counted(translate: Translate, count: number, plural: string, one: string, many: string): string {
+  const text = translate(plural, count);
+  return text === plural.replace("%n", String(count)) ? `${count} ${count === 1 ? one : many}` : text;
+}
+
+/** "3 messages, 2 sessions" and, when any match, "1 creation"; each count translated with its plural form (zerus-5wmh.13.17.3.1). */
+export function searchCount(messages: number, sessions: number, creations = 0, translate: Translate = tr): string {
+  const parts = [counted(translate, messages, MESSAGES, "message", "messages"), counted(translate, sessions, SESSIONS, "session", "sessions")];
+  if (creations) parts.push(counted(translate, creations, CREATIONS, "creation", "creations"));
+  return parts.join(", ");
 }

@@ -188,6 +188,16 @@
     "%n подключения недоступны. Изменения сохранены локально и синхронизируются после восстановления связи.",
     "%n подключений недоступны. Изменения сохранены локально и синхронизируются после восстановления связи."
   ],
+  "%n creation(s)": [
+    "%n создание",
+    "%n создания",
+    "%n созданий"
+  ],
+  "%n message(s)": [
+    "%n сообщение",
+    "%n сообщения",
+    "%n сообщений"
+  ],
   "%n project conflict(s) need review in Swarm.": [
     "В общем пространстве нужно проверить %n конфликт проектов.",
     "В общем пространстве нужно проверить %n конфликта проектов.",
@@ -223,6 +233,7 @@
   "1 session is on an offline or stale machine. Its last known status is shown on the machine cards.": "1 сессия находится на компьютере, который не в сети или давно не отвечал. Её последнее известное состояние показано на карточках компьютеров.",
   "1 tool call": "1 вызов инструмента",
   "1 worktree can be removed without losing work. Review it first.": "Одно рабочее дерево можно удалить без потери работы. Сначала проверьте его.",
+  "<1 m": "<1 мин",
   "A colored circle with the account's first letter or emoji. One account can be hidden in its Color and mark settings on the Accounts screen.": "Цветной кружок с первой буквой аккаунта или эмодзи. Отдельный аккаунт можно скрыть в его настройках «Цвет и значок» на экране «Аккаунты».",
   "A confirmation is waiting. Loading it…": "Ожидает подтверждение. Загрузка…",
   "A different draft was already here, so these copies stayed where they were.": "Здесь уже был другой черновик, поэтому эти копии остались на месте.",
@@ -276,6 +287,8 @@
   "Active": "Активные",
   "Active: working, scheduled, waiting, needs attention or a draft": "Активные: работают, запланированы, ждут, требуют внимания или содержат черновик",
   "Activity": "Активность",
+  "Activity did not load": "Активность не загрузилась",
+  "Activity is not recorded for shell sessions. Use Terminal to work in this shell.": "Для сессий оболочки активность не записывается. Работайте в этой оболочке через терминал.",
   "Activity is not tracked for this session. Sessions started with HGS 1.9 report their tools and status here.": "Активность в этой сессии не отслеживается. Сессии, начатые с HGS 1.9, сообщают о своих инструментах и статусе здесь.",
   "Activity is unavailable from the desktop service. Retry to reconnect.": "Активность недоступна в фоновой службе. Повторите подключение.",
   "Activity width": "Ширина активности",
@@ -713,6 +726,7 @@
   "Clearing session": "Очистка сессии",
   "Clearing…": "Очистка…",
   "Click a column heading to sort folders.": "Нажмите на заголовок столбца, чтобы отсортировать папки.",
+  "Click to change it in Details.": "Нажмите, чтобы изменить в разделе «Подробности».",
   "Click to copy": "Нажмите, чтобы скопировать",
   "Click to select; double-click to show its sessions": "Щёлкните, чтобы выбрать; дважды щёлкните, чтобы показать его сессии",
   "Click to start a video recording.": "Нажмите, чтобы начать запись видео.",
@@ -1400,6 +1414,7 @@
   "Keep cache warm has expired; nothing was submitted": "Срок прогрева кэша истёк, ничего не отправлено",
   "Keep cache warm settings are unreadable; nothing was submitted": "Настройки прогрева кэша не читаются, ничего не отправлено",
   "Keep cache warm was turned off; nothing was submitted": "Прогрев кэша выключен, ничего не отправлено",
+  "Keep cache warm: %1": "Поддерживать кэш тёплым: %1",
   "Keep copies": "Хранить копии",
   "Keep folder": "Сохранить папку",
   "Keep folders": "Сохранить папки",
@@ -1751,6 +1766,7 @@
   "No output recorded yet.": "Выходных данных пока нет.",
   "No pending session creations": "Нет создаваемых сессий",
   "No phones": "Телефонов нет",
+  "No recorded activity": "Нет записанной активности",
   "No related sessions.": "Связанных сессий нет.",
   "No remote machines": "Нет удалённых машин",
   "No reply to the last keep-warm ping was seen. Keeping it warm resumes after your next message.": "Ответ на последний пинг прогрева не получен. Прогрев возобновится после вашего следующего сообщения.",
@@ -3041,6 +3057,7 @@
   "The session state changed. Open its actions again.": "Состояние сессии изменилось. Откройте ее действия еще раз.",
   "The session usage limit stopped this turn. Automatic recovery can wait for reset or retry on a schedule when enabled in Settings. Your draft is kept.": "Лимит использования сессии остановил этот ход. Если автоматическое восстановление включено в настройках, оно может дождаться сброса или повторять попытки по расписанию. Ваш черновик сохранен.",
   "The session was not resumed. Check Terminal; your draft was kept without sending.": "Сессия не была возобновлена. Проверьте терминал; черновик сохранён без отправки.",
+  "The session's computer did not answer in time.": "Компьютер сессии не ответил вовремя.",
   "The session, its messages and running agent stay intact.": "Сессия, ее сообщения и работающий агент остаются нетронутыми.",
   "The shared notification change was not confirmed. Refresh the session before trying again.": "Изменение общих уведомлений не подтверждено. Обновите сессию перед повторной попыткой.",
   "The shared notification setting changed while this request was pending. Refresh the session.": "Общая настройка уведомлений изменилась во время запроса. Обновите сессию.",

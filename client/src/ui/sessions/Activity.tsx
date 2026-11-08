@@ -40,6 +40,7 @@ import { emptyActivity } from "./activity-empty";
 import { markdownReady } from "./markdown";
 import { ActivitySession, Body, HighlightQuery } from "./MarkdownBody";
 import { searchHitItems } from "./search-hit";
+import { ActivityPending } from "./ActivityPending";
 
 export { Body } from "./MarkdownBody";
 import { activityAll, activityFlow, activityRange, measureActivityRows, activitySelectionIndexes, activitySelectionText, activityText, activityTexts, activityVirtualOffset, selectActivityAll, selectionCoversActivity } from "./activity-virtual";
@@ -774,6 +775,10 @@ export function ActivityView(props: { source?: ActivitySource }) {
   const [expanded, setExpanded] = createStore<Record<string, boolean>>({});
   /** Show more per tool event (`outputKey`), kept while its row is loaded so a row scrolled back keeps its height. */
   const [more, setMore] = createStore<Record<string, number>>({});
+  /** Show more per event of the shown search hit (zerus-tso9j): the same steps, kept only for that hit. */
+  const [hitMore, setHitMore] = createSignal<Record<string, number>>({});
+  createEffect(on(() => preview()?.hit, () => setHitMore({}), { defer: true }));
+  const moreHit = (id: string, index: number) => setHitMore((m) => { const key = outputKey(id, index); return { ...m, [key]: (m[key] ?? TOOL_OUTPUT.first) + TOOL_OUTPUT.step }; });
   /**
    * View process from the live main Activity while Processes is on
    * (ActivityView.cpp:1129-1134): only in the Processes view of the session
@@ -1095,9 +1100,14 @@ export function ActivityView(props: { source?: ActivitySource }) {
     <ActivityLayoutHeld.Provider value={layoutHeld}>
     <div class="activity" style={{ position: "relative" }}>
       <Show when={!placed()}>
-        <div class="act-col" style={{ position: "absolute", inset: "0", "min-height": "0", "pointer-events": "none" }} role="status">
+        <div class="act-col" style={{ position: "absolute", inset: "0", "min-height": "0", "pointer-events": "none", "z-index": "1" }} role="status">
           <div class="act-label eyebrow">{tr("Recorded activity — messages and tool excerpts")}</div>
-          <div class="act-older hint">{tr("Reading activity…")}</div>
+          {/* Placement waits for a first page, which a shell session and a
+              stalled read never have: their states show here, above the
+              hidden column and its scroller, and take clicks (zerus-soudn). */}
+          <Show when={!states().archived && !view.loaded && !view.items.length} fallback={<div class="act-older hint">{tr("Reading activity…")}</div>}>
+            <div style={{ "pointer-events": "auto" }}><ActivityPending source={source()} session={s()} /></div>
+          </Show>
         </div>
       </Show>
       <LocalDeleteDialog />
@@ -1141,7 +1151,8 @@ export function ActivityView(props: { source?: ActivitySource }) {
             {/* The message as Activity shows it, Markdown and links with the query marked (ActivityView.cpp:664, 1592-1605). */}
             <div class="search-preview-body">
               <HighlightQuery.Provider value={p().query}>
-                <For each={searchHitItems(p().hit)}>{(item) => <Item item={item} scope={scope()} sourceId={source().target()?.id} postersEnabled={false} expanded={item.kind === "tool" || item.kind === "tools"} />}</For>
+                <For each={searchHitItems(p().hit)}>{(item) => <Item item={item} scope={scope()} sourceId={source().target()?.id} postersEnabled={false} expanded={item.kind === "tool" || item.kind === "tools"}
+                  shown={(index) => hitMore()[outputKey(item.id, index)]} onMore={(index) => moreHit(item.id, index)} />}</For>
               </HighlightQuery.Provider>
             </div>
           </section>}</Show>
@@ -1162,7 +1173,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
             <div class="act-older hint">{tr("Older events have expired from the journal.")}</div>
           </Show>
           <Show when={!states().archived} fallback={<div class="notice"><Icon name="archive" size={14} /><div>{tr("This conversation is archived.")}</div></div>}>
-            <Show when={view.loaded || view.items.length} fallback={<div class="act-older hint">{tr("Reading activity…")}</div>}>
+            <Show when={view.loaded || view.items.length} fallback={<ActivityPending source={source()} session={s()} />}>
               <Show when={view.items.length} fallback={<div class="act-empty"><b>{empty().title}</b><p class="muted">{empty().text}</p></div>}>
                 {/* Reserve the current virtual extent through range swaps. Without
                     it, a synchronous layout between removing rows and updating

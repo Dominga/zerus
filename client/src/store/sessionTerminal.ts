@@ -115,7 +115,14 @@ export function waitForResumed(saved: ActionRow, ms = RESUME_TERMINAL_MS, rows: 
     const timer = setTimeout(() => finish(undefined), ms);
     createEffect(() => {
       const found = resumedRow(saved, rows());
-      if (found) queueMicrotask(() => finish(found));
+      // A listed row is updated in place: the answer is the identity that
+      // matched, frozen now, never what the row becomes later (zerus-1gima).
+      // The terminal opens for that run and conversation, which Rust checks
+      // against the live row again.
+      if (found) {
+        const matched = found === "changed" ? found : snapshotOf(found);
+        queueMicrotask(() => finish(matched));
+      }
     });
   }));
 }

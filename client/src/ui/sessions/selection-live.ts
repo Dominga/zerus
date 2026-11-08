@@ -9,7 +9,7 @@ import { clearMulti } from "./organize";
 import type { Row } from "./model";
 import type { Session } from "./types";
 import { MACHINES_WAITING, machineEntries } from "./machine-batch";
-import { countable, selectionMenu, visibleSelected } from "./selection-ui";
+import { anyUnmuted, countable, selectionMenu, visibleSelected } from "./selection-ui";
 import { selectionSnapshot, type SelectionAction, type SelectionRow } from "./selection";
 import { liveNameIndex } from "./actions-ui";
 
@@ -30,7 +30,7 @@ export const runSelection = (rows: SelectionRow[], a: SelectionAction) => { void
 /** The context menu of a row inside a multi-selection (Qt populateSelectionMenu). */
 export const selectionContextMenu = (listed: readonly Row[]): MenuEntry[] => {
   const rows = selectedRows(listed).map(selectionSnapshot);
-  return selectionMenu(selectionCount(rows), rows.length, running(), (a) => runSelection(rows, a), clearMulti);
+  return selectionMenu(selectionCount(rows), rows.length, running(), (a) => runSelection(rows, a), clearMulti, anyUnmuted(rows));
 };
 
 /** Pause all and Resume all per computer (Qt's populateBatchActions): this computer first, then the peers. */

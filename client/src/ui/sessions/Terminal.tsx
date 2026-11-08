@@ -2,11 +2,15 @@ import { For, Show, createEffect, createSignal, onCleanup, onMount } from "solid
 import type { Terminal as XTerm } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 import { Icon } from "../lib/icons";
-import { contentScale } from "../../store/ui";
+import { contentScale, selected } from "../../store/ui";
 import { skin } from "../../skin/runtime";
 import { screenShowsLatest, terminal, type Screen } from "../../store/terminal";
 import { tr } from "../../i18n";
 import { terminalMenu } from "./terminal-menu";
+import { teams, sessionIs } from "../../store/teams";
+import { mountTerminalNotices } from "./terminal-notices";
+import { leadNoticeMode, setLeadNoticeMode } from "./Activity";
+import { NOTICE_MODES, type NoticeMode } from "./leadNotices";
 
 // xterm.js 6 loads when Terminal first opens. Linux keeps the DOM renderer;
 // macOS and Windows add the WebGL addon and fall back to DOM when its
@@ -25,6 +29,7 @@ function theme() {
 export function TerminalTab() {
   let host!: HTMLDivElement;
   const [live, setLive] = createSignal<{ term: XTerm; measure: () => void } | undefined>();
+  const [folds, setFolds] = createSignal<ReturnType<typeof mountTerminalNotices> | undefined>();
   const [menu, setMenu] = createSignal<{ x: number; y: number } | undefined>();
   const selection = () => live()?.term.getSelection() ?? "";
   let gone = false;
@@ -90,11 +95,13 @@ export function TerminalTab() {
     const [{ Terminal }, { FitAddon }] = await Promise.all([import("@xterm/xterm"), import("@xterm/addon-fit"), import("@xterm/xterm/css/xterm.css")]);
     if (gone) return;
     const css = getComputedStyle(document.documentElement);
-    const term = new Terminal({ fontFamily: css.getPropertyValue("--z-font-mono"), fontSize: Math.round(13 * contentScale()), cursorBlink: true, scrollback: SCROLLBACK, theme: theme() });
+    const row = selected();
+    const foldMode = row && isLead(row) ? leadNoticeMode(row) : "full";
+    const term = new Terminal({ fontFamily: css.getPropertyValue("--z-font-mono"), fontSize: Math.round(13 * contentScale()), cursorBlink: true, scrollback: SCROLLBACK, theme: theme(), allowProposedApi: true });
     const fit: FitAddon = new FitAddon();
     term.loadAddon(fit);
     term.open(host);
-    if (webgl) {
+    if (webgl && foldMode === "full") {
       try {
         const { WebglAddon } = await import("@xterm/addon-webgl");
         const gl = new WebglAddon();
@@ -114,12 +121,23 @@ export function TerminalTab() {
     term.onResize(({ cols, rows }) => terminal.resized(cols, rows));
     const observer = new ResizeObserver(measure);
     observer.observe(host);
-    teardown = () => { terminal.hide(); observer.disconnect(); term.dispose(); };
+    const fold = mountTerminalNotices(term, foldMode as NoticeMode);
+    setFolds(fold);
+    teardown = () => { fold.dispose(); setFolds(undefined); terminal.hide(); observer.disconnect(); term.dispose(); };
     setLive({ term, measure });
     terminal.show(screen);
     term.focus();
   });
 
+  createEffect(() => {
+    const fold = folds(), row = selected();
+    if (fold) fold.setMode(row && isLead(row) ? leadNoticeMode(row) : "full");
+  });
+  const isLead = (row: ReturnType<typeof selected>): boolean => {
+    if (!row) return false;
+    const team = teams.teamOf(row);
+    return !!team?.members.some((member) => member.lead && sessionIs(member.session, row.computer, row));
+  };
   const connected = () => terminal.connected();
   // Qt's updateButtons tooltips; unavailable shows the reason.
   const reason = () => terminal.texts()?.reason ?? "";
@@ -130,6 +148,14 @@ export function TerminalTab() {
     <div class="term-tab">
       <div class="term-bar">
         <span class="ell" title={terminal.status()}>{terminal.status()}</span>
+        <Show when={selected() && isLead(selected())}>
+          <label class="term-notice-mode" title={tr("How the team's notices to the lead and its replies to them show here.")}>
+            <span class="muted">{tr("Team notices")}</span>
+            <select class="field small" data-notice-mode value={leadNoticeMode(selected()!)} onChange={(event) => setLeadNoticeMode(selected()!, event.currentTarget.value as NoticeMode)}>
+              <For each={NOTICE_MODES}>{(mode) => <option value={mode}>{mode === "full" ? tr("Full") : mode === "collapsed" ? tr("Collapsed") : tr("Hidden")}</option>}</For>
+            </select>
+          </label>
+        </Show>
         <span class="grow" />
         <button class="icon-btn" data-tip={reconnectTip()} aria-label={tr("Reconnect terminal")} disabled={!terminal.ready()} onClick={() => { void terminal.reconnect(); }}>
           <Icon name="refresh-cw" size={15} />

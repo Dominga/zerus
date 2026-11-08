@@ -2512,5 +2512,7 @@
   "Task states": "Состояния задач",
   "New team…": "Новая команда…",
   "No sessions in this project yet.": "В этом проекте пока нет сеансов.",
-  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд"
+  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
+  "How the team's notices to the lead and its replies to them show here.": "Как показывать уведомления команды лиду и его ответы на них.",
+  "Expand this team notice and the lead's reply": "Развернуть уведомление команды и ответ лида"
 }

@@ -9,7 +9,11 @@
 //! effect-free observation child decides it, in each read of the wait and
 //! once more right before the send's spawn turn (zerus-5wmh.66.4.10). A
 //! restart never resumes a wait.
-use super::child::{self, Ended};
+// Only the Linux runner starts an original child; macOS refuses every
+// original at admission.
+#[cfg(target_os = "linux")]
+use super::child;
+use super::child::Ended;
 use super::ledger::{self, Child};
 use super::ready::{self, Readiness};
 use super::receipt::{self, Evidence, Observed, Roots};
@@ -65,6 +69,7 @@ enum Proof {
     Admitting,
 }
 /// Each whole child, the CLI's own lock wait included.
+#[cfg(target_os = "linux")]
 pub(super) const DEADLINE: Duration = Duration::from_secs(30);
 /// The one bounded deadline of the receipt read after the physical drain,
 /// never renewed: a later result is Unknown.

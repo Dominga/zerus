@@ -5,11 +5,17 @@
 //! same live operation waits, off the actor and within one never-renewed
 //! budget, for the session's slot to show it completed, and only then
 //! prepares, reserves and spawns the send. A restart never resumes a wait.
-use super::child::{self, Ended};
+// Only the Linux runner starts an original child; macOS refuses every
+// original at admission.
+#[cfg(target_os = "linux")]
+use super::child;
+use super::child::Ended;
+use super::consent::Consent;
 use super::ledger::{self, Child};
 use super::receipt::{self, Evidence, Observed, Roots};
 use super::slot::{self, Slot};
-use super::{consent::Consent, target};
+#[cfg(any(test, target_os = "linux"))]
+use super::target;
 use crate::desktop::creation_clone::lease::{Lease, Machine};
 use crate::desktop::custody::Observation;
 use crate::{
@@ -44,6 +50,7 @@ use zerus_desktop_ledger::operations::{
 /// The refusal of every macOS original until a qualified child seam exists.
 pub(super) const MAC_UNAVAILABLE: &str = "compact_to_send_native_image_unavailable";
 /// Each whole child, the CLI's own lock wait included.
+#[cfg(target_os = "linux")]
 pub(super) const DEADLINE: Duration = Duration::from_secs(30);
 /// The one bounded deadline of the receipt read after the physical drain,
 /// never renewed: a later result is Unknown.

@@ -682,6 +682,9 @@ pub struct ArchivePage {
     pub partial: bool,
     /// Rows the host looked at for this page (zerus-080n8); 0 from an exact page.
     pub searched: u64,
+    /// The host answered a bounded page: every bounded reply says whether it
+    /// is `partial` (zerus-5czy6); an exact one, from an older host too, does not.
+    pub bounded: bool,
 }
 
 /// The help line of a CLI that serves bounded archive pages (zerus-080n8).
@@ -822,6 +825,7 @@ fn page(data: &Value) -> ArchivePage {
         position_capped: data.get("position_capped").and_then(Value::as_bool) == Some(true),
         partial: data.get("partial").and_then(Value::as_bool) == Some(true),
         searched: data.get("searched").and_then(Value::as_u64).unwrap_or(0),
+        bounded: data.get("partial").and_then(Value::as_bool).is_some(),
         position: data
             .get("position")
             .and_then(Value::as_f64)
@@ -1889,6 +1893,11 @@ mod tests {
         let old = page(&page_with(|_| {}));
         assert!(!old.partial && !old.total_capped && !old.position_capped);
         assert_eq!(old.searched, 0);
+        // zerus-5czy6: the webview tells an exact reply from a bounded one by this flag,
+        // since an exact reply's projected `searched` is 0 too.
+        assert!(!old.bounded);
+        assert!(page(&partial).bounded);
+        assert!(page(&page_with(|p| p["partial"] = json!(false))).bounded);
     }
 
     #[test]

@@ -788,6 +788,12 @@ mod tests {
         Actor::Agent(run(name))
     }
 
+    fn ready_for(task: &mut TaskDoc, origin: &str, text: &str, actor: &Actor, now: i64) -> bool {
+        task.report_attempt(origin, text, ReportKind::Ready, None, actor, now)
+            .unwrap()
+            .moves
+    }
+
     fn native(name: &str) -> NativeRequest {
         NativeRequest {
             machine: "m1".into(),
@@ -796,6 +802,188 @@ mod tests {
             conversation_id: format!("conversation-{name}"),
             digest: "ab".repeat(32),
         }
+    }
+
+    #[test]
+    fn an_original_report_cannot_ready_a_new_generation_in_the_same_executor() {
+        let mut task = task();
+        send(&mut task, ONE, "api");
+        settle(&mut task, ONE);
+        let original = || (ONE, "Same result", ReportKind::Ready, Some(1), agent("api"));
+        let (id, text, kind, considered, actor) = original();
+        assert!(
+            task.report_attempt(id, text, kind, considered, &actor, 20)
+                .unwrap()
+                .moves
+        );
+        task.set_stage(Stage::Todo, &Actor::Person, 21).unwrap();
+        send(&mut task, TWO, "api");
+        settle(&mut task, TWO);
+        let facts = task.attempt_facts(TWO).unwrap();
+        let (id, text, kind, considered, actor) = original();
+        let late = task
+            .report_attempt(id, text, kind, considered, &actor, 30)
+            .unwrap();
+        assert_eq!((late.moves, late.stale), (false, Some(Stale::OtherAttempt)));
+        assert_eq!(task.stage().unwrap(), Stage::Active);
+        assert_eq!(task.attempt_facts(TWO).unwrap(), facts);
+        let last = task.view().unwrap().log.pop().unwrap();
+        assert_eq!(last.reported_attempt.as_deref(), Some(ONE));
+        assert_eq!(last.considered, Some(1));
+        let restored = TaskDoc::from_bytes(&task.snapshot().unwrap()).unwrap();
+        assert_eq!(
+            restored
+                .view()
+                .unwrap()
+                .log
+                .last()
+                .unwrap()
+                .reported_attempt
+                .as_deref(),
+            Some(ONE)
+        );
+        assert!(
+            task.report_attempt(
+                TWO,
+                "Current result",
+                ReportKind::Ready,
+                None,
+                &agent("api"),
+                31
+            )
+            .unwrap()
+            .moves
+        );
+    }
+
+    #[test]
+    fn unscoped_managed_reports_are_history_only_without_current_attempt_facts() {
+        for kind in [ReportKind::Ready, ReportKind::Progress] {
+            let mut task = task();
+            send(&mut task, ONE, "api");
+            let facts = task.attempt_facts(ONE).unwrap();
+            let before = task.view().unwrap();
+            let report = task
+                .report("Unscoped result", kind, None, &agent("api"), 20)
+                .unwrap();
+            assert_eq!(
+                (report.moves, report.stale),
+                (false, Some(Stale::OtherAttempt))
+            );
+            assert_eq!(task.stage().unwrap(), before.stage);
+            assert_eq!(task.attempt_facts(ONE).unwrap(), facts);
+            let last = task.view().unwrap().log.pop().unwrap();
+            assert_eq!(last.reported_attempt, None);
+            assert_eq!(last.stale, Some(Stale::OtherAttempt));
+            // An unscoped report supplies no acknowledgement of unknown input.
+            assert!(task
+                .settle_attempt(ONE, Settlement::NotAdmitted, &Actor::Person, 21)
+                .is_ok());
+        }
+    }
+
+    #[test]
+    fn scoped_progress_and_ready_keep_current_executor_and_delivery_guards() {
+        let mut task = task();
+        send(&mut task, ONE, "api");
+        let unknown = task
+            .report_attempt(ONE, "Work", ReportKind::Ready, None, &agent("api"), 11)
+            .unwrap();
+        assert_eq!(unknown.stale, Some(Stale::Undelivered));
+        assert!(!unknown.moves);
+        settle(&mut task, ONE);
+        let outsider = task
+            .report_attempt(
+                ONE,
+                "Other executor",
+                ReportKind::Ready,
+                None,
+                &agent("web"),
+                12,
+            )
+            .unwrap();
+        assert_eq!(outsider.stale, Some(Stale::OtherExecutor));
+        let progress = task
+            .report_attempt(
+                ONE,
+                "Progress",
+                ReportKind::Progress,
+                Some(1),
+                &agent("api"),
+                13,
+            )
+            .unwrap();
+        assert!(!progress.moves && progress.stale.is_none());
+        assert_eq!(task.stage().unwrap(), Stage::Active);
+        assert!(task
+            .attempt_facts(ONE)
+            .unwrap()
+            .unwrap()
+            .contains(&EventKind::Progress));
+        assert!(
+            task.report_attempt(ONE, "Ready", ReportKind::Ready, None, &agent("api"), 14)
+                .unwrap()
+                .moves
+        );
+    }
+
+    #[test]
+    fn a_pinned_agents_unsent_queued_legacy_report_still_moves_to_review() {
+        let mut task = task();
+        task.set_target(&Target::Session(run("api")), &Actor::Person, 2)
+            .unwrap();
+        assert!(!task.execution_managed());
+        assert!(
+            task.report(
+                "Already implemented",
+                ReportKind::Ready,
+                None,
+                &agent("api"),
+                3
+            )
+            .unwrap()
+            .moves
+        );
+        assert_eq!(task.stage().unwrap(), Stage::Review);
+        assert!(task.attempt_phases().unwrap().is_empty());
+        assert!(task
+            .view()
+            .unwrap()
+            .log
+            .last()
+            .unwrap()
+            .reported_attempt
+            .is_none());
+    }
+
+    #[test]
+    fn explicit_human_reports_still_accept_work_and_bad_origin_syntax_writes_nothing() {
+        let mut task = task();
+        send(&mut task, ONE, "api");
+        settle(&mut task, ONE);
+        let before = task.version();
+        assert!(task
+            .report_attempt(
+                "latest",
+                "Invalid origin",
+                ReportKind::Ready,
+                None,
+                &agent("api"),
+                12
+            )
+            .is_err());
+        assert_eq!(task.version(), before);
+        assert!(
+            task.report(
+                "Accepted explicitly",
+                ReportKind::Ready,
+                None,
+                &Actor::Person,
+                13
+            )
+            .unwrap()
+            .moves
+        );
     }
 
     /// The receipt a reservation's own submitted input leaves.
@@ -934,7 +1122,7 @@ mod tests {
         // Its executor's start and result then count.
         task.record_start(&agent("api"), 30).unwrap();
         assert_eq!(current(&task).phase, Phase::Running);
-        assert!(task.record_report("Done", &agent("api"), 40).unwrap());
+        assert!(ready_for(&mut task, ONE, "Done", &agent("api"), 40));
         assert_eq!(current(&task).phase, Phase::Ready);
     }
 
@@ -981,7 +1169,7 @@ mod tests {
         // The pinned executor's report neither starts nor moves the task.
         for kind in [ReportKind::Ready, ReportKind::Progress] {
             let decision = task
-                .report("Done already", kind, None, &agent("api"), 12)
+                .report_attempt(ONE, "Done already", kind, None, &agent("api"), 12)
                 .unwrap();
             assert_eq!(
                 (decision.moves, decision.stale),
@@ -1012,7 +1200,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            task.report("Late", ReportKind::Ready, None, &agent("api"), 23)
+            task.report_attempt(TWO, "Late", ReportKind::Ready, None, &agent("api"), 23)
                 .unwrap()
                 .stale,
             Some(Stale::OtherExecutor)
@@ -1030,7 +1218,7 @@ mod tests {
             .iter()
             .any(|e| e.kind == "started" && e.session == Some(run("web"))));
         assert_eq!(
-            task.report("Mine", ReportKind::Ready, None, &agent("web"), 25)
+            task.report_attempt(TWO, "Mine", ReportKind::Ready, None, &agent("web"), 25)
                 .unwrap()
                 .stale,
             Some(Stale::Undelivered)
@@ -1045,7 +1233,7 @@ mod tests {
             (Some(run("web")), Target::Session(run("web")))
         );
         assert_eq!(current(&task).phase, Phase::Running);
-        assert!(task.record_report("Done", &agent("web"), 30).unwrap());
+        assert!(ready_for(&mut task, TWO, "Done", &agent("web"), 30));
     }
 
     #[test]
@@ -1088,7 +1276,7 @@ mod tests {
             3,
             "the next attempt follows the refused one"
         );
-        assert!(task.record_report("Done", &agent("api"), 25).unwrap());
+        assert!(ready_for(&mut task, TWO, "Done", &agent("api"), 25));
     }
 
     #[test]
@@ -1283,7 +1471,7 @@ mod tests {
         let mut task = task();
         send(&mut task, ONE, "api");
         settle(&mut task, ONE);
-        task.record_report("Done", &agent("api"), 30).unwrap();
+        ready_for(&mut task, ONE, "Done", &agent("api"), 30);
         task.set_stage(Stage::Todo, &Actor::Person, 31).unwrap();
         task.record_start(&agent("web"), 32).unwrap();
         let view = task.view().unwrap();
@@ -1303,7 +1491,7 @@ mod tests {
         assert!(other
             .record_send(&run("api"), "legacy", &Actor::Person, 12)
             .is_err());
-        task.record_report("Done", &agent("web"), 33).unwrap();
+        ready_for(&mut task, &now.id, "Done", &agent("web"), 33);
         assert!(task
             .reserve_attempt(
                 TWO,
@@ -1611,7 +1799,7 @@ mod tests {
         let mut d = TaskDoc::from_bytes(&bytes).unwrap();
         send(&mut d, ONE, "api");
         settle(&mut d, ONE);
-        d.record_report("Done", &agent("api"), 30).unwrap();
+        ready_for(&mut d, ONE, "Done", &agent("api"), 30);
         d.set_stage(Stage::Todo, &Actor::Person, 31).unwrap();
         d.import(&c.snapshot().unwrap()).unwrap();
         assert_eq!(d.held().unwrap().map(|a| a.id), Some(THREE.to_owned()));
@@ -1682,7 +1870,7 @@ mod tests {
         let mut task = task();
         send(&mut task, ONE, "api");
         settle(&mut task, ONE);
-        task.record_report("Done", &agent("api"), 21).unwrap();
+        ready_for(&mut task, ONE, "Done", &agent("api"), 21);
         assert!(task
             .reserve_attempt(
                 TWO,
@@ -1725,7 +1913,7 @@ mod tests {
             send(&mut task, ONE, "api");
             assert_eq!(phase(&task, ONE), Some((Origin::Send, Phase::Unknown)));
             settle(&mut task, ONE);
-            task.record_report("Done", &agent("api"), 21).unwrap();
+            ready_for(&mut task, ONE, "Done", &agent("api"), 21);
             let reopen = native("api");
             task.reserve_attempt(TWO, Origin::Reopen, &run("api"), reopen, &Actor::Person, 22)
                 .unwrap();
@@ -1758,7 +1946,8 @@ mod tests {
             task.set_target(&Target::Session(run("api")), &Actor::Person, 2)
                 .unwrap();
             send(&mut task, ONE, "api");
-            task.report("Work", kind, None, &agent("api"), 11).unwrap();
+            task.report_attempt(ONE, "Work", kind, None, &agent("api"), 11)
+                .unwrap();
             assert!(task
                 .settle_attempt(ONE, Settlement::NotAdmitted, &Actor::Person, 12)
                 .is_err());
@@ -1769,7 +1958,7 @@ mod tests {
                 (Phase::Submitted, Some(11)),
                 "{kind:?}"
             );
-            assert!(task.record_report("Done", &agent("api"), 13).unwrap());
+            assert!(ready_for(&mut task, ONE, "Done", &agent("api"), 13));
         }
         // After a refused send: still undelivered, and no new start from it.
         let mut task = task();
@@ -1779,7 +1968,7 @@ mod tests {
         task.settle_attempt(ONE, Settlement::NotAdmitted, &Actor::Person, 11)
             .unwrap();
         let decision = task
-            .report("Old work", ReportKind::Ready, None, &agent("api"), 12)
+            .report_attempt(ONE, "Old work", ReportKind::Ready, None, &agent("api"), 12)
             .unwrap();
         assert_eq!(
             (decision.moves, decision.stale),
@@ -1828,7 +2017,14 @@ mod tests {
                 let executor = now.executor.clone().unwrap();
                 assert_eq!(
                     merged
-                        .report("Done", ReportKind::Ready, None, &Actor::Agent(executor), 30)
+                        .report_attempt(
+                            ONE,
+                            "Done",
+                            ReportKind::Ready,
+                            None,
+                            &Actor::Agent(executor),
+                            30
+                        )
                         .unwrap()
                         .stale,
                     Some(Stale::Conflict)
@@ -1887,7 +2083,14 @@ mod tests {
         assert_eq!(execution::next_generation(Some(&execution)).unwrap(), 2);
         // The legacy executor still acknowledges and finishes its work.
         task.record_start(&agent("api"), 22).unwrap();
-        assert!(task.record_report("Done", &agent("api"), 23).unwrap());
+        assert!(!task.record_report("Done", &agent("api"), 23).unwrap());
+        assert_eq!(
+            task.view().unwrap().log.last().unwrap().stale,
+            Some(Stale::OtherAttempt)
+        );
+        // Transition for an old prompt: explicit human acceptance, not a
+        // current-attempt ID invented for the legacy reporter.
+        assert!(task.record_report("Accepted", &Actor::Person, 24).unwrap());
         // A later handoff follows the refused attempt's generation.
         let mut again = super::tests::task();
         again
@@ -2270,7 +2473,7 @@ mod tests {
         let attempt = send(&mut task, ONE, "api");
         assert_eq!(attempt.frontier.as_ref().map(Vec::len), Some(1));
         settle(&mut task, ONE);
-        task.record_report("Done again", &agent("api"), 21).unwrap();
+        ready_for(&mut task, ONE, "Done again", &agent("api"), 21);
         // A settled reopen names its request in its history entry.
         task.reserve_attempt(
             TWO,
@@ -2288,7 +2491,7 @@ mod tests {
         let execution = view.execution.unwrap();
         assert!(execution.unexplained.is_empty() && !execution.conflict);
         // A direct start freezes its baseline too.
-        task.record_report("Finished", &agent("api"), 30).unwrap();
+        ready_for(&mut task, TWO, "Finished", &agent("api"), 30);
         task.set_stage(Stage::Todo, &Actor::Person, 31).unwrap();
         task.record_start(&agent("api"), 32).unwrap();
         let (_, ids) = task.view_with_history_ids().unwrap();

@@ -1077,7 +1077,8 @@ fn a_done_fetch_is_shallow_but_keeps_the_complete_task_state_and_attempt_facts()
     task.record_start(&Actor::Agent(executor.clone()), 201)
         .unwrap();
     assert!(
-        task.report(
+        task.report_attempt(
+            id,
             "Ready for review.",
             ReportKind::Ready,
             None,

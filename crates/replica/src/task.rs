@@ -586,6 +586,7 @@ impl TaskDoc {
                         None => Vec::new(),
                     },
                     stale: string(&entry, "stale").and_then(|s| Stale::parse(&s)),
+                    reported_attempt: string(&entry, "reported_attempt"),
                     considered: integer(&entry, "considered").and_then(|n| u64::try_from(n).ok()),
                     reviews: string(&entry, "reviews"),
                     of: string(&entry, "of"),
@@ -1137,24 +1138,71 @@ impl TaskDoc {
         actor: &Actor,
         now: i64,
     ) -> Result<ReportDecision> {
+        self.report_scoped(summary, kind, considered, None, actor, now)
+    }
+
+    /// Report for the attempt pinned in this execution's original context.
+    /// The caller never substitutes whatever attempt happens to be current.
+    pub fn report_attempt(
+        &mut self,
+        attempt: &str,
+        summary: &str,
+        kind: ReportKind,
+        considered: Option<u64>,
+        actor: &Actor,
+        now: i64,
+    ) -> Result<ReportDecision> {
+        if !ids::is_uuid(attempt) {
+            return Err(Error::new("a report attempt is a canonical UUID"));
+        }
+        self.report_scoped(summary, kind, considered, Some(attempt), actor, now)
+    }
+
+    fn report_scoped(
+        &mut self,
+        summary: &str,
+        kind: ReportKind,
+        considered: Option<u64>,
+        origin: Option<&str>,
+        actor: &Actor,
+        now: i64,
+    ) -> Result<ReportDecision> {
         self.writable()?;
         check_text(summary, "report")?;
         let considered = considered
             .map(|n| i64::try_from(n).ok().filter(|n| *n > 0))
             .map(|n| n.ok_or_else(|| Error::new("the considered revision counts from 1")))
             .transpose()?;
-        // A report by the exact pinned agent is explicit work evidence even
-        // when it filed the task during an already-running turn. A task that
-        // records attempts never begins one implicitly: its executor starts it.
-        if !self.execution_managed()
+        // Preserve the documented direct-work rule for a pinned agent's
+        // unsent queued legacy task. A cut-over task never starts implicitly
+        // and never supplies its latest attempt to an unscoped report.
+        if origin.is_none()
+            && !self.execution_managed()
             && matches!(self.stage()?, Stage::Todo | Stage::Backlog)
             && matches!((&self.view()?.target, actor), (Target::Session(target), Actor::Agent(own)) if target == own)
         {
             self.record_start(actor, now)?;
         }
         let view = self.view()?;
-        let decision =
-            execution::decide_report(view.stage, view.execution.as_ref(), actor, kind, None);
+        let current = view.execution.as_ref().and_then(|e| e.current.as_ref());
+        let named_current = match origin {
+            Some(id) => self.attempt(id)?.is_some_and(|named| {
+                current.is_some_and(|current| {
+                    !current.legacy
+                        && current.id == named.id
+                        && current.generation == named.generation
+                })
+            }),
+            None => !self.execution_managed() || matches!(actor, Actor::Person),
+        };
+        let decision = if named_current {
+            execution::decide_report(view.stage, view.execution.as_ref(), actor, kind, origin)
+        } else {
+            ReportDecision {
+                moves: false,
+                stale: Some(execution::Stale::OtherAttempt),
+            }
+        };
         if decision.moves {
             let fields = self.fields();
             fields.insert("stage", Stage::Review.as_str())?;
@@ -1166,6 +1214,9 @@ impl TaskDoc {
             ReportKind::Ready => "report",
         };
         let entry = self.log(entry_kind, actor, now, summary, None)?;
+        if let Some(origin) = origin {
+            entry.insert("reported_attempt", origin)?;
+        }
         if let Some(stale) = decision.stale {
             entry.insert("stale", stale.as_str())?;
         }
@@ -2834,9 +2885,18 @@ mod tests {
             let restored = TaskDoc::from_bytes(&task.snapshot().unwrap()).unwrap();
             assert_eq!(restored.view().unwrap().execution, view.execution);
             // The current executor's result finishes the attempt in its commit.
-            assert!(task
-                .record_report("Done", &Actor::Agent(worker()), 70)
-                .unwrap());
+            assert!(
+                task.report_attempt(
+                    A1,
+                    "Done",
+                    ReportKind::Ready,
+                    None,
+                    &Actor::Agent(worker()),
+                    70
+                )
+                .unwrap()
+                .moves
+            );
             let current = task.view().unwrap().execution.unwrap().current.unwrap();
             assert_eq!((current.id.as_str(), current.phase), (A1, Phase::Ready));
             // A newer schema is read-only: writes fail closed rather than

@@ -8,6 +8,7 @@ Own session/project; PROJECT/T-xxxxxx selects another. Text: stdin; --json: task
   hgs task add --start
   hgs task start REF
   hgs task report REF [--progress]
+  hgs task report-attempt REF --attempt UUID [--progress|--ready] [--considered REV]
   hgs task comment REF
   hgs task rename REF
   hgs task edit REF
@@ -23,6 +24,13 @@ Own session/project; PROJECT/T-xxxxxx selects another. Text: stdin; --json: task
 Add queues later work; add --start or start REF records current work without
 resending. Report changes, checks, remaining work/blockers: it moves to Review.
 Only the person accepts Done.
+For a managed execution use the report-attempt command pinned in its original
+task prompt or start acknowledgement, adding --progress while working. Never
+replace that UUID with a newer one from task get or start. An explicitly legacy
+start prints the ordinary report command and has no attempt UUID. A history-only
+report succeeded in saving history but did not move the task: do not retry a
+duplicate. Ask the person to accept or resend an older managed task whose prompt
+has no pinned report command.
 You cannot cancel your dispatched task; report instead. Handoff transfers active
 ownership after native submission; messages do not transfer it.
 

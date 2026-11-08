@@ -177,12 +177,13 @@ fn rendered(
     settings
         .check_agent(&Actor::Person, to, true, starts)
         .map_err(fail)?;
-    let (prompt, files) = dispatch_content(
+    let (mut prompt, files) = dispatch_content(
         settings,
         &task.view().map_err(fail)?,
         project_name,
         matches!(task.view().map_err(fail)?.target, Target::Subagent { .. }),
     )?;
+    reports::pin(&mut prompt, project_name, &task.id(), request_id);
     let request =
         crate::state::prepare_task_reply(to, "", request_id, &prompt, &files).map_err(fail)?;
     if request["expected_run_id"].as_str() != Some(selection.run_id.as_str())

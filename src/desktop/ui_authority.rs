@@ -706,6 +706,7 @@ impl Validated {
                     | Request::DeferredSend { .. }
                     | Request::DeferredAnswer { .. }
                     | Request::CompactToSend { .. }
+                    | Request::SessionResume { .. }
                     | Request::TaskStartReconcile { .. }
                     | Request::TerminationOutcome { .. }
                     | Request::WorktreeProgramStop { .. }
@@ -765,6 +766,17 @@ impl Validated {
         self.check()?;
         let Request::CompactToSend { intent } = self.0 else {
             anyhow::bail!("not a compact-to-send");
+        };
+        Ok(*intent)
+    }
+    /// Only the session resume actor calls this, after BEGIN IMMEDIATE.
+    /// Cached native Service mode was bound to this exact original request
+    /// during admission.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn session_resume(self) -> Result<zerus_client_core::desktop::session_resume::Intent> {
+        self.check()?;
+        let Request::SessionResume { intent } = self.0 else {
+            anyhow::bail!("not a session resume");
         };
         Ok(*intent)
     }
@@ -1610,6 +1622,14 @@ fn validate(
             "compact-to-send does not match the native service frontend"
         );
     }
+    if let Request::SessionResume { intent } = &envelope.request {
+        ensure!(
+            reply.request.ownership_mode
+                == Some(zerus_client_core::desktop::ownership::Mode::Service)
+                && intent.scope.configuration == configuration,
+            "session resume does not match the native service frontend"
+        );
+    }
     if let Request::TaskStartReconcile { intent } = &envelope.request {
         ensure!(
             reply.request.ownership_mode
@@ -1697,6 +1717,7 @@ enum OrderedOperation {
     DeferredSend,
     DeferredAnswer,
     CompactToSend,
+    SessionResume,
     TaskStartReconcile,
     ActivationWait,
     AutomaticApprovals,
@@ -1723,6 +1744,7 @@ impl From<&Request> for OrderedOperation {
             Request::DeferredSend { .. } => Self::DeferredSend,
             Request::DeferredAnswer { .. } => Self::DeferredAnswer,
             Request::CompactToSend { .. } => Self::CompactToSend,
+            Request::SessionResume { .. } => Self::SessionResume,
             Request::TaskStartReconcile { .. } => Self::TaskStartReconcile,
             Request::ActivationWait { .. } => Self::ActivationWait,
             Request::AutomaticApprovals { .. } => Self::AutomaticApprovals,
@@ -2809,6 +2831,86 @@ mod tests {
             .into_request()
             .is_err());
         if let Request::CompactToSend { intent } = &mut envelope.request {
+            intent.scope.configuration = "b".repeat(64);
+        }
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+    }
+
+    /// A valid session resume, built as the client builds it.
+    fn session_resume_intent(
+        configuration: String,
+        epoch: String,
+    ) -> zerus_client_core::desktop::session_resume::Intent {
+        use zerus_client_core::{
+            desktop::session_resume::{Intent, Scope},
+            operation_recovery::deferred_input as checkpoint,
+        };
+        let reserved = checkpoint::Checkpoint::reserve_session_resume(checkpoint::Intent {
+            kind: checkpoint::Kind::ResumeToSend,
+            draft_revision: 1,
+            message_sha256: checkpoint::message_sha256("after resume", std::iter::empty()),
+            run_id: "run-1".into(),
+            conversation_id: "conversation-1".into(),
+            question: None,
+            start: Some(checkpoint::Start::Resume),
+            retry_of: None,
+            consent: true,
+        })
+        .unwrap();
+        let resume = serde_json::json!({"request_id": reserved.request_id, "action": "resume",
+            "expected_run_id": "run-1", "expected_conversation_id": "conversation-1"});
+        let original = serde_json::json!({"request_id": reserved.send_request_id,
+            "text": "after resume", "attachments": [], "expected_run_id": "run-1",
+            "expected_conversation_id": "conversation-1"});
+        Intent {
+            scope: Scope {
+                configuration,
+                service_epoch: epoch,
+            },
+            session: "claude/private-resume".into(),
+            request_id: reserved.request_id.clone(),
+            send_request_id: reserved.send_request_id.clone().unwrap(),
+            checkpoint: serde_json::to_string(&reserved).unwrap(),
+            resume: resume.to_string(),
+            original: original.to_string(),
+        }
+    }
+
+    #[test]
+    fn session_resume_has_its_own_lane_and_never_passes_the_generic_boundary() {
+        use zerus_client_core::desktop::ownership::Mode;
+        let (mut envelope, caller, frontend, mut reply) = fixture();
+        let intent = session_resume_intent("a".repeat(64), id(92));
+        envelope.request = Request::SessionResume {
+            intent: Box::new(intent.clone()),
+        };
+        assert_eq!(
+            OrderedOperation::from(&envelope.request),
+            OrderedOperation::SessionResume
+        );
+        for other in [
+            OrderedOperation::CompactToSend,
+            OrderedOperation::DeferredSend,
+            OrderedOperation::DeferredAnswer,
+            OrderedOperation::TaskMessage,
+            OrderedOperation::CreationLaunch,
+        ] {
+            assert_ne!(OrderedOperation::SessionResume, other);
+        }
+        assert_eq!(envelope.request.id(), intent.request_id);
+        reply.request.request_id = intent.request_id.clone();
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Native);
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Service);
+        validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).unwrap();
+        // Only its own typed actor accessor may consume it.
+        assert!(Validated::fixture(&serde_json::json!(envelope.request))
+            .into_request()
+            .is_err());
+        if let Request::SessionResume { intent } = &mut envelope.request {
             intent.scope.configuration = "b".repeat(64);
         }
         reply.request.fingerprint = envelope.request.fingerprint();

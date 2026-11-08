@@ -322,6 +322,8 @@ fn schema_32_preserves_existing_conversation_keys_and_indexes_the_new_run_lookup
             .to_owned(),
         configuration: "a".repeat(64),
     };
+    // The later schema-34 session resume leaf is rewound too.
+    crate::desktop::session_resume::remove_fixture(&f.store.db);
     f.store
         .db
         .execute_batch("DROP INDEX desktop_attention_catalog_run; PRAGMA user_version=31;")

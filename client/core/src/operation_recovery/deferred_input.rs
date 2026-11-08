@@ -22,6 +22,15 @@ pub const VERSION: u32 = 1;
 /// (zerus-5wmh.66.4.8): both request IDs, saved together before the desktop
 /// service is offered the pair. A reload never derives another send ID.
 pub const COMPACT_TO_SEND_VERSION: u32 = 2;
+/// The version of a resume-then-send checkpoint the desktop service resumes
+/// through the receipted `hgs session-action` (zerus-5wmh.66.4.9): a
+/// [`Start::Resume`], its receipt family `action_receipts`, and the send it
+/// reserves with it, both saved together before the offer. A reload never
+/// derives another send ID; version 1 keeps the direct `hgs resume` path.
+pub const SESSION_RESUME_VERSION: u32 = 3;
+/// The receipt family of a version 3 resume-then-send: the session action's
+/// own `action_receipts/<request_id>.json`.
+pub const ACTION_RECEIPTS: &str = "action_receipts";
 /// The longest run, conversation, question or row identity kept.
 const MAX_ID: usize = 512;
 
@@ -37,7 +46,9 @@ pub enum Kind {
     CompactToSend,
     /// The start before a send. `hgs resume` takes no request id; the
     /// session's `resume_input` binding is what reconciliation reads, and the
-    /// request id is the client's own identity of that dispatch.
+    /// request id is the client's own identity of that dispatch. A version 3
+    /// checkpoint resumes through `hgs session-action` instead, whose
+    /// `action_receipts` record is keyed by this request id.
     ResumeToSend,
 }
 
@@ -100,8 +111,9 @@ pub struct Checkpoint {
     /// Whether the user gave the cold-cache consent at the click: recorded
     /// intent, never a permission.
     pub consent: bool,
-    /// The send a version 2 compact-to-send reserved with its compaction;
-    /// absent in every version 1 record.
+    /// The send a version 2 compact-to-send reserved with its compaction, or
+    /// a version 3 resume-then-send with its resume; absent in every version
+    /// 1 record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub send_request_id: Option<String>,
 }
@@ -154,22 +166,53 @@ impl Checkpoint {
         })
     }
 
+    /// Reserves both request IDs of a resume-then-send the desktop service
+    /// runs as one operation: `request_id` for the receipted
+    /// `hgs session-action` resume and `send_request_id` for the send after
+    /// it. `None` unless `intent` is a resume-then-send that resumes
+    /// ([`Start::Resume`]); a fresh start or a resume with compaction stays
+    /// on the direct path.
+    pub fn reserve_session_resume(intent: Intent) -> Option<Self> {
+        (intent.kind == Kind::ResumeToSend && intent.start == Some(Start::Resume)).then(|| {
+            let mut checkpoint = Self::reserve(intent);
+            checkpoint.version = SESSION_RESUME_VERSION;
+            checkpoint.receipts = ACTION_RECEIPTS.into();
+            checkpoint.send_request_id = Some(uuid::Uuid::new_v4().to_string());
+            checkpoint
+        })
+    }
+
+    /// The CLI receipt family this checkpoint's request id is reconciled
+    /// against: the kind's own, but `action_receipts` for version 3.
+    pub fn receipt_family(&self) -> &'static str {
+        if self.version == SESSION_RESUME_VERSION {
+            ACTION_RECEIPTS
+        } else {
+            self.kind.receipts()
+        }
+    }
+
     /// Every field consistent: the version, a canonical request id, the
     /// kind's own receipt family, digests, bounded identities, a question
     /// exactly for an answer and a start exactly for a resume-then-send.
     pub fn valid(&self) -> bool {
         let id = |value: &str| value.len() <= MAX_ID && !value.chars().any(char::is_control);
-        // Version 2 is exactly a compact-to-send with its own, distinct send.
+        let paired = |send: &str| canonical_uuid(send) && send != self.request_id;
+        // Version 2 is exactly a compact-to-send with its own, distinct send;
+        // version 3 exactly a resume-then-send that resumes, with its own.
         let version = match (self.version, self.send_request_id.as_deref()) {
             (VERSION, None) => true,
             (COMPACT_TO_SEND_VERSION, Some(send)) => {
-                self.kind == Kind::CompactToSend && canonical_uuid(send) && send != self.request_id
+                self.kind == Kind::CompactToSend && paired(send)
+            }
+            (SESSION_RESUME_VERSION, Some(send)) => {
+                self.kind == Kind::ResumeToSend && self.start == Some(Start::Resume) && paired(send)
             }
             _ => false,
         };
         version
             && canonical_uuid(&self.request_id)
-            && self.receipts == self.kind.receipts()
+            && self.receipts == self.receipt_family()
             && digest(&self.message_sha256)
             && id(&self.run_id)
             && id(&self.conversation_id)

@@ -84,7 +84,7 @@ impl std::fmt::Debug for Intent {
 }
 
 /// `hgs send`'s stdin attachment, exactly as the CLI reads it.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Attachment {
     name: String,
@@ -94,7 +94,7 @@ struct Attachment {
     reference: String,
 }
 /// `hgs send`'s stdin, exactly as the CLI reads it.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Send {
     request_id: String,
@@ -104,7 +104,7 @@ struct Send {
     expected_conversation_id: String,
     #[serde(default)]
     attachments: Vec<Attachment>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     expected_compaction_id: String,
 }
 
@@ -339,6 +339,24 @@ pub(super) fn frozen(original: &str) -> Result<Frozen, Unsendable> {
         compaction_id: send.expected_compaction_id,
         message_sha256,
     })
+}
+
+/// The send `template` names `original` as its run; the same send naming
+/// `run` instead, every other field exactly as decoded. `session_resume`
+/// binds its send to the resumed run this way, and only this way. A template
+/// the CLI would not take, or one naming another run, is refused.
+pub(super) fn rebound(template: &str, original: &str, run: &str) -> Result<String, Unsendable> {
+    let mut send: Send = serde_json::from_str(template).map_err(|_| Unsendable::Invalid)?;
+    cli_rules(&send).ok_or(Unsendable::Refused)?;
+    if send.expected_run_id != original
+        || run.is_empty()
+        || run.len() > 128
+        || run.chars().any(char::is_control)
+    {
+        return Err(Unsendable::Invalid);
+    }
+    send.expected_run_id = run.into();
+    serde_json::to_string(&send).map_err(|_| Unsendable::Invalid)
 }
 
 /// `[Image #n]` or `[File #n]`, n from 1 with at most nine digits.

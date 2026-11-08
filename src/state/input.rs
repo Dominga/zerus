@@ -266,6 +266,48 @@ pub(super) fn attention_message_summary(record: &Value, output: &mut Value, live
     output[format!("{prefix}_message_reason")] = json!(result.err().unwrap_or_default());
 }
 
+/// What a resumed session's record says about a send to it now
+/// (zerus-5wmh.66.4.9): the record gates of `hgs send` that change while a
+/// resumed Claude or Kimi agent starts, read without any effect (no terminal
+/// query, lock or write; its processes from /proc only). A continuation
+/// condition only: `hgs send` checks every gate again under its input lock,
+/// the panels shown only on the terminal included. A Codex resume pending its
+/// first message shows its readiness only on its terminal, so it is never
+/// ready here (zerus-5wmh.66.4.10).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Readiness {
+    /// The record shows the agent takes a message now.
+    Ready,
+    /// Still starting, busy or not yet confirmed: read again.
+    Starting,
+    /// The resumed session failed, ends or left its conversation: no send.
+    Ended,
+}
+pub(crate) fn resumed_readiness(record: &Value) -> Readiness {
+    if terminating::check_mutation(record).is_err()
+        || !string(record, "error").is_empty()
+        || !string(record, "archive_id").is_empty()
+        || string(record, "conversation_id").is_empty()
+    {
+        return Readiness::Ended;
+    }
+    let unconfirmed = record["input_pending_at"]
+        .as_f64()
+        .is_some_and(|pending| record["last_event_at"].as_f64().unwrap_or(0.0) <= pending);
+    if resume_input::pending(record)
+        || !string(record, "expected_id").is_empty()
+        || string(record, "activity") != "idle"
+        || string(record, "phase") != "idle"
+        || unconfirmed
+        || settings_unconfirmed(record)
+        || pause_active(record)
+        || !process_alive(record)
+    {
+        return Readiness::Starting;
+    }
+    Readiness::Ready
+}
+
 fn checked_input(
     name: &str,
     run_id: &str,
@@ -1341,6 +1383,75 @@ fn paste_shown(screen: &str, pasted: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// zerus-5wmh.66.4.9: a resumed session's record alone, never its
+    /// terminal, decides whether a deferred send may start; only a confirmed,
+    /// idle, live agent is ready, and a pending Codex resume never is.
+    #[test]
+    fn a_resumed_record_is_ready_only_when_confirmed_idle_and_alive() {
+        let pid = std::process::id();
+        let ready = json!({"name": "claude/resumed", "agent": "claude", "run_id": "run-2",
+            "conversation_id": "conversation-1", "expected_id": "", "activity": "idle",
+            "phase": "idle", "error": "", "pid": pid, "process_start": process_start(pid)});
+        assert_eq!(resumed_readiness(&ready), Readiness::Ready);
+        let with = |change: &dyn Fn(&mut Value)| {
+            let mut copy = ready.clone();
+            change(&mut copy);
+            resumed_readiness(&copy)
+        };
+        // Still starting: not yet confirmed, busy, unconfirmed input or
+        // settings, or no live agent process.
+        for (key, value) in [
+            ("expected_id", json!("conversation-1")),
+            ("activity", json!("busy")),
+            ("phase", json!("starting")),
+            ("activity", json!("unknown")),
+            ("input_pending_at", json!(5.0)),
+            ("settings_unconfirmed_at", json!(5.0)),
+            ("pid", json!(0)),
+            ("process_start", json!("other")),
+        ] {
+            assert_eq!(
+                with(&|r| r[key] = value.clone()),
+                Readiness::Starting,
+                "{key}"
+            );
+        }
+        // A confirmed later event clears an earlier pending input.
+        assert_eq!(
+            with(&|r| {
+                r["input_pending_at"] = json!(5.0);
+                r["last_event_at"] = json!(6.0);
+            }),
+            Readiness::Ready
+        );
+        // Ended: the supervisor failed, the session left its conversation,
+        // is archived or is being terminated.
+        assert_eq!(
+            with(&|r| r["error"] = json!("launch failed")),
+            Readiness::Ended
+        );
+        assert_eq!(
+            with(&|r| r["conversation_id"] = json!("")),
+            Readiness::Ended
+        );
+        assert_eq!(
+            with(&|r| r["archive_id"] = json!("00000000-0000-4000-8000-000000000001")),
+            Readiness::Ended
+        );
+        // A Codex resume pending its first message shows readiness only on
+        // its terminal: never ready from its record (zerus-5wmh.66.4.10).
+        let codex = with(&|r| {
+            r["agent"] = json!("codex");
+            r["run_identity_version"] = json!(1);
+            r["startup_kind"] = json!("resume");
+            r["supervisor"] = json!({"pid": pid, "start": process_start(pid)});
+            r["expected_id"] = json!("conversation-1");
+            r["activity"] = json!("unknown");
+            r["phase"] = json!("unknown");
+        });
+        assert_eq!(codex, Readiness::Starting);
+    }
 
     /// desktop-u's (a): what the receipt store already holds decides by
     /// itself. Only a positively absent receipt lets a later refusal witness

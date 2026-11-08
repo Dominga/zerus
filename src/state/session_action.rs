@@ -9,7 +9,7 @@ use std::cell::{Cell, RefCell};
 mod status;
 pub(super) use status::dispatch as status_dispatch;
 pub(crate) use status::machine as status_machine;
-pub(crate) use status::observe_original;
+pub(crate) use status::{observe_held, observe_original};
 
 const INPUT_LIMIT: usize = 8192;
 
@@ -444,6 +444,25 @@ fn decode_request(bytes: &[u8], name: &str) -> Result<Request> {
 fn request_input(args: &[String], command: &str) -> Result<Request> {
     let bytes = input_bytes(args, command)?;
     decode_request(&bytes, &args[0])
+}
+
+/// The exact action receipt `hgs session-action` writes for the original
+/// stdin `original` of `name` with `status` (and, when completed, the
+/// resumed `run` as its result target), for other modules' fixtures.
+#[cfg(test)]
+pub(crate) fn fixture_receipt(
+    name: &str,
+    original: &[u8],
+    status: &str,
+    run: Option<&str>,
+) -> Value {
+    let request = decode_request(original, name).unwrap();
+    let mut value = receipt(&request, name, &request_hash(&request, name), status);
+    if let Some(run) = run {
+        value["result_target"] = json!({"name":name,"run_id":run,
+            "conversation_id":request.expected_conversation_id});
+    }
+    value
 }
 
 fn request_hash(request: &Request, name: &str) -> String {

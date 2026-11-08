@@ -42,6 +42,9 @@ pub(super) const SCHEMA: i64 = 30;
 /// tables drops their triggers and indexes.
 #[cfg(test)]
 pub(super) fn remove_fixture(db: &rusqlite::Connection) {
+    // Rewind the later schema-34 session resume leaf too, never leaving it
+    // labelled older.
+    super::session_resume::remove_fixture(db);
     db.execute_batch("DROP INDEX desktop_attention_catalog_run;")
         .unwrap();
     db.execute_batch(

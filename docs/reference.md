@@ -1467,6 +1467,24 @@ output and records the run under the session; the same `request_id` never runs
 twice, and asking again reads its state. `hgs run --list --json` lists the
 session's newest runs.
 
+Task 290 (owner, 2026-11-08): a run's command gets the environment the team's
+build templates have. A template starts from the team worker's environment (the
+owner's shell); `hgs run` starts its runner from the calling agent's own
+process, whose environment may lack the developer variables, and then MSVC's
+cl.exe dies with `D8050 ... failed to get command line into debug records`
+(stacker, ring) although the same cargo builds from the owner's shell. The
+claim now carries TEMP and TMP, SystemRoot, windir, SystemDrive, ComSpec and
+PATHEXT, PATH with the system folders, and the Visual Studio developer
+variables (`INCLUDE`, `LIB`, `LIBPATH`, the tools and Windows SDK folders and
+their PATH) read once from `vcvarsall.bat x64` through `vswhere` when the
+caller's shell does not already carry them; a sandboxed member's run still
+points TEMP and TMP into its own folder and keeps the build cache server's
+variables. The command inherits the rest of the environment as before. When a
+run fails and its output is the compiler-startup signature (D8050, the
+debug-record message, or `cannot execute ... c1.dll`), the result says so in
+`error` and carries `"compiler_cannot_start": true` instead of leaving only a
+tail to read.
+
 On Windows a Git Bash wrapper (`bash -c`, `env`, `nohup`, `timeout`, `xargs`,
 `sh -c`, `npx -c`) ends a Windows process between the session and hgs, so the
 process ancestry stops at a process that no longer exists. hgs then asks the
@@ -2601,6 +2619,16 @@ is there, in one click.
   roster and their folders stay inside the root. A create outside the root,
   without the QA right, or before the standing rule is granted is refused;
   `scratch_parent` names the parent team, the creating task and the member.
+  - Task #231 (owner, 2026-11-08, on task 170's F2): a scratch team's members
+  get their own folders like a normal team. When the scratch team's folder is
+  a git repository (or inside one), `Create team` gives each member a worktree
+  or clone of it, cut as a sibling of the scratch team's folder - inside the
+  rule's folder, trusted by the same rule - and the `git-commit` template,
+  member branches, the predecessor's commit for a dependent task and the merge
+  queue work there. A lead's scratch team (rule 159) and a QA member's both
+  get this. A scratch folder that is not a git repository keeps today's shared
+  team folder, and the commit refusal says why: make the scratch folder a git
+  repository so each member gets its own folder.
   The parent lead sees each scratch team as `scratch_team_created` and
   `scratch_teams_stopped` in its feed and a `scratch_team` inbox item
   (created, stopped, or listed). When the creating task is accepted, rejected
@@ -2683,6 +2711,27 @@ the right work by relevance.
 - The lead's message to a member that hands down an owner decision ("the
   owner decided ...") is refused by `hgs send` and `hgs team message`, naming
   `hgs team decide`.
+
+Task 279 (owner, 2026-11-08): the owner's standing rules are kept with their
+words and source, so the lead records them at any age.
+- Every owner message of the lead's session is indexed already: it is a
+  `UserPromptSubmit` event of the lead's conversation in the events journal
+  (content search and lore history read it read-only).
+  `hgs team decisions --json {"team":"ID","action":"owner-messages","limit":40}`
+  lists them newest first with `id` (the journal's event id), `at` and `text`.
+- `hgs team decide --json` takes `owner_message: {"id":N,"quote":"..."}` for a
+  lead caller instead of `owner_word`: the message may be any age, Zerus checks
+  it is the owner's own `UserPromptSubmit` in the lead's conversation (never an
+  injected policy, a team message or a scheduled turn) and that the quote is in
+  it (case and spacing ignored); a wrong quote, a quote from another message or
+  an unknown id is refused with the message it names. The decision records
+  `owner_message` (id, quote, at), and `by` says "the lead on your message N".
+  The 30-minute `owner_word` path stays for a fresh sentence.
+- `"kind":"standing rule"` (or `"rule"`) makes it a standing rule: a decision
+  kind of its own, recalled in every lead brief ("Your standing rules ...") and
+  in the hand-out of every task it binds, each line carrying its source
+  (`From your message N: "..."`). It is superseded like any decision, and with a
+  `spec` it reaches the project's lore section too.
 
 A reassign, a take-over or a cancel of a task whose attempt its member is still
 working on (sent or delivered, not reported) tells that member at once: one
@@ -2770,6 +2819,29 @@ not decided (assigned, in progress, reported, in a stage, or sent back), and of
 two ready ones only the first in dispatch order starts; it never goes to
 another member to run beside it. Two returned tasks never wait on each other:
 the lower number goes first. A task without `output` is not held by this rule.
+
+Every view names such a wait (task 295, owner, 2026-11-08: ui4 sat idle while
+its ready #226 waited for #219 and then #225, and the session state, status and
+look all said it waited for the lead to hand #226 out). It names the task that
+holds the files, the ones that run and the ready ones before it, lowest first
+(`plan::output_queue`):
+
+- The member's session state is `deps` with kind `team_output`: "Waiting for #225
+  <title>: it writes the same files as #226", with `holders`.
+- The task's status `waits` is `{"for":"deps","on":[225],"unblock":"finish #225"}`.
+- Look's next action is "Its task #226 waits for #225, which writes the same
+  files; Zerus hands it out when #225 ends".
+
+A ready task whose hand-out step was refused or never confirmed (an accepted
+dependency's merge conflicted in the member's folder, a context action) is
+named the same way. The session state has kind `team_task_waits`: "Waiting for
+Lead to retry or reassign #N: <reason>", or "Waiting for Zerus to prepare #N"
+while it runs. Look gives that reason too. Only a ready task nothing else holds
+waits for the lead's hand-out, and the dispatcher hands it out at its next
+tick. The lead may propose a relaunch for any member, also an idle one that
+never takes its task. The owner's click runs the relaunch, a fresh
+conversation with the handoff brief, without asking whether the session failed
+to start.
 
 Before a hand-out, after its task branch, Zerus merges the accepted work of the
 task's dependencies (direct or through another dependency) into the member's
@@ -3026,6 +3098,43 @@ and fails with "The team database stayed busy for 60 s". Since task 287:
   change. The members are kept in their own column with the revision that
   wrote them. A write by an older hgs, which sets neither, still rebuilds it
   from the record.
+
+### A team's tasks and attempts are rows
+
+Since task 288 a team record keeps only its shared fields (members, phases,
+settings and the like) in `teams.payload`. Each task, without its attempts, is
+a row of `team_tasks` (its id, its place `ord` in the plan), and each attempt
+is a row of `team_attempts` (its task and its place in the task). Every row
+carries `rev`, the team revision that last wrote it; the `teams` row carries
+`layout` (2 for rows) and `head_rev`. The store assembles the same team as
+before for every reader (`load`, the list reads, the member lookup), with
+the revision per team as before.
+
+A change works on a copy of the team the store keeps. The copy is read
+before the write lock. Under the lock only the revision is checked, and when
+another writer changed the team meanwhile, only the rows written since are
+read. The change then writes the rows it changed: one attempt's row for an
+attempt, the task's row for the task's own fields, its place for a move, and
+the shared fields only when one of them changed. A team of 4.7 MB of tasks no
+longer reads, serializes and writes them all under the lock.
+Measured on a copy of the live store (team 33fbafeb, a 5.75 MB record,
+release build, 20 changes each), the lock was held as follows (median, p95
+and max):
+
+| Change | Whole record | Rows |
+| --- | --- | --- |
+| Member change with a request id | 49, 70, 84 ms | 27, 30, 34 ms |
+| Worker tick | 25, 42, 42 ms | 13, 16, 17 ms |
+
+The one-time migration held the lock for 89 ms.
+
+The first write open of a store migrates each team stored whole, one
+transaction a team, so an interrupted migration goes on at the next open and a
+migrated team is never migrated again. A team whose task ids repeat keeps the
+whole record (`layout` 1). An older hgs cannot read a migrated team. Its
+shared fields hold `"tasks"` as a sentence, not a list, so the older hgs
+answers "Invalid team record" and never writes the team back without its
+tasks. Every hgs and desktop on the computer is updated together.
 
 ### A stalled lead tells the owner
 

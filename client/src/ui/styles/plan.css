@@ -429,3 +429,28 @@
 .pm-phase-head { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid var(--z-color-card-border); border-radius: 8px; background: var(--z-color-card); white-space: nowrap; }
 .pm-phase-n { display: grid; place-items: center; min-width: 17px; height: 17px; border-radius: 5px; background: var(--z-color-field); color: var(--z-color-muted); font-size: var(--fs-2xs); }
 .pm-phase-name { max-width: 24ch; overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-xs); }
+
+/* Task #226: the plan's lanes, as Qt's lane sections. */
+.pm-lanes { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 10px; padding: 10px; }
+.pm-lanes-phase { border: 1px solid var(--z-color-card-border); border-radius: 10px; background: var(--z-color-card); }
+.pm-lanes-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--z-color-divider); font-size: var(--fs-sm); }
+.pm-lanes-head .pm-lane-tip { margin-left: auto; color: var(--z-color-muted); font-size: var(--fs-2xs); }
+.pm-lane { position: relative; border-bottom: 1px solid var(--z-color-divider); }
+.pm-lane:last-child { border-bottom: 0; }
+.pm-lane-head { display: flex; align-items: center; gap: 6px; padding: 4px 8px; }
+.pm-lane-toggle { display: flex; align-items: center; gap: 5px; padding: 3px 4px; border: 0; background: none; color: var(--z-color-text-2); font-size: var(--fs-xs); font-weight: 600; cursor: pointer; }
+.pm-lane-toggle:hover { color: var(--z-color-text); }
+.pm-lane-actions { position: relative; display: inline-flex; margin-left: auto; }
+.pm-lane-menu { position: absolute; right: 0; top: calc(100% + 2px); z-index: 20; min-width: 180px; max-height: 40vh; overflow: auto; display: flex; flex-direction: column; padding: 4px; border: 1px solid var(--z-color-card-border); border-radius: 8px; background: var(--z-color-surface); box-shadow: 0 8px 22px rgb(0 0 0 / 0.25); }
+.pm-lane-menu button { text-align: left; padding: 5px 8px; border: 0; border-radius: 6px; background: none; color: var(--z-color-text); font-size: var(--fs-sm); cursor: pointer; }
+.pm-lane-menu button:hover, .pm-lane-menu button.on { background: var(--z-color-hover); }
+.pm-lane-body { display: flex; flex-direction: column; gap: 1px; padding: 0 8px 8px 22px; }
+.pm-lane-task { display: flex; align-items: baseline; gap: 8px; }
+.pm-lane-task .pm-lane-actions { margin-left: auto; }
+.pm-lane-open { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 8px; padding: 4px 6px; border: 0; border-radius: 6px; background: none; color: inherit; text-align: left; cursor: pointer; }
+.pm-lane-open:hover { background: var(--z-color-hover); }
+.pm-lane-open b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pm-lane-heat { color: var(--z-color-warn); font-size: var(--fs-2xs); }
+.pm-lane-note { margin: 0; font-size: var(--fs-sm); }
+.pm-lane-note.danger { color: var(--z-color-danger); }
+.pm-profile-head { display: flex; align-items: center; gap: 8px; padding: 0 0 6px; }

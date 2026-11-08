@@ -158,6 +158,33 @@ pub(crate) const BUILTIN: &[Template] = &[
         params: &[optional("sources", Kind::Paths), optional("project", Kind::Path)],
         timeout_secs: 1800,
     },    // Owner, 2026-10-28: QA ran the Android tests by hand, a permission each.
+    // Task #280: the Tauri app's only build/dev/launch path. The templates
+    // carry 273's development identity; the release-candidate/package step is
+    // the only place that builds the switch identity.
+    Template {
+        id: "tauri-build",
+        summary: "builds Zerus Next with the development identity (npm --prefix client run tauri -- build --no-bundle); the package step alone builds the switch identity",
+        program: "python",
+        args: &["scripts/tauri_template.py", "build"],
+        params: &[optional("files", Kind::Paths)],
+        timeout_secs: 1800,
+    },
+    Template {
+        id: "tauri-dev",
+        summary: "runs Zerus Next's dev server with the development identity (npm --prefix client run tauri -- dev)",
+        program: "python",
+        args: &["scripts/tauri_template.py", "dev"],
+        params: &[optional("files", Kind::Paths)],
+        timeout_secs: 1800,
+    },
+    Template {
+        id: "tauri-launch",
+        summary: "launches the development build after checking its identity; a switch-identity build is refused outside the package",
+        program: "python",
+        args: &["scripts/tauri_template.py", "launch"],
+        params: &[optional("files", Kind::Paths)],
+        timeout_secs: 1800,
+    },
     Template {
         id: "android-test",
         summary: "the Android unit tests (gradlew :app:testDebugUnitTest) with Gradle's home and cache in your folder",
@@ -2000,6 +2027,14 @@ fn template_environment(plan: &Plan, folder: &Path) -> Vec<(String, String)> {
     if plan.template == "android-test" {
         env.push(("GRADLE_USER_HOME".into(), folder.join(".zerus-team").join("gradle").join("home").display().to_string()));
     }
+    // Task #280: every app path goes through these templates, and each names
+    // its action and 273's development identity in the environment.
+    if let Some(action) = plan.template.strip_prefix("tauri-") {
+        if matches!(action, "build" | "dev" | "launch") {
+            env.push(("ZERUS_TAURI_ACTION".into(), action.to_owned()));
+            env.push(("ZERUS_TAURI_IDENTITY".into(), "development".into()));
+        }
+    }
     // Task #239: the web project's npm cache lives in the member's folder, so a
     // sandboxed member never reads or writes the person's own cache (the
     // EPERM ui3 met) and two members never share one download.
@@ -2521,7 +2556,7 @@ mod tests {
         // The set the owner asked for, by id.
         let ids: Vec<&str> = BUILTIN.iter().map(|template| template.id).collect();
         // Task 85: the CMake and MSBuild templates of any project after them; task 86: the Python and Cython ones; task 87: Unreal.
-        assert_eq!(ids, ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test", "py-test", "cython-build", "android-test", "release-candidate",
+        assert_eq!(ids, ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test", "py-test", "cython-build", "tauri-build", "tauri-dev", "tauri-launch", "android-test", "release-candidate",
                          "clean-build", "git-merge-lead", "git-commit", "ue-build", "ue-test", "cmake-configure", "cmake-build", "ctest", "msbuild-build", "vstest", "web-test"]);
     }
 
@@ -3713,6 +3748,23 @@ kind = "path"
     #[cfg(not(windows))]
     fn visual_studio_generator() -> Option<String> {
         None
+    }
+
+    #[test]
+    fn tauri_templates_carry_the_development_identity_and_never_the_switch() {
+        let dir = temp();
+        for (template, action) in [("tauri-build", "build"), ("tauri-dev", "dev"), ("tauri-launch", "launch")] {
+            let planned = plan(template, &json!({}), dir.path()).unwrap();
+            assert_eq!(planned.program, "python", "{template}");
+            assert_eq!(planned.argv, ["scripts/tauri_template.py", action], "{template}");
+            assert!(!planned.argv.iter().any(|arg| arg.contains("switch")), "{template}");
+            let env = template_environment(&planned, dir.path());
+            assert!(env.contains(&("ZERUS_TAURI_ACTION".to_owned(), action.to_owned())), "{template}: {env:?}");
+            assert!(env.contains(&("ZERUS_TAURI_IDENTITY".to_owned(), "development".to_owned())), "{template}: {env:?}");
+        }
+        // Only the release candidate/package leg names the switch identity.
+        assert!(builtin("release-candidate").is_some());
+        assert!(builtin("tauri-build").is_some());
     }
 
     #[test]

@@ -543,6 +543,26 @@ pub struct TaskView {
     /// which tells "starting" from "idle" on its card.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub attempt_begun: bool,
+    /// Task #226: the plan lane (U27) the task is in; absent for lane 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lane: Option<LaneView>,
+}
+
+/// Task #226: a plan lane (U27): its number (above 0) and the label every task
+/// in it carries.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct LaneView {
+    pub n: u64,
+    pub label: String,
+}
+
+fn lane(value: &Value) -> Option<LaneView> {
+    let found = value.get("lane").filter(|lane| lane.is_object())?;
+    let n = count(found, "n");
+    (n > 0).then(|| LaneView {
+        n,
+        label: name(found, "label"),
+    })
 }
 
 fn is_zero(value: &f64) -> bool {
@@ -1035,6 +1055,7 @@ fn task(value: &Value) -> TaskView {
         attempt_begun: attempts
             .last()
             .is_some_and(|attempt| number(attempt, "started_at") > 0.0 || number(attempt, "turn_ended_at") > 0.0),
+        lane: lane(value),
     }
 }
 
@@ -2244,5 +2265,21 @@ pub fn builds(team: &str, value: &Value) -> BuildsView {
                     .collect(),
             })
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_task_carries_its_lane_and_lane_zero_is_no_lane() {
+        let lane = task(&json!({"id":1,"title":"T","lane":{"n":2,"label":"Checkpoint 2"}}));
+        assert_eq!(
+            lane.lane,
+            Some(LaneView { n: 2, label: "Checkpoint 2".into() })
+        );
+        assert_eq!(task(&json!({"id":2,"title":"T","lane":{"n":0,"label":"x"}})).lane, None);
+        assert_eq!(task(&json!({"id":3,"title":"T"})).lane, None);
     }
 }

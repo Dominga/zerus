@@ -14,6 +14,7 @@ import { setSetting, settings as settingsStore } from "../../store/settings";
 import { shownTemplates, templateSeats, templateTaskCount, toggledFavourite, coordinatorLine, type AccountChoice } from "../../store/newTeamSources";
 import { createModelCatalogs, modelOptions } from "./catalogControls";
 import { LeadConversation } from "./TeamTab";
+import { NewTeamFooter } from "./NewTeamFooter";
 import { teamRoleModels } from "../../bridge";
 import type { Catalog, CatalogTemplate } from "./catalog";
 import type { DraftMember } from "./types";
@@ -529,17 +530,9 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
       </aside>
       </div>
 
-      <footer class="nt-foot">
-        <span class="nt-hint grow">{draft() ? (store.dirty().size ? tr("Draft, unsaved changes") : tr("Draft saved, revision %1", store.revision())) : tr("Nothing is created until you press Start planning.")}</span>
-        <Show when={draft()}>
-          <Show when={store.view()}><span class="nt-hint">{(store.view()!.validation.errors.length ? tr("Preflight: %1 errors", store.view()!.validation.errors.length) : tr("Preflight: ok"))}</span></Show>
-          <Show when={store.dirty().size > 0}>
-            <button type="button" class="btn small ghost" title={tr("Drop your unsaved changes and show the draft as the lead last saved it")} onClick={store.useLeadVersion}>{tr("Show the lead's version")}</button>
-          </Show>
-          <button type="button" class="btn small ghost danger" disabled={store.busy()} onClick={() => setDiscarding(true)}>{tr("Discard draft")}</button>
-          <button type="button" class="btn small primary" disabled={store.busy() || !!createWhy()} title={createWhy()} onClick={() => void create()}>{tr("Create team")}</button>
-        </Show>
-      </footer>
+      <NewTeamFooter draft={!!draft()} dirty={store.dirty().size > 0} revision={store.revision()} busy={store.busy()}
+        preflightErrors={store.view()?.validation.errors.length} createWhy={createWhy()}
+        onUseLead={store.useLeadVersion} onDiscard={() => setDiscarding(true)} onCreate={() => void create()} />
       <Show when={discarding()}>
         <DiscardDialog name={fields().name.trim()} close={() => setDiscarding(false)} discard={(stopLead) => void discard(stopLead)} />
       </Show>

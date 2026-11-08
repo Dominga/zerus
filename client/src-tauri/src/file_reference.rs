@@ -2,19 +2,29 @@
 //! `MessageComposer.cpp:865-959`; zerus-5wmh.13.5): the local file chooser and
 //! the local existence check. Only a path is inserted into the draft; the file
 //! is never read, copied or uploaded. A remote session's path is checked for its
-//! form in the webview and its existence is not checked, as in Qt.
+//! form in the webview; when its computer's hgs has `path-info`
+//! (zerus-5wmh.13.18), Insert also asks it whether a file is there. Older
+//! computers keep Qt's rule: the existence is not checked.
 //!
 //! The local check is one metadata call off the UI thread with a 3 s budget. A
 //! stat blocked on a stale network mount cannot be cancelled, so each dialog has
 //! at most one outstanding check and all dialogs together at most [`CAP`]: a
 //! Retry while one is still blocked answers "busy" at once and starts nothing.
+//!
+//! A remote check is one bounded `hgs` call that a close cancels: the help
+//! probe (cached per computer for [`SUPPORT_TTL`]) and `path-info`. A newer
+//! check of the same dialog ends its earlier one; at most [`REMOTE_CAP`] run
+//! across dialogs.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Mutex, PoisonError};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use zerus_client_core::reads::{self, PathInfo, ReadError};
+use zerus_client_core::ComputerId;
 
 /// How long the dialog waits for one metadata call.
 const BUDGET: Duration = Duration::from_secs(3);
@@ -143,6 +153,229 @@ pub async fn file_reference_pick(app: tauri::AppHandle) -> Result<Option<String>
         .and_then(|file| file.into_path().ok())
         .filter(|path| path.is_absolute())
         .map(|path| path.to_string_lossy().into_owned()))
+}
+
+/// How long a computer's answer to the help probe is kept.
+const SUPPORT_TTL: Duration = Duration::from_secs(300);
+/// Computers whose answer is kept; the oldest goes first.
+const SUPPORT_ENTRIES: usize = 64;
+/// Remote calls running across all dialogs.
+const REMOTE_CAP: usize = 8;
+
+/// The remote check's answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum RemoteCheck {
+    /// A regular file is there.
+    File,
+    /// Nothing is there, or something that is not a regular file.
+    Missing,
+    /// The computer's account cannot inspect the path.
+    Unreadable,
+    /// The computer's hgs has no `path-info`, or did not answer the probe:
+    /// the path is inserted unchecked, as before.
+    Unchecked,
+    /// The call failed or did not answer in time, or too many run.
+    Busy,
+    /// A close or a newer check of the dialog ended it.
+    Superseded,
+}
+
+/// What reads run for which dialog, and the computers' probe answers.
+#[derive(Default)]
+struct Remote {
+    /// Per dialog, its reads in flight by kind (probe or check).
+    reads: HashMap<(u64, bool), Arc<AtomicBool>>,
+    running: usize,
+    support: HashMap<String, (bool, Instant)>,
+}
+
+static REMOTE: Mutex<Option<Remote>> = Mutex::new(None);
+
+fn remote<T>(work: impl FnOnce(&mut Remote) -> T) -> T {
+    let mut guard = REMOTE.lock().unwrap_or_else(PoisonError::into_inner);
+    work(guard.get_or_insert_with(Remote::default))
+}
+
+/// One remote call's place: it ends an earlier call of the same dialog and
+/// kind, and frees its place when dropped.
+struct Slot {
+    key: (u64, bool),
+    cancel: Arc<AtomicBool>,
+}
+
+impl Slot {
+    /// Ends an earlier call of the same dialog and kind; None when
+    /// [`REMOTE_CAP`] calls run.
+    fn take(dialog: u64, check: bool) -> Option<Slot> {
+        remote(|state| {
+            if let Some(earlier) = state.reads.remove(&(dialog, check)) {
+                earlier.store(true, Ordering::Relaxed);
+            }
+            if state.running >= REMOTE_CAP {
+                return None;
+            }
+            state.running += 1;
+            let cancel = Arc::new(AtomicBool::new(false));
+            state.reads.insert((dialog, check), Arc::clone(&cancel));
+            Some(Slot {
+                key: (dialog, check),
+                cancel,
+            })
+        })
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        remote(|state| {
+            state.running -= 1;
+            // A close, or a newer call of this dialog, already took the key.
+            if state
+                .reads
+                .get(&self.key)
+                .is_some_and(|current| Arc::ptr_eq(current, &self.cancel))
+            {
+                state.reads.remove(&self.key);
+            }
+        });
+    }
+}
+
+fn cached_support(computer: &str, now: Instant) -> Option<bool> {
+    remote(|state| {
+        let (supported, at) = *state.support.get(computer)?;
+        (now.saturating_duration_since(at) < SUPPORT_TTL).then_some(supported)
+    })
+}
+
+fn remember_support(computer: &str, supported: bool, now: Instant) {
+    remote(|state| {
+        if !state.support.contains_key(computer) && state.support.len() >= SUPPORT_ENTRIES {
+            let oldest = state
+                .support
+                .iter()
+                .min_by_key(|(_, (_, at))| *at)
+                .map(|(name, _)| name.clone());
+            if let Some(oldest) = oldest {
+                state.support.remove(&oldest);
+            }
+        }
+        state.support.insert(computer.to_owned(), (supported, now));
+    });
+}
+
+/// Whether `computer`'s hgs has `path-info`; None when the probe did not
+/// answer (not kept, so the next one asks again) or was ended.
+fn support_with(
+    computer: &str,
+    cancel: &AtomicBool,
+    probe: impl FnOnce(&AtomicBool) -> Result<bool, ReadError>,
+) -> Option<bool> {
+    if let Some(known) = cached_support(computer, Instant::now()) {
+        return Some(known);
+    }
+    let supported = probe(cancel).ok()?;
+    remember_support(computer, supported, Instant::now());
+    Some(supported)
+}
+
+fn remote_check_with(
+    dialog: u64,
+    computer: &str,
+    probe: impl FnOnce(&AtomicBool) -> Result<bool, ReadError>,
+    read: impl FnOnce(&AtomicBool) -> Result<PathInfo, ReadError>,
+) -> RemoteCheck {
+    let Some(slot) = Slot::take(dialog, true) else {
+        return RemoteCheck::Busy;
+    };
+    let ended = || slot.cancel.load(Ordering::Relaxed);
+    let supported = support_with(computer, &slot.cancel, probe);
+    if ended() {
+        return RemoteCheck::Superseded;
+    }
+    if supported != Some(true) {
+        return RemoteCheck::Unchecked;
+    }
+    let answer = match read(&slot.cancel) {
+        Ok(PathInfo::File { .. }) => RemoteCheck::File,
+        Ok(PathInfo::Directory | PathInfo::Other | PathInfo::Missing) => RemoteCheck::Missing,
+        Ok(PathInfo::Unknown) => RemoteCheck::Unreadable,
+        Err(_) => RemoteCheck::Busy,
+    };
+    if ended() {
+        RemoteCheck::Superseded
+    } else {
+        answer
+    }
+}
+
+fn remote_support_with(
+    dialog: u64,
+    computer: &str,
+    probe: impl FnOnce(&AtomicBool) -> Result<bool, ReadError>,
+) -> Option<bool> {
+    let slot = Slot::take(dialog, false)?;
+    let supported = support_with(computer, &slot.cancel, probe);
+    (!slot.cancel.load(Ordering::Relaxed))
+        .then_some(supported)
+        .flatten()
+}
+
+/// Whether dialog `dialog`'s remote computer checks paths: true or false
+/// once its hgs answered the help probe, None while that is unknown.
+#[tauri::command]
+pub async fn file_reference_remote_support(dialog: u64, computer: String) -> Option<bool> {
+    let id = ComputerId::from(computer.as_str());
+    if id.is_local() || crate::actions::blocked() {
+        return None;
+    }
+    let hgs = zerus_client_core::default_hgs();
+    tauri::async_runtime::spawn_blocking(move || {
+        remote_support_with(dialog, &computer, |cancel| {
+            reads::path_info_supported(&hgs, &id, cancel)
+        })
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Dialog `dialog`'s remote existence check of `path` on `computer`; the
+/// path's form was checked in the webview.
+#[tauri::command]
+pub async fn file_reference_check_remote(
+    dialog: u64,
+    computer: String,
+    path: String,
+) -> RemoteCheck {
+    let id = ComputerId::from(computer.as_str());
+    if id.is_local() || crate::actions::blocked() {
+        return RemoteCheck::Unchecked;
+    }
+    let hgs = zerus_client_core::default_hgs();
+    tauri::async_runtime::spawn_blocking(move || {
+        remote_check_with(
+            dialog,
+            &computer,
+            |cancel| reads::path_info_supported(&hgs, &id, cancel),
+            |cancel| reads::path_info(&hgs, &id, &path, cancel),
+        )
+    })
+    .await
+    .unwrap_or(RemoteCheck::Busy)
+}
+
+/// The dialog closed: its remote calls end.
+#[tauri::command]
+pub fn file_reference_cancel(dialog: u64) {
+    remote(|state| {
+        for check in [false, true] {
+            if let Some(cancel) = state.reads.remove(&(dialog, check)) {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -340,5 +573,193 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(!blocked.iter().any(|id| outstanding(|set| set.contains(id))));
+    }
+
+    /// A computer name of its own per test: the probe answers are kept.
+    fn computer() -> String {
+        format!("peer-{}", dialog())
+    }
+
+    fn until(done: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// A read that answers only once it was ended, as `run_cancellable` does.
+    fn blocked(cancel: &AtomicBool) -> Result<PathInfo, ReadError> {
+        until(|| cancel.load(Ordering::Relaxed));
+        Err(ReadError::Superseded)
+    }
+
+    fn running() -> usize {
+        remote(|state| state.running)
+    }
+
+    #[test]
+    fn a_computer_without_path_info_is_asked_once_and_inserts_unchecked() {
+        let _turn = serial();
+        let peer = computer();
+        let probes = AtomicUsize::new(0);
+        for _ in 0..2 {
+            let answer = remote_check_with(
+                dialog(),
+                &peer,
+                |_| {
+                    probes.fetch_add(1, Ordering::Relaxed);
+                    Ok(false)
+                },
+                |_| panic!("an older computer is never asked for path-info"),
+            );
+            assert_eq!(answer, RemoteCheck::Unchecked);
+        }
+        assert_eq!(probes.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            remote_support_with(dialog(), &peer, |_| panic!("kept")),
+            Some(false)
+        );
+        assert_eq!(running(), 0);
+    }
+
+    #[test]
+    fn a_failed_probe_is_not_kept_and_inserts_unchecked() {
+        let _turn = serial();
+        let peer = computer();
+        let probes = AtomicUsize::new(0);
+        let probe = |_: &AtomicBool| {
+            probes.fetch_add(1, Ordering::Relaxed);
+            Err(ReadError::TimedOut)
+        };
+        assert_eq!(remote_support_with(dialog(), &peer, probe), None);
+        let answer = remote_check_with(dialog(), &peer, probe, |_| panic!("not supported"));
+        assert_eq!(answer, RemoteCheck::Unchecked);
+        assert_eq!(probes.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn the_answer_follows_the_path_info_reply() {
+        let _turn = serial();
+        let peer = computer();
+        let cases = [
+            (Ok(PathInfo::File { size: 3 }), RemoteCheck::File),
+            (Ok(PathInfo::Directory), RemoteCheck::Missing),
+            (Ok(PathInfo::Other), RemoteCheck::Missing),
+            (Ok(PathInfo::Missing), RemoteCheck::Missing),
+            (Ok(PathInfo::Unknown), RemoteCheck::Unreadable),
+            (Err(ReadError::TimedOut), RemoteCheck::Busy),
+            (
+                Err(ReadError::Failed {
+                    code: Some(1),
+                    message: "hgs: update the selected computer to check file paths".into(),
+                }),
+                RemoteCheck::Busy,
+            ),
+        ];
+        for (reply, expected) in cases {
+            let answer = remote_check_with(dialog(), &peer, |_| Ok(true), move |_| reply);
+            assert_eq!(answer, expected);
+        }
+        assert_eq!(running(), 0);
+    }
+
+    #[test]
+    fn a_close_ends_the_dialogs_call_and_answers_superseded() {
+        let _turn = serial();
+        let peer = computer();
+        let id = dialog();
+        let checking = {
+            let peer = peer.clone();
+            std::thread::spawn(move || remote_check_with(id, &peer, |_| Ok(true), blocked))
+        };
+        until(|| remote(|state| state.reads.contains_key(&(id, true))));
+        file_reference_cancel(id);
+        assert_eq!(checking.join().unwrap(), RemoteCheck::Superseded);
+
+        let probing = std::thread::spawn(move || {
+            remote_support_with(id, &format!("{peer}-probe"), |cancel| {
+                blocked(cancel).map(|_| true)
+            })
+        });
+        until(|| remote(|state| state.reads.contains_key(&(id, false))));
+        file_reference_cancel(id);
+        assert_eq!(probing.join().unwrap(), None);
+        assert_eq!(running(), 0);
+        assert!(remote(|state| state.reads.is_empty()));
+    }
+
+    #[test]
+    fn a_newer_check_of_the_dialog_ends_the_earlier_one() {
+        let _turn = serial();
+        let peer = computer();
+        let id = dialog();
+        let earlier = {
+            let peer = peer.clone();
+            std::thread::spawn(move || remote_check_with(id, &peer, |_| Ok(true), blocked))
+        };
+        until(|| remote(|state| state.reads.contains_key(&(id, true))));
+        let newer = remote_check_with(id, &peer, |_| Ok(true), |_| Ok(PathInfo::File { size: 1 }));
+        assert_eq!(newer, RemoteCheck::File);
+        assert_eq!(earlier.join().unwrap(), RemoteCheck::Superseded);
+        assert_eq!(running(), 0);
+        assert!(remote(|state| state.reads.is_empty()));
+    }
+
+    #[test]
+    fn at_most_the_cap_of_remote_calls_run_across_dialogs() {
+        let _turn = serial();
+        let peer = computer();
+        let ids: Vec<u64> = (0..REMOTE_CAP).map(|_| dialog()).collect();
+        let checks: Vec<_> = ids
+            .iter()
+            .map(|&id| {
+                let peer = peer.clone();
+                std::thread::spawn(move || remote_check_with(id, &peer, |_| Ok(true), blocked))
+            })
+            .collect();
+        until(|| running() == REMOTE_CAP);
+        let refused = remote_check_with(
+            dialog(),
+            &peer,
+            |_| panic!("no call"),
+            |_| panic!("no call"),
+        );
+        assert_eq!(refused, RemoteCheck::Busy);
+        assert_eq!(
+            remote_support_with(dialog(), &peer, |_| panic!("no call")),
+            None
+        );
+        for &id in &ids {
+            file_reference_cancel(id);
+        }
+        for check in checks {
+            assert_eq!(check.join().unwrap(), RemoteCheck::Superseded);
+        }
+        assert_eq!(running(), 0);
+    }
+
+    #[test]
+    fn probe_answers_expire_and_stay_bounded() {
+        let _turn = serial();
+        let peer = computer();
+        let now = Instant::now();
+        remember_support(&peer, true, now);
+        assert_eq!(cached_support(&peer, now + SUPPORT_TTL / 2), Some(true));
+        assert_eq!(cached_support(&peer, now + SUPPORT_TTL), None);
+        for index in 0..SUPPORT_ENTRIES {
+            remember_support(
+                &format!("{peer}-{index}"),
+                false,
+                now + Duration::from_millis(index as u64 + 1),
+            );
+        }
+        assert!(remote(|state| state.support.len()) <= SUPPORT_ENTRIES);
+        assert_eq!(
+            cached_support(&peer, now),
+            None,
+            "the oldest answer went first"
+        );
+        assert_eq!(cached_support(&format!("{peer}-0"), now), Some(false));
     }
 }

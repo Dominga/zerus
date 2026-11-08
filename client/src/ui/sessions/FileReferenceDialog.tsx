@@ -1,20 +1,22 @@
 import { Show, createSignal, onCleanup, onMount } from "solid-js";
 import { Icon } from "../lib/icons";
 import { TextInput } from "../lib/TextField";
-import { fileReferenceCheck, fileReferencePick } from "../../bridge";
+import { fileReferenceCancel, fileReferenceCheck, fileReferenceCheckRemote, fileReferencePick, fileReferenceRemoteSupport } from "../../bridge";
 import { tr } from "../../i18n";
 import { referenceSentence, remoteForm, wellFormed } from "./file-reference";
 import type { Style } from "./path-forms";
 
 // Reference an existing file (Qt's referenceFile dialog, MessageComposer.cpp
 // 865-959; zerus-5wmh.13.5). A local path is checked once, off the UI thread,
-// for an existing regular file; a remote one only for its form. The dialog
-// hands the sentence to the composer, which inserts it only while the draft it
-// opened on is unchanged.
+// for an existing regular file. A remote one is checked for its form, and, when
+// its computer's hgs has `path-info` (zerus-5wmh.13.18), for an existing file
+// there; an older computer keeps Qt's unchecked insert. The dialog hands the
+// sentence to the composer, which inserts it only while the draft it opened on
+// is unchanged.
 
 /** The session the dialog references a file for, as the composer saw it when it opened. */
 export interface ReferenceTarget {
-  /** This computer, or the session's remote computer. */
+  /** This computer, or the session's remote computer (`host`). */
   local: boolean;
   machine: string;
   host: string;
@@ -37,12 +39,20 @@ export function FileReferenceDialog(props: {
   const [error, setError] = createSignal("");
   const [checking, setChecking] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
+  /** Whether the remote computer checks paths; undefined until its hgs answered. */
+  const [checks, setChecks] = createSignal<boolean>();
   let attempt = 0;
   let gone = false;
-  onCleanup(() => { gone = true; attempt++; });
+  onCleanup(() => {
+    gone = true; attempt++;
+    if (!props.target.local) void fileReferenceCancel(id).catch(() => {});
+  });
   onMount(() => {
     dialog.showModal();
     queueMicrotask(() => field?.focus());
+    if (!props.target.local) {
+      void fileReferenceRemoteSupport(id, props.target.host).then((known) => { if (!gone && known !== null) setChecks(known); }).catch(() => {});
+    }
   });
 
   // A changed path makes a pending check's answer obsolete: it is dropped,
@@ -68,7 +78,7 @@ export function FileReferenceDialog(props: {
     if (!wellFormed(value)) { setError(tr("Enter a file path without line breaks or control characters.")); return; }
     if (!props.target.local) {
       if (!remoteForm(value, props.target.style)) { setError(tr("Enter an absolute path or ~/ path on %1.", machine())); return; }
-      finish(value);
+      checkRemote(value);
       return;
     }
     const mine = ++attempt;
@@ -88,6 +98,27 @@ export function FileReferenceDialog(props: {
     });
   };
 
+  const checkRemote = (value: string) => {
+    const mine = ++attempt;
+    setChecking(true);
+    setError("");
+    void fileReferenceCheckRemote(id, props.target.host, value).then((answer) => {
+      // A late answer for a closed dialog, or an earlier attempt, is dropped.
+      if (gone || mine !== attempt) return;
+      setChecking(false);
+      setBusy(answer.status === "busy");
+      if (answer.status !== "unchecked" && answer.status !== "busy" && answer.status !== "superseded") setChecks(true);
+      if (answer.status === "file" || answer.status === "unchecked") finish(value);
+      else if (answer.status === "missing") setError(tr("Choose an existing file on %1.", machine()));
+      else if (answer.status === "unreadable") setError(tr("This path cannot be inspected on %1.", machine()));
+      else if (answer.status === "busy") setError(tr("Cannot check this path now."));
+    }).catch((failure) => {
+      if (gone || mine !== attempt) return;
+      setChecking(false);
+      setError(String(failure));
+    });
+  };
+
   const browse = () => {
     void fileReferencePick().then((picked) => { if (!gone && picked) edited(picked); }).catch(() => {});
   };
@@ -99,7 +130,9 @@ export function FileReferenceDialog(props: {
       <div class="dlg-body">
         <p class="confirm-body" id="file-reference-hint">{props.target.local
           ? tr("Insert a path to an existing file on this computer. Only the path is added; the file is not read or uploaded.")
-          : tr("Enter the path of an existing file on %1 (%2), not on this computer. Only the path is added; its existence is not checked here.", machine(), props.target.host)}</p>
+          : checks()
+            ? tr("Enter the path of an existing file on %1 (%2), not on this computer. Only the path is added; the file is not read or uploaded.", machine(), props.target.host)
+            : tr("Enter the path of an existing file on %1 (%2), not on this computer. Only the path is added; its existence is not checked here.", machine(), props.target.host)}</p>
         <div class="file-reference-row">
           <TextInput ref={field} class="field grow" value={path()} aria-label={tr("File path on %1", machine())}
             placeholder={props.target.local ? tr("Absolute file path") : tr("/path/to/file, ~/file or C:\\path\\file")}

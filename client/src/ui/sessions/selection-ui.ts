@@ -1,7 +1,7 @@
 import type { MenuEntry } from "../../store/ui";
 import type { Row } from "./model";
 import type { Session } from "./types";
-import { MOVE_LATER, SELECTION_ACTIONS, selectionText, type SelectionAction, type SelectionRow } from "./selection";
+import { MOVE_WAIT, SELECTION_ACTIONS, selectionText, type SelectionAction, type SelectionRow } from "./selection";
 import { tr } from "../../i18n";
 
 // The selection bar and the selection context menu, after Qt's
@@ -64,21 +64,23 @@ export interface SelectionTool {
 
 /**
  * The bar's visible tools in Qt's order: a tool shows when its count is above
- * 0. `unmuted` says whether any selected session is unmuted (`anyUnmuted`).
+ * 0. `unmuted` says whether any selected session is unmuted (`anyUnmuted`);
+ * `moveRefusal` why the organization takes no edit now (zerus-5wmh.18.1).
  */
-export function barTools(count: (a: SelectionAction) => number, selected: number, batchRunning: boolean, unmuted = true): SelectionTool[] {
+export function barTools(count: (a: SelectionAction) => number, selected: number, batchRunning: boolean, unmuted = true, moveRefusal?: string): SelectionTool[] {
   const tools: SelectionTool[] = [];
   for (const action of SELECTION_ACTIONS) {
     const n = count(action);
     if (n <= 0 || hiddenBell(action, unmuted)) continue;
-    const move = action === "move";
+    // Move waits for a lifecycle batch on the selection, then for project sync.
+    const blocked = action === "move" ? (batchRunning ? tr(MOVE_WAIT) : moveRefusal) : undefined;
     tools.push({
       action,
       icon: SELECTION_ICONS[action],
       text: `${selectionText(action)} (${n})`,
-      hint: move ? tr(MOVE_LATER) : `${selectionText(action)} — ${n} of ${selected} selected sessions`,
+      hint: blocked ?? `${selectionText(action)} — ${n} of ${selected} selected sessions`,
       count: n,
-      enabled: !move && (presentation(action) || !batchRunning),
+      enabled: action === "move" ? !blocked : presentation(action) || !batchRunning,
       danger: action === "forget" || action === "terminate",
     });
   }
@@ -94,14 +96,14 @@ export function splitTools<T>(tools: readonly T[], capacity: number): { shown: T
 
 /** An overflow entry for a tool. */
 export function toolEntry(t: SelectionTool, run: (a: SelectionAction) => void): MenuEntry {
-  return { label: t.text, icon: t.icon, danger: t.danger, disabled: !t.enabled, hint: t.action === "move" ? tr(MOVE_LATER) : undefined, action: () => run(t.action) };
+  return { label: t.text, icon: t.icon, danger: t.danger, disabled: !t.enabled, hint: t.action === "move" && !t.enabled ? t.hint : undefined, action: () => run(t.action) };
 }
 
 /** The selection menu: a section, the applicable actions, a separator and Deselect all. */
-export function selectionMenu(count: (a: SelectionAction) => number, selected: number, batchRunning: boolean, run: (a: SelectionAction) => void, deselect: () => void, unmuted = true): MenuEntry[] {
+export function selectionMenu(count: (a: SelectionAction) => number, selected: number, batchRunning: boolean, run: (a: SelectionAction) => void, deselect: () => void, unmuted = true, moveRefusal?: string): MenuEntry[] {
   return [
     { heading: `${selected} selected sessions` },
-    ...barTools(count, selected, batchRunning, unmuted).map((t) => toolEntry(t, run)),
+    ...barTools(count, selected, batchRunning, unmuted, moveRefusal).map((t) => toolEntry(t, run)),
     { separator: true },
     { label: tr("Deselect all"), action: deselect },
   ];

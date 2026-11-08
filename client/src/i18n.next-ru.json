@@ -68,6 +68,16 @@
     "%n сессии",
     "%n сессий"
   ],
+  "%n session(s) moved to project.": [
+    "%n сессия перемещена в проект.",
+    "%n сессии перемещены в проект.",
+    "%n сессий перемещено в проект."
+  ],
+  "%n session(s) no longer listed.": [
+    "%n сессия больше не в списке.",
+    "%n сессии больше не в списке.",
+    "%n сессий больше не в списке."
+  ],
   "(%1 sessions)": "(сессий: %1)",
   "(1 session)": "(1 сессия)",
   "(locked)": "(заблокировано)",
@@ -146,7 +156,6 @@
   "Arrives with account management.": "Появится вместе с управлением учётными записями.",
   "Arrives with machine editing.": "Появится вместе с редактированием компьютеров.",
   "Arrives with project editing.": "Появится вместе с редактированием проектов.",
-  "Arrives with project organisation.": "Появится вместе с организацией проектов.",
   "Arrives with the worktree flows.": "Появится вместе с операциями над рабочими деревьями.",
   "Ask before tools": "Спрашивать перед использованием инструментов",
   "Asking: %1": "Спрашивают: %1",
@@ -1056,6 +1065,7 @@
   "The saved task start changed. Refresh the task before reviewing it.": "Сохранённая запись запуска задачи изменилась. Обновите задачу перед проверкой.",
   "The selected computer changed. Select it again.": "Выбранный компьютер изменился. Выберите его снова.",
   "The selected session is offline.": "Выбранная сессия не в сети.",
+  "The selected sessions are no longer listed.": "Выбранных сессий больше нет в списке.",
   "The selected text is on the clipboard": "Выделенный текст скопирован в буфер обмена",
   "The session ID is on the clipboard": "ID сессии скопирован в буфер обмена",
   "The session changed. Refresh it and try again.": "Сессия изменилась. Обновите её и попробуйте снова.",
@@ -1169,7 +1179,7 @@
   "Voice message": "Голосовое сообщение",
   "Voice provider": "Голосовой провайдер",
   "Wait for background work to finish, then retry.": "Дождитесь завершения фоновой работы, затем повторите попытку.",
-  "Wait for the current action to finish.": "Дождитесь завершения текущего действия.",
+  "Wait for the current action to finish.": "Дождитесь окончания текущего действия.",
   "Waiting for Claude to report its cache lifetime with its next reply.": "Ждём, когда Claude сообщит время жизни кэша в следующем ответе.",
   "Waiting for Codex to report its model.": "Ждём, когда Codex сообщит свою модель.",
   "Waiting for Kimi to report its model.": "Ждём, когда Kimi сообщит свою модель.",

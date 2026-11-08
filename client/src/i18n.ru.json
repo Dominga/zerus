@@ -209,6 +209,16 @@
     "%n сессии",
     "%n сессий"
   ],
+  "%n session(s) moved to project.": [
+    "%n сессия перемещена в проект.",
+    "%n сессии перемещены в проект.",
+    "%n сессий перемещено в проект."
+  ],
+  "%n session(s) no longer listed.": [
+    "%n сессия больше не в списке.",
+    "%n сессии больше не в списке.",
+    "%n сессий больше не в списке."
+  ],
   "(%1 sessions)": "(сессий: %1)",
   "(1 session)": "(1 сессия)",
   "(empty answer)": "(пустой ответ)",
@@ -453,7 +463,6 @@
   "Arrives with account management.": "Появится вместе с управлением учётными записями.",
   "Arrives with machine editing.": "Появится вместе с редактированием компьютеров.",
   "Arrives with project editing.": "Появится вместе с редактированием проектов.",
-  "Arrives with project organisation.": "Появится вместе с организацией проектов.",
   "Arrives with the worktree flows.": "Появится вместе с операциями над рабочими деревьями.",
   "As soon as I'm away": "Как только я отойду",
   "Ask before tools": "Спрашивать перед использованием инструментов",
@@ -3051,6 +3060,7 @@
   "The selected computer changed. Select it again.": "Выбранный компьютер изменился. Выберите его снова.",
   "The selected project changed. The new task draft was kept.": "Выбранный проект изменился. Черновик новой задачи сохранён.",
   "The selected session is offline.": "Выбранная сессия не в сети.",
+  "The selected sessions are no longer listed.": "Выбранных сессий больше нет в списке.",
   "The selected text is on the clipboard": "Выделенный текст скопирован в буфер обмена",
   "The session ID is on the clipboard": "ID сессии скопирован в буфер обмена",
   "The session changed. Open its actions again.": "Сессия изменилась. Откройте её действия снова.",
@@ -3358,7 +3368,7 @@
   "Wait for synchronization to finish before saving.": "Прежде чем сохранять, дождитесь завершения синхронизации.",
   "Wait for the answer to be delivered.": "Подождите, пока ответ будет доставлен.",
   "Wait for the context reset to finish. Your draft stays here.": "Дождитесь завершения сброса контекста. Ваш черновик останется здесь.",
-  "Wait for the current action to finish.": "Дождитесь завершения текущего действия.",
+  "Wait for the current action to finish.": "Дождитесь окончания текущего действия.",
   "Wait for the current file transfer to finish.": "Дождитесь завершения текущей передачи файла.",
   "Wait for the model settings change to finish.": "Дождитесь завершения изменения настроек модели.",
   "Wait for the session identity to load, then drop the files again.": "Подождите, пока загрузится идентификатор сессии, а затем снова перетащите файлы.",

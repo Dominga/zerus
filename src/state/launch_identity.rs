@@ -2,6 +2,8 @@
 //! native admission, consent or permission to adopt an existing session.
 use super::*;
 
+pub(crate) mod helper;
+
 /// Distinct from the creation request's HGS_LAUNCH_ID. An old caller may
 /// inherit HGS_SESSION_ID, so that variable alone cannot allocate a new row.
 pub(crate) const DECLARATION: &str = "HGS_LAUNCH_SESSION_ID";
@@ -77,8 +79,8 @@ impl Allocation {
 
 /// A required private argv form, carried in the existing `--run` count
 /// slot. Older helpers parse only an integer and refuse BEFORE bootstrap.
-/// Nothing emits this in production until ID-layout writers are enabled.
-#[allow(dead_code)]
+/// Unix new/fork constructors emit it only for a positively capable helper.
+/// ID-layout publication and duplicate-label writers remain separately gated.
 pub(crate) fn required_count(session: &str, run: &str, count: usize) -> Result<String> {
     if !valid_id(session) || !valid_id(run) {
         return Err("The required launch identity is unavailable".into());

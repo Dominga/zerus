@@ -3004,36 +3004,6 @@ fn launch(
     #[cfg(unix)]
     let supervisor_environment = account_environment
         .iter().chain(&hint_environment).cloned().collect::<Vec<_>>();
-    // The Unix login shell is the pane's root process. On Windows PowerShell
-    // runs under `--run` as well: the host starts every root process as a new
-    // process group, which ignores Ctrl+C together with everything it starts,
-    // and only the supervisor turns Ctrl+C back on for its child (spec D11).
-    let command = if command_name == "sh" && cfg!(unix) {
-        base
-    } else {
-        #[cfg(unix)]
-        let mut words = {
-            let (program, flags) = crate::accounts::supervisor_shell(&shell);
-            vec![
-                program.into(),
-                flags.into(),
-                crate::accounts::supervisor_script(program, &supervisor_environment),
-                executable.clone(),
-            ]
-        };
-        // The supervisor starts directly, with the session's variables, which
-        // carry the account (spec D8).
-        #[cfg(windows)]
-        let mut words = vec![executable.clone(), "--run".to_owned()];
-        if auto {
-            words.push(resume.len().to_string());
-            words.extend(resume);
-        } else {
-            words.push("0".into());
-        }
-        words.extend(base);
-        words
-    };
     if existing {
         if options.dry {
             if !options.detached && config.tab {
@@ -3094,6 +3064,48 @@ fn launch(
             Ok(rc)
         };
     }
+    let tracked = matches!(command_name.as_str(), "claude" | "codex" | "kimi")
+        && env::var("HGS_TRACKING").as_deref() != Ok("0");
+    let allocation = tracked.then(state::launch_identity::Allocation::fresh);
+    let helper = if tracked && !options.dry {
+        Some(state::launch_identity::helper::Observed::probe(&executable))
+    } else {
+        None
+    };
+    let count = match (&helper, &allocation) {
+        (Some(helper), Some(allocation)) => helper
+            .count(allocation.session(), allocation.run(), if auto { resume.len() } else { 0 })
+            .map_err(|error| Error::new(1, error))?,
+        _ => if auto { resume.len().to_string() } else { "0".into() },
+    };
+    // The Unix login shell is the pane's root process. On Windows PowerShell
+    // runs under `--run` as well: the host starts every root process as a new
+    // process group, which ignores Ctrl+C together with everything it starts,
+    // and only the supervisor turns Ctrl+C back on for its child (spec D11).
+    let command = if command_name == "sh" && cfg!(unix) {
+        base
+    } else {
+        #[cfg(unix)]
+        let mut words = {
+            let (program, flags) = crate::accounts::supervisor_shell(&shell);
+            vec![
+                program.into(),
+                flags.into(),
+                crate::accounts::supervisor_script(program, &supervisor_environment),
+                executable.clone(),
+            ]
+        };
+        // The supervisor starts directly, with the session's variables, which
+        // carry the account (spec D8).
+        #[cfg(windows)]
+        let mut words = vec![executable.clone(), "--run".to_owned()];
+        words.push(count);
+        if auto {
+            words.extend(resume);
+        }
+        words.extend(base);
+        words
+    };
     let mut spec = LaunchSpec {
         name: session.clone(),
         cwd: directory,
@@ -3111,9 +3123,7 @@ fn launch(
         println!("{}", terminal().describe(&DryRun::Launch(&spec)));
         return Ok(0);
     }
-    if matches!(command_name.as_str(), "claude" | "codex" | "kimi")
-        && env::var("HGS_TRACKING").as_deref() != Ok("0")
-    {
+    if tracked {
         spec.env.extend([
             format!("HGS_SESSION={session}"),
             // A new session's terminal is its label (zerus-ucck P3b).
@@ -3139,8 +3149,12 @@ fn launch(
             ),
             "HGS_TRACKING=1".into(),
         ]);
-        let allocation=state::launch_identity::Allocation::fresh();
-        spec.env.extend(allocation.environment().into_iter().map(|(key,value)|format!("{key}={value}")));
+        let allocation = allocation.as_ref().expect("tracked launch allocation");
+        let handoff = helper.as_ref().map_or_else(
+            || allocation.environment(),
+            |helper| helper.environment(allocation),
+        );
+        spec.env.extend(handoff.into_iter().map(|(key, value)| format!("{key}={value}")));
         for key in ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME"] {
             spec.env
                 .push(format!("{key}={}", env::var(key).unwrap_or_default()));

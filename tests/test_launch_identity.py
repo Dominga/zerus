@@ -30,28 +30,38 @@ class LaunchIdentity(test_fork.Base):
             test_pause.AGENT = original
 
     def use_required_helper(self, changed_run=False):
-        """Emulate the future constructor at the actual selected-helper seam.
-        This changes only --run's count; hooks keep their ordinary ABI."""
+        """Observe actual production new/fork counts; saved-ID reader uses
+        the existing fixture injection until its own constructor is updated."""
         helper = self.root / 'required-helper' / 'hgs'
         helper.parent.mkdir()
-        helper.write_text("""#!/usr/bin/env python3
-import os, sys
+        source = r'''#!/usr/bin/env python3
+import os, sys, json, pathlib, subprocess, uuid
 argv = sys.argv[1:]
-if argv and argv[0] == '--run' and (os.environ.get('HGS_LAUNCH_SESSION_ID') or os.environ.get('HGS_RESUME_SESSION_ID')):
-    argv[1] = 'sid1:' + os.environ['HGS_SESSION_ID'] + ':' + os.environ['HGS_RUN_ID'] + ':' + argv[1]
-os.execv(""" + repr(str(test_pause.HGS)) + """, [""" + repr(str(test_pause.HGS)) + """] + argv)
-""")
-        if changed_run:
-            source = helper.read_text()
-            source = source.replace('import os, sys', 'import os, sys, json, pathlib, subprocess, uuid')
-            source = source.replace("os.environ['HGS_RUN_ID'] + ':' + argv[1]",
-                                    "str(uuid.UUID(int=uuid.UUID(os.environ['HGS_RUN_ID']).int ^ 1)) + ':' + argv[1]")
-            start = source.index('os.execv(')
-            source = source[:start] + ("result = subprocess.run(" + repr([str(test_pause.HGS)]) +
-                " + argv, text=True, capture_output=True)\ndestination = pathlib.Path(" + repr(str(self.root / 'helper-result')) +
-                ")\nstaging = destination.with_suffix('.tmp')\nstaging.write_text(json.dumps(dict(code=result.returncode, stdout=result.stdout[:1024], stderr=result.stderr[:1024])))\n" +
-                "os.replace(staging, destination)\nsys.exit(result.returncode)\n")
-            helper.write_text(source)
+if argv and argv[0] == '--run':
+    received = argv[1]
+    with pathlib.Path(__CALLS__).open('a') as log:
+        log.write(json.dumps(dict(count=received, sid=os.environ.get('HGS_SESSION_ID'),
+                                 run=os.environ.get('HGS_RUN_ID'), new=os.environ.get('HGS_LAUNCH_SESSION_ID'))) + '\n')
+    if received.isdigit() and os.environ.get('HGS_RESUME_SESSION_ID'):
+        argv[1] = 'sid1:' + os.environ['HGS_SESSION_ID'] + ':' + os.environ['HGS_RUN_ID'] + ':' + received
+    if __CHANGED__:
+        fields = argv[1].split(':')
+        assert len(fields) == 4 and fields[0] == 'sid1'
+        fields[2] = str(uuid.UUID(int=uuid.UUID(os.environ['HGS_RUN_ID']).int ^ 1))
+        argv[1] = ':'.join(fields)
+        result = subprocess.run([__HGS__] + argv, text=True, capture_output=True)
+        destination = pathlib.Path(__RESULT__)
+        staging = destination.with_suffix('.tmp')
+        staging.write_text(json.dumps(dict(code=result.returncode, stdout=result.stdout[:1024], stderr=result.stderr[:1024])))
+        os.replace(staging, destination)
+        sys.exit(result.returncode)
+os.execv(__HGS__, [__HGS__] + argv)
+'''
+        source = source.replace('__HGS__', repr(str(test_pause.HGS)))
+        source = source.replace('__CALLS__', repr(str(self.root / 'helper-calls.jsonl')))
+        source = source.replace('__RESULT__', repr(str(self.root / 'helper-result')))
+        source = source.replace('__CHANGED__', repr(changed_run))
+        helper.write_text(source)
         helper.chmod(0o700)
         self.env['HGS_EXECUTABLE'] = str(helper)
 
@@ -63,6 +73,11 @@ os.execv(""" + repr(str(test_pause.HGS)) + """, [""" + repr(str(test_pause.HGS))
         for key in ('HGS_SESSION_ID', 'HGS_RUN_ID', 'HGS_RESUME_SESSION_ID', 'HGS_LAUNCH_SESSION_ID'):
             self.env.pop(key, None)
         self.test_every_terminal_fork_preallocates_a_distinct_identity_and_keeps_it_on_resume()
+        calls = [json.loads(line) for line in (self.root / 'helper-calls.jsonl').read_text().splitlines()]
+        fresh = [call for call in calls if call.get('new')]
+        self.assertGreaterEqual(len(fresh), 7)
+        for call in fresh:
+            self.assertEqual(call['count'], f"sid1:{call['sid']}:{call['run']}:0")
 
     def test_selected_helper_required_count_keeps_a_saved_id_on_resume(self):
         self.use_required_helper()
@@ -116,6 +131,80 @@ os.execv(""" + repr(str(test_pause.HGS)) + """, [""" + repr(str(test_pause.HGS))
                            env=dict(self.env, HGS_TRACKING='0'), text=True, capture_output=True, timeout=5)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(p.stdout.strip(), 'legacy-command')
+
+    def test_a_required_auto_recipe_keeps_its_nonzero_resume_count(self):
+        self.use_required_helper()
+        escaped = ''.join(c if c.isascii() and c.isalnum() else '-' for c in str(self.project.resolve()))
+        history = self.root / '.claude' / 'projects' / escaped
+        history.mkdir(parents=True)
+        (history / 'old.jsonl').write_text('{}\n')
+        self.hgs('claude', 'p', '-c', '-n', 'auto-count', '-d')
+        self.wait(lambda: self.binding('claude/p/auto-count').get('conversation_id'))
+        calls = [json.loads(line) for line in (self.root / 'helper-calls.jsonl').read_text().splitlines()]
+        self.assertEqual(len(calls), 1)
+        fields = calls[0]['count'].split(':')
+        self.assertEqual(fields[:3], ['sid1', calls[0]['sid'], calls[0]['run']])
+        self.assertGreater(int(fields[3]), 0)
+        self.assertIn('-c', json.loads((self.root / 'argv.jsonl').read_text().splitlines()[-1])['argv'])
+
+    def test_an_uncertain_capability_probe_keeps_the_integer_launch_recipe(self):
+        for kind in ('overflow', 'timeout', 'replacement'):
+            with self.subTest(kind=kind):
+                marker = self.root / ('helper-dispatch-' + kind)
+                helper = self.bin / ('capability-' + kind)
+                source = r'''#!/usr/bin/env python3
+import os, sys, pathlib, time, json
+if sys.argv[1:] == ['--help']:
+    print('session-launch-identity-v1', flush=True)
+    if __KIND__ == 'overflow':
+        print('x' * (70 << 10))
+    elif __KIND__ == 'timeout':
+        time.sleep(10)
+    else:
+        path = pathlib.Path(sys.argv[0])
+        new = path.with_suffix('.new')
+        new.write_bytes(path.read_bytes())
+        new.chmod(0o700)
+        os.replace(new, path)
+    sys.exit(0)
+if sys.argv[1:2] == ['--run']:
+    pathlib.Path(__MARKER__).write_text(json.dumps(dict(count=sys.argv[2], sid=os.environ.get('HGS_SESSION_ID'),
+                                                     declared=os.environ.get('HGS_LAUNCH_SESSION_ID'))))
+os.execv(__HGS__, [__HGS__] + sys.argv[1:])
+'''
+                helper.write_text(source.replace('__KIND__', repr(kind)).replace('__MARKER__', repr(str(marker)))
+                                  .replace('__HGS__', repr(str(test_pause.HGS))))
+                helper.chmod(0o700)
+                self.env['HGS_EXECUTABLE'] = str(helper)
+                name = 'codex/p/capability-' + kind
+                self.hgs('codex', 'p', '-n', 'capability-' + kind, '-d')
+                self.wait(lambda: self.binding(name).get('conversation_id'))
+                delivered = json.loads(marker.read_text())
+                self.assertTrue(delivered['count'].isdigit(), delivered)
+                self.assertEqual(delivered['sid'], '', delivered)
+                self.assertEqual(delivered['declared'], '', delivered)
+                self.assertFalse((self.root / 'state' / 'sessions').exists())
+                # The fixture's original owned tmux teardown settles these
+                # children; this admission control needs no separate Pause.
+
+    @unittest.skipUnless(os.environ.get('HGS_TEST_OLD_CLI'), 'requires the verified old CLI fixture')
+    def test_an_old_selected_helper_keeps_the_integer_recipe_without_parent_id_markers(self):
+        old = pathlib.Path(os.environ['HGS_TEST_OLD_CLI'])
+        self.assertEqual(hashlib.sha256(old.read_bytes()).hexdigest(),
+                         '146731d47b4aa7c9787096bb12cf3d9054e0b043194fca245fa5a27f2988bbf5')
+        parent = str(uuid.uuid4())
+        self.env.update(HGS_EXECUTABLE=str(old), HGS_SESSION_ID=parent,
+                        HGS_LAUNCH_SESSION_ID=parent, HGS_RUN_ID=str(uuid.uuid4()))
+        name = self.start('codex')
+        record = self.binding(name)
+        self.assertFalse(record.get('session_id'), 'the literal floor has no SID field')
+        self.assertNotEqual(record['run_id'], self.env['HGS_RUN_ID'])
+        read = subprocess.run([str(self.bin / 'tmux'), 'show-environment', '-t', name, 'HGS_SESSION_ID'],
+                              env=self.env, text=True, capture_output=True, timeout=5)
+        self.assertEqual(read.returncode, 0, read.stderr)
+        self.assertEqual(read.stdout.strip(), 'HGS_SESSION_ID=')
+        self.assertEqual(json.loads((self.root / 'argv.jsonl').read_text().splitlines()[-1])['hgs_session_id'], '')
+        self.assertFalse((self.root / 'state' / 'sessions').exists())
 
     @unittest.skipUnless(os.environ.get('HGS_TEST_OLD_CLI'), 'requires the verified old CLI fixture')
     def test_literal_old_helper_refuses_the_required_count_before_bootstrap(self):

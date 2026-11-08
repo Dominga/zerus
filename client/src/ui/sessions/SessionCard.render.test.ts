@@ -10,7 +10,7 @@ const entry = "\0session-card-render";
 const stores = "\0session-card-stores";
 const translations = "\0session-card-i18n";
 let server: ViteDevServer | undefined;
-let render: (compact: boolean, session: Session, online?: boolean) => string;
+let render: (compact: boolean, session: Session, online?: boolean, extra?: Record<string, unknown>) => string;
 
 beforeAll(async () => {
   const { fileURLToPath } = await import(/* @vite-ignore */ ["node", "url"].join(":")) as { fileURLToPath(url: URL): string };
@@ -36,10 +36,10 @@ beforeAll(async () => {
           import {renderToString} from 'solid-js/web';
           import {SessionCard, CompactCard} from '/src/ui/sessions/SessionCard.tsx';
           import {state} from '${stores}';
-          export const render = (compact, session, online = true) => {
+          export const render = (compact, session, online = true, extra = {}) => {
             state.online = online;
             return renderToString(() => createComponent(compact ? CompactCard : SessionCard,
-              {session, selected: false, expandable: false, expanded: false, onToggleChildren() {}, onExpand() {}}));
+              {session, selected: false, expandable: false, expanded: false, onToggleChildren() {}, onExpand() {}, ...extra}));
           };`;
       },
     }, solid({ ssr: true })],
@@ -105,5 +105,35 @@ describe("full and compact session question presentation", () => {
       expect(question).toContain("qchip muted");
       expect(question).toContain("1000 optional questions waiting");
     }
+  });
+});
+
+describe("a team member's row (task 330)", () => {
+  it("keeps a team member's box at the pane edge and its row connector", async () => {
+    const { readFileSync } = await import(/* @vite-ignore */ ["node", "fs"].join(":")) as { readFileSync(path: URL): string };
+    const stylesheet = String(readFileSync(new URL("../../ui/styles/sessions.css", import.meta.url)));
+    const rule = (selector: string) => {
+      const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return stylesheet.replace(/\r\n/g, "\n").match(new RegExp(`${escaped} \\{([^}]*)\\}`))?.[1] ?? "";
+    };
+    const html = render(false, row(), true, { depth: 1, teamFirst: true });
+    expect(html).toContain("team-member");
+    expect(html).toMatch(/style="[^"]*left:\s*2px/);
+    expect(html).not.toMatch(/left:\s*24px/);
+
+    // Parse the stylesheet, never a literal run of its text: the box spans the
+    // row (and so does the hover), its content stays indented, and the vertical
+    // connector runs from the row above to the last member's centre.
+    const member = rule(".scard.team-member");
+    expect(stylesheet).toContain(".scard.team-member");
+    expect(member).toMatch(/left:\s*2px/);
+    expect(member).toMatch(/right:\s*2px/);
+    expect(member).toMatch(/padding-left:\s*22px/);
+    const before = rule(".scard.team-member::before");
+    expect(before).toMatch(/left:\s*12px/);
+    expect(before).toMatch(/top:\s*-8px/);
+    expect(before).toMatch(/bottom:\s*-6px/);
+    expect(rule(".scard.team-member.team-last::before")).toMatch(/bottom:\s*50%/);
+    expect(rule(".scard.team-member::after")).toMatch(/top:\s*50%/);
   });
 });

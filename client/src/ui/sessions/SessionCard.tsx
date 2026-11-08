@@ -445,7 +445,10 @@ export function SessionCard(props: {
   return (
     <div class="scard" classList={{ selected: props.selected, offline: statusOf(s()) === "offline", muted: !!s().muted,
       "team-lead": !!props.team, "team-member": !!props.depth, "team-first": !!props.teamFirst, "team-last": !!props.teamLast }}
-      style={{ left: `${2 + (props.depth ?? 0) * 22}px` }} data-emphasis={emphasis(s())}
+      // Task #330: a member's box spans the row (its content is indented by
+      // the stylesheet), so the hover highlight and the card reach the pane
+      // edge; the old inline left shrank both and left the indent unpainted.
+      style={{ left: `${props.depth ? 2 : 2 + (props.depth ?? 0) * 22}px` }} data-emphasis={emphasis(s())}
       title={fullTooltip(s(), props.team)}>
       <div class="sc-l1">
         <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { toSession } from "../../store/catalog";
 import {
-  MOVE_LATER, SELECTION_ACTIONS, changedText, confirmationCopy, forgetsBinding, markSummary, progressText, restoreLimitText, sameInstance,
+  MOVE_WAIT, SELECTION_ACTIONS, changedText, confirmationCopy, forgetsBinding, markSummary, progressText, restoreLimitText, sameInstance,
   selectionApplies, selectionCall, selectionOperation, selectionSnapshot, selectionText, summaryText, type ApplyContext, type SelectionAction,
 } from "./selection";
 import type { ViewRow } from "../../types";
@@ -21,7 +21,7 @@ describe("selection texts", () => {
       "Compact session rows", "Expand session rows", "Mark as read", "Mark needs attention", "Mute notifications", "Unmute notifications", "Pause", "Resume / restore", "Move to archive",
       "Move to project", "Forget", "Terminate",
     ]);
-    expect(MOVE_LATER).toBe("Arrives with project organisation.");
+    expect(MOVE_WAIT).toBe("Wait for the current action to finish.");
   });
   it("words the queue's progress, refusals and summaries", () => {
     expect(progressText("pause", 2, 5)).toBe("Pause: 2 / 5…");

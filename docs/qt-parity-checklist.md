@@ -42,7 +42,7 @@ Every partial, missing and unverified row names the bead that tracks it.
 
 | Area | done | partial | missing | other |
 | --- | --- | --- | --- | --- |
-| Sessions list, row actions and header | 27 | | 1 | 2 owner decisions, 1 intentional difference |
+| Sessions list, row actions and header | 28 | | | 2 owner decisions, 1 intentional difference |
 | Archive and search | 15 | 0 | 0 | |
 | Composer and sending | 35 | | | 1 intentional difference |
 | Activity | 17 | 0 | 0 | |
@@ -54,7 +54,7 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Settings | 17 | | | 1 intentional difference |
 | Machines, accounts, projects, new session, tasks and worktrees | 18 | | | |
 | Terminal, processes and platform session support | 8 | | | |
-| Total (193 rows) | 178 | 5 | 2 | 8 |
+| Total (193 rows) | 179 | 5 | 1 | 8 |
 
 ## Owner decisions
 
@@ -71,7 +71,6 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Bead | Priority | Gap |
 | --- | --- | --- |
 | `zerus-5wmh.13.14` | P2 | Windows: focus-aware banners, update alert, tray theme, watchdog, startup note |
-| `zerus-5wmh.18` | existing | Selection Move to project, with project organisation |
 | `zerus-5wmh.66.10` | existing | Desktop presence for phone alerts |
 | `zerus-5wmh.13.11.4` | P4 | Deferred: batch Terminate folder removal, one confirmation holding every session's program manifest |
 
@@ -101,7 +100,7 @@ Keyboard commands for every area are listed once, under Shortcuts and navigation
 | Left and Right on a plain row collapse or expand its project; Home and End | done | `ui/sessions/SessionList.tsx:641-675`; Right reopens the project hiding the open row, and the arrows go on past it | `SessionList.cpp:623-627` |
 | Enter on a row jumps to the latest Activity | done (a focused button in the list keeps its own Enter) | `ui/sessions/SessionList.tsx:676-680`; `store/ui.ts:61-71`, taken by the mounted Activity: `ui/sessions/Activity.tsx:989` | `SessionsWindow.cpp:565,5499-5504` |
 | Selection bar and menu: Mark read, Mark needs attention, Compact, Expand, Pause, Resume or Restore, Archive, Forget and Terminate with confirmation | done | `ui/sessions/selection.ts:11-31,113-136`; `store/batch.ts:134-145`; `ui/sessions/ActionDialogs.tsx:326-345` | `SessionSelection.cpp:52-218,258-286` |
-| Selection Move to project | **missing** (`zerus-5wmh.18`) | disabled with "Arrives with project organisation." (`ui/sessions/selection.ts:19`; `ui/sessions/selection-ui.ts:59-66`); a single row can move | `SessionSelection.cpp:184-195` |
+| Selection Move to project | done; one move for the rows still listed, waits while a lifecycle batch runs | `ui/sessions/selection-ui.ts:76`; `ui/sessions/selection-live.ts:33-38`; `ui/sessions/organization-ui.ts:137-153` (`movedText`), `:177-215` (`openMoveSelection`, re-check, one move) | `SessionSelection.cpp:184-195` |
 | Selection Terminate: remove working folders after stopping | intentional difference (`zerus-5wmh.13.11.4`) | batch Terminate offers no folder removal in this pass (`ui/sessions/selection.ts:111-112`); per-session Terminate with its program manifest, ownership nonce, separate Force and removed, kept and unknown outcomes stays the way to remove folders, as the Terminate and Remove working folder rules in `AGENTS.md` set them for one session (design-tima2, 2026-11-08; the batch design is kept in the bead) | `SessionSelection.cpp:274-283` |
 | Footer: creation status, Mark all as read, Saved drafts | done | `ui/sessions/SessionList.tsx:702-712` | `SessionsWindow.cpp:459-489` |
 | Footer summary (N shown, N working, N attention) | removed by owner decision | dropped on owner feedback of 2026-11-07 (PR #1685) | `SessionsWindowRows.cpp:473-479` |

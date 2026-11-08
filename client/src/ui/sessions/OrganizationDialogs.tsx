@@ -2,17 +2,16 @@ import { Dropdown } from "../lib/Dropdown";
 import { TextInput } from "../lib/TextField";
 import { For, Show, createEffect, createSignal } from "solid-js";
 import { Icon } from "../lib/icons";
-import * as organization from "../../store/organization";
 import type { MenuEntry } from "../../store/ui";
 import type { Session } from "./types";
-import { createOrgDialogs, deleteText, nameProblem, projectColor, type OrgDialog } from "./organization-ui";
+import { deleteText, nameProblem, projectColor, type OrgDialog } from "./organization-ui";
 import { tr } from "../../i18n";
+import { dialogs } from "./org-dialogs";
 
 // The organization dialogs: Move to project (also for a selection), New
 // project, Rename project and Delete project, in one modal host as
 // ActionDialogs. Their rules and calls are organization-ui.ts's.
 
-const dialogs = createOrgDialogs(organization);
 const { dialog, close } = dialogs;
 
 export const openMoveDialog = (rows: readonly Session[]): void => dialogs.openMove(rows);

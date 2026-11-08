@@ -1,9 +1,27 @@
 import { describe, expect, it, vi } from "vitest";
 import { ARCHIVE_ACTIONS_BOUND, barTools, countable, selectionMenu, splitTools, SELECTION_ICONS } from "./selection-ui";
-import { MOVE_LATER, SELECTION_ACTIONS, type SelectionAction } from "./selection";
+import { SELECTION_ACTIONS, type SelectionAction } from "./selection";
 import { resolveIcon } from "../lib/icons";
 
 const counts = (c: Partial<Record<SelectionAction, number>>) => (a: SelectionAction) => c[a] ?? 0;
+
+describe("Move to project for a selection (zerus-5wmh.18.1)", () => {
+  const counts = (n: number) => (a: SelectionAction) => (a === "move" ? n : 0);
+  it("is enabled while project editing is ready and no lifecycle batch runs", () => {
+    const [move] = barTools(counts(3), 3, false, true, undefined);
+    expect([move.action, move.enabled, move.hint]).toEqual(["move", true, "Move to project — 3 of 3 selected sessions"]);
+  });
+  it("waits for a running lifecycle batch, then for project sync, with the reason as its hint", () => {
+    const [running] = barTools(counts(3), 3, true, true, undefined);
+    expect([running.enabled, running.hint]).toEqual([false, "Wait for the current action to finish."]);
+    const [waiting] = barTools(counts(3), 3, false, true, "Project sync is starting.");
+    expect([waiting.enabled, waiting.hint]).toEqual([false, "Project sync is starting."]);
+    const entry = selectionMenu(counts(3), 3, true, () => {}, () => {}, true, undefined).find((e) => "label" in e && e.label.startsWith("Move to project")) as { disabled?: boolean; hint?: string };
+    expect([entry.disabled, entry.hint]).toEqual([true, "Wait for the current action to finish."]);
+    const ready = selectionMenu(counts(3), 3, false, () => {}, () => {}, true, undefined).find((e) => "label" in e && e.label.startsWith("Move to project")) as { disabled?: boolean; hint?: string };
+    expect([ready.disabled, ready.hint]).toEqual([false, undefined]);
+  });
+});
 
 describe("barTools", () => {
   it("shows only tools with a count, in Qt's order, with Qt's texts and hints", () => {
@@ -43,11 +61,11 @@ describe("barTools", () => {
     expect(Object.fromEntries(tools.map((t) => [t.action, t.enabled]))).toEqual({ compact: true, expand: true, mark_read: false, pause: false, forget: false });
     expect(barTools(counts({ pause: 1 }), 2, false)[0].enabled).toBe(true);
   });
-  it("shows Move to project with its count, disabled, with the later hint", () => {
+  it("shows Move to project with its count, enabled while project editing is ready (zerus-5wmh.18.1)", () => {
     const [move] = barTools(counts({ move: 3 }), 3, false);
     expect(move.text).toBe("Move to project (3)");
-    expect(move.enabled).toBe(false);
-    expect(move.hint).toBe(MOVE_LATER);
+    expect(move.enabled).toBe(true);
+    expect(move.hint).toBe("Move to project — 3 of 3 selected sessions");
   });
   it("marks Forget and Terminate dangerous and gives every action a known icon", () => {
     const all = Object.fromEntries(SELECTION_ACTIONS.map((a) => [a, 1]));
@@ -86,8 +104,8 @@ describe("selectionMenu", () => {
     const labels = items.map((e) => ("label" in e ? e.label : "separator" in e ? "-" : e.heading));
     expect(labels).toEqual(["4 selected sessions", "Pause (2)", "Move to project (4)", "Forget (1)", "-", "Deselect all"]);
     const move = items[2] as { disabled?: boolean; hint?: string };
-    expect(move.disabled).toBe(true);
-    expect(move.hint).toBe(MOVE_LATER);
+    expect(move.disabled).toBe(false);
+    expect(move.hint).toBeUndefined();
     (items[1] as { action(): void }).action();
     expect(run).toHaveBeenCalledWith("pause");
     (items[5] as { action(): void }).action();

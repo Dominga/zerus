@@ -1617,9 +1617,13 @@ choose a file or enter its absolute path (or a `~/` path); Zerus checks that it
 names an existing file. If that check cannot answer within a few seconds, for
 example on an unresponsive network mount, the dialog says so and offers Retry.
 For a remote session, enter an absolute path (including Windows drive or UNC
-paths on a Windows computer) or `~/` path on the named remote computer; only its
-form is checked, not whether the file exists. A file on your desktop is not
-uploaded or made accessible to that computer. Zerus inserts an editable, quoted path into
+paths on a Windows computer) or `~/` path on the named remote computer. When
+that computer's hgs has `path-info`, Insert asks it whether a file is there
+(one metadata read, no content) and refuses a folder or a missing path; if it
+does not answer in time, the dialog offers Retry, and closing the dialog ends
+the call. On a computer with an older hgs, only the path's form is checked, as
+the dialog then says. A file on your desktop is not uploaded or made accessible
+to that computer. Zerus inserts an editable, quoted path into
 the draft and saves it as ordinary message text. Review it and press Send when
 ready. This action does not read, copy or Base64-encode the file and has no file
 size limit. It refers to the existing file, whose contents may change; the agent

@@ -1363,7 +1363,11 @@ fn the_phone_s_inventories_come_from_the_index_without_reading_every_task() {
 /// replica's merged upgrade lowered, saved as such: the store's inventory
 /// repairs it before reading its version (zerus-cg5h.21, review-win-e).
 fn unrepaired(store: &ProjectStore) -> TaskDoc {
-    let mut task = new_task(store, "T-repair", Stage::Todo, "V", "Repair me");
+    unrepaired_as(store, "T-repair")
+}
+
+fn unrepaired_as(store: &ProjectStore, id: &str) -> TaskDoc {
+    let mut task = new_task(store, id, Stage::Todo, "V", "Repair me");
     assert!(task.floor().unwrap());
     task.lower_stored_schema_for_test(5);
     assert!(task.needs_schema_repair());
@@ -1432,4 +1436,59 @@ fn a_row_an_older_build_writes_later_is_read_again_with_the_repair() {
     index.live_inventory().unwrap();
     let (_, decoded, stamped) = counted(|| index.live_inventory().unwrap());
     assert_eq!((decoded, stamped), (0, 1));
+}
+
+#[test]
+fn rows_an_older_build_stored_on_both_sides_of_the_last_read_here_are_all_read_again() {
+    // review-win-e on #1736 R3 (zerus-cg5h.21.2): an older build whose
+    // clock was set back and then caught up stores unrepaired rows dated
+    // before and after this build's last write. No clock may decide which
+    // are read again: the index's inventory is not used until every row was.
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    drop(Index::open(&store).unwrap());
+    let (early, late) = (unrepaired_as(&store, "T-early1"), unrepaired_as(&store, "T-late01"));
+    age(&store, early.uuid());
+    age(&store, late.uuid());
+    LEGACY_DERIVE.with(|legacy| legacy.set(true));
+    let index = Index::open(&store).unwrap();
+    LEGACY_DERIVE.with(|legacy| legacy.set(false));
+    let since: i64 = index.meta("derived_at").unwrap().unwrap().parse().unwrap();
+    index.db.execute("UPDATE tasks SET checked = ?1 WHERE uuid = ?2", params![since - 1_000, early.uuid()]).unwrap();
+    drop(index);
+    let mut index = Index::open(&store).unwrap();
+    let held = index.live_inventory();
+    let expected = store.live_inventory().unwrap().0;
+    // Either not used (the phone reads the store) or already exact.
+    if let Ok(inventory) = held {
+        assert_eq!(inventory, expected);
+    }
+    // Once every row was read again here, the index answers, exactly.
+    for _ in 0..4 {
+        index.live_inventory().ok();
+    }
+    assert_eq!(index.live_inventory().unwrap(), store.live_inventory().unwrap().0);
+    assert!(!store.load(early.uuid()).unwrap().needs_schema_repair());
+}
+
+#[test]
+fn after_another_build_s_write_the_index_answers_only_once_every_row_was_read_again() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    for n in 0..600 {
+        write_plain(&store, &new_task(&store, &format!("T-{n:06}"), Stage::Todo, "V", "Plain"));
+    }
+    drop(Index::open(&store).unwrap());
+    let stale = unrepaired(&store);
+    age(&store, stale.uuid());
+    LEGACY_DERIVE.with(|legacy| legacy.set(true));
+    drop(Index::open(&store).unwrap());
+    LEGACY_DERIVE.with(|legacy| legacy.set(false));
+    let mut index = Index::open(&store).unwrap();
+    // 601 rows, at most 256 read again per read (the open was one): the
+    // store answers until every row was read here again.
+    assert!(matches!(index.live_inventory(), Err(Failure::Other)));
+    let inventory = index.live_inventory().unwrap();
+    assert_eq!(inventory, store.live_inventory().unwrap().0);
+    assert_eq!(inventory.tasks.len(), 601);
 }

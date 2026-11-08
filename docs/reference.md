@@ -1845,8 +1845,8 @@ prompt as well. An edit made while a message is on its way stays for the next
 one. Permissions and the permissions profile are the mode the member's next
 start gets; its running session keeps its own. A swap to another session drops
 the changes still pending for the session it replaced. The owner's After a task
-policy (fter_task empty keeps context, compact or clear, with
-fter_task_on percent/	okens and fter_task_at) reaches a free member's
+policy (`after_task` empty keeps context, `compact` or `clear`, with
+`after_task_on` `percent`/`tokens` and `after_task_at`) reaches a free member's
 next hand-out only when its context passes the threshold; the lead's runs only
 while the lead is free.
 
@@ -1861,7 +1861,8 @@ In the Qt team workspace, a member's menu offers **Edit member** once its curren
 settings have been read. The dialog starts with that member's prompt, model,
 effort, permissions/profile, per-task context action, **After a task** mode with
 its criterion and threshold, allowed models and iron rules. The threshold field
-takes 1-100 percent, or a token count when the criterion is tokens. Save sends only changed fields in one `members_update`; a refusal stays
+takes 1-100 percent, or a token count when the criterion is tokens. Save sends
+only changed fields in one `members_update`; a refusal stays
 in the dialog and preserves the draft while the stored member stays unchanged.
 A changed prompt reveals **Clear context first**, unchecked by default (only a
 running member can clear). Permissions-profile widening requires the owner's
@@ -2392,6 +2393,7 @@ the lead's own task still reaches it without a message (C1), but its context
 action waits for a free lead. A mode the agent cannot run, a mode without a
 criterion, and a threshold outside 1-100 percent or above 10000000 tokens are
 refused by field, in a plan and in the owner's `members_update`.
+
 ### When Zerus starts a member
 
 A member's session starts with its first task hand-out, after a swap, or for

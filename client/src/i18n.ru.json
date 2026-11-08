@@ -2763,6 +2763,8 @@
   "Starting": "Запуск",
   "Starting %1 with a new conversation…": "Запуск %1 с новым разговором…",
   "Starting OpenCode…": "Запуск OpenCode…",
+  "Starting Zerus…": "Запуск Zerus…",
+  "Starting Zerus…\nUpdating the hgs command line for local sessions": "Запуск Zerus…\nОбновление командной строки hgs для локальных сессий",
   "Starting automatically…": "Автоматический запуск…",
   "Starting session…": "Запуск сессии…",
   "Starting…": "Запуск…",

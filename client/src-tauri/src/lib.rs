@@ -104,6 +104,9 @@ mod speech_settings;
 #[cfg(feature = "live")]
 mod startup_error;
 mod startup_log;
+// Its text needs the interface catalog, so its portable tests need `live` too.
+#[cfg(all(feature = "live", any(windows, test)))]
+mod startup_note;
 #[cfg(feature = "live")]
 mod task_copy_review;
 #[cfg(feature = "live")]

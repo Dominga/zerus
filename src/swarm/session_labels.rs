@@ -13,6 +13,8 @@ use std::{
 };
 use zerus_watch_protocol::session_labels as wire;
 mod cache;
+#[cfg(test)]
+mod test_fixture;
 pub(super) use cache::{begin_peer, finish_peer};
 pub(crate) use cache::{cached, due_local, refresh_local, refresh_peer};
 
@@ -103,6 +105,10 @@ fn absolute_environment(name: &str) -> Option<PathBuf> {
 }
 
 fn connector_path(config: &Config) -> PathBuf {
+    #[cfg(test)]
+    if let Some((path, _)) = test_fixture::paths(config) {
+        return path;
+    }
     wire::configuration_path(
         Some(config.home.clone().into()),
         absolute_environment("XDG_CONFIG_HOME"),
@@ -114,6 +120,10 @@ fn connector_path(config: &Config) -> PathBuf {
 /// Only maintained installer slots participate. A custom --config or legacy
 /// service is outside the declared support boundary, never found by name/PID.
 fn installer_units(config: &Config) -> Vec<PathBuf> {
+    #[cfg(test)]
+    if let Some((_, units)) = test_fixture::paths(config) {
+        return units;
+    }
     if cfg!(target_os = "linux") {
         let root = absolute_environment("XDG_CONFIG_HOME")
             .unwrap_or_else(|| PathBuf::from(&config.home).join(".config"));
@@ -316,24 +326,8 @@ pub(crate) fn observe_absent(config: &Config) -> Result<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn fixture() -> (tempfile::TempDir, Config) {
-        let dir = tempfile::tempdir().unwrap();
-        let config = Config {
-            home: dir.path().to_str().unwrap().into(),
-            dir: dir.path().join("config"),
-            state: dir.path().join("state"),
-            selves: vec!["fixture".into()],
-            peers: vec![],
-            base_peers: vec![],
-            peers_from_environment: false,
-            machines: BTreeMap::new(),
-            tab: false,
-            tab_colors: String::new(),
-        };
-        let mut store = store::LockedStore::load(&config).unwrap();
-        store.save().unwrap();
-        drop(store);
-        (dir, config)
+    fn fixture() -> (test_fixture::Fixture, Config) {
+        test_fixture::fixture()
     }
     #[test]
     fn reader_observation_never_claims_the_unfinished_native_writer_floor() {

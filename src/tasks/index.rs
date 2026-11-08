@@ -618,6 +618,12 @@ impl<'a> Index<'a> {
             }
             // A clock set back can hide those rows: then every row is read again.
             rederive = foreign.is_empty();
+            // Clocks may also straddle that time (zerus-cg5h.21.2): every row
+            // is suspect and read again in bounded batches, and the phone's
+            // inventory is not read from the index until all were.
+            let mark = now.to_string();
+            self.db.execute("INSERT OR REPLACE INTO meta VALUES('suspect', ?1)", [&mark])?;
+            self.db.execute("INSERT OR REPLACE INTO meta VALUES('repair_floor', ?1)", [&mark])?;
         }
         let full = !built
             || rederive
@@ -631,8 +637,10 @@ impl<'a> Index<'a> {
         // dated after now.
         let past = now - MAX_AGE_MS - 1;
         self.db.execute("UPDATE tasks SET checked=?1 WHERE checked > ?2", params![past, now])?;
-        if self.meta("suspect")?.and_then(|v| v.parse::<i64>().ok()).is_some_and(|mark| mark > now) {
-            self.db.execute("INSERT OR REPLACE INTO meta VALUES('suspect', ?1)", [now.to_string()])?;
+        for key in ["suspect", "repair_floor"] {
+            if self.meta(key)?.and_then(|v| v.parse::<i64>().ok()).is_some_and(|mark| mark > now) {
+                self.db.execute("INSERT OR REPLACE INTO meta VALUES(?1, ?2)", params![key, now.to_string()])?;
+            }
         }
         let moved = changes.generation != generation || changes.offset != offset;
         if built && changes.documents.is_none() && moved {
@@ -885,6 +893,16 @@ impl<'a> Index<'a> {
     /// or the periodic check finds a change.
     pub(super) fn live_inventory(&mut self) -> Outcome<Inventory> {
         self.sync()?;
+        // After another build changed rows, every row must have been read
+        // here again under the repair rule (zerus-cg5h.21.2); until then the
+        // caller reads the store.
+        if let Some(floor) = self.meta("repair_floor")?.and_then(|v| v.parse::<i64>().ok()) {
+            let uncertain: bool =
+                self.db.query_row("SELECT EXISTS(SELECT 1 FROM tasks WHERE checked < ?1)", [floor], |r| r.get(0))?;
+            if uncertain {
+                return Err(Failure::Other);
+            }
+        }
         // Missing while the project document cannot be read: the caller
         // reads the store, which says why.
         let project = self.meta("project_version")?.ok_or(Failure::Other)?;

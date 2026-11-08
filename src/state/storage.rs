@@ -9,6 +9,10 @@ use std::io::Write;
 #[allow(dead_code)]
 pub(super) mod native_domain;
 
+// Finite worker exclusion shared with a future owner-key transaction.
+#[cfg(unix)]
+pub(super) mod job_round;
+
 pub(super) fn root() -> PathBuf {
     nonempty_env("HGS_STATE_DIR")
         .map(PathBuf::from)

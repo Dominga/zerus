@@ -21,6 +21,8 @@ export type Status =
 
 export interface Subagent {
   id: string;
+  /** The child's own conversation ID, when its roster reports one (search matches it). */
+  conversationId?: string;
   name: string;
   state: "working" | "ready" | "attention" | "error" | "paused" | "unknown" | "ended";
   summary: string;

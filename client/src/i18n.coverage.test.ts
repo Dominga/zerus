@@ -23,6 +23,7 @@ const DYNAMIC_FILES: Record<string, string> = {
   "./ui/sessions/ActionDialogs.tsx": "actions-ui menu labels, reasons and notices; detail reasons from the core",
   "./ui/sessions/mark-entries.ts": "the actions store notice constants",
   "./store/actions.ts": "its own notice constants",
+  "./store/content-search-model.ts": "its own identity label table, registered with trNoop",
   "./store/restores.ts": "the actions notice constants",
   "./store/taskBoard.ts": "its own task action table",
   "./ui/screens/tasks-ui.ts": "its own task stage table",

@@ -1,7 +1,7 @@
 import { batch, createSignal } from "solid-js";
 import type { Session } from "../ui/sessions/types";
 import type { ActivityEvent, ViewRow } from "../types";
-import { tr } from "../i18n";
+import { tr, trNoop } from "../i18n";
 
 export const SEARCH_DELAY = 350;
 export const SEARCH_HOSTS = 32;
@@ -85,21 +85,53 @@ export function identityMatches(row: Session | undefined, hit: FoundHit["hit"]):
 export function metadataMatches(row: Session, query: string): boolean {
   const needle = query.toLowerCase();
   return [row.name, row.title, row.machine, row.model, row.effort, row.cwdPath, row.branch, row.worktree,
-    row.conversationId, row.runId, row.archiveId, ...(row.subagents ?? []).map((s) => s.id)]
+    row.conversationId, row.runId, row.archiveId, ...(row.subagents ?? []).flatMap((s) => [s.id, s.conversationId])]
     .some((text) => text?.toLowerCase().includes(needle));
+}
+
+/**
+ * The first identity of `row` that contains `query`, as "Label: ID", in Qt's
+ * order (SessionSearch.cpp:239-268): session, run and archive IDs, then each
+ * child's agent ID and its own conversation ID. Undefined when only other
+ * metadata matched.
+ */
+export function matchedIdentity(row: Session, query: string): string | undefined {
+  const needle = query.toLowerCase();
+  const ids: [string | undefined, string][] = [
+    [row.conversationId, trNoop("Session ID")], [row.runId, trNoop("Run ID")], [row.archiveId, trNoop("Archive ID")],
+    ...(row.subagents ?? []).flatMap((s): [string | undefined, string][] => [[s.id, trNoop("Agent ID")], [s.conversationId, trNoop("Child session ID")]]),
+  ];
+  const found = ids.find(([id]) => !!id && id.toLowerCase().includes(needle));
+  return found ? `${tr(found[1])}: ${found[0]}` : undefined;
 }
 
 /** A session keeps its position and row identity as metadata and host replies
  * arrive. The newest matching message supplies its single excerpt. */
-export function mergeSessionMatch<T extends { id: string; session: Session; found?: FoundHit }>(items: T[], positions: Map<string, number>, item: T, cap: number): boolean {
+export function mergeSessionMatch<T extends { id: string; session: Session; found?: FoundHit; matched?: string }>(items: T[], positions: Map<string, number>, item: T, cap: number): boolean {
   const index = positions.get(item.session.key);
   if (index !== undefined) {
     const previous = items[index];
-    if (item.found && (!previous.found || item.found.hit.at > previous.found.hit.at)) items[index] = { ...item, id: previous.id };
+    // The identity that matched stays with the row a message hit refreshes.
+    if (item.found && (!previous.found || item.found.hit.at > previous.found.hit.at)) items[index] = { ...item, id: previous.id, matched: item.matched ?? previous.matched };
+    else if (!previous.matched && item.matched) items[index] = { ...previous, matched: item.matched };
     return true;
   }
   if (items.length >= cap) return false;
   positions.set(item.session.key, items.length); items.push(item); return true;
+}
+/**
+ * A result row's tooltip, as Qt's (SessionSearch.cpp:257-262): the session's
+ * name, title and machine, its IDs, the identity that matched when not
+ * already listed, and the message excerpt.
+ */
+export function searchTooltip(item: { session: Session; found?: FoundHit; matched?: string }): string {
+  const s = item.session;
+  const lines = [s.name, s.title !== s.name ? s.title : "", s.machine,
+    s.conversationId ? tr("Session ID: %1", s.conversationId) : "", s.runId ? tr("Run ID: %1", s.runId) : "",
+    s.archiveId ? tr("Archive ID: %1", s.archiveId) : ""].filter(Boolean);
+  if (item.matched && !lines.includes(item.matched)) lines.push(item.matched);
+  if (item.found?.hit.snippet) lines.push(item.found.hit.snippet);
+  return lines.join("\n");
 }
 export function searchCount(messages: number, sessions: number): string {
   return `${messages} ${messages === 1 ? "message" : "messages"}, ${sessions} ${sessions === 1 ? "session" : "sessions"}`;

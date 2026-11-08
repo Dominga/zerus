@@ -9,12 +9,12 @@ import { bindSearchRow, machineFilter, matchesFilter, page, projectFilter, accou
 import { compileScopes } from "../ui/sessions/scope-filters";
 import { pageHidden } from "./visibility";
 import { notify, bindSearchActionRow } from "./actions";
-import { createContentSearch, identityMatches, metadataMatches, mergeSessionMatch, searchCount, SEARCH_ROWS, type FoundHit, type SearchReply } from "./content-search-model";
+import { createContentSearch, identityMatches, matchedIdentity, metadataMatches, mergeSessionMatch, searchCount, SEARCH_ROWS, type FoundHit, type SearchReply } from "./content-search-model";
 import { clearSearchPreview, setSearchPreview } from "./searchSelection";
 import type { Session } from "../ui/sessions/types";
 import { trNoop, tr } from "../i18n";
 
-export interface SearchItem { id: string; session: Session; found?: FoundHit; run: string; conversation: string }
+export interface SearchItem { id: string; session: Session; found?: FoundHit; run: string; conversation: string; matched?: string }
 export const STALE_SEARCH = trNoop("This session changed. Search again to see its current history.");
 export { identityMatches, metadataMatches } from "./content-search-model";
 
@@ -51,7 +51,7 @@ export const { contentSearch, searchItems, searchStatus, activateSearchItem, sea
     const metadata = stateFilter() === "archived" ? archive.rows() : orderedRows();
     for (const row of metadata) {
       const group = (row as { group?: string }).group ?? groups[row.key]?.group ?? defaultProject();
-      if (accepts(row, group) && metadataMatches(row, query)) { if (items.length >= 300) { limited = true; continue; } append({ id: `metadata:${row.key}`, session: row }); }
+      if (accepts(row, group) && metadataMatches(row, query)) { if (items.length >= 300) { limited = true; continue; } append({ id: `metadata:${row.key}`, session: row, matched: matchedIdentity(row, query) }); }
     }
     for (const found of contentSearch.hits()) {
       const hit = found.hit;

@@ -12,6 +12,14 @@ const parent = () => toSession("", "run:1", { name: "dsh/example/review", conver
   done: { name: "Finished", state: "ready", task: "Earlier result" },
 } });
 
+describe("a child's own conversation ID (zerus-5wmh.13.17)", () => {
+  it("is kept when the roster reports one, bounded and printable", () => {
+    const rows = childRows({ one: { state: "ready", conversation_id: "child-conversation-one" }, two: { state: "ready" },
+      three: { state: "ready", conversation_id: 7 }, four: { state: "ready", conversation_id: "x".repeat(300) }, five: { state: "ready", conversation_id: "bad\nid" } });
+    expect(Object.fromEntries(rows.map((r) => [r.id, r.conversationId]))).toEqual({ one: "child-conversation-one", two: undefined, three: undefined, four: undefined, five: undefined });
+  });
+});
+
 describe("native child presentation", () => {
   it("keeps unchanged current and non-current cards by identity, including absent child metadata", () => {
     for (const state of ["ready", "archived", "paused", "stopped"] as const) {

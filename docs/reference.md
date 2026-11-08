@@ -2626,10 +2626,16 @@ confirmed state. The slider rounds the time left up to whole hours but ignores
 the first five minutes past an hour, so a fresh choice keeps its position
 although the host's clock may run slightly ahead. When the agent or account is
 not eligible the switch is disabled and the host's reason is shown under it; a
-computer whose `hgs` lacks `session-keep-warm-v1` shows an update hint. While a
-ping runs, the session reads **Ready** with **Warming cache** and counts in
-neither Active nor Working. Activity folds the ping, its reply and its Stop into
-one dim **Cache kept warm** row that expands to show both.
+computer whose `hgs` lacks `session-keep-warm-v1` shows an update hint. While it
+is on, the session header also shows it on its chip row beside the model: a bolt
+with the time left, such as **2 h 14 m**, or an infinity sign for Always, at the
+chip row's height so the header never grows. Its tooltip gives the same state
+and lines as the Details row, and a click opens **Details** at the control. It
+reads only the listing, the followed session's Details summary and a change
+confirmed in this window. While a ping runs, the session reads **Ready** with
+**Warming cache** and counts in neither Active nor Working. Activity folds the
+ping, its reply and its Stop into one dim **Cache kept warm** row that expands
+to show both.
 
 Android follows the same status rule: while a ping runs the session reads
 **Warming cache**, is neither Working nor Active, and holds no reply in progress,

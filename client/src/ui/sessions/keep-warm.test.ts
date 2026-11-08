@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ALWAYS, choiceAt, durationLabel, durationMark, keepWarmOf, mergeKeepWarm, positionOf, remainingText, statusLine, tooltipLines } from "./keep-warm";
+import { ALWAYS, choiceAt, durationLabel, durationMark, headerKeepWarm, keepWarmOf, mergeKeepWarm, positionOf, remainingText, statusLine, tooltipLines } from "./keep-warm";
 import type { KeepWarmState } from "../../types";
 
 const NOW = 1_794_000_000;
@@ -57,6 +57,19 @@ describe("keep cache warm presentation", () => {
   it("marks Always with an infinity sign, keeping Always as its name (zerus-ua4bi)", () => {
     expect([durationMark(1), durationMark(7), durationMark(ALWAYS)]).toEqual(["1 h", "7 h", "\u221e"]);
     expect(durationLabel(ALWAYS)).toBe("Always");
+  });
+
+  it("sums the header mark up: nothing while off, an infinity sign for Always, else the time left (zerus-yacns)", () => {
+    expect(headerKeepWarm(undefined, NOW, 0)).toBeUndefined();
+    expect(headerKeepWarm(state({ enabled: false, until: null, state: "off" }), NOW, 0)).toBeUndefined();
+    const always = headerKeepWarm(state({ until: null }), NOW, 0)!;
+    expect([always.mark, always.label]).toEqual(["\u221e", "Keep cache warm: Always"]);
+    const timed = headerKeepWarm(state({ until: NOW + 2 * 3600 + 14 * 60 + 5, next_at: NOW + 600 }), NOW, 0)!;
+    expect([timed.mark, timed.label]).toEqual(["2 h 14 m", "Keep cache warm: 2 h 14 m left"]);
+    expect(timed.tooltip.split("\n")).toEqual(["Keep cache warm: 2 h 14 m left", "Next ping in 10 m", "Each ping reads the whole cached context from this account's usage.", "Click to change it in Details."]);
+    expect(headerKeepWarm(state({ until: NOW + 3 * 3600 }), NOW, 0)!.mark).toBe("3 h");
+    expect(headerKeepWarm(state({ until: NOW + 45 * 60 + 30 }), NOW, 0)!.mark).toBe("45 m");
+    expect(headerKeepWarm(state({ until: NOW + 30 }), NOW, 0)!.mark).toBe("<1 m");
   });
 
   it("says how long is left without dot separators", () => {

@@ -585,6 +585,8 @@ describe("Waiting for you", () => {
     const accepted = item("1", "phase_acceptance", "accept_phase", "Phase 1 is ready for your acceptance", NOW - 60,
       { phase: 1, summary: { accepted: 3, rejected: 1, cancelled: 0, tests: "tests pass", minutes: 42 } });
     expect(waitingKindLabel(accepted)).toBe("Phase acceptance");
+    // Task 245: the lead's plan changes have their own label and icon.
+    expect([waitingKindLabel({ kind: "lead_changes", action: "open_team" }), waitingKindIcon("lead_changes")]).toEqual(["Lead's changes", "pencil"]);
     expect(acceptanceSummary(accepted.detail!.summary as Record<string, unknown>)).toBe("3 accepted, 1 rejected, 0 cancelled; tests pass; 42 min");
     const answered: string[] = [];
     let row = new WaitingAnswer(accepted, f.port, "", () => {}, (done) => answered.push(done.id));

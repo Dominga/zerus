@@ -147,6 +147,7 @@ private slots:
     void aConfirmedDecisionLeavesWaitingAtOnceAndARefusedOneStays();
     void aLowDriveOpensBuildFoldersAndItsNoticeNamesTheDrive();
     void aPausedTeamWaitsWithResumeTeamAndIsNeverNotified();
+    void theLeadsChangesHaveTheirLabelSeenAndRevert();
     void initTestCase()
     {
         setUpCase();
@@ -2751,6 +2752,34 @@ void TestTeamsUiWaiting::aPausedTeamWaitsWithResumeTeamAndIsNeverNotified()
     QList<TeamWaitingPage::Item> all{TeamWaitingPage::parse(paused)};
     QCOMPARE(TeamWaitingFeed::decidedIds(all, "team-1", "resume", {}), QStringList{paused["id"].toString()});
     QVERIFY(TeamWaitingFeed::decidedIds(all, "team-2", "resume", {}).isEmpty());
+}
+
+// Task 245 (hgs task 162): the lead's plan changes inside the approved goal
+// are one digest: its own label, Seen, and Revert, which undoes the newest
+// change and names it in its tooltip.
+void TestTeamsUiWaiting::theLeadsChangesHaveTheirLabelSeenAndRevert()
+{
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    const QJsonObject digest{{"id", "team-1/lead_changes/digest"}, {"team", "team-1"}, {"team_name", "Checkout"}, {"kind", "lead_changes"},
+                             {"since", now - 60}, {"title", "The lead changed the plan 2 times inside the approved goal, newest: split #4 into #4 and #9"},
+                             {"action", "open_team"},
+                             {"changes", QJsonArray{QJsonObject{{"id", "lc2"}, {"summary", "split #4 into #4 and #9"}}, QJsonObject{{"id", "lc1"}, {"summary", "moved #3 to phase 2"}}}}};
+    QVERIFY(writeWaiting(script() + ".waiting", QJsonArray{digest}));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamWaitingPage page(&controller);
+    page.resize(980, 520); page.show();
+    WAIT_VERIFY(page.findChild<QPushButton *>("teamWaitingSeen"));
+    QCOMPARE(TeamWaitingPage::kindLabel("lead_changes"), QStringLiteral("Lead's changes"));
+    auto *revert = page.findChild<QPushButton *>("teamWaitingRevert");
+    QVERIFY(revert);
+    QCOMPARE(revert->toolTip(), QStringLiteral("Revert the newest change: split #4 into #4 and #9"));
+    revert->click();
+    QTRY_COMPARE(calls(script(), "revert-lead-change").size(), 1);
+    QCOMPARE(calls(script(), "revert-lead-change").first()["change"].toString(), QStringLiteral("lc2"));
+    page.findChild<QPushButton *>("teamWaitingSeen")->click();
+    QTRY_COMPARE(calls(script(), "seen-lead-changes").size(), 1);
+    QCOMPARE(calls(script(), "seen-lead-changes").first()["team"].toString(), QStringLiteral("team-1"));
 }
 
 #include "test_teamsui_waiting.moc"

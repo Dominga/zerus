@@ -300,7 +300,7 @@ function Row(props: { item: TeamWaitingItem; compact?: boolean }) {
         <Show when={item().kind === "lead_changes"}>
           <button class="btn small" data-waiting-seen onClick={(event) => { event.stopPropagation(); void send({ kind: "seen_lead_changes" }); }}>{tr("Seen")}</button>
           <Show when={changes().length > 0}>
-            <button class="btn small ghost" data-waiting-revert onClick={(event) => {
+            <button class="btn small ghost" data-waiting-revert title={tr("Revert the newest change: %1", changes()[0].summary)} onClick={(event) => {
               event.stopPropagation(); void send({ kind: "revert_lead_change", change: changes()[0].id });
             }}>{tr("Revert")}</button>
           </Show>

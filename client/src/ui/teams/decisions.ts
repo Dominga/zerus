@@ -488,6 +488,8 @@ export function waitingKindLabel(item: Pick<TeamWaitingItem, "kind" | "action">)
     case "team_paused": return tr("Team paused");
     // Task 186: an urgent team message the working lead has not received.
     case "lead_message_undelivered": return tr("Urgent message");
+    // Task 245 (hgs task 162): the lead's plan changes inside the approved goal, each revertible.
+    case "lead_changes": return tr("Lead's changes");
     default: return item.kind;
   }
 }
@@ -509,6 +511,7 @@ export function waitingKindIcon(kind: string): string {
     case "disk_low": return "hard-drive";
     case "team_paused": return "pause";
     case "lead_message_undelivered": return "message-square";
+    case "lead_changes": return "pencil";
     default: return "triangle-alert";
   }
 }

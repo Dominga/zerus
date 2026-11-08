@@ -98,6 +98,7 @@ QString TeamWaitingPage::kindLabel(const QString &kind)
     if (kind == "deferred") return tr("Deferred");   // task 97
     if (kind == "disk_low") return tr("Disk space");   // task 108
     if (kind == "team_paused") return tr("Team paused");   // task 112
+    if (kind == "lead_changes") return tr("Lead's changes");   // task 245 (hgs task 162)
     return kind;
 }
 
@@ -118,6 +119,7 @@ QString TeamWaitingPage::kindIcon(const QString &kind)
     if (kind == "deferred") return QStringLiteral("clock");
     if (kind == "disk_low") return QStringLiteral("attention");
     if (kind == "team_paused") return QStringLiteral("pause");
+    if (kind == "lead_changes") return QStringLiteral("pencil");   // task 245
     return QStringLiteral("warning");
 }
 
@@ -352,6 +354,8 @@ QWidget *TeamWaitingPage::rowFor(const Item &item)
         h->addWidget(seen);
         if (!item.changes.isEmpty()) {
             auto *revert = button(tr("Revert"), "teamWaitingRevert");
+            // Task 245: Revert undoes the newest change; its tooltip names it.
+            revert->setToolTip(tr("Revert the newest change: %1").arg(item.changes.first().toObject().value("summary").toString()));
             QObject::connect(revert, &QPushButton::clicked, frame, [this, item] {
                 const auto change = item.changes.first().toObject().value("id").toString();
                 if (!change.isEmpty()) m_teams->act(QStringLiteral("revert-lead-change"), QJsonObject{{"team", item.team}, {"change", change}});

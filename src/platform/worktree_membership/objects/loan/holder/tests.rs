@@ -59,7 +59,14 @@ fn the_readonly_holder_lives_across_a_physically_retired_phase_but_never_reloans
     fixture.release_loan();
     holder.joined(&request).unwrap();
     assert!(holder.settled());
+    // The census lists this test's own helper, not every process of this
+    // user on the host, any of which can be caught while it exits
+    // (zerus-89pkd). The assertions concern only the manifest's custody.
+    #[cfg(target_os = "linux")]
+    let roster = crate::platform::worktree_membership::test_roster::owned(&[fixture.child.id()]);
     let observed = holder.observe(1001, until()).unwrap();
+    #[cfg(target_os = "linux")]
+    drop(roster);
     assert_eq!(observed.capture, input.manifest.capture);
     assert_eq!(observed.checkout, input.manifest.checkout);
     assert_eq!(observed.expires, input.manifest.expires);
@@ -279,7 +286,13 @@ fn a_fresh_readonly_list_preserves_original_custody_but_never_expands_the_old_co
             .spawn()
             .unwrap(),
     );
+    // The census lists this test's own occupant (zerus-89pkd); the
+    // assertions concern only it and the original custody.
+    #[cfg(target_os = "linux")]
+    let roster = crate::platform::worktree_membership::test_roster::owned(&[child.0.id()]);
     let fresh = holder.observe(1001, until()).unwrap();
+    #[cfg(target_os = "linux")]
+    drop(roster);
     assert!(fresh.programs.iter().any(|p| p.pid == child.0.id()));
     assert_eq!(fresh.capture, input.manifest.capture);
     assert_eq!(fresh.checkout, input.manifest.checkout);
@@ -331,4 +344,25 @@ fn a_changed_checkout_name_cannot_be_reopened_as_the_original_holder() {
     assert!(!holder.phase.as_ref().unwrap().spent);
     assert!(!holder.settled());
     std::fs::remove_dir(&moved).unwrap();
+}
+
+/// zerus-89pkd: an owned roster never hides uncertainty from an observation.
+/// An entry that still exists without a cwd, as a process caught while it
+/// exits, fails the observation NotFound; it is never an empty list.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_observation_keeps_a_missing_read_in_an_existing_entry_uncertain() {
+    let (_dir, mut holder, _input, _request) = holder();
+    let roster = crate::platform::worktree_membership::test_roster::owned(&[]);
+    let entry = roster.path().join(u32::MAX.to_string());
+    std::fs::create_dir(&entry).unwrap();
+    for name in ["status", "stat"] {
+        std::fs::write(
+            entry.join(name),
+            std::fs::read(format!("/proc/self/{name}")).unwrap(),
+        )
+        .unwrap();
+    }
+    let error = holder.observe(1001, until()).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
 }

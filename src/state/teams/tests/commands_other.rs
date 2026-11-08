@@ -707,13 +707,18 @@ fn the_lead_never_answers_its_own_permission_card() {
 #[test]
 fn a_bad_finding_is_refused_with_the_report_not_at_accept() {
     // N13: "high" is no severity: the member hears it at once, and the
-    // corrected report is accepted.
+    // corrected report is accepted. Task #292: the validation runs on the
+    // owner's path, not the sandbox's queued write; the test forces it so it
+    // reads the same on a sandboxed machine.
+    crate::platform::set_test_sandboxed(Some(false));
     let (team, attempt, _) = review_team();
     with_review_team(&team, || {
         let error = call("report", json!({"task":1,"attempt":attempt,"text":"Done",
             "report":{"summary":"Done","findings":[finding("high","Lost write")]}}))
         .unwrap_err()
         .to_string();
+        // Task #229: a finding may name crit or minor too (the same severities
+        // a spawned follow-up takes), so the refusal names all five.
         assert!(error.contains("A finding is critical (crit), normal (minor) or later"), "{error}");
         assert_eq!(stored().task(1).unwrap().attempts[0].report, None);
         let error = call("report", json!({"task":1,"attempt":attempt,"text":"Done",
@@ -729,6 +734,7 @@ fn a_bad_finding_is_refused_with_the_report_not_at_accept() {
         assert_eq!(team.findings.len(), 1);
         assert_eq!(team.findings[0].severity, "critical");
     });
+    crate::platform::set_test_sandboxed(None);
 }
 
 #[test]

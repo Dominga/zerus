@@ -131,6 +131,17 @@ export function createNewTeam(port: NewTeamPort) {
     setAddendumEdited(false);
   };
   const close = () => setOpen(false);
+  /**
+   * Task 200 (Qt TeamNewTab::openDraft, F5): the form shows a draft again,
+   * from its lead's session or the drafts list. Nothing is sent: the draft's
+   * view (`new:<id>`) fills the fields as the lead last saved them, and the
+   * owner's edits save against its revision from then on.
+   */
+  const openDraft = (team: string) => {
+    if (!team || team === draftId()) return;
+    openNew();
+    setDraftId(team);
+  };
 
   const edit = (field: DraftField, value: NewTeamFields[DraftField]) => {
     setFields({ ...fields(), [field]: value } as NewTeamFields);
@@ -361,6 +372,7 @@ export function createNewTeam(port: NewTeamPort) {
   return {
     open,
     openNew,
+    openDraft,
     close,
     view,
     fields,

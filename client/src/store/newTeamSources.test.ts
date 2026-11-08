@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { accountChoices, catalogOf, computerChoices, coordinatorOf } from "./newTeamSources";
+import { accountChoices, catalogOf, computerChoices, coordinatorOf, draftLedBy, draftsOf, projectOfRow, shownTemplates, templateSeats, templateTaskCount, toggledFavourite } from "./newTeamSources";
 import { memberRoles } from "./newTeamForm";
-import type { AccountsView } from "../types";
+import type { AccountsView, TeamSummary } from "../types";
 
 // Task 56: New team from the rail offers what it offers from the Team tab:
 // every computer (with its online state), this computer's accounts, the
@@ -36,6 +36,47 @@ describe("New team sources", () => {
       { id: "ds", label: "DeepSeek", provider: "dsh", signedIn: false },
     ]);
     expect(accountChoices(undefined)).toEqual([]);
+    // Task 200 (Qt m_accounts[host]): a member on another computer gets that computer's accounts.
+    expect(accountChoices(view, "studio")).toEqual([{ id: "remote", label: "Work", provider: "codex", signedIn: true }]);
+  });
+
+  it("finds the draft a session leads, and lists the drafts newest first (task 200)", () => {
+    const lead = { id: "lead", role: "Lead", agent: "claude", state: "active", lead: true, session: { host: "", name: "claude/orbit/lead", run_id: "", conversation_id: "" } };
+    const draft = { id: "t1", status: "draft", members: [lead] };
+    expect(draftLedBy(draft, { name: "claude/orbit/lead" })).toBe("t1");
+    expect(draftLedBy({ ...draft, status: "running" }, { name: "claude/orbit/lead" })).toBe("");
+    expect(draftLedBy({ ...draft, members: [{ ...lead, lead: false }] }, { name: "claude/orbit/lead" })).toBe("");
+    expect(draftLedBy(draft, { name: "codex/orbit/other" })).toBe("");
+    expect(draftLedBy(undefined, { name: "claude/orbit/lead" })).toBe("");
+    const teams = [{ id: "a", status: "draft", updated: 5, name: "A", folder: "" }, { id: "b", status: "running", updated: 9, name: "B", folder: "" },
+      { id: "c", status: "draft", updated: 7, name: "C", folder: "" }] as unknown as TeamSummary[];
+    expect(draftsOf({ teams }).map((team) => team.id)).toEqual(["c", "a"]);
+    expect(draftsOf(undefined)).toEqual([]);
+  });
+
+  it("sends the selected session's project by name and id, the Inbox neither (task 200)", () => {
+    const names: Record<string, string> = { p1: "Orbit" };
+    expect(projectOfRow("p1", (id) => names[id])).toEqual({ project: "Orbit", projectId: "p1" });
+    expect(projectOfRow("p2", (id) => names[id])).toEqual({ project: "p2", projectId: "p2" });
+    expect(projectOfRow("ungrouped", (id) => names[id])).toEqual({});
+    expect(projectOfRow("", (id) => names[id])).toEqual({});
+  });
+
+  it("searches templates by name, description and roles, favourites first (task 200, Qt TeamTemplateList)", () => {
+    const catalog = catalogOf({ version: 3, roles: [{ id: "backend", name: "Backend engineer" }, { id: "qa", name: "Tester" }],
+      templates: [{ id: "feature", name: "Feature", description: "One feature", roster: [{ role: "backend", count: 2 }], tasks: [{ title: "a" }] },
+        { id: "audit", name: "Audit", description: "Review the code", roster: [{ role: "qa", count: 1 }] },
+        { id: "bugfix", name: "Bug fix", description: "", roster: [] }] })!;
+    expect(shownTemplates(catalog, "", [], false).map((found) => found.id)).toEqual(["audit", "bugfix", "feature"]);
+    expect(shownTemplates(catalog, "", ["feature"], false).map((found) => found.id)).toEqual(["feature", "audit", "bugfix"]);
+    expect(shownTemplates(catalog, "", ["feature"], true).map((found) => found.id)).toEqual(["feature"]);
+    expect(shownTemplates(catalog, "ENGINEER", [], false).map((found) => found.id)).toEqual(["feature"]);
+    expect(shownTemplates(catalog, "qa", [], false).map((found) => found.id)).toEqual(["audit"]);
+    expect(shownTemplates(catalog, "review", [], false).map((found) => found.id)).toEqual(["audit"]);
+    expect(shownTemplates(catalog, "nothing", [], false)).toEqual([]);
+    expect([templateSeats(catalog.templates[0]), templateTaskCount(catalog.templates[0]), templateTaskCount(catalog.templates[1])]).toEqual([2, 1, 0]);
+    expect(toggledFavourite(["a"], "b")).toEqual(["a", "b"]);
+    expect(toggledFavourite(["a", "b"], "a")).toEqual(["b"]);
   });
 
   it("offers the catalog's roles once it is read", () => {

@@ -9,7 +9,9 @@ describe("usage windows (inventory 8.4, gaps 1-4 and 7)", () => {
     expect(usageRetryWaiting(u, NOW)).toBe(true);
     expect(accountTooltip(u, NOW)).toContain("5h: 42% used");
     // A tooltip names the retry's clock time; only the visible notice counts seconds (zerus-5ryrx).
-    expect(rateLimitNotice(u, NOW, true)).toBe(`Limits 2 min ago, rate limited. Retry at ${clock(NOW + 100)}`);
+    expect(rateLimitNotice(u, NOW, true)).toBe(`Limits from ${clock(NOW - 120)}, rate limited. Retry at ${clock(NOW + 100)}`);
+    // A tooltip names clock times: it reads the same a minute later (zerus-f5gta).
+    expect(rateLimitNotice(u, NOW + 60, true)).toBe(rateLimitNotice(u, NOW, true));
     expect(accountTooltip(u, NOW)).toContain(rateLimitNotice(u, NOW, true));
     expect(accountTooltip(u, NOW)).not.toMatch(/Retry in \d+ s/);
     expect(accountTooltip(u, NOW + 1)).toBe(accountTooltip(u, NOW));

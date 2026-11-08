@@ -1788,6 +1788,7 @@ pub fn set_project_collapsed(state: State<'_, Organization>, project: String, co
 #[cfg(all(test, unix))]
 mod tests {
     mod legacy_projects;
+    mod remote_windows_folders;
     mod swarm_conflicts;
     mod swarm_dialog_cases;
     mod windows_folders;

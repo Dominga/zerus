@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { createEffect, createRoot, on } from "solid-js";
+import { createStore } from "solid-js/store";
 import { machineMeta } from "./testing";
 import { fleetKey } from "./newSession";
 import { folder, NOT_LOADED, project, settle, setup, type Json, type World } from "./newSessionFake";
@@ -650,6 +652,37 @@ describe("opening (SessionsWindow::showNewSession 2895-2928)", () => {
     expect(key({ ...card, local_host: { state: "stopped", pid: null, protocol: 1, conpty: "bundled", integrity: "medium", windows_session: null, error: null } })).not.toBe(before);
     expect(key({ ...card, local_sessions: true })).not.toBe(before);
     expect(fleetKey({ "": card }, ["mac"], (c) => c !== "mac")).not.toBe(fleetKey({ "": card }, ["mac"], () => true));
+  });
+
+  it("the fleet key changes when only a peer platform arrives", () => {
+    const cards = { "": machineMeta("pc"), mac: machineMeta("mac", {}, { platform: null }) };
+    const before = fleetKey(cards, ["mac"], () => true);
+    expect(fleetKey(cards, ["mac"], () => true)).toBe(before);
+    cards.mac = machineMeta("mac", {}, { platform: "windows" });
+    expect(fleetKey(cards, ["mac"], () => true)).not.toBe(before);
+  });
+
+  it("republishes normalized rows and native form input when only the selected peer platform arrives", async () => {
+    await createRoot(async (dispose) => {
+      const [cards, setCards] = createStore({ "": machineMeta("pc"), mac: machineMeta("mac", {}, { platform: null }) });
+      const t = setup((w) => { w.cards = cards; w.projects = [project("work", "Work", [folder("main", "mac", "C:\\Work\\Main")], { is_default: true })]; });
+      createEffect(on(() => fleetKey(cards, ["mac"], () => true), () => t.store.fleetChanged(), { defer: true }));
+      try {
+        await t.open({ computer: "mac", agent: "codex" });
+        await t.choose("work");
+        const accountKeys = t.state().accounts.map((row) => row.key);
+        expect(t.state().style).toBe("posix");
+        setCards("mac", "platform", "windows");
+        await settle();
+        expect(t.state()).toMatchObject({ style: "windows", folderPath: "C:\\Work\\Main", accountId: "work" });
+        expect(t.state().accounts.map((row) => row.key)).toEqual(accountKeys);
+        const latestInput = t.world.of("newSessionForm").at(-1)!.args[0] as NewSessionFormInput;
+        expect(latestInput.form).toMatchObject({ style: "windows", path: "C:/Work/Main" });
+      } finally {
+        t.store.closeNewSession();
+        dispose();
+      }
+    });
   });
 
   it("selectedHostTarget names a single peer filter only", () => {

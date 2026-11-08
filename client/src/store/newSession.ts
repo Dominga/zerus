@@ -1219,15 +1219,15 @@ export function createNewSessionStore(deps: NewSessionDeps, launches: FolderLaun
 }
 
 /**
- * What the open dialog reads of the fleet: the computers, whose card is ok
- * and its host name, and this computer's platform, local sessions and session
- * host (`can_enable_local_sessions`, launch.rs 178-185). A change runs setFleet.
+ * What the open dialog reads of the fleet: the computers, whose card is ok,
+ * host name and platform, and this computer's local sessions and session host
+ * (`can_enable_local_sessions`, launch.rs 178-185). A change runs setFleet.
  */
 export function fleetKey(cards: Record<ComputerId, MachineMeta>, peers: string[], online: (computer: ComputerId) => boolean): string {
   const local = cards[""];
   return JSON.stringify([
-    peers, ["", ...peers].map((id) => [online(id), cards[id]?.host ?? null]),
-    local?.platform ?? null, local?.local_sessions ?? null, local?.local_host ?? null,
+    peers, ["", ...peers].map((id) => [online(id), cards[id]?.host ?? null, cards[id]?.platform ?? null]),
+    local?.local_sessions ?? null, local?.local_host ?? null,
   ]);
 }
 

@@ -2,6 +2,7 @@
 //! native directory opener. Reading/editing a link creates no folder or checkout.
 use super::*;
 use serde::Deserialize;
+use zerus_client_core::paths::{self, Style};
 use zerus_client_core::swarm::{folder_edit, Folder};
 
 #[derive(Clone, Debug, Deserialize)]
@@ -34,7 +35,7 @@ pub enum Change {
         copy: bool,
     },
 }
-pub(super) fn machine(pump: &Pump, place: &Place) -> Result<String, String> {
+fn machine_style(pump: &Pump, place: &Place) -> Result<(String, Style), String> {
     let current = pump
         .machine(&zerus_client_core::ComputerId(place.computer.clone()))
         .ok_or("Waiting for this computer's identity.")?;
@@ -46,51 +47,135 @@ pub(super) fn machine(pump: &Pump, place: &Place) -> Result<String, String> {
     }
     if place.computer.is_empty()
         && (current.local_sessions == Some(false)
-            || zerus_client_core::paths::of(current.platform.as_deref(), true)
-                != zerus_client_core::paths::Style::Posix)
+            || paths::of(current.platform.as_deref(), true) != Style::Posix)
     {
         return Err("Folder management is unavailable for this computer.".into());
     }
-    Ok(if place.computer.is_empty() {
-        place.host.clone()
+    let style = if current.platform.as_deref() == Some("windows") {
+        Style::Windows
     } else {
-        place.computer.clone()
+        paths::of(current.platform.as_deref(), place.computer.is_empty())
+    };
+    Ok((
+        if place.computer.is_empty() {
+            place.host.clone()
+        } else {
+            place.computer.clone()
+        },
+        style,
+    ))
+}
+pub(super) fn machine(pump: &Pump, place: &Place) -> Result<String, String> {
+    machine_style(pump, place).map(|(machine, _)| machine)
+}
+fn original_style(pump: &Pump, original: &Folder) -> Result<Style, String> {
+    let local = pump.machine(&zerus_client_core::ComputerId::local());
+    if local.as_ref().and_then(|current| current.host.as_deref()) == Some(original.machine.as_str())
+    {
+        let current = local.ok_or("Waiting for this computer's identity.")?;
+        if !original.machine_id.is_empty()
+            && current.machine_id.as_deref() != Some(original.machine_id.as_str())
+        {
+            return Err("The selected computer changed. Select it again.".into());
+        }
+        if current.local_sessions == Some(false)
+            || paths::of(current.platform.as_deref(), true) != Style::Posix
+        {
+            return Err("Folder management is unavailable for this computer.".into());
+        }
+        return Ok(paths::of(current.platform.as_deref(), true));
+    }
+    let current = pump
+        .machine(&zerus_client_core::ComputerId(original.machine.clone()))
+        .ok_or("The selected computer changed. Select it again.")?;
+    if (!original.machine_id.is_empty()
+        && current.machine_id.as_deref() != Some(original.machine_id.as_str()))
+        || (!original.machine_name.is_empty()
+            && current.host.as_deref() != Some(original.machine_name.as_str()))
+    {
+        return Err("The selected computer changed. Select it again.".into());
+    }
+    Ok(if current.platform.as_deref() == Some("windows") {
+        Style::Windows
+    } else {
+        paths::of(current.platform.as_deref(), false)
     })
 }
-fn intent(pump: &Pump, project: String, change: Change, id: String) -> Result<Intent, String> {
-    let change = match change {
-        Change::Add { place, path, name } => folder_edit::Change::Set {
-            original: None,
-            id,
-            machine: machine(pump, &place)?,
-            path,
-            name,
-        },
+pub(super) fn intent(
+    pump: &Pump,
+    project: String,
+    change: Change,
+    id: String,
+) -> Result<Intent, String> {
+    match change {
+        Change::Add { place, path, name } => {
+            let (machine, style) = machine_style(pump, &place)?;
+            Ok(Intent::FolderStyled {
+                project,
+                original: None,
+                id,
+                machine,
+                path,
+                name,
+                style,
+                original_style: None,
+            })
+        }
         Change::Edit {
             original,
             place,
             path,
             name,
-        } => folder_edit::Change::Set {
-            original: Some(original),
-            id,
-            machine: machine(pump, &place)?,
-            path,
-            name,
-        },
-        Change::Remove { original } => folder_edit::Change::Remove { original },
+        } => {
+            let source_style = original_style(pump, &original)?;
+            let (machine, style) = machine_style(pump, &place)?;
+            Ok(Intent::FolderStyled {
+                project,
+                original: Some(original),
+                id,
+                machine,
+                path,
+                name,
+                style,
+                original_style: Some(source_style),
+            })
+        }
+        Change::Remove { original } => Ok(Intent::Folder {
+            project,
+            change: folder_edit::Change::Remove { original },
+        }),
         Change::Transfer {
             original,
             destination,
             copy,
-        } => folder_edit::Change::Transfer {
-            original,
-            destination,
-            copy,
-            id,
-        },
+        } => Ok(Intent::Folder {
+            project,
+            change: folder_edit::Change::Transfer {
+                original,
+                destination,
+                copy,
+                id,
+            },
+        }),
+    }
+}
+pub(super) fn selected_folder(intent: &Intent) -> Option<String> {
+    let Intent::FolderStyled {
+        original,
+        id,
+        machine,
+        path,
+        style,
+        ..
+    } = intent
+    else {
+        return None;
     };
-    Ok(Intent::Folder { project, change })
+    Some(match original {
+        None => id.clone(),
+        Some(original) if !original.id.is_empty() => original.id.clone(),
+        Some(_) => format!("{}\n{}", machine, paths::clean(path, *style)),
+    })
 }
 #[derive(serde::Serialize)]
 pub struct Changed {
@@ -107,7 +192,7 @@ pub async fn project_folder_change(
 ) -> Result<Changed, String> {
     let org = state.inner().clone();
     let id = uuid::Uuid::new_v4().to_string();
-    let folder = match &change {
+    let mut folder = match &change {
         Change::Add { .. } => Some(id.clone()),
         Change::Edit {
             original,
@@ -124,14 +209,18 @@ pub async fn project_folder_change(
                 } else {
                     &place.computer
                 },
-                zerus_client_core::paths::clean(path, zerus_client_core::paths::Style::Posix)
+                paths::clean(path, Style::Posix)
             )
         }),
         _ => None,
     };
-    tauri::async_runtime::spawn_blocking(move || Changed {
-        outcome: org.submit_checked(move |pump| intent(pump, project, change, id)),
-        folder,
+    tauri::async_runtime::spawn_blocking(move || {
+        let outcome = org.submit_checked(|pump| {
+            let admitted = intent(pump, project.clone(), change.clone(), id.clone())?;
+            folder = selected_folder(&admitted);
+            Ok(admitted)
+        });
+        Changed { outcome, folder }
     })
     .await
     .map_err(|e| e.to_string())

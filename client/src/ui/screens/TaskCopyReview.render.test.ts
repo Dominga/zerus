@@ -164,3 +164,67 @@ it.each(["moved", "refused", "unknown"])("a confirmed %s outcome survives panel 
     expect(reviewTaskCopy).toHaveBeenCalledTimes(2);
   } finally { finish?.(reply(state) as never); await flush(); }
 });
+
+it("retires an unconfirmed dialog whose original damage card disappears", async () => {
+  vi.mocked(reviewTaskCopy).mockResolvedValueOnce(reply() as never);
+  button("Review local copy…").click(); await flush();
+  expect(reviewingCopy()).toBeDefined();
+  const move = button("Move copy aside");
+  tasks.apply([{computer:"",key:"p",kind:"list",payload:{project:{id:"p"},tasks:[],damaged:[{uuid:uuid(2),kept:true,error:"another kept copy"}]}}]);
+  expect(host.querySelector('[aria-label="Damaged task copy ' + uuid() + '"]')).toBeNull();
+  expect(host.querySelectorAll("article")).toHaveLength(1);
+  expect(host.querySelector("dialog")).toBeNull();
+  move.click(); await flush();
+  expect(reviewTaskCopy).toHaveBeenCalledTimes(1);
+  expect(copyReviewBusy()).toBe(false);
+  expect(reviewingCopy()).toBeUndefined();
+});
+
+const keepSecondCard = () => tasks.apply([{ computer: "", key: "p", kind: "list", payload: { project: { id: "p" }, tasks: [], damaged: [{ uuid: uuid(2), kept: true, error: "another kept copy" }] } }]);
+
+it("retires a removed card's pending read before its late reply can open a dialog", async () => {
+  let finish!: (value: never) => void;
+  vi.mocked(reviewTaskCopy).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  button("Review local copy…").click(); keepSecondCard();
+  expect(copyReviewBusy()).toBe(false);
+  finish(reply() as never); await flush();
+  expect(reviewingCopy()).toBeUndefined();
+  expect(host.querySelector("dialog")).toBeNull();
+  expect(reviewTaskCopy).toHaveBeenCalledTimes(1);
+});
+
+it("removing another card does not retire the original unconfirmed review", async () => {
+  update(2); vi.mocked(reviewTaskCopy).mockResolvedValueOnce(reply() as never);
+  button("Review local copy…").click(); await flush();
+  const current = reviewingCopy();
+  update(1); await flush();
+  expect(reviewingCopy()).toBe(current);
+  expect(host.querySelector("dialog")).not.toBeNull();
+  expect(reviewTaskCopy).toHaveBeenCalledTimes(1);
+});
+
+it.each(["moved", "refused", "unknown"])("card cleanup retains an already-confirmed %s write and its original outcome", async (state) => {
+  let finish!: (value: never) => void;
+  vi.mocked(reviewTaskCopy).mockResolvedValueOnce(reply() as never)
+    .mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  try {
+    button("Review local copy…").click(); await flush(); button("Move copy aside").click();
+    const current = reviewingCopy(); keepSecondCard();
+    expect(copyReviewBusy()).toBe(true);
+    expect(reviewingCopy()).toBe(current);
+    finish(reply(state, { reason: "original result" }) as never); await flush();
+    expect(copyReviewBusy()).toBe(false);
+    expect(reviewingCopy()).toBeUndefined();
+    expect(copyReviewOutcome("p", uuid())).toEqual({ state, reason: "original result" });
+    expect(reviewTaskCopy).toHaveBeenCalledTimes(2);
+  } finally { finish?.(reply(state) as never); await flush(); }
+});
+
+it("also retires an idle confirmation if its origin disconnects outside card cleanup", async () => {
+  vi.mocked(reviewTaskCopy).mockResolvedValueOnce(reply() as never);
+  const origin = button("Review local copy…"); origin.click(); await flush(); origin.remove();
+  await confirmCopyReview();
+  expect(reviewingCopy()).toBeUndefined();
+  expect(host.querySelector("dialog")).toBeNull();
+  expect(reviewTaskCopy).toHaveBeenCalledTimes(1);
+});

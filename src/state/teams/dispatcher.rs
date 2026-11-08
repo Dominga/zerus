@@ -9940,6 +9940,17 @@ fn start_run(
     if request["member"].as_str() != Some(member.id.as_str()) {
         return refuse(format!("the folder belongs to {}", team.name_of(&member.id)));
     }
+    // Task #229: a Crit holds the release: no release candidate starts while one
+    // is open in the team.
+    if target_template == "release-candidate" {
+        let crits = super::plan::open_crits_all(team);
+        if !crits.is_empty() {
+            return refuse(format!(
+                "A critical task is open: {}; the release candidate starts once it is decided",
+                crits.iter().map(|(phase, id)| format!("#{id} in phase {phase}")).collect::<Vec<_>>().join(", ")
+            ));
+        }
+    }
     let attempt = request["attempt"].as_str().unwrap_or_default();
     // U36: a test stage builds under its stage run, as an attempt.
     if !attempt_of(team, attempt, &member.id) {

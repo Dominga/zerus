@@ -32,6 +32,15 @@ re-approves it. A phase needing the owner's acceptance holds later ones until
 accept-phase (a card). A phase is standard or free (the owner closes a free one). Once
 an hour Zerus names who is starved and what to do; a waiting role is not starved.
 
+Spawn follow-ups from a task or review, not by hand: a Crit blocks using the phase's
+result, a Minor does not. A Crit joins its origin's running phase at once (no card),
+deps on its origin, holds that phase's acceptance, close and any release candidate, and
+the owner is told in Waiting (revertible until it starts):
+  {"team":"ID","origin":12,"severity":"crit","tasks":[...]} | hgs team spawn --json
+A Minor joins the next phase that has not started, or a new Minor phase (free mode,
+right after the origin's, "new_phase":true) that may end with tail tasks ("tail":true)
+depending on all its minors. A Minor never blocks its origin's phase.
+
 Decide reports. A report reaches your inbox (hgs team inbox). Check its claim, then:
   {"request_id":"U","team":"ID","task":4} | hgs team accept --json
 reject needs "reason" and reworks on the same member; "fresh":true gives it to a free

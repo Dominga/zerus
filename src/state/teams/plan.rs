@@ -1,7 +1,7 @@
 //! WhiteWh fork: pure rules of a team's task graph, as the prototype
 //! (design/agent-teams/index.html: cycleNodes, layersOf, chainOf, readyTasks,
 //! planErrors) defines them. Edges run from a dependency to its dependent.
-use super::model::{AttemptState, DependencyKind, Member, MemberState, Phase, PhaseAcceptance, PhasePause, PhaseState, Task, TaskStatus, Team};
+use super::model::{AttemptState, DependencyKind, Member, MemberState, Phase, PhaseAcceptance, PhaseKind, PhasePause, PhaseState, Task, TaskStatus, Team};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
@@ -766,6 +766,8 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
                 "running"
             };
             let health = phase_health(team, n);
+            // Task #229: a phase's kind, and the critical tasks holding it.
+            let crit = open_crits(team, n);
             // A phase with no open tasks has nothing to schedule: no line.
             let mut line = if open == 0 {
                 String::new()
@@ -793,8 +795,46 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
                 "pause": pause,
                 "acceptance": record.map_or(PhaseAcceptance::Lead, |phase| phase.acceptance),
                 "health_line": line,
+                // Task #229: the phase's kind, its open critical tasks and the
+                // gate they hold (the lead's own change, shown to every client).
+                "kind": record.map_or(PhaseKind::Plan, |phase| phase.kind).as_str(),
+                "crit": crit,
+                "crit_gate": crit_gate(team, n),
             })
         })
+        .collect()
+}
+
+/// Task #229: the critical tasks of a phase that are still open. While one is,
+/// the phase cannot be accepted or closed, and no release candidate starts.
+pub(crate) fn open_crits(team: &Team, phase: u32) -> Vec<u32> {
+    team.tasks
+        .iter()
+        .filter(|task| task.phase == phase && task.severity == "crit" && !task.status.finished())
+        .map(|task| task.id)
+        .collect()
+}
+
+/// Task #229: why a phase is held by its critical tasks, in one line, or None.
+pub(crate) fn crit_gate(team: &Team, phase: u32) -> Option<String> {
+    let open = open_crits(team, phase);
+    if open.is_empty() {
+        return None;
+    }
+    let ids = open.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(", ");
+    Some(if open.len() == 1 {
+        format!("critical task {ids} in phase {phase} is open")
+    } else {
+        format!("critical tasks {ids} in phase {phase} are open")
+    })
+}
+
+/// Task #229: every open critical task in the team, with its phase.
+pub(crate) fn open_crits_all(team: &Team) -> Vec<(u32, u32)> {
+    team.tasks
+        .iter()
+        .filter(|task| task.severity == "crit" && !task.status.finished())
+        .map(|task| (task.phase, task.id))
         .collect()
 }
 

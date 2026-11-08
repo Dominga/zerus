@@ -1899,6 +1899,43 @@ task has started since, or when another task depends on a task it added.
 seen (with `"change"`, up to that one). `hgs team lead-changes --json` lists
 them. At most 300 are kept, seen or reverted ones leaving first.
 
+### Critical and Minor follow-ups (task 229)
+
+Owner, 2026-11-07: "one task or review can spawn new tasks with a status -
+Crit or Minor. Crit: blocks using the phase's result (its release). Minor:
+shortcomings or missing functionality that do not block the phase's result."
+The lead spawns them with `{"team","origin":N,"severity":"crit"|"minor",
+"tasks":[...]} | hgs team spawn --json`; each spawned task carries its `origin`
+(a task or review) and its `severity`, and a report's or a review's finding
+may name that severity for the lead to turn into a task.
+
+A **Crit** joins the running phase of its origin at once and without a card.
+It becomes a hard dependency of what its origin produced (`deps` names the
+origin), so nothing that uses the phase's result runs before it is decided, and
+while it is open the phase cannot be accepted or closed, no release candidate
+starts (the `release-candidate` run is refused naming the crits), and `finish`
+waits. The owner is told at once, without acting: Waiting for you shows one
+`crit_added` item per open crit, "The lead added critical task #N to phase P
+(from #origin): title" (action `open_task`, the desktop notifies it like any
+Waiting item), the plan feed carries `task_spawned`, and the change is the
+lead's own `lead_changes` entry (`lcN`, "opened critical #N ..."), revertible
+until the crit starts.
+
+A **Minor** blocks nothing. It joins the next phase that has not started, or a
+Minor phase the lead opens (`"new_phase":true`, or when no later phase is
+unstarted): a phase of `kind` "minor" that runs at once without an approval
+card and in free mode, ordered right after the origin's phase. A Minor phase
+may end with **tail tasks** (`"tail":true`) that depend on every Minor in it,
+such as the release build with the fixes. A Minor never gates its origin's
+phase.
+
+`hgs team status --json` carries each task's `severity` and `origin`, each
+phase's `kind`, `crit` (its open critical task ids) and `crit_gate` (the line
+that holds it), and the team's `crit` list of open crits with their phases;
+`hgs team events` carries `task_spawned` with the severity, the origin, the
+phase and the gate. The desktop renders these fields; the CLI is their source.
+
+
 The owner's typed word (`owner_word`) is no longer taken where a card exists:
 approve, approve-phase, discard-phase, return-to-draft, unpause-phase,
 phase-acceptance, accept-phase, add-member, scale, drain, swap-member,

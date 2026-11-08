@@ -24,6 +24,10 @@ export interface ActTeam {
   free_phase?: number | null; phase_modes_known?: boolean;
   /** Task #219: the lead's open proposals; a switch-plan-mode one marks its phase. */
   proposals?: { kind: string; mode?: string; change?: unknown }[];
+  /** D2: the first page of the team's findings. */
+  findings?: { items: import("../../types").TeamFindingItem[]; next_cursor?: string };
+  /** F7: the team a next goal led to. */
+  next?: string;
   widenings?: { member?: string; role?: string; from?: string; to?: string }[];
   children?: { team: string; name?: string; status?: string }[];
 }
@@ -221,7 +225,7 @@ export function leadStall(team: Pick<ActTeam, "attention">): LeadStall | null {
 }
 
 export interface BarAction {
-  id: "resumeLimits" | "finish" | "discard" | "sendBack" | "approve" | "pause" | "resume" | "stop" | "archive";
+  id: "resumeLimits" | "finish" | "discard" | "sendBack" | "approve" | "pause" | "resume" | "stop" | "archive" | "findings" | "nextGoal";
   text: string; tip: string; primary: boolean; danger: boolean; enabled: boolean;
   /** The Resume after limits switch's state. */
   checked?: boolean;
@@ -263,6 +267,8 @@ export function barActions(team: ActTeam, planMode: string): BarAction[] {
     out.push({ primary: false, danger: false, enabled: true, ...a });
   };
   const status = team.status;
+  if ((team.findings?.items.length ?? 0) > 0)
+    action({ id: "findings", text: tr("Findings…"), tip: tr("The owner's findings: fixed, dropped, deferred, reopened, urgent or replanned") });
   if (status === "planning" || status === "running" || status === "paused") {
     const on = team.settings.resume_after_limits === true;
     action({ id: "resumeLimits", text: tr("Resume after limits"), checked: on,
@@ -286,8 +292,15 @@ export function barActions(team: ActTeam, planMode: string): BarAction[] {
   }
   if (status === "running" || status === "paused") action({ id: "stop", text: tr("Stop…"), tip: tr("Cancel every open task"), danger: true });
   if (status === "done" || status === "stopped") action({ id: "archive", text: tr("Archive"), tip: tr("Archive the team") });
+  if (status === "done" && !team.next)
+    action({ id: "nextGoal", text: tr("Next goal…"), tip: tr("A new team takes the next goal with this folder, its settings, the lead and the members"), primary: true });
   return out;
 }
+
+/** D2: the finding actions' words, as Qt's dialog names them. */
+export const FINDING_LABELS = {
+  fixed: tr("Fixed"), dropped: tr("Dropped"), defer: tr("Defer"), reopen: tr("Reopen"), urgent: tr("Urgent phase"), replan: tr("Replan"),
+} as const;
 
 /**
  * G1: the sub-teams a tree action reaches and their member sessions, the team
@@ -599,6 +612,30 @@ export class TeamActions {
   }
   stop(impact: { teams: number; sessions: number }) { return this.run("stop", { kind: "stop" }, stopConfirmation(this.where().team, impact)); }
   archive() { return this.run("archive", { kind: "archive" }); }
+  /** D2: one finding's answer; every answer but Replan asks first (Qt's teamFindingActionConfirm). */
+  finding(finding: string, action: Extract<TeamAction, { kind: "finding" }>["action"], proposal?: string, task?: number) {
+    const item = this.where().team.findings?.items.find((found) => found.id === finding);
+    const label = FINDING_LABELS[action];
+    const ask: TeamConfirmation | undefined = action === "replan" ? undefined : {
+      name: "teamFindingActionConfirm", title: label, text: tr("%1 finding \"%2\"?", label, item?.title || finding), action: label,
+    };
+    return this.run(`finding:${finding}:${action}`, {
+      kind: "finding", finding, action, ...(proposal ? { proposal } : {}), ...(task ? { task } : {}),
+    }, ask);
+  }
+  /** F7: the next goal a Done team starts with the same people. */
+  nextGoal(goal: string, name?: string) {
+    return this.run("next-goal", { kind: "next_goal", goal: goal.trim(), ...(name?.trim() ? { name: name.trim() } : {}) });
+  }
+  /** G1: a sub-team from a task, with the assignee as its lead. */
+  createSubteam(name: string, task: number) {
+    const { team } = this.where();
+    const ask: TeamConfirmation = {
+      name: "teamDelegateConfirm", title: tr("Delegate to a sub-team"),
+      text: tr("Create a sub-team from task #%1? Its lead will be the assignee.", task), action: tr("Delegate"),
+    };
+    return this.run(`create:${task}`, { kind: "create", name: name.trim(), parent: { team: team.id, task } }, ask);
+  }
   /** Finish: the dialog with its summary is the confirmation. */
   async finish(summary: string) {
     if (!finishSummary(summary).ok) return undefined;

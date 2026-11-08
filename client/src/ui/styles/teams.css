@@ -262,3 +262,15 @@
 .team-swap-field { display: flex; flex-direction: column; gap: 3px; font-size: var(--fs-sm); }
 .team-swap-mode { display: flex; align-items: center; gap: 6px; font-size: var(--fs-sm); }
 .team-swap-session { margin-left: 22px; width: calc(100% - 22px); }
+
+/* Task #225: the Findings, Next goal and Delegate dialogs. */
+.team-findings-dialog { width: min(760px, 94vw); }
+.team-findings-list { display: flex; flex-direction: column; gap: 10px; max-height: 60vh; overflow-y: auto; }
+.team-finding-row { display: flex; flex-direction: column; gap: 3px; padding-bottom: 8px; border-bottom: 1px solid var(--z-color-divider); }
+.team-finding-row p { margin: 0; }
+.team-finding-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 3px; }
+.team-finding-critical { color: var(--z-color-danger); }
+.team-finding-normal { color: var(--z-color-warn); }
+.team-next-goal-dialog { width: min(620px, 94vw); }
+.team-next-goal-dialog .nt-field { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; font-size: var(--fs-sm); color: var(--z-color-muted); }
+.team-task-delegate { margin: 4px 0; }

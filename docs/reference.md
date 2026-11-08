@@ -2808,6 +2808,41 @@ connection has it open, and this hgs's next write open switches it again.
 `hgs team list` reads every record before it parses any, so a read never holds
 the store while megabytes of JSON parse.
 
+### The team store's write lock is held briefly
+
+One team write at a time holds the store's write lock (`BEGIN IMMEDIATE` to its
+commit), and SQLite queues nobody: a waiting call retries until its 60 s bound
+and fails with "The team database stayed busy for 60 s". Since task 287:
+
+- Every write logs how long it held the lock, with the code that took it, in
+  `logs/team-store-locks.log` under the state root (one JSON line: `caller` as
+  file and line, `team`, `held_ms`, `waited_ms`, `outcome` commit or rollback,
+  `level`). A hold of 200 ms or more is `warn` and also goes to
+  `logs/slow-calls.log`. Both logs keep 256 KB plus one older file. A process
+  started while the lock is held (a git that slipped into a transaction) is a
+  `warn` line naming the holder.
+- A member's report makes its git reads (its folder's HEAD and branch, the
+  test delta against the lead's commit) before the transaction; the
+  transaction reads the answers from memory.
+- `hgs team inbox` and `hgs team current` mark messages read by changing only
+  the message rows and adding the receipt's event. The team record is not
+  rewritten and its revision does not move. The member's unread summary in the
+  record follows at the worker's next tick. A mark that fails (the store stayed
+  busy) still prints the messages, with `read.error`; they stay unread and come
+  again with the next inbox.
+- The worker applies a team's steps of one tick to a working copy and writes
+  it in one transaction at the end. A change with a request id, or one of the
+  working tier (a doorbell), writes the copy first and the batch goes on after
+  it. If another writer changed the team meanwhile, the worker's changes are
+  merged over that record: objects key by key, lists of records by their `id`
+  (or a phase's `n`). A value both changed keeps the other writer's, which the
+  next tick recomputes from. The worker pauses 100 ms between teams so a
+  waiting call takes the lock.
+- The member projection (`team_rule_members`) is rebuilt only when the members
+  change. The members are kept in their own column with the revision that
+  wrote them. A write by an older hgs, which sets neither, still rebuilds it
+  from the record.
+
 ### A stalled lead tells the owner
 
 When the lead's decisions (a member's report, question or permission) have

@@ -3881,6 +3881,9 @@ pub(crate) fn member_folder_path(team: &Team, member: &Member) -> anyhow::Result
 /// (a temp dir) so a TEMP inside another repository cannot leak into discovery
 /// without touching the process environment other tests share.
 pub(crate) fn git_command(folder: &str) -> std::process::Command {
+    // Task 287: a git started while this thread holds the store's write lock
+    // is a warning in the lock log.
+    super::store::note_process("git", &[folder.to_owned()]);
     let mut command = std::process::Command::new("git");
     // A member's folder may carry its own config: no fsmonitor, hooks or
     // optional locks run for these reads.
@@ -3942,12 +3945,47 @@ pub(crate) fn set_git_ceiling(ceiling: &str) {
     GIT_CEILING.with(|value| *value.borrow_mut() = Some(ceiling.to_owned()));
 }
 
-pub(crate) fn git_at(folder: &str, args: &[&str]) -> Option<String> {
-    let output = git_command(folder).args(args).output().ok()?;
-    if !output.status.success() {
-        return None;
+thread_local! {
+    /// Task 287: git answers gathered before a store transaction and served
+    /// inside it (`with_git_answers`), so no git runs under the write lock.
+    static GIT_MEMO: std::cell::RefCell<Option<std::collections::HashMap<(String, Vec<String>), Option<String>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Task 287: runs `prefetch` (the git reads a change will make, outside any
+/// transaction), then `then` (the change) with those answers served from
+/// memory. A read `prefetch` did not make still runs, and the store logs it.
+pub(crate) fn with_git_answers<T>(prefetch: impl FnOnce(), then: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            GIT_MEMO.with(|memo| *memo.borrow_mut() = None);
+        }
     }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    GIT_MEMO.with(|memo| *memo.borrow_mut() = Some(std::collections::HashMap::new()));
+    let _reset = Reset;
+    prefetch();
+    then()
+}
+
+pub(crate) fn git_at(folder: &str, args: &[&str]) -> Option<String> {
+    let key = (folder.to_owned(), args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<String>>());
+    if let Some(answer) = GIT_MEMO.with(|memo| memo.borrow().as_ref().and_then(|memo| memo.get(&key).cloned())) {
+        return answer;
+    }
+    let answer = (|| {
+        let output = git_command(folder).args(args).output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    })();
+    GIT_MEMO.with(|memo| {
+        if let Some(memo) = memo.borrow_mut().as_mut() {
+            memo.insert(key, answer.clone());
+        }
+    });
+    answer
 }
 
 /// F1.4: the reason a member's folder cannot be started in, or None when it
@@ -4564,6 +4602,7 @@ fn check_folder_branch(team: &Team, member: &Member, folder: &str) -> anyhow::Re
 }
 
 /// One change to a team outside any request: the dispatcher's own record.
+#[track_caller]
 fn change(store: &mut Store, team: &str, change: impl FnOnce(&mut Team, &mut Vec<Event>) -> anyhow::Result<()>) -> anyhow::Result<()> {
     store.mutate(None, team, None, |team, events| {
         change(team, events)?;
@@ -9399,12 +9438,13 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
     sample_contexts(store, &teams, &sessions, now());
     let teams: Vec<Team> = teams.iter().filter_map(|t| store.load(&t.id).ok().flatten()).collect();
     defer_watched(&teams, &sessions);
-    for team in &teams {
-        for step in steps_with(team, &sessions, now(), Some(&listed)) {
-            if let Err(error) = run_step(store, team, &step, host) {
-                eprintln!("hgs team worker: {}: {step:?}: {error}", team.name);
-            }
+    for (index, team) in teams.iter().enumerate() {
+        // Task 287: a member's call waiting for the store gets it between two
+        // teams (SQLite's busy wait queues nobody).
+        if index > 0 {
+            std::thread::sleep(TEAM_YIELD);
         }
+        run_team_steps(store, team, &sessions, &listed, host);
         // U62 (#717): the team's test queue. An empty queue is a no-op (no load
         // read); a read is at most once per 30 s, and results become notices.
         // U62 (#760): the merge queue first, so its tests run in the same tick.
@@ -9419,6 +9459,58 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
     // thread of its own so removing gigabytes never holds up a tick.
     crate::state::build_dirs::maintain_in_background(now());
     Ok(true)
+}
+
+/// Task 287: the pause between two teams of a tick, longer than SQLite's
+/// longest busy-wait sleep, so a waiting member call takes the lock.
+const TEAM_YIELD: Duration = Duration::from_millis(100);
+
+/// Task 287 (owner, 2026-11-08): a team's steps of one tick are one
+/// transaction. Every change the steps make goes to the store's working copy
+/// of the team (`Store::begin_batch`), which is written once at the end; a
+/// change with a request id or of the working tier writes it first.
+fn run_team_steps(store: &mut Store, team: &Team, sessions: &[Seen], listed: &BTreeSet<String>, host: &str) {
+    if let Err(error) = store.begin_batch(&team.id) {
+        eprintln!("hgs team worker: {}: {error:#}", team.name);
+    }
+    if let Err(error) = refresh_unread(store, team) {
+        eprintln!("hgs team worker: {}: unread: {error:#}", team.name);
+    }
+    let fresh = store.load(&team.id).ok().flatten();
+    let team = fresh.as_ref().unwrap_or(team);
+    for step in steps_with(team, sessions, now(), Some(listed)) {
+        if let Err(error) = run_step(store, team, &step, host) {
+            eprintln!("hgs team worker: {}: {step:?}: {error}", team.name);
+        }
+    }
+    if let Err(error) = store.end_batch() {
+        eprintln!("hgs team worker: {}: the tick's changes were not written: {error:#}", team.name);
+    }
+}
+
+/// Task 287: marking messages read changes only their rows; the tick brings
+/// each member's unread summary in the team record up to date from them, in
+/// its own transaction, before its steps ring anyone.
+pub(crate) fn refresh_unread(store: &mut Store, team: &Team) -> anyhow::Result<()> {
+    let at = now();
+    let mut fresh = Vec::new();
+    for member in team.members.iter().filter(|member| member.unread.is_some()) {
+        let summary = super::working::summary(store.connection(), &team.id, &member.id, member.unread.as_ref(), at)?;
+        if summary != member.unread {
+            fresh.push((member.id.clone(), summary));
+        }
+    }
+    if fresh.is_empty() {
+        return Ok(());
+    }
+    change(store, &team.id, |team, _| {
+        for (id, summary) in fresh {
+            if let Some(member) = team.members.iter_mut().find(|member| member.id == id) {
+                member.unread = summary;
+            }
+        }
+        Ok(())
+    })
 }
 
 /// DeepSeek reports only the running total of its tokens and keeps no history,
@@ -10031,9 +10123,8 @@ fn apply_outbox(store: &mut Store, team: &Team, member: &Member, request: &Value
         let ids: Vec<String> = input["ids"].as_array().into_iter().flatten().filter_map(|id| id.as_str().map(str::to_owned)).take(200).collect();
         let via = if input["via"] == "current" { "current" } else { "inbox" };
         let member_id = member.id.clone();
-        let marked = store.mutate_working(&team.id, |tx, team, events| {
-            super::commands::read_messages(tx, team, &member_id, &ids, via, &request_id, events)
-        })?;
+        // Task 287: the rows and the receipt only, never the team record.
+        let marked = store.write_rows(&team.id, |tx, events| super::commands::read_messages(tx, team, &member_id, &ids, via, &request_id, events))?;
         return Ok(json!({"status":"read","read":marked,"request_id":request_id}));
     }
     if op != "expect" {
@@ -10086,9 +10177,12 @@ fn apply_outbox(store: &mut Store, team: &Team, member: &Member, request: &Value
         }
     }
     let member_id = member.id.clone();
-    let value = store.mutate(Some((&request_id, &input)), &team.id, None, |team, events| {
-        ops::apply(team, op, &input, &ops::Actor::Member(member_id.clone()), &BTreeSet::new(), events)
-    })?;
+    let actor = ops::Actor::Member(member_id.clone());
+    // Task 287: the report's git reads run before the store's lock.
+    let value = with_git_answers(
+        || ops::prefetch_git(team, op, &input, &actor),
+        || store.mutate(Some((&request_id, &input)), &team.id, None, |team, events| ops::apply(team, op, &input, &actor, &BTreeSet::new(), events)),
+    )?;
     // 9.6: a queued reply is the same answer the direct path routes down to the
     // sub-team's question; the answer is already recorded, so a routing error
     // is logged and never refused as if nothing had been applied.
@@ -10412,6 +10506,9 @@ mod dispatcher_crash;
 #[cfg(test)]
 #[path = "tests/dispatcher_pause_cold.rs"]
 mod dispatcher_pause_cold;
+#[cfg(test)]
+#[path = "tests/dispatcher_store_locks.rs"]
+mod dispatcher_store_locks;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_host_start.rs"]

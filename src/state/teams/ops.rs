@@ -3700,6 +3700,49 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     report_with(team, input, actor, false, events)
 }
 
+/// #684 N1, #718: a member's report records its folder's HEAD and branch, so a
+/// later stage checks that commit and never reads HEAD at its start, and the
+/// test lines and functions the change adds and removes against the lead's
+/// commit (the project's test globs say what a test file is).
+/// Task 287: every one of these is a git read; `prefetch_git` makes them
+/// before the store's transaction and the report reads the answers.
+fn report_git(team: &Team, id: u32, by_member: &str) -> (String, String, Option<Value>) {
+    if by_member.is_empty() {
+        return (String::new(), String::new(), None);
+    }
+    let folder = team.member(by_member).and_then(|member| super::dispatcher::member_folder_path(team, member).ok()).unwrap_or_default();
+    if folder.is_empty() || !std::path::Path::new(&folder).is_dir() || !super::stages::is_git(&folder) {
+        return (String::new(), String::new(), None);
+    }
+    let head = super::dispatcher::git_at(&folder, &["rev-parse", "HEAD"]).unwrap_or_default();
+    let branch = super::dispatcher::task_branch(team, id, by_member)
+        .or_else(|| super::dispatcher::git_at(&folder, &["rev-parse", "--abbrev-ref", "HEAD"]).filter(|branch| branch != "HEAD"))
+        .unwrap_or_default();
+    let test_delta = if head.is_empty() || team.folder.is_empty() {
+        None
+    } else {
+        let base = super::dispatcher::git_at(&team.folder, &["rev-parse", "HEAD"]).unwrap_or_default();
+        match crate::test_discipline::load(std::path::Path::new(&team.folder), None) {
+            Ok(loaded) if !base.is_empty() && loaded.active() => super::test_results::report_delta(&folder, &base, &loaded.config),
+            _ => None,
+        }
+    };
+    (head, branch, test_delta)
+}
+
+/// Task 287: the git reads an operation will make, made now, before the store's
+/// transaction, for `dispatcher::with_git_answers` to serve inside it: a
+/// report's folder HEAD, branch and test delta (`report_git`).
+pub(crate) fn prefetch_git(team: &Team, op: &str, input: &Value, actor: &Actor) {
+    if op != "report" || input["interim"].as_bool() == Some(true) {
+        return;
+    }
+    let Ok(id) = task_id(input) else { return };
+    if let Actor::Member(member) = actor {
+        let _ = report_git(team, id, member);
+    }
+}
+
 /// `captured`: Zerus records the member's last reply (A2); it never enters the
 /// pipeline's stages (#538 C1).
 fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, events: &mut Vec<Event>) -> anyhow::Result<Value> {
@@ -3784,34 +3827,7 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
         ));
         return Ok(json!({"status":"interim","task":id,"attempt":n}));
     }
-    // #684 N1: the attempt records its folder's HEAD and branch at the report,
-    // so a later stage checks that commit and never reads HEAD at its start.
-    let (folder_head, folder_branch) = if by_member.is_empty() {
-        (String::new(), String::new())
-    } else {
-        let folder = team.member(&by_member).and_then(|member| super::dispatcher::member_folder_path(team, member).ok()).unwrap_or_default();
-        if folder.is_empty() || !std::path::Path::new(&folder).is_dir() || !super::stages::is_git(&folder) {
-            (String::new(), String::new())
-        } else {
-            let head = super::dispatcher::git_at(&folder, &["rev-parse", "HEAD"]).unwrap_or_default();
-            let branch = super::dispatcher::task_branch(team, id, &by_member)
-                .or_else(|| super::dispatcher::git_at(&folder, &["rev-parse", "--abbrev-ref", "HEAD"]).filter(|branch| branch != "HEAD"))
-                .unwrap_or_default();
-            (head, branch)
-        }
-    };
-    // #718: the test lines and functions the change adds and removes, against
-    // the lead's commit; the project's test globs say what a test file is.
-    let test_delta = if folder_head.is_empty() || team.folder.is_empty() {
-        None
-    } else {
-        let folder = team.member(&by_member).and_then(|member| super::dispatcher::member_folder_path(team, member).ok()).unwrap_or_default();
-        let base = super::dispatcher::git_at(&team.folder, &["rev-parse", "HEAD"]).unwrap_or_default();
-        match crate::test_discipline::load(std::path::Path::new(&team.folder), None) {
-            Ok(loaded) if !base.is_empty() && loaded.active() => super::test_results::report_delta(&folder, &base, &loaded.config),
-            _ => None,
-        }
-    };
+    let (folder_head, folder_branch, test_delta) = report_git(team, id, &by_member);
     // C1: the lead reports its own task and accepts it in one step; nobody
     // else accepts on a report.
     if accept {

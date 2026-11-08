@@ -87,7 +87,7 @@ pub(crate) fn log_path() -> PathBuf {
 }
 
 /// Appends one line, first moving a full log aside (one older file).
-fn append(path: &Path, line: &str) -> std::io::Result<()> {
+pub(crate) fn append(path: &Path, line: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

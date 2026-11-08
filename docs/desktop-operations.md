@@ -570,7 +570,10 @@ the hand-over the draft is the delivery the service holds, like a handed
 "Compact and continue": its row shows the message sending, the status shows
 the service's line, and Cancel send stays shown but locked. Once offered,
 nothing falls back: a lost reply goes to the read-only lookup, and Unknown is
-never sent again. A recorded send clears the draft. A send that never started
+never sent again. A recorded send clears the draft; its row, recorded under
+the stopped run, then belongs to the run the resume's receipt returned as well,
+so it stays shown until the agent's history shows the message
+(zerus-5wmh.66.4.9.3). A send that never started
 keeps the draft and releases its identity: after a refused resume with "The
 session was not resumed", after a resume whose agent never became ready with
 the direct path's own "The agent did not become ready" line. A send that may

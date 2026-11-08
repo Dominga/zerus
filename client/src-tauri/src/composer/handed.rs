@@ -51,7 +51,8 @@ type CompactCheckFn = dyn Fn(&CompactPlan) -> Checked + Send + Sync;
 type ResumeHandingFn<'a> = dyn Fn(&ResumePlan) -> bool + 'a;
 type ResumeFn =
     dyn Fn(&str, &Checkpoint, &[u8], &[u8], &ResumeHandingFn<'_>) -> ResumeAnswer + Send + Sync;
-type ResumeCheckFn = dyn Fn(&ResumePlan) -> Checked + Send + Sync;
+/// A check of a handed resume, with the run its resume's receipt returned.
+type ResumeCheckFn = dyn Fn(&ResumePlan) -> (Checked, Option<String>) + Send + Sync;
 
 /// The selected desktop service's deferred send route.
 pub struct DeferredRoute {
@@ -77,7 +78,8 @@ pub struct ResumeRoute {
     /// right before the offer is written, and waits, bounded, for its
     /// result.
     pub offer: Arc<ResumeFn>,
-    /// One read-only lookup by the exact plan. It never resumes or sends.
+    /// One read-only lookup by the exact plan, with the run its resume's
+    /// receipt returned once recorded. It never resumes or sends.
     pub check: Arc<ResumeCheckFn>,
 }
 
@@ -128,16 +130,17 @@ impl Continuation {
     }
 }
 
-/// What the service says about a continuation it was offered, either kind.
+/// What the service says about a continuation it was offered, either kind;
+/// a settled resume names the run its message's row belongs to.
 enum Continued {
-    Settled(SendAnswer),
+    Settled(SendAnswer, Option<String>),
     Pending(HandedPlan),
     Direct,
 }
 impl From<CompactAnswer> for Continued {
     fn from(answer: CompactAnswer) -> Self {
         match answer {
-            CompactAnswer::Settled(answer) => Self::Settled(answer),
+            CompactAnswer::Settled(answer) => Self::Settled(answer, None),
             CompactAnswer::Pending(plan) => Self::Pending(HandedPlan::Compact(plan)),
             CompactAnswer::Direct => Self::Direct,
         }
@@ -146,7 +149,7 @@ impl From<CompactAnswer> for Continued {
 impl From<ResumeAnswer> for Continued {
     fn from(answer: ResumeAnswer) -> Self {
         match answer {
-            ResumeAnswer::Settled(answer) => Self::Settled(answer),
+            ResumeAnswer::Settled(answer, run) => Self::Settled(answer, run),
             ResumeAnswer::Pending(plan) => Self::Pending(HandedPlan::Resume(plan)),
             ResumeAnswer::Direct => Self::Direct,
         }
@@ -449,20 +452,31 @@ impl Composers {
         (self.0.deps.spawn)(Box::new(move || {
             // A check that panicked, or of a kind without its route, knows
             // nothing: never a held state 6.
-            let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &plan {
-                HandedPlan::Send(plan) => deferred.map(|route| (route.check)(plan)),
-                HandedPlan::Compact(plan) => compact.map(|route| (route.check)(plan)),
-                HandedPlan::Resume(plan) => resume.map(|route| (route.check)(plan)),
-            }))
-            .ok()
-            .flatten()
-            .unwrap_or(Checked::Unavailable);
-            me.checked(&key, handle, &plan, basis, checked);
+            let (checked, run) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &plan {
+                    HandedPlan::Send(plan) => deferred.map(|route| ((route.check)(plan), None)),
+                    HandedPlan::Compact(plan) => compact.map(|route| ((route.check)(plan), None)),
+                    HandedPlan::Resume(plan) => resume.map(|route| (route.check)(plan)),
+                }))
+                .ok()
+                .flatten()
+                .unwrap_or((Checked::Unavailable, None));
+            me.checked(&key, handle, &plan, basis, checked, run.as_deref());
         }));
     }
 
-    /// Applies one check's answer while the draft still holds that identity.
-    fn checked(&self, key: &str, handle: u64, plan: &HandedPlan, basis: Basis, checked: Checked) {
+    /// Applies one check's answer while the draft still holds that identity;
+    /// `run`: the run a handed resume's receipt returned, which its
+    /// message's row then belongs to.
+    fn checked(
+        &self,
+        key: &str,
+        handle: u64,
+        plan: &HandedPlan,
+        basis: Basis,
+        checked: Checked,
+        run: Option<&str>,
+    ) {
         let now = self.now();
         let mut hub = self.lock();
         let held = hub.composers.get(key).is_some_and(|c| {
@@ -512,6 +526,9 @@ impl Composers {
                 detail: deferred_send::UNCONFIRMED.into(),
             },
         };
+        if let Some(run) = run {
+            hub.local.rebind_run(key, plan.row(), run);
+        }
         let detail = hub.local.finished_as_is(key, plan.row(), &outcome);
         if let Some(composer) = hub.composers.get_mut(key) {
             composer.handed = None;
@@ -655,15 +672,16 @@ impl Composers {
             Ok(answer) => answer,
             // The offer's thread died: once handed it may have reached the
             // service; before, nothing did.
-            Err(_) if handed.get() => {
-                Continued::Settled(SendAnswer::Unconfirmed(deferred_send::UNCONFIRMED.into()))
-            }
-            Err(_) => Continued::Settled(SendAnswer::Unsent(deferred_send::NOT_SENT.into())),
+            Err(_) if handed.get() => Continued::Settled(
+                SendAnswer::Unconfirmed(deferred_send::UNCONFIRMED.into()),
+                None,
+            ),
+            Err(_) => Continued::Settled(SendAnswer::Unsent(deferred_send::NOT_SENT.into()), None),
         };
         if !handed.get() {
             let text = match answer {
                 Continued::Direct => return false,
-                Continued::Settled(SendAnswer::Unsent(text)) => text,
+                Continued::Settled(SendAnswer::Unsent(text), _) => text,
                 // Nothing is offered before the hand-over.
                 _ => deferred_send::NOT_SENT.into(),
             };
@@ -681,21 +699,30 @@ impl Composers {
             }
             return true;
         }
-        let outcome = match answer {
+        let (answer, run) = match answer {
             Continued::Pending(plan) => {
                 self.handed_over(&delivery, plan);
                 self.push_finished(&delivery.request_id, false, true);
                 return true;
             }
-            Continued::Settled(SendAnswer::Recorded(outcome)) => Outcome::Done {
+            Continued::Settled(answer, run) => (Some(answer), run),
+            Continued::Direct => (None, None),
+        };
+        let outcome = match answer {
+            Some(SendAnswer::Recorded(outcome)) => Outcome::Done {
                 receipt: serde_json::json!({"request_id": outcome.request_id}),
                 cleanup: None,
             },
-            Continued::Settled(SendAnswer::Unsent(detail)) => Outcome::Failed { detail },
-            Continued::Settled(_) | Continued::Direct => Outcome::Uncertain {
+            Some(SendAnswer::Unsent(detail)) => Outcome::Failed { detail },
+            _ => Outcome::Uncertain {
                 detail: deferred_send::UNCONFIRMED.into(),
             },
         };
+        // The message's row belongs to the run its resume returned, never
+        // the stopped one it was recorded under (zerus-5wmh.66.4.9.3).
+        if let Some(run) = &run {
+            self.lock().local.rebind_run(key, &delivery.request_id, run);
+        }
         if let Some(composer) = self.lock().composers.get_mut(key) {
             if composer.handed.as_ref().is_some_and(Handed::locked) {
                 composer.handed = None;

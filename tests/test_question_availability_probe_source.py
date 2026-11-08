@@ -33,6 +33,13 @@ TASK_TRACKER_UPDATES_SHA = "5cb5f076e3f176069d8e57d945f1286cea7763fcf37c3dbfb6f6
 # keep historical policy pins.
 VISIBLE_REFRESH_UPDATES = ROOT / "tests/fixtures/question-availability-visible-refresh-updates.patch"
 VISIBLE_REFRESH_UPDATES_SHA = "5c6042fa033ffb1f75bcac2136cc94eff5b895fa144be4e2f325661edb04e797"
+# Exact child-session delta to these two files: #1722 (d7c70e41e, merge
+# 88b9b6060) and its follow-up #1723 (bd7ded090, merge 96d8df5dc). Nested
+# child cards, quiet supervised children, account marks and the collapse
+# store; none changes question eligibility or the ten verification writes
+# (zerus-e3buj). Reversed first, as the newest reviewed update.
+CHILD_SESSION_UPDATES = ROOT / "tests/fixtures/question-availability-child-session-updates.patch"
+CHILD_SESSION_UPDATES_SHA = "c97d445dacc9121bad6f7618c2938a699d5a6cd1364c9f9d05ac959ad5937fc7"
 WORKSPACE_BASE_SHA = {
     "ZerusViewModel.kt": "5932d92ca74ccf37da9595a580bcb1457c93c83951976606c8defa8d1ee83326",
     "MainActivity.kt": "f68902349d1e0ac939582e9e139548663f5763c430a3c566f8823d9f045645f0",
@@ -84,6 +91,7 @@ def reverse_reviewed_patch(name, source, fixture, fixture_sha):
 
 
 def reverse_reviewed_updates(name, source):
+    source = reverse_reviewed_patch(name, source, CHILD_SESSION_UPDATES, CHILD_SESSION_UPDATES_SHA)
     source = reverse_reviewed_patch(name, source, VISIBLE_REFRESH_UPDATES, VISIBLE_REFRESH_UPDATES_SHA)
     source = reverse_reviewed_patch(name, source, TASK_TRACKER_UPDATES, TASK_TRACKER_UPDATES_SHA)
     source = reverse_reviewed_patch(name, source, WORKSPACE_UPDATES, WORKSPACE_UPDATES_SHA)
@@ -107,6 +115,8 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         for name, digest in WORKSPACE_BASE_SHA.items():
             with self.subTest(source=name):
                 current = reverse_reviewed_patch(name, (MAIN / name).read_text(),
+                                                CHILD_SESSION_UPDATES, CHILD_SESSION_UPDATES_SHA)
+                current = reverse_reviewed_patch(name, current,
                                                 VISIBLE_REFRESH_UPDATES, VISIBLE_REFRESH_UPDATES_SHA)
                 current = reverse_reviewed_patch(name, current,
                                                 TASK_TRACKER_UPDATES, TASK_TRACKER_UPDATES_SHA)
@@ -152,6 +162,19 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
             source = (MAIN / name).read_text()
             self.assertEqual(source.count(addition), 1)
             for replacement in (addition.rstrip("\n") + " // changed\n", "", addition + addition):
+                with self.subTest(source=name, replacement=replacement):
+                    self.assertFalse(original_source(name, source.replace(addition, replacement, 1)))
+
+    def test_child_session_projection_refuses_changed_missing_or_duplicate_reviewed_hunks(self):
+        # Reversing the exact child-session delta must not hide a later edit.
+        additions = {
+            "ZerusViewModel.kt": "    fun teamCollapsed(session: Session) = teamCollapse.collapsed(session, machineUuid(session.target))\n",
+            "MainActivity.kt": "                            SessionTeamCounter(model, entry, online)\n",
+        }
+        for name, addition in additions.items():
+            source = (MAIN / name).read_text()
+            self.assertEqual(source.count(addition), 1)
+            for replacement in (addition.rstrip("\n") + " // changed reviewed addition\n", "", addition + addition):
                 with self.subTest(source=name, replacement=replacement):
                     self.assertFalse(original_source(name, source.replace(addition, replacement, 1)))
 

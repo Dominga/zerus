@@ -73,10 +73,10 @@ export function activityText(items: TranscriptItem[], expanded: Record<string, b
       expanded[item.id] ? item.transcript : undefined, item.error,
     ]);
     if (item.kind === "context") return item.body ?? "";
-    if (item.kind === "thinking") return lines([tr("Thinking"), item.body]);
+    if (item.kind === "thinking") return lines([tr("Thinking"), item.body ? markdownText(item.body) : undefined]);
     if (item.kind === "report") return lines([
       item.title, item.sender ? tr("from %1", item.sender) : undefined, item.at,
-      expanded[item.id] ? item.body : undefined,
+      expanded[item.id] && item.body ? markdownText(item.body) : undefined,
     ]);
     if (item.kind === "tool" || item.kind === "tools") return lines([
       item.title, item.kind === "tools" ? item.body : undefined, item.at,

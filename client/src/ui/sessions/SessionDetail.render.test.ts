@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
 
@@ -28,7 +28,7 @@ vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} } }));
 import * as bridge from "../../bridge";
 import { App } from "../../App";
 import { receive, activity } from "../../store/session";
-import { selected, setSelectedKey, setDetailTab, detailTab, setSubagentOpen, setMenu, menu, setStateFilter } from "../../store/ui";
+import { selected, setSelectedKey, setDetailTab, detailTab, setSubagentOpen, setMenu, menu, setStateFilter, setSearch } from "../../store/ui";
 import { inspectorTab, type InspectorTab } from "../../store/inspector";
 import { settingsReady, setSetting, restoreSettings } from "../../store/settings";
 import { openCleanup, closeCleanup } from "../../store/terminationCleanup";
@@ -188,4 +188,20 @@ it("keeps the moved row actions in the real session header menu", async () => {
   for (const label of ["Expand all collapsed", "Open folder", "Open shell in session folder", "Pause session", "Fork session…", "Set parent…", "Copy session name", "Copy session reference", "Copy folder path"]) {
     expect(labels, label).toContain(label);
   }
+});
+
+describe("an archive search keeps the archive status and paging (zerus-5wmh.13.17 (4))", () => {
+  afterEach(() => setSearch(""));
+
+  it("shows the window, Newer and Older for the query's page, and a capped total as N+", async () => {
+    vi.mocked(bridge.archivePage).mockResolvedValue({ rows: [], next_cursor: "c", previous_cursor: "p", total: 10_000, total_capped: true, position: 50 } as never);
+    put(fixtureRow());
+    setStateFilter("archived"); await flush();
+    setSearch("needle"); await flush();
+    await vi.waitFor(() => expect(vi.mocked(bridge.archivePage).mock.calls.some((call) => call[4] === "needle")).toBe(true), { timeout: 3000 });
+    await vi.waitFor(() => expect(host.querySelector(".archive-status")?.textContent).toBe("0 shown of 10000+"), { timeout: 3000 });
+    expect([...host.querySelectorAll(".archive-nav")].map((b) => b.getAttribute("aria-label"))).toEqual(["Newer sessions", "Older sessions"]);
+    // The results list still shows the search (messages and the page's archive rows).
+    expect(host.querySelector(".search-results, [role=listbox]")).not.toBeNull();
+  });
 });

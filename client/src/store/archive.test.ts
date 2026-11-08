@@ -362,6 +362,13 @@ describe("the status text (ArchiveBrowser::updateStatus)", () => {
     expect(statusOf({}, [LOCAL], true).summary).toBe("0 loaded");
   });
 
+  it("shows a total the host capped as N+ (zerus-5wmh.13.17 (4), zerus-080n8)", () => {
+    expect(statusOf({ "": loaded(50, 10_000, { position: 50, capped: true }) }, [LOCAL], true).summary).toBe("51–100 of 10000+");
+    expect(statusOf({ "": loaded(2, 10_000, { capped: true }) }, [LOCAL], true).summary).toBe("2 shown of 10000+");
+    expect(statusOf({ "": loaded(2, 2), box: loaded(1, 10_000, { capped: true }) }, [LOCAL, BOX], true).summary).toBe("3 loaded of 10002+");
+    expect(statusOf({ "": loaded(50, 10_000, { position: 0, cursor: "c", capped: true }), box: loaded(1, 2) }, [LOCAL, BOX], true).hint).toBe("Local: 1–50 of 10000+\nbox: 1 shown of 2");
+  });
+
   it("puts each computer's window in the hint and sets the buttons as Qt", () => {
     const s = statusOf({ "": loaded(50, 257, { position: 0, cursor: "c" }), box: loaded(1, 2, { previous: "p" }) }, [LOCAL, BOX], true);
     expect(s.hint).toBe("Local: 1–50 of 257\nbox: 1 shown of 2");

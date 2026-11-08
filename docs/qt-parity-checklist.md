@@ -43,7 +43,7 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Area | done | partial | missing | other |
 | --- | --- | --- | --- | --- |
 | Sessions list, row actions and header | 27 | | 1 | 2 owner decisions, 1 intentional difference |
-| Archive and search | 13 | 2 | 0 | |
+| Archive and search | 14 | 1 | 0 | |
 | Composer and sending | 34 | 1 | | |
 | Activity | 17 | 0 | 0 | |
 | Questions and approvals | 12 | | | |
@@ -54,7 +54,7 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Settings | 17 | | | 1 intentional difference |
 | Machines, accounts, projects, new session, tasks and worktrees | 18 | | | |
 | Terminal, processes and platform session support | 8 | | | |
-| Total (192 rows) | 171 | 12 | 3 | 6 |
+| Total (192 rows) | 172 | 11 | 3 | 6 |
 
 ## Owner decisions
 
@@ -132,7 +132,7 @@ Keyboard commands for every area are listed once, under Shortcuts and navigation
 | Archive filter with count; date picker with presets and a checked custom range; Refresh | done | `ui/sessions/ArchiveBar.tsx:35,66-159`; `ui/sessions/archive-dates.ts:18,114` | `ArchiveDatePicker.cpp`; `ArchiveBrowser.cpp:17-19` |
 | Status, Newer and Older paging, per-machine errors | done | `ui/sessions/ArchiveBar.tsx:39-55`; `store/archive.ts:104-131` | `ArchiveBrowser.cpp:23-80` |
 | Archived rows grouped by project and filtered; archive counts in pickers | done | `store/archive.ts:182-196,446-449`; `ui/sessions/archive-filters.ts:5-27` | `SessionsWindowRows.cpp:266-300` |
-| Search archive names and IDs with paging | partial (`zerus-5wmh.13.17`) | the query reaches `hgs` (`store/archive.ts:373,440`), but while searching the status and Newer and Older are hidden (`ui/sessions/ArchiveBar.tsx:39,53`), so matches past the loaded page are unreachable | `SessionsWindow.cpp:386,410`; `ArchiveBrowser.cpp:58` |
+| Search archive names and IDs with paging | done; a total the host capped shows as N+ | the query reaches `hgs` (`store/archive.ts:378,445`); while searching the status and Newer and Older stay (`ui/sessions/ArchiveBar.tsx:41-55`) and the results' archive rows are the query's current page (`store/contentSearch.ts:52`); `store/archive.ts:106` | `SessionsWindow.cpp:386,410`; `ArchiveBrowser.cpp:58` |
 | Read-only recorded Activity for an archived session | done | `ui/sessions/SessionDetail.tsx:166-173`; `store/archiveActivity.ts:206` | `SessionsWindow.cpp:3434-3716` |
 | Restore, blocked when the name is live; copy restore command; rename; Forget; Clear archive | done | `ui/sessions/SessionDetail.tsx:141`; `store/restores.ts:195`; `ui/sessions/actions-ui.ts:154-247,355`; `ui/sessions/archive-entries.ts:14-45` | `SessionsWindow.cpp:371-373,618,1958-1966,3148-3154` |
 

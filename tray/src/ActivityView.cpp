@@ -75,6 +75,8 @@
 #include <functional>
 #include <utility>
 #include <QRegularExpression>   // WhiteWh fork: agent team plaques
+#include <QComboBox>
+#include "LeadNotices.h"
 #include <tuple>
 
 namespace ActivityMedia {
@@ -564,6 +566,21 @@ TeamMessage teamMessage(QString text)
     return m;
 }
 
+// WhiteWh fork, task 244: a prompt Zerus pasted for the team: a session's
+// envelope (peer_message), a team header from anyone but "You", or Zerus's
+// sender-less "[Zerus team]" / "[Zerus task N]" pastes (hgs reply_team_notice).
+bool teamNoticePrompt(const QJsonObject &event)
+{
+    if (event.value("origin") == "peer_message") return true;
+    // A prompt of the main agent only (messageRole's "user" kinds).
+    static const QStringList prompts{"UserPromptSubmit", "UserPromptQueued", "TurnStarted", "LocalMessage", "UserMessage"};
+    if (!prompts.contains(event.value("type").toString()) || !event.value("agent_id").toString().isEmpty()) return false;
+    const auto text = event.value("detail").toString().trimmed();
+    if (const auto team = teamMessage(text); team.valid) return team.from != QLatin1String("You");
+    static const QRegularExpression zerus(QStringLiteral("^\\[Zerus (team|task)(\\]| [^\\]\\n]*\\])"));
+    return zerus.match(text).hasMatch();
+}
+
 QString teamRoleColor(const QString &role, bool dark)
 {
     static const QList<std::tuple<const char *, const char *, const char *>> palette{
@@ -768,6 +785,8 @@ struct ActivityRenderResult {
     QHash<QString, QString> m_mediaLinks;
     QSet<QString> m_knownEvents, m_toggleKeys, m_processLinks;
     bool m_dark = false, m_tracked = true, processesEnabled = false, content = false, m_bubbles = false;
+    // WhiteWh fork, task 244: full, collapsed or silent team notices (a lead's session).
+    QString m_noticeMode = QStringLiteral("full");
     double m_scale = 1.;
     quint64 generation = 0, contentRevision = 0;
     qreal width = 0;
@@ -1260,7 +1279,60 @@ struct ActivityRenderResult {
         if (!answer.isEmpty()) html += card("answer-snapshot", tr("Agent (recorded response)"), {}, markdown(answer, agentTheme, m_fileLinks), false, false, false, answer);
     }
     m_toggleKeys.clear();m_processLinks.clear();
+    // WhiteWh fork, task 244: in a lead's session a turn only the team's
+    // pastes opened (a notice, a member's message, a doorbell) and the lead's
+    // reply to it fold into tool-call rows, or do not show; a turn with any
+    // of the owner's prompts is the owner's and shows in full.
+    QVector<char> hidden(events.size(), 0);
+    QHash<int, QString> foldRows;
+    if (m_noticeMode != QLatin1String("full") && searching == false) {
+        const auto ownerPrompt = [&](const QJsonObject &e) {
+            const auto role = messageRole(e);
+            return role == "user" && !teamNoticePrompt(e);
+        };
+        const auto noticePrompt = [&](const QJsonObject &e) { return teamNoticePrompt(e); };
+        const auto prompt = [&](int k) { return ownerPrompt(events[k]) || noticePrompt(events[k]); };
+        const auto foldRow = [&](const QString &key, const QString &who, const QString &what, const QString &at, bool open) {
+            m_toggleKeys.insert(key);
+            QString line = what.simplified(); if (line.size() > 140) line = line.left(139) + QChar(0x2026);
+            return QString("<a name='item-%1'></a><table width='100%' cellspacing='0' cellpadding='0' style='margin-top:4px;'><tr><td width='2' bgcolor='%2'></td>"
+                "<td style='padding:3px 10px;'><a href='hgs-activity:%1' style='color:%3;text-decoration:none;'>%4&nbsp;&nbsp;<b>%5</b></a>"
+                "<span style='color:%6;'>&nbsp;&nbsp;%7</span></td><td align='right' style='padding:3px 6px;'><span style='font-size:11px;color:%6;'>%8</span></td></tr></table>")
+                .arg(escaped(key), border, fg, open ? QStringLiteral("&#9662;") : QStringLiteral("&#9656;"), escaped(who), muted, escaped(line), escaped(at));
+        };
+        int k = 0;
+        while (k < events.size() && !prompt(k)) ++k;
+        while (k < events.size()) {
+            QList<int> prompts; while (k < events.size() && prompt(k)) prompts << k++;
+            const int body = k; while (k < events.size() && !prompt(k)) ++k;
+            bool owner = false; for (int p : prompts) owner = owner || ownerPrompt(events[p]);
+            if (owner) continue;
+            if (m_noticeMode == QLatin1String("silent")) { for (int x = prompts.first(); x < k; ++x) hidden[x] = 1; continue; }
+            for (int p : prompts) {
+                const auto &e = events[p];
+                const auto key = "notice-fold-" + eventKey(e);
+                const bool open = m_expanded.value(key);
+                const auto team = teamMessage(e.value("origin") == "peer_message" ? e.value("report").toString(e.value("detail").toString()) : e.value("detail").toString());
+                const QString who = team.valid ? team.from : e.value("origin") == "peer_message" ? tr("Message from %1").arg(e.value("sender").toString()) : tr("Zerus team");
+                QString what = team.valid ? team.kind + (team.task ? QStringLiteral(", #%1").arg(team.task) : QString()) + QStringLiteral(": ") + (team.title.isEmpty() ? team.body : team.title)
+                                          : e.value("detail").toString().section(QLatin1Char(']'), 1);
+                foldRows[p] += foldRow(key, who, what, timeText(e), open);
+                if (!open) hidden[p] = 1;
+            }
+            if (body < k) {
+                const auto key = "reply-fold-" + eventKey(events[body]);
+                const bool open = m_expanded.value(key);
+                QString what;
+                for (int x = body; x < k && what.isEmpty(); ++x) if (messageRole(events[x]) == "assistant") what = events[x].value("detail").toString().section(QLatin1Char('\n'), 0, 0);
+                if (what.isEmpty()) what = tr("%1 activity events").arg(k - body);
+                foldRows[body] += foldRow(key, tr("Lead's reply"), what, timeText(events[k - 1]), open);
+                if (!open) for (int x = body; x < k; ++x) hidden[x] = 1;
+            }
+        }
+    }
     for (int i = 0; i < events.size();) {
+        if (foldRows.contains(i)) html += foldRows.take(i);
+        if (hidden.value(i)) { ++i; continue; }
         const auto event = events[i]; const auto role = messageRole(event);
         const bool taskEntry = event.value("source") == "zerus_task" && event.value("type") == "TaskEntry";
         if (taskEntry && event.value("task_role") == "document") {
@@ -1692,6 +1764,24 @@ ActivityView::ActivityView(QWidget *parent) : QWidget(parent)
     m_browser->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_browser->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
     m_browser->setAccessibleName(tr("Session activity"));
+    // WhiteWh fork, task 244: a lead's session chooses how team notices show.
+    {
+        auto *row = new QHBoxLayout; row->setContentsMargins(12, 0, 12, 0); row->addStretch(1);
+        m_noticeBox = new QComboBox(this); m_noticeBox->setObjectName("activityNoticeMode");
+        m_noticeBox->addItem(tr("Team notices: Full"), QStringLiteral("full"));
+        m_noticeBox->addItem(tr("Team notices: Collapsed"), QStringLiteral("collapsed"));
+        m_noticeBox->addItem(tr("Team notices: Hidden"), QStringLiteral("silent"));
+        m_noticeBox->setToolTip(tr("How the team's notices to the lead and its replies to them show here. The lead receives them all."));
+        m_noticeBox->hide();
+        row->addWidget(m_noticeBox);
+        layout->addLayout(row);
+        connect(m_noticeBox, &QComboBox::activated, this, [this](int index) {
+            if (m_noticeKey.isEmpty()) return;
+            const auto mode = m_noticeBox->itemData(index).toString();
+            LeadNotices::setMode(m_noticeKey, mode);
+            if (mode != m_noticeMode) { m_noticeMode = mode; render(true); }
+        });
+    }
     layout->addWidget(m_browser, 1);
     // A browser child overlays the viewport without participating in layout
     // or moving with its scrolled contents.
@@ -2432,6 +2522,7 @@ void ActivityView::startRender()
     result->m_mediaTiles = m_mediaTiles;
     result->m_voiceError=m_voiceError;
     result->m_dark = m_dark; result->m_tracked = m_tracked; result->m_scale = m_scale; result->m_bubbles = m_bubbles;
+    result->m_noticeMode = m_noticeMode;
     result->processesEnabled = ProcessSettings::enabled();
     result->width = m_browser->viewport()->width();
     result->viewportHeight = m_browser->viewport()->height();
@@ -2675,6 +2766,16 @@ void ActivityView::clearDocument()
 }
 
 #include "ActivityView.moc"
+
+void ActivityView::setLeadNotices(const QString &settingsKey)
+{
+    const auto mode = settingsKey.isEmpty() ? QStringLiteral("full") : LeadNotices::mode(settingsKey);
+    m_noticeBox->setVisible(!settingsKey.isEmpty());
+    if (!settingsKey.isEmpty()) { const QSignalBlocker block(m_noticeBox); m_noticeBox->setCurrentIndex(m_noticeBox->findData(mode)); }
+    if (settingsKey == m_noticeKey && mode == m_noticeMode) return;
+    m_noticeKey = settingsKey; m_noticeMode = mode;
+    render(true);
+}
 
 void ActivityView::playVoice(const QString &key,const QString &path,const QString &error)
 {

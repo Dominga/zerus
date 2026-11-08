@@ -496,7 +496,8 @@ function transcriptItems(events: readonly ActivityEvent[], summary?: Record<stri
       else {
         // A session's message may carry a team header (Qt reads it inside the envelope).
         const notice = e.origin === "peer_message" ? systemNotice(report || e.detail || "") : undefined;
-        items.push({ id, kind: "system", at, sender: notice?.from ?? (e.origin === "peer_message" ? tr("Message from %1", e.sender ?? tr("another session")) : tr("Background task")), body: report || e.detail, notice });
+        items.push({ id, kind: "system", at, sender: notice?.from ?? (e.origin === "peer_message" ? tr("Message from %1", e.sender ?? tr("another session")) : tr("Background task")), body: report || e.detail, notice,
+          teamNotice: notice ? notice.from !== "You" : e.origin === "peer_message" });
       }
       i++; continue;
     }
@@ -515,7 +516,7 @@ function transcriptItems(events: readonly ActivityEvent[], summary?: Record<stri
     if (role === "user" && e.type !== "QuestionAnswered" && !e.question_replies?.length) {
       const notice = systemNotice(e.detail ?? "");
       if (notice) {
-        items.push({ id, kind: "system", at, sender: notice.from, body: notice.full, notice, attachments: attachments(e) });
+        items.push({ id, kind: "system", at, sender: notice.from, body: notice.full, notice, attachments: attachments(e), teamNotice: notice.from !== "You" });
         i++; continue;
       }
     }

@@ -1,5 +1,7 @@
 #include <QtTest>
 #include "FleetState.h"
+#include "LeadNotices.h"
+#include "Settings.h"
 #include "SessionPresentation.h"
 
 static BoxState box(const QString &host, bool ok, int sessions)
@@ -27,6 +29,7 @@ static SessionInfo shared(const QString &reply = "7:100.5", const QString &signa
 class TestFleetState : public QObject {
     Q_OBJECT
 private slots:
+    void aLeadsRepliesToTeamNoticesAreReadUnlessFull();
     void sumsAcrossBoxes();
     void attentionMarksFollowConversationAndRejectStaleActions();
     void attentionMarksIgnoreRoutineEventsButKeepNewRequestsUnread();
@@ -641,6 +644,25 @@ void TestFleetState::combinedReadStateMatchesSeparatePasses()
     QVERIFY(combined.local().sessions[5].reviewLater); QVERIFY(!combined.local().sessions[3].unreadReply);
     QVERIFY(combined.peer("mac")->sessions[0].unreadReply);
     QVERIFY(combined.attentionMarks().contains(key({"", "claude", "c-asking"})));
+}
+
+// WhiteWh fork, task 244: a lead's reply to a turn only the team's pastes
+// opened is not unread (no mark, count or notification) unless its mode is Full.
+void TestFleetState::aLeadsRepliesToTeamNoticesAreReadUnlessFull()
+{
+    SessionInfo s; s.name = "claude/p/lead"; s.runId = "run-1"; s.teamLead = true; s.replyTeamNotice = true; s.unreadReply = true;
+    const auto key = LeadNotices::sessionKey("", s.runId, s.name);
+    QCOMPARE(key, QString::fromUtf8("\nrun:run-1"));
+    Settings::set("teams/leadNotices", "collapsed"); Settings::set("teams/leadNoticeSessions", "{}");
+    auto quiet = [&](SessionInfo copy) { FleetState::quietTeamReply("", copy); return !copy.unreadReply; };
+    QVERIFY(quiet(s));
+    LeadNotices::setMode(key, "full");
+    QVERIFY(!quiet(s));
+    LeadNotices::setMode(key, "silent");
+    QVERIFY(quiet(s));
+    SessionInfo owner = s; owner.replyTeamNotice = false; QVERIFY(!quiet(owner));
+    SessionInfo member = s; member.teamLead = false; QVERIFY(!quiet(member));
+    Settings::set("teams/leadNoticeSessions", "{}");
 }
 
 QTEST_APPLESS_MAIN(TestFleetState)

@@ -2655,5 +2655,14 @@
   "Message the coordinator…": "Сообщение координатору…",
   "Write to coordinator": "Написать координатору",
   "Start 1 subagent": "Запустить 1 субагента",
-  "Start %1 subagents": "Запустить субагентов: %1"
+  "Start %1 subagents": "Запустить субагентов: %1",
+  "A fresh session with the same settings": "Новая сессия с теми же настройками",
+  "Lead's reply": "Ответ лида",
+  "How the team's notices to the lead and its replies to them show here. The lead receives them all.": "Как здесь показываются уведомления команды для лида и его ответы на них. Лид получает их все.",
+  "Team notices": "Уведомления команды",
+  "Team notices in a lead's session": "Уведомления команды в сессии лида",
+  "Collapsed shows each notice and the lead's reply to it as one folded line and never notifies you; Hidden shows neither. The lead still receives everything, and what waits for you is never hidden.": "«Свёрнуто» показывает каждое уведомление и ответ лида на него одной свёрнутой строкой и никогда не оповещает вас; «Скрыто» не показывает ни то, ни другое. Лид всё равно получает всё, а то, что ждёт вас, никогда не скрывается.",
+  "Full": "Полностью",
+  "Collapsed": "Свёрнуто",
+  "Hidden": "Скрыто"
 }

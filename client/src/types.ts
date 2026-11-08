@@ -35,6 +35,9 @@ export interface ViewRow {
   /** `approval` or `question` while the session asks for one. */
   attention?: string | boolean | null;
   unread?: boolean;
+  /** Task 175 / 244: the session leads its team; hgs says only the team's pastes opened its reply's turn. */
+  team_lead?: boolean;
+  reply_team_notice?: boolean;
   muted?: boolean;
   /** The row's notification preferences pass Qt's validation, and their revision. */
   shared_notifications?: boolean;

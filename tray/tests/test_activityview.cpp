@@ -1,4 +1,6 @@
 #include "ActivityView.h"
+#include "LeadNotices.h"
+#include <QComboBox>
 #include "MarkdownHtml.h"
 #include "ContentScale.h"
 #include "MarkdownObjects.h"
@@ -199,6 +201,7 @@ private slots:
     void archiveRestoreKeepsVisibleHistoryAndSelection();
     void hiddenSnapshotsDoNotBuildDocuments();
     void teamMessagesReadAsPlaques();
+    void leadSessionFoldsOrHidesTeamNotices();
     void allDecidedMessagesReadAsPlaques();
     void cacheKeepalivesReadAsOneQuietLine();
     void whiteWhTranscriptReadsFlat();
@@ -397,6 +400,55 @@ void TestActivityView::teamMessagesReadAsPlaques()
     QMetaObject::invokeMethod(view.browser(), "anchorClicked", Q_ARG(QUrl, QUrl("hgs-team-task:3")));
     QCOMPARE(task.count(), 1);
     QCOMPARE(task.first().first().toInt(), 3);
+}
+
+// WhiteWh fork, task 244: a lead's session shows the team's notices and its
+// replies to them in full, folded into tool-call rows (the default) or not
+// at all; the owner's turns, and a turn the owner joined, always show.
+void TestActivityView::leadSessionFoldsOrHidesTeamNotices()
+{
+    const QString inbox = QString::fromUtf8("[Zerus team \u00b7 from: Zerus \u00b7 inbox]\nReport for task #185 Side panel: done.");
+    const QJsonArray events{journalEvent(1, "UserPromptSubmit", "Plan the next phase, please."), journalEvent(2, "Stop", "Planned phase 4."),
+        journalEvent(3, "UserPromptSubmit", inbox), journalEvent(4, "Stop", "Accepted 185.\n\nHanded out the next task."),
+        journalEvent(5, "UserPromptSubmit", "[Zerus team] 1 new message for you"), journalEvent(6, "UserPromptSubmit", "And check the light theme."),
+        journalEvent(7, "Stop", "Done with both.")};
+    SettledActivityView view; view.resize(700, 600);
+    Settings::set("teams/leadNotices", "collapsed");
+    Settings::set("teams/leadNoticeSessions", "{}");
+    view.setLeadNotices(QString::fromUtf8("\nrun:lead"));
+    QCOMPARE(view.leadNoticeMode(), QString("collapsed"));
+    view.setActivity({}, events);
+    auto text = [&] { return view.browser()->toPlainText(); };
+    QTRY_VERIFY(text().contains("Lead's reply"));
+    QVERIFY(text().contains("Planned phase 4."));            // the owner's turn
+    QVERIFY(text().contains("Accepted 185.")); QVERIFY(!text().contains("Handed out the next task"));   // folded to its first line
+    QVERIFY(text().contains("Done with both."));              // the owner joined the doorbell's turn
+    QVERIFY(text().contains("Report to lead"));               // the folded notice names its kind
+    // Opening the folded reply shows it.
+    QVERIFY(view.browser()->toHtml().contains("hgs-activity:reply-fold-"));
+    // Hidden: neither the notice nor the reply.
+    LeadNotices::setMode(QString::fromUtf8("\nrun:lead"), "silent");
+    view.setLeadNotices(QString::fromUtf8("\nrun:lead"));
+    QTRY_VERIFY(!text().contains("Lead's reply"));
+    QVERIFY(!text().contains("Accepted 185")); QVERIFY(!text().contains("Report to lead"));
+    QVERIFY(text().contains("Planned phase 4.")); QVERIFY(text().contains("Done with both."));
+    // Full: as today.
+    LeadNotices::setMode(QString::fromUtf8("\nrun:lead"), "full");
+    view.setLeadNotices(QString::fromUtf8("\nrun:lead"));
+    QTRY_VERIFY(text().contains("Handed out the next task"));
+    // Not a lead: always full, the selector hidden.
+    view.setLeadNotices({});
+    QCOMPARE(view.leadNoticeMode(), QString("full"));
+    QVERIFY(!view.findChild<QComboBox *>("activityNoticeMode")->isVisibleTo(&view));
+    if (const auto shots = qEnvironmentVariable("ZERUS_TEAM_SHOTS"); !shots.isEmpty()) {
+        view.setBubbles(true); view.setTheme(true);
+        for (const auto &mode : {QStringLiteral("full"), QStringLiteral("collapsed"), QStringLiteral("silent")}) {
+            LeadNotices::setMode(QString::fromUtf8("\nrun:lead"), mode);
+            view.setLeadNotices(QString::fromUtf8("\nrun:lead"));
+            QTest::qWait(300);
+            view.grab().save(QDir(shots).filePath("lead-notices-" + mode + ".png"));
+        }
+    }
 }
 
 // WhiteWh fork: the dispatcher's one "all tasks decided" message is a plaque

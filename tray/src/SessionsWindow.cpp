@@ -166,6 +166,7 @@
 #include <QUuid>
 
 #include <algorithm>
+#include "LeadNotices.h"
 
 namespace {
 
@@ -2241,7 +2242,25 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_teamCatalog->confirm=[this](const QString &name,const QString &title,const QString &text,const QString &action){return m_teamPanel->confirm(name,title,text,action);};
     // U25: Prompt order shows the selected session's project rules.
     m_teamCatalog->projectRules=[this]{return teamProjectRules();};
-    m_teamSettingsSection=m_settingsPage->addSection(tr("Teams"),m_teamCatalog);
+    // WhiteWh fork, task 244: how a lead's session shows the team's notices,
+    // unless the session chose its own mode (its Activity selector).
+    auto *teamsSettings=new QWidget;auto *teamsColumn=new QVBoxLayout(teamsSettings);teamsColumn->setContentsMargins(0,0,0,0);teamsColumn->setSpacing(8);
+    {
+        auto *row=new QHBoxLayout;row->setSpacing(8);
+        auto *label=new QLabel(tr("Team notices in a lead's session"));label->setObjectName("leadNoticesLabel");
+        auto *mode=new QComboBox;mode->setObjectName("leadNoticesDefault");
+        mode->addItem(tr("Full"),QStringLiteral("full"));mode->addItem(tr("Collapsed"),QStringLiteral("collapsed"));mode->addItem(tr("Hidden"),QStringLiteral("silent"));
+        mode->setCurrentIndex(mode->findData(LeadNotices::defaultMode()));
+        mode->setToolTip(tr("Collapsed shows each notice and the lead's reply to it as one folded line and never notifies you; Hidden shows neither. The lead still receives everything, and what waits for you is never hidden."));
+        connect(mode,&QComboBox::activated,this,[this,mode](int index){
+            Settings::set(QStringLiteral("teams/leadNotices"),mode->itemData(index).toString());
+            renderDetails();
+        });
+        row->addWidget(label);row->addWidget(mode);row->addStretch(1);
+        teamsColumn->addLayout(row);
+    }
+    teamsColumn->addWidget(m_teamCatalog,1);
+    m_teamSettingsSection=m_settingsPage->addSection(tr("Teams"),teamsSettings);
     // U60 (#656): this computer's model servers - the rail's tab while it has
     // one, and their settings; the configuration stays with hgs.
     m_modelServers=new ModelServers::Controller(&m_client,this);
@@ -4745,6 +4764,9 @@ void SessionsWindow::renderDetails()
     updateSessionLoading();
     m_compactCancel->setVisible(m_compacts.contains(m_selectedKey) || (m_startSend.key == m_selectedKey && !m_startSend.key.isEmpty()));
     const auto *entry = selected(); m_detailStack->setCurrentIndex(entry ? 1 : 0);
+    // WhiteWh fork, task 244: a team lead's session folds or hides the team's notices.
+    m_activityView->setLeadNotices(entry && entry->session.teamLead
+        ? LeadNotices::sessionKey(entry->host, entry->session.runId, entry->session.name) : QString());
     updateTasks(entry);
     if (entry && m_inspectorPanel->isVisible() && m_inspector->block(InspectorCards::Context)->isExpanded()) m_accountsPage->ensureCatalogs();   // the account lines sit in the Context card
     if (entry && awaitingRestoredInspection(*entry) && m_inspectError.isEmpty())

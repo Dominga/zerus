@@ -834,6 +834,10 @@ impl DeskLoop {
                 attention
                     .tracker
                     .set_optional_questions((cx.optional_questions)());
+                if let Some((default, sessions)) = TEAM_NOTICES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone() {
+                    self.desk.set_team_notice_modes(&default, sessions.clone());
+                    attention.tracker.set_team_notice_modes(&default, sessions);
+                }
                 outcome.changes = observe_round(
                     &mut attention.tracker,
                     &self.desk,
@@ -936,9 +940,25 @@ fn device_marks(app: &AppHandle, cache: &mut MarksCache) -> Option<DeviceMarks> 
 }
 
 fn optional_questions(app: &AppHandle) -> bool {
+    // Task 244: the lead sessions' modes for team notices are read with it.
+    if let Some(store) = app.try_state::<crate::settings::Store>() {
+        let sessions = serde_json::from_str::<std::collections::BTreeMap<String, Value>>(&store.0.text(LEAD_NOTICE_SESSIONS))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(key, mode)| mode.as_str().map(|mode| (key, mode.to_owned())))
+            .collect();
+        *TEAM_NOTICES.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((store.0.text(LEAD_NOTICES), sessions));
+    }
     app.try_state::<crate::settings::Store>()
         .is_some_and(|store| store.0.flag(OPTIONAL_QUESTIONS))
 }
+
+/// Task 244: how lead sessions show the team's notices (Settings > Teams and
+/// each lead session's choice); a reply to a turn only team pastes opened
+/// notifies only where it is "full".
+pub const LEAD_NOTICES: &str = "teams/leadNotices";
+pub const LEAD_NOTICE_SESSIONS: &str = "teams/leadNoticeSessions";
+static TEAM_NOTICES: std::sync::Mutex<Option<(String, std::collections::BTreeMap<String, String>)>> = std::sync::Mutex::new(None);
 
 fn run(
     app: AppHandle,

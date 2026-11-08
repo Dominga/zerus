@@ -219,7 +219,7 @@ export interface LocalItem {
 
 export interface ActivityItem {
   id: string;
-  kind: "user" | "agent" | "tool" | "tools" | "question" | "approval" | "system" | "receipt" | "thinking" | "report" | "voice" | "cleared" | "context";
+  kind: "user" | "agent" | "tool" | "tools" | "question" | "approval" | "system" | "receipt" | "thinking" | "report" | "voice" | "cleared" | "context" | "folded";
   at: string;
   title?: string;
   body?: string;
@@ -243,6 +243,11 @@ export interface ActivityItem {
   inherited?: boolean;
   /** Task 248: the pictures a tool group worked with (Qt toolMedia), previewed under it. */
   media?: string[];
+  /** Task 244: a prompt Zerus pasted for the team (a notice or a member's message), never the owner's. */
+  teamNotice?: boolean;
+  /** Task 244: a folded notice or the lead's folded reply to one, and what it holds. */
+  folded?: TranscriptItem[];
+  foldKind?: "notice" | "reply";
   /** Task 208: a team message or Zerus notice pasted into the session (Qt's plaque), never the owner's. */
   notice?: import("./notices").SystemNotice;
 }

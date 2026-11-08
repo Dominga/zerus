@@ -172,6 +172,7 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.conversationId = obj.value("conversation_id").toString();
     s.replyId = obj.value("reply_id").toString(); s.replyAt = obj.value("reply_at").toDouble();
     s.replyScheduled = obj.value("reply_scheduled").toBool();
+    s.teamLead = obj.value("team_lead").toBool(); s.replyTeamNotice = obj.value("reply_team_notice").toBool();
     const auto schedules = obj.value("schedules").toObject();
     s.scheduledJobs = schedules.value("count").toInt(-1);
     s.recurringSchedules = schedules.value("recurring").toInt(-1);

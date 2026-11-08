@@ -30,6 +30,8 @@ import { TOOL_WIDTH, clearArchiveMenuEntry, machineMenu, moveState, runSelection
 import { barTools, splitTools, toolEntry } from "./selection-ui";
 import { actionEntries, copyEntries, freshActionEntry, forkEntry, muteEntry } from "./ActionDialogs";
 import { markAllEntry, markAllTip, markEntry, runMarkAll } from "./mark-entries";
+import { keepWarmAvailable, keepWarmHours, setKeepWarm } from "../../store/keepWarm";
+import { toggledHours, warmable } from "./keep-warm";
 import { moveEntry, openCreateProjectDialog, openDeleteProjectDialog, openRenameProjectDialog } from "./OrganizationDialogs";
 import { backgroundEntries } from "./background-menu";
 import { chipColor, headerEntries, projectColor, type FilterChip } from "./organization-ui";
@@ -228,6 +230,20 @@ function clearEntry(s: Session, prepared?: ClearRead): MenuEntry {
   };
 }
 
+/**
+ * Keep cache warm (Qt's contextKeepCacheWarm): checked while the session's
+ * cache is kept warm; on from here is one hour, the hours stay as set in
+ * Details. No confirmation, as in Qt.
+ */
+function keepWarmEntry(s: Session): MenuEntry {
+  const hours = keepWarmHours(s), available = keepWarmAvailable();
+  return {
+    label: tr("Keep cache warm"), icon: "zap", checked: hours > 0, disabled: !warmable(s) || !available,
+    hint: available ? tr("Send the idle agent a one-word service message before its prompt cache expires") : tr("Keep cache warm does not run while the background service manages sessions."),
+    action: () => { void setKeepWarm(s, toggledHours(hours)).catch(() => notify("error", tr("Keep cache warm could not be saved."), true)); },
+  };
+}
+
 export function sessionMenu(s: Session, folderStatus?: { request: ReturnType<typeof folderRequest>; status: FolderStatus }, forkDetails?: import("../../types").Details, preparedClear?: ClearRead): MenuEntry[] {
   // The selected row's menu reads the same details as the header (Qt's m_details).
   const details = s.key === selectedKey() && !subagentOpen() ? detailsFor(s, !computerOffline(s.computer), followedFor(s.key)) : undefined;
@@ -241,8 +257,8 @@ export function sessionMenu(s: Session, folderStatus?: { request: ReturnType<typ
   const archived = s.state === "archived";
   const commands = runningCommandsEntry(s, () => computerFresh(s.computer), () => flag("processes/enabled"), () => { setSelectedKey(s.key); setSubagentOpen(undefined); setDetailTab("processes"); });
   return [
-    // Keep attention actions first, with Mark before Mute.
-    ...(archived ? [] : [...(mark ? [mark] : []), ...(mute ? [mute] : []), { separator: true } as const]),
+    // Keep attention actions first, with Mark before Mute; Keep cache warm follows Mute (Qt).
+    ...(archived ? [] : [...(mark ? [mark] : []), ...(mute ? [mute] : []), keepWarmEntry(s), { separator: true } as const]),
     { label: compactRows[s.key] ? tr("Expand session row") : tr("Compact session row"), icon: compactRows[s.key] ? "expand-row" : "compact-row", action: () => setRowCompact(s.key, !compactRows[s.key]) },
     { label: tr("Expand all collapsed"), icon: "expand-row", disabled: !hasCompactRows(), action: expandCompactRows },
     { separator: true },

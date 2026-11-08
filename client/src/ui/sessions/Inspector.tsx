@@ -33,6 +33,7 @@ import { of, sameKey, native } from "./paths";
 import type { BoundRow } from "./scope-filters";
 import type { Session } from "./types";
 import { IronRulesPanel } from "./IronRulesPanel";
+import { KeepWarmRow } from "./KeepWarmRow";
 import { captionText, childStatus } from "./SessionCard";
 import { currentChildren, finishedFoldId, foldedChildren, workingChildren } from "./subagents";
 import { tr, trNoop } from "../../i18n";
@@ -236,7 +237,7 @@ function useDetails() {
 function Details() {
   const { s, details, identity, value, rows, usage, context, clear, account, accountText, home, profileId } = useDetails();
   return <div class="insp-body"><Card id="details-id" title={tr(identity().title)}><Row icon="key-round" mono title={tr(identity().title)} tail={<button class="icon-btn small" aria-label={tr(identity().caption)} title={tr(identity().caption)} disabled={!identity().value} onClick={() => void copyIdentity(snapshotOf(s()), details())}><Icon name="copy" size={13} /></button>}><span class="selectable">{value(identity().value)}</span></Row></Card>
-    <Card id="details-session" title={tr("Session")}><Row icon="message-square" label={tr("name")} mono title={s().name}>{s().name}</Row><Row icon="monitor" label={tr("machine")}>{s().machine}</Row><Row icon="folder" label={tr("directory")} mono title={s().cwdPath}>{value(s().cwdPath)}</Row><Row icon="git-branch" label={tr("branch")}>{value(s().branch)}</Row><Row icon="layers" label={tr("project")}>{grouping().headers.find((p) => p.id === groupOf(s().key))?.name ?? tr("Not reported")}</Row><Row icon="clock" label={tr("last event")}>{s().updatedAt ? eventTimeOf(new Date(s().updatedAt! * 1000)) : tr("Not reported")}</Row><div class="hint">{tr("Activity stays on %1. Closing this window does not stop your agent.", s().machine)}</div></Card>
+    <Card id="details-session" title={tr("Session")}><Row icon="message-square" label={tr("name")} mono title={s().name}>{s().name}</Row><Row icon="monitor" label={tr("machine")}>{s().machine}</Row><Row icon="folder" label={tr("directory")} mono title={s().cwdPath}>{value(s().cwdPath)}</Row><Row icon="git-branch" label={tr("branch")}>{value(s().branch)}</Row><Row icon="layers" label={tr("project")}>{grouping().headers.find((p) => p.id === groupOf(s().key))?.name ?? tr("Not reported")}</Row><Row icon="clock" label={tr("last event")}>{s().updatedAt ? eventTimeOf(new Date(s().updatedAt! * 1000)) : tr("Not reported")}</Row><KeepWarmRow session={s()} main={!subagentOpen()} /><div class="hint">{tr("Activity stays on %1. Closing this window does not stop your agent.", s().machine)}</div></Card>
     <IronRulesCard session={s()} />
     <ChangesCard session={s()} id="changes" />
     <Card id="details-account" title={tr("Account")}><Row icon="user-round-cog" label={tr("account")} title={profileId() ? tr("Profile %1", profileId()) : undefined} tail={<Show when={account().tag}><span class="acct-pid tabular" title={tr("Profile %1", profileId())}>{account().tag}</span></Show>}>{accountText()}</Row><Row icon="hard-drive" label={tr("agent home")} mono title={home() || undefined}>{value(homeShort(home()))}</Row><Row icon="sparkles" label={tr("model")}>{value(s().model)} {s().effort}</Row></Card>
@@ -347,6 +348,7 @@ function Sections() {
       <Row icon="git-branch" label={tr("branch")}>{value(s().branch)}</Row>
       <Row icon="sparkles" label={tr("model")}>{value(s().model)} {s().effort}</Row>
       <Row icon="clock" label={tr("last event")}>{s().updatedAt ? eventTimeOf(new Date(s().updatedAt! * 1000)) : tr("Not reported")}</Row>
+      <KeepWarmRow session={s()} main={!subagentOpen()} />
     </Card>
     <Card id="sec-context" title={tr("Context")} aside={<Show when={window() && window()!.percent >= 0}><span class="dim tabular">{tr("%1%", window()!.percent)}</span></Show>}>
       <Show when={window()} fallback={<div class="hint">{tr("Context: %1", context()?.text || tr("Not reported"))}</div>}>{(w) => <>

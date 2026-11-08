@@ -51,6 +51,7 @@
   "workspace/allSwarmProjects": false,
   "workspace/alwaysOnTop": false,
   "workspace/animateActivity": true,
+  "workspace/cacheKeepWarm": "",
   "workspace/collapsedSessionRows": [],
   "workspace/collapsedTeams": [],
   "workspace/compact": false,

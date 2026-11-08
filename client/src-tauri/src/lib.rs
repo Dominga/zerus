@@ -58,6 +58,8 @@ mod instance;
 #[cfg(windows)]
 #[path = "instance_windows.rs"]
 mod instance;
+#[cfg(feature = "live")]
+mod keep_warm;
 #[doc(hidden)]
 pub mod lifecycle;
 #[cfg(feature = "live")]
@@ -908,6 +910,12 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     catalog_cache_writer(pump.clone(), dir.clone());
                 }
                 app.manage(approvals::start(
+                    pump.clone(),
+                    app.state::<actions::Actions>().inner().clone(),
+                    app.state::<settings::Store>().0.clone(),
+                ));
+                // Keep cache warm runs with the window closed, as Qt's tray agent.
+                app.manage(keep_warm::start(
                     pump.clone(),
                     app.state::<actions::Actions>().inner().clone(),
                     app.state::<settings::Store>().0.clone(),
@@ -1804,6 +1812,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         analytics::analytics_save_review,
         approvals::approvals_list,
         approvals::approvals_detail,
+        keep_warm::keep_warm_set,
         worktree_policy::worktree_policy_view,
         worktree_policy::worktree_policy_read,
         worktree_policy::worktree_policy_choose,

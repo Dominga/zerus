@@ -43,6 +43,10 @@
   .irow.doing .irow-ico { color: var(--z-color-warn); }
   .irow.agent.working .irow-label { color: var(--z-color-status-working); }
   .irow.agent.attention .irow-label { color: var(--z-color-status-attention); }
+  /* Keep cache warm: the hours slider and its label beside the switch (Qt's 70 px slider). */
+  .irow.keep-warm .kw-hours { flex: none; width: 70px; margin: 0; accent-color: var(--z-color-accent); }
+  .irow.keep-warm .kw-limit { min-width: 3ch; text-align: right; }
+  .irow.keep-warm .switch:disabled { opacity: .5; }
   .selectable { user-select: text; }
   button.irow { width: 100%; border-radius: var(--z-radius-md); margin: 0 -6px; padding: 0 6px; width: calc(100% + 12px); transition: background var(--z-motion-fast); }
   button.irow:hover { background: var(--z-color-hover); }

@@ -745,7 +745,8 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope; sourceId?:
   if (it.kind === "folded") return <FoldedItem item={it} open={open()} toggle={toggleOpen} scope={props.scope} sourceId={props.sourceId} />;
   if (it.kind === "system" && it.notice) return <NoticeCard item={it} notice={it.notice} open={open()} toggle={toggleOpen} />;
   if (it.kind === "media") return <MediaCard item={it} scope={rowScope(it, props.scope)} sourceId={props.sourceId} postersEnabled={props.postersEnabled} expanded={props.expanded} onExpanded={props.onExpanded} />;
-  if (it.kind === "context") return <div class="act-label eyebrow" id={`item-${it.id}`}>{it.body}</div>;
+  // A context line with a time (a kept-warm cache) shows it apart, never after a dot.
+  if (it.kind === "context") return <div class="act-label eyebrow" id={`item-${it.id}`}>{it.body}<Show when={it.at}><span class="act-time"> {it.at}</span></Show></div>;
   if (it.kind === "thinking") return <div class="act-thinking" id={`item-${it.id}`} classList={{ inherited: !!it.inherited }}><span class="eyebrow">{tr("Thinking")}</span><p>{it.body}</p></div>;
   if (it.kind === "report")
     return (

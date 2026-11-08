@@ -17,6 +17,7 @@ pub mod attention;
 pub mod attention_store;
 pub mod batch;
 pub mod cache;
+pub mod cache_keepalive;
 pub mod catalog_cache;
 pub mod child_environment;
 pub mod claude_app;

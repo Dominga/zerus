@@ -1,0 +1,111 @@
+// @vitest-environment happy-dom
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createComponent } from "solid-js";
+import { render } from "solid-js/web";
+
+const bridge = vi.hoisted(() => ({
+  check: vi.fn(async (_dialog: number, _path: string): Promise<unknown> => ({ status: "missing" })),
+  pick: vi.fn(async (): Promise<string | null> => null),
+}));
+vi.mock("../../bridge", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../bridge")>()), fileReferenceCheck: bridge.check, fileReferencePick: bridge.pick,
+}));
+
+import { FileReferenceDialog, type ReferenceTarget } from "./FileReferenceDialog";
+
+let dispose: (() => void) | undefined;
+afterEach(() => { dispose?.(); dispose = undefined; document.body.replaceChildren(); vi.clearAllMocks(); });
+const settle = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+
+function open(target: ReferenceTarget, insert = vi.fn((_sentence: string): string | undefined => undefined)) {
+  const close = vi.fn(() => { dispose?.(); dispose = undefined; });
+  const host = document.createElement("div"); document.body.append(host);
+  dispose = render(() => createComponent(FileReferenceDialog, { target, insert, close }), host);
+  const field = host.querySelector<HTMLInputElement>("input")!;
+  const button = (label: string) => [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === label);
+  const type = (value: string) => { field.value = value; field.dispatchEvent(new Event("input", { bubbles: true })); };
+  const error = () => host.querySelector("[role=alert]")?.textContent ?? "";
+  return { host, field, button, type, error, insert, close };
+}
+
+const local: ReferenceTarget = { local: true, machine: "", host: "", style: undefined };
+const remote: ReferenceTarget = { local: false, machine: "Studio", host: "studio", style: "posix" };
+
+describe("Reference an existing file dialog", () => {
+  it("says what it does on this computer and checks the file before inserting its path", async () => {
+    bridge.check.mockResolvedValueOnce({ status: "file", path: "/home/example/notes/plan.md" });
+    const d = open(local);
+    expect(d.host.querySelector("h2")?.textContent).toBe("Reference file — this computer");
+    expect(d.host.textContent).toContain("Only the path is added; the file is not read or uploaded.");
+    d.type("~/notes/plan.md");
+    d.button("Insert reference")!.click();
+    await settle();
+    expect(bridge.check).toHaveBeenCalledWith(expect.any(Number), "~/notes/plan.md");
+    expect(d.insert).toHaveBeenCalledExactlyOnceWith("Use the existing file at \"/home/example/notes/plan.md\".");
+    expect(d.close).toHaveBeenCalled();
+  });
+
+  it("asks to retry while the check cannot answer, and refuses a missing file", async () => {
+    bridge.check.mockResolvedValueOnce({ status: "busy" });
+    const d = open(local);
+    d.type("/mnt/stale/report.pdf");
+    d.button("Insert reference")!.click();
+    await settle();
+    expect(d.error()).toBe("Cannot check this path now.");
+    expect(d.button("Retry")).toBeDefined();
+    bridge.check.mockResolvedValueOnce({ status: "missing" });
+    d.button("Retry")!.click();
+    await settle();
+    expect(d.error()).toBe("Choose an existing file on this computer.");
+    expect(bridge.check).toHaveBeenCalledTimes(2);
+    // The same dialog number both times: Rust allows it one outstanding check.
+    expect(bridge.check.mock.calls[0][0]).toBe(bridge.check.mock.calls[1][0]);
+    expect(d.insert).not.toHaveBeenCalled();
+  });
+
+  it("drops a late answer once the dialog closed", async () => {
+    let answer!: (value: unknown) => void;
+    bridge.check.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    const d = open(local);
+    d.type("/srv/report.pdf");
+    d.button("Insert reference")!.click();
+    d.button("Cancel")!.click();
+    answer({ status: "file", path: "/srv/report.pdf" });
+    await settle();
+    expect(d.insert).not.toHaveBeenCalled();
+  });
+
+  it("checks a remote path's form only and says its existence is not checked", async () => {
+    const d = open(remote);
+    expect(d.host.querySelector("h2")?.textContent).toBe("Reference file — Studio");
+    expect(d.host.textContent).toContain("on Studio (studio), not on this computer. Only the path is added; its existence is not checked here.");
+    expect(d.button("Browse…")).toBeUndefined();
+    d.type("relative/report.pdf");
+    d.button("Insert reference")!.click();
+    expect(d.error()).toBe("Enter an absolute path or ~/ path on Studio.");
+    // A text field drops line breaks itself; other controls reach the rule.
+    d.type("/srv/a\u0007b");
+    d.button("Insert reference")!.click();
+    expect(d.error()).toBe("Enter a file path without line breaks or control characters.");
+    d.type("~/report.pdf");
+    d.button("Insert reference")!.click();
+    expect(bridge.check).not.toHaveBeenCalled();
+    expect(d.insert).toHaveBeenCalledExactlyOnceWith("Use the existing file at \"~/report.pdf\".");
+  });
+
+  it("keeps the dialog open with the composer's refusal", () => {
+    const d = open(remote, vi.fn(() => "Message exceeds 64 KiB."));
+    d.type("/srv/report.pdf");
+    d.button("Insert reference")!.click();
+    expect(d.error()).toBe("Message exceeds 64 KiB.");
+    expect(d.close).not.toHaveBeenCalled();
+  });
+
+  it("Browse… fills in the chosen local path", async () => {
+    bridge.pick.mockResolvedValueOnce("/home/example/chosen.txt");
+    const d = open(local);
+    d.button("Browse…")!.click();
+    await settle();
+    expect(d.field.value).toBe("/home/example/chosen.txt");
+  });
+});

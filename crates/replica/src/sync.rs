@@ -909,12 +909,12 @@ mod tests {
         store.save(&mut task).unwrap();
         let uuid = task.uuid().to_owned();
         let old_time = SystemTime::now() - Duration::from_secs(60);
-        let age = |path: &Path| {
+        let age = |path: &Path, modified| {
             fs::File::options()
                 .write(true)
                 .open(path)
                 .unwrap()
-                .set_times(fs::FileTimes::new().set_modified(old_time))
+                .set_times(fs::FileTimes::new().set_modified(modified))
                 .unwrap();
         };
         for path in [
@@ -922,17 +922,27 @@ mod tests {
             store.updates_path(&uuid),
             store.managed_path(&uuid),
         ] {
-            age(&path);
+            age(&path, old_time);
         }
         let (warm, damaged) = store.inventory().unwrap();
         assert!(damaged.is_empty() && warm.tasks.contains_key(&uuid));
+        let before = store.stamps(&uuid);
         // The mark moves ahead and the save fails before its append.
         task.comment("Never appended", &Actor::Person, 5).unwrap();
         let first = fs::read(store.updates_path(&uuid)).unwrap();
         store
             .write_mark(&uuid, &Mark::new(&task.current_vv(), &first))
             .unwrap();
-        age(&store.managed_path(&uuid));
+        #[cfg(unix)]
+        age(&store.managed_path(&uuid), old_time);
+        #[cfg(windows)]
+        // Windows stamps have no file identity: restoring the same mtime
+        // and length is a known product limitation. Use a different settled
+        // time to test mark-only invalidation without relying on Unix inodes.
+        age(&store.managed_path(&uuid), old_time + Duration::from_secs(1));
+        let after = store.stamps(&uuid);
+        assert_eq!(&after[..2], &before[..2]);
+        assert_ne!(after[2], before[2]);
         assert!(store.load(&uuid).is_err());
         let (inventory, damaged) = store.inventory().unwrap();
         assert!(!inventory.tasks.contains_key(&uuid));

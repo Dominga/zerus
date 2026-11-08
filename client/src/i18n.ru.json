@@ -1742,6 +1742,7 @@
   "No session is running a task": "Ни одна сессия не выполняет задачу",
   "No session matches.": "Подходящих сессий нет.",
   "No sessions are working, need attention or have drafts.": "Нет сессий, которые работают, требуют внимания или содержат черновики.",
+  "No sessions need attention": "Нет сессий, требующих внимания",
   "No sessions yet": "Сессий пока нет",
   "No shell commands recorded yet": "Команды оболочки еще не записаны",
   "No subagent activity has been reported yet.": "О деятельности субагентов пока не сообщалось.",

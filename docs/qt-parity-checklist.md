@@ -48,18 +48,17 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Questions and approvals | 12 | | | |
 | Notifications | 6 | 6 | | |
 | Tray, menu bar and Dock | 6 | 2 | 1 | 2 owner decisions |
-| Shortcuts and navigation | 4 | 1 | 1 | |
+| Shortcuts and navigation | 6 | | | |
 | Lifecycle and updates | 6 | 2 | 1 | |
 | Settings | 17 | | 1 | |
 | Machines, accounts, projects, new session, tasks and worktrees | 18 | | | |
 | Terminal, processes and platform session support | 6 | | 1 | 1 unverified |
-| Total (192 rows) | 146 | 26 | 15 | 5 |
+| Total (192 rows) | 148 | 25 | 14 | 5 |
 
-The gaps a person is likely to meet first in daily use are the shortcut commands that do nothing
-(`zerus-5wmh.13.9`), the interrupted prompt that does not come back after Stop
-(`zerus-5wmh.13.4`), short tray messages that never appear on Linux and Windows
-(`zerus-5wmh.13.13`) and the missing Terminal Copy and Paste menu
-(`zerus-5wmh.13.12`).
+The gaps a person is likely to meet first in daily use are the interrupted
+prompt that does not come back after Stop (`zerus-5wmh.13.4`), short tray
+messages that never appear on Linux and Windows (`zerus-5wmh.13.13`) and the
+missing Terminal Copy and Paste menu (`zerus-5wmh.13.12`).
 
 ## Owner decisions
 
@@ -78,7 +77,6 @@ The gaps a person is likely to meet first in daily use are the shortcut commands
 | `zerus-5wmh.13.4` | P2 | After Stop, return the interrupted prompt to an empty message field |
 | `zerus-5wmh.13.5` | P2 | Reference an existing file from the composer |
 | `zerus-5wmh.13.6` | P2 | OpenCode queued-message stamps, waiting hint and Remove |
-| `zerus-5wmh.13.9` | P2 | Window shortcut commands that do nothing; shortcut help text |
 | `zerus-5wmh.13.12` | P2 | Built-in Terminal Copy and Paste menu; verify keyboard copy |
 | `zerus-5wmh.13.13` | P2 | Short tray messages call `osascript` on Linux and Windows |
 | `zerus-5wmh.13.14` | P2 | Windows: focus-aware banners, update alert, tray theme, watchdog, startup note |
@@ -287,8 +285,8 @@ In the default native alert mode the Zerus Next app posts alerts itself while it
 | Commands with per-platform default keys; Settings > Keyboard; key routing that keeps Terminal and text fields safe | done | `store/shortcuts.ts:22-81,392-514`; `ui/screens/settings/Keyboard.tsx:27-91` | `Shortcuts.cpp`; `KeyboardSettings.cpp` |
 | Go to screens (Ctrl+1 to 5, Ctrl+,); Go to popup (Ctrl+K); shortcut help (F1, Ctrl+/) | done | `App.tsx:114-121`; `store/goTo.ts:19-129`; `ui/sessions/GoToDialog.tsx`; `ui/sessions/ShortcutHelpDialog.tsx:8-42` | `SessionsWindowShortcuts.cpp:209-215`; `SessionsWindowGoTo.cpp`; `ShortcutsDialog.cpp` |
 | New session, content scale, side panel, Send, Send queued now, Send and push | done | `App.tsx:108-127`; `ui/sessions/SessionDetail.tsx:271,276`; `ui/sessions/Composer.tsx:250,258` | `SessionsWindowShortcuts.cpp:222-245` |
-| Window commands: next and previous session, next and previous needing attention, rename (F2), search (Ctrl+F), refresh (Ctrl+R, F5), next and previous tab, Activity and Terminal (Ctrl+\`), next and previous area (F6) | **missing** (`zerus-5wmh.13.9`) | listed in `store/shortcuts.ts:31-50`, Settings, shortcut help and Go to, but no handler runs them; picking one in Go to does nothing (`store/goTo.ts:53-56,126-127`) | `SessionsWindowShortcuts.cpp:218-241,346-435` |
-| Shortcut help: Terminal rule text and its ✓ marks | partial (`zerus-5wmh.13.9`) | the footer mentions marks the list never shows (`ui/sessions/ShortcutHelpDialog.tsx:38`) | `ShortcutsDialog.cpp:15-110` |
+| Window commands: next and previous session, next and previous needing attention, rename (F2), search (Ctrl+F), refresh (Ctrl+R, F5), next and previous tab, Activity and Terminal (Ctrl+\`), next and previous area (F6) | done | `ui/sessions/window-commands.ts:88-245`, installed at `App.tsx:131`, so Go to runs them too (`store/goTo.ts:126-127`); the Projects list keeps Alt+Up and Alt+Down (`store/shortcuts.ts:410-413`) | `SessionsWindowShortcuts.cpp:218-241,346-435` |
+| Shortcut help: Terminal rule text and its ✓ marks | done (✓ marks as in Settings > Keyboard) | `ui/sessions/shortcutHelp.ts:30-35`; `ui/sessions/ShortcutHelpDialog.tsx:38` | `ShortcutsDialog.cpp:15-110` |
 | Key hints in tooltips | done | `ui/components/Rail.tsx:34-46` | `Shortcuts.cpp:261-271` |
 
 ### Lifecycle and updates

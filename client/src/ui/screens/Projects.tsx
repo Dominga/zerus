@@ -259,7 +259,7 @@ export function ProjectsScreen() {
 
         <div class="proj-split">
           <aside class="proj-left">
-            <ul class="proj-list" role="listbox" aria-label={tr("Projects")} tabindex="-1" onKeyDown={onListKey}
+            <ul class="proj-list" role="listbox" aria-label={tr("Projects")} tabindex="-1" data-shortcut-claims="Alt+Up Alt+Down" onKeyDown={onListKey}
               onDragOver={(event) => { if (dragging()) { event.preventDefault(); setDropBefore(undefined); } }} onDrop={(event) => drop(event)}
               onContextMenu={(e) => { if (e.target === e.currentTarget) listMenu(e); }}>
               <For each={projects().map((p) => p.id)}>{(id) => {

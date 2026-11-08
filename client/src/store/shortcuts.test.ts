@@ -19,13 +19,14 @@ const ctrl = (letter: string, init: Partial<KeyboardEvent> = {}) =>
   key({ key: letter.toLowerCase(), code: /[0-9]/.test(letter) ? `Digit${letter}` : `Key${letter}`, ctrlKey: true, ...init });
 
 /** A focus target as the router reads it: a mark, a tag, xterm, a dialog, a selection. */
-function focus(o: { marked?: string; tag?: string; xterm?: boolean; dialog?: boolean; selection?: [number, number] } = {}): EventTarget {
+function focus(o: { marked?: string; tag?: string; xterm?: boolean; dialog?: boolean; selection?: [number, number]; claims?: string } = {}): EventTarget {
   const found = (yes: boolean | undefined, attribute: string | null = null) => (yes ? { getAttribute: () => attribute } : null);
   return {
     closest: (selector: string) =>
       selector === "dialog[open]" ? found(o.dialog)
       : selector === "[data-shortcut-context]" ? found(!!o.marked, o.marked ?? null)
-      : selector === ".xterm" ? found(o.xterm) : null,
+      : selector === ".xterm" ? found(o.xterm)
+      : selector === "[data-shortcut-claims]" ? found(!!o.claims, o.claims ?? null) : null,
     matches: (selector: string) => !!o.tag && selector.split(", ").includes(o.tag.toLowerCase()),
     tagName: o.tag,
     selectionStart: o.selection?.[0],
@@ -205,6 +206,16 @@ describe("the registry and matching", () => {
     expect(route(key({ key: "g", code: "KeyG", ctrlKey: true }), state, "linux")).toEqual({ consume: false });
     await setSetting("shortcuts/go.settings", null);
     expect(ran).toBe(0);
+  });
+  it("leaves a chord an element claims to that element", () => {
+    const off = onCommand("session.previous", () => {});
+    const state = sequenceState();
+    const list = focus({ claims: "Alt+Up Alt+Down" });
+    try {
+      expect(route(key({ key: "ArrowUp", code: "ArrowUp", altKey: true, target: list }), state, "linux")).toEqual({ consume: false });
+      expect(route(key({ key: "ArrowUp", code: "ArrowUp", altKey: true, target: focus() }), state, "linux")).toEqual({ run: "session.previous", consume: true });
+      expect(route(key({ key: "PageUp", code: "PageUp", ctrlKey: true, target: list }), state, "linux")).toEqual({ run: "session.previous", consume: true });
+    } finally { off(); }
   });
   it("keeps a newer handler first and restores the one before", () => {
     const calls: string[] = [];

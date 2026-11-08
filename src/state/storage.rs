@@ -119,6 +119,38 @@ pub(super) fn writer_until(deadline: std::time::Instant) -> Result<Option<Guard>
     Ok(Some(guard))
 }
 
+/// Inactive run-gate support: recover ONLY under the normal writer's original
+/// pinned file. No installed caller uses this entry. Do not call the path-based
+/// writer first: its recovery would run before a replaced lock was detected.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)]
+pub(super) fn recover_run_writer(
+    guard: &Guard,
+    original: crate::platform::FileIdentity,
+    until: std::time::Instant,
+) -> Result<()> {
+    let refused = "Original session state writer changed";
+    if std::time::Instant::now() >= until {
+        return Err(refused.into());
+    }
+    let file = crate::platform::no_follow(OpenOptions::new().read(true).write(true))
+        .open(root().join(".lock"))
+        .map_err(|_| refused)?;
+    if !crate::platform::verify_private_file(&file).map_err(|_| refused)?
+        || crate::platform::FileIdentity::of(&file).map_err(|_| refused)? != original
+        || guard.identity().map_err(|_| refused)? != original
+    {
+        return Err(refused.into());
+    }
+    rename::recover_locked()?;
+    rename::sync_legacy_locked()?;
+    worktree_lock::recover_locked();
+    if std::time::Instant::now() >= until {
+        return Err(refused.into());
+    }
+    Ok(())
+}
+
 /// An owner-only lock file, never written. Windows locks a byte range only
 /// through a handle with read or write access, which append-only lacks.
 pub(super) fn lock_file(path: &Path) -> Result<fs::File> {

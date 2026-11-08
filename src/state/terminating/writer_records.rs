@@ -13,6 +13,7 @@ use std::{sync::Arc, time::Instant};
 
 mod store;
 use store::{Lease, Store};
+mod gate;
 
 const VERSION: u8 = 1;
 const ROWS: usize = 16;

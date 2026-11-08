@@ -310,12 +310,14 @@ export function createTerminal(port: TerminalPort, timers: Timers = realTimers, 
     /**
      * A paste, cleaned as Qt does, through xterm's bracketed paste. `attach`,
      * when given, is the attach the paste began on (`generation`): a later
-     * attach, another session's or a reconnect, never receives it.
+     * attach, another session's or a reconnect, never receives it. True
+     * when the paste reached the shown terminal.
      */
-    paste(text: string, attach?: number) {
+    paste(text: string, attach?: number): boolean {
       const clean = cleanPaste(text);
-      if (phase() !== "connected" || !clean || (attach !== undefined && attach !== generation)) return;
-      screen?.paste?.(clean);
+      if (phase() !== "connected" || !clean || (attach !== undefined && attach !== generation) || !screen?.paste) return false;
+      screen.paste(clean);
+      return true;
     },
   };
 }

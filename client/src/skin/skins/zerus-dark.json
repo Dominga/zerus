@@ -221,6 +221,7 @@
     "sessions-pane": "left",
     "inspector": "docked",
     "activity-column": "centered",
-    "side-panel": "tabs"
+    "side-panel": "tabs",
+    "chrome": "system"
   }
 }

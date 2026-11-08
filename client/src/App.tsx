@@ -11,6 +11,10 @@ import { taskSettings } from "./store/taskSettings";
 import { taskCancellation } from "./store/taskCancel";
 import { For, Match, Show, Suspense, Switch, createEffect, createMemo, createSignal, lazy, onCleanup, onMount } from "solid-js";
 import { Rail } from "./ui/components/Rail";
+import { TitleBar } from "./ui/components/TitleBar";
+import { openAbout } from "./store/desk";
+import { appBuildInfo } from "./store/buildInfo";
+import { installedAppName, railVersion } from "./ui/screens/settings/about-version";
 import { MenuLayer, Toasts } from "./ui/components/Overlays";
 import { ActionDialogs } from "./ui/sessions/ActionDialogs";
 import { newSessionFromShortcut, newSessionOpened } from "./ui/sessions/newsession-view";
@@ -23,7 +27,7 @@ import { OverviewScreen } from "./ui/screens/Overview";
 import { ProjectsScreen } from "./ui/screens/Projects";
 import { applySkin, skin } from "./skin/runtime";
 import { catalog } from "./store/catalog";
-import { contentScale, page, selectedKey, setContentScale, setPage, toast } from "./store/ui";
+import { contentScale, page, selectedKey, setContentScale, setPage, setUnifiedChrome, toast } from "./store/ui";
 import { num, setSetting } from "./store/settings";
 import { installShortcutRouter, onCommand } from "./store/shortcuts";
 import { openGoTo, openShortcutHelp, goToOrigin, shortcutHelpOrigin } from "./store/goTo";
@@ -31,7 +35,7 @@ import { rememberRecentSession } from "./ui/sessions/goTo";
 import { updateCommands, updates } from "./store/updates";
 import { openUpdates } from "./store/desk";
 import { SessionUsageStrip } from "./ui/components/SessionUsageStrip";
-import { fleetRefresh, sandboxCheck, type BridgeMode } from "./bridge";
+import { fleetRefresh, sandboxCheck, windowChrome, type BridgeMode } from "./bridge";
 import { installUiLanguage, tr, uiLanguage } from "./i18n";
 import { WaitingPage } from "./ui/teams/Waiting";
 import { NewTeamPage } from "./ui/teams/NewTeamPage";
@@ -121,6 +125,10 @@ function StatusBar(props: { mode: () => BridgeMode | "starting" }) {
       <CleanupChip />
       <span class="grow" />
       <SessionUsageStrip />
+      {/* Task 243: with the controls in the title bar the version moves here, as Qt's placeRailControls. */}
+      <Show when={skin().layout.chrome === "unified"}>
+        <button type="button" class="status-version" data-tip={tr("%1\nOpen About", installedAppName(appBuildInfo()))} onClick={openAbout}>{railVersion(appBuildInfo()) || tr("About")}</button>
+      </Show>
     </footer>
   );
 }
@@ -164,9 +172,13 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
     void sandboxCheck().then((reason) => { if (reason) toast(tr("Zerus is sandboxed"), reason, "error", true); }).catch(() => undefined);
     onCleanup(() => off.forEach((undo) => undo()));
   });
+  // Task 243: the Compact skins draw one title bar with the controls instead of the
+  // system title bar and the rail; the native decorations follow the skin.
+  const unified = () => skin().layout.chrome === "unified";
+  createEffect(() => { setUnifiedChrome(unified()); void windowChrome(unified()).catch(() => undefined); });
   return (
-    <div class="app" classList={{ "rail-labeled": skin().layout.rail === "labeled" }}>
-      <Rail />
+    <div class="app" classList={{ "rail-labeled": skin().layout.rail === "labeled" && !unified(), "chrome-unified": unified() }}>
+      <Show when={unified()} fallback={<Rail />}><TitleBar /></Show>
       <main class="page">
         <Switch>
           <Match when={page() === "sessions"}>

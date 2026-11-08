@@ -17,7 +17,8 @@ import { visibleUnreadReply } from "../../store/attention";
 import { optionalQuestionCount } from "./optional-questions";
 import { currentChildren } from "./subagents";
 import { runningCommandsEntry } from "../../store/processes";
-import { flag } from "../../store/settings";
+import { flag, setSetting, settings, settingsReady } from "../../store/settings";
+import { sessionsToggleTick, unifiedChrome } from "../../store/ui";
 import { compactSessionRows, expandSessionsOnHover } from "./session-prefs";
 import { archiveCount, archiveTip } from "../../store/archive";
 import { ArchiveBar, datePanelOpen } from "./ArchiveBar";
@@ -580,6 +581,8 @@ export function SessionList() {
     openSavedDrafts(from, handle);
   };
 
+  // Task 243: the Compact skins' title bar hides the list completely (no strip), as Qt.
+  const unified = unifiedChrome;
   // Docked <-> strip: the conversation resizes once; the panel animates above it.
   const toggleDock = () => {
     Object.keys(multi).forEach((k) => setMulti(k, false));
@@ -593,7 +596,14 @@ export function SessionList() {
       setPanelVisible(true);
       slideOpenLater(() => panel, sessionsWidth);
     }
+    // Remembered as Qt's SessionPanelDock does (the same key).
+    void setSetting("workspace/sessionsCollapsed", stripMode());
   };
+  // The saved state, without sliding into it (Qt SessionPanelDock::restore).
+  void settingsReady.then(() => {
+    if (settings["workspace/sessionsCollapsed"] === true && !stripMode()) { setStripMode(true); setPanelVisible(false); }
+  }).catch(() => {});
+  createEffect(on(sessionsToggleTick, () => toggleDock(), { defer: true }));
   // Peek: the full panel lies over the conversation; the strip stays put.
   createEffect(on(peek, (open, was) => {
     if (!stripMode() || open === was) return;
@@ -658,9 +668,10 @@ export function SessionList() {
 
   return (
     <section class="sessions-pane" ref={section} classList={{ strip: stripMode(), peek: stripMode() && peek() }} aria-label={tr("Sessions")}
-      style={{ "--pane-w": stripMode() ? `${STRIP_WIDTH}px` : `${sessionsWidth()}px`, "--panel-w": `${sessionsWidth()}px` }}
+      style={{ "--pane-w": stripMode() ? (unified() ? "0px" : `${STRIP_WIDTH}px`) : `${sessionsWidth()}px`, "--panel-w": `${sessionsWidth()}px` }}
+      data-hidden={stripMode() && unified() ? "" : undefined}
       onPointerEnter={onSectionEnter} onPointerLeave={onSectionLeave}>
-      <Show when={stripMode()}><Strip onEnter={onStripEnter} onToggle={toggleDock} /></Show>
+      <Show when={stripMode() && !unified()}><Strip onEnter={onStripEnter} onToggle={toggleDock} /></Show>
       <div class="sp-panel" ref={panel} classList={{ overlay: stripMode() }} hidden={!panelVisible()}
         onContextMenu={(e) => { if ((e.target as Element).closest("input,textarea")) return; openMenu(e, backgroundEntries({ newSession: newSessionFromPanel, newProject: openCreateProjectDialog })); }}>
         <header class="sp-head">

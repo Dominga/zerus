@@ -70,6 +70,12 @@ export const setCompactRows = rowDensity.set;
 export const expandCompactRows = rowDensity.expandAll;
 export const hasCompactRows = rowDensity.any;
 export const [stripMode, setStripMode] = createSignal(params.get("strip") === "1");
+/** Task 243: the title bar's sessions toggle asks the list (which owns the slide) to collapse or show again. */
+const [sessionsToggleTick, setSessionsToggleTick] = createSignal(0);
+export { sessionsToggleTick };
+export const toggleSessionsList = () => setSessionsToggleTick((tick) => tick + 1);
+/** Task 243: the skin draws one title bar (`chrome: unified`); App says so, the sessions list hides completely then. */
+export const [unifiedChrome, setUnifiedChrome] = createSignal(false);
 // sessionKey is a transient highlight, independent of conversation selection.
 type Menu = { x: number; y: number; items: MenuEntry[]; sessionKey?: string };
 // Keep the logical snapshot synchronous for guarded asynchronous menu reads.

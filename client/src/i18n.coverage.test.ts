@@ -12,6 +12,7 @@ import supplement from "./i18n.next-ru.json";
 const DYNAMIC_FILES: Record<string, string> = {
   "./App.tsx": "connection state names from its STATE_TEXT table",
   "./ui/components/Rail.tsx": "its own screen table",
+  "./ui/components/TitleBar.tsx": "the rail's screen table (Rail.tsx ITEMS)",
   "./ui/screens/Machines.tsx": "field labels passed as literal props",
   "./ui/screens/MachineConnectionDialog.tsx": "its own option tables",
   "./ui/screens/Settings.tsx": "the section table",

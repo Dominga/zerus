@@ -2677,5 +2677,12 @@
   "A draft phase starts in Standard; it can switch when the team runs and the phase is approved": "Черновик фазы начнётся в стандартном режиме; переключить его можно, когда команда запущена и фаза утверждена",
   "Phase %1 is not running: only a running phase opens for tasks as they come": "Фаза %1 не выполняется: только выполняющуюся фазу можно открыть для задач по мере поступления",
   "Phase %1 is not accepted: a draft has no mode to lock": "Фаза %1 не принята: у неё нет режима для блокировки",
-  "Phase %1 already takes tasks as they come; switch it to standard first": "Фаза %1 уже принимает задачи по мере поступления; сначала переключите её на стандартный режим"
+  "Phase %1 already takes tasks as they come; switch it to standard first": "Фаза %1 уже принимает задачи по мере поступления; сначала переключите её на стандартный режим",
+  "Window title bar": "Заголовок окна",
+  "Show the session list": "Показать список сессий",
+  "Hide the session list": "Скрыть список сессий",
+  "Search sessions, IDs and messages": "Поиск по сессиям, идентификаторам и сообщениям",
+  "Minimize": "Свернуть",
+  "Maximize": "Развернуть",
+  "Close window": "Закрыть окно"
 }

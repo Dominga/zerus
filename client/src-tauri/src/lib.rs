@@ -148,6 +148,7 @@ mod window_geometry;
 #[cfg(feature = "live")]
 #[doc(hidden)]
 pub mod window_layer;
+pub mod window_chrome;
 #[doc(hidden)]
 pub mod window_theme;
 mod window_visibility;
@@ -1752,6 +1753,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         settings::settings_set,
         desk::desk_take_pending,
         window_layer::window_layer_state,
+        window_chrome::window_chrome,
+        window_chrome::window_control,
         settings::hgs_version,
         settings::hgs_setting,
         settings::open_repository,

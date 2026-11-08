@@ -235,8 +235,6 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
                 member={focus() ?? ""}
                 onMember={(id) => setFocus(id || null)}
                 onAutoAccept={(on) => void setAutoAccept(on)}
-                phaseActions={(n) => <PhaseModeControl computer={props.computer} team={props.team} phase={n} />}
-                onApprovePhase={(n) => void approvePhase(n)}
                 onLaneEdit={editLanes}
               />
             )}

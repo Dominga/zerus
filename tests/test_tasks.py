@@ -1836,6 +1836,35 @@ class ReportAttemptCommands(DeliveryFixture):
         self.assertEqual((ready["moved_to_review"], ready["task"]["stage"]), (True, "review"))
         self.assertEqual(ready["task"].get("execution", {}).get("attempts", 0), 0)
 
+    def test_a_legacy_fallback_acknowledgement_names_its_reporting_boundary(self):
+        legacy = self.add("Original legacy work", "--start", session="codex/source")
+        held = self.add("Temporarily holds destination input", "--target", self.name)
+        self.hgs("send", held["ref"], "--json")
+        self.hgs("handoff", legacy["ref"], "--session", self.name, "--json", session="codex/source", ok=False)
+        before = self.hgs("get", legacy["ref"])["task"]["execution"]
+        current = before["current"]
+        self.assertTrue(current["legacy"])
+        self.assertEqual(current["executor"]["session"], "codex/source")
+        ack = self.hgs("start", legacy["ref"], "--json", session="codex/source")
+        self.assertIn("reporting", ack, "successful start needs an explicit reporting/transition outcome")
+        self.assertEqual(ack["reporting"], "history_only")
+        self.assertNotIn("report_command", ack)
+        self.assertNotIn("report_attempt", ack)
+        for text in (ack["answer"], ack["report_hint"], self.says("start", legacy["ref"], session="codex/source")):
+            self.assertIn("No attempt UUID was created", text)
+            self.assertIn("kept as history", text)
+            self.assertIn("accept or resend", text)
+            self.assertNotIn("hgs task report", text)
+        after = self.hgs("get", legacy["ref"])["task"]["execution"]
+        self.assertEqual(after["attempts"], before["attempts"], "an acknowledgement must not invent an attempt")
+        self.assertTrue(after["current"]["legacy"])
+        report = self.hgs("report", legacy["ref"], "--json", text="Original legacy result", session="codex/source")
+        self.assertEqual((report["outcome"], report["moved_to_review"], report["stale"]),
+                         ("not_applied", False, "other_attempt"))
+        self.assertEqual(report["task"]["stage"], "active")
+        accepted = self.hgs("report", legacy["ref"], "--json", text="Explicit human acceptance")
+        self.assertTrue(accepted["moved_to_review"])
+
     def test_scope_syntax_refuses_before_history_and_cli_help_has_a_capability_marker(self):
         task, origin, _ = self.managed()
         count = len(self.hgs("get", task["ref"])["task"]["log"])

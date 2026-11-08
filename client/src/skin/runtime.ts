@@ -1,6 +1,7 @@
 import { createSignal, createMemo } from "solid-js";
 import { resolveSkins, compileSkin, type ResolvedSkin, type SkinFile } from "./skin";
 import { DEFAULTS, flag, setSetting, settingsReady, text } from "../store/settings";
+import { choiceWrites, slotSkin } from "./choice";
 import zerusDark from "./skins/zerus-dark.json";
 import zerusLight from "./skins/zerus-light.json";
 import fjord from "./skins/fjord.json";
@@ -37,14 +38,9 @@ const slot = (appearance: Appearance) => (appearance === "dark" ? "client/darkSk
 const [skinListSignal, setSkinList] = createSignal<ResolvedSkin[]>([...skins]);
 export const skinList = skinListSignal;
 
-/** The skin chosen for `appearance`; an unknown or mismatched id falls back to the slot's default. */
+/** The skin chosen for `appearance` (choice.ts: the WhiteWh port, the slot's default). */
 export function chosenSkin(appearance: Appearance): string {
-  const id = text(slot(appearance));
-  if (id === String(DEFAULTS[slot(appearance)]) && text("workspace/skin") === "whitewh") {
-    const ported = `whitewh-${appearance}`;
-    if (skinListSignal().some((s) => s.id === ported)) return ported;
-  }
-  return skinListSignal().some((s) => s.id === id && s.appearance === appearance) ? id : String(DEFAULTS[slot(appearance)]);
+  return slotSkin(appearance, text, DEFAULTS, skinListSignal());
 }
 
 /** The appearance a theme shows now. */
@@ -67,8 +63,8 @@ export function chooseTheme(choice: Theme) {
 export function chooseSkin(id: string): boolean {
   const chosen = skinListSignal().find((s) => s.id === id);
   if (!chosen) return false;
-  void setSetting(slot(chosen.appearance), id);
-  if (theme() !== "system" && theme() !== chosen.appearance) void setSetting("workspace/theme", chosen.appearance);
+  // Task 348: the writes, in order (choice.ts), so a standard skin can be chosen back from Compact.
+  for (const [key, value] of choiceWrites(chosen, text, DEFAULTS, skinListSignal())) void setSetting(key, value);
   const shown = appearanceFor(theme(), systemLight()) === chosen.appearance;
   // Choosing a skin that shows applies its activity-column variant (a user
   // action; a skin waiting for the other appearance, or one the system

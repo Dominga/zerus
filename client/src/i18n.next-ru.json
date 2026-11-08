@@ -1369,7 +1369,7 @@
   "Side panel": "Боковая панель",
   "Side panel collapsed": "Боковая панель свёрнута",
   "Side panel docked": "Боковая панель закреплена",
-  "Side panel tabs": "Вкладки боковой панели",
+  "Side panel tabs": "Боковая панель с вкладками",
   "Side panel width": "Ширина боковой панели",
   "Sign-in needed": "Нужен вход",
   "Sign-in unusable": "Вход нельзя использовать",
@@ -2517,5 +2517,8 @@
   "No sessions in this project yet.": "В этом проекте пока нет сеансов.",
   "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
   "How the team's notices to the lead and its replies to them show here.": "Как показывать уведомления команды лиду и его ответы на них.",
-  "Expand this team notice and the lead's reply": "Развернуть уведомление команды и ответ лида"
+  "Expand this team notice and the lead's reply": "Развернуть уведомление команды и ответ лида",
+  "Side panel sections": "Боковая панель с разделами",
+  "System title bar": "Системный заголовок окна",
+  "One title bar with the controls": "Один заголовок с элементами управления"
 }

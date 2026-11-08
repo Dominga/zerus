@@ -79,6 +79,7 @@ pub(crate) mod session_resume;
 pub(crate) mod task_message;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod task_start_reconcile;
+mod task_controls;
 mod termination_outcome;
 mod transport;
 mod ui_authority;

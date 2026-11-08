@@ -50,7 +50,7 @@ describe("a search hit's Markdown (zerus-5wmh.13.17.5)", () => {
     const text = "Find the **Needle** in `needle()` and [a needle link](https://example.com).\n\n```\nneedle block\n```";
     const host = document.createElement("div");
     document.body.append(host);
-    dispose = render(() => createComponent(HighlightQuery.Provider, { value: "needle", get children() { return createComponent(Body, { text }); } }), host);
+    dispose = render(() => createComponent(HighlightQuery.Provider, { value: () => "needle", get children() { return createComponent(Body, { text }); } }), host);
     expect([...host.querySelectorAll("mark")].map((m) => m.textContent)).toEqual(["Needle", "needle", "needle", "needle"]);
     expect(host.querySelector("b mark")?.textContent).toBe("Needle");
     expect(host.querySelector("code mark")?.textContent).toBe("needle");

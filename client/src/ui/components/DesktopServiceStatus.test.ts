@@ -45,7 +45,7 @@ describe("passive service", () => {
   });
   it("replaces the skeletons, Connecting and the empty detail only while paused without computers", async () => {
     const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as { readFileSync(path: URL, encoding: "utf8"): string };
-    const read = (path: string) => fs.readFileSync(new URL(path, import.meta.url), "utf8");
+    const read = (path: string) => fs.readFileSync(new URL(path, import.meta.url), "utf8").replaceAll("\r\n", "\n");
     const component = read("./DesktopServiceStatus.tsx");
     expect(component).toContain("(!!servicePaused(desktopService.state()) || firstChoicePending(desktopService.state()))\n  && !Object.keys(catalog.computers).length");
     const detail = component.match(/export function PausedServiceDetail[\s\S]*?\n}\n/)?.[0] ?? "";

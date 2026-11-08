@@ -301,6 +301,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
                 "cleared_conversations",
                 "session_id",
                 "worktree_protection",
+                "layout_transition",
                 "launch_label",
                 "layout",
                 "parent",
@@ -1043,7 +1044,8 @@ fn resume_archive(name: &str, id: &str, dry: bool, scope: Option<&session_action
 pub(super) fn resume(names: &[String], dry: bool) -> Result<i32> { resume_scoped(names,dry,None) }
 
 // A legacy-to-ID move or rename can preserve both run and conversation.
-// Keep the prepared recipe bound to the same selected storage and terminal.
+// Keep the prepared recipe bound to the same selected storage and terminal,
+// including opaque negative transition evidence. Missing and null differ.
 fn saved_binding(record: &Value) -> Value {
     json!([
         record["run_id"],
@@ -1051,7 +1053,9 @@ fn saved_binding(record: &Value) -> Value {
         record["session_id"],
         record["layout"],
         record["name"],
-        record["terminal_name"]
+        record["terminal_name"],
+        record.get("layout_transition").is_some(),
+        record["layout_transition"]
     ])
 }
 
@@ -1315,6 +1319,30 @@ fn refuse_unsettled_clear(record: &Value) -> Result<()> {
 #[cfg(test)]
 mod fresh_pause_tests {
     use super::*;
+
+    #[test]
+    fn a_saved_recipe_binds_transition_evidence_including_its_presence() {
+        let record = json!({"run_id":"run", "conversation_id":"conversation", "session_id":"sid",
+            "layout":"id", "name":"codex/example/one", "terminal_name":"terminal"});
+        let absent = saved_binding(&record);
+        for marker in [
+            Value::Null,
+            json!({"version":1}),
+            json!(["invalid"]),
+            json!(false),
+        ] {
+            let mut changed = record.clone();
+            changed["layout_transition"] = marker.clone();
+            assert_ne!(
+                saved_binding(&changed),
+                absent,
+                "presence is evidence: {marker}"
+            );
+            let bound = saved_binding(&changed);
+            changed["layout_transition"] = json!({"different":marker});
+            assert_ne!(saved_binding(&changed), bound, "content is evidence");
+        }
+    }
 
     fn fresh() -> Value {
         json!({"run_identity_version":1,"name":"codex/example/fresh","agent":"codex",

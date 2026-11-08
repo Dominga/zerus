@@ -211,16 +211,26 @@ os.execv(__HGS__,[__HGS__]+sys.argv[1:])
     def test_saved_identity_changes_during_the_probe_refuse_before_terminal_start(self):
         import fcntl
         self.use_required_helper()
+        absent = object()
+        cases = [(field, absent, value) for field, value in (
+            ('session_id', str(uuid.uuid4())), ('layout', 'legacy'),
+            ('name', 'codex/p/changed'), ('terminal_name', 'codex/p/other'),
+            ('layout_transition', None), ('layout_transition', {'version': 1}))]
+        cases += [('layout_transition', None, absent),
+                  ('layout_transition', {'version': 1}, {'version': 2})]
         for fresh in (False, True):
-            for field, value in (('session_id', str(uuid.uuid4())), ('layout', 'legacy'),
-                                 ('name', 'codex/p/changed'), ('terminal_name', 'codex/p/other')):
+            for case, (field, previous, value) in enumerate(cases):
                 with self.subTest(fresh=fresh, field=field):
-                    tag = ('fresh-' if fresh else 'resume-') + field
+                    tag = ('fresh-' if fresh else 'resume-') + str(case) + '-' + field
                     name = self.start('codex', tag)
                     self.wait(lambda: self.binding(name).get('activity') == 'idle')
                     self.hgs('pause', name)
                     sid, held = self.move_to_id_layout(name)
                     path = self.root / 'state' / 'sessions' / (sid + '.json')
+                    if previous is not absent:
+                        record = held()
+                        record[field] = previous
+                        path.write_text(json.dumps(record) + '\n')
                     original = path.read_bytes()
                     history = (self.root / 'argv.jsonl').read_bytes()
                     barrier = self.root / 'hold-helper-help'
@@ -239,7 +249,10 @@ os.execv(__HGS__,[__HGS__]+sys.argv[1:])
                             # The help exchange must not hold the state writer.
                             fcntl.flock(writer, fcntl.LOCK_EX | fcntl.LOCK_NB)
                             record = held()
-                            record[field] = value
+                            if value is absent:
+                                record.pop(field)
+                            else:
+                                record[field] = value
                             staging = path.with_suffix('.tmp')
                             staging.write_text(json.dumps(record) + '\n')
                             os.replace(staging, path)
@@ -254,6 +267,84 @@ os.execv(__HGS__,[__HGS__]+sys.argv[1:])
                         if child.poll() is None:
                             child.communicate(timeout=10)
                         path.write_bytes(original)
+
+    def test_same_session_rebuilds_keep_opaque_transition_evidence(self):
+        # These are fixture records, not calls to the dormant publisher. Even
+        # malformed evidence must survive a rebuild for later admission checks.
+        markers = ({'version': 1, 'before_sha256': 'a' * 64}, None, ['invalid', {'retain': True}])
+        for agent, marker in zip(('claude', 'codex', 'kimi'), markers):
+            for fresh in (False, True):
+                with self.subTest(agent=agent, marker=marker, fresh=fresh):
+                    name = self.start(agent, 'carry-fresh' if fresh else 'carry-resume')
+                    self.wait(lambda: self.binding(name).get('activity') == 'idle')
+                    self.hgs('pause', name)
+                    sid, held = self.move_to_id_layout(name)
+                    path = self.root / 'state' / 'sessions' / (sid + '.json')
+                    original = held()
+                    original['layout_transition'] = marker
+                    path.write_text(json.dumps(original) + '\n')
+                    if fresh:
+                        self.hgs('resume', name, '--fresh', '-d')
+                        self.wait(lambda: self.binding(name).get('activity') == 'idle'
+                                  and self.binding(name).get('conversation_id') not in (None, original['conversation_id']))
+                    else:
+                        self.resume(name)
+                    rebuilt = self.binding(name)
+                    self.assertIn('layout_transition', rebuilt)
+                    self.assertEqual(rebuilt['layout_transition'], marker)
+                    self.assertEqual(rebuilt['session_id'], sid)
+                    self.assertEqual(rebuilt['layout'], 'id')
+                    self.assertEqual(rebuilt.get('parent'), original.get('parent'))
+                    self.assertNotEqual(rebuilt['run_id'], original['run_id'])
+                    if fresh:
+                        self.assertNotEqual(rebuilt['conversation_id'], original['conversation_id'])
+                    else:
+                        self.assertEqual(rebuilt['conversation_id'], original['conversation_id'])
+
+    def test_rename_archive_and_restore_retain_transition_evidence(self):
+        name = self.start('codex')
+        self.wait(lambda: self.binding(name).get('activity') == 'idle')
+        self.hgs('pause', name)
+        path = self.root / 'state' / (hashlib.sha256(name.encode()).hexdigest() + '.json')
+        original = self.binding(name)
+        marker = {'version': 1, 'before_sha256': 'b' * 64}
+        original['layout_transition'] = marker
+        path.write_text(json.dumps(original) + '\n')
+        renamed = 'codex/p/renamed'
+        self.hgs('rename', name, renamed)
+        self.assertEqual(self.binding(renamed)['layout_transition'], marker)
+        self.hgs('archive', renamed)
+        archived = json.loads(next((self.root / 'state' / 'archives').glob('*.json')).read_text())
+        self.assertEqual(archived['layout_transition'], marker)
+        self.hgs('resume', renamed, '--archive', archived['archive_id'], '-d')
+        self.wait(lambda: self.binding(renamed).get('activity') == 'idle'
+                  and not self.binding(renamed).get('expected_id'))
+        restored = self.binding(renamed)
+        self.assertIn('layout_transition', restored)
+        self.assertEqual(restored['layout_transition'], marker)
+        self.assertEqual(restored['session_id'], original['session_id'])
+        self.assertEqual(restored['conversation_id'], original['conversation_id'])
+        self.assertNotEqual(restored.get('layout'), 'id', 'P3a restore remains legacy')
+
+    def test_a_fork_and_a_new_session_do_not_inherit_transition_evidence(self):
+        name = self.start('codex')
+        self.wait(lambda: self.binding(name).get('activity') == 'idle')
+        self.hgs('pause', name)
+        path = self.root / 'state' / (hashlib.sha256(name.encode()).hexdigest() + '.json')
+        original = self.binding(name)
+        original['layout_transition'] = {'version': 1, 'before_sha256': 'c' * 64}
+        path.write_text(json.dumps(original) + '\n')
+        self.hgs('fork', name, '-n', 'independent', '-d', '--expected-run-id', original['run_id'],
+                 '--expected-conversation-id', original['conversation_id'])
+        child_name = 'codex/p/independent'
+        self.wait(lambda: self.binding(child_name).get('activity') == 'idle')
+        child = self.binding(child_name)
+        self.assertNotIn('layout_transition', child)
+        self.assertNotEqual(child['session_id'], original['session_id'])
+        created = self.binding(self.start('codex', 'new-identity'))
+        self.assertNotIn('layout_transition', created)
+        self.assertNotEqual(created['session_id'], original['session_id'])
+        self.assertEqual(self.binding(name)['layout_transition'], original['layout_transition'])
 
     def test_an_uncertain_saved_id_capability_never_uses_the_integer_recipe(self):
         name = self.start('codex')

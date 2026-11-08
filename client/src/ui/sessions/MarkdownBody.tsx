@@ -75,5 +75,5 @@ export function Body(props: { text: string }) {
   // Rerenders once when the lazily loaded parser arrives; Activity places its
   // rows only after that, so placed rows keep their height.
   const tree = createMemo(() => { markdownReady(); return markdownTree(props.text); });
-  return <>{blocks(tree(), session, query)}</>;
+  return <>{blocks(tree(), session, query())}</>;
 }

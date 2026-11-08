@@ -20,7 +20,7 @@ function OutputEvent(props: { event: ToolEvent; shown?: number; onMore: () => vo
         <button type="button" class="link act-tool-process" onClick={() => props.process?.open(process())}>{tr("View process")}</button>
       }</Show>
       <Show when={props.event.size > 0}>
-        <pre class="act-tool-detail mono">{query ? <SearchHighlight text={text()} query={query} /> : text()}</pre>
+        <pre class="act-tool-detail mono">{query() ? <SearchHighlight text={text()} query={query()} /> : text()}</pre>
         <Show when={text().length < props.event.size}>
           <div class="act-tool-more">
             <button type="button" class="link" onClick={() => props.onMore()}>{tr("Show more")}</button>
@@ -58,7 +58,7 @@ export function ToolRow(props: {
       </button>
       <Show when={it().kind === "tool" && !props.open}><div class="act-tool-cmd mono">{it().body}</div></Show>
       <Show when={props.open && it().lines}>
-        <div class="act-tool-lines mono"><For each={it().lines}>{(l) => <div>{query ? <SearchHighlight text={l} query={query} /> : l}</div>}</For></div>
+        <div class="act-tool-lines mono"><For each={it().lines}>{(l) => <div>{query() ? <SearchHighlight text={l} query={query()} /> : l}</div>}</For></div>
       </Show>
       <Show when={props.open && it().events}>
         <div class="act-tool-events">

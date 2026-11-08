@@ -76,6 +76,21 @@ pub(super) fn atomic(path: &Path, contents: &str) -> Result<()> {
     crate::platform::sync_dir(parent).map_err(|e| e.to_string())
 }
 
+/// Create-only publication. A present entry, including an irregular or
+/// unreadable one, is never a destination we may replace. The caller holds
+/// the writer and any native exclusion required by the record being published.
+pub(super) fn atomic_new(path: &Path, contents: &str) -> Result<()> {
+    let parent = path.parent().ok_or("cannot write file without parent")?;
+    cut_write()?;
+    private_dir(parent)?;
+    let mut temp = tempfile::Builder::new().prefix(".hgs-new-")
+        .tempfile_in(parent).map_err(|e| e.to_string())?;
+    temp.write_all(contents.as_bytes()).map_err(|e| e.to_string())?;
+    temp.as_file().sync_all().map_err(|e| e.to_string())?;
+    temp.persist_noclobber(path).map_err(|e| e.error.to_string())?;
+    crate::platform::sync_dir(parent).map_err(|e| e.to_string())
+}
+
 pub(super) type Guard = crate::platform::FileLock;
 
 pub(super) fn lock(path: Option<&Path>) -> Result<Guard> {
@@ -446,6 +461,78 @@ pub(super) fn write(record: &mut Value) -> Result<()> {
     }
     session_index::note(record, session_index::Kind::Record);
     rename::mirror_legacy(record)
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    pub(super) static BEFORE_NEW_ID: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Dormant P3e primitive: publish a NEW, preallocated identity, never move or
+/// recreate a prior one. Caller holds the writer and original input exclusion.
+/// No production writer calls this until the complete fleet floor is enabled.
+/// An error is not a no-effect witness and must never re-mint a native request.
+#[allow(dead_code)]
+pub(super) fn publish_new_id(record: &mut Value) -> Result<()> {
+    use super::provider_binding::Provider;
+    use super::repositories::directory::Directory;
+    let id = string(record,"session_id");
+    let name = string(record,"name");
+    if !is_id_layout_record(record,id) || name.is_empty() || name.len() > 2048 {
+        return Err("A new ID record needs its original canonical session identity".into());
+    }
+    let provider = Provider::named(name);
+    let (namespace,kind,limit) = match provider {
+        Some(Provider::DeepSeek) if record["backend"] == "dsh"
+            && string(record,"conversation_id").starts_with("session-")
+            && string(record,"conversation_id").len() <= 2048 =>
+                (Some("dsh"),session_index::Kind::DeepSeekId,1<<20),
+        Some(Provider::OpenCode) if record["backend"] == "opencode"
+            && opencode::native_id(string(record,"conversation_id"),"ses_") =>
+                (Some("opencode"),session_index::Kind::OpenCodeId,1<<20),
+        None if record["version"] == 1 && AGENTS.contains(&string(record,"agent"))
+            && name.starts_with(&format!("{}/",string(record,"agent"))) =>
+                (None,session_index::Kind::IdRecord,ID_RECORD_BYTES),
+        _ => return Err("The new session's native namespace and identity disagree".into()),
+    };
+    let references = worktree_cleanup::bindings()?;
+    if references.iter().any(|r| r.session_id == id) {
+        return Err("This session identity is already published; it cannot be created again".into());
+    }
+    let state = Directory::open(&absolute_root()?)?;
+    let parent = namespace.map(|name| state.ensure_child(name)).transpose()?;
+    let directory = parent.as_ref().unwrap_or(&state).ensure_child("sessions")?;
+    let label_directory = state.ensure_child("labels")?;
+    let mut published = record.clone();
+    published["updated"] = json!(now());
+    processes::compact(&mut published);
+    let bytes = format!("{published}\n");
+    if bytes.len() as u64 > limit {return Err("The new session record exceeds its bound".into());}
+    // A protective Git veto is durable before either the superset or record.
+    // Keep its actual repository/directory/lock resources through publication.
+    let protection = worktree_lock::Protection::acquire(&published)?;
+    labels::add(name,id)?;
+    if !labels::listed_in(&state.path,name).is_some_and(|ids| ids.iter().any(|i| i == id)) {
+        return Err("The original label index did not retain the new identity".into());
+    }
+    #[cfg(all(test, unix))]
+    if let Some(hook) = BEFORE_NEW_ID.with(|hook| hook.borrow_mut().take()) {hook();}
+    state.verify()?; directory.verify()?; label_directory.verify()?;
+    if crate::platform::canonical(root()).map_err(|e| e.to_string())? != state.path {
+        return Err("The selected state root changed before ID publication".into());
+    }
+    if let Some(protection) = &protection {protection.verify()?;}
+    cut_write()?;
+    directory.write_new(&format!("{id}.json"),bytes.as_bytes())?;
+    crate::platform::sync_dir(&directory.path).map_err(|e| e.to_string())?;
+    state.verify()?; directory.verify()?; label_directory.verify()?;
+    if crate::platform::canonical(root()).map_err(|e| e.to_string())? != state.path {
+        return Err("The selected state root changed after ID publication".into());
+    }
+    if let Some(protection) = &protection {protection.verify()?;}
+    session_index::note(&published,kind);
+    *record = published;
+    Ok(())
 }
 
 /// Every saved live/archive record write also migrates legacy command text.

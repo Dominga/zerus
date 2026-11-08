@@ -89,6 +89,7 @@ fn valid_process_consent(proof: &str, row: &Value, common: &Path, at: u64) -> bo
 /// Folders a Zerus session record refers to.
 pub(super) struct Reference {
     pub(super) name: String,
+    pub(super) session_id: String,
     pub(super) folders: Vec<PathBuf>,
     /// The ID of the checkout ownership recorded at the session's launch.
     pub(super) owner: String,
@@ -173,6 +174,7 @@ fn reference(record: &Value) -> Reference {
         .collect();
     Reference {
         name: string(record, "name").to_owned(),
+        session_id: string(record, "session_id").to_owned(),
         folders,
         owner: string(&record["worktree_owner"], "id").to_owned(),
     }
@@ -1137,7 +1139,7 @@ fn settle_until(common: &Path, path: &Path, until: Instant) -> Settled {
     }
 }
 
-fn repository_lock(common: &Path) -> Result<std::fs::File> {
+pub(super) fn repository_lock(common: &Path) -> Result<std::fs::File> {
     let cache = cache_file("repo", &common.to_string_lossy());
     private_dir(cache.parent().unwrap())?;
     crate::platform::private_open(

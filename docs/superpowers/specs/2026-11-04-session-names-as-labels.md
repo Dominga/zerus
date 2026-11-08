@@ -337,6 +337,26 @@ P3e's controls for the lock:
 - the exact release by the owned last holder;
 - v0.47.0's maintenance, run literally, refusing the locked checkout.
 
+The P3e publication foundation is dormant: no production creator calls it and
+it does not open the duplicate-label writer gate. Its create-only publisher
+requires the caller's writer/input exclusion and a preallocated canonical ID;
+an existing identity is never recreated or overwritten. A bounded, verified
+label-index superset and the original owned checkout's Git veto precede the
+canonical ID record. An interrupted publication keeps its veto for review.
+
+A private receipt binds that veto to the ownership nonce and the native state,
+checkout, common-directory, metadata and lock objects. A missing Ready lock
+means an unlock or interruption, never permission to relock. Shared retirement
+transfers the fixed-length reason through the same original file descriptor,
+under the writer and nonblocking repository exclusion, without an unlocked gap.
+Unknown holder identities keep the veto. Last-holder release checks the original
+file again after taking it; the existing recovery puts an unfinished take back.
+An explicit person's unlock is respected, and only a confirmed Zerus release
+permits a later new publication. None of this is removal or signal consent.
+Native constructor/transition continuity and the required outer CLI writer bit
+remain prerequisites before P3e activation; the canonical connector deployment
+is still owner-approved separately.
+
 ### Acceptance controls (desktop-u G1)
 
 Each PR lists which of these it covers, and every one is covered by P3e at the latest:

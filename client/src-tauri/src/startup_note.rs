@@ -92,7 +92,7 @@ fn run<W: NoteWindow>(
 ) {
     let (state, wake) = shared;
     let deadline = Instant::now() + delay;
-    let first = {
+    {
         let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
         loop {
             if guard.done {
@@ -100,8 +100,7 @@ fn run<W: NoteWindow>(
             }
             let now = Instant::now();
             if now >= deadline && guard.text.is_some() {
-                guard.changed = false;
-                break guard.text.clone().unwrap_or_default();
+                break;
             }
             let wait = deadline.saturating_duration_since(now).max(PUMP);
             guard = wake
@@ -109,8 +108,20 @@ fn run<W: NoteWindow>(
                 .unwrap_or_else(PoisonError::into_inner)
                 .0;
         }
-    };
+    }
     let Some(mut window) = make() else { return };
+    // Read after the window exists: the checks may have ended or moved on
+    // while it was made (zerus-ogdgc).
+    let first = {
+        let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
+        guard.changed = false;
+        (!guard.done).then(|| guard.text.clone().unwrap_or_default())
+    };
+    let Some(first) = first else {
+        // Never shown; destroyed on this thread, which made it.
+        window.close();
+        return;
+    };
     window.open(&first);
     loop {
         let next = {
@@ -399,6 +410,72 @@ mod tests {
         none.step("Starting Zerus…".into());
         std::thread::sleep(Duration::from_millis(60));
         drop(none);
+    }
+
+    /// A note whose window is made only once `release` sends, after
+    /// `making` has told the test that making it began.
+    struct Gated {
+        note: StartupNote,
+        log: Arc<Mutex<Vec<String>>>,
+        making: std::sync::mpsc::Receiver<()>,
+        release: std::sync::mpsc::Sender<()>,
+    }
+
+    fn gated_note() -> Gated {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&log);
+        let (made, making) = std::sync::mpsc::channel();
+        let (release, gate) = std::sync::mpsc::channel();
+        let note = StartupNote::start(Duration::ZERO, move || {
+            made.send(()).unwrap();
+            gate.recv().unwrap();
+            Some(Fake(recorded))
+        });
+        Gated {
+            note,
+            log,
+            making,
+            release,
+        }
+    }
+
+    #[test]
+    fn checks_that_end_while_the_window_is_made_never_show_it() {
+        let Gated {
+            note,
+            log,
+            making,
+            release,
+        } = gated_note();
+        note.step("Starting Zerus…".into());
+        making.recv_timeout(Duration::from_secs(5)).unwrap();
+        let state = Arc::clone(&note.shared);
+        let ending = std::thread::spawn(move || drop(note));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !state.0.lock().unwrap().done {
+            assert!(Instant::now() < deadline, "the note was not ended");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        release.send(()).unwrap();
+        ending.join().unwrap();
+        assert_eq!(*log.lock().unwrap(), ["close"], "made, never shown");
+    }
+
+    #[test]
+    fn an_action_started_while_the_window_is_made_is_its_first_text() {
+        let Gated {
+            note,
+            log,
+            making,
+            release,
+        } = gated_note();
+        note.step("status".into());
+        making.recv_timeout(Duration::from_secs(5)).unwrap();
+        note.step("install".into());
+        release.send(()).unwrap();
+        until(&log, "open install");
+        drop(note);
+        assert_eq!(*log.lock().unwrap(), ["open install", "close"]);
     }
 
     #[test]

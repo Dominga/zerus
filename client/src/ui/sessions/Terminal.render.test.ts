@@ -6,7 +6,10 @@ import { render } from "solid-js/web";
 const fixture = vi.hoisted(() => ({
   canAttach: vi.fn(() => true), image: vi.fn(async (_file: Blob) => {}), send: vi.fn(),
   paste: vi.fn(), input: vi.fn(), show: vi.fn(), hide: vi.fn(),
+  copy: vi.fn(async (_text: string) => {}), clipboard: vi.fn(async () => "pasted from the menu"),
+  selection: "", mouse: "none", keys: undefined as ((event: KeyboardEvent) => boolean) | undefined,
 }));
+vi.mock("../../bridge", async (importOriginal) => ({ ...(await importOriginal<typeof import("../../bridge")>()), copyVerbatim: fixture.copy, pasteText: fixture.clipboard }));
 vi.mock("../../store/composer", () => ({ composer: { canAttach: fixture.canAttach, pasteImage: fixture.image, send: fixture.send } }));
 vi.mock("../../store/terminal", () => ({
   screenShowsLatest: () => true,
@@ -18,13 +21,16 @@ vi.mock("@xterm/xterm", () => ({ Terminal: class {
   cols = 80; rows = 24; options: Record<string, unknown>; textarea?: HTMLTextAreaElement;
   constructor(options: Record<string, unknown>) { this.options = options; }
   loadAddon() {} onData() {} onBinary() {} onResize() {} write(_bytes: unknown, done?: () => void) { done?.(); }
+  attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean) { fixture.keys = handler; }
+  getSelection() { return fixture.selection; } hasSelection() { return !!fixture.selection; }
+  get modes() { return { mouseTrackingMode: fixture.mouse }; }
   open(host: HTMLElement) { this.textarea = document.createElement("textarea"); host.append(this.textarea); }
   focus() { this.textarea?.focus(); } dispose() { this.textarea?.remove(); } reset() {} paste() {}
 } }));
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} } }));
 
 import { TerminalTab } from "./Terminal";
-import { detailTab, setDetailTab } from "../../store/ui";
+import { detailTab, menu, setDetailTab, setMenu } from "../../store/ui";
 
 let dispose: (() => void) | undefined, host: HTMLDivElement;
 const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
@@ -36,7 +42,7 @@ beforeEach(async () => {
   dispose = render(() => createComponent(TerminalTab, {}), host);
   await settle();
 });
-afterEach(() => { dispose?.(); dispose = undefined; document.body.replaceChildren(); vi.unstubAllGlobals(); });
+afterEach(() => { dispose?.(); dispose = undefined; document.body.replaceChildren(); vi.unstubAllGlobals(); setMenu(undefined); fixture.selection = ""; fixture.mouse = "none"; });
 
 function paste(data: Partial<DataTransfer>, target = host.querySelector(".term-host")!) {
   const event = new Event("paste", { bubbles: true, cancelable: true });
@@ -98,4 +104,50 @@ it("removes the image paste listener with the original tab", () => {
   dispose!(); dispose = undefined;
   paste({ files: [image()] as unknown as FileList }, old);
   expect(fixture.image).not.toHaveBeenCalled(); expect(fixture.paste).not.toHaveBeenCalled();
+});
+
+/** The tab loads xterm with dynamic imports; its handlers exist once they settle. */
+const mounted = async () => { await vi.dynamicImportSettled(); await settle(); };
+
+function rightClick(shiftKey = false) {
+  const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 40, clientY: 50, shiftKey });
+  host.querySelector(".term-host")!.dispatchEvent(event);
+  return event;
+}
+const entry = (label: string) => menu()?.items.find((item) => "label" in item && item.label === label) as { disabled?: boolean; action?: () => void } | undefined;
+
+it("right-click offers Copy selection and Paste, copying the selection exactly and pasting through the terminal", async () => {
+  await mounted();
+  fixture.selection = "line one\nline two";
+  expect(rightClick().defaultPrevented).toBe(true);
+  expect(entry("Copy selection")?.disabled).toBeFalsy();
+  entry("Copy selection")!.action!();
+  expect(fixture.copy).toHaveBeenCalledExactlyOnceWith("line one\nline two");
+  entry("Paste")!.action!();
+  await settle();
+  expect(fixture.clipboard).toHaveBeenCalledTimes(1);
+  expect(fixture.paste).toHaveBeenCalledExactlyOnceWith("pasted from the menu");
+  expect(fixture.input).not.toHaveBeenCalled();
+});
+
+it("right-click without a selection disables Copy selection; an agent reading the mouse gets the click unless Shift is held", async () => {
+  await mounted();
+  rightClick();
+  expect(entry("Copy selection")?.disabled).toBe(true);
+  setMenu(undefined);
+  fixture.mouse = "any";
+  expect(rightClick().defaultPrevented).toBe(true);
+  expect(menu()).toBeUndefined();
+  rightClick(true);
+  expect(entry("Paste")).toBeDefined();
+});
+
+it("Ctrl+Shift+C copies the selection without typing, and Ctrl+C stays the agent's", async () => {
+  await mounted();
+  fixture.selection = "selected output";
+  const press = (init: KeyboardEventInit) => fixture.keys!(new KeyboardEvent("keydown", { key: "c", code: "KeyC", ...init }));
+  expect(press({ key: "C", ctrlKey: true, shiftKey: true })).toBe(false);
+  expect(fixture.copy).toHaveBeenCalledExactlyOnceWith("selected output");
+  expect(press({ ctrlKey: true })).toBe(true);
+  expect(fixture.copy).toHaveBeenCalledTimes(1);
 });

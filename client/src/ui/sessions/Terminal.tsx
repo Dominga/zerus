@@ -2,7 +2,10 @@ import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import type { Terminal as XTerm } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 import { Icon } from "../lib/icons";
-import { contentScale, setDetailTab } from "../../store/ui";
+import { contentScale, setDetailTab, setMenu, toast } from "../../store/ui";
+import { copyVerbatim, pasteText } from "../../bridge";
+import { platform } from "../../store/shortcuts";
+import { clipboardKeyHandler, terminalMenu } from "./terminal-clipboard";
 import { composer } from "../../store/composer";
 import { skin } from "../../skin/runtime";
 import { screenShowsLatest, terminal, type Screen } from "../../store/terminal";
@@ -67,6 +70,25 @@ export function TerminalTab() {
     terminal.paste(data?.getData("text/plain") ?? "");
   };
 
+  // Qt's copySelection and pasteClipboard: the selection exactly as shown,
+  // and the clipboard's text through the same cleaned paste as a paste event.
+  const copySelection = () => {
+    const text = live()?.term.getSelection() ?? "";
+    if (text) void copyVerbatim(text).catch((error) => toast(tr("Terminal"), tr("Could not copy: %1", String(error)), "error"));
+  };
+  const pasteClipboard = () => {
+    void pasteText().then((text) => { terminal.paste(text); live()?.term.focus(); })
+      .catch((error) => toast(tr("Terminal"), tr("Could not paste: %1", String(error)), "error"));
+  };
+  const onContextMenu = (event: MouseEvent) => {
+    event.preventDefault();
+    const term = live()?.term;
+    if (!term) return;
+    const items = terminalMenu({ selection: term.hasSelection(), mouseApp: term.modes.mouseTrackingMode !== "none", shift: event.shiftKey, on: platform },
+      copySelection, pasteClipboard);
+    if (items) setMenu({ x: event.clientX, y: event.clientY, items });
+  };
+
   onMount(async () => {
     host.addEventListener("paste", onPaste, true);
     onCleanup(() => host.removeEventListener("paste", onPaste, true));
@@ -92,6 +114,8 @@ export function TerminalTab() {
       write: (bytes, done) => term.write(bytes, done), paste: (text) => term.paste(text), reset: () => term.reset(), size: () => ({ cols: term.cols, rows: term.rows }),
       latest: () => screenShowsLatest(term),
     };
+    // The copy key never reaches the agent (Qt's copyKey); paste keys arrive as onPaste.
+    term.attachCustomKeyEventHandler(clipboardKeyHandler(platform, copySelection));
     term.onData((data) => terminal.input(encoder.encode(data), screen));
     term.onBinary((data) => terminal.input(Uint8Array.from(data, (c) => c.charCodeAt(0) & 255), screen));
     term.onResize(({ cols, rows }) => terminal.resized(cols, rows));
@@ -129,7 +153,7 @@ export function TerminalTab() {
           <button class="icon-btn small" aria-label={tr("Dismiss")} onClick={() => setImagePasteUnavailable(false)}><Icon name="x" size={14} /></button>
         </div>
       </Show>
-      <div class="term-host" data-shortcut-context="terminal" ref={host} />
+      <div class="term-host" data-shortcut-context="terminal" ref={host} onContextMenu={onContextMenu} />
     </div>
   );
 }

@@ -427,6 +427,13 @@ export async function copyVerbatim(text: string): Promise<void> {
   await navigator.clipboard.writeText(text);
 }
 
+/** The clipboard's text for a paste into Terminal: from Rust in the app, the page's clipboard in a browser. */
+export async function pasteText(): Promise<string> {
+  if (inTauri()) return invoke<string>("paste_text");
+  if (!navigator.clipboard) throw "The clipboard is unavailable.";
+  return navigator.clipboard.readText();
+}
+
 // Project organization edits (client/src-tauri `organization.rs`). Each is
 // one call, which the Rust side sends as one `hgs swarm apply`; members are
 // "<host>\n<session name>". Outside the app an edit is refused.

@@ -52,13 +52,12 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Lifecycle and updates | 6 | 2 | 1 | |
 | Settings | 17 | | 1 | |
 | Machines, accounts, projects, new session, tasks and worktrees | 18 | | | |
-| Terminal, processes and platform session support | 6 | | 1 | 1 unverified |
-| Total (192 rows) | 148 | 25 | 14 | 5 |
+| Terminal, processes and platform session support | 8 | | | |
+| Total (192 rows) | 150 | 25 | 13 | 4 |
 
 The gaps a person is likely to meet first in daily use are the interrupted
-prompt that does not come back after Stop (`zerus-5wmh.13.4`), short tray
-messages that never appear on Linux and Windows (`zerus-5wmh.13.13`) and the
-missing Terminal Copy and Paste menu (`zerus-5wmh.13.12`).
+prompt that does not come back after Stop (`zerus-5wmh.13.4`) and short tray
+messages that never appear on Linux and Windows (`zerus-5wmh.13.13`).
 
 ## Owner decisions
 
@@ -77,7 +76,6 @@ missing Terminal Copy and Paste menu (`zerus-5wmh.13.12`).
 | `zerus-5wmh.13.4` | P2 | After Stop, return the interrupted prompt to an empty message field |
 | `zerus-5wmh.13.5` | P2 | Reference an existing file from the composer |
 | `zerus-5wmh.13.6` | P2 | OpenCode queued-message stamps, waiting hint and Remove |
-| `zerus-5wmh.13.12` | P2 | Built-in Terminal Copy and Paste menu; verify keyboard copy |
 | `zerus-5wmh.13.13` | P2 | Short tray messages call `osascript` on Linux and Windows |
 | `zerus-5wmh.13.14` | P2 | Windows: focus-aware banners, update alert, tray theme, watchdog, startup note |
 | `zerus-5wmh.13.7` | P3 | Composer and voice small controls |
@@ -366,8 +364,8 @@ In the default native alert mode the Zerus Next app posts alerts itself while it
 | Capability | Status | Zerus Next evidence | Qt |
 | --- | --- | --- | --- |
 | Built-in Terminal: Connect, Disconnect, Reconnect; 5,000-line scrollback; theme and scale; paste (images go to the message field); dropped files insert paths | done | `ui/sessions/Terminal.tsx:15-123`; `store/drops.ts:34` | `TerminalView.cpp`; `TerminalScreen.cpp:696-698` |
-| Terminal right-click menu: Copy selection, Paste | **missing** (`zerus-5wmh.13.12`) | `ui/sessions/Terminal.tsx` has no context-menu handler | `TerminalScreen.cpp:699-708` |
-| Terminal keyboard copy (Ctrl+Shift+C; Cmd+C on macOS) | unverified (`zerus-5wmh.13.12`) | no copy handler in `ui/sessions/Terminal.tsx`; the shortcut help lists it (`ui/sessions/shortcutHelp.ts:10,21`); needs a live check on each platform | `TerminalScreen.cpp:28-34,476-479` |
+| Terminal right-click menu: Copy selection, Paste | done | `ui/sessions/Terminal.tsx:75-90,156`; `ui/sessions/terminal-clipboard.ts:48-58`; the clipboard read `tauri/clipboard.rs:59-68` | `TerminalScreen.cpp:699-708` |
+| Terminal keyboard copy (Ctrl+Shift+C; Cmd+C on macOS) and paste (Ctrl+Shift+V, Shift+Insert; Cmd+V) | done | copy: `ui/sessions/terminal-clipboard.ts:19-37`, `ui/sessions/Terminal.tsx:118`; paste keys reach `ui/sessions/Terminal.tsx` onPaste. Checked in WebKitGTK 2.54 with `client/scripts/terminal-keys-smoke.py`; xterm alone copied nothing on Ctrl+Shift+C | `TerminalScreen.cpp:28-46,476-479` |
 | External terminal, native DeepSeek UI, shell in the session folder, connect and restore commands | done | `store/sessionTerminal.ts:12-24`; `store/sessionFolders.ts:39`; `ui/sessions/actions-ui.ts:344-355` | `SessionsWindow.cpp:599,635,5295,5304` |
 | Processes tab: count in the label, live and recorded tree, output, Copy command, Stop and Terminate selected | done | `ui/sessions/Processes.tsx:25-123`; `store/processes.ts:74-75,255-264` | `ProcessView.cpp`; `SessionsWindow.cpp:1330,3787` |
 

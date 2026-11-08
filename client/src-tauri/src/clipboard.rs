@@ -56,6 +56,17 @@ pub fn copy_verbatim(app: AppHandle, text: String) -> Result<(), String> {
     write(&app, text)
 }
 
+/// The clipboard's text for Paste in Terminal's right-click menu (Qt's
+/// `TerminalScreen::pasteClipboard`, which read `QClipboard::text`); the paste
+/// keys arrive as the webview's own paste event. Async, so the read never runs
+/// on GTK's thread, which the plugin forbids.
+#[tauri::command(async)]
+pub fn paste_text(app: AppHandle) -> Result<String, String> {
+    tauri_plugin_clipboard_manager::ClipboardExt::clipboard(&app)
+        .read_text()
+        .map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{copyable, verbatim};

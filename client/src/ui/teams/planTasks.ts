@@ -27,12 +27,14 @@ export function taskState(task: TeamTaskView): TaskState {
     case "pending": return make(tr("Pending"), "muted");
     case "assigned": return make(tr("Assigned"), "assigned");
     case "in_progress": return make(tr("In progress"), "active");
-    case "submitted": return make(tr("Submitted"), "done");
-    case "in_review": return make(tr("In review"), "active");
-    case "in_test": return make(tr("In test"), "active");
+    // Task 342 (owner, 2026-11-08): what waits for a decision is in review, a
+    // blue of its own, not the done green of a task nobody has accepted yet.
+    case "submitted": return make(tr("Submitted"), "review");
+    case "in_review": return make(tr("In review"), "review");
+    case "in_test": return make(tr("In test"), "review");
     case "accepted": return make(tr("Accepted"), "done");
     case "rejected": return make(tr("Rejected"), "danger");
-    case "cancelled": return make(tr("Cancelled"), "dim");
+    case "cancelled": return make(tr("Cancelled"), "cancelled");
     default: return make(task.status || tr("Pending"), "muted");
   }
 }

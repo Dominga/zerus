@@ -640,7 +640,7 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
         None => String::new(),
     };
     // A lead without a session is started first; an existing lead is briefed.
-    let team = Team {
+    let mut team = Team {
         id: id.to_owned(),
         name: name.clone(),
         goal: clean(text(input, "goal"), 20_000, "The goal")?,
@@ -663,6 +663,11 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
         ..Default::default()
     };
     let events = vec![Event::new("created", json!({"by":"You","name":name}))];
+    // Task 271: a team whose working mode is recorded carries the lead
+    // playbook (and is briefed); a team with no mode keeps the plain flow.
+    if !team.working_mode.is_empty() {
+        team.playbook = Some(super::playbook::playbook(&team));
+    }
     Ok((team, events))
 }
 
@@ -5455,6 +5460,10 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                     }
                 }
                 None => team.mode_proposal = Some(json!({"preset":""})),
+            }
+            // Task 271: the playbook is stored with a team that has a mode.
+            if !team.working_mode.is_empty() {
+                team.playbook = Some(super::playbook::playbook(team));
             }
             let validation = plan::validate(team, offline);
             ensure!(

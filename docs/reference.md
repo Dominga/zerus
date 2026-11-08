@@ -8965,6 +8965,38 @@ it makes, not one the lead must remember.
 - The lead guide (`hgs guide team-lead`) is size-bounded; the presets and their
   reasons are read from the draft and `hgs team status` instead.
 
+#### The lead playbook and the brief (#271)
+
+Owner, 2026-11-08: "let us make sure such mistakes in running a project do not
+happen; let Zeros itself propose the methods of running it and remind you after
+a compaction".
+
+- **The playbook** (`src/state/teams/playbook.rs`) is the team's working-mode
+  preset (task 270) plus nine rules: (a) the mode its project needs; (b) accepted
+  work lands on the integration line; (c) no member idles while ready work
+  waits; (d) a task names files or module paths, not a whole folder; (e) the
+  lore (project memory) has a task shipping its binary in the package; (f) one
+  session, one team; (g) a report's tests are run before the accept; (h) a task
+  starts from the integration line; (i) no real-format token or secret in a task
+  text or a report. It is stored on the team (`playbook`) at create and from a
+  draft, and the lead brief carries it.
+- **The check** is read-only and cheap: every rule is evaluated from the team
+  record (settings, cached mode proposal, tasks and attempts, merge entries,
+  reports, decisions), never from Git, the session listing or the file system,
+  so it runs on every inbox or status read. Each breach is ONE `playbook` item
+  with the rule, what it sees and the exact fix command; a breach clears when
+  the team record no longer shows it. What only the owner may decide is marked
+  in the item ("the owner's decision"): the working-mode preset's settings, and
+  a leaked secret.
+- **The brief** is short plain text: the working mode and the base, the rules,
+  the open breaches with their fixes, the owner's standing decisions from the
+  lore, the integration line's last landing, and which members have no work. It
+  is sent to the lead at team start, at each new phase, and when the lead's
+  session or context shows a compaction or a clear (a new run or conversation,
+  or a context reading well below the one the last brief saw, at most once per
+  change). `hgs team brief --lead` (or `--json`) prints it on demand; the same
+  payload carries the playbook and the breaches for the clients.
+
 #### The merge queue (#760)
 
 With `[merge_queue] enabled = true` (the owner may override it), the lead's or

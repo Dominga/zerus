@@ -1815,3 +1815,31 @@ fn the_phone_s_done_page_comes_from_the_index_as_from_the_documents() {
     let mut index = Index::open(&store).unwrap();
     assert!(index.done_entries().unwrap().is_none());
 }
+
+#[test]
+fn a_done_row_without_session_metadata_declines_instead_of_hiding_the_task() {
+    // review-win-d on #1780 (zerus-7w9zj): a cached row without its session
+    // property is not a task sent to no session; the index declines.
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let session = SessionKey { machine: "m1".into(), session: "codex/api".into(), session_id: "launch_id:api".into() };
+    let task = accepted(&store, "T-d00001", &session, 1_000);
+    let mut index = Index::open(&store).unwrap();
+    let raw: String = index.db.query_row("SELECT row FROM tasks WHERE uuid=?1", [task.uuid()], |r| r.get(0)).unwrap();
+    let mut row: Value = serde_json::from_str(&raw).unwrap();
+    assert!(row["session"].is_object());
+    row.as_object_mut().unwrap().remove("session");
+    assert_eq!(index.db.execute("UPDATE tasks SET row=?1 WHERE uuid=?2", params![row.to_string(), task.uuid()]).unwrap(), 1);
+    let page = match index.done_entries().unwrap() {
+        Some(entries) => store.done_page_of(entries, None, 7, 0, Some(&session)).unwrap(),
+        None => store.done_page(None, 7, 0, Some(&session)).unwrap(),
+    };
+    let expected = store.done_page(None, 7, 0, Some(&session)).unwrap();
+    assert_eq!(expected.total, 1);
+    assert_eq!(page, expected, "missing cached session metadata must fall back, not silently hide the task");
+    // An explicit null is a task sent to no session: the index answers.
+    row["session"] = Value::Null;
+    index.db.execute("UPDATE tasks SET row=?1 WHERE uuid=?2", params![row.to_string(), task.uuid()]).unwrap();
+    let entries = index.done_entries().unwrap().unwrap();
+    assert_eq!(entries.iter().map(|e| (e.uuid.as_str(), e.sent.clone())).collect::<Vec<_>>(), [(task.uuid(), None)]);
+}

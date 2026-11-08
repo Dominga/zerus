@@ -1059,9 +1059,13 @@ impl<'a> Index<'a> {
             let Some(at) = row["stage_at"].as_i64() else {
                 return Ok(None);
             };
-            let sent = match &row["session"] {
-                Value::Null => None,
-                session => match serde_json::from_value::<SessionKey>(session.clone()) {
+            // The row's session property is required: an explicit null is a
+            // task sent to no session, a missing one is a row that cannot say
+            // (zerus-7w9zj), so the store answers.
+            let sent = match row.get("session") {
+                None => return Ok(None),
+                Some(Value::Null) => None,
+                Some(session) => match serde_json::from_value::<SessionKey>(session.clone()) {
                     Ok(session) => Some(session),
                     Err(_) => return Ok(None),
                 },

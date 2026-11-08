@@ -317,6 +317,10 @@ fn thread_handles(pid: u32) -> io::Result<Option<Vec<u64>>> {
 /// gone even though its own cwd can remain. Reuse of a successfully read
 /// value can likewise address a different thread. The process identity
 /// checks do not close this per-thread TSD-change window.
+/// XNU also reports a zeroed vnode when it has no own cwd OR when acquiring
+/// that vnode fails during churn; the API cannot distinguish these. That
+/// native reported-no-vnode observation is accepted, not perpetual absence.
+/// A reported vnode survives a failed vn_getpath and must remain evidence.
 fn thread_cwds(pid: u32, deadline: Instant) -> io::Result<(Vec<libc::vnode_info_path>, bool)> {
     'attempt: for _ in 0..ATTEMPTS {
         bounded(0, deadline)?;
@@ -344,9 +348,12 @@ fn thread_cwds(pid: u32, deadline: Instant) -> io::Result<(Vec<libc::vnode_info_
             };
             if used == size_of::<ThreadPath>() as i32 {
                 let value = unsafe { value.assume_init() };
-                // A thread without its own cwd has a zeroed path.
-                if unsafe { *value.cwd.vip_path.as_ptr().cast::<u8>() } != 0 {
-                    cwds.push(value.cwd);
+                #[cfg(test)]
+                let value = roster::thread_path(value);
+                match reported_thread_cwd(value.cwd) {
+                    Ok(Some(cwd)) => cwds.push(cwd),
+                    Ok(None) => {}
+                    Err(_) => continue 'attempt,
                 }
                 continue;
             }
@@ -360,6 +367,21 @@ fn thread_cwds(pid: u32, deadline: Instant) -> io::Result<(Vec<libc::vnode_info_
         return Ok((cwds, access_denied));
     }
     Err(limit())
+}
+
+fn reported_thread_cwd(cwd: libc::vnode_info_path) -> io::Result<Option<libc::vnode_info_path>> {
+    // vn_getpath errors do not erase fill_vnodeinfo's successful result.
+    // Object membership needs no pathname; sample() separately requires one.
+    let object = vnode_object(&cwd);
+    if cwd.vip_vi.vi_type != 0 || object.device != 0 || object.inode != 0 {
+        return Ok(Some(cwd));
+    }
+    if unsafe { *cwd.vip_path.as_ptr().cast::<u8>() } != 0 {
+        // A pathname without native vnode identity is not interpretable.
+        return Err(limit());
+    }
+    // The native no-vnode sentinel, with the acquisition/churn residual above.
+    Ok(None)
 }
 
 fn vnode_object(value: &libc::vnode_info_path) -> objects::Object {
@@ -689,13 +711,33 @@ pub(in crate::platform) fn sample(deadline: Instant) -> Result<WorktreeProcesses
 #[cfg(test)]
 mod roster {
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     thread_local! {
         static OWNED: RefCell<Option<BTreeSet<i32>>> = const { RefCell::new(None) };
+        static UNRESOLVED: Cell<bool> = const { Cell::new(false) };
     }
 
     pub(super) struct Owned;
+
+    pub(super) struct Unresolved;
+    pub(super) fn unresolved_paths() -> Unresolved {
+        UNRESOLVED.with(|flag| assert!(!flag.replace(true)));
+        Unresolved
+    }
+    impl Drop for Unresolved {
+        fn drop(&mut self) {
+            UNRESOLVED.with(|flag| assert!(flag.replace(false)));
+        }
+    }
+    pub(super) fn thread_path(mut value: ThreadPath) -> ThreadPath {
+        if UNRESOLVED.with(Cell::get) {
+            // Fault injection only after the real full native read. Keep its
+            // vnode and TSD; emulate vn_getpath failing to resolve the name.
+            unsafe { *value.cwd.vip_path.as_mut_ptr().cast::<u8>() = 0 };
+        }
+        value
+    }
 
     pub(super) fn owned(pids: &[u32]) -> Owned {
         assert!(!pids.is_empty() && pids.len() <= 16);
@@ -847,6 +889,75 @@ mod tests {
 
     fn soon() -> Instant {
         Instant::now() + std::time::Duration::from_secs(5)
+    }
+
+    #[test]
+    fn reported_vnodes_are_independent_of_their_paths() {
+        let empty = || unsafe { std::mem::zeroed::<libc::vnode_info_path>() };
+        assert!(reported_thread_cwd(empty()).unwrap().is_none());
+        for (kind, device, inode) in [(2, 0, 0), (0, 7, 0), (0, 0, 42), (2, 7, 42)] {
+            for first in [0, b'x'] {
+                let mut cwd = empty();
+                cwd.vip_vi.vi_type = kind;
+                cwd.vip_vi.vi_stat.vst_dev = device;
+                cwd.vip_vi.vi_stat.vst_ino = inode;
+                unsafe { *cwd.vip_path.as_mut_ptr().cast::<u8>() = first };
+                let retained = reported_thread_cwd(cwd).unwrap().unwrap();
+                assert_eq!(retained.vip_vi.vi_type, kind);
+                assert_eq!(
+                    vnode_object(&retained),
+                    objects::Object {
+                        device: u64::from(device),
+                        inode,
+                    }
+                );
+                assert!(
+                    vnode_path(&retained).is_err(),
+                    "sample cannot use empty/relative paths"
+                );
+            }
+        }
+        for first in [b'/', b'x'] {
+            let mut cwd = empty();
+            unsafe { *cwd.vip_path.as_mut_ptr().cast::<u8>() = first };
+            assert!(
+                reported_thread_cwd(cwd).is_err(),
+                "path-only metadata is contradictory"
+            );
+        }
+    }
+
+    /// Native object reads remain real. Only the successful response's name
+    /// is faulted, emulating the allowed vn_getpath failure, not reproducing
+    /// a filesystem path-reconstruction failure on this host.
+    #[test]
+    fn an_unresolved_thread_path_keeps_known_membership_and_refuses_a_sample() {
+        let checkout = tempfile::tempdir().unwrap();
+        let root = checkout.path().canonicalize().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let outside = elsewhere.path().canonicalize().unwrap();
+        let scope = objects::Scope::open(&root, soon()).unwrap();
+        let inventory = scope.inventory(soon()).unwrap();
+        let inside = Python::start(&outside, THREAD_CWD, &[root.to_str().unwrap()]);
+        let none = Python::start(&outside, THREAD_CWD, &[""]);
+        let _owned = roster::owned(&[inside.pid(), none.pid()]);
+        let _unresolved = roster::unresolved_paths();
+        let (cwds, denied) = thread_cwds(inside.pid(), soon()).unwrap();
+        assert!(!denied);
+        assert_eq!(cwds.len(), 1);
+        assert!(inventory.contains(vnode_object(&cwds[0])));
+        assert!(vnode_path(&cwds[0]).is_err());
+        assert!(member(inside.pid(), &inventory, soon()).unwrap());
+        assert!(!member(none.pid(), &inventory, soon()).unwrap());
+        assert!(thread_cwds(none.pid(), soon()).unwrap().0.is_empty());
+        assert!(programs(&inventory, soon())
+            .unwrap()
+            .iter()
+            .any(|row| row.pid == inside.pid()));
+        let Err(error) = sample(soon()) else {
+            panic!("an unresolved thread path cannot produce a complete sample");
+        };
+        assert!(error.contains("thread inspection is incomplete"));
     }
 
     /// Native PATHINFO addresses only the first zero-TSD thread. A second

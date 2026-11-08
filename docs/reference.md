@@ -3777,6 +3777,14 @@ implementation](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0
 and the coordinator's zerus-q0cd5 addressability ruling. Private fixture PID
 tests qualify their own processes only; a full-host diagnostic reporting a
 limit remains incomplete and does not qualify full-host Remove.
+Native vnode evidence is retained independently of its pathname: XNU may
+return a filled vnode while path reconstruction fails. Exact object membership
+still applies, while the generic sampler refuses an empty or relative path.
+A path without interpretable native vnode metadata is unsettled. The native
+zeroed reported-no-vnode response is accepted only as that observation: XNU
+uses it both for no own cwd and for a failed vnode acquisition during churn,
+which the API cannot distinguish. This additional kernel-acquisition residual
+does not prove perpetual absence or exempt aliased thread handles.
 
 After the original confirmation closes, cleanup runs in the background only
 following exact successful termination. A compact workspace notice shows progress,

@@ -61,7 +61,9 @@ impl Drop for RawChild {
             match self.0.try_wait() {
                 Ok(Some(_)) => return,
                 Ok(None) => std::thread::sleep(Duration::from_millis(5)),
-                Err(_) => break,
+                // A lost wait no longer proves an unreaped original PID.
+                // EOF was sent already; no later PID-based stop is permitted.
+                Err(_) => return,
             }
         }
         // Assertion-failure cleanup only, of our retained unreaped Child.

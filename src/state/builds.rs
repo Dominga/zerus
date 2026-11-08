@@ -1088,6 +1088,28 @@ pub(crate) mod tests {
         println!("low={} first={first} again={again} medium_denied={medium_denied}", crate::host::token::below_medium());
     }
 
+    /// Windows's Low folder of this account (FOLDERID_LocalAppDataLow).
+    #[cfg(windows)]
+    fn local_low() -> Option<PathBuf> {
+        use std::os::windows::ffi::OsStringExt;
+        use windows_sys::Win32::System::Com::CoTaskMemFree;
+        use windows_sys::Win32::UI::Shell::{FOLDERID_LocalAppDataLow, SHGetKnownFolderPath};
+        let mut path: windows_sys::core::PWSTR = std::ptr::null_mut();
+        // SAFETY: the out pointer is valid; on success the string is freed below.
+        let result = unsafe { SHGetKnownFolderPath(&FOLDERID_LocalAppDataLow, 0, std::ptr::null_mut(), &mut path) };
+        if result != 0 || path.is_null() {
+            return None;
+        }
+        // SAFETY: a NUL-terminated wide string the call returned.
+        let wide = unsafe {
+            let len = (0..).take_while(|&n| *path.add(n) != 0).count();
+            std::slice::from_raw_parts(path, len).to_vec()
+        };
+        // SAFETY: the shell allocated it with the COM allocator.
+        unsafe { CoTaskMemFree(path.cast()) };
+        Some(PathBuf::from(std::ffi::OsString::from_wide(&wide)))
+    }
+
     /// Task 320: why a sandboxed run builds without the shared sccache server.
     /// Its Low compiler rebuilds its own outputs in its Low folder, while an
     /// output a Medium process (the shared server) wrote there carries the
@@ -1097,10 +1119,12 @@ pub(crate) mod tests {
     fn a_sandboxed_run_rebuilds_its_own_outputs_but_not_a_medium_servers() {
         // The member's folder, as a DeepSeek sandbox's is: a Low folder. A new
         // folder in the user's LocalLow inherits its Low label, with no ACL
-        // change (a team run may not relabel a folder).
-        let profile = std::env::var_os("USERPROFILE").map(PathBuf::from).expect("USERPROFILE");
-        let local_low = profile.join("AppData").join("LocalLow");
-        assert!(local_low.is_dir(), "{} is Windows's Low folder", local_low.display());
+        // change (a team run may not relabel a folder). The known folder, not
+        // USERPROFILE: a team run gives its tests a home of their own.
+        let Some(local_low) = local_low().filter(|folder| folder.is_dir()) else {
+            eprintln!("skipped: this account has no LocalLow folder");
+            return;
+        };
         let own = tempfile::Builder::new().prefix("hgs-test-320-").tempdir_in(&local_low).unwrap();
         // What the shared Medium server leaves: an output with the Medium label.
         let folder = tempfile::tempdir().unwrap();

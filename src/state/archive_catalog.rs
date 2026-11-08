@@ -449,6 +449,9 @@ fn bounded_window(db: &Connection, q: &Query, cursor: Option<&Cursor>, b: Bounds
         let previous = if more { rows.first().map(edge) } else if partial { last.clone() } else { None };
         (rows.last().map(edge).or_else(|| last.clone()), previous)
     };
+    // zerus-0g4rm: a capped total is a lower bound over the newest rows of the
+    // range; a deeper page knows at least its position and rows.
+    let total = if total_capped { total.max(position + rows.len() as u64) } else { total };
     Ok(Window { rows, total, total_capped, position, position_capped, partial, searched, next, previous })
 }
 
@@ -703,6 +706,8 @@ mod tests {
         assert_eq!(names(&third), ["codex/p/s1"]);
         assert!(!third.partial && third.next.is_none());
         assert_eq!(third.searched, 2);
+        // zerus-0g4rm: a capped total is a lower bound, never below the rows this page found.
+        assert!(third.total_capped && third.total >= third.position + third.rows.len() as u64);
         // Nothing newer matches, within the budget looked at.
         assert_eq!((third.position, third.previous.is_some()), (0, third.position_capped));
     }

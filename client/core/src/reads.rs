@@ -608,6 +608,7 @@ pub fn check_archive_page(
     // A bounded page that ran out of its scan budget may be short, or empty,
     // and still continue (zerus-080n8).
     let partial = data.get("partial").and_then(Value::as_bool) == Some(true);
+    let total_capped = data.get("total_capped").and_then(Value::as_bool) == Some(true);
     let mut error = None;
     let page_ok = data.is_object()
         && data.get("version").and_then(Value::as_f64) == Some(1.0)
@@ -618,7 +619,8 @@ pub fn check_archive_page(
                 && !(rows.is_empty() && !next.is_empty() && !partial)
                 && (cursor.is_empty() || next != cursor)
         })
-        && total.is_some_and(|total| total >= rows.len() as f64)
+        // A capped total (zerus-080n8) is only a lower bound (zerus-0g4rm).
+        && total.is_some_and(|total| total >= 0.0 && (total_capped || total >= rows.len() as f64))
         && data.get("from").and_then(Value::as_f64) == Some(from)
         && data.get("until").and_then(Value::as_f64) == Some(until)
         && data.get("query").and_then(Value::as_str) == Some(query);
@@ -1714,6 +1716,16 @@ mod tests {
         });
         assert_eq!(verdict("c", later.clone()), None);
         assert!(page(&later).position_capped);
+        // zerus-0g4rm: a capped total may be a lower bound below the rows a later page finds.
+        let deep = page_with(|p| {
+            p["total"] = json!(0);
+            p["total_capped"] = json!(true);
+            p["partial"] = json!(false);
+        });
+        assert_eq!(verdict("c", deep), None);
+        // Without the capped flag the total still has to cover the rows.
+        let short = page_with(|p| p["total"] = json!(0));
+        assert_eq!(verdict("c", short).as_deref(), Some(ARCHIVE_PAGE_INVALID));
         // An older hgs answers a bounded request without the new fields: an exact page.
         let old = page(&page_with(|_| {}));
         assert!(!old.partial && !old.total_capped && !old.position_capped);

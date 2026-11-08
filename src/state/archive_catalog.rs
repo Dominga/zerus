@@ -534,20 +534,32 @@ pub(crate) fn page_with(value: &Value, bounded: bool) -> Result<Value> {
     }
     if bounded {
         let w = bounded_window(&db, &q, cursor.as_ref(), BOUNDS)?;
-        let records = records_of(&w.rows, q.limit)?;
+        let newer = cursor.as_ref().is_some_and(|c| c.newer);
+        // zerus-m0boz: the byte limit keeps the rows nearest the cursor, the
+        // newest going Older and the oldest going Newer, so the next page in
+        // the same direction goes on from the last one sent.
+        let nearest: Vec<Listed> = if newer { w.rows.iter().rev().cloned().collect() } else { w.rows.clone() };
+        let records = records_of(&nearest, q.limit)?;
         drop(_guard); // Journal summaries never block live hooks or lifecycle writers.
-        let sessions = sessions_of(&w.rows, &records)?;
+        let mut sessions = sessions_of(&nearest, &records)?;
         let encode = |at: f64, id: &str, newer: bool| encode_cursor(&q, &catalog, at, id, newer);
-        // Rows the byte limit left out continue Older from the last one sent.
-        let next = if !sessions.is_empty() && sessions.len() < w.rows.len() {
-            let (id, _, at) = &w.rows[sessions.len() - 1];
-            Some((*at, id.clone()))
-        } else {
-            w.next.clone()
-        };
+        let (mut next, mut previous, mut position) = (w.next.clone(), w.previous.clone(), w.position);
+        if !sessions.is_empty() && sessions.len() < nearest.len() {
+            let (id, _, at) = &nearest[sessions.len() - 1];
+            if newer {
+                // The newer rows left out are matches newer than every row sent.
+                previous = Some((*at, id.clone()));
+                position += (nearest.len() - sessions.len()) as u64;
+            } else {
+                next = Some((*at, id.clone()));
+            }
+        }
+        if newer {
+            sessions.reverse();
+        }
         let next = next.map(|(at, id)| encode(at, &id, false)).transpose()?.unwrap_or_default();
-        let previous = w.previous.as_ref().map(|(at, id)| encode(*at, id, true)).transpose()?.unwrap_or_default();
-        return Ok(json!({"version":1,"sessions":sessions,"next_cursor":next,"previous_cursor":previous,"position":w.position,"total":w.total,
+        let previous = previous.as_ref().map(|(at, id)| encode(*at, id, true)).transpose()?.unwrap_or_default();
+        return Ok(json!({"version":1,"sessions":sessions,"next_cursor":next,"previous_cursor":previous,"position":position,"total":w.total,
             "total_capped":w.total_capped,"position_capped":w.position_capped,"partial":w.partial,"searched":w.searched,
             "from":q.from,"until":q.until,"query":q.query}));
     }

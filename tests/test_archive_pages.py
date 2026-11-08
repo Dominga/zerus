@@ -142,4 +142,26 @@ class ArchivePages(unittest.TestCase):
             self.assertEqual(ran.returncode,0,ran.stderr)
             self.assertEqual((home/'called').read_text(encoding='utf-8').split(),expected)
 
+    def test_bounded_pages_cut_by_bytes_reach_every_row_in_both_directions(self):
+        # zerus-m0boz: about 9.5 kB of metadata per row, so 250 kB holds 26 of a 50-row page.
+        for i in range(80):
+            value=self.record(i,100+i,title='\U0001f9ed'*1024);value['cwd']='/synthetic/'+'p'*3000
+            path=self.archives/(value['archive_id']+'.json');path.write_text(json.dumps(value),encoding='utf-8')
+        expected=[str(uuid.UUID(int=i+1)) for i in reversed(range(80))]
+        page=self.run_query({'limit':50},bounded=True);older=[];sizes=[]
+        while True:
+            older+=[r['archive_id'] for r in page['sessions']];sizes.append(len(page['sessions']))
+            if not page['next_cursor']:break
+            page=self.run_query({'limit':50,'cursor':page['next_cursor']},bounded=True)
+        self.assertEqual(older,expected);self.assertTrue(all(n<50 for n in sizes) and len(sizes)>2,sizes)
+        newer=[];pages=[]
+        while page['previous_cursor']:
+            page=self.run_query({'limit':50,'cursor':page['previous_cursor']},bounded=True)
+            ids=[r['archive_id'] for r in page['sessions']];pages.append(ids);newer+=ids
+            # Each page's position is the count of rows newer than its first one.
+            self.assertEqual(page['position'],expected.index(ids[0]))
+        self.assertEqual(sorted(newer),sorted(expected[:80-sizes[-1]]))
+        self.assertEqual(len(newer),len(set(newer)))
+        for ids in pages:self.assertEqual(ids,sorted(ids,key=expected.index))
+
 if __name__=='__main__':unittest.main()

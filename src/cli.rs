@@ -1374,6 +1374,23 @@ fn selector_markers(command: &str, args: &[String]) -> Result<Option<Vec<Marker>
     Ok(Some(markers))
 }
 
+/// The POSIX script for a bounded archive page on a peer (zerus-080n8): an
+/// older CLI rejects `--bounded`, so one that does not list the marker gets
+/// the exact call, which it always served. `guarded` (an `--expect-machine`
+/// call) first needs `guarded-create-v1`, as every guarded call does.
+pub(crate) fn bounded_archive_script(args: &[String], guarded: bool) -> String {
+    let exact: Vec<String> = args.iter().filter(|arg| *arg != "--bounded").cloned().collect();
+    let page = format!(
+        "if ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*{}[[:space:]]*'; then exec ~/.local/bin/hgs {}; else exec ~/.local/bin/hgs {}; fi",
+        state::archive_catalog::BOUNDED_MARKER, platform::join(args), platform::join(&exact)
+    );
+    platform::remote_sh(&if guarded {
+        format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'guarded-create-v1'; then {page}; else echo 'hgs: update the selected computer to continue verified creation' >&2; exit 1; fi")
+    } else {
+        page
+    })
+}
+
 /// A POSIX script that runs `hgs ARGS` on the peer only when the installed
 /// CLI's help lists every marker; otherwise it asks for an update.
 pub(crate) fn gated(markers: &[Marker], args: &[String]) -> String {
@@ -1768,6 +1785,9 @@ fn remote_via(
         // Probe the same executable, without reading the JSON stream. An old
         // peer must never interpret this reader's name as a program to launch.
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'guarded-create-v1' && ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*lifecycle-receipt-status-v1[[:space:]]*'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to read lifecycle receipts' >&2; exit 1; fi",platform::join(&remote_args)))
+    } else if command == "--expect-machine" && args.get(1).is_some_and(|inner| inner == "archives") && has(&args, "--bounded") {
+        // zerus-wzzr9: a machine-guarded archive page falls back the same way.
+        bounded_archive_script(&remote_args, true)
     } else if command == "--expect-machine" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'guarded-create-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to continue verified creation' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "subagent" {
@@ -1785,11 +1805,7 @@ fn remote_via(
     } else if command == "notifications" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*session-notifications-v1[[:space:]]*'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to change notification preferences' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "archives" && has(&args, "--bounded") {
-        // zerus-080n8: an older peer rejects --bounded, so it serves the exact
-        // page it always did; the reply then carries no capped or partial fields.
-        let exact: Vec<String> = remote_args.iter().filter(|arg| *arg != "--bounded").cloned().collect();
-        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*{}[[:space:]]*'; then exec ~/.local/bin/hgs {}; else exec ~/.local/bin/hgs {}; fi",
-            state::archive_catalog::BOUNDED_MARKER, platform::join(&remote_args), platform::join(&exact)))
+        bounded_archive_script(&remote_args, false)
     } else if command == "keep-warm" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*session-keep-warm-v1[[:space:]]*'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to keep the prompt cache warm' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "hooks" {
@@ -1839,7 +1855,8 @@ fn remote_via(
         if machine.is_some() { markers.push(("guarded-create-v1", false)); }
         let mut words = remote_args.clone();
         // A non-POSIX peer runs the words without a shell probe: send --bounded only to one that lists it.
-        if command == "archives" && has(&args, "--bounded") && crate::remote_shell::windows(config, target).unwrap_or(false)
+        let archives = command == "archives" || (command == "--expect-machine" && args.get(1).is_some_and(|inner| inner == "archives"));
+        if archives && has(&args, "--bounded") && crate::remote_shell::windows(config, target).unwrap_or(false)
             && !crate::remote_shell::supports(config, target, &[(state::archive_catalog::BOUNDED_MARKER, true)]).unwrap_or(false) {
             words.retain(|arg| arg != "--bounded");
         }
@@ -3209,6 +3226,32 @@ fn launch(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn a_bounded_archive_page_falls_back_on_a_peer_without_the_marker() {
+        // zerus-080n8, zerus-wzzr9: plain and machine-guarded calls alike.
+        let machine = "11111111-1111-4111-8111-111111111111";
+        let root = tempfile::tempdir().unwrap();
+        for guarded in [false, true] {
+            let mut args: Vec<String> = if guarded { vec!["--expect-machine".into(), machine.into()] } else { Vec::new() };
+            args.extend(["archives", "--json", "--bounded"].map(String::from));
+            let script = bounded_archive_script(&args, guarded);
+            for marker in [true, false] {
+                let home = root.path().join(format!("{guarded}-{marker}"));
+                let bin = home.join(".local/bin");
+                std::fs::create_dir_all(&bin).unwrap();
+                let help = if marker { "echo '       archive-bounded-pages-v1';" } else { "" };
+                std::fs::write(bin.join("hgs"), format!("#!/bin/sh\nif [ \"$1\" = --help ]; then echo usage; echo '       guarded-create-v1'; {help} exit 0; fi\nprintf '%s\\n' \"$@\" > \"$HOME/called\"\n")).unwrap();
+                std::fs::set_permissions(bin.join("hgs"), std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+                let ran = std::process::Command::new("sh").arg("-c").arg(&script).env_clear().env("HOME", &home).env("PATH", "/usr/bin:/bin").output().unwrap();
+                assert!(ran.status.success(), "{guarded} {marker}: {}", String::from_utf8_lossy(&ran.stderr));
+                let called = std::fs::read_to_string(home.join("called")).unwrap();
+                let expected: Vec<&str> = args.iter().map(String::as_str).filter(|arg| marker || *arg != "--bounded").collect();
+                assert_eq!(called.split_whitespace().collect::<Vec<_>>(), expected, "{guarded} {marker}");
+            }
+        }
+    }
+
     /// zerus-t2hd0: with local sessions off, as on a Windows computer without
     /// its session host, dispatch never resolves a label first, so each
     /// command answers for itself: `native-ui dsh/p` and `a dsh/p` with the

@@ -102,6 +102,20 @@ describe("pages", () => {
     t.dispose();
   });
 
+  it("ends a partial run with an empty last page without reading it as a changed archive (zerus-bv0a7)", async () => {
+    const t = setup();
+    await t.answer(pageOf([arow(1, 300)], { total: 1, total_capped: true, next_cursor: "c1", position: 0, partial: true, searched: 25_000 }));
+    t.archive.older();
+    // The scan reached the end of the range: nothing more, not a change.
+    await t.answer(pageOf([], { total: 1, total_capped: true, next_cursor: "", previous_cursor: "p1", position: 1, partial: false, searched: 40 }));
+    const s = t.archive.status();
+    expect(s.error).toBe("");
+    expect(t.archive.partial()).toBe(false);
+    expect(s.older.visible).toBe(false);
+    expect(t.archive.rows()).toEqual([]);
+    t.dispose();
+  });
+
   it("Older loads the cursor and Newer the previous cursor, each replacing the one bounded page", async () => {
     const t = setup();
     await t.answer(pageOf([arow(1, 300), arow(2, 200)], { total: 3, next_cursor: "c1", position: 0 }));

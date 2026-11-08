@@ -842,6 +842,8 @@
   "State filter": "Фильтр состояния",
   "Status": "Статус",
   "Steps": "Шаги",
+  "Stop and keep the recording for review. Space or Esc does the same.": "Остановить и сохранить запись для проверки. То же делают Пробел и Esc.",
+  "Stop and preview": "Остановить и прослушать",
   "Stop the listed programs and sessions first, then review this folder again. No folder will be removed from this review.": "Сначала остановите перечисленные программы и сессии, затем проверьте папку снова. Сейчас папка не будет удалена.",
   "Stopped by you. It stays stopped until you choose Start connector.": "Остановлен вами. Он не запустится, пока вы не выберете «Запустить коннектор».",
   "Stopped. Choose Start connector once and Zerus will start it automatically from then on.": "Остановлен. Выберите «Запустить коннектор» один раз, и дальше Zerus будет запускать его автоматически.",

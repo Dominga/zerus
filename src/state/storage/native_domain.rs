@@ -11,7 +11,9 @@ use std::os::fd::FromRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::time::Instant;
 
+mod fresh;
 mod reservation;
+pub(in crate::state) use fresh::Fresh;
 
 /// A negative allocation decision only. This does not select or mutate an
 /// existing first holder, nor prove that any record move completed.
@@ -34,6 +36,7 @@ pub(in crate::state) struct Domain {
     new: String,
     until: Instant,
     reservation: reservation::Held,
+    kind: reservation::SidHeld,
 }
 
 /// Original exclusion acquired BEFORE the record/job transaction writes a
@@ -141,6 +144,9 @@ impl Original {
         if !inputs.private()? {
             return Err("The native input directory is not private".into());
         }
+        if create {
+            reservation::refuse_allocated_sid(&state, &inputs, id)?;
+        }
         let old = format!("{}.lock", owner_key(record));
         let new = format!("{id}.lock");
         let file = if create {
@@ -230,6 +236,8 @@ impl Original {
         self.verify(current)?;
         let reservation =
             reservation::Held::create(&self.state, &self.inputs, current, self.original)?;
+        let kind =
+            reservation::SidHeld::create_moved(&self.state, &self.inputs, &reservation, current)?;
         let domain = Domain {
             state: self.state,
             inputs: self.inputs,
@@ -242,6 +250,7 @@ impl Original {
             new: self.new,
             until: self.until,
             reservation,
+            kind,
         };
         domain.verify_before_link()?;
         domain.link()?;
@@ -270,6 +279,8 @@ impl Domain {
             return Err("The original native input directories are not private".into());
         }
         let reservation = reservation::Held::load(&state, &inputs, record)?;
+        let kind = reservation::SidHeld::load(&state, &inputs, string(record, "session_id"))?;
+        kind.verify_moved(&state, &inputs, &reservation)?;
         let old = format!("{}.lock", owner_key(record));
         let new = format!("{}.lock", string(record, "session_id"));
         let file = open_entry(&inputs, &old, true)?;
@@ -287,6 +298,7 @@ impl Domain {
             new,
             until,
             reservation,
+            kind,
         };
         domain.verify_scope()?;
         // Never reconstruct even a missing SID name: a pre-link crash and a
@@ -354,6 +366,8 @@ impl Domain {
         self.inputs.verify()?;
         self.reservation
             .verify(&self.state, &self.inputs, &self.record)?;
+        self.kind
+            .verify_moved(&self.state, &self.inputs, &self.reservation)?;
         if crate::platform::canonical(root()).map_err(|e| e.to_string())? != self.state.path
             || !self.state.private()?
             || !self.inputs.private()?
@@ -476,6 +490,9 @@ fn deadline(until: Instant) -> Result<()> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod kind_tests;
 
 #[cfg(test)]
 mod tests {
@@ -666,7 +683,7 @@ mod tests {
                 later["run_id"] = json!(uuid::Uuid::new_v4().to_string());
                 later["conversation_id"] = json!("later-conversation");
                 later["layout"] = json!("id");
-                publish_new_id(&mut later).unwrap();
+                publish_new_id(&_writer, &mut later).unwrap();
                 let old_worker = Guard::exclusive(old_worker_file).unwrap();
                 let later_driver = startup_choice::driving(&later).unwrap();
                 assert_ne!(
@@ -692,14 +709,19 @@ mod tests {
                     restored.as_object_mut().unwrap().remove("archive_id");
                     restored.as_object_mut().unwrap().remove("archived_at");
                     restored["state"] = json!("stopped");
-                    publish_new_id(&mut restored).unwrap();
+                    sessions
+                        .write_new(
+                            &format!("{}.json", string(&restored, "session_id")),
+                            restored.to_string().as_bytes(),
+                        )
+                        .unwrap();
                     assert_eq!(fs::read(&proof_path).unwrap(), proof_before);
                 }
                 assert_eq!(
                     fs::read_dir(root().join("native-input-reservations"))
                         .unwrap()
                         .count(),
-                    1
+                    3 // one old-key proof plus the moved and later SID kinds
                 );
                 assert_eq!(
                     fs::metadata(inputs.join(format!("{}.lock", owner_key(&later))))

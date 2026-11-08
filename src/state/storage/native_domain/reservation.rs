@@ -1,11 +1,17 @@
-//! Permanent negative reservation of a moved legacy native-input key.
+//! Permanent old-key reservations and exact-SID native-input kind proofs.
 //!
-//! The fixed old-key entry is immutable and bounded. New ID-layout sessions
-//! never create one. Thus the number of entries and alias pairs is bounded by
-//! legacy sessions ever moved, not launches, labels subsequently reused, time
-//! or retries. There is deliberately no delete, expiry or repair operation.
+//! Old-key v1 entries and alias pairs are bounded by legacy sessions moved;
+//! new ID sessions never create a legacy alias. Exact `sid-<UUID>.json` entries
+//! have a nonhex prefix, so cannot collide with the old 64-hex-key filenames.
+//! One immutable, at most 4096-byte kind entry accompanies each ID session's
+//! SID lock, including retained interrupted preparations with no published
+//! record. Neither kind grows per launch, rename or retry. There is no listing,
+//! deletion, expiry, reconstruction or repair operation. An orphan stays unused.
 use super::*;
 use serde::{Deserialize, Serialize};
+
+mod sid;
+pub(super) use sid::{inputs_for_fresh, refuse_allocated_sid, SidHeld};
 
 const DIRECTORY: &str = "native-input-reservations";
 const ANCHOR: &str = "native-input-reservation-scope.json";

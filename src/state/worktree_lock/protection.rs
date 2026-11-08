@@ -6,6 +6,13 @@ use crate::state::repositories::directory::Directory;
 use fs2::FileExt;
 use std::io::{Seek, SeekFrom, Write};
 
+mod legacy_veto;
+
+#[cfg(all(test, unix))]
+thread_local! {
+    pub(super) static BEFORE_LEGACY_RETENTION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {std::cell::RefCell::new(None)};
+}
+
 pub(in crate::state) struct Protection {
     owner: Value,
     state: Directory,
@@ -99,6 +106,22 @@ fn owner_matches(owner: &Value) -> bool {
         && worktree_lifecycle::owned(common, path).as_ref() == Some(owner)
 }
 
+#[cfg(unix)]
+fn mark_for_move(record: &Value, owner: &Value) -> Result<Value> {
+    if record
+        .get("worktree_protection")
+        .is_some_and(|marker| marker != &owner["id"])
+    {
+        return Err("The original legacy protection marker is inconsistent".into());
+    }
+    let mut marked = record.clone();
+    marked["worktree_protection"] = owner["id"].clone();
+    if marked.to_string().len() as u64 > storage::ID_RECORD_BYTES {
+        return Err("The protected legacy binding exceeds its bound".into());
+    }
+    Ok(marked)
+}
+
 fn open_lock(metadata: &Directory) -> Result<fs::File> {
     let file = crate::platform::no_follow(fs::OpenOptions::new().read(true).write(true))
         .open(metadata.path.join("locked"))
@@ -123,6 +146,182 @@ fn text(file: &mut fs::File) -> Result<String> {
 }
 
 impl Protection {
+    /// Existing immutable protection only. Transaction recovery verifies its
+    /// own original before-image; this reader never rewrites a legacy record
+    /// or creates a missing proof/lock after the record left its old name.
+    #[cfg(unix)]
+    #[allow(dead_code)]
+    pub(in crate::state) fn retained_for_move(record: &Value) -> Result<Option<Self>> {
+        if record["worktree_owner"].is_null() {return Ok(None);}
+        let owner=&record["worktree_owner"];
+        if record["worktree_protection"]!=owner["id"] {
+            return Err("The original transition protection marker is missing".into());
+        }
+        Self::retained_any(owner,None,false).map(Some)
+    }
+
+    /// Dormant metadata-move preparation, under the original state writer.
+    /// Unlike new-session publication, this NEVER creates a Git lock: an
+    /// existing legacy holder must retain its verified original veto object.
+    /// A negative marker is durable before the receipt or an ID record, so a
+    /// missing/interrupted receipt cannot restore text-only release authority.
+    #[cfg(unix)]
+    #[allow(dead_code)]
+    pub(in crate::state) fn for_legacy_move(record: &mut Value) -> Result<Option<Self>> {
+        if record["worktree_owner"].is_null() {
+            return Ok(None);
+        }
+        let before = record.clone();
+        let owner = &before["worktree_owner"];
+        let id = string(&before, "session_id");
+        let name = string(&before, "name");
+        if storage::in_id_layout(&before)
+            || before["version"] != 1
+            || !AGENTS.contains(&string(&before, "agent"))
+            || !name.starts_with(&format!("{}/", string(&before, "agent")))
+            || !session_id::canonical(id)
+            || before.get("legacy_shadow").is_some()
+            || before["rename_shadow"] == true
+            || !owner_matches(owner)
+            || !Path::new(string(&before, "launch_dir"))
+                .starts_with(Path::new(string(owner, "path")))
+        {
+            return Err("The original legacy checkout binding cannot be moved".into());
+        }
+        let state = state()?;
+        if !state.private()? {
+            return Err("The original legacy state root is not private".into());
+        }
+        // Routed/shadow chains need their own complete before-images in the
+        // record transaction. Never silently leave a name-based route behind.
+        match fs::symlink_metadata(storage::route_path(name)) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => (),
+            _ => {
+                return Err("The legacy rename route requires explicit transition recovery".into())
+            }
+        }
+        let binding = format!("{}.json", storage::label_key(name));
+        let read_binding = || -> Result<Value> {
+            serde_json::from_slice(&state.read_file(&binding, storage::ID_RECORD_BYTES as usize)?)
+                .map_err(|e| e.to_string())
+        };
+        if read_binding()? != before {
+            return Err("The original legacy record changed".into());
+        }
+        let receipts = state.ensure_child("worktree-protections")?;
+        let receipt = receipt(owner);
+        if let Some(proof) = read_receipt(&receipts, &receipt)? {
+            if proof["version"] == legacy_veto::VERSION
+                && before["worktree_protection"] != owner["id"]
+            {
+                return Err(
+                    "The original legacy retention marker is missing; retain it for review".into(),
+                );
+            }
+            // Use ONLY the existing-proof reader, never the create-capable
+            // new-publication path (even if a receipt changes after our read).
+            let held = Self::retained_any(owner, None, false)?;
+            if held.before["version"]==legacy_veto::VERSION && before["worktree_protection"]!=owner["id"] {
+                return Err("The original legacy retention marker was lost; keep it for review".into());
+            }
+            if !worktree_cleanup::bindings()?.iter().any(|holder| {
+                holder.owner == string(owner, "id") && holder.session_id == held.reason
+            }) {
+                return Err("The original protective veto has no verified holder".into());
+            }
+            let marked = mark_for_move(&before, owner)?;
+            if marked != before {
+                held.verify()?;
+                state.verify()?;
+                if read_binding()? != before {
+                    return Err("The legacy record changed before retention".into());
+                }
+                storage::cut_write()?;
+                state.replace_file(&binding, marked.to_string().as_bytes())?;
+            }
+            held.verify()?;
+            if read_binding()? != marked {
+                return Err("Legacy retention publication is unconfirmed".into());
+            }
+            *record = marked;
+            return Ok(Some(held));
+        }
+        if before.get("worktree_protection").is_some() {
+            return Err(
+                "The original legacy protection receipt is missing; retain it for review".into(),
+            );
+        }
+        let common = Directory::open(Path::new(string(owner, "common_dir")))?;
+        let checkout = Directory::open(Path::new(string(owner, "path")))?;
+        let metadata = Directory::open(Path::new(string(owner, "metadata")))?;
+        let repository = worktree_cleanup::repository_lock(&common.path)?;
+        repository
+            .try_lock_exclusive()
+            .map_err(|_| "The original checkout is busy")?;
+        let mut lock = legacy_veto::open(&metadata)?;
+        let lock_object = object(&lock)?;
+        let lock_version = legacy_veto::version(&lock)?;
+        if text(&mut lock)? != format!("zerus:{id}\n") {
+            return Err("The existing Git lock is not this legacy holder's original veto".into());
+        }
+        let proof = json!({"version":legacy_veto::VERSION,"kind":legacy_veto::KIND,"status":"ready","owner":owner,"state_object":state.object()?,
+            "receipt_object":receipts.object()?,"common_object":common.object()?,
+            "checkout_object":checkout.object()?,"metadata_object":metadata.object()?,"lock_object":lock_object,
+            "lock_version":lock_version,"lock_mode":lock_version[2]});
+        let verify = || -> Result<()> {
+            state.verify()?;
+            receipts.verify()?;
+            common.verify()?;
+            checkout.verify()?;
+            metadata.verify()?;
+            if crate::platform::canonical(root()).map_err(|e| e.to_string())? != state.path
+                || !owner_matches(owner)
+            {
+                return Err("The original legacy checkout scope changed".into());
+            }
+            let mut current = legacy_veto::open(&metadata)?;
+            if object(&current)? != lock_object
+                || legacy_veto::version(&current)? != lock_version
+                || text(&mut current)? != format!("zerus:{id}\n")
+            {
+                return Err("The original legacy Git lock changed".into());
+            }
+            Ok(())
+        };
+        #[cfg(all(test, unix))]
+        if let Some(hook) = BEFORE_LEGACY_RETENTION.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+        verify()?;
+        let marked = mark_for_move(&before, owner)?;
+        if read_binding()? != before {
+            return Err("The legacy record changed before retention".into());
+        }
+        storage::cut_write()?;
+        state.replace_file(&binding, marked.to_string().as_bytes())?;
+        verify()?;
+        if read_binding()? != marked {
+            return Err("Legacy retention publication is unconfirmed".into());
+        }
+        write_receipt(&receipts, &receipt, &proof, false)?;
+        let held = Self {
+            owner: owner.clone(),
+            state,
+            receipts,
+            common,
+            checkout: Some(checkout),
+            metadata,
+            _repository: repository,
+            receipt,
+            before: proof,
+            lock,
+            reason: id.to_owned(),
+        };
+        held.verify()?;
+        *record = marked;
+        Ok(Some(held))
+    }
+
     /// Existing protection only. A missing lock with a retained Ready receipt
     /// is a person's unlock or an interrupted action, never a relock request.
     fn retained(owner: &Value, expected: Option<&str>, allow_missing: bool) -> Result<Self> {
@@ -226,7 +425,7 @@ impl Protection {
         let receipt = receipt(owner);
         let current = read_receipt(&receipts, &receipt)?;
         if current.as_ref().is_some_and(|r| r["status"] == "ready") {
-            let held = Self::retained(owner, None, false)?;
+            let held = Self::retained_any(owner, None, false)?;
             // An orphaned lock from interrupted publication is never adopted.
             if !users
                 .iter()
@@ -304,6 +503,13 @@ impl Protection {
     }
 
     pub(in crate::state) fn verify(&self) -> Result<()> {
+        if self.before["version"] == legacy_veto::VERSION {
+            return self.verify_legacy();
+        }
+        self.verify_v1()
+    }
+
+    fn verify_v1(&self) -> Result<()> {
         self.state.verify()?;
         self.receipts.verify()?;
         self.common.verify()?;
@@ -435,6 +641,9 @@ impl Protection {
     /// Keep the same regular Git lock present throughout a shared handoff.
     /// Partial/error writes leave a lock for review, never an unlocked gap.
     pub(super) fn transfer(mut self, holder: &worktree_cleanup::Reference) -> Result<()> {
+        if self.before["version"] == legacy_veto::VERSION {
+            return Err("The original legacy advisory veto is retained unchanged; shared retirement needs review".into());
+        }
         let id = holder.session_id.as_str();
         if !session_id::canonical(id) {
             return Err("A shared holder has no stable session identity".into());
@@ -505,5 +714,10 @@ pub(super) fn existing(record: &Value) -> Result<Option<Protection>> {
         }
         return Ok(None);
     }
-    Protection::retained(owner, Some(string(record, "session_id")), true).map(Some)
+    if read_receipt(&state.child("worktree-protections")?, &receipt(owner))?.is_some_and(|proof| {
+        proof["version"] == legacy_veto::VERSION && record["worktree_protection"] != owner["id"]
+    }) {
+        return Err("The original legacy retention marker is missing; keep it for review".into());
+    }
+    Protection::retained_any(owner, Some(string(record, "session_id")), true).map(Some)
 }

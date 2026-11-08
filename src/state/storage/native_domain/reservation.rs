@@ -96,10 +96,16 @@ fn absent(directory: &Directory, name: &str) -> Result<bool> {
 }
 
 pub(super) fn inputs_for_prepare(state: &Directory, record: &Value) -> Result<Directory> {
+    inputs_for_mode(state, record, true)
+}
+pub(super) fn inputs_for_existing(state: &Directory, record: &Value) -> Result<Directory> {
+    inputs_for_mode(state, record, false)
+}
+fn inputs_for_mode(state: &Directory, record: &Value, create: bool) -> Result<Directory> {
     legacy(record)?;
     state.verify()?;
     let first_scope = absent(state, ANCHOR)? && absent(state, DIRECTORY)?;
-    let inputs = if first_scope {
+    let inputs = if first_scope && create {
         state.ensure_child("native-input")?
     } else {
         state.child("native-input")?

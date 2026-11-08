@@ -15,7 +15,7 @@ vi.mock("./settings", async (original) => ({
 }));
 
 import { profileToken, saveAccountAppearance, type MarkPort } from "./accountMarks";
-import { markMigration } from "./accountMarkMigration";
+import { markMigration, RETRY_FIRST, type Schedule } from "./accountMarkMigration";
 import { setAccountsPage } from "./accounts";
 import { emptyAccounts, type Account, type AccountsView, type Profile } from "../types";
 import type { AccountEditResult } from "../bridge";
@@ -89,6 +89,9 @@ describe("saving an account's appearance", () => {
   });
 });
 
+/** A schedule that never runs: the tests drive each run themselves. */
+const never: Schedule = () => () => {};
+
 describe("moving this desktop's marks to their computers (zerus-sa9qn.6)", () => {
   beforeEach(() => { state.writes.length = 0; for (const key of Object.keys(state.values)) delete state.values[key]; });
   const view = (...profiles: Partial<Profile>[]): AccountsView => ({
@@ -101,7 +104,7 @@ describe("moving this desktop's marks to their computers (zerus-sa9qn.6)", () =>
     state.values[`accounts/color/${token(older)}`] = "#00aa7f";
     setAccountsPage(view({ ...hosted, mark_color: "#ff9234" }, older));
     const migrate = vi.fn(async () => true);
-    await markMigration(migrate)();
+    await markMigration(migrate, Date.now, never)();
     expect(migrate.mock.calls).toEqual([[hosted.key, "#2b97ff", "🦊"]]);
     expect(state.values).toEqual({ [`accounts/color/${token(older)}`]: "#00aa7f" });
   });
@@ -110,14 +113,14 @@ describe("moving this desktop's marks to their computers (zerus-sa9qn.6)", () =>
     state.values[`accounts/color/${token(hosted)}`] = "#2b97ff";
     setAccountsPage(view({ ...hosted, mark_color: "#ff9234", mark_emoji: "🐙" }));
     const migrate = vi.fn(async () => true);
-    await markMigration(migrate)();
+    await markMigration(migrate, Date.now, never)();
     expect(migrate).not.toHaveBeenCalled();
     expect(state.values).toEqual({});
     state.values[`accounts/mark/${token(hosted)}`] = "🦊";
     setAccountsPage(view(hosted));
     let now = 1_000, online = false;
     const flaky = vi.fn(async () => online);
-    const run = markMigration(flaky, () => now);
+    const run = markMigration(flaky, () => now, never);
     await run();
     now += 30_000; await run();
     expect(flaky).toHaveBeenCalledTimes(1);
@@ -131,8 +134,38 @@ describe("moving this desktop's marks to their computers (zerus-sa9qn.6)", () =>
     state.values[`accounts/color/${token(hosted)}`] = "#2b97ff";
     setAccountsPage(view({ ...hosted, online: false }, older));
     const migrate = vi.fn(async () => true);
-    await markMigration(migrate)();
+    await markMigration(migrate, Date.now, never)();
     expect(migrate).not.toHaveBeenCalled();
     expect(state.values).toEqual({ [`accounts/color/${token(hosted)}`]: "#2b97ff" });
+  });
+
+  it("schedules its own retry, backing off, and stops once moved or no longer pending (zerus-k4odl)", async () => {
+    state.values[`accounts/mark/${token(hosted)}`] = "🦊";
+    setAccountsPage(view(hosted));
+    let now = 0, online = false;
+    const timers: { run: () => void; ms: number; cancelled: boolean }[] = [];
+    const schedule: Schedule = (run, ms) => { const t = { run, ms, cancelled: false }; timers.push(t); return () => { t.cancelled = true; }; };
+    const flaky = vi.fn(async () => online);
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+    await markMigration(flaky, () => now, schedule)();
+    expect(timers.map((t) => t.ms)).toEqual([RETRY_FIRST]);
+    // No Accounts change: the timer alone tries again, then waits twice as long.
+    now += RETRY_FIRST; timers[0].run(); await settle();
+    expect(flaky).toHaveBeenCalledTimes(2);
+    expect(timers.map((t) => t.ms)).toEqual([RETRY_FIRST, 2 * RETRY_FIRST]);
+    online = true; now += 2 * RETRY_FIRST; timers[1].run(); await settle();
+    expect(flaky).toHaveBeenCalledTimes(3);
+    expect(state.values).toEqual({});
+    expect(timers).toHaveLength(2);
+    // A member that is no longer pending is forgotten with its timer.
+    state.values[`accounts/mark/${token(hosted)}`] = "🦊";
+    online = false;
+    const run = markMigration(flaky, () => now, schedule);
+    await run();
+    expect(timers).toHaveLength(3);
+    setAccountsPage(view({ ...hosted, online: false }));
+    await run();
+    expect(timers[2].cancelled).toBe(true);
+    expect(timers).toHaveLength(3);
   });
 });

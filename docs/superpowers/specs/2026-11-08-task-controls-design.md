@@ -221,9 +221,12 @@ changed fact/configuration/store bindings refuse. Import only adds or retains
 holds, and never reactivates a settled identity or grants input authority.
 
 The native writer captures a sealed bounded file identity, size and SHA-256
-digest. After that writer drops, the actor imports the captured page in one
-immediate transaction and rechecks the retained no-follow file inside that
-transaction before commit. It takes no native lock there. Missing, changed,
+digest, retaining unlocked original fact and independently opened writer-file
+handles so their numeric identities cannot recycle through replacement. The
+original native exclusion is not retained. After that writer drops, the actor
+imports the captured page in one immediate transaction and rechecks the
+retained no-follow file inside that transaction before commit. It takes no
+native lock there. Missing, changed,
 oversized or overflowed evidence and any failed import refuse admission; a
 caller cannot skip reconciliation and treat the absence of imported holds as
 permission. A failure rolls back the page, including request reservations and

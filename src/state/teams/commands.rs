@@ -3584,9 +3584,12 @@ fn message_command(input: &Value) -> anyhow::Result<Value> {
     // Task 156: the lead's decision is recorded, never only messaged.
     ensure!(by != team.lead || !super::decisions::decision_like(&body), "{}", super::decisions::refusal(&team.id));
     // Task 161: the lead never tells a member to wait; waiting is a park.
-    if by == team.lead && super::wait_loops::lead_wait_instruction(&body) {
-        let open = recipients.iter().find_map(|member| team.tasks.iter().find_map(|task| task.open_attempt().filter(|attempt| attempt.member == *member).map(|attempt| (task.id, attempt.id.clone()))));
-        bail!("{}", super::wait_loops::lead_refusal(&team.id, open.as_ref().map(|found| found.0), open.as_ref().map_or("", |found| found.1.as_str())));
+    // Task #276: the refusal quotes the phrase that judged it an instruction.
+    if by == team.lead {
+        if let Some(phrase) = super::wait_loops::lead_wait_instruction(&body) {
+            let open = recipients.iter().find_map(|member| team.tasks.iter().find_map(|task| task.open_attempt().filter(|attempt| attempt.member == *member).map(|attempt| (task.id, attempt.id.clone()))));
+            bail!("{}", super::wait_loops::lead_refusal(&team.id, open.as_ref().map(|found| found.0), open.as_ref().map_or("", |found| found.1.as_str()), &phrase));
+        }
     }
     // Task 173: a lead message naming a task goes only to that task's holder
     // and is bound to its attempt; otherwise it is refused with the hand-out.

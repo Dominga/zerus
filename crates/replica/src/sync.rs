@@ -64,6 +64,16 @@ pub struct DoneRow {
     pub accepted_at: i64,
 }
 
+/// A Done task as a page of the Done list is chosen from (`done_page_of`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DoneEntry {
+    /// When it entered Done (Unix milliseconds).
+    pub at: i64,
+    pub uuid: String,
+    /// The session it was sent to.
+    pub sent: Option<SessionKey>,
+}
+
 /// A page of the Done list; `next` is the cursor of the page after it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DonePage {
@@ -316,21 +326,40 @@ impl ProjectStore {
         session: Option<&SessionKey>,
     ) -> Result<DonePage> {
         let (_, stages, _) = self.inventory_with_stages()?;
-        let mut done: Vec<(i64, String)> = stages
+        let done = stages
             .into_iter()
-            .filter(|(_, (stage, _, sent))| {
-                *stage == Stage::Done
-                    && session.is_none_or(|session| {
-                        sent.as_ref().is_some_and(|sent| {
-                            if session.session_id.is_empty() {
-                                sent.machine == session.machine && sent.session == session.session
-                            } else {
-                                sent == session
-                            }
-                        })
+            .filter(|(_, (stage, _, _))| *stage == Stage::Done)
+            .map(|(uuid, (_, at, sent))| DoneEntry { at, uuid, sent })
+            .collect();
+        self.done_page_of(done, before, limit, since, session)
+    }
+
+    /// `done_page` over the Done tasks a caller already holds (hgs's task
+    /// index, zerus-cg5h.23): each one's UUID, when it entered Done and the
+    /// session it was sent to, which must be what the documents say. Only
+    /// the page's documents are read.
+    pub fn done_page_of(
+        &self,
+        done: Vec<DoneEntry>,
+        before: Option<(i64, String)>,
+        limit: usize,
+        since: i64,
+        session: Option<&SessionKey>,
+    ) -> Result<DonePage> {
+        let mut done: Vec<(i64, String)> = done
+            .into_iter()
+            .filter(|entry| {
+                session.is_none_or(|session| {
+                    entry.sent.as_ref().is_some_and(|sent| {
+                        if session.session_id.is_empty() {
+                            sent.machine == session.machine && sent.session == session.session
+                        } else {
+                            sent == session
+                        }
                     })
+                })
             })
-            .map(|(uuid, (_, at, _))| (at, uuid))
+            .map(|entry| (entry.at, entry.uuid))
             .collect();
         done.sort_unstable_by(|a, b| b.cmp(a));
         let total = done.len();

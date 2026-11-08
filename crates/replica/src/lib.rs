@@ -34,7 +34,7 @@ pub use store::{
     ProjectStore, DEPENDS_ON_INCOMING_COPY, MARK_FORMAT,
 };
 pub use sync::{
-    canonical_version, version_includes, Document, DonePage, DoneRow, Imported, Inventory, Update,
-    Version,
+    canonical_version, version_includes, Document, DoneEntry, DonePage, DoneRow, Imported,
+    Inventory, Update, Version,
 };
 pub use task::{NewTask, Settled, Settlement, TaskDoc};

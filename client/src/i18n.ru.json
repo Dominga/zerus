@@ -1,4 +1,7 @@
 {
+  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
+  "New team…": "Новая команда…",
+  "No sessions in this project yet.": "В этом проекте пока нет сеансов.",
   "\n\n%1 unavailable or inapplicable sessions will be left as they are.": "\n\nНедоступные или неприменимые сессии (%1) останутся без изменений.",
   "\n\nOnly these saved or archived entries are removed. Live sessions and native conversation history are kept.": "\n\nБудут удалены только эти сохранённые или архивные записи. Работающие сессии и история разговоров агента сохранятся.",
   "\n\nRunning processes will stop. Tracked Codex, Claude and Kimi conversations are kept in Archive; native conversation history is kept.": "\n\nЗапущенные процессы остановятся. Отслеживаемые разговоры Codex, Claude и Kimi сохраняются в Архиве; история разговоров агента сохраняется.",
@@ -4544,7 +4547,25 @@
   "The background service has not confirmed this settings change.": "Фоновая служба не подтвердила это изменение настроек.",
   "The background service was refreshed.": "Фоновая служба обновлена.",
   "The branch %1 is kept.": "Ветка %1 сохраняется.",
-  "The branch name: {id} is the task, {member} the member and {team8} the team's first eight characters": "Имя ветки: {id} — задача, {member} — участник, {team8} — первые восемь символов команды",
+  "The branch name: {
+  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
+  "New team…": "Новая команда…",
+  "No sessions in this project yet.": "В этом проекте пока нет сеансов.",id} is the task, {
+  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
+  "New team…": "Новая команда…",
+  "No sessions in this project yet.": "В этом проекте пока нет сеансов.",member} the member and {
+  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
+  "New team…": "Новая команда…",
+  "No sessions in this project yet.": "В этом проекте пока нет сеансов.",team8} the team's first eight characters": "Имя ветки: {
+  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
+  "New team…": "Новая команда…",
+  "No sessions in this project yet.": "В этом проекте пока нет сеансов.",id} — задача, {
+  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
+  "New team…": "Новая команда…",
+  "No sessions in this project yet.": "В этом проекте пока нет сеансов.",member} — участник, {
+  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
+  "New team…": "Новая команда…",
+  "No sessions in this project yet.": "В этом проекте пока нет сеансов.",team8} — первые восемь символов команды",
   "The build broker is off: members sharing a folder build in it directly. The owner turns it on in the team's settings.": "Брокер сборок выключен: участники с общей папкой собирают прямо в ней. Владелец включает его в настройках команды.",
   "The builds the team ran and their queue": "Сборки команды и их очередь",
   "The catalog is not read yet.": "Каталог ещё не прочитан.",
@@ -5580,7 +5601,19 @@
   "on this computer": "на этом компьютере",
   "on time": "вовремя",
   "open native DeepSeek UI": "открыть собственный пользовательский интерфейс DeepSeek",
-  "optional, argv templates; {model} is the model, {server} the server": "необязательно, шаблоны argv; {model} — модель, {server} — сервер",
+  "optional, argv templates; {
+  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
+  "New team…": "Новая команда…",
+  "No sessions in this project yet.": "В этом проекте пока нет сеансов.",model} is the model, {
+  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
+  "New team…": "Новая команда…",
+  "No sessions in this project yet.": "В этом проекте пока нет сеансов.",server} the server": "необязательно, шаблоны argv; {
+  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
+  "New team…": "Новая команда…",
+  "No sessions in this project yet.": "В этом проекте пока нет сеансов.",model} — модель, {
+  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
+  "New team…": "Новая команда…",
+  "No sessions in this project yet.": "В этом проекте пока нет сеансов.",server} — сервер",
   "or plain lines:  small: running   large: stopped   memory: 12.5/64 GB": "или простые строки:  small: running   large: stopped   memory: 12.5/64 GB",
   "or this share of the drive (%)": "или такую долю диска (%)",
   "partial": "частично",

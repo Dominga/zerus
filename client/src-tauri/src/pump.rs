@@ -768,6 +768,22 @@ impl Pump {
         self.lock().grouping.windows_folders_import_layout()
     }
 
+    /// N6 (owner, 2026-11-08): a project folder of this computer on Windows,
+    /// edited in the device-local family; the organization republishes and
+    /// saves the layout, never the shared catalog.
+    pub fn edit_windows_folder(
+        &self,
+        organization: &serde_json::Value,
+        project: &str,
+        node: &str,
+        change: &zerus_client_core::swarm::folder_edit::Change,
+    ) -> Result<(), String> {
+        let mut inner = self.lock();
+        inner.grouping.edit_local_windows_folder(organization, node, project, change)?;
+        self.wake(inner);
+        Ok(())
+    }
+
     pub fn seed_windows_folders(
         &self,
         seed: zerus_client_core::swarm::layout::WindowsFoldersSeed,

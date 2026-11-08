@@ -708,6 +708,22 @@ impl Grouping {
             .map(|pending| pending.then(|| self.layout.clone()))
     }
 
+    /// N6 (owner, 2026-11-08): a project folder of this computer on Windows,
+    /// edited in the device-local family and republished; never the shared
+    /// catalog (a Windows path means nothing to a peer).
+    pub fn edit_local_windows_folder(
+        &mut self,
+        organization: &Value,
+        current_node: &str,
+        project: &str,
+        change: &super::folder_edit::Change,
+    ) -> Result<(), String> {
+        let mut next = self.layout.clone();
+        next.edit_local_windows_folder(organization, current_node, project, Some(current_node), change)?;
+        self.replace_layout(next);
+        Ok(())
+    }
+
     pub fn seed_windows_folders(
         &mut self,
         seed: super::layout::WindowsFoldersSeed,

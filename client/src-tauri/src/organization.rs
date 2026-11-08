@@ -358,6 +358,44 @@ impl Organization {
         writer.save_layout(&self.0.pump, &self.0.layout, self.0.layout_writable);
         Ok(())
     }
+    /// N6 (owner, 2026-11-08): whether this computer is Windows (its project
+    /// folders then live in the device-local family, never the shared catalog).
+    pub(super) fn local_windows(&self) -> bool {
+        self.0
+            .pump
+            .machine(&zerus_client_core::ComputerId::local())
+            .is_some_and(|machine| machine.platform.as_deref() == Some("windows"))
+    }
+
+    /// N6 (owner, 2026-11-08): a project folder of this computer on Windows:
+    /// metadata only, in the device-local family, republished and saved here.
+    pub(super) fn local_windows_folder_change(
+        &self,
+        project: &str,
+        change: zerus_client_core::swarm::folder_edit::Change,
+        node: &str,
+    ) -> Result<(), String> {
+        if !self.0.allowed {
+            return Err(REPLAY_NEEDS_HGS.into());
+        }
+        let mut writer = self.writer();
+        let mut hub = self.lock();
+        if self.windows_read_node(&hub).as_deref() != Some(node) {
+            return Err("Waiting for this computer's identity.".into());
+        }
+        let Some(catalog) = hub.sync.observed_value() else {
+            return Err("The project catalog has not arrived yet.".into());
+        };
+        let organization = catalog["organization"].clone();
+        self.0.pump.edit_windows_folder(&organization, project, node, &change)?;
+        hub.shown = None;
+        self.publish(&mut hub);
+        self.release(hub);
+        writer.save_layout(&self.0.pump, &self.0.layout, self.0.layout_writable);
+        self.0.wake.notify_all();
+        Ok(())
+    }
+
     pub fn new(
         pump: Pump,
         hgs: PathBuf,

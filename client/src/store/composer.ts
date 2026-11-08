@@ -64,6 +64,8 @@ export interface ComposerPort {
   allowRetry(handle: number): Promise<void>;
   cancelSend(handle: number): Promise<void>;
   interrupted(handle: number): Promise<void>;
+  /** The Stop's interrupt was refused: its prompt is not given back (zerus-5wmh.13.4). */
+  interruptFailed(handle: number): Promise<void>;
   clear(handle: number, run: string, conversation: string, dismiss: boolean, delay?: import("./endActionBusy").EndReference): Promise<SendReply>;
   refresh(handle: number): Promise<void>;
   /** Opens a draft attachment by its `zerus-file` path: null when it opened, else a notice; rejects with why not (Task 9). */
@@ -537,6 +539,8 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
     },
     /** Before a Stop interrupts: Rust cancels this composer's start or compaction (Qt 1187-1191). */
     async interrupted() { const h = handle(); if (h !== undefined) await port.interrupted(h).catch(() => {}); },
+    /** After Stop: the interrupt did not go through, so the turn's prompt stays with the turn (Qt 1204). */
+    async interruptFailed() { const h = handle(); if (h !== undefined) await port.interruptFailed(h).catch(() => {}); },
     /** The status line's Refresh (Qt's sessionRefreshRequested). */
     async refresh() { const h = handle(); if (h !== undefined && !operationLocked()) await port.refresh(h).catch(() => {}); },
     /**
@@ -597,7 +601,7 @@ export type ComposerStore = ReturnType<typeof createComposer>;
 export const composer = createRoot(() => createComposer({
   open: bridge.composerOpen, edit: bridge.composerEdit, pick: bridge.composerPick, attach: (h, paths, start, end) => bridge.composerAttach(h, paths, start, end), pasteImage: bridge.composerPasteImage,
   send: bridge.sendMessage, push: (...args) => bridge.sendPush(...args), sendNow: (id) => bridge.queueSendNow(id), answer: bridge.sendAnswer, remove: bridge.composerRemove, undo: bridge.composerUndoRemove,
-  allowRetry: bridge.composerAllowRetry, cancelSend: bridge.sendCancel, interrupted: bridge.sendInterrupted, clear: bridge.clearContext,
+  allowRetry: bridge.composerAllowRetry, cancelSend: bridge.sendCancel, interrupted: bridge.sendInterrupted, interruptFailed: bridge.sendInterruptFailed, clear: bridge.clearContext,
   refresh: bridge.composerRefresh, openAttachment: (path) => bridge.attachmentOpenDraft(path), localRetry: bridge.localRetry, localDelete: bridge.localDelete, localInspect: bridge.localInspect,
 }, realTimers, browserImages, appNotices, suggestions.dismiss, async (session, control, execute) => {
   const [{ endActions }, { catalog, rowId }, { captureEnd, sameEnd }] = await Promise.all([import("./endActions"), import("./catalog"), import("./endActionBusy")]);

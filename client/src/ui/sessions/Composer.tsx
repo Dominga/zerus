@@ -209,7 +209,8 @@ export function Composer() {
     if (child()) return false;
     const stop = act().stop;
     if (!stop.shown || stop.disabled) return false;
-    void composer.interrupted().then(() => stop.action());
+    // A refused interrupt keeps the turn's prompt with the turn (Qt 1204).
+    void composer.interrupted().then(() => stop.interrupt()).then((out) => { if (out && out.outcome !== "done") void composer.interruptFailed(); });
     return true;
   };
   const onKey = (e: KeyboardEvent) => {

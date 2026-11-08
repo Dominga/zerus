@@ -49,6 +49,7 @@ function fakes(reply: SendReply = { kind: "sending" }, opened: ComposerView | nu
     remove: async (_h, index) => { calls.push(`remove ${index}`); }, undo: async () => { calls.push("undo"); },
     allowRetry: async () => { calls.push("allow retry"); }, cancelSend: async () => { calls.push("cancel send"); },
     interrupted: async () => { calls.push("interrupted"); },
+    interruptFailed: async () => { calls.push("interruptFailed"); },
     clear: async (_h, run, conversation, dismiss) => { calls.push(`clear ${run} ${conversation} ${dismiss}`); return { kind: "notice", text: "Context cleared. Your draft is ready to send.", error: false }; },
     refresh: async (h) => { calls.push(`refresh ${h}`); },
     openAttachment: async (path) => { calls.push(`open file ${path}`); return openReply(); },
@@ -102,6 +103,20 @@ describe("child draft identity", () => {
     for (const other of [null, "", "not-a-uuid", id.toUpperCase(), "00000000-0000-0000-0000-000000000000"]) {
       expect(draftKey({ ...SESSION, session_id: other }), String(other)).toBe(KEY);
     }
+  });
+});
+
+describe("composer Stop", () => {
+  it("tells Rust before the interrupt and again when it was refused, for the open composer only", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      await c.interrupted(); await c.interruptFailed();
+      expect(f.calls).toEqual([]);
+      c.apply(view());
+      await c.interrupted(); await c.interruptFailed();
+      expect(f.calls).toEqual(["interrupted", "interruptFailed"]);
+    });
   });
 });
 

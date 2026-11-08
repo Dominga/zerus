@@ -27,6 +27,7 @@ pub mod fetch;
 pub mod files;
 pub mod handed;
 mod history_hint;
+mod interrupted;
 pub mod questions;
 pub mod queue;
 pub mod saved;
@@ -645,6 +646,9 @@ pub(crate) struct Hub {
     pub(crate) events: VecDeque<ComposerEvent>,
     /// The window is hidden: a handed-over send is not checked.
     pub(crate) hidden: bool,
+    /// The prompts a Stop gives back once their turns read interrupted
+    /// (Qt's `m_interruptPrompts`), by draft key, at most 16.
+    pub(crate) interrupted: interrupted::Prompts,
 }
 
 impl Hub {
@@ -1627,6 +1631,7 @@ impl Composers {
     /// `continueAfterCompact` and `continueAfterStart`, 3607), and the
     /// question cards follow (`renderQuestion`).
     fn after_observe(&self, accepted_details: bool) {
+        self.restore_interrupted();
         self.reconcile();
         self.continue_open();
         self.settle_gave_up();
@@ -1637,6 +1642,60 @@ impl Composers {
             self.queue_observed();
         }
         self.changed();
+    }
+
+    /// Qt's `restoreInterruptedPrompt`: once the open session's stopped turn
+    /// reads interrupted, its prompt returns to the message field, which
+    /// must be empty and idle: a draft the person started, or a message on
+    /// its way, always wins (`offerDraft`). Runs before the local rows'
+    /// reconcile, which may drop the row that holds the exact sent text.
+    fn restore_interrupted(&self) {
+        let mut hub = self.lock();
+        let Some(key) = hub.open_key.clone() else {
+            return;
+        };
+        if hub.closed
+            || hub
+                .open
+                .as_ref()
+                .is_some_and(|open| open.subagent.is_some())
+        {
+            return;
+        }
+        let (Some(prompt), Some(details)) = (
+            hub.interrupted.get(&key).cloned(),
+            hub.followed.details.clone(),
+        ) else {
+            return;
+        };
+        match interrupted::verdict(&prompt, &details) {
+            interrupted::Verdict::Wait => return,
+            interrupted::Verdict::Drop => {
+                hub.interrupted.remove(&key);
+                return;
+            }
+            interrupted::Verdict::Restore => hub.interrupted.remove(&key),
+        }
+        let Some(composer) = hub.composers.get_mut(&key) else {
+            return;
+        };
+        if !composer.loaded
+            || composer.has_content()
+            || composer.busy()
+            || prompt.text.trim().is_empty()
+        {
+            return;
+        }
+        let end = prompt.text.encode_utf16().count() as i64;
+        composer.draft.text = prompt.text;
+        composer.position = end;
+        composer.anchor = end;
+        // The webview takes the text, with its cursor at the end.
+        composer.text_epoch += 1;
+        if !composer.error && !composer.uncertain {
+            composer.notice.clear();
+        }
+        self.save(composer);
     }
 
     /// A reloaded webview gets the view and the draft keys again. Its

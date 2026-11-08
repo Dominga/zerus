@@ -949,6 +949,7 @@ export const queueSendNow = (queueId: string | null) => desktop<boolean>("queue_
 export const sendAnswer = (token: number, answer: Answer) => desktop<SendReply>("send_answer", { token, answer });
 export const sendCancel = (handle: number) => desktop<void>("send_cancel", { handle });
 export const sendInterrupted = (handle: number) => desktop<void>("send_interrupted", { handle });
+export const sendInterruptFailed = (handle: number) => desktop<void>("send_interrupt_failed", { handle });
 /** Answers once the clear ended (up to 45 s). */
 export const clearContext = (handle: number, run: string, conversation: string, dismiss: boolean, delay?: import("./store/endActionBusy").EndReference) =>
   desktop<SendReply>("clear_context", { handle, run, conversation, dismiss, delay });

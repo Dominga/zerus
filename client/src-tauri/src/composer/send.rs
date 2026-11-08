@@ -3251,6 +3251,44 @@ impl Composers {
     /// (`interrupt_supported`, one interrupt at a time).
     pub fn interrupted(&self, handle: u64) {
         self.cancel_open(handle, rules::INTERRUPTED);
+        self.remember_interrupted(handle);
+    }
+
+    /// As in Terminal, the prompt of the interrupted turn returns to the
+    /// message field (`SessionsWindow.cpp:1192-1197`): the open session's
+    /// turn prompt is kept now, bound to its run and conversation, and goes
+    /// back once the turn reads interrupted (`restore_interrupted`).
+    fn remember_interrupted(&self, handle: u64) {
+        let mut hub = self.lock();
+        let Some(key) = hub.open_key.clone() else {
+            return;
+        };
+        if hub
+            .open
+            .as_ref()
+            .is_some_and(|open| open.subagent.is_some())
+            || !hub.composers.get(&key).is_some_and(|c| c.handle == handle)
+        {
+            return;
+        }
+        let prompt = hub
+            .followed
+            .details
+            .clone()
+            .and_then(|details| super::interrupted::prompt_of(&details, hub.local.rows(&key)));
+        hub.interrupted.set(&key, prompt);
+    }
+
+    /// The interrupt was refused: its turn goes on, and its prompt is not
+    /// given back (Qt drops it when the request fails, 1204).
+    pub fn interrupt_failed(&self, handle: u64) {
+        let mut hub = self.lock();
+        let Some(key) = hub.open_key.clone() else {
+            return;
+        };
+        if hub.composers.get(&key).is_some_and(|c| c.handle == handle) {
+            hub.interrupted.remove(&key);
+        }
     }
 
     fn cancel_open(&self, handle: u64, text: &str) {
@@ -3495,6 +3533,12 @@ pub fn send_cancel(state: State<'_, Composers>, handle: u64) {
 #[tauri::command]
 pub fn send_interrupted(state: State<'_, Composers>, handle: u64) {
     state.interrupted(handle);
+}
+
+/// The composer's Stop was refused (`send_interrupted` came first).
+#[tauri::command]
+pub fn send_interrupt_failed(state: State<'_, Composers>, handle: u64) {
+    state.interrupt_failed(handle);
 }
 
 /// Blocking: it answers once the reset ended (`Composers::clear_context`).
@@ -8225,6 +8269,82 @@ mod continuations {
             "Interrupted. Your draft was kept without sending."
         );
         assert!(sends(&fake).is_empty());
+    }
+
+    fn turn(phase: &str) -> Value {
+        let mut details = ready();
+        details["phase"] = json!(phase);
+        details["activity"] = json!(phase);
+        details["prompt"] = json!("Fix the build");
+        details
+    }
+
+    /// zerus-5wmh.13.4, Qt's interrupted prompt (`SessionsWindow.cpp:1192-1197,2279-2307`).
+    #[test]
+    fn stop_gives_the_interrupted_prompt_back_to_an_empty_field() {
+        let root = dir("interrupted-prompt");
+        let (c, _fake) = send_hub(&root);
+        let view = opened(&c, turn("working"));
+        c.interrupted(view.handle);
+        // Still stopping: nothing yet.
+        c.observe(&state(turn("tool")));
+        assert!(c.current().unwrap().text.is_empty());
+        c.observe(&state(turn("interrupted")));
+        let back = until(&c, |v| v.text == "Fix the build");
+        assert_eq!((back.position, back.anchor), (13, 13));
+        assert!(back.text_epoch > view.text_epoch);
+        // Given back once: a later interrupted state does not repeat it.
+        c.edit(back.handle, 1, back.text_epoch, String::new(), 0, 0);
+        c.observe(&state(turn("interrupted")));
+        assert!(until(&c, |v| v.text.is_empty()).text.is_empty());
+    }
+
+    #[test]
+    fn a_draft_the_person_started_wins_over_the_interrupted_prompt() {
+        let root = dir("interrupted-draft");
+        let (c, _fake) = send_hub(&root);
+        let view = opened(&c, turn("working"));
+        c.interrupted(view.handle);
+        c.edit(
+            view.handle,
+            1,
+            view.text_epoch,
+            "my next message".into(),
+            15,
+            15,
+        );
+        c.observe(&state(turn("interrupted")));
+        assert_eq!(
+            until(&c, |v| v.text == "my next message").text,
+            "my next message"
+        );
+    }
+
+    #[test]
+    fn a_turn_that_ends_another_way_or_a_refused_stop_gives_nothing_back() {
+        let root = dir("interrupted-other");
+        let (c, _fake) = send_hub(&root);
+        let view = opened(&c, turn("working"));
+        // The turn ended by itself before it read interrupted.
+        c.interrupted(view.handle);
+        c.observe(&state(turn("idle")));
+        c.observe(&state(turn("interrupted")));
+        assert!(c.current().unwrap().text.is_empty());
+        // Another run took the session.
+        c.observe(&state(turn("working")));
+        c.interrupted(view.handle);
+        let mut moved = turn("interrupted");
+        moved["run_id"] = json!("run-2");
+        c.observe(&state(moved));
+        c.observe(&state(turn("interrupted")));
+        assert!(c.current().unwrap().text.is_empty());
+        // The interrupt request was refused.
+        c.observe(&state(turn("working")));
+        c.interrupted(view.handle);
+        c.interrupt_failed(view.handle + 100);
+        c.interrupt_failed(view.handle);
+        c.observe(&state(turn("interrupted")));
+        assert!(c.current().unwrap().text.is_empty());
     }
 
     /// zerus-le5s: the start gave up at 180 s, then the session moved on

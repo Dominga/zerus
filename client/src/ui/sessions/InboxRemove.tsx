@@ -15,15 +15,34 @@ export interface InboxRemovePorts {
 
 /** The message whose Remove waits for its confirmation, the composer it was
  * shown in, and the Remove button the focus returns to on Cancel. */
-const [asking, setAsking] = createSignal<{ item: InboxItem; handle: number; from: HTMLElement }>();
+export interface Asking { item: InboxItem; handle: number; from: HTMLElement }
+
+/**
+ * One Activity owner's Remove: its ports and the review that waits for a
+ * confirmation. It is created with that owner and retired with it
+ * (zerus-5i2e5), so a later mount never reopens a review nobody confirmed. A
+ * confirmed Remove has already left the review and still settles.
+ */
+export interface InboxRemoveScope {
+  ports: InboxRemovePorts;
+  asking(): Asking | undefined;
+  ask(asking: Asking | undefined): void;
+}
+
+/** Called inside the owner (ActivityView): the review is that owner's own
+ * signal, never module state, so it ends with the owner. */
+export function createInboxRemoveScope(ports: InboxRemovePorts): InboxRemoveScope {
+  const [asking, setAsking] = createSignal<Asking>();
+  return { ports, asking, ask: setAsking };
+}
 
 /** Remove under a not-delivered OpenCode message (ActivityView.cpp:1077-1087): off while any removal runs. */
-export function InboxRemove(props: { item: InboxItem; ports: InboxRemovePorts }) {
-  const state = () => removeState(props.item, props.ports.view());
+export function InboxRemove(props: { item: InboxItem; scope: InboxRemoveScope }) {
+  const state = () => removeState(props.item, props.scope.ports.view());
   const open = (from: HTMLElement) => {
-    const handle = props.ports.view()?.handle;
+    const handle = props.scope.ports.view()?.handle;
     if (state().disabled || handle === undefined) return;
-    setAsking({ item: props.item, handle, from });
+    props.scope.ask({ item: props.item, handle, from });
   };
   return (
     <div class="act-local-actions">
@@ -40,8 +59,10 @@ export function InboxRemove(props: { item: InboxItem; ports: InboxRemovePorts })
  * changed (SessionsWindow::removeQueuedMessage, 4433-4467). The dialog stays
  * open when the message changes underneath it, as in Qt.
  */
-export function RemoveQueuedDialog(props: { ports: InboxRemovePorts }) {
+export function RemoveQueuedDialog(props: { scope: InboxRemoveScope }) {
   let el: HTMLDialogElement | undefined;
+  const asking = () => props.scope.asking();
+  const setAsking = (value: Asking | undefined) => props.scope.ask(value);
   createEffect(() => {
     if (!el) return;
     if (!asking()) { if (el.open) el.close(); return; }
@@ -56,11 +77,12 @@ export function RemoveQueuedDialog(props: { ports: InboxRemovePorts }) {
   const confirm = () => {
     const shown = asking();
     setAsking(undefined);
-    props.ports.done();
+    const ports = props.scope.ports;
+    ports.done();
     if (!shown) return;
-    void props.ports.remove(shown.handle, shown.item.run, shown.item.conversation, shown.item.messageId).then((reply) => {
+    void ports.remove(shown.handle, shown.item.run, shown.item.conversation, shown.item.messageId).then((reply) => {
       const notice = removeNotice(reply);
-      if (notice) props.ports.notify(notice.tone, notice.text, notice.sticky);
+      if (notice) ports.notify(notice.tone, notice.text, notice.sticky);
     });
   };
   return (

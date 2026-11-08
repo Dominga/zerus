@@ -3,14 +3,21 @@ use serde_json::json;
 
 const ID: &str = "00000000-0000-4000-8000-000000000001";
 fn executor() -> Value {
-    json!({"computer":ID,"run":"original-run","conversation":"original-conversation","child":null})
+    json!({"computer":ID,"session_id":ID,"run":"original-run","birth":"original-birth","conversation":"original-conversation","child":null})
 }
 fn plan() -> Value {
     json!({"schema":1,"request_id":ID,"action":"pause","target":{"scope":"attempt","project":"project-one","task":ID,"attempt":ID},"observed_pauses":[],"observed_stops":[]})
 }
 fn execute() -> Value {
-    json!({"schema":1,"request":{"id":ID,"action":"pause","executor":executor(),"attempt":{"project":"project-one","task":ID,"attempt":ID,"generation":1,"fingerprint":"a".repeat(64)},"slot":{"id":ID,"revision":1},"task_version":"original-version","turn":"original-turn","observed_pauses":[],"observed_stops":[]},
-        "caller":{"kind":"person"},"configuration":"b".repeat(64),"store_identity":"c".repeat(64),"cli_image":"d".repeat(64),"loaded_adapter":"e".repeat(64)})
+    let value = json!({"schema":1,"request":{"id":ID,"admission":"0".repeat(64),"action":"pause","executor":executor(),"attempt":{"project":"project-one","task":ID,"attempt":ID,"generation":1,"fingerprint":"a".repeat(64)},"slot":{"id":ID,"revision":1},"task_version":"original-version","turn":"original-turn","observed_pauses":[],"observed_stops":[]},
+        "caller":{"kind":"person"},"configuration":"b".repeat(64),"store_identity":"c".repeat(64),"cli_image":"d".repeat(64),"loaded_adapter":"e".repeat(64)});
+    serde_json::to_value(
+        serde_json::from_value::<wire::Plan>(value)
+            .unwrap()
+            .seal()
+            .unwrap(),
+    )
+    .unwrap()
 }
 fn read(action: &str, value: &Value) -> std::result::Result<Command, String> {
     wire::read(action, &serde_json::to_vec(value).unwrap())
@@ -155,4 +162,63 @@ fn dormant_helpers_keep_instructions_and_existing_report_prompt_bytes() {
     assert_eq!(refusal["code"], "task_controls_inactive");
     assert_eq!(refusal["attempted"], false);
     assert_eq!(refusal["request_id"], ID);
+}
+
+#[test]
+fn admission_binds_every_outer_guard_and_only_the_identical_plan_repeats() {
+    let mut value = execute();
+    value["request"]["action"] = "yield".into();
+    let plan = serde_json::from_value::<wire::Plan>(value)
+        .unwrap()
+        .seal()
+        .unwrap();
+    let original = serde_json::to_value(&plan).unwrap();
+    let bytes = serde_json::to_vec(&original).unwrap();
+    let Command::Execute(repeated) = wire::read("execute", &bytes).unwrap() else {
+        panic!("execute");
+    };
+    assert_eq!(
+        serde_json::to_vec(&repeated).unwrap(),
+        serde_json::to_vec(&plan).unwrap()
+    );
+    assert_eq!(repeated.request, plan.request);
+    for key in [
+        "caller",
+        "configuration",
+        "store_identity",
+        "cli_image",
+        "loaded_adapter",
+    ] {
+        let mut changed = original.clone();
+        if key == "caller" {
+            changed[key] = json!({"kind":"executor","executor":executor()});
+        } else {
+            changed[key] = "f".repeat(64).into();
+        }
+        assert!(
+            read("execute", &changed).is_err(),
+            "{key} retained the old digest"
+        );
+        // Even with a newly computed valid binding, its immutable Request now
+        // differs under the original UUID. Ledger reserve must refuse it.
+        let new = serde_json::from_value::<wire::Plan>(changed)
+            .unwrap()
+            .seal()
+            .unwrap();
+        assert_eq!(new.request.id, plan.request.id);
+        assert_ne!(new.request.admission, plan.request.admission, "{key}");
+        assert_ne!(new.request, plan.request, "{key}");
+    }
+    let mut omitted = original.clone();
+    omitted["request"]
+        .as_object_mut()
+        .unwrap()
+        .remove("admission");
+    assert!(read("execute", &omitted).is_err());
+    let mut missing_selector = original;
+    missing_selector["request"]["executor"]
+        .as_object_mut()
+        .unwrap()
+        .remove("session_id");
+    assert!(read("execute", &missing_selector).is_err());
 }

@@ -7,8 +7,10 @@ fn id(n: u64) -> String {
 fn executor() -> Executor {
     Executor {
         computer: id(1),
+        session_id: id(9000),
         run: "original-run".into(),
-        conversation: "original-conversation".into(),
+        birth: "original-birth".into(),
+        conversation: Some("original-conversation".into()),
         child: None,
     }
 }
@@ -37,6 +39,7 @@ fn slot(n: u64) -> Slot {
 fn request(n: u64) -> Request {
     Request {
         id: id(n + 300),
+        admission: "f".repeat(64),
         action: Action::Stop,
         executor: executor(),
         attempt: None,
@@ -62,6 +65,283 @@ fn connection() -> Connection {
     db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA user_version=34;")
         .unwrap();
     db
+}
+
+#[test]
+fn changed_plan_guard_bindings_refuse_the_original_uuid_without_overwrite_or_replay() {
+    let mut db = connection();
+    let mut store = store::open_enabled(&mut db).unwrap();
+    let original = request(1);
+    assert!(matches!(
+        store.reserve(&original).unwrap(),
+        store::Reservation::New
+    ));
+    let retained = store.control(&original.id).unwrap().unwrap();
+    for guard in [
+        "caller",
+        "configuration",
+        "store_identity",
+        "cli_image",
+        "loaded_adapter",
+    ] {
+        let mut changed = original.clone();
+        changed.admission = hash(guard.as_bytes());
+        assert_ne!(changed.admission, original.admission);
+        assert!(store.reserve(&changed).is_err(), "{guard}");
+        assert_eq!(store.control(&original.id).unwrap(), Some(retained.clone()));
+        assert_eq!(store.controls(&executor(), None, 10).unwrap().rows.len(), 1);
+    }
+    assert_eq!(
+        store.reserve(&original).unwrap(),
+        store::Reservation::Existing(Box::new(retained))
+    );
+}
+
+#[test]
+fn executor_keys_include_birth_and_child_but_never_conversation() {
+    let mut value = executor();
+    let original = value.key().unwrap();
+    value.session_id = id(9001);
+    assert_eq!(value.key().unwrap(), original);
+    value.conversation = None;
+    assert_eq!(value.key().unwrap(), original);
+    value.conversation = Some("a-later-conversation".into());
+    assert_eq!(value.key().unwrap(), original);
+    for part in ["run", "birth", "child", "computer"] {
+        let mut changed = value.clone();
+        match part {
+            "run" => changed.run = "resumed-run".into(),
+            "birth" => changed.birth = "another-birth".into(),
+            "child" => changed.child = Some("addressable-child".into()),
+            _ => changed.computer = id(2),
+        }
+        assert_ne!(changed.key().unwrap(), original, "{part}");
+    }
+    let mut unconfirmed = value.clone();
+    unconfirmed.session_id = uuid::Uuid::nil().to_string();
+    assert!(unconfirmed.validate().is_err());
+    value.birth.clear();
+    assert!(value.key().is_err());
+}
+
+#[test]
+fn a_different_session_selector_cannot_cross_or_clear_original_stop_holds() {
+    let mut db = connection();
+    let mut store = store::open_enabled(&mut db).unwrap();
+    let stop = request(1);
+    store.reserve(&stop).unwrap();
+    let held = hold(1, HoldKind::Stop, &stop);
+    store.hold(&held).unwrap();
+    let mut changed = executor();
+    changed.session_id = id(9001);
+    assert_eq!(changed.key().unwrap(), stop.executor.key().unwrap());
+    assert!(matches!(
+        store.dispatch(&changed, Dispatch::PersonSend, &[]).unwrap(),
+        Admission::Held(_)
+    ));
+    assert!(store
+        .dispatch(
+            &changed,
+            Dispatch::PersonSend,
+            std::slice::from_ref(&held.id)
+        )
+        .is_err());
+    let mut continuation = request(2);
+    continuation.executor = changed;
+    continuation.action = Action::Send;
+    continuation.attempt = Some(attempt(1));
+    continuation.task_version = Some("original-version".into());
+    continuation.observed_stops = vec![held.id.clone()];
+    store.reserve(&continuation).unwrap();
+    store
+        .settle(&continuation.id, Outcome::Submitted, None)
+        .unwrap();
+    assert!(store.settle_observed(&continuation.id).is_err());
+    assert_eq!(
+        store.holds(&executor(), None, 10).unwrap().rows[0].value,
+        held
+    );
+}
+
+#[test]
+fn startup_binds_once_without_retargeting_its_slot_or_stop_holds() {
+    let mut db = connection();
+    let mut store = store::open_enabled(&mut db).unwrap();
+    let mut original = slot(1);
+    original.executor.conversation = None;
+    store.claim(&original).unwrap();
+    let mut stop = request(1);
+    stop.executor = original.executor.clone();
+    store.reserve(&stop).unwrap();
+    let held = hold(1, HoldKind::Stop, &stop);
+    store.hold(&held).unwrap();
+    let confirmed = executor();
+    let binding = Binding {
+        acknowledgement: id(1),
+        turn: "exact-turn".into(),
+    };
+    let bound = store
+        .bind_startup(
+            &original.guard(),
+            &original.attempt,
+            &original.provenance,
+            &confirmed,
+            &binding,
+        )
+        .unwrap();
+    assert_eq!(bound.executor, confirmed);
+    assert_eq!(bound.revision, original.revision + 1);
+    assert_eq!(store.slot(&original.executor).unwrap(), Some(bound.clone()));
+    assert_eq!(
+        store.holds(&confirmed, None, 10).unwrap().rows[0].value,
+        held
+    );
+    let mut later = confirmed.clone();
+    later.conversation = Some("later-conversation".into());
+    assert_eq!(
+        store.dispatch(&later, Dispatch::Automatic, &[]).unwrap(),
+        Admission::Occupied(bound.guard())
+    );
+    assert!(store
+        .bind_startup(
+            &bound.guard(),
+            &original.attempt,
+            &original.provenance,
+            &later,
+            &binding
+        )
+        .is_err());
+    let mut changed = bound.clone();
+    changed.revision += 1;
+    changed.executor = later;
+    assert!(store.replace(&bound.guard(), &changed).is_err());
+    assert_eq!(store.slot(&confirmed).unwrap(), Some(bound));
+}
+
+#[test]
+fn startup_cas_requires_the_exact_original_request_attempt_and_run_birth() {
+    let mut db = connection();
+    let mut store = store::open_enabled(&mut db).unwrap();
+    let mut original = slot(1);
+    original.executor.conversation = None;
+    store.claim(&original).unwrap();
+    let binding = Binding {
+        acknowledgement: id(1),
+        turn: "exact-turn".into(),
+    };
+    for part in [
+        "slot",
+        "request",
+        "digest",
+        "generation",
+        "run",
+        "birth",
+        "child",
+        "unconfirmed",
+        "session_id",
+    ] {
+        let mut guard = original.guard();
+        let mut attempt = original.attempt.clone();
+        let mut provenance = original.provenance.clone();
+        let mut executor = executor();
+        match part {
+            "slot" => guard.revision += 1,
+            "generation" => attempt.generation += 1,
+            "run" => executor.run = "other-run".into(),
+            "birth" => executor.birth = "other-birth".into(),
+            "child" => executor.child = Some("other-child".into()),
+            "unconfirmed" => executor.conversation = None,
+            "session_id" => executor.session_id = id(9001),
+            _ => {
+                if let Provenance::Dispatch { request_id, digest } = &mut provenance {
+                    if part == "request" {
+                        *request_id = id(99);
+                    } else {
+                        *digest = "c".repeat(64);
+                    }
+                }
+            }
+        }
+        assert!(
+            store
+                .bind_startup(&guard, &attempt, &provenance, &executor, &binding)
+                .is_err(),
+            "{part}"
+        );
+        assert_eq!(
+            store.slot(&original.executor).unwrap(),
+            Some(original.clone()),
+            "{part}"
+        );
+    }
+}
+
+#[test]
+fn a_resumed_run_cannot_inherit_satisfy_or_clear_the_old_runs_slot_and_holds() {
+    let mut db = connection();
+    let mut store = store::open_enabled(&mut db).unwrap();
+    let original = slot(1);
+    store.claim(&original).unwrap();
+    let stop = request(1);
+    store.reserve(&stop).unwrap();
+    let held = hold(1, HoldKind::Stop, &stop);
+    store.hold(&held).unwrap();
+    let mut resumed = executor();
+    resumed.run = "new-resume-run".into();
+    resumed.birth = "new-resume-birth".into();
+    assert_eq!(resumed.session_id, original.executor.session_id);
+    assert!(store.slot(&resumed).unwrap().is_none());
+    assert!(store.holds(&resumed, None, 10).unwrap().rows.is_empty());
+    assert!(matches!(
+        store.dispatch(&resumed, Dispatch::Automatic, &[]).unwrap(),
+        Admission::Allowed { .. }
+    ));
+    let mut release = request(2);
+    release.action = Action::ReleaseStop;
+    release.executor = resumed;
+    release.turn = None;
+    release.observed_stops = vec![held.id.clone()];
+    store.reserve(&release).unwrap();
+    store.settle(&release.id, Outcome::Confirmed, None).unwrap();
+    assert!(store.settle_observed(&release.id).is_err());
+    let mut retarget = original.clone();
+    retarget.revision += 1;
+    retarget.executor = release.executor.clone();
+    assert!(store.replace(&original.guard(), &retarget).is_err());
+    assert_eq!(
+        store.slot(&original.executor).unwrap(),
+        Some(original.clone())
+    );
+    assert_eq!(
+        store.holds(&original.executor, None, 10).unwrap().rows[0].value,
+        held
+    );
+    let mut fresh = slot(2);
+    fresh.attempt.project = "another-project".into();
+    fresh.executor = release.executor;
+    store.claim(&fresh).unwrap();
+    assert_ne!(fresh.attempt.attempt, original.attempt.attempt);
+    assert_eq!(store.slot(&fresh.executor).unwrap(), Some(fresh));
+}
+
+#[test]
+fn a_version_one_prototype_refuses_without_migration_or_reset() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("prototype.sqlite3");
+    let mut db = Connection::open(&path).unwrap();
+    let store = store::open_enabled(&mut db).unwrap();
+    drop(store);
+    db.execute(
+        "UPDATE desktop_task_control_meta SET version=1 WHERE id=1",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    let original = std::fs::read(&path).unwrap();
+    let mut db = Connection::open(&path).unwrap();
+    assert!(store::open_enabled(&mut db).is_err());
+    drop(db);
+    assert_eq!(std::fs::read(path).unwrap(), original);
 }
 
 #[test]

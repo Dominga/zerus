@@ -9,7 +9,7 @@ use zerus_desktop_ledger::task_controls::{REQUEST_BYTES, TASK_CONTROLS};
 
 #[cfg(test)]
 mod tests;
-mod wire;
+pub(crate) mod wire;
 use wire::Command;
 
 const INACTIVE: &str =

@@ -146,6 +146,12 @@
   .team-proposal-by { font-size: 10.5px; }
   .team-proposal-change { padding-left: 6px; color: var(--z-color-muted); overflow-wrap: anywhere; user-select: text; }
   .team-proposal-reason { color: var(--z-color-muted); overflow-wrap: anywhere; }
+  /* Task 367: an owner card grows with its text and keeps its buttons; only a
+     long reason is clamped, with More. The strip owns no inner scrollbar. */
+  .team-proposal-reason.clamped { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; }
+  .team-proposal-more { align-self: flex-start; font-size: var(--fs-xs); }
+  .team-proposal-answers { flex: none; }
+  .team-conversation > .team-proposals { max-height: none; overflow: visible; flex: none; }
   .team-proposal-notice, .team-waiting-notice { color: var(--z-color-warn); overflow-wrap: anywhere; }
   .team-waiting-notice.inline { font-size: 11px; max-width: 40ch; }
   .team-proposal-answers { display: flex; align-items: center; gap: 6px; }

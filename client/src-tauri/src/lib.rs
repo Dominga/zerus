@@ -1060,6 +1060,31 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                             desktop_service::compact_to_send::check(service, plan)
                         }),
                     });
+                    // "Resume and send" of a local Claude or Kimi session the
+                    // service takes whole (session_resume), the same way;
+                    // every other start stays direct.
+                    let (resuming, checking) = (app.handle().clone(), app.handle().clone());
+                    composers.set_resume(composer::ResumeRoute {
+                        offer: std::sync::Arc::new(
+                            move |session, checkpoint, resume, stdin, handing| {
+                                let service =
+                                    resuming.state::<commands::AppState>().desktop_service();
+                                desktop_service::session_resume::call(
+                                    service,
+                                    session,
+                                    checkpoint,
+                                    resume,
+                                    stdin,
+                                    handing,
+                                    &std::sync::atomic::AtomicBool::new(false),
+                                )
+                            },
+                        ),
+                        check: std::sync::Arc::new(move |plan| {
+                            let service = checking.state::<commands::AppState>().desktop_service();
+                            desktop_service::session_resume::check(service, plan)
+                        }),
+                    });
                     // Question answers the service takes (deferred_answer),
                     // the same way; every other answer stays direct.
                     let (answering, checking) = (app.handle().clone(), app.handle().clone());

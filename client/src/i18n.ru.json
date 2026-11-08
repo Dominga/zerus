@@ -2996,6 +2996,7 @@
   "The session reference is on the clipboard": "Ссылка на сессию скопирована в буфер обмена",
   "The session state changed. Open its actions again.": "Состояние сессии изменилось. Откройте ее действия еще раз.",
   "The session usage limit stopped this turn. Automatic recovery can wait for reset or retry on a schedule when enabled in Settings. Your draft is kept.": "Лимит использования сессии остановил этот ход. Если автоматическое восстановление включено в настройках, оно может дождаться сброса или повторять попытки по расписанию. Ваш черновик сохранен.",
+  "The session was not resumed. Check Terminal; your draft was kept without sending.": "Сессия не была возобновлена. Проверьте терминал; черновик сохранён без отправки.",
   "The session, its messages and running agent stay intact.": "Сессия, ее сообщения и работающий агент остаются нетронутыми.",
   "The shared notification change was not confirmed. Refresh the session before trying again.": "Изменение общих уведомлений не подтверждено. Обновите сессию перед повторной попыткой.",
   "The shared notification setting changed while this request was pending. Refresh the session.": "Общая настройка уведомлений изменилась во время запроса. Обновите сессию.",

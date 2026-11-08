@@ -2195,7 +2195,7 @@ fn rules_of_row(
 }
 
 /// The continuation of `key` named by `revision`: the start or the compaction.
-fn pending_mut<'a>(
+pub(super) fn pending_mut<'a>(
     hub: &'a mut Hub,
     key: &str,
     start: bool,
@@ -2558,8 +2558,23 @@ impl Composers {
         };
         // A compaction also reserves the send it waits for (version 2), so
         // the desktop service can take the whole compact-to-send; the
-        // direct path reserves its send again when it sends.
-        let checkpoint = if start {
+        // direct path reserves its send again when it sends. A resume the
+        // service may take (a local Claude or Kimi session, while a session
+        // resume route is set) reserves its send too, with the receipted
+        // resume (version 3); every other start keeps version 1.
+        let resumable = start
+            && choice == Some(StartChoice::Resume)
+            && self.resume_routed()
+            && named.as_ref().is_some_and(|(pending, _)| {
+                pending.session.computer.is_empty()
+                    && pending.session.subagent.is_none()
+                    && pending.session.name.split('/').next().is_some_and(|agent| {
+                        zerus_client_core::desktop::session_resume::AGENTS.contains(&agent)
+                    })
+            });
+        let checkpoint = if resumable {
+            Checkpoint::reserve_session_resume(intent).expect("a resume's checkpoint")
+        } else if start {
             Checkpoint::reserve(intent)
         } else {
             Checkpoint::reserve_compact_to_send(intent).expect("a compaction's checkpoint")
@@ -2736,9 +2751,14 @@ impl Composers {
                     pending.call = Call::Running;
                 }
             }
-            // The desktop service takes the whole compact-to-send, decided
-            // before any offer; once offered, nothing falls back.
+            // The desktop service takes the whole compact-to-send or
+            // resume-then-send, decided before any offer; once offered,
+            // nothing falls back.
             if !start && !id.is_empty() && me.hand_compaction(&owned, revision) {
+                me.changed();
+                return;
+            }
+            if start && !id.is_empty() && me.hand_start(&owned, revision) {
                 me.changed();
                 return;
             }

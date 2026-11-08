@@ -50,8 +50,20 @@ describe("copied files in a paste (Qt MessageComposer.cpp:186-196)", () => {
   it("asks the native clipboard for files without their paths, keeping the image and the text", () => {
     const image = new File([new Uint8Array([1])], "image.png", { type: "image/png" });
     const pdf = new File([new Uint8Array([1])], "report.pdf", { type: "application/pdf" });
-    expect(pasteRoute(data({ "text/plain": "report.pdf" }, [pdf, image]), false)).toEqual({ kind: "native", image, text: "report.pdf" });
-    expect(pasteRoute(data({}, [pdf]), false)).toEqual({ kind: "native", image: undefined, text: "" });
+    expect(pasteRoute(data({ "text/plain": "report.pdf" }, [pdf, image]), false)).toEqual({ kind: "native", ask: true, image, text: "report.pdf" });
+    expect(pasteRoute(data({}, [pdf]), false)).toEqual({ kind: "native", ask: true, image: undefined, text: "" });
+  });
+
+  it("never asks the native clipboard when the paste's own URL list is not all local (zerus-g01ok)", async () => {
+    const image = new File([new Uint8Array([1])], "plan.png", { type: "image/png" });
+    const route = pasteRoute(data({ "text/uri-list": "file:///srv/plan.png\nhttps://example.com/remote.png", "text/plain": "plan.png" }, [image]), false);
+    expect(route).toEqual({ kind: "native", ask: false, image, text: "plan.png" });
+    // The reviewer's control: arboard 3.7 on Linux would return only the local entry.
+    const calls: string[] = [];
+    const native = vi.fn(async () => ["/srv/plan.png"]);
+    if (route.kind === "native") await pasteNative(route, { native, current: () => true, attach: () => { calls.push("attach"); }, image: () => { calls.push("image"); }, text: () => { calls.push("text"); } });
+    expect(calls, "Qt attaches none of the files when one URL is not local").toEqual(["image"]);
+    expect(native).not.toHaveBeenCalled();
   });
 });
 
@@ -71,25 +83,25 @@ describe("a paste of files without their paths", () => {
 
   it("attaches the copied files, as Qt's allLocal rule", async () => {
     const { d, calls } = deps(["/home/example/plan.png"]);
-    await pasteNative({ kind: "native", image, text: "plan.png" }, d);
+    await pasteNative({ kind: "native", ask: true, image, text: "plan.png" }, d);
     expect(calls).toEqual(["attach /home/example/plan.png"]);
   });
 
   it("pastes the image, then the text, when the clipboard has no file list", async () => {
     const one = deps(null);
-    await pasteNative({ kind: "native", image, text: "image.png" }, one.d);
+    await pasteNative({ kind: "native", ask: true, image, text: "image.png" }, one.d);
     expect(one.calls).toEqual(["image image.png"]);
     const two = deps(new Error("no clipboard"));
-    await pasteNative({ kind: "native", image: undefined, text: "report.pdf" }, two.d);
+    await pasteNative({ kind: "native", ask: true, image: undefined, text: "report.pdf" }, two.d);
     expect(two.calls).toEqual(["text report.pdf"]);
     const three = deps([]);
-    await pasteNative({ kind: "native", image: undefined, text: "" }, three.d);
+    await pasteNative({ kind: "native", ask: true, image: undefined, text: "" }, three.d);
     expect(three.calls).toEqual([]);
   });
 
   it("does nothing once the draft it was made in changed", async () => {
     const { d, calls } = deps(["/home/example/plan.png"], false);
-    await pasteNative({ kind: "native", image, text: "plan.png" }, d);
+    await pasteNative({ kind: "native", ask: true, image, text: "plan.png" }, d);
     expect(calls).toEqual([]);
   });
 });

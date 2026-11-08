@@ -2182,6 +2182,7 @@
   "Recovery record released": "Запись восстановления освобождена",
   "Recovery request timed out. Reload its state before trying again.": "Время ожидания запроса на восстановление истекло. Обновите его состояние, прежде чем повторить попытку.",
   "Recovery settings are unavailable from the desktop service.": "Настройки восстановления недоступны в фоновой службе.",
+  "Recreate…": "Создать заново…",
   "Reduce motion": "Уменьшить анимацию",
   "Reduce motion is on, so working sessions hold still.": "Уменьшение анимации включено, поэтому работающие сессии не анимируются.",
   "Reference an existing file": "Сослаться на существующий файл",

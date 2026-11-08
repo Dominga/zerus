@@ -29,7 +29,7 @@ export const NO_PENDING = trNoop("No pending session creations");
 export const PROGRESS = trNoop("Session creation progress");
 export const BUTTON = {
   resume: trNoop("Continue setup"), check: trNoop("Check result"), stop: trNoop("Stop creating"), stopAfter: trNoop("Stop after preparation"),
-  edit: trNoop("Edit choices…"), hide: trNoop("Hide status"), back: trNoop("Return to filters"),
+  recreate: trNoop("Recreate…"), edit: trNoop("Edit choices…"), hide: trNoop("Hide status"), back: trNoop("Return to filters"),
 } as const;
 
 /** A creation's row key in the list. */
@@ -108,8 +108,8 @@ export function panelButtons(c: CreationCard): PanelButtons {
   return {
     resume: c.can_resume,
     check: s === "unknown" || s === "recover" || s === "confirming",
-    stop: !c.launch_dispatched && s !== "stopped" && s !== "failed" && s !== "storage_error",
-    stopEnabled: !c.stop_requested,
+    stop: !c.launch_dispatched && s !== "stopped" && (s !== "failed" || c.worktree_pending === true) && s !== "storage_error",
+    stopEnabled: !c.stop_requested || s === "unknown" || s === "recover",
     stopText: s === "cloning" || (s === "worktree" && !c.worktree_receipts) ? BUTTON.stopAfter : BUTTON.stop,
     edit: c.can_edit,
   };

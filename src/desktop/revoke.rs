@@ -639,9 +639,9 @@ pub fn offline(location: &Location, command: &Command) -> Result<Value> {
         }
     }
     location.prepare()?;
-    let _owner = location.lock()?;
+    let owner = location.lock()?;
     let epoch = uuid::Uuid::new_v4().to_string();
-    let mut store = Store::open(location, &epoch)?;
+    let mut store = Store::open_owned(location, &epoch, &owner)?;
     // No service is running under owner.lock. Inspect exact existing custody
     // off-thread; a bounded return never substitutes for a completed proof.
     let until = std::time::Instant::now() + std::time::Duration::from_secs(2);

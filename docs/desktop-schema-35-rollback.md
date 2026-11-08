@@ -18,10 +18,13 @@ of it. Keep the previous CLI/GUI installation through the maintained updater.
 Before the first migration of an existing store, the service holds its original
 service-owner and handoff locks, closes its read-only version probe, and copies
 the original private database plus its WAL (or records positive WAL absence).
-All raw database/WAL descriptors close before the writable SQLite connection
-opens. Native objects, versions and streaming digests are checked before and
-after copying. Reads use 64 KiB chunks, a 30-second aggregate deadline, 1 GiB per
-file and 4 GiB of aggregate read work including verification. No contents enter
+The probe connection closes before copying. On Unix, existing raw inputs enter
+the process-retained registry described below; none closes while another local
+SQLite connection could own locks. Windows backup-only input handles close
+before the writable SQLite connection opens; the original database pin follows
+the Store connection lifetime. Native objects, versions and streaming digests
+are checked before and after copying. Reads use 64 KiB chunks, a 30-second
+aggregate deadline, 1 GiB per file and 4 GiB of aggregate read work including verification. No contents enter
 the diagnostic log.
 
 Let `D` be **this configuration's actual desktop state directory** (the
@@ -100,3 +103,24 @@ press Stop or Recreate on the owner's machine. After installation, the owner:
 
 The service's status and diagnostic reads remain read-only throughout this
 check. No manual deletion of the owner's folder, branch or journal is needed.
+
+## Passive startup while an original handoff is held
+
+A current-schema store can start passively under its original service-owner
+lock while an import or installer retains `handoff.lock`. A missing database,
+or a positively empty version-zero database without ambiguous sidecars, can
+perform initial passive preparation under that same owner. The exact database,
+schema, configuration and empty shape are checked again before writable work.
+Existing-data migrations still require the original handoff exclusion, a fresh
+observation under it, and the verified rollback backup described above.
+
+On Unix, each opened original database or existing backup-input descriptor stays
+in the same fixed process-wide registry of at most **64** pins until process
+teardown. Even a failed opener retains its descriptor: closing it could release
+another local SQLite reader's record locks. Reuse checks the held original and native name; schema results are
+never cached. The cap refuses before opening another descriptor. A normal
+service uses one selected database and its bounded rollback-input roster.
+Windows retains its original handle through the Store connection instead, using
+its handle-scoped lock lifetime. Backup copying, hashing and manifest parsing use positional reads on the retained
+originals. Name and sidecar-absence checks use metadata only, so a rejected
+alias cannot close a raw descriptor of another live SQLite database.

@@ -1,4 +1,4 @@
-import { batch, createEffect, createMemo, createRoot, createSignal } from "solid-js";
+import { batch, createEffect, createMemo, createRoot, createSignal, on } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { inTauri } from "../bridge";
 import { catalog, computerFresh, orderedRows } from "./catalog";
@@ -18,12 +18,17 @@ export interface SearchItem { id: string; session: Session; found?: FoundHit; ru
 export const STALE_SEARCH = trNoop("This session changed. Search again to see its current history.");
 export { identityMatches, metadataMatches } from "./content-search-model";
 
-export const { contentSearch, searchItems, searchStatus, activateSearchItem } = createRoot(() => {
+export const { contentSearch, searchItems, searchStatus, activateSearchItem, searchCursor, setSearchCursor } = createRoot(() => {
   const contentSearch = createContentSearch({
     read: (computer, query, generation) => inTauri() ? invoke<SearchReply>("content_search", { computer, query, generation }) : Promise.reject(tr("Contents search needs the desktop app.")),
     cancel: (through) => { if (inTauri()) void invoke("cancel_content_search", { through }).catch(() => {}); },
   });
   const [held, setHeld] = createSignal<Session>();
+  // The result row the keyboard or a click chose (Qt's current row), shared by
+  // the results list and the window's next and previous commands; a new query
+  // starts without one.
+  const [searchCursor, setSearchCursor] = createSignal("");
+  createEffect(on(search, () => setSearchCursor(""), { defer: true }));
   const heldRow = (key: string) => held()?.key === key ? held() : undefined;
   bindSearchRow(heldRow); bindSearchActionRow(heldRow);
   const liveRow = (computer: string, hit: FoundHit["hit"]) =>
@@ -80,5 +85,5 @@ export const { contentSearch, searchItems, searchStatus, activateSearchItem } = 
       else clearSearchPreview();
     });
   }
-  return { contentSearch, searchItems, searchStatus, activateSearchItem };
+  return { contentSearch, searchItems, searchStatus, activateSearchItem, searchCursor, setSearchCursor };
 });

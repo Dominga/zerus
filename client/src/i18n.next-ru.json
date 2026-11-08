@@ -505,6 +505,7 @@
   "No reply to the last keep-warm ping was seen. Keeping it warm resumes after your next message.": "Ответ на последний пинг прогрева не получен. Прогрев возобновится после вашего следующего сообщения.",
   "No saved limits, rate limited": "Сохранённых лимитов нет, запросы ограничены",
   "No session matches.": "Подходящих сессий нет.",
+  "No sessions need attention": "Нет сессий, требующих внимания",
   "No sessions yet": "Сессий пока нет",
   "No subagent is working now.": "Сейчас ни один субагент не работает.",
   "No tasks in To do": "Нет задач к выполнению",

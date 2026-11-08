@@ -1505,8 +1505,8 @@ arrows, Home, End, Backspace or Delete), and keys without Ctrl, Command or Alt.
 Function keys are not editing keys: F1, F2, F5 and F6 reach Zerus without a
 modifier. So Alt+↑/↓ switches sessions even while typing, and on Linux Ctrl+K
 opens Go to instead of deleting to the end of the line. A focused drop-down
-list keeps Alt+↑/↓ and F4 to open it, and the Projects dialog's list keeps
-Alt+↑/↓ to reorder projects.
+list keeps Alt+↑/↓ and F4 to open it, and the project list on the Projects page
+keeps Alt+↑/↓ to reorder projects.
 
 **Go to** (Ctrl+K) searches sessions (not archived), projects, accounts,
 machines, sections and commands by name; start the query with `>` to list only

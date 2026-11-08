@@ -402,6 +402,16 @@ const listPopupKey = (target: EventTarget | null, c: Combo) =>
   (focused(target)?.tagName === "SELECT" || focused(target)?.matches('[role="combobox"]'))
   && ((only(c, { alt: true }) && (c.key === "Up" || c.key === "Down")) || (only(c, {}) && c.key === "F4"));
 
+/**
+ * Chords an element keeps for itself (Qt's ClaimedKeys, a widget's own
+ * shortcut override): data-shortcut-claims lists them in portable text,
+ * separated by spaces, such as the Projects list's "Alt+Up Alt+Down".
+ */
+function claimed(target: EventTarget | null, combo: Combo): boolean {
+  const claims = focused(target)?.closest("[data-shortcut-claims]")?.getAttribute("data-shortcut-claims");
+  return !!claims && claims.split(" ").some((text) => { const own = parseChord(text); return !!own && sameCombo(own, combo); });
+}
+
 /** What a handler is limited to: the focus must be inside it (a message field). */
 export interface Root { contains(target: Node | null): boolean }
 type HandlerRoot = Root | (() => Root | undefined);
@@ -468,7 +478,7 @@ export function route(event: RouterEvent, state: SequenceState = windowState, on
   const context = contextOf(event.target);
   const typing = context === "text-field" || context === "composer";
   // AltGr types characters; on Windows it arrives as Ctrl+Alt.
-  if (context === "none" || (typing && event.getModifierState?.("AltGraph")) || listPopupKey(event.target, combo)) {
+  if (context === "none" || (typing && event.getModifierState?.("AltGraph")) || listPopupKey(event.target, combo) || (!pending && claimed(event.target, combo))) {
     state.typed = [];
     return { consume: false };
   }

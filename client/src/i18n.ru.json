@@ -70,6 +70,7 @@
   "%1 active / %2 observed runs": "%1 активно / %2 наблюдаемых запусков",
   "%1 active / %2 total": "%1 активно / всего %2",
   "%1 active / total unknown": "%1 активно/всего неизвестно",
+  "%1 active, %2": "Активно: %1, %2",
   "%1 activity events": "%1 событий активности",
   "%1 added": "Добавлено: %1",
   "%1 already shares this project catalog.\nConnect directly to synchronize through this computer.": "%1 уже использует этот каталог проектов.\nПодключитесь напрямую для синхронизации через этот компьютер.",

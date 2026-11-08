@@ -144,6 +144,19 @@ mod tests {
             render_in(&zerus_client_core::text!("%1 need attention", 3_i64), true),
             "Требуют внимания: 3"
         );
+        let summary = zerus_client_core::text!(
+            "%1 active, %2",
+            4_i64,
+            zerus_client_core::text!(
+                "%1%2",
+                zerus_client_core::text!("%1 need attention", 3_i64),
+                zerus_client_core::text!(", %1 sessions total", 55_i64)
+            )
+        );
+        assert_eq!(
+            render_in(&summary, true),
+            "Активно: 4, Требуют внимания: 3, всего сессий: 55"
+        );
     }
 
     #[test]

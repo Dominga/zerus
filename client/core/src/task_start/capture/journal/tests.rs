@@ -25,11 +25,15 @@ fn saved(f: &Fixture) -> Saved {
     .unwrap()
     .unwrap()
 }
+// Every caller expects a successful prepare: a later one may meet a parallel
+// fork's inherited lock description, so wait for Busy only (zerus-3bix9).
 fn prepared(f: &Fixture) -> Journal {
-    Journal::prepare(
-        f.capture().unwrap(),
-        &CheckId::fixture_initial(&f.intent.reconcile_id),
-    )
+    retry_busy(|| {
+        Journal::prepare(
+            f.capture().unwrap(),
+            &CheckId::fixture_initial(&f.intent.reconcile_id),
+        )
+    })
     .unwrap()
 }
 
@@ -120,7 +124,8 @@ fn prepared_reopen_reuses_the_original_id_with_only_a_fresh_service_scope() {
     let bytes = fs::read(&f.file).unwrap();
     f.intent.scope.service_epoch = NEXT.into();
     let mut journal =
-        Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(READ)).unwrap();
+        retry_busy(|| Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(READ)))
+            .unwrap();
     assert_eq!(journal.saved().phase(), Phase::Prepared);
     assert_eq!(journal.saved().reconcile_id(), f.intent.reconcile_id);
     let offered = journal.offer().unwrap();
@@ -129,7 +134,8 @@ fn prepared_reopen_reuses_the_original_id_with_only_a_fresh_service_scope() {
     assert_eq!(offered.original.as_bytes(), bytes);
     drop(journal);
     let mut reloaded =
-        Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(READ)).unwrap();
+        retry_busy(|| Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(READ)))
+            .unwrap();
     assert_eq!(reloaded.offer().err(), Some(Error::OfferedUnknown));
     assert_eq!(reloaded.saved().reconcile_id(), f.intent.reconcile_id);
 }
@@ -146,7 +152,8 @@ fn another_writer_or_changed_source_cannot_rotate_or_replace_a_saved_original() 
     drop(first);
     f.change(|v| v["opaque_future"] = json!("changed source"));
     assert_eq!(
-        Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(NEXT)).err(),
+        retry_busy(|| Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(NEXT)))
+            .err(),
         Some(Error::Unavailable)
     );
     assert_eq!(
@@ -323,7 +330,10 @@ fn explicit_discard_only_retires_the_exact_never_offered_metadata() {
     let f = Fixture::new();
     drop(prepared(&f));
     let original = fs::read(&f.file).unwrap();
-    assert_eq!(saved(&f).discard_prepared(NEXT), Err(Error::Unavailable));
+    assert_eq!(
+        retry_busy(|| saved(&f).discard_prepared(NEXT)),
+        Err(Error::Unavailable)
+    );
     assert_eq!(saved(&f).phase(), Phase::Prepared);
     // The original outbox may have changed or gone away. This API discards
     // only confirmed never-offered journal metadata, not that outbox.
@@ -359,7 +369,7 @@ fn explicit_discard_only_retires_the_exact_never_offered_metadata() {
     drop(next);
     let bytes = fs::read(f.file.with_extension("reconcile")).unwrap();
     assert_eq!(
-        saved(&f).discard_prepared(&next_id),
+        retry_busy(|| saved(&f).discard_prepared(&next_id)),
         Err(Error::OfferedUnknown)
     );
     assert_eq!(fs::read(f.file.with_extension("reconcile")).unwrap(), bytes);
@@ -419,15 +429,16 @@ fn missing_journal_beside_its_original_lock_never_creates_another_reconciliation
     )
     .is_err());
     assert_eq!(
-        Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(NEXT)).err(),
+        retry_busy(|| Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(NEXT)))
+            .err(),
         Some(Error::Unavailable)
     );
     assert_eq!(
-        Journal::prepare_after_discard(
+        retry_busy(|| Journal::prepare_after_discard(
             f.capture().unwrap(),
             &CheckId::fixture_initial(NEXT),
             &f.intent.reconcile_id
-        )
+        ))
         .err(),
         Some(Error::Unavailable)
     );

@@ -1078,6 +1078,49 @@ describe("a paste that waits for the native clipboard (zerus-voy7d)", () => {
   });
 });
 
+describe("a paste keeps the range it was accepted at (zerus-ptyzp)", () => {
+  // The reviewer's control: the typing is still being saved and the read-only field gets a new selection.
+  function held(f: ReturnType<typeof fakes>) {
+    let edited!: () => void;
+    f.port.edit = async (_h, rev, _epoch, text) => { f.calls.push(`edit ${rev} ${text}`); await new Promise<void>((resolve) => { edited = resolve; }); };
+    return () => edited();
+  }
+
+  it("pasted files attach at the original range", async () => {
+    const f = fakes();
+    const release = held(f);
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view()); c.input("draft to preserve", 5, 5);
+      const opened = c.view()!, at = c.selection();
+      const bound: PasteBinding = { handle: opened.handle, key: opened.key, epoch: opened.text_epoch, text: c.text(), start: at.start, end: at.end };
+      let attaching: Promise<void> | undefined;
+      await pasteNative({ kind: "native", ask: true, image: undefined, text: "" }, {
+        native: async () => ["/srv/a.txt"], current: () => samePaste(c.view(), bound, c.locked(), c.text(), c.selection()),
+        attach: (paths) => { attaching = c.attachPasted(paths); }, image: () => {}, text: () => {},
+      });
+      expect(c.locked()).toBe(true);
+      c.select(0, c.text().length);
+      release(); await attaching;
+      expect(f.calls.at(-1), "a selection in the read-only field does not retarget the accepted paste").toBe("attach /srv/a.txt 5-5");
+    });
+  });
+
+  it("a pasted image goes in at the original range", async () => {
+    const f = fakes();
+    const release = held(f);
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      f.port.pasteImage = async (_h, bytes, start, end) => { f.calls.push(`paste ${bytes.length} ${start}-${end}`); };
+      c.apply(view()); c.input("draft to preserve", 6, 2);
+      const pasting = c.pasteImage(new Blob([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], { type: "image/png" }));
+      c.select(0, c.text().length);
+      release(); await pasting;
+      expect(f.calls.at(-1)).toBe("paste 4 2-6");
+    });
+  });
+});
+
 describe("opening a draft attachment (MessageComposer::openAttachment, 1067-1085)", () => {
   const shot = { name: "shot.png", mime: "image/png", reference: "[Image #1]", bytes: 8, path: "draft/1/2/0", excerpt: null };
 

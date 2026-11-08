@@ -9,13 +9,14 @@ import { bus, toast } from "../../store/notices";
 import * as bridge from "../../bridge";
 import type { Project } from "../../types";
 import type { Place } from "./project-folders";
+import { selectedStyle } from "../sessions/path-forms";
 import "../styles/project-clone.css";
 import { tr } from "../../i18n";
 export interface CloneView { id: string; url: string; parent: string; name: string; destination: string; status: string; busy: boolean; cloning: boolean; uncertain: boolean; ready: boolean; locked: boolean; can_submit: boolean }
 const NEW = "__new__";
 /** setup-clone-computer / setup-clone. The native adapter owns the operation. */
 export default function ProjectCloneDialog(props: { project: string; preferred?: string; projects: Project[]; origin: HTMLElement; close(): void; placed(project: string, folder: string): void }) {
-  const places: Place[] = Object.entries(machineCards).filter(([id, m]) => m.ok && m.host && m.machine_id && (id !== "" || (m.local_sessions !== false && m.platform !== "windows"))).map(([computer, m]) => ({ computer, host: m.host!, machine_id: m.machine_id!, label: computer || `${m.host} (this computer)` }));
+  const places: Place[] = Object.entries(machineCards).filter(([id, m]) => m.ok && m.host && m.machine_id && (id !== "" || (m.local_sessions !== false && m.platform !== "windows"))).map(([computer, m]) => ({ computer, host: m.host!, machine_id: m.machine_id!, label: computer || `${m.host} (this computer)`, style: selectedStyle(m.platform, computer === "", "posix") }));
   const [computer, setComputer] = createSignal(places.find((x) => (x.computer || x.host) === props.preferred)?.computer ?? places[0]?.computer ?? "");
   const [place, setPlace] = createSignal<Place>();
   const [view, setView] = createSignal<CloneView>();

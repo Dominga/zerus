@@ -4,8 +4,8 @@ import type { PathStyle } from "../../types";
 // (folder-launch.ts): a computer's folder style, whether a path is a folder
 // of a computer, and the form shown to the user. Part of the port of
 // client/core/src/paths.rs in paths.ts, which re-exports them; the shared
-// golden fixture pins them there (paths.test.ts). The root helpers are
-// exported for paths.ts only.
+// golden fixture pins the ported rules there (paths.test.ts). The root helpers
+// are exported for paths.ts only.
 
 export type Style = PathStyle;
 
@@ -18,6 +18,11 @@ export function of(platform: string | null | undefined, local: boolean, build: S
   if (!local) return "posix";
   if (platform === null || platform === undefined || platform === "") return build;
   return platform === "windows" ? "windows" : "posix";
+}
+
+/** A selected computer's reported Windows platform wins, including a peer; everything else keeps `of`'s fallback. */
+export function selectedStyle(platform: string | null | undefined, local: boolean, build: Style): Style {
+  return platform === "windows" ? "windows" : of(platform, local, build);
 }
 
 const separator = (c: string | undefined) => c === "/" || c === "\\";

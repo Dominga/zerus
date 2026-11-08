@@ -1,0 +1,112 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createSignal } from "solid-js";
+
+// Resume and open terminal (zerus-5wmh.13.11.3; Qt SessionsWindow.cpp:5466-5476):
+// the row's own Resume, then the identity-bound terminal of that same session.
+
+vi.hoisted(() => { vi.stubGlobal("location", new URL("http://localhost/")); });
+const fixture = vi.hoisted(() => ({
+  change: vi.fn(async (_row: unknown): Promise<{ outcome: string; detail?: string }> => ({ outcome: "done" })),
+  notify: vi.fn(),
+  open: vi.fn(async (_target: unknown): Promise<string | null> => null),
+  offline: false,
+}));
+vi.mock("./actions", () => ({ change: fixture.change, notify: fixture.notify, stillListed: (row: unknown) => row, updating: () => false }));
+vi.mock("./batch", () => ({ running: () => false }));
+vi.mock("./catalog", () => ({ catalog: { order: [], rows: {} }, computerOffline: () => fixture.offline }));
+vi.mock("./notices", () => ({ toast: vi.fn() }));
+vi.mock("../bridge", () => ({ sessionTerminalOpen: fixture.open }));
+
+import { RESUMED_CHANGED, RESUMED_NOT_RUNNING, bindResumeTerminalConfirm, resumeAndOpenTerminal, resumedRow, sessionTerminalEntry, waitForResumed } from "./sessionTerminal";
+import type { Session } from "../ui/sessions/types";
+import type { ActionRow } from "../ui/sessions/actions-ui";
+
+const saved = { key: "\nrun:old", computer: "", name: "claude/project/a", machine: "arch", cmd: "claude", state: "paused",
+  runId: "old", sessionId: "session-1", conversationId: "conversation-1", terminalSupported: true, terminalReported: true,
+  tracked: true, resumable: true, activity: "idle", processState: "stopped", allowed: "resume pause terminate kill" } as unknown as ActionRow;
+const resumed = (extra: Partial<ActionRow> = {}) => ({ ...saved, key: "\nrun:new", state: "running", runId: "new", ...extra } as ActionRow);
+
+beforeEach(() => { vi.useFakeTimers(); fixture.offline = false; });
+afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
+
+describe("the same session after its resume", () => {
+  it("is the saved session's computer and ID, now running with a run", () => {
+    expect(resumedRow(saved, [saved])).toBeUndefined();
+    expect(resumedRow(saved, [resumed({ runId: undefined })])).toBeUndefined();
+    expect(resumedRow(saved, [resumed({ computer: "peer" })]), "another computer").toBeUndefined();
+    expect(resumedRow(saved, [resumed({ sessionId: "session-2", name: saved.name })]), "a session reusing the name").toBeUndefined();
+    expect(resumedRow(saved, [resumed({ name: "claude/project/renamed" })])).toMatchObject({ runId: "new" });
+  });
+
+  it("is found by its conversation when the saved row has no session ID, and refused when its conversation changed", () => {
+    const old = { ...saved, sessionId: undefined } as ActionRow;
+    expect(resumedRow(old, [resumed({ sessionId: undefined })])).toMatchObject({ runId: "new" });
+    expect(resumedRow(saved, [resumed({ conversationId: "conversation-2" })])).toBe("changed");
+  });
+});
+
+describe("Resume and open terminal", () => {
+  it("opens the identity-bound terminal of the resumed run once it reports running", async () => {
+    const [rows, setRows] = createSignal<ActionRow[]>([saved]);
+    const pending = resumeAndOpenTerminal(saved, (row) => waitForResumed(row, 30_000, rows));
+    await vi.advanceTimersByTimeAsync(10);
+    expect(fixture.change).toHaveBeenCalledExactlyOnceWith(saved);
+    expect(fixture.open).not.toHaveBeenCalled();
+    setRows([resumed()]);
+    await vi.advanceTimersByTimeAsync(10);
+    await pending;
+    expect(fixture.open).toHaveBeenCalledExactlyOnceWith({ computer: "", name: saved.name, run_id: "new", conversation_id: "conversation-1" });
+    expect(fixture.notify).not.toHaveBeenCalled();
+  });
+
+  it("opens nothing after the bound, and says the session was resumed", async () => {
+    const [rows] = createSignal<ActionRow[]>([saved]);
+    const pending = resumeAndOpenTerminal(saved, (row) => waitForResumed(row, 30_000, rows));
+    await vi.advanceTimersByTimeAsync(30_001);
+    await pending;
+    expect(fixture.open).not.toHaveBeenCalled();
+    expect(fixture.notify).toHaveBeenCalledExactlyOnceWith("info", RESUMED_NOT_RUNNING.replace("%1", saved.name), true);
+  });
+
+  it("opens nothing when the session runs another conversation, or the Resume did not succeed", async () => {
+    const [rows] = createSignal<ActionRow[]>([resumed({ conversationId: "conversation-2" })]);
+    await resumeAndOpenTerminal(saved, (row) => waitForResumed(row, 30_000, rows));
+    expect(fixture.notify).toHaveBeenCalledExactlyOnceWith("error", RESUMED_CHANGED, true);
+    fixture.change.mockResolvedValueOnce({ outcome: "failed", detail: "refused" });
+    const wait = vi.fn();
+    await resumeAndOpenTerminal(saved, wait);
+    expect(wait, "the Resume reports its own failure").not.toHaveBeenCalled();
+    expect(fixture.open).not.toHaveBeenCalled();
+  });
+});
+
+describe("the row menu's terminal entry", () => {
+  const entry = (row: Partial<ActionRow>) => sessionTerminalEntry({ ...saved, ...row } as unknown as Session) as { label: string; disabled?: boolean; hint?: string; action: () => void };
+
+  it("is Resume and open terminal for a saved session, and Open terminal for a running one", () => {
+    expect(entry({})).toMatchObject({ label: "Resume and open terminal", disabled: false });
+    expect(entry({ state: "running", runId: "live" })).toMatchObject({ label: "Open terminal", disabled: false });
+  });
+
+  it("says why it is off: offline, no Terminal, or no identity to resume by", () => {
+    fixture.offline = true;
+    expect(entry({})).toMatchObject({ disabled: true, hint: "Machine unavailable. Reconnect when it is online." });
+    fixture.offline = false;
+    expect(entry({ terminalSupported: false })).toMatchObject({ disabled: true, hint: "Terminal is unavailable for this session." });
+    expect(entry({ sessionId: undefined, conversationId: undefined })).toMatchObject({ disabled: true, hint: "Refresh this session's identity before opening its terminal." });
+  });
+
+  it("asks once, then resumes only after the confirmation", async () => {
+    const ask = vi.fn(async () => false);
+    bindResumeTerminalConfirm(ask);
+    entry({}).action();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(fixture.change, "a cancelled question resumes nothing").not.toHaveBeenCalled();
+    ask.mockResolvedValueOnce(true);
+    entry({}).action();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.change).toHaveBeenCalledTimes(1);
+    expect(fixture.change.mock.calls[0][0]).toMatchObject({ key: saved.key, state: "paused", sessionId: "session-1" });
+  });
+});

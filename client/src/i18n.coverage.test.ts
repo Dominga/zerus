@@ -21,6 +21,7 @@ const DYNAMIC_FILES: Record<string, string> = {
   "./ui/sessions/KeepWarmRow.tsx": "the core's keep-warm refusals, registered in keep-warm.ts",
   "./ui/sessions/Inspector.tsx": "its own tab table and actions-ui identity titles",
   "./ui/sessions/ActionDialogs.tsx": "actions-ui menu labels, reasons and notices; detail reasons from the core",
+  "./store/sessionTerminal.ts": "actions-ui change reasons and its own marked Resume and open terminal notices",
   "./ui/sessions/mark-entries.ts": "the actions store notice constants",
   "./store/actions.ts": "its own notice constants",
   "./store/restores.ts": "the actions notice constants",

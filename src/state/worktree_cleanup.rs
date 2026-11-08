@@ -178,11 +178,47 @@ fn reference(record: &Value) -> Reference {
     }
 }
 
+/// Decode the entry actually enumerated, without the command's target
+/// selection. A census must not replace another holder's reference with the
+/// selected same-label session. The result is folder metadata, never an action
+/// record or native permission.
+fn binding_reference(directory: &str, path: &Path) -> Result<Option<Reference>> {
+    let bytes = storage::binding_bytes(path).map_err(|error| error.to_string())?;
+    let value: Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let name = string(&value,"name");
+    let stem = path.file_stem().and_then(|stem| stem.to_str()).ok_or("Invalid session binding path")?;
+    if !value.is_object() || name.is_empty() { return Err("Invalid saved session identity".into()); }
+    let by_id = matches!(directory,"sessions" | "dsh/sessions" | "opencode/sessions");
+    if (by_id && !storage::is_id_layout_record(&value,stem)) || (!by_id && storage::in_id_layout(&value)) {
+        return Err("The session binding layout and location disagree".into());
+    }
+    if !by_id && storage::label_key(name) != stem {
+        return Err("The session binding name and location disagree".into());
+    }
+    let valid = match directory {
+        "" | "bindings" | "sessions" => value["version"] == 1 && AGENTS.contains(&string(&value,"agent")),
+        "dsh/bindings" | "dsh/sessions" => value["backend"] == "dsh" && name.starts_with("dsh/")
+            && string(&value,"conversation_id").starts_with("session-") && string(&value,"conversation_id").len() <= 2048,
+        "opencode/bindings" | "opencode/sessions" => value["backend"] == "opencode" && name.starts_with("opencode/")
+            && opencode::native_id(string(&value,"conversation_id"),"ses_"),
+        _ => false,
+    };
+    if !valid { return Err("Invalid saved session binding".into()); }
+    for field in ["cwd","launch_dir"] {
+        if value.get(field).is_some_and(|value| !value.is_null() && !value.is_string()) {
+            return Err("A saved session folder is unreadable".into());
+        }
+    }
+    if value["rename_shadow"] == true { return Ok(None); }
+    Ok(Some(reference(&value)))
+}
+
 pub(super) fn bindings() -> Result<Vec<Reference>> {
-    // Ordinary catalog reads tolerate broken records. Deletion cannot interpret
-    // a skipped or unreadable record as proof that no session uses the folder.
+    // Ordinary listings may tolerate a broken entry. Folder/lock decisions
+    // cannot treat a skipped, replaced or unreadable binding as no reference.
     let mut result = Vec::new();
     let mut count = 0;
+    let deadline = Instant::now() + Duration::from_secs(2);
     for directory in storage::BINDING_DIRS {
         let folder = root().join(directory);
         let files = match fs::read_dir(&folder) {
@@ -191,47 +227,20 @@ pub(super) fn bindings() -> Result<Vec<Reference>> {
             Err(e) => return Err(e.to_string()),
         };
         for file in files {
-            let file = file.map_err(|e| e.to_string())?;
-            let path = file.path();
-            if path.extension().is_none_or(|e| e != "json") {
-                continue;
-            }
-            let stem = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default();
-            if !storage::binding_stem(directory, stem) {
-                continue;
-            }
+            if Instant::now() >= deadline { return Err("Session references could not all be checked in time".into()); }
+            let path = file.map_err(|e| e.to_string())?.path();
+            if path.extension().is_none_or(|e| e != "json") { continue; }
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+            if !storage::binding_stem(directory,stem) { continue; }
             count += 1;
-            if count > 5000 {
-                return Err("Too many session bindings to check".into());
-            }
-            // Bounded, no final link, no FIFO wait, a regular file only: an
-            // unreadable binding is an error, so a release keeps its lock
-            // for review (zerus-lr1l2).
-            let bytes = storage::binding_bytes(&path).map_err(|e| e.to_string())?;
-            let value: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-            if value["rename_shadow"] == true {
-                continue;
-            }
-            if string(&value, "name").is_empty() {
-                return Err("Invalid saved session identity".into());
-            }
-            // A session in the ID layout is its own record: its label's path
-            // may hold another session (P3a), whose folders are not its own.
-            let value = if directory.contains('/') {
-                value
-            } else if directory == "sessions" {
-                storage::read_id(stem)?
-            } else {
-                // Bounded as well: the label may route to another file in
-                // `bindings/` (zerus-zy12o).
-                storage::read_binding(string(&value, "name"))?
-            };
-            result.push(reference(&value));
+            if count > 5000 { return Err("Too many session bindings to check".into()); }
+            // Every physical holder (including routed legacy bindings) uses
+            // main's bounded binding_bytes read. Do not re-resolve the label:
+            // that would substitute the command-selected same-label twin.
+            if let Some(reference) = binding_reference(directory,&path)? { result.push(reference); }
         }
     }
+    if Instant::now() >= deadline { return Err("Session references could not all be checked in time".into()); }
     Ok(result)
 }
 
@@ -3593,5 +3602,75 @@ mod tests {
         assert_eq!(mode(), 0o500);
         deletion::checked(&fd, unsafe { libc::geteuid() }, &identity).unwrap();
         assert_eq!(mode(), 0o700);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod binding_census_tests {
+    use super::*;
+    use std::io::Read;
+
+    #[test]
+    fn a_binding_census_keeps_every_twin_and_refuses_irregular_entries() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "state::worktree_cleanup::binding_census_tests::binding_census_fixture", "--ignored", "--test-threads=1"])
+            .env("HGS_STATE_DIR",fixture.path().join("state"))
+            .env("HGS_CONFIG_DIR",fixture.path().join("config"))
+            .env("ZERUS_BINDING_CENSUS_FIXTURE","1")
+            .env_remove("TMUX").env_remove("HGS_SESSION_ID").env_remove("HGS_SESSION").env_remove("HGS_RUN_ID")
+            .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+        let until = Instant::now()+Duration::from_secs(30);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() { break status; }
+            if Instant::now() >= until { child.kill().unwrap(); break child.wait().unwrap(); }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let mut out = Vec::new(); let mut err = Vec::new();
+        child.stdout.take().unwrap().take(65536).read_to_end(&mut out).unwrap();
+        child.stderr.take().unwrap().take(65536).read_to_end(&mut err).unwrap();
+        assert!(status.success() && String::from_utf8_lossy(&out).contains("test result: ok. 1 passed"),
+            "{}{}",String::from_utf8_lossy(&out),String::from_utf8_lossy(&err));
+    }
+
+    #[test]
+    #[ignore = "process-isolated binding census fixture"]
+    fn binding_census_fixture() {
+        if std::env::var("ZERUS_BINDING_CENSUS_FIXTURE").as_deref()!=Ok("1") {return;}
+        let name = "codex/example/shared";
+        let folders: Vec<_> = (0..4).map(|n|root().parent().unwrap().join(format!("folder-{n}"))).collect();
+        for folder in &folders { fs::create_dir_all(folder).unwrap(); }
+        let first = json!({"version":1,"agent":"codex","name":name,"session_id":uuid::Uuid::new_v4().to_string(),
+            "run_id":"first","conversation_id":"first-conversation","cwd":folders[0]});
+        let second = json!({"version":1,"agent":"codex","name":name,"session_id":uuid::Uuid::new_v4().to_string(),
+            "layout":"id","run_id":"second","conversation_id":"second-conversation","cwd":folders[1]});
+        atomic(&storage::label_record_path(name),&first.to_string()).unwrap();
+        let second_path = storage::id_record_path(string(&second,"session_id")).unwrap();
+        atomic(&second_path,&second.to_string()).unwrap();
+        for (provider,cid,folder) in [("dsh","session-third",&folders[2]),("opencode","ses_fourth",&folders[3])] {
+            let id=uuid::Uuid::new_v4().to_string();
+            let record=json!({"backend":provider,"agent":provider,"name":format!("{provider}/example/shared"),
+                "layout":"id","session_id":id,"run_id":provider,"conversation_id":cid,"cwd":folder});
+            atomic(&root().join(provider).join("sessions").join(format!("{id}.json")),&record.to_string()).unwrap();
+        }
+        session_id::select(name,string(&second,"session_id"));
+        let refs=bindings().unwrap();
+        assert_eq!(refs.len(),4);
+        for folder in &folders {assert!(refs.iter().any(|r|r.folders.contains(folder)),"missing {}",folder.display());}
+        assert_eq!(refs.iter().filter(|r|r.name==name).count(),2);
+        let original=fs::read(&second_path).unwrap();
+        fs::remove_file(&second_path).unwrap();
+        let path=std::ffi::CString::new(second_path.to_str().unwrap()).unwrap();
+        // SAFETY: the fixture owns this NUL-free absent path.
+        assert_eq!(unsafe {libc::mkfifo(path.as_ptr(),0o600)},0);
+        assert!(bindings().is_err());
+        fs::remove_file(&second_path).unwrap();
+        std::os::unix::fs::symlink(storage::label_record_path(name),&second_path).unwrap();
+        assert!(bindings().is_err());
+        fs::remove_file(&second_path).unwrap();
+        atomic(&second_path,"{}").unwrap(); assert!(bindings().is_err());
+        fs::write(&second_path,&original).unwrap();
+        assert_eq!(bindings().unwrap().len(),4);
+        session_id::clear();
     }
 }

@@ -283,3 +283,12 @@
 .team-next-goal-dialog { width: min(620px, 94vw); }
 .team-next-goal-dialog .nt-field { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; font-size: var(--fs-sm); color: var(--z-color-muted); }
 .team-task-delegate { margin: 4px 0; }
+
+/* Task 251: the lead's tool_missing inbox row. */
+.team-drawer-row.team-inbox-tool { display: flex; flex-direction: column; align-items: stretch; gap: 4px; padding: 6px 8px; }
+.team-inbox-tool-head { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.team-inbox-tool-why { color: var(--z-color-text-2); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.team-inbox-tool-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.team-inbox-tool-actions .field { flex: 1; min-width: 160px; }
+.team-inbox-tool-notice { flex-basis: 100%; color: var(--z-color-danger); font-size: var(--fs-2xs); overflow-wrap: anywhere; }
+.team-proposal-command { display: block; margin: 4px 0; padding: 4px 6px; border-radius: 4px; background: var(--z-color-field); color: var(--z-color-text); font-family: var(--z-font-mono); font-size: var(--fs-xs); overflow-wrap: anywhere; user-select: text; }

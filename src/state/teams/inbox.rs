@@ -1519,6 +1519,25 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             detail: attempt.decision_flags.iter().map(|flag| format!("- {}: {}", flag["decision"].as_str().unwrap_or_default(), flag["choice"].as_str().unwrap_or_default())).collect::<Vec<_>>().join("\n"),
         });
     }
+    // Task 271 (owner, 2026-11-08): the lead playbook; every breach is one item
+    // with the exact fix, and only what the owner must decide is marked so.
+    // Only a team that carries a playbook is coached: a team from before the
+    // playbook (or one built in a test) reads as it did.
+    if active && team.playbook.is_some() {
+        for breach in super::playbook::breaches(team) {
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "playbook",
+                key: breach.key(),
+                task: None,
+                member: team.lead.clone(),
+                since: crate::state::now(),
+                summary: summary(&format!("Playbook ({}): {}{}", breach.rule, breach.title, if breach.owner { " — the owner's decision" } else { "" })),
+                command: breach.fix,
+                detail: breach.detail,
+            });
+        }
+    }
     items.sort_by(|a, b| a.since.total_cmp(&b.since).then_with(|| a.key.cmp(&b.key)));
     items.truncate(ITEM_LIMIT);
     items

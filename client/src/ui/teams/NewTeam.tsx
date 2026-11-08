@@ -308,6 +308,30 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
           <p class="nt-note">{tr("This folder is not a Git repository. Every member will share it; worktrees are off.")}</p>
         </Show>
 
+        <Show when={store.view()?.working_mode?.proposal}>
+          {(proposal) => (
+            <section class="nt-working-mode" data-working-mode={proposal().preset}>
+              <div class="nt-inline">
+                <b>{tr("Working mode")}</b>
+                <span class="nt-hint">{tr("The project suggests %1", proposal().title || proposal().preset)}</span>
+              </div>
+              <label class="nt-field">
+                <span>{tr("How members work")} {mark("working_mode")}</span>
+                <select value={fields().working_mode} onChange={(event) => store.edit("working_mode", event.currentTarget.value)}>
+                  <option value="auto">{tr("Auto: follow the project (%1)", proposal().preset)}</option>
+                  <option value="branch-pipeline">{tr("Branch pipeline")}</option>
+                  <option value="branch-per-task">{tr("Branch per task")}</option>
+                  <option value="shared-folder">{tr("One shared folder")}</option>
+                  <option value="none">{tr("Keep the settings as they are")}</option>
+                </select>
+              </label>
+              <ul class="nt-working-reasons">
+                <For each={proposal().reasons}>{(reason) => <li>{reason}</li>}</For>
+              </ul>
+            </section>
+          )}
+        </Show>
+
         <div class="nt-members">
           <div class="nt-members-head">
             <b>{tr("Members")}</b>

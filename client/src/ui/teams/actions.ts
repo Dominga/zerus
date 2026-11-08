@@ -419,7 +419,31 @@ export interface MoreItem {
 /** A task that started: an attempt was made or it left Pending (Qt taskStarted). */
 const started = (task: ActTask) => task.attempts > 0 || !["pending", "draft"].includes(task.status);
 
-/** U58: the phases a task that has not started may move to, and why one may not (Qt moveTargets). */
+/** Task #296: the lead member of a team in a team list, once the list has it. */
+export function leadMemberOf(
+  list: { teams: readonly Pick<import("../../types").TeamSummary, "id" | "members">[] } | undefined,
+  id: string,
+): import("../../types").TeamSummary["members"][number] | undefined {
+  return list?.teams.find((team) => team.id === id)?.members.find((member) => member.lead);
+}
+
+/** Task #253: hgs answered a retry with `continue`: the attempt K is kept. */
+export function retryContinues(receipt: unknown): number | null {
+  if (!receipt || typeof receipt !== "object") return null;
+  const found = receipt as Record<string, unknown>;
+  if (found.status !== "continue") return null;
+  const attempt = Number(found.attempt);
+  return Number.isFinite(attempt) && attempt > 0 ? attempt : null;
+}
+
+export function retryContinueText(attempt: number): string {
+  return tr("Continues attempt %1 - nothing was revoked", attempt);
+}
+
+/**
+ * Task 196: moves a task that has not started to another phase, offering Qt's
+ * phases; the plan revision is the one the owner saw.
+ */
 export function moveTargets(team: ActTeam, id: number): { phase: number; title: string; blocked: string }[] {
   const task = team.tasks.find((found) => found.id === id);
   if (!task || finished(task) || started(task)) return [];
@@ -683,7 +707,12 @@ export class TeamActions {
     if (!choice) return "cancelled" as const;
     return this.run(key, action(choice), undefined, true);
   }
-  retry(task: ActTask) { return this.run(`retry:${task.id}`, { kind: "retry", task: task.id }, retryConfirmation(task)); }
+  async retry(task: ActTask) {
+    const outcome = await this.run(`retry:${task.id}`, { kind: "retry", task: task.id }, retryConfirmation(task));
+    const attempt = outcome && outcome !== "cancelled" && outcome.outcome === "done" ? retryContinues(outcome.receipt) : null;
+    if (attempt !== null) { this.notice = retryContinueText(attempt); this.changed(); }
+    return outcome;
+  }
   /** Task 55: the owner's answer to a member's question (`hgs team reply`); nothing without text or for a closed question. */
   reply(task: ActTask, question: string, text: string) {
     const answer = text.trim();
@@ -746,6 +775,11 @@ export class TeamActions {
     return this.run(`discard-phase:${phase}`, { kind: "discard_phase", phase, tasks, accepted: state === "queued" || state === "running" });
   }
   returnToDraft(phase: number) { return this.run(`return-to-draft:${phase}`, { kind: "return_to_draft", phase }); }
+  /** Task #308: asks the owner to allow the project's working mode. */
+  proposeWorkingMode(preset: string, reason = "") {
+    return this.run(`working-mode:${preset}`, { kind: "propose_working_mode", preset, reason },
+      { name: "teamWorkingModeConfirm", title: tr("Switch the working mode?"), text: tr("Propose switching this team to %1? Its settings follow the project's proposal.", preset), action: tr("Propose the switch") });
+  }
   /** Move earlier or later among the movable phases (drafts and accepted ones not started). */
   movePhase(phase: number, later: boolean) {
     const team = this.where().team;

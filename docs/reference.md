@@ -8924,6 +8924,89 @@ testing, conflict with its `resolve` task, or no landing queued); the lead's
 inbox lists each with an `unlanded` item, and an accept answers with its
 `landing`.
 
+#### The working mode follows the project (#270)
+
+Owner, 2026-11-08: "a small project, code first - the branch pipeline pays; a
+huge one with binaries - one folder with soft file locks". Zeros profiles the
+project when a team is planned and proposes a preset, so the mode is a decision
+it makes, not one the lead must remember.
+
+- The **project profile** reads the tracked tree of the team's folder (bounded:
+  at most 200,000 entries, a 10 s Git budget): the tracked files and bytes, the
+  binary files by extension and their share, the files of 5 MiB or more, Git LFS
+  (`.gitattributes` with `filter=lfs`, or `.git/lfs`), the engine markers
+  (`.uproject`, `.uplugin`, `Content/`, `Binaries/`), the test subsystem's
+  suite providers and whether `[merge_queue]` is on, and the folder's branch
+  (the integration line at planning).
+- The **presets**:
+  - `branch-pipeline` - a branch per task cut from `base_branch` (the
+    integration line), the `code` pipeline (review -> tests), accepted work
+    landing through the merge queue. It pays for a code repository whose tests
+    run: no LFS, fewer than 20 files of 5 MiB or more, binary bytes under 512
+    MiB and under 20% of the tracked bytes, no engine markers, and at least one
+    test suite provider.
+  - `branch-per-task` - the same branches and base without a pipeline, for code
+    with no test subsystem.
+  - `shared-folder` - one folder for every member, the soft file locks per task
+    output (task 155), no branches or merges, the build broker for builds. It
+    pays for a binary or asset project: 2 GiB or more tracked, 512 MiB or more of
+    binaries, a binary share of 20% or more, Git LFS, 20 or more large assets, or
+    an engine project.
+- **Writing it**. The settings a preset writes are `branch_per_task`
+  (`task/{id}`), `base_branch` and `folder_policy` (`worktree`) for the branch
+  presets, and `folder_policy` `shared`, no branch per task, the build broker for
+  `shared-folder`. `hgs team draft` carries `working_mode`: the proposal (preset,
+  title, reasons, settings, profile) and the preset the owner accepted so far
+  (`auto` is the proposal); the draft's `update` action sets
+  `working_mode` to a preset, `auto` or `none`. Create team writes it into the
+  settings; an explicit setting the owner named wins, and a folder that is not a
+  Git repository keeps the plain flow. `hgs team status` carries `working_mode`
+  with `preset`, the `proposal` and `disagreeing` (what the settings still miss).
+  A create request may name `working_mode` (`auto` is the default for a Git
+  repository).
+- **A running team** whose settings disagree with its profile gets ONE owner
+  card from the lead (`kind:"working-mode"`, the preset, its settings and the
+  reasons), created at a safe point only: the team runs or is paused and no
+  attempt is open. The card is not repeated for the same preset; an Allow writes
+  the preset's settings (the owner setting the mode directly may also use
+  `hgs team settings` for the fields the lead cannot change). A card whose mode
+  is already in force, or whose project now profiles to another mode, withdraws
+  by itself.
+- The lead guide (`hgs guide team-lead`) is size-bounded; the presets and their
+  reasons are read from the draft and `hgs team status` instead.
+
+#### The lead playbook and the brief (#271)
+
+Owner, 2026-11-08: "let us make sure such mistakes in running a project do not
+happen; let Zeros itself propose the methods of running it and remind you after
+a compaction".
+
+- **The playbook** (`src/state/teams/playbook.rs`) is the team's working-mode
+  preset (task 270) plus nine rules: (a) the mode its project needs; (b) accepted
+  work lands on the integration line; (c) no member idles while ready work
+  waits; (d) a task names files or module paths, not a whole folder; (e) the
+  lore (project memory) has a task shipping its binary in the package; (f) one
+  session, one team; (g) a report's tests are run before the accept; (h) a task
+  starts from the integration line; (i) no real-format token or secret in a task
+  text or a report. It is stored on the team (`playbook`) at create and from a
+  draft, and the lead brief carries it.
+- **The check** is read-only and cheap: every rule is evaluated from the team
+  record (settings, cached mode proposal, tasks and attempts, merge entries,
+  reports, decisions), never from Git, the session listing or the file system,
+  so it runs on every inbox or status read. Each breach is ONE `playbook` item
+  with the rule, what it sees and the exact fix command; a breach clears when
+  the team record no longer shows it. What only the owner may decide is marked
+  in the item ("the owner's decision"): the working-mode preset's settings, and
+  a leaked secret.
+- **The brief** is short plain text: the working mode and the base, the rules,
+  the open breaches with their fixes, the owner's standing decisions from the
+  lore, the integration line's last landing, and which members have no work. It
+  is sent to the lead at team start, at each new phase, and when the lead's
+  session or context shows a compaction or a clear (a new run or conversation,
+  or a context reading well below the one the last brief saw, at most once per
+  change). `hgs team brief --lead` (or `--json`) prints it on demand; the same
+  payload carries the playbook and the breaches for the clients.
+
 #### The merge queue (#760)
 
 With `[merge_queue] enabled = true` (the owner may override it), the lead's or

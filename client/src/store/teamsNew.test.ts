@@ -150,6 +150,17 @@ describe("draft polling", () => {
     expect(store.unseen()).toEqual(["name", "goal", "settings", "members"]);
   });
 
+  it("Task #308: shows the project's working mode and keeps the owner's choice", () => {
+    const store = createNewTeam(new Port());
+    store.applyView(draftView({ working_mode: { accepted: "auto", preset: "branch-pipeline",
+      proposal: { preset: "branch-pipeline", title: "Branch pipeline", reasons: ["A code repository with tests"] } } }));
+    expect(store.fields().working_mode).toBe("auto");
+    store.edit("working_mode", "shared-folder");
+    store.applyView(draftView({ working_mode: { accepted: "auto", preset: "branch-pipeline",
+      proposal: { preset: "branch-pipeline", title: "Branch pipeline", reasons: ["A code repository with tests"] } } }));
+    expect(store.fields().working_mode).toBe("shared-folder");
+  });
+
   it("merges a polled view without touching dirty fields", () => {
     const local: NewTeamFields = {
       name: "Local",
@@ -159,6 +170,7 @@ describe("draft polling", () => {
       settings: { land: false },
       members: [],
       tasks: [],
+      working_mode: "auto",
     };
     const merged = mergeDraft(local, new Set(["name", "goal"]), draftView());
     expect(merged.name).toBe("Local");

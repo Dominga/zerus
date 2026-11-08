@@ -1095,6 +1095,21 @@ Team parse(const QJsonObject &v)
         team.findingsNext = str(findings, "next_cursor");
     }
     if (v.value("findings_summary").isObject()) team.findingsSummary = v.value("findings_summary").toObject();
+    // Task #308: the working mode, its proposal and the settings that disagree.
+    if (v.value("working_mode").isObject()) {
+        const auto mode = v.value("working_mode").toObject();
+        team.workingMode.known = true;
+        team.workingMode.preset = str(mode, "preset");
+        team.workingMode.disagreeing.clear();
+        for (const auto &wrong : mode.value("disagreeing").toArray()) team.workingMode.disagreeing << wrong.toString();
+        if (mode.value("proposal").isObject()) {
+            const auto proposal = mode.value("proposal").toObject();
+            team.workingMode.proposalPreset = str(proposal, "preset");
+            team.workingMode.title = str(proposal, "title");
+            team.workingMode.reasons.clear();
+            for (const auto &reason : proposal.value("reasons").toArray()) team.workingMode.reasons << reason.toString();
+        }
+    }
     return team;
 }
 
@@ -1451,6 +1466,12 @@ QString proposalText(const Team &team, const Team::Proposal &proposal)
     if (proposal.kind == "discard-phase") return tr("Discard %1").arg(phaseName(team, change.value("phase").toInt()));
     // #740: the lead's question to the owner, whole.
     if (proposal.kind == "question") return change.value("question").toString();
+    // Task 251: the lead's install card names the tool and why.
+    if (proposal.kind == "install-tool") {
+        const QString tool = change.value("tool").toString();
+        const QString why = change.value("why").toString(proposal.reason);
+        return why.isEmpty() ? tr("Install %1").arg(tool) : tr("Install %1: %2").arg(tool, why);
+    }
     // #756: the lead's switch card for one owner setting.
     if (proposal.kind == "switch-setting") {
         const bool on = change.value("value").toBool();
@@ -1495,6 +1516,14 @@ QStringList proposalChanges(const Team &team, const Team::Proposal &proposal)
         lines << tr("Each open task goes to the new session with what was done so far; the old session is paused and kept under Saved as <name>-replaced.");
     } else if (proposal.kind == "next-goal") {
         lines << proposal.goal.left(600);
+    } else if (proposal.kind == "install-tool") {
+        // Task 251: the exact command, the folder and the project it serves.
+        QStringList words;
+        for (const auto &word : change.value("command").toArray()) words << word.toString();
+        if (!words.isEmpty()) lines << tr("Command: %1").arg(words.join(QLatin1Char(' ')));
+        if (const QString folder = change.value("folder").toString(); !folder.isEmpty()) lines << tr("Folder: %1").arg(folder);
+        if (const QString project = change.value("project").toString(); !project.isEmpty()) lines << tr("Project: %1").arg(project);
+        if (const QString saves = change.value("saves").toString(); !saves.isEmpty()) lines << tr("It saves %1").arg(saves);
     } else if (proposal.kind == "add-to-phase") {
         for (const auto &value : change.value("tasks").toArray()) {
             const auto task = value.toObject();
@@ -1951,10 +1980,22 @@ QList<InboxItem> parseInbox(const QJsonObject &value)
         InboxItem inbox;
         inbox.kind = str(item, "kind"); inbox.member = str(item, "member");
         inbox.summary = str(item, "summary"); inbox.command = str(item, "command");
+        inbox.detail = str(item, "detail");
         inbox.task = item.value("task").toInt(); inbox.since = item.value("since").toDouble();
         items.append(inbox);
     }
     return items;
+}
+
+// Task 251: the offer id a tool_missing inbox item names in its deny command
+// (or, when that is missing, in its detail's propose command).
+QString inboxToolOffer(const InboxItem &item)
+{
+    const QRegularExpression re(QStringLiteral("\"offer\"\\s*:\\s*\"([^\"]+)\""));
+    const auto match = re.match(item.command);
+    if (match.hasMatch()) return match.captured(1);
+    const auto detail = re.match(item.detail);
+    return detail.hasMatch() ? detail.captured(1) : QString();
 }
 
 namespace {

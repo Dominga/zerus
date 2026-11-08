@@ -374,6 +374,8 @@ export type Action =
   | { kind: "mark_read"; reply_id: string | null; attention_signature: string | null }
   | { kind: "pause" }
   | { kind: "resume" }
+  | { kind: "resume_stale"; with_lost_dialogue?: boolean; accept_stale?: boolean }
+  | { kind: "remove_queued"; message_id: string }
   | { kind: "rename"; new_name: string; archive_id: string | null }
   | { kind: "archive" }
   | { kind: "terminate" }
@@ -848,6 +850,10 @@ export interface LocalMessage {
 export interface QueueView { id: string; text: string; hint: string; can_send_now: boolean; enabled: boolean; label: string; run_id?: string; conversation_id?: string }
 /** A held message: the request of its local row, its exact text and its file names. */
 export interface HeldMessageView { request_id: string; text: string; attachments: string[] }
+/** U35: a message hgs holds until the agent takes the previous one (src-tauri composer/held.rs). */
+export interface HeldInputView { request_id: string; text: string; cancelling: boolean }
+/** Text left in the agent's own Terminal input; `error` says why the last Send it did not go. */
+export interface TerminalDraftView { draft: string; can_send: boolean; submitting: boolean; error: Text | null }
 export interface ComposerView {
   handle: number; key: string; subagent?: { agent_id: string; send_supported: boolean; hint: string } | null; loaded: boolean; rev: number; text_epoch: number; text: string; position: number; anchor: number;
   attachments: AttachmentView[]; removed: string | null; attaching: boolean; sending: boolean; recording?: boolean; waiting: string | null; uncertain: boolean;
@@ -861,6 +867,10 @@ export interface ComposerView {
   cancel_send: boolean; cancel_locked?: boolean; compacting: boolean; clear: ClearControl;
   /** The message a "Compact and continue" holds while the desktop service compacts first: it left the composer but is not sent yet (zerus-pabah). */
   held?: HeldMessageView | null;
+  /** U35: the messages hgs holds until the agent takes the previous one, oldest first. */
+  held_inputs?: HeldInputView[];
+  /** Text left in the agent's own Terminal input, which holds every send. */
+  terminal_draft?: TerminalDraftView | null;
   /** The agent's question card shown in the composer (A2). */
   question: QuestionView | null;
   /** False while a required card stands in for the editor and the action row (Qt's setInputVisible). */
@@ -894,7 +904,9 @@ export type QuestionEdit = { kind: "option"; item: string; option: string; check
 export interface ColdAnswer { title: string; text: string; proceed: string }
 export type QuestionReply = { kind: "sending" } | { kind: "busy" } | { kind: "cold"; token: number; prompt: ColdAnswer } | { kind: "notice"; text: string };
 /** Notices and Terminal requests that arrive after their call (`next_batch`'s `composer_events`). */
-export type ComposerEvent = { kind: "notice"; text: string; error: boolean; transient: boolean } | { kind: "open_terminal"; key: string };
+export type ComposerEvent = { kind: "notice"; text: string; error: boolean; transient: boolean } | { kind: "open_terminal"; key: string }
+  /** A notice whose prose is translated here: held messages, the Terminal draft, a Send that did nothing. */
+  | { kind: "said"; text: Text; error: boolean; sticky: boolean };
 /** A Codex question reply, parsed in Rust (`question_replies`, `prompt_replies`). */
 export interface Reply { question: string; answer: string }
 export type ColdAction = "send" | "compact" | "clear";
@@ -1289,6 +1301,8 @@ export interface TeamFindingsPage { items: TeamFindingItem[]; next_cursor?: stri
 export interface TeamView {
   id: string; name: string; status: string; project: string; folder: string; goal: string; plan_mode: string; lead: string;
   revision: number; created: number; updated: number; waiting_for_lead: boolean; pending_phase: number | null;
+  /** Task #308: the team's working mode, the proposal and what its settings miss. */
+  working_mode?: { preset: string; proposal?: { preset: string; title: string; reasons: string[]; settings?: Record<string, unknown> } | null; disagreeing?: string[] };
   /** F7: the team a next goal came from, and the one it led to. */
   previous?: string; next?: string;
   /** Task #58: the phase that takes tasks as they come, and whether hgs sends each phase's mode. */
@@ -1388,6 +1402,8 @@ export type TeamAction =
   | { kind: "phase_mode"; phase: number; mode: "free" | "standard"; reason?: string }
   | { kind: "send_back_phase"; phase: number; comment: string }
   | { kind: "decide_tool"; offer: string; allow: boolean; reason?: string }
+  /** Task 251: the lead asks the owner to install a tool its run found missing. */
+  | { kind: "propose"; proposal_kind: "install-tool"; reason: string; offer: string }
   /** Task 97: the owner's answer to a deferred request; one message reaches the session. */
   | { kind: "answer_deferred"; id: string; decision: "allow" | "deny" | "answer"; text?: string }
   /** Task 88: the team's test configuration for its Tests settings: read it, or check a candidate override; neither writes. */
@@ -1412,6 +1428,8 @@ export type TeamAction =
   /** Task 304 (hgs #246): the owner dismisses a Waiting row in its state, or restores one. */
   | { kind: "waiting_dismiss"; id: string; state: string; team?: string }
   | { kind: "waiting_restore"; id: string }
+  /** Task #308: proposes a working mode; its card allows the switch. */
+  | { kind: "propose_working_mode"; preset: string; reason?: string }
   /** Task #218: a member moves to another agent/account/model or to an existing session. */
   | { kind: "swap-member"; member: string; agent?: string; model?: string; effort?: string; account?: string; session?: TeamSessionView }
   | { kind: "take_over"; task: number }

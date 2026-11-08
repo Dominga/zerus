@@ -6,6 +6,7 @@ import { createMarks, type MarksPort } from "./marks";
 import { notificationsState, snapshotOf } from "../ui/sessions/actions-ui";
 import * as bridge from "../bridge";
 import { emptyBatch, type Action, type Batch, type Details, type Outcome, type RowOut, type ViewRow } from "../types";
+import { resumeBehind } from "./resumeBehind";
 
 vi.mock("../bridge", () => ({
   runAction: vi.fn(),
@@ -1125,6 +1126,33 @@ describe("explicit cleanup confirmation", () => {
       expect((await a.end(opening, "terminate", "old-offer")).outcome).toBe("failed");
       expect(mocked.terminationCleanupConfirm).not.toHaveBeenCalled();
       expect(mocked.runAction).not.toHaveBeenCalled();
+      dispose();
+    });
+  });
+});
+
+describe("task 247 session dialogs", () => {
+  it("opens the transcript-behind question instead of a plain resume error", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      resumeBehind.close();
+      const detail = 'a: the native transcript stops 30 s before the events Zerus recorded (transcript_behind); resume with --accept-stale or --with-lost-dialogue {"error":"transcript_behind","transcript_at":1700000000,"events_at":1700000030,"missing":2}';
+      mocked.runAction.mockResolvedValue({ outcome: "failed", detail });
+      const out = await a.perform(session(), { kind: "resume" });
+      expect(out.outcome).toBe("failed");
+      expect(resumeBehind.state()?.behind).toEqual({ transcriptAt: 1700000000, eventsAt: 1700000030, missing: 2, lag: 30 });
+      expect(a.notices()).toEqual([]);
+      resumeBehind.close();
+      dispose();
+    });
+  });
+
+  it("words a removed queued message as Qt does, not as a generic update", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup();
+      mocked.runAction.mockResolvedValue(done());
+      await a.perform(session({ agent: "opencode" }), { kind: "remove_queued", message_id: "msg-1" });
+      expect(a.notices().map((notice) => notice.text)).toEqual(["Queued message removed."]);
       dispose();
     });
   });

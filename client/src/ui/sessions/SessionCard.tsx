@@ -11,6 +11,7 @@ import type { AgentKind, Session, Status, Subagent } from "./types";
 import type { TeamSummary } from "../../types";
 import { currentChildren, workingChildren } from "./subagents";
 import { presentState, stateFacts, STATE_GLYPH, type Shown, type StateIcon } from "./session-states";
+import { keepWarmHours } from "../../store/keepWarm";
 
 // Card anatomy follows tray/src/SessionCardDelegate.h paintCard() at the
 // compact density (94 px rows, the only density in the web client):
@@ -80,7 +81,8 @@ export const isStateKind = (kind: BadgeKind | undefined): kind is StateKind =>
 export interface CardState { shown: Shown; kind?: BadgeKind; caption?: string }
 export function cardState(s: Session): CardState {
   const online = !computerOffline(s.computer);
-  const shown = presentState(stateFacts(s, online, visibleUnreadReply(s, computerFresh(s.computer))), now());
+  // Keep cache warm stretches Cooling to its hours (SessionsWindow.cpp:4936).
+  const shown = presentState(stateFacts(s, online, visibleUnreadReply(s, computerFresh(s.computer)), keepWarmHours(s) * 3600), now());
   const blocked = s.status === "attention" || s.status === "error";
   const key = shown.key;
   if ((key === "deps" || key === "build" || key === "cooling" || key === "cold" || key === "stopped")

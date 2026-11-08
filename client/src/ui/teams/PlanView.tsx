@@ -433,7 +433,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         <span class="pt-card-l1">
           <span class="pt-state"><Icon name={statusIcon(task, !!problem)} size={12} /></span>
           <span class="pt-id">#{task.id}</span>
-          <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit" title={task.origin ? tr("Critical follow-up of #%1", task.origin) : tr("Critical follow-up")}>Crit{task.origin ? ` · #${task.origin}` : ""}</span></Show>
+          <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit" title={task.origin ? tr("Critical follow-up of #%1", task.origin) : tr("Critical follow-up")}>Crit{task.origin ? ` #${task.origin}` : ""}</span></Show>
           <Show when={task.severity === "minor"}><span class="pt-chip pt-chip-minor" data-severity="minor">Minor</span></Show>
           <span class="pt-title">{task.title || tr("Task %1", task.id)}</span>
           <Show when={task.pipeline_run?.open}>{(stage) => <span class="pt-badge" data-stage={stage().kind}>{stageName(stage().kind)}</span>}</Show>
@@ -532,7 +532,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         <span class="pm-card-line">
           <span class="pt-state"><Icon name={statusIcon(task, !!problem)} size={13} /></span>
           <span class="pm-id">#{task.id}</span>
-          <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit">Crit{task.origin ? ` · #${task.origin}` : ""}</span></Show>
+          <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit">Crit{task.origin ? ` #${task.origin}` : ""}</span></Show>
           <Show when={task.severity === "minor"}><span class="pt-chip pt-chip-minor" data-severity="minor">Minor</span></Show>
           <Show when={task.deps.length > 0}><span class="pm-deps">←{task.deps.map((dep) => `#${dep.task}`).join(" ")}</span></Show>
           <b class="pm-title">{task.title}</b>
@@ -610,7 +610,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
                         <span class="pm-layer-label">{tr("L%1", (own.get(layer) ?? 0) + 1)}</span>
                         <span class="pt-state"><Icon name={statusIcon(task, !!problem)} size={12} /></span>
                         <span class="pm-id">#{task.id}</span>
-                        <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit">Crit{task.origin ? ` · #${task.origin}` : ""}</span></Show>
+                        <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit">Crit{task.origin ? ` #${task.origin}` : ""}</span></Show>
                         <Show when={task.severity === "minor"}><span class="pt-chip pt-chip-minor" data-severity="minor">Minor</span></Show>
                         <Show when={task.deps.length > 0}><span class="pm-deps">←{task.deps.map((dep) => `#${dep.task}`).join(" ")}</span></Show>
                         <span class="pm-layer-title">{task.title}</span>
@@ -655,7 +655,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           <span class="pt-chip">{taskState(task).text}</span>
           <span class="pt-chip">{tr("Phase %1", phase?.phase.n ?? task.phase)}</span>
           <span class="pt-chip">{task.assignee || tr("Unassigned")}</span>
-          <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit">{tr("Crit")}{task.origin ? tr(" · from #%1", task.origin) : ""}</span></Show>
+          <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit">{tr("Crit")}{task.origin ? tr(" from #%1", task.origin) : ""}</span></Show>
           <Show when={task.severity === "minor"}><span class="pt-chip pt-chip-minor" data-severity="minor">{tr("Minor")}</span></Show>
           <Show when={task.origin}>{(origin) => (
             <button type="button" class="pt-chip pt-chip-origin" data-origin={origin()} title={tr("Open task %1", origin())}
@@ -882,11 +882,13 @@ export function PlanView(props: PlanViewProps): JSX.Element {
             <ProfileTime team={props.team} load={load()} profile={props.profile} statusName={runStatusLabel} onOpen={open} />
           )}</Show>
           <ProfilePanel profile={props.profile} team={props.team.id} />
+          {detail()}
         </div>
       </Show>
       <Show when={mode() === "tests"}>
         <TestsPanel tests={props.tests} onMore={() => props.onLoadTests?.(props.tests?.next ?? null)}
           builds={props.builds} buildsError={props.buildsError} onLoadBuilds={props.onLoadBuilds} onForce={props.onForceTest} />
+        {detail()}
       </Show>
     </section>
   );

@@ -120,6 +120,12 @@ export const teamRead = (computer: ComputerId, team: string) =>
 export const teamsOlder = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_older", { computer }) : Promise.resolve(false);
 /** Task 75: why this process is sandboxed, null on a normal desktop. */
 export const sandboxCheck = () => inTauri() ? invoke<string | null>("sandbox_check") : Promise.resolve(null);
+/** Task #247: the sandbox warning's Quit Zerus (the same draft flush as a menu quit). */
+export const quitApp = () => inTauri() ? invoke<void>("app_quit") : Promise.resolve();
+/** Task #247: Qt's `hgs sandbox-folder grant FOLDER --json [--elevated]` (creation panel, Fix folder rights). */
+export const sandboxFolderGrant = (folder: string, elevated: boolean) =>
+  inTauri() ? invoke<{ ok: boolean; error?: string; receipt?: unknown }>("sandbox_folder_grant", { folder, elevated })
+    : Promise.resolve({ ok: false, error: "Folder rights need the desktop app." });
 /** Task 69: moves one local session to another account after the owner confirms. */
 export const sessionSwitchAccount = (session: string, account: string, request: string) =>
   inTauri() ? invoke<Record<string, unknown>>("session_switch_account", { session, account, request }) : Promise.reject(new Error("Accounts need the desktop app."));
@@ -1122,6 +1128,10 @@ export const queueSendNow = (queueId: string | null) => desktop<boolean>("queue_
 export const sendAnswer = (token: number, answer: Answer) => desktop<SendReply>("send_answer", { token, answer });
 export const sendCancel = (handle: number) => desktop<void>("send_cancel", { handle });
 export const sendInterrupted = (handle: number) => desktop<void>("send_interrupted", { handle });
+/** U35 Cancel on a held row (`hgs send-cancel`); false when nothing started. */
+export const heldCancel = (handle: number, requestId: string) => desktop<boolean>("held_cancel", { handle, request_id: requestId });
+/** Send it on the Terminal draft bar: Enter in Terminal for the draft shown; false when nothing started. */
+export const terminalDraftSubmit = (handle: number) => desktop<boolean>("terminal_draft_submit", { handle });
 /** Answers once the clear ended (up to 45 s). */
 export const clearContext = (handle: number, run: string, conversation: string, dismiss: boolean, delay?: import("./store/endActionBusy").EndReference) =>
   desktop<SendReply>("clear_context", { handle, run, conversation, dismiss, delay });
@@ -1284,3 +1294,15 @@ export const claudeAppResume = (host: string, session: string, name: string, for
 export const socraticodeStatus = (host: string, path: string, native: boolean) => desktop<import("./store/socraticode").SocratiCodePanel>("socraticode_status", { host, path, native });
 /** One of `install`, `install-qdrant`, `start`, `stop` or `connect`. */
 export const socraticodeAct = (action: import("./store/socraticode").SocratiCodeVerb, host: string, path: string, native: boolean) => desktop<import("./store/socraticode").Acted>("socraticode_act", { host, path, action, native });
+
+// Qt parity (I3, I5a): the inspector's Changes card and the composer's
+// Reference file (src-tauri composer/changes.rs and composer/reference.rs).
+
+/** `hgs [@host] git-status --path P --json`, read at most every 15 s per folder; a failed read is `{state: "unavailable"}`. */
+export const gitStatus = (computer: ComputerId, path: string) => desktop<Record<string, unknown>>("git_status", { computer, path });
+/** `hgs [@host] git-diff --path P --json`, read anew; a rejection is why the call failed. */
+export const gitDiff = (computer: ComputerId, path: string) => desktop<Record<string, unknown>>("git_diff", { computer, path });
+/** The path to insert for an existing file on this computer (`~/` expanded), null when it is not one. */
+export const referenceLocalFile = (path: string) => desktop<string | null>("reference_local_file", { path });
+/** The system file dialog for Reference file's Browse…; null when cancelled. */
+export const pickReferenceFile = () => desktop<string | null>("pick_reference_file", {});

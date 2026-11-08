@@ -122,6 +122,9 @@ thread_local! {
     pub(super) static MATERIALIZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Reads rows as the build before the repair rule did, without it.
     pub(super) static LEGACY_DERIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Reads rows as the #1736 and #1748 builds did: with the repair and
+    /// their own "derived_*" marks, but without the repair epoch.
+    pub(super) static PROOF_WRITER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// A file's length, modification time and inode, or `-` when it is missing,
@@ -269,6 +272,16 @@ fn legacy() -> bool {
     return LEGACY_DERIVE.with(std::cell::Cell::get);
     #[cfg(not(test))]
     false
+}
+
+/// Whether this build keeps the repair epoch (zerus-cg5h.21.2): builds
+/// before it (emulated in tests) do not.
+fn epochs() -> bool {
+    #[cfg(test)]
+    if PROOF_WRITER.with(std::cell::Cell::get) {
+        return false;
+    }
+    !legacy()
 }
 
 /// A task's row and the stamps of its files, read as the store's inventory
@@ -638,11 +651,16 @@ impl<'a> Index<'a> {
             }
             // A clock set back can hide those rows: then every row is read again.
             rederive = foreign.is_empty();
-            // Clocks may also straddle that time, and a later read of the same
-            // row by such a build moves its stamps and read time without a new
-            // revision (zerus-cg5h.21.2): a new repair epoch, which only this
-            // build writes, makes every row pending until read here again, and
-            // the phone's inventory is not read from the index until then.
+        }
+        // Clocks may also straddle that time, a later read of the same row by
+        // such a build moves its stamps and read time without a new revision,
+        // and #1736/#1748 builds mark "derived_revision" current themselves
+        // (zerus-cg5h.21.2): any row change by a build without the repair
+        // epoch leaves "epoch_revision", which only such builds as this one
+        // write, behind "revision". Then a new repair epoch makes every row
+        // pending until read here again, and the phone's inventory is not read
+        // from the index until then.
+        if epochs() && built && self.meta("revision")? != self.meta("epoch_revision")? {
             let epoch = self.epoch()? + 1;
             self.db.execute("INSERT OR REPLACE INTO meta VALUES('repair_epoch', ?1)", [epoch.to_string()])?;
             self.db.execute("INSERT OR REPLACE INTO meta VALUES('uncertified', '1')", [])?;
@@ -724,7 +742,7 @@ impl<'a> Index<'a> {
         }
         // Rows not yet read under the current repair epoch, a bounded batch
         // at a time; the index answers for the phone again once none remain.
-        if ours && self.meta("uncertified")?.is_some() {
+        if epochs() && self.meta("uncertified")?.is_some() {
             let epoch = self.epoch()?;
             let pending: BTreeSet<String> = {
                 let mut query =
@@ -783,6 +801,10 @@ impl<'a> Index<'a> {
                 tx.execute("INSERT OR REPLACE INTO meta SELECT 'derived_revision', value FROM meta WHERE key = 'revision'", [])?;
                 tx.execute("INSERT OR REPLACE INTO meta VALUES('derived_at', ?1)", [super::now().to_string()])?;
             }
+            if epochs() {
+                // Rows another build changed are pending under the epoch.
+                tx.execute("INSERT OR REPLACE INTO meta SELECT 'epoch_revision', value FROM meta WHERE key = 'revision'", [])?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -825,7 +847,7 @@ impl<'a> Index<'a> {
         let read_at = now();
         // The repair epoch rows read here are marked with; an emulated older
         // build writes none (zerus-cg5h.21.2).
-        let epoch = (!legacy()).then(|| self.epoch()).transpose()?;
+        let epoch = epochs().then(|| self.epoch()).transpose()?;
         for chunk in uuids.chunks(CHUNK) {
             let mut work = Vec::new();
             for uuid in chunk {
@@ -928,10 +950,19 @@ impl<'a> Index<'a> {
                         [],
                         |r| r.get(0),
                     )?;
+                let clean_epoch: bool = epochs()
+                    && tx.query_row(
+                        "SELECT (SELECT value FROM meta WHERE key = 'revision') IS (SELECT value FROM meta WHERE key = 'epoch_revision')",
+                        [],
+                        |r| r.get(0),
+                    )?;
                 let revision = ids::new_uuid();
                 tx.execute("INSERT OR REPLACE INTO meta VALUES('revision', ?1)", [&revision])?;
                 if clean {
                     tx.execute("INSERT OR REPLACE INTO meta VALUES('derived_revision', ?1)", [&revision])?;
+                }
+                if clean_epoch {
+                    tx.execute("INSERT OR REPLACE INTO meta VALUES('epoch_revision', ?1)", [&revision])?;
                 }
             }
             tx.commit()?;

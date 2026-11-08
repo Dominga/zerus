@@ -1574,3 +1574,46 @@ fn an_index_from_before_the_repair_epoch_gains_it_in_place_and_reads_every_row_a
     assert_eq!(pending(&index), 0);
     assert!(index.meta("uncertified").unwrap().is_none());
 }
+
+#[test]
+fn an_older_repair_build_cannot_mask_an_unrepaired_row_from_the_epoch() {
+    // review-win-d on #1753: a #1736/#1748 build repairs some rows itself and
+    // marks "derived_revision" current, after an older build stored
+    // unrepaired rows; that must not hide them from this build's epoch.
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    for n in 0..1000 {
+        write_plain(&store, &new_task(&store, &format!("T-{n:06}"), Stage::Todo, "V", "Plain"));
+    }
+    drop(Index::open(&store).unwrap());
+    let early = unrepaired_ranked(&store, "T-early1", "U");
+    let late = unrepaired_as(&store, "T-late01");
+    age(&store, early.uuid());
+    age(&store, late.uuid());
+    let stale = early.inventory_version();
+    // A #1724 build stores both unrepaired, with a clock straddling this
+    // build's last write.
+    LEGACY_DERIVE.with(|legacy| legacy.set(true));
+    let index = Index::open(&store).unwrap();
+    LEGACY_DERIVE.with(|legacy| legacy.set(false));
+    let since: i64 = index.meta("derived_at").unwrap().unwrap().parse().unwrap();
+    index.db.execute("UPDATE tasks SET checked = ?1 WHERE uuid != ?2", params![since - 2_000, late.uuid()]).unwrap();
+    index.db.execute("UPDATE tasks SET checked = ?1 WHERE uuid = ?2", params![since - 1_000, early.uuid()]).unwrap();
+    drop(index);
+    // A #1736/#1748 build repairs `late` and marks its own proof current.
+    PROOF_WRITER.with(|proof| proof.set(true));
+    let index = Index::open(&store).unwrap();
+    PROOF_WRITER.with(|proof| proof.set(false));
+    assert!(store.load(early.uuid()).unwrap().needs_schema_repair(), "the scenario needs `early` left unrepaired");
+    assert_eq!(index.meta("revision").unwrap(), index.meta("derived_revision").unwrap());
+    drop(index);
+    let mut index = Index::open(&store).unwrap();
+    let mut answered = None;
+    for _ in 0..8 {
+        if let Ok(inventory) = index.live_inventory() {
+            assert_ne!(inventory.tasks[early.uuid()], stale, "an unrepaired row was served");
+            answered = Some(inventory);
+        }
+    }
+    assert_eq!(answered.unwrap(), store.live_inventory().unwrap().0);
+}

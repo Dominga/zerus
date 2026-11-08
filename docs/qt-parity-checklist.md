@@ -48,13 +48,13 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Activity | 17 | 0 | 0 | |
 | Questions and approvals | 12 | | | |
 | Notifications | 7 | 5 | | |
-| Tray, menu bar and Dock | 6 | 2 | 1 | 2 owner decisions |
+| Tray, menu bar and Dock | 7 | 1 | | 2 owner decisions, 1 intentional difference |
 | Shortcuts and navigation | 6 | | | |
-| Lifecycle and updates | 6 | 2 | 1 | |
+| Lifecycle and updates | 7 | 1 | 1 | |
 | Settings | 17 | | | 1 intentional difference |
 | Machines, accounts, projects, new session, tasks and worktrees | 18 | | | |
 | Terminal, processes and platform session support | 8 | | | |
-| Total (193 rows) | 174 | 9 | 3 | 7 |
+| Total (193 rows) | 176 | 7 | 2 | 8 |
 
 ## Owner decisions
 
@@ -72,7 +72,6 @@ Every partial, missing and unverified row names the bead that tracks it.
 | --- | --- | --- |
 | `zerus-5wmh.13.14` | P2 | Windows: focus-aware banners, update alert, tray theme, watchdog, startup note |
 | `zerus-5wmh.13.8` | P3 | Activity rendering: full tool output, View process, Markdown, inline-code links, empty state |
-| `zerus-5wmh.13.15` | P3 | Tray Refresh entry, Linux without a tray host, Linux launch during service start |
 | `zerus-5wmh.13.16` | P3 | Alert text language; the labeled rail's exact-count tooltip (`zerus-nfmh1`) |
 | `zerus-5wmh.13.17` | P3 | Search result refinements after the search port (`zerus-5wmh.66.2.2`) |
 | `zerus-5wmh.18` | existing | Selection Move to project, with project organisation |
@@ -261,11 +260,11 @@ In the default native alert mode the Zerus Next app posts alerts itself while it
 | Left click opens Zerus, right click the menu; Open Zerus; Update available; Restart to finish update (macOS); machine state lines; Quit saving drafts | all | done | `core/menubar.rs:644-676`; `tauri/updates.rs:905-916,1305-1311`; `tauri/platform/linux_tray.rs:256-264,968-973`; `tauri/platform/windows/tray.rs:114-117,183,189` | `TrayMenu.cpp:162-245`; `QtTrayIcon.cpp`; `SniTrayIcon.cpp` |
 | Per-session rows in the tray menu | all | removed by owner decision | one count line per machine (`core/menubar.rs:639-678`, owner, 0.48.0) | `TrayMenu.cpp:23-31,168-234` |
 | Open in terminal-mode submenu | all | removed by owner decision | only read from files (`tauri/desk.rs:224-288`); see Terminal preferences | `TrayMenu.cpp:62-148`; `TrayAgent.cpp:832-873` |
-| Tray Refresh | all | **missing** (`zerus-5wmh.13.15`) | the entry type exists (`core/menubar.rs:378`) but the menu never adds it; the macOS handler does nothing (`tauri/platform/macos_menubar.rs:209`) | `TrayMenu.cpp:241-242` |
+| Tray Refresh | all | done | the core menu ends with Refresh and Quit on every platform (`core/menubar.rs:677`), pinned as each tray lays it out (`tauri/desk.rs:2773`); it reconnects every computer's stream: Linux `tauri/platform/linux_tray.rs:991`, macOS `tauri/platform/macos_menubar.rs:209`, Windows `tauri/platform/windows/tray.rs:185` | `TrayMenu.cpp:241-242` |
 | Menu not rebuilt while open | all | done | `core/menubar.rs:696-731`; `tauri/platform/windows/tray.rs:136-177` | `QuietTrayIcon.cpp`; `TrayMenu.h:40-43` |
 | Dock badge, Dock icon only with a window, Dock click restores; app menu | macOS | done | `tauri/platform/macos_menubar.rs:100-131`; `tauri/lifecycle.rs:19-53,196-243`; `tauri/exit_flush.rs:528-570` | `MacApplicationBadge.mm`; `MacAppVisibility.mm` |
 | StatusNotifierItem tray re-registering after panel restarts; launcher badge | Linux | done | `tauri/platform/linux_tray.rs:221-440,715-745`; `tauri/platform/linux_tray/badge.rs` | `SniTrayIcon.cpp`; `LinuxApplicationBadge.cpp` |
-| Desktop without a tray host | Linux | partial (`zerus-5wmh.13.15`) | the app runs without an icon (`tauri/platform/linux_tray.rs:740`); Qt refused to start so the service retried | `main.cpp:364-367` |
+| Desktop without a tray host | Linux | intentional difference (`zerus-5wmh.13.15`) | Zerus Next keeps running without an icon, registers it as soon as a tray host appears (`tauri/platform/linux_tray.rs`, NameOwnerChanged), opens from the applications menu (`--sessions` through the instance socket) and writes once per start "no tray host; open Zerus from the applications menu" (`tauri/platform/linux_tray.rs:790-805`). Qt exited 4 and `hgs-tray.service`'s RestartPreventExitStatus=4 kept it stopped, so such a desktop had no GUI at all (design-tima2, 2026-11-08) | `main.cpp:364-367`; `packaging/hgs-tray.service` |
 | Notification-area icon re-added after Explorer restarts; taskbar overlay badge; taskbar grouping | Windows | done | `tauri/platform/windows/tray.rs:107-110,260-406`; `tauri/platform/windows/startup.rs:105-109` | `QtTrayIcon.cpp`; `WindowsApplicationBadge.cpp`; `main.cpp:284` |
 
 ### Shortcuts and navigation
@@ -284,7 +283,7 @@ In the default native alert mode the Zerus Next app posts alerts itself while it
 | Capability | Platform | Status | Zerus Next evidence | Qt |
 | --- | --- | --- | --- | --- |
 | One instance per user handing over open or stay hidden | all | done | `tauri/instance.rs:1-45`; `tauri/instance_windows.rs:34-80,222-260` | `main.cpp:296-362`; `SingleInstance.cpp` |
-| A launch waits for the login service that is still starting | Linux | partial (`zerus-5wmh.13.15`) | macOS waits (`tauri/instance.rs:447-520`); on Linux the check reports no service (`tauri/instance.rs:681-687`) | `SingleInstance.cpp:107-140` |
+| A launch waits for the login service that is still starting | Linux | done | `systemctl --user show` of `hgs-tray.service`, read-only and bounded at 2 s with the child killed and reaped (`tauri/instance.rs:464-618`); Qt's states, and never on its own run: its MainPID or, through a wrapper, its InvocationID (`tauri/instance.rs:528-534`); macOS waits on launchd the same way | `SingleInstance.cpp:48-71,107-140` |
 | `--sessions` and `--background`; closing hides the window; show, raise and unminimise; window geometry remembered; keep above | all | done | `tauri/cli.rs:23-31`; `tauri/lifecycle.rs:13-168`; `tauri/window_geometry.rs`; `tauri/window_layer.rs` | `AppConfig.cpp:461-463`; `main.cpp:279`; `SessionsWindow.cpp:5831-5908` |
 | Start at login; macOS Fix login item | all | done | `packaging/linux/hgs-tray.service`; `tauri/login_item.rs:106-207`; `ui/screens/settings/Updates.tsx:18-70` | `tray/packaging`; `SessionsWindow.cpp:1775-1823` |
 | Quit saves drafts and clears badges | all | done | `tauri/exit_flush.rs`; `tauri/signals.rs`; `tauri/lifecycle.rs:253-283` | `main.cpp:380-382`; `TerminationSignals.cpp` |

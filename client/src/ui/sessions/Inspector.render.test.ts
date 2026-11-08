@@ -107,6 +107,18 @@ afterAll(async () => { await server?.close(); });
 const state = (value: Record<string, unknown>) => { (globalThis as Record<string, unknown>).__inspector = { session, details, team, ...value }; };
 /** The HTML without Solid's hydration markers, as the text reads. */
 const plain = (html: string) => html.replace(/<!--[^>]*-->/g, "");
+/** A stylesheet's rule body, read from disk (as task 317 does). */
+const read = async (path: string) => {
+  const fs = await import(/* @vite-ignore */ ["node", "fs"].join(":")) as { readFileSync(path: URL, encoding: "utf8"): string };
+  return fs.readFileSync(new URL(path, import.meta.url), "utf8").replace(/\r\n/g, "\n");
+};
+const rule = (css: string, selector: string) => {
+  const at = css.indexOf(`${selector} {`);
+  expect(at, selector).toBeGreaterThan(-1);
+  return css.slice(at, css.indexOf("}", at));
+};
+/** A drawn line, not the rounded corner's radius. */
+const borderLine = /\bborder(?:-(?:top|right|bottom|left|width|style|color))?\s*:/;
 const shown = (html: string) => [...html.matchAll(/data-section="([^"]+)"/g)].map((match) => match[1]);
 const folded = (html: string) => [...html.matchAll(/<section([^>]*)>/g)].map((match) => match[1])
   .filter((attributes) => /class="[^"]*\bclosed\b/.test(attributes)).map((attributes) => /data-section="([^"]+)"/.exec(attributes)?.[1]);
@@ -179,5 +191,43 @@ describe("the side panel (task 206)", () => {
     expect(html.match(/role="tab"/g)).toHaveLength(4);
     expect(shown(html).filter((id) => id.startsWith("sec-"))).toEqual([]);
     expect(plain(html)).toContain("Plan &amp; agents");
+  });
+});
+
+// Task 354 (owner, 2026-11-08): the panel's outer lines and the "Session"
+// caption go; the sections keep their own cards and only the collapse button
+// stays above them.
+describe("the side panel's frame and caption (task 354)", () => {
+  it("shows only the collapse button above the Compact panel's sections, with no 'Session' caption", () => {
+    state({ skin: sections });
+    const html = plain(render());
+    expect(html).not.toContain("insp-title");
+    const head = /<div[^>]*class="insp-head"[^>]*>([\s\S]*?)<\/div>/.exec(html)?.[1];
+    expect(head).toBeDefined();
+    expect((head!.match(/<button/g) ?? []).length).toBe(1);
+    expect(head).toContain('aria-label="Collapse side panel"');
+    // Nothing but the button and its spacer: the caption row is gone.
+    expect(head!.replace(/<[^>]+>/g, "").trim()).toBe("");
+    expect(shown(html)).toHaveLength(8);
+  });
+
+  it("draws no caption in the tabbed skins either, and keeps one collapse button", () => {
+    state({ skin: tabs });
+    const html = plain(render());
+    expect(html).not.toContain("insp-title");
+    expect(html).not.toContain('class="insp-head"');
+    expect(html).toContain('role="tablist"');
+    expect((html.match(/aria-label="Collapse side panel"/g) ?? []).length).toBe(1);
+  });
+
+  it("removes the panel's outer border and the line under its head, and keeps the sections' cards", async () => {
+    const css = await read("../styles/inspector.css");
+    expect(rule(css, ".inspector")).not.toMatch(borderLine);
+    expect(rule(css, ".insp-head")).not.toMatch(borderLine);
+    expect(css).not.toContain(".insp-title");
+    // The sections inside keep their own cards.
+    expect(rule(css, ".icard")).toContain("border: 1px solid var(--z-color-card-border)");
+    // detail.css still carries an older copy of the panel's rules; it drops the frame as well.
+    expect(rule(await read("../styles/detail.css"), ".inspector")).not.toMatch(borderLine);
   });
 });

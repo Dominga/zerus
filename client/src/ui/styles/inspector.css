@@ -1,7 +1,7 @@
 @layer components {
   .inspector { --insp-motion: calc((var(--z-motion-base) + var(--z-motion-slow)) / 2);
     position: relative; width: 400px; min-width: 240px; flex: 0 1 auto; display: flex; flex-direction: column; margin: 0 8px 8px 0;
-    border: 1px solid var(--z-color-divider); border-radius: var(--z-radius-dialog); background: var(--z-color-pane); overflow: hidden;
+    border-radius: var(--z-radius-dialog); background: var(--z-color-pane); overflow: hidden;
     animation: insp-in var(--insp-motion) var(--ease) both; }
   .inspector.leaving { position: absolute; z-index: 2; top: 0; right: 0; bottom: 8px; pointer-events: none; animation: insp-out var(--insp-motion) var(--ease) both; }
   :root[data-skin] .app:has(.layout-right) .inspector { margin-left: 0; }
@@ -82,8 +82,9 @@
   .inspector .usage { user-select: text; }
   .work-main { min-width: min(360px, 100%); }
   /* Task 206: the Compact skins' side panel, one scroll of Qt's collapsible sections. */
-  .insp-head { display: flex; }
-  .insp-title { font-size: var(--fs-xs); font-weight: 600; color: var(--z-color-text-3); padding-left: 4px; }
+  /* Task 354: the Compact panel's top is its collapse button alone, with no
+     caption row and no line under it; the sections keep their own cards. */
+  .insp-head { display: flex; align-items: center; flex: none; height: 30px; padding: 0 6px 0 8px; }
   .insp-sections .icard-body { display: flex; flex-direction: column; gap: 2px; }
   /* Qt's section header: a small title after its chevron. */
   .insp-sections > .icard > .icard-head > .icard-toggle { flex-direction: row-reverse; justify-content: flex-end; }

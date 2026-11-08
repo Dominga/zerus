@@ -171,3 +171,24 @@ describe("drag to nest (zerus-sa9qn.9)", () => {
     expect(placement(plain.rows, plain.offsets, plain.heights, C, 181, { kind: "session", id: A }).nest).toBeUndefined();
   });
 });
+
+describe("the card a Shift key extends the range to (SessionList.cpp:589-602)", () => {
+  const keys = ["a", "b", "c"];
+  it("steps from the range's far end, else from the open conversation", async () => {
+    const { rangeTarget } = await import("./organize");
+    expect(rangeTarget(keys, "b", "a", "ArrowDown")).toBe(2);
+    expect(rangeTarget(keys, "b", "a", "ArrowUp")).toBe(0);
+    expect(rangeTarget(keys, undefined, "b", "ArrowDown")).toBe(2);
+    expect(rangeTarget(keys, "gone", "a", "ArrowDown"), "a far end no longer listed").toBe(1);
+  });
+  it("goes to the first or last card for Home and End, and nowhere past either end", async () => {
+    const { rangeTarget } = await import("./organize");
+    expect(rangeTarget(keys, "b", "b", "Home")).toBe(0);
+    expect(rangeTarget(keys, "b", "b", "End")).toBe(2);
+    expect(rangeTarget(keys, "c", "c", "ArrowDown")).toBeUndefined();
+    expect(rangeTarget(keys, "a", "a", "ArrowUp")).toBeUndefined();
+    expect(rangeTarget(keys, undefined, undefined, "ArrowDown"), "nothing open: the first card").toBe(0);
+    expect(rangeTarget(keys, undefined, undefined, "ArrowUp"), "nothing open: the last card").toBe(2);
+    expect(rangeTarget([], "a", "a", "End")).toBeUndefined();
+  });
+});

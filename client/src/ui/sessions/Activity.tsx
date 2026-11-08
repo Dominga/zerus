@@ -21,7 +21,7 @@ import { recordingBlob } from "./voice-playback";
 import { cardTarget, createOpen, readCards, rowScope } from "./attachment-card";
 import { createStore, reconcile } from "solid-js/store";
 import { Icon } from "../lib/icons";
-import { selected, toast, contentScale, subagentOpen, setSubagentOpen, setMenu, setDetailTab, type MenuEntry } from "../../store/ui";
+import { selected, toast, contentScale, subagentOpen, setSubagentOpen, setMenu, setDetailTab, takeLatestRequest, type MenuEntry } from "../../store/ui";
 import { activity } from "../../store/session";
 import { orderedRows } from "../../store/catalog";
 import { flag, num, setSetting } from "../../store/settings";
@@ -985,6 +985,8 @@ export function ActivityView(props: { source?: ActivitySource }) {
       offset: (id) => rows.offset(id),
     }, reply, shown.events(), shown.summary());
   };
+  // Enter on a session row: this view jumps, once per request, even if it mounted after it.
+  createEffect(() => { if (takeLatestRequest()) queueMicrotask(jumpToLatest); });
   onMount(() => {
     liveScroller = scroller;
     liveLatest = latest;

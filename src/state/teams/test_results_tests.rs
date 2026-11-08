@@ -25,6 +25,8 @@ fn request(id: &str, suite: &str, command: &str) -> Request {
         resources: String::new(),
         command: command.into(),
         platforms: Vec::new(),
+        performance: false,
+        compare: String::new(),
     }
 }
 

@@ -9,7 +9,7 @@ Each request is one JSON object on stdin with "team":"ID" and a new lowercase
 To start a team:
   {"request_id":"U","name":"Checkout","goal":"...","folder":"DIR"} | hgs team create --json
 
-Plan a goal. Tasks one member can finish in a sitting, each with a title, checkable
+Plan a goal. Tasks one member can finish, each with a title, checkable
 criteria, an assignee or "role", deps on tasks accepted first and "estimate_minutes".
 Every task gets an estimate. Tasks writing the same "output" paths never run apart:
 chain them; name files or a module (a folder is advisory). A follow-up for a miss
@@ -85,4 +85,4 @@ unknown, never zero. hgs team look MEMBER shows one. All decided: extend or fini
 cancel empty tasks
 first; owner stop is final. A repeating routine request: hgs guide team-safe.
 Models, stages, scale: team-custom. Sub-teams: hgs guide team-tree.
-Scratch teams: a QA member leads them; deciding a task stops it.
+Scratch teams: a QA member leads them; deciding a task stops it. Perf: team-tests.

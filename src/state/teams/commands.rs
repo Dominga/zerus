@@ -3278,6 +3278,10 @@ fn test_command(input: &Value) -> anyhow::Result<Value> {
             request.team = team_id.clone();
             request.task = input["task"].as_u64().and_then(|id| u32::try_from(id).ok());
             request.asked_by = if asked_by.is_empty() { "You".to_owned() } else { asked_by };
+            // Task #281: a run may be marked a performance measurement, and a
+            // comparison group alternates its binaries in rounds.
+            request.performance |= input["performance"].as_bool() == Some(true);
+            request.compare = text(input, "compare").to_owned();
             // #719: the desktop's Force run queues the suite as forced: the worker
             // runs it first at its next tick, never a reused result, and no
             // desktop call waits for the run.

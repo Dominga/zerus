@@ -162,6 +162,9 @@
   .act-tool-detail { justify-self: stretch; margin: 0; padding: 7px 9px; border-radius: var(--z-radius-md); background: var(--z-color-code-bg); color: var(--z-color-text-2); font-size: var(--fs-xs); line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
   .act-tool-more { display: flex; align-items: baseline; gap: 8px; font-size: var(--fs-xs); }
   .act-tool-process, .act-tool-more .link { font-size: var(--fs-xs); }
+  /* An empty Activity's guidance (ActivityView.cpp:1145-1150). */
+  .act-empty { padding: 18px 2px 6px; font-size: var(--fs-sm); }
+  .act-empty p { margin-top: 4px; }
   .act-live { display: flex; align-items: center; gap: 8px; padding: 6px 2px; font-size: var(--fs-sm); color: var(--z-color-muted); }
   .typing { display: inline-flex; gap: 3px; }
   .typing i { width: 5px; height: 5px; border-radius: 50%; background: var(--z-color-accent); animation: pulse 1.05s ease-in-out infinite; }

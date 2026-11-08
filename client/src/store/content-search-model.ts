@@ -1,7 +1,7 @@
 import { batch, createSignal } from "solid-js";
 import type { Session } from "../ui/sessions/types";
 import type { ActivityEvent, ViewRow } from "../types";
-import { tr, trNoop } from "../i18n";
+import { tr, trNoop, type TranslationArgument } from "../i18n";
 
 export const SEARCH_DELAY = 350;
 export const SEARCH_HOSTS = 32;
@@ -156,7 +156,18 @@ export function searchTooltip(item: { session: Session; found?: FoundHit; matche
   if (item.found?.hit.snippet) lines.push(item.found.hit.snippet);
   return lines.join("\n");
 }
-export function searchCount(messages: number, sessions: number, creations = 0): string {
-  const text = `${messages} ${messages === 1 ? "message" : "messages"}, ${sessions} ${sessions === 1 ? "session" : "sessions"}`;
-  return creations ? `${text}, ${creations} ${creations === 1 ? "creation" : "creations"}` : text;
+type Translate = (source: string, ...args: TranslationArgument[]) => string;
+const MESSAGES = trNoop("%n message(s)"), SESSIONS = trNoop("%n session(s)"), CREATIONS = trNoop("%n creation(s)");
+
+/** One count in the interface language with its plural form; English keeps "1 message" and "2 messages". */
+function counted(translate: Translate, count: number, plural: string, one: string, many: string): string {
+  const text = translate(plural, count);
+  return text === plural.replace("%n", String(count)) ? `${count} ${count === 1 ? one : many}` : text;
+}
+
+/** "3 messages, 2 sessions" and, when any match, "1 creation"; each count translated with its plural form (zerus-5wmh.13.17.3.1). */
+export function searchCount(messages: number, sessions: number, creations = 0, translate: Translate = tr): string {
+  const parts = [counted(translate, messages, MESSAGES, "message", "messages"), counted(translate, sessions, SESSIONS, "session", "sessions")];
+  if (creations) parts.push(counted(translate, creations, CREATIONS, "creation", "creations"));
+  return parts.join(", ");
 }

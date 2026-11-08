@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createContentSearch, identityMatches, matchedIdentity, metadataMatches, searchCount, searchRows, searchTooltip, SESSION_MESSAGES, SEARCH_HITS, SEARCH_HOSTS, type SearchHit, type SearchReply } from "./content-search-model";
 import type { Session } from "../ui/sessions/types";
+import { translateWithCatalog } from "../i18n";
+import ru from "../i18n.ru.json";
 
 const host = (n: number, online = true) => ({ computer: `host-${n}`, machine: `machine-${n}`, online });
 const hit = (id: string): SearchHit => ({ name: "claude/demo/sample", run_id: "run-one", conversation_id: "conversation-one", archive_id: "", message_id: id, at: 10, role: "assistant", snippet: "needle", event: { type: "AgentMessage", detail: "needle" }, content_truncated: false, session: null, group: "" });
@@ -30,6 +32,13 @@ describe("bounded public-content search", () => {
     expect(searchCount(3, 2)).toBe("3 messages, 2 sessions");
     expect(searchCount(1, 1, 1)).toBe("1 message, 1 session, 1 creation");
     expect(searchCount(0, 0, 2)).toBe("0 messages, 0 sessions, 2 creations");
+  });
+  it("counts in Russian with its plural forms, creations included (zerus-5wmh.13.17.3.1)", () => {
+    const russian = (source: string, ...args: (string | number)[]) => translateWithCatalog(ru, "ru", source, ...args);
+    expect(searchCount(1, 1, 1, russian)).toBe("1 сообщение, 1 сессия, 1 создание");
+    expect(searchCount(3, 2, 4, russian)).toBe("3 сообщения, 2 сессии, 4 создания");
+    expect(searchCount(5, 11, 21, russian)).toBe("5 сообщений, 11 сессий, 21 создание");
+    expect(searchCount(0, 0, 0, russian)).toBe("0 сообщений, 0 сессий");
   });
   it("matches a child's conversation ID and names the ID that matched, as Qt does (SessionSearch.cpp:239-268)", () => {
     const row = { name: "claude/demo/sample", title: "Demo", machine: "workstation", runId: "run-one", conversationId: "conversation-one", archiveId: "archive-one",

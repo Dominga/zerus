@@ -1,5 +1,5 @@
 use super::*;
-use crate::task_start::capture::tests::Fixture;
+use crate::task_start::capture::tests::{retry_busy, Fixture};
 use serde_json::json;
 use std::{
     fs,
@@ -24,21 +24,6 @@ fn saved(f: &Fixture) -> Saved {
     )
     .unwrap()
     .unwrap()
-}
-// A parallel fixture's fork may retain a CLOEXEC lock description until exec.
-// Busy refuses before any write. Retry only that refusal, never an offer or an
-// uncertain publication; keep every other result and one fixed wait bound.
-#[track_caller]
-fn retry_busy<T>(mut operation: impl FnMut() -> Result<T, Error>) -> Result<T, Error> {
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(8);
-    loop {
-        match operation() {
-            Err(Error::Busy) if std::time::Instant::now() < until => {
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-            result => return result,
-        }
-    }
 }
 fn prepared(f: &Fixture) -> Journal {
     Journal::prepare(
@@ -641,13 +626,17 @@ fn older_cancelled_id_cannot_return_after_a_second_explicit_discard() {
     let f = Fixture::new();
     let first = CheckId::fixture_initial(&f.intent.reconcile_id);
     drop(Journal::prepare(f.capture().unwrap(), &first).unwrap());
-    saved(&f).discard_prepared(first.as_str()).unwrap();
+    retry_busy(|| saved(&f).discard_prepared(first.as_str())).unwrap();
     let next = saved(&f).next_check_id().unwrap();
-    drop(Journal::prepare_after_discard(f.capture().unwrap(), &next, first.as_str()).unwrap());
-    saved(&f).discard_prepared(next.as_str()).unwrap();
+    drop(
+        retry_busy(|| Journal::prepare_after_discard(f.capture().unwrap(), &next, first.as_str()))
+            .unwrap(),
+    );
+    retry_busy(|| saved(&f).discard_prepared(next.as_str())).unwrap();
     let before = fs::read(f.file.with_extension("reconcile")).unwrap();
     assert_eq!(
-        Journal::prepare_after_discard(f.capture().unwrap(), &first, next.as_str()).err(),
+        retry_busy(|| Journal::prepare_after_discard(f.capture().unwrap(), &first, next.as_str()))
+            .err(),
         Some(Error::Unavailable)
     );
     assert_eq!(

@@ -438,9 +438,9 @@ pub(crate) fn start_for_sandbox(id: &str, input: &Value, session: Value, folder:
     let mut claim = json!({"request_id":id,"label":label,"command":command,"cwd":cwd.display().to_string(),
         "session":session,"started":now(),"timeout_secs":minutes * 60,"source":"hgs_run",
         "env":env});
-    // Task 261: the shared sccache server is started here, by the worker's
-    // normal token, before the run; a run that cannot rely on it builds
-    // without the wrapper rather than start a server in its restricted token.
+    // Task 261/320: a sandboxed run builds without the shared sccache server,
+    // so its outputs keep its own level and it never starts a restricted
+    // server; the worker keeps that server at its own level for the others.
     for (key, value) in super::build_cache_server::sandboxed_env() {
         claim["env"][key] = json!(value);
     }
@@ -666,7 +666,13 @@ fn worker(id: &str) -> Result<i32> {
     };
     let timeout = Duration::from_secs(claim["timeout_secs"].as_u64().unwrap_or(DEFAULT_MINUTES * 60));
     let started = std::time::Instant::now();
+    // Task 320: a run at the worker's own level never builds through a shared
+    // sccache server that a sandboxed process started in its restricted token.
+    let restarted_before = claim["integrity"] != "low" && claim["sandbox"] != "codex" && super::build_cache_server::ensure_unrestricted();
     let mut outcome = teams::templates::run_tree(&mut command, timeout, None);
+    if restarted_before {
+        outcome.tail = format!("{}\n{}", outcome.tail, super::build_cache_server::RESTARTED_BEFORE_NOTE);
+    }
     // Task 261: a build the shared sccache server could not write is run once
     // more after the worker restarted the server; the lead is told.
     let mut restarted = false;
@@ -684,7 +690,7 @@ fn worker(id: &str) -> Result<i32> {
         }
     }
     let mut done = claim.clone();
-    if restarted {
+    if restarted || restarted_before {
         done["cache_restarted"] = json!(true);
     }
     if let Some(record) = done.as_object_mut() {
@@ -1067,6 +1073,92 @@ pub(crate) mod tests {
         assert!(!crate::host::token::below_medium(), "the test process itself stays at its level");
     }
 
+    /// Task 320: the helper side of the test below: a process that lowers
+    /// itself as `low_exec` does writes an output in its Low folder, writes it
+    /// again, and tries to overwrite one a Medium process wrote there.
+    #[cfg(windows)]
+    #[test]
+    fn low_rebuild_helper() {
+        let Some(own) = std::env::var_os("HGS_TEST_LOW_OWN") else { return };
+        crate::platform::lower_to_low_integrity().unwrap();
+        let own = Path::new(&own);
+        let first = fs::write(own.join("out.d"), b"first").is_ok();
+        let again = fs::write(own.join("out.d"), b"again").is_ok();
+        let medium_denied = fs::write(own.join("medium.d"), b"low").is_err();
+        println!("low={} first={first} again={again} medium_denied={medium_denied}", crate::host::token::below_medium());
+    }
+
+    /// Task 320: why a sandboxed run builds without the shared sccache server.
+    /// Its Low compiler rebuilds its own outputs in its Low folder, while an
+    /// output a Medium process (the shared server) wrote there carries the
+    /// Medium label and stops the member's next Low build - qa's 12:25 failure.
+    #[cfg(windows)]
+    #[test]
+    fn a_sandboxed_run_rebuilds_its_own_outputs_but_not_a_medium_servers() {
+        let folder = tempfile::tempdir().unwrap();
+        let own = folder.path().join("target");
+        fs::create_dir_all(&own).unwrap();
+        fs::write(own.join("medium.d"), b"medium").unwrap();
+        // The member's folder, as a DeepSeek sandbox's is: Low, inherited by
+        // what is created in it later (the file above keeps its Medium level).
+        let labelled = Command::new("icacls").arg(&own).args(["/setintegritylevel", "(OI)(CI)L", "/Q"]).stdout(Stdio::null()).status().unwrap();
+        assert!(labelled.success());
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["state::builds::tests::low_rebuild_helper", "--exact", "--nocapture", "--test-threads=1"])
+            .env("HGS_TEST_LOW_OWN", &own)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(text.contains("low=true first=true again=true medium_denied=true"), "{text}\n{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(fs::read(own.join("out.d")).unwrap(), b"again", "the Low process rebuilt its own output");
+        assert_eq!(fs::read(own.join("medium.d")).unwrap(), b"medium");
+    }
+
+    /// Task 320: a non-sandboxed member's run is never sent through `low_exec`:
+    /// it runs at the runner's own level and overwrites what it built before,
+    /// and a shared server found in a restricted token is restarted first.
+    #[test]
+    fn a_medium_run_overwrites_its_outputs_and_restarts_a_restricted_server_first() {
+        let root = tempfile::tempdir().unwrap();
+        with_test_state_root(root.path(), || {
+            private_dir(&dir()).unwrap();
+            let out = root.path().join("out.d");
+            fs::write(&out, b"before").unwrap();
+            #[cfg(windows)]
+            let argv = {
+                let script = root.path().join("rebuild.cmd");
+                fs::write(&script, format!("@echo off\r\necho after> \"{}\"\r\n", out.display())).unwrap();
+                vec!["cmd.exe".to_owned(), "/D".to_owned(), "/C".to_owned(), script.display().to_string()]
+            };
+            #[cfg(not(windows))]
+            let argv = vec!["sh".to_owned(), "-c".to_owned(), format!("echo after > '{}'", out.display())];
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            super::super::build_cache_server::fake(Some(super::super::build_cache_server::Fake {
+                program: Some(PathBuf::from("C:/Users/example/.cargo/bin/sccache.exe")), running: true, restricted: true, start_exit: 0,
+                calls: calls.clone() }));
+            crate::platform::set_test_sandboxed(Some(false));
+            INLINE_RUNNER.with(|flag| flag.set(true));
+            let id = "12121212-1212-4121-8121-121212121212";
+            start_argv_for(id, "cargo build", &argv, root.path(), json!({"name":"","run_id":"","conversation_id":""}), 1, &[]).unwrap();
+            // A second run with the server now at the worker's level restarts nothing.
+            let again = "13131313-1313-4131-8131-131313131313";
+            start_argv_for(again, "cargo build", &argv, root.path(), json!({"name":"","run_id":"","conversation_id":""}), 1, &[]).unwrap();
+            INLINE_RUNNER.with(|flag| flag.set(false));
+            super::super::build_cache_server::fake(None);
+            crate::platform::set_test_sandboxed(None);
+            let done = read(&result_path(id)).unwrap();
+            assert_eq!(done["exit"].as_i64(), Some(0), "{done}");
+            assert!(done.get("integrity").is_none(), "never the Low executor: {done}");
+            assert_eq!(done["cache_restarted"], true, "{done}");
+            assert!(done["tail"].as_str().unwrap().contains(super::super::build_cache_server::RESTARTED_BEFORE_NOTE), "{done}");
+            assert_eq!(*calls.borrow(), ["--stop-server", "--start-server"], "restarted once, before the first run");
+            let second = read(&result_path(again)).unwrap();
+            assert!(second.get("cache_restarted").is_none(), "{second}");
+            assert_eq!(String::from_utf8_lossy(&fs::read(&out).unwrap()).trim(), "after", "the run overwrote its output");
+        });
+    }
+
     /// Task #28 (1): a process that is no team member's in a sandbox hears
     /// why, and nothing is queued anywhere.
     /// Task 173: a team member's run with nothing handed to it is refused
@@ -1370,7 +1462,7 @@ pub(crate) mod tests {
             // to the sandboxed run: it builds without the wrapper.
             let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
             super::super::build_cache_server::fake(Some(super::super::build_cache_server::Fake {
-                program: Some(PathBuf::from("C:/Users/example/.cargo/bin/sccache.exe")), running: false, start_exit: 2, calls: calls.clone() }));
+                program: Some(PathBuf::from("C:/Users/example/.cargo/bin/sccache.exe")), running: false, start_exit: 2, calls: calls.clone(), ..Default::default() }));
             crate::platform::set_test_sandboxed(Some(false));
             HELD_RUNNER.with(|flag| flag.set(true));
             let id = "66666666-6666-4666-8666-666666666666";
@@ -1413,7 +1505,7 @@ pub(crate) mod tests {
             );
             let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
             super::super::build_cache_server::fake(Some(super::super::build_cache_server::Fake {
-                program: Some(PathBuf::from("C:/Users/example/.cargo/bin/sccache.exe")), running: true, start_exit: 0, calls: calls.clone() }));
+                program: Some(PathBuf::from("C:/Users/example/.cargo/bin/sccache.exe")), running: true, start_exit: 0, calls: calls.clone(), ..Default::default() }));
             crate::platform::set_test_sandboxed(Some(false));
             let session = json!({"name":"","run_id":"","conversation_id":""});
             INLINE_RUNNER.with(|flag| flag.set(true));

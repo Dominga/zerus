@@ -49,8 +49,96 @@ it("offers Always at the slider's last position", async () => {
   range.dispatchEvent(new Event("change"));
   await flush();
   expect(native.setKeepWarm).toHaveBeenCalledWith(expect.anything(), { kind: "always" }, 4);
-  expect(host.querySelector(".kw-value")!.textContent).toBe("Always");
+  // zerus-ua4bi: an infinity sign, named Always for assistive technology.
+  const value = host.querySelector(".kw-value")!;
+  expect(value.textContent).toBe("\u221e");
+  expect(value.getAttribute("aria-hidden")).toBe("true");
+  expect(value.getAttribute("title")).toBe("Always");
+  expect(range.getAttribute("aria-valuetext")).toBe("Always");
   expect(row.hints()).toContain("Always");
+});
+
+it("a one hour choice stays at one hour when the reply's end is a little later than this window's clock (zerus-ua4bi)", async () => {
+  // The host set until from its own clock; this window's clock read is up to 30 s old.
+  native.setKeepWarm.mockResolvedValue(warm({ enabled: true, until: Date.now() / 1000 + 3600 + 25, revision: 5, state: "waiting" }));
+  const row = mount(session(warm({ enabled: true, until: NOW + 3 * 3600, revision: 4, state: "waiting" })));
+  const range = row.range()!;
+  range.value = "1";
+  range.dispatchEvent(new Event("input"));
+  range.dispatchEvent(new Event("change"));
+  await flush();
+  expect(native.setKeepWarm).toHaveBeenCalledWith(expect.anything(), { kind: "hours", hours: 1 }, 4);
+  expect(row.range()!.value).toBe("1");
+  expect(host.querySelector(".kw-value")!.textContent).toBe("1 h");
+});
+
+it("the slider offers exactly the host's 1 to 7 hours and Always (zerus-ua4bi)", () => {
+  const range = mount(session(warm({ enabled: true, until: NOW + 3 * 3600, revision: 4, state: "waiting" }))).range()!;
+  expect([range.min, range.max, range.step]).toEqual(["1", "8", "1"]);
+});
+
+it("a change keeps the switch, slider and value nodes and never disables them while it is saved (zerus-ua4bi)", async () => {
+  let resolve!: (value: unknown) => void;
+  native.setKeepWarm.mockImplementation(() => new Promise((done) => { resolve = done; }));
+  const row = mount(session(warm({ enabled: true, until: NOW + 3 * 3600, revision: 4, state: "waiting" })));
+  const nodes = [row.toggle(), row.range()!, host.querySelector(".kw-value")!];
+  const removed: Node[] = [];
+  const observer = new MutationObserver((records) => { for (const r of records) removed.push(...r.removedNodes); });
+  observer.observe(host, { childList: true, subtree: true });
+  const range = row.range()!;
+  range.value = "5";
+  range.dispatchEvent(new Event("input"));
+  range.dispatchEvent(new Event("change"));
+  await flush();
+  expect(native.setKeepWarm).toHaveBeenCalledWith(expect.anything(), { kind: "hours", hours: 5 }, 4);
+  expect([row.toggle().disabled, row.range()!.disabled]).toEqual([false, false]);
+  expect(host.querySelector(".kw-row")!.getAttribute("aria-busy")).toBe("true");
+  expect(host.querySelector(".kw-value")!.textContent).toBe("5 h");
+  resolve(warm({ enabled: true, until: Date.now() / 1000 + 5 * 3600, revision: 5, state: "waiting" }));
+  await flush();
+  expect(host.querySelector(".kw-row")!.getAttribute("aria-busy")).toBeNull();
+  expect([row.range()!.value, host.querySelector(".kw-value")!.textContent]).toEqual(["5", "5 h"]);
+  expect([row.toggle(), row.range(), host.querySelector(".kw-value")]).toEqual(nodes);
+  observer.disconnect();
+  expect(removed.filter((node) => nodes.some((kept) => node === kept || node.contains(kept)))).toEqual([]);
+});
+
+it("a choice made while another is saved goes next with the confirmed revision, and the last one wins (zerus-ua4bi)", async () => {
+  const replies: ((value: unknown) => void)[] = [];
+  native.setKeepWarm.mockImplementation(() => new Promise((done) => { replies.push(done); }));
+  const row = mount(session(warm({ enabled: true, until: NOW + 3 * 3600, revision: 4, state: "waiting" })));
+  const choose = (value: string) => { const range = row.range()!; range.value = value; range.dispatchEvent(new Event("input")); range.dispatchEvent(new Event("change")); };
+  choose("5");
+  await flush();
+  choose("6");
+  choose("2");
+  await flush();
+  expect(native.setKeepWarm).toHaveBeenCalledTimes(1);
+  expect(host.querySelector(".kw-value")!.textContent).toBe("2 h");
+  replies[0](warm({ enabled: true, until: Date.now() / 1000 + 5 * 3600, revision: 5, state: "waiting" }));
+  await flush();
+  expect(native.setKeepWarm).toHaveBeenCalledTimes(2);
+  expect(native.setKeepWarm).toHaveBeenLastCalledWith(expect.anything(), { kind: "hours", hours: 2 }, 5);
+  expect(host.querySelector(".kw-value")!.textContent).toBe("2 h");
+  replies[1](warm({ enabled: true, until: Date.now() / 1000 + 2 * 3600, revision: 6, state: "waiting" }));
+  await flush();
+  expect(native.setKeepWarm).toHaveBeenCalledTimes(2);
+  expect([row.range()!.value, host.querySelector(".kw-value")!.textContent]).toEqual(["2", "2 h"]);
+});
+
+it("the switch shows a change at once and returns to the confirmed state when the host refuses it (zerus-ua4bi)", async () => {
+  let reject!: (error: Error) => void;
+  native.setKeepWarm.mockImplementation(() => new Promise((_, fail) => { reject = fail; }));
+  const row = mount(session(warm()), { keep_warm: { ...warm(), supported: true } });
+  row.toggle().click();
+  await flush();
+  expect(row.toggle().getAttribute("aria-checked")).toBe("true");
+  expect(row.range()!.value).toBe("2");
+  reject(new Error("At most 64 sessions on one computer can keep their cache warm."));
+  await flush();
+  expect(row.toggle().getAttribute("aria-checked")).toBe("false");
+  expect(row.range()).toBeNull();
+  expect(host.querySelector("[role=alert]")!.textContent).toBe("At most 64 sessions on one computer can keep their cache warm.");
 });
 
 it("shows why an ineligible agent cannot keep its cache warm, with the switch disabled", () => {
@@ -89,10 +177,11 @@ it("a reply for the previously selected session never changes the newly selected
   const toggle = () => host.querySelector<HTMLButtonElement>("button[role=switch]")!;
   toggle().click();
   await flush();
-  expect(toggle().disabled).toBe(true);
+  expect(toggle().getAttribute("aria-checked")).toBe("true");
   select(beta);
   await flush();
-  expect(toggle().disabled).toBe(false);
+  expect(toggle().getAttribute("aria-checked")).toBe("false");
+  expect(host.querySelector(".kw-row")!.getAttribute("aria-busy")).toBeNull();
   resolve({ ...warm({ enabled: true, until: null, revision: 4, state: "waiting" }), supported: true });
   await flush();
   expect(native.setKeepWarm).toHaveBeenCalledTimes(1);

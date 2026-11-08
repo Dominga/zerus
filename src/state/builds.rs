@@ -1119,10 +1119,8 @@ pub(crate) mod tests {
         // folder in the user's LocalLow inherits its Low label, with no ACL
         // change (a team run may not relabel a folder). The known folder, not
         // USERPROFILE: a team run gives its tests a home of their own.
-        let Some(local_low) = local_low().filter(|folder| folder.is_dir()) else {
-            eprintln!("skipped: this account has no LocalLow folder");
-            return;
-        };
+        let local_low = local_low().expect("Windows's LocalLow known folder");
+        assert!(local_low.is_dir(), "{} is Windows's Low folder", local_low.display());
         let own = tempfile::Builder::new().prefix("hgs-test-320-").tempdir_in(&local_low).unwrap();
         // What the shared Medium server leaves: an output with the Medium label.
         let folder = tempfile::tempdir().unwrap();

@@ -49,7 +49,7 @@ pub(super) fn open_enabled(db: &mut Connection) -> Result<Store<'_>> {
             |r| r.get(0),
         )?;
         ensure!(
-            version == 1,
+            version == 2,
             "task-control records require a different writer version"
         );
         schema::validate(&tx)?;
@@ -66,7 +66,7 @@ pub(super) fn open_enabled(db: &mut Connection) -> Result<Store<'_>> {
 
 fn create(tx: &Transaction<'_>) -> Result<()> {
     tx.execute_batch("CREATE TABLE desktop_task_control_meta(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL);
-      INSERT INTO desktop_task_control_meta VALUES(1,1);
+      INSERT INTO desktop_task_control_meta VALUES(1,2);
       CREATE TABLE desktop_task_control_slots(
         seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,executor TEXT NOT NULL,
         project TEXT NOT NULL,task TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>0),
@@ -107,7 +107,10 @@ impl Store<'_> {
         if let Some(slot) = &value {
             let slot: &Slot = slot;
             slot.validate()?;
-            ensure!(&slot.executor == executor, "task-control executor mismatch");
+            ensure!(
+                slot.executor.key()? == executor.key()?,
+                "task-control executor mismatch"
+            );
         }
         Ok(value)
     }
@@ -151,6 +154,60 @@ impl Store<'_> {
         ensure!(changed == 1, "slot ownership changed");
         tx.commit()?;
         Ok(())
+    }
+
+    /// First startup binding only. The owning native admission must retain
+    /// the original request and verify the scoped begin proof before calling.
+    /// This data CAS cannot authorize a new conversation or native effect.
+    pub fn bind_startup(
+        &mut self,
+        expected: &SlotGuard,
+        attempt: &Attempt,
+        original: &Provenance,
+        confirmed: &Executor,
+        binding: &Binding,
+    ) -> Result<Slot> {
+        expected.validate()?;
+        attempt.validate()?;
+        confirmed.validate()?;
+        ensure!(
+            confirmed.conversation.is_some(),
+            "startup conversation is unconfirmed"
+        );
+        ensure!(
+            matches!(original, Provenance::Dispatch { .. }),
+            "startup requires its original native request"
+        );
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut slot: Slot = read(&tx, "slots", "id=?1 AND active=1", &expected.id)?
+            .context("startup slot is no longer current")?;
+        slot.validate()?;
+        ensure!(
+            slot.guard() == *expected
+                && slot.executor.key()? == confirmed.key()?
+                && slot.executor.session_id == confirmed.session_id
+                && slot.executor.conversation.is_none()
+                && slot.binding.is_none()
+                && slot.attempt == *attempt
+                && slot.provenance == *original,
+            "original startup request, attempt or slot changed"
+        );
+        slot.executor = confirmed.clone();
+        slot.binding = Some(binding.clone());
+        slot.revision = slot
+            .revision
+            .checked_add(1)
+            .context("slot revision exhausted")?;
+        slot.validate()?;
+        let changed = tx.execute(
+            "UPDATE desktop_task_control_slots SET revision=?1,payload=?2 WHERE id=?3 AND revision=?4 AND active=1",
+            params![slot.revision,json(&slot,RECORD_BYTES)?,expected.id,expected.revision],
+        )?;
+        ensure!(changed == 1, "startup slot changed");
+        tx.commit()?;
+        Ok(slot)
     }
 
     /// The caller supplies exact verified completion/yield evidence. Neither
@@ -269,7 +326,10 @@ impl Store<'_> {
         let tx = self.db.unchecked_transaction()?;
         if let Some(slot) = read::<Slot>(&tx, "slots", "executor=?1 AND active=1", &key)? {
             slot.validate()?;
-            ensure!(&slot.executor == executor, "task-control executor mismatch");
+            ensure!(
+                slot.executor.key()? == key,
+                "task-control executor mismatch"
+            );
             return Ok(Admission::Occupied(slot.guard()));
         }
         // The status byte limit is not an admission limit: examine *all*
@@ -289,19 +349,24 @@ impl Store<'_> {
             }
         }
         ensure!(
-            holds.iter().all(|h| h.executor == *executor),
+            holds
+                .iter()
+                .all(|h| h.executor.key().is_ok_and(|k| k == key)),
             "task-control executor mismatch"
         );
         for id in observed_stops {
             ensure!(
-                holds
-                    .iter()
-                    .any(|h| h.id == *id && h.kind == HoldKind::Stop),
+                holds.iter().any(|h| h.id == *id
+                    && h.kind == HoldKind::Stop
+                    && h.executor.session_id == executor.session_id),
                 "observed Stop hold changed"
             );
         }
         let (crossed, blocking): (Vec<_>, Vec<_>) = holds.into_iter().partition(|hold| {
-            kind.person() && hold.kind == HoldKind::Stop && observed_stops.contains(&hold.id)
+            kind.person()
+                && hold.kind == HoldKind::Stop
+                && hold.executor.session_id == executor.session_id
+                && observed_stops.contains(&hold.id)
         });
         if !blocking.is_empty() {
             return Ok(Admission::Held(blocking));
@@ -349,9 +414,12 @@ impl Store<'_> {
                     read(&tx, "holds", "id=?1", id)?.context("observed hold is missing")?;
                 hold.validate()?;
                 ensure!(
-                    hold.executor == request.executor
+                    hold.executor.key()? == request.executor.key()?
+                        && hold.executor.session_id == request.executor.session_id
                         && hold.kind == kind
-                        && (kind != HoldKind::Pause || hold.attempt == request.attempt),
+                        && (kind != HoldKind::Pause
+                            || (hold.attempt == request.attempt
+                                && hold.executor == request.executor)),
                     "observed hold origin changed"
                 );
                 tx.execute("UPDATE desktop_task_control_holds SET active=0,settled_by=?1 WHERE id=?2 AND active=1", params![request_id, id])?;

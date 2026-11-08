@@ -233,7 +233,8 @@
     "inspector": "docked",
     "activity-column": "centered",
     "side-panel": "tabs",
-    "chrome": "system"
+    "chrome": "system",
+    "new-session": "dense"
   }
 }
 

@@ -4,6 +4,11 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 
+// Dormant physical exclusion for a future legacy-to-ID storage move.
+#[cfg(unix)]
+#[allow(dead_code)]
+pub(super) mod native_domain;
+
 pub(super) fn root() -> PathBuf {
     nonempty_env("HGS_STATE_DIR")
         .map(PathBuf::from)

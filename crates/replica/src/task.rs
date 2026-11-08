@@ -216,6 +216,22 @@ impl TaskDoc {
         Ok(self.doc.export(ExportMode::Snapshot)?)
     }
 
+    /// Current state without the operations before these frontiers. The
+    /// logical task history and execution facts are state, so remain intact.
+    pub(crate) fn shallow_snapshot(&self) -> Result<Vec<u8>> {
+        self.doc.commit();
+        if self.doc.state_vv() != self.doc.oplog_vv() {
+            return Err(Error::new("the task has unapplied changes"));
+        }
+        Ok(self
+            .doc
+            .export(ExportMode::shallow_snapshot(&self.doc.oplog_frontiers()))?)
+    }
+
+    pub(crate) fn is_shallow(&self) -> bool {
+        self.doc.is_shallow()
+    }
+
     pub fn version(&self) -> Vec<u8> {
         self.doc.oplog_vv().encode()
     }

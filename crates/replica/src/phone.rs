@@ -284,7 +284,7 @@ pub fn answer_with(
         Some(resume) => {
             // The whole update again: its parts continue while it is unchanged.
             let wanted = document(resume.task);
-            let (whole, _) = store.updates_for(&only(&ours, &wanted), &theirs, usize::MAX)?;
+            let (whole, _) = store.updates_for_phone(&only(&ours, &wanted), &theirs, usize::MAX)?;
             if let Some(update) = whole.into_iter().find(|u| u.document == wanted) {
                 let same =
                     sha256(&update.bytes) == resume.sha256 && resume.offset < update.bytes.len();
@@ -293,7 +293,7 @@ pub fn answer_with(
             }
         }
         None => {
-            let (page, more) = store.updates_for(&ours, &theirs, PAGE)?;
+            let (page, more) = store.updates_for_phone(&ours, &theirs, PAGE)?;
             match page.as_slice() {
                 [update] if update.bytes.len() > PAGE => {
                     answered.part = Some(part(update, 0));
@@ -384,6 +384,10 @@ pub struct Exchange {
     /// Tasks the phone asks for although it does not hold them, such as a
     /// Done task the person opens; they arrive whole and are then held.
     wanted: BTreeSet<String>,
+    /// A refused shallow copy gets at most one fresh empty-version fetch
+    /// per exchange. Its files stay in place until that copy covers them.
+    refresh: BTreeSet<String>,
+    refreshed: BTreeSet<String>,
     requests: usize,
 }
 
@@ -417,6 +421,8 @@ impl Exchange {
             unsent: BTreeSet::new(),
             refused_here: BTreeSet::new(),
             wanted: BTreeSet::new(),
+            refresh: BTreeSet::new(),
+            refreshed: BTreeSet::new(),
             requests: 0,
         }
     }
@@ -466,6 +472,9 @@ impl Exchange {
         for uuid in self.wanted.iter().filter(|uuid| range.contains(uuid)) {
             asked.tasks.entry(uuid.clone()).or_default();
         }
+        for uuid in self.refresh.iter().filter(|uuid| range.contains(uuid)) {
+            asked.tasks.insert(uuid.clone(), Version::new());
+        }
         Ok(Some(Request {
             schema: 1,
             project: store.project_id().to_owned(),
@@ -511,12 +520,38 @@ impl Exchange {
                 "the computer's answer brought nothing but said more remains",
             ));
         }
-        let imported = store.import_updates(updates)?;
+        let received: BTreeSet<_> = updates
+            .iter()
+            .filter_map(|update| match &update.document {
+                Document::Task(uuid) => Some(uuid.clone()),
+                Document::Project => None,
+            })
+            .collect();
+        let imported = store.import_phone_updates(updates, &self.refresh)?;
+        for uuid in received {
+            if self.refresh.remove(&uuid)
+                && !imported.refused.iter().any(|refused| refused.uuid == uuid)
+            {
+                self.skip.remove(&uuid);
+                self.refused_here.remove(&uuid);
+            }
+        }
+        let mut refreshing = false;
+        for uuid in &imported.refresh {
+            if self.refreshed.insert(uuid.clone()) {
+                self.refresh.insert(uuid.clone());
+                // Do not push local edits while checking whether the fresh
+                // copy contains them. A missing operation keeps this copy.
+                self.skip.insert(uuid.clone());
+                refreshing = true;
+            }
+        }
         self.skip
             .extend(answer.refused.iter().map(|damaged| damaged.uuid.clone()));
         // An answer that changes nothing and only brings what this replica
         // already refused would come back the same until the budget runs out.
-        if brought > 0
+        if !refreshing
+            && brought > 0
             && imported.changed == 0
             && !imported.refused.is_empty()
             && imported
@@ -532,10 +567,25 @@ impl Exchange {
         }
         self.refused_here
             .extend(imported.refused.iter().map(|damaged| damaged.uuid.clone()));
-        self.computer = answer.inventory.map(|theirs| self.ranges[0].narrow(theirs));
+        if !self.refresh.is_empty()
+            && answer.inventory.as_ref().is_some_and(|inventory| {
+                self.refresh
+                    .iter()
+                    .any(|uuid| !inventory.tasks.contains_key(uuid))
+            })
+        {
+            return Err(Error::failed(
+                "the fresh task copy is unavailable; the local copy is kept for a person's review",
+            ));
+        }
+        self.computer = if self.refresh.is_empty() {
+            answer.inventory.map(|theirs| self.ranges[0].narrow(theirs))
+        } else {
+            None
+        };
         self.queued = None;
         let mut settled = false;
-        if self.part.is_none() && !answer.more {
+        if self.refresh.is_empty() && self.part.is_none() && !answer.more {
             if let Some(theirs) = self.computer.take() {
                 let (held, _) = store.inventory()?;
                 let ours = self.ranges[0].narrow(held);

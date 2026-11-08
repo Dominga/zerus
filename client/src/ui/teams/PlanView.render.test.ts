@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
+import type { JSX } from "solid-js";
 import type { TeamTaskView, TeamView } from "../../types";
 import type { PlanGraph } from "./types";
 
@@ -295,4 +296,24 @@ describe("the plan's Graph, Board and Layers (task 197)", () => {
     expect(two).toContain("↤#1 #2");
     expect(two).not.toContain("+0");
   });
+
+  // Task 335 (owner, 2026-11-08): the strip of phase chips 219 added above the
+  // plan is gone. Qt keeps the Standard/Free toggle in each phase's own header;
+  // Board and Layers draw that header, Lanes its own, and Profile and Tests
+  // have no phase headers at all.
+  it("has no phase strip above the plan and keeps the toggle in each phase header", () => {
+    const { team, graph } = fixture();
+    const phaseActions = ((n: number) => `TOGGLE-${n}`) as unknown as (n: number) => JSX.Element;
+    for (const initialMode of ["graph", "board", "layers", "lanes", "profile", "tests"]) {
+      const html = render({ team, graph, problems, now, initialMode, phaseActions });
+      expect(html, initialMode).not.toContain("pm-phase-strip");
+    }
+    for (const initialMode of ["board", "layers", "lanes"]) {
+      const html = render({ team, graph, problems, now, initialMode, phaseActions });
+      // Each phase's header, once: no repeated chip row above the view.
+      for (const n of [1, 2]) expect(html, `${initialMode}/${n}`).toContain(`TOGGLE-${n}`);
+      expect(html, initialMode).not.toContain("TOGGLE-undefined");
+    }
+  });
 });
+

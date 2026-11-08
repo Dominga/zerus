@@ -22,6 +22,8 @@ export function LanesView(props: {
   profile?: TeamProfileView | null;
   onOpen?: (id: number) => void;
   onEdit?: (phase: number, updates: LaneEdit[]) => Promise<boolean>;
+  /** Task 335: the phase's own common actions, with the Standard/Free toggle. */
+  phaseActions?: (n: number) => JSX.Element;
 }): JSX.Element {
   const [collapsed, setCollapsed] = createSignal<Set<string>>(new Set());
   const [menu, setMenu] = createSignal<{ phase: number; lane?: number; task?: number } | null>(null);
@@ -86,6 +88,8 @@ export function LanesView(props: {
               <span class="pt-pn">{section.phase.n}</span>
               <b>{section.phase.title || tr("Phase %1", section.phase.n)}</b>
               <span class="pm-count">{section.lanes.reduce((sum, lane) => sum + lane.tasks.length, 0)}</span>
+              {/* Task 335: the phase's own Standard/Free toggle sits in its header, as in Qt. */}
+              {props.phaseActions?.(section.phase.n)}
               <span class="pm-lane-tip">{tr("Lanes only shape the plan; hand-out still follows dependencies and phases")}</span>
             </header>
             <For each={section.lanes}>

@@ -637,7 +637,7 @@ impl Desk {
     }
 
     /// The menu: Open Zerus, an update's entries, one line per computer (how
-    /// many sessions it has, or its state) and Quit. It lists no sessions:
+    /// many sessions it has, or its state), Refresh and Quit. It lists no sessions:
     /// with their numbers a row each stopped being useful (the owner, 0.48.0),
     /// and nothing builds or refreshes such rows.
     pub fn menu(&self) -> Vec<Entry> {
@@ -673,7 +673,8 @@ impl Desk {
                 crate::text!("%1 on %2", computer.visible(), alias)
             }));
         }
-        menu.extend([Entry::Separator, Entry::Quit]);
+        // Qt's Refresh before Quit, on every platform (`TrayMenu.cpp:241-242`).
+        menu.extend([Entry::Separator, Entry::Refresh, Entry::Quit]);
         menu
     }
 }
@@ -1430,6 +1431,7 @@ mod tests {
                 Entry::Label(crate::text!("%1: polling…", "studio")),
                 Entry::Label(crate::text!("%1: unreachable", "win")),
                 Entry::Separator,
+                Entry::Refresh,
                 Entry::Quit,
             ]
         );
@@ -1476,6 +1478,7 @@ mod tests {
                 Entry::Separator,
                 Entry::Label(crate::text!("%1: polling…", crate::text!("this box"))),
                 Entry::Separator,
+                Entry::Refresh,
                 Entry::Quit,
             ]
         );
@@ -1493,6 +1496,7 @@ mod tests {
                 Entry::Separator,
                 Entry::Label(crate::text!("No remote machines")),
                 Entry::Separator,
+                Entry::Refresh,
                 Entry::Quit,
             ]
         );

@@ -64,6 +64,7 @@ pub(in crate::desktop) struct Runtime {
     executor: Option<Executor>,
     scope: Scope,
     location: Location,
+    receipt_root: crate::state::WorktreeReceiptRoot,
     owner: Arc<platform::FileLock>,
     exclusion: Option<Arc<HandoffLock>>,
     machine: Option<Machine>,
@@ -78,6 +79,13 @@ pub(in crate::desktop) struct Runtime {
 impl Runtime {
     pub fn new(config: &Config, epoch: &str, owner: Arc<platform::FileLock>) -> Result<Self> {
         let location = Location::new(config)?;
+        let receipt_root = crate::state::WorktreeReceiptRoot::capture(
+            location
+                .root
+                .parent()
+                .context("missing native state root")?,
+        )
+        .map_err(anyhow::Error::msg)?;
         Ok(Self {
             #[cfg(test)]
             executor: None,
@@ -86,6 +94,7 @@ impl Runtime {
                 service_epoch: epoch.into(),
             },
             location,
+            receipt_root,
             owner,
             exclusion: None,
             machine: None,
@@ -214,16 +223,95 @@ impl Runtime {
         })();
         match result {
             Ok(value) => json!(value),
-            Err(_) => json!(wire::Admission {
+            Err(error) => json!(wire::Admission {
                 abi: wire::ABI.into(),
                 request_id: id,
                 scope: self.scope.clone(),
                 accepted: false,
                 durable: false,
-                code: "creation_worktree_unavailable".into(),
+                code: error
+                    .downcast_ref::<ledger::Refused>()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "creation_worktree_unavailable".into()),
                 receipt: None
             }),
         }
+    }
+    /// Explicit exclusion/observation only. It cannot admit a checkout, retire
+    /// custody, supersede a scheduling slot or reconstruct native consent.
+    pub fn receipt_control(
+        &mut self,
+        store: &Store,
+        value: &Value,
+        exclusion: Option<Arc<HandoffLock>>,
+    ) -> Value {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Input {
+            op: String,
+            request: wire::ControlRequest,
+        }
+        self.refresh(store, exclusion);
+        let result = (|| -> Result<wire::ControlReply> {
+            let input: Input = serde_json::from_value(value.clone())?;
+            let request = input.request;
+            ensure!(
+                input.op == "creation_worktree_receipt"
+                    && request.valid()
+                    && request.scope == self.scope,
+                "creation receipt scope changed"
+            );
+            let lease = self
+                .lease
+                .as_ref()
+                .context("creation receipt owner unavailable")?;
+            lease.current(
+                &store.db,
+                &self.location,
+                self.machine.as_ref(),
+                self.exclusion.as_ref(),
+            )?;
+            ensure!(
+                request.plan.expected_machine == lease.machine_id(),
+                "creation receipt machine changed"
+            );
+            if let Some(row) = ledger::load(&store.db, &request.plan.worktree_request_id)? {
+                ensure!(
+                    row.verified.plan == request.plan
+                        && row.verified.binding.creation_id == request.creation_id,
+                    "creation receipt original changed"
+                );
+            }
+            let fingerprint = request
+                .plan
+                .request_fingerprint()
+                .context("invalid original fingerprint")?;
+            let receipt = self
+                .receipt_root
+                .receipt(
+                    &request.plan.worktree_request_id,
+                    (request.action == wire::ControlAction::Cancel).then_some(fingerprint.as_str()),
+                )
+                .map_err(anyhow::Error::msg)?;
+            lease.current(
+                &store.db,
+                &self.location,
+                self.machine.as_ref(),
+                self.exclusion.as_ref(),
+            )?;
+            let reply = wire::ControlReply {
+                abi: wire::ABI.into(),
+                request_id: request.request_id.clone(),
+                scope: self.scope.clone(),
+                action: request.action,
+                receipt: receipt.as_ref().and_then(wire::project),
+            };
+            ensure!(reply.matches(&request), "creation receipt result changed");
+            Ok(reply)
+        })();
+        result
+            .map(|reply| json!(reply))
+            .unwrap_or_else(|_| json!({"accepted":false,"code":"creation_receipt_unavailable"}))
     }
     fn check(
         &self,

@@ -586,7 +586,7 @@ describe("row presentation", () => {
     });
   });
 
-  it("Move to project waits for project organisation", async () => {
+  it("never runs Move to project as a host write: it goes through the organization's Move dialog (zerus-5wmh.18.1)", async () => {
     await createRoot(async (dispose) => {
       const a = setup([rowOut("a")]);
       expect(a.applies(a.listed("a")[0], "move", false, true)).toBe(true);

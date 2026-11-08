@@ -17,6 +17,8 @@ const HARNESS = [
   "client/scripts/account-identity-geometry-smoke.mjs",
 ];
 const CASES = ["loading", "kimi", "codex", "claude", "unavailable", "claude-late"];
+const TITLE_CASES = ["short", "email-label", "switch-long", "long-label", "localized-label", "hidden-short", "hidden-long", "unhidden-short"];
+let titleLabels;
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const digest = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
 
@@ -149,18 +151,42 @@ function checkGeometry(details, baseline, label) {
   if (baseline) {
     for (const key of ["machines", "usage"]) closeTo(details[key].top, baseline[key].top, `${label}: ${key} top`);
     for (const key of ["title", "identity"]) closeTo(details[key].height, baseline[key].height, `${label}: ${key} height`);
+    for (const key of ["titleMain", "actionArea"]) {
+      for (const metric of ["top", "height", "left", "right"]) closeTo(details[key][metric], baseline[key][metric], `${label}: ${key} ${metric}`);
+    }
+    for (const key of ["mark", "provider"]) {
+      for (const metric of ["top", "height", "right"]) closeTo(details[key][metric], baseline[key][metric], `${label}: ${key} ${metric}`);
+    }
+    closeTo(details.accountLabel.height, baseline.accountLabel.height, `${label}: account label height`);
     closeTo(details.identity.bottom, baseline.identity.bottom, `${label}: header bottom`);
   }
 }
 
 async function runCase(bidi, widthName, caseName, output) {
   let details;
-  if (caseName === "loading") details = await bidi.json("window.accountIdentityFixture.reset()");
+  if (caseName === "loading" || caseName === "short") details = await bidi.json("window.accountIdentityFixture.reset()");
   else if (caseName === "kimi") details = await bidi.json("window.accountIdentityFixture.update('kimi')");
   else if (caseName === "codex") details = await bidi.json("window.accountIdentityFixture.select('Codex Work')");
   else if (caseName === "claude") details = await bidi.json("window.accountIdentityFixture.select('Claude Team')");
   else if (caseName === "unavailable") details = await bidi.json("window.accountIdentityFixture.update('unavailable')");
-  else details = await bidi.json("window.accountIdentityFixture.update('claude-late')");
+  else if (caseName === "claude-late") details = await bidi.json("window.accountIdentityFixture.update('claude-late')");
+  else if (caseName === "switch-long") {
+    await bidi.json("window.accountIdentityFixture.select('Codex Work')");
+    details = await bidi.json(`window.accountIdentityFixture.select(${JSON.stringify(titleLabels["email-label"])})`);
+  } else if (caseName === "email-label" || caseName === "long-label" || caseName === "localized-label") {
+    details = await bidi.json(`window.accountIdentityFixture.setLabel(${JSON.stringify(titleLabels[caseName])})`);
+  } else if (caseName === "hidden-short") {
+    await bidi.json(`window.accountIdentityFixture.setLabel(${JSON.stringify(titleLabels.short)})`);
+    details = await bidi.json("window.accountIdentityFixture.setHidden(true)");
+  } else if (caseName === "hidden-long") {
+    details = await bidi.json(`window.accountIdentityFixture.setLabel(${JSON.stringify(titleLabels["localized-label"])})`);
+  } else if (caseName === "unhidden-short") {
+    await bidi.json(`window.accountIdentityFixture.setLabel(${JSON.stringify(titleLabels.short)})`);
+    details = await bidi.json("window.accountIdentityFixture.setHidden(false)");
+  } else throw new Error(`Unknown fixture case: ${caseName}`);
+  const hiddenExpected = caseName === "hidden-short" || caseName === "hidden-long" ? true
+    : ["short", "email-label", "switch-long", "long-label", "localized-label", "unhidden-short"].includes(caseName) ? false : undefined;
+  if (hiddenExpected !== undefined && !!details.hidden?.shown !== hiddenExpected) throw new Error(`${widthName}/${caseName}: hidden status mismatch`);
   return { details, image: `${output}/accounts-${widthName}-${caseName}.png` };
 }
 
@@ -223,13 +249,14 @@ try {
   if (!bidi.context) throw new Error("Accounts fixture context not found");
   await waitReady(bidi);
   const inputs = await bidi.json("window.accountIdentityFixture.inputs()");
+  titleLabels = inputs.titleLabels;
   const results = {};
 
   for (const [widthName, width] of [["wide", 1100], ["narrow", 720]]) {
     await bidi.viewport(width);
     let baseline;
     const captures = [];
-    for (const caseName of CASES) {
+    for (const caseName of [...CASES, ...TITLE_CASES]) {
       const { details, image } = await runCase(bidi, widthName, caseName, output);
       checkGeometry(details, baseline, `${widthName}/${caseName}`);
       baseline ??= details;

@@ -175,11 +175,12 @@ function Detail(props: { a: Account }) {
   return (
     <div class="acct-detail">
       <div class="acct-title">
-        <AccountMarkCircle mark={accountMark(props.a, settings)} size={22} />
-        <h2 class="ell" title={props.a.label}>{props.a.label}</h2>
-        <AgentBadge agent={agentKind(props.a.provider)} />
-        <Show when={accountAppearance(settings, props.a.members).hidden}><span class="dim am-hidden" title={tr("Hidden on session cards")}>{tr("Hidden on session cards")}</span></Show>
-        <span class="grow" />
+        <div class="acct-title-main">
+          <AccountMarkCircle mark={accountMark(props.a, settings)} size={22} />
+          <h2 class="ell" title={props.a.label} aria-label={props.a.label}>{props.a.label}</h2>
+          <AgentBadge agent={agentKind(props.a.provider)} />
+        </div>
+        <span class="dim am-hidden" classList={{ shown: accountAppearance(settings, props.a.members).hidden }} title={tr("Hidden on session cards")} aria-label={tr("Hidden on session cards")} aria-hidden={!accountAppearance(settings, props.a.members).hidden}>{tr("Hidden on session cards")}</span>
         <div class="acct-title-actions">
           <button class="btn" onClick={event=>setMarkEditor({ origin: event.currentTarget })}><Icon name="palette" size={13} />{tr("Color and mark…")}</button>
           <button class="btn" disabled={managementBusy()} onClick={event=>void openCatalog("rename",props.a.key,m().key,event.currentTarget)}><Icon name="pencil" size={13} />{tr("Rename…")}</button>

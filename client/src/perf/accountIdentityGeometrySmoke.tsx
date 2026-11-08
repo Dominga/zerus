@@ -32,6 +32,12 @@ const CLAUDE_LATE_IDENTITY: Identity = {
   plan: "Pro",
   auth_method: "passkey",
 };
+const TITLE_LABELS = {
+  short: "Kimi Personal",
+  "email-label": "a.person.with.a.long.account.label@example.test",
+  "long-label": "A long research account title used for independent interface checks",
+  "localized-label": "Очень длинное название учётной записи 例 для проверки стабильности карточек",
+};
 
 function identityLines(label: string, identity: Identity): Text[] {
   const seen = new Set([label.trim().toLowerCase()]);
@@ -96,6 +102,11 @@ const box = (element: Element) => {
 function geometry() {
   const detail = document.querySelector<HTMLElement>(".acct-detail")!;
   const title = detail.querySelector<HTMLElement>(".acct-title")!;
+  const titleMain = title.querySelector<HTMLElement>(".acct-title-main")!;
+  const actionArea = title.querySelector<HTMLElement>(".acct-title-actions")!;
+  const heading = titleMain.querySelector<HTMLElement>("h2")!;
+  const hidden = title.querySelector<HTMLElement>(".am-hidden");
+  const provider = titleMain.querySelector<HTMLElement>(".agent-badge")!;
   const identity = detail.querySelector<HTMLElement>(".acct-identity")!;
   const main = document.querySelector<HTMLElement>(".acct-main-scroll")!;
   const metadata = [...detail.querySelectorAll<HTMLElement>("[data-meta]")].map((element) => ({
@@ -103,21 +114,31 @@ function geometry() {
     ...box(element), clientWidth: element.clientWidth, scrollWidth: element.scrollWidth,
   }));
   check(getComputedStyle(identity).userSelect === "text", "metadata group remains selectable");
+  check(heading.textContent === heading.title && heading.getAttribute("aria-label") === heading.title, "full account label remains in DOM, tooltip and accessibility");
+  check(getComputedStyle(heading).whiteSpace === "nowrap" && getComputedStyle(titleMain).flexWrap === "nowrap", "account label and title row never wrap");
+  if (hidden) {
+    const shown = hidden.classList.contains("shown");
+    check(hidden.textContent === hidden.title && hidden.getAttribute("aria-label") === hidden.title, "hidden status keeps full tooltip and accessible text");
+    check(getComputedStyle(hidden).visibility === (shown ? "visible" : "hidden") && hidden.getAttribute("aria-hidden") === String(!shown), "hidden status is exposed only when true");
+  }
   for (const value of metadata) {
     if (value.text !== "—") {
       check(value.title === value.text, `${value.kind}: full-value tooltip`);
       check(value.aria?.endsWith(value.text ?? ""), `${value.kind}: full accessible value`);
     }
   }
-  const actions = [...title.querySelectorAll<HTMLElement>(".acct-title-actions .btn")].map((element) => ({ text: element.textContent, ...box(element) }));
+  const actions = [...actionArea.querySelectorAll<HTMLElement>(".btn")].map((element) => ({ text: element.textContent, ...box(element) }));
   for (const action of actions) check(action.left >= 0 && action.right <= window.innerWidth, `${action.text}: action stays in the viewport`);
   check(main.scrollWidth <= main.clientWidth + 1, "detail has no horizontal overflow");
   return {
-    selected: title.querySelector("h2")?.textContent,
+    selected: heading.textContent,
     language: document.documentElement.lang,
     viewport: { width: window.innerWidth, height: window.innerHeight },
-    detail: box(detail), title: box(title), identity: box(identity),
-    titleDisplay: getComputedStyle(title).display, titleWrap: getComputedStyle(title).flexWrap,
+    detail: box(detail), title: box(title), titleMain: box(titleMain), actionArea: box(actionArea), identity: box(identity),
+    accountLabel: { text: heading.textContent, title: heading.title, aria: heading.getAttribute("aria-label"), ...box(heading), clientWidth: heading.clientWidth, scrollWidth: heading.scrollWidth },
+    hidden: hidden ? { shown: hidden.classList.contains("shown"), visibility: getComputedStyle(hidden).visibility, ariaHidden: hidden.getAttribute("aria-hidden"), text: hidden.textContent, title: hidden.title, aria: hidden.getAttribute("aria-label"), ...box(hidden) } : null,
+    provider: { text: provider.textContent, title: provider.title, ...box(provider) }, mark: box(titleMain.querySelector(".acct-mark")!),
+    titleDisplay: getComputedStyle(title).display, titleColumns: getComputedStyle(title).gridTemplateColumns,
     machines: box(detail.querySelector(".acct-card")!), usage: box(detail.querySelector(".acct-usage")!),
     actions, metadata, mainClientWidth: main.clientWidth, mainScrollWidth: main.scrollWidth,
     accountCount: document.querySelectorAll(".acct-row").length,
@@ -143,6 +164,42 @@ async function update(kind: Update) {
   return geometry();
 }
 
+function selectedFixtureAccount() {
+  const label = document.querySelector(".acct-title h2")?.textContent;
+  const selected = accountsPage().accounts.find((item) => item.label === label);
+  if (!selected) throw Error(`Selected account is missing: ${label}`);
+  return selected;
+}
+
+async function setLabel(label: string) {
+  const current = selectedFixtureAccount();
+  const before = document.querySelector(".acct-detail"), focus = document.activeElement;
+  setAccountsPage({ ...accountsPage(), accounts: accountsPage().accounts.map((item) => item.key === current.key ? {
+    ...item, label, members: item.members.map((member) => ({ ...member, label })), identity_lines: identityLines(label, item.usage.identity),
+  } : item) });
+  await settle();
+  check(document.querySelector(".acct-detail") === before && document.activeElement === focus, `${label}: late label preserves Detail and focus`);
+  return geometry();
+}
+
+async function setHidden(hidden: boolean) {
+  const [{ ACCOUNT_HIDE, profileToken }, { setSetting }] = await Promise.all([import("../store/accountMarks"), import("../store/settings")]);
+  const current = selectedFixtureAccount();
+  const before = document.querySelector(".acct-detail"), focus = document.activeElement;
+  await Promise.all(current.members.map((member) => setSetting(ACCOUNT_HIDE + profileToken(member.host, member.id), hidden, { persist: false })));
+  await settle();
+  check(!!document.querySelector(".am-hidden.shown") === hidden, `${hidden}: hidden setting takes effect`);
+  check(document.querySelector(".acct-detail") === before && document.activeElement === focus, `${hidden}: hidden setting preserves Detail and focus`);
+  return geometry();
+}
+
+async function clearHidden() {
+  const [{ ACCOUNT_HIDE, profileToken }, { setSetting }] = await Promise.all([import("../store/accountMarks"), import("../store/settings")]);
+  for (const item of initialAccounts()) for (const member of item.members) {
+    await setSetting(ACCOUNT_HIDE + profileToken(member.host, member.id), false, { persist: false });
+  }
+}
+
 async function machineKeyboard() {
   const radio = document.querySelector<HTMLButtonElement>(".acct-mrow-pick")!;
   radio.focus();
@@ -165,6 +222,7 @@ async function run() {
   }
   const { applySkin, skins } = await import("../skin/runtime");
   applySkin(skins[0]);
+  const { ACCOUNT_HIDE, profileToken } = await import("../store/accountMarks");
   setAccountsPage(initialView());
   const { AccountsScreen } = await import("../ui/screens/Accounts");
   render(() => <AccountsScreen />, document.getElementById("root")!);
@@ -173,9 +231,14 @@ async function run() {
     geometry,
     select,
     update,
+    setLabel,
+    setHidden,
     machineKeyboard,
-    reset: async () => { setAccountsPage(initialView()); await settle(); return select("Kimi Personal"); },
-    inputs: () => ({ initial: initialView(), updates: { kimi: kimiLoaded(), unavailable: claudeUnavailable(), "claude-late": claudeLate() } }),
+    reset: async () => { await clearHidden(); setAccountsPage(initialView()); await settle(); return select(TITLE_LABELS.short); },
+    inputs: () => ({
+      initial: initialView(), updates: { kimi: kimiLoaded(), unavailable: claudeUnavailable(), "claude-late": claudeLate() },
+      titleLabels: TITLE_LABELS, hiddenKeys: initialAccounts().flatMap((item) => item.members.map((member) => ACCOUNT_HIDE + profileToken(member.host, member.id))), hiddenValues: [true, false],
+    }),
     failures: () => failures,
     calls: () => calls,
   };

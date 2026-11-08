@@ -107,25 +107,29 @@ pub(super) struct Lease {
 
 pub(super) struct Store {
     scope: Run,
+    root: Arc<Directory>,
     directory: Arc<Directory>,
     gate: Identity,
     lock: Identity,
 }
 impl Store {
-    fn path(scope: &Run) -> Result<PathBuf> {
+    fn location(scope: &Run) -> Result<(Arc<Directory>, PathBuf)> {
         Run::new(&scope.session, &scope.run)?;
         // Lookup never creates even the state root. Initialization is for a
         // supervisor whose original binding already has an existing root.
-        let root = platform::canonical(storage::root()).map_err(|_| REFUSED)?;
-        Directory::open(&root)?;
-        Ok(root
+        let root = Arc::new(Directory::open(
+            &platform::canonical(storage::root()).map_err(|_| REFUSED)?,
+        )?);
+        let path = root
+            .path
             .join("terminating-writers")
             .join(&scope.session)
-            .join(&scope.run))
+            .join(&scope.run);
+        Ok((root, path))
     }
     pub(super) fn initialize(scope: &Run, until: Instant) -> Result<()> {
         current(until)?;
-        let path = Self::path(scope)?;
+        let (root, path) = Self::location(scope)?;
         let session = path.parent().ok_or(REFUSED)?;
         let base = session.parent().ok_or(REFUSED)?;
         platform::private_dir(base).map_err(|_| REFUSED)?;
@@ -155,11 +159,13 @@ impl Store {
         dir.file.sync_all().map_err(|_| REFUSED)?;
         platform::sync_dir(session).map_err(|_| REFUSED)?;
         dir.current()?;
+        root.current()?;
         current(until)
     }
     pub(super) fn open(scope: &Run, until: Instant) -> Result<Self> {
         current(until)?;
-        let directory = Arc::new(Directory::open(&Self::path(scope)?)?);
+        let (root, path) = Self::location(scope)?;
+        let directory = Arc::new(Directory::open(&path)?);
         let gate = read_file(&directory.path.join("gate"))?;
         let mut bytes = Vec::new();
         (&gate)
@@ -171,6 +177,7 @@ impl Store {
         }
         let value = Self {
             scope: scope.clone(),
+            root,
             gate: identity(&gate)?,
             lock: identity(&read_file(&directory.path.join("lock"))?)?,
             directory,
@@ -180,6 +187,10 @@ impl Store {
         Ok(value)
     }
     fn validate(&self) -> Result<()> {
+        self.root.current()?;
+        if platform::canonical(storage::root()).map_err(|_| REFUSED)? != self.root.path {
+            return Err(REFUSED.into());
+        }
         self.directory.current()?;
         let gate = read_file(&self.directory.path.join("gate"))?;
         let mut bytes = Vec::new();
@@ -191,6 +202,51 @@ impl Store {
             || identity(&gate)? != self.gate
             || identity(&read_file(&self.directory.path.join("lock"))?)? != self.lock
         {
+            return Err(REFUSED.into());
+        }
+        Ok(())
+    }
+    /// Only exclusion on this original store. An empty ledger plus this lock
+    /// is not consent, a target proof, or a cleanup/termination capability.
+    pub(super) fn exclusive(&self, until: Instant) -> Result<Lease> {
+        current(until)?;
+        self.validate()?;
+        let file = write_file(&self.directory.path.join("gate"))?;
+        if identity(&file)? != self.gate {
+            return Err(REFUSED.into());
+        }
+        loop {
+            current(until)?;
+            match file.try_lock_exclusive() {
+                Ok(()) => {
+                    self.validate()?;
+                    current(until)?;
+                    return Ok(Lease {
+                        _file: file,
+                        _directory: self.directory.clone(),
+                    });
+                }
+                Err(error) if platform::lock_contended(&error) => {
+                    #[cfg(test)]
+                    super::gate::contended();
+                    std::thread::sleep(
+                        Duration::from_millis(2)
+                            .min(until.saturating_duration_since(Instant::now())),
+                    );
+                }
+                Err(_) => return Err(REFUSED.into()),
+            }
+        }
+    }
+    pub(super) fn state_lock(&self) -> Result<File> {
+        self.validate()?;
+        // Never manufacture the lock while observing an old/missing scope.
+        write_file(&self.root.path.join(".lock"))
+    }
+    pub(super) fn check_writer(&self, original: &File, writer: &storage::Guard) -> Result<()> {
+        let now = identity(&self.state_lock()?)?;
+        let held = writer.identity().map_err(|_| REFUSED)?;
+        if identity(original)? != now || Identity(held.device, held.inode) != now {
             return Err(REFUSED.into());
         }
         Ok(())

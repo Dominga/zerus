@@ -287,6 +287,9 @@ name = "relay"
 kind = "cargo"
 root = "services/mobile/relay"
 sources = ["services/mobile/relay/**", "services/mobile/vectors/**"]
+# Its test code uses Unix file modes without a platform guard, so the tests
+# do not build on Windows; the fork's Windows CI does not run them either.
+platforms = ["linux", "macos"]
 
 [[provider]]
 name = "connector"
@@ -320,6 +323,9 @@ kind = "unittest"
 root = "services/mobile/tests"
 sources = ["services/mobile/**"]
 tests = ["services/mobile/tests/test_*.py"]
+# The suite needs fcntl and an installed zerus_mobile package (CI installs it
+# on Ubuntu); it does not run on Windows.
+platforms = ["linux", "macos"]
 
 [[provider]]
 name = "speech"

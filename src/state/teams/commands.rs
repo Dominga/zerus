@@ -2936,7 +2936,15 @@ pub(crate) fn commit_in_team(team: &Team, member_id: &str, input: &Value) -> any
     let message = text(input, "message").trim().to_owned();
     ensure!(!message.is_empty() && message.chars().count() <= 4000, "A commit message is required (at most 4000 characters)");
     let folder = super::dispatcher::member_folder_path(team, member)?;
-    ensure!(!folder.is_empty() && folder != team.folder, "Zerus commits in the member's own folder, not the team's");
+    ensure!(
+        !folder.is_empty() && folder != team.folder,
+        "Zerus commits in the member's own folder, not the team's{}",
+        if !team.scratch_rule.is_empty() || team.scratch_parent.is_some() {
+            ": this scratch team's folder is not a git repository (or a member was given the shared folder), so its members share it; make the scratch folder a git repository so each member gets a worktree or clone"
+        } else {
+            ""
+        }
+    );
     // U48: with a branch per task, the member's open task's branch is its team
     // branch while that attempt is open.
     let attempt_id = text(input, "attempt");

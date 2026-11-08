@@ -134,7 +134,7 @@ pub(crate) fn prepare(parent: &Team, member: &Member, input: &Value) -> anyhow::
     });
     let mut members = Vec::new();
     for value in input["members"].as_array().into_iter().flatten() {
-        let mut value = value.clone();
+        let value = value.clone();
         let agent = value["agent"].as_str().unwrap_or_default().to_owned();
         anyhow::ensure!(
             roster.contains(&agent),
@@ -146,9 +146,9 @@ pub(crate) fn prepare(parent: &Team, member: &Member, input: &Value) -> anyhow::
             directory.is_empty() || owner_steps::inside(&directory, &root),
             "A scratch member's folder is inside the team's scratch root {root} (got {directory})"
         );
-        // The scratch team's folder itself, never a worktree or clone outside
-        // the root: the standing rule trusts only the root.
-        value["folder"] = json!("shared");
+        // Task #231: the member's own worktree or clone (set by ops::create when
+        // the scratch folder is a git repository), or its custom directory; a
+        // scratch folder that is not a repository keeps the shared folder.
         anyhow::ensure!(value["id"] != member.id, "The creating member leads the scratch team; do not add it as a member");
         members.push(value);
     }

@@ -565,6 +565,13 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
     // Task #228: the standing rule a QA member's scratch team was created
     // under; the dispatcher trusts the scratch root for its roster's agents.
     let scratch_rule = clean(text(input, "scratch_rule").trim(), 40, "The scratch rule")?;
+    // Task #231: a scratch team's members get their own folders, a worktree or
+    // clone of the scratch folder's repository cut inside the rule's folder (the
+    // normal team folder path), so the commit template, member branches and a
+    // dependent's base work there. A scratch folder that is not a git
+    // repository keeps the shared folder, and the commit refusal says why.
+    let scratch_folder = text(input, "folder");
+    let scratch_repository = !scratch_rule.is_empty() || input["scratch_parent"].is_object();
     // From the desktop: the members and template tasks proposed for the
     // lead's plan; the lead starts and gets a planning brief.
     let mut members = vec![lead.clone()];
@@ -572,6 +579,14 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
         let member = parse_member(value)?;
         ensure!(members.iter().all(|m| m.id != member.id), "Member id {} is used twice", member.id);
         members.push(member);
+    }
+    if scratch_repository && !super::dispatcher::folder_facts(&scratch_folder).0.is_empty() {
+        for member in members.iter_mut().skip(1) {
+            if member.folder == MemberFolder::Shared && member.directory.is_empty() && member.session.is_none() {
+                member.folder = super::dispatcher::default_folder(&member.agent);
+                super::dispatcher::sandbox_folder(member);
+            }
+        }
     }
     let mut tasks = Vec::new();
     for value in input["tasks"].as_array().into_iter().flatten() {

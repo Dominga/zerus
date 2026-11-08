@@ -1464,6 +1464,17 @@ pub async fn session_switch_account(
     .map_err(|error| error.to_string())?
 }
 
+/// Task 352: what choosing an account would do for a session (the same
+/// agent's switch, or a move to another agent), for the confirmation.
+#[tauri::command]
+pub async fn session_switch_preview(session: String, account: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        zerus_client_core::account_switch::preview(&zerus_client_core::default_hgs(), &session, &account)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[tauri::command(async)]
 pub fn account_filters_view(
     state: State<'_, Screens>,

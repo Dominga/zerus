@@ -2528,5 +2528,22 @@
   "No sessions in this project yet.": "В этом проекте пока нет сеансов.",
   "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
   "How the team's notices to the lead and its replies to them show here.": "Как показывать уведомления команды лиду и его ответы на них.",
-  "Expand this team notice and the lead's reply": "Развернуть уведомление команды и ответ лида"
+  "Expand this team notice and the lead's reply": "Развернуть уведомление команды и ответ лида",
+  "Account: %1 (%2)": "Аккаунт: %1 (%2)",
+  "Move this session to %1?": "Перенести эту сессию в %1?",
+  "Move this conversation from %1 (%2) to %3 (%4)?": "Перенести этот разговор из %1 (%2) в %3 (%4)?",
+  "%1 cannot resume %2's conversation, so Zerus starts a new %1 session in the same folder and gives it a handoff. The old session stops and stays readable; the two are linked.": "%1 не может продолжить разговор %2, поэтому Zerus запускает новую сессию %1 в той же папке и передаёт ей сводку. Старая сессия останавливается и остаётся доступной для чтения; обе сессии связаны.",
+  "Carried over:": "Переносится:",
+  "a summary, the open tasks, the recent turns and the attachments as references.": "сводка, открытые задачи, последние реплики и вложения в виде ссылок.",
+  "Not carried over:": "Не переносится:",
+  "%1's own tool state, its prompt cache and the permissions chosen for this session.": "собственное состояние инструментов %1, его кеш промптов и разрешения, выбранные для этой сессии.",
+  "New session: %1": "Новая сессия: %1",
+  "Checking the move…": "Проверяем перенос…",
+  "Cannot move: %1": "Перенести нельзя: %1",
+  "Move session": "Перенести сессию",
+  "Moved to %1 in %2; the old session is stopped and stays readable.": "Перенесено в %1, сессия %2; старая сессия остановлена и доступна для чтения.",
+  "%1 started for %2, but it did not confirm the handoff. Check it; Zerus does not retry.": "%1 запущена для %2, но не подтвердила передачу. Проверьте её; Zerus не повторяет попытку.",
+  "The move to %1 failed (%2). Resume the old session from Activity.": "Перенос в %1 не удался (%2). Возобновите старую сессию из Активности.",
+  "The move to %1 failed (%2); the old session resumed.": "Перенос в %1 не удался (%2); старая сессия возобновлена.",
+  "the move gave no receipt": "перенос не вернул квитанцию"
 }

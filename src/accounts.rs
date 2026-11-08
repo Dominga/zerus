@@ -646,6 +646,72 @@ pub(crate) fn switch_target(config: &Config, id: &str, provider: &str) -> Result
     Ok((profile.label, home))
 }
 
+/// Task 352: the agent an account id belongs to on this computer.
+pub(crate) fn provider_of(config: &Config, id: &str) -> Result<String> {
+    Ok(lookup(config, id)?.0.provider)
+}
+
+/// Task 352: an account of another agent a session may move to: the agent is
+/// installed here and, for Claude, Codex and Kimi, the account is signed in.
+/// DeepSeek and OpenCode run on their native configuration. Returns the
+/// agent, the label and the account folder.
+pub(crate) fn move_target(config: &Config, id: &str) -> Result<(String, String, PathBuf)> {
+    let (profile, home, native) = lookup(config, id)?;
+    let provider = profile.provider.clone();
+    if !["claude", "codex", "kimi", "dsh", "opencode"].contains(&provider.as_str()) {
+        return Err(Error::new(1, format!("Account '{id}' belongs to an agent Zerus cannot start ({provider}).")));
+    }
+    if !agent_installed(&provider) {
+        return Err(Error::new(
+            1,
+            format!("{} is not installed on {}; install it in Accounts before moving a session to it.", agent_name(&provider), config.host()),
+        ));
+    }
+    if ["claude", "codex", "kimi"].contains(&provider.as_str()) {
+        if !native && !home.is_dir() {
+            return Err(Error::new(1, format!("Account '{id}' has no profile folder on this computer; log in to it first.")));
+        }
+        if !signed_in(&home, &provider, native) {
+            return Err(Error::new(
+                1,
+                format!("Account '{id}' is not signed in on {}; log in to it before moving a session.", config.host()),
+            ));
+        }
+    }
+    Ok((provider, profile.label, home))
+}
+
+/// An agent's name as the owner reads it.
+pub(crate) fn agent_name(provider: &str) -> &'static str {
+    match provider {
+        "claude" => "Claude Code",
+        "codex" => "Codex",
+        "kimi" => "Kimi",
+        "dsh" => "DeepSeek",
+        "opencode" => "OpenCode",
+        _ => "This agent",
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests name the agents installed on their computer.
+    static TEST_INSTALLED: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_installed(agents: Option<&[&str]>) {
+    TEST_INSTALLED.with(|cell| *cell.borrow_mut() = agents.map(|agents| agents.iter().map(|agent| (*agent).to_owned()).collect()));
+}
+
+fn agent_installed(provider: &str) -> bool {
+    #[cfg(test)]
+    if let Some(agents) = TEST_INSTALLED.with(|cell| cell.borrow().clone()) {
+        return agents.iter().any(|agent| agent == provider);
+    }
+    platform::available(provider)
+}
+
 /// Whether the account has a sign-in to run with: a credential file, a keychain
 /// item (macOS Claude), or the provider's key in this process's environment.
 fn signed_in(home: &Path, provider: &str, native: bool) -> bool {

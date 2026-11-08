@@ -134,6 +134,9 @@ export const sandboxFolderGrant = (folder: string, elevated: boolean) =>
 /** Task 69: moves one local session to another account after the owner confirms. */
 export const sessionSwitchAccount = (session: string, account: string, request: string) =>
   inTauri() ? invoke<Record<string, unknown>>("session_switch_account", { session, account, request }) : Promise.reject(new Error("Accounts need the desktop app."));
+/** Task 352: what an account choice would do (the same agent's switch, or a move to another agent). */
+export const sessionSwitchPreview = (session: string, account: string) =>
+  inTauri() ? invoke<Record<string, unknown>>("session_switch_preview", { session, account }) : Promise.reject(new Error("Accounts need the desktop app."));
 /** Task 51: loads the next older Waiting page; false when there is none. */
 export const teamsWaitingOlder = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_waiting_older", { computer }) : Promise.resolve(false);
 /** Task 51: raises or clears Waiting item notifications through the native notifier. */

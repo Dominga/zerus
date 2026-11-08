@@ -99,6 +99,7 @@ mod session_upload;
 mod session_state;
 pub(crate) mod slow_calls;
 mod switch_account;
+mod switch_provider;
 mod builds;
 pub(crate) mod build_cache_server;
 pub(crate) mod build_dirs;

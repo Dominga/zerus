@@ -1,6 +1,8 @@
 //! The owner moves one running session to another account of the same agent
 //! (`hgs switch-account`): the agent is stopped, the conversation is copied to
-//! the target's store and resumed, and a failed launch rolls back. The webview
+//! the target's store and resumed, and a failed launch rolls back. Task 352: an
+//! account of another agent moves the session to that agent with a handoff;
+//! `preview` tells the confirmation what the choice would do. The webview
 //! never runs hgs; this module builds the guarded call and bounds its receipt.
 
 use crate::actions::{Exit, Invocation};
@@ -9,8 +11,11 @@ use serde_json::Value;
 use std::path::Path;
 use std::time::Duration;
 
-/// A switch copies a conversation and restarts the agent; Qt waits 180 s.
-const TIMEOUT: Duration = Duration::from_secs(180);
+/// A switch copies a conversation and restarts the agent; a move to another
+/// agent reads its history and starts the new session. Qt waits as long.
+const TIMEOUT: Duration = Duration::from_secs(300);
+/// A preview only reads the session.
+const PREVIEW_TIMEOUT: Duration = Duration::from_secs(90);
 /// The receipt is small; a larger reply is not a switch receipt.
 const RECEIPT_BYTES: usize = 4 * 1024 * 1024;
 
@@ -60,6 +65,48 @@ pub fn switch(hgs: &Path, session: &str, account: &str, request: &str) -> Result
     }
 }
 
+/// Task 352: what choosing `account` for `session` would do, changing
+/// nothing: `kind` is `account` (the same agent) or `move` (another agent,
+/// with `new_session`, `carries`, `drops`), and `refusal` says why it cannot
+/// run, empty when it can.
+pub fn preview(hgs: &Path, session: &str, account: &str) -> Result<Value, String> {
+    if !valid_name(session) || !valid_name(account) {
+        return Err("A preview needs a session and an account.".into());
+    }
+    let call = Invocation {
+        args: vec![
+            "switch-account".into(),
+            session.into(),
+            "--account".into(),
+            account.into(),
+            "--preview".into(),
+        ],
+        stdin: None,
+        timeout: PREVIEW_TIMEOUT,
+        request_id: None,
+    };
+    let exit = run_limited(hgs, &call, &[], RECEIPT_BYTES)
+        .map_err(|error| format!("The preview reply is too large: {}", error.cap))?;
+    match exit {
+        Exit::Code { code: 0, stdout, .. } => {
+            let preview: Value = serde_json::from_slice(&stdout).map_err(|_| "The preview gave no answer.".to_owned())?;
+            if preview["kind"].as_str().is_some() {
+                Ok(preview)
+            } else {
+                Err("The preview gave no answer.".into())
+            }
+        }
+        Exit::Code { stderr, .. } => Err(if stderr.trim().is_empty() {
+            "This hgs cannot preview a move; update it.".into()
+        } else {
+            stderr.trim().to_owned()
+        }),
+        Exit::TimedOut => Err("The preview did not answer in time.".into()),
+        Exit::StartFailed(error) => Err(format!("Could not start hgs: {error}")),
+        Exit::WriteFailed | Exit::Abnormal { .. } => Err("The preview did not run.".into()),
+    }
+}
+
 fn valid_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 512
@@ -84,6 +131,14 @@ mod tests {
         assert!(valid_name("claude/project/session"));
         assert!(!valid_name("two words"));
         assert!(!valid_name(""));
+    }
+
+    #[test]
+    fn a_preview_needs_a_session_and_an_account() {
+        let error = preview(Path::new("hgs"), "", "account").unwrap_err();
+        assert!(error.contains("session and an account"), "{error}");
+        let error = preview(Path::new("hgs"), "claude/p/s", "two words").unwrap_err();
+        assert!(error.contains("session and an account"), "{error}");
     }
 
     #[test]

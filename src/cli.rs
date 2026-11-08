@@ -166,6 +166,8 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] effort <session> --json   change this agent's effort from JSON stdin
        hgs [@host] settings <session> --json model and effort for this session (JSON stdin)
        hgs [@host] switch-account <session> --account ID --request-id UUID   move a running session to another account of its agent
+       hgs [@host] switch-account <session> --to ID --request-id UUID   an account of another agent moves the session there with a handoff (also: session switch-account)
+       hgs [@host] switch-account <session> --account ID --preview   what that choice would do and why it is refused; changes nothing
        hgs [@host] recovery get | set | action   automatic recovery policy (JSON stdin for writes)
        hgs [@host] search --query <text> [--limit N]   search saved session contents
        hgs [@host] search --indexed --query <text> [--limit 1..100] [--cursor C]   content-search-query-v1
@@ -664,6 +666,11 @@ pub(crate) fn dispatch_at(args: Vec<String>, entered: Instant) -> Result<i32> {
 }
 
 fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
+    // Task 352: `hgs [@host] session switch-account` is `hgs switch-account`.
+    let at = usize::from(args.first().is_some_and(|arg| arg.starts_with('@')));
+    if args.get(at).is_some_and(|arg| arg == "session") && args.get(at + 1).is_some_and(|arg| arg == "switch-account") {
+        args.remove(at);
+    }
     if args.first().is_some_and(|s| s == "swarm") && args.get(1).is_some_and(|s| s == crate::wsl::RECEIVER) {
         crate::wsl::validate_request(&args[2..])?;
         if !cfg!(target_os = "linux") { return Err(Error::new(2,"The wsl-local receiver requires a Linux hgs build")); }

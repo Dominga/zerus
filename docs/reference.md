@@ -418,6 +418,40 @@ label, in `account_id` and `account_label`.
 A team member's account changes only through `hgs team swap-member`, on your
 word; `switch-account` refuses a member's session and names the team.
 
+#### Moving a session to another agent
+
+```sh
+hgs switch-account claude/sample-project/review --to native-dsh --preview
+hgs switch-account claude/sample-project/review --to native-dsh --request-id 3c9d2a71-5b8e-4f60-a1d4-9e2b7c6f0a18
+```
+
+An account of another agent (Claude, Codex, Kimi, DeepSeek or OpenCode) moves the
+session there; `--to` is `--account`, and `hgs session switch-account` is the
+same command. One agent cannot resume another's native conversation, so Zerus
+starts a new session of the target agent in the same folder (`<agent>/<project>/<tag>`,
+the old tag or the first free `tag-N`) and gives it a handoff as its first prompt
+(DeepSeek and OpenCode get it as their first message): what the session was
+about, its open Zerus tasks, the last turns and its attachments as `hgs
+attachment` references, bounded like a team brief. The full handoff is kept in
+`session_moves/<request-id>.md` under the state folder. The other agent's tool
+state, prompt cache and the permissions chosen for the session are not carried.
+
+`--preview` changes nothing and answers `kind` (`account` for the same agent,
+`move` for another), the new session's name, what carries over and does not,
+and `refusal`, empty when the move can run. A move is refused before anything
+changes when the target agent is not installed, a Claude, Codex or Kimi account
+is not signed in, the session is a team member's, it works or builds, a
+question or a held message waits, it has no confirmed conversation, or its
+folder is missing.
+
+The old session is then paused and stays readable; the new one starts with the
+chosen account. The receipt's status is `moved` once the new session shows its
+conversation, `uncertain` when it did not in time or the first message was not
+delivered (never retried), and `failed` when the start failed; the old session
+is then resumed (`relaunched`). A retry with the same request id returns the
+kept receipt. Both rows of `ls` and `inspect` name the other session:
+`moved_to` on the old one and `moved_from` on the new one.
+
 To move a team off an account, `swap-member` takes `from_account`,
 `to_account` and `provider` instead of a member: every member of that agent
 whose local session really runs on `from_account`, the lead included, moves

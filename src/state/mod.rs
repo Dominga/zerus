@@ -35,7 +35,9 @@ mod goals;
 mod hooks;
 pub(crate) mod hook_health;
 mod input;
-pub(crate) use input::{Lookup as ReceiptLookup, Submission};
+pub(crate) use input::{
+    resumed_readiness, Lookup as ReceiptLookup, Readiness as ResumedReadiness, Submission,
+};
 mod input_queue;
 mod journal;
 mod keep_warm;
@@ -101,8 +103,11 @@ mod terminating;
 mod untracked_shell;
 mod session_action;
 pub(crate) use session_action::{
-    observe_original as observe_lifecycle_receipt, status_machine as lifecycle_receipt_machine,
+    observe_held as observe_held_lifecycle_receipt, observe_original as observe_lifecycle_receipt,
+    status_machine as lifecycle_receipt_machine,
 };
+#[cfg(test)]
+pub(crate) use session_action::fixture_receipt as lifecycle_fixture_receipt;
 mod shown_path;
 mod startup_choice;
 mod terminal;

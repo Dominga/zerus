@@ -249,6 +249,8 @@ fn schema_thirty_one_preserves_prior_failure_receipts_and_marks_their_time_unava
             .to_owned(),
         configuration: "a".repeat(64),
     };
+    // The later schema-34 session resume leaf is rewound too.
+    crate::desktop::session_resume::remove_fixture(&f.store.db);
     f.store
         .db
         .execute_batch(

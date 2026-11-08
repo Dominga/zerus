@@ -27,6 +27,9 @@ mod notification_controls;
 mod notifications;
 #[allow(dead_code)]
 mod operations;
+// The never-renewed overall deadline of a multi-child operation.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod operation_clock;
 // One bounded original-child runner for the launch and task message leaves.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod original_child;
@@ -68,6 +71,8 @@ mod swarm_windows;
 pub(crate) mod compact_to_send;
 pub(crate) mod deferred_answer;
 pub(crate) mod deferred_send;
+/// The resume-then-send leaf (zerus-5wmh.66.4.9, slice 3).
+pub(crate) mod session_resume;
 pub(crate) mod task_message;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod task_start_reconcile;
@@ -1245,6 +1250,12 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         } else if hello
                             .request
                             .as_ref()
+                            .is_some_and(|v| v["op"] == "session_resume_result")
+                        {
+                            session_resume::query(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
                             .is_some_and(|v| v["op"] == "task_message_staging")
                         {
                             task_message::staging_route(
@@ -1305,6 +1316,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                         | "deferred_send"
                                         | "deferred_answer"
                                         | "compact_to_send"
+                                        | "session_resume"
                                         | "task_start_reconcile"
                                 )
                             )

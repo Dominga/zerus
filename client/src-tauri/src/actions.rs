@@ -2058,6 +2058,8 @@ pub struct ArchivePageOut {
     pub partial: bool,
     /// Rows the host looked at for this page (zerus-080n8).
     pub searched: u64,
+    /// A bounded page; an exact one, from an older host too, is not (zerus-5czy6).
+    pub bounded: bool,
 }
 
 struct ArchiveContext {
@@ -2097,6 +2099,7 @@ fn grouped_archive_page(
         position_capped: page.position_capped,
         partial: page.partial,
         searched: page.searched,
+        bounded: page.bounded,
     })
 }
 
@@ -4151,6 +4154,7 @@ mod tests {
             position_capped: false,
             partial: true,
             searched: 25000,
+            bounded: true,
         }
     }
 
@@ -4201,6 +4205,8 @@ mod tests {
             ),
             (Some(true), Some(25000), Some(false))
         );
+        // zerus-5czy6: and whether the page is bounded at all.
+        assert_eq!(json["bounded"].as_bool(), Some(true));
         assert_eq!(json["rows"][0]["name"], "codex/sample-project/review");
         assert_eq!(json["rows"][0]["group"], "alpha");
         assert_eq!(json["rows"][0]["rank"], page.rows[0].rank);

@@ -810,6 +810,8 @@ export interface ArchivePage {
   partial?: boolean;
   /** zerus-080n8: rows the host looked at for this page. */
   searched?: number;
+  /** zerus-5czy6: a bounded page; an exact one (an older host too) is not. */
+  bounded?: boolean;
 }
 
 /** One read of an archived session's recorded Activity (`archived_activity`, `hgs inspect --archive`). */

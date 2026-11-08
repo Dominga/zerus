@@ -1,6 +1,6 @@
 import type { ActivityEvent, LocalMessage, Reply } from "../../types";
 import { eventKey } from "../../store/activity";
-import type { ActivityItem, LocalItem, MediaMessage, TranscriptItem, VoiceState } from "./types";
+import type { ActivityItem, InboxItem, LocalItem, MediaMessage, TranscriptItem, VoiceState } from "./types";
 import { imageSize } from "./attachment-image";
 import { messageTimeOf } from "../lib/dates";
 import { tr, trNoop } from "../../i18n";
@@ -534,7 +534,18 @@ function transcriptItems(events: readonly ActivityEvent[], summary?: Record<stri
     }
     if (role) {
       let receipt: string | undefined;
-      if (role === "user") {
+      let inbox: InboxItem | undefined;
+      // OpenCode reports its inbox: a waiting message is queued, and after
+      // Stop it stays there, not delivered, until it is sent or removed
+      // (ActivityView.cpp:1036-1038, 1072-1087).
+      const delivery = role === "user" ? e.delivery_state : undefined;
+      if (delivery === "queued" || delivery === "not_delivered") {
+        receipt = delivery === "queued" ? tr("Queued") : tr("Not delivered");
+        const messageId = typeof e.message_id === "string" ? e.message_id : "";
+        const allowed = Array.isArray(summary?.allowed_actions) && summary.allowed_actions.includes("remove_queued");
+        inbox = { state: delivery, messageId, run: String(summary?.run_id ?? ""), conversation: String(summary?.conversation_id ?? ""),
+          removable: delivery === "not_delivered" && !!messageId && allowed };
+      } else if (role === "user") {
         let accepted = e.type !== "UserPromptQueued";
         for (let j = i + 1; !accepted && j < events.length; j++) {
           const next = events[j];
@@ -549,7 +560,7 @@ function transcriptItems(events: readonly ActivityEvent[], summary?: Record<stri
         : e.type === "QuestionAnswered" || replies ? tr("You (answer)") : undefined;
       items.push({ id, kind: role === "user" ? "user" : "agent", at, body: e.detail ?? "",
         echoBody: typeof e.attachment_echo === "string" ? e.attachment_echo : undefined,
-        attachments: attachments(e), receipt, label, replies });
+        attachments: attachments(e), receipt, label, replies, ...(inbox ? { inbox } : {}) });
       i++; continue;
     }
     // Adjacent operational events form one group; messages and attention stay boundaries.

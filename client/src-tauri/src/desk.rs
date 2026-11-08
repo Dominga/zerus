@@ -1215,7 +1215,9 @@ pub fn tray_notify(app: &AppHandle, title: &str, body: &str) {
 }
 
 /// The one token of every tray message: no click target, update or
-/// attention edge knows it (`attention::target` refuses it).
+/// attention edge knows it (`attention::target` refuses it). macOS posts
+/// tray messages through `osascript`, without a token.
+#[cfg(any(target_os = "linux", windows, test))]
 pub(crate) const TRAY_TOKEN: &str = "zerus-tray-message";
 
 /// A tray message replaces the previous one, as Qt's tray balloon did: the

@@ -1192,7 +1192,8 @@ pub fn tray_notify(app: &AppHandle, title: &str, body: &str) {
             .try_state::<crate::platform::linux_notify::Poster>()
             .is_some()
         {
-            crate::platform::linux_notify::deliver(app, Vec::new(), vec![tray_notice(title, body)]);
+            let (cleared, raised) = tray_delivery(title, body);
+            crate::platform::linux_notify::deliver(app, cleared, raised);
         } else {
             window_notice(app, title, body);
         }
@@ -1203,11 +1204,8 @@ pub fn tray_notify(app: &AppHandle, title: &str, body: &str) {
             .try_state::<crate::platform::windows::tray::WindowsShell>()
             .is_some()
         {
-            crate::platform::windows::tray::deliver(
-                app,
-                Vec::new(),
-                vec![tray_notice(title, body)],
-            );
+            let (cleared, raised) = tray_delivery(title, body);
+            crate::platform::windows::tray::deliver(app, cleared, raised);
         } else {
             window_notice(app, title, body);
         }
@@ -1216,21 +1214,30 @@ pub fn tray_notify(app: &AppHandle, title: &str, body: &str) {
     window_notice(app, title, body);
 }
 
-/// A tray message's notification: its own token each time, so the
-/// notification daemon shows every message, and one that no click target,
-/// update or withdrawal knows (`attention::target` refuses it).
+/// The one token of every tray message: no click target, update or
+/// attention edge knows it (`attention::target` refuses it). macOS posts
+/// tray messages through `osascript`, without a token.
 #[cfg(any(target_os = "linux", windows, test))]
-fn tray_notice(title: &str, body: &str) -> zerus_client_core::attention::Notice {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_millis());
-    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    zerus_client_core::attention::Notice {
-        token: format!("zerus-tray-message:{at}:{n}"),
-        title: title.to_owned(),
-        body: body.to_owned(),
-    }
+pub(crate) const TRAY_TOKEN: &str = "zerus-tray-message";
+
+/// A tray message replaces the previous one, as Qt's tray balloon did: the
+/// earlier message under [`TRAY_TOKEN`] is withdrawn and the new one posted
+/// under it. The tray then holds at most one of the notification store's
+/// slots across expiry, daemon changes and restarts, and never takes
+/// capacity from attention notices (zerus-5wmh.13.13.1).
+#[cfg(any(target_os = "linux", windows, test))]
+pub(crate) fn tray_delivery(
+    title: &str,
+    body: &str,
+) -> (Vec<String>, Vec<zerus_client_core::attention::Notice>) {
+    (
+        vec![TRAY_TOKEN.to_owned()],
+        vec![zerus_client_core::attention::Notice {
+            token: TRAY_TOKEN.to_owned(),
+            title: title.to_owned(),
+            body: body.to_owned(),
+        }],
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -1407,22 +1414,24 @@ impl Bar {
 mod tests {
     use super::*;
 
-    /// zerus-5wmh.13.13: each tray message is its own notification, and a
-    /// click on it opens no session, update or anything else.
+    /// zerus-5wmh.13.13, .13.1: a tray message replaces the last one under one
+    /// token, which no click opens.
     #[test]
-    fn a_tray_message_has_its_own_token_that_nothing_routes() {
-        let first = tray_notice("Zerus: the terminal did not open", "detail");
-        let second = tray_notice("Zerus: the terminal did not open", "detail");
-        assert_ne!(first.token, second.token);
+    fn a_tray_message_replaces_the_last_under_one_token_that_nothing_routes() {
+        let (cleared, raised) = tray_delivery("Zerus: the terminal did not open", "detail");
+        assert_eq!(cleared, [TRAY_TOKEN]);
+        assert_eq!(raised.len(), 1);
+        let notice = &raised[0];
         assert_eq!(
-            (first.title.as_str(), first.body.as_str()),
-            ("Zerus: the terminal did not open", "detail")
+            (
+                notice.token.as_str(),
+                notice.title.as_str(),
+                notice.body.as_str()
+            ),
+            (TRAY_TOKEN, "Zerus: the terminal did not open", "detail")
         );
-        for notice in [&first, &second] {
-            assert!(notice.token.starts_with("zerus-tray-message:"));
-            assert!(attention::target(&notice.token).is_none());
-            assert!(!zerus_client_core::updates::is_update_token(&notice.token));
-        }
+        assert!(attention::target(TRAY_TOKEN).is_none());
+        assert!(!zerus_client_core::updates::is_update_token(TRAY_TOKEN));
     }
     use std::collections::BTreeSet;
     use zerus_client_core::attention::Tracker;

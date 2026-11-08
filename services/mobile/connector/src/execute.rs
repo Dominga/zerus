@@ -1039,8 +1039,9 @@ impl<N: Native + 'static> Connector<N> {
         Ok(Value::Object(result))
     }
 
-    /// History head indexing makes bounded native progress locally: up to 31
-    /// more reads within 2 s, while the head changes.
+    /// Full history pages make bounded native indexing progress locally: up
+    /// to 31 more reads within 2 s. A one-row metadata probe yields after its
+    /// first read so catalog counts do not monopolize the serial native queue.
     async fn history(
         &self,
         session: &str,
@@ -1055,7 +1056,8 @@ impl<N: Native + 'static> Connector<N> {
         let selected = ["before", "after", "around", "around_incoming_seq"]
             .iter()
             .any(|key| payload.get(*key).is_some());
-        if !selected {
+        let metadata_only = payload.get("limit").and_then(Value::as_u64) == Some(1);
+        if !selected && !metadata_only {
             for _ in 0..31 {
                 if !result
                     .as_object()

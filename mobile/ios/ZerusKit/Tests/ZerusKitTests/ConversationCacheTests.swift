@@ -323,6 +323,21 @@ final class ConversationCacheTests: XCTestCase {
         XCTAssertNil(fresh?.latestIncoming)
     }
 
+    func testDelayedSavedPageCannotRestoreAnOlderHistoryIntent() async throws {
+        let page = try savedPage().page(for: target)
+        var intent = 0
+        // The selected conversation and nil history window remain unchanged;
+        // an accepted latest navigation is the ownership change during cache I/O.
+        let restored = try await HistoryReadPaths.saved(current: { intent == 0 }) {
+            await Task.yield()
+            intent += 1
+            return page
+        }
+        XCTAssertNil(restored)
+        let current = try await HistoryReadPaths.saved(current: { intent == 1 }) { page }
+        XCTAssertEqual(current?.events, page.events)
+    }
+
     func testForeignScopeAndCacheFailureAreSafeMisses() async throws {
         for other in [target.with(connectionId: "other"), target.with(run: "other")] {
             let page = try await HistoryReadPaths.saved { try self.savedPage().page(for: other) }

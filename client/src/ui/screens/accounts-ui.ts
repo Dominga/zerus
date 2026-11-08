@@ -37,6 +37,24 @@ export function memberOf(a: Account, key: string | undefined, machine: string): 
   return a.members.find((m) => m.key === key) ?? a.members.find((m) => m.host === machine) ?? a.members[0];
 }
 
+export function identityFields(a: Account) {
+  const identity = a.usage.identity;
+  const seen = new Set([a.label.trim().toLowerCase()]);
+  const distinct = (value: string) => {
+    const text = value.trim(), key = text.toLowerCase();
+    if (!text || seen.has(key)) return "";
+    seen.add(key);
+    return text;
+  };
+  return {
+    name: distinct(identity.name),
+    email: distinct(identity.email),
+    organization: distinct(identity.organization),
+    plan: identity.plan,
+    signIn: identity.auth_method === "none" ? "" : identity.auth_method,
+  };
+}
+
 /** At most `max` machine chips, keeping the selected one (spec round 6); the rest show as "+N more". */
 export function visibleMembers(a: Account, selectedKey: string | undefined, max = 4): Profile[] {
   const all = a.members;

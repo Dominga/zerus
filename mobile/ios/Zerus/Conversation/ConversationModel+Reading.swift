@@ -20,7 +20,10 @@ extension ConversationModel {
             app.error = "Private read positions could not be opened. They have been preserved; unread totals remain unknown."
         }
         readPositionReady = true
-        if let target = selected?.target { restoreSavedWindow(target, navigation: navigationId) }
+        if let target = selected?.target {
+            restoreSavedWindow(target, navigation: navigationId)
+            restoreHistory(target)
+        }
         if let frame = activeFrame, selected?.target == frame.target, let presentation = frame.presentation {
             captureUnreadBoundary(frame.target, presentation.events)
         }
@@ -36,9 +39,9 @@ extension ConversationModel {
 
     func conversationViewport(_ target: Target) -> SavedConversationViewport? { readState.record(target)?.viewport }
 
-    func saveViewport(_ target: Target, eventId: String, offset: Int) {
+    func saveViewport(_ target: Target, eventId: String, offset: Int, following: Bool = false) {
         guard selected?.target == target, activeFrame?.target == target, let event = events.first(where: { $0.id == eventId }) else { return }
-        editRead { $0.viewport(target, eventId: eventId, offset: offset, cursor: event.historyCursor, epoch: event.historyEpoch) }
+        editRead { $0.viewport(target, eventId: eventId, offset: offset, cursor: event.historyCursor, epoch: event.historyEpoch, following: following) }
         retainViewport(target, cursor: event.historyCursor)
     }
 

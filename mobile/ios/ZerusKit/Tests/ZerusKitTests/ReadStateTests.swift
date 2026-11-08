@@ -22,6 +22,28 @@ final class ReadStateTests: XCTestCase {
         XCTAssertEqual(state.record(target)!.viewport, SavedConversationViewport(eventId: "incoming", offset: 24))
     }
 
+    func testLegacyViewportRemainsAnOlderReadingPosition() throws {
+        let legacy = Data(#"{"eventId":"older","offset":24,"cursor":"older-cursor","epoch":"epoch"}"#.utf8)
+        let viewport = try JSONDecoder().decode(SavedConversationViewport.self, from: legacy)
+        XCTAssertFalse(viewport.following)
+        XCTAssertEqual(viewport.eventId, "older")
+        XCTAssertEqual(viewport.cursor, "older-cursor")
+        XCTAssertEqual(viewport.epoch, "epoch")
+    }
+
+    func testFollowingViewportSurvivesPersistenceAndIdentityAliases() {
+        let state = ConversationReadState().viewed(target, ["native-recent"])
+            .viewport(target, eventId: "native-recent", offset: 7, cursor: "cursor", epoch: "epoch", following: true)
+        let restored = roundTrip(state)
+        XCTAssertEqual(restored.record(target)?.viewport, SavedConversationViewport(eventId: "native-recent", offset: 7,
+                                                                                   cursor: "cursor", epoch: "epoch", following: true))
+        let aliased = restored.supersede(target, ["native-recent": "canonical-recent"])
+        XCTAssertEqual(aliased.record(target)?.viewport, SavedConversationViewport(eventId: "canonical-recent", offset: 7,
+                                                                                 cursor: "cursor", epoch: "epoch", following: true))
+        XCTAssertEqual(aliased.record(target)?.readThrough, 0)
+        XCTAssertTrue(aliased.record(target)?.seen.contains("canonical-recent") == true)
+    }
+
     func testViewedRowsSurviveRestartWithoutCrossConversationLeak() {
         let state = ConversationReadState().viewed(target, ["incoming:1", "incoming:2"]).viewport(target, eventId: "incoming:1", offset: 30)
         let restored = roundTrip(state)

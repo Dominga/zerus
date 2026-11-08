@@ -217,15 +217,18 @@ struct ConversationView: View {
                                        boundary: unreadBoundary, ready: readReady, newer: model.hasNewer, questions: questions.count)) {
             applyContent(target: target, keys: keys, events: events, questions: questions, unreadBoundary: unreadBoundary, readReady: readReady)
         }
-        .task(id: VisibilityKey(ids: visible, readable: scenePhase == .active && follow.opened && readReady && !userScrolling)) {
+        .task(id: VisibilityKey(ids: visible, readable: scenePhase == .active && follow.opened && readReady && !userScrolling,
+                                following: follow.following && !model.hasNewer)) {
             guard scenePhase == .active, follow.opened, readReady, !userScrolling, !app.demo else { return }
             // A transient row during initial positioning or a fling is not a deliberate read.
             try? await Task.sleep(for: .milliseconds(350))
             guard !Task.isCancelled else { return }
             let ids = Set(visible.filter { $0.hasPrefix("event:") }.map { String($0.dropFirst(6)) })
             model.visibleMessages(target, ids)
-            if let first = visible.first(where: { $0.hasPrefix("event:") }) { model.saveViewport(target, eventId: String(first.dropFirst(6)), offset: 0) }
-            if visible.contains("history:earlier") && model.hasOlder && !model.olderLoading && model.olderError.isEmpty { model.loadOlder(target) }
+            if let first = visible.first(where: { $0.hasPrefix("event:") }) {
+                model.saveViewport(target, eventId: String(first.dropFirst(6)), offset: 0, following: follow.following && !model.hasNewer)
+            }
+            if !model.historyEpoch.isEmpty && visible.contains("history:earlier") && model.hasOlder && !model.olderLoading && model.olderError.isEmpty { model.loadOlder(target) }
         }
         .task(id: model.olderLoading) {
             historyProgress = false
@@ -265,7 +268,8 @@ struct ConversationView: View {
             if !loading {
                 if !model.olderError.isEmpty {
                     Text(model.olderError).font(.footnote).foregroundStyle(Theme.amber).multilineTextAlignment(.center)
-                    Button("Retry history") { model.retryHistory(target) }.disabled(model.olderLoading || !historyReason.isEmpty)
+                    Button(model.lastHistoryWasLatest ? "Retry latest messages" : "Retry history") { model.retryHistory(target) }
+                        .disabled(model.olderLoading || !model.lastHistoryWasLatest && !historyReason.isEmpty)
                 } else if model.hasOlder {
                     Button("Load earlier messages") { model.loadOlder(target) }.disabled(model.olderLoading || !historyReason.isEmpty)
                 } else if !model.historyEpoch.isEmpty && !model.historyIndexing {
@@ -321,7 +325,7 @@ struct ConversationView: View {
             HStack {
                 Spacer()
                 Button("Load newer messages") { model.loadNewer(target) }.disabled(model.olderLoading || !historyReason.isEmpty)
-                Button("Latest") { requestLatest(target: target) }.disabled(latestPending || model.olderLoading || !historyReason.isEmpty)
+                Button("Latest") { requestLatest(target: target) }.disabled(latestPending)
                 Spacer()
             }
             .font(.footnote.weight(.semibold))
@@ -364,7 +368,7 @@ struct ConversationView: View {
             .background(Color(hex: 0x2D4142), in: RoundedRectangle(cornerRadius: 16))
         }
         .buttonStyle(.plain)
-        .disabled(latestPending || (model.hasNewer && model.olderLoading))
+        .disabled(latestPending)
         .padding(16)
         .accessibilityLabel("Jump to latest messages")
         .accessibilityValue(latestPending ? "Loading latest messages" : unread?.description ?? "")
@@ -437,13 +441,8 @@ struct ConversationView: View {
     }
 
     private func requestLatest(target: Target) {
-        guard model.selected?.target == target, !latestPending, !(model.hasNewer && model.olderLoading) else { return }
-        let needsHistory = model.hasNewer
-        let reason = needsHistory ? model.historyReason(target) : ""
-        guard reason.isEmpty else {
-            notice = "Could not reach the latest messages. \(reason)"
-            return
-        }
+        guard model.selected?.target == target, !latestPending else { return }
+        let needsHistory = model.hasNewer || model.olderLoading
         latestPending = true
         Task {
             defer { latestPending = false }
@@ -499,6 +498,7 @@ private struct OpeningKey: Equatable {
 private struct VisibilityKey: Equatable {
     let ids: [String]
     let readable: Bool
+    let following: Bool
 }
 
 /// Searches loaded messages only; results never advance read state.

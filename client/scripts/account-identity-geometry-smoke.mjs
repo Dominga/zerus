@@ -1,0 +1,275 @@
+#!/usr/bin/env node
+// Capture the real Accounts identity header in an isolated Firefox profile.
+import { spawn, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import net from "node:net";
+
+const CLIENT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = resolve(CLIENT, "..");
+const PAGE = "scripts/account-identity-geometry-smoke.html";
+const HARNESS = [
+  "client/src/perf/accountIdentityGeometrySmoke.tsx",
+  "client/scripts/account-identity-geometry-smoke.html",
+  "client/scripts/account-identity-geometry-smoke.mjs",
+];
+const CASES = ["loading", "kimi", "codex", "claude", "unavailable", "claude-late"];
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const digest = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
+
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address();
+      server.close(() => resolve(port));
+    });
+  });
+}
+
+async function stop(child) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise((resolve) => child.once("exit", resolve));
+  child.kill("SIGTERM");
+  if (!await Promise.race([exited.then(() => true), pause(8000).then(() => false)])) {
+    child.kill("SIGKILL");
+    await exited;
+  }
+}
+
+class Bidi {
+  constructor(ws) {
+    this.ws = ws;
+    this.pending = new Map();
+    this.nextId = 0;
+    ws.addEventListener("message", (event) => {
+      const message = JSON.parse(event.data);
+      const request = this.pending.get(message.id);
+      if (!request) return;
+      this.pending.delete(message.id);
+      clearTimeout(request.timer);
+      if (message.error) request.reject(new Error(JSON.stringify(message)));
+      else request.resolve(message.result);
+    });
+  }
+
+  static async connect(port) {
+    let lastError;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/session`);
+      try {
+        await new Promise((resolve, reject) => {
+          ws.addEventListener("open", resolve, { once: true });
+          ws.addEventListener("error", reject, { once: true });
+          setTimeout(() => reject(new Error("BiDi open timed out")), 2000).unref();
+        });
+        const bidi = new Bidi(ws);
+        await bidi.call("session.new", { capabilities: {} });
+        return bidi;
+      } catch (error) {
+        lastError = error;
+        ws.close();
+        await pause(100);
+      }
+    }
+    throw lastError;
+  }
+
+  call(method, params = {}) {
+    return new Promise((resolve, reject) => {
+      const id = ++this.nextId;
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`${method} timed out`));
+      }, 15000);
+      this.pending.set(id, { resolve, reject, timer });
+      this.ws.send(JSON.stringify({ id, method, params }));
+    });
+  }
+
+  async evaluate(expression) {
+    const response = await this.call("script.evaluate", {
+      expression, target: { context: this.context }, awaitPromise: true, resultOwnership: "none",
+    });
+    if (response.type === "exception") throw new Error(`Browser evaluation failed: ${JSON.stringify(response)}`);
+    return response.result.value ?? response.result;
+  }
+
+  async json(expression) {
+    return JSON.parse(await this.evaluate(`(async () => JSON.stringify(await (${expression})))()`));
+  }
+
+  async viewport(width) {
+    await this.call("browsingContext.setViewport", {
+      context: this.context, viewport: { width, height: 1000 }, devicePixelRatio: 1,
+    });
+    await pause(100);
+  }
+
+  async capture(path) {
+    const { data } = await this.call("browsingContext.captureScreenshot", {
+      context: this.context, format: { type: "png" },
+    });
+    const bytes = Buffer.from(data, "base64");
+    writeFileSync(path, bytes);
+    return createHash("sha256").update(bytes).digest("hex");
+  }
+}
+
+async function waitReady(bidi) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const state = await bidi.json("document.documentElement.dataset.fixtureReady || ''");
+    if (state === "true") {
+      const failures = await bidi.json("window.accountIdentityFixture.failures()");
+      if (failures.length) throw new Error(`Fixture initialization failed: ${JSON.stringify(failures)}`);
+      return;
+    }
+    if (state === "error") throw new Error(JSON.stringify(await bidi.json("window.accountIdentityFixture.failures()")));
+    await pause(100);
+  }
+  throw new Error("Accounts fixture did not initialize");
+}
+
+function closeTo(before, after, label) {
+  if (Math.abs(before - after) > 0.02) throw new Error(`${label}: ${before} != ${after}`);
+}
+
+function checkGeometry(details, baseline, label) {
+  if (details.accountCount !== 3 || details.machineCount !== 1 || !details.ipcExpected) {
+    throw new Error(`${label}: real screen counts or unexpected startup IPC: ${JSON.stringify(details)}`);
+  }
+  if (details.mainScrollWidth > details.mainClientWidth + 1) {
+    throw new Error(`${label}: horizontal overflow ${details.mainScrollWidth} > ${details.mainClientWidth}`);
+  }
+  if (details.actions.length !== 2) throw new Error(`${label}: title actions missing`);
+  if (baseline) {
+    for (const key of ["machines", "usage"]) closeTo(details[key].top, baseline[key].top, `${label}: ${key} top`);
+    for (const key of ["title", "identity"]) closeTo(details[key].height, baseline[key].height, `${label}: ${key} height`);
+    closeTo(details.identity.bottom, baseline.identity.bottom, `${label}: header bottom`);
+  }
+}
+
+async function runCase(bidi, widthName, caseName, output) {
+  let details;
+  if (caseName === "loading") details = await bidi.json("window.accountIdentityFixture.reset()");
+  else if (caseName === "kimi") details = await bidi.json("window.accountIdentityFixture.update('kimi')");
+  else if (caseName === "codex") details = await bidi.json("window.accountIdentityFixture.select('Codex Work')");
+  else if (caseName === "claude") details = await bidi.json("window.accountIdentityFixture.select('Claude Team')");
+  else if (caseName === "unavailable") details = await bidi.json("window.accountIdentityFixture.update('unavailable')");
+  else details = await bidi.json("window.accountIdentityFixture.update('claude-late')");
+  return { details, image: `${output}/accounts-${widthName}-${caseName}.png` };
+}
+
+const args = process.argv.slice(2);
+if (args.length !== 2 || args[0] !== "--output") throw new Error("Usage: account-identity-geometry-smoke.mjs --output NEW_DIRECTORY");
+const output = resolve(args[1]);
+mkdirSync(output, { recursive: false });
+const firefox = execFileSync("sh", ["-c", "command -v firefox"], { encoding: "utf8" }).trim();
+const vite = `${CLIENT}/node_modules/.bin/vite`;
+if (!firefox || !readFileSync(vite)) throw new Error("Firefox and the client's locked Vite dependency are required");
+
+const source = {
+  commit: execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf8" }).trim(),
+  tree: execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: ROOT, encoding: "utf8" }).trim(),
+};
+const status = execFileSync("git", ["status", "--porcelain"], { cwd: ROOT, encoding: "utf8" });
+source.clean = !status;
+if (status) source.tracked_diff_sha256 = createHash("sha256").update(execFileSync("git", ["diff", "--binary"], { cwd: ROOT })).digest("hex");
+const harness = Object.fromEntries(HARNESS.map((name) => [name, digest(`${ROOT}/${name}`)]));
+harness["client/package-lock.json"] = digest(`${CLIENT}/package-lock.json`);
+
+let server, browserProcess, bidi;
+const scratch = mkdtempSync(`${tmpdir()}/zerus-account-identity-browser-`);
+try {
+  for (const name of ["home", "config", "data", "cache", "state", "runtime", "tmp", "profile"]) mkdirSync(`${scratch}/${name}`, { mode: 0o700 });
+  const env = {
+    ...process.env,
+    HOME: `${scratch}/home`, XDG_CONFIG_HOME: `${scratch}/config`, XDG_DATA_HOME: `${scratch}/data`,
+    XDG_CACHE_HOME: `${scratch}/cache`, XDG_STATE_HOME: `${scratch}/state`, XDG_RUNTIME_DIR: `${scratch}/runtime`,
+    TMPDIR: `${scratch}/tmp`, NO_AT_BRIDGE: "1", GSETTINGS_BACKEND: "memory", MOZ_HEADLESS: "1", LANG: "C.UTF-8",
+  };
+  const port = await freePort();
+  const url = `http://127.0.0.1:${port}/${PAGE}`;
+  const viteLog = openSync(`${output}/vite.log`, "w");
+  server = spawn(vite, ["--host", "127.0.0.1", "--port", String(port), "--strictPort"], {
+    cwd: CLIENT, env, stdio: ["ignore", viteLog, viteLog],
+  });
+  closeSync(viteLog);
+  let served = false;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (server.exitCode !== null) throw new Error("Vite exited before the fixture was ready");
+    try {
+      const response = await fetch(url);
+      if (response.ok) { served = true; break; }
+    } catch { /* Vite is still starting. */ }
+    await pause(100);
+  }
+  if (!served) throw new Error("Vite did not serve the Accounts fixture");
+
+  const bidiPort = await freePort();
+  const firefoxLog = openSync(`${output}/firefox.log`, "w");
+  browserProcess = spawn(firefox, [
+    "--no-remote", "--profile", `${scratch}/profile`, "--headless", "--window-size=1100,1000",
+    "--remote-debugging-port", String(bidiPort), url,
+  ], { cwd: scratch, env, stdio: ["ignore", firefoxLog, firefoxLog] });
+  closeSync(firefoxLog);
+  bidi = await Bidi.connect(bidiPort);
+  const tree = await bidi.call("browsingContext.getTree");
+  bidi.context = tree.contexts.find((item) => item.url.includes(PAGE))?.context;
+  if (!bidi.context) throw new Error("Accounts fixture context not found");
+  await waitReady(bidi);
+  const inputs = await bidi.json("window.accountIdentityFixture.inputs()");
+  const results = {};
+
+  for (const [widthName, width] of [["wide", 1100], ["narrow", 720]]) {
+    await bidi.viewport(width);
+    let baseline;
+    const captures = [];
+    for (const caseName of CASES) {
+      const { details, image } = await runCase(bidi, widthName, caseName, output);
+      checkGeometry(details, baseline, `${widthName}/${caseName}`);
+      baseline ??= details;
+      details.screenshot = image;
+      details.sha256 = await bidi.capture(image);
+      captures.push({ case: caseName, geometry: details });
+    }
+    const keyboard = await bidi.json("window.accountIdentityFixture.machineKeyboard()");
+    checkGeometry(keyboard, baseline, `${widthName}/keyboard`);
+    results[widthName] = captures;
+  }
+
+  await bidi.call("browsingContext.navigate", { context: bidi.context, url: `${url}?lang=ru`, wait: "complete" });
+  await bidi.viewport(720);
+  await waitReady(bidi);
+  let baseline;
+  const captures = [];
+  for (const caseName of ["loading", "kimi", "codex"]) {
+    const { details, image } = await runCase(bidi, "narrow-ru", caseName, output);
+    if (details.language !== "ru") throw new Error("Russian fixture did not load its catalog");
+    checkGeometry(details, baseline, `narrow-ru/${caseName}`);
+    baseline ??= details;
+    details.screenshot = image;
+    details.sha256 = await bidi.capture(image);
+    captures.push({ case: caseName, geometry: details });
+  }
+  results["narrow-ru"] = captures;
+
+  const failures = await bidi.json("window.accountIdentityFixture.failures()");
+  const calls = await bidi.json("window.accountIdentityFixture.calls()");
+  if (failures.length) throw new Error(`Fixture failures: ${JSON.stringify(failures)}`);
+  writeFileSync(`${output}/provenance.json`, `${JSON.stringify({
+    source, harness, inputs, url, firefox: execFileSync(firefox, ["--version"], { encoding: "utf8" }).trim(),
+    results, failures, ipc_calls: calls,
+  }, null, 2)}\n`);
+  console.log(`PASS ${Object.values(results).flat().length} captures; stable Machines and usage tops; full metadata; no management IPC`);
+  console.log(`${output}/provenance.json`);
+} finally {
+  if (bidi) bidi.ws.close();
+  await stop(browserProcess);
+  await stop(server);
+  rmSync(scratch, { recursive: true, force: true });
+}

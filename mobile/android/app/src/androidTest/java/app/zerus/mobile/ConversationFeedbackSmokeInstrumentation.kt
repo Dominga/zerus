@@ -31,7 +31,7 @@ class ConversationFeedbackSmokeInstrumentation : Instrumentation() {
         try {
             check(BuildConfig.DEBUG && Build.HARDWARE in setOf("ranchu", "goldfish"))
             smoke()
-            result.putString("stream", "Conversation feedback passed: visible pinned read stages, parallel opening reads in both completion orders without duplicate history, stable retained-message position, settled/failed reads, retained next-draft editing, one sending label and actionable unknown delivery. Zero mutations.\n")
+            result.putString("stream", "Conversation feedback passed: visible pinned read stages, explicitly requested history parallel to inspection in both completion orders without duplicate reads, stable retained-message position, settled/failed reads, retained next-draft editing, one sending label and actionable unknown delivery. Zero mutations.\n")
             finish(Activity.RESULT_OK, result)
         } catch (error: Throwable) {
             result.putString("stream", "Conversation feedback failed: ${error.stackTraceToString()}\n")
@@ -154,6 +154,7 @@ class ConversationFeedbackSmokeInstrumentation : Instrumentation() {
                 set(model, "setRelayOperations", mapOf(target.connectionId to setOf("history")))
                 set(model, "setMachineOperations", mapOf(MachineKey(target.connectionId, target.computerId) to setOf("history")))
                 model.open(session)
+                model.loadOlder(target)
             }
             await("both reads started while inspection and history are held") { inspectionReads.get() > 0 && historyReads.get() > 0 && text(saved) != null }
             // A catalog update during opening must not spend the serial relay queue on head probes.
@@ -215,12 +216,15 @@ class ConversationFeedbackSmokeInstrumentation : Instrumentation() {
             check(main { model.outgoing.single().status == "uncertain" })
             check(main { model.draft(target).text == "Next fixture draft" && model.sendingBlocked(target) })
 
-            // Reverse the race on a new exact conversation. A page arriving before
-            // inspection cannot verify activity or trigger another identical read.
+            // Reverse the explicitly requested history race on a new exact
+            // conversation. A page cannot verify activity or duplicate the read.
             inspection.set(CountDownLatch(1)); history.set(CountDownLatch(1))
             val beforeHistory = historyReads.get()
             val beforeInspection = inspectionReads.get()
-            main { model.open(Session(second, "Second fixture", "codex", "idle", "", "", 0, secondRaw)) }
+            main {
+                model.open(Session(second, "Second fixture", "codex", "idle", "", "", 0, secondRaw))
+                model.loadOlder(second)
+            }
             await("second opening starts both reads") { historyReads.get() > beforeHistory && inspectionReads.get() > beforeInspection }
             history.get().countDown()
             await("history precedes the held inspection") { main { model.historyComplete && !model.activityVerified && model.detailBusy } }

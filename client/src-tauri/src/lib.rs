@@ -104,8 +104,9 @@ mod speech_settings;
 mod startup_error;
 mod startup_log;
 #[cfg(feature = "live")]
-mod task_details;
 mod task_copy_review;
+#[cfg(feature = "live")]
+mod task_details;
 #[cfg(feature = "live")]
 mod task_editor;
 #[cfg(feature = "live")]

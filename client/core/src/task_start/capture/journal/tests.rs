@@ -557,17 +557,23 @@ fn abort_after_candidate_sync_can_reoffer_the_same_prepared_original() {
     const LEAF: &str = "ZERUS_TEST_TASK_PUBLICATION_BEFORE_TRACKING";
     if let Some(root) = std::env::var_os(LEAF) {
         let intent = wire::test_intent();
-        let source = Captured::read(
-            Path::new(&root),
-            &intent.binding.key.project,
-            &intent.binding.key.task,
-            &intent.binding.key.request_id,
-            &intent.binding.ui_snapshot_sha256,
-            intent.scope,
-        )
+        // The parent prepared this same fixture before spawning this leaf; a
+        // parallel fork there may still hold that lock description, so only
+        // this prepare waits for Busy, re-reading the unchanged source each
+        // time (zerus-puowk). The offer and its candidate-sync cut stay exact.
+        let mut journal = retry_busy(|| {
+            let source = Captured::read(
+                Path::new(&root),
+                &intent.binding.key.project,
+                &intent.binding.key.task,
+                &intent.binding.key.request_id,
+                &intent.binding.ui_snapshot_sha256,
+                intent.scope.clone(),
+            )
+            .unwrap();
+            Journal::prepare(source, &CheckId::fixture_initial(&intent.reconcile_id))
+        })
         .unwrap();
-        let mut journal =
-            Journal::prepare(source, &CheckId::fixture_initial(&intent.reconcile_id)).unwrap();
         journal
             .offer_with_sync(|file, directory| {
                 if !directory {

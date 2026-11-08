@@ -4853,6 +4853,20 @@ fn member_folder_with(team: &Team, member: &Member, run: &dyn Fn(&str, &[&str]) 
     // one is set (U48), else from the HEAD of the team's folder (the lead's
     // branch), never from a clone's default branch.
     let base = if team.settings.base_branch.is_empty() { "HEAD".to_owned() } else { team.settings.base_branch.clone() };
+    // Task 374 (owner, 2026-11-08): the integration line may live only in the
+    // team's integration folder; fetch its branch into the team's repository
+    // before the worktree or clone is cut from it (a clone copies its refs).
+    if !remote && !base.is_empty() && base != "HEAD" && !team.settings.integration_folder.trim().is_empty() {
+        let source = Path::new(&folder);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let known = super::super::worktrees::git(source, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{base}")], deadline).is_ok()
+            || super::super::worktrees::git(source, &["rev-parse", "--verify", "--quiet", &format!("{base}^{{commit}}")], deadline).is_ok();
+        if !known {
+            let integration = team.integration_folder();
+            super::super::worktrees::git(source, &["fetch", "--no-tags", "--quiet", &integration, &base], deadline)
+                .map_err(|error| anyhow::anyhow!("The line's branch {base} is not in {folder} and was not fetched from {integration}: {}", error.detail))?;
+        }
+    }
     let mut args: Vec<&str> = vec!["worktrees", "create", "--path", &folder, "--branch", &branch, "--destination", &destination, "--base", &base, "--json"];
     if member.folder == MemberFolder::Clone {
         args.insert(2, "--clone");
@@ -6418,7 +6432,27 @@ pub(crate) fn prepare_branch(team: &Team, task_id: u32, member_id: &str) -> Opti
         } else {
             team.settings.base_branch.clone()
         };
-        (git_bounded(&folder, &["checkout", "-b", &branch, &base]), format!("created from {base}"))
+        // Task 374 (owner, 2026-11-08): a member's separate clone has the
+        // line's branch only if it fetched it, and the line lives in the team's
+        // integration folder. Fetch it there before branching from it.
+        let known = |rev: &str| git_bounded(&folder, &["rev-parse", "--verify", "--quiet", rev]).is_ok();
+        let start = if known(&format!("refs/heads/{base}")) || known(&format!("{base}^{{commit}}")) {
+            base.clone()
+        } else {
+            let source = team.integration_folder();
+            let fetched = git_bounded(&folder, &["fetch", "--no-tags", "--quiet", &source, &base]);
+            match fetched {
+                Ok(_) => "FETCH_HEAD".to_owned(),
+                Err((_, error)) => {
+                    return Some(step(
+                        &current,
+                        "refused",
+                        format!("The line's branch {base} is not in this folder and was not fetched from {source}: {error}"),
+                    ))
+                }
+            }
+        };
+        (git_bounded(&folder, &["checkout", "-b", &branch, &start]), format!("created from {base}"))
     };
     match moved {
         Ok(_) => {}

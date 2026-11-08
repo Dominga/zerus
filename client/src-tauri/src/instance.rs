@@ -552,7 +552,108 @@ pub fn platform_service(
 /// and, on Linux, it inherits no descriptor beyond those three.
 #[cfg(any(target_os = "linux", test))]
 pub fn bounded_read(command: Command, limit: Duration) -> Option<String> {
-    bounded_read_with(command, limit, |_| {})
+    bounded_read_with(command, limit, |_| {}, children_auto_reaped)
+}
+
+/// Whether a SIGCHLD disposition reaps children without a wait: ignored, or
+/// SA_NOCLDWAIT (zerus-5zo1o).
+#[cfg(any(target_os = "linux", test))]
+fn auto_reaps(handler: libc::sighandler_t, flags: libc::c_int) -> bool {
+    handler == libc::SIG_IGN || flags & libc::SA_NOCLDWAIT != 0
+}
+
+/// Whether this process's children are reaped without a wait. A bounded read
+/// refuses then: once the kernel reaped its child, the child's PID may name
+/// another process, which must never be signalled.
+#[cfg(any(target_os = "linux", test))]
+fn children_auto_reaped() -> bool {
+    // SAFETY: a null new action only reads the current disposition into a
+    // zeroed, properly sized sigaction.
+    let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+    if unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), &mut current) } != 0 {
+        return true;
+    }
+    auto_reaps(current.sa_sigaction, current.sa_flags)
+}
+
+/// What [`settle`] does to a child, so tests can script it.
+#[cfg(any(target_os = "linux", test))]
+trait Owned {
+    fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>>;
+    fn kill(&mut self) -> io::Result<()>;
+    fn wait(&mut self) -> io::Result<std::process::ExitStatus>;
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl Owned for std::process::Child {
+    fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
+        std::process::Child::try_wait(self)
+    }
+    fn kill(&mut self) -> io::Result<()> {
+        std::process::Child::kill(self)
+    }
+    fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
+        std::process::Child::wait(self)
+    }
+}
+
+/// The most a bounded read takes from its child's output.
+#[cfg(any(target_os = "linux", test))]
+const READ_CAP: usize = 64 << 10;
+
+/// The child's whole output when it exits successfully and its output ends,
+/// both by `deadline`; otherwise None. `out` does not block, so no reader
+/// outlives the call, even while another process holds the pipe open
+/// (zerus-fp1m7): the pipe is simply closed. Only a child that `try_wait`
+/// has just reported running is signalled, then waited for: no wait has
+/// collected it, so its PID is still its own. Once waiting fails (the kernel
+/// reaped it, for example) nothing is signalled (zerus-5zo1o).
+#[cfg(any(target_os = "linux", test))]
+fn drain(
+    child: &mut impl Owned,
+    out: &mut impl Read,
+    deadline: Instant,
+    pause: Duration,
+) -> Option<Vec<u8>> {
+    let (mut text, mut ended, mut exited) = (Vec::new(), false, None);
+    let mut chunk = [0_u8; 4096];
+    loop {
+        while !ended {
+            match out.read(&mut chunk) {
+                Ok(0) => ended = true,
+                Ok(read) if text.len() + read <= READ_CAP => text.extend_from_slice(&chunk[..read]),
+                Ok(_) => {
+                    // Too much: stop the child as at the deadline.
+                    if exited.is_none() && matches!(child.try_wait(), Ok(None)) {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                    return None;
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(_) => ended = true,
+            }
+        }
+        if exited.is_none() {
+            match child.try_wait() {
+                Ok(Some(status)) => exited = Some(status),
+                Ok(None) => {}
+                Err(_) => return None,
+            }
+        }
+        match exited {
+            Some(status) if ended => return status.success().then_some(text),
+            _ if Instant::now() >= deadline => {
+                if exited.is_none() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                return None;
+            }
+            _ => std::thread::sleep(pause),
+        }
+    }
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -560,7 +661,11 @@ fn bounded_read_with(
     mut command: Command,
     limit: Duration,
     spawned: impl FnOnce(u32),
+    auto_reaped: impl FnOnce() -> bool,
 ) -> Option<String> {
+    if auto_reaped() {
+        return None;
+    }
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -578,32 +683,20 @@ fn bounded_read_with(
             Ok(())
         });
     }
+    let deadline = Instant::now() + limit;
     let mut child = command.spawn().ok()?;
     spawned(child.id());
-    let mut stdout = child.stdout.take()?;
-    let (sender, receiver) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut text = Vec::new();
-        let _ = (&mut stdout).take(64 << 10).read_to_end(&mut text);
-        let _ = sender.send(text);
+    let mut stdout = child.stdout.take();
+    // SAFETY: F_GETFL and F_SETFL on this call's own pipe descriptor.
+    let nonblocking = stdout.as_ref().is_some_and(|out| unsafe {
+        let flags = libc::fcntl(out.as_raw_fd(), libc::F_GETFL);
+        flags >= 0 && libc::fcntl(out.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) == 0
     });
-    let deadline = Instant::now() + limit;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
-            _ => {
-                // Not yet reaped, so the PID is still this child's.
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    };
-    if !status.success() {
-        return None;
-    }
-    let text = receiver.recv_timeout(Duration::from_millis(500)).ok()?;
+    let text = match stdout.as_mut().filter(|_| nonblocking) {
+        Some(out) => drain(&mut child, out, deadline, Duration::from_millis(10)),
+        // No pipe to read: end the child now, as at the deadline.
+        None => drain(&mut child, &mut io::empty(), Instant::now(), Duration::ZERO).and(None),
+    }?;
     Some(String::from_utf8_lossy(&text).into_owned())
 }
 
@@ -1634,6 +1727,175 @@ mod tests {
         assert_eq!(*asked.borrow(), expected);
     }
 
+    /// A scripted child for `settle`.
+    struct Scripted {
+        waits: VecDeque<io::Result<Option<std::process::ExitStatus>>>,
+        signalled: usize,
+        reaped: usize,
+    }
+
+    impl Owned for Scripted {
+        fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
+            self.waits.pop_front().unwrap_or(Ok(None))
+        }
+        fn kill(&mut self) -> io::Result<()> {
+            self.signalled += 1;
+            Ok(())
+        }
+        fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
+            self.reaped += 1;
+            Ok(std::os::unix::process::ExitStatusExt::from_raw(9))
+        }
+    }
+
+    /// A pipe that answers from a script, then would block (or ends).
+    struct Pipe {
+        reads: VecDeque<io::Result<Vec<u8>>>,
+        ends: bool,
+    }
+
+    impl Read for Pipe {
+        fn read(&mut self, into: &mut [u8]) -> io::Result<usize> {
+            match self.reads.pop_front() {
+                Some(Ok(bytes)) => {
+                    into[..bytes.len()].copy_from_slice(&bytes);
+                    Ok(bytes.len())
+                }
+                Some(Err(error)) => Err(error),
+                None if self.ends => Ok(0),
+                None => Err(io::ErrorKind::WouldBlock.into()),
+            }
+        }
+    }
+
+    #[test]
+    fn a_child_whose_wait_was_lost_is_never_signalled() {
+        let exited = |code: i32| -> io::Result<Option<std::process::ExitStatus>> {
+            Ok(Some(std::os::unix::process::ExitStatusExt::from_raw(code)))
+        };
+        let script = |waits: Vec<io::Result<Option<std::process::ExitStatus>>>| Scripted {
+            waits: waits.into(),
+            signalled: 0,
+            reaped: 0,
+        };
+        let pipe = |reads: Vec<&[u8]>, ends: bool| Pipe {
+            reads: reads.into_iter().map(|bytes| Ok(bytes.to_vec())).collect(),
+            ends,
+        };
+        let later = Instant::now() + Duration::from_secs(60);
+        // The kernel already reaped it (SIGCHLD ignored): ECHILD, and its old PID is not ours.
+        let mut lost = script(vec![Err(io::Error::from_raw_os_error(libc::ECHILD))]);
+        assert_eq!(
+            drain(&mut lost, &mut pipe(vec![], false), later, Duration::ZERO),
+            None
+        );
+        assert_eq!((lost.signalled, lost.reaped), (0, 0));
+        let mut lost_later = script(vec![
+            Ok(None),
+            Ok(None),
+            Err(io::Error::from_raw_os_error(libc::ECHILD)),
+        ]);
+        assert_eq!(
+            drain(
+                &mut lost_later,
+                &mut pipe(vec![], false),
+                later,
+                Duration::ZERO
+            ),
+            None
+        );
+        assert_eq!(lost_later.signalled, 0);
+        // Still running at the deadline: signalled once, then waited for.
+        let mut hung = script(vec![Ok(None)]);
+        assert_eq!(
+            drain(
+                &mut hung,
+                &mut pipe(vec![], false),
+                Instant::now(),
+                Duration::ZERO
+            ),
+            None
+        );
+        assert_eq!((hung.signalled, hung.reaped), (1, 1));
+        // Exited, and its output ended: the whole answer.
+        let mut quick = script(vec![Ok(None), exited(0)]);
+        let answer = drain(
+            &mut quick,
+            &mut pipe(vec![b"ActiveState=", b"active\n"], true),
+            later,
+            Duration::ZERO,
+        );
+        assert_eq!(answer.as_deref(), Some(&b"ActiveState=active\n"[..]));
+        assert_eq!((quick.signalled, quick.reaped), (0, 0));
+        // Exited, but another process keeps its output open: no answer by the
+        // deadline, nothing signalled and nothing left reading (zerus-fp1m7).
+        let mut held = script(vec![exited(0)]);
+        let soon = Instant::now() + Duration::from_millis(30);
+        assert_eq!(
+            drain(
+                &mut held,
+                &mut pipe(vec![b"ActiveState=active\n"], false),
+                soon,
+                Duration::from_millis(5)
+            ),
+            None
+        );
+        assert_eq!((held.signalled, held.reaped), (0, 0));
+        // A failed show answers nothing.
+        let mut failed = script(vec![exited(3 << 8)]);
+        assert_eq!(
+            drain(
+                &mut failed,
+                &mut pipe(vec![b"partial"], true),
+                later,
+                Duration::ZERO
+            ),
+            None
+        );
+        // More than the cap: the running child is stopped.
+        let mut chatty = script(vec![Ok(None), Ok(None)]);
+        let flood = vec![b'x'; 4096];
+        let mut big = Pipe {
+            reads: (0..20).map(|_| Ok(flood.clone())).collect(),
+            ends: false,
+        };
+        assert_eq!(drain(&mut chatty, &mut big, later, Duration::ZERO), None);
+        assert_eq!((chatty.signalled, chatty.reaped), (1, 1));
+    }
+
+    #[test]
+    fn a_read_returns_while_another_process_holds_the_pipe() {
+        // A background child keeps the pipe open after the shell exits.
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "(sleep 3) & printf 'ActiveState=active\\n'"]);
+        let begun = Instant::now();
+        assert_eq!(bounded_read(command, Duration::from_millis(200)), None);
+        assert!(
+            begun.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            begun.elapsed()
+        );
+    }
+
+    #[test]
+    fn an_auto_reaping_sigchld_policy_refuses_the_read_before_any_child() {
+        assert!(auto_reaps(libc::SIG_IGN, 0));
+        assert!(auto_reaps(libc::SIG_DFL, libc::SA_NOCLDWAIT));
+        assert!(!auto_reaps(libc::SIG_DFL, 0));
+        assert!(!auto_reaps(libc::SIG_DFL, libc::SA_RESTART));
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "printf answered"]);
+        assert_eq!(
+            bounded_read_with(
+                command,
+                Duration::from_secs(5),
+                |_| panic!("no child under SIG_IGN"),
+                || true
+            ),
+            None
+        );
+    }
+
     #[test]
     fn a_bounded_read_answers_kills_or_refuses() {
         let sh = |script: &str| {
@@ -1661,8 +1923,12 @@ mod tests {
         let begun = Instant::now();
         let mut pid = 0;
         assert_eq!(
-            bounded_read_with(sh("exec sleep 30"), Duration::from_millis(200), |id| pid =
-                id),
+            bounded_read_with(
+                sh("exec sleep 30"),
+                Duration::from_millis(200),
+                |id| pid = id,
+                || false
+            ),
             None
         );
         assert!(

@@ -33,6 +33,8 @@ import { animationFrames, createActivityEnd, newLocalSends } from "./activity-en
 import { replyVisible } from "../../store/viewedReply";
 import { buildTranscript, createActivityProjections, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
 import { DELETE_TEXT, DELETE_TITLE, retryReason, routeInspect } from "./local-actions";
+import { NOT_DELIVERED_HINT } from "./inbox-actions";
+import { InboxRemove, RemoveQueuedDialog, type InboxRemovePorts } from "./InboxRemove";
 import { markdownReady, markdownTree, type Inline, type MarkdownBlock } from "./markdown";
 import { activityAll, activityFlow, activityRange, measureActivityRows, activitySelectionIndexes, activitySelectionText, activityText, activityTexts, activityVirtualOffset, selectActivityAll, selectionCoversActivity } from "./activity-virtual";
 import { openExternal, openSessionFile } from "./sessionFiles";
@@ -560,6 +562,14 @@ function LocalDeleteDialog() {
   );
 }
 
+/** Remove for a not-delivered OpenCode message: the composer's view and its Rust command (zerus-5wmh.13.6). */
+const inboxPorts: InboxRemovePorts = {
+  view: () => composer.view(),
+  remove: (handle, run, conversation, messageId) => composer.inboxRemove(handle, run, conversation, messageId),
+  notify: (tone, text, sticky) => { notify(tone, text, sticky); },
+  done: () => { focusTranscript(); },
+};
+
 /** The native queue shares the outgoing Markdown/attachment renderer and its
  * guarded file-reference context, without adding sent/delivery actions. */
 export function OutgoingMessage(props: { item: ActivityItem; scope?: AttachmentScope; session?: Session }) {
@@ -594,6 +604,9 @@ function ItemBody(props: { item: ActivityItem; scope?: AttachmentScope }) {
         </div>
       </Show>
       <Show when={it().local?.actions.length}><LocalActions local={it().local!} /></Show>
+      {/* Not delivered is not a refusal: OpenCode keeps the message and runs it first; Zerus never resends it. */}
+      <Show when={it().inbox?.state === "not_delivered"}><p class="act-inbox-hint">{tr(NOT_DELIVERED_HINT)}</p></Show>
+      <Show when={it().inbox?.removable ? it().inbox : undefined}>{(item) => <InboxRemove item={item()} ports={inboxPorts} />}</Show>
     </div>
   );
 }
@@ -1122,6 +1135,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
         </div>
       </Show>
       <LocalDeleteDialog />
+      <RemoveQueuedDialog ports={inboxPorts} />
       <SessionFileDialog />
       <div class="act-scroll" ref={scroller} tabindex="-1" onContextMenu={activityMenu} onScroll={onScroll} style={{ "overflow-anchor": "none" }}
         onWheel={scrollIntent}

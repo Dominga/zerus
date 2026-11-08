@@ -105,6 +105,7 @@
   .act-stamp.failed { color: color-mix(in srgb, var(--z-color-warn) 78%, var(--z-color-text)); }
   .act-error { margin-top: 6px; font-size: var(--fs-sm); color: color-mix(in srgb, var(--z-color-warn) 78%, var(--z-color-text)); white-space: pre-wrap; }
   .act-local-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; white-space: normal; }
+  .act-inbox-hint { margin-top: 6px; font-size: var(--fs-sm); color: var(--z-color-text-muted, inherit); white-space: pre-wrap; }
   .att-chip.unavailable { color: var(--z-color-dim); }
   .act-copy { opacity: 0; transition: opacity var(--z-motion-fast); }
   .act-msg:hover .act-copy { opacity: 1; }

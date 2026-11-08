@@ -144,6 +144,10 @@ pub struct ViewRow {
     pub team_id: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub team_lead: bool,
+    /// Task 244: hgs's `reply_team_notice`: only the team's pastes opened the
+    /// reply's turn (a lead whose notices are not Full does not mark it unread).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reply_team_notice: bool,
     /// A child/forked session is never a row of its own.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub subagent: bool,
@@ -277,6 +281,9 @@ pub struct NotifyFacts {
     /// overlay sets it.
     pub review_later: bool,
     pub reply_scheduled: bool,
+    /// Task 244: hgs's `reply_team_notice`: only Zerus's team pastes opened
+    /// the reply's turn; a lead whose notices are not Full never notifies it.
+    pub reply_team_notice: bool,
     /// `schedules.recurring`, -1 when unknown.
     pub recurring_schedules: i64,
     /// `process_work.count`, -1 when unknown.
@@ -1210,6 +1217,10 @@ fn notify_facts(value: &Value, session: &Session) -> NotifyFacts {
             .get("reply_scheduled")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        reply_team_notice: value
+            .get("reply_team_notice")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         recurring_schedules: count(value, "schedules", "recurring"),
         background: session.background,
         subagents_active: session.subagents_active,
@@ -1365,6 +1376,7 @@ pub fn row(value: &Value) -> ViewRow {
             .unwrap_or_default(),
         team_id: text(value, "team_id").to_owned(),
         team_lead: value["team_lead"].as_bool().unwrap_or(false),
+        reply_team_notice: value["reply_team_notice"].as_bool().unwrap_or(false),
         subagent: !text(value, "fork_parent_id").is_empty(),
         tracked: session.tracked,
         resumable: value

@@ -332,6 +332,8 @@ struct Pass<'a, 'n> {
     now: i64,
     focused: bool,
     notice_id: &'n mut dyn FnMut() -> String,
+    /// Task 244: this row is a lead whose replies to team notices do not notify.
+    quiet_team_replies: bool,
 }
 
 impl Pass<'_, '_> {
@@ -486,10 +488,12 @@ impl Pass<'_, '_> {
                 started: None,
             };
             let previous = self.previous;
-            // Routine ticks of a recurring scheduled job are consumed.
+            // Routine ticks of a recurring scheduled job are consumed, and
+            // (task 244) a lead's replies to the team's notices unless its mode is Full.
             if muted(row)
                 || suppressed
                 || (idle && facts.reply_scheduled && facts.recurring_schedules > 0)
+                || (idle && facts.reply_team_notice && self.quiet_team_replies)
             {
                 self.notice(row, edge("", true));
             } else if idle && (!facts.reply_scheduled || facts.recurring_schedules == 0) {
@@ -693,6 +697,9 @@ impl Pass<'_, '_> {
 pub struct Tracker {
     hosts: Map<String, Value>,
     optional_questions: bool,
+    /// Task 244: how lead sessions show the team's notices: the default and
+    /// each session's own choice, keyed "<computer>\n<row key>".
+    team_notices: (String, BTreeMap<String, String>),
     /// The state changed since [`Tracker::take_changed`] last asked.
     changed: bool,
 }
@@ -702,6 +709,7 @@ impl Tracker {
         Self {
             hosts: saved,
             optional_questions: false,
+            team_notices: ("collapsed".to_owned(), BTreeMap::new()),
             changed: false,
         }
     }
@@ -711,6 +719,20 @@ impl Tracker {
     /// ones. The caller reads the setting (`notifications/optionalQuestions`).
     pub fn set_optional_questions(&mut self, on: bool) {
         self.optional_questions = on;
+    }
+
+    /// Task 244: the modes for team notices in lead sessions (`teams/leadNotices`
+    /// and `teams/leadNoticeSessions`): a reply to a turn only the team's
+    /// pastes opened notifies only where the mode is "full".
+    pub fn set_team_notice_modes(&mut self, default: &str, sessions: BTreeMap<String, String>) {
+        let default = if ["full", "collapsed", "silent"].contains(&default) { default } else { "collapsed" };
+        self.team_notices = (default.to_owned(), sessions);
+    }
+
+    /// Whether a lead's replies to team notices notify on `host`'s row `key`.
+    fn team_notices_notify(&self, host: &str, key: &str) -> bool {
+        let (default, sessions) = &self.team_notices;
+        sessions.get(&format!("{host}\n{key}")).filter(|mode| ["full", "collapsed", "silent"].contains(&mode.as_str())).unwrap_or(default) == "full"
     }
 
     pub fn state(&self) -> &Map<String, Value> {
@@ -749,8 +771,10 @@ impl Tracker {
             now,
             focused,
             notice_id,
+            quiet_team_replies: false,
         };
-        for row in host.rows.values() {
+        for (key, row) in host.rows.iter() {
+            pass.quiet_team_replies = row.team_lead && !self.team_notices_notify(host.alias, key);
             pass.session(row);
         }
         // Posted first, as Qt does (`AttentionTracker.cpp:243-245`).
@@ -1189,6 +1213,35 @@ mod tests {
         last.notify.reply_scheduled = true;
         last.notify.recurring_schedules = 0;
         assert_eq!(fixture.observe(vec![last]).raised.len(), 1);
+    }
+
+    #[test]
+    fn a_leads_replies_to_team_notices_notify_only_in_full_mode() {
+        // Task 244: Collapsed (the default) and Hidden never notify the
+        // owner of a lead's reply to a turn only team pastes opened.
+        let notice_reply = |name: &str, reply: &str, lead: bool| {
+            let mut row = replied(name, reply);
+            row.notify.reply_team_notice = true;
+            row.team_lead = lead;
+            row
+        };
+        let mut fixture = Fixture::new();
+        assert!(fixture.observe(vec![notice_reply("claude/p/lead", "rep-1", true)]).raised.is_empty());
+        // The owner's own turn still notifies.
+        assert_eq!(fixture.observe(vec![replied("claude/p/lead", "rep-2")]).raised.len(), 1);
+        // A member is not a lead: its mode does not apply.
+        assert_eq!(Fixture::new().observe(vec![notice_reply("claude/p/dev", "rep-1", false)]).raised.len(), 1);
+        // Full as the default notifies; a lead's own Hidden choice wins over it.
+        let mut full = Fixture::new();
+        full.tracker.set_team_notice_modes("full", BTreeMap::new());
+        assert_eq!(full.observe(vec![notice_reply("claude/p/lead", "rep-1", true)]).raised.len(), 1);
+        let mut own = Fixture::new();
+        own.tracker.set_team_notice_modes("full", BTreeMap::from([("\nclaude/p/lead".to_owned(), "silent".to_owned())]));
+        assert!(own.observe(vec![notice_reply("claude/p/lead", "rep-1", true)]).raised.is_empty());
+        // An unknown default reads as Collapsed.
+        let mut odd = Fixture::new();
+        odd.tracker.set_team_notice_modes("loud", BTreeMap::new());
+        assert!(odd.observe(vec![notice_reply("claude/p/lead", "rep-1", true)]).raised.is_empty());
     }
 
     #[test]

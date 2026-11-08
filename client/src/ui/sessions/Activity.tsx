@@ -1,6 +1,6 @@
 import { nativeRoute } from "./native-entry";
 import { withoutHeld } from "./held-message";
-import { tr } from "../../i18n";
+import { tr, trNoop } from "../../i18n";
 import { createActivityScroll } from "./activity-scroll";
 import { activityReadingRows, createActivityAnchor } from "./activity-anchor";
 import { ActivityHeights, activityMeasureWindow, activityOverscan, createActivityResize, syncActivityHeights } from "./activity-heights";
@@ -39,6 +39,9 @@ import { openExternal, openSessionFile } from "./sessionFiles";
 import { SessionFileDialog } from "./SessionFileDialog";
 import { captionText, statusOf } from "./SessionCard";
 import { foldedBody, noticeBar, type SystemNotice } from "./notices";
+import { NOTICE_MODES, foldNoticeTurns, sessionNoticeMode, withSessionNoticeMode, type NoticeMode } from "./leadNotices";
+import { teams, sessionIs } from "../../store/teams";
+import { settings } from "../../store/settings";
 import { MediaStrip, MediaViewerDialog, VideoMessageDialog } from "./MediaViewer";
 import { mediaReferences } from "./media";
 import { onMediaNotice, type MediaScope } from "../../store/media";
@@ -703,9 +706,42 @@ function NoticeCard(props: { item: ActivityItem; notice: SystemNotice; open: boo
   );
 }
 
+/** Task 244: a folded team notice or the lead's folded reply to one, as Qt's tool-call row. */
+function FoldedItem(props: { item: ActivityItem; open: boolean; toggle: () => void; scope?: AttachmentScope; sourceId?: string }) {
+  const it = props.item;
+  return (
+    <div class="act-tools act-folded" id={`item-${it.id}`} classList={{ open: props.open, reply: it.foldKind === "reply" }} data-folded={it.foldKind}>
+      <button class="act-tools-head" onClick={props.toggle} aria-expanded={props.open}>
+        <Icon name="chevron-right" size={12} class="chev" />
+        <b>{it.sender}</b>
+        <span class="muted ell">{it.title}</span>
+        <span class="act-time">{it.at}</span>
+      </button>
+      <Show when={props.open}>
+        <div class="act-folded-body"><For each={it.folded ?? []}>{(child) => <Item item={child} scope={props.scope} sourceId={props.sourceId} />}</For></div>
+      </Show>
+    </div>
+  );
+}
+
+/** Task 244: whether `row` is its team's lead session (the modes apply there only). */
+export function isLeadSession(row: Session | undefined): boolean {
+  if (!row) return false;
+  const team = teams.teamOf(row);
+  return !!team?.members.some((member) => member.lead && sessionIs(member.session, row.computer, row));
+}
+
+/** Task 244: the lead session's mode for team notices (its own choice, else Settings > Teams). */
+export const leadNoticeMode = (row: Session): NoticeMode => sessionNoticeMode(settings["teams/leadNoticeSessions"], row.key, settings["teams/leadNotices"]);
+export function setLeadNoticeMode(row: Session, mode: NoticeMode) {
+  void setSetting("teams/leadNoticeSessions", withSessionNoticeMode(settings["teams/leadNoticeSessions"], row.key, mode));
+}
+const NOTICE_LABEL: Record<NoticeMode, string> = { full: trNoop("Full"), collapsed: trNoop("Collapsed"), silent: trNoop("Hidden") };
+
 function Item(props: { item: TranscriptItem; scope?: AttachmentScope; sourceId?: string; postersEnabled?: boolean; expanded?: boolean; onExpanded?: (open: boolean) => void }) {
   const [open, toggleOpen] = layoutDisclosure(() => props.expanded, props.onExpanded);
   const it = props.item;
+  if (it.kind === "folded") return <FoldedItem item={it} open={open()} toggle={toggleOpen} scope={props.scope} sourceId={props.sourceId} />;
   if (it.kind === "system" && it.notice) return <NoticeCard item={it} notice={it.notice} open={open()} toggle={toggleOpen} />;
   if (it.kind === "media") return <MediaCard item={it} scope={rowScope(it, props.scope)} sourceId={props.sourceId} postersEnabled={props.postersEnabled} expanded={props.expanded} onExpanded={props.onExpanded} />;
   if (it.kind === "context") return <div class="act-label eyebrow" id={`item-${it.id}`}>{it.body}</div>;
@@ -876,7 +912,10 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
   const built = createMemo(() => {
     const target = displayTarget();
     if (target !== projectedTarget) { projection.reset(); projectedTarget = target; }
-    return projection.build(source().events(), source().transcriptSummary?.() ?? source().summary(), local());
+    const items = projection.build(source().events(), source().transcriptSummary?.() ?? source().summary(), local());
+    // Task 244: a lead session shows team notices and its replies to them as its mode says.
+    const row = s();
+    return row && !subagentOpen() && isLeadSession(row) ? foldNoticeTurns(items, leadNoticeMode(row)) : items;
   });
   createEffect(() => {
     const items = built(), loaded = source().loaded();
@@ -1260,6 +1299,15 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
           </div>
           <Show when={!source().olderDone() && source().events().length > 0}>
             <button type="button" class="btn small ghost act-read-older" disabled={source().loadingOlder()} onClick={() => source().loadOlder()}>{tr("Read earlier activity")}</button>
+          </Show>
+          {/* Task 244: how this lead session shows the team's notices and its replies to them. */}
+          <Show when={s() && !subagentOpen() && isLeadSession(s())}>
+            <label class="act-notice-mode" title={tr("How the team's notices to the lead and its replies to them show here. The lead receives them all.")}>
+              <span class="muted">{tr("Team notices")}</span>
+              <select class="field small" data-notice-mode value={leadNoticeMode(s()!)} onChange={(event) => setLeadNoticeMode(s()!, event.currentTarget.value as NoticeMode)}>
+                <For each={NOTICE_MODES}>{(mode) => <option value={mode}>{tr(NOTICE_LABEL[mode])}</option>}</For>
+              </select>
+            </label>
           </Show>
           </div>
           <Show when={view.expired}>

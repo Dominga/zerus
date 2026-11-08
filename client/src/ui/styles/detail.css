@@ -95,6 +95,12 @@
   .act-plaque-body { margin: 2px 0 0; color: var(--z-color-text); }
   .act-plaque-foot { display: flex; align-items: center; gap: 8px; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--z-color-divider); font-size: var(--fs-2xs); color: var(--z-color-muted); min-width: 0; }
   .act-plaque-foot .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  /* Task 244: a folded team notice or reply (Qt's tool-call row), and the lead's mode control. */
+  .act-folded .act-tools-head .muted { flex: 1; min-width: 0; }
+  .act-folded.reply .act-tools-head b { color: var(--z-color-accent); }
+  .act-folded-body { display: flex; flex-direction: column; gap: 8px; padding: 6px 4px 4px 18px; }
+  .act-notice-mode { display: flex; align-items: center; gap: 6px; flex: none; font-size: var(--fs-xs); }
+  .act-notice-mode select { height: 24px; padding: 0 6px; font-size: var(--fs-xs); }
   /* Task 248: Qt's media tiles (ActivityMedia: 320 x 180, rounded, the name on a dark strip, a play mark on a video). */
   .media-strip { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
   .media-tile { position: relative; flex: none; max-width: 100%; border-radius: 8px; overflow: hidden; background: #1b1f26; border: 1px solid #39404a; padding: 0; cursor: pointer; }

@@ -39,6 +39,8 @@
   "teams/attentionNotified": "{}",
   "teams/heatModes": "{}",
   "teams/hideFinished": false,
+  "teams/leadNoticeSessions": "{}",
+  "teams/leadNotices": "collapsed",
   "teams/planModes": "{}",
   "ui/catalogHideUnusedRoles": false,
   "updates/automatic": true,

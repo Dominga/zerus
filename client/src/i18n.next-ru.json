@@ -2650,5 +2650,13 @@
   "%1 of %2 phases finished; discarded drafts do not count": "Завершено фаз: %1 из %2; отклонённые черновики не считаются",
   "Hide team members": "Скрыть участников команды",
   "Show team members": "Показать участников команды",
-  "Team: %1, %2 of %3 phases": "Команда: %1, фаз %2 из %3"
+  "Team: %1, %2 of %3 phases": "Команда: %1, фаз %2 из %3",
+  "Lead's reply": "Ответ лида",
+  "How the team's notices to the lead and its replies to them show here. The lead receives them all.": "Как здесь показываются уведомления команды для лида и его ответы на них. Лид получает их все.",
+  "Team notices": "Уведомления команды",
+  "Team notices in a lead's session": "Уведомления команды в сессии лида",
+  "Collapsed shows each notice and the lead's reply to it as one folded line and never notifies you; Hidden shows neither. The lead still receives everything, and what waits for you is never hidden.": "«Свёрнуто» показывает каждое уведомление и ответ лида на него одной свёрнутой строкой и никогда не оповещает вас; «Скрыто» не показывает ни то, ни другое. Лид всё равно получает всё, а то, что ждёт вас, никогда не скрывается.",
+  "Full": "Полностью",
+  "Collapsed": "Свёрнуто",
+  "Hidden": "Скрыто"
 }

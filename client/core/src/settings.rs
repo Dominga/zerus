@@ -356,6 +356,14 @@ pub const KEYS: &[Key] = &[
     // finished" and the catalog's unused-role switch as plain flags; its heat
     // mode is per team, so the imported map holds team -> "time" | "tokens".
     key("teams/hideFinished", Kind::Flag(false)),
+    // Task 244: how a lead session shows the team's notices (Full, Collapsed
+    // by default, Hidden), and each lead session's own choice by its row key.
+    key("teams/leadNotices", Kind::Choice(&["collapsed", "full", "silent"])),
+    Key {
+        name: "teams/leadNoticeSessions",
+        kind: Kind::Text("{}"),
+        seeded: false,
+    },
     key("ui/catalogHideUnusedRoles", Kind::Flag(false)),
     Key {
         name: "teams/heatModes",

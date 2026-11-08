@@ -242,6 +242,23 @@ pub fn read_state(computer: &ComputerId, row: &ViewRow, device: &DeviceMarks) ->
     }
 }
 
+/// Task 244: a lead's reply to a turn only the team's pastes opened is read
+/// unless the lead's mode for team notices is "full": no unread mark, count
+/// or reply notification. `modes` is the default and each session's choice.
+pub fn quiet_team_reply(computer: &ComputerId, key: &str, row: &mut ViewRow, modes: &(String, BTreeMap<String, String>)) {
+    if !row.team_lead || !row.notify.reply_team_notice {
+        return;
+    }
+    let valid = |mode: &&String| ["full", "collapsed", "silent"].contains(&mode.as_str());
+    let default = Some(&modes.0).filter(valid).map_or("collapsed", String::as_str);
+    let mode = modes.1.get(&format!("{}\n{key}", computer.0)).filter(valid).map_or(default, String::as_str);
+    if mode != "full" {
+        row.unread = false;
+        row.notify.unread_reply = false;
+        row.needs_attention = crate::view::attention_needed(row.notify.needs_action, row.notify.acknowledged, row.state == "archived", false, row.notify.review_later);
+    }
+}
+
 /// Applies [`read_state`] to the fields the counts and the attention
 /// notifications read: `unread`, `needs_attention`, `notify.unread_reply`,
 /// `notify.acknowledged` and `notify.review_later`. It reads none of them,
@@ -414,6 +431,8 @@ pub fn escape(text: &str) -> String {
 pub struct Desk {
     computers: BTreeMap<ComputerId, Computer>,
     marks: DeviceMarks,
+    /// Task 244: the lead sessions' modes for team notices (default, per "<computer>\n<key>").
+    team_notices: (String, BTreeMap<String, String>),
     update_version: Option<String>,
     restart_required: bool,
 }
@@ -435,6 +454,7 @@ impl Desk {
             Change::Upsert { computer, key, row } => {
                 let mut row = row.clone();
                 overlay(computer, &mut row, &self.marks);
+                quiet_team_reply(computer, key, &mut row, &self.team_notices);
                 self.computers
                     .entry(computer.clone())
                     .or_default()
@@ -446,12 +466,14 @@ impl Desk {
             }
             Change::Replace { computer, rows } => {
                 let marks = &self.marks;
+                let modes = &self.team_notices;
                 let entry = self.computers.entry(computer.clone()).or_default();
                 entry.rows = rows
                     .iter()
                     .map(|(key, row)| {
                         let mut row = row.clone();
                         overlay(computer, &mut row, marks);
+                        quiet_team_reply(computer, key, &mut row, modes);
                         (key.clone(), row)
                     })
                     .collect();
@@ -494,8 +516,25 @@ impl Desk {
         }
         self.marks = marks;
         for (computer, state) in &mut self.computers {
-            for row in state.rows.values_mut() {
+            for (key, row) in state.rows.iter_mut() {
                 overlay(computer, row, &self.marks);
+                quiet_team_reply(computer, key, row, &self.team_notices);
+            }
+        }
+        true
+    }
+
+    /// Task 244: the lead sessions' modes for team notices; true when they
+    /// changed. A changed mode applies from the next change of a row.
+    pub fn set_team_notice_modes(&mut self, default: &str, sessions: BTreeMap<String, String>) -> bool {
+        let modes = (default.to_owned(), sessions);
+        if modes == self.team_notices {
+            return false;
+        }
+        self.team_notices = modes;
+        for (computer, state) in &mut self.computers {
+            for (key, row) in state.rows.iter_mut() {
+                quiet_team_reply(computer, key, row, &self.team_notices);
             }
         }
         true

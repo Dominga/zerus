@@ -8,6 +8,17 @@ import { connectionOf } from "./overview";
 import { childRows } from "../ui/sessions/subagents";
 import { draftKey, nameDraftKey } from "./draftKeys";
 import { tr } from "../i18n";
+import { settings } from "./settings";
+import { sessionNoticeMode } from "../ui/sessions/leadNotices";
+
+/** Task 244: a lead's reply to a turn only the team's pastes opened is not
+ * unread unless the lead's mode for team notices is Full (no mark, count or
+ * Waiting reply badge); the owner's own turns stay as they are. */
+export function quietTeamReply(computer: ComputerId, key: string, v: Pick<ViewRow, "team_lead" | "reply_team_notice">,
+  values: Record<string, unknown> = settings): boolean {
+  return !!v.team_lead && !!v.reply_team_notice
+    && sessionNoticeMode(values["teams/leadNoticeSessions"], rowId(computer, key), values["teams/leadNotices"]) !== "full";
+}
 
 // The catalog: every live session row of every computer, keyed by
 // computer + "\n" + catalog key. A batch is one reactive transaction. An
@@ -124,7 +135,7 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     caption,
     phase: phase || undefined,
     summary: text(v.summary),
-    unread: !!v.unread,
+    unread: !!v.unread && !quietTeamReply(computer, key, v),
     draft: false,
     muted: !!v.muted,
     attention,
@@ -192,7 +203,7 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     baseStatus: status,
     baseCaption: caption,
     baseAttention: attention,
-    baseUnread: !!v.unread,
+    baseUnread: !!v.unread && !quietTeamReply(computer, key, v),
     baseSummary: text(v.summary),
     baseMuted: !!v.muted,
     readReplyId: optional(v.read_reply_id),

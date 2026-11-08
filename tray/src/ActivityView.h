@@ -45,6 +45,13 @@ public:
     // The owner reconciles these local acknowledgements with arriving hooks.
     // Items: id, text, submitted_at, status, attachments (file references), error.
     void setLocalMessages(const QJsonArray &messages);
+    // WhiteWh fork, task 244: a team lead's session (`settingsKey` from
+    // LeadNotices::sessionKey; empty for any other session) shows the team's
+    // notices and its replies to them as its mode says: full, collapsed into
+    // tool-call rows (the default) or silent. A selector above the transcript
+    // changes and remembers the mode.
+    void setLeadNotices(const QString &settingsKey);
+    QString leadNoticeMode() const { return m_noticeMode; }
     void setTheme(bool dark);
     // WhiteWh fork: the user's messages as bubbles on the right.
     void setBubbles(bool bubbles) { if (bubbles == m_bubbles) return; m_bubbles = bubbles; setTheme(m_dark); render(true); }
@@ -108,6 +115,8 @@ protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
+    QString m_noticeKey, m_noticeMode = QStringLiteral("full");
+    class QComboBox *m_noticeBox = nullptr;
     void render(bool contentUpdate);
     void startRender();
     void clearDocument();

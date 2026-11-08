@@ -44,12 +44,13 @@ export function CacheChip(props: { compact: boolean }) {
             <Show when={v().cache_warning}><p class="cache-warning">{v().cache_warning}</p></Show>
             <p class="cache-detail">{v().cache_details}</p>
             <div class="cache-actions">
-              {/* Qt's Usage details: the side panel's Details tab, with the account usage (993-1000). */}
-              <button type="button" class="btn small" onClick={() => { close(); openInspector("details"); }}>{tr("Usage details")}</button>
+              {/* Qt's Usage details: the side panel's Details tab, with the account usage (993-1000).
+                  Both actions remove the focused button with the popover: focus goes back to the chip, as on Escape. */}
+              <button type="button" class="btn small" onClick={() => { close(true); openInspector("details"); }}>{tr("Usage details")}</button>
               {/* Shown with a warning only (3793); enabled by the cache rule, not Clear session's (3794). */}
               <Show when={v().cache_warning}>
                 <button type="button" class="btn small" disabled={!v().clear.cache_enabled} title={v().clear.cache_reason || USUAL_CACHE_CLEAR()}
-                  onClick={() => { close(); composer.openClear(); }}>{tr("Clear context")}</button>
+                  onClick={() => { close(true); composer.openClear(); }}>{tr("Clear context")}</button>
               </Show>
             </div>
           </div>

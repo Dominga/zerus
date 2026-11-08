@@ -200,6 +200,8 @@ mod test_context;
 /// exited before anything runs it. An existing entry is removed first, so a
 /// fixture symlink to a checked-in script is never written through.
 #[cfg(all(test, unix))]
+// On macOS only `live` tests use it; the replay build has none (zerus-tn54u).
+#[cfg_attr(not(feature = "live"), allow(dead_code))]
 pub(crate) fn write_executable(path: &std::path::Path, contents: impl AsRef<[u8]>) {
     use std::os::unix::fs::PermissionsExt;
     let name = path.file_name().expect("executable name").to_string_lossy();

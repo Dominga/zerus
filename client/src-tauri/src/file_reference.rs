@@ -15,6 +15,12 @@
 //! probe (cached per computer for [`SUPPORT_TTL`]) and `path-info`. A newer
 //! check of the same dialog ends its earlier one; at most [`REMOTE_CAP`] run
 //! across dialogs.
+//!
+//! The replay build (no `live` feature) keeps the local check and Browse…, as
+//! before. It never asks a computer: its remote commands answer as the browser
+//! replay does, unknown and unchecked (zerus-tn54u).
+// The remote half's state and limits are unused without `live`.
+#![cfg_attr(not(feature = "live"), allow(dead_code))]
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -23,7 +29,9 @@ use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+#[cfg(feature = "live")]
 use zerus_client_core::reads::{self, PathInfo, ReadError};
+#[cfg(feature = "live")]
 use zerus_client_core::ComputerId;
 
 /// How long the dialog waits for one metadata call.
@@ -139,8 +147,12 @@ pub async fn file_reference_pick(app: tauri::AppHandle) -> Result<Option<String>
     let window = crate::main_window(&app);
     let picked = tauri::async_runtime::spawn_blocking(move || {
         // The window handle is asked of the main thread: never block it here.
+        #[cfg(feature = "live")]
         let title =
             crate::native_text::render(&zerus_client_core::text!("Reference an existing file"));
+        // The replay build has no interface catalog.
+        #[cfg(not(feature = "live"))]
+        let title = "Reference an existing file";
         let mut dialog = app.dialog().file().set_title(title);
         if let Some(window) = &window {
             dialog = dialog.set_parent(window);
@@ -280,6 +292,7 @@ fn remember_support(computer: &str, supported: bool, now: Instant) {
 
 /// Whether `computer`'s hgs has `path-info`; None when the probe did not
 /// answer (not kept, so the next one asks again) or was ended.
+#[cfg(feature = "live")]
 fn support_with(
     computer: &str,
     cancel: &AtomicBool,
@@ -294,6 +307,7 @@ fn support_with(
 }
 
 /// The check in the place `slot` took before it was queued (None: too many run).
+#[cfg(feature = "live")]
 fn remote_check_with(
     slot: Option<Slot>,
     computer: &str,
@@ -328,6 +342,7 @@ fn remote_check_with(
     }
 }
 
+#[cfg(feature = "live")]
 fn remote_support_with(
     slot: Option<Slot>,
     computer: &str,
@@ -345,6 +360,7 @@ fn remote_support_with(
 
 /// Whether dialog `dialog`'s remote computer checks paths: true or false
 /// once its hgs answered the help probe, None while that is unknown.
+#[cfg(feature = "live")]
 #[tauri::command]
 pub async fn file_reference_remote_support(dialog: u64, computer: String) -> Option<bool> {
     let id = ComputerId::from(computer.as_str());
@@ -365,6 +381,7 @@ pub async fn file_reference_remote_support(dialog: u64, computer: String) -> Opt
 
 /// Dialog `dialog`'s remote existence check of `path` on `computer`; the
 /// path's form was checked in the webview.
+#[cfg(feature = "live")]
 #[tauri::command]
 pub async fn file_reference_check_remote(
     dialog: u64,
@@ -387,6 +404,27 @@ pub async fn file_reference_check_remote(
     })
     .await
     .unwrap_or(RemoteCheck::Busy)
+}
+
+/// The replay build asks no computer: unknown, as the browser replay answers.
+#[cfg(not(feature = "live"))]
+#[tauri::command]
+pub async fn file_reference_remote_support(dialog: u64, computer: String) -> Option<bool> {
+    let _ = (dialog, computer);
+    None
+}
+
+/// The replay build asks no computer: the path is inserted unchecked, as the
+/// browser replay does.
+#[cfg(not(feature = "live"))]
+#[tauri::command]
+pub async fn file_reference_check_remote(
+    dialog: u64,
+    computer: String,
+    path: String,
+) -> RemoteCheck {
+    let _ = (dialog, computer, path);
+    RemoteCheck::Unchecked
 }
 
 /// The dialog closed: its remote calls end, queued ones too, and one that
@@ -605,11 +643,14 @@ mod tests {
         assert!(!blocked.iter().any(|id| outstanding(|set| set.contains(id))));
     }
 
+    // The remote checks need `live` (zerus_client_core's reads).
     /// A computer name of its own per test: the probe answers are kept.
+    #[cfg(feature = "live")]
     fn computer() -> String {
         format!("peer-{}", dialog())
     }
 
+    #[cfg(feature = "live")]
     fn until(done: impl Fn() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(10);
         while !done() {
@@ -619,16 +660,20 @@ mod tests {
     }
 
     /// A read that answers only once it was ended, as `run_cancellable` does.
+    #[cfg(feature = "live")]
     fn blocked(cancel: &AtomicBool) -> Result<PathInfo, ReadError> {
         until(|| cancel.load(Ordering::Relaxed));
         Err(ReadError::Superseded)
     }
 
+    #[cfg(feature = "live")]
     fn running() -> usize {
         remote(|state| state.running)
     }
 
+    #[cfg(feature = "live")]
     #[test]
+    #[cfg(feature = "live")]
     fn a_computer_without_path_info_is_asked_once_and_inserts_unchecked() {
         let _turn = serial();
         let peer = computer();
@@ -653,7 +698,9 @@ mod tests {
         assert_eq!(running(), 0);
     }
 
+    #[cfg(feature = "live")]
     #[test]
+    #[cfg(feature = "live")]
     fn a_failed_probe_is_not_kept_and_inserts_unchecked() {
         let _turn = serial();
         let peer = computer();
@@ -673,7 +720,9 @@ mod tests {
         assert_eq!(probes.load(Ordering::Relaxed), 2);
     }
 
+    #[cfg(feature = "live")]
     #[test]
+    #[cfg(feature = "live")]
     fn the_answer_follows_the_path_info_reply() {
         let _turn = serial();
         let peer = computer();
@@ -704,7 +753,9 @@ mod tests {
         assert_eq!(running(), 0);
     }
 
+    #[cfg(feature = "live")]
     #[test]
+    #[cfg(feature = "live")]
     fn a_close_ends_the_dialogs_call_and_answers_superseded() {
         let _turn = serial();
         let peer = computer();
@@ -735,7 +786,9 @@ mod tests {
         assert!(remote(|state| state.reads.is_empty()));
     }
 
+    #[cfg(feature = "live")]
     #[test]
+    #[cfg(feature = "live")]
     fn a_newer_check_of_the_dialog_ends_the_earlier_one() {
         let _turn = serial();
         let peer = computer();
@@ -759,7 +812,9 @@ mod tests {
         assert!(remote(|state| state.reads.is_empty()));
     }
 
+    #[cfg(feature = "live")]
     #[test]
+    #[cfg(feature = "live")]
     fn at_most_the_cap_of_remote_calls_run_across_dialogs() {
         let _turn = serial();
         let peer = computer();
@@ -794,7 +849,9 @@ mod tests {
         assert_eq!(running(), 0);
     }
 
+    #[cfg(feature = "live")]
     #[test]
+    #[cfg(feature = "live")]
     fn probe_answers_expire_and_stay_bounded() {
         let _turn = serial();
         let peer = computer();
@@ -820,7 +877,9 @@ mod tests {
 
     // zerus-a0imb: a close while the call waits for a worker, or before it
     // arrives, starts nothing.
+    #[cfg(feature = "live")]
     #[test]
+    #[cfg(feature = "live")]
     fn a_close_while_the_call_is_queued_ends_it_before_any_call() {
         let _turn = serial();
         let peer = computer();
@@ -846,7 +905,9 @@ mod tests {
         assert!(remote(|state| state.reads.is_empty()));
     }
 
+    #[cfg(feature = "live")]
     #[test]
+    #[cfg(feature = "live")]
     fn a_call_arriving_after_its_dialog_closed_starts_nothing() {
         let _turn = serial();
         let peer = computer();
@@ -879,7 +940,9 @@ mod tests {
         assert_eq!(running(), 0);
     }
 
+    #[cfg(feature = "live")]
     #[test]
+    #[cfg(feature = "live")]
     fn closed_dialogs_are_remembered_within_a_bound() {
         let _turn = serial();
         let first = dialog();

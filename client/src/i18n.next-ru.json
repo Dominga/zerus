@@ -682,7 +682,6 @@
   "Folder filter": "Фильтр по папке",
   "Folder held by another task": "Папка занята другой задачей",
   "Folder is not a Git repository: every member works in this folder, so the policy is shared.": "Папка не является репозиторием Git: все участники работают в этой папке, поэтому политика общая.",
-  "Folder management is unavailable for this computer.": "Управление папками недоступно для этого компьютера.",
   "Folder missing": "Папка отсутствует",
   "For dark appearance": "Для тёмной темы",
   "For example /mnt, the configured mount root": "Например, /mnt, настроенный корень монтирования",
@@ -2753,5 +2752,8 @@
   "what the team delivers: every member reads it with each task": "что команда сдаёт: каждый участник читает это с каждой задачей",
   "the lead drafts it; you approve it after Create team": "его набрасывает лид; вы утверждаете его после «Создать команду»",
   "No plan yet. Ask the lead in Chat, or use the template's tasks under Planning.": "Плана пока нет. Попросите лида в чате или возьмите задачи шаблона в разделе «Планирование».",
-  "No sessions need attention": "Нет сессий, которым нужно внимание"
+  "No sessions need attention": "Нет сессий, которым нужно внимание",
+  "New team…": "Новая команда…",
+  "No sessions in this project yet.": "В этом проекте пока нет сеансов.",
+  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд"
 }

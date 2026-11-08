@@ -2519,13 +2519,16 @@ mod tests {
     fn a_crashed_instance_socket_is_claimed() {
         let dir = scratch("crashed");
         let paths = paths("zerus-test", &dir, &dir);
-        {
-            // A child forked meanwhile would keep the listener open until it execs.
-            let _tree = crate::PROCESS_TREE
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            drop(UnixListener::bind(&paths.socket).unwrap());
-        }
+        // Bound but never listening, so the file refuses connections as a
+        // crashed instance's does. A listener would not: a child that another
+        // test forks meanwhile, with or without `PROCESS_TREE`, keeps a copy
+        // listening until it execs (zerus-cqbmw).
+        let socket =
+            socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None).unwrap();
+        socket
+            .bind(&socket2::SockAddr::unix(&paths.socket).unwrap())
+            .unwrap();
+        drop(socket);
         assert!(paths.socket.exists(), "a socket file nobody listens on");
         let Claim::Claimed(claimed) =
             claim_at(&paths, None, Activation::Show, &LockInfo::own(), &fast())
@@ -2600,14 +2603,22 @@ mod tests {
         }
         let dir = scratch(fixture);
         let holder = dir.join("zci-holder");
-        let mut child = Owned({
-            // No other test forks while the copy is open for writing (ETXTBSY).
-            let _tree = crate::PROCESS_TREE
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            fs::copy("/bin/sleep", &holder).unwrap();
-            start(&holder)
-        });
+        // Shared, as every test that starts children holds it (`lib.rs`).
+        let _tree = crate::PROCESS_TREE
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // `cp` writes the copy, so this process never holds it open for
+        // writing. A child that another test forks meanwhile, with or without
+        // `PROCESS_TREE`, would keep such a descriptor until it execs, and
+        // starting the copy then fails with ETXTBSY (zerus-cqbmw).
+        let copied = Command::new("cp")
+            .arg("/bin/sleep")
+            .arg(&holder)
+            .stdin(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(copied.success(), "cp /bin/sleep: {copied}");
+        let mut child = Owned(start(&holder));
         let expected = fs::metadata(&holder).unwrap();
         let until = Instant::now() + Duration::from_secs(3);
         // Spawn completion is not the fixture's native executable observation.
@@ -2665,6 +2676,9 @@ mod tests {
         );
         // SAFETY: geteuid cannot fail.
         if unsafe { libc::geteuid() } != 0 {
+            let _tree = crate::PROCESS_TREE
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             // PID 1 can be our own readable namespace init in local CI. Use
             // an original live, non-dumpable child for the permission refusal.
             let mut unreadable = Command::new("python3")

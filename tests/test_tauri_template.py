@@ -35,5 +35,21 @@ class LaunchIdentityTest(unittest.TestCase):
         self.assertIn("tauri.windows.switch.conf.json", package)
 
 
+class RunResolvesTheProgramTest(unittest.TestCase):
+    """Task 205: npm is npm.cmd on Windows; CreateProcess needs the full name."""
+
+    def test_the_program_is_resolved_like_the_shell_does(self):
+        calls = []
+        which, call = tauri_template.shutil.which, tauri_template.subprocess.call
+        tauri_template.shutil.which = lambda name: "C:/Program Files/nodejs/npm.cmd" if name == "npm" else None
+        tauri_template.subprocess.call = lambda argv, cwd=None: calls.append(argv) or 0
+        try:
+            self.assertEqual(tauri_template.run(["npm", "--prefix", "client", "run", "tauri"]), 0)
+            self.assertEqual(tauri_template.run(["not-on-path", "x"]), 0)
+        finally:
+            tauri_template.shutil.which, tauri_template.subprocess.call = which, call
+        self.assertEqual(calls, [["C:/Program Files/nodejs/npm.cmd", "--prefix", "client", "run", "tauri"], ["not-on-path", "x"]])
+
+
 if __name__ == "__main__":
     unittest.main()

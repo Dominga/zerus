@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -53,7 +54,10 @@ def read_info(executable: Path) -> dict:
 
 def run(command: list[str], cwd: Path = ROOT) -> int:
     print("+ " + " ".join(command), flush=True)
-    return subprocess.call(command, cwd=cwd)
+    # Task 205: on Windows npm is npm.cmd, which CreateProcess does not find
+    # by its bare name; resolve it the way the shell would.
+    program = shutil.which(command[0]) or command[0]
+    return subprocess.call([program, *command[1:]], cwd=cwd)
 
 
 def build() -> int:

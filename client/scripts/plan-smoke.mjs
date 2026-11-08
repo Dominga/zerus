@@ -8,7 +8,7 @@
 // headless Chrome of its own (a new, empty profile under the output folder),
 // drives it over CDP only (Page.captureScreenshot; no OS input, no screen
 // capture), and closes both. No CLI, session or owner data is opened.
-//   node scripts/plan-smoke.mjs <output folder> [chrome.exe] [plan|side-panel|activity-notices|agent-media]
+//   node scripts/plan-smoke.mjs <output folder> [chrome.exe] [plan|side-panel|activity-notices|agent-media|subagent-card]
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -67,15 +67,17 @@ try {
     ? { width: 440, height: 1000, deviceScaleFactor: 1, mobile: false }
     : page === "activity-notices" ? { width: 760, height: 1100, deviceScaleFactor: 1, mobile: false }
     : page === "agent-media" ? { width: 760, height: 1000, deviceScaleFactor: 1, mobile: false }
+    : page === "subagent-card" ? { width: 760, height: 520, deviceScaleFactor: 1, mobile: false }
     : { width: 1180, height: 900, deviceScaleFactor: 1, mobile: false });
-  const cases = page === "agent-media" ? [["media-dark", "skin=whitewh-dark"], ["media-light", "skin=whitewh-light"], ["media-viewer-dark", "skin=whitewh-dark&viewer=1"]]
+  const cases = page === "subagent-card" ? [["subagents-dark", "skin=whitewh-dark"], ["subagents-light", "skin=whitewh-light"], ["subagents-confirm-dark", "skin=whitewh-dark&confirm=1"]]
+    : page === "agent-media" ? [["media-dark", "skin=whitewh-dark"], ["media-light", "skin=whitewh-light"], ["media-viewer-dark", "skin=whitewh-dark&viewer=1"]]
     : page === "activity-notices" ? [["activity-dark", "skin=whitewh-dark"], ["activity-light", "skin=whitewh-light"]] : page === "side-panel" ? [
     ["sections-dark", "skin=whitewh-dark"], ["sections-light", "skin=whitewh-light"], ["sections-folded-dark", "skin=whitewh-dark&fold=1"],
     ["tabs-dark", "skin=zerus-dark"], ["sections-finished-dark", "skin=whitewh-dark&finished=1&tasks=1"], ["tabs-finished-dark", "skin=zerus-dark&finished=1"],
   ] : [
     ["graph-dark", "mode=graph"], ["board-dark", "mode=board"], ["layers-dark", "mode=layers"],
     ["graph-light", "mode=graph&skin=whitewh-light"], ["board-light", "mode=board&skin=whitewh-light"], ["layers-light", "mode=layers&skin=whitewh-light"],
-    ["graph-tester", "mode=graph&member=tester"],
+    ["graph-tester", "mode=graph&member=tester"], ["graph-drawers-dark", "mode=graph&drawers=1"], ["graph-drawers-light", "mode=graph&drawers=1&skin=whitewh-light"],
   ];
   for (const [name, query] of cases) {
     await cdp.send("Page.navigate", { url: `http://127.0.0.1:${port}/scripts/${page}-smoke.html?${query}` });
@@ -87,7 +89,9 @@ try {
     if (!title.endsWith(": ready")) throw new Error(`${name}: the page never said it was ready (${title})`);
     await sleep(600);
     const errors = (await cdp.send("Runtime.evaluate", {
-      expression: page === "agent-media"
+      expression: page === "subagent-card"
+        ? "JSON.stringify({rows: document.querySelectorAll('.qcard-subagent').length, buttons: [...document.querySelectorAll('.qcard-actions button')].map((b) => b.textContent)})"
+        : page === "agent-media"
         ? "JSON.stringify({tiles: [...document.querySelectorAll('.media-tile')].map((e) => e.dataset.media + ': ' + (e.querySelector('.media-note')?.textContent ?? 'shown')), viewer: document.querySelector('dialog.media-viewer[open] h2')?.textContent ?? ''})"
         : page === "activity-notices"
         ? "JSON.stringify([...document.querySelectorAll('.act-msg')].map((e) => e.className.replace('act-msg ', '') + ': ' + (e.querySelector('header b')?.textContent ?? '')))"

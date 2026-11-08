@@ -896,3 +896,25 @@ describe("a confirmed decision leaves at once (task 107)", () => {
     expect(decided({ kind: "decide_proposal", proposal: "p1", accept: true, expected_hash: "h1" }, "t3")).toEqual([]);
   });
 });
+
+// Task 198 (W3): Allow and Deny never fail silently: a card without the
+// question's hash or its answer ids says why (Qt TeamWaitingAnswer C4).
+describe("a permission that cannot be answered says why (task 198)", () => {
+  it("names the missing hash, the missing answer ids, or nothing when it can answer", async () => {
+    const noIds = fake(answerTeam({ members: [member({ id: "lead", role: "Lead", lead: true }), member({ id: "backend", permission: { ...QUESTION, answer: undefined } })] }));
+    const row = new WaitingAnswer(answerItems().permission, noIds.port, "", () => {});
+    await row.open();
+    expect(row.permissionBlocked()).toBe("This hgs sends no answer ids for the question; answer it in the session.");
+    expect(await row.answerPermission(true)).toBeUndefined();
+    expect(noIds.sent).toEqual([]);
+    expect(row.notice).toBe("This hgs sends no answer ids for the question; answer it in the session.");
+    const noHash = fake(answerTeam({ members: [member({ id: "lead", role: "Lead", lead: true }), member({ id: "backend", permission: { ...QUESTION, question_hash: "" } })] }));
+    const hashless = new WaitingAnswer(answerItems().permission, noHash.port, "", () => {});
+    await hashless.open();
+    expect(hashless.permissionBlocked()).toBe("This hgs sends no question hash in status; answer it in the session.");
+    const fine = fake(answerTeam());
+    const ok = new WaitingAnswer(answerItems().permission, fine.port, "", () => {});
+    await ok.open();
+    expect(ok.permissionBlocked()).toBe("");
+  });
+});

@@ -876,7 +876,10 @@ export interface CardView { heading: Text; progress: Text | null; pending: Text 
   page: number; forms: FormView[]; status: Text; status_error: boolean; available: boolean; locked: boolean;
   /** Only Terminal can answer it: the options are a plain list and Open Terminal is the primary action. */
   read_only: boolean; review: boolean; created_at: number;
-  submit: ButtonView; approve: ButtonView; deny: ButtonView; skip: ButtonView; previous: ButtonView; next: ButtonView; retry: boolean; skip_tip: Text; retry_tip: Text }
+  submit: ButtonView; approve: ButtonView; deny: ButtonView;
+  /** Task 198 (W5): a subagent card's "Allow all, don't ask again" and the subagents it would start. */
+  always?: ButtonView; subagents?: { kind: string; model: string; effort: string; task: string }[];
+  skip: ButtonView; previous: ButtonView; next: ButtonView; retry: boolean; skip_tip: Text; retry_tip: Text }
 /**
  * `revision` grows when the card is built again (a new card, a changed form,
  * a restored answer): the review starts again and the fields reset. `epoch`
@@ -1053,6 +1056,12 @@ export interface TeamsOut {
 export interface TeamSessionView { host: string; name: string; run_id: string; conversation_id: string }
 
 export interface TeamListedMember { id: string; role: string; agent: string; state: string; lead: boolean; session: TeamSessionView | null }
+
+/** Task 198: one feed event (core FeedEvent), its feed (core FeedView) and the lead's inbox (core InboxView). */
+export interface TeamFeedEvent { seq: number; at: number; kind: string; detail: unknown }
+export interface TeamFeedView { team: string; events: TeamFeedEvent[]; more: boolean; capped: boolean }
+export interface TeamInboxItem { kind: string; member: string; task: number | null; summary: string; since: number; command: string; detail: unknown }
+export interface TeamInboxView { team: string; items: TeamInboxItem[]; truncated: boolean }
 
 export interface TeamSummary {
   id: string; name: string; status: string; project: string; folder: string; plan_mode: string; lead: string;

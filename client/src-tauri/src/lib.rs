@@ -2075,6 +2075,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         processes::processes_stop,
         composer::questions::question_submit,
         composer::questions::question_decide,
+        composer::questions::question_always,
         composer::questions::question_skip,
         composer::questions::question_cold,
         updates::updates_view,

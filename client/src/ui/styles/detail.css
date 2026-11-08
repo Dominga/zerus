@@ -542,6 +542,11 @@
 .qcard-head > svg { flex: none; }
 .qcard-title { font-weight: 600; }
 .qcard-dim, .qcard-mode { color: var(--z-color-muted); font-size: 11px; }
+/* Task 198 (W5): a subagent card's rows (Qt questionSubagent). */
+.qcard-subagents { display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow-y: auto; }
+.qcard-subagent { padding: 7px 10px 8px; border: 1px solid var(--z-color-card-border); border-radius: 8px; background: var(--z-color-card); }
+.qcard-subagent-top { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.qcard-subagent-task { margin-top: 3px; color: var(--z-color-text-2); font-size: var(--fs-sm); user-select: text; }
 .qcard-head .qcard-dim { flex: none; }
 .qcard-page { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
 .qcard-scroll { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; min-height: 40px; }

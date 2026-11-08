@@ -2064,6 +2064,7 @@ class PullRequestRunCancellationTests(unittest.TestCase):
         condition = field(job(text, "native"), "if")
         opt_in = "contains(github.event.pull_request.labels.*.name, 'native-agent-hint')"
         self.assertIn(opt_in, condition)
+        per_pr = rendered(group, self.event("pull_request", action="synchronize"))
         for action, label, opted, cancels, runs in [
             ("synchronize", None, True, True, True),
             ("labeled", "native-agent-hint", True, True, True),
@@ -2075,6 +2076,12 @@ class PullRequestRunCancellationTests(unittest.TestCase):
                 github = self.event("pull_request", action=action, label=label)
                 self.assertIs(rendered(cancel, github), cancels)
                 self.assertEqual(bool(github_expression(condition.replace(opt_in, str(opted)), github)), runs)
+                # A newer run replaces a pending one in its group even without
+                # cancellation: another label's run stays out of the PR's group,
+                # so a new head's run waiting there is never displaced (zerus-b8zze.1).
+                self.assertEqual(rendered(group, github) == per_pr, cancels)
+        self.assertEqual(rendered(group, self.event("pull_request", action="labeled", label="documentation")),
+                         "agent-hint-run-4242")
         dispatch = self.event("workflow_dispatch")
         self.assertIs(rendered(cancel, dispatch), False)
         self.assertTrue(github_expression(condition.replace(opt_in, "False"), dispatch))

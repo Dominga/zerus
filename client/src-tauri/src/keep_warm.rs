@@ -85,6 +85,8 @@ impl Worker {
                         attachments: Vec::new(),
                         agent_id: None,
                         expected_compaction_id: None,
+                        // A keepalive is never held by hgs for later.
+                        queue_when_unconfirmed: false,
                     },
                 ))
             }),

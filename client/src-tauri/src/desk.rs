@@ -2764,6 +2764,37 @@ mod tests {
         }
     }
 
+    /// zerus-5wmh.13.15: the menu every platform's tray composes (Linux's
+    /// StatusNotifier menu, macOS's menu bar and Windows' notification-area
+    /// menu all lay out the core's entries with this Bar) ends with Qt's
+    /// Refresh before Quit, once, and choosing it is MenuAction::Refresh
+    /// (`TrayMenu.cpp:241-242`).
+    #[test]
+    fn every_platforms_tray_offers_refresh_before_quit_once() {
+        let mut bar = Bar::default();
+        let items = bar.layout(&zerus_client_core::menubar::Desk::default().menu());
+        let texts: Vec<&str> = items
+            .iter()
+            .map(|item| match item {
+                Item::Action { text, .. } | Item::Label { text, .. } => text.as_str(),
+                Item::Separator => "-",
+            })
+            .collect();
+        assert_eq!(
+            texts[texts.len() - 3..],
+            ["-", "Refresh", "Quit"],
+            "{texts:?}"
+        );
+        assert_eq!(texts.iter().filter(|text| **text == "Refresh").count(), 1);
+        let refresh = &items[items.len() - 2];
+        assert!(matches!(refresh, Item::Action { .. }));
+        assert_eq!(bar.action(id(refresh)), Some(MenuAction::Refresh));
+        assert_eq!(
+            bar.action(id(&items[items.len() - 1])),
+            Some(MenuAction::Quit)
+        );
+    }
+
     /// The owner's 0.48.0 menu: Open Zerus, one line per computer, Quit; no
     /// session rows and no "Open in" (nothing a click could open).
     #[test]

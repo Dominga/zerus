@@ -313,6 +313,10 @@
   .cmp-actions { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 8px 6px 6px; }
   .cmp-files { flex: none; display: inline-flex; gap: 2px; }
   .cmp-attach { width: 32px; height: 32px; }
+  /* Reference an existing file (FileReferenceDialog.tsx): the path field and Browse… in one row. */
+  .file-reference-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+  .file-reference-row .field { flex: 1; min-width: 0; }
+  .file-reference .dlg-detail.error { color: var(--z-color-danger); }
   .cmp-status { font-size: var(--fs-xs); color: var(--z-color-dim); }
   .cmp-model { gap: 4px; max-width: 330px; font-size: var(--fs-xs); }
   /* The status line's colours (MessageComposer updateControls 1224-1226): an

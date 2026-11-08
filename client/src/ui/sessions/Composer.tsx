@@ -1,6 +1,6 @@
 import { replaceText } from "../lib/text-edit";
 import { TextArea } from "../lib/TextField";
-import { Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
+import { Show, Suspense, createEffect, createMemo, createSignal, lazy, on, onCleanup, onMount } from "solid-js";
 import { createVoice, voicePort } from "../../store/voice";
 import { VoiceToolbar, VoicePreview } from "./VoiceControls";
 import { pageHidden } from "../../store/visibility";
@@ -26,6 +26,9 @@ import { focusTranscript, following, jumpToLatest, unseen } from "./Activity";
 import type { ChipTone } from "../../types";
 import { tr } from "../../i18n";
 import { trText } from "../../text";
+import { machineCards } from "../../store/machines";
+import type { ReferenceTarget } from "./FileReferenceDialog";
+import { sameDraft, styleOfPlatform, withReference, type DraftBinding } from "./file-reference";
 
 // The message composer (Qt MessageComposer, 300-366), after the mockup's
 // structure: an edge grip, the 34 px toolbar, the editor (76-720 px) and the
@@ -41,6 +44,8 @@ import { trText } from "../../text";
 const EDITOR = { initial: 76, min: 76, max: 720 };
 const HEIGHT_KEY = "zerus-client-editor-height";
 const savedHeight = (() => { try { return Number(localStorage.getItem(HEIGHT_KEY)) || 0; } catch { return 0; } })();
+// Reference an existing file loads with its first use (zerus-5wmh.13.5).
+const FileReferenceDialog = lazy(() => import("./FileReferenceDialog").then((m) => ({ default: m.FileReferenceDialog })));
 const [editorHeight, setEditorHeightRaw] = createSignal(savedHeight >= EDITOR.min ? Math.min(EDITOR.max, savedHeight) : EDITOR.initial);
 const setEditorHeight = (h: number) => {
   const v = Math.round(Math.max(EDITOR.min, Math.min(EDITOR.max, h)));
@@ -163,6 +168,29 @@ export function Composer() {
   const voice = createVoice(voicePort);
   onCleanup(() => { void voice.close(); });
   const child = () => !!v()?.subagent;
+  // Reference an existing file (zerus-5wmh.13.5): bound to the draft it opened on.
+  const [reference, setReference] = createSignal<DraftBinding & { target: ReferenceTarget }>();
+  const openReference = () => {
+    const view = v(), session = s();
+    if (!view || composer.locked()) return;
+    const card = machineCards[session.computer];
+    setReference({ handle: view.handle, key: view.key, epoch: view.text_epoch, target: {
+      local: session.computer === "", machine: session.machine, host: session.computer, style: styleOfPlatform(card?.platform) } });
+  };
+  /**
+   * The sentence goes in as an ordinary edit, only into the draft the dialog
+   * opened on: the same composer and text, and no send, attach or remove
+   * under way. Otherwise nothing is inserted, as Qt's current() check.
+   */
+  const insertReference = (bound: DraftBinding, sentence: string): string | undefined => {
+    if (!sameDraft(composer.view(), bound, composer.locked())) return undefined;
+    const selection = composer.selection();
+    const placed = withReference(composer.text(), selection.start, selection.end, sentence);
+    if (!placed) return tr("Message exceeds 64 KiB.");
+    composer.input(placed.text, placed.cursor, placed.cursor);
+    requestAnimationFrame(() => { if (!editor.isConnected) return; editor.focus(); editor.setSelectionRange(placed.cursor, placed.cursor); });
+    return undefined;
+  };
   const online = () => !computerOffline(s().computer);
   const details = createMemo(() => detailsFor(s(), online(), followedFor(s().key)));
   createEffect(() => {
@@ -320,8 +348,12 @@ export function Composer() {
           <button type="button" class="icon-btn cmp-attach" disabled={!v() || composer.locked() || !v()!.attachments_available} aria-label={tr("Attach files to message")}
             title={v()?.attachments_available === false ? v()!.attachments_reason : ATTACH()}
             onClick={() => { void composer.attachFiles(); }}><Icon name="paperclip" size={17} /></button>
-          <button type="button" class="icon-btn cmp-attach" disabled aria-label={tr("Reference an existing file")} title={tr("Arrives with file references.")}><Icon name="file-text" size={16} /></button>
+          <button type="button" class="icon-btn cmp-attach cmp-reference" disabled={!v() || composer.locked()} aria-label={tr("Reference an existing file")}
+            title={tr("Reference an existing file")} onClick={openReference}><Icon name="file-text" size={16} /></button>
         </span>
+        <Show when={reference()} keyed>{(bound) => (
+          <Suspense><FileReferenceDialog target={bound.target} insert={(sentence) => insertReference(bound, sentence)} close={() => setReference(undefined)} /></Suspense>
+        )}</Show>
         <Show when={status().text}>
           <span class="cmp-status ell" classList={{ error: status().error, waiting: !status().error && !!v()?.waiting }} title={statusDetail()} aria-label={status().text}>{status().text}</span>
         </Show>

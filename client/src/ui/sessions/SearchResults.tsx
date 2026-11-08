@@ -1,6 +1,6 @@
-import { For, Show, createEffect, createMemo, createSignal, on } from "solid-js";
+import { For, Show, createEffect, createMemo, on } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
-import { contentSearch, searchItems, searchStatus, activateSearchItem } from "../../store/contentSearch";
+import { contentSearch, searchItems, searchStatus, activateSearchItem, searchCursor as current, setSearchCursor as setCurrent } from "../../store/contentSearch";
 import { search, selectedKey } from "../../store/ui";
 import { Icon } from "../lib/icons";
 import { AgentBadge, MachineBadge } from "./SessionCard";
@@ -10,14 +10,18 @@ import { SearchHighlight } from "./SearchHighlight";
 import { tr } from "../../i18n";
 export function SearchResults() {
   let element: HTMLDivElement | undefined;
-  const [current, setCurrent] = createSignal("");
   const list = createVirtualizer({ get count() { return searchItems().length; }, getScrollElement: () => element?.isConnected ? element : null,
     estimateSize: (index) => searchItems()[index]?.found ? 90 : 64, gap: 2, getItemKey: (index) => searchItems()[index]?.id ?? index, overscan: 6 });
   const virtualRows = createMemo(() => list.getVirtualItems());
   const keys = createMemo(() => virtualRows().map((row) => String(row.key)), [] as string[], { equals: (a, b) => a.length === b.length && a.every((id, index) => id === b[index]) });
   const positions = createMemo(() => new Map(virtualRows().map((row) => [String(row.key), row])));
   const byId = createMemo(() => new Map(searchItems().map((item) => [item.id, item])));
-  createEffect(on(search, () => { setCurrent(""); element?.scrollTo({ top: 0 }); }));
+  createEffect(on(search, () => { element?.scrollTo({ top: 0 }); }));
+  // Next and previous session (window-commands.ts) choose a row from outside the list.
+  createEffect(on(current, (id) => {
+    const index = id ? searchItems().findIndex((item) => item.id === id) : -1;
+    if (index >= 0) list.scrollToIndex(index, { align: "auto" });
+  }, { defer: true }));
   createEffect(on(() => searchItems().map((item) => `${item.id}:${!!item.found}`).join("|"), () => {
     list.measure();
     // Existing nodes can retain their size when new results arrive. Re-measure

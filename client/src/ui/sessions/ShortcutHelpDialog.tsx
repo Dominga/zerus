@@ -3,6 +3,7 @@ import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import { closeShortcutHelp, customizeShortcutHelp, shortcutHelpOrigin } from "../../store/goTo";
 import { filterShortcutRows, shortcutHelpRows } from "./shortcutHelp";
 import { Icon } from "../lib/icons";
+import { terminalRule } from "../../store/shortcuts";
 import { tr } from "../../i18n";
 
 export function ShortcutHelpDialog() {
@@ -34,8 +35,9 @@ export function ShortcutHelpDialog() {
               </section>
             )}</For>
           </div>
+          <p class="hint shortcut-help-terminal">{terminalRule()} {tr("Chords marked ✓ also work while Terminal has focus.")}</p>
         </div>
-        <div class="dlg-foot"><span class="hint">{tr("Chords marked ✓ also work while Terminal has focus.")}</span><span class="spacer" /><button class="btn" data-initial onClick={customizeShortcutHelp}>{tr("Customize…")}</button></div>
+        <div class="dlg-foot"><span class="spacer" /><button class="btn" data-initial onClick={customizeShortcutHelp}>{tr("Customize…")}</button></div>
       </dialog>
     </Show>
   );

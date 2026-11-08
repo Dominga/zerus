@@ -1038,6 +1038,39 @@ impl<'a> Index<'a> {
         Ok(())
     }
 
+    /// The Done tasks the phone's Done page is chosen from (zerus-cg5h.23),
+    /// from their rows: each one's UUID, when it entered Done and the session
+    /// it was sent to. None when the index may not answer (`placeable`, after
+    /// checking every task file's stamp) or a row lacks them; the store then
+    /// reads every task as before.
+    pub(super) fn done_entries(&mut self) -> Outcome<Option<Vec<zerus_replica::DoneEntry>>> {
+        self.check_files()?;
+        if !self.placeable()? {
+            return Ok(None);
+        }
+        let mut query = self.db.prepare_cached("SELECT uuid, row FROM tasks WHERE done = 1 AND version IS NOT NULL")?;
+        let rows = query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))?;
+        let mut entries = Vec::new();
+        for row in rows {
+            let (uuid, row) = row?;
+            let Some(row) = row.and_then(|row| serde_json::from_str::<Value>(&row).ok()) else {
+                return Ok(None);
+            };
+            let Some(at) = row["stage_at"].as_i64() else {
+                return Ok(None);
+            };
+            let sent = match &row["session"] {
+                Value::Null => None,
+                session => match serde_json::from_value::<SessionKey>(session.clone()) {
+                    Ok(session) => Some(session),
+                    Err(_) => return Ok(None),
+                },
+            };
+            entries.push(zerus_replica::DoneEntry { at, uuid, sent });
+        }
+        Ok(Some(entries))
+    }
+
     /// The loadable tasks of `stage` in (rank, UUID) order.
     fn stage_order(&self, stage: Stage) -> Outcome<Vec<zerus_replica::Placed>> {
         let mut query = self

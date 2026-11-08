@@ -4472,7 +4472,10 @@ computer as `hgs task mobile-send --json` and `mobile-cancel --json`, which do
 what `send` and `cancel` do and answer only the task's stage (a refusal says
 `"uncertain": true` when the prompt was pasted but could not be recorded);
 `hgs task mobile-done --json` answers a page of at most 50 Done tasks, newest
-first, with how many there are and how many from the last 7 days. See
+first, with how many there are and how many from the last 7 days. It chooses
+the page from the task index while the index may place tasks (see the task
+index below) and reads only the page's tasks; otherwise it reads every task as
+before. See
 `services/mobile/relay/README.md`.
 
 The phone apps edit only tasks at schema 2 or below, and none of their edits

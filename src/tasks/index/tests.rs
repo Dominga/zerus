@@ -1760,3 +1760,58 @@ fn task_file_checks_never_postpone_a_due_project_version_refresh() {
     let actual = index.live_inventory().unwrap();
     assert_eq!(actual, store.live_inventory().unwrap().0, "task-only checking renewed the project-version clock");
 }
+
+/// Sends, reports and accepts a new task through `session` at time `at`.
+fn accepted(store: &ProjectStore, id: &str, session: &SessionKey, at: i64) -> TaskDoc {
+    let mut task = new_task(store, id, Stage::Todo, "V", &format!("Done {id}"));
+    task.record_send(session, &format!("request-{id}"), &Actor::Agent(session.clone()), at).unwrap();
+    task.record_report("Result", &Actor::Agent(session.clone()), at).unwrap();
+    task.set_stage(Stage::Done, &Actor::Person, at).unwrap();
+    aged_save(store, &mut task);
+    task
+}
+
+#[test]
+fn the_phone_s_done_page_comes_from_the_index_as_from_the_documents() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let api = SessionKey { machine: "m1".into(), session: "codex/api".into(), session_id: "launch_id:api".into() };
+    let web = SessionKey { machine: "m1".into(), session: "codex/web".into(), session_id: "launch_id:web".into() };
+    for n in 0..30 {
+        let session = if n % 3 == 0 { &web } else { &api };
+        accepted(&store, &format!("T-d{n:05}"), session, 1_000 + (n % 7) * 100);
+    }
+    write_plain(&store, &new_task(&store, "T-live01", Stage::Todo, "V", "Still to do"));
+    let mut index = Index::open(&store).unwrap();
+    let named_only = SessionKey { session_id: String::new(), ..api.clone() };
+    for session in [None, Some(&api), Some(&named_only), Some(&web)] {
+        for limit in [1, 7, 50] {
+            let mut before = None;
+            loop {
+                let entries = index.done_entries().unwrap().unwrap();
+                let page = store.done_page_of(entries, before.clone(), limit, 1_300, session).unwrap();
+                assert_eq!(page, store.done_page(before.clone(), limit, 1_300, session).unwrap(), "{session:?} {limit}");
+                before = page.next.clone();
+                if before.is_none() {
+                    break;
+                }
+            }
+        }
+    }
+    // Choosing the page decodes no task: it stamps each task file once (for
+    // writers without the journal), as the store's inventory did, without
+    // its cache; the page reads only its own documents.
+    let (_, decoded, stamped) = counted(|| index.done_entries().unwrap().unwrap());
+    assert_eq!((decoded, stamped), (0, 3 * 31));
+    let entries = index.done_entries().unwrap().unwrap();
+    let loads = zerus_replica::load_count_for_test();
+    store.done_page_of(entries, None, 7, 1_300, None).unwrap();
+    assert_eq!(zerus_replica::load_count_for_test() - loads, 7);
+    // Uncertified or holding a damaged task: the store answers.
+    index.db.execute("INSERT OR REPLACE INTO meta VALUES('uncertified', '1')", []).unwrap();
+    assert!(index.done_entries().unwrap().is_none());
+    drop(index);
+    fs::write(store.dir().join("tasks").join(format!("{}.loro", ids::new_uuid())), b"not a task").unwrap();
+    let mut index = Index::open(&store).unwrap();
+    assert!(index.done_entries().unwrap().is_none());
+}

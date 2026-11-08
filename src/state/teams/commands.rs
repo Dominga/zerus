@@ -4631,6 +4631,19 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
     }
 }
 
+/// Task 353 (owner, 2026-11-08): the agents of the standing rule a scratch team
+/// was created under, when this team is such a scratch team; None for a normal
+/// team (its lead stays carded).
+fn scratch_roster_agents(store: &Store, team: &Team) -> anyhow::Result<Option<Vec<String>>> {
+    let (Some(link), false) = (&team.scratch_parent, team.scratch_rule.is_empty()) else {
+        return Ok(None);
+    };
+    let Some(parent) = store.load(&link.team)? else {
+        return Ok(None);
+    };
+    Ok(super::scratch::standing(&parent).map(|rule| rule.agents))
+}
+
 /// U26: fills the verified roster word for a lead caller, or refuses. The
 /// verifier is a parameter so a test can use a fixture events database.
 fn check_roster_word(
@@ -4639,10 +4652,31 @@ fn check_roster_word(
     input: &Value,
     filled: &mut Value,
     caller: &Actor,
+    rule_agents: Option<&[String]>,
     verify: impl Fn(&Team, &Value, &super::owner_word::WordRule, f64) -> anyhow::Result<super::model::OwnerWord>,
 ) -> anyhow::Result<()> {
     if !matches!(caller, Actor::Member(id) if *id == team.lead) {
         return Ok(());
+    }
+    // Task 353 (owner, 2026-11-08): a scratch team created under the standing
+    // rule already runs without the owner's per-plan approval; its lead
+    // relaunches, adds and removes its own members within the rule's agents
+    // without a card. Anything outside the rule, and every normal team, still
+    // asks: the flag below stands for the verified word the card would give.
+    if let Some(agents) = rule_agents {
+        let inside = match op {
+            "relaunch" | "remove-member" => team
+                .member(text(filled, "member"))
+                .is_some_and(|member| agents.iter().any(|agent| *agent == member.agent)),
+            "add-member" => agents.iter().any(|agent| *agent == text(&filled["member"], "agent")),
+            _ => false,
+        };
+        if inside {
+            if let Some(object) = filled.as_object_mut() {
+                object.insert("roster_word".into(), Value::Bool(true));
+            }
+            return Ok(());
+        }
     }
     let rule = roster_word_rule(team, op, filled);
     if !rule.needed() {
@@ -5815,7 +5849,8 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             if matches!(op, "add-member" | "scale" | "drain" | "swap-member" | "remove-member" | "relaunch" | "settings") {
                 let team = store.load(team_id)?.context("Unknown team")?;
                 let caller = actor(&team, op, &filled)?;
-                check_roster_word(&team, op, input, &mut filled, &caller, |team, input, rule, now| {
+                let rule_agents = scratch_roster_agents(&store, &team)?;
+                check_roster_word(&team, op, input, &mut filled, &caller, rule_agents.as_deref(), |team, input, rule, now| {
                     super::owner_word::verify_roster(team, input, rule, now)
                 })?;
             }

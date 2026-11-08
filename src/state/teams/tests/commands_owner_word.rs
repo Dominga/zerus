@@ -56,25 +56,25 @@ fn every_roster_change_needs_the_owner_word_naming_it() {
         let mut without = base.clone();
         let input = base.clone();
         assert!(super::roster_word_rule(&team, op, &input).needed(), "{op}");
-        let error = super::check_roster_word(&team, op, &input, &mut without, &caller, verify).unwrap_err().to_string();
+        let error = super::check_roster_word(&team, op, &input, &mut without, &caller, None, verify).unwrap_err().to_string();
         assert!(error.contains("your word"), "{op}: {error}");
         // A caller-supplied roster_word is not a word.
         let mut claimed = base.clone();
         claimed["roster_word"] = Value::Bool(true);
         let input = claimed.clone();
-        let error = super::check_roster_word(&team, op, &input, &mut claimed, &caller, verify).unwrap_err().to_string();
+        let error = super::check_roster_word(&team, op, &input, &mut claimed, &caller, None, verify).unwrap_err().to_string();
         assert!(error.contains("your word"), "{op}: {error}");
         // A word naming something else is refused.
         let mut wrong = base.clone();
         wrong["owner_word"] = json!({"text": other});
         let input = wrong.clone();
-        let error = super::check_roster_word(&team, op, &input, &mut wrong, &caller, verify).unwrap_err().to_string();
+        let error = super::check_roster_word(&team, op, &input, &mut wrong, &caller, None, verify).unwrap_err().to_string();
         assert!(error.contains("your word") || error.contains("not in the lead session") || error.contains("does not name"), "{op}: {error}");
         // The fresh word naming the change fills the verified flag.
         let mut good = base.clone();
         good["owner_word"] = json!({"text": sentence});
         let input = good.clone();
-        super::check_roster_word(&team, op, &input, &mut good, &caller, verify).unwrap();
+        super::check_roster_word(&team, op, &input, &mut good, &caller, None, verify).unwrap();
         assert_eq!(good["roster_word"], true, "{op}");
         assert!(good["owner_word_checked"].is_object(), "{op}");
     }
@@ -422,4 +422,60 @@ fn a_typed_owner_word_is_no_longer_taken_where_a_card_exists() {
             }
         });
     });
+}
+
+// Task 353 (owner, 2026-11-08): a scratch team created under the standing rule
+// runs without the owner's per-plan approval; its lead manages its own members
+// within the rule's agents without a card. A normal team still asks.
+#[test]
+fn a_scratch_teams_lead_manages_its_members_without_a_card() {
+    use crate::state::teams::model::{Member, ScratchParent};
+    let mut team = Team {
+        id: "scratch".into(),
+        name: "QA scratch".into(),
+        lead: "qa".into(),
+        status: TeamStatus::Running,
+        scratch_parent: Some(ScratchParent { team: "parent".into(), task: 1, member: "qa".into() }),
+        scratch_rule: "rule-1".into(),
+        ..Default::default()
+    };
+    team.members.push(Member { id: "qa".into(), role: "QA".into(), agent: "claude".into(), ..Default::default() });
+    team.members.push(Member { id: "dev1".into(), role: "Backend".into(), agent: "claude".into(), ..Default::default() });
+    team.members.push(Member { id: "dev2".into(), role: "Frontend".into(), agent: "codex".into(), ..Default::default() });
+    let caller = Actor::Member("qa".into());
+    let agents = vec!["claude".to_string(), "codex".to_string()];
+    let verify = |_: &Team, _: &Value, _: &super::super::owner_word::WordRule, _: f64| -> anyhow::Result<crate::state::teams::model::OwnerWord> {
+        unreachable!("the rule needs no word")
+    };
+    for (op, input) in [
+        ("relaunch", json!({"member":"dev1"})),
+        ("remove-member", json!({"member":"dev2"})),
+        ("add-member", json!({"member":{"id":"dev3","role":"Backend","agent":"codex"}})),
+    ] {
+        let mut filled = input.clone();
+        super::check_roster_word(&team, op, &input, &mut filled, &caller, Some(&agents), verify).unwrap();
+        assert_eq!(filled["roster_word"], true, "{op}");
+    }
+    // Outside the rule's agents: the card is still needed.
+    let mut filled = json!({"member":{"id":"dev9","role":"Backend","agent":"kimi"}});
+    let input = filled.clone();
+    let error = super::check_roster_word(&team, "add-member", &input, &mut filled, &caller, Some(&agents), verify)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("your word"), "{error}");
+    // A normal team asks as before.
+    let normal = Team {
+        id: "t".into(),
+        name: "T".into(),
+        lead: "lead".into(),
+        status: TeamStatus::Running,
+        members: vec![Member { id: "dev1".into(), role: "Backend".into(), agent: "claude".into(), ..Default::default() }],
+        ..Default::default()
+    };
+    let mut filled = json!({"member":"dev1"});
+    let input = filled.clone();
+    let error = super::check_roster_word(&normal, "relaunch", &input, &mut filled, &Actor::Member("lead".into()), None, verify)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("your word"), "{error}");
 }

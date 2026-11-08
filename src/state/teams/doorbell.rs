@@ -317,7 +317,7 @@ pub(crate) fn continue_after_interrupt(store: &mut Store, team: &Team, member_id
     };
     let agent = member.agent.clone();
     let count = list.len();
-    let mut text = working::doorbell(&header, count, count);
+    let mut text = working::doorbell(&header, &list);
     text.push('\n');
     text.push_str(CONTINUE);
     if !turn_hook(&agent) {

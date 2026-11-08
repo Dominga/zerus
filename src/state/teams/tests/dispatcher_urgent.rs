@@ -140,6 +140,7 @@ fn an_urgent_message_unread_past_the_alarm_is_a_lead_and_owner_alarm() {
         rings: 1,
         rung_at: Some(at - 600.0),
         lead_told: false,
+        ..Default::default()
     };
     let member = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
     member.unread = Some(unread);

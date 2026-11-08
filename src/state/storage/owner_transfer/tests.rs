@@ -6,6 +6,8 @@ use std::{
     time::Duration,
 };
 
+mod input_domain_tests;
+
 fn control(case: &str) {
     let temp = tempfile::tempdir().unwrap();
     for name in ["home", "state", "config", "tmp"] {
@@ -249,6 +251,10 @@ fn fixture() {
     let writer = lock(None).unwrap();
     let until = Instant::now() + Duration::from_secs(15);
     let legacy = legacy_record_path(string(&data.original, "name"));
+    if let Some(case) = case.strip_prefix("input:") {
+        input_domain_tests::fixture(&data, &writer, until, case);
+        return;
+    }
     if ["review-record-bound", "review-record-headroom"].contains(&case.as_str()) {
         // Original independent zerus-xrm5q counter, retained at the exact
         // existing cap; no fixture cap increase or weaker assertion.

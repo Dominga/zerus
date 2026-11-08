@@ -1,8 +1,12 @@
 //! Project folder links reuse the organization writer, source decoder and
-//! native directory opener. Reading/editing a link creates no folder or checkout.
+//! native directory opener. Drive-absolute remote links use the separate drive
+//! controller, never a legacy replacement organization. Reading/editing a link
+//! creates no folder or checkout.
 use super::*;
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use zerus_client_core::paths::{self, Style};
+use zerus_client_core::swarm::drive_folders::{DriveRecord, DriveSetRequest, MachineProof};
 use zerus_client_core::swarm::{folder_edit, Folder};
 
 #[derive(Clone, Debug, Deserialize)]
@@ -177,6 +181,169 @@ pub(super) fn selected_folder(intent: &Intent) -> Option<String> {
         Some(_) => format!("{}\n{}", machine, paths::clean(path, *style)),
     })
 }
+fn drive_path(change: &Change) -> bool {
+    let path = match change {
+        Change::Add { path, .. } | Change::Edit { path, .. } => path,
+        _ => return false,
+    };
+    paths::absolute(path, Style::Windows) && !path.starts_with('/')
+}
+
+fn drive_proof(
+    pump: &Pump,
+    computer: &str,
+    host: &str,
+    machine_id: &str,
+) -> Result<MachineProof, String> {
+    let id = zerus_client_core::ComputerId(computer.to_owned());
+    if !pump.live(computer) {
+        return Err("The selected computer is not live. Select it again.".into());
+    }
+    let current = pump
+        .machine(&id)
+        .ok_or("Waiting for this computer's identity.")?;
+    if !zerus_client_core::creation::canonical_uuid(machine_id)
+        || current.machine_id.as_deref() != Some(machine_id)
+        || current.host.as_deref() != Some(host)
+        || host.is_empty()
+        || current.platform.as_deref() != Some("windows")
+        || current.ok != Some(true)
+    {
+        return Err("The selected computer changed. Select it again.".into());
+    }
+    Ok(MachineProof {
+        node: machine_id.to_owned(),
+        platform: "windows".into(),
+        verified: true,
+    })
+}
+
+pub(super) fn drive_change(
+    org: Organization,
+    project: String,
+    change: Change,
+    id: String,
+    mut folder: Option<String>,
+) -> Changed {
+    let outcome = || {
+        let place = match &change {
+            Change::Add { place, .. } | Change::Edit { place, .. } => place.clone(),
+            _ => return Err("drive folder requires a Set operation".into()),
+        };
+        let admitted = intent(&org.0.pump, project.clone(), change, id.clone())?;
+        folder = selected_folder(&admitted);
+        let Intent::FolderStyled {
+            original,
+            id,
+            path,
+            name,
+            style,
+            ..
+        } = &admitted
+        else {
+            return Err("drive folder requires a Set operation".into());
+        };
+        let original_record = original
+            .as_ref()
+            .map(|record| {
+                if record.id.is_empty()
+                    || !zerus_client_core::creation::canonical_uuid(&record.machine_id)
+                {
+                    return Err("drive folder identity is unavailable".to_owned());
+                }
+                Ok(DriveRecord {
+                    id: Some(record.id.clone()),
+                    project: project.clone(),
+                    machine: record.machine_id.clone(),
+                    path: record.path.clone(),
+                    name: record.name.clone(),
+                })
+            })
+            .transpose()?;
+        let machine_id = place
+            .machine_id
+            .as_deref()
+            .filter(|id| zerus_client_core::creation::canonical_uuid(id))
+            .ok_or("destination computer identity is unavailable")?;
+        let desired = DriveRecord {
+            id: Some(
+                original_record
+                    .as_ref()
+                    .and_then(|record| record.id.clone())
+                    .unwrap_or_else(|| id.clone()),
+            ),
+            project: project.clone(),
+            machine: machine_id.to_owned(),
+            path: paths::clean(path, *style),
+            name: name
+                .trim()
+                .chars()
+                .take(zerus_client_core::swarm::edit::NAME_CHARS)
+                .collect(),
+        };
+        let source = original
+            .as_ref()
+            .map(|record| {
+                drive_proof(
+                    &org.0.pump,
+                    &record.machine,
+                    &record.machine_name,
+                    &record.machine_id,
+                )
+            })
+            .transpose()?;
+        let destination = drive_proof(&org.0.pump, &place.computer, &place.host, machine_id)?;
+        Ok((
+            original_record,
+            desired,
+            source,
+            destination,
+            uuid::Uuid::new_v4().to_string(),
+        ))
+    };
+    let (original_record, desired, source, destination, request_id) = match outcome() {
+        Ok(values) => values,
+        Err(detail) => {
+            return Changed {
+                outcome: EditOutcome::Refused { detail },
+                folder,
+            }
+        }
+    };
+    let outcome = org.submit_drive(move |_pump, observation| {
+        let versions = match &original_record {
+            Some(record) => {
+                let id = record.id.as_deref().unwrap_or_default();
+                let token = format!("drive_folders_v1:{id}");
+                let heads = observation.versions.get(&token).cloned().ok_or_else(|| {
+                    super::DriveError::Refused(
+                        "The original drive-folder frontier is unavailable.".into(),
+                    )
+                })?;
+                BTreeMap::from([(token, heads)])
+            }
+            None => BTreeMap::new(),
+        };
+        Ok(DriveSetRequest {
+            original: original_record,
+            desired,
+            versions,
+            request_id,
+            store_nonce: observation.store_nonce.clone(),
+            source,
+            destination,
+        })
+    });
+    Changed {
+        outcome: match outcome {
+            Ok(_) => EditOutcome::Done { conflicts: 0 },
+            Err(super::DriveError::Refused(detail)) => EditOutcome::Refused { detail },
+            Err(super::DriveError::Unknown(detail)) => EditOutcome::Kept { detail },
+        },
+        folder,
+    }
+}
+
 #[derive(serde::Serialize)]
 pub struct Changed {
     #[serde(flatten)]
@@ -184,14 +351,7 @@ pub struct Changed {
     #[serde(skip_serializing_if = "Option::is_none")]
     folder: Option<String>,
 }
-#[tauri::command]
-pub async fn project_folder_change(
-    state: State<'_, Organization>,
-    project: String,
-    change: Change,
-) -> Result<Changed, String> {
-    let org = state.inner().clone();
-    let id = uuid::Uuid::new_v4().to_string();
+pub(super) fn change(org: Organization, project: String, change: Change, id: String) -> Changed {
     let mut folder = match &change {
         Change::Add { .. } => Some(id.clone()),
         Change::Edit {
@@ -214,16 +374,28 @@ pub async fn project_folder_change(
         }),
         _ => None,
     };
-    tauri::async_runtime::spawn_blocking(move || {
-        let outcome = org.submit_checked(|pump| {
-            let admitted = intent(pump, project.clone(), change.clone(), id.clone())?;
-            folder = selected_folder(&admitted);
-            Ok(admitted)
-        });
-        Changed { outcome, folder }
-    })
-    .await
-    .map_err(|e| e.to_string())
+    if drive_path(&change) {
+        return drive_change(org, project, change, id, folder);
+    }
+    let outcome = org.submit_checked(|pump| {
+        let admitted = intent(pump, project.clone(), change.clone(), id.clone())?;
+        folder = selected_folder(&admitted);
+        Ok(admitted)
+    });
+    Changed { outcome, folder }
+}
+
+#[tauri::command]
+pub async fn project_folder_change(
+    state: State<'_, Organization>,
+    project: String,
+    change: Change,
+) -> Result<Changed, String> {
+    let org = state.inner().clone();
+    let id = uuid::Uuid::new_v4().to_string();
+    tauri::async_runtime::spawn_blocking(move || self::change(org, project, change, id))
+        .await
+        .map_err(|e| e.to_string())
 }
 #[tauri::command]
 pub async fn project_folder_open(

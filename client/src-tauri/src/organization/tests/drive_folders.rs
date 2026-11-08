@@ -1,0 +1,223 @@
+use super::*;
+use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
+use std::process::{Command, Stdio};
+use zerus_client_core::{ComputerStatus, MachineMeta};
+
+const FOLDER: &str = "11111111-2222-4333-8444-555555555555";
+
+fn call(hgs: &Path, args: &[&str], input: Value) -> Value {
+    let mut child = Command::new(hgs)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(&input).unwrap())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+struct Real {
+    dir: PathBuf,
+    hgs: PathBuf,
+    snapshot: Value,
+    machine: String,
+}
+
+impl Real {
+    fn new() -> Self {
+        let dir = std::env::temp_dir().join(format!("zerus-native-drive-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let binary = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/hgs");
+        assert!(binary.is_file(), "build the exact candidate CLI first");
+        let hgs = dir.join("hgs-private");
+        let script = format!(
+            "#!/bin/sh\nexport HOME='{0}'\nexport HGS_CONFIG_DIR='{1}'\nexport HGS_STATE_DIR='{2}'\nexport HGS_SELF='example-local'\nexport HGS_PEERS=''\nexec '{3}' \"$@\"\n",
+            dir.display(),
+            dir.join("config").display(),
+            dir.join("state").display(),
+            binary.canonicalize().unwrap().display(),
+        );
+        std::fs::write(&hgs, script).unwrap();
+        std::fs::set_permissions(&hgs, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let organization = json!({"version":2,"default_project":"alpha","projects":[
+            {"id":"alpha","name":"Alpha","color":"#123456","folders":[],"sessions":[]}
+        ]});
+        let initialized = call(&hgs, &["swarm", "initialize", "--json"], organization);
+        let mut desired = initialized["organization"].clone();
+        desired["projects"][0]["folders"] = json!([{
+            "id":"legacy-machine","machine":"windows-peer","path":"/srv/repo","name":""
+        }]);
+        let snapshot = call(
+            &hgs,
+            &["swarm", "apply", "--json"],
+            json!({
+                "base":initialized["organization"],
+                "desired":desired,
+                "versions":initialized["versions"]
+            }),
+        );
+        let machine = snapshot["organization"]["projects"][0]["folders"][0]["machine_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        Self {
+            dir,
+            hgs,
+            snapshot,
+            machine,
+        }
+    }
+
+    fn drive_get(&self) -> Value {
+        call(
+            &self.hgs,
+            &["swarm", "drive-folders", "get", "--json"],
+            Value::Null,
+        )
+    }
+
+    fn finish(self, organization: Organization) {
+        let runs = organization.runs_writer();
+        let shared = Arc::downgrade(&organization.0);
+        drop(organization);
+        wait_until("the real organization worker to end", || {
+            shared.strong_count() == 0
+        });
+        runs.stop();
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn card(pump: &Pump, computer: &str, host: &str, node: &str, platform: &str) {
+    let computer = ComputerId(computer.to_owned());
+    pump.push(Change::Machine {
+        computer: computer.clone(),
+        machine: MachineMeta {
+            machine_id: Some(node.into()),
+            host: Some(host.into()),
+            platform: Some(platform.into()),
+            ok: Some(true),
+            ..Default::default()
+        },
+    });
+    pump.push(Change::Computer {
+        computer,
+        status: ComputerStatus::Live,
+    });
+}
+
+#[test]
+fn project_folder_change_persists_add_and_edit_with_a_stable_id() {
+    let real = Real::new();
+    let main_before = std::fs::read(real.dir.join("config/swarm/catalog.json")).unwrap();
+    let pump = Pump::default();
+    card(
+        &pump,
+        "",
+        "example-local",
+        real.snapshot["node_id"].as_str().unwrap(),
+        "linux",
+    );
+    card(
+        &pump,
+        "windows-peer",
+        "windows-peer",
+        &real.machine,
+        "windows",
+    );
+    let organization = Organization::new(
+        pump,
+        real.hgs.clone(),
+        true,
+        real.dir.join("layout.json"),
+        real.dir.join("draft.json"),
+        false,
+    );
+    organization.set_source(snapshot_of(&real.snapshot));
+    organization.observe(&state_of(&real.snapshot));
+    let place = folders::Place {
+        computer: "windows-peer".into(),
+        host: "windows-peer".into(),
+        machine_id: Some(real.machine.clone()),
+    };
+    let added = folders::change(
+        organization.clone(),
+        "alpha".into(),
+        folders::Change::Add {
+            place: place.clone(),
+            path: "C:\\Work\\..\\Repo\\".into(),
+            name: String::new(),
+        },
+        FOLDER.into(),
+    );
+    let added_json = serde_json::to_value(&added).unwrap();
+    assert_eq!(added_json["outcome"], "done", "{added_json}");
+    let observed = real.drive_get();
+    assert_eq!(observed["records"][0]["id"], FOLDER);
+    assert_eq!(observed["records"][0]["path"], "C:/Repo");
+    let graph: Value = serde_json::from_slice(
+        &std::fs::read(real.dir.join("config/swarm/drive-folders.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(graph["operations"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .all(|id| id != FOLDER));
+
+    let original = organization
+        .project_folders("alpha")
+        .into_iter()
+        .find(|folder| folder.id == FOLDER)
+        .expect("the capable native projection contains the new folder");
+    assert_eq!(original.machine, "windows-peer");
+    assert_eq!(original.machine_id, real.machine);
+    assert!(organization.creation_projects("example-local")[0]
+        .folders
+        .iter()
+        .all(|folder| folder.path != "C:/Repo"));
+    let edited = folders::change(
+        organization.clone(),
+        "alpha".into(),
+        folders::Change::Edit {
+            original,
+            place,
+            path: "D:\\Edited\\.".into(),
+            name: "Renamed".into(),
+        },
+        uuid::Uuid::new_v4().to_string(),
+    );
+    assert_eq!(serde_json::to_value(&edited).unwrap()["outcome"], "done");
+    let observed = real.drive_get();
+    assert_eq!(observed["records"][0]["id"], FOLDER);
+    assert_eq!(observed["records"][0]["path"], "D:/Edited");
+    assert_eq!(observed["records"][0]["name"], "Renamed");
+    let graph: Value = serde_json::from_slice(
+        &std::fs::read(real.dir.join("config/swarm/drive-folders.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(graph["operations"].as_object().unwrap().len(), 2);
+    assert!(observed["versions"]
+        .as_object()
+        .unwrap()
+        .values()
+        .all(|heads| heads.as_array().unwrap().len() == 1));
+    assert_eq!(
+        std::fs::read(real.dir.join("config/swarm/catalog.json")).unwrap(),
+        main_before
+    );
+    real.finish(organization);
+}

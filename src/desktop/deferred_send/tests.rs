@@ -1946,6 +1946,39 @@ os._exit(0)"#;
         );
     }
 
+    /// zerus-5llxc (review-win-d on #1824): another connection's request is
+    /// never answered not admitted nor sealed, even when its permit expires
+    /// after the empty read or when this epoch sealed its ID.
+    #[test]
+    fn another_connections_request_is_never_not_admitted() {
+        let (_, mut f) = counting();
+        let foreign = super::original(&f.location.configuration, &uuid::Uuid::new_v4().to_string());
+        let request = json!(
+            zerus_client_core::desktop::ui_requests::Request::DeferredSend {
+                intent: Box::new(foreign.intent.clone()),
+            }
+        );
+        let expired = ui_authority::Validated::fixture_expiring(
+            &request,
+            Instant::now() - Duration::from_secs(1),
+        );
+        let reply = f
+            .runtime
+            .frontend(&mut f.store, expired, Some(f.exclusion.clone()));
+        assert_eq!(reply["code"], "deferred_send_unavailable", "{reply}");
+        assert!(!f.fences.deferred_send.sealed(&foreign.plan.request_id));
+        // This epoch's seal is no answer for another connection's copy.
+        let original = f.original();
+        assert!(offer(&mut f, broken(&original)).not_admitted(&original.intent));
+        let mut intent = original.intent.clone();
+        intent.scope.service_epoch = uuid::Uuid::new_v4().to_string();
+        let copy = intent.verify().unwrap();
+        let reply = f.admit(&copy);
+        assert_eq!(reply.code, "deferred_send_unavailable");
+        assert!(!reply.not_admitted(&copy.intent));
+        assert!(no_row(&f, &original.plan.request_id));
+    }
+
     /// The seal belongs to the epoch: the background runtime destroyed and
     /// built again under the same epoch still refuses the sealed request,
     /// and a request of another epoch's connection is never sealed.

@@ -406,7 +406,5 @@ fn capability_identity_compares_actual_running_code_without_app_admission() {
     assert!(!same_running_code_for_capability(std::path::Path::new(
         "/bin/cat"
     )));
-    assert!(!same_running_code_for_capability(
-        &tree.1.join("missing")
-    ));
+    assert!(!same_running_code_for_capability(&tree.1.join("missing")));
 }

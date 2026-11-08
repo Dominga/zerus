@@ -329,3 +329,8 @@
     scrollbar-width: none;
   }
 }
+
+/* Task #331: a tab that a data update hides keeps its button mounted, so its
+   underline never remounts; this restores the hidden attribute over .tab's
+   inline-flex display. */
+.tab[hidden] { display: none; }

@@ -873,6 +873,31 @@ pub async fn local_folder_exists(path: String) -> bool {
         .unwrap_or(false)
 }
 
+/// Task 200: New team's folder check (Qt PathProbe::folder): the folder exists,
+/// and it is a Git repository when it holds `.git` (a directory, or the file
+/// a worktree has).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct FolderProbe {
+    pub exists: bool,
+    pub git: bool,
+}
+
+fn folder_probe(path: &str) -> FolderProbe {
+    let exists = folder_exists(path);
+    FolderProbe {
+        exists,
+        git: exists && Path::new(path).join(".git").exists(),
+    }
+}
+
+/// [`folder_probe`] on the blocking pool: a stat can wait on a network drive.
+#[tauri::command]
+pub async fn local_folder_probe(path: String) -> FolderProbe {
+    tauri::async_runtime::spawn_blocking(move || folder_probe(&path))
+        .await
+        .unwrap_or_default()
+}
+
 #[tauri::command]
 pub async fn opencode_models(
     state: State<'_, NewSession>,
@@ -1273,6 +1298,25 @@ mod tests {
         assert!(!folder_exists(""));
         assert!(folder_exists(&std::env::temp_dir().to_string_lossy()));
         assert!(!folder_exists("/nonexistent/zerus-example"));
+    }
+
+    #[test]
+    fn new_teams_folder_probe_finds_the_folder_and_its_git() {
+        let root = std::env::temp_dir().join(format!("zerus-probe-{}", uuid::Uuid::new_v4().simple()));
+        let plain = root.join("plain");
+        let repo = root.join("repo");
+        let worktree = root.join("worktree");
+        for dir in [&plain, &repo.join(".git"), &worktree] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(worktree.join(".git"), "gitdir: ../repo/.git/worktrees/w\n").unwrap();
+        let probe = |path: &Path| folder_probe(&path.to_string_lossy());
+        assert_eq!(probe(&plain), FolderProbe { exists: true, git: false });
+        assert_eq!(probe(&repo), FolderProbe { exists: true, git: true });
+        assert_eq!(probe(&worktree), FolderProbe { exists: true, git: true });
+        assert_eq!(probe(&root.join("missing")), FolderProbe::default());
+        assert_eq!(folder_probe(""), FolderProbe::default());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     // start (757-776) reads the form live at the click: the plan takes the

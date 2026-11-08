@@ -4,6 +4,13 @@
 //! turns the native decorations off for the main window and the webview's
 //! bar drives the window through these commands. Other skins keep the
 //! system title bar (`chrome: system`).
+//!
+//! Task 297: Windows 11 snap layouts appear on a maximize button that the
+//! window's hit test answers with HTMAXBUTTON. Qt's frameless bar answers
+//! HTCAPTION for its empty space and HTCLIENT for every control, its maximize
+//! button included (tray/src/WindowTitleBar.cpp FramelessWindow::nativeEvent;
+//! test_sessionswindow_settings1 framelessTitleBarHitTestsKeepTheButtonsClientArea),
+//! so it offers no snap layouts there; this bar keeps that parity.
 use tauri::{Runtime, WebviewWindow};
 
 /// The window buttons the bar draws.

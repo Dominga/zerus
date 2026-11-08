@@ -9,6 +9,7 @@ import { nativeUi } from "../../store/native-ui";
 import { pageHidden } from "../../store/visibility";
 import { ProcessesTab } from "./Processes";
 import { TeamTab } from "../teams/TeamTab";
+import { NewTeamPage } from "../teams/NewTeamPage";
 import { WaitingBanner } from "../teams/Waiting";
 import { LeadProposals } from "../teams/ProposalCards";
 import { teamAnswers } from "../teams/leadTeam";
@@ -220,7 +221,8 @@ const tabs = () => {
     processesTab(flag("processes/enabled"), count),
     { id: "taskview" as const, label: tr("Task View"), show: detailTab() === "taskview" && !!selectedTask() },
     // Task 9: the selected session's team (its lead's or a member's session).
-    { id: "team" as const, label: tr("Team"), show: !!selectedTeam() && !subagentOpen() },
+    // Task 200 (Qt F5): a draft is not a team yet; its lead's tab is New team, which shows the draft again.
+    { id: "team" as const, label: selectedTeam()?.status === "draft" ? tr("New team") : tr("Team"), show: !!selectedTeam() && !subagentOpen() },
   ];
   const s = selected();
   return s ? detailTabs(s.key, all) : all;
@@ -293,6 +295,7 @@ export function SessionDetail() {
                 <Match when={detailTab() === "terminal"}><TerminalTab /></Match>
                 <Match when={detailTab() === "native"}><NativeUiTab /></Match>
                 <Match when={detailTab() === "processes"}><ProcessesTab /></Match>
+                <Match when={detailTab() === "team" && selectedTeam()?.status === "draft" && selected()!.computer === "" && selectedTeam()}>{(team) => <NewTeamPage embedded draft={team().id} />}</Match>
                 <Match when={detailTab() === "team" && selectedTeam()}>{(team) => <TeamTab computer={selected()!.computer} team={team().id} />}</Match>
               </Switch>
             </div>

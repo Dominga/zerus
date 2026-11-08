@@ -148,4 +148,9 @@ namespace FramelessWindow {
 void apply(QWidget *window);
 // Handles the frame's messages for nativeEvent(); false leaves a message to Qt.
 bool nativeEvent(QWidget *window, const WindowTitleBar *bar, void *message, qintptr *result);
+// WM_NCHITTEST's answer for a point in screen pixels: a resize edge within
+// `edge` pixels of a restored window's frame, else HTCAPTION where the bar
+// drags and HTCLIENT elsewhere. Every bar button, the maximize button
+// included, is client area, so Windows shows no snap layouts on it.
+qintptr hitTest(const QRect &frame, const QPoint &point, bool zoomed, int edge, bool barDrags);
 }

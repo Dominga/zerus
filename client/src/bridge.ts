@@ -873,6 +873,8 @@ export const createDirectory = (computer: ComputerId, path: string) => desktopNe
 /** The system folder dialog on this computer; null when cancelled. */
 export const pickLocalFolder = (start: string) => desktopNewSession<string | null>("pick_local_folder", { start });
 export const localFolderExists = (path: string) => desktopNewSession<boolean>("local_folder_exists", { path });
+/** Task 200: New team's folder check on this computer (Qt PathProbe): it exists, and it holds `.git`. */
+export const localFolderProbe = (path: string) => desktopNewSession<{ exists: boolean; git: boolean }>("local_folder_probe", { path });
 /** The folder's OpenCode model catalog; `name` words an older computer's update text. */
 export const openCodeModels = (computer: ComputerId, folder: string, name: string) => desktopNewSession<Record<string, unknown>>("opencode_models", { computer, folder, name });
 /** One star: one request identity, never sent again. */

@@ -3993,6 +3993,13 @@ change activates no new C3 admission or floor path. Legacy plain reports keep
 the documented pinned-agent rule for never-sent queued work. A floor or a
 recorded attempt never authorizes an implicit legacy start.
 
+If managed history remains but the current execution falls back to legacy
+(for example, after its first managed handoff is refused), a successful start
+acknowledgement returns `reporting: "history_only"` and an explicit `report_hint`,
+without `report_command` or `report_attempt`. It creates no attempt UUID and
+explains that reports stay in history without moving the task. The person can
+accept the result or resend the task as a new attempt.
+
 This is an updated-writer boundary, with no task/exchange schema, event shape,
 C3 or floor change. Older writer binaries still apply their older unscoped
 policy. Prompts for attempts started before this change have no pinned command;

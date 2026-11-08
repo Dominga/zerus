@@ -7,6 +7,10 @@ pub(super) const HISTORY_HINT: &str = "The report was kept as history and the ta
     Use the pinned report-attempt command in the original task prompt, or ask the person to accept \
     or resend the task.";
 
+const LEGACY_TRANSITION_HINT: &str = "Start acknowledged. This task has managed history, but its \
+    current execution has no managed report origin. No attempt UUID was created. Reports will be \
+    kept as history and will not move the task. Ask the person to accept or resend it.";
+
 pub(super) fn execute(config: &Config, args: &[String]) -> Result<Value> {
     validate(args)?;
     change(config, "report-attempt", args)
@@ -61,6 +65,9 @@ pub(super) fn started(out: &mut Value, task: &TaskDoc, project: &str) -> Result<
     } else if !task.execution_managed() {
         out["reporting"] = json!("legacy");
         out["report_command"] = json!(command(project, &task.id(), None));
+    } else {
+        out["reporting"] = json!("history_only");
+        out["report_hint"] = json!(LEGACY_TRANSITION_HINT);
     }
     Ok(())
 }

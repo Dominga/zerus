@@ -251,6 +251,12 @@ impl BadgeService {
 
 #[derive(Clone)]
 struct ItemService(Arc<Mutex<Tray>>);
+/// SNI descriptions may be parsed as XHTML; numeric line-feed references keep
+/// newlines without adding markup tags.
+fn tooltip_description(text: &str) -> String {
+    zerus_client_core::linux_notify::escape_body(text).replace('\n', "&#10;")
+}
+
 #[zbus::interface(name = "org.kde.StatusNotifierItem")]
 impl ItemService {
     fn activate(&self, _x: i32, _y: i32) {
@@ -332,7 +338,7 @@ impl ItemService {
             String::new(),
             tray.icons.clone(),
             title,
-            tray.tooltip.clone(),
+            tooltip_description(&tray.tooltip),
         )
     }
 }
@@ -1113,6 +1119,19 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
 
+    #[test]
+    fn tooltip_descriptions_keep_literal_markup_and_multiline_text() {
+        let body = "1 active, 1 needs attention, 3 sessions total\n<b>studio</b> & <i>peer</i>: not polled yet\n\"quoted\" &amp;";
+        let escaped = tooltip_description(body);
+        assert_eq!(
+            escaped,
+            "1 active, 1 needs attention, 3 sessions total&#10;&lt;b&gt;studio&lt;/b&gt; &amp; &lt;i&gt;peer&lt;/i&gt;: not polled yet&#10;&quot;quoted&quot; &amp;amp;"
+        );
+        assert!(!escaped.contains('\n'));
+        assert!(!escaped.contains("<br"));
+        assert_eq!(tooltip_description("new tooltip"), "new tooltip");
+    }
+
     fn badge_updates(connection: &Connection, owner: &str) -> zbus::MessageStream {
         let rule = zbus::MatchRule::builder()
             .msg_type(zbus::message::Type::Signal)
@@ -1541,7 +1560,7 @@ mod tests {
         offer_native(
             &native,
             Face::counts(1, 1, false),
-            "1 needs attention\n1 here".into(),
+            "1 needs attention\n1 here\n<b>studio</b> & <i>peer</i>: not polled yet".into(),
             entries("claude/p/a"),
             None,
         );
@@ -1555,7 +1574,10 @@ mod tests {
         );
         let tooltip: (String, Vec<Icon>, String, String) = item.get_property("ToolTip").unwrap();
         assert_eq!(tooltip.2, crate::desk::tooltip_title());
-        assert_eq!(tooltip.3, "1 needs attention\n1 here");
+        assert_eq!(
+            tooltip.3,
+            "1 needs attention&#10;1 here&#10;&lt;b&gt;studio&lt;/b&gt; &amp; &lt;i&gt;peer&lt;/i&gt;: not polled yet"
+        );
         item.call::<_, _, ()>("ProvideXdgActivationToken", &("fixture-activation",))
             .unwrap();
         item.call::<_, _, ()>("Activate", &(10_i32, 20_i32))

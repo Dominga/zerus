@@ -62,6 +62,14 @@ export function boardTask(window: readonly Task[], view: Record<Stage, Task[]> |
   if (!uuid) return undefined;
   return window.find((t) => t.uuid === uuid) ?? (view ? STAGES.map((s) => view[s].find((t) => t.uuid === uuid)).find(Boolean) : undefined);
 }
+/**
+ * Whether Only this session stays on when `task` is revealed (zerus-60v37):
+ * the session owns it, or its own view (hgs's pages, while one is shown)
+ * holds it. Owning it counts while the view's stage is still being read.
+ */
+export function keepsSessionFilter(task: Task, session: Session, view: Record<Stage, Task[]> | undefined): boolean {
+  return belongsTo(task, session) || (!!view && !!boardTask([], view, task.uuid));
+}
 /** Keep an older page anchored when newer tasks arrive above it. */
 export function taskPageOffset(previous: readonly Task[], next: readonly Task[], at: number): number {
   if (!at) return 0;

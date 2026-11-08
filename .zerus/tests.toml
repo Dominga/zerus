@@ -14,6 +14,8 @@ ignore = [
     ".gitleaksignore", "packaging/rust-licenses/**", "**/licenses/**",
     # The configuration and its map: `hgs test map --check` answers for them.
     ".zerus/**",
+    # Owner, 2026-11-08: the Qt desktop is out of the supported set; its provider is disabled.
+    "tray/**",
 ]
 
 # The release full run is the fork CI's run of the candidate, on the owner's word.
@@ -195,6 +197,10 @@ command = "cargo test --locked --target-dir ../../target/lore {targets}"
 # test binary uses. The build folder is this checkout's; the owner may move it.
 [[provider]]
 name = "tray"
+# Owner, 2026-11-08: only the Tauri client is supported; no Qt builds or tests, so
+# the queue and the affected plans never select this provider. Remove the line to
+# bring the Qt suites back.
+disabled = true
 budget_lines = 86000
 kind = "ctest"
 build_dir = ".ci-build/gui"

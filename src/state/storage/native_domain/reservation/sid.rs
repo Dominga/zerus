@@ -218,6 +218,13 @@ impl SidHeld {
         self.proof.lock
     }
 
+    pub(in crate::state::storage::native_domain) fn kind(&self) -> super::super::InputKind {
+        match self.proof.origin {
+            Kind::Fresh {} => super::super::InputKind::Fresh,
+            Kind::LegacyMoved { .. } => super::super::InputKind::LegacyMoved,
+        }
+    }
+
     pub(in crate::state::storage::native_domain) fn fresh(&self) -> Result<()> {
         if self.proof.origin != (Kind::Fresh {}) {
             return Err("This session requires its original legacy-moved input domain".into());

@@ -98,7 +98,6 @@ impl Input {
             || string(current, "name").len() > 2048
             || !string(current, "name").starts_with(&format!("{}/", string(current, "agent")))
             || string(current, "run_id").is_empty()
-            || string(current, "conversation_id").is_empty()
             || hash.len() != 64
             || !hash.bytes().all(|b| b.is_ascii_hexdigit())
             || *marker != json!({"version":1,"before_sha256":hash})

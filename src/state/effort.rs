@@ -9,6 +9,11 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
+// Dormant ID-input facade. Existing picker controllers do not call it.
+#[cfg(unix)]
+#[allow(dead_code)]
+mod picker_scope;
+
 const MAX_TAIL: u64 = 8 * 1024 * 1024;
 const LEVELS: &[&str] = &[
     "off", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "on",

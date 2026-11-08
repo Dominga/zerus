@@ -1226,7 +1226,8 @@ mod actor {
         let mut f = Fixture::with(Arc::new(
             move |state, plan, args, input, lock, resources| {
                 // The first operation's resumed agent never becomes ready.
-                if args[0] == "session-action" && !gate.swap(true, Ordering::SeqCst) {
+                if args[0] == "session-action" && plan.session == SESSION {
+                    gate.store(true, Ordering::SeqCst);
                     ran_busy(state, plan, input);
                     return Ended::Exited { code: 0 };
                 }
@@ -1240,11 +1241,19 @@ mod actor {
             Duration::from_millis(5),
             Duration::from_millis(345),
         );
-        // Two stopped sessions: one resume each.
-        let first = f.original();
+        // Two stopped sessions: one resume each. The queue runs by admission
+        // millisecond, then request ID: with the first's ID lower, a tie
+        // between the two admissions still runs the first first
+        // (review-win-e on #1750, as zerus-mupq4 for compact-to-send).
         let other = "claude/private-second";
         session_record(&f.state, other, "claude", RUN, json!({}));
-        let second = original_of(&f.location.configuration, &f.epoch, other);
+        let (first, second) = loop {
+            let first = f.original();
+            let second = original_of(&f.location.configuration, &f.epoch, other);
+            if first.plan.resume_request_id < second.plan.resume_request_id {
+                break (first, second);
+            }
+        };
         f.admit(&first);
         let admitted = Instant::now();
         f.admit(&second);
@@ -1252,7 +1261,20 @@ mod actor {
             f.row(&first).receipt.drained && f.row(&second).receipt.drained
         });
         assert!(Instant::now() > admitted + Duration::from_millis(345));
-        assert_eq!(f.row(&first).receipt.code, ledger::WAIT_EXPIRED);
+        // The first ends unsent at its own budget or deadline, whichever its
+        // timing reaches first; the second, queued behind it, still sends.
+        let first_receipt = f.row(&first).receipt;
+        assert!(
+            [ledger::WAIT_EXPIRED, ledger::CHAIN_EXPIRED].contains(&first_receipt.code.as_str()),
+            "{}",
+            first_receipt.code
+        );
+        assert_eq!(
+            first_receipt.result(&first.plan),
+            Some(Settled::NotSent {
+                resume: Step::Recorded
+            })
+        );
         assert_eq!(f.row(&second).receipt.send.step, Step::Recorded);
         assert!(first_done.load(Ordering::SeqCst));
     }
@@ -1570,6 +1592,40 @@ else:
         assert_eq!(
             (receipt.send.step, receipt.code.as_str()),
             (Step::NotStarted, ledger::VETOED)
+        );
+        assert_eq!(ran.counts(), (1, 0));
+    }
+
+    /// review-win-e on #1750: a readiness read that ends after the wait's
+    /// own budget, however it began, starts nothing: the send never starts
+    /// past the budget, even when the agent became ready meanwhile.
+    #[test]
+    fn a_ready_read_that_ends_after_the_budget_never_sends() {
+        let ran = Arc::new(Ran::default());
+        let mut f = Fixture::with(executor(ran.clone(), Resume::Completed { ready: false }));
+        f.runtime.fixture_wait(
+            Duration::from_millis(500),
+            Duration::from_millis(5),
+            runtime::CHAIN,
+        );
+        let state = f.state.clone();
+        let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        f.runtime.fixture_ready_hook(Arc::new(move || {
+            // The first read outlives the budget, and only then finds the
+            // agent ready.
+            if first.swap(false, Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(700));
+                resumed_record(&state, true);
+            }
+        }));
+        let original = f.original();
+        f.admit(&original);
+        f.until("settled", |f| f.row(&original).receipt.drained);
+        let receipt = f.row(&original).receipt;
+        assert_eq!(receipt.resume.step, Step::Recorded);
+        assert_eq!(
+            (receipt.send.step, receipt.code.as_str()),
+            (Step::NotStarted, ledger::WAIT_EXPIRED)
         );
         assert_eq!(ran.counts(), (1, 0));
     }

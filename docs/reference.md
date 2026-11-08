@@ -2813,7 +2813,11 @@ only peeks. Task 186 (docs/lore.md 11.6): only you peek at the lead's messages.
 A call with `team` from a caller Zerus cannot verify (a session outside the
 team, a stale session marker) is refused, never read as yours; a parent lead or
 an intake key reads no team's messages. In a sandbox the receipt waits in the member's folder for the
-worker (`messages-read`), as a report does. Nothing else marks a message read.
+worker (`messages-read`), as a report does. Task 277 (owner, 2026-11-08) adds
+one more receipt: a hand-out or stage message whose text reached the member's
+turn (`injected_at`) for an attempt it holds is stale, not unread, and the
+worker marks it read (`read_via: taken`), so "does not read" counts only
+messages that never reached it. Nothing else marks a message read.
 
 Delivery does not depend on the agent's discipline. A Claude or Codex member's
 turn-start hook (`UserPromptSubmit`) gets the unread text Zerus has not put into
@@ -2857,12 +2861,33 @@ Status shows each member's `unread`: `count`, `urgent`, the oldest message and
 its rings, and the schedule `ring_at`, `stall_at` and `held_urgent_at`. Zerus
 Next's member row shows `unread: N`.
 
+Task 277 (owner, 2026-11-08): an urgent message does not wait for the turn end.
+While the member works, Zerus interrupts its turn natively through `hgs
+interrupt` (Claude, Codex and Kimi stop; DeepSeek aborts; OpenCode stops),
+pinned to the displayed turn and its run and conversation, then waits for the
+stop and opens a new turn that carries the message and `Continue your task from
+where you stopped.`; the attempt goes on untouched. Claude and Codex get the
+text from the turn hook, the others in the prompt. A member already handed a
+task, a stage or a resume this tick gets that delivery first, and a question or
+approval is a safe point of its own. An urgent message unread or not acted on
+after `urgent_alarm_minutes` (team setting, default 3, 0 off) is an alarm: the
+lead's inbox gets one urgent `urgent_unread` item naming the member, the sender
+and why (its turn was interrupted and the message waits for the stop, the new
+turn delivered it but it was not acted on, Zerus could not interrupt its turn,
+or it waits for the turn end); for a message you sent, your Waiting list gets
+the same item (`urgent_message`). Ordinary unread notices stay folded into the
+one `unread_messages` item. The lead's inbox message is urgent when it names a
+question, a permission, a Terminal question, a crash, a blocked input, a stuck
+member or an urgent unread message.
+
 The lead's inbox message is urgent when it names a question, a permission, a
-Terminal question, a crash, a blocked input or a stuck member. `hgs team message
+Terminal question, a crash, a blocked input, a stuck member or an urgent unread
+message (task 277). `hgs team message
 --json` with `{"request_id","to","text","urgent"}` (`to`: a member id, `lead`
 or `team`, one message per other member) stores a note from the lead, a member
 or you (`by`: the member id, or `owner`) of at most 2,000 characters, and Zerus
-rings it at the recipient's next idle moment. A recipient with 50 unread normal
+rings it at the recipient's next idle moment; an urgent one interrupts a busy
+member's turn as above. A recipient with 50 unread normal
 or 5 unread urgent messages takes no more of that kind; the sender is refused
 with the count. Zerus's own messages are at most 32 KiB each. A RustCodeLore
 team keeps its team messages here too: hgs does not link the lore crate, and a

@@ -341,6 +341,12 @@ pub(crate) enum Step {
     /// Task 134: the member's unread team messages ring their doorbell (at an
     /// idle moment only; the second ring after their bound).
     RingMessages { member: String },
+    /// Task 277 (owner, 2026-11-08): an urgent message interrupts the
+    /// member's busy turn natively; `turn` pins the displayed turn.
+    InterruptMessages { member: String, turn: f64, run: String, conversation: String },
+    /// Task 277: the stopped turn opens a new one with the urgent message on
+    /// top and "continue your task from where you stopped"; the attempt goes on.
+    ContinueUrgent { member: String },
     /// The member's started session appeared, or its identity changed.
     Adopt { member: String, session: SessionRef },
     Launch { member: String },
@@ -581,9 +587,47 @@ pub(crate) enum Step {
     InterruptStop { stop: String },
 }
 
+/// Task 277 (owner, 2026-11-08): the urgent-message step for `member` this
+/// tick. A stopped turn asks for the new turn that carries the message; a
+/// busy one asks for the native interrupt. None when there is nothing urgent
+/// to deliver, the member is asking at a safe point, or the same message
+/// already interrupted (the alarm covers it, and a newer urgent message may
+/// try once more).
+fn urgent_step(team: &Team, member: &Member, seen: &[Seen], given: bool) -> Option<Step> {
+    if member.id == team.lead || member.state == MemberState::Removed || member.pending.is_some() || member.terminal_question.is_some() {
+        return None;
+    }
+    let found = session_of(member, seen);
+    if let Some(urgent) = member.urgent.as_ref() {
+        if urgent.state == "requested" {
+            let stopped = found.is_none_or(|found| !found.live || (found.free && can_take_a_message(found)));
+            return stopped.then(|| Step::ContinueUrgent { member: member.id.clone() });
+        }
+        let newer = member.unread.as_ref().is_some_and(|unread| {
+            unread.urgent > 0 && !unread.urgent_oldest.is_empty() && unread.urgent_oldest != urgent.oldest
+        });
+        if !newer {
+            return None;
+        }
+    }
+    member.unread.as_ref().filter(|unread| unread.urgent > 0)?;
+    if given {
+        // The delivery this tick already rings for everything unread.
+        return None;
+    }
+    let found = found.filter(|found| found.live && !found.free && !found.asking)?;
+    let turn = found.turn_started?;
+    Some(Step::InterruptMessages {
+        member: member.id.clone(),
+        turn,
+        run: found.run_id.clone(),
+        conversation: found.conversation_id.clone(),
+    })
+}
+
 /// U18: the lead's turn has ended and it can take a message, also while its own
 /// subagents or Background jobs run (an idle agent with Background work accepts
-/// new messages); never during a turn, a question, an approval or a sign-in.
+/// a new message); never during a turn, a question, an approval or a sign-in.
 fn can_take_a_message(found: &Seen) -> bool {
     if found.free {
         return true;
@@ -2034,6 +2078,22 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         }
         if session_of(member, seen).is_some_and(|found| found.free && can_take_a_message(found)) {
             steps.push(Step::RingMessages { member: member.id.clone() });
+        }
+    }
+    // Task 277 (owner, 2026-11-08): an urgent message interrupts a busy
+    // member's turn natively and then opens a new turn that carries it and
+    // says to continue the task (the attempt goes on); ordinary messages still
+    // wait for the turn end. A member handed a task, a stage or a resume this
+    // tick gets that delivery first, and a question or approval is a safe
+    // point of its own.
+    for member in team.members.iter().filter(|member| member.state != MemberState::Removed) {
+        let given = steps.iter().any(|step| match step {
+            Step::HandOut { member: to, .. } | Step::StageOut { member: to, .. } | Step::Resume { member: to, .. } => *to == member.id,
+            Step::Rebalance { to, .. } => *to == member.id,
+            _ => false,
+        });
+        if let Some(step) = urgent_step(team, member, seen, given) {
+            steps.push(step);
         }
     }
     // U49: a draining member finishes its open attempt and stage run, takes
@@ -6684,7 +6744,8 @@ fn hand_out_now(
             }
         }
         Ok(())
-    })
+    })?;
+    Ok(())
 }
 
 /// Task 135: the brief went out with the session's first message (a refused
@@ -9205,6 +9266,8 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::SubInbox { member } => tell_sub_inbox(store, team, member),
         Step::SubBrief { member } => send_sub_brief(store, team, member),
         Step::RingMessages { member } => super::doorbell::ring(store, team, member).map(drop),
+        Step::InterruptMessages { member, turn, run, conversation } => super::doorbell::interrupt(store, team, member, *turn, run, conversation),
+        Step::ContinueUrgent { member } => super::doorbell::continue_after_interrupt(store, team, member),
         Step::RemindReviewer { task, member } => remind_reviewer(store, team, *task, member),
         Step::RemindReport { task } => remind_report(store, team, *task),
         Step::Unassigned { member, what, task } => change(store, &team.id, |team, events| {
@@ -9902,6 +9965,11 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
         // teams (SQLite's busy wait queues nobody).
         if index > 0 {
             std::thread::sleep(TEAM_YIELD);
+        }
+        // Task 277 (owner, 2026-11-08): a hand-out or stage message that
+        // reached the member's turn is taken, not unread.
+        if let Err(error) = super::doorbell::mark_taken(store, team) {
+            eprintln!("hgs team worker: {}: taken hand-outs: {error}", team.name);
         }
         run_team_steps(store, team, &sessions, &listed, host);
         // U62 (#717): the team's test queue. An empty queue is a no-op (no load

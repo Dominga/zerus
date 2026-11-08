@@ -668,6 +668,7 @@ void TestTeamsUiNewteam::embeddedNewTeamIsLedByTheSession()
     QVERIFY(working->findData(QStringLiteral("auto")) >= 0);
     QVERIFY(working->findData(QStringLiteral("branch-pipeline")) >= 0);
     QVERIFY(tab.findChild<QLabel *>("teamNewWorkingReasons"));
+    shot(&tab, "newteam-working-mode");
     // QA #347: a folder that is not a Git repository has one folder for every
     // member; the draft shows the policy as Shared, fixed, with the reason.
     {

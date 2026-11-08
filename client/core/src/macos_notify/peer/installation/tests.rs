@@ -407,6 +407,6 @@ fn capability_identity_compares_actual_running_code_without_app_admission() {
         "/bin/cat"
     )));
     assert!(!same_running_code_for_capability(
-        &temp.path().join("missing")
+        &tree.1.join("missing")
     ));
 }

@@ -885,6 +885,8 @@
   "Start unconfirmed: check the executor’s session. The task will not be sent again automatically.": "Запуск не подтверждён: проверьте сессию исполнителя. Задача не будет отправлена повторно автоматически.",
   "Started by %1\nClick to open it.": "Запущена сессией %1\nНажмите, чтобы открыть её.",
   "Started by %1\nThat session is not listed.": "Запущена сессией %1\nЭтой сессии нет в списке.",
+  "Starting Zerus…": "Запуск Zerus…",
+  "Starting Zerus…\nUpdating the hgs command line for local sessions": "Запуск Zerus…\nОбновление командной строки hgs для локальных сессий",
   "Starting automatically…": "Автоматический запуск…",
   "Starts Zerus in the notification area when you sign in to Windows. This setting doesn't detect or remove a shortcut in the Windows Startup folder.": "Запускает Zerus в области уведомлений при входе в Windows. Эта настройка не видит и не удаляет ярлык в папке автозагрузки Windows.",
   "Startup": "Запуск",

@@ -432,10 +432,10 @@ fn the_keep_choice_hides_the_block_until_the_profile_changes() {
     assert!(disagreement(&team).is_some(), "the shared folder differs from the branch settings");
     // The owner keeps the team's settings: the block leaves.
     let at = 1_800_000_000.0;
-    let kept = keep(&mut team, at).expect("a keep");
-    assert_eq!(kept["preset"], SHARED_FOLDER);
+    let record = keep(&mut team, at).expect("a keep");
+    assert_eq!(record["preset"], SHARED_FOLDER);
     assert!(disagreement(&team).is_none(), "{:?}", disagreement(&team));
-    assert!(kept(team).is_some());
+    assert!(kept(&team).is_some());
     // A material profile change brings it back.
     team.mode_kept = Some(json!({"preset":SHARED_FOLDER,"fingerprint":"an older profile","at":at}));
     assert!(disagreement(&team).is_some(), "the profile changed: the block returns");

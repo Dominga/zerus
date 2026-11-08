@@ -30,8 +30,10 @@ vi.mock("../../store/creations", () => ({
   selectCreation: (id: string) => fixture.selected.push(id),
   selectedCreation: () => undefined,
 }));
-vi.mock("../../store/ui", () => ({ search: () => "api", selectedKey: () => undefined }));
+vi.mock("../../store/ui", () => ({ search: () => "api", selectedKey: () => undefined, stateFilter: () => "all" }));
 vi.mock("../../store/catalog", () => ({ agentKind: (cmd: string) => cmd }));
+// The archive's partial-scan notice (zerus-080n8) shows only under the Archive filter.
+vi.mock("../../store/archive", () => ({ archive: { partial: () => false, partialNewer: () => false, searched: () => 0 } }));
 vi.mock("./SessionCard", () => ({ AgentBadge: () => null, MachineBadge: () => null }));
 import { SearchResults } from "./SearchResults";
 

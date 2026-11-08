@@ -13,7 +13,9 @@ vi.mock("../../store/contentSearch", async () => {
  return {contentSearch:{errors:()=>[],busy:()=>false,refresh(){}},searchItems:()=>searchRows(entries as never).rows,searchStatus:()=>"2 messages, 1 session",activateSearchItem:(item:{id:string})=>fixture.activated.push(item.id),searchCursor:cursor,setSearchCursor:setCursor};
 });
 vi.mock("../../store/creations",()=>({searchCards:()=>[],selectCreation(){},selectedCreation:()=>undefined}));
-vi.mock("../../store/ui",()=>({search:()=>"needle",selectedKey:()=>"one"}));
+vi.mock("../../store/ui",()=>({search:()=>"needle",selectedKey:()=>"one",stateFilter:()=>"all"}));
+// SearchResults reads the archive's partial-scan state (zerus-080n8); the real store pulls in the catalog.
+vi.mock("../../store/archive",()=>({archive:{partial:()=>false,partialNewer:()=>false,searched:()=>0}}));
 vi.mock("../../store/catalog",()=>({agentKind:(cmd:string)=>cmd}));
 vi.mock("./SessionCard",()=>({AgentBadge:()=>null,MachineBadge:()=>null}));
 import {SearchResults} from "./SearchResults";

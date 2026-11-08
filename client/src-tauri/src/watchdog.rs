@@ -10,6 +10,12 @@
 //! starts the client again, and the crash report shows where the main thread
 //! stood; a plain exit would not be restarted. On Linux no unit supervises the
 //! client (`hgs-tray.service` runs the Qt GUI), so an abort only ends that run.
+//! On Windows the beat is a thread timer that the message loop and every modal
+//! loop dispatch. After the abort Windows Error Reporting may offer to start
+//! the client again with its registered command line
+//! (`platform/windows/startup.rs`, `RegisterApplicationRestart`, as Qt's
+//! `main.cpp:388-405`; zerus-5wmh.13.14.3). That restart is not automatic: it
+//! needs the person's consent and at least 60 s of uptime before the abort.
 //!
 //! The clock stops while the machine sleeps ([`now_ms`]). Around sleep macOS
 //! leaves the main thread unscheduled for longer than the threshold while the
@@ -201,7 +207,26 @@ impl Drop for Watchdog {
 }
 
 /// Milliseconds that stop while the machine sleeps (`MainThreadWatchdog::nowMs`):
-/// uptime (`CLOCK_UPTIME_RAW`) on macOS, `CLOCK_MONOTONIC` on Linux.
+/// uptime (`CLOCK_UPTIME_RAW`) on macOS, `CLOCK_MONOTONIC` on Linux, and on
+/// Windows the unbiased interrupt time, which excludes sleep and hibernation
+/// (`QueryPerformanceCounter` keeps counting, so a resume would look like a hang).
+#[cfg(windows)]
+pub fn now_ms() -> i64 {
+    let mut ticks = 0_u64;
+    // SAFETY: QueryUnbiasedInterruptTime writes only the value it is given.
+    unsafe {
+        windows_sys::Win32::System::WindowsProgramming::QueryUnbiasedInterruptTime(&mut ticks)
+    };
+    unbiased_ms(ticks)
+}
+
+/// The unbiased interrupt time's 100 ns units, in milliseconds.
+#[cfg(any(windows, test))]
+fn unbiased_ms(ticks: u64) -> i64 {
+    i64::try_from(ticks / 10_000).unwrap_or(i64::MAX)
+}
+
+#[cfg(not(windows))]
 pub fn now_ms() -> i64 {
     #[cfg(target_os = "macos")]
     let clock = libc::CLOCK_UPTIME_RAW;
@@ -224,7 +249,25 @@ pub fn abort_on_hang(silent_ms: i64) -> ! {
     let mut line = [0; 256];
     let length = hang_line(&mut line, silent_ms);
     // SAFETY: writes initialized bytes of a stack buffer to stderr.
-    unsafe { libc::write(libc::STDERR_FILENO, line.as_ptr().cast(), length) };
+    #[cfg(not(windows))]
+    unsafe {
+        libc::write(libc::STDERR_FILENO, line.as_ptr().cast(), length)
+    };
+    // SAFETY: WriteFile of the same stack buffer to stderr's handle, which
+    // as_raw_handle reads without a lock or an allocation; abort then fails
+    // fast without a message box on the hung desktop.
+    #[cfg(windows)]
+    unsafe {
+        use std::os::windows::io::AsRawHandle;
+        let mut written = 0_u32;
+        windows_sys::Win32::Storage::FileSystem::WriteFile(
+            io::stderr().as_raw_handle(),
+            line.as_ptr(),
+            length as u32,
+            &mut written,
+            std::ptr::null_mut(),
+        );
+    }
     std::process::abort()
 }
 
@@ -246,6 +289,19 @@ fn hang_line(buffer: &mut [u8; 256], silent_ms: i64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_windows_clock_counts_milliseconds_of_unbiased_time() {
+        // 100 ns units: 10 000 per millisecond, rounded down.
+        assert_eq!(unbiased_ms(0), 0);
+        assert_eq!(unbiased_ms(9_999), 0);
+        assert_eq!(unbiased_ms(10_000), 1);
+        assert_eq!(unbiased_ms(36_000_000_000), 3_600_000, "an hour");
+        assert_eq!(
+            unbiased_ms(u64::MAX),
+            i64::try_from(u64::MAX / 10_000).unwrap()
+        );
+    }
 
     const LIMITS: Limits = Limits {
         hang_ms: 300,

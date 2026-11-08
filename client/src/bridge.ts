@@ -419,6 +419,13 @@ export async function copyText(text: string): Promise<void> {
   await navigator.clipboard.writeText(text);
 }
 
+/** Reference an existing file's local check (zerus-5wmh.13.5): one bounded metadata call in Rust, per dialog. */
+export type FileReferenceCheck = { status: "file"; path: string } | { status: "missing" } | { status: "busy" };
+export const fileReferenceCheck = (dialog: number, path: string): Promise<FileReferenceCheck> =>
+  inTauri() ? invoke<FileReferenceCheck>("file_reference_check", { dialog, path }) : Promise.resolve({ status: "missing" });
+/** Browse… for an existing local file: only its path, null when none was chosen. */
+export const fileReferencePick = (): Promise<string | null> => inTauri() ? invoke<string | null>("file_reference_pick") : Promise.resolve(null);
+
 /** Copies `text` exactly as it is (a process's command, as Qt's ProcessView copies it); refuses only an empty text. */
 export async function copyVerbatim(text: string): Promise<void> {
   if (inTauri()) return invoke<void>("copy_verbatim", { text });

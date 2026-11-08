@@ -2587,10 +2587,18 @@ async fn http_rejects_bad_content_before_mutation_and_recovers_from_disconnect()
         413
     );
     // Abort an unknown-length upload while it owns the sole large payload lane.
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
-    stream.write_all(format!("POST /v1/requests HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {auth}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n{{\r\n").as_bytes()).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    // Hyper sends Continue when the relay first polls the body, after taking
+    // the lane. Socket writes alone cannot prove server-side admission.
+    stream.write_all(format!("POST /v1/requests HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {auth}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nExpect: 100-continue\r\n\r\n").as_bytes()).await.unwrap();
+    let mut interim = [0u8; 25];
+    tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut interim))
+        .await
+        .expect("the relay admits the held payload before the overload check")
+        .unwrap();
+    assert_eq!(&interim, b"HTTP/1.1 100 Continue\r\n\r\n");
+    stream.write_all(b"1\r\n{\r\n").await.unwrap();
     // A second client is already streaming when admission is refused. It must
     // receive a usable overload response instead of losing it to a TCP reset.
     let overloaded = client

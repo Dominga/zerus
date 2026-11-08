@@ -855,9 +855,6 @@ pub(super) fn safe_filename(name: &str, index: usize) -> String {
 }
 
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
-    if args.len() == 3 && args[1] == "--observe" && args[2] == "--json" {
-        return observe_dispatch(&args[0]);
-    }
     if args.len() != 2 || args[1] != "--json" {
         return Err("usage: hgs send <session> --json (JSON from stdin)".into());
     }
@@ -887,6 +884,25 @@ struct ObserveRequest {
 const MAX_OBSERVE_INPUT: u64 = 8 << 10;
 /// The longest refusal an observation reply carries, in characters.
 const MAX_OBSERVE_REASON: usize = 1024;
+
+/// Any `hgs send` carrying `--observe`, decided before any provider routing
+/// (zerus-5wmh.66.4.10.1): exactly `hgs send <session> --observe --json` for
+/// a terminal agent's session, or a refusal before stdin is read. An
+/// OpenCode or DeepSeek session takes no observation: its own send path
+/// would ignore the flag, so it refuses by its name alone, with no provider
+/// contact.
+pub(super) fn observe_command(args: &[String]) -> Result<i32> {
+    if args.len() != 3 || args[1] != "--observe" || args[2] != "--json" {
+        return Err("usage: hgs send <session> --observe --json (JSON from stdin)".into());
+    }
+    if matches!(args[0].split('/').next(), Some("opencode" | "dsh"))
+        || opencode::exists(&args[0])
+        || dsh::exists(&args[0])
+    {
+        return Err("hgs send --observe reads terminal agent sessions only".into());
+    }
+    observe_dispatch(&args[0])
+}
 
 /// `hgs send <session> --observe --json`: whether `hgs send` would take a
 /// message for this exact run and conversation now, by its own gates (the

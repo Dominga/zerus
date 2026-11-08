@@ -1209,6 +1209,12 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     if command == "interrupt" { return interrupt::dispatch(args); }
     if command == "processes" { return processes::dispatch(args); }
     if command == "parent" { return parent_link::dispatch(args); }
+    // The send's effect-free observation (zerus-5wmh.66.4.10) is decided
+    // before any provider routing: an OpenCode or DeepSeek send takes no
+    // observation and would ignore the flag and send (zerus-5wmh.66.4.10.1).
+    if command == "send" && args.iter().any(|arg| arg == "--observe") {
+        return input::observe_command(args);
+    }
     if args.first().is_some_and(|name| opencode::exists(name)) { return opencode::dispatch(command,args); }
     if args.first().is_some_and(|name| dsh::exists(name)) {
         return dsh::dispatch(command, args);

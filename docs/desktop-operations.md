@@ -553,7 +553,11 @@ before its lock: the record and its exact live process, a pending resume's
 own verification (the supervised Codex holding the expected rollout open)
 and the empty native composer. It takes no lock and types nothing; it writes
 no receipt, attachment, diagnostic capture, record, attention state or read
-mark, and prints `{ready, reason}`. Only a clean, timely reply of at most
+mark, and prints `{ready, reason}`. Any `hgs send` carrying `--observe` is
+decided before provider routing: an OpenCode or DeepSeek session refuses by
+its name with no provider contact, because its own send path would ignore the
+flag. `@host` refuses it too, because an older remote CLI would not know the
+flag (zerus-5wmh.66.4.10.1). Only a clean, timely reply of at most
 8 KiB with `ready` lets the send start, and the record is read again after
 it. Anything else reads again until the budget ends the wait. The
 observation runs once more right before the send's spawn turn, and that

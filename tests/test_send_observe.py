@@ -7,7 +7,9 @@ itself then does, and must leave the whole fixture tree byte-identical: no
 record, receipt, attachment, diagnostic capture, read mark, attention state,
 lock file or directory change, nothing typed, and no terminal resize. Every
 case runs on a private tmux socket with a fake agent; the pending Codex resume
-is the input suite's native stand-in with an open rollout.
+is the input suite's native stand-in with an open rollout. An OpenCode or
+DeepSeek session, or another computer, takes no observation and refuses
+before any effect (zerus-5wmh.66.4.10.1).
 """
 import json
 import subprocess
@@ -16,6 +18,7 @@ import unittest
 import uuid
 
 import test_answer_observe
+import test_dsh_session_actions
 import test_input as fixtures
 
 HGS = fixtures.HGS
@@ -114,6 +117,16 @@ class SendObservation(unittest.TestCase):
         self.assertEqual(receipt['conversation_id'], self.conversation_id)
         self.wait_for(lambda: self.received().endswith(b'\r'))
 
+    def test_a_remote_observation_is_refused_before_any_forwarding(self):
+        # An older remote hgs would not know the flag (zerus-5wmh.66.4.10.1).
+        before = tree(self.root)
+        result = subprocess.run([str(HGS), '@remote', 'send', self.name, '--observe', '--json'],
+                                input=json.dumps(dict(expected_run_id=self.run_id)), text=True,
+                                capture_output=True, env=self.env, timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("this computer's sessions only", result.stderr)
+        self.assertEqual(tree(self.root), before)
+
     def test_invalid_stdin_is_refused_and_changes_nothing(self):
         before = tree(self.root)
         for raw in ['', 'not json', json.dumps(dict(expected_run_id='')),
@@ -124,6 +137,56 @@ class SendObservation(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(result.stdout, '')
         self.assertEqual(tree(self.root), before)
+
+
+
+def provider_send(case, *args, body):
+    return subprocess.run([str(HGS), 'send', *args], input=json.dumps(body), text=True,
+                          capture_output=True, env=case.env, timeout=30)
+
+
+def deepseek_observation_never_contacts_its_host(self):
+    """zerus-5wmh.66.4.10.1: a DeepSeek session's own send ignores the flag, so
+    any send carrying --observe refuses before provider routing: no RPC call,
+    receipt or state change, whatever the body. The same fixture takes an
+    ordinary send, so the refusal is the observation's own."""
+    send = dict(request_id=str(uuid.uuid4()), text='an observation must not send', attachments=[],
+                expected_run_id='run', expected_conversation_id='session-synthetic')
+    observe = dict(expected_run_id='run', expected_conversation_id='session-synthetic')
+    before = tree(self.root)
+    for args in [(self.name, '--observe', '--json'), (self.name, '--json', '--observe'),
+                 (self.name, '--observe')]:
+        for body in (send, observe):
+            with self.subTest(args=args, body=sorted(body)):
+                result = provider_send(self, *args, body=body)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(result.stdout, '')
+    self.assertEqual(self.calls, [], 'the observation contacted the DeepSeek host')
+    self.assertEqual(tree(self.root), before)
+    sent = provider_send(self, self.name, '--json', body=send)
+    self.assertEqual(sent.returncode, 0, sent.stderr)
+    self.assertEqual(json.loads(sent.stdout)['status'], 'submitted')
+    self.assertIn('send', [call['method'] for call in self.calls])
+
+
+def opencode_observation_refuses_by_its_name(self):
+    """An OpenCode session refuses the same way, by its name alone."""
+    before = tree(self.root)
+    for name in ('opencode/example/session', 'opencode/other'):
+        result = provider_send(self, name, '--observe', '--json',
+                               body=dict(expected_run_id='run', expected_conversation_id='session'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('terminal agent sessions only', result.stderr)
+    self.assertEqual(tree(self.root), before)
+    self.assertEqual(self.calls, [])
+
+
+# The DeepSeek suite's private synthetic Unix RPC host; its own tests are not run again.
+ProviderSessionsRefuse = type('ProviderSessionsRefuse', (test_dsh_session_actions.DeepSeekScopedActions,), {
+    **{name: None for name in dir(test_dsh_session_actions.DeepSeekScopedActions) if name.startswith('test')},
+    'test_a_deepseek_observation_never_contacts_its_host': deepseek_observation_never_contacts_its_host,
+    'test_an_opencode_observation_refuses_by_its_name': opencode_observation_refuses_by_its_name,
+})
 
 
 if __name__ == '__main__':

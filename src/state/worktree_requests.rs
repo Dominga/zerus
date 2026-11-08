@@ -121,6 +121,7 @@ pub(super) fn has_receipt_id(args: &[String]) -> bool {
         .any(|pair| pair[0] == "--request-id" && uuid::Uuid::parse_str(&pair[1]).is_ok())
 }
 
+#[cfg(all(test, target_os = "linux"))]
 fn folder() -> PathBuf {
     root().join("worktree-requests")
 }

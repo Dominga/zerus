@@ -122,7 +122,7 @@ impl Directory {
         let file = match crate::platform::no_follow(OpenOptions::new().read(true))
             .open(self.path.join(name))
         {
-            Ok(Some(file)) => file,
+            Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.to_string()),
         };

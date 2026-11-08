@@ -1174,6 +1174,7 @@ mod tests {
             let mut operation: Value = serde_json::from_str(&intent.original).unwrap();
             operation["host"] = json!(host);
             operation["target"] = json!(source);
+            operation["worktree_source"] = json!(source);
             operation["worktree_common"] = json!(common);
             operation["destination"] = json!(destination);
             assert!(Plan::from_operation(&intent.creation_id, &operation).is_none());

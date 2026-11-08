@@ -3672,7 +3672,10 @@ mod binding_census_tests {
         session_id::select(name,string(&second,"session_id"));
         let refs=bindings().unwrap();
         assert_eq!(refs.len(),4);
-        for folder in &folders {assert!(refs.iter().any(|r|r.folders.contains(folder)),"missing {}",folder.display());}
+        for folder in &folders {
+            let expected = crate::platform::canonical(folder).unwrap();
+            assert!(refs.iter().any(|r|r.folders.contains(&expected)),"missing {}",folder.display());
+        }
         assert_eq!(refs.iter().filter(|r|r.name==name).count(),2);
         let original=fs::read(&second_path).unwrap();
         fs::remove_file(&second_path).unwrap();

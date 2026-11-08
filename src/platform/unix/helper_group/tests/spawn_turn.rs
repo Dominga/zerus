@@ -77,7 +77,7 @@ fn an_on_time_turn_still_serializes_and_starts_exactly_one_child() {
 
 fn marked_command(marker: &Path) -> Command {
     let name = CString::new(marker.as_os_str().as_encoded_bytes()).unwrap();
-    let mut command = Command::new("/bin/true");
+    let mut command = Command::new("/usr/bin/true");
     command.env_clear().env("PATH", "/usr/bin:/bin");
     unsafe {
         command.pre_exec(move || {

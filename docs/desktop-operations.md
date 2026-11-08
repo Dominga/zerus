@@ -250,6 +250,31 @@ refuses it too (`deferred_send_unsupported`), and only Linux advertises the
 help marker. An unauthenticated hello naming it gets
 `frontend_authentication_required`, like its siblings.
 
+**Not admitted** (zerus-tlb9q). A refusal is `deferred_send_unavailable`,
+which can hide anything up to an admitted original, so the client looks it
+up and never sends it again. One refusal is closed instead:
+`deferred_send_not_admitted`, for an original refused before its ledger
+admission whose ledger provably holds no row for the request. In the writer
+transaction the actor reads the row first, and only that successful empty
+read, followed by a refusal before `ledger::admit`, proves it. A refusal
+before that transaction (the owner stopping, no lease) is proven by a fresh
+BEGIN IMMEDIATE read on the same held store, and only for a request of this
+epoch's own scope. A busy or unreadable store, an existing row, another
+connection's request and any failure from the admission on stay
+unavailable. Before the reply the actor seals the request ID for the service
+epoch, and a sealed ID never admits: a copy of the same request held behind
+the refusal gets the same answer. The seals belong to the epoch, outside the
+background runtime, so a runtime the service stops and starts again under
+the same epoch keeps them; a new epoch refuses the old scope anyway. Each
+kind seals at most 1024 IDs per epoch and never evicts one; a full fence
+answers unavailable. The read-only lookup never answers not admitted. The
+client takes it only from a completed exchange whose reply is exactly that
+refusal: this kind's ABI, the original's request and scope, not accepted,
+not durable, no receipt and the closed code. The send then settles as never
+started ("the desktop service could not start it"): the draft stays and its
+identity is released, with no lookup, direct path or resend. The session
+resume follows the same rule with `session_resume_not_admitted`.
+
 The second kind, `deferred_answer` (`desktop::deferred_answer`, ABI
 `desktop-deferred-answer-v1`), defines its closed wire for one `hgs answer
 <session> --json` to a question card:
@@ -598,7 +623,9 @@ the hand-over the draft is the delivery the service holds, like a handed
 "Compact and continue": its row shows the message sending, the status shows
 the service's line, and Cancel send stays shown but locked. Once offered,
 nothing falls back: a lost reply goes to the read-only lookup, and Unknown is
-never sent again. A recorded send clears the draft; its row, recorded under
+never sent again. Only the exact `session_resume_not_admitted` refusal settles
+without a lookup, as never started (see the deferred send's not admitted
+rule). A recorded send clears the draft; its row, recorded under
 the stopped run, then belongs to the run the resume's receipt returned as well,
 so it stays shown until the agent's history shows the message
 (zerus-5wmh.66.4.9.3). A send that never started

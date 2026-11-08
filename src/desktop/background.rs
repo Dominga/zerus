@@ -73,6 +73,9 @@ impl Runtime {
         epoch: &str,
         broker: &mut feed::Broker,
         owner: Arc<platform::FileLock>,
+        #[cfg(any(target_os = "linux", target_os = "macos"))] fences: Arc<
+            super::not_admitted::Fences,
+        >,
     ) -> Result<Self> {
         let location = Location::new(config)?;
         let delivery = delivery::Runtime::start(config, epoch)?;
@@ -87,13 +90,15 @@ impl Runtime {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let message = super::task_message::Runtime::new(config, epoch, owner.clone())?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let send = super::deferred_send::Runtime::new(config, epoch, owner.clone())?;
+        let send =
+            super::deferred_send::Runtime::new(config, epoch, owner.clone(), fences.clone())?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let answer = super::deferred_answer::Runtime::new(config, epoch, owner.clone())?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let compact = super::compact_to_send::Runtime::new(config, epoch, owner.clone())?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let resume = super::session_resume::Runtime::new(config, epoch, owner.clone())?;
+        let resume =
+            super::session_resume::Runtime::new(config, epoch, owner.clone(), fences.clone())?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let task_start = super::task_start_reconcile::Runtime::new(config, epoch, owner.clone())?;
         match fleet::Runtime::start(config, epoch) {

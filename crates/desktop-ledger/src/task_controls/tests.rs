@@ -521,3 +521,170 @@ fn malformed_or_oversized_records_refuse_without_resetting_them() {
     assert!(records.control(&request(1).id).is_err());
     assert!(records.controls(&executor(), None, 128).is_err());
 }
+
+#[test]
+fn review_1823_partial_ledger_without_executor_index_refuses() {
+    let mut db = connection();
+    let _ = store::open_enabled(&mut db).unwrap();
+    db.execute_batch("DROP INDEX desktop_task_control_executor")
+        .unwrap();
+    let Ok(mut records) = store::open_enabled(&mut db) else {
+        return;
+    };
+    records.claim(&slot(1)).unwrap();
+    let mut other = slot(2);
+    other.attempt.project = "other-project".into();
+    assert!(
+        records.claim(&other).is_err(),
+        "partial ledger admitted two active tasks for the same exact executor"
+    );
+}
+
+#[test]
+fn review_1823_partial_ledger_without_budget_row_refuses() {
+    let mut db = connection();
+    let _ = store::open_enabled(&mut db).unwrap();
+    db.execute_batch("DELETE FROM desktop_task_control_budget")
+        .unwrap();
+    let Ok(mut records) = store::open_enabled(&mut db) else {
+        return;
+    };
+    assert!(
+        records.reserve(&request(1)).is_err(),
+        "missing budget singleton was accepted and its trigger updated zero rows"
+    );
+}
+
+#[test]
+fn review_1823_partial_ledger_without_budget_trigger_refuses() {
+    let mut db = connection();
+    let _ = store::open_enabled(&mut db).unwrap();
+    db.execute(
+        "UPDATE desktop_task_control_budget SET rows=?1",
+        [STORE_ROWS],
+    )
+    .unwrap();
+    db.execute_batch("DROP TRIGGER desktop_task_control_slots_insert")
+        .unwrap();
+    let Ok(mut records) = store::open_enabled(&mut db) else {
+        return;
+    };
+    assert!(
+        records.claim(&slot(1)).is_err(),
+        "partial ledger bypassed the configured full-record budget"
+    );
+}
+
+#[test]
+fn review_1823_late_wrong_pause_rolls_back_every_observed_settlement() {
+    let mut db = connection();
+    let mut records = store::open_enabled(&mut db).unwrap();
+    let stopped = request(1);
+    records.reserve(&stopped).unwrap();
+    let stop = hold(1, HoldKind::Stop, &stopped);
+    records.hold(&stop).unwrap();
+    let mut paused = request(2);
+    paused.action = Action::Pause;
+    paused.attempt = Some(attempt(1));
+    paused.task_version = Some("v-one".into());
+    records.reserve(&paused).unwrap();
+    let pause = hold(2, HoldKind::Pause, &paused);
+    records.hold(&pause).unwrap();
+    let mut other = paused.clone();
+    other.id = id(997);
+    other.attempt = Some(attempt(2));
+    records.reserve(&other).unwrap();
+    let other_pause = hold(3, HoldKind::Pause, &other);
+    records.hold(&other_pause).unwrap();
+    let mut wrong = paused.clone();
+    wrong.id = id(998);
+    wrong.action = Action::Resume;
+    wrong.observed_stops = vec![stop.id.clone()];
+    wrong.observed_pauses = vec![pause.id.clone(), other_pause.id.clone()];
+    records.reserve(&wrong).unwrap();
+    records.settle(&wrong.id, Outcome::Submitted, None).unwrap();
+    assert!(records.settle_observed(&wrong.id).is_err());
+    assert_eq!(records.holds(&executor(), None, 64).unwrap().rows.len(), 3);
+    assert!(matches!(
+        records
+            .dispatch(&executor(), Dispatch::PersonSend, &[stop.id])
+            .unwrap(),
+        Admission::Held(_)
+    ));
+}
+
+#[test]
+fn every_required_named_index_and_trigger_is_checked_without_repair() {
+    let mut db = connection();
+    let _ = store::open_enabled(&mut db).unwrap();
+    let objects = db.prepare("SELECT type,name FROM sqlite_schema WHERE substr(name,1,21)='desktop_task_control_' AND type IN('index','trigger') ORDER BY name LIMIT 33").unwrap()
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    assert_eq!(objects.len(), 11);
+    for (kind, name) in objects {
+        let mut db = connection();
+        let _ = store::open_enabled(&mut db).unwrap();
+        // Names come from this fixture's fixed schema, never external input.
+        db.execute_batch(&format!("DROP {kind} {name}")).unwrap();
+        let before = db.total_changes();
+        assert!(store::open_enabled(&mut db).is_err(), "missing {name}");
+        assert_eq!(
+            db.total_changes(),
+            before,
+            "validation wrote while refusing {name}"
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name=?1",
+                [&name],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        db.execute_batch("PRAGMA query_only=ON").unwrap();
+        assert!(open(&mut db).unwrap().is_none()); // Gate-off still ignores it.
+    }
+}
+
+#[test]
+fn correct_names_do_not_hide_changed_constraints_or_trigger_bodies() {
+    for mutation in [
+        "DROP INDEX desktop_task_control_executor; CREATE INDEX desktop_task_control_executor ON desktop_task_control_slots(executor) WHERE active=1;",
+        "DROP TRIGGER desktop_task_control_slots_insert; CREATE TRIGGER desktop_task_control_slots_insert AFTER INSERT ON desktop_task_control_slots BEGIN UPDATE desktop_task_control_budget SET rows=rows WHERE id=1; END;",
+        "DROP TABLE desktop_task_control_budget; CREATE TABLE desktop_task_control_budget(id INTEGER PRIMARY KEY,rows INTEGER NOT NULL,bytes INTEGER NOT NULL); INSERT INTO desktop_task_control_budget VALUES(1,0,0);",
+    ] {
+        let mut db = connection();
+        let _ = store::open_enabled(&mut db).unwrap();
+        db.execute_batch(mutation).unwrap();
+        let before = db.total_changes();
+        assert!(store::open_enabled(&mut db).is_err());
+        assert_eq!(db.total_changes(), before);
+    }
+}
+
+#[test]
+fn disk_schema_refusal_keeps_original_database_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.sqlite3");
+    {
+        let mut db = Connection::open(&path).unwrap();
+        let mut records = store::open_enabled(&mut db).unwrap();
+        records.reserve(&request(1)).unwrap();
+        records
+            .settle(
+                &request(1).id,
+                Outcome::Unknown,
+                Some("retained original outcome"),
+            )
+            .unwrap();
+        db.execute_batch("DROP INDEX desktop_task_control_executor")
+            .unwrap();
+    }
+    let before = std::fs::read(&path).unwrap();
+    {
+        let mut db = Connection::open(&path).unwrap();
+        assert!(store::open_enabled(&mut db).is_err());
+    }
+    assert_eq!(std::fs::read(path).unwrap(), before);
+}

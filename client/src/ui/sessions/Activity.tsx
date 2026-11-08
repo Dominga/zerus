@@ -43,9 +43,12 @@ import { searchHitItems } from "./search-hit";
 
 export { Body } from "./MarkdownBody";
 import { activityAll, activityFlow, activityRange, measureActivityRows, activitySelectionIndexes, activitySelectionText, activityText, activityTexts, activityVirtualOffset, selectActivityAll, selectionCoversActivity } from "./activity-virtual";
-import { SessionFileDialog } from "./SessionFileDialog";
 import { captionText, statusOf } from "./SessionCard";
 import type { ActivityItem, ItemAttachment, LocalItem, MediaMessage, Session, TranscriptItem } from "./types";
+import { lazyView } from "../lazy-view";
+import { LazyBoundary } from "../lazy-boundary";
+// The File reference dialog opens on demand, outside the entry chunk (zerus-ycycu).
+const SessionFileDialog = lazyView(() => import("./SessionFileDialog"), (m) => m.SessionFileDialog);
 
 // ---------------------------------------------------------------------------
 // Reading column (ActivityWidth.h): 900 px at 100% content scale, 480–2400,
@@ -1099,7 +1102,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
       </Show>
       <LocalDeleteDialog />
       <RemoveQueuedDialog scope={inboxScope} />
-      <SessionFileDialog />
+      <LazyBoundary floating><SessionFileDialog /></LazyBoundary>
       <div class="act-scroll" ref={scroller} tabindex="-1" onContextMenu={activityMenu} onScroll={onScroll} style={{ "overflow-anchor": "none" }}
         onWheel={scrollIntent}
         onKeyDown={(e) => {

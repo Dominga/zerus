@@ -143,6 +143,46 @@ describe("window commands from the keyboard", () => {
     }
   });
 
+  it("Alt+Shift+Down reaches an approval under a collapsed team inside a collapsed project", async () => {
+    // review-win-e's follow-up for PR #1774 (zerus-wfajl.1).
+    const { listRows } = await import("./model");
+    const { receive } = await import("../../store/session");
+    const { setTeamCollapsed, teamCollapsed } = await import("../../store/teamCollapse");
+    const { machineMeta } = await import("../../store/testing");
+    const machine = "11111111-1111-4111-8111-111111111111";
+    const parentId = "00000000-0000-4000-8000-000000000001";
+    const grouping = (collapsed: boolean) => ({
+      loaded: true, default_project: "ungrouped", ready: true, reason: null, busy: false, status: "", status_error: false, conflicts: 0,
+      headers: [
+        { id: "alpha", name: "Alpha", color: null, accessible: true, collapsed, is_default: false, palette: 0 },
+        { id: "ungrouped", name: "General", color: null, accessible: true, collapsed: false, is_default: true, palette: 1 },
+      ],
+    });
+    const changed = rows.map((r) => ({ ...r, row: { ...r.row, status: "ready" } }));
+    changed[0].row = { ...changed[0].row, session_id: parentId, conversation_id: "c1" };
+    changed[1].row = { ...changed[1].row, status: "attention", phase: "approval", session_id: "00000000-0000-4000-8000-000000000002", conversation_id: "c2",
+      parent: { machine, session_id: parentId, name: changed[0].row.name, conversation_id: "c1", run_id: "1", state: "live" } };
+    const groups = [{ computer: "", key: "run:1", group: "alpha", rank: 1 }, { computer: "", key: "run:2", group: "alpha", rank: 2 },
+      { computer: "", key: "run:3", group: "ungrouped", rank: 3 }, { computer: "", key: "run:4", group: "ungrouped", rank: 4 }];
+    receive({ ...emptyBatch(), computers: [{ computer: "", status: "live", attempt: 0 }],
+      machines: [{ computer: "", machine: machineMeta("", {}, { machine_id: machine }) }], upserts: changed, groups, grouping: grouping(true) });
+    setTeamCollapsed(id(1), true);
+    setSelectedKey(id(3));
+    const cards = () => listRows().filter((r) => r.type === "card").map((r) => r.id);
+    try {
+      expect(cards()).toEqual([id(3), id(4)]);
+      press({ ...ALT_DOWN, shift: true });
+      expect(selectedKey()).toBe(id(2));
+      expect(teamCollapsed(id(1))).toBe(false);
+      // The project opens through the organization store's next grouping batch.
+      receive({ ...emptyBatch(), grouping: grouping(false) });
+      expect(cards()).toContain(id(2));
+    } finally {
+      setTeamCollapsed(id(1), false);
+      receive({ ...emptyBatch(), upserts: rows, grouping: { ...grouping(false), loaded: false, headers: [] } });
+    }
+  });
+
   it("Alt+Down steps through search results while they are shown", () => {
     setSearch("t3");
     press(ALT_DOWN);

@@ -139,6 +139,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        lifecycle-receipt-status-v1
        hgs [@host] <command> --session-id ID ...   select a live or saved session by its durable ID instead of its name
        session-id-selector-v1
+       session-launch-identity-v1
        session-labels-v1
        hgs [@host] <command> 'zerus://session?...' ...   select the session a reference names, on every session command
        session-reference-selector-v1
@@ -1055,9 +1056,10 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
 /// then runs the base command in place of this process on Unix and as its
 /// child on Windows, which has no exec (spec D8).
 fn run(args: &[String]) -> Result<i32> {
-    let n: usize = require(args, 0, "--run needs a resume-argument count")?
-        .parse()
-        .map_err(|_| Error::new(1, "invalid --run resume-argument count"))?;
+    let count = state::launch_identity::resume_count(
+        require(args, 0, "--run needs a resume-argument count")?
+    ).map_err(|error| Error::new(1,error))?;
+    let n = count.value;
     if n >= args.len() - 1 {
         return Err(Error::new(
             1,
@@ -1067,6 +1069,13 @@ fn run(args: &[String]) -> Result<i32> {
     if env::var("HGS_SESSION").is_ok_and(|s| !s.is_empty())
         && env::var("HGS_TRACKING").as_deref() != Ok("0")
     {
+        // The existing lifecycle receives its unchanged numeric grammar.
+        // Required identities were verified before any bootstrap/native work.
+        if count.required {
+            let mut plain = args.to_vec();
+            plain[0] = n.to_string();
+            return state_command("run", &plain);
+        }
         return state_command("run", args);
     }
     let resume = &args[1..n + 1];

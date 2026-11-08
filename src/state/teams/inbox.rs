@@ -258,11 +258,24 @@ fn all_items(team: &Team) -> Vec<Item> {
     // with its own member (pinned, keep_assignees or a rework). An idle member
     // that may take such a task is named here with the task, so the lead can
     // hand it over instead of leaving both waiting.
+    // Task 263 (owner, 2026-11-08): a member whose own ready work another open
+    // task's outputs hold is idle too; that item names the holder, so an
+    // hour-long silent hold like 198 against 218-226 is visible and freeable.
     if active {
         let ready = plan::dispatch_order(team, plan::ready(team));
         let outputs = InProgressOutputs::new(team);
         for member in team.members.iter().filter(|member| member.id != team.lead && member.state != MemberState::Removed) {
-            let Some(since) = member.starved_since else { continue };
+            let held = plan::held_ready(team, &member.id);
+            let idle = member.starved_since.is_some()
+                || (!held.is_empty() && member.seen_activity == "idle" && member.session.is_some());
+            if !idle {
+                continue;
+            }
+            let since = member
+                .starved_since
+                .or(member.seen_event_at)
+                .or_else(|| member.seen.as_ref().map(|seen| seen.at))
+                .unwrap_or_else(crate::state::now);
             let role = team.role_of(&member.id);
             let mut best: Option<(u8, usize, &Task)> = None;
             for (index, id) in ready.iter().enumerate() {
@@ -283,21 +296,49 @@ fn all_items(team: &Team) -> Vec<Item> {
                     best = Some((rank, index, task));
                 }
             }
-            let Some((_, _, task)) = best else { continue };
-            let why = if task.rework() { "a rework stays with the member that got it" } else { "an explicit assignment (pinned or keep_assignees) keeps it" };
+            if let Some((_, _, task)) = best {
+                let why = if task.rework() { "a rework stays with the member that got it" } else { "an explicit assignment (pinned or keep_assignees) keeps it" };
+                let minutes = ((crate::state::now() - since).max(0.0) / 60.0).round() as u64;
+                items.push(Item {
+                    subagents: Value::Null,
+                    kind: "idle_with_ready_work",
+                    key: format!("idle_with_ready_work:{}:{}", member.id, task.id),
+                    task: Some(task.id),
+                    member: team.name_of(&member.id),
+                    since,
+                    summary: summary(&format!("#{} {} is ready and {} is idle {minutes} min: it may take it", task.id, task.title, team.name_of(&member.id))),
+                    command: format!("{} | hgs team reassign --json",
+                        json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id,"member":member.id})),
+                    detail: format!("{} has no ready task of its own while #{} waits for {}. {}; Zerus does not move it by itself. Its outputs are free for {} ({role}) and its launch can do it. Reassign it to hand the task over, or leave it with its member.",
+                        team.name_of(&member.id), task.id, team.name_of(&task.assignee), why, team.name_of(&member.id)).trim_end().to_owned(),
+                });
+                continue;
+            }
+            // Task 263: the member's own ready work is held by another open
+            // task's outputs; name the holder and the action that frees it.
+            let Some((task_id, holder)) = held.first().copied() else { continue };
+            let Some(task) = team.task(task_id) else { continue };
+            let note = plan::holder_note(team, holder);
+            let waiting = plan::holder_waits_for_member(team, holder);
             let minutes = ((crate::state::now() - since).max(0.0) / 60.0).round() as u64;
+            let command = if waiting {
+                format!("{} | hgs team hold --json", json!({"request_id":PLACEHOLDER,"team":team.id,"task":holder,
+                    "reason":format!("#{holder} waits for its member and holds #{}'s outputs for {}", task_id, team.name_of(&member.id))}))
+            } else {
+                format!("{} | hgs team look --json",
+                    json!({"team":team.id,"member":team.task(holder).map(|task| task.assignee.clone()).unwrap_or_default()}))
+            };
             items.push(Item {
                 subagents: Value::Null,
                 kind: "idle_with_ready_work",
-                key: format!("idle_with_ready_work:{}:{}", member.id, task.id),
-                task: Some(task.id),
+                key: format!("idle_with_ready_work:{}:{}:outputs", member.id, task_id),
+                task: Some(task_id),
                 member: team.name_of(&member.id),
                 since,
-                summary: summary(&format!("#{} {} is ready and {} is idle {minutes} min: it may take it", task.id, task.title, team.name_of(&member.id))),
-                command: format!("{} | hgs team reassign --json",
-                    json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id,"member":member.id})),
-                detail: format!("{} has no ready task of its own while #{} waits for {}. {}; Zerus does not move it by itself. Its outputs are free for {} ({role}) and its launch can do it. Reassign it to hand the task over, or leave it with its member.",
-                    team.name_of(&member.id), task.id, team.name_of(&task.assignee), why, team.name_of(&member.id)).trim_end().to_owned(),
+                summary: summary(&format!("#{} {} is ready for {} but held by #{}'s outputs", task_id, task.title, team.name_of(&member.id), holder)),
+                command,
+                detail: format!("#{} waits for #{}'s output; {}. {} is idle {minutes} min. Hold or reassign #{} to let #{} start, or wait for it.",
+                    task_id, holder, note, team.name_of(&member.id), holder, task_id).trim_end().to_owned(),
             });
         }
     }
@@ -1607,6 +1648,16 @@ pub(crate) fn waits(team: &Team, task: &Task, ready: bool) -> Option<Value> {
         if let Some(first) = blockers.first() {
             return Some(json!({
                 "for":"deps","on":blockers,"unblock":format!("finish #{}", first)
+            }));
+        }
+    }
+    // Task 263 (owner, 2026-11-08): another open task's outputs hold this one;
+    // name the holder and why it has not started, never a silent wait.
+    if task.status == TaskStatus::Pending && task.open_attempt().is_none() {
+        if let Some(holder) = plan::output_holders(team, task).first().copied() {
+            return Some(json!({
+                "for":"outputs","on":[holder],
+                "unblock":plan::holder_unblock(team, holder)
             }));
         }
     }

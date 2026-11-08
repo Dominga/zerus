@@ -534,6 +534,19 @@ fn deliver(task: &Task, member: &Member) -> Step {
     }
 }
 
+/// Task 263 (owner, 2026-11-08): a task claims its files for this tick only
+/// when the tick actually hands it out, or starts its member for it. A task
+/// that merely waits for its busy member used to claim them too, and every
+/// later ready task writing the same files was skipped in silence (218-226
+/// VS 198): the idle member got nothing. Now the later task goes ahead, and
+/// once the waiting task can start, the later task's in-progress work holds
+/// it back instead (plan::output_holders), so the two still never run apart.
+fn claim_outputs<'a>(claimed: &mut Vec<&'a Task>, task: &'a Task) {
+    if task.narrow_outputs().next().is_some() {
+        claimed.push(task);
+    }
+}
+
 fn session_of<'a>(member: &Member, seen: &'a [Seen]) -> Option<&'a Seen> {
     let session = member.session.as_ref()?;
     seen.iter().find(|s| s.host == session.host && s.name == session.name)
@@ -1690,7 +1703,11 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     // dependants goes first, then the lowest number.
     let ready = plan::dispatch_order(team, ready_ids);
     // Task 155: the outputs of the tasks taken in this tick's order; a later
-    // task writing the same files waits for them.
+    // task writing the same files waits for them. Task 263: a task claims them
+    // only when the tick actually hands it out (or starts its member for it) -
+    // a task that merely waits for a busy member does not hold a later
+    // member's ready task, and once it can start the later task's work holds
+    // it back instead (plan::output_holders).
     let mut claimed: Vec<&Task> = Vec::new();
     for id in ready {
         let Some(task) = team.task(id) else { continue };
@@ -1716,9 +1733,6 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         if !plan::output_holders(team, task).is_empty() || claimed.iter().any(|other| other.narrow_output_overlaps(task)) {
             continue;
         }
-        if task.narrow_outputs().next().is_some() {
-            claimed.push(task);
-        }
         // U45: a task with models or for a role goes to a member that can run
         // one of its models, switched first when it must be.
         if super::models::applies(team, task) {
@@ -1731,6 +1745,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 if let (Some(member), Some(_)) = (member, found.filter(|found| super::models::confirmed(pending, &found.model, &found.effort))) {
                     if switching.contains(member.id.as_str()) && available(member, &BTreeSet::new(), Some(id)) && super::stages::held(team, &member.id).is_none() {
                         switching.remove(member.id.as_str());
+                        claim_outputs(&mut claimed, task);
                         steps.push(deliver(task, member));
                     }
                 } else if now - pending.at >= super::models::CONFIRM_SECONDS {
@@ -1771,12 +1786,14 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             match chosen {
                 Some((member, super::models::Fit::Ready)) => {
                     busy.insert(member.id.as_str());
+                    claim_outputs(&mut claimed, task);
                     steps.push(deliver(task, member));
                 }
                 Some((member, super::models::Fit::Switch(choice))) => {
                     busy.insert(member.id.as_str());
                     let found = session_of(member, seen);
                     let from = found.filter(|found| !found.model.is_empty()).map(|found| super::models::label(&found.model, &found.effort)).unwrap_or_default();
+                    claim_outputs(&mut claimed, task);
                     steps.push(Step::SwitchModel { task: id, member: member.id.clone(), from, model: choice.model.clone(), effort: choice.effort.clone() });
                 }
                 None => {
@@ -1787,6 +1804,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                             && super::models::fit(m, task, super::models::launch_model(m)).is_some()
                     }) {
                         if launching.insert(member.id.clone()) {
+                            claim_outputs(&mut claimed, task);
                             steps.push(Step::Launch { member: member.id.clone() });
                         }
                     }
@@ -1808,6 +1826,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 continue;
             }
             busy.insert(member.id.as_str());
+            claim_outputs(&mut claimed, task);
             steps.push(Step::HandOut { task: id, member: member.id.clone() });
             continue;
         }
@@ -1848,6 +1867,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 );
                 if let Some(peer) = peer {
                     busy.insert(peer.id.as_str());
+                    claim_outputs(&mut claimed, task);
                     steps.push(Step::Rebalance { task: id, from: member.id.clone(), to: peer.id.clone() });
                     continue;
                 }
@@ -1859,6 +1879,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         }
         if member.session.is_none() {
             if member.launch_id.is_empty() && member.error.is_empty() && launching.insert(member.id.clone()) {
+                claim_outputs(&mut claimed, task);
                 steps.push(Step::Launch { member: member.id.clone() });
             }
             continue;
@@ -1867,6 +1888,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             continue;
         }
         busy.insert(member.id.as_str());
+        claim_outputs(&mut claimed, task);
         steps.push(if member.needs_settings() { Step::Settings { member: member.id.clone() } } else { Step::HandOut { task: id, member: member.id.clone() } });
     }
     // Task 158 (owner, 2026-11-07): there is no work ahead or start ahead any

@@ -21,6 +21,7 @@
 //! off the dispatcher's tick. `hgs team look <member>` gives the same compact
 //! snapshot in one call, and an uncertain member is told to the lead once.
 use super::model::{AttemptState, LeadStall, Member, MemberCheck, MemberState, Team};
+use super::plan;
 use serde_json::{json, Value};
 
 /// Sources must disagree this long (two reads) before the member is uncertain.
@@ -428,6 +429,18 @@ pub(crate) fn next_action(team: &Team, member: &Member, state: &str) -> String {
             format!("Waits for its report on #{}; marks it stuck after the stuck bound without an event.", task.id)
         }
         (Some((task, _)), _) => format!("Waits for its report on #{}; reminds it when its turn ended without one.", task.id),
+        // Task 263 (owner, 2026-11-08): the member is idle because another
+        // open task's outputs hold its ready work; name the holder so the
+        // lead sees what stands in the way instead of "hands it the next".
+        (None, "idle") if member.state == MemberState::Active => {
+            let held = plan::held_ready(team, &member.id);
+            if let Some((task, holder)) = held.first().copied() {
+                let more = if held.len() > 1 { format!(" and {} more task(s)", held.len() - 1) } else { String::new() };
+                format!("Its ready task #{task}{more} is held by #{holder}'s outputs; {}.", plan::holder_unblock(team, holder))
+            } else {
+                "Hands it the next ready task, if one is ready for it.".into()
+            }
+        }
         (None, _) if member.state == MemberState::Active => "Hands it the next ready task, if one is ready for it.".into(),
         _ => "Nothing: the member is not active.".into(),
     }

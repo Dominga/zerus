@@ -465,6 +465,68 @@ pub(crate) fn output_holders(team: &Team, task: &Task) -> Vec<u32> {
         .collect()
 }
 
+/// Task 263 (owner, 2026-11-08): the ready tasks of `member` that another
+/// open task's outputs hold, with that holder: `(task, holder)`. A queued
+/// task that cannot start because its member is busy no longer claims its
+/// files (the dispatcher claims only what it hands out), but a task that runs
+/// or waits for its member after an attempt still holds them. Naming the
+/// holder keeps the idle member from waiting silently.
+pub(crate) fn held_ready(team: &Team, member: &str) -> Vec<(u32, u32)> {
+    ready(team)
+        .into_iter()
+        .filter(|id| team.task(*id).is_some_and(|task| task.assignee == member && task.open_attempt().is_none()))
+        .filter_map(|id| {
+            let task = team.task(id)?;
+            output_holders(team, task).first().map(|holder| (id, *holder))
+        })
+        .collect()
+}
+
+/// Task 263: whether `holder` only waits for its own member, so the lead can
+/// free the tasks it holds (hold or reassign it); a running holder finishes
+/// on its own, and a held or parked one waits for its own release or event.
+pub(crate) fn holder_waits_for_member(team: &Team, holder: u32) -> bool {
+    team.task(holder).is_some_and(|task| {
+        task.status == TaskStatus::Pending
+            && task.open_attempt().is_none()
+            && task.hold.is_none()
+            && task.park.is_none()
+            && !task.assignee.is_empty()
+            && task.assignee != team.lead
+    })
+}
+
+/// Task 263: one line naming why a holder has not started: "#198 waits for
+/// ui2 (Frontend)", "#198 is held", or "#198 runs now".
+pub(crate) fn holder_note(team: &Team, holder: u32) -> String {
+    let Some(task) = team.task(holder) else { return format!("#{holder}") };
+    if holder_waits_for_member(team, holder) {
+        format!("#{holder} waits for {}", team.name_of(&task.assignee))
+    } else if task.hold.is_some() {
+        format!("#{holder} is held")
+    } else if task.park.is_some() {
+        format!("#{holder} is parked")
+    } else {
+        format!("#{holder} runs now")
+    }
+}
+
+/// Task 263: the action that frees a task its holder keeps: hold or reassign
+/// a waiting holder; a held one is released, a parked one waits for its
+/// event, and a running one only finishes.
+pub(crate) fn holder_unblock(team: &Team, holder: u32) -> String {
+    let Some(task) = team.task(holder) else { return format!("wait for #{holder}") };
+    if holder_waits_for_member(team, holder) {
+        format!("{}: hold or reassign #{holder}", holder_note(team, holder))
+    } else if task.hold.is_some() {
+        format!("wait for #{holder} to be released")
+    } else if task.park.is_some() {
+        format!("wait for #{holder}'s event")
+    } else {
+        format!("wait for #{holder} to finish")
+    }
+}
+
 /// Every task `id` waits for through dependencies that hold it until they are
 /// accepted (hard ones, or all with `all_hard`).
 fn hard_ancestors(tasks: &[Task], id: u32, all_hard: bool) -> BTreeSet<u32> {

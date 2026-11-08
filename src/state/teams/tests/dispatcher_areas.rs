@@ -50,3 +50,6 @@ mod dispatcher_doorbell;
 
 #[path = "dispatcher_cross_role.rs"]
 mod dispatcher_cross_role;
+
+#[path = "dispatcher_holds.rs"]
+mod dispatcher_holds;

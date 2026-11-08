@@ -19,6 +19,9 @@ use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
+mod copy_review;
+pub use copy_review::{CopyReview, CopyReviewOutcome};
+
 /// A rank longer than this renumbers its stage (ranks stay valid up to 64).
 const RENUMBER_AT: usize = 32;
 /// Appended updates beyond this size are folded into the snapshot.
@@ -1124,13 +1127,21 @@ impl ProjectStore {
     /// every file of it read whole (`read_regular`), and a copy that holds
     /// less than its mark is damaged. It writes nothing (no mark is raised).
     fn counted(&self, uuid: &str) -> Result<TaskDoc> {
-        let mut task = TaskDoc::from_bytes(&read_regular(&self.snapshot_path(uuid))?)?;
+        self.counted_with(uuid, read_regular)
+    }
+
+    fn counted_with(
+        &self,
+        uuid: &str,
+        read: impl Fn(&Path) -> std::io::Result<Vec<u8>>,
+    ) -> Result<TaskDoc> {
+        let mut task = TaskDoc::from_bytes(&read(&self.snapshot_path(uuid))?)?;
         if task.uuid() != uuid {
             return Err(Error::failed("the task file does not match its name"));
         }
         // Every update block must frame and import whole: a broken or cut
         // record is unknown evidence, never fewer starts (#1519 R3).
-        match read_regular(&self.updates_path(uuid)) {
+        match read(&self.updates_path(uuid)) {
             Ok(bytes) => {
                 let (found, intact) = blocks(&bytes);
                 if !intact {
@@ -1145,7 +1156,7 @@ impl ProjectStore {
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        match read_regular(&self.managed_path(uuid)) {
+        match read(&self.managed_path(uuid)) {
             Ok(bytes) => {
                 let saved = Mark::unsealed(&bytes)
                     .and_then(|mark| mark.version())

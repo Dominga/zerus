@@ -4149,6 +4149,26 @@ while the mark remains, and removing the mark as well accepts the next copy
 sent, which may lack attempts. Any
 entry at the mark's path counts as a mark, even one that cannot be read.
 
+For an explicit local review, `hgs task review-copy --project P --uuid UUID
+--json` inspects only that exact kept damaged copy. It returns a fingerprint;
+`hgs task review-copy --project P --uuid UUID --confirm FINGERPRINT --json`
+confirms moving its `.loro` and `.updates` into a private sibling
+`<uuid>.review-<UUID>` directory and removing its `.managed` mark last. Only a
+person can confirm. A healthy copy, changed fingerprint, link, special file,
+missing store or unexpected project identity is refused. Missing task files are
+explicitly part of the review; a mark-only copy can be reviewed. The store lock
+wait is bounded to two seconds, and inspection reads at most 64 MiB across the
+three files with a five-second inspection budget. Other tasks are not read or
+changed. The next incoming copy uses the existing importer; review sends and
+starts nothing. The files moved aside remain available for manual examination.
+
+In desktop Tasks, the damaged-files notice shows at most five kept-copy review
+cards, with project, known title and a copyable exact UUID. **Review local copy…**
+opens a confirmation naming the possible loss of attempt history and unsent
+local edits; **Cancel** has default focus. The card retains moved, refused with
+reason, or unknown outcomes. Unknown is never automatically retried; inspect
+the files manually. **Dismiss** removes a moved outcome from the view only.
+
 What this recovery supports, alone or combined: running an older Zerus
 after a rollback (its importer may fold, append or rewrite the task files as
 it always did), a crash at any point, damaged or truncated files, and an

@@ -105,6 +105,7 @@ mod startup_error;
 mod startup_log;
 #[cfg(feature = "live")]
 mod task_details;
+mod task_copy_review;
 #[cfg(feature = "live")]
 mod task_editor;
 #[cfg(feature = "live")]
@@ -1716,6 +1717,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         task_forms::task_form_submit,
         task_forms::task_form_cancel,
         task_details::task_attachment_open,
+        task_copy_review::task_copy_review,
         actions::pending_read_marks,
         actions::queue_read_marks,
         actions::attention_marks,

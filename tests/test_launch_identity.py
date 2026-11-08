@@ -56,7 +56,7 @@ os.execv(""" + repr(str(test_pause.HGS)) + """, [""" + repr(str(test_pause.HGS))
         self.env['HGS_EXECUTABLE'] = str(helper)
 
     def test_selected_helper_required_count_keeps_the_actual_new_and_fork_ids(self):
-        self.assertIn('session-launch-identity-v1', self.hgs('--help').stdout)
+        self.assertIn('session-launch-identity-v1', self.hgs('--help'))
         self.use_required_helper()
         self.test_new_identity_exists_before_bootstrap_and_never_inherits_the_caller()
         # The constructor replaces the deliberately inherited variables above.

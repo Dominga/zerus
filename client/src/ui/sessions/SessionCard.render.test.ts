@@ -137,3 +137,30 @@ describe("a team member's row (task 330)", () => {
     expect(rule(".scard.team-member::after")).toMatch(/top:\s*50%/);
   });
 });
+describe("session cards at the narrow side panel (task 343)", () => {
+  it("keeps the lead and member parts at 480 and 360 px", async () => {
+    const { readFileSync } = await import(/* @vite-ignore */ ["node", "fs"].join(":")) as { readFileSync(path: URL): string };
+    const css = String(readFileSync(new URL("../../ui/styles/sessions.css", import.meta.url))).replace(/\r\n/g, "\n");
+    const block = (selector: string) => {
+      const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return [...css.matchAll(new RegExp(`(?:^|\\n)\\s*${escaped}\\s*\\{([^}]*)\\}`, "gm"))].at(-1)?.[1] ?? "";
+    };
+    expect(block(".scard")).toContain("container-type: inline-size");
+    expect(block(".sc-cold")).toContain("flex: none");
+    expect(block(".sc-l3 > .ell")).toContain("flex: 1 1 auto");
+    const container = (head: string) => { const at = css.indexOf(head); return at < 0 ? "" : css.slice(at, at + 900); };
+    const narrow = container("@container (max-width: 430px)");
+    expect(narrow).toContain(".agent-badge:not(.narrow)");
+    expect(narrow).toContain("width: 26px");
+    expect(narrow).toContain(".ab-label");
+    expect(narrow).toContain(".mbadge");
+    expect(container("@container (max-width: 360px)")).toContain(".sc-cold button");
+
+    const member = render(false, row(), true, { depth: 1, teamFirst: true });
+    expect(member).toContain("team-member");
+    expect(member).toMatch(/style="[^"]*left:\s*2px/);
+    const lead = render(false, row(), true, { team: { name: "T", status: "running", phase: 1, phase_done: 1, phase_total: 2,
+      phases_done: 1, phases_total: 2, attention: 0, members: [] } });
+    expect(lead).toContain("team-strip");
+  });
+});

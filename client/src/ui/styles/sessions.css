@@ -399,3 +399,27 @@
 .term-menu button { text-align: left; padding: 5px 10px; border: 0; border-radius: 6px; background: none; color: var(--z-color-text); font-size: var(--fs-sm); cursor: pointer; }
 .term-menu button:hover:not(:disabled) { background: var(--z-color-hover); }
 .term-menu button:disabled { opacity: 0.5; cursor: default; }
+
+/* Task #343: session cards at the owner's narrow side panel. The card answers
+   its own width like Qt's delegate: the provider label folds to its glyph, the
+   machine, title and status lines give way with an ellipsis, and the cold
+   actions keep their room, so nothing is cut at the right edge. */
+.scard { container-type: inline-size; }
+.sc-l1, .sc-l2, .sc-l3, .sc-foot { min-width: 0; }
+.sc-l1 > .sc-title { flex: 1 1 auto; min-width: 0; }
+.sc-l1 > .agent-badge { flex: 0 1 auto; min-width: 0; }
+.sc-l2 > .mbadge { flex: 0 1 auto; min-width: 0; }
+.sc-l3 > .ell { flex: 1 1 auto; min-width: 0; }
+.sc-cold { flex: none; display: inline-flex; gap: 6px; }
+@container (max-width: 430px) {
+  .agent-badge:not(.narrow) { width: 26px; min-width: 26px; flex: none; padding: 0; }
+  .agent-badge:not(.narrow) .ab-label { display: none; }
+  .agent-badge:not(.narrow) svg { left: 7px; }
+  .mbadge { max-width: 30%; }
+  .sc-l1 > .sbadge { max-width: 128px; }
+}
+@container (max-width: 360px) {
+  .sc-title { font-size: 13px; }
+  .sc-l1 > .sbadge { max-width: 104px; }
+  .sc-cold button { padding: 0 6px; }
+}

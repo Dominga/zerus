@@ -502,7 +502,10 @@ impl Store {
                     task INTEGER NOT NULL,done TEXT NOT NULL,next TEXT NOT NULL,blocked TEXT NOT NULL,at REAL NOT NULL,
                     source TEXT NOT NULL,expires REAL);
                 CREATE INDEX IF NOT EXISTS working_pulses_member ON working_pulses(team,member,task,at);
-                CREATE INDEX IF NOT EXISTS working_pulses_team_at ON working_pulses(team,at);",
+                CREATE INDEX IF NOT EXISTS working_pulses_team_at ON working_pulses(team,at);
+                -- Task #246: the owner's dismissed Waiting rows, with the state seen.
+                CREATE TABLE IF NOT EXISTS dismissed(id TEXT PRIMARY KEY,team TEXT NOT NULL,state TEXT NOT NULL,
+                    at REAL NOT NULL,by TEXT NOT NULL);",
             )?;
             // Task 134: the working tier's team messages (docs/lore.md 11.5).
             db.execute_batch(super::working::SCHEMA)?;
@@ -541,6 +544,32 @@ impl Store {
             if migration { db.execute_batch("COMMIT")?; }
         }
         Ok(Self { db, batch: None })
+    }
+
+    /// Task #246: the owner's dismissed Waiting rows: id, team, the state at
+    /// dismissal and when. A missing table (an older store read before its next
+    /// write open) is no dismissal.
+    pub(crate) fn dismissed(&self) -> anyhow::Result<Vec<Value>> {
+        let mut statement = self.db.prepare("SELECT id,team,state,at,by FROM dismissed ORDER BY at DESC")?;
+        let rows = statement.query_map([], |row| {
+            Ok(json!({"id":row.get::<_,String>(0)?,"team":row.get::<_,String>(1)?,"state":row.get::<_,String>(2)?,
+                "at":row.get::<_,f64>(3)?,"by":row.get::<_,String>(4)?}))
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Task #246: dismiss a Waiting item; the owner's (the caller checks).
+    pub(crate) fn dismiss(&self, id: &str, team: &str, state: &str, at: f64, by: &str) -> anyhow::Result<()> {
+        self.db.execute(
+            "INSERT OR REPLACE INTO dismissed(id,team,state,at,by) VALUES(?1,?2,?3,?4,?5)",
+            params![id, team, state, at, by],
+        )?;
+        Ok(())
+    }
+
+    /// Task #246: Show dismissed > Restore; false when nothing was dismissed.
+    pub(crate) fn undismiss(&self, id: &str) -> anyhow::Result<bool> {
+        Ok(self.db.execute("DELETE FROM dismissed WHERE id=?1", [id])? > 0)
     }
 
     /// Task 133: writes a member's pulse (docs/lore.md 11.2, 11.5). One by the

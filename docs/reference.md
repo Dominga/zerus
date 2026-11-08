@@ -2571,6 +2571,18 @@ is there, in one click.
   card names what waits on it (`waiting_tasks`, and "(#N wait for it)" in its
   title). Without a desktop's presence nothing is held. The desktop posts a
   batch as one notice and withdraws it with its last card.
+- Task #246 (owner, 2026-11-08): every Waiting row can be dismissed. `hgs team
+  waiting --json` gives each item a `state`: a drive's threshold band, a paused
+  team's `paused_at`, a plan or phase's team revision, a tool offer's state, a
+  deferred request's id and time, and so on. `{"action":"dismiss","id","team",
+  "state"}` (owner only; `by":"human"` from a shell or the desktop) hides the
+  row and takes it out of `items`/`total`, the badge and the notifications
+  until that state changes; then the row returns by itself. `{"action":
+  "undismiss","id"}` (Show dismissed > Restore) brings it back at once. A
+  decision that blocks work (phase or plan approval, a proposal or question, a
+  permission) stays in the `dismissed` section with `blocking:true` and
+  `blocks` naming the team or member it still blocks; the other dismissed items
+  just rest there. `dismissed`/`dismissed_total` come beside the live page.
 - One owner rule for scratch teams, granted once by card
   (`{"kind":"scratch-rule","folder":"ABS","agents":["claude","codex"],"reason":"..."}`
   | `hgs team propose --json`, or the owner's own `hgs team scratch-rule

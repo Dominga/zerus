@@ -38,18 +38,31 @@ pub fn open(db: &mut Connection) -> Result<Option<Store<'_>>> {
 pub struct Executor {
     pub computer: String,
     pub run: String,
-    pub conversation: String,
+    pub birth: String,
+    pub conversation: Option<String>,
     pub child: Option<String>,
 }
 impl Executor {
-    fn key(&self) -> Result<String> {
+    pub fn validate(&self) -> Result<()> {
         uuid(&self.computer)?;
         text(&self.run, 512)?;
-        text(&self.conversation, 512)?;
+        text(&self.birth, 512)?;
+        if let Some(conversation) = &self.conversation {
+            text(conversation, 512)?;
+        }
         if let Some(child) = &self.child {
             text(child, 512)?;
         }
-        Ok(hash(json(self, 2048)?.as_bytes()))
+        Ok(())
+    }
+
+    /// Conversation is an effect guard. A newly bound or changed conversation
+    /// must still find the original run's slot and executor-wide holds.
+    pub fn key(&self) -> Result<String> {
+        self.validate()?;
+        Ok(hash(
+            json(&(&self.computer, &self.run, &self.birth, &self.child), 2048)?.as_bytes(),
+        ))
     }
 }
 
@@ -120,6 +133,10 @@ impl Slot {
             Provenance::DirectStart { admission_id } => uuid(admission_id)?,
         }
         if let Some(binding) = &self.binding {
+            ensure!(
+                self.executor.conversation.is_some(),
+                "a native-turn binding requires a confirmed conversation"
+            );
             uuid(&binding.acknowledgement)?;
             text(&binding.turn, 512)?;
         }

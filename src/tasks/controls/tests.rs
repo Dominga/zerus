@@ -3,7 +3,7 @@ use serde_json::json;
 
 const ID: &str = "00000000-0000-4000-8000-000000000001";
 fn executor() -> Value {
-    json!({"computer":ID,"run":"original-run","conversation":"original-conversation","child":null})
+    json!({"computer":ID,"run":"original-run","birth":"original-birth","conversation":"original-conversation","child":null})
 }
 fn plan() -> Value {
     json!({"schema":1,"request_id":ID,"action":"pause","target":{"scope":"attempt","project":"project-one","task":ID,"attempt":ID},"observed_pauses":[],"observed_stops":[]})

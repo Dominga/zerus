@@ -296,13 +296,7 @@ fn digest(s: &str) -> Result<(), String> {
     }
 }
 fn executor_key(e: &Executor) -> Result<(), String> {
-    canonical(&e.computer)?;
-    text(&e.run, 512)?;
-    text(&e.conversation, 512)?;
-    if let Some(c) = &e.child {
-        text(c, 512)?;
-    }
-    Ok(())
+    e.validate().map_err(|error| error.to_string())
 }
 fn observed(ids: &[String]) -> Result<(), String> {
     if ids.len() > EXECUTOR_HOLDS {

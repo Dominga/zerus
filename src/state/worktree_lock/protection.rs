@@ -9,11 +9,12 @@ use std::io::{Seek, SeekFrom, Write};
 pub(in crate::state) struct Protection {
     owner: Value,
     state: Directory,
+    receipts: Directory,
     common: Directory,
     checkout: Option<Directory>,
     metadata: Directory,
     _repository: fs::File,
-    receipt: PathBuf,
+    receipt: String,
     before: Value,
     lock: fs::File,
     reason: String,
@@ -28,18 +29,45 @@ fn state() -> Result<Directory> {
     Directory::open(&crate::platform::canonical(root()).map_err(|e| e.to_string())?)
 }
 
-fn receipt(state: &Directory, owner: &Value) -> PathBuf {
-    state
-        .path
-        .join("worktree-protections")
-        .join(format!("{}.json", storage::label_key(string(owner, "id"))))
+fn receipt(owner: &Value) -> String {
+    format!("{}.json", storage::label_key(string(owner, "id")))
 }
 
-fn read_receipt(path: &Path) -> Result<Option<Value>> {
-    labels::read_file(path, 16384)
-        .map_err(|e| e.to_string())?
-        .map(|bytes| serde_json::from_slice(&bytes).map_err(|e| e.to_string()))
-        .transpose()
+fn read_receipt(directory: &Directory, name: &str) -> Result<Option<Value>> {
+    directory.verify()?;
+    match fs::symlink_metadata(directory.path.join(name)) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            directory.verify()?;
+            return Ok(None);
+        }
+        Err(e) => return Err(e.to_string()),
+        Ok(_) => (),
+    }
+    let mut bytes = Vec::new();
+    directory
+        .read_private(name)?
+        .take(16385)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    directory.verify()?;
+    if bytes.len() > 16384 {
+        return Err("The protection receipt exceeds its bound".into());
+    }
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
+fn write_receipt(directory: &Directory, name: &str, value: &Value, replace: bool) -> Result<()> {
+    directory.verify()?;
+    storage::cut_write()?;
+    let bytes = value.to_string();
+    if replace {
+        directory.replace_file(name, bytes.as_bytes())?;
+    } else {
+        directory.write_new(name, bytes.as_bytes())?;
+    }
+    directory.verify()
 }
 
 fn owner_matches(owner: &Value) -> bool {
@@ -100,13 +128,15 @@ impl Protection {
             .try_lock_exclusive()
             .map_err(|_| "The worktree is busy; nothing was published")?;
         let state = state()?;
-        let receipt = receipt(&state, owner);
-        let before = read_receipt(&receipt)?
+        let receipts = state.child("worktree-protections")?;
+        let receipt = receipt(owner);
+        let before = read_receipt(&receipts, &receipt)?
             .ok_or("An existing Git lock is not Zerus publication protection")?;
         if before["version"] != 1
             || before["status"] != "ready"
             || before["owner"] != *owner
             || before["state_object"] != json!(state.object()?)
+            || before["receipt_object"] != json!(receipts.object()?)
             || before["common_object"] != json!(common.object()?)
             || match &checkout {
                 Some(checkout) => before["checkout_object"] != json!(checkout.object()?),
@@ -134,6 +164,7 @@ impl Protection {
         let value = Self {
             owner: owner.clone(),
             state,
+            receipts,
             common,
             checkout,
             metadata,
@@ -172,8 +203,9 @@ impl Protection {
             })
             .collect();
         let state = state()?;
-        let receipt = receipt(&state, owner);
-        let current = read_receipt(&receipt)?;
+        let receipts = state.ensure_child("worktree-protections")?;
+        let receipt = receipt(owner);
+        let current = read_receipt(&receipts, &receipt)?;
         if current.as_ref().is_some_and(|r| r["status"] == "ready") {
             let held = Self::retained(owner, None, false)?;
             // An orphaned lock from interrupted publication is never adopted.
@@ -204,18 +236,19 @@ impl Protection {
             }
         }
         let mut before = json!({"version":1,"status":"preparing","owner":owner,"state_object":state.object()?,
-            "common_object":common.object()?,"checkout_object":checkout.object()?,"metadata_object":metadata.object()?});
+            "receipt_object":receipts.object()?,"common_object":common.object()?,"checkout_object":checkout.object()?,"metadata_object":metadata.object()?});
         match current {
-            None => storage::atomic_new(&receipt, &before.to_string())?,
+            None => write_receipt(&receipts, &receipt, &before, false)?,
             Some(previous)
                 if previous["status"] == "released"
                     && previous["owner"] == *owner
                     && previous["state_object"] == before["state_object"]
+                    && previous["receipt_object"] == before["receipt_object"]
                     && previous["common_object"] == before["common_object"]
                     && previous["checkout_object"] == before["checkout_object"]
                     && previous["metadata_object"] == before["metadata_object"] =>
             {
-                atomic(&receipt, &before.to_string())?
+                write_receipt(&receipts, &receipt, &before, true)?
             }
             _ => return Err(
                 "An interrupted protection or manual unlock needs review; Zerus will not relock it"
@@ -233,10 +266,11 @@ impl Protection {
         crate::platform::sync_dir(&metadata.path).map_err(|e| e.to_string())?;
         before["lock_object"] = object(&lock)?;
         before["status"] = json!("ready");
-        atomic(&receipt, &before.to_string())?;
+        write_receipt(&receipts, &receipt, &before, true)?;
         let held = Self {
             owner: owner.clone(),
             state,
+            receipts,
             common,
             checkout: Some(checkout),
             metadata,
@@ -252,6 +286,7 @@ impl Protection {
 
     pub(in crate::state) fn verify(&self) -> Result<()> {
         self.state.verify()?;
+        self.receipts.verify()?;
         self.common.verify()?;
         self.checkout_current()?;
         self.metadata.verify()?;
@@ -259,7 +294,7 @@ impl Protection {
             return Err("The selected state root changed".into());
         }
         if !owner_matches(&self.owner)
-            || read_receipt(&self.receipt)?.as_ref() != Some(&self.before)
+            || read_receipt(&self.receipts, &self.receipt)?.as_ref() != Some(&self.before)
         {
             return Err("Checkout ownership or protection changed".into());
         }
@@ -292,12 +327,96 @@ impl Protection {
         }
     }
 
+    /// Persist negative retention evidence before a legacy holder becomes the
+    /// reason of a protected lock. Losing the receipt must not restore that
+    /// holder's old text-only release path. The exact census snapshot is used;
+    /// a label lookup could select a different same-label session.
+    fn mark_legacy(&self, holder: &worktree_cleanup::Reference) -> Result<()> {
+        use sha2::{Digest, Sha256};
+        let binding = holder
+            .binding
+            .as_ref()
+            .ok_or("The shared holder has no saved binding")?;
+        let provider = match binding.directory.as_str() {
+            "sessions" | "dsh/sessions" | "opencode/sessions" => return Ok(()),
+            "" | "bindings" => None,
+            "dsh/bindings" => Some("dsh"),
+            "opencode/bindings" => Some("opencode"),
+            _ => return Err("The shared holder has an unknown binding namespace".into()),
+        };
+        let mut directories = Vec::new();
+        for component in binding.directory.split('/').filter(|s| !s.is_empty()) {
+            let parent = directories.last().unwrap_or(&self.state);
+            directories.push(parent.child(component)?);
+        }
+        let directory = directories.last().unwrap_or(&self.state);
+        // Native bindings have their own writer. Never wait in reverse lock
+        // order: a contended provider keeps the original veto for review.
+        let _provider = provider
+            .map(|name| {
+                storage::lock_until(
+                    &self.state.path.join(name).join("bindings.lock"),
+                    std::time::Instant::now(),
+                )?
+                .ok_or_else(|| {
+                    "The shared native holder is busy; the original lock stays".to_owned()
+                })
+            })
+            .transpose()?;
+        let verify = || -> Result<()> {
+            self.verify()?;
+            for dir in &directories {
+                dir.verify()?;
+            }
+            Ok(())
+        };
+        verify()?;
+        let mut bytes = Vec::new();
+        directory
+            .read_private(&binding.file)?
+            .take(storage::ID_RECORD_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        if bytes.len() as u64 > storage::ID_RECORD_BYTES
+            || format!("{:x}", Sha256::digest(&bytes)) != binding.digest
+        {
+            return Err("The shared holder changed after the reference census".into());
+        }
+        let mut record: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        if storage::in_id_layout(&record)
+            || record["worktree_owner"] != self.owner
+            || string(&record, "session_id") != holder.session_id
+            || string(&record, "name") != holder.name
+        {
+            return Err("The shared holder's original binding changed".into());
+        }
+        if let Some(marker) = record.get("worktree_protection") {
+            return if marker == &self.owner["id"] {
+                verify()
+            } else {
+                Err("The shared holder's protection marker is inconsistent".into())
+            };
+        }
+        record["worktree_protection"] = self.owner["id"].clone();
+        let encoded = record.to_string();
+        if encoded.len() as u64 > storage::ID_RECORD_BYTES {
+            return Err("The shared binding exceeds its bound".into());
+        }
+        verify()?;
+        storage::cut_write()?;
+        directory.replace_file(&binding.file, encoded.as_bytes())?;
+        verify()
+    }
+
     /// Keep the same regular Git lock present throughout a shared handoff.
     /// Partial/error writes leave a lock for review, never an unlocked gap.
-    pub(super) fn transfer(mut self, id: &str) -> Result<()> {
+    pub(super) fn transfer(mut self, holder: &worktree_cleanup::Reference) -> Result<()> {
+        let id = holder.session_id.as_str();
         if !session_id::canonical(id) {
             return Err("A shared holder has no stable session identity".into());
         }
+        self.verify()?;
+        self.mark_legacy(holder)?;
         self.verify()?;
         storage::cut_write()?;
         self.lock
@@ -313,13 +432,14 @@ impl Protection {
 
     pub(super) fn released(&self) -> Result<()> {
         self.state.verify()?;
+        self.receipts.verify()?;
         self.common.verify()?;
         self.checkout_current()?;
         self.metadata.verify()?;
         if crate::platform::canonical(root()).map_err(|e| e.to_string())? != self.state.path {
             return Err("The selected state root changed".into());
         }
-        if read_receipt(&self.receipt)?.as_ref() != Some(&self.before)
+        if read_receipt(&self.receipts, &self.receipt)?.as_ref() != Some(&self.before)
             || !fs::symlink_metadata(self.metadata.path.join("locked"))
                 .is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
             || !owner_matches(&self.owner)
@@ -328,7 +448,7 @@ impl Protection {
         }
         let mut released = self.before.clone();
         released["status"] = json!("released");
-        atomic(&self.receipt, &released.to_string())
+        write_receipt(&self.receipts, &self.receipt, &released, true)
     }
 }
 
@@ -337,7 +457,21 @@ impl Protection {
 pub(super) fn existing(record: &Value) -> Result<Option<Protection>> {
     let owner = &record["worktree_owner"];
     let state = state()?;
-    if read_receipt(&receipt(&state, owner))?.is_none() {
+    state.verify()?;
+    let present = match fs::symlink_metadata(state.path.join("worktree-protections")) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+        Err(e) => return Err(e.to_string()),
+        Ok(_) => read_receipt(&state.child("worktree-protections")?, &receipt(owner))?.is_some(),
+    };
+    state.verify()?;
+    if !present {
+        // ID publication and a protected legacy handoff require the original
+        // native lock proof. Losing it cannot opt into text-only retirement.
+        if storage::in_id_layout(record) || record.get("worktree_protection").is_some() {
+            return Err(
+                "The original protection receipt is missing; review the retained lock".into(),
+            );
+        }
         return Ok(None);
     }
     Protection::retained(owner, Some(string(record, "session_id")), true).map(Some)

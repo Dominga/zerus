@@ -76,21 +76,6 @@ pub(super) fn atomic(path: &Path, contents: &str) -> Result<()> {
     crate::platform::sync_dir(parent).map_err(|e| e.to_string())
 }
 
-/// Create-only publication. A present entry, including an irregular or
-/// unreadable one, is never a destination we may replace. The caller holds
-/// the writer and any native exclusion required by the record being published.
-pub(super) fn atomic_new(path: &Path, contents: &str) -> Result<()> {
-    let parent = path.parent().ok_or("cannot write file without parent")?;
-    cut_write()?;
-    private_dir(parent)?;
-    let mut temp = tempfile::Builder::new().prefix(".hgs-new-")
-        .tempfile_in(parent).map_err(|e| e.to_string())?;
-    temp.write_all(contents.as_bytes()).map_err(|e| e.to_string())?;
-    temp.as_file().sync_all().map_err(|e| e.to_string())?;
-    temp.persist_noclobber(path).map_err(|e| e.error.to_string())?;
-    crate::platform::sync_dir(parent).map_err(|e| e.to_string())
-}
-
 pub(super) type Guard = crate::platform::FileLock;
 
 pub(super) fn lock(path: Option<&Path>) -> Result<Guard> {
@@ -504,6 +489,9 @@ pub(super) fn publish_new_id(record: &mut Value) -> Result<()> {
     let directory = parent.as_ref().unwrap_or(&state).ensure_child("sessions")?;
     let label_directory = state.ensure_child("labels")?;
     let mut published = record.clone();
+    if !published["worktree_owner"].is_null() {
+        published["worktree_protection"] = published["worktree_owner"]["id"].clone();
+    }
     published["updated"] = json!(now());
     processes::compact(&mut published);
     let bytes = format!("{published}\n");

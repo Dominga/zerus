@@ -344,6 +344,15 @@ an existing identity is never recreated or overwritten. A bounded, verified
 label-index superset and the original owned checkout's Git veto precede the
 canonical ID record. An interrupted publication keeps its veto for review.
 
+The protection-receipt directory is held without following aliases, and its
+native object is part of the receipt. Reads and atomic writes use that held
+directory. Losing the receipt cannot downgrade an ID-layout record to the legacy
+text-only release rule. Before a shared transfer to a legacy holder, the exact
+census-bound record receives a durable negative `worktree_protection` marker;
+its provider exclusion is try-only, and resume/fresh rebuilds carry the marker.
+Missing or inconsistent proof keeps the lock for review. The marker grants no
+publication, removal or signal authority.
+
 A private receipt binds that veto to the ownership nonce and the native state,
 checkout, common-directory, metadata and lock objects. A missing Ready lock
 means an unlock or interruption, never permission to relock. Shared retirement

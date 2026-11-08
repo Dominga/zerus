@@ -143,7 +143,7 @@ pub(super) fn release_locked(record: &Value) -> Release {
                         || !session_id::canonical(&r.session_id) || r.session_id == id) {
                         return kept("a shared holder's exact identity needs review".into());
                     }
-                    let next = users.iter().map(|r| r.session_id.as_str()).min().unwrap();
+                    let next = users.iter().min_by_key(|r| &r.session_id).unwrap();
                     return match protection.transfer(next) {
                         Ok(()) => kept(format!("{} still uses it; its protective lock was transferred",other.name)),
                         Err(error) => kept(error),
@@ -520,6 +520,32 @@ mod tests {
         control_within("publication_old",std::time::Duration::from_secs(60));
     }
 
+    #[test]
+    fn review_receipt_directory_alias_never_writes_foreign_entries() {
+        control("review_receipt_alias");
+    }
+    #[test]
+    fn review_missing_receipt_never_downgrades_original_lock_proof() {
+        control("review_missing_receipt");
+    }
+
+    #[test]
+    fn a_receipt_directory_swapped_after_acquisition_never_receives_a_write() {
+        control("review_receipt_swap");
+    }
+    #[test]
+    fn a_protected_legacy_shared_holder_never_loses_its_original_lock_fence() {
+        control("review_shared_root");
+    }
+    #[test]
+    fn a_shared_dsh_holder_is_marked_under_its_own_nonblocking_exclusion() {
+        control("review_shared_dsh");
+    }
+    #[test]
+    fn a_shared_opencode_holder_is_marked_under_its_own_nonblocking_exclusion() {
+        control("review_shared_opencode");
+    }
+
     fn git(dir: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
             .args(args)
@@ -612,6 +638,36 @@ mod tests {
             assert_eq!(intents_left(), 0);
         };
         match case.as_str() {
+            "review_receipt_alias" => {
+                let _writer = storage::lock(None).unwrap();
+                let foreign = base.join("foreign-protection");
+                fs::create_dir(&foreign).unwrap();
+                std::os::unix::fs::symlink(&foreign,root().join("worktree-protections")).unwrap();
+                let mut candidate=record.clone(); candidate["layout"]=json!("id");
+                let result=storage::publish_new_id(&mut candidate);
+                let entries=fs::read_dir(&foreign).unwrap().count();
+                assert!(result.is_err() && entries==0,
+                    "receipt alias was followed: result={result:?}, foreign entries={entries}");
+            }
+            "review_missing_receipt" => {
+                let _writer=storage::lock(None).unwrap();
+                let mut candidate=record.clone();candidate["layout"]=json!("id");
+                storage::publish_new_id(&mut candidate).unwrap();
+                let retained=lock.with_extension("retained-original");
+                fs::rename(&lock,&retained).unwrap();
+                atomic(&lock,&format!("{own}\n")).unwrap();
+                let a=crate::platform::file_identity(&retained).unwrap();
+                let b=crate::platform::file_identity(&lock).unwrap();
+                assert_ne!((a.device,a.inode),(b.device,b.inode));
+                let receipt=root().join("worktree-protections")
+                    .join(format!("{}.json",storage::label_key(string(&ownership,"id"))));
+                fs::remove_file(receipt).unwrap();
+                storage::remove_record(&candidate).unwrap();
+                let result=release_locked(&candidate);
+                assert!(matches!(result,Release::Kept(..)) && lock.exists(),
+                    "missing proof allowed replacement lock release: {result:?}; exists={}",lock.exists());
+            }
+
             "publication" | "publication_old" => {
                 let mut writer = Some(storage::lock(None).unwrap());
                 let mut candidate = record.clone(); candidate["layout"] = json!("id");
@@ -668,6 +724,71 @@ mod tests {
                 assert_eq!(release_locked(&later),Release::Released(checkout.clone()));
                 assert!(!lock.exists());
                 drop(writer);
+            }
+            "review_receipt_swap" => {
+                let _writer=storage::lock(None).unwrap();
+                let mut candidate=record.clone(); candidate["layout"]=json!("id");
+                let receipts=root().join("worktree-protections");
+                let original=base.join("original-receipts");
+                let foreign=base.join("foreign-receipts");fs::create_dir(&foreign).unwrap();
+                let destination=receipts.clone();let outside=foreign.clone();
+                storage::BEFORE_NEW_ID.with(|hook| *hook.borrow_mut()=Some(Box::new(move || {
+                    fs::rename(&destination,&original).unwrap();
+                    std::os::unix::fs::symlink(&outside,&destination).unwrap();
+                })));
+                assert!(storage::publish_new_id(&mut candidate).is_err());
+                assert_eq!(fs::read_dir(&foreign).unwrap().count(),0);
+                assert!(!storage::id_record_path(&id).unwrap().exists());
+                assert_eq!(fs::read_to_string(&lock).unwrap(),format!("{own}\n"));
+            }
+            "review_shared_root" | "review_shared_dsh" | "review_shared_opencode" => {
+                let _writer=storage::lock(None).unwrap();
+                let provider=case.strip_prefix("review_shared_").unwrap();
+                let mut legacy=record.clone();
+                let legacy_id=uuid::Uuid::new_v4().to_string();
+                legacy["session_id"]=json!(legacy_id); legacy["run_id"]=json!("legacy-run");
+                let directory=match provider {
+                    "root" => {legacy["name"]=json!("claude/example/legacy");root()},
+                    "dsh" => {legacy["name"]=json!("dsh/example/legacy");legacy["backend"]=json!("dsh");
+                        legacy["conversation_id"]=json!("session-native");root().join("dsh/bindings")},
+                    "opencode" => {legacy["name"]=json!("opencode/example/legacy");legacy["backend"]=json!("opencode");
+                        legacy["conversation_id"]=json!("ses_native");root().join("opencode/bindings")},
+                    _ => unreachable!(),
+                };
+                let binding=directory.join(format!("{}.json",storage::label_key(string(&legacy,"name"))));
+                atomic(&binding,&legacy.to_string()).unwrap();
+                let mut candidate=record.clone();candidate["layout"]=json!("id");
+                storage::publish_new_id(&mut candidate).unwrap();
+                let object=crate::platform::file_identity(&lock).unwrap();
+                storage::remove_record(&candidate).unwrap();
+                if provider != "root" {
+                    let aux=root().join(provider).join("bindings.lock");
+                    let held=storage::lock(Some(&aux)).unwrap();
+                    assert!(matches!(release_locked(&candidate),Release::Kept(_,reason) if reason.contains("busy")));
+                    assert_eq!(fs::read_to_string(&lock).unwrap(),format!("{own}\n"));
+                    assert_eq!(serde_json::from_slice::<Value>(&fs::read(&binding).unwrap()).unwrap(),legacy);
+                    drop(held);
+                }
+                assert!(matches!(release_locked(&candidate),Release::Kept(..)));
+                let after=crate::platform::file_identity(&lock).unwrap();
+                assert_eq!((object.device,object.inode),(after.device,after.inode));
+                assert_eq!(fs::read_to_string(&lock).unwrap(),format!("zerus:{legacy_id}\n"));
+                let marked:Value=serde_json::from_slice(&fs::read(&binding).unwrap()).unwrap();
+                let mut expected=legacy.clone();expected["worktree_protection"]=ownership["id"].clone();
+                assert_eq!(marked,expected,"only negative retention metadata may change");
+                let receipt=root().join("worktree-protections").join(format!("{}.json",storage::label_key(string(&ownership,"id"))));
+                let proof=fs::read(&receipt).unwrap();
+                let original=lock.with_extension("retained-original");fs::rename(&lock,&original).unwrap();
+                let reason=format!("zerus:{legacy_id}\n");atomic(&lock,&reason).unwrap();
+                fs::remove_file(&receipt).unwrap();fs::remove_file(&binding).unwrap();
+                assert!(matches!(release_locked(&marked),Release::Kept(..)));
+                assert_eq!(fs::read_to_string(&lock).unwrap(),reason);
+                // The same valid proof and original object still permit the
+                // final release; a negative marker never grants one by itself.
+                fs::remove_file(&lock).unwrap();fs::rename(&original,&lock).unwrap();
+                atomic(&receipt,std::str::from_utf8(&proof).unwrap()).unwrap();
+                assert_eq!(release_locked(&marked),Release::Released(checkout.clone()));
+                assert!(!lock.exists());
             }
             "publication_destination" => {
                 let _writer=storage::lock(None).unwrap();

@@ -232,6 +232,16 @@ impl Directory {
     /// The same publication, retaining the exact file created by this call.
     /// A later pathname open cannot stand in for that original object.
     pub fn write_new_file(&self, name: &str, bytes: &[u8]) -> Result<File> {
+        self.publish_file(name, bytes, false)
+    }
+
+    /// Replace metadata under caller-held exclusion, through this original
+    /// directory. This does not establish any action or consent authority.
+    pub(in crate::state) fn replace_file(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        self.publish_file(name, bytes, true).map(drop)
+    }
+
+    fn publish_file(&self, name: &str, bytes: &[u8], replace: bool) -> Result<File> {
         use std::io::Write;
         use std::os::fd::{AsRawFd, FromRawFd};
         if name.is_empty() || name.contains('/') || name == "." || name == ".." {
@@ -263,11 +273,11 @@ impl Directory {
             .map_err(|e| e.to_string());
         #[cfg(target_os = "linux")]
         let rc = written.as_ref().map_or(-1, |_| unsafe {
-            libc::renameat2(dir, staging.as_ptr(), dir, to.as_ptr(), libc::RENAME_NOREPLACE)
+            libc::renameat2(dir, staging.as_ptr(), dir, to.as_ptr(), if replace { 0 } else { libc::RENAME_NOREPLACE })
         });
         #[cfg(target_os = "macos")]
         let rc = written.as_ref().map_or(-1, |_| unsafe {
-            libc::renameatx_np(dir, staging.as_ptr(), dir, to.as_ptr(), libc::RENAME_EXCL)
+            libc::renameatx_np(dir, staging.as_ptr(), dir, to.as_ptr(), if replace { 0 } else { libc::RENAME_EXCL })
         });
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let rc = -1; // Refuse publication without an atomic no-replace primitive.
@@ -278,6 +288,8 @@ impl Directory {
             written?;
             return Err(format!("Cannot publish {}: {error}", to.to_string_lossy()));
         }
+        self.file.sync_all().map_err(|e| e.to_string())?;
+        self.verify()?;
         Ok(file)
     }
 
@@ -371,6 +383,16 @@ impl Directory {
     /// The same publication, retaining the exact file created by this call.
     /// A later pathname open cannot stand in for that original object.
     pub fn write_new_file(&self, name: &str, bytes: &[u8]) -> Result<File> {
+        self.publish_file(name, bytes, false)
+    }
+
+    /// Replace metadata under caller-held exclusion, through this original
+    /// directory. This does not establish any action or consent authority.
+    pub(in crate::state) fn replace_file(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        self.publish_file(name, bytes, true).map(drop)
+    }
+
+    fn publish_file(&self, name: &str, bytes: &[u8], replace: bool) -> Result<File> {
         use std::io::Write;
         if name.is_empty() || name.contains(['/', '\\', ':']) || name == "." || name == ".." {
             return Err("Invalid file name".into());
@@ -380,7 +402,11 @@ impl Directory {
             .tempfile_in(&self.path).map_err(|e| e.to_string())?;
         file.write_all(bytes).map_err(|e| e.to_string())?;
         file.as_file().sync_all().map_err(|e| e.to_string())?;
-        let file = file.persist_noclobber(self.path.join(name)).map_err(|e| e.error.to_string())?;
+        let file = if replace {
+            crate::platform::persist(file, self.path.join(name))
+        } else {
+            file.persist_noclobber(self.path.join(name))
+        }.map_err(|e| e.error.to_string())?;
         self.verify()?;
         Ok(file)
     }

@@ -11,6 +11,8 @@ import type { Action, Details, Outcome, Target } from "../types";
 import type { Session } from "../ui/sessions/types";
 import { tr, trNoop } from "../i18n";
 import { resumeTeamToo } from "./resumeTeam";
+import { resumeBehind } from "./resumeBehind";
+import { transcriptBehind } from "../ui/sessions/resume-behind";
 
 // Guarded session actions. Every action is one call to the Rust side; a call
 // is never repeated. A rejected call is an unknown outcome and is shown as a
@@ -86,6 +88,18 @@ export function createActions(
     if (key && out.outcome === "failed" && out.detail === STATE_CHANGED && isEndAction(action)) {
       const verb = action.kind === "archive" ? "Archive" : ["terminate", "kill", "terminate_shell"].includes(action.kind) ? "Terminate" : "Forget";
       notify("info", `${verb} cancelled: the session changed.`); return;
+    }
+    if (action.kind === "resume" && out.outcome === "failed") {
+      // Task #247: Qt's resumeBehind: the refusal names the older transcript,
+      // so the owner chooses instead of getting a plain error.
+      const behind = transcriptBehind(out.detail);
+      if (behind) { resumeBehind.open(row, behind, out.detail); return; }
+    }
+    if (action.kind === "remove_queued") {
+      // Task #247: Qt's removeQueued result (SessionsWindow.cpp:1182).
+      if (out.outcome === "done") notify("info", tr("Queued message removed."));
+      else notify("error", out.detail, true);
+      return;
     }
     if (out.outcome === "failed") { notify("error", out.detail, true); return; }
     if (action.kind === "forget_binding") { notify("info", tr("Zerus forgot %1. The conversation stays in OpenCode.", row.name)); return; }

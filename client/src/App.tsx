@@ -17,6 +17,7 @@ import { appBuildInfo } from "./store/buildInfo";
 import { installedAppName, railVersion } from "./ui/screens/settings/about-version";
 import { MenuLayer, Toasts } from "./ui/components/Overlays";
 import { ActionDialogs } from "./ui/sessions/ActionDialogs";
+import { ResumeBehindDialog } from "./ui/sessions/ResumeBehindDialog";
 import { newSessionFromShortcut, newSessionOpened } from "./ui/sessions/newsession-view";
 import { OrganizationDialogs } from "./ui/sessions/OrganizationDialogs";
 import { SessionList } from "./ui/sessions/SessionList";
@@ -36,7 +37,7 @@ import { rememberRecentSession } from "./ui/sessions/goTo";
 import { updateCommands, updates } from "./store/updates";
 import { openUpdates } from "./store/desk";
 import { SessionUsageStrip } from "./ui/components/SessionUsageStrip";
-import { fleetRefresh, sandboxCheck, windowChrome, type BridgeMode } from "./bridge";
+import { fleetRefresh, windowChrome, type BridgeMode } from "./bridge";
 import { installUiLanguage, tr, uiLanguage } from "./i18n";
 import { WaitingPage } from "./ui/teams/Waiting";
 import { NewTeamPage } from "./ui/teams/NewTeamPage";
@@ -45,6 +46,8 @@ import { TeamDesigner } from "./ui/teams/TeamDesigner";
 import { connected, connectionError as hasConnectionError, staleNote, statusSummary } from "./ui/status-summary";
 import { ModelServersScreen } from "./ui/screens/ModelServers";
 import { TeamConfirmDialog } from "./ui/teams/TeamConfirmDialog";
+import { SandboxWarning } from "./ui/SandboxWarning";
+import { BootSplash } from "./ui/BootSplash";
 
 // The client shell: the rail, the pages and the status bar.
 const WorktreeCleanup = lazy(() => import("./ui/screens/WorktreeCleanup"));
@@ -170,7 +173,6 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
   ];
   onMount(() => {
     const off = [installShortcutRouter(), ...commands.map(([id, run]) => onCommand(id, run)), installWindowCommands()];
-    void sandboxCheck().then((reason) => { if (reason) toast(tr("Zerus is sandboxed"), reason, "error", true); }).catch(() => undefined);
     onCleanup(() => off.forEach((undo) => undo()));
   });
   // Task 243: the Compact skins draw one title bar with the controls instead of the
@@ -204,7 +206,10 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
       <MenuLayer />
       <Toasts />
       <ActionDialogs />
+      <ResumeBehindDialog />
       <TeamConfirmDialog />
+      <SandboxWarning />
+      <BootSplash mode={props.mode} />
       <Show when={cleanupDialog()}><Suspense><WorktreeCleanup /></Suspense></Show>
       <Show when={worktreeReviewDialog()}><Suspense><WorktreeReviewDialog /></Suspense></Show>
       <Show when={taskAssignmentPopover()}><Suspense><TaskAssignmentPopover /></Suspense></Show>

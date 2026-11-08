@@ -1,4 +1,4 @@
-import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import type { Terminal as XTerm } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 import { Icon } from "../lib/icons";
@@ -6,6 +6,7 @@ import { contentScale } from "../../store/ui";
 import { skin } from "../../skin/runtime";
 import { screenShowsLatest, terminal, type Screen } from "../../store/terminal";
 import { tr } from "../../i18n";
+import { terminalMenu } from "./terminal-menu";
 
 // xterm.js 6 loads when Terminal first opens. Linux keeps the DOM renderer;
 // macOS and Windows add the WebGL addon and fall back to DOM when its
@@ -24,6 +25,8 @@ function theme() {
 export function TerminalTab() {
   let host!: HTMLDivElement;
   const [live, setLive] = createSignal<{ term: XTerm; measure: () => void } | undefined>();
+  const [menu, setMenu] = createSignal<{ x: number; y: number } | undefined>();
+  const selection = () => live()?.term.getSelection() ?? "";
   let gone = false;
   let teardown: (() => void) | undefined;
   // Registered synchronously: the owner is gone once the imports below resolve.
@@ -51,9 +54,39 @@ export function TerminalTab() {
     terminal.paste(event.clipboardData?.getData("text/plain") ?? "");
   };
 
+  // Task #247: Qt's TerminalScreen context menu (Copy selection, Paste) over
+  // the terminal area; the webview's own menu is never shown.
+  const copySelection = () => {
+    const text = selection();
+    if (text) void navigator.clipboard?.writeText(text).catch(() => undefined);
+    setMenu(undefined);
+  };
+  const pasteClipboard = async () => {
+    setMenu(undefined);
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) terminal.paste(text);
+    } catch { /* the clipboard is unavailable */ }
+  };
+
   onMount(async () => {
     host.addEventListener("paste", onPaste, true);
     onCleanup(() => host.removeEventListener("paste", onPaste, true));
+    const onContext = (event: MouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setMenu({ x: event.clientX, y: event.clientY });
+    };
+    const closeMenu = () => setMenu(undefined);
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") closeMenu(); };
+    host.addEventListener("contextmenu", onContext);
+    window.addEventListener("pointerdown", closeMenu);
+    window.addEventListener("keydown", onKey);
+    onCleanup(() => {
+      host.removeEventListener("contextmenu", onContext);
+      window.removeEventListener("pointerdown", closeMenu);
+      window.removeEventListener("keydown", onKey);
+    });
     const [{ Terminal }, { FitAddon }] = await Promise.all([import("@xterm/xterm"), import("@xterm/addon-fit"), import("@xterm/xterm/css/xterm.css")]);
     if (gone) return;
     const css = getComputedStyle(document.documentElement);
@@ -107,6 +140,20 @@ export function TerminalTab() {
         </button>
       </div>
       <div class="term-host" data-shortcut-context="terminal" ref={host} />
+      <Show when={menu()}>
+        {(at) => (
+          <div class="term-menu" role="menu" style={{ left: `${at().x}px`, top: `${at().y}px` }} onPointerDown={(event) => event.stopPropagation()}>
+            <For each={terminalMenu(selection())}>
+              {(item) => (
+                <button type="button" role="menuitem" data-terminal-action={item.id} disabled={item.disabled}
+                  onClick={() => { if (item.id === "copy") copySelection(); else void pasteClipboard(); }}>
+                  {item.label}
+                </button>
+              )}
+            </For>
+          </div>
+        )}
+      </Show>
     </div>
   );
 }

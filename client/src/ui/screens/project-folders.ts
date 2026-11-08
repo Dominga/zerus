@@ -6,6 +6,7 @@ import { bus } from "../../store/notices";
 import type { Folder, FolderOut, Project } from "../../types";
 import { localWindowsFolder } from "../sessions/folder-launch";
 import { trNoop, tr } from "../../i18n";
+import { teamConfirm } from "../../store/teamConfirm";
 
 export interface Place { computer: string; host: string; machine_id: string | null; label: string }
 export type FolderChange =
@@ -16,6 +17,16 @@ export type FolderChange =
 export interface FolderPrompt { project: string; original?: FolderOut; places: Place[]; origin: HTMLElement }
 const CHANGED = trNoop("This project folder changed. Select it again.");
 const refuse = (text: string) => bus.notify("warn", text);
+
+/** Qt's ProjectsDialog::removeFolder question: the folder's name (else its last path part), its path, machine and project. */
+export function folderRemovalCopy(folder: Folder, project: string): { title: string; text: string; action: string } {
+  const name = folder.name || folder.path.split(/[\/\\]/u).filter(Boolean).at(-1) || folder.path;
+  return {
+    title: tr("Remove folder?"),
+    text: tr("Remove “%1” (%2 on %3) from %4? Files stay on disk.", name, folder.path, folder.machine || folder.computer || tr("this computer"), project),
+    action: tr("Remove folder"),
+  };
+}
 export function createProjectFolders(projects: () => Project[], select: (key: string) => void) {
   const [prompt, setPrompt] = createSignal<FolderPrompt>();
   const [busy, setBusy] = createSignal(false);
@@ -60,5 +71,11 @@ export function createProjectFolders(projects: () => Project[], select: (key: st
     try { await bridge.projectFolderOpen(project, await read(project, folder)); }
     catch (error) { refuse(String(error)); }
   }
-  return { prompt, busy, enabled, open, close, save, remove: (project: string, folder: Folder) => change(project, folder), transfer: (project: string, folder: Folder, target: string, copy: boolean) => change(project, folder, target, copy), openFolder };
+  async function remove(project: string, folder: Folder) {
+    if (!enabled(project, folder)) return;
+    const found = projects().find((candidate) => candidate.id === project);
+    if (!found || !(await teamConfirm.ask({ name: "removeProjectFolderConfirm", ...folderRemovalCopy(folder, found.name) }))) return;
+    return change(project, folder);
+  }
+  return { prompt, busy, enabled, open, close, save, remove, transfer: (project: string, folder: Folder, target: string, copy: boolean) => change(project, folder, target, copy), openFolder };
 }

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   BUTTON, NO_PENDING, OLDER, PREPARING, accessibleText, computerOf, createDetailsView, creationOfRow, creationRowId, elapsed, footerText, machineOf,
-  newestFirst, noticeOf, panelButtons, panelStatus, placeCreations, projectOf, rowDetail, statusMenu, shownCards, type ListScope, type Placement,
+  newestFirst, noticeOf, panelButtons, panelStatus, placeCreations, projectOf, rowDetail, statusMenu, shownCards, fixFolderRights, sandboxFolderOf, type ListScope, type Placement,
 } from "./creations-ui";
 import { toSession } from "../../store/catalog";
 import { applyGrouping } from "../../store/organization";
@@ -311,5 +311,20 @@ describe("a drop over a creation row (SessionList.cpp:490-528)", () => {
     expect(placement(rows, offsets, heights, creationRowId("a"), 50, item)).toEqual({ group: "alpha", before: creationRowId("a"), line: 40, inset: 12 });
     // A card under an unlisted project is the default project's.
     expect(placement(rows, offsets, heights, creationRowId("b"), 230, item).group).toBe("ungrouped");
+  });
+});
+
+describe("fixing folder rights", () => {
+  it("reads the folder a DeepSeek sandbox error names", () => {
+    const error = "launch failed: the DeepSeek sandbox needs full control of C:\\work (missing write access)";
+    expect(sandboxFolderOf(error)).toBe("C:\\work");
+    expect(sandboxFolderOf("another error")).toBe("");
+  });
+
+  it("offers the button only for a local creation whose error names the folder", () => {
+    const error = "the DeepSeek sandbox needs full control of C:\\work (missing write access)";
+    expect(fixFolderRights({ host: "", error })).toBe(true);
+    expect(fixFolderRights({ host: "peer", error })).toBe(false);
+    expect(fixFolderRights({ host: "", error: "other" })).toBe(false);
   });
 });

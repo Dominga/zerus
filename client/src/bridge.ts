@@ -120,6 +120,12 @@ export const teamRead = (computer: ComputerId, team: string) =>
 export const teamsOlder = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_older", { computer }) : Promise.resolve(false);
 /** Task 75: why this process is sandboxed, null on a normal desktop. */
 export const sandboxCheck = () => inTauri() ? invoke<string | null>("sandbox_check") : Promise.resolve(null);
+/** Task #247: the sandbox warning's Quit Zerus (the same draft flush as a menu quit). */
+export const quitApp = () => inTauri() ? invoke<void>("app_quit") : Promise.resolve();
+/** Task #247: Qt's `hgs sandbox-folder grant FOLDER --json [--elevated]` (creation panel, Fix folder rights). */
+export const sandboxFolderGrant = (folder: string, elevated: boolean) =>
+  inTauri() ? invoke<{ ok: boolean; error?: string; receipt?: unknown }>("sandbox_folder_grant", { folder, elevated })
+    : Promise.resolve({ ok: false, error: "Folder rights need the desktop app." });
 /** Task 69: moves one local session to another account after the owner confirms. */
 export const sessionSwitchAccount = (session: string, account: string, request: string) =>
   inTauri() ? invoke<Record<string, unknown>>("session_switch_account", { session, account, request }) : Promise.reject(new Error("Accounts need the desktop app."));

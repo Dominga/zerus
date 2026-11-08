@@ -77,3 +77,9 @@
   .meter.warn > i { background: var(--z-color-warn); }
   .meter.danger > i { background: var(--z-color-danger); }
 }
+
+/* Task #247: Qt's StartupNotice splash (appears only after its delay). */
+.boot-splash { position: fixed; inset: 0; z-index: 70; display: grid; place-items: center; background: var(--z-color-page); }
+.boot-splash-box { display: flex; flex-direction: column; gap: 6px; padding: 18px 24px; border: 1px solid var(--z-color-card-border); border-radius: 10px; background: var(--z-color-surface); font-size: var(--fs-sm); text-align: center; }
+.boot-splash-box b { font-size: var(--fs-md); }
+.boot-splash-box span { color: var(--z-color-muted); }

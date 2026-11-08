@@ -327,7 +327,7 @@ HGS_TEST_FAKE_AGENT="$(cygpath -w "$PWD/target/debug/examples/fake_agent.exe")" 
     python -m unittest discover -s tests -p test_windows_mobile_gateway.py -v </dev/null
 export CARGO_TARGET_DIR="$PWD/target/windows-next"
 (cd client && npm ci --no-audit --no-fund && \
-    npm run tauri -- build --ci --no-bundle --config src-tauri/tauri.windows.conf.json --features video)
+    npm run tauri -- build --ci --no-bundle --config src-tauri/tauri.windows.switch.conf.json --features video)
 python client/scripts/collect-notices.py artifacts/windows-frontend-licenses
 unset CARGO_TARGET_DIR
 python scripts/package-windows.py --cli target/release/hgs.exe \

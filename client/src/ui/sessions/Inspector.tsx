@@ -1,4 +1,5 @@
 import { For, Show, Switch, Match, Suspense, lazy, createEffect, createMemo, createSignal, onCleanup, on, type JSX } from "solid-js";
+import { isServer } from "solid-js/web";
 import { Icon } from "../lib/icons";
 import { selected, setSubagentOpen, setDetailTab, setSelectedKey, subagentOpen, setMenu } from "../../store/ui";
 import { inspectorOpen, inspectorTab, inspectorWidth, inspectorClosed, setInspectorOpen, setInspectorTab, setInspectorWidth, toggleInspectorCard, panelGeometry, inspectorHint, INSPECTOR_TABS, type InspectorTab } from "../../store/inspector";
@@ -13,7 +14,13 @@ import { tasks } from "../../store/tasks";
 import { taskProject } from "../../store/taskContext";
 import "../styles/tasks.css";
 import { object, text } from "../screens/tasks-ui";
-import { homeShort, sessionAccount, sessionGoal, sessionPlan, usageRows } from "./inspector-data";
+import { cardKey, cardOpen, compactCount, contextUsage, homeShort, sessionAccount, sessionGoal, sessionPlan, sideTeam, usageRows } from "./inspector-data";
+import { skin } from "../../skin/runtime";
+import { selectedTeam, teams } from "../../store/teams";
+import { agentKind } from "../../store/catalog";
+import { AgentBadge } from "./SessionCard";
+import { duration, memberStatus, stateLabel, stateTone } from "../teams/team-model";
+import { roleStyle } from "../teams/roles";
 import { machineCards } from "../../store/machines";
 import { flag } from "../../store/settings";
 import { SocratiCodePanel } from "./SocratiCodePanel";
@@ -26,7 +33,7 @@ import type { BoundRow } from "./scope-filters";
 import type { Session } from "./types";
 import { IronRulesPanel } from "./IronRulesPanel";
 import { captionText, childStatus } from "./SessionCard";
-import { currentChildren, workingChildren } from "./subagents";
+import { currentChildren, finishedFoldId, foldedChildren, workingChildren } from "./subagents";
 import { tr, trNoop } from "../../i18n";
 import { accountsPage } from "../../store/accounts";
 import { openFilterAccounts } from "../../store/accountFilters";
@@ -49,16 +56,35 @@ const raw = () => selected() ? followedFor(selected()!.key).value : undefined;
 const SHELLS = new Set(["sh", "shell", "bash", "zsh", "pwsh"]);
 /** Computers whose account catalog the Inspector already asked for in this run. */
 const askedCatalogs = new Set<string>();
-function Card(props: { id: string; title: JSX.Element; aside?: JSX.Element; class?: string; classList?: Record<string, boolean>; onContextMenu?: JSX.EventHandler<HTMLElement, MouseEvent>; children: JSX.Element }) {
-  const open = () => !inspectorClosed().has(props.id);
-  return <section class={`icard ${props.class ?? ""}`} classList={{ closed: !open(), ...props.classList }} onContextMenu={props.onContextMenu}><header class="icard-head">
-    <button class="icard-toggle" aria-expanded={open()} aria-controls={`icard-${props.id}`} onClick={() => toggleInspectorCard(props.id)}><span class="icard-title">{props.title}</span><Icon name="chevron-down" size={12} class="icard-chev" /></button>
+function Card(props: { id: string; title: JSX.Element; aside?: JSX.Element; class?: string; classList?: Record<string, boolean>; onContextMenu?: JSX.EventHandler<HTMLElement, MouseEvent>; folded?: boolean; children: JSX.Element }) {
+  const open = () => cardOpen(props.id, !props.folded, inspectorClosed());
+  return <section class={`icard ${props.class ?? ""}`} classList={{ closed: !open(), ...props.classList }} onContextMenu={props.onContextMenu} data-section={props.id}><header class="icard-head">
+    <button class="icard-toggle" aria-expanded={open()} aria-controls={`icard-${props.id}`} onClick={() => toggleInspectorCard(cardKey(props.id, !props.folded))}><span class="icard-title">{props.title}</span><Icon name="chevron-down" size={12} class="icard-chev" /></button>
     <Show when={props.aside}><span class="icard-aside">{props.aside}</span></Show>
   </header><Show when={open()}><div class="icard-body" id={`icard-${props.id}`}>{props.children}</div></Show></section>;
 }
 function Row(props: { icon: string; label?: string; mono?: boolean; title?: string; tail?: JSX.Element; children: JSX.Element }) {
   return <div class="irow" title={props.title}><span class="irow-ico"><Icon name={props.icon} size={16} /></span><span class="irow-val ell" classList={{ mono: props.mono }}>{props.children}</span>{props.tail}<Show when={props.label}><span class="irow-label">{props.label}</span></Show></div>;
 }
+/** Task 262: the session's subagents, finished ones folded into "N finished, show" as in Qt; the fold is remembered per session. */
+function SubagentRows(props: { session: Session; online: boolean; summaries?: boolean; empty?: JSX.Element }) {
+  const current = () => currentChildren(props.session, props.online);
+  const id = () => finishedFoldId(props.session.key);
+  const open = () => cardOpen(id(), false, inspectorClosed());
+  const fold = createMemo(() => foldedChildren((props.session.subagents ?? []).slice(0, 100), current(), open()));
+  return <>
+    <For each={fold().shown} fallback={fold().finished ? undefined : props.empty}>{(child) => <Row icon="circle" label={childStatus(child, current()).caption} title={child.summary}><button class="link" onClick={() => { setSubagentOpen(child.id); setDetailTab("activity"); }}>{child.name} →</button><Show when={props.summaries}><span class="dim"> {child.summary}</span></Show></Row>}</For>
+    <Show when={fold().finished || (open() && current() && (props.session.subagents ?? []).some((child) => child.state !== "working" && child.state !== "attention" && !child.group))}>
+      <div class="side-finished" data-finished={fold().finished}>
+        <Show when={!open()} fallback={<button class="link" onClick={() => toggleInspectorCard(cardKey(id(), false))}>{tr("hide finished")}</button>}>
+          <span class="dim">{fold().finished === 1 ? tr("1 finished") : tr("%1 finished", fold().finished)}</span>
+          <button class="link" onClick={() => toggleInspectorCard(cardKey(id(), false))}>{tr("show")}</button>
+        </Show>
+      </div>
+    </Show>
+  </>;
+}
+
 function PlanAgents() {
   const s = selected, plan = createMemo(() => sessionPlan(raw())), goal = createMemo(() => sessionGoal(raw()));
   const online = () => !!s() && !computerOffline(s()!.computer);
@@ -67,12 +93,12 @@ function PlanAgents() {
     <Show when={goal().objective}><Card id="plan-goal" title={tr("Goal")} aside={<span class="muted">{goal().status === "active" ? tr("Pursuing goal") : goal().status}</span>}><p class="icard-text">{goal().objective}</p><Show when={goal().completion}><div class="hint">{tr("Reported by the agent. Completion: %1", goal().completion!)}</div></Show></Card></Show>
     <Show when={plan().length}><Card id="plan-tasks" title={tr("Tasks")} aside={<span class="dim">{tr("%1 of %2 completed (last recorded)", plan().filter((p) => p.status === "completed").length, plan().length)}</span>}><For each={plan()}>{(p) => <Row icon={p.status === "completed" ? "check" : "circle-dot"} label={p.status === "completed" ? tr("Done") : p.status === "in_progress" ? tr("In progress") : tr("To do")}>{p.title}</Row>}</For></Card></Show>
     <Card id="plan-agents" title={tr("Subagents")} aside={<span class="dim">{tr("%1 active / %2 total", s() ? workingChildren(s()!, online()) : 0, s()?.subagents?.length ?? 0)}</span>}>
-      <For each={s()?.subagents?.slice(0, 100)} fallback={<div class="hint">{tr("No subagent activity has been reported yet.")}</div>}>{(child) => <Row icon="circle" label={childStatus(child, !!s() && currentChildren(s()!, online())).caption} title={child.summary}><button class="link" onClick={() => { setSubagentOpen(child.id); setDetailTab("activity"); }}>{child.name} →</button><span class="dim"> {child.summary}</span></Row>}</For>
+      <Show when={s()} fallback={<div class="hint">{tr("No subagent activity has been reported yet.")}</div>}>{(row) => <SubagentRows session={row()} online={online()} summaries empty={<div class="hint">{tr("No subagent activity has been reported yet.")}</div>} />}</Show>
     </Card>
   </div>;
 }
 /** Task 68: the selected session's project and own iron rules (Qt's Details card). */
-function IronRulesCard(props: { session: Session }) {
+function IronRulesCard(props: { session: Session; id?: string; folded?: boolean }) {
   const [count, setCount] = createSignal(0);
   const project = () => { const group = groupOf(props.session.key); return group === INBOX ? "" : group ?? ""; };
   const context = () => ({
@@ -80,12 +106,12 @@ function IronRulesCard(props: { session: Session }) {
     project: project(),
     session: props.session.runId ? { name: props.session.name, run_id: props.session.runId, conversation_id: props.session.conversationId ?? "" } : undefined,
   });
-  return <Card id="details-rules" title={tr("Iron rules")} aside={<Show when={count()}><span class="dim tabular">{count()}</span></Show>}>
+  return <Card id={props.id ?? "details-rules"} folded={props.folded} title={tr("Iron rules")} aside={<Show when={count()}><span class="dim tabular">{count()}</span></Show>}>
     <IronRulesPanel context={context()} onCount={setCount} />
   </Card>;
 }
 
-function Details() {
+function useDetails() {
   const s = () => selected()!;
   const details = () => detailsFor(s(), !computerOffline(s().computer), followedFor(s().key));
   createEffect(() => {
@@ -114,6 +140,10 @@ function Details() {
   };
   const home = () => bound().accountHome || account().profile?.home || "";
   const profileId = () => bound().accountId || account().profile?.id || "";
+  return { s, details, identity, value, rows, usage, context, clear, account, accountText, home, profileId };
+}
+function Details() {
+  const { s, details, identity, value, rows, usage, context, clear, account, accountText, home, profileId } = useDetails();
   return <div class="insp-body"><Card id="details-id" title={tr(identity().title)}><Row icon="key-round" mono title={tr(identity().title)} tail={<button class="icon-btn small" aria-label={tr(identity().caption)} title={tr(identity().caption)} disabled={!identity().value} onClick={() => void copyIdentity(snapshotOf(s()), details())}><Icon name="copy" size={13} /></button>}><span class="selectable">{value(identity().value)}</span></Row></Card>
     <Card id="details-session" title={tr("Session")}><Row icon="message-square" label={tr("name")} mono title={s().name}>{s().name}</Row><Row icon="monitor" label={tr("machine")}>{s().machine}</Row><Row icon="folder" label={tr("directory")} mono title={s().cwdPath}>{value(s().cwdPath)}</Row><Row icon="git-branch" label={tr("branch")}>{value(s().branch)}</Row><Row icon="layers" label={tr("project")}>{grouping().headers.find((p) => p.id === groupOf(s().key))?.name ?? tr("Not reported")}</Row><Row icon="clock" label={tr("last event")}>{s().updatedAt ? eventTimeOf(new Date(s().updatedAt! * 1000)) : tr("Not reported")}</Row><div class="hint">{tr("Activity stays on %1. Closing this window does not stop your agent.", s().machine)}</div></Card>
     <IronRulesCard session={s()} />
@@ -181,7 +211,87 @@ function Worktrees() {
     <div class="insp-foot"><button class="btn small" onClick={() => { setPicked(undefined); clearFolderFilter(); }}>{tr("All sessions")}</button><button ref={cleanupButton} class="btn small" disabled={!canCleanup()} title={tr("Review this repository's worktrees on its computer before anything is removed")} onClick={(e) => review("", e.currentTarget)}>{tr("Clean up…")}</button><span class="grow" /><button class="btn small" disabled={!fresh() || !current() || current()?.available === false || current()?.kind === "bare"} onClick={() => { const s = selected(), path = text(current()?.path); if (s && path && fresh()) void newSessionFromWorktree(groupOf(s.key), s.computer, path); }}><Icon name="plus" size={12} />{tr("New session…")}</button></div>
   </div>;
 }
+/** Task 206: the Team section, Qt TeamPanel's running summary. */
+function SideTeamCard() {
+  const summary = () => selectedTeam();
+  const view = () => { const row = selected(), id = summary()?.id; return row && id ? teams.team(row.computer, id) : undefined; };
+  const [now, setNow] = createSignal(Date.now() / 1000);
+  if (!isServer) { const timer = setInterval(() => setNow(Date.now() / 1000), 60_000); onCleanup(() => clearInterval(timer)); }
+  const card = createMemo(() => { const team = view(); return team ? sideTeam(team, now()) : undefined; });
+  const state = () => view()?.status ?? summary()?.status ?? "";
+  const pending = () => view()?.pending_phase ?? summary()?.pending_phase ?? null;
+  const members = () => view()?.members.filter((member) => member.state !== "removed") ?? [];
+  const bar = (done: number, total: number) => <span class="side-bar" role="presentation"><i style={{ width: `${total ? Math.round(100 * done / total) : 0}%` }} /></span>;
+  return <div class="side-team">
+    <div class="side-team-top"><Icon name="users" size={15} /><b class="ell">{summary()?.name}</b><span class="grow" /><span class={`side-chip tone-${stateTone(state())}`}>{stateLabel(state())}</span></div>
+    <Show when={pending()}>{(n) => <div><span class="side-chip tone-warn">{tr("phase %1 pending approval", n())}</span></div>}</Show>
+    <Show when={card()}>{(c) => <>
+      <Show when={c().phase}>{(phase) => <div class="side-progress"><span>{tr("Phase %1", phase().n)}</span>{bar(phase().done, phase().total)}<span class="tabular dim">{tr("%1/%2", phase().done, phase().total)}</span></div>}</Show>
+      <Show when={c().phases.total}><div class="side-progress"><span>{tr("Phases")}</span>{bar(c().phases.done, c().phases.total)}<span class="tabular dim">{tr("%1/%2", c().phases.done, c().phases.total)}</span></div></Show>
+      <div class="dim">{c().age ? tr("%1/%2 accepted, %3", c().accepted, c().total, duration(c().age)) : tr("%1/%2 accepted", c().accepted, c().total)}</div>
+    </>}</Show>
+    <button class="btn small primary" onClick={() => setDetailTab("team")}>{tr("Open Team")}</button>
+    <Show when={members().length}>
+      <div class="side-members-head"><b>{tr("Members")}</b><span class="dim tabular">{members().length}</span></div>
+      <For each={members()}>{(member) => { const status = () => memberStatus(view()!, member); return <div class="side-member" data-member={member.id}>
+        <span class="role-badge ell" style={roleStyle(member.role, member.lead)}>{member.role || member.id}</span><AgentBadge agent={agentKind(member.agent)} narrow /><span class="grow" /><span class={`dim ell tone-${status().tone}`} title={status().text}>{status().short || status().text}</span>
+      </div>; }}</For>
+    </Show>
+    <div class="hint">{tr("Plan, graph and member changes live in the Team tab.")}</div>
+  </div>;
+}
+
+/** Task 206: the Compact skins' side panel, Qt's InspectorCards: one scroll of collapsible sections. */
+function Sections() {
+  const { s, details, identity, value, rows, usage, context, clear, accountText, home } = useDetails();
+  const plan = createMemo(() => sessionPlan(raw())), goal = createMemo(() => sessionGoal(raw()));
+  const online = () => !computerOffline(s().computer);
+  const window = createMemo(() => contextUsage(raw()));
+  const git = () => s().git;
+  return <div class="insp-body insp-sections">
+    <Card id="sec-environment" title={tr("Environment")}>
+      <Row icon="key-round" mono title={tr(identity().title)} tail={<button class="icon-btn small" aria-label={tr(identity().caption)} title={tr(identity().caption)} disabled={!identity().value} onClick={() => void copyIdentity(snapshotOf(s()), details())}><Icon name="copy" size={13} /></button>}><span class="selectable">{value(identity().value)}</span></Row>
+      <Row icon="monitor" label={tr("machine")}>{s().machine}</Row>
+      <Row icon="folder" label={tr("directory")} mono title={s().cwdPath}>{value(s().cwdPath)}</Row>
+      <Row icon="git-branch" label={tr("branch")}>{value(s().branch)}</Row>
+      <Row icon="sparkles" label={tr("model")}>{value(s().model)} {s().effort}</Row>
+      <Row icon="clock" label={tr("last event")}>{s().updatedAt ? eventTimeOf(new Date(s().updatedAt! * 1000)) : tr("Not reported")}</Row>
+    </Card>
+    <Card id="sec-context" title={tr("Context")} aside={<Show when={window() && window()!.percent >= 0}><span class="dim tabular">{tr("%1%", window()!.percent)}</span></Show>}>
+      <Show when={window()} fallback={<div class="hint">{tr("Context: %1", context()?.text || tr("Not reported"))}</div>}>{(w) => <>
+        <div class="side-progress"><span>{w().limit ? tr("%1% used", w().percent) : tr("%1 used", compactCount(w().used))}</span>{w().limit ? <span class="side-bar" role="presentation"><i style={{ width: `${Math.min(100, w().percent)}%` }} /></span> : <span class="grow" />}<span class="tabular dim">{w().limit ? tr("%1/%2", compactCount(w().used), compactCount(w().limit)) : ""}</span></div>
+      </>}</Show>
+      {/* Qt: "128k left in the window" with Clear session beside it, then the account and the session's usage. */}
+      <div class="side-actions"><span class="hint grow">{window()?.limit ? tr("%1 left in the window", compactCount(Math.max(0, window()!.limit - window()!.used))) : ""}</span><Show when={!subagentOpen()}><button class="btn small" title={clear()?.reason || undefined} disabled={!clear()?.enabled} onClick={() => composer.openClear()}>{clear()?.running ? tr("Clearing…") : tr("Clear session…")}</button></Show></div>
+      <Row icon="user-round-cog" label={tr("account")}>{accountText()}</Row>
+      <Row icon="hard-drive" label={tr("agent home")} mono title={home() || undefined}>{value(homeShort(home()))}</Row>
+      <Show when={rows().length}><table class="usage"><tbody><For each={rows()}>{([label, val]) => <tr><td>{label}</td><td class="tabular">{val}</td></tr>}</For></tbody></table><Show when={usage().costNote}><div class="hint">{usage().costNote}</div></Show></Show>
+    </Card>
+    <Show when={selectedTeam()}><Card id="sec-team" title={tr("Team")}><SideTeamCard /></Card></Show>
+    <Card id="sec-tasks" title={tr("Tasks")} aside={<Show when={plan().length}><span class="dim">{tr("%1 of %2 completed (last recorded)", plan().filter((p) => p.status === "completed").length, plan().length)}</span></Show>}>
+      <Row icon="activity" label={tr("status")}>{captionText(s().caption)}</Row>
+      <Row icon="terminal" label={tr("action")} mono title={s().summary}>{s().summary || tr("Not reported")}</Row>
+      <Show when={goal().objective}><p class="icard-text">{goal().objective}</p></Show>
+      <For each={plan()}>{(p) => <Row icon={p.status === "completed" ? "check" : "circle-dot"} label={p.status === "completed" ? tr("Done") : p.status === "in_progress" ? tr("In progress") : tr("To do")}>{p.title}</Row>}</For>
+      <div class="side-members-head"><b>{tr("Subagents")}</b><span class="dim tabular">{tr("%1 active / %2 total", workingChildren(s(), online()), s().subagents?.length ?? 0)}</span></div>
+      <SubagentRows session={s()} online={online()} />
+      <SessionLeadPanel />
+    </Card>
+    <IronRulesCard session={s()} id="sec-rules" folded />
+    <Card id="sec-worktrees" title={tr("Worktrees")} folded><Worktrees /></Card>
+    <Card id="sec-changes" title={tr("Changes")} folded aside={<Show when={git()?.changed}><span class="dim tabular">{git()!.changed}</span></Show>}>
+      <Show when={git() && git()!.state !== "unknown"} fallback={<div class="hint">{tr("Git status not reported for this folder.")}</div>}>
+        <Show when={git()!.changed} fallback={<div class="hint">{tr("Working tree is clean.")}</div>}><Row icon="git-compare-arrows" label={tr("files")}>{tr("%1 changed files", git()!.changed)}</Row></Show>
+        <Show when={git()!.ahead || git()!.behind}><Row icon="git-branch" label={tr("branch")}>{tr("%1 ahead, %2 behind", git()!.ahead, git()!.behind)}</Row></Show>
+      </Show>
+    </Card>
+    <Card id="sec-projecttasks" title={tr("Project tasks")} folded aside={<TaskTabBadge />}><div class="side-tasks"><Suspense><TasksPanel /></Suspense></div></Card>
+    <Show when={flag("extensions/socraticode") === true && !!s().cwdPath}><Card id="sec-socraticode" title={tr("SocratiCode")}><SocratiCodePanel /></Card></Show>
+  </div>;
+}
+
 export function Inspector(props: { available: number }) {
+  const sections = () => skin().layout["side-panel"] === "sections";
   const geometry = () => panelGeometry(props.available, inspectorWidth());
   let panel!: HTMLElement;
   let returnFocus: HTMLElement | undefined;
@@ -205,7 +315,9 @@ export function Inspector(props: { available: number }) {
   };
   return <Show when={inspectorOpen()}><aside ref={panel} class="inspector" classList={{ floating: geometry().floating }} style={{ width: `${geometry().width}px` }} aria-label={tr("Side panel")}>
     <div class="insp-resize" tabindex="0" role="separator" aria-orientation="vertical" aria-label={tr("Side panel width")} aria-valuemin={240} aria-valuemax={900} aria-valuenow={inspectorWidth()} onPointerDown={resize} onDblClick={() => setInspectorWidth(400)} onKeyDown={(e) => { if (["ArrowLeft", "ArrowRight", "Home"].includes(e.key)) { e.preventDefault(); setInspectorWidth(e.key === "Home" ? 400 : inspectorWidth() + (e.key === "ArrowLeft" ? 20 : -20)); } }}><i /></div>
-    <div class="insp-tabs tabs" role="tablist" aria-label={tr("Side panel tabs")}><For each={INSPECTOR_TABS}>{(tab) => <button class="tab" role="tab" classList={{ on: inspectorTab() === tab }} title={tr(LABEL[tab])} aria-selected={inspectorTab() === tab} tabindex={inspectorTab() === tab ? 0 : -1} onClick={() => setInspectorTab(tab)} onKeyDown={(e) => { const i = INSPECTOR_TABS.indexOf(tab), next = e.key === "ArrowRight" ? (i + 1) % 4 : e.key === "ArrowLeft" ? (i + 3) % 4 : e.key === "Home" ? 0 : e.key === "End" ? 3 : -1; if (next >= 0) { e.preventDefault(); setInspectorTab(INSPECTOR_TABS[next]); panel.querySelectorAll<HTMLButtonElement>(".insp-tabs .tab")[next]?.focus(); } }}><span class="tab-label">{tr(LABEL[tab])}</span>{tab === "tasks" ? <TaskTabBadge /> : null}</button>}</For><span class="grow" /><button class="icon-btn small" aria-label={tr("Collapse side panel")} data-tip={inspectorHint(tr("Collapse side panel"))} data-tip-pos="left" onClick={close}><Icon name="panel-right-close" size={14} /></button></div>
-    <div class="insp-scroll" classList={{ tasks: inspectorTab() === "tasks" }}><Switch><Match when={inspectorTab() === "plan"}><PlanAgents /></Match><Match when={inspectorTab() === "details" && selected()}><Details /></Match><Match when={inspectorTab() === "worktrees"}><Worktrees /></Match><Match when={inspectorTab() === "tasks"}><Suspense><TasksPanel /></Suspense></Match></Switch></div>
+    <Show when={sections()}><div class="insp-tabs insp-head"><b class="insp-title">{tr("Session")}</b><span class="grow" /><button class="icon-btn small" aria-label={tr("Collapse side panel")} data-tip={inspectorHint(tr("Collapse side panel"))} data-tip-pos="left" onClick={close}><Icon name="panel-right-close" size={14} /></button></div>
+      <div class="insp-scroll sections"><Show when={selected()} fallback={<div class="insp-body"><div class="hint">{tr("No session selected")}</div></div>}><Sections /></Show></div></Show>
+    <Show when={!sections()}><div class="insp-tabs tabs" role="tablist" aria-label={tr("Side panel tabs")}><For each={INSPECTOR_TABS}>{(tab) => <button class="tab" role="tab" classList={{ on: inspectorTab() === tab }} title={tr(LABEL[tab])} aria-selected={inspectorTab() === tab} tabindex={inspectorTab() === tab ? 0 : -1} onClick={() => setInspectorTab(tab)} onKeyDown={(e) => { const i = INSPECTOR_TABS.indexOf(tab), next = e.key === "ArrowRight" ? (i + 1) % 4 : e.key === "ArrowLeft" ? (i + 3) % 4 : e.key === "Home" ? 0 : e.key === "End" ? 3 : -1; if (next >= 0) { e.preventDefault(); setInspectorTab(INSPECTOR_TABS[next]); panel.querySelectorAll<HTMLButtonElement>(".insp-tabs .tab")[next]?.focus(); } }}><span class="tab-label">{tr(LABEL[tab])}</span>{tab === "tasks" ? <TaskTabBadge /> : null}</button>}</For><span class="grow" /><button class="icon-btn small" aria-label={tr("Collapse side panel")} data-tip={inspectorHint(tr("Collapse side panel"))} data-tip-pos="left" onClick={close}><Icon name="panel-right-close" size={14} /></button></div>
+    <div class="insp-scroll" classList={{ tasks: inspectorTab() === "tasks" }}><Switch><Match when={inspectorTab() === "plan"}><PlanAgents /></Match><Match when={inspectorTab() === "details" && selected()}><Details /></Match><Match when={inspectorTab() === "worktrees"}><Worktrees /></Match><Match when={inspectorTab() === "tasks"}><Suspense><TasksPanel /></Suspense></Match></Switch></div></Show>
   </aside></Show>;
 }

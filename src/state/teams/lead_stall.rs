@@ -16,8 +16,16 @@ use super::model::{LeadStall, MemberState, Team, TeamStatus};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
-/// The lead's decisions: what stops a member or waits for its accept.
+/// Task #289: the lead's waiting decisions. Notices (a decided proposal, a
+/// cancelled dependency, an unread count, a digest) are information, never a
+/// decision, so they neither start the stall nor count in its nag.
 const DECISIONS: [&str; 3] = ["report", "question", "permission"];
+
+/// The items the stall counts and names: the same set, so the nag's count and
+/// its list agree.
+pub(crate) fn decision(item: &inbox::Item) -> bool {
+    DECISIONS.contains(&item.kind)
+}
 
 /// The stall this tick sees: `None` when it cannot decide (the lead's
 /// computer did not answer the listing), `Some(None)` when the lead is not
@@ -31,7 +39,7 @@ pub(crate) fn desired(team: &Team, seen: &[Seen], now: f64, listed: Option<&BTre
     let after = minutes as f64 * 60.0;
     let waiting: Vec<inbox::Item> = inbox::items(team)
         .into_iter()
-        .filter(|item| DECISIONS.contains(&item.kind) && now - item.since >= after)
+        .filter(|item| decision(item) && now - item.since >= after)
         .collect();
     if waiting.is_empty() {
         return Some(None);

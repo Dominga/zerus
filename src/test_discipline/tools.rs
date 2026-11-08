@@ -341,6 +341,16 @@ pub struct Offer {
     /// The install's output, its last part.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub output: String,
+    /// Task #220: the team whose session raised the offer (empty when the run
+    /// was in no team: the owner's own shell, a worker-started run).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub team: String,
+    /// The member whose run raised it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub member: String,
+    /// The task that member held when its run raised it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<u32>,
 }
 
 fn is_zero(value: &f64) -> bool {
@@ -412,6 +422,14 @@ pub fn refresh(root: &Path, config: &TestsConfig) -> anyhow::Result<Vec<Offer>> 
 /// `refresh` with the presence of each need given (tests give it).
 pub fn record(root: &Path, needs: &[(Need, bool)]) -> anyhow::Result<Vec<Offer>> {
     let (project, project_name) = project_key(root);
+    // Task #220: an offer a team's run raises names that team, its member and
+    // the task the member held; a run outside every team keeps the owner's
+    // path. Read once, and only when this check may file something new.
+    let raised_in = needs
+        .iter()
+        .any(|(need, here)| !*here && offer_of(&project, &need.tool).is_none())
+        .then(crate::state::teams::commands::calling_team)
+        .flatten();
     locked(|store| {
         for (need, here) in needs {
             let id = offer_id(&project, &need.tool);
@@ -422,20 +440,26 @@ pub fn record(root: &Path, needs: &[(Need, bool)]) -> anyhow::Result<Vec<Offer>>
                         offer.decided = now();
                     }
                 }
-                None if !*here => store.offers.push(Offer {
-                    id,
-                    project: project.clone(),
-                    project_name: project_name.clone(),
-                    folder: root.display().to_string(),
-                    tool: need.tool.clone(),
-                    why: need.why.clone(),
-                    saves: need.saves.clone(),
-                    source: need.source.clone(),
-                    command: need.command.clone(),
-                    state: "offered".into(),
-                    since: now(),
-                    ..Offer::default()
-                }),
+                None if !*here => {
+                    let (team, member, task) = raised_in.clone().unwrap_or_default();
+                    store.offers.push(Offer {
+                        id,
+                        project: project.clone(),
+                        project_name: project_name.clone(),
+                        folder: root.display().to_string(),
+                        tool: need.tool.clone(),
+                        why: need.why.clone(),
+                        saves: need.saves.clone(),
+                        source: need.source.clone(),
+                        command: need.command.clone(),
+                        state: "offered".into(),
+                        since: now(),
+                        team,
+                        member,
+                        task,
+                        ..Offer::default()
+                    })
+                }
                 None => {}
             }
         }
@@ -443,22 +467,32 @@ pub fn record(root: &Path, needs: &[(Need, bool)]) -> anyhow::Result<Vec<Offer>>
     })
 }
 
+/// The stored offer of one tool of the project, if this computer already filed
+/// one (whatever became of it).
+fn offer_of(project: &str, tool: &str) -> Option<Offer> {
+    let id = offer_id(project, tool);
+    read_store().offers.into_iter().find(|offer| offer.id == id)
+}
+
 /// Files the offer of one tool the project lacks, as the build cache does when
 /// a run finds its tool missing (#721). Quiet: an error only loses the offer.
-pub fn offer_missing(folder: &Path, tool: &str) {
-    let Ok(loaded) = super::config::load(folder, None) else { return };
+/// Task #220: the offer comes back with the team its run named, if any.
+pub fn offer_missing(folder: &Path, tool: &str) -> Option<Offer> {
+    let loaded = super::config::load(folder, None).ok()?;
     let needs = needs(folder, &loaded.config, os(), &|manager| find_program(manager.program()).is_some());
-    let Some(need) = needs.into_iter().find(|need| need.tool.eq_ignore_ascii_case(tool)) else { return };
+    let need = needs.into_iter().find(|need| need.tool.eq_ignore_ascii_case(tool))?;
     let here = present(&need);
-    let _ = record(folder, &[(need, here)]);
+    record(folder, &[(need, here)]).ok()?.into_iter().find(|offer| offer.tool.eq_ignore_ascii_case(tool))
 }
 
 /// What waits for the owner: offers not decided yet, and failed installs
-/// (with their output) to retry or deny. Items of Waiting for you.
+/// (with their output) to retry or deny. Items of Waiting for you. Task #220:
+/// an offer a team's run raised waits for that team's lead instead, not here.
 pub fn waiting_items() -> Vec<Value> {
     read_store()
         .offers
         .iter()
+        .filter(|offer| offer.team.is_empty())
         .filter(|offer| matches!(offer.state.as_str(), "offered" | "failed" | "installing"))
         .map(|offer| {
             let command = offer.command.join(" ");
@@ -475,6 +509,22 @@ pub fn waiting_items() -> Vec<Value> {
         .collect()
 }
 
+/// Task #220: the offers one team's runs raised and that wait for its lead:
+/// offered, or failed with its output to deny or ask again. An install the
+/// owner allowed is the owner's from then on.
+pub fn offers_of(team: &str) -> Vec<Offer> {
+    read_store()
+        .offers
+        .into_iter()
+        .filter(|offer| offer.team == team && matches!(offer.state.as_str(), "offered" | "failed"))
+        .collect()
+}
+
+/// The stored offer with this id, whatever became of it.
+pub fn offer(id: &str) -> Option<Offer> {
+    read_store().offers.into_iter().find(|offer| offer.id == id)
+}
+
 /// The owner's answer to an offer: `{"offer":ID,"allow":bool,"by":"human",
 /// "reason":"..."}`. Deny is remembered; Allow marks it installing and starts
 /// the install runner, which records the command's output. Only the owner
@@ -485,34 +535,80 @@ pub fn decide(input: &Value) -> anyhow::Result<Value> {
     let id = input["offer"].as_str().unwrap_or_default().to_owned();
     let allow = input["allow"].as_bool().ok_or_else(|| anyhow::anyhow!("\"allow\" is true or false"))?;
     let reason: String = input["reason"].as_str().unwrap_or_default().chars().take(500).collect();
-    let offer = locked(|store| {
-        let offer = store.offers.iter_mut().find(|offer| offer.id == id).ok_or_else(|| anyhow::anyhow!("No tool offer {id}"))?;
-        match (offer.state.as_str(), allow) {
-            ("offered" | "failed", false) => {
-                offer.state = "denied".into();
-                offer.reason = reason.clone();
-            }
-            ("offered" | "failed", true) => {
-                anyhow::ensure!(!offer.command.is_empty(), "No package manager on this computer installs {}; install it yourself", offer.tool);
-                offer.state = "installing".into();
-            }
-            // Decided before: the same answer again changes nothing.
-            _ => return Ok((offer.clone(), false)),
-        }
-        offer.decided = now();
-        Ok((offer.clone(), true))
-    })?;
-    let (offer, changed) = offer;
+    let (offer, changed) = locked(|store| answer(store, &id, allow, &reason))?;
     if changed && offer.state == "installing" {
         start_install(&offer)?;
     }
     Ok(json!({"offer":offer.id,"tool":offer.tool,"state":offer.state,"command":offer.command.join(" ")}))
 }
 
+/// Task #220: the team's lead denies an offer its own team's run raised. The
+/// lead never allows an install; to get one, the lead asks the owner with an
+/// install-tool card.
+pub fn lead_deny(team: &str, id: &str, reason: &str) -> anyhow::Result<Offer> {
+    locked(|store| {
+        let found = store
+            .offers
+            .iter()
+            .find(|offer| offer.id == id && offer.team == team)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("No tool offer {id} waits for this team"))?;
+        anyhow::ensure!(
+            matches!(found.state.as_str(), "offered" | "failed"),
+            "The offer of {} is {}; there is nothing to deny",
+            found.tool,
+            found.state
+        );
+        answer(store, id, false, reason).map(|(offer, _)| offer)
+    })
+}
+
+/// Task #220: the owner allowed the lead's install card: marked installing and
+/// started, as the direct Allow does.
+pub fn allow_escalated(id: &str) -> anyhow::Result<Offer> {
+    let (offer, changed) = locked(|store| answer(store, id, true, ""))?;
+    if changed && offer.state == "installing" {
+        start_install(&offer)?;
+    }
+    Ok(offer)
+}
+
+/// Task #220: the owner denied the lead's install card; the reason is
+/// remembered on the offer, so the team works without the tool.
+pub fn deny_escalated(id: &str, reason: &str) -> anyhow::Result<Offer> {
+    locked(|store| answer(store, id, false, reason)).map(|(offer, _)| offer)
+}
+
+/// One answer to an offer: deny remembers its reason, allow marks it installing
+/// (the caller starts the runner), and a decided offer keeps its first answer.
+fn answer(store: &mut Store, id: &str, allow: bool, reason: &str) -> anyhow::Result<(Offer, bool)> {
+    let offer = store.offers.iter_mut().find(|offer| offer.id == id).ok_or_else(|| anyhow::anyhow!("No tool offer {id}"))?;
+    match (offer.state.as_str(), allow) {
+        ("offered" | "failed", false) => {
+            offer.state = "denied".into();
+            offer.reason = reason.to_owned();
+        }
+        ("offered" | "failed", true) => {
+            anyhow::ensure!(!offer.command.is_empty(), "No package manager on this computer installs {}; install it yourself", offer.tool);
+            offer.state = "installing".into();
+        }
+        // Decided before: the same answer again changes nothing.
+        _ => return Ok((offer.clone(), false)),
+    }
+    offer.decided = now();
+    Ok((offer.clone(), true))
+}
+
 #[cfg(test)]
 thread_local! {
     /// A test runs the install in place instead of a detached runner.
     static INLINE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A test in another module runs an allowed install in place.
+#[cfg(test)]
+pub(crate) fn inline_install(on: bool) {
+    INLINE.with(|inline| inline.set(on));
 }
 
 fn start_install(offer: &Offer) -> anyhow::Result<()> {

@@ -15,7 +15,7 @@ manual dispatch, only in `WhiteWh/zerus`. On a standard `windows-2025` runner it
 3. runs the Tauri desktop's fork update tests and the Qt-to-Tauri handoff
    (`client/core/tests/fork_handoff.rs`), then builds the Tauri desktop as
    upstream does (`npm ci`, `tauri build --no-bundle` with
-   `tauri.windows.conf.json` and the `video` feature) as `hgs-tray.exe`;
+   `tauri.windows.switch.conf.json` and the `video` feature) as `hgs-tray.exe`;
 4. packages the zip with `scripts/package-windows.py --fork` (the fork
    identity, the relay, the fork README section and the Qt fallback) and
    self-tests it (`scripts/check-windows-portable.py --run --selftest`, which
@@ -46,12 +46,10 @@ release drops it: remove `--qt-fallback` and the Qt steps from
 `fork-windows.yml`.
 
 A local dry run uses the workflow's own commands from a clean checkout (the
-Tauri `--build-info` check refuses a dirty source): the release builds
-(including `crates/lore`'s `lore.exe` for team and project memory), `npm run
+Tauri `--build-info` check refuses a dirty source): the release builds, `npm run
 tauri -- build ...` with `ZERUS_FORK_BUILD` and `ZERUS_FORK_FEED_URL` set,
-`scripts/package-windows.py --fork ... --lore crates/lore/target/release/lore.exe
---qt-fallback .ci-build/gui/hgs-tray.exe`, and
-`scripts/check-windows-portable.py <zip> --run --selftest`. Never push
+`scripts/package-windows.py --fork ... --qt-fallback .ci-build/gui/hgs-tray.exe`
+and `scripts/check-windows-portable.py <zip> --run --selftest`. Never push
 `whitewh/main` for it: a push publishes.
 
 A failing step publishes nothing. The run number is embedded in `hgs-tray.exe` as

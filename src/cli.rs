@@ -1118,13 +1118,13 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
             Ok(0)
         }
         "subagent" => {
-            if args.len() != 3 || args[0] != "retire" || args[2] != "--json" || dry {
-                return Err(Error::new(1,"usage: hgs subagent retire NAME --json (JSON stdin)"));
+            if args.len() != 3 || !["retire", "settle"].contains(&args[0].as_str()) || args[2] != "--json" || dry {
+                return Err(Error::new(1,"usage: hgs subagent retire|settle NAME --json (JSON stdin)"));
             }
             use std::io::Read;
             let mut bytes = Vec::new();
             std::io::stdin().lock().take(8193).read_to_end(&mut bytes)?;
-            let result = state::subagent_lifecycle::retire(&args[1],&bytes).map_err(|e|Error::new(1,e))?;
+            let result = if args[0] == "settle" { state::subagent_lifecycle::settle(&args[1],&bytes) } else { state::subagent_lifecycle::retire(&args[1],&bytes) }.map_err(|e|Error::new(1,e))?;
             println!("{result}"); Ok(0)
         }
         "ls" => list(&config, args, dry),
@@ -2042,39 +2042,53 @@ fn local_json_archives(config: &Config, archives: bool) -> Result<Value> {
         crate::external_workstreams::append_listing(config,&mut raw)?;
         return Ok(raw);
     }
+    // Task 193: where a listing's time goes; over SLOW_MS it is one slow-calls
+    // line (`hgs inspect` already has the same phases).
+    let mut phases = crate::state::slow_calls::Phases::start();
     let mut projects = serde_json::Map::new();
     for project in config.projects()? {
         projects.insert(project.name, json!(project.dir));
     }
+    phases.mark("projects");
     // Before the terminal lists: a launch's session that this listing does not
     // show existed before it began and has ended.
     let launches = state::launches::Evidence::read();
+    phases.mark("launches");
     // A listing that fails is an error: no sessions would show live ones as stopped.
     let listing = terminal().listing().map_err(|e| Error::new(1, e))?;
+    phases.mark("terminal");
     let sessions = state::listed_rows(&listing);
     let mut raw = json!({"host":config.host(),"ok":true,"hgs_version":env!("CARGO_PKG_VERSION"),"projects":projects,"sessions":sessions,"peers":config.peers,"metrics":crate::metrics::snapshot(&config.state)});
+    phases.mark("raw");
     // Phone alerts wait while the owner is active here; see src/presence.rs.
     if let Some(presence) = crate::presence::listing(&config.state, crate::presence::now()) {
         raw["desktop_presence"] = presence;
     }
+    phases.mark("presence");
     raw["preferences"] = crate::swarm::preferences(config);
     private_stores(&mut raw);
+    phases.mark("preferences");
     // Windows: the session host as found, never started (spec D2). Unix
     // listings stay as they were.
     #[cfg(windows)]
     {
         raw["local_host"] = crate::host::admin::local_host(&config.state);
     }
+    phases.mark("local_host");
     // A session renamed before merge_listing reads the panes keeps its ID.
     let ids = state::listed_ids(&listing);
     let mut merged = state::merge_listing_archives(raw, &ids, archives).map_err(|e| Error::new(1, e))?;
+    phases.mark("merge");
     merged["archive_paging"] = json!(true);
     merged["archive_revision"] = json!(state::archive_catalog::revision().map_err(|e|Error::new(1,e))?);
     let ended = launches.ended(merged["sessions"].as_array().map_or(&[], Vec::as_slice));
     if !ended.is_empty() {
         merged["ended_launches"] = json!(ended);
     }
+    phases.mark("ended");
     crate::external_workstreams::append_listing(config,&mut merged)?;
+    phases.mark("external");
+    phases.finish("ls", &config.host());
     Ok(merged)
 }
 fn local_list(config: &Config) -> Result<()> {

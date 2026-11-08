@@ -23,6 +23,7 @@ pub mod action;
 pub mod catalog_edit;
 pub mod heads;
 pub mod model;
+pub mod plan_edit;
 pub mod poller;
 pub mod read;
 pub mod role_models;

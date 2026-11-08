@@ -1,6 +1,6 @@
 import { nativeRoute } from "./native-entry";
 import { withoutHeld } from "./held-message";
-import { tr } from "../../i18n";
+import { tr, trNoop } from "../../i18n";
 import { createActivityScroll } from "./activity-scroll";
 import { activityReadingRows, createActivityAnchor } from "./activity-anchor";
 import { ActivityHeights, activityMeasureWindow, activityOverscan, createActivityResize, syncActivityHeights } from "./activity-heights";
@@ -38,6 +38,13 @@ import { activityAll, activityFlow, activityRange, measureActivityRows, activity
 import { openExternal, openSessionFile } from "./sessionFiles";
 import { SessionFileDialog } from "./SessionFileDialog";
 import { captionText, statusOf } from "./SessionCard";
+import { foldedBody, noticeBar, type SystemNotice } from "./notices";
+import { NOTICE_MODES, foldNoticeTurns, sessionNoticeMode, withSessionNoticeMode, type NoticeMode } from "./leadNotices";
+import { teams, sessionIs } from "../../store/teams";
+import { settings } from "../../store/settings";
+import { MediaStrip, MediaViewerDialog, VideoMessageDialog } from "./MediaViewer";
+import { mediaReferences } from "./media";
+import { onMediaNotice, type MediaScope } from "../../store/media";
 import type { ActivityItem, ItemAttachment, LocalItem, MediaMessage, Session, TranscriptItem } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -240,6 +247,31 @@ function blocks(list: MarkdownBlock[], session?: () => Session | undefined): JSX
   });
 }
 
+// Task 248: what Qt says in its notice line when a media file cannot be opened or loads from a peer.
+onMediaNotice((text) => toast(tr("Media"), text, "info", false));
+
+/** Task 248: where the Activity's session resolves the media its agent names. */
+function useMediaScope(): () => MediaScope | undefined {
+  const session = useContext(ActivitySession);
+  return () => {
+    const current = session?.();
+    return current ? { sessionKey: current.key, computer: current.computer, cwd: current.cwdPath || current.cwdCanonical || "", machine: current.machine } : undefined;
+  };
+}
+
+/** The pictures, animations and videos a reply names, previewed under it (Qt mediaTiles). */
+function ReplyMedia(props: { text: string }) {
+  const scope = useMediaScope();
+  const refs = createMemo(() => { markdownReady(); return mediaReferences(markdownTree(props.text)); }, [], { equals: (a, b) => a.join("\n") === b.join("\n") });
+  return <MediaStrip scope={scope()} refs={refs()} />;
+}
+
+/** The pictures a tool group worked with (Qt toolMedia), under the group. */
+function ToolMedia(props: { refs: readonly string[] }) {
+  const scope = useMediaScope();
+  return <MediaStrip scope={scope()} refs={props.refs} />;
+}
+
 export function Body(props: { text: string }) {
   const session = useContext(ActivitySession);
   // Rerenders once when the lazily loaded parser arrives; Activity places its
@@ -361,6 +393,24 @@ function MediaCard(props: { item: MediaMessage; scope?: AttachmentScope; sourceI
     finally { if (mine.current()) setLoading(false); }
   };
   const pause = () => { player?.pause(); setPlaying(false); };
+  // Task 248: Qt plays a round video message in its own "Video message" dialog (ActivityView::playVoice).
+  const [dialogUrl, setDialogUrl] = createSignal("");
+  const openDialog = async () => {
+    const current = target();
+    if (!current || loading()) return;
+    pause();
+    if (!objectUrl) {
+      setLoading(true);
+      try {
+        const bytes = await attachmentMedia(current.computer, current.ref, true);
+        if (target() !== current) return;
+        objectUrl = URL.createObjectURL(recordingBlob(bytes, true));
+        setUrl(objectUrl);
+      } catch (failure) { setError(tr("Could not play recording: %1", String(failure))); return; }
+      finally { setLoading(false); }
+    }
+    setDialogUrl(objectUrl);
+  };
   const loaded = (event: Event) => {
     if (!claim?.current() || !objectUrl) return;
     const media = event.currentTarget as HTMLMediaElement;
@@ -431,8 +481,10 @@ function MediaCard(props: { item: MediaMessage; scope?: AttachmentScope; sourceI
             </span>
             <span class="vm-time tabular">{position() > 0 ? `${mediaTime(position())} / ` : ""}{mediaTime(duration())}</span>
           </button>
+          <button class="icon-btn small vm-open" aria-label={tr("Video message")} title={tr("Video message")} data-video-dialog disabled={!target() || loading()} onClick={() => void openDialog()}><Icon name="maximize-2" size={14} /></button>
           <Show when={it.transcript}><TranscriptButton open={transcript()} onToggle={toggleTranscript} /></Show>
         </div>
+        <Show when={dialogUrl()}><VideoMessageDialog url={dialogUrl()} onClose={() => setDialogUrl("")} /></Show>
       </Show>
       <Show when={transcript() && it.transcript}><p class="vm-text">{it.transcript}</p></Show>
       <Show when={!video}><audio ref={(el) => { player = el; }} src={url() || undefined} preload="none"
@@ -628,9 +680,69 @@ function EchoBody(props: { item: ActivityItem; scope?: AttachmentScope }) {
   return <ItemBody {...props} item={shown()} />;
 }
 
+/** Qt's team plaque (ActivityView.cpp teamMessage): kind, sender and receiver,
+ * task and attempt, three lines of the body, then the header Zerus pasted. */
+function NoticeCard(props: { item: ActivityItem; notice: SystemNotice; open: boolean; toggle: () => void }) {
+  const n = () => props.notice;
+  const folded = createMemo(() => foldedBody(n()));
+  const bar = () => noticeBar(n().from);
+  return (
+    <article class="act-msg k-system act-plaque" id={`item-${props.item.id}`} classList={{ inherited: !!props.item.inherited }}
+      style={{ "--bar-dark": bar().dark, "--bar-light": bar().light }} data-notice={n().from}>
+      <header>
+        <b class="act-plaque-kind">{n().kind}</b>
+        <span class="act-plaque-chip">{n().to ? `${n().from} → ${n().to}` : n().from}</span>
+        <Show when={n().task}><span class="act-plaque-chip task">{n().title ? tr("Task: %1", n().title) : tr("Task #%1", n().task)}</span></Show>
+        <Show when={n().attempt}><span class="act-plaque-chip">{tr("Attempt %1", n().attempt)}</span></Show>
+        <span class="grow" />
+        <span class="act-time">{props.item.at}</span>
+      </header>
+      <p class="act-plaque-body wrap-pre">{props.open ? n().full : folded().text}</p>
+      <footer class="act-plaque-foot">
+        <span class="mono">{n().header}</span><span class="grow" />
+        <Show when={folded().clipped || props.open}><button class="link" onClick={props.toggle}>{props.open ? tr("Show less") : tr("Show more")}</button></Show>
+      </footer>
+    </article>
+  );
+}
+
+/** Task 244: a folded team notice or the lead's folded reply to one, as Qt's tool-call row. */
+function FoldedItem(props: { item: ActivityItem; open: boolean; toggle: () => void; scope?: AttachmentScope; sourceId?: string }) {
+  const it = props.item;
+  return (
+    <div class="act-tools act-folded" id={`item-${it.id}`} classList={{ open: props.open, reply: it.foldKind === "reply" }} data-folded={it.foldKind}>
+      <button class="act-tools-head" onClick={props.toggle} aria-expanded={props.open}>
+        <Icon name="chevron-right" size={12} class="chev" />
+        <b>{it.sender}</b>
+        <span class="muted ell">{it.title}</span>
+        <span class="act-time">{it.at}</span>
+      </button>
+      <Show when={props.open}>
+        <div class="act-folded-body"><For each={it.folded ?? []}>{(child) => <Item item={child} scope={props.scope} sourceId={props.sourceId} />}</For></div>
+      </Show>
+    </div>
+  );
+}
+
+/** Task 244: whether `row` is its team's lead session (the modes apply there only). */
+export function isLeadSession(row: Session | undefined): boolean {
+  if (!row) return false;
+  const team = teams.teamOf(row);
+  return !!team?.members.some((member) => member.lead && sessionIs(member.session, row.computer, row));
+}
+
+/** Task 244: the lead session's mode for team notices (its own choice, else Settings > Teams). */
+export const leadNoticeMode = (row: Session): NoticeMode => sessionNoticeMode(settings["teams/leadNoticeSessions"], row.key, settings["teams/leadNotices"]);
+export function setLeadNoticeMode(row: Session, mode: NoticeMode) {
+  void setSetting("teams/leadNoticeSessions", withSessionNoticeMode(settings["teams/leadNoticeSessions"], row.key, mode));
+}
+const NOTICE_LABEL: Record<NoticeMode, string> = { full: trNoop("Full"), collapsed: trNoop("Collapsed"), silent: trNoop("Hidden") };
+
 function Item(props: { item: TranscriptItem; scope?: AttachmentScope; sourceId?: string; postersEnabled?: boolean; expanded?: boolean; onExpanded?: (open: boolean) => void }) {
   const [open, toggleOpen] = layoutDisclosure(() => props.expanded, props.onExpanded);
   const it = props.item;
+  if (it.kind === "folded") return <FoldedItem item={it} open={open()} toggle={toggleOpen} scope={props.scope} sourceId={props.sourceId} />;
+  if (it.kind === "system" && it.notice) return <NoticeCard item={it} notice={it.notice} open={open()} toggle={toggleOpen} />;
   if (it.kind === "media") return <MediaCard item={it} scope={rowScope(it, props.scope)} sourceId={props.sourceId} postersEnabled={props.postersEnabled} expanded={props.expanded} onExpanded={props.onExpanded} />;
   if (it.kind === "context") return <div class="act-label eyebrow" id={`item-${it.id}`}>{it.body}</div>;
   if (it.kind === "thinking") return <div class="act-thinking" id={`item-${it.id}`} classList={{ inherited: !!it.inherited }}><span class="eyebrow">{tr("Thinking")}</span><p>{it.body}</p></div>;
@@ -652,12 +764,14 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope; sourceId?:
           <span class="act-time">{it.at}</span>
         </button>
         <Show when={it.kind === "tool"}><div class="act-tool-cmd mono">{it.body}</div></Show>
+        <Show when={it.media?.length}><ToolMedia refs={it.media!} /></Show>
         <Show when={open() && it.lines}>
           <div class="act-tool-lines mono"><For each={it.lines}>{(l) => <div>{l}</div>}</For></div>
         </Show>
       </div>
     }>
-      <article class={`act-msg k-${it.kind}`} id={`item-${it.id}`} classList={{ inherited: !!it.inherited }}>
+      <article class={`act-msg k-${it.kind}`} id={`item-${it.id}`} classList={{ inherited: !!it.inherited }}
+        style={it.kind === "system" ? { "--bar-dark": noticeBar(it.sender ?? "").dark, "--bar-light": noticeBar(it.sender ?? "").light } : undefined}>
         <header>
           <b>{it.label ?? (it.kind === "user" ? tr("You") : it.kind === "agent" ? tr("Agent") : it.sender ?? "Zerus")}</b>
           {/* A local row's stamp stands in for the time and the receipt (ActivityView.cpp:1053-1055). */}
@@ -670,6 +784,7 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope; sourceId?:
         </header>
         {/* A fork's inherited row belongs to its source: never this session's attachments. */}
         <EchoBody item={it} scope={rowScope(it, props.scope)} />
+        <Show when={it.kind === "agent" && !it.inherited && it.body}><ReplyMedia text={it.body!} /></Show>
       </article>
     </Show>
   );
@@ -797,7 +912,10 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
   const built = createMemo(() => {
     const target = displayTarget();
     if (target !== projectedTarget) { projection.reset(); projectedTarget = target; }
-    return projection.build(source().events(), source().transcriptSummary?.() ?? source().summary(), local());
+    const items = projection.build(source().events(), source().transcriptSummary?.() ?? source().summary(), local());
+    // Task 244: a lead session shows team notices and its replies to them as its mode says.
+    const row = s();
+    return row && !subagentOpen() && isLeadSession(row) ? foldNoticeTurns(items, leadNoticeMode(row)) : items;
   });
   createEffect(() => {
     const items = built(), loaded = source().loaded();
@@ -1132,6 +1250,7 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
       </Show>
       <LocalDeleteDialog />
       <SessionFileDialog />
+      <MediaViewerDialog />
       <div class="act-scroll" ref={scroller} tabindex="-1" onContextMenu={activityMenu} onScroll={onScroll} style={{ "overflow-anchor": "none" }}
         onWheel={scrollIntent}
         onKeyDown={(e) => {
@@ -1180,6 +1299,15 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
           </div>
           <Show when={!source().olderDone() && source().events().length > 0}>
             <button type="button" class="btn small ghost act-read-older" disabled={source().loadingOlder()} onClick={() => source().loadOlder()}>{tr("Read earlier activity")}</button>
+          </Show>
+          {/* Task 244: how this lead session shows the team's notices and its replies to them. */}
+          <Show when={s() && !subagentOpen() && isLeadSession(s())}>
+            <label class="act-notice-mode" title={tr("How the team's notices to the lead and its replies to them show here. The lead receives them all.")}>
+              <span class="muted">{tr("Team notices")}</span>
+              <select class="field small" data-notice-mode value={leadNoticeMode(s()!)} onChange={(event) => setLeadNoticeMode(s()!, event.currentTarget.value as NoticeMode)}>
+                <For each={NOTICE_MODES}>{(mode) => <option value={mode}>{tr(NOTICE_LABEL[mode])}</option>}</For>
+              </select>
+            </label>
           </Show>
           </div>
           <Show when={view.expired}>

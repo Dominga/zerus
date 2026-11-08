@@ -50,7 +50,10 @@ impl Read {
     /// The `hgs` arguments after the computer.
     pub fn args(&self) -> Vec<String> {
         match self {
-            Self::Listing => vec!["ls".into(), "--json".into()],
+            // Task 235: this computer's own sessions without the archive
+            // pass, as the watch stream lists them; an older hgs ignores
+            // flags it does not know.
+            Self::Listing => vec!["ls".into(), "--json".into(), "--local".into(), "--no-archives".into()],
             Self::Activity { name, after, .. } => vec![
                 "inspect".into(),
                 name.clone(),
@@ -538,7 +541,7 @@ mod tests {
             processes.args(),
             ["inspect", "codex/p/t", "--after", &i64::MAX.to_string()]
         );
-        assert_eq!(Read::Listing.args(), ["ls", "--json"]);
+        assert_eq!(Read::Listing.args(), ["ls", "--json", "--local", "--no-archives"]);
         let peer = ComputerId::from("studio");
         assert_eq!(activity.timeout(&peer), Duration::from_secs(15));
         assert_eq!(

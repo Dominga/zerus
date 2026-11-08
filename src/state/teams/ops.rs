@@ -191,6 +191,26 @@ fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
         "The tests override is an object shaped like .zerus/tests.toml"
     );
     ensure!((1..=32).contains(&settings.max_members), "A team has 1 to 32 members");
+    // Task 209: the threshold a member's context is compacted at; a fraction of
+    // the window high enough that a compact helps, 95 by default.
+    ensure!(
+        (50..=100).contains(&settings.context_compact_percent),
+        "context_compact_percent is 50 to 100 (the share of the context window at which Zerus compacts a member)"
+    );
+    // Task 254: a cold session at this share of its window is compacted
+    // before it works; 0 never compacts for a cold cache.
+    ensure!(
+        settings.cold_compact_percent <= 100,
+        "cold_compact_percent is 0 to 100 (the share of the context window at which a cold session is compacted before it works; 0 never)"
+    );
+    // Task #228: the QA scratch root is an absolute folder or empty (the team
+    // folder's .qa-scratch).
+    let root = settings.scratch_root.trim();
+    ensure!(
+        root.is_empty()
+            || (std::path::Path::new(root).is_absolute() && root.chars().count() <= 4096 && !root.chars().any(char::is_control)),
+        "The scratch root is an absolute folder or empty: {{\"scratch_root\":\"D:/scratch\"}}"
+    );
     ensure!(
         (30..=3600).contains(&settings.start_timeout_seconds),
         "The start warning waits 30 to 3600 seconds after delivery"
@@ -202,7 +222,10 @@ fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
     // Section 9.2: the tree bounds are set on the master.
     // Task 95: 0 turns the stalled-lead notice off; a day is the longest wait.
     ensure!(settings.lead_stall_minutes <= 1440, "lead_stall_minutes is 0 (off) to 1440");
+    ensure!((1..=120).contains(&settings.urgent_bound_minutes), "urgent_bound_minutes is 1 to 120");
     ensure!(settings.defer_minutes <= 1440, "defer_minutes is 0 (off) to 1440");
+    // Task 277: an urgent message unread this long is an alarm; 0 turns it off.
+    ensure!(settings.urgent_alarm_minutes <= 1440, "urgent_alarm_minutes is 0 (off) to 1440");
     ensure!((1..=8).contains(&settings.tree_depth), "A tree goes 1 to 8 levels below its master");
     ensure!((1..=200).contains(&settings.tree_sessions), "A tree runs 1 to 200 sessions");
     // U48: the task branch's name template gives a valid branch for any task.
@@ -425,6 +448,12 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
     ensure!(task.deps.iter().all(|dep| dep.task != task.id), "{who}: field \"deps\": the task depends on itself");
     // Task #60: a follow-up names the task it came from, never itself.
     ensure!(task.origin.is_none_or(|origin| origin != task.id && origin > 0), "{who}: field \"origin\": a follow-up names another task as its origin");
+    // Task #229: a spawned follow-up is a Crit or a Minor; anything else is a
+    // misspelling Zerus refuses rather than reading as ordinary work.
+    ensure!(
+        task.severity.is_empty() || matches!(task.severity.as_str(), "crit" | "minor"),
+        "{who}: field \"severity\": \"crit\" or \"minor\""
+    );
     // U27: the lane the task is drawn in; its number and label are bounded and
     // it changes nothing about hand-out.
     if let Some(lane) = task.lane.as_mut() {
@@ -522,6 +551,27 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
     } else {
         None
     };
+    // Task #228: a QA member's scratch team names the parent team and the task
+    // whose decision stops it; it is not a delegated sub-team (`parent` above).
+    let scratch_parent: Option<ScratchParent> = if input["scratch_parent"].is_object() {
+        let value = &input["scratch_parent"];
+        let team = clean(text(value, "team").trim(), 80, "The parent team")?;
+        ensure!(!team.is_empty(), "The scratch team's parent team is required");
+        let task = value["task"].as_u64().and_then(|id| u32::try_from(id).ok()).unwrap_or(0);
+        Some(ScratchParent { team, task, member: clean(text(value, "member").trim(), 40, "The parent member")? })
+    } else {
+        None
+    };
+    // Task #228: the standing rule a QA member's scratch team was created
+    // under; the dispatcher trusts the scratch root for its roster's agents.
+    let scratch_rule = clean(text(input, "scratch_rule").trim(), 40, "The scratch rule")?;
+    // Task #231: a scratch team's members get their own folders, a worktree or
+    // clone of the scratch folder's repository cut inside the rule's folder (the
+    // normal team folder path), so the commit template, member branches and a
+    // dependent's base work there. A scratch folder that is not a git
+    // repository keeps the shared folder, and the commit refusal says why.
+    let scratch_folder = text(input, "folder");
+    let scratch_repository = !scratch_rule.is_empty() || input["scratch_parent"].is_object();
     // From the desktop: the members and template tasks proposed for the
     // lead's plan; the lead starts and gets a planning brief.
     let mut members = vec![lead.clone()];
@@ -529,6 +579,14 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
         let member = parse_member(value)?;
         ensure!(members.iter().all(|m| m.id != member.id), "Member id {} is used twice", member.id);
         members.push(member);
+    }
+    if scratch_repository && !super::dispatcher::folder_facts(&scratch_folder).0.is_empty() {
+        for member in members.iter_mut().skip(1) {
+            if member.folder == MemberFolder::Shared && member.directory.is_empty() && member.session.is_none() {
+                member.folder = super::dispatcher::default_folder(&member.agent);
+                super::dispatcher::sandbox_folder(member);
+            }
+        }
     }
     let mut tasks = Vec::new();
     for value in input["tasks"].as_array().into_iter().flatten() {
@@ -567,6 +625,8 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
         brief: if start { Notice::Pending } else { Notice::None },
         lead_protocol: clean(&lead_protocol, 8000, "The lead protocol")?,
         parent,
+        scratch_parent,
+        scratch_rule,
         ..Default::default()
     };
     let events = vec![Event::new("created", json!({"by":"You","name":name}))];
@@ -1226,7 +1286,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
 /// Spec 6.1 lets the lead set resume_after_limits too.
-pub(crate) const OWNER_SETTINGS: [&str; 25] = [
+pub(crate) const OWNER_SETTINGS: [&str; 28] = [
     "approval",
     // Task 126: the owner chooses the team's memory and its store.
     "memory",
@@ -1266,6 +1326,14 @@ pub(crate) const OWNER_SETTINGS: [&str; 25] = [
     // phase pause, and sets who accepts new phases.
     "lead_removes_own_pause",
     "phase_acceptance",
+    // Task 209: only the owner sets what Zerus does to a member's context (the
+    // share of the window at which it compacts, 95% by default).
+    "context_compact_percent",
+    // Task 254: and when a cold session is compacted before it works.
+    "cold_compact_percent",
+    // Task #228: the folder a QA member's scratch teams start in (empty is the
+    // team folder's .qa-scratch); the owner grants the standing rule as well.
+    "scratch_root",
 ];
 
 /// Task 126: a lead's whole settings object that leaves out `memory` keeps
@@ -1471,6 +1539,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
     team.phases.push(Phase {
         n,
         order,
+        kind: PhaseKind::Plan,
         title: title.clone(),
         barrier,
         approval,
@@ -1865,6 +1934,203 @@ fn add_to_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSe
     Ok(json!({"status":"added","phase":n,"tasks":ids,"validation":validation,"renumbered":renumbered_json(&renumbered)}))
 }
 
+/// Task #229 (owner, 2026-11-07): the lead spawns a follow-up from a task or a
+/// review. A Crit joins the running phase of its origin at once and without a
+/// card; the owner sees it in Waiting and the digest, and may revert it. It
+/// depends on its origin and holds that phase's acceptance, its close and any
+/// release candidate. A Minor blocks nothing: it joins the next phase that has
+/// not started, or a new Minor phase the lead opens (which may run in free mode
+/// and may end with tail tasks depending on all its minors).
+fn spawn(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(actor.is_lead(team), "Only the lead spawns a follow-up task; you add one to a phase with add-to-phase");
+    ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "Only a running or paused team takes a spawned task");
+    let severity = text(input, "severity").trim().to_ascii_lowercase();
+    ensure!(matches!(severity.as_str(), "crit" | "minor"), "A spawned task's \"severity\" is \"crit\" or \"minor\"");
+    let origin = input["origin"]
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .context("A spawned task names its origin, the task or review it came from")?;
+    let origin_phase = team.task(origin).with_context(|| format!("Unknown origin task #{origin}"))?.phase;
+    let values = input["tasks"].as_array().filter(|tasks| !tasks.is_empty()).context("Name at least one task to spawn")?;
+    ensure!(values.len() <= ADDED_TASKS, "At most {ADDED_TASKS} tasks are spawned at once");
+    ensure!(team.tasks.len() + values.len() <= 500, "A team has at most 500 tasks (it has {})", team.tasks.len());
+    let by = actor.label(team);
+    let at = now();
+    let tail = input["tail"].as_bool() == Some(true);
+    let summary = plan::phase_summary(team);
+    let state_of = |n: u32| -> String {
+        summary
+            .iter()
+            .find(|phase| phase["n"].as_u64() == Some(u64::from(n)))
+            .and_then(|phase| phase["state"].as_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let origin_order = team.phases.iter().find(|phase| phase.n == origin_phase).map_or(origin_phase, Phase::order);
+    // The target phase: the origin's own running phase for a Crit; for a Minor,
+    // the named or next phase that has not started, else a new Minor phase.
+    let mut new_phase = false;
+    let n = if severity == "crit" {
+        ensure!(
+            state_of(origin_phase) == "running",
+            "The origin #{origin} is in phase {origin_phase}, which is not running ({}): a Crit joins a running phase; extend the plan for a later one",
+            state_of(origin_phase).replace('_', " ")
+        );
+        origin_phase
+    } else if let Some(named) = input["phase"].as_u64().and_then(|named| u32::try_from(named).ok()).filter(|named| *named > 0) {
+        let state = state_of(named);
+        ensure!(
+            matches!(state.as_str(), "draft" | "queued"),
+            "Phase {named} has started ({}): a Minor joins the next phase that has not started, or a new Minor phase",
+            state.replace('_', " ")
+        );
+        named
+    } else {
+        // A Minor first joins the Minor phase the lead already opened (its set
+        // of minors); then the next phase that has not started; then a new
+        // Minor phase. An explicit "phase" overrides the choice above.
+        let open_minor = team
+            .phases
+            .iter()
+            .filter(|phase| phase.kind == PhaseKind::Minor && phase.state != PhaseState::Discarded)
+            .filter(|phase| matches!(state_of(phase.n).as_str(), "running" | "queued"))
+            .map(|phase| (phase.order(), phase.n))
+            .min();
+        if let Some((_, n)) = open_minor {
+            n
+        } else {
+            let next = summary.iter().filter_map(|phase| {
+                let n = u32::try_from(phase["n"].as_u64()?).ok()?;
+                let order = team.phases.iter().find(|record| record.n == n).map_or(n, Phase::order);
+                let started = team.tasks.iter().any(|task| task.phase == n && task.attempts.iter().any(|attempt| attempt.sent_at > 0.0));
+                let state = phase["state"].as_str().unwrap_or_default();
+                (order > origin_order && !started && matches!(state, "draft" | "queued")).then_some((order, n))
+            });
+            match (input["new_phase"].as_bool(), next.min_by_key(|(order, n)| (*order, *n))) {
+                (Some(true), _) => {
+                    new_phase = true;
+                    0
+                }
+                (_, Some((_, n))) => n,
+                (_, None) => {
+                    new_phase = true;
+                    0
+                }
+            }
+        }
+    };
+    // A Minor phase is the lead's own: it opens after the origin's phase, in
+    // free mode, with no approval card; `spawn` records it as a lead change.
+    let n = if new_phase {
+        let next = team
+            .tasks
+            .iter()
+            .map(|task| task.phase)
+            .chain(team.phases.iter().map(|phase| phase.n))
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .context("Phase numbers are exhausted")?;
+        let order = origin_order.saturating_add(1);
+        for phase in &mut team.phases {
+            if phase.order() >= order {
+                phase.order = phase.order() + 1;
+            }
+        }
+        let title = clean_text(text(input, "title"), 120, "A Minor phase title")?;
+        let title = if title.trim().is_empty() { format!("Minor phase {next}") } else { title };
+        team.phases.push(Phase {
+            n: next,
+            order,
+            kind: PhaseKind::Minor,
+            title,
+            state: PhaseState::Approved,
+            approval: Approval::Auto,
+            tasks: Vec::new(),
+            added_by: by.clone(),
+            added_at: at,
+            ..Default::default()
+        });
+        team.phase_modes.insert(next, PlanMode::Free);
+        next
+    } else {
+        n
+    };
+    let kind = team.phases.iter().find(|phase| phase.n == n).map_or(PhaseKind::Plan, |phase| phase.kind);
+    ensure!(
+        !(tail && severity != "minor") && !(tail && kind.is_plan()),
+        "A tail task belongs to a Minor phase: spawn its minors first"
+    );
+    let mut tasks = values.iter().map(parse_task).collect::<anyhow::Result<Vec<Task>>>()?;
+    for task in &mut tasks {
+        task.severity = severity.clone();
+        task.origin = Some(origin);
+    }
+    // #754: the next free numbers, whatever the request named.
+    let renumbered = renumber_new_tasks(team, &mut tasks)?;
+    for task in &mut tasks {
+        task.phase = n;
+        if severity == "crit" {
+            // A Crit depends on what it came from: none of its phase's result
+            // is used before it is decided.
+            if !task.deps.iter().any(|dep| dep.task == origin) {
+                task.deps.push(Dependency { task: origin, kind: DependencyKind::Hard });
+            }
+            task.deps.sort_by_key(|dep| dep.task);
+            task.added_late = Some(AddedLate { by: by.clone(), at, request: String::new(), confirm: "critical follow-up".into() });
+        }
+        // Task status follows the phase it joins: a draft waits for its
+        // approval, a running or Minor phase is handed out at once.
+        task.status = if state_of(n) == "draft" { TaskStatus::Draft } else { TaskStatus::Pending };
+    }
+    if tail {
+        let minors: Vec<u32> = team
+            .tasks
+            .iter()
+            .filter(|task| task.phase == n && task.severity == "minor" && !task.status.finished())
+            .map(|task| task.id)
+            .collect();
+        ensure!(!minors.is_empty(), "A tail task waits for its Minor phase's minors: spawn them first");
+        for task in &mut tasks {
+            for id in &minors {
+                if !task.deps.iter().any(|dep| dep.task == *id) {
+                    task.deps.push(Dependency { task: *id, kind: DependencyKind::Hard });
+                }
+            }
+            task.deps.sort_by_key(|dep| dep.task);
+        }
+    }
+    // The tasks as they would join: numbered, validated in place, then kept.
+    let validation = {
+        let first_new = team.tasks.len();
+        let wanted: BTreeSet<u32> = tasks.iter().map(|task| task.id).collect();
+        team.tasks.extend(tasks.iter().cloned());
+        let validation = plan::validate(team, offline);
+        let errors = phase_errors(&validation, &wanted, true);
+        team.tasks.truncate(first_new);
+        ensure!(errors.is_empty(), "Fix {} task error(s) to spawn: {}", errors.len(), errors_text(&errors));
+        validation
+    };
+    let ids: Vec<u32> = tasks.iter().map(|task| task.id).collect();
+    team.tasks.extend(tasks);
+    if let Some(record) = team.phases.iter_mut().find(|phase| phase.n == n) {
+        record.tasks.extend(ids.iter().copied());
+        record.tasks.sort_unstable();
+    }
+    events.push(Event::new(
+        "task_spawned",
+        with_origins(
+            json!({"by":by,"severity":severity,"origin":origin,"phase":n,"phase_kind":kind.as_str(),
+                "tasks":ids,"tail":tail,"crit_gate":plan::crit_gate(team, n)}),
+            team,
+            &ids,
+        ),
+    ));
+    Ok(json!({"status":"spawned","severity":severity,"origin":origin,"phase":n,"phase_kind":kind.as_str(),
+        "tasks":ids,"tail":tail,"validation":validation,"renumbered":renumbered_json(&renumbered),
+        "crit_gate":plan::crit_gate(team, n)}))
+}
+
 /// Approves a draft phase once every phase before it ended (owner), or discards
 /// it with its tasks (the lead or the owner, F10).
 fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
@@ -2239,6 +2505,12 @@ fn accept_phase_as_owner(team: &mut Team, input: &Value, actor: &Actor, events: 
     let n = phase_number(input)?;
     let at = team.phases.iter().position(|phase| phase.n == n).with_context(|| format!("Unknown phase {n}"))?;
     ensure!(plan::awaits_acceptance(team, &team.phases[at]), "Phase {n} is not waiting for the owner's acceptance");
+    // Task #229: a Crit in the phase holds its acceptance.
+    ensure!(
+        plan::crit_gate(team, n).is_none(),
+        "Phase {n} cannot be accepted: {}",
+        plan::crit_gate(team, n).unwrap_or_default()
+    );
     ensure_owner_or_word(team, actor, input, n, "accepts a phase")?;
     let by = actor.label(team);
     let owner_word = verified_word(input)?;
@@ -3387,12 +3659,79 @@ fn discard_empty_draft(team: &mut Team, phase: u32, by: &str) {
     }
 }
 
+/// Task #289 (owner, 2026-11-08): the lead marks notices seen; one stays out of
+/// its inbox until its content changes, and a restart keeps that (the signature
+/// is stored with the team). A decision is answered, never marked seen.
+fn seen(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you mark the inbox seen");
+    let keys: Vec<String> = input["items"]
+        .as_array()
+        .context("Name the notice keys to mark seen: {\"items\":[\"proposal:p77\"]}")?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .take(200)
+        .collect();
+    ensure!(!keys.is_empty(), "Name at least one notice to mark seen");
+    let notices: Vec<super::inbox::Item> = super::inbox::all_items(team).into_iter().filter(|item| super::inbox::notice(item.kind)).collect();
+    let at = now();
+    let mut marked = Vec::new();
+    let mut unknown = Vec::new();
+    for key in keys {
+        let Some(item) = notices.iter().find(|item| item.key == key) else {
+            unknown.push(key);
+            continue;
+        };
+        let signature = super::inbox::signature(item);
+        team.seen_notices.retain(|seen| seen.key != key);
+        team.seen_notices.push(SeenNotice { key: key.clone(), signature, at });
+        marked.push(key);
+    }
+    team.seen_notices.sort_by(|a, b| a.at.total_cmp(&b.at));
+    let extra = team.seen_notices.len().saturating_sub(300);
+    team.seen_notices.drain(0..extra);
+    let by = actor.label(team);
+    events.push(Event::new("notices_seen", json!({"by":by,"items":marked})));
+    Ok(json!({"status":"seen","seen":marked,"unknown":unknown}))
+}
+
+/// Task #289: the lead keeps a task after its dependency was cancelled - it does
+/// not need that work - so the dependency_cancelled notice clears.
+fn keep(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    let id = task_id(input)?;
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you keep a task's cancelled dependency");
+    let task = team.task(id).with_context(|| format!("Unknown task #{id}"))?;
+    let wanted: Vec<u32> = match input["deps"].as_array() {
+        Some(deps) => deps.iter().filter_map(Value::as_u64).filter_map(|dep| u32::try_from(dep).ok()).collect(),
+        None => plan::cancelled_deps(team, task),
+    };
+    ensure!(!wanted.is_empty(), "Task #{id} has no cancelled dependency to keep");
+    for dep in &wanted {
+        ensure!(task.deps.iter().any(|found| found.task == *dep), "Task #{id} does not depend on #{dep}");
+        ensure!(team.task(*dep).is_some_and(|found| found.status == TaskStatus::Cancelled), "Task #{dep} is not a cancelled dependency of #{id}");
+    }
+    let label = actor.label(team);
+    let task = team.task_mut(id).context("Unknown task")?;
+    for dep in &wanted {
+        if !task.kept_cancelled.contains(dep) {
+            task.kept_cancelled.push(*dep);
+        }
+    }
+    task.kept_cancelled.sort_unstable();
+    events.push(Event::new("dependency_kept", json!({"by":label,"task":id,"deps":wanted})));
+    Ok(json!({"status":"kept","task":id,"deps":wanted}))
+}
+
 /// Ends the team with the lead's or your summary; Done is final.
 fn finish(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you finish the team");
     ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
     let summary = clean(text(input, "summary").trim(), 4000, "A summary")?;
     ensure!(!summary.is_empty(), "A summary is required");
+    // Task #229: a Crit blocks using its phase's result to the end.
+    if let Some((phase, id)) = plan::open_crits_all(team).first() {
+        bail!("A critical task is open: #{id} in phase {phase}; decide or cancel it first");
+    }
     let open = team.tasks.iter().filter(|task| !task.status.finished()).count();
     ensure!(open == 0, "{open} task(s) are not decided: decide or cancel them first");
     // U63: a phase that waits for the owner's acceptance (or its rework) is
@@ -3402,7 +3741,7 @@ fn finish(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     }
     // D2: a critical finding that is still open blocks a finish; the owner may
     // force it.
-    let critical = team.findings.iter().any(|finding| finding.severity == "critical" && finding.unresolved());
+    let critical = team.findings.iter().any(|finding| matches!(finding.severity.as_str(), "critical" | "crit") && finding.unresolved());
     // C16: only the owner forces a finish over an open critical finding.
     let force = input["force"].as_bool() == Some(true) && matches!(actor, Actor::Human);
     ensure!(
@@ -3666,7 +4005,7 @@ struct CheckedFinding {
 fn checked_finding(team: &Team, finding: &Value) -> anyhow::Result<CheckedFinding> {
     ensure!(finding.is_object(), "A finding is an object");
     let severity = finding["severity"].as_str().unwrap_or("normal").to_owned();
-    ensure!(["critical", "normal", "later"].contains(&severity.as_str()), "A finding is critical, normal or later");
+    ensure!(["critical", "normal", "later", "crit", "minor"].contains(&severity.as_str()), "A finding is critical (crit), normal (minor) or later");
     let title = clean(finding["title"].as_str().unwrap_or_default().trim(), 200, "A finding title")?;
     ensure!(!title.is_empty(), "A finding needs a title");
     let scenario = clean(finding["scenario"].as_str().unwrap_or_default().trim(), 2000, "A finding scenario")?;
@@ -3681,6 +4020,49 @@ fn checked_finding(team: &Team, finding: &Value) -> anyhow::Result<CheckedFindin
 
 fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     report_with(team, input, actor, false, events)
+}
+
+/// #684 N1, #718: a member's report records its folder's HEAD and branch, so a
+/// later stage checks that commit and never reads HEAD at its start, and the
+/// test lines and functions the change adds and removes against the lead's
+/// commit (the project's test globs say what a test file is).
+/// Task 287: every one of these is a git read; `prefetch_git` makes them
+/// before the store's transaction and the report reads the answers.
+fn report_git(team: &Team, id: u32, by_member: &str) -> (String, String, Option<Value>) {
+    if by_member.is_empty() {
+        return (String::new(), String::new(), None);
+    }
+    let folder = team.member(by_member).and_then(|member| super::dispatcher::member_folder_path(team, member).ok()).unwrap_or_default();
+    if folder.is_empty() || !std::path::Path::new(&folder).is_dir() || !super::stages::is_git(&folder) {
+        return (String::new(), String::new(), None);
+    }
+    let head = super::dispatcher::git_at(&folder, &["rev-parse", "HEAD"]).unwrap_or_default();
+    let branch = super::dispatcher::task_branch(team, id, by_member)
+        .or_else(|| super::dispatcher::git_at(&folder, &["rev-parse", "--abbrev-ref", "HEAD"]).filter(|branch| branch != "HEAD"))
+        .unwrap_or_default();
+    let test_delta = if head.is_empty() || team.folder.is_empty() {
+        None
+    } else {
+        let base = super::dispatcher::git_at(&team.folder, &["rev-parse", "HEAD"]).unwrap_or_default();
+        match crate::test_discipline::load(std::path::Path::new(&team.folder), None) {
+            Ok(loaded) if !base.is_empty() && loaded.active() => super::test_results::report_delta(&folder, &base, &loaded.config),
+            _ => None,
+        }
+    };
+    (head, branch, test_delta)
+}
+
+/// Task 287: the git reads an operation will make, made now, before the store's
+/// transaction, for `dispatcher::with_git_answers` to serve inside it: a
+/// report's folder HEAD, branch and test delta (`report_git`).
+pub(crate) fn prefetch_git(team: &Team, op: &str, input: &Value, actor: &Actor) {
+    if op != "report" || input["interim"].as_bool() == Some(true) {
+        return;
+    }
+    let Ok(id) = task_id(input) else { return };
+    if let Actor::Member(member) = actor {
+        let _ = report_git(team, id, member);
+    }
 }
 
 /// `captured`: Zerus records the member's last reply (A2); it never enters the
@@ -3767,34 +4149,7 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
         ));
         return Ok(json!({"status":"interim","task":id,"attempt":n}));
     }
-    // #684 N1: the attempt records its folder's HEAD and branch at the report,
-    // so a later stage checks that commit and never reads HEAD at its start.
-    let (folder_head, folder_branch) = if by_member.is_empty() {
-        (String::new(), String::new())
-    } else {
-        let folder = team.member(&by_member).and_then(|member| super::dispatcher::member_folder_path(team, member).ok()).unwrap_or_default();
-        if folder.is_empty() || !std::path::Path::new(&folder).is_dir() || !super::stages::is_git(&folder) {
-            (String::new(), String::new())
-        } else {
-            let head = super::dispatcher::git_at(&folder, &["rev-parse", "HEAD"]).unwrap_or_default();
-            let branch = super::dispatcher::task_branch(team, id, &by_member)
-                .or_else(|| super::dispatcher::git_at(&folder, &["rev-parse", "--abbrev-ref", "HEAD"]).filter(|branch| branch != "HEAD"))
-                .unwrap_or_default();
-            (head, branch)
-        }
-    };
-    // #718: the test lines and functions the change adds and removes, against
-    // the lead's commit; the project's test globs say what a test file is.
-    let test_delta = if folder_head.is_empty() || team.folder.is_empty() {
-        None
-    } else {
-        let folder = team.member(&by_member).and_then(|member| super::dispatcher::member_folder_path(team, member).ok()).unwrap_or_default();
-        let base = super::dispatcher::git_at(&team.folder, &["rev-parse", "HEAD"]).unwrap_or_default();
-        match crate::test_discipline::load(std::path::Path::new(&team.folder), None) {
-            Ok(loaded) if !base.is_empty() && loaded.active() => super::test_results::report_delta(&folder, &base, &loaded.config),
-            _ => None,
-        }
-    };
+    let (folder_head, folder_branch, test_delta) = report_git(team, id, &by_member);
     // C1: the lead reports its own task and accepts it in one step; nobody
     // else accepts on a report.
     if accept {
@@ -4213,6 +4568,43 @@ fn swap_one(team: &mut Team, input: &Value, id: &str, keep_session: bool, actor:
     Ok(json!({"status":"swapped","member":id,"from":from,"to":to,"agent":agent,"tasks":handed,"lead":lead,"by":by}))
 }
 
+/// Task 209: gives a member a fresh conversation, keeping the seat and its open
+/// attempt. The old session is remembered (`replaced`), so the dispatcher's
+/// Launch step pauses and renames it before the new one takes the member's name;
+/// `handoff` makes the handoff brief the new session's first message. `why` is
+/// `relaunch` (the owner or the lead) or `context` (the auto rule).
+pub(crate) fn fresh_session(team: &mut Team, id: &str, why: &str, events: &mut Vec<Event>) -> anyhow::Result<()> {
+    let role = team.role_of(id);
+    let member = team.members.iter_mut().find(|member| member.id == id).context("Unknown member")?;
+    ensure!(member.state != MemberState::Removed, "This member was removed");
+    let from = member.session.take();
+    let from_name = from.as_ref().map(|session| session.name.clone()).unwrap_or_default();
+    if let Some(old) = from {
+        member.replaced = Some(old);
+    }
+    member.context = None;
+    member.context_compact = None;
+    member.context_retry_at = None;
+    member.restart_pending = false;
+    member.handoff = Some(super::model::HandoffNeed {
+        why: why.to_owned(),
+        at: now(),
+        from: from_name.clone(),
+        changes: Vec::new(),
+    });
+    // A fresh session starts even before its next task (H6): the member keeps
+    // its open attempt, so there may be no hand-out to carry the brief.
+    member.launch_after_swap = true;
+    member.launch_id.clear();
+    member.error.clear();
+    member.host_waits = 0;
+    member.seen = None;
+    member.settings_applied = false;
+    member.state = MemberState::NotCreated;
+    events.push(Event::new("fresh_session", json!({"member":role,"why":why,"from":from_name})));
+    Ok(())
+}
+
 /// Section 9.2: the root of a team's tree, by parent links among the loaded
 /// teams (a missing parent stops the walk at the team itself).
 pub(crate) fn root_of(team: &Team, all: &[Team]) -> Team {
@@ -4527,8 +4919,10 @@ fn reply(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>)
         AskedWhere::Attempt(attempt) => Some(team.tasks[task].attempts[attempt].id.clone()),
         AskedWhere::Stage(_) => None,
     };
-    if lead && !parks && super::wait_loops::lead_wait_instruction(&body) {
-        bail!("{}", super::wait_loops::lead_refusal(&team.id, Some(task_id), open.as_deref().unwrap_or_default()));
+    if lead && !parks {
+        if let Some(phrase) = super::wait_loops::lead_wait_instruction(&body) {
+            bail!("{}", super::wait_loops::lead_refusal(&team.id, Some(task_id), open.as_deref().unwrap_or_default(), &phrase));
+        }
     }
     ensure!(!parks || open.is_some(), "A stage's question is answered, not parked");
     let label = actor.label(team);
@@ -5136,15 +5530,41 @@ fn serves_another_team(session: &SessionRef, others: &[Team]) -> bool {
     })
 }
 
+/// Task #220: the lead asks the owner to install a tool its team's run found
+/// missing. The card shows the tool, why it is needed and the command Allow
+/// runs; the offer belongs to this team, is still waiting, and has one card.
+fn install_tool_change(team: &Team, input: &Value) -> anyhow::Result<Value> {
+    let id = text(input, "offer");
+    ensure!(
+        !id.is_empty(),
+        "An install-tool proposal names its offer: {{\"kind\":\"install-tool\",\"offer\":\"...\",\"reason\":\"...\"}}"
+    );
+    let found = crate::test_discipline::tools::offer(id).context("Unknown tool offer")?;
+    ensure!(found.team == team.id, "That offer is not this team's");
+    ensure!(matches!(found.state.as_str(), "offered" | "failed"), "The offer of {} is {}; there is nothing to ask", found.tool, found.state);
+    ensure!(!found.command.is_empty(), "No package manager on this computer installs {}; install it yourself", found.tool);
+    ensure!(
+        !team.proposals
+            .iter()
+            .any(|proposal| proposal["state"] == "open" && proposal["kind"] == "install-tool" && proposal["change"]["offer"] == found.id),
+        "The owner already has the card for {}",
+        found.tool
+    );
+    Ok(json!({"offer":found.id,"tool":found.tool,"why":found.why,"saves":found.saves,"command":found.command,
+        "folder":found.folder,"project":found.project_name,
+        "lines":[format!("Install {}: {}", found.tool, found.command.join(" ")),
+            format!("Why: {} (saves {})", found.why, found.saves)]}))
+}
+
 /// F8: the lead proposes a membership change; the owner decides.
 fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(actor.is_lead(team), "Only the lead proposes a change to your team");
     let kind = text(input, "kind").to_owned();
     ensure!(
         ["add-member", "remove-member", "swap-member", "next-goal", "switch-plan-mode",
-         "add-to-phase", "cancel-tasks", "discard-phase", "question", "switch-setting", "iron-rules"].contains(&kind.as_str())
+         "add-to-phase", "cancel-tasks", "discard-phase", "question", "switch-setting", "iron-rules", "install-tool"].contains(&kind.as_str())
             || OWNER_OPS.contains(&kind.as_str()),
-        "A proposal is one of: add-member, remove-member, swap-member, next-goal, switch-plan-mode, add-to-phase, cancel-tasks, discard-phase, question, switch-setting, iron-rules, {}",
+        "A proposal is one of: add-member, remove-member, swap-member, next-goal, switch-plan-mode, add-to-phase, cancel-tasks, discard-phase, question, switch-setting, iron-rules, install-tool, {}",
         OWNER_OPS.join(", ")
     );
     let reason = clean(text(input, "reason").trim(), 2000, "A proposal reason")?;
@@ -5202,6 +5622,9 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
             Some(n) => json!({"phase":n}),
             None => Value::Null,
         },
+        // Task #220: a tool the team's run found missing; the owner installs it
+        // or denies the card, and the offer carries the outcome.
+        "install-tool" => install_tool_change(team, input)?,
         "question" => question_change(input)?,
         "swap-member" => swap_change(team, input)?,
         // Task #21: an owner-gated operation the owner allows with a click.
@@ -5342,6 +5765,15 @@ fn decide_proposal(team: &mut Team, input: &Value, actor: &Actor, offline: &BTre
             team.memory_mode_reason.clear();
             events.push(Event::new("memory_mode_denied", json!({"by":"You","proposal":id,"reason":reason})));
         }
+        if kind == "install-tool" {
+            // Task #220: the tool is not installed; the offer remembers why, so
+            // no card asks again.
+            let offer = card["change"]["offer"].as_str().unwrap_or_default();
+            if let Err(error) = crate::test_discipline::tools::deny_escalated(offer, &reason) {
+                eprintln!("hgs: the tool offer was not recorded as denied: {error:#}");
+            }
+            events.push(Event::new("install_tool_denied", json!({"by":"You","proposal":id,"offer":offer,"reason":reason})));
+        }
         return Ok(json!({"status":"rejected","proposal":id}));
     }
     let member = team.proposals[at]["member"].clone();
@@ -5421,6 +5853,17 @@ pub(crate) fn inapplicable(team: &Team, proposal: &Value) -> Option<String> {
         return Some("the team has finished".into());
     }
     let mode = proposal["mode"].as_str().unwrap_or_default();
+    // Task #220: an install card whose offer was decided or is gone withdraws.
+    if kind == "install-tool" {
+        let offer = proposal["change"]["offer"].as_str().unwrap_or_default();
+        let Some(found) = crate::test_discipline::tools::offer(offer) else {
+            return Some("the tool offer is gone".into());
+        };
+        if !matches!(found.state.as_str(), "offered" | "failed") {
+            return Some(format!("the offer of {} is {}", found.tool, found.state));
+        }
+        return None;
+    }
     trial(team, kind, &proposal["member"], &proposal["change"], mode).err().map(|error| format!("{error:#}"))
 }
 
@@ -5586,6 +6029,12 @@ fn run_proposal(team: &mut Team, kind: &str, member: &Value, change: &Value, mod
             apply(team, "settings", &value, &Actor::Human, offline, events)?
         }
         "switch-setting" => switch_setting(team, change, id, reason, events)?,
+        // Task #220: the owner's Allow installs the tool the card names.
+        "install-tool" => {
+            let offer = change["offer"].as_str().context("The install-tool proposal names its offer")?;
+            let allowed = crate::test_discipline::tools::allow_escalated(offer)?;
+            json!({"tool":allowed.tool,"state":allowed.state,"command":allowed.command.join(" "),"folder":allowed.folder})
+        }
         op if OWNER_OPS.contains(&op) => {
             let mut value = change["input"].clone();
             value["team"] = json!(team.id);
@@ -5906,7 +6355,12 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
             task.merge = Some(entry);
             events.push(Event::new("merge_queued", json!({"by":label,"task":id,"commit":commit})));
         }
-        return Ok(json!({"status":"merge_queued","task":id}));
+        // Task #267: the answer names the landing and the line it goes to.
+        let line = super::merge_queue::integration_branch(team).unwrap_or_default();
+        let head = super::merge_queue::integration_head(team).unwrap_or_default();
+        return Ok(json!({"status":"merge_queued","task":id,
+            "landing":{"state":"queued","line":line,"head":head,
+                "note":"Zerus lands it on the integration line when its affected tests pass; hgs team status names its landing."}}));
     }
     // A reject or a decision that skips the queue takes the task out of it.
     task.merge = None;
@@ -5994,7 +6448,14 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
         events.push(Event::new("held", json!({"by":label,"task":id,"reason":reason})));
     }
     let status = serde_json::to_value(team.task(id).unwrap().status)?;
-    Ok(json!({"status":status,"task":id}))
+    let mut answer = json!({"status":status,"task":id});
+    // Task #267: an accept outside the queue says whether its work is on the
+    // integration line: only the queue lands it.
+    if accept && !merged && !team.integration_folder().is_empty() {
+        answer["landing"] = json!({"state":"not_queued",
+            "why":"the merge queue is off for this team, so the accepted work is not on the integration line"});
+    }
+    Ok(answer)
 }
 
 fn reassign(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
@@ -6107,6 +6568,67 @@ fn retry(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>)
     ensure!(actor.reviews(team, &assignee), "Only the lead or you retry tasks");
     let label = actor.label(team);
     let reachable = super::merge_queue::merge_still_reachable(team, id);
+    // Task #227 (owner, 2026-11-07): a retry while the member works on that very
+    // task never revokes the attempt it is working under - core lost its task
+    // that way. It becomes a "continue": the attempt stays, the member hears it
+    // at its turn's safe point, and only "fresh":true starts the task over.
+    let fresh = input["fresh"].as_bool() == Some(true);
+    let working = team.task(id).is_some_and(|task| {
+        // A waiting task is retried for its refused step, not continued.
+        task.waits.is_none()
+            && task.open_attempt().is_some_and(|attempt| {
+                (attempt.state == AttemptState::Delivered && attempt.turn_ended_at.is_none())
+                    || (attempt.state == AttemptState::Unconfirmed && attempt.error.contains("the session crashed"))
+            })
+    });
+    let stray = team.member(&assignee).and_then(|member| member.unassigned.as_ref()).is_some_and(|flag| flag.task == Some(id));
+    if !fresh && (working || stray) {
+        let attempt = {
+            let task = team.task_mut(id).context("Unknown task")?;
+            ensure!(!task.status.finished() && task.status != TaskStatus::Draft, "Task #{id} cannot be retried now");
+            match task.open_attempt() {
+                Some(attempt) => attempt.n,
+                None => {
+                    // The member works on the task with no attempt of its own:
+                    // the retry binds the work in progress instead of starting
+                    // it over, so its report has an attempt and its number.
+                    let n = task.attempts.len() as u32 + 1;
+                    let at = now();
+                    task.attempts.push(Attempt {
+                        n,
+                        id: uuid::Uuid::new_v4().to_string(),
+                        member: assignee.clone(),
+                        state: AttemptState::Delivered,
+                        sent_at: at,
+                        delivered_at: Some(at),
+                        started_at: Some(at),
+                        ..Default::default()
+                    });
+                    task.status = TaskStatus::InProgress;
+                    n
+                }
+            }
+        };
+        let at = now();
+        let notice = ContinueNotice {
+            id: uuid::Uuid::new_v4().to_string(),
+            task: id,
+            attempt,
+            member: assignee.clone(),
+            by: label.clone(),
+            at,
+            notice: Notice::Pending,
+            tries: 0,
+        };
+        team.continues.push(notice);
+        if team.continues.len() > 20 {
+            let excess = team.continues.len() - 20;
+            team.continues.drain(..excess);
+        }
+        events.push(Event::new("continue_requested", json!({"by":label,"task":id,"attempt":attempt,
+            "how":if stray { "work in progress" } else { "the attempt in progress" }})));
+        return Ok(json!({"status":"continue","task":id,"attempt":attempt}));
+    }
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(!task.status.finished() && task.status != TaskStatus::Draft, "Task #{id} cannot be retried now");
     if task.merge.as_ref().is_some_and(|entry| entry.state == "testing") {
@@ -6274,6 +6796,8 @@ fn apply_op(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &B
         "reports-to" | "sub-lead" => hierarchy(team, op, input, actor, events),
         "move-phase" => move_phase(team, input, actor, events),
         "add-to-phase" => add_to_phase(team, input, actor, offline, events),
+        // Task #229: a Crit or Minor spawned from a task or review.
+        "spawn" => spawn(team, input, actor, offline, events),
         "approve-phase" => decide_phase(team, input, actor, true, offline, events),
         "discard-phase" => decide_phase(team, input, actor, false, offline, events),
         "return-to-draft" => return_to_draft(team, input, actor, events),
@@ -6294,6 +6818,10 @@ fn apply_op(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &B
             events.push(Event::new("scratch_rule_granted", json!({"folder":rule.folder,"agents":rule.agents})));
             Ok(json!({"status":"granted","folder":rule.folder,"agents":rule.agents}))
         }
+        // Task #289: the lead marks inbox notices seen, and keeps a task after
+        // its dependency was cancelled.
+        "seen" => seen(team, input, actor, events),
+        "keep" => keep(team, input, actor, events),
         "finding" => finding(team, input, actor, offline, events),
         "draft" => draft(team, input, actor, offline, events),
         "propose" => propose(team, input, actor, events),
@@ -6426,6 +6954,8 @@ fn apply_op(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &B
             if let Some(named) = input.get("phase").and_then(Value::as_u64) {
                 ensure!(named == u64::from(n), "Phase {named} is not the free phase; phase {n} is");
             }
+            // Task #229: a Crit in the phase holds its close.
+            ensure!(plan::crit_gate(team, n).is_none(), "Phase {n} cannot be closed: {}", plan::crit_gate(team, n).unwrap_or_default());
             // (b) a phase whose work still runs is not closed; the running ids
             // are named so the owner or the lead knows what waits.
             let running: Vec<u32> = team
@@ -6457,7 +6987,10 @@ fn apply_op(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &B
         "relaunch" => {
             // U54: the owner relaunches directly; the lead on its verified word.
             // U56: on the owner's setting, the lead also relaunches a member
-            // Zerus marks stuck.
+            // Zerus marks stuck. Task 209 (owner, 2026-11-07): a relaunch is a
+            // fresh conversation with a handoff brief, never the same one; the
+            // lead proposes it for a stuck member too, not only for one that
+            // failed to start.
             let member_id = text(input, "member").to_owned();
             let stuck = team.member(&member_id).is_some_and(|member| member.stuck.is_some());
             ensure!(
@@ -6468,25 +7001,20 @@ fn apply_op(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &B
             );
             let id = member_id;
             let by = actor.label(team);
-            let member = team.members.iter_mut().find(|m| m.id == id).context("Unknown member")?;
-            if member.stuck.is_some() {
-                // U56/#728: the real route for a stuck member: the dispatcher
-                // interrupts its session and resumes it in its conversation;
-                // the lead needs no word when the owner set lead_restarts_stuck,
-                // and the owner has the same route.
-                member.restart_pending = true;
-                member.error.clear();
-                member.host_waits = 0;
-                member.launch_id.clear();
-                events.push(Event::new("member_restart_requested", json!({"by":by,"member":id})));
-                return Ok(json!({"status":"relaunching","member":id}));
-            }
-            ensure!(member.session.is_none() && !member.error.is_empty(), "This member's session did not fail to start");
-            member.error.clear();
-            member.host_waits = 0;
-            member.launch_id.clear();
-            events.push(Event::new("relaunch", json!({"by":"You","member":id})));
-            Ok(json!({"status":"relaunch","member":id}))
+            // Task 209: a member that failed to start, is stuck, or simply runs
+            // in a conversation the owner wants replaced gets a new one. The old
+            // session is set aside by the Launch step (paused and renamed), so
+            // the new one takes the member's name, and the handoff brief goes as
+            // its first message.
+            let (state, from) = team
+                .member(&id)
+                .map(|member| (member.state, member.session.as_ref().map(|session| session.name.clone()).unwrap_or_default()))
+                .context("Unknown member")?;
+            ensure!(state != MemberState::Removed, "This member was removed");
+            ensure!(id != team.lead, "Relaunch the lead by swapping it (hgs team swap-member)");
+            fresh_session(team, &id, "relaunch", events)?;
+            events.push(Event::new("relaunch", json!({"by":by,"member":id,"fresh":true,"from":from})));
+            Ok(json!({"status":"relaunch","member":id,"fresh":true,"from":from}))
         }
         "pause-member" | "resume-member" => {
             ensure!(human_or_lead, "Only the lead or you pause a member");
@@ -6828,6 +7356,10 @@ mod ops_members;
 mod ops_lead_plan;
 
 #[cfg(test)]
+#[path = "tests/ops_spawn.rs"]
+mod ops_spawn;
+
+#[cfg(test)]
 #[path = "tests/ops_phases.rs"]
 mod ops_phases;
 
@@ -6854,3 +7386,4 @@ mod ops_settings;
 #[cfg(test)]
 #[path = "tests/ops_other.rs"]
 mod ops_other;
+

@@ -9,9 +9,11 @@ import { clearMulti } from "./organize";
 import type { Row } from "./model";
 import type { Session } from "./types";
 import { MACHINES_WAITING, machineEntries } from "./machine-batch";
-import { countable, selectionMenu, visibleSelected } from "./selection-ui";
+import { countable, selectionMenu, visibleSelected, type MoveState } from "./selection-ui";
 import { selectionSnapshot, type SelectionAction, type SelectionRow } from "./selection";
 import { liveNameIndex } from "./actions-ui";
+import { grouping } from "../../store/organization";
+import { editEntry } from "./organization-ui";
 
 // The live (store-bound) halves of the selection bar and the batch menu; the
 // pure models are in selection-ui.ts, machine-batch.ts and archive-entries.ts.
@@ -26,11 +28,25 @@ export const selectionCount = (rows: SelectionRow[]) => {
   return (a: SelectionAction) =>
     rows.filter((s) => countable(s, a, a === "move" || applies(s, a, !computerOffline(s.computer), updating(s.computer, s.name), index))).length;
 };
-export const runSelection = (rows: SelectionRow[], a: SelectionAction) => { void run(a, rows.map(selectionSnapshot)); };
+/** Move to project is available while the project organization is editable (Qt's editEntry). */
+export const moveState = (): MoveState => {
+  const e = editEntry(grouping());
+  return { enabled: e.enabled, reason: e.reason };
+};
+/** Move to project opens its dialog for the selected rows that still exist; the other actions are the batch queue's. */
+export const runSelection = (rows: SelectionRow[], a: SelectionAction) => {
+  if (a === "move") {
+    const live = rows.map((r) => catalog.rows[r.key]).filter((s): s is Session => !!s);
+    // The dialogs are a component module: they load with the first Move to project.
+    if (live.length) void import("./OrganizationDialogs").then((dialogs) => dialogs.openMoveDialog(live));
+    return;
+  }
+  void run(a, rows.map(selectionSnapshot));
+};
 /** The context menu of a row inside a multi-selection (Qt populateSelectionMenu). */
 export const selectionContextMenu = (listed: readonly Row[]): MenuEntry[] => {
   const rows = selectedRows(listed).map(selectionSnapshot);
-  return selectionMenu(selectionCount(rows), rows.length, running(), (a) => runSelection(rows, a), clearMulti);
+  return selectionMenu(selectionCount(rows), rows.length, running(), (a) => runSelection(rows, a), clearMulti, moveState());
 };
 
 /** Pause all and Resume all per computer (Qt's populateBatchActions): this computer first, then the peers. */

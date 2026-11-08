@@ -154,6 +154,9 @@ private:
     // owner's confirmation.
     QWidget *planModeCard(const Teams::Team &team);
     QWidget *phaseModeBadge(const Teams::Team &team, int phase);
+    // Task #219: the phase headers above Profile and Tests, each with its
+    // Standard | Free toggle; Graph, Board and Layers carry one in phaseScroll.
+    QWidget *phaseModeStrip(const Teams::Team &team);
     static bool freeOpenPhase(const Teams::Team &team, int phase);
     QWidget *freeAcceptedFold(const Teams::Team &team, int phase, const QList<int> &accepted);
     QWidget *freeIdleCard(const Teams::Team &team, int phase);

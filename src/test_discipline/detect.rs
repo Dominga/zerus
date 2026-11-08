@@ -121,6 +121,7 @@ fn provider(name: String, kind: Kind, root: &str, sources: Vec<String>, tests: V
         reuse: Default::default(),
         disabled: false,
         results: None,
+        performance: false,
     }
 }
 

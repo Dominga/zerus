@@ -4,7 +4,8 @@ import { createStore } from "solid-js/store";
 import { applyBatch, catalog, toSession } from "../../store/catalog";
 import { applyGrouping } from "../../store/organization";
 import { rowOut } from "../../store/testing";
-import { groupMembers, groupRows, membersByGroup, projectChoices, summarize, type ListInput } from "./model";
+import { groupMembers, groupRows, membersByGroup, projectChoices, summarize, cardHeight, rowHeight, listRows, COMPACT_CARD_HEIGHT, NORMAL_CARD_HEIGHT, type ListInput } from "./model";
+import { setSetting } from "../../store/settings";
 import { emptyBatch, type Batch, type GroupingOut, type ViewRow } from "../../types";
 import type { Session } from "./types";
 
@@ -36,6 +37,20 @@ describe("grouped rows", () => {
     const g = grouping([header("alpha"), header("ungrouped"), header("beta", true)]);
     expect(shape(groupRows(input(g, members)))).toEqual(["#alpha", "s1", "s2", "#beta"]);
     expect(shape(groupRows(input(g, members, { projects: ["beta"] })))).toEqual(["#beta"]);
+  });
+
+  it("shows an empty project only with the setting off and nothing filtering (task 202, SessionsWindowRows.cpp:559)", () => {
+    const members = new Map([["alpha", [session(1)]], ["empty", []]]);
+    const g = grouping([header("alpha"), header("empty")]);
+    // "Hide projects without active sessions" defaults on.
+    expect(shape(groupRows(input(g, members)))).toEqual(["#alpha", "s1"]);
+    // Off, an empty but reachable project keeps its header and has no cards.
+    expect(shape(groupRows(input(g, members, { hideEmpty: false })))).toEqual(["#alpha", "s1", "#empty"]);
+    // Any active filter hides it anyway, as Qt does.
+    expect(shape(groupRows(input(g, members, { hideEmpty: false, filtering: true })))).toEqual(["#alpha", "s1"]);
+    // A project the organization cannot reach is always hidden.
+    const inaccessible = grouping([header("alpha"), { ...header("empty"), accessible: false }]);
+    expect(shape(groupRows(input(inaccessible, members, { hideEmpty: false })))).toEqual(["#alpha", "s1"]);
   });
 
   it("counts every member of a project in its header, never muted ones", () => {
@@ -181,4 +196,34 @@ describe("grouped rows", () => {
     ]);
     dispose();
   }));
+});
+
+describe("session card density (task 202)", () => {
+  it("is Qt's 104 px normal card, or 94 px with Compact session rows", async () => {
+    expect(cardHeight()).toBe(NORMAL_CARD_HEIGHT);
+    const card = { type: "card" as const, id: "run:1", session: session(1), expandable: false, expanded: false, compactRow: false };
+    expect(rowHeight(card)).toBe(NORMAL_CARD_HEIGHT);
+    await setSetting("workspace/compact", true);
+    expect(cardHeight()).toBe(COMPACT_CARD_HEIGHT);
+    expect(rowHeight(card)).toBe(COMPACT_CARD_HEIGHT);
+    await setSetting("workspace/compact", false);
+    expect(cardHeight()).toBe(NORMAL_CARD_HEIGHT);
+  });
+
+  it("the list follows the stored settings: an empty project and its card height", async () => {
+    applyBatch(batchOf({ upserts: [rowOut("", 21)] }));
+    applyGrouping(batchOf({
+      grouping: grouping([header("alpha"), header("empty")]),
+      groups: [{ computer: "", key: "run:21", group: "alpha", rank: 0 }],
+    }));
+    // "Hide projects without active sessions" is on by default.
+    expect(listRows().map((row) => row.id)).not.toContain("h:empty");
+    await setSetting("workspace/hideEmptyProjects", false);
+    expect(listRows().map((row) => row.id)).toContain("h:empty");
+    await setSetting("workspace/hideEmptyProjects", true);
+    await setSetting("workspace/compact", true);
+    const card = listRows().find((row) => row.type === "card");
+    expect(card && rowHeight(card)).toBe(COMPACT_CARD_HEIGHT);
+    await setSetting("workspace/compact", false);
+  });
 });

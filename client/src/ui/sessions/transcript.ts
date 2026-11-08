@@ -4,6 +4,8 @@ import type { ActivityItem, LocalItem, MediaMessage, TranscriptItem, VoiceState 
 import { imageSize } from "./attachment-image";
 import { messageTimeOf } from "../lib/dates";
 import { tr, trNoop } from "../../i18n";
+import { systemNotice } from "./notices";
+import { toolMedia } from "./media";
 
 // A Symbol cannot arrive from a provider's JSON. Only our own local send
 // supplies these immutable-cache preview paths and oriented dimensions.
@@ -491,7 +493,12 @@ function transcriptItems(events: readonly ActivityEvent[], summary?: Record<stri
     if (role === "notice") {
       const report = typeof e.report === "string" ? e.report : "";
       if (e.origin === "subagent_report") items.push({ id, kind: "report", at, title: preview(e.detail) || tr("Subagent report"), body: report || e.detail, sender: e.sender || undefined });
-      else items.push({ id, kind: "system", at, sender: e.origin === "peer_message" ? tr("Message from %1", e.sender ?? tr("another session")) : tr("Background task"), body: report || e.detail });
+      else {
+        // A session's message may carry a team header (Qt reads it inside the envelope).
+        const notice = e.origin === "peer_message" ? systemNotice(report || e.detail || "") : undefined;
+        items.push({ id, kind: "system", at, sender: notice?.from ?? (e.origin === "peer_message" ? tr("Message from %1", e.sender ?? tr("another session")) : tr("Background task")), body: report || e.detail, notice,
+          teamNotice: notice ? notice.from !== "You" : e.origin === "peer_message" });
+      }
       i++; continue;
     }
     if (role === "user" && e.source === "hgs_voice") {
@@ -503,6 +510,15 @@ function transcriptItems(events: readonly ActivityEvent[], summary?: Record<stri
       const row = e.local as LocalMessage;
       items.push({ id: `local-${row.id}`, kind: "user", at: "", body: row.text, attachments: attachments(e), local: localItem(row, summary) });
       i++; continue;
+    }
+    // Task 208: what Zerus pasted into the session (a team message, a doorbell)
+    // is a system notice with its sender, never "You" (ActivityView.cpp teamMessage).
+    if (role === "user" && e.type !== "QuestionAnswered" && !e.question_replies?.length) {
+      const notice = systemNotice(e.detail ?? "");
+      if (notice) {
+        items.push({ id, kind: "system", at, sender: notice.from, body: notice.full, notice, attachments: attachments(e), teamNotice: notice.from !== "You" });
+        i++; continue;
+      }
     }
     if (role) {
       let receipt: string | undefined;
@@ -539,11 +555,14 @@ function transcriptItems(events: readonly ActivityEvent[], summary?: Record<stri
     const last = group[group.length - 1];
     const lines = group.map((g) => `${eventTitle(g.type)}${g.tool ? ` / ${g.tool}` : ""}${childEvent(g) ? tr(" (subagent %1)", g.agent_id) : ""}  ${preview(g.detail)}`);
     const shownTools = tools.slice(0, 3).join(", ") + (tools.length > 3 ? " …" : "");
+    // Task 248: the pictures the group's finished tools worked with (Qt toolMedia).
+    const pictures = toolMedia(group.filter((g) => g.type === "PostToolUse").map((g) => g.detail ?? ""));
+    const shown = pictures.length ? pictures : undefined;
     if (group.length === 1) {
-      items.push({ id, kind: "tool", at: timeText(last.at), title: `${eventTitle(e.type)}${e.tool ? ` / ${e.tool}` : ""}`, body: preview(e.detail), lines, warn: attention(e) });
+      items.push({ id, kind: "tool", at: timeText(last.at), title: `${eventTitle(e.type)}${e.tool ? ` / ${e.tool}` : ""}`, body: preview(e.detail), lines, warn: attention(e), media: shown });
     } else {
       const title = calls > 0 ? tr("%1, %2 events", calls === 1 ? tr("1 tool call") : tr("%1 tool calls", calls), group.length) : tr("%1 activity events", group.length);
-      items.push({ id, kind: "tools", at: timeText(last.at), title, body: shownTools || preview(last.detail), lines, warn: group.some(attention) });
+      items.push({ id, kind: "tools", at: timeText(last.at), title, body: shownTools || preview(last.detail), lines, warn: group.some(attention), media: shown });
     }
   }
   inherit();

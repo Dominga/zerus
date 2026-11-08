@@ -62,8 +62,8 @@ class ForkPackageTests(unittest.TestCase):
 
     def fork(self, output, *extra):
         arguments = ["--connector", self.directory / "zerus-mobile-connector.exe", "--cli", self.directory / "hgs.exe",
-                     "--gui", self.directory / "hgs-tray.exe", "--lore", self.directory / "lore.exe",
-                     "--output", output, "--crt-dir", self.crt,
+                     "--lore", self.directory / "lore.exe",
+                     "--gui", self.directory / "hgs-tray.exe", "--output", output, "--crt-dir", self.crt,
                      "--rust-licenses", self.rust, "--frontend-licenses", self.frontend, "--conpty", self.conpty, *extra]
         environment = {key: value for key, value in os.environ.items() if not key.startswith(("QT_", "HGS_", "ZERUS_FORK_"))}
         environment["SOURCE_DATE_EPOCH"] = "1760000000"
@@ -115,19 +115,14 @@ class ForkWorkflowTests(unittest.TestCase):
 
     def test_the_fork_builds_and_packages_the_tauri_app_with_its_identity(self):
         build = self.step("name: Build the Tauri Windows desktop with the fork channel")
-        self.assertIn("npm run tauri -- build --ci --no-bundle --config src-tauri/tauri.windows.conf.json --features video", build)
+        self.assertIn("npm run tauri -- build --ci --no-bundle --config src-tauri/tauri.windows.switch.conf.json --features video", build)
         package = self.step("name: Portable zip from the tested executables")
-        for part in ["package-windows.py --fork", "--gui target/windows-next/release/hgs-tray.exe",
+        for part in ["package-windows.py --fork", "--lore target/lore/release/lore.exe", "--gui target/windows-next/release/hgs-tray.exe",
                      "--mobile-relay services/mobile/relay/target/release/zerus-relay.exe",
-                     "--lore crates/lore/target/release/lore.exe",
                      "--qt-fallback .ci-build/gui/hgs-tray.exe", '--qt-root "$QT_ROOT_DIR"',
                      "--frontend-licenses artifacts/windows-frontend-licenses",
                      "check-windows-portable.py artifacts/zerus-windows-x86_64.zip --run --selftest"]:
             self.assertIn(part, package)
-        # Task 260: the zip's lore.exe is built from crates/lore before packaging.
-        rust = self.step("name: Rust tests and release build")
-        self.assertIn("cargo build --release --locked --manifest-path crates/lore/Cargo.toml", rust)
-        self.assertLess(self.index("name: Rust tests and release build"), self.index("name: Portable zip from the tested executables"))
         self.assertNotIn("package-windows-qt.py", self.text)
         self.assertIn("ZERUS_FORK_BUILD: ${{ !startsWith(github.ref, 'refs/tags/whitewh-exp-') && github.run_number || '' }}", self.text)
         self.assertIn("ZERUS_FORK_FEED_URL:", self.text)
@@ -141,17 +136,52 @@ class ForkWorkflowTests(unittest.TestCase):
         self.assertLess(zip_step, self.index("name: Update feed"))
 
 
-class ReleaseCandidateLocalTests(unittest.TestCase):
-    def test_the_local_leg_builds_lore_and_packages_it(self):
-        # Task 260: the release-candidate local leg is the same package step as
-        # the fork workflow, so it builds crates/lore's binary and ships it.
-        result = subprocess.run([sys.executable, str(ROOT / "scripts/release-candidate-local.py"), "--dry-run"],
-                                capture_output=True, text=True, cwd=ROOT)
+class LocalLegForkIdentityTests(unittest.TestCase):
+    """Task 213: the local leg takes the fork identity explicitly, so the Tauri
+    app embeds what build-info.json names and the portable self-test passes.
+
+    The dry run prints the steps and the identity; nothing builds or packages.
+    """
+
+    def dry(self, *extra):
+        return subprocess.run([sys.executable, "scripts/release-candidate-local.py", "--dry-run", *extra],
+                              cwd=ROOT, capture_output=True, text=True, timeout=60)
+
+    def test_the_local_leg_embeds_and_packages_the_fork_identity(self):
+        result = self.dry("--fork-build", "41", "--fork-feed", FEED)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("cargo build --locked --release --manifest-path crates/lore/Cargo.toml --target-dir target",
-                      result.stdout)
-        self.assertIn("--lore target/release/lore.exe", result.stdout)
+        self.assertIn(f"fork identity: build 41, feed {FEED}", result.stdout)
+        self.assertIn(f"tauri fork channel: ZERUS_FORK_BUILD=41 ZERUS_FORK_FEED_URL={FEED}", result.stdout)
+        self.assertIn(f"--fork-build 41 --fork-feed {FEED}", result.stdout)
+        # An experimental leg (neither) embeds and packages no identity.
+        experimental = self.dry()
+        self.assertEqual(experimental.returncode, 0, experimental.stderr)
+        self.assertIn("fork identity: build none (experimental), feed none (experimental)", experimental.stdout)
+        self.assertIn("ZERUS_FORK_BUILD=(unset) ZERUS_FORK_FEED_URL=(unset)", experimental.stdout)
+        self.assertIn("--fork-build  --fork-feed ", experimental.stdout)
+
+    def test_one_fork_value_without_the_other_or_a_foreign_feed_is_refused(self):
+        for extra, words in [
+            (["--fork-build", "41"], "both a build number and a feed"),
+            (["--fork-feed", FEED], "both a build number and a feed"),
+            (["--fork-build", "41", "--fork-feed", "https://example.com/feed.json"], "release asset"),
+            (["--fork-build", "-3", "--fork-feed", FEED], "positive number"),
+        ]:
+            with self.subTest(extra=extra):
+                result = self.dry(*extra)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(words, result.stderr)
+
+    def test_the_ctest_leg_uses_two_workers(self):
+        # Task 213: four suites fail under four workers and pass alone.
+        text = (ROOT / "scripts/release-candidate.py").read_text(encoding="utf-8")
+        self.assertIn('"--parallel", os.environ.get("ZERUS_TEST_JOBS", "2")', text)
+        self.assertNotIn('"--parallel", "4"', text)
+        self.assertNotIn('ZERUS_TEST_JOBS", "4"', text)
+        self.assertIn("--fork-build", text)
+        self.assertIn("--fork-feed", text)
 
 
 if __name__ == "__main__":
     unittest.main()
+

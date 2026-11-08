@@ -215,7 +215,7 @@ if pathlib.Path(sys.argv[0]).name == "python3" and os.environ["ZERUS_CASK_TEST_R
 
     def test_required_files_include_setup_and_notices(self):
         names = set(check.TAURI_RELEASE_REQUIRED)
-        for name in ("Contents/MacOS/hgs", "Contents/MacOS/zerus-mobile-connector", "Contents/Resources/bin/zerus-setup",
+        for name in ("Contents/MacOS/hgs", "Contents/MacOS/lore", "Contents/MacOS/zerus-mobile-connector", "Contents/Resources/bin/zerus-setup",
                      "Contents/Resources/setup/install-macos-session-service.py",
                      "Contents/Resources/setup/install-mobile-connector-service.py",
                      "Contents/Resources/licenses/rust/inventory.json",
@@ -267,3 +267,4 @@ if pathlib.Path(sys.argv[0]).name == "python3" and os.environ["ZERUS_CASK_TEST_R
 
 if __name__ == "__main__":
     unittest.main()
+

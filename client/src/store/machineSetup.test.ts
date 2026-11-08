@@ -1,14 +1,14 @@
 import { describe, it, expect, vi } from "vitest";
 import { createRoot, createSignal } from "solid-js";
 vi.hoisted(() => vi.stubGlobal("location", new URL("http://localhost/")));
-vi.mock("../bridge", () => ({ machineChange: vi.fn(), machinePickKey: vi.fn(), machineSsh: vi.fn(), machineSetup: vi.fn(), machinePickSource: vi.fn(), fleetRefresh: vi.fn(), machinesView: vi.fn(), machineResolve: vi.fn(), machineCheck: vi.fn() }));
+vi.mock("../bridge", () => ({ machineChange: vi.fn(), machinePickKey: vi.fn(), machineSsh: vi.fn(), machineSetup: vi.fn(), machinePickSource: vi.fn(), fleetRefresh: vi.fn(), machinesView: vi.fn(), machineResolve: vi.fn(), machineCheck: vi.fn(), machineTestHost: vi.fn() }));
 import { createMachineEditor, LOCAL_MACHINE } from "./machineEditor";
 import { createMachineSetup } from "./machineSetup";
-import { emptyMachines, type MachineMeta, type MachineSetupOutcome } from "../types";
+import { emptyMachines, type MachineMeta, type MachineSetupOutcome, type MachinesView } from "../types";
 const success: MachineSetupOutcome = { success: true, uncertain: false, text: "HGS installed. Checking connection…", output: "fixture setup complete" };
 function fixture() {
   return createRoot((dispose) => {
-    const [view, setView] = createSignal({ ...emptyMachines(), loaded: true, local: "local", connection_revision: "a".repeat(64), machines: [{ alias: "peer.invalid", hostname: "peer.invalid", user: "", port: null, identity_file: "", enabled: true, source: "local", inherited: false, origin: "" }] });
+    const [view, setView] = createSignal<MachinesView>({ ...emptyMachines(), loaded: true, local: "local", connection_revision: "a".repeat(64), machines: [{ alias: "peer.invalid", transport: "ssh", wsl: null, test_runner: "", hostname: "peer.invalid", user: "", port: null, identity_file: "", enabled: true, source: "local", inherited: false, origin: "" }] });
     const [local, setLocal] = createSignal<MachineMeta>({ machine_id: "original-local", platform: "windows", local_sessions: false, local_host: {}, host: "local" } as MachineMeta);
     const tools = { setup: vi.fn(async () => success), pick: vi.fn(async (): Promise<string | null> => null), refresh: vi.fn(async () => {}), check: vi.fn(async () => undefined) };
     const editor = createMachineEditor(view, vi.fn(), vi.fn(), vi.fn());

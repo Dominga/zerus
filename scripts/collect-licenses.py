@@ -34,7 +34,9 @@ def reviewed_monorepo_notice(package):
         return None
     if package["source"] != CANONICALPATH_SOURCE or package["version"] != "2026.5.18-2":
         raise SystemExit("Review the CanonicalPath source revision and root license before distribution.")
-    text = (ROOT / "docs/licenses/canonicalpath-LICENSE.txt").read_bytes()
+    # Task 192: a Windows checkout with core.autocrlf has CRLF line ends; the
+    # reviewed bytes are git's LF form, which is also what ships.
+    text = (ROOT / "docs/licenses/canonicalpath-LICENSE.txt").read_bytes().replace(b"\r\n", b"\n")
     if hashlib.sha256(text).hexdigest() != CANONICALPATH_LICENSE_SHA256:
         raise SystemExit("The retained CanonicalPath license differs from the reviewed revision.")
     inventory = {"name": package["name"], "version": package["version"], "license": "MIT",

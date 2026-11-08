@@ -1,7 +1,32 @@
 /* Application shell: side rail, pages, status bar. */
 @layer components {
-  .app { --z-agent-sh: var(--z-agent-codex); display: grid; grid-template-columns: var(--rail-w) 1fr; grid-template-rows: 1fr auto; height: 100vh; background: var(--z-color-page); }
+  .app { --z-agent-sh: var(--z-agent-codex); --z-agent-ollama: var(--z-agent-codex); display: grid; grid-template-columns: var(--rail-w) 1fr; grid-template-rows: 1fr auto; height: 100vh; background: var(--z-color-page); }
   .app.rail-labeled { --rail-w: 84px; }
+  /* Task 243: the Compact skins' one title bar (Qt WindowTitleBar with the rail's controls). */
+  .app.chrome-unified { grid-template-columns: 1fr; grid-template-rows: auto 1fr auto; }
+  .status-version { flex: none; height: 22px; padding: 0 8px; border-radius: 6px; color: var(--z-color-muted); font-size: var(--fs-2xs); }
+  .status-version:hover { background: var(--z-color-hover); color: var(--z-color-text); }
+  .titlebar { display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 0 1px 8px; background: var(--z-color-surface); border-bottom: 1px solid var(--z-color-divider); user-select: none; -webkit-user-select: none; min-width: 0; }
+  .tb-name { font-size: 13px; font-weight: 600; color: var(--z-color-text); }
+  .tb-group { display: flex; align-items: center; gap: 2px; flex: none; }
+  .tb-btn { position: relative; display: grid; place-items: center; width: 30px; height: 28px; border-radius: 7px; color: var(--z-color-text-3); }
+  .tb-btn:hover { background: var(--z-color-hover); color: var(--z-color-text); }
+  .tb-btn.on { background: var(--z-color-hover); color: var(--z-color-accent); }
+  .tb-btn.pinned { color: var(--z-color-accent); }
+  .tb-btn:disabled { opacity: .45; }
+  .tb-brand { width: 30px; height: 30px; }
+  .tb-badge { position: absolute; top: 0; left: 16px; min-width: 14px; height: 13px; padding: 0 3px; border-radius: 7px; background: var(--z-color-danger); color: #fff; font-size: 9px; font-weight: 700; line-height: 13px; text-align: center; }
+  .tb-search { flex: 3 1 180px; min-width: 180px; max-width: 460px; height: 28px; display: flex; align-items: center; gap: 8px; padding: 0 6px 0 10px; border-radius: 8px;
+    background: var(--z-color-field, var(--z-color-page)); border: 1px solid var(--z-color-divider); color: var(--z-color-muted); font-size: 12px; text-align: left; }
+  .tb-search:hover { border-color: var(--z-color-muted); }
+  .tb-search-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tb-shortcut { flex: none; padding: 1px 6px; border-radius: 4px; background: var(--z-color-hover); font-size: 10px; font-family: Consolas, monospace; }
+  .titlebar > .grow { flex: 1 1 0; align-self: stretch; }
+  .tb-window { display: flex; align-self: stretch; flex: none; }
+  .tb-win { width: 46px; display: grid; place-items: center; color: var(--z-color-text-3); }
+  .tb-win:hover { background: var(--z-color-hover); color: var(--z-color-text); }
+  .tb-win.close:hover { background: #c42b1c; color: #fff; }
+  .sessions-pane[data-hidden] { width: 0; min-width: 0; border: 0; margin: 0; padding: 0; overflow: hidden; }
 
   .rail { grid-row: 1 / 3; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 10px 0 8px; background: var(--z-color-surface); border-right: 1px solid var(--z-color-divider); }
   .rail button { position: relative; display: grid; place-items: center; width: 40px; height: 40px; border-radius: var(--z-radius-lg); color: var(--z-color-muted); transition: background var(--z-motion-fast), color var(--z-motion-fast); }
@@ -26,7 +51,7 @@
   .service-status-details { position: fixed; right: 12px; bottom: 36px; z-index: 70; max-width: min(600px, calc(100vw - 24px)); padding: 10px 12px; white-space: pre-line; border: 1px solid var(--z-color-border); border-radius: var(--z-radius-sm); background: var(--z-color-raised); color: var(--z-color-text); box-shadow: var(--z-shadow-popover); font-size: var(--fs-xs); }
   .desktop-service-status .state-dot { display: inline-block; margin-right: 6px; }
   .desktop-service-status .btn { flex: none; height: 22px; padding: 0 6px; }
-  .statusbar { grid-column: 2; display: flex; align-items: center; gap: 14px; height: 28px; white-space: nowrap; overflow: hidden; padding: 0 12px; border-top: 1px solid var(--z-color-divider); background: var(--z-color-pane); font-size: var(--fs-xs); color: var(--z-color-muted); }
+  .statusbar { grid-column: -2 / -1; display: flex; align-items: center; gap: 14px; height: 28px; white-space: nowrap; overflow: hidden; padding: 0 12px; border-top: 1px solid var(--z-color-divider); background: var(--z-color-pane); font-size: var(--fs-xs); color: var(--z-color-muted); }
   .statusbar .sb-usage { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 6px; border-radius: var(--z-radius-sm); color: var(--z-color-muted); }
   .statusbar .sb-usage:hover, .statusbar .sb-usage:focus-visible { background: var(--z-list-usage-hover); color: var(--z-color-text); }
   .session-usage-strip { display: inline-flex; align-items: center; gap: 4px; flex: none; height: 22px; margin-left: auto; }

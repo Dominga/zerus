@@ -235,6 +235,8 @@ fn run_on(remote: &dyn Remote, runner: &Runner, project: &Path, request: &Reques
         recorded_ms: (request.seconds * 1000.0) as u64,
         runner: runner.alias.clone(),
         report: None,
+        performance: request.performance,
+        load: None,
     })
 }
 

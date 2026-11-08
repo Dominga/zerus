@@ -35,6 +35,10 @@ export const LAYOUT_VARIANTS = {
   "sessions-pane": ["left", "right"],
   inspector: ["docked", "collapsed"],
   "activity-column": ["centered", "full"],
+  // Task 206: the side panel as tabs, or (the Compact skins, as Qt) one scroll of collapsible sections.
+  "side-panel": ["tabs", "sections"],
+  // Task 243: the system title bar and the rail, or (the Compact skins, as Qt) one title bar holding the controls.
+  chrome: ["system", "unified"],
 } as const;
 
 export type ComponentVariants = { -readonly [K in keyof typeof COMPONENT_VARIANTS]: (typeof COMPONENT_VARIANTS)[K][number] };

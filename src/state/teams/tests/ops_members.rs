@@ -205,7 +205,9 @@ fn scale_adds_a_roles_members_at_once_within_the_roster() {
 }
 
 /// U56: the lead relaunches a stuck member only on the owner's setting;
-/// otherwise the refusal names the command that sets it.
+/// otherwise the refusal names the command that sets it. Task 209: the
+/// relaunch gives a fresh conversation with a handoff brief, not a restart of
+/// the old one.
 #[test]
 fn a_stuck_member_is_relaunched_by_the_lead_only_with_the_owners_setting() {
     let mut team = running_team();
@@ -221,13 +223,57 @@ fn a_stuck_member_is_relaunched_by_the_lead_only_with_the_owners_setting() {
     assert!(error.contains("lead_restarts_stuck"), "{error}");
     team.settings.lead_restarts_stuck = true;
     let receipt = apply(&mut team, "relaunch", &json!({"member":"qa"}), &lead, &none, &mut events).unwrap();
-    // #728: the request records a pending restart; the dispatcher interrupts
-    // and resumes the session and only then clears the mark.
-    assert_eq!((receipt["status"].as_str(), receipt["member"].as_str()), (Some("relaunching"), Some("qa")));
+    assert_eq!((receipt["status"].as_str(), receipt["fresh"].as_bool(), receipt["from"].as_str()), (Some("relaunch"), Some(true), Some("kimi/x/qa")));
     let qa = team.members.iter().find(|member| member.id == "qa").unwrap();
-    assert!(qa.restart_pending);
-    assert!(qa.stuck.is_some());
-    assert!(events.iter().any(|event| event.kind == "member_restart_requested"));
+    assert!(qa.session.is_none(), "the fresh session starts on the next tick");
+    assert!(qa.launch_after_swap);
+    let handoff = qa.handoff.as_ref().expect("the new session gets the handoff brief");
+    assert_eq!((handoff.why.as_str(), handoff.from.as_str()), ("relaunch", "kimi/x/qa"));
+    assert_eq!(qa.replaced.as_ref().map(|session| session.name.as_str()), Some("kimi/x/qa"));
+    assert!(events.iter().any(|event| event.kind == "fresh_session"));
+    assert!(events.iter().any(|event| event.kind == "relaunch"));
+}
+
+/// Task 209: the owner relaunches a running member; it is not refused for
+/// "did not fail to start", and the old conversation is set aside.
+#[test]
+fn the_owner_relaunches_a_running_member_into_a_fresh_conversation() {
+    let mut team = running_team();
+    let mut events = Vec::new();
+    let qa = team.members.iter_mut().find(|member| member.id == "qa").unwrap();
+    qa.session = Some(SessionRef { name: "kimi/x/qa".into(), run_id: "r1".into(), conversation_id: "c".into(), ..Default::default() });
+    let receipt = apply(&mut team, "relaunch", &json!({"member":"qa"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    assert_eq!((receipt["status"].as_str(), receipt["fresh"].as_bool()), (Some("relaunch"), Some(true)));
+    let qa = team.members.iter().find(|member| member.id == "qa").unwrap();
+    assert!(qa.session.is_none() && qa.launch_after_swap && qa.handoff.is_some(), "a fresh session with its brief");
+}
+
+/// Task 209: the lead may propose a relaunch for a stuck member (the owner
+/// allows it with a click); the card's trial runs the owner's own path, so a
+/// running member no longer refuses it with "did not fail to start".
+#[test]
+fn the_lead_proposes_a_relaunch_for_a_stuck_member() {
+    use crate::state::teams::model::MemberStuck;
+    let mut team = running_team();
+    let lead = Actor::Member("lead".into());
+    let mut events = Vec::new();
+    {
+        let qa = team.members.iter_mut().find(|member| member.id == "qa").unwrap();
+        qa.stuck = Some(MemberStuck { at: 1.0, reason: "no_progress".into(), phase: "tool".into(), ..Default::default() });
+        qa.session = Some(SessionRef { name: "kimi/x/qa".into(), run_id: "r1".into(), conversation_id: "c".into(), ..Default::default() });
+    }
+    let receipt = apply(
+        &mut team,
+        "propose",
+        &json!({"kind":"relaunch","member":"qa","reason":"no progress for an hour"}),
+        &lead,
+        &BTreeSet::new(),
+        &mut events,
+    )
+    .unwrap();
+    assert_eq!(receipt["status"], "proposed");
+    let proposal = team.proposals.last().unwrap();
+    assert_eq!((proposal["kind"].as_str(), proposal["state"].as_str()), (Some("relaunch"), Some("open")));
 }
 
 #[test]

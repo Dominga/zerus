@@ -30,7 +30,11 @@ mkdir -p "$prefix/bin"
 binary_stage="$(mktemp "$prefix/bin/.hgs.XXXXXXXX")"
 shim_stage="$(mktemp "$prefix/bin/.hgs-state.XXXXXXXX")"
 connector_stage=""
-trap 'rm -f "$binary_stage" "$shim_stage" ${connector_stage:+"$connector_stage"}' EXIT
+lore_stage="$(mktemp "$prefix/bin/.lore.XXXXXXXX")"
+trap 'rm -f "$binary_stage" "$shim_stage" "$lore_stage" ${connector_stage:+"$connector_stage"}' EXIT
+# Task 182: hgs runs lore as a subprocess from beside itself.
+"$cargo_bin" build --manifest-path "$here/crates/lore-bin/Cargo.toml" --locked --release --target-dir "$build_dir"
+install -m 0755 "$build_dir/release/lore" "$lore_stage"
 install -m 0755 "$build_dir/release/hgs" "$binary_stage"
 install -m 0644 "$here/hgs_state.py" "$shim_stage"
 changed=0
@@ -56,6 +60,13 @@ else
 fi
 if [ "$changed" -eq 1 ]; then echo "Installed hgs Rust CLI."; fi
 "$prefix/bin/hgs" --version
+if [ ! -L "$prefix/bin/lore" ] && cmp -s "$lore_stage" "$prefix/bin/lore"; then
+    rm -f "$lore_stage"
+else
+    mv -f "$lore_stage" "$prefix/bin/lore"
+    echo "Installed lore."
+fi
+"$prefix/bin/lore" --version
 # The Rust mobile connector builds hyper, rustls, ring and SQLite, so until
 # gateways run it a source install builds it only when asked
 # (HGS_MOBILE_CONNECTOR=1) or to update an installed copy; 0 always skips. Its

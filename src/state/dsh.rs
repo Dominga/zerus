@@ -2,7 +2,9 @@
 //! Zerus, tmux, and individual sessions. HGS stores bindings, not credentials.
 use super::*;
 use crate::config::Config;
+use serde_json::Map;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -751,6 +753,167 @@ fn session_rows(record: &Value, conversations: &[&str]) -> Result<Value> {
         Err(error) if error == "Unsupported HGS native request" => rpc(record, "list", json!({})),
         rows => rows,
     }
+}
+
+/// Task 234: how long a stopped conversation's row is reused when the host
+/// cannot say which sessions it has loaded (a bridge before `loadedSessions`).
+/// A launch or resume through Zerus gives the binding a new run, which asks
+/// again at once; only a session loaded in the host's own web UI waits for it.
+const STOPPED_ROW_SECONDS: f64 = 900.0;
+/// With `loadedSessions` a stopped row stays valid until the host loads the
+/// session; this bounds it all the same.
+const STOPPED_ROW_MAX_SECONDS: f64 = 3600.0;
+/// At most this many rows are kept per host.
+const STOPPED_ROWS_KEPT: usize = 2000;
+/// A listing refreshes at most this many rows past their bound (the oldest
+/// first) and reuses the others until their turn: refreshing all twelve
+/// stopped rows of this machine at once took 7 s again every 5 minutes.
+const STALE_ROWS_PER_LISTING: usize = 1;
+
+fn rows_cache_path(record: &Value) -> PathBuf {
+    host_dir(record).join("listing-rows.json")
+}
+
+/// A row the host built for a session it has not loaded: neither available
+/// nor running. Building one replays the stored history (about half a second
+/// each on a long session), and it changes only when the session is loaded.
+fn stopped_row(row: &Value) -> bool {
+    row["agentAvailable"] != true && row["running"] != true && row["pendingQuestions"].as_array().is_none_or(Vec::is_empty)
+}
+
+/// Task 234 (owner's hgs ls under 1 s): which conversations of one host a
+/// listing asks for, and which stopped rows it reuses from `cache` (the
+/// host's last answers, `{generation, rows: {id: {row, run_id, at}}}`).
+/// A cached row is reused while the host's generation and the binding's run
+/// are the same and the session is not loaded (`loaded`, when the host names
+/// them). A row past its bound is refreshed, at most
+/// `STALE_ROWS_PER_LISTING` a listing, oldest first; the others are reused
+/// until their turn. A reused row brings its subagents' cached rows along.
+fn plan_rows(cache: &Value, records: &[&Value], generation: &Value, loaded: Option<&BTreeSet<String>>, now: f64) -> (Vec<Value>, Vec<String>) {
+    let bound = if loaded.is_some() { STOPPED_ROW_MAX_SECONDS } else { STOPPED_ROW_SECONDS };
+    let same_host = !generation.is_null() && cache["generation"] == *generation;
+    let mut ask: Vec<String> = Vec::new();
+    let mut valid: Vec<(f64, &str)> = Vec::new();
+    for record in records {
+        let id = string(record, "conversation_id");
+        if id.is_empty() || ask.iter().any(|seen| seen == id) || valid.iter().any(|(_, seen)| *seen == id) {
+            continue;
+        }
+        let entry = &cache["rows"][id];
+        let at = entry["at"].as_f64().filter(|at| now >= *at);
+        match at {
+            Some(at) if same_host && entry["run_id"] == record["run_id"] && loaded.is_none_or(|loaded| !loaded.contains(id)) => {
+                valid.push((at, id));
+            }
+            _ => ask.push(id.to_owned()),
+        }
+    }
+    let mut stale: Vec<(f64, &str)> = valid.iter().copied().filter(|(at, _)| now - at >= bound).collect();
+    stale.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let refresh: BTreeSet<&str> = stale.into_iter().take(STALE_ROWS_PER_LISTING).map(|(_, id)| id).collect();
+    let mut reused = Vec::new();
+    for (_, id) in valid {
+        if refresh.contains(id) {
+            ask.push(id.to_owned());
+            continue;
+        }
+        let entry = &cache["rows"][id];
+        reused.push(entry["row"].clone());
+        for child in entry["row"]["projections"]["values"]["subagentCatalog"].as_array().into_iter().flatten() {
+            if let Some(found) = child["id"].as_str().map(|child| &cache["rows"][child]["row"]).filter(|row| row.is_object()) {
+                reused.push(found.clone());
+            }
+        }
+    }
+    (reused, ask)
+}
+
+/// The cache after an answer: its stopped rows are kept (with the run of the
+/// binding they answered for; a subagent keeps its parent's), its live rows
+/// leave; rows of conversations no longer bound go, and the oldest past
+/// `STOPPED_ROWS_KEPT`.
+fn update_rows(cache: &Value, records: &[&Value], generation: &Value, items: &[Value], now: f64) -> Value {
+    let mut rows = if cache["generation"] == *generation { cache["rows"].as_object().cloned().unwrap_or_default() } else { Map::new() };
+    let runs: BTreeMap<&str, &Value> = records.iter().map(|record| (string(record, "conversation_id"), &record["run_id"])).collect();
+    let mut parent_run: BTreeMap<String, Value> = BTreeMap::new();
+    for item in items {
+        if let Some(run) = item["sessionId"].as_str().and_then(|id| runs.get(id)) {
+            for child in item["projections"]["values"]["subagentCatalog"].as_array().into_iter().flatten() {
+                if let Some(child) = child["id"].as_str() {
+                    parent_run.insert(child.to_owned(), (*run).clone());
+                }
+            }
+        }
+    }
+    for item in items {
+        let Some(id) = item["sessionId"].as_str() else { continue };
+        let run = runs.get(id).map(|run| (*run).clone()).or_else(|| parent_run.get(id).cloned());
+        match run.filter(|_| stopped_row(item)) {
+            Some(run) => {
+                rows.insert(id.to_owned(), json!({"row":item,"run_id":run,"at":now}));
+            }
+            None => {
+                rows.remove(id);
+            }
+        }
+    }
+    let bound: BTreeSet<&str> = runs.keys().copied().collect();
+    let children: BTreeSet<String> = rows
+        .iter()
+        .filter(|(id, _)| bound.contains(id.as_str()))
+        .flat_map(|(_, entry)| entry["row"]["projections"]["values"]["subagentCatalog"].as_array().cloned().unwrap_or_default())
+        .filter_map(|child| child["id"].as_str().map(str::to_owned))
+        .collect();
+    rows.retain(|id, _| bound.contains(id.as_str()) || children.contains(id));
+    if rows.len() > STOPPED_ROWS_KEPT {
+        let mut ages: Vec<(f64, String)> = rows.iter().map(|(id, entry)| (entry["at"].as_f64().unwrap_or(0.0), id.clone())).collect();
+        ages.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (_, id) in ages.into_iter().take(rows.len() - STOPPED_ROWS_KEPT) {
+            rows.remove(&id);
+        }
+    }
+    json!({"generation":generation,"rows":rows})
+}
+
+/// Task 234: the listing's rows of one host's conversations. One `ping`
+/// (milliseconds) names the host's generation, and a newer bridge the
+/// sessions it has loaded; a stopped conversation's row is reused from the
+/// host's last answer, and only the others go to `rows`. Without a cache, or
+/// when the ping fails, every conversation is asked for, as before.
+fn listing_rows(records: &[&Value]) -> Result<Value> {
+    let Some(first) = records.first() else { return Ok(json!({"items":[]})) };
+    let conversations: Vec<&str> = records.iter().map(|record| string(record, "conversation_id")).collect();
+    let Ok(ping) = rpc_within(first, "ping", json!({}), Duration::from_secs(5)) else {
+        return session_rows(first, &conversations);
+    };
+    let generation = ping["generation"].clone();
+    let loaded: Option<BTreeSet<String>> =
+        ping["loadedSessions"].as_array().map(|ids| ids.iter().filter_map(Value::as_str).map(str::to_owned).collect());
+    let path = rows_cache_path(first);
+    let cache = fs::read(&path).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()).unwrap_or(Value::Null);
+    let now = now();
+    let (mut items, ask) = plan_rows(&cache, records, &generation, loaded.as_ref(), now);
+    let mut answer_generation = generation.clone();
+    if !ask.is_empty() {
+        let asked: Vec<&str> = ask.iter().map(String::as_str).collect();
+        let answer = session_rows(first, &asked)?;
+        if !answer["generation"].is_null() {
+            answer_generation = answer["generation"].clone();
+        }
+        let fresh = answer["items"].as_array().cloned().unwrap_or_default();
+        // A host that answered with another generation restarted meanwhile:
+        // its reused rows are not trusted, so every conversation is asked for.
+        if answer_generation != generation {
+            return session_rows(first, &conversations);
+        } else {
+            let updated = update_rows(&cache, records, &generation, &fresh, now);
+            if updated != cache && private_dir(path.parent().unwrap_or(Path::new("."))).is_ok() {
+                let _ = atomic_private(&path, &updated.to_string());
+            }
+        }
+        items.extend(fresh);
+    }
+    Ok(json!({"generation":answer_generation,"items":items}))
 }
 fn rpc_within(record: &Value, method: &str, params: Value, read_timeout: Duration) -> Result<Value> {
     #[cfg(unix)]
@@ -1584,6 +1747,8 @@ fn remember_upload(name: &str, read: &Value, at: f64, tail: Option<(&Path, u64)>
 }
 
 pub(crate) fn snapshots() -> Result<Vec<Value>> {
+    // Task 234: where the DeepSeek rows of a listing spend their time.
+    let mut phases = super::slow_calls::Phases::start();
     let mut out = Vec::new();
     let preferences = notifications::load();
     let Ok(files) = fs::read_dir(bindings()) else {
@@ -1605,6 +1770,7 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
         }
         records.push(record);
     }
+    phases.mark("bindings");
     // U22: a session whose own records still accept the upload is marked, so
     // the session card and Accounts can say so. Bounded and throttled per
     // session; only when the block is on and the session is not marked yet.
@@ -1617,21 +1783,28 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
             }
         }
     }
+    phases.mark("upload");
     // One request per host home, for exactly the conversations bound here.
-    let mut homes: BTreeMap<String, Vec<&str>> = BTreeMap::new();
-    for record in &records {
-        homes.entry(string(record, "agent_home").to_owned()).or_default().push(string(record, "conversation_id"));
-    }
     let mut hosts = BTreeMap::new();
     for record in &records {
         let key = string(record, "agent_home").to_owned();
-        let list = hosts
-            .entry(key.clone())
-            .or_insert_with(|| session_rows(record, &homes[&key]).unwrap_or(Value::Null));
-        let mut value = snapshot_from(record, list);
+        if !hosts.contains_key(&key) {
+            // Task 234: a stopped conversation's row comes from the host's
+            // last answer; only the rest are asked for (`listing_rows`).
+            let home: Vec<&Value> = records.iter().filter(|other| string(other, "agent_home") == key).collect();
+            let list = listing_rows(&home).unwrap_or(Value::Null);
+            hosts.insert(key.clone(), list);
+            phases.mark("host_rows");
+        }
+        let mut value = snapshot_from(record, &hosts[&key]);
+        phases.mark("project");
         notifications::enrich(&mut value, preferences.as_ref(), journal::journal_name(record));
+        phases.mark("notifications");
         out.push(value);
     }
+    phases.note("records", records.len() as u64);
+    phases.note("hosts", hosts.len() as u64);
+    phases.finish_at("ls-dsh", "", 100);
     Ok(out)
 }
 
@@ -1925,6 +2098,8 @@ fn normalize(record: &Value, row: &Value, inspected: &Value) -> Value {
     recovery::enrich(record,&mut value);
     let process_source = if inspected["jobs"].is_array() || inspected["shellCalls"].is_array() { inspected } else { row };
     value["process_work"] = processes::dsh_work(record,process_source,alive && value["activity"] == "idle" && value["phase"] == "idle");
+    // Task 278: its own running jobs, whatever its activity.
+    value["background_jobs"] = processes::dsh_registered(record,process_source,alive);
     value
 }
 
@@ -2228,6 +2403,24 @@ pub(crate) fn inspect(name: &str, agent_id: Option<&str>) -> Result<Value> {
     // Internal recovery/input checks never need a process inventory.
     inspect_with_processes(name, agent_id, false)
 }
+/// Task 209: whether the host can compact this session natively. Capability is
+/// the host's (`compactSupported`, from the command or the native seam), never
+/// the member being idle at the moment of the read.
+fn compact_capability(agent_id: Option<&str>, inspected: &Value) -> bool {
+    agent_id.is_none() && inspected["compactSupported"] == true
+}
+
+/// Task 209: why a native compaction cannot run now (empty when it can).
+fn compact_reason(supported: bool, phase: &str) -> &'static str {
+    if !supported {
+        "Native DeepSeek compaction is unavailable"
+    } else if !matches!(phase, "" | "idle" | "ready") {
+        "Wait for the DeepSeek agent to become idle before compacting its context"
+    } else {
+        ""
+    }
+}
+
 /// Reads the session's token counters and records them as a sample (a team
 /// profile takes a window's tokens from the samples at its two ends). `force`
 /// records even closer than the minimum gap to the previous sample, for an
@@ -2347,7 +2540,13 @@ fn inspect_with_processes(name: &str, agent_id: Option<&str>, include_processes:
         let _ = usage_samples::record(string(&record, "name"), string(&record, "conversation_id"), now(), &inspected["baseline"]["values"], false);
     }
     if include_processes { result["processes"] = process_snapshot; }
-    result["compact_context_supported"] = json!(agent_id.is_none() && inspected["compactSupported"] == true && result["phase"] == "idle");
+    // Task 209: the host's capability, never the member's momentary phase: an
+    // idle check here made a session that was merely busy report that its agent
+    // cannot compact at all. The reason says why a command cannot run now, and
+    // the command itself refuses a busy agent.
+    let compact_supported = compact_capability(agent_id, &inspected);
+    result["compact_context_supported"] = json!(compact_supported);
+    result["compact_context_reason"] = json!(compact_reason(compact_supported, &string(&result, "phase")));
     result["compact_context_request"] = inspected["compactRequest"].clone();
     if result["compact_context_request"].is_object() {
         result["compact_context_request"]["run_id"] = record["run_id"].clone();
@@ -2355,7 +2554,7 @@ fn inspect_with_processes(name: &str, agent_id: Option<&str>, include_processes:
         if result["compact_context_request"]["status"] == "compacting" {
             result["phase"] = json!("compacting"); result["activity"] = json!("busy");
             result["compaction_started"] = result["compact_context_request"]["at"].clone();
-            result["compact_context_supported"] = json!(false);
+            result["compact_context_reason"] = json!("A compaction is already running");
         }
     }
     result["interrupt_supported"] = json!(inspected["interruptSupported"] == true &&
@@ -2656,7 +2855,13 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
         "compact-context" => {
             let request = checked_request(&record)?;
             let current = inspect(name, None)?;
-            if current["compact_context_supported"] != true { return Err("Native compaction is unavailable or the agent is busy".into()); }
+            // Task 209: supported says the host can compact; this says it can
+            // do it now.
+            if current["compact_context_supported"] != true
+                || !matches!(string(&current, "phase"), "" | "idle" | "ready")
+            {
+                return Err("Wait for the DeepSeek agent to become idle before compacting its context".into());
+            }
             rpc(&record, "compact", json!({"sessionId":record["conversation_id"],"generation":current["host_generation"],"requestId":request["request_id"]}))?;
             println!("{}",json!({"request_id":request["request_id"],"name":name,"run_id":record["run_id"],"conversation_id":record["conversation_id"],"status":"submitted"}));
         }
@@ -4223,5 +4428,105 @@ mod delivery_tests {
                 format!("Interrupt delivery uncertain: {after}")
             );
         }
+    }
+}
+
+/// Task 209: a session's compaction capability is its host's, not its phase;
+/// the phase only says why the command cannot run right now.
+#[cfg(test)]
+mod compact_support_tests {
+    use super::*;
+
+    #[test]
+    fn compact_support_does_not_depend_on_the_member_being_idle() {
+        assert!(compact_capability(None, &json!({"compactSupported": true})));
+        assert!(!compact_capability(None, &json!({"compactSupported": false})));
+        assert!(!compact_capability(Some("child"), &json!({"compactSupported": true})), "a subagent has no compaction of its own");
+        // Busy is a reason, never a loss of capability: the reported bug said
+        // "cannot compact" while the host supported it and the member was busy.
+        assert_eq!(compact_reason(true, "idle"), "");
+        assert_eq!(compact_reason(true, "ready"), "");
+        assert_eq!(compact_reason(true, "working"), "Wait for the DeepSeek agent to become idle before compacting its context");
+        assert_eq!(compact_reason(false, "idle"), "Native DeepSeek compaction is unavailable");
+    }
+}
+
+/// Task 234: a listing reuses the host's rows of stopped DeepSeek sessions
+/// (each costs the host a replay of the stored history) and asks only for
+/// the rest.
+#[cfg(test)]
+mod listing_rows_tests {
+    use super::*;
+
+    fn record(id: &str, run: &str) -> Value {
+        json!({"conversation_id":id,"run_id":run,"agent_home":"h"})
+    }
+
+    fn row(id: &str, live: bool) -> Value {
+        json!({"sessionId":id,"agentAvailable":live,"running":false,"pendingQuestions":[]})
+    }
+
+    fn ids(rows: &[Value]) -> Vec<&str> {
+        rows.iter().map(|row| row["sessionId"].as_str().unwrap()).collect()
+    }
+
+    #[test]
+    fn stopped_rows_are_reused_and_only_the_rest_asked_for() {
+        let (a, b, c) = (record("a", "r1"), record("b", "r2"), record("c", "r3"));
+        let records = [&a, &b, &c];
+        let generation = json!("g1");
+        // Nothing cached: every conversation is asked for.
+        let (reused, ask) = plan_rows(&Value::Null, &records, &generation, None, 100.0);
+        assert!(reused.is_empty());
+        assert_eq!(ask, ["a", "b", "c"]);
+        // The answer: a and c stopped, b loaded. Only the stopped ones are kept.
+        let cache = update_rows(&Value::Null, &records, &generation, &[row("a", false), row("b", true), row("c", false)], 100.0);
+        assert_eq!(cache["rows"].as_object().unwrap().keys().collect::<Vec<_>>(), ["a", "c"]);
+        let (reused, ask) = plan_rows(&cache, &records, &generation, None, 160.0);
+        assert_eq!((ids(&reused), ask), (vec!["a", "c"], vec!["b".to_owned()]));
+        // Another host generation, another run of a binding, or a session the
+        // host says it loaded: asked for again.
+        assert_eq!(plan_rows(&cache, &records, &json!("g2"), None, 160.0).1, ["a", "b", "c"]);
+        let resumed = record("a", "r9");
+        assert_eq!(plan_rows(&cache, &[&resumed, &b, &c], &generation, None, 160.0).1, ["a", "b"]);
+        let loaded: BTreeSet<String> = ["c".to_owned()].into();
+        assert_eq!(plan_rows(&cache, &records, &generation, Some(&loaded), 160.0).1, ["b", "c"]);
+        // A row that came back live leaves the cache.
+        let after = update_rows(&cache, &records, &generation, &[row("c", true)], 170.0);
+        assert!(after["rows"]["c"].is_null() && after["rows"]["a"].is_object());
+        // A binding that is gone takes its row along.
+        let fewer = update_rows(&cache, &[&a, &b], &generation, &[], 170.0);
+        assert!(fewer["rows"]["c"].is_null() && fewer["rows"]["a"].is_object());
+    }
+
+    #[test]
+    fn rows_past_their_bound_are_refreshed_one_a_listing_oldest_first() {
+        let (a, b) = (record("a", "r1"), record("b", "r2"));
+        let records = [&a, &b];
+        let generation = json!("g1");
+        let cache = update_rows(&Value::Null, &records, &generation, &[row("a", false)], 100.0);
+        let cache = update_rows(&cache, &records, &generation, &[row("b", false)], 200.0);
+        let later = 200.0 + STOPPED_ROW_SECONDS + 1.0;
+        let (reused, ask) = plan_rows(&cache, &records, &generation, None, later);
+        assert_eq!((ids(&reused), ask), (vec!["b"], vec!["a".to_owned()]), "the oldest first, one a listing");
+        // A host naming its loaded sessions keeps a stopped row much longer.
+        let loaded = BTreeSet::new();
+        assert!(plan_rows(&cache, &records, &generation, Some(&loaded), later).1.is_empty());
+    }
+
+    #[test]
+    fn a_reused_row_brings_its_subagents() {
+        let a = record("a", "r1");
+        let generation = json!("g1");
+        let parent = json!({"sessionId":"a","agentAvailable":false,"running":false,
+            "projections":{"values":{"subagentCatalog":[{"id":"a-child"}]}}});
+        let cache = update_rows(&Value::Null, &[&a], &generation, &[parent, row("a-child", false)], 100.0);
+        assert_eq!(cache["rows"]["a-child"]["run_id"], "r1", "a subagent keeps its parent's run");
+        let (reused, ask) = plan_rows(&cache, &[&a], &generation, None, 110.0);
+        assert!(ask.is_empty());
+        assert_eq!(ids(&reused), ["a", "a-child"]);
+        // A row with a pending question is never cached.
+        let asking = json!({"sessionId":"a","agentAvailable":false,"running":false,"pendingQuestions":[{"id":"q"}]});
+        assert!(update_rows(&Value::Null, &[&a], &generation, &[asking], 100.0)["rows"]["a"].is_null());
     }
 }

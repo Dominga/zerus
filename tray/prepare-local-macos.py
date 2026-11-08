@@ -43,12 +43,13 @@ def check_cli(hgs, runner):
         raise ValueError("Run ./install.sh (or mac-install.sh) from this checkout first; the stable hgs CLI differs from the build.")
 
 
-def prepare(app, hgs, output, installed, requested="", runner=None):
+def prepare(app, hgs, output, installed, requested="", runner=None, lore=None):
     """Only a successfully verified private copy is returned to the caller."""
-    if app.is_symlink() or hgs.is_symlink() or installed.is_symlink():
+    if app.is_symlink() or hgs.is_symlink() or installed.is_symlink() or (lore is not None and lore.is_symlink()):
         raise ValueError("App, CLI and previous-app inputs must not be symbolic links.")
     app = app.resolve(strict=True)
     hgs = hgs.resolve(strict=True)
+    lore = lore.resolve(strict=True) if lore is not None else None
     installed = installed.resolve()
     # Resolve the parent, not an existing final leaf. mkdir below reserves that
     # leaf without ever replacing a file, directory or dangling link.
@@ -60,7 +61,8 @@ def prepare(app, hgs, output, installed, requested="", runner=None):
         raise ValueError("The prepared output must keep the hgs-tray.app basename.")
     if output.exists() or output.is_symlink():
         raise ValueError("The output already exists; use a fresh scratch prefix.")
-    if any(overlaps(output, source) for source in (app, hgs, installed)):
+    sources = (app, hgs, installed) if lore is None else (app, hgs, lore, installed)
+    if any(overlaps(output, source) for source in sources):
         raise ValueError("The output must not overlap any input or previous installation.")
     if runner is not None:
         check_cli(hgs, runner)
@@ -73,6 +75,10 @@ def prepare(app, hgs, output, installed, requested="", runner=None):
         raise ValueError("The built CLI must be a regular executable file.")
     if signer.regular_bytes(hgs, 4) not in signer.MACH_O:
         raise ValueError("The built CLI is not Mach-O.")
+    if lore is not None and (not lore.is_file() or not os.access(lore, os.X_OK)):
+        raise ValueError("The built lore binary must be a regular executable file.")
+    if lore is not None and signer.regular_bytes(lore, 4) not in signer.MACH_O:
+        raise ValueError("The built lore binary is not Mach-O.")
     output.mkdir(mode=0o700)
     owned = output.stat()
     try:
@@ -81,6 +87,8 @@ def prepare(app, hgs, output, installed, requested="", runner=None):
         shutil.copytree(app, output, symlinks=True, dirs_exist_ok=True)
         output.chmod(0o700)
         shutil.copy2(hgs, output / "Contents/MacOS/hgs", follow_symlinks=False)
+        if lore is not None:
+            shutil.copy2(lore, output / "Contents/MacOS/lore", follow_symlinks=False)
         service_payload.stage(Path(__file__).resolve().parents[1], output)
         service_payload.require_payload(output)
         record = signer.sign(output, installed, requested, paired=True)
@@ -89,6 +97,8 @@ def prepare(app, hgs, output, installed, requested="", runner=None):
             check_cli(hgs, runner)
             if signer.sha256(hgs) != record["build_sha256"]:
                 raise ValueError("The CLI build changed during signing; no application was installed.")
+        if lore is not None and signer.sha256(lore) != record.get("lore_sha256"):
+            raise ValueError("The lore build changed during signing; no application was installed.")
         return record
     except BaseException:
         # A replaced output is uncertain. Preserve it rather than deleting a
@@ -107,6 +117,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--app", type=Path, help="built single-executable source app")
     parser.add_argument("--hgs", type=Path, required=True, help="matching root Cargo build artifact")
+    parser.add_argument("--lore", type=Path, help="matching lore build artifact")
     parser.add_argument("--runner-hgs", type=Path, help="independent installed CLI used by agents")
     parser.add_argument("--check-cli", action="store_true", help="check build/runner equality without signing or staging")
     parser.add_argument("--output", type=Path, help="fresh scratch prefix's hgs-tray.app")
@@ -121,7 +132,7 @@ def main():
             if any(path is None for path in (args.app, args.output, args.installed)):
                 parser.error("preparation requires --app, --output and --installed")
             prepare(args.app, args.hgs, args.output, args.installed,
-                    os.environ.get("HGS_MACOS_SIGN_IDENTITY", ""), args.runner_hgs)
+                    os.environ.get("HGS_MACOS_SIGN_IDENTITY", ""), args.runner_hgs, args.lore)
     except (ValueError, OSError, KeyError, subprocess.SubprocessError) as error:
         message = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) else str(error)
         parser.exit(1, f"Local macOS pair preparation failed: {message}\n")

@@ -2,9 +2,7 @@
 """Bundle tested hgs, lore, the Tauri desktop and connector into the Windows zip.
 
 The app-local MSVC runtime and pinned ConPTY pair accompany the unchanged
-binaries. lore.exe sits beside hgs.exe, which finds it there for team and
-project memory. WebView2 uses the installed Evergreen runtime; Qt is never
-deployed.
+binaries. WebView2 uses the installed Evergreen runtime; Qt is never deployed.
 """
 import argparse
 import datetime
@@ -21,6 +19,7 @@ import tomllib
 import zipfile
 
 import conpty_pair
+from lore_dependency import lore_version
 from release_common import require
 from windows_portable import TOP, inspect
 
@@ -100,14 +99,11 @@ def write_zip(stage, output, date_time):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--cli", type=Path, required=True, help="tested hgs.exe")
+    parser.add_argument("--lore", type=Path, required=True, help="tested lore.exe (task 128 subprocess)")
     parser.add_argument("--connector", type=Path, required=True, help="tested zerus-mobile-connector.exe")
     parser.add_argument("--gui", type=Path, required=True, help="tested hgs-tray.exe")
     # WhiteWh fork: a relay for this computer alone (docs/fork-updates.md).
     parser.add_argument("--mobile-relay", type=Path, help="tested zerus-relay.exe")
-    # Task 260: team and project memory run crates/lore's binary, which hgs
-    # finds beside itself, so every Windows package ships it beside hgs.exe.
-    parser.add_argument("--lore", type=Path, required=True,
-                        help="tested lore.exe (crates/lore), shipped beside hgs.exe for team and project memory")
     parser.add_argument("--output", type=Path, required=True, help="zip to write")
     parser.add_argument("--crt-dir", type=Path, help="Microsoft.VC14*.CRT folder [default: found with vswhere]")
     parser.add_argument("--rust-licenses", type=Path,
@@ -137,6 +133,7 @@ def main():
     cli_version = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
     manifest = {"product": "Zerus", "version": version, "cli_version": cli_version, "platform": "Windows",
                 "architecture": "x86_64", "desktop": "tauri", "webview2_runtime": "evergreen", "native_agents_bundled": False, "mobile_connector_bundled": True,
+                "lore_version": lore_version(ROOT),
                 "source_commit": source_commit()}
     if args.fork:
         build = args.fork_build.strip()
@@ -158,10 +155,9 @@ def main():
         else:
             pair = conpty_pair.fetch(Path(temporary) / "conpty")
         copy(args.cli, stage / "hgs.exe")
+        copy(args.lore, stage / "lore.exe")
         copy(args.gui, stage / "hgs-tray.exe")
         copy(args.connector, stage / "zerus-mobile-connector.exe")
-        copy(args.lore, stage / "lore.exe")
-        manifest["lore_bundled"] = True
         if args.mobile_relay:
             copy(args.mobile_relay, stage / "zerus-relay.exe")
         for dll in sorted(crt.glob("*.dll")):
@@ -186,10 +182,10 @@ def main():
             shutil.copytree(args.rust_licenses, licenses / "rust")
         else:
             relay = ["--manifest-path", str(ROOT / "services/mobile/relay/Cargo.toml")] if args.mobile_relay else []
-            lore = ["--manifest-path", str(ROOT / "crates/lore/Cargo.toml")]
             subprocess.run([sys.executable, str(ROOT / "scripts/collect-licenses.py"), str(licenses / "rust"),
                             "--manifest-path", str(ROOT / "Cargo.toml"),
-                            "--manifest-path", str(ROOT / "services/mobile/connector/Cargo.toml"), *relay, *lore],
+                            "--manifest-path", str(ROOT / "services/mobile/connector/Cargo.toml"),
+                            "--manifest-path", str(ROOT / "crates/lore-bin/Cargo.toml"), *relay],
                            cwd=ROOT, check=True)
             subprocess.run([sys.executable, str(ROOT / "scripts/collect-licenses.py"), str(licenses / "rust/desktop"),
                             "--manifest-path", str(ROOT / "client/src-tauri/Cargo.toml"),
@@ -241,3 +237,4 @@ if __name__ == "__main__":
         main()
     except ValueError as error:
         raise SystemExit(f"package-windows: {error}") from None
+

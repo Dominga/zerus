@@ -1,6 +1,7 @@
 import { tr } from "../../i18n";
 import { act, hgsWords, type DecisionPort } from "./decisions";
-import type { ComputerId, TeamAction, TeamChoice, TeamConfirmation, TeamOutcome, TeamSummary } from "../../types";
+import { moveTarget } from "./phaseHeader";
+import type { ComputerId, TeamAction, TeamChoice, TeamConfirmation, TeamOutcome, TeamPlanChange, TeamSummary } from "../../types";
 
 // Task 40: the team bar's actions and the task card's actions, as Qt's
 // TeamWorkspace (headerActionsContent, the bar chips), TeamPanel (approvePlan,
@@ -21,6 +22,12 @@ export interface ActTeam {
   phases: { n: number; title: string; state: string; status: string; mode?: string }[];
   /** Task #58: the free phase, and whether hgs sends each phase's mode. */
   free_phase?: number | null; phase_modes_known?: boolean;
+  /** Task #219: the lead's open proposals; a switch-plan-mode one marks its phase. */
+  proposals?: { kind: string; mode?: string; change?: unknown }[];
+  /** D2: the first page of the team's findings. */
+  findings?: { items: import("../../types").TeamFindingItem[]; next_cursor?: string };
+  /** F7: the team a next goal led to. */
+  next?: string;
   widenings?: { member?: string; role?: string; from?: string; to?: string }[];
   children?: { team: string; name?: string; status?: string }[];
 }
@@ -83,6 +90,64 @@ export function phaseModeChip(team: ActTeam, n: number): ModeChip | undefined {
   if (free) return { mode: "free", text: tr("Free mode"), tip: tr("Free planning: the phase stays open and takes tasks as they come until you close it") };
   if (!team.phase_modes_known || phase.state !== "running") return undefined;
   return { mode: "standard", text: tr("Standard mode"), tip: tr("Standard planning: the phase is planned, approved and closed with its build") };
+}
+
+/**
+ * Task #219: the segmented Standard | Free toggle of every phase header, in
+ * every plan mode. It names the phase's current mode, the lead's open proposal
+ * beside it, and whether this viewer may switch it: only the owner does
+ * (`phase-mode`); a lead or member session sees the same state read-only. A
+ * draft shows the mode it will start in and says on hover why the core cannot
+ * switch it yet.
+ */
+export interface PhaseModeState {
+  phase: number;
+  mode: "free" | "standard";
+  /** The lead's open switch-plan-mode proposal for this phase, if any. */
+  proposed?: "free" | "standard";
+  /** The mode the other segment asks for. */
+  target: "free" | "standard";
+  /** The mode's one-line explanation, shown as the toggle's tooltip. */
+  tip: string;
+  /** Why it cannot be switched now; "" when it can. */
+  why: string;
+  canSwitch: boolean;
+  /** A draft phase: the mode it will start in, not one it runs in yet. */
+  draft: boolean;
+  /** The viewer is a lead or member session, not the owner. */
+  readOnly: boolean;
+}
+
+export function phaseModeState(team: ActTeam, n: number, owner = true): PhaseModeState | undefined {
+  const phase = team.phases.find((found) => found.n === n);
+  if (!phase) return undefined;
+  const free = (team.free_phase ?? 0) === n || phase.mode === "free"
+    || (!phase.mode && !team.phase_modes_known && team.plan_mode === "free");
+  const mode: "free" | "standard" = free ? "free" : "standard";
+  const target: "free" | "standard" = free ? "standard" : "free";
+  const draft = phase.state === "draft";
+  const proposal = team.proposals?.find((found) => {
+    if (found.kind !== "switch-plan-mode") return false;
+    const change = found.change && typeof found.change === "object" ? found.change as { phase?: number } : {};
+    return change.phase === n || (!change.phase && phase.state === "running");
+  });
+  const proposed = proposal?.mode === "free" ? "free" as const : proposal?.mode === "standard" ? "standard" as const : undefined;
+  const tip = (mode === "free"
+    ? tr("Free: the phase stays open and takes tasks as they come until you close it")
+    : tr("Standard: the phase is planned, approved and closed with its build"))
+    + (proposed ? `\n${tr("The lead proposes %1", proposed === "free" ? tr("Free") : tr("Standard"))}` : "");
+  let why = "";
+  if (!owner) why = tr("Only the owner switches a phase's mode; the lead proposes it");
+  else if (!["running", "paused"].includes(team.status)) why = tr("Only a running or paused team switches a phase's mode");
+  else if (draft) why = mode === "free"
+    ? tr("A draft phase starts free here; only an approved phase can open for tasks as they come")
+    : tr("A draft phase starts in Standard; it can switch when the team runs and the phase is approved");
+  else if (target === "free" && !["approved", "running"].includes(phase.state)) why = tr("Phase %1 is not running: only a running phase opens for tasks as they come", n);
+  else if (target === "standard" && !["approved", "running", "awaiting_acceptance", "done", "accepted"].includes(phase.state))
+    why = tr("Phase %1 is not accepted: a draft has no mode to lock", n);
+  else if (target === "free" && (team.free_phase ?? 0) > 0 && (team.free_phase ?? 0) !== n)
+    why = tr("Phase %1 already takes tasks as they come; switch it to standard first", team.free_phase ?? 0);
+  return { phase: n, mode, proposed, target, tip, why, canSwitch: !why, draft, readOnly: !owner };
 }
 
 /** Task #59: the team bar's mode badge (Qt teamHeaderPlanMode), with the free phase it names. */
@@ -160,7 +225,7 @@ export function leadStall(team: Pick<ActTeam, "attention">): LeadStall | null {
 }
 
 export interface BarAction {
-  id: "resumeLimits" | "finish" | "discard" | "sendBack" | "approve" | "pause" | "resume" | "stop" | "archive";
+  id: "resumeLimits" | "finish" | "discard" | "sendBack" | "approve" | "pause" | "resume" | "stop" | "archive" | "findings" | "nextGoal";
   text: string; tip: string; primary: boolean; danger: boolean; enabled: boolean;
   /** The Resume after limits switch's state. */
   checked?: boolean;
@@ -202,6 +267,8 @@ export function barActions(team: ActTeam, planMode: string): BarAction[] {
     out.push({ primary: false, danger: false, enabled: true, ...a });
   };
   const status = team.status;
+  if ((team.findings?.items.length ?? 0) > 0)
+    action({ id: "findings", text: tr("Findings…"), tip: tr("The owner's findings: fixed, dropped, deferred, reopened, urgent or replanned") });
   if (status === "planning" || status === "running" || status === "paused") {
     const on = team.settings.resume_after_limits === true;
     action({ id: "resumeLimits", text: tr("Resume after limits"), checked: on,
@@ -225,8 +292,15 @@ export function barActions(team: ActTeam, planMode: string): BarAction[] {
   }
   if (status === "running" || status === "paused") action({ id: "stop", text: tr("Stop…"), tip: tr("Cancel every open task"), danger: true });
   if (status === "done" || status === "stopped") action({ id: "archive", text: tr("Archive"), tip: tr("Archive the team") });
+  if (status === "done" && !team.next)
+    action({ id: "nextGoal", text: tr("Next goal…"), tip: tr("A new team takes the next goal with this folder, its settings, the lead and the members"), primary: true });
   return out;
 }
+
+/** D2: the finding actions' words, as Qt's dialog names them. */
+export const FINDING_LABELS = {
+  fixed: tr("Fixed"), dropped: tr("Dropped"), defer: tr("Defer"), reopen: tr("Reopen"), urgent: tr("Urgent phase"), replan: tr("Replan"),
+} as const;
 
 /**
  * G1: the sub-teams a tree action reaches and their member sessions, the team
@@ -538,6 +612,30 @@ export class TeamActions {
   }
   stop(impact: { teams: number; sessions: number }) { return this.run("stop", { kind: "stop" }, stopConfirmation(this.where().team, impact)); }
   archive() { return this.run("archive", { kind: "archive" }); }
+  /** D2: one finding's answer; every answer but Replan asks first (Qt's teamFindingActionConfirm). */
+  finding(finding: string, action: Extract<TeamAction, { kind: "finding" }>["action"], proposal?: string, task?: number) {
+    const item = this.where().team.findings?.items.find((found) => found.id === finding);
+    const label = FINDING_LABELS[action];
+    const ask: TeamConfirmation | undefined = action === "replan" ? undefined : {
+      name: "teamFindingActionConfirm", title: label, text: tr("%1 finding \"%2\"?", label, item?.title || finding), action: label,
+    };
+    return this.run(`finding:${finding}:${action}`, {
+      kind: "finding", finding, action, ...(proposal ? { proposal } : {}), ...(task ? { task } : {}),
+    }, ask);
+  }
+  /** F7: the next goal a Done team starts with the same people. */
+  nextGoal(goal: string, name?: string) {
+    return this.run("next-goal", { kind: "next_goal", goal: goal.trim(), ...(name?.trim() ? { name: name.trim() } : {}) });
+  }
+  /** G1: a sub-team from a task, with the assignee as its lead. */
+  createSubteam(name: string, task: number) {
+    const { team } = this.where();
+    const ask: TeamConfirmation = {
+      name: "teamDelegateConfirm", title: tr("Delegate to a sub-team"),
+      text: tr("Create a sub-team from task #%1? Its lead will be the assignee.", task), action: tr("Delegate"),
+    };
+    return this.run(`create:${task}`, { kind: "create", name: name.trim(), parent: { team: team.id, task } }, ask);
+  }
   /** Finish: the dialog with its summary is the confirmation. */
   async finish(summary: string) {
     if (!finishSummary(summary).ok) return undefined;
@@ -589,6 +687,99 @@ export class TeamActions {
     return this.run(`reply:${question}`, { kind: "reply", question, text: answer });
   }
   move(task: ActTask, phase: number) { return this.run(`move:${task.id}`, { kind: "move_task", task: task.id, phase, revision: this.where().team.revision }); }
+
+  // Task 199: the member menu and card (Qt TeamWorkspace::memberMenu, members).
+  pauseMember(member: string) { return this.run(`pause-member:${member}`, { kind: "pause_member", member }); }
+  resumeMember(member: string) { return this.run(`resume-member:${member}`, { kind: "resume_member", member }); }
+  relaunch(member: string) { return this.run(`relaunch:${member}`, { kind: "relaunch", member }); }
+  /** Drain asks first (core words it as Qt); Cancel drain goes at once. */
+  drain(member: string, role: string, cancel = false) { return this.run(`drain:${member}`, { kind: "drain", member, role, cancel }); }
+  removeMember(member: string, role: string) { return this.run(`remove-member:${member}`, { kind: "remove_member", member, role }); }
+  reportsTo(member: string, parent: string) { return this.run(`reports-to:${member}`, { kind: "reports_to", member, parent }); }
+  subLead(member: string, sub: boolean) { return this.run(`sub-lead:${member}`, { kind: "sub_lead", member, sub }); }
+  scale(input: { role: string; agent: string; count: number; model?: string; effort?: string; account?: string }) {
+    return this.run(`scale:${input.role}`, { kind: "scale", ...input });
+  }
+  swap(member: string, change: { agent?: string; model?: string; effort?: string; account?: string; fresh?: boolean }) {
+    return this.run(`swap:${member}`, { kind: "swap_member", member, ...change });
+  }
+  moveAccount(provider: string, from: string, to: string) { return this.run(`move-account:${provider}`, { kind: "move_account", provider, from_account: from, to_account: to }); }
+  addMember(member: Record<string, unknown>) { return this.run(`add-member`, { kind: "add_member", member }); }
+  ironRules(member: string, rules: string[]) {
+    return this.run(`iron-rules:${member}`, { kind: "settings", settings: {}, members_update: [{ id: member, iron_rules: rules }] });
+  }
+  /** C4: Allow or Deny a member's permission with its question id, hash and the card's own answer ids; a deny's reason travels as text. */
+  answerMember(member: string, question: { question_id?: string; question_hash?: string; expected_question_hash?: string; answer?: unknown }, allow: boolean, text = "") {
+    const native = question.answer && typeof question.answer === "object" ? question.answer as { question_id?: string; allow?: string; deny?: string } : undefined;
+    const hash = question.question_hash || question.expected_question_hash || "";
+    if (!question.question_id || !hash || !native?.question_id || !native.allow || !native.deny) return Promise.resolve(undefined);
+    return this.run(`answer:${member}`, { kind: "answer", member, question_id: question.question_id, expected_question_hash: hash,
+      answers: [{ question_id: native.question_id, selected_option_ids: [allow ? native.allow : native.deny], text: allow ? "" : text.trim() }] });
+  }
+  /** #719: Force run queues the suite as forced. */
+  forceTest(suite: string) { return this.run(`force:${suite}`, { kind: "force_test", suite }); }
+  /** U51: a new intake key; hgs answers its secret once in the receipt. */
+  createIntake(label: string) { return this.run(`intake`, { kind: "intake_key", label: label.trim() }); }
+  revokeIntake(id: string, label: string) { return this.run(`intake-revoke:${id}`, { kind: "intake_key", revoke: id, label }); }
+
+  // Task 196: the phase header and its menu (Qt TeamWorkspace's phase header).
+  approvePhase(phase: number) { return this.run(`approve-phase:${phase}`, { kind: "approve", phase }); }
+  rejectPhase(phase: number, comment: string) {
+    if (!comment.trim()) return Promise.resolve(undefined);
+    return this.run(`reject-phase:${phase}`, { kind: "reject_phase", phase, comment: comment.trim(), revision: this.where().team.revision });
+  }
+  undoRejectPhase(phase: number) { return this.run(`undo-reject-phase:${phase}`, { kind: "undo_reject_phase", phase }); }
+  acceptOwnerPhase(phase: number) { return this.run(`accept-phase:${phase}`, { kind: "accept_phase", phase }); }
+  sendBackPhase(phase: number, comment: string) {
+    if (!comment.trim()) return Promise.resolve(undefined);
+    return this.run(`send-back-phase:${phase}`, { kind: "send_back_phase", phase, comment: comment.trim() });
+  }
+  /** Core asks first, in Qt's words: an accepted phase says so. */
+  discardPhase(phase: number) {
+    const team = this.where().team;
+    const state = team.phases.find((found) => found.n === phase)?.state ?? "";
+    const tasks = team.tasks.filter((task) => task.phase === phase).length;
+    return this.run(`discard-phase:${phase}`, { kind: "discard_phase", phase, tasks, accepted: state === "queued" || state === "running" });
+  }
+  returnToDraft(phase: number) { return this.run(`return-to-draft:${phase}`, { kind: "return_to_draft", phase }); }
+  /** Move earlier or later among the movable phases (drafts and accepted ones not started). */
+  movePhase(phase: number, later: boolean) {
+    const team = this.where().team;
+    const target = moveTarget(team, phase, later);
+    if (!target) return Promise.resolve(undefined);
+    return this.run(`move-phase:${phase}`, { kind: "move_phase", phase, to: target.to, position: target.position });
+  }
+  pausePhase(phase: number, reason: string) { return this.run(`pause-phase:${phase}`, { kind: "pause_phase", phase, reason: reason.trim() }); }
+  unpausePhase(phase: number) { return this.run(`unpause-phase:${phase}`, { kind: "unpause_phase", phase }); }
+  phaseAcceptance(phase: number, owner: boolean) { return this.run(`phase-acceptance:${phase}`, { kind: "phase_acceptance", phase, owner }); }
+  /** Edit phase: only what changed is sent, at the revision the team was read at. */
+  editPhase(phase: number, title: string | undefined, updates: { id: number; title?: string; description?: string; criteria?: string[]; assignee?: string; deps?: unknown[] }[]) {
+    if (title === undefined && updates.length === 0) return Promise.resolve(undefined);
+    const action: TeamAction = { kind: "edit_draft", phase, revision: this.where().team.revision, tasks_update: updates };
+    if (title !== undefined) action.title = title;
+    return this.run(`edit-draft:${phase}`, action);
+  }
+  /** Drag and delete of a dependency in a draft, or in an accepted phase not started (edit-draft). */
+  linkDraft(task: ActTask, dependency: number, add: boolean) {
+    const deps = task.deps.filter((dep) => dep.task !== dependency).map((dep) => ({ task: dep.task, kind: dep.hard ? "hard" : "soft" }));
+    if (add) deps.push({ task: dependency, kind: "hard" });
+    return this.editPhase(task.phase, undefined, [{ id: task.id, deps }]);
+  }
+  /** Planning: one edit of the plan; core sends the whole plan at the revision the owner saw. */
+  planEdit(change: TeamPlanChange) { return this.run(`plan-edit`, { kind: "plan_edit", revision: this.where().team.revision, change }); }
+  /**
+   * Add task... to a running phase: hgs warns first (the request keeps the
+   * addition pending); the owner's confirmation adds it, a cancel declines it.
+   */
+  async addTasks(phase: number, tasks: { title: string; assignee?: string; description?: string }[]) {
+    const requested = await this.run(`add-to-phase:${phase}`, { kind: "add_to_phase", phase, tasks });
+    if (!requested || requested === "cancelled" || requested.outcome !== "done") return requested;
+    const receipt = requested.receipt as { status?: string; pending?: string; warning?: string };
+    if (receipt.status !== "warning" || !receipt.pending) return requested;
+    const yes = await this.port.confirm({ name: "teamAddLateConfirm", title: tr("Add to running phase?"), text: receipt.warning ?? "", action: tr("Add") });
+    if (!yes) return this.run(`add-to-phase:${phase}:decline`, { kind: "add_to_phase", phase, confirm: receipt.pending, decline: true });
+    return this.run(`add-to-phase:${phase}:confirm`, { kind: "add_to_phase", phase, confirm: receipt.pending, confirmation: "add" });
+  }
   /** An inline form: nothing is sent without a reason. */
   submit(task: ActTask, form: TaskForm, reason: string, returnLater = false) {
     const action = formAction(task, form, reason, returnLater);

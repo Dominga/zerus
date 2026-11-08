@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TeamActions, allDecided, freeMode, phaseModeChip, phaseModeConfirmation, phaseModeSwitch, teamModeBadge, type ActTeam } from "./actions";
+import { TeamActions, allDecided, freeMode, phaseModeChip, phaseModeConfirmation, phaseModeState, phaseModeSwitch, teamModeBadge, type ActTeam } from "./actions";
 import { proposalText } from "./decisions";
 import type { DecisionPort } from "./decisions";
 import type { TeamCall, TeamConfirmation, TeamProposalView } from "../../types";
@@ -48,6 +48,25 @@ describe("a phase's mode", () => {
     // An older hgs or a team that is not running offers no switch.
     expect(phaseModeSwitch(team({ phase_modes_known: false }), 2)).toBeUndefined();
     expect(phaseModeSwitch(team({ status: "planning" }), 2)).toBeUndefined();
+  });
+
+  it("every phase header's toggle names its mode and what the owner may do", () => {
+    const t = team();
+    expect(phaseModeState(t, 2, true)).toMatchObject({ mode: "standard", target: "free", canSwitch: true, draft: false, readOnly: false });
+    expect(phaseModeState(t, 2, false)).toMatchObject({ mode: "standard", canSwitch: false, readOnly: true,
+      why: "Only the owner switches a phase's mode; the lead proposes it" });
+    const free = team({ free_phase: 2, phases: t.phases.map((phase) => (phase.n === 2 ? { ...phase, mode: "free" } : phase)) });
+    expect(phaseModeState(free, 2, true)).toMatchObject({ mode: "free", target: "standard", canSwitch: true });
+    // A draft shows the mode it will start in and says why it cannot switch yet.
+    expect(phaseModeState(t, 3, true)).toMatchObject({ mode: "standard", draft: true, canSwitch: false });
+    expect(phaseModeState(t, 3, true)?.why).toContain("draft phase starts in Standard");
+  });
+
+  it("a pending switch-plan-mode proposal is marked on the toggle", () => {
+    const t = team({ proposals: [{ kind: "switch-plan-mode", mode: "free", change: { phase: 2 } }] });
+    expect(phaseModeState(t, 2, true)).toMatchObject({ mode: "standard", proposed: "free", target: "free" });
+    expect(phaseModeState(t, 1, true)?.proposed).toBeUndefined();
+    expect(phaseModeState(t, 2, true)?.tip).toContain("Free");
   });
 
   it("a free phase keeps the queue idle, whichever phase it is", () => {

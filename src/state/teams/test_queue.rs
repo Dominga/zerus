@@ -48,6 +48,13 @@ pub(crate) struct Request {
     /// U62 (#732): the suite's platform classes (its provider's `platforms`);
     /// empty runs here. Another class goes only to a test runner of it.
     pub platforms: Vec<String>,
+    /// Task #281: a performance measurement; its run checks the machine first
+    /// and records the load, and waits for a quiet window (bounded).
+    pub performance: bool,
+    /// Task #281: a comparison group; its performance requests alternate the
+    /// binaries in rounds, never one binary's rounds back to back.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub compare: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -79,6 +86,12 @@ pub(crate) struct Record {
     /// Task 88: one result per test from the provider's report, if it names one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub report: Option<super::run_results::Report>,
+    /// Task #281: a performance measurement; its result carries the load.
+    pub performance: bool,
+    /// Task #281: the machine's load before and during the run, whether it
+    /// waited, and whether it ran marked `loaded`; none for a correctness test.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load: Option<serde_json::Value>,
 }
 
 /// #719: a request still in the queue: waiting, or running since `started`.
@@ -95,9 +108,9 @@ pub(crate) struct Pending {
 /// #719: at most this many queued and running requests in one read.
 pub(crate) const PENDING_LIMIT: i64 = 100;
 
-const REQUEST_COLUMNS: &str = "id,team,suite,task,targets,commit_id,input_hash,asked_by,forced,at,seconds,budget_minutes,resources,command,platforms";
+const REQUEST_COLUMNS: &str = "id,team,suite,task,targets,commit_id,input_hash,asked_by,forced,at,seconds,budget_minutes,resources,command,platforms,performance,compare";
 // #718: reused_from, flags, due and recorded_ms after #719's task.
-const RECORD_COLUMNS: &str = "id,team,suite,commit_id,input_hash,status,duration_ms,excerpt,asked_by,at,affected,task,reused_from,flags,due,recorded_ms,runner,report";
+const RECORD_COLUMNS: &str = "id,team,suite,commit_id,input_hash,status,duration_ms,excerpt,asked_by,at,affected,task,reused_from,flags,due,recorded_ms,runner,report,performance,load";
 
 fn add_column(db: &Connection, table: &str, column: &str, kind: &str) -> rusqlite::Result<()> {
     let present = db.prepare(&format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name=?1"))?.exists([column])?;
@@ -156,6 +169,11 @@ impl TestStore {
             // #732: a suite's platform classes, why it waits, and the runner of a result.
             add_column(&db, "queue", "platforms", "TEXT NOT NULL DEFAULT '[]'")?;
             add_column(&db, "queue", "reason", "TEXT NOT NULL DEFAULT ''")?;
+            // Task #281: a performance run, its comparison group and its load.
+            add_column(&db, "queue", "performance", "INTEGER NOT NULL DEFAULT 0")?;
+            add_column(&db, "queue", "compare", "TEXT NOT NULL DEFAULT ''")?;
+            add_column(&db, "results", "performance", "INTEGER NOT NULL DEFAULT 0")?;
+            add_column(&db, "results", "load", "TEXT NOT NULL DEFAULT ''")?;
             add_column(&db, "results", "runner", "TEXT NOT NULL DEFAULT ''")?;
             add_column(&db, "results", "task", "INTEGER")?;
             // Task 88: one result per test, as JSON; empty for none.
@@ -178,7 +196,7 @@ impl TestStore {
 
     pub(crate) fn enqueue(&self, request: &Request) -> anyhow::Result<()> {
         self.db.execute(
-            &format!("INSERT OR REPLACE INTO queue({REQUEST_COLUMNS},state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,'queued')"),
+            &format!("INSERT OR REPLACE INTO queue({REQUEST_COLUMNS},state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,'queued')"),
             params![
                 request.id,
                 request.team,
@@ -194,7 +212,9 @@ impl TestStore {
                 request.budget_minutes,
                 request.resources,
                 request.command,
-                serde_json::to_string(&request.platforms)?
+                serde_json::to_string(&request.platforms)?,
+                request.performance as i64,
+                request.compare
             ],
         )?;
         Ok(())
@@ -216,7 +236,7 @@ impl TestStore {
              ORDER BY state='running' DESC, forced DESC, at ASC LIMIT ?2"
         ))?;
         let rows = statement.query_map(params![team, PENDING_LIMIT], |row| {
-            Ok(Pending { request: Self::request(row)?, state: row.get(15)?, started: row.get(16)?, reason: row.get(17)? })
+            Ok(Pending { request: Self::request(row)?, state: row.get(17)?, started: row.get(18)?, reason: row.get(19)? })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
@@ -238,6 +258,8 @@ impl TestStore {
             resources: row.get(12)?,
             command: row.get(13)?,
             platforms: serde_json::from_str(&row.get::<_, String>(14)?).unwrap_or_default(),
+            performance: row.get::<_, i64>(15)? != 0,
+            compare: row.get(16)?,
         })
     }
 
@@ -263,7 +285,7 @@ impl TestStore {
     /// hash, status, duration, a bounded excerpt and who asked.
     pub(crate) fn write(&self, record: &Record) -> anyhow::Result<()> {
         self.db.execute(
-            &format!("INSERT OR REPLACE INTO results({RECORD_COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)"),
+            &format!("INSERT OR REPLACE INTO results({RECORD_COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)"),
             params![
                 record.id,
                 record.team,
@@ -282,7 +304,9 @@ impl TestStore {
                 record.due as i64,
                 record.recorded_ms as i64,
                 record.runner,
-                record.report.as_ref().map(serde_json::to_string).transpose()?.unwrap_or_default()
+                record.report.as_ref().map(serde_json::to_string).transpose()?.unwrap_or_default(),
+                record.performance as i64,
+                record.load.as_ref().map(serde_json::to_string).transpose()?.unwrap_or_default()
             ],
         )?;
         // Bounded: only the oldest records past the limit go.
@@ -336,6 +360,8 @@ impl TestStore {
             runner: String::new(),
             task: request.task,
             report: source.report.clone(),
+            performance: request.performance,
+            load: source.load.clone(),
         };
         self.write(&record)?;
         Ok(record)
@@ -398,6 +424,8 @@ impl TestStore {
             recorded_ms: row.get::<_, i64>(15)? as u64,
             runner: row.get(16)?,
             report: row.get::<_, Option<String>>(17)?.filter(|text| !text.is_empty()).and_then(|text| serde_json::from_str(&text).ok()),
+            performance: row.get::<_, i64>(18)? != 0,
+            load: row.get::<_, Option<String>>(19)?.filter(|text| !text.is_empty()).and_then(|text| serde_json::from_str(&text).ok()),
         })
     }
 }
@@ -436,6 +464,126 @@ pub(crate) fn record_notices(team: &mut super::model::Team, records: &[Record], 
 pub(crate) fn load_now() -> Load {
     let cpu_free = std::thread::available_parallelism().map(|count| count.get() as u32).unwrap_or(1);
     Load { cpu_free, ram_free_mb: free_memory_mb().unwrap_or(0), gpu_free: true, at_night: false }
+}
+
+/// Task #281: the machine's load for a performance run: busy CPU and disk,
+/// and the Zerus builds running now. A perf run records it and waits for a
+/// quiet machine (bounded), or runs marked `loaded` with these numbers.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub(crate) struct PerfLoad {
+    pub cpu_percent: f64,
+    pub disk_percent: f64,
+    pub builds: u32,
+    pub at: f64,
+}
+
+impl PerfLoad {
+    /// Quiet: CPU, disk and builds all at or under the policy's limits.
+    pub(crate) fn quiet(&self, policy: &config::Performance) -> bool {
+        self.cpu_percent <= f64::from(policy.cpu_percent)
+            && self.disk_percent <= f64::from(policy.disk_percent)
+            && self.builds <= policy.builds
+    }
+}
+
+/// Task #281: whether a performance run may start now. `Run(loaded)` starts
+/// it; `loaded` is true when the bounded wait is over and the machine is still
+/// busy, so the run is marked with the load.
+pub(crate) enum PerfGate {
+    Wait,
+    Run(bool),
+}
+
+pub(crate) fn perf_gate(load: &PerfLoad, policy: &config::Performance, queued_at: f64, now: f64) -> PerfGate {
+    if load.quiet(policy) {
+        return PerfGate::Run(false);
+    }
+    if now - queued_at < policy.wait_seconds.max(0.0) {
+        return PerfGate::Wait;
+    }
+    PerfGate::Run(true)
+}
+
+/// Task #281: samples the machine for a perf run. A test replaces it with a
+/// fake load (`perf_load_override`).
+pub(crate) fn perf_load(project: &Path) -> PerfLoad {
+    #[cfg(test)]
+    if let Some(load) = PERF_LOAD.with(|slot| slot.borrow().clone()) {
+        return load;
+    }
+    PerfLoad {
+        cpu_percent: cpu_percent(),
+        disk_percent: disk_percent(project),
+        builds: super::super::builds::running(super::super::now()).len() as u32,
+        at: super::super::now(),
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static PERF_LOAD: std::cell::RefCell<Option<PerfLoad>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn perf_load_override(load: Option<PerfLoad>) {
+    PERF_LOAD.with(|slot| *slot.borrow_mut() = load);
+}
+
+/// The busy share of the machine's CPU, sampled over a short window.
+#[cfg(windows)]
+fn cpu_percent() -> f64 {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetSystemTimes;
+    let sample = || -> (u64, u64, u64) {
+        let (mut idle, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default());
+        unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) };
+        let time = |value: &FILETIME| ((u64::from(value.dwHighDateTime)) << 32) | u64::from(value.dwLowDateTime);
+        (time(&idle), time(&kernel), time(&user))
+    };
+    let (idle, kernel, user) = sample();
+    std::thread::sleep(Duration::from_millis(75));
+    let (idle_after, kernel_after, user_after) = sample();
+    let total = (kernel_after.saturating_sub(kernel) + user_after.saturating_sub(user)) as f64;
+    let idle = idle_after.saturating_sub(idle) as f64;
+    if total <= 0.0 {
+        0.0
+    } else {
+        ((total - idle) / total * 100.0).clamp(0.0, 100.0)
+    }
+}
+
+#[cfg(unix)]
+fn cpu_percent() -> f64 {
+    let read = || -> Option<(f64, f64)> {
+        let text = std::fs::read_to_string("/proc/stat").ok()?;
+        let line = text.lines().find(|line| line.starts_with("cpu "))?;
+        let values: Vec<f64> = line.split_whitespace().skip(1).map(|value| value.parse().unwrap_or(0.0)).collect();
+        let idle = values.get(3).copied().unwrap_or(0.0) + values.get(4).copied().unwrap_or(0.0);
+        Some((values.iter().sum(), idle))
+    };
+    let Some((total, idle)) = read() else { return 0.0 };
+    std::thread::sleep(Duration::from_millis(75));
+    let Some((total_after, idle_after)) = read() else { return 0.0 };
+    let total = total_after - total;
+    let idle = idle_after - idle;
+    if total <= 0.0 {
+        0.0
+    } else {
+        ((total - idle) / total * 100.0).clamp(0.0, 100.0)
+    }
+}
+
+/// The used share of the volume `project` is on.
+fn disk_percent(project: &Path) -> f64 {
+    let existing = project.canonicalize().unwrap_or_else(|_| project.to_path_buf());
+    let (Some(total), Some(free)) = (fs2::total_space(&existing).ok(), fs2::available_space(&existing).ok()) else {
+        return 0.0;
+    };
+    if total == 0 {
+        0.0
+    } else {
+        ((total.saturating_sub(free)) as f64 / total as f64 * 100.0).clamp(0.0, 100.0)
+    }
 }
 
 #[cfg(windows)]
@@ -541,7 +689,64 @@ pub(crate) fn schedule(requests: &[Request], classes: &Classes, load: &Load) -> 
         heavy |= this_heavy;
         chosen.push(request.clone());
     }
-    chosen
+    // Task #281: a comparison's binaries alternate in rounds by default.
+    alternate_comparisons(chosen)
+}
+
+/// Task #281: a comparison group's requests alternate the binaries in rounds
+/// (A, B, A, B), never one binary's rounds back to back; a request outside a
+/// group keeps its place. The binary is the suite; the rounds are the order
+/// the group's requests were queued in.
+fn alternate_comparisons(chosen: Vec<Request>) -> Vec<Request> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut groups: BTreeMap<String, Vec<Request>> = BTreeMap::new();
+    for request in &chosen {
+        if !request.compare.is_empty() {
+            groups.entry(request.compare.clone()).or_default().push(request.clone());
+        }
+    }
+    if groups.is_empty() {
+        return chosen;
+    }
+    let alternated: BTreeMap<String, Vec<Request>> = groups
+        .into_iter()
+        .map(|(name, list)| {
+            let mut binaries: Vec<String> = Vec::new();
+            for request in &list {
+                if !binaries.contains(&request.suite) {
+                    binaries.push(request.suite.clone());
+                }
+            }
+            let mut buckets: Vec<Vec<Request>> = binaries
+                .iter()
+                .map(|suite| list.iter().filter(|request| &request.suite == suite).cloned().collect())
+                .collect();
+            let mut mixed = Vec::new();
+            loop {
+                let mut took = false;
+                for bucket in &mut buckets {
+                    if !bucket.is_empty() {
+                        mixed.push(bucket.remove(0));
+                        took = true;
+                    }
+                }
+                if !took {
+                    break;
+                }
+            }
+            (name, mixed)
+        })
+        .collect();
+    let mut emitted: BTreeSet<String> = BTreeSet::new();
+    let mut out = Vec::new();
+    for request in chosen {
+        if request.compare.is_empty() {
+            out.push(request);
+        } else if emitted.insert(request.compare.clone()) {
+            out.extend(alternated.get(&request.compare).cloned().unwrap_or_default());
+        }
+    }
+    out
 }
 
 pub(crate) fn shell(command: &str, cwd: &Path) -> Command {
@@ -577,6 +782,8 @@ pub(crate) fn shell(command: &str, cwd: &Path) -> Command {
 pub(crate) fn run_due(store: &TestStore, project: &Path, requests: &[Request], now: f64, policy: &super::test_results::Policy) -> anyhow::Result<Vec<Record>> {
     let mut written = Vec::new();
     let began = std::time::Instant::now();
+    // Task #281: a perf run checks the machine first, and records what it saw.
+    let performance = crate::test_discipline::load(project, None).map(|loaded| loaded.config.performance).unwrap_or_default();
     // Task 174: a queued suite gets what the members' templates get: the
     // build cache, and for CMake or CTest the tools and Qt's settings.
     let command = |request: &Request| {
@@ -588,6 +795,25 @@ pub(crate) fn run_due(store: &TestStore, project: &Path, requests: &[Request], n
     for request in requests {
         let started = std::time::Instant::now();
         let at = now + began.elapsed().as_secs_f64();
+        let mut loaded = false;
+        let mut before = None;
+        if request.performance {
+            let sample = perf_load(project);
+            match perf_gate(&sample, &performance, request.at, at) {
+                PerfGate::Wait => {
+                    store.hold(&request.id, &format!(
+                        "waiting for a quiet machine: cpu {:.0}% (limit {}%), disk {:.0}% (limit {}%), {} Zerus build(s) (limit {})",
+                        sample.cpu_percent, performance.cpu_percent, sample.disk_percent, performance.disk_percent,
+                        sample.builds, performance.builds
+                    ))?;
+                    continue;
+                }
+                PerfGate::Run(over) => {
+                    loaded = over;
+                    before = Some(sample);
+                }
+            }
+        }
         store.start(&request.id, at)?;
         // Task 88: the provider's report, removed first so an older one is
         // never read as this run's.
@@ -640,6 +866,26 @@ pub(crate) fn run_due(store: &TestStore, project: &Path, requests: &[Request], n
         // A flaky run keeps the failure it hid: that is the episode's evidence.
         let shown = if status == "flaky" { &first } else { &outcome };
         let excerpt = if shown.excerpt.is_empty() { last_chars(&shown.tail, EXCERPT_BYTES) } else { shown.excerpt.clone() };
+        // Task #281: the load after the run too, so the result carries both.
+        let load = if request.performance {
+            let during = perf_load(project);
+            if !during.quiet(&performance) {
+                loaded = true;
+            }
+            if loaded && !flags.iter().any(|flag| flag == "loaded") {
+                flags.push("loaded".to_owned());
+            }
+            Some(serde_json::json!({
+                "before": before,
+                "during": during,
+                "loaded": loaded,
+                "limits": {"cpu_percent": performance.cpu_percent, "disk_percent": performance.disk_percent,
+                    "builds": performance.builds, "wait_seconds": performance.wait_seconds},
+                "waited_s": (at - request.at).max(0.0),
+            }))
+        } else {
+            None
+        };
         let record = Record {
             id: format!("{}-{}", request.id, now as i64),
             team: request.team.clone(),
@@ -659,6 +905,8 @@ pub(crate) fn run_due(store: &TestStore, project: &Path, requests: &[Request], n
             runner: String::new(),
             task: request.task,
             report: report.map(|(path, format)| super::run_results::read(&path, format)),
+            performance: request.performance,
+            load,
         };
         store.write(&record)?;
         if record.status == "flaky" {
@@ -725,6 +973,12 @@ pub(crate) fn suite_from_config(project: &Path, team: Option<&str>, name: &str, 
         resources: provider.resources.clone(),
         command,
         platforms: suite_platforms(provider),
+        // Task #281: a provider marked performance, or a bench/perf suite.
+        performance: provider.performance
+            || name.to_lowercase().contains("bench")
+            || name.to_lowercase().contains("perf")
+            || targets.iter().any(|target| target.to_lowercase().contains("bench") || target.to_lowercase().contains("perf")),
+        compare: String::new(),
     })
 }
 
@@ -743,6 +997,7 @@ mod tests {
             id: id.into(), team: "t".into(), suite: suite.into(), task: None, targets: Vec::new(),
             commit: "c".into(), input_hash: "h".into(), asked_by: "dev".into(), forced, at: 1.0,
             seconds, budget_minutes: 10.0, resources: resources.into(), command: String::new(), platforms: Vec::new(),
+            performance: false, compare: String::new(),
         }
     }
 
@@ -799,7 +1054,7 @@ mod tests {
             excerpt: "the log".into(),
             asked_by: "dev".into(),
             at: 10.0,
-            affected: Vec::new(), reused_from: String::new(), flags: Vec::new(), due: false, recorded_ms: 0, task: None, runner: String::new(), report: None,
+            affected: Vec::new(), reused_from: String::new(), flags: Vec::new(), due: false, recorded_ms: 0, task: None, runner: String::new(), report: None, performance: false, load: None,
         };
         record_notices(&mut team, std::slice::from_ref(&record), 100.0);
         assert_eq!(team.test_load_at, 100.0);
@@ -852,7 +1107,7 @@ mod tests {
         let record = |id: &str, suite: &str, at: f64| Record {
             id: id.into(), team: "t".into(), suite: suite.into(), commit: "c".into(), input_hash: "h".into(),
             status: "passed".into(), duration_ms: 10, excerpt: "ok".into(), asked_by: "dev".into(), at,
-            affected: vec!["a".into()], reused_from: String::new(), flags: Vec::new(), due: false, recorded_ms: 0, task: None, runner: String::new(), report: None,
+            affected: vec!["a".into()], reused_from: String::new(), flags: Vec::new(), due: false, recorded_ms: 0, task: None, runner: String::new(), report: None, performance: false, load: None,
         };
         store.write(&record("1", "cargo", 1.0)).unwrap();
         store.write(&record("2", "cargo", 2.0)).unwrap();
@@ -1067,7 +1322,7 @@ results = { format = \"junit\", path = \"out/junit.xml\" }
             let record = Record {
                 id: format!("r{index}"), team: "t".into(), suite: "s".into(), commit: "c".into(), input_hash: "h".into(),
                 status: "passed".into(), duration_ms: 1, excerpt: String::new(), asked_by: "dev".into(), at: index as f64,
-                affected: Vec::new(), reused_from: String::new(), flags: Vec::new(), due: false, recorded_ms: 0, task: None, runner: String::new(), report: None,
+                affected: Vec::new(), reused_from: String::new(), flags: Vec::new(), due: false, recorded_ms: 0, task: None, runner: String::new(), report: None, performance: false, load: None,
             };
             store.write(&record).unwrap();
         }
@@ -1077,5 +1332,81 @@ results = { format = \"junit\", path = \"out/junit.xml\" }
         assert_eq!(indexed, 1);
         let newest = store.results(Some("t"), None, 1, None, None).unwrap();
         assert_eq!(newest[0].id, format!("r{}", RESULT_LIMIT + 1));
+    }
+    /// Task #281: a performance run looks at the machine first: busy within the
+    /// bound it waits, past the bound it runs marked loaded with the numbers,
+    /// and a quiet machine runs normally with the load recorded.
+    #[test]
+    fn perf_runs_wait_for_a_quiet_machine_or_run_loaded_with_the_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TestStore::open_at(&dir.path().join("tests.sqlite3"), false).unwrap();
+        let policy = config::Performance { cpu_percent: 70, disk_percent: 90, builds: 1, wait_seconds: 600.0 };
+        let busy = PerfLoad { cpu_percent: 92.0, disk_percent: 95.0, builds: 3, at: 0.0 };
+        let quiet = PerfLoad { cpu_percent: 10.0, disk_percent: 20.0, builds: 0, at: 0.0 };
+        assert!(matches!(perf_gate(&busy, &policy, 100.0, 200.0), PerfGate::Wait));
+        assert!(matches!(perf_gate(&busy, &policy, 100.0, 800.0), PerfGate::Run(true)));
+        assert!(matches!(perf_gate(&quiet, &policy, 100.0, 800.0), PerfGate::Run(false)));
+        let mut perf = request("perf", "bench", 1.0, false, "small");
+        perf.performance = true;
+        perf.command = if cfg!(windows) { "exit /b 0".into() } else { "true".into() };
+        perf.at = 1000.0;
+        store.enqueue(&perf).unwrap();
+        perf_load_override(Some(busy.clone()));
+        let written = run_due(&store, dir.path(), &store.queued("t").unwrap(), 1000.0, &Default::default()).unwrap();
+        assert!(written.is_empty(), "a busy machine waits");
+        let waiting = store.pending("t").unwrap();
+        assert_eq!(waiting.len(), 1);
+        assert!(waiting[0].reason.contains("quiet machine"), "{}", waiting[0].reason);
+        // Past the bounded wait it runs marked loaded, carrying the numbers.
+        let written = run_due(&store, dir.path(), &store.queued("t").unwrap(), 1000.0 + policy.wait_seconds + 1.0, &Default::default()).unwrap();
+        assert_eq!(written.len(), 1);
+        assert!(written[0].performance && written[0].flags.contains(&"loaded".to_owned()), "{:?}", written[0].flags);
+        let load = written[0].load.as_ref().expect("the load is recorded");
+        assert_eq!(load["loaded"], serde_json::json!(true));
+        assert_eq!(load["before"]["cpu_percent"], serde_json::json!(92.0));
+        assert_eq!(load["during"]["builds"], serde_json::json!(3));
+        // A quiet machine runs normally, still carrying the load.
+        store.enqueue(&perf).unwrap();
+        perf_load_override(Some(quiet));
+        let written = run_due(&store, dir.path(), &store.queued("t").unwrap(), 100.0, &Default::default()).unwrap();
+        assert_eq!(written.len(), 1);
+        assert!(written[0].performance && !written[0].flags.contains(&"loaded".to_owned()), "{:?}", written[0].flags);
+        assert_eq!(written[0].load.as_ref().unwrap()["before"]["cpu_percent"], serde_json::json!(10.0));
+        perf_load_override(None);
+    }
+
+    /// Task #281: a comparison's two binaries alternate in rounds, never one
+    /// binary's rounds back to back.
+    #[test]
+    fn comparisons_alternate_the_binaries_in_rounds() {
+        let classes: Classes = [("small".to_owned(), Resources { cpu: 1, ram_mb: 0, gpu: false, exclusive: false })]
+            .into_iter()
+            .collect();
+        let mut requests = Vec::new();
+        for round in 0..2 {
+            for suite in ["bench-new", "bench-old"] {
+                let mut one = request(&format!("{suite}-{round}"), suite, 1.0, false, "small");
+                one.compare = "lore".into();
+                one.at = 10.0 + f64::from(round);
+                requests.push(one);
+            }
+        }
+        let load = Load { cpu_free: 8, ram_free_mb: 0, gpu_free: true, at_night: true };
+        let chosen: Vec<String> = schedule(&requests, &classes, &load).into_iter().map(|request| request.id).collect();
+        assert_eq!(chosen, ["bench-new-0", "bench-old-0", "bench-new-1", "bench-old-1"], "{chosen:?}");
+    }
+
+    /// Task #281: a bench or perf suite is a performance run without any flag.
+    #[test]
+    fn a_bench_or_perf_suite_is_marked_performance() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".zerus")).unwrap();
+        std::fs::write(
+            dir.path().join(".zerus/tests.toml"),
+            "version = 1\n[[provider]]\nname = \"bench\"\nkind = \"command\"\naffected = \"all\"\ncommand = \"x\"\n",
+        )
+        .unwrap();
+        let request = suite_from_config(dir.path(), None, "bench", &[]).unwrap();
+        assert!(request.performance, "a bench suite is a performance run");
     }
 }

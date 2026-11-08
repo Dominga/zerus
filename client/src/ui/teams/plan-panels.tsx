@@ -1,12 +1,13 @@
 import { For, Show, createSignal } from "solid-js";
 import type { JSX } from "solid-js";
 import { tr } from "../../i18n";
-import type { TeamProfileView, TeamTestsView } from "../../types";
+import type { TeamBuildItem, TeamBuildsView, TeamProfileView, TeamTestsView } from "../../types";
 import type { PlacedNode } from "./plan";
 import { KIND_STYLES, keyName, lossKey, styleOf, swatchBackground } from "./profile-palette";
 import { taskHeat, type TaskHeat } from "./heat";
 import { downloadJson, profileExport, profileFileName } from "./profileExport";
 import { skin } from "../../skin/runtime";
+export { runStatusLabel } from "./planModes";
 import {
   boardColumns,
   formatSeconds,
@@ -16,7 +17,11 @@ import {
   stageChips,
   stageName,
   testStatus,
+  runStatusLabel,
   testsRows,
+  testSuites,
+  suiteRuns,
+  forcedWaiting,
   reportCounts,
   caseName,
   caseFailed,
@@ -105,14 +110,6 @@ function lossLabel(kind: string): string {
   return kind;
 }
 
-export function runStatusLabel(status: string): string {
-  const kind = testStatus(status);
-  if (kind === "passed") return tr("Passed");
-  if (kind === "timed-out") return tr("Timed out");
-  if (kind === "reused") return tr("Reused");
-  if (kind === "queued") return tr("Queued");
-  return tr("Failed");
-}
 
 function columnTitle(key: string): string {
   if (key === "todo") return tr("To do");
@@ -363,12 +360,65 @@ export function ProfilePanel(props: { profile?: TeamProfileView | null; team?: s
 export function TestsPanel(props: {
   tests?: TeamTestsView | null;
   onMore?: () => void;
+  /** Task 199 (Qt TeamTests): the Builds tab, its read and Force run of a suite (its refusal, if any). */
+  builds?: TeamBuildsView | null;
+  buildsError?: string;
+  onLoadBuilds?: () => void;
+  onForce?: (suite: string) => Promise<string>;
 }): JSX.Element {
   const rows = () => testsRows(props.tests);
   const [open, setOpen] = createSignal("");
+  const [tab, setTab] = createSignal<"tests" | "builds">("tests");
+  const [forcing, setForcing] = createSignal<Record<string, boolean>>({});
+  const [refused, setRefused] = createSignal<Record<string, string>>({});
+  const force = async (suite: string) => {
+    if (!props.onForce || forcing()[suite]) return;
+    setForcing({ ...forcing(), [suite]: true });
+    const error = await props.onForce(suite);
+    setForcing({ ...forcing(), [suite]: false });
+    setRefused({ ...refused(), [suite]: error });
+  };
   return (
     <div class="pm-tests">
-      <Show when={props.tests} fallback={<p class="pm-empty">{tr("Reading the tests…")}</p>}>
+      <div class="pm-tabs" role="tablist">
+        <button type="button" role="tab" class="btn ghost small" aria-selected={tab() === "tests"} data-tab="tests" onClick={() => setTab("tests")}>{tr("Tests")}</button>
+        <button type="button" role="tab" class="btn ghost small" aria-selected={tab() === "builds"} data-tab="builds"
+          onClick={() => { setTab("builds"); props.onLoadBuilds?.(); }}>{tr("Builds")}</button>
+      </div>
+      <Show when={tab() === "builds"}>
+        <BuildsPanel builds={props.builds} error={props.buildsError} />
+      </Show>
+      <Show when={tab() === "tests" && props.tests} fallback={<Show when={tab() === "tests"}><p class="pm-empty">{tr("Reading the tests…")}</p></Show>}>
+        <Show when={testSuites(props.tests).length > 0}>
+          <h3>{tr("Suites")}</h3>
+          <For each={testSuites(props.tests)}>{(suite) => {
+            const runs = () => suiteRuns(props.tests, suite);
+            const waiting = () => forcedWaiting(props.tests, suite);
+            return (
+              <div class={`pm-run pm-suite pm-${runs()[0] ? testStatus(runs()[0].status) : "queued"}`} data-suite={suite}>
+                <b class="pm-run-suite">{suite}</b>
+                <Show when={runs()[0]} fallback={<span class="pm-note">{tr("no result yet")}</span>}>{(latest) => (
+                  <>
+                    <span class="pm-run-status">{runStatusLabel(latest().status)}</span>
+                    <span>{runTime(latest().duration_ms)}</span>
+                    <span class="pm-strip" aria-hidden="true">
+                      <For each={[...runs()].reverse()}>{(run) => <i class={`pm-${testStatus(run.status)}`} title={runStatusLabel(run.status)} />}</For>
+                    </span>
+                    <Show when={latest().over_budget}><span class="pm-pill danger">{tr("Over budget")}</span></Show>
+                  </>
+                )}</Show>
+                <span class="grow" />
+                <Show when={refused()[suite]}><span class="danger pm-note" data-force-error>{refused()[suite]}</span></Show>
+                <Show when={props.onForce}>
+                  <button type="button" class="btn ghost small" data-action="force-run" disabled={!!forcing()[suite] || waiting()}
+                    title={tr("Run %1 now: first in the queue, at day too, never a reused result", suite)} onClick={() => void force(suite)}>
+                    {forcing()[suite] ? tr("Queuing\u2026") : waiting() ? tr("Forced, waiting") : tr("Force run")}
+                  </button>
+                </Show>
+              </div>
+            );
+          }}</For>
+        </Show>
         <Show when={rows().running.length > 0}>
           <h3>{tr("Running now")}</h3>
           <For each={rows().running}>{(item) => <TestQueueRow item={item} />}</For>
@@ -419,6 +469,70 @@ export function TestsPanel(props: {
           <button type="button" class="btn ghost small" onClick={() => props.onMore?.()}>{tr("Load older")}</button>
         </Show>
       </Show>
+    </div>
+  );
+}
+
+function seconds(value: number): string {
+  return runTime(Math.max(0, value) * 1000);
+}
+
+/** Task 199 (Qt TeamTests builds): the build broker's shared folders, their build folders, what builds, waits and finished. */
+function BuildsPanel(props: { builds?: TeamBuildsView | null; error?: string }): JSX.Element {
+  const line = (item: TeamBuildItem, kind: "running" | "queue" | "recent") => (
+    <div class={`pm-queue pm-build pm-build-${kind}`} data-member={item.member}>
+      <b>{item.member}</b>
+      <span class="pm-note">{item.template}</span>
+      <Show when={kind === "running"}>
+        <span class="pm-pill">{item.snapshot ? tr("snapshot") : tr("shared")}</span>
+        <span class="pm-note">{item.usual_ms > 0 ? tr("%1 of usually %2", seconds(item.seconds), runTime(item.usual_ms)) : tr("running %1", seconds(item.seconds))}</span>
+      </Show>
+      <Show when={kind === "queue"}>
+        <span class="pm-note">{tr("waiting %1", seconds(item.seconds))}</span>
+        <Show when={item.coalesced_with}><span class="pm-note accent">{tr("same tree as %1: one result", item.coalesced_with)}</span></Show>
+        <Show when={item.waiting_for.length > 0}><span class="pm-note warn">{tr("waiting for edits of %1", item.waiting_for.join(", "))}</span></Show>
+      </Show>
+      <Show when={kind === "recent"}>
+        <span class="pm-note">{runTime(item.ms)}</span>
+        <Show when={item.hit}><span class="pm-note accent">{item.by ? tr("from the cache, built by %1", item.by) : tr("from the cache")}</span></Show>
+        <Show when={!item.hit && (item.exit ?? 0) !== 0}><span class="pm-note danger">{item.timed_out ? tr("Timed out") : tr("Failed")}</span></Show>
+        <Show when={item.error}><span class="pm-note danger">{item.error}</span></Show>
+      </Show>
+    </div>
+  );
+  return (
+    <div class="pm-builds">
+      <Show when={props.error}><p class="danger">{tr("Could not read the builds: %1", props.error!)}</p></Show>
+      <Show when={props.builds} fallback={<Show when={!props.error}><p class="pm-empty">{tr("Reading the builds\u2026")}</p></Show>}>{(builds) => (
+        <>
+          <p class="pm-note">{builds().enabled
+            ? tr("Members sharing a folder build through the build broker: each in its own snapshot, one build at a time per build folder.")
+            : tr("The build broker is off: members sharing a folder build in it directly. The owner turns it on in the team's settings.")}</p>
+          <Show when={builds().folders.length > 0} fallback={<p class="pm-empty">{tr("No two members share a folder.")}</p>}>
+            <For each={builds().folders}>{(folder) => (
+              <section class="pm-build-folder" data-folder={folder.folder}>
+                <h3 title={tr("Shared by %1", folder.members.join(", "))}>{folder.folder}</h3>
+                <Show when={folder.build_folders.length > 0} fallback={<p class="pm-empty">{tr("No build through the broker yet.")}</p>}>
+                  <For each={folder.build_folders}>{(group) => (
+                    <div class="pm-build-group" data-build-folder={group.name}>
+                      <div class="pm-queue">
+                        <b>{group.name === "." ? tr("the shared folder itself") : group.name}</b>
+                        <Show when={group.usual_ms > 0}><span class="pm-note">{tr("usually %1", runTime(group.usual_ms))}</span></Show>
+                        <Show when={group.hit_rate !== null}><span class="pm-pill">{tr("cache hits %1%", Math.round((group.hit_rate ?? 0) * 100))}</span></Show>
+                      </div>
+                      <Show when={group.running.length + group.queue.length === 0}><p class="pm-empty">{tr("Nothing builds or waits.")}</p></Show>
+                      <For each={group.running}>{(item) => line(item, "running")}</For>
+                      <For each={group.queue}>{(item) => line(item, "queue")}</For>
+                      <Show when={group.recent.length > 0}><h4>{tr("Recent builds")}</h4></Show>
+                      <For each={group.recent}>{(item) => line(item, "recent")}</For>
+                    </div>
+                  )}</For>
+                </Show>
+              </section>
+            )}</For>
+          </Show>
+        </>
+      )}</Show>
     </div>
   );
 }

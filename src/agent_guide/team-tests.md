@@ -14,7 +14,8 @@ the failure or the conflicting files. Nobody merges, builds or tests a
 member's work by hand. A merger reviews the diff and the findings and
 resolves the conflicts the queue returns; a phase integration reads the
 queue's results (hgs test affected MERGE_TESTED..HEAD) and the release
-candidate. The full run happens only before a release: ask the owner
+candidate. Tauri: tauri-*; release-candidate.
+The full run happens only before a release: ask the owner
 first with the estimate; the owner sets the full_tests policy in the team
 settings (never, ask, allowed) or grants one run for a release.
 
@@ -30,3 +31,11 @@ once, after all its parts. The lead plans each task's tests this way.
 A split keeps every test, counted before and after. A test that repeats
 another becomes a case of a table test; a test that guards nothing (it
 cannot fail, or its code is gone) is removed, with the reason in the report.
+
+
+A performance run looks at the machine first: a perf suite (a `performance = true`
+provider, or a bench/perf name) samples CPU, disk and the running Zerus builds
+before and during. Over the `[performance]` limits it waits for a quiet window
+(bounded by `wait_seconds`), then runs marked `loaded` with the numbers in its
+result. Compare binaries alternating rounds (A, B, A, B), never all of one then
+the other.

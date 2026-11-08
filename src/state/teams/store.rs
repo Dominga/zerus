@@ -97,6 +97,118 @@ impl Event {
 
 pub(crate) struct Store {
     db: Connection,
+    /// Task 287: the worker's changes to one team in this tick, written in one
+    /// transaction at its end (`begin_batch`, `end_batch`).
+    batch: Option<Batch>,
+}
+
+/// Task 287: a team's working copy while the worker ticks it. Each change is
+/// applied to the copy at once (its closure runs once, as before); the copy
+/// is written in one transaction at the end of the team's steps. A record
+/// another writer changed meanwhile is merged (`merge3`): their changes stay,
+/// the worker's are applied over them.
+struct Batch {
+    team: String,
+    base_revision: u64,
+    base: Value,
+    working: Team,
+    events: Vec<(f64, Vec<Event>)>,
+    changed: bool,
+}
+
+/// Task 287: a write transaction whose lock hold is logged (`Hold`).
+pub(crate) struct Write<'a> {
+    transaction: rusqlite::Transaction<'a>,
+    // Dropped after the transaction: a rollback is inside the measured hold.
+    hold: Hold,
+}
+
+impl<'a> std::ops::Deref for Write<'a> {
+    type Target = rusqlite::Transaction<'a>;
+    fn deref(&self) -> &Self::Target {
+        &self.transaction
+    }
+}
+
+/// Task 287: a transaction's write lock, from BEGIN IMMEDIATE to its COMMIT or
+/// rollback, with the code that took it. Every hold is one line of
+/// `<state>/logs/team-store-locks.log`; one of `SLOW_HOLD_MS` or more is a
+/// warning, and also a line of the slow-calls log.
+struct Hold {
+    started: Instant,
+    waited_ms: u64,
+    caller: &'static std::panic::Location<'static>,
+    team: String,
+    outcome: &'static str,
+}
+
+/// Task 287: a lock held this long is a warning.
+pub(crate) const SLOW_HOLD_MS: u64 = 200;
+
+thread_local! {
+    /// Task 287: the code holding this thread's write lock now.
+    static HOLDER: std::cell::Cell<Option<&'static std::panic::Location<'static>>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: the lock lines and the processes started under a held lock.
+    static LOCK_LINES: std::cell::RefCell<Vec<Value>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_lock_lines() -> Vec<Value> {
+    LOCK_LINES.with(|lines| std::mem::take(&mut *lines.borrow_mut()))
+}
+
+impl Hold {
+    fn start(caller: &'static std::panic::Location<'static>, team: &str, waited: Duration) -> Self {
+        HOLDER.with(|holder| holder.set(Some(caller)));
+        Self { started: Instant::now(), waited_ms: waited.as_millis() as u64, caller, team: team.to_owned(), outcome: "rollback" }
+    }
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        HOLDER.with(|holder| holder.set(None));
+        let held_ms = self.started.elapsed().as_millis() as u64;
+        let level = if held_ms >= SLOW_HOLD_MS { "warn" } else { "info" };
+        lock_line(json!({"at":now(),"pid":std::process::id(),"level":level,"caller":format!("{}:{}", self.caller.file(), self.caller.line()),
+            "team":self.team,"held_ms":held_ms,"waited_ms":self.waited_ms,"outcome":self.outcome}));
+    }
+}
+
+/// Task 287: the code holding this thread's write lock, if one is held.
+pub(crate) fn lock_holder() -> Option<&'static std::panic::Location<'static>> {
+    HOLDER.with(std::cell::Cell::get)
+}
+
+/// Task 287: a process about to start (`program` with `args`): one started
+/// while this thread holds the write lock is a warning line naming both, so
+/// a git call that slipped into a transaction is found.
+pub(crate) fn note_process(program: &str, args: &[String]) {
+    if let Some(holder) = lock_holder() {
+        lock_line(json!({"at":now(),"pid":std::process::id(),"level":"warn","caller":format!("{}:{}", holder.file(), holder.line()),
+            "process":program,"args":args.iter().take(8).collect::<Vec<_>>(),"note":"a process started while the team store's write lock was held"}));
+    }
+}
+
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn lock_log_path() -> PathBuf {
+    root().join("logs").join("team-store-locks.log")
+}
+
+fn lock_line(line: Value) {
+    #[cfg(test)]
+    LOCK_LINES.with(|lines| lines.borrow_mut().push(line));
+    #[cfg(not(test))]
+    {
+        let text = line.to_string();
+        let _ = super::super::slow_calls::append(&lock_log_path(), &text);
+        if line["level"] == "warn" {
+            let _ = super::super::slow_calls::append(&super::super::slow_calls::log_path(), &text);
+        }
+    }
 }
 
 /// The stable identity of a request's content, for idempotent replays.
@@ -139,27 +251,60 @@ fn busy_error(error: rusqlite::Error) -> anyhow::Error {
 /// (the dispatcher, a member's command, a status read) holds the database.
 /// Team 33fbafeb: `hgs team reassign` failed with "database is locked" after
 /// the 2 s busy wait while the dispatcher wrote.
-fn begin(db: &Connection) -> anyhow::Result<rusqlite::Transaction<'_>> {
-    let deadline = Instant::now() + WRITE_WAIT;
+fn begin<'a>(db: &'a Connection, caller: &'static std::panic::Location<'static>, team: &str) -> anyhow::Result<Write<'a>> {
+    let asked = Instant::now();
+    let deadline = asked + write_wait();
     loop {
         match rusqlite::Transaction::new_unchecked(db, TransactionBehavior::Immediate) {
-            Ok(transaction) => return Ok(transaction),
+            Ok(transaction) => return Ok(Write { transaction, hold: Hold::start(caller, team, asked.elapsed()) }),
             Err(error) if busy(&error) && Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
             Err(error) => return Err(busy_error(error)),
         }
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests: a shorter wait for a write than `WRITE_WAIT`.
+    static TEST_WRITE_WAIT: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_write_wait(wait: Option<Duration>) {
+    TEST_WRITE_WAIT.with(|found| found.set(wait));
+}
+
+/// SQLite's own wait for one statement; a test with a shorter write wait
+/// waits no longer.
+fn busy_wait() -> Duration {
+    #[cfg(test)]
+    if let Some(wait) = TEST_WRITE_WAIT.with(std::cell::Cell::get) {
+        return wait;
+    }
+    BUSY_WAIT
+}
+
+fn write_wait() -> Duration {
+    #[cfg(test)]
+    if let Some(wait) = TEST_WRITE_WAIT.with(std::cell::Cell::get) {
+        return wait;
+    }
+    WRITE_WAIT
+}
+
 /// Task 25: commits, waiting for readers to finish. A COMMIT that fails with
 /// SQLITE_BUSY leaves the transaction open, so it is tried again; any other
 /// failure (or the deadline) rolls the whole change back.
-fn commit(transaction: rusqlite::Transaction<'_>) -> anyhow::Result<()> {
-    let deadline = Instant::now() + WRITE_WAIT;
+fn commit(mut write: Write<'_>) -> anyhow::Result<()> {
+    let deadline = Instant::now() + write_wait();
     loop {
-        match transaction.execute_batch("COMMIT") {
+        match write.transaction.execute_batch("COMMIT") {
             // The connection is back in autocommit: dropping the
             // transaction does nothing more.
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                write.hold.outcome = "commit";
+                return Ok(());
+            }
             Err(error) if busy(&error) && Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
             Err(error) => return Err(busy_error(error)),
         }
@@ -202,6 +347,68 @@ fn sandbox_writable(dir: &Path) {
         .is_ok_and(|status| status.success());
     if done {
         let _ = fs::write(&marker, b"");
+    }
+}
+
+/// Task 287: the member projection's trigger parsed the whole team record
+/// (megabytes) with json_each on every write. The record's members are also
+/// kept in their own column, written with `members_rev` (the revision that
+/// wrote them); the trigger runs only when they changed. A write by an older
+/// hgs, which sets neither, leaves `members_rev` behind the revision, and the
+/// trigger then reads the members from the record as before.
+const MEMBERS_CHANGED: &str =
+    "NEW.members_rev IS NOT NEW.revision OR OLD.members_rev IS NOT OLD.revision OR NEW.members IS NOT OLD.members";
+const MEMBERS_SOURCE: &str =
+    "CASE WHEN NEW.members_rev IS NEW.revision THEN NEW.members ELSE json_extract(NEW.payload,'$.members') END";
+
+/// Task 287: adds the members columns and replaces a projection trigger that
+/// runs on every write, once, in one transaction.
+fn members_column(db: &Connection) -> anyhow::Result<()> {
+    let has_teams: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='teams')", [], |row| row.get(0))?;
+    if !has_teams {
+        return Ok(());
+    }
+    let columns: Vec<String> = db.prepare("SELECT name FROM pragma_table_info('teams')")?.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
+    let trigger: Option<String> = db.query_row("SELECT sql FROM sqlite_master WHERE name='team_rules_update'", [], |row| row.get(0)).optional()?;
+    let old_trigger = trigger.as_deref().is_some_and(|sql| !sql.contains("members_rev"));
+    let missing = !columns.iter().any(|name| name == "members") || !columns.iter().any(|name| name == "members_rev");
+    if !missing && !old_trigger {
+        return Ok(());
+    }
+    db.execute_batch("BEGIN IMMEDIATE")?;
+    let done = (|| -> rusqlite::Result<()> {
+        let columns: Vec<String> = db.prepare("SELECT name FROM pragma_table_info('teams')")?.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
+        if !columns.iter().any(|name| name == "members") {
+            db.execute_batch("ALTER TABLE teams ADD COLUMN members TEXT")?;
+        }
+        if !columns.iter().any(|name| name == "members_rev") {
+            db.execute_batch("ALTER TABLE teams ADD COLUMN members_rev INTEGER")?;
+        }
+        // Re-created below by `open`, with its WHEN.
+        let trigger: Option<String> = db.query_row("SELECT sql FROM sqlite_master WHERE name='team_rules_update'", [], |row| row.get(0)).optional()?;
+        if trigger.as_deref().is_some_and(|sql| !sql.contains("members_rev")) {
+            db.execute_batch("DROP TRIGGER team_rules_update")?;
+        }
+        Ok(())
+    })();
+    match done {
+        Ok(()) => db.execute_batch("COMMIT")?,
+        Err(error) => {
+            let _ = db.execute_batch("ROLLBACK");
+            return Err(error.into());
+        }
+    }
+    Ok(())
+}
+
+impl Drop for Store {
+    /// Task 287: a batch left open (a tick that returned early) is written.
+    fn drop(&mut self) {
+        if self.batch.is_some() {
+            if let Err(error) = self.end_batch() {
+                eprintln!("hgs team store: the worker's batch was not written: {error:#}");
+            }
+        }
     }
 }
 
@@ -253,7 +460,7 @@ impl Store {
         )?;
         // Task 25: a write waits for the lock (it used to give up after 2 s);
         // a read waits less.
-        db.busy_timeout(if write { BUSY_WAIT } else { Duration::from_secs(10) })?;
+        db.busy_timeout(if write { busy_wait() } else { Duration::from_secs(10) })?;
         // Task #28: a sorted read (`team list`, `team current`) spilled to a
         // temporary file in %TEMP%, which a sandboxed member at Low integrity
         // may not create: "unable to open database file". Sorts stay in
@@ -273,7 +480,7 @@ impl Store {
             } else {
                 db.busy_timeout(SWITCH_WAIT)?;
                 let mode = db.query_row(&format!("PRAGMA journal_mode={wanted}"), [], |row| row.get(0)).unwrap_or(current);
-                db.busy_timeout(BUSY_WAIT)?;
+                db.busy_timeout(busy_wait())?;
                 mode
             };
             if mode.eq_ignore_ascii_case("wal") {
@@ -301,6 +508,9 @@ impl Store {
             db.execute_batch(super::working::SCHEMA)?;
         }
         if write {
+            members_column(&db)?;
+        }
+        if write {
             // Build an indexed projection once; triggers keep it in the same
             // transaction as every team write, including dispatcher mutations.
             let mut exists: bool = db.query_row(
@@ -316,21 +526,21 @@ impl Store {
                 db.execute_batch("DROP TRIGGER IF EXISTS team_rules_insert; DROP TRIGGER IF EXISTS team_rules_update; DROP TRIGGER IF EXISTS team_rules_delete; DELETE FROM team_rule_members;")?;
                 exists = false;
             }
-            db.execute_batch("CREATE TABLE IF NOT EXISTS team_rule_members(team TEXT NOT NULL,member TEXT NOT NULL,host TEXT NOT NULL,name TEXT NOT NULL,run TEXT NOT NULL,conversation TEXT NOT NULL,launch TEXT NOT NULL,PRIMARY KEY(team,member));
+            db.execute_batch(&"CREATE TABLE IF NOT EXISTS team_rule_members(team TEXT NOT NULL,member TEXT NOT NULL,host TEXT NOT NULL,name TEXT NOT NULL,run TEXT NOT NULL,conversation TEXT NOT NULL,launch TEXT NOT NULL,PRIMARY KEY(team,member));
                 CREATE INDEX IF NOT EXISTS team_rule_session ON team_rule_members(host,name,run,conversation);
                 CREATE INDEX IF NOT EXISTS team_rule_launch ON team_rule_members(launch);
                 CREATE TRIGGER IF NOT EXISTS team_rules_delete AFTER DELETE ON teams BEGIN DELETE FROM team_rule_members WHERE team=OLD.id; END;
-                CREATE TRIGGER IF NOT EXISTS team_rules_update AFTER UPDATE OF payload ON teams BEGIN
+                CREATE TRIGGER IF NOT EXISTS team_rules_update AFTER UPDATE OF payload ON teams WHEN {MEMBERS_CHANGED} BEGIN
                     DELETE FROM team_rule_members WHERE team=NEW.id;
-                    INSERT INTO team_rule_members SELECT NEW.id,json_extract(m.value,'$.id'),COALESCE(NULLIF(json_extract(m.value,'$.session.host'),''),json_extract(m.value,'$.computer'),''),COALESCE(json_extract(m.value,'$.session.name'),''),COALESCE(json_extract(m.value,'$.session.run_id'),''),COALESCE(json_extract(m.value,'$.session.conversation_id'),''),COALESCE(json_extract(m.value,'$.launch_id'),'') FROM json_each(NEW.payload,'$.members') m; END;
+                    INSERT INTO team_rule_members SELECT NEW.id,json_extract(m.value,'$.id'),COALESCE(NULLIF(json_extract(m.value,'$.session.host'),''),json_extract(m.value,'$.computer'),''),COALESCE(json_extract(m.value,'$.session.name'),''),COALESCE(json_extract(m.value,'$.session.run_id'),''),COALESCE(json_extract(m.value,'$.session.conversation_id'),''),COALESCE(json_extract(m.value,'$.launch_id'),'') FROM json_each({MEMBERS_SOURCE}) m; END;
                 CREATE TRIGGER IF NOT EXISTS team_rules_insert AFTER INSERT ON teams BEGIN
-                    INSERT INTO team_rule_members SELECT NEW.id,json_extract(m.value,'$.id'),COALESCE(NULLIF(json_extract(m.value,'$.session.host'),''),json_extract(m.value,'$.computer'),''),COALESCE(json_extract(m.value,'$.session.name'),''),COALESCE(json_extract(m.value,'$.session.run_id'),''),COALESCE(json_extract(m.value,'$.session.conversation_id'),''),COALESCE(json_extract(m.value,'$.launch_id'),'') FROM json_each(NEW.payload,'$.members') m; END;")?;
+                    INSERT INTO team_rule_members SELECT NEW.id,json_extract(m.value,'$.id'),COALESCE(NULLIF(json_extract(m.value,'$.session.host'),''),json_extract(m.value,'$.computer'),''),COALESCE(json_extract(m.value,'$.session.name'),''),COALESCE(json_extract(m.value,'$.session.run_id'),''),COALESCE(json_extract(m.value,'$.session.conversation_id'),''),COALESCE(json_extract(m.value,'$.launch_id'),'') FROM json_each(NEW.payload,'$.members') m; END;".replace("{MEMBERS_CHANGED}", MEMBERS_CHANGED).replace("{MEMBERS_SOURCE}", MEMBERS_SOURCE))?;
             if !exists {
                 db.execute_batch("INSERT OR IGNORE INTO team_rule_members SELECT t.id,json_extract(m.value,'$.id'),COALESCE(NULLIF(json_extract(m.value,'$.session.host'),''),json_extract(m.value,'$.computer'),''),COALESCE(json_extract(m.value,'$.session.name'),''),COALESCE(json_extract(m.value,'$.session.run_id'),''),COALESCE(json_extract(m.value,'$.session.conversation_id'),''),COALESCE(json_extract(m.value,'$.launch_id'),'') FROM teams t,json_each(t.payload,'$.members') m;")?;
             }
             if migration { db.execute_batch("COMMIT")?; }
         }
-        Ok(Self { db })
+        Ok(Self { db, batch: None })
     }
 
     /// Task 133: writes a member's pulse (docs/lore.md 11.2, 11.5). One by the
@@ -466,6 +676,10 @@ impl Store {
     }
 
     pub(crate) fn load(&self, id: &str) -> anyhow::Result<Option<Team>> {
+        // Task 287: the worker's own changes of this tick are seen by its next step.
+        if let Some(batch) = self.batch.as_ref().filter(|batch| batch.team == id) {
+            return Ok(Some(batch.working.clone()));
+        }
         let payload: Option<String> =
             self.db.query_row("SELECT payload FROM teams WHERE id=?1", params![id], |row| row.get(0)).optional()?;
         payload.map(|text| serde_json::from_str(&text).context("Invalid team record")).transpose()
@@ -689,8 +903,9 @@ impl Store {
     }
 
     /// Creates a team. A replay of the same request returns its first receipt.
+    #[track_caller]
     pub(crate) fn create(&mut self, request_id: &str, input: &Value, mut team: Team, events: Vec<Event>) -> anyhow::Result<Value> {
-        let transaction = begin(&self.db)?;
+        let transaction = begin(&self.db, std::panic::Location::caller(), &team.id)?;
         if let Some(receipt) = replay(&transaction, request_id, input)? {
             return Ok(receipt);
         }
@@ -734,12 +949,28 @@ impl Store {
     /// transaction: `change` gets the transaction and the team, as `mutate`'s
     /// closure gets the team; the team record and its events are written
     /// with it. Answers what `change` answers.
+    #[track_caller]
     pub(crate) fn mutate_working<T>(
         &mut self,
         team_id: &str,
         change: impl FnOnce(&rusqlite::Transaction, &mut Team, &mut Vec<Event>) -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
-        let transaction = begin(&self.db)?;
+        let caller = std::panic::Location::caller();
+        // Task 287: the worker's batch of this team is written first, and goes
+        // on after this change.
+        let resume = self.suspend_batch(team_id, caller)?;
+        let answer = self.mutate_working_now(team_id, caller, change);
+        self.resume_batch(resume)?;
+        answer
+    }
+
+    fn mutate_working_now<T>(
+        &mut self,
+        team_id: &str,
+        caller: &'static std::panic::Location<'static>,
+        change: impl FnOnce(&rusqlite::Transaction, &mut Team, &mut Vec<Event>) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let transaction = begin(&self.db, caller, team_id)?;
         let payload: String = transaction
             .query_row("SELECT payload FROM teams WHERE id=?1", params![team_id], |row| row.get(0))
             .optional()?
@@ -756,6 +987,7 @@ impl Store {
         Ok(answer)
     }
 
+    #[track_caller]
     pub(crate) fn mutate(
         &mut self,
         request: Option<(&str, &Value)>,
@@ -763,7 +995,29 @@ impl Store {
         expected_revision: Option<u64>,
         change: impl FnOnce(&mut Team, &mut Vec<Event>) -> anyhow::Result<Value>,
     ) -> anyhow::Result<Value> {
-        let transaction = begin(&self.db)?;
+        let caller = std::panic::Location::caller();
+        if self.batch.as_ref().is_some_and(|batch| batch.team == team_id) {
+            // Task 287: the worker's own change joins its tick's transaction.
+            if request.is_none() && expected_revision.is_none() {
+                return self.mutate_in_batch(change);
+            }
+            let resume = self.suspend_batch(team_id, caller)?;
+            let answer = self.mutate_now(request, team_id, expected_revision, caller, change);
+            self.resume_batch(resume)?;
+            return answer;
+        }
+        self.mutate_now(request, team_id, expected_revision, caller, change)
+    }
+
+    fn mutate_now(
+        &mut self,
+        request: Option<(&str, &Value)>,
+        team_id: &str,
+        expected_revision: Option<u64>,
+        caller: &'static std::panic::Location<'static>,
+        change: impl FnOnce(&mut Team, &mut Vec<Event>) -> anyhow::Result<Value>,
+    ) -> anyhow::Result<Value> {
+        let transaction = begin(&self.db, caller, team_id)?;
         if let Some((id, input)) = request {
             if let Some(receipt) = replay(&transaction, id, input)? {
                 return Ok(receipt);
@@ -779,17 +1033,8 @@ impl Store {
         }
         let mut events = Vec::new();
         let mut receipt = change(&mut team, &mut events)?;
-        // Task 111: every change re-checks the open proposals; one that can no
-        // longer apply is withdrawn in the same write.
-        super::ops::withdraw_inapplicable(&mut team, &mut events);
-        // Task 112: only a paused team keeps its pause record.
-        if team.status != super::model::TeamStatus::Paused {
-            team.paused = None;
-        }
         let at = now();
-        // Task 81: a task of the approved plan gets its baseline schedule in the
-        // change that approves it or adds it.
-        super::baseline::stamp(&mut team, at);
+        after_change(&mut team, &mut events, at);
         team.revision += 1;
         team.updated = at;
         write(&transaction, &team)?;
@@ -809,12 +1054,284 @@ impl Store {
     }
 }
 
+impl Store {
+    /// Task 287 (owner, 2026-11-08): `hgs team inbox` marking messages read
+    /// rewrote the whole team record. A change of the working tier's rows that
+    /// leaves the team record alone: its rows and its events, in one short
+    /// transaction; the revision does not move.
+    #[track_caller]
+    pub(crate) fn write_rows<T>(
+        &mut self,
+        team_id: &str,
+        change: impl FnOnce(&rusqlite::Transaction, &mut Vec<Event>) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let transaction = begin(&self.db, std::panic::Location::caller(), team_id)?;
+        let mut events = Vec::new();
+        let answer = change(&transaction, &mut events)?;
+        append(&transaction, team_id, now(), &events)?;
+        commit(transaction)?;
+        Ok(answer)
+    }
+
+    /// Task 287: the worker's changes to `team_id` from here on go to a working
+    /// copy and are written once, by `end_batch` (a change with a request id,
+    /// or one of the working tier, writes the batch first and goes on after).
+    pub(crate) fn begin_batch(&mut self, team_id: &str) -> anyhow::Result<()> {
+        self.end_batch()?;
+        let payload: Option<String> =
+            self.db.query_row("SELECT payload FROM teams WHERE id=?1", params![team_id], |row| row.get(0)).optional()?;
+        let Some(payload) = payload else { return Ok(()) };
+        let base: Value = serde_json::from_str(&payload).context("Invalid team record")?;
+        let working: Team = serde_json::from_value(base.clone()).context("Invalid team record")?;
+        self.batch = Some(Batch { team: team_id.to_owned(), base_revision: working.revision, base, working, events: Vec::new(), changed: false });
+        Ok(())
+    }
+
+    /// Task 287: writes the batch in one transaction; whether it wrote.
+    #[track_caller]
+    pub(crate) fn end_batch(&mut self) -> anyhow::Result<bool> {
+        let caller = std::panic::Location::caller();
+        let Some(batch) = self.batch.take() else { return Ok(false) };
+        if !batch.changed {
+            return Ok(false);
+        }
+        self.flush(batch, caller)?;
+        Ok(true)
+    }
+
+    fn suspend_batch(&mut self, team_id: &str, caller: &'static std::panic::Location<'static>) -> anyhow::Result<Option<String>> {
+        if !self.batch.as_ref().is_some_and(|batch| batch.team == team_id) {
+            return Ok(None);
+        }
+        let batch = self.batch.take().expect("checked");
+        if batch.changed {
+            self.flush(batch, caller)?;
+        }
+        Ok(Some(team_id.to_owned()))
+    }
+
+    fn resume_batch(&mut self, team: Option<String>) -> anyhow::Result<()> {
+        match team {
+            Some(team) => self.begin_batch(&team),
+            None => Ok(()),
+        }
+    }
+
+    fn mutate_in_batch(&mut self, change: impl FnOnce(&mut Team, &mut Vec<Event>) -> anyhow::Result<Value>) -> anyhow::Result<Value> {
+        let batch = self.batch.as_mut().expect("a batch");
+        // A change that fails leaves the copy as it was, as a rollback does.
+        let mut team = batch.working.clone();
+        let mut events = Vec::new();
+        let mut receipt = change(&mut team, &mut events)?;
+        let at = now();
+        after_change(&mut team, &mut events, at);
+        team.updated = at;
+        batch.working = team;
+        batch.events.push((at, events));
+        batch.changed = true;
+        if receipt.is_object() {
+            receipt["team"] = json!(batch.team);
+            receipt["revision"] = json!(batch.base_revision + 1);
+        }
+        Ok(receipt)
+    }
+
+    /// Writes a batch: the copy itself when nobody else wrote the team since it
+    /// was read, else the copy merged over the newer record. The record is
+    /// prepared before the lock; under it only the revision is checked.
+    fn flush(&mut self, batch: Batch, caller: &'static std::panic::Location<'static>) -> anyhow::Result<()> {
+        let Batch { team: team_id, base_revision, base, mut working, events, .. } = batch;
+        let ours = serde_json::to_value(&working)?;
+        let mut expected = base_revision;
+        for round in 0..4 {
+            working.revision = expected + 1;
+            let payload = serde_json::to_string(&working)?;
+            let members = serde_json::to_string(&working.members)?;
+            let status = serde_json::to_value(working.status)?;
+            let transaction = begin(&self.db, caller, &team_id)?;
+            let stored: Option<i64> =
+                transaction.query_row("SELECT revision FROM teams WHERE id=?1", params![team_id], |row| row.get(0)).optional()?;
+            let Some(stored) = stored else { return Ok(()) };
+            if stored as u64 == expected || round == 3 {
+                let (payload, members, status) = if stored as u64 == expected {
+                    (payload, members, status.as_str().unwrap_or_default().to_owned())
+                } else {
+                    // The last round merges under the lock rather than lose the changes.
+                    let fresh: String = transaction.query_row("SELECT payload FROM teams WHERE id=?1", params![team_id], |row| row.get(0))?;
+                    working = merged(&base, &ours, &serde_json::from_str(&fresh)?)?;
+                    working.revision = stored as u64 + 1;
+                    let status = serde_json::to_value(working.status)?;
+                    (serde_json::to_string(&working)?, serde_json::to_string(&working.members)?, status.as_str().unwrap_or_default().to_owned())
+                };
+                write_raw(&transaction, &team_id, working.revision, &status, working.updated, &payload, &members)?;
+                for (at, events) in &events {
+                    append(&transaction, &team_id, *at, events)?;
+                }
+                commit(transaction)?;
+                return Ok(());
+            }
+            drop(transaction);
+            // Another writer changed the team: merge over its record, outside the lock.
+            let Some(fresh) = self.raw(&team_id)? else { return Ok(()) };
+            expected = fresh["revision"].as_u64().unwrap_or(stored as u64);
+            working = merged(&base, &ours, &fresh)?;
+        }
+        Ok(())
+    }
+
+    fn raw(&self, team_id: &str) -> anyhow::Result<Option<Value>> {
+        let payload: Option<String> =
+            self.db.query_row("SELECT payload FROM teams WHERE id=?1", params![team_id], |row| row.get(0)).optional()?;
+        payload.map(|text| serde_json::from_str(&text).context("Invalid team record")).transpose()
+    }
+}
+
+/// The rules every change of a team keeps, in a transaction or a batch.
+fn after_change(team: &mut Team, events: &mut Vec<Event>, at: f64) {
+    // Task 111: every change re-checks the open proposals; one that can no
+    // longer apply is withdrawn in the same write.
+    super::ops::withdraw_inapplicable(team, events);
+    // Task 112: only a paused team keeps its pause record.
+    if team.status != super::model::TeamStatus::Paused {
+        team.paused = None;
+    }
+    // Task 81: a task of the approved plan gets its baseline schedule in the
+    // change that approves it or adds it.
+    super::baseline::stamp(team, at);
+}
+
+/// Task 287: the worker's copy merged over a newer record, as a team.
+fn merged(base: &Value, ours: &Value, theirs: &Value) -> anyhow::Result<Team> {
+    serde_json::from_value(merge3(base, ours, theirs)).context("The worker's changes did not merge into the team record")
+}
+
+/// Task 287: the changes from `base` to `ours` applied over `theirs`, another
+/// writer's newer record. Objects merge key by key; lists of records with an
+/// `id` (tasks, attempts, members) or an `n` (phases) merge record by record;
+/// any other value is ours when only we changed it, and theirs when they did
+/// (a member's or the owner's action wins over the worker's, which the next
+/// tick recomputes).
+pub(crate) fn merge3(base: &Value, ours: &Value, theirs: &Value) -> Value {
+    if ours == base || ours == theirs {
+        return theirs.clone();
+    }
+    if theirs == base {
+        return ours.clone();
+    }
+    match (base, ours, theirs) {
+        (Value::Object(base), Value::Object(ours), Value::Object(theirs)) => {
+            let mut out = serde_json::Map::new();
+            for (key, their) in theirs {
+                match (base.get(key), ours.get(key)) {
+                    (Some(was), Some(our)) => {
+                        out.insert(key.clone(), merge3(was, our, their));
+                    }
+                    // We removed it: gone unless they changed it.
+                    (Some(was), None) => {
+                        if their != was {
+                            out.insert(key.clone(), their.clone());
+                        }
+                    }
+                    (None, Some(our)) => {
+                        out.insert(key.clone(), merge3(&Value::Null, our, their));
+                    }
+                    (None, None) => {
+                        out.insert(key.clone(), their.clone());
+                    }
+                }
+            }
+            for (key, our) in ours {
+                if theirs.contains_key(key) {
+                    continue;
+                }
+                // They removed it: gone unless we changed it.
+                match base.get(key) {
+                    Some(was) if was == our => {}
+                    _ => {
+                        out.insert(key.clone(), our.clone());
+                    }
+                }
+            }
+            Value::Object(out)
+        }
+        (Value::Array(base), Value::Array(ours), Value::Array(theirs)) => {
+            let (base, ours, theirs) = (base.as_slice(), ours.as_slice(), theirs.as_slice());
+            match (keyed(base), keyed(ours), keyed(theirs)) {
+            (Some(base_keys), Some(our_keys), Some(their_keys)) => {
+                let find = |list: &[Value], keys: &[String], key: &str| keys.iter().position(|found| found == key).map(|index| list[index].clone());
+                let mut out = Vec::new();
+                for (index, key) in their_keys.iter().enumerate() {
+                    let their = &theirs[index];
+                    match (find(base, base_keys.as_slice(), key), find(ours, our_keys.as_slice(), key)) {
+                        (Some(was), Some(our)) => out.push(merge3(&was, &our, their)),
+                        (Some(was), None) => {
+                            if *their != was {
+                                out.push(their.clone());
+                            }
+                        }
+                        (None, Some(our)) => out.push(merge3(&Value::Null, &our, their)),
+                        (None, None) => out.push(their.clone()),
+                    }
+                }
+                for (index, key) in our_keys.iter().enumerate() {
+                    if their_keys.contains(key) {
+                        continue;
+                    }
+                    match find(base, base_keys.as_slice(), key) {
+                        Some(was) if was == ours[index] => {}
+                        _ => out.push(ours[index].clone()),
+                    }
+                }
+                Value::Array(out)
+            }
+            // Both changed a plain list: theirs, as for any other value.
+            _ => Value::Array(theirs.to_vec()),
+            }
+        }
+        _ => theirs.clone(),
+    }
+}
+
+/// The keys of a list of records (`id`, else `n`), when every record has a
+/// distinct one.
+fn keyed(list: &[Value]) -> Option<Vec<String>> {
+    let keys: Vec<String> = list
+        .iter()
+        .map(|item| {
+            let key = item.get("id").filter(|key| !key.is_null()).or_else(|| item.get("n").filter(|key| !key.is_null()))?;
+            Some(match key {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            })
+        })
+        .collect::<Option<_>>()?;
+    let mut unique = keys.clone();
+    unique.sort();
+    unique.dedup();
+    (unique.len() == keys.len()).then_some(keys)
+}
+
 fn write(transaction: &rusqlite::Transaction, team: &Team) -> anyhow::Result<()> {
     let status = serde_json::to_value(team.status)?;
+    write_raw(
+        transaction,
+        &team.id,
+        team.revision,
+        status.as_str().unwrap_or_default(),
+        team.updated,
+        &serde_json::to_string(team)?,
+        &serde_json::to_string(&team.members)?,
+    )
+}
+
+/// The record with its members (task 287: the projection's trigger reads them
+/// from their own column, and only when they changed).
+fn write_raw(transaction: &rusqlite::Transaction, id: &str, revision: u64, status: &str, updated: f64, payload: &str, members: &str) -> anyhow::Result<()> {
     transaction.execute(
-        "INSERT INTO teams(id,revision,status,updated,payload) VALUES(?1,?2,?3,?4,?5)
-         ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,status=excluded.status,updated=excluded.updated,payload=excluded.payload",
-        params![team.id, team.revision as i64, status.as_str().unwrap_or_default(), team.updated, serde_json::to_string(team)?],
+        "INSERT INTO teams(id,revision,status,updated,payload,members,members_rev) VALUES(?1,?2,?3,?4,?5,?6,?2)
+         ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,status=excluded.status,updated=excluded.updated,payload=excluded.payload,
+             members=excluded.members,members_rev=excluded.members_rev",
+        params![id, revision as i64, status, updated, payload, members],
     )?;
     Ok(())
 }
@@ -1178,6 +1695,215 @@ mod tests {
                 "parse_ms":median(parse),"serialize_ms":median(serialize),"update_with_trigger_ms":median(update),
                 "update_without_trigger_ms":median(bare),"commit_ms":median(commit_ms)}));
         }
+    }
+
+    /// Task 287: every write's lock hold is a line with the code that took it
+    /// (not the store's own), its hold and its wait; a hold of 200 ms or more
+    /// is a warning, and a change that fails is a rollback.
+    #[test]
+    fn every_write_logs_its_lock_hold_with_its_caller() {
+        let (_dir, mut store) = store();
+        take_lock_lines();
+        store.create(REQUEST, &json!({}), team("t1"), vec![]).unwrap();
+        store
+            .mutate(None, "t1", None, |team, _| {
+                std::thread::sleep(Duration::from_millis(250));
+                team.name.push('!');
+                Ok(Value::Null)
+            })
+            .unwrap();
+        assert!(store.mutate(None, "t1", None, |_, _| anyhow::bail!("refused")).is_err());
+        let lines = take_lock_lines();
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        let here = format!("{}:", file!());
+        assert!(lines.iter().all(|line| line["caller"].as_str().unwrap().starts_with(&here)), "the caller is this test: {lines:?}");
+        assert!(lines.iter().all(|line| line["team"] == "t1" && line["waited_ms"].is_u64() && line["pid"].is_u64()), "{lines:?}");
+        assert_eq!(lines[0]["outcome"], "commit");
+        assert!(lines[1]["held_ms"].as_u64().unwrap() >= 250, "{}", lines[1]);
+        assert_eq!((lines[1]["level"].as_str(), lines[1]["outcome"].as_str()), (Some("warn"), Some("commit")));
+        assert_eq!(lines[2]["outcome"], "rollback");
+        assert!(lock_holder().is_none(), "no lock is left held");
+    }
+
+    /// Task 287: a process started while the write lock is held (a git that
+    /// slipped into a transaction) is a warning naming the holder.
+    #[test]
+    fn a_process_under_the_write_lock_is_a_warning() {
+        let (_dir, mut store) = store();
+        store.create(REQUEST, &json!({}), team("t1"), vec![]).unwrap();
+        take_lock_lines();
+        note_process("git", &["outside".into()]);
+        assert!(take_lock_lines().is_empty(), "no lock held: nothing to say");
+        store
+            .mutate(None, "t1", None, |_, _| {
+                assert!(lock_holder().is_some());
+                note_process("git", &["inside".into()]);
+                Ok(Value::Null)
+            })
+            .unwrap();
+        let lines = take_lock_lines();
+        let started: Vec<&Value> = lines.iter().filter(|line| line["process"] == "git").collect();
+        assert_eq!(started.len(), 1, "{lines:?}");
+        assert_eq!((started[0]["level"].as_str(), started[0]["args"].clone()), (Some("warn"), json!(["inside"])));
+    }
+
+    /// Task 287: the worker's changes to a team in one tick are one
+    /// transaction; each step sees the earlier ones, a failed change leaves the
+    /// copy as it was, and a change with a request id writes the batch first.
+    #[test]
+    fn a_worker_tick_is_one_transaction() {
+        let (_dir, mut store) = store();
+        store.create(REQUEST, &json!({}), team("t1"), vec![]).unwrap();
+        take_lock_lines();
+        store.begin_batch("t1").unwrap();
+        for step in ["a", "b", "c"] {
+            store
+                .mutate(None, "t1", None, |team, events| {
+                    team.name.push_str(step);
+                    events.push(Event::new("ran", json!({"step":step})));
+                    Ok(Value::Null)
+                })
+                .unwrap();
+        }
+        assert_eq!(store.load("t1").unwrap().unwrap().name, "Checkoutabc", "the next step sees the earlier ones");
+        let written: i64 = store.db.query_row("SELECT revision FROM teams WHERE id='t1'", [], |row| row.get(0)).unwrap();
+        assert_eq!(written, 1, "nothing is written during the steps");
+        assert!(take_lock_lines().is_empty(), "no lock is taken during the steps");
+        assert!(store.end_batch().unwrap());
+        assert_eq!(take_lock_lines().len(), 1, "one transaction for the tick");
+        let saved = store.load("t1").unwrap().unwrap();
+        assert_eq!((saved.name.as_str(), saved.revision), ("Checkoutabc", 2));
+        assert_eq!(store.events("t1", None, 10).unwrap()["items"].as_array().unwrap().len(), 3, "every step's events");
+        // A failed change leaves the copy as it was; nothing changed, nothing written.
+        store.begin_batch("t1").unwrap();
+        assert!(store
+            .mutate(None, "t1", None, |team, _| {
+                team.name.clear();
+                anyhow::bail!("refused")
+            })
+            .is_err());
+        assert_eq!(store.load("t1").unwrap().unwrap().name, "Checkoutabc");
+        assert!(!store.end_batch().unwrap());
+        // A change with a request id writes the batch first and the batch goes on.
+        store.begin_batch("t1").unwrap();
+        store
+            .mutate(None, "t1", None, |team, _| {
+                team.goal = "worker".into();
+                Ok(Value::Null)
+            })
+            .unwrap();
+        reassign(&mut store, "22222222-2222-4222-8222-222222222222").unwrap();
+        store
+            .mutate(None, "t1", None, |team, _| {
+                team.stop_reason = "later".into();
+                Ok(Value::Null)
+            })
+            .unwrap();
+        store.end_batch().unwrap();
+        let saved = store.load("t1").unwrap().unwrap();
+        assert_eq!((saved.goal.as_str(), saved.name.as_str(), saved.stop_reason.as_str()), ("worker", "Checkoutabc+", "later"));
+    }
+
+    /// Task 287: another writer that changed the team during the worker's tick
+    /// keeps its change; the worker's are applied over it, and a value both
+    /// changed is theirs.
+    #[test]
+    fn a_batch_merges_over_another_writers_change() {
+        use super::super::model::Member;
+        let (dir, mut store) = store();
+        let mut first = team("t1");
+        first.members.push(Member { id: "dev".into(), ..Default::default() });
+        store.create(REQUEST, &json!({}), first, vec![]).unwrap();
+        let mut other = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        store.begin_batch("t1").unwrap();
+        store
+            .mutate(None, "t1", None, |team, _| {
+                team.goal = "worker".into();
+                team.name = "Worker".into();
+                team.members[0].role = "Backend".into();
+                Ok(Value::Null)
+            })
+            .unwrap();
+        other
+            .mutate(Some(("22222222-2222-4222-8222-222222222222", &json!({}))), "t1", None, |team, _| {
+                team.stop_reason = "owner".into();
+                team.name = "Owner".into();
+                team.members.push(Member { id: "qa".into(), ..Default::default() });
+                Ok(json!({}))
+            })
+            .unwrap();
+        store.end_batch().unwrap();
+        let saved = store.load("t1").unwrap().unwrap();
+        assert_eq!((saved.goal.as_str(), saved.stop_reason.as_str()), ("worker", "owner"), "both changes are kept");
+        assert_eq!(saved.name, "Owner", "a value both changed is theirs");
+        let members: Vec<(&str, &str)> = saved.members.iter().map(|member| (member.id.as_str(), member.role.as_str())).collect();
+        assert_eq!(members, [("dev", "Backend"), ("qa", "")]);
+        assert_eq!(saved.revision, 3);
+    }
+
+    #[test]
+    fn the_merge_goes_record_by_record() {
+        let base = json!({"tasks":[{"id":1,"status":"todo","n":0},{"id":2,"status":"todo"}],"list":[1,2],"name":"a"});
+        let ours = json!({"tasks":[{"id":1,"status":"in_progress","n":0},{"id":2,"status":"todo"},{"id":3,"status":"todo"}],"list":[1,2,3],"name":"a"});
+        let theirs = json!({"tasks":[{"id":1,"status":"todo","n":1},{"id":2,"status":"cancelled"}],"list":[2],"name":"b"});
+        let merged = merge3(&base, &ours, &theirs);
+        assert_eq!(merged["tasks"], json!([{"id":1,"status":"in_progress","n":1},{"id":2,"status":"cancelled"},{"id":3,"status":"todo"}]));
+        assert_eq!(merged["list"], json!([2]), "a plain list both changed: theirs");
+        assert_eq!(merged["name"], "b");
+        assert_eq!(merge3(&json!({"a":1,"b":2}), &json!({"a":1}), &json!({"a":1,"b":2,"c":3})), json!({"a":1,"c":3}), "removed by us, untouched by them");
+        assert_eq!(merge3(&json!({"a":1}), &json!({"a":1,"b":2}), &json!({})), json!({"b":2}), "added by us, a removal by them kept");
+    }
+
+    /// Task 287: the member projection's trigger parsed the whole record on
+    /// every write; it runs only when the members change, and for a write of
+    /// an older hgs (which leaves `members_rev` behind).
+    #[test]
+    fn the_member_projection_is_rebuilt_only_when_members_change() {
+        use super::super::model::Member;
+        let (dir, mut store) = store();
+        let mut first = team("t1");
+        first.members.push(Member { id: "dev".into(), ..Default::default() });
+        store.create(REQUEST, &json!({}), first, vec![]).unwrap();
+        let rows = |store: &Store| -> Vec<(String, String)> {
+            store
+                .db
+                .prepare("SELECT member,name FROM team_rule_members WHERE team='t1' ORDER BY member")
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        let fresh = |ids: &[&str]| ids.iter().map(|id| ((*id).to_owned(), String::new())).collect::<Vec<_>>();
+        assert_eq!(rows(&store), fresh(&["dev"]));
+        store.db.execute("UPDATE team_rule_members SET name='stale'", []).unwrap();
+        store
+            .mutate(None, "t1", None, |team, _| {
+                team.goal = "g".into();
+                Ok(Value::Null)
+            })
+            .unwrap();
+        assert_eq!(rows(&store), [("dev".to_owned(), "stale".to_owned())], "the members did not change: not rebuilt");
+        store
+            .mutate(None, "t1", None, |team, _| {
+                team.members.push(Member { id: "qa".into(), ..Default::default() });
+                Ok(Value::Null)
+            })
+            .unwrap();
+        assert_eq!(rows(&store), fresh(&["dev", "qa"]), "a members change rebuilds it");
+        // An older hgs writes the record alone: rebuilt from the record.
+        store.db.execute("UPDATE team_rule_members SET name='stale'", []).unwrap();
+        store.db.execute("UPDATE teams SET revision=revision+1,payload=json_set(payload,'$.goal','old') WHERE id='t1'", []).unwrap();
+        assert_eq!(rows(&store), fresh(&["dev", "qa"]));
+        // A store with the trigger of before is given the new one on open.
+        store
+            .db
+            .execute_batch("DROP TRIGGER team_rules_update; CREATE TRIGGER team_rules_update AFTER UPDATE OF payload ON teams BEGIN DELETE FROM team_rule_members WHERE team=NEW.id; END;")
+            .unwrap();
+        drop(store);
+        let store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let sql: String = store.db.query_row("SELECT sql FROM sqlite_master WHERE name='team_rules_update'", [], |row| row.get(0)).unwrap();
+        assert!(sql.contains("members_rev"), "{sql}");
     }
 
     #[test]

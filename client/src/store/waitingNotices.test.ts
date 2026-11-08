@@ -50,6 +50,33 @@ describe("waiting notices", () => {
     expect(out.posted).toHaveLength(2);
   });
 
+  it("holds and batches the top-level fields hgs writes (task 258)", () => {
+    const out = port();
+    const notices = new WaitingNotices(out);
+    // A card the server held while the owner was away is not announced.
+    expect(notices.observe([{ ...item("a"), notify: false }], true)).toEqual([]);
+    expect(notices.known()).toEqual([]);
+    // Cards that come back together are one notice.
+    const first = { ...item("b"), notify: true, batch: "b1" };
+    const second = { ...item("c"), notify: true, batch: "b1" };
+    expect(notices.observe([first, second], true).map((notice) => notice.token)).toEqual(["team-waiting:batch:b1"]);
+    expect(out.posted[0].body).toBe("b\nc");
+  });
+
+  it("does not raise an item a restart already showed and saves every change (W2)", () => {
+    const out = port();
+    const saves: Record<string, string>[] = [];
+    const notices = new WaitingNotices(out, [["a", "team-waiting:a"]], (posted) => saves.push(Object.fromEntries(posted)));
+    // "a" was shown before the restart; only the fresh "b" is announced.
+    expect(notices.observe([item("a"), item("b")], false).map((notice) => notice.token)).toEqual(["team-waiting:b"]);
+    expect(saves).toEqual([{ a: "team-waiting:a", b: "team-waiting:b" }]);
+    // A complete read that drops "a" rewrites the saved set without it.
+    notices.observe([item("b")], true);
+    expect(saves.at(-1)).toEqual({ b: "team-waiting:b" });
+    notices.withdraw("b");
+    expect(saves.at(-1)).toEqual({});
+  });
+
   it("withdraws a notice when its item is answered", () => {
     const out = port();
     const notices = new WaitingNotices(out);
@@ -67,5 +94,24 @@ describe("waiting notices", () => {
     expect(out.withdrawn).toEqual(["team-waiting:a"]);
     notices.observe([], true);
     expect(out.withdrawn).toEqual(["team-waiting:a", "team-waiting:b"]);
+  });
+
+  it("announces a new proposal card once, and withdraws it when it is decided (task 217)", () => {
+    const out = port();
+    const notices = new WaitingNotices(out);
+    const proposal: TeamWaitingItem = {
+      id: "team-1/owner_word_asked/proposal-p1", kind: "owner_word_asked", team: "team-1", team_name: "Live",
+      title: "The lead proposes: max_members 6 → 8", action: "decide_proposal", since: 1, proposal: "p1", detail: { proposal: "p1" },
+    };
+    // The desktop notification the owner sees when the lead's Activity draws a new card.
+    expect(notices.observe([proposal], true)).toEqual([{
+      token: "team-waiting:team-1/owner_word_asked/proposal-p1", title: "Waiting for you in Live", body: proposal.title,
+    }]);
+    expect(out.posted.map((posted) => posted.body)).toEqual([proposal.title]);
+    // One notice per card, never again for it.
+    expect(notices.observe([proposal], true)).toEqual([]);
+    // Decided: the complete read no longer lists it, so its notice goes.
+    notices.observe([], true);
+    expect(out.withdrawn).toEqual(["team-waiting:team-1/owner_word_asked/proposal-p1"]);
   });
 });

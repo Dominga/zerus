@@ -17,7 +17,7 @@ import { UsageMeters } from "../components/UsageMeter";
 import { accountManagement } from "../../store/accountManagement";
 import { accountSetup } from "../../store/accountSetup";
 import {accountDistribution} from "../../store/accountDistribution";
-import { creditsText, loginLabel, memberStateLabel, memberStateText, memberOf, panelWindow, profileTags, summaryLine, tone, visibleAccounts, visibleMembers } from "./accounts-ui";
+import { creditsText, loginLabel, memberStateLabel, memberStateText, memberOf, panelWindow, profileTags, summaryLine, tone, visibleAccounts, visibleMembers, accountSignState, noAccountsMatch, signState, signedCounts, type SignFilter } from "./accounts-ui";
 import { tr } from "../../i18n";
 import { trText } from "../../text";
 
@@ -28,6 +28,9 @@ import { trText } from "../../text";
 
 const AccountDistributionDialog=lazy(()=>import("./AccountDistributionDialog"));
 const AccountSetupDialog = lazy(() => import("./AccountSetupDialog"));
+const OpenCodeBindDialog = lazy(() => import("./OpenCodeBindDialog"));
+const [bindPrompt, setBindPrompt] = createSignal<{ host: string; machine: string; home: string } | null>(null);
+const [bindNotice, setBindNotice] = createSignal("");
 const managementBusy=()=>accountManagement.busy()||accountSetup.busy()||accountDistribution.busy();
 const closeManagement=()=>{accountManagement.close();accountSetup.close();accountDistribution.close();};
 const clearManagementNotice=()=>{accountManagement.clearNotice();accountSetup.clearNotice();accountDistribution.clearNotice();};
@@ -38,6 +41,19 @@ const AccountCatalogDialog = lazy(() => import("./AccountCatalogDialog"));
 
 const [selectedAccount, setSelectedAccount] = createSignal<string | undefined>();
 const [selectedProfile, setSelectedProfile] = createSignal<string | undefined>();
+// U25 (spec 9): All / Signed in / Signed out, counted on the machine filter (AccountsPage.cpp:276-290).
+const [signFilter, setSignFilter] = createSignal<SignFilter>("all");
+
+/** A signed-out or expired account's pill beside its provider (AccountsPage.cpp:190-195). */
+function SignPill(props: { state: "in" | "out" | "expired" }) {
+  return (
+    <Show when={props.state !== "in"}>
+      <span class="acct-sign" data-state={props.state} title={props.state === "expired" ? tr("Sign-in expired") : tr("Signed out")}>
+        {props.state === "expired" ? tr("Expired") : tr("Signed out")}
+      </span>
+    </Show>
+  );
+}
 
 /** The id tag that tells apart two profiles of one account on the same machine. */
 function ProfileTag(props: { tag?: string; id: string }) {
@@ -47,6 +63,7 @@ function ProfileTag(props: { tag?: string; id: string }) {
 function AccountRow(props: { a: Account; now: number }) {
   const on = () => selectedAccount() === props.a.key;
   const tags = createMemo(() => profileTags(props.a));
+  const sign = () => accountSignState(props.a, accountMachine());
   const pick = () => {
     closeManagement();clearManagementNotice();
     setSelectedAccount(props.a.key);
@@ -58,11 +75,12 @@ function AccountRow(props: { a: Account; now: number }) {
       <span class="acct-av"><span class="acct-ptile" style={{ "--agent": `var(--z-agent-${agentKind(props.a.provider)})` }}><ProviderGlyph agent={agentKind(props.a.provider)} size={18} /></span></span>
       <span class="acct-l1">
         <b class="ell grow">{props.a.label}</b>
+        <SignPill state={sign()} />
         <AgentBadge agent={agentKind(props.a.provider)} />
       </span>
       <span class="row acct-row-tags">
         <span class="row acct-machines">
-          <For each={props.a.members.slice(0, 3)}>{(m) => <span class="acct-mchip"><MachineLabel alias={m.machine} dimmed={!m.online} /><ProfileTag tag={tags().get(m.key)} id={m.id} /></span>}</For>
+          <For each={props.a.members.slice(0, 3)}>{(m) => <span class="acct-mchip" classList={{ off: signState(m) !== "in" }}><MachineLabel alias={m.machine} dimmed={!m.online} /><ProfileTag tag={tags().get(m.key)} id={m.id} /></span>}</For>
           <Show when={props.a.members.length > 3}><span class="dim">+{props.a.members.length - 3}</span></Show>
         </span>
         <span class="grow" />
@@ -163,6 +181,7 @@ function Detail(props: { a: Account }) {
       </div>
       <div class="row acct-identity">
         <AgentBadge agent={agentKind(props.a.provider)} />
+        <SignPill state={signState(m())} />
         <div class="col selectable">
           <For each={props.a.identity_lines}>{(line) => <span>{trText(line)}</span>}</For>
           <Show when={props.a.identity_note}>{(note) => <span class="muted">{trText(note())}</span>}</Show>
@@ -174,7 +193,7 @@ function Detail(props: { a: Account }) {
         {/* One row per profile: the row chooses it; the default is a badge or a separate button beside it. */}
         <div class="acct-mrows" classList={{ defaults: defaultable() }} role="radiogroup" aria-label={tr("Machine profile")} onKeyDown={stepProfile}>
           <For each={shown()}>{(x) => (
-            <div class="acct-mrow" classList={{ on: x.key === m().key }}>
+            <div class="acct-mrow" classList={{ on: x.key === m().key, off: signState(x) !== "in" }}>
               <button class="acct-mrow-pick" role="radio" aria-checked={x.key === m().key} tabIndex={x.key === m().key ? 0 : -1} onClick={() => choose(x.key)}>
                 <MachineTile os={osOf(machineCards[x.host]?.platform)} state={x.online ? connectionOf(catalog.computers[x.host]?.status).tile : "offline"} size={22} />
                 <MachineLabel alias={x.machine} dimmed={!x.online} />
@@ -208,7 +227,7 @@ function Detail(props: { a: Account }) {
                   <div class="acct-more-list">
                     <For each={matches()} fallback={<div class="dim acct-more-empty">{tr("No machine matches.")}</div>}>
                       {(x) => (
-                        <button class="acct-more-row" classList={{ on: x.key === m().key }} onClick={() => { choose(x.key); closeMore(); }}>
+                        <button class="acct-more-row" classList={{ on: x.key === m().key, off: signState(x) !== "in" }} onClick={() => { choose(x.key); closeMore(); }}>
                           <MachineTile os={osOf(machineCards[x.host]?.platform)} state={x.online ? connectionOf(catalog.computers[x.host]?.status).tile : "offline"} size={22} />
                           <MachineLabel alias={x.machine} />
                           <ProfileTag tag={tags().get(x.key)} id={x.id} />
@@ -232,6 +251,9 @@ function Detail(props: { a: Account }) {
             <Show when={!m().installed}><button class="btn" disabled={!m().online||m().provider==="opencode"||managementBusy()} onClick={event=>{accountManagement.close();accountManagement.clearNotice();void accountSetup.open("install",event.currentTarget,props.a.key,m().key);}}><Icon name="download" size={13} />{tr("Install agent…")}</button></Show>
             <Show when={m().opencode?.stopped}>
               <button class="btn" disabled={!m().online||managementBusy()} onClick={event=>{accountManagement.close();accountManagement.clearNotice();void accountSetup.open("start",event.currentTarget,props.a.key,m().key);}}><Icon name="play" size={13} />{tr("Start OpenCode on %1", m().machine)}</button>
+            </Show>
+            <Show when={m().id==="native-opencode"&&!!m().home&&m().online}>
+              <button class="btn" disabled={managementBusy()} onClick={()=>{setBindNotice("");setBindPrompt({host:m().host,machine:m().machine,home:m().home});}}><Icon name="link" size={13} />{tr("Bind existing conversation…")}</button>
             </Show>
           </Actions>
         </div>
@@ -279,7 +301,10 @@ function Detail(props: { a: Account }) {
 export function AccountsScreen() {
   onCleanup(closeManagement);
   const view = accountsPage;
-  const visible = createMemo(() => visibleAccounts(view(), accountMachine()));
+  const visible = createMemo(() => visibleAccounts(view(), accountMachine(), signFilter()));
+  const counts = createMemo(() => signedCounts(view(), accountMachine()));
+  /** "Clear filters": every machine and every sign-in state again (AccountsPage.cpp:315-318). */
+  const clearFilters = () => { setSignFilter("all"); setAccountMachine("*"); };
   // The rows' reset times re-render every 15 s; one timer serves every row.
   const now = useNow(15_000);
   // An Overview card asks for a profile: select its account once it is listed.
@@ -333,6 +358,14 @@ export function AccountsScreen() {
               <option value="*">{tr("All machines")}</option>
               <For each={view().hosts}>{(h) => <option value={h.computer}>{h.label}</option>}</For>
             </select>
+            <div class="acct-signs" role="group" aria-label={tr("Sign-in state")}>
+              <button type="button" class="btn small" classList={{ on: signFilter() === "all" }} aria-pressed={signFilter() === "all"}
+                onClick={() => setSignFilter("all")}>{tr("All")}</button>
+              <button type="button" class="btn small" classList={{ on: signFilter() === "in" }} aria-pressed={signFilter() === "in"}
+                onClick={() => setSignFilter("in")}>{tr("Signed in %1", counts().in)}</button>
+              <button type="button" class="btn small" classList={{ on: signFilter() === "out" }} aria-pressed={signFilter() === "out"}
+                onClick={() => setSignFilter("out")}>{tr("Signed out %1", counts().out)}</button>
+            </div>
             <Show when={view().snapshot}>
               <div class="row acct-count"><Show when={view().pending}><Spinner size={12} /></Show><span class="muted ell">{summaryLine(view(), visible().length)}</span></div>
             </Show>
@@ -340,7 +373,12 @@ export function AccountsScreen() {
           <div class="acct-scroll" ref={list} role="list" aria-label={tr("Agent accounts")} onKeyDown={step}>
             <Show when={!view().no_hosts}>
               <Show when={view().snapshot} fallback={<div class="acct-loading"><div class="row"><Spinner /><span>{tr("Loading accounts…")}</span></div><p class="muted">{tr("Checking accounts across your machines.")}</p></div>}>
-                <Show when={visible().length} fallback={<p class="muted acct-none">{accountMachine() === "*" ? tr("No accounts.") : tr("No accounts on %1.", filterName())}</p>}>
+                <Show when={visible().length} fallback={
+                  <div class="acct-none">
+                    <p class="muted">{noAccountsMatch(view()) ? tr("No accounts match") : accountMachine() === "*" ? tr("No accounts.") : tr("No accounts on %1.", filterName())}</p>
+                    <Show when={noAccountsMatch(view())}><button type="button" class="btn small" onClick={clearFilters}>{tr("Clear filters")}</button></Show>
+                  </div>
+                }>
                   <Index each={visible()}>{(a) => <div role="listitem"><AccountRow a={a()} now={now()} /></div>}</Index>
                 </Show>
                 <Show when={view().truncated > 0}><p class="dim acct-none">{tr("%1 more accounts are not shown.", view().truncated)}</p></Show>
@@ -364,7 +402,8 @@ export function AccountsScreen() {
         </div>
       </main>
       <Show when={accountDistribution.prompt()}>{prompt=><Suspense><AccountDistributionDialog prompt={prompt()}/></Suspense>}</Show>
-      <Show when={accountSetup.prompt()}>{prompt=><Suspense><AccountSetupDialog prompt={prompt()} busy={accountSetup.busy()} close={accountSetup.close} confirm={(values,handle)=>void accountSetup.confirm(values,handle)}/></Suspense>}</Show>
+      <Show when={accountSetup.prompt()}>{prompt=><Suspense><AccountSetupDialog prompt={prompt()} busy={accountSetup.busy()} close={accountSetup.close} confirm={(values,handle)=>void accountSetup.confirm(values,handle)}/></Suspense>}</Show><Show when={bindNotice()}>{text=><Status kind="ok">{text()}</Status>}</Show>
+      <Show when={bindPrompt()}>{p=><Suspense><OpenCodeBindDialog host={p().host} machine={p().machine} agentHome={p().home} close={()=>setBindPrompt(null)} bound={(name)=>{setBindPrompt(null);setBindNotice(tr("Existing OpenCode conversation is bound as %1. Native history was preserved.",name));void loadAccounts();}}/></Suspense>}</Show>
       <Show when={accountManagement.prompt()}>{prompt=><Suspense><Switch><Match when={prompt().kind==="permissions" && prompt().permissions}>{editor=><AccountPermissionsDialog prompt={prompt()} editor={editor()} close={accountManagement.close} confirm={(values,handle)=>void accountManagement.confirm(values,handle)}/>}</Match><Match when={prompt().kind==="permissions" || prompt().kind==="model"}><AccountDefaultsDialog prompt={prompt()} close={accountManagement.close} confirm={(values,handle)=>void accountManagement.confirm(values,handle)}/></Match><Match when={true}><AccountCatalogDialog prompt={prompt()} close={accountManagement.close} confirm={(label,handle)=>void accountManagement.confirm(label,handle)}/></Match></Switch></Suspense>}</Show>
     </div>
   );

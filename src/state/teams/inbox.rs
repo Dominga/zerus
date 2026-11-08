@@ -15,7 +15,7 @@ const SUMMARY_CHARS: usize = 300;
 
 /// Task 134: items a member is blocked on make the lead's inbox message
 /// urgent: its doorbell says URGENT and rings at once.
-pub(crate) const URGENT_KINDS: [&str; 6] = ["question", "permission", "terminal_question", "crashed", "input_blocked", "member_stuck"];
+pub(crate) const URGENT_KINDS: [&str; 7] = ["question", "permission", "terminal_question", "crashed", "input_blocked", "member_stuck", "urgent_unread"];
 
 pub(crate) fn urgency<'a>(items: impl IntoIterator<Item = &'a Item>) -> super::working::Urgency {
     if items.into_iter().any(|item| URGENT_KINDS.contains(&item.kind)) {
@@ -54,6 +54,15 @@ impl Item {
         // U18: every item says how long it has waited, so the desktop and the
         // lead see the stuck ones without reading timestamps.
         value["age"] = json!(age(crate::state::now(), self.since));
+        // Task #289: the lead knows a notice from a decision and how to mark it
+        // seen; the key is what `hgs team seen --json` takes.
+        value["notice"] = json!(notice(self.kind));
+        if notice(self.kind) {
+            value["seen"] = json!(format!(
+                "{{\"request_id\":\"UUID\",\"team\":\"TEAM\",\"items\":[\"{}\"]}} | hgs team seen --json",
+                self.key
+            ));
+        }
         if !self.detail.is_empty() {
             value["detail"] = json!(self.detail);
         }
@@ -62,6 +71,30 @@ impl Item {
         }
         value
     }
+}
+
+/// Task #289 (owner, 2026-11-08): notices are information for the lead, never a
+/// decision waiting: a decided proposal, a cancelled dependency, a member that
+/// does not read and the digests. They can be marked seen and return only when
+/// their content changes.
+const NOTICES: [&str; 4] = ["proposal_decided", "dependency_cancelled", "unread_messages", "lead_changes"];
+
+pub(crate) fn notice(kind: &str) -> bool {
+    NOTICES.contains(&kind)
+}
+
+/// A notice's change signature: the same key marked seen comes back when its
+/// words, time, member or task change.
+pub(crate) fn signature(item: &Item) -> String {
+    use sha2::{Digest, Sha256};
+    let text = format!("{}\n{}\n{}\n{}\n{}\n{:?}\n{:.0}", item.kind, item.key, item.summary, item.detail, item.member, item.task, item.since);
+    format!("{:x}", Sha256::digest(text.as_bytes()))
+}
+
+/// Whether the lead marked this notice seen with exactly this content.
+fn is_seen(team: &Team, item: &Item) -> bool {
+    let signature = signature(item);
+    team.seen_notices.iter().any(|seen| seen.key == item.key && seen.signature == signature)
 }
 
 /// One line of a text, never a paragraph: the inbox message stays readable.
@@ -123,6 +156,8 @@ pub(crate) fn items(team: &Team) -> Vec<Item> {
 pub(crate) fn items_for(team: &Team, reviewer: &str) -> Vec<Item> {
     let mut items = all_items(team);
     items.retain(|item| reviewer_of(team, item) == reviewer);
+    // Task #289: a notice the lead marked seen stays out until it changes.
+    items.retain(|item| !notice(item.kind) || !is_seen(team, item));
     items
 }
 
@@ -138,7 +173,9 @@ fn reviewer_of(team: &Team, item: &Item) -> String {
     }
 }
 
-fn all_items(team: &Team) -> Vec<Item> {
+/// Every item, seen notices included: `hgs team seen` marks what it finds here,
+/// and `items` hides what is already seen (task #289).
+pub(crate) fn all_items(team: &Team) -> Vec<Item> {
     let active = matches!(team.status, TeamStatus::Running | TeamStatus::Paused);
     // N5: a finished team has no open work, but the owner's decision on the
     // lead's proposal is still the lead's to read (spec 4).
@@ -187,6 +224,32 @@ fn all_items(team: &Team) -> Vec<Item> {
             });
         }
     }
+    // Task #267: accepted work that is not on the integration line waits for
+    // the lead: the queue, its resolve task, or a landing nobody made.
+    if active && !team.settings.integration_folder.trim().is_empty() {
+        let landing = super::merge_queue::landing(team);
+        for entry in landing["unlanded"].as_array().into_iter().flatten() {
+            let task = entry["task"].as_u64().unwrap_or_default() as u32;
+            let why = entry["why"].as_str().unwrap_or_default();
+            let resolve = entry["resolve"].as_u64();
+            let next = match resolve {
+                Some(resolve) => format!("The resolve task #{resolve} resolves the conflict; the landing retries once it is decided."),
+                None => "Retry the landing, or resolve it by hand and accept again.".to_owned(),
+            };
+            let target = resolve.unwrap_or(u64::from(task));
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "unlanded",
+                key: format!("unlanded:{task}"),
+                task: Some(task),
+                member: team.name_of(team.task(task).map(|task| task.assignee.as_str()).unwrap_or_default()),
+                since: team.task(task).and_then(|task| task.merge.as_ref()).map_or(team.updated, |entry| entry.at),
+                summary: summary(&format!("#{task} is accepted but not on the integration line: {why}")),
+                command: format!("{} | hgs team retry --json", json!({"request_id":PLACEHOLDER,"team":team.id,"task":target})),
+                detail: format!("Accepted work lands on {} ({}) at acceptance through the queue. {next}", landing["branch"].as_str().unwrap_or_default(), landing["head"].as_str().unwrap_or_default()),
+            });
+        }
+    }
     // A rework keeps its member indefinitely. Show the wait even when that
     // member has an approval or usage limit rather than a stored task wait.
     for task in team.tasks.iter().filter(|task| active && task.rework() && task.status == TaskStatus::Pending
@@ -213,6 +276,169 @@ fn all_items(team: &Team) -> Vec<Item> {
             detail: format!("{} keeps this rework without a time limit. Wait for that member or explicitly reassign the task. {}",
                 team.name_of(&task.assignee), task.waits.as_ref().map(|wait| wait.reason.as_str()).unwrap_or_default()).trim_end().to_owned(),
         });
+    }
+    // Task #220: a tool a team's run found missing waits for its lead, not the
+    // owner: the lead denies it with a reason, or asks the owner on a card.
+    if active {
+        // A card the lead already asked for answers it; the offer is not the
+        // lead's again until the owner's answer says so.
+        let asked: Vec<String> = team
+            .proposals
+            .iter()
+            .filter(|proposal| proposal["state"] == "open" && proposal["kind"] == "install-tool")
+            .filter_map(|proposal| proposal["change"]["offer"].as_str().map(str::to_owned))
+            .collect();
+        for offer in crate::test_discipline::tools::offers_of(&team.id).into_iter().filter(|offer| !asked.contains(&offer.id)) {
+            let who = if offer.member.is_empty() { team.name.clone() } else { team.name_of(&offer.member) };
+            let needs = format!("{who}'s run needs {}", offer.tool);
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "tool_missing",
+                key: format!("tool_missing:{}", offer.id),
+                task: offer.task,
+                member: who.clone(),
+                since: offer.since,
+                summary: summary(&format!("{needs} in {}: {}", offer.project_name, offer.why)),
+                command: format!(
+                    "{} | hgs team decide-tool --json",
+                    json!({"request_id":PLACEHOLDER,"team":team.id,"offer":offer.id,"allow":false,
+                        "reason":format!("We work without {} for now", offer.tool)})
+                ),
+                detail: format!(
+                    "Project: {} ({}).\nThe install command: {}\nAsk the owner to install it: {} | hgs team propose --json",
+                    offer.project_name,
+                    offer.folder,
+                    offer.command.join(" "),
+                    json!({"request_id":PLACEHOLDER,"team":team.id,"kind":"install-tool","offer":offer.id,
+                        "reason":format!("{needs}: {}", offer.why)})
+                ),
+            });
+        }
+    }
+    // Task 259 (owner, 2026-11-08): no idle member while ready work waits.
+    // Zerus moves a ready task with free outputs to an idle member itself; the
+    // one case it leaves to the lead is a task an explicit assignment keeps
+    // with its own member (pinned, keep_assignees or a rework). An idle member
+    // that may take such a task is named here with the task, so the lead can
+    // hand it over instead of leaving both waiting.
+    // Task 263 (owner, 2026-11-08): a member whose own ready work another open
+    // task's outputs hold is idle too; that item names the holder, so an
+    // hour-long silent hold like 198 against 218-226 is visible and freeable.
+    if active {
+        let ready = plan::dispatch_order(team, plan::ready(team));
+        let outputs = InProgressOutputs::new(team);
+        for member in team.members.iter().filter(|member| member.id != team.lead && member.state != MemberState::Removed) {
+            let held = plan::held_ready(team, &member.id);
+            let idle = member.starved_since.is_some()
+                || (!held.is_empty() && member.seen_activity == "idle" && member.session.is_some());
+            if !idle {
+                continue;
+            }
+            let since = member
+                .starved_since
+                .or(member.seen_event_at)
+                .or_else(|| member.seen.as_ref().map(|seen| seen.at))
+                .unwrap_or_else(crate::state::now);
+            let role = team.role_of(&member.id);
+            let mut best: Option<(u8, usize, &Task)> = None;
+            for (index, id) in ready.iter().enumerate() {
+                let Some(task) = team.task(*id) else { continue };
+                if task.assignee.is_empty() || task.assignee == member.id || task.assignee == team.lead { continue; }
+                if !team.requires_assignee(task) {
+                    // Zerus hands this one over on its own next tick.
+                    continue;
+                }
+                if !plan::output_holders(team, task).is_empty() || outputs.blocks_for(&member.id, task) { continue; }
+                if !super::rights::missing(task, member).is_empty() { continue; }
+                let found = team.role_of(&task.assignee);
+                // Task 259: a compatible role - the same one, or one doing the
+                // same kind of work - is what lets a member take the task.
+                if found != role && !related_roles(&role, &found) { continue; }
+                let rank = if found == role { 0 } else { 1 };
+                if best.is_none_or(|(best_rank, best_index, _)| (rank, index) < (best_rank, best_index)) {
+                    best = Some((rank, index, task));
+                }
+            }
+            if let Some((_, _, task)) = best {
+                let why = if task.rework() { "a rework stays with the member that got it" } else { "an explicit assignment (pinned or keep_assignees) keeps it" };
+                let minutes = ((crate::state::now() - since).max(0.0) / 60.0).round() as u64;
+                items.push(Item {
+                    subagents: Value::Null,
+                    kind: "idle_with_ready_work",
+                    key: format!("idle_with_ready_work:{}:{}", member.id, task.id),
+                    task: Some(task.id),
+                    member: team.name_of(&member.id),
+                    since,
+                    summary: summary(&format!("#{} {} is ready and {} is idle {minutes} min: it may take it", task.id, task.title, team.name_of(&member.id))),
+                    command: format!("{} | hgs team reassign --json",
+                        json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id,"member":member.id})),
+                    detail: format!("{} has no ready task of its own while #{} waits for {}. {}; Zerus does not move it by itself. Its outputs are free for {} ({role}) and its launch can do it. Reassign it to hand the task over, or leave it with its member.",
+                        team.name_of(&member.id), task.id, team.name_of(&task.assignee), why, team.name_of(&member.id)).trim_end().to_owned(),
+                });
+                continue;
+            }
+            // Task 263: the member's own ready work is held by another open
+            // task's outputs; name the holder and the action that frees it.
+            let Some((task_id, holder)) = held.first().copied() else { continue };
+            let Some(task) = team.task(task_id) else { continue };
+            let note = plan::holder_note(team, holder);
+            let waiting = plan::holder_waits_for_member(team, holder);
+            let minutes = ((crate::state::now() - since).max(0.0) / 60.0).round() as u64;
+            let command = if waiting {
+                format!("{} | hgs team hold --json", json!({"request_id":PLACEHOLDER,"team":team.id,"task":holder,
+                    "reason":format!("#{holder} waits for its member and holds #{}'s outputs for {}", task_id, team.name_of(&member.id))}))
+            } else {
+                format!("{} | hgs team look --json",
+                    json!({"team":team.id,"member":team.task(holder).map(|task| task.assignee.clone()).unwrap_or_default()}))
+            };
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "idle_with_ready_work",
+                key: format!("idle_with_ready_work:{}:{}:outputs", member.id, task_id),
+                task: Some(task_id),
+                member: team.name_of(&member.id),
+                since,
+                summary: summary(&format!("#{} {} is ready for {} but held by #{}'s outputs", task_id, task.title, team.name_of(&member.id), holder)),
+                command,
+                detail: format!("#{} waits for #{}'s output; {}. {} is idle {minutes} min. Hold or reassign #{} to let #{} start, or wait for it.",
+                    task_id, holder, note, team.name_of(&member.id), holder, task_id).trim_end().to_owned(),
+            });
+        }
+    }
+    // Task 277 (owner, 2026-11-08): an urgent message unread past the alarm
+    // bound is an alarm: the member has not acted on it and Zerus did not get
+    // its new turn through. Ordinary unread notices stay folded into the one
+    // "does not read" item; only an urgent one is shouted.
+    if active && team.settings.urgent_alarm_minutes > 0 {
+        let now = crate::state::now();
+        let bound = team.settings.urgent_alarm_minutes as f64 * 60.0;
+        for member in team.members.iter().filter(|member| member.id != team.lead && member.state != MemberState::Removed) {
+            let Some(unread) = member.unread.as_ref().filter(|unread| unread.urgent > 0) else { continue };
+            let Some(at) = unread.urgent_at else { continue };
+            let waited = (now - at).max(0.0);
+            if waited < bound {
+                continue;
+            }
+            let minutes = (waited / 60.0).round() as u64;
+            let who = if unread.urgent_by == "owner" { "you" } else { "the lead" };
+            let why = match member.urgent.as_ref().map(|urgent| urgent.state.as_str()).unwrap_or_default() {
+                "requested" => "its turn was interrupted and the message waits for the stop",
+                "sent" => "it was delivered in a new turn but not acted on",
+                "failed" => "Zerus could not interrupt its turn",
+                _ => "it waits for the member's turn to end",
+            };
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "urgent_unread",
+                key: format!("urgent_unread:{}:{}", member.id, unread.urgent_oldest),
+                task: None,
+                member: team.name_of(&member.id),
+                since: at,
+                summary: summary(&format!("{} has an urgent message from {who} unread {minutes} min: {why}", team.name_of(&member.id))),
+                command: format!("{} | hgs team look --json", json!({"team":team.id,"member":member.id})),
+                detail: format!("{} unread urgent message(s); {why}. The message is in the member's team inbox. Open its look to see the session, or stop it natively.", unread.urgent),
+            });
+        }
     }
     // #752: two or more members in one folder build each other's half-done
     // edits; the lead proposes the build broker once (a switch card), and a
@@ -270,7 +496,7 @@ fn all_items(team: &Team) -> Vec<Item> {
     // and the bound again, or an urgent one its turn kept back) is one item for
     // the lead, with the member's state; the messages stay unread for it.
     for member in team.members.iter().filter(|member| member.id != team.lead).filter(|_| active) {
-        let Some(why) = super::doorbell::unread_stalled(member, crate::state::now()) else { continue };
+        let Some(why) = super::doorbell::unread_stalled(member, crate::state::now(), super::working::urgent_bound(team)) else { continue };
         let unread = member.unread.as_ref().expect("a stall has unread messages");
         let role = team.name_of(&member.id);
         let state = serde_json::to_value(member.state).ok().and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_default();
@@ -347,10 +573,10 @@ fn all_items(team: &Team) -> Vec<Item> {
                     format!("{} Reassigning it to {peer} frees it now.", wait.reason),
                 ),
                 (None, MemberState::Paused) => (resume, format!("{} Resume the member to free it.", wait.reason)),
-                (None, _) if !live => (relaunch, format!("{} Relaunch its session to free it.", wait.reason)),
+                (None, _) if !live => (relaunch, format!("{} Relaunch its session in a fresh conversation with a handoff brief to free it.", wait.reason)),
                 (None, _) if team.settings.lead_restarts_stuck && member_stuck => (
                     relaunch,
-                    format!("{} Restart it: relaunch interrupts its stuck turn, or relaunches it in its conversation.", wait.reason),
+                    format!("{} Relaunch it: a fresh conversation with a handoff brief continues the task.", wait.reason),
                 ),
                 (None, _) => (
                     owner,
@@ -449,7 +675,7 @@ fn all_items(team: &Team) -> Vec<Item> {
                     json!({"request_id":PLACEHOLDER,"team":team.id,"member":member.id})
                 ),
                 format!(
-                    "You may restart it: hgs team relaunch {} interrupts its stuck turn and continues it, or relaunches the session in its own conversation.",
+                    "You may relaunch it: hgs team relaunch {} gives it a fresh conversation with a handoff brief that continues the task.",
                     member.id
                 ),
             )
@@ -535,8 +761,12 @@ fn all_items(team: &Team) -> Vec<Item> {
                 task.title,
                 names.join(", ")
             )),
-            command: format!("{} | hgs team status --json", json!({"team":team.id})),
-            detail: "Re-plan it if it needed the cancelled work: give it a new dependency, hold it, or cancel it too.".into(),
+            command: format!("{} | hgs team keep --json", json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id})),
+            detail: format!(
+                "Keep it if it does not need the cancelled work: the keep command above records that and clears this notice. Otherwise re-plan it: hold it with {} | hgs team hold --json, or cancel it too with {} | hgs team cancel --json.",
+                json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id}),
+                json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id,"reason":"..."})
+            ),
         });
     }
     // #718: flaky suites to file a task for, suites over their budgets, the
@@ -833,7 +1063,7 @@ fn all_items(team: &Team) -> Vec<Item> {
                     ),
                     // Task 161: a member blocked on an outside event is
                     // answered with a park until its condition, with an ETA.
-                    detail: if super::wait_loops::waiting_reply(&question.text) || super::wait_loops::lead_wait_instruction(&question.text) {
+                    detail: if super::wait_loops::waiting_reply(&question.text) || super::wait_loops::lead_wait_instruction(&question.text).is_some() {
                         let (condition, what) = super::wait_loops::guess_condition(&question.text, question.at);
                         format!(
                             "Blocked on an outside event? Answer with a park until {what}, ETA: {} | hgs team reply --json",
@@ -1132,19 +1362,146 @@ fn all_items(team: &Team) -> Vec<Item> {
         }
     }
     // Task 173: a member working with nothing handed to it, at once.
+    // Task #227: when its folder's branch names the task it works on, the item
+    // names it and one command binds the work in progress to that task.
     for member in team.members.iter().filter(|_| active) {
         let Some(flag) = member.unassigned.as_ref() else { continue };
+        let named = flag.task.and_then(|id| team.task(id).map(|task| (id, task.title.clone())));
+        let (summary, command, detail) = match &named {
+            Some((task, title)) => (
+                summary(&format!("{} {} on #{} {} with no attempt (unassigned work)", team.name_of(&member.id), flag.what, task, title)),
+                format!(
+                    "{} | hgs team retry --json (binds the work in progress to #{}), or reassign",
+                    json!({"request_id":"UUID","team":team.id,"task":task}),
+                    task
+                ),
+                format!("Its branch shows #{}; the retry keeps the work and tells the member to report under it, never to start over.", task),
+            ),
+            None => (
+                summary(&super::shadow::lead_line(team, member, flag)),
+                "{\"request_id\":\"UUID\",\"team\":\"ID\",\"task\":N} | hgs team retry --json (or reassign); hgs team look MEMBER shows what it runs".into(),
+                String::new(),
+            ),
+        };
         items.push(Item {
             subagents: Value::Null,
             kind: "unassigned_work",
             key: format!("unassigned_work:{}:{}", member.id, flag.since as i64),
-            task: None,
+            task: flag.task,
             member: member.id.clone(),
             since: flag.since,
-            summary: summary(&super::shadow::lead_line(team, member, flag)),
-            command: "{\"request_id\":\"UUID\",\"team\":\"ID\",\"task\":N} | hgs team retry --json (or reassign); hgs team look MEMBER shows what it runs".into(),
-            detail: String::new(),
+            summary,
+            command,
+            detail,
         });
+    }
+    // Task #227: the attempts a restart gave back by itself, as one item: what
+    // Zerus re-sent or bound, with no action for the lead.
+    if active {
+        let cutoff = crate::state::now() - 30.0 * 60.0;
+        let recovered: Vec<&Value> = team
+            .crash_recovered
+            .iter()
+            .filter(|entry| entry["at"].as_f64().unwrap_or(0.0) >= cutoff)
+            .collect();
+        if !recovered.is_empty() {
+            let since = recovered.iter().filter_map(|entry| entry["at"].as_f64()).fold(f64::INFINITY, f64::min);
+            let named: Vec<String> = recovered
+                .iter()
+                .filter_map(|entry| {
+                    let task = entry["task"].as_u64()?;
+                    let attempt = entry["attempt"].as_u64().unwrap_or_default();
+                    Some(match entry["how"].as_str().unwrap_or("") {
+                        "resent" => format!("#{task} attempt {attempt} sent again"),
+                        "continued" => format!("#{task} attempt {attempt} continued on its own"),
+                        _ => format!("#{task} attempt {attempt}"),
+                    })
+                })
+                .collect();
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "attempt_recovered",
+                key: format!("attempt_recovered:{:.0}", since),
+                task: None,
+                member: "Zerus".into(),
+                since,
+                summary: summary(&format!("The restart gave {} attempt(s) back by itself: {}", named.len(), named.join(", "))),
+                command: "no action: Zerus kept each attempt's number; hgs team status --json shows them".into(),
+                detail: String::new(),
+            });
+        }
+    }
+    // Task #275: a sandboxed member's queued call the worker refused or that
+    // failed; the member is told as a team message and the lead reads why.
+    if active || finished {
+        let cutoff = crate::state::now() - 24.0 * 3600.0;
+        let failures: Vec<&Value> = team
+            .outbox_failures
+            .iter()
+            .filter(|failure| failure["at"].as_f64().unwrap_or(0.0) >= cutoff)
+            .collect();
+        if !failures.is_empty() {
+            let since = failures.iter().filter_map(|failure| failure["at"].as_f64()).fold(f64::INFINITY, f64::min);
+            let named: Vec<String> = failures
+                .iter()
+                .map(|failure| {
+                    let member = failure["member"].as_str().unwrap_or_default();
+                    let op = failure["op"].as_str().unwrap_or("call");
+                    let error = failure["error"].as_str().unwrap_or("no reason recorded");
+                    format!("{member}'s queued {op}: {error}")
+                })
+                .collect();
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "refused_queued_call",
+                key: format!("refused_queued_call:{since:.0}"),
+                task: None,
+                member: "Zerus".into(),
+                since,
+                summary: summary(&format!("A queued call was refused: {}", named.join("; "))),
+                command: "no action: the member was told at its next safe point; hgs team status --json shows the team".into(),
+                detail: named.join("; "),
+            });
+        }
+    }
+    // Task #228: the scratch teams a QA member created for this team's tasks.
+    // The lead reads each creation and stop here; a team whose sessions could
+    // not be stopped is listed for the owner.
+    if active || finished {
+        let cutoff = crate::state::now() - 7.0 * 86400.0;
+        let recent: Vec<&super::model::ScratchChild> = team
+            .scratch_teams
+            .iter()
+            .filter(|record| record.at >= cutoff)
+            .collect();
+        if !recent.is_empty() {
+            let since = recent.iter().map(|record| record.at).fold(f64::INFINITY, f64::min);
+            let mut names = Vec::new();
+            for record in &recent {
+                let task = if record.task == 0 { String::new() } else { format!(" for task #{}", record.task) };
+                names.push(match record.state.as_str() {
+                    "stopped" => format!("{} ({}, stopped{task})", record.name, record.id),
+                    "listed" => format!("{} ({}, listed: its sessions could not be stopped{task})", record.name, record.id),
+                    _ => format!("{} ({}, created{task})", record.name, record.id),
+                });
+            }
+            let listed = recent.iter().any(|record| record.state == "listed");
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "scratch_team",
+                key: format!("scratch_team:{since:.0}"),
+                task: None,
+                member: "Zerus".into(),
+                since,
+                summary: summary(&format!("Scratch teams created by the QA check: {}", names.join("; "))),
+                command: if listed {
+                    "The owner stops a listed team: {\"team\":\"<scratch team>\",\"by\":\"human\"} | hgs team stop --json".into()
+                } else {
+                    "no action: hgs team status --json shows them; Zerus stops them when the creating task is decided".into()
+                },
+                detail: names.join("; "),
+            });
+        }
     }
     // Task 156: a report that contradicts a decision, before its accept.
     for task in team.tasks.iter().filter(|_| active) {
@@ -1429,6 +1786,26 @@ pub(crate) fn waits(team: &Team, task: &Task, ready: bool) -> Option<Value> {
             }));
         }
     }
+    // Task 263 (owner, 2026-11-08): another open task's outputs hold this one;
+    // name the holder and why it has not started, never a silent wait.
+    if task.status == TaskStatus::Pending && task.open_attempt().is_none() {
+        if let Some(holder) = plan::output_holders(team, task).first().copied() {
+            return Some(json!({
+                "for":"outputs","on":[holder],
+                "unblock":plan::holder_unblock(team, holder)
+            }));
+        }
+    }
+    // Task 295: a ready task whose files another open task writes waits for
+    // that task, not for its member.
+    if ready && task.status == TaskStatus::Pending {
+        let queue = plan::output_queue(team, task);
+        if let Some(first) = queue.first() {
+            return Some(json!({"for":"deps","on":queue,
+                "reason":format!("#{first} writes the same files; tasks writing the same files never run side by side"),
+                "unblock":format!("finish #{first}")}));
+        }
+    }
     let role = team.name_of(&task.assignee);
     Some(json!({"for":"member","on":[role],"unblock":format!("wait for {role}")}))
 }
@@ -1638,6 +2015,22 @@ pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
         out.push(json!({"kind":"phase_acceptance","phase":phase.n,"since":phase.awaiting_since.unwrap_or(team.updated),
             "summary":format!("{} is ready for your acceptance", phase_name(phase)),
             "outcome":acceptance_summary(team, phase, now)}));
+    }
+    // Task 277 (owner, 2026-11-08): your own urgent message to a member that
+    // stays unread past the alarm bound is on your Waiting list too.
+    if team.settings.urgent_alarm_minutes > 0 {
+        let bound = team.settings.urgent_alarm_minutes as f64 * 60.0;
+        for member in team.members.iter().filter(|member| member.id != team.lead && member.state != MemberState::Removed) {
+            let Some(unread) = member.unread.as_ref().filter(|unread| unread.urgent > 0 && unread.urgent_by == "owner") else { continue };
+            let Some(at) = unread.urgent_at else { continue };
+            let waited = (now - at).max(0.0);
+            if waited < bound {
+                continue;
+            }
+            let minutes = (waited / 60.0).round() as u64;
+            out.push(json!({"kind":"urgent_message","member":team.role_of(&member.id),"member_id":member.id,"since":at,"minutes":minutes,
+                "summary":format!("{} has your urgent message unread {minutes} min", team.name_of(&member.id))}));
+        }
     }
     out.sort_by(|a, b| a["since"].as_f64().unwrap_or_default().total_cmp(&b["since"].as_f64().unwrap_or_default()));
     out
@@ -2348,3 +2741,4 @@ mod told_tests {
         assert_eq!(told, vec!["proposal:p1".to_owned()]);
     }
 }
+

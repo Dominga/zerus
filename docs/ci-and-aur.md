@@ -590,7 +590,7 @@ exits after using one (the fake client refuses it), so steps that start `hgs.exe
 `ssh` or the desktop app read stdin from `/dev/null`.
 
 The Windows desktop is Zerus Next, built from the locked frontend and Tauri
-Rust package with `tauri.windows.conf.json` and the `video` feature. The output
+Rust package with `tauri.windows.switch.conf.json` and the `video` feature. The output
 is `target/windows-next/release/hgs-tray.exe`, with the installed identity
 `com.hgdev.hgs-tray`. This job does not install Qt, run `windeployqt` or cache a
 Qt/C++ desktop build. Native Windows shell contracts also run in the dedicated
@@ -607,17 +607,16 @@ with a fixed timeout and checks the registration again. It refuses owner and
 non-Windows environments and never removes the shared runtime. See Microsoft's
 [WebView2 distribution guidance](https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution).
 
-`scripts/package-windows.py` copies the exact tested `hgs.exe`, `lore.exe`, Tauri
+`scripts/package-windows.py` copies the exact tested `hgs.exe`, Tauri
 `hgs-tray.exe` and `zerus-mobile-connector.exe` into
 `zerus-windows-x86_64.zip`, preserving the top-level
 `zerus-windows-x86_64/hgs-tray.exe` path winget uses. It adds the app-local MSVC
-runtime from Visual Studio's default redistributable directory, the pinned
-ConPTY pair next to `hgs.exe`, and `lore.exe` beside it for team and project
-memory. No Qt runtime or plugins are deployed.
+runtime from Visual Studio's default redistributable directory and the pinned
+ConPTY pair next to `hgs.exe`. No Qt runtime or plugins are deployed.
 
 The zip carries the project, Codex and ConPTY notices, the host-target Rust
-notices for the CLI, lore, connector and Tauri desktop (including its selected
-video feature), and the exact installed production frontend packages' license texts.
+notices for the CLI/connector and Tauri desktop (including its selected video
+feature), and the exact installed production frontend packages' license texts.
 Frontend collection uses the shared `client/scripts/collect-notices.py` and npm
 lockfile, excludes development tools except Vite's emitted preload runtime, and
 refuses missing notices or mismatched installed versions. `build-info.json`

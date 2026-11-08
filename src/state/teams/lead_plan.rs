@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// The lead's planning operations inside an approved goal: recorded when the
 /// lead does them on a running or paused team.
-pub(crate) const LEAD_PLAN_OPS: [&str; 6] = ["extend", "edit-draft", "move-phase", "move-task", "add-to-phase", "cancel"];
+pub(crate) const LEAD_PLAN_OPS: [&str; 7] = ["extend", "edit-draft", "move-phase", "move-task", "add-to-phase", "cancel", "spawn"];
 
 /// Whether `actor` is the lead planning inside the team's approved goal: the
 /// plan is approved and the team runs (or is paused).
@@ -102,7 +102,20 @@ pub(crate) fn record(team: &mut Team, op: &str, tasks_before: &[Task], phases_be
             }
         }
     }
-    if changed.is_empty() && added.is_empty() && phases.is_empty() {
+    // Task #229: a phase the change opened (a Minor phase) is recorded so a
+    // revert removes it with its tasks.
+    let mut added_phases = Vec::new();
+    for now in &team.phases {
+        if !phases_before.iter().any(|old| old.n == now.n) && !now.state.is_draft() {
+            added_phases.push(now.n);
+            words.push(if now.kind == PhaseKind::Minor {
+                format!("opened Minor phase {}", now.n)
+            } else {
+                format!("added phase {}", now.n)
+            });
+        }
+    }
+    if changed.is_empty() && added.is_empty() && phases.is_empty() && added_phases.is_empty() {
         return;
     }
     let n = team.lead_changes.iter().filter_map(|change| change.id.strip_prefix("lc")?.parse::<u32>().ok()).max().unwrap_or(0) + 1;
@@ -110,7 +123,7 @@ pub(crate) fn record(team: &mut Team, op: &str, tasks_before: &[Task], phases_be
     let summary = if words.is_empty() { format!("changed phase {}", phases.iter().map(|phase| phase.n.to_string()).collect::<Vec<_>>().join(", ")) } else { words.join("; ") };
     events.push(Event::new("lead_changed_plan", json!({"change":id,"op":op,"by":by,"summary":summary,"added":added,
         "changed":changed.iter().map(|task| task.id).collect::<Vec<_>>()})));
-    team.lead_changes.push(LeadChange { id, op: op.to_owned(), summary, by: by.to_owned(), at, tasks_before: changed, added, phases_before: phases, ..Default::default() });
+    team.lead_changes.push(LeadChange { id, op: op.to_owned(), summary, by: by.to_owned(), at, tasks_before: changed, added, phases_before: phases, phases_added: added_phases, ..Default::default() });
     // Bounded: the oldest seen or reverted ones leave first, then the oldest.
     while team.lead_changes.len() > LEAD_CHANGES_KEPT {
         let at = team.lead_changes.iter().position(|change| change.seen || change.reverted_at.is_some()).unwrap_or(0);
@@ -124,7 +137,7 @@ fn touched(change: &LeadChange) -> BTreeSet<u32> {
 }
 
 fn touched_phases(change: &LeadChange) -> BTreeSet<u32> {
-    change.phases_before.iter().map(|phase| phase.n).collect()
+    change.phases_before.iter().map(|phase| phase.n).chain(change.phases_added.iter().copied()).collect()
 }
 
 /// The owner reverts one of the lead's changes: the tasks it changed are as
@@ -156,6 +169,11 @@ pub(crate) fn revert(team: &mut Team, input: &Value, actor: &Actor, events: &mut
         }
     }
     team.tasks.retain(|task| !change.added.contains(&task.id));
+    // Task #229: a phase the change opened leaves with its tasks.
+    team.phases.retain(|phase| !change.phases_added.contains(&phase.n));
+    for n in &change.phases_added {
+        team.phase_modes.remove(n);
+    }
     for phase in &mut team.phases {
         phase.tasks.retain(|task| !change.added.contains(task));
     }
@@ -245,7 +263,7 @@ pub(crate) fn list(team: &Team, limit: usize) -> Value {
         .rev()
         .take(limit.clamp(1, 200))
         .map(|change| json!({"id":change.id,"op":change.op,"summary":change.summary,"by":change.by,"at":change.at,
-            "seen":change.seen,"reverted_at":change.reverted_at,"added":change.added,
+            "seen":change.seen,"reverted_at":change.reverted_at,"added":change.added,"phases_added":change.phases_added,
             "changed":change.tasks_before.iter().map(|task| task.id).collect::<Vec<_>>()}))
         .collect();
     json!({"team":team.id,"changes":shown,"total":team.lead_changes.len()})

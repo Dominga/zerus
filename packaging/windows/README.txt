@@ -14,17 +14,14 @@ Requirements
 Use
 - Extract the whole folder and run hgs-tray.exe. This is the Tauri Zerus Next
   desktop; it ships no Qt runtime. Keep the files together: the desktop uses
-  the adjacent hgs.exe, lore.exe and zerus-mobile-connector.exe.
+  the adjacent hgs.exe and zerus-mobile-connector.exe.
 - Closing the window keeps Zerus in the notification area. Run hgs-tray.exe
   again to bring it back. For portable login start, put a shortcut in
   shell:startup with --background appended to its Target. The per-user
   installer also offers an optional Start at login choice, off by default.
-- The CLI works from a terminal as .\hgs.exe '@myserver' ls in PowerShell.
+- The CLI works from a terminal as .\hgs.exe '@myserver' ls in PowerShell. lore.exe beside it serves the local knowledge base; its model weights are fetched when needed and are never part of this folder.
   With this folder on PATH, use hgs.exe '@myserver' ls. In Git Bash set
   MSYS_NO_PATHCONV=1 before passing remote paths such as /workspace/project.
-- Team and project memory use the included lore.exe, which hgs.exe finds beside
-  itself; it needs no separate install. Local sessions carry it into the staged
-  CLI and host image.
 - Configuration remains in %USERPROFILE%\.config\hgs (HOME when set).
   HGS_CONFIG_DIR and HGS_STATE_DIR keep their existing meanings. tray.conf
   is read from .config\hgs under HOME or the account's profile folder.
@@ -58,8 +55,9 @@ components. This distribution includes:
 - Microsoft.Windows.Console.ConPTY @CONPTY_VERSION@, under the MIT license
   (licenses\conpty-LICENSE.txt), with OpenConsole's third-party notices
   (licenses\conpty-NOTICE.md). hgs.exe stages the pinned pair for local hosts.
-- Rust dependency notices for hgs, lore and the connector (licenses\rust), and
-  the Tauri desktop's selected Rust dependencies (licenses\rust\desktop).
+- Rust dependency notices for hgs and the connector (licenses\rust), and the
+  Tauri desktop's selected Rust dependencies (licenses\rust\desktop).
 - Locked frontend runtime dependency notices, including Vite's emitted preload
   helper (licenses\frontend).
 WebView2 Evergreen is installed separately under Microsoft's terms.
+

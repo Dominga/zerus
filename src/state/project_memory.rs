@@ -9,7 +9,7 @@
 //!
 //! Commits (docs/lore.md 2.5, the owner's answer 2): a store outside any git
 //! working tree, the default under Zerus data among them, is its own private
-//! git repository, made as crates/lore's `private.rs` makes it: `git init`, a
+//! git repository, made as CodeLore's `private.rs` makes it: `git init`, a
 //! local identity, a marker in its git folder, `commit.mode = "plain"` and a
 //! first commit; RustCodeLore then commits every write. A store in a folder
 //! inside another working tree is never initialized: it keeps lore's rules for
@@ -37,7 +37,7 @@ pub(crate) const KNOWLEDGE_KINDS: [&str; 5] = ["fault", "reading", "decision", "
 const FILE_LIMIT: usize = 200_000;
 const CACHE: &str = ".cache";
 /// The marker in a store's git folder that says Zerus made the repository
-/// (crates/lore private.rs).
+/// (CodeLore's private.rs).
 const STORE_MARKER: &str = "zerus-lore-store";
 /// The address of every commit a private store makes (a reserved domain).
 const STORE_EMAIL: &str = "lore@zerus.invalid";
@@ -183,7 +183,7 @@ pub(crate) fn status(store: &Path) -> anyhow::Result<Status> {
     Ok(status)
 }
 
-/// `lore init`'s lore.toml (crates/lore config::template) with no areas.
+/// `lore init`'s lore.toml (CodeLore's config::template) with no areas.
 fn lore_toml(mode: &str) -> String {
     format!(
         "version = 1\ndir = \"lore\"\nareas = []\n\n[commit]\nmode = \"{mode}\"          # \"none\" | \"plain\" | \"shared-tree\"\nbranch = \"main\"\npush = false\n\n[embed]\nprovider = \"ollama\"     # \"ollama\" | \"none\"\nurl = \"http://127.0.0.1:11434\"\nmodel = \"nomic-embed-text\"\n"
@@ -274,7 +274,7 @@ fn set_mode(store: &Path, mode: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Makes `dir` its own private repository, as crates/lore private.rs does:
+/// Makes `dir` its own private repository, as CodeLore's private.rs does:
 /// `git init`, a local identity, the marker, plain commits, and a commit of
 /// what the folder holds (a new store's lore.toml and .gitattributes).
 fn make_private(dir: &Path, subject: &str) -> anyhow::Result<()> {

@@ -255,24 +255,47 @@ pub(super) fn reconcile_locked(snapshot: &Snapshot) -> Result<(Vec<Value>, Vec<V
 
 /// Active polling never opens every archived record or its conversation journal.
 /// Only bindings that might need reconciliation consult the metadata index.
-pub(super) fn reconcile_active_locked(snapshot: &Snapshot) -> Result<Vec<Value>> {
+///
+/// Task 193: the read-only counterpart of [`reconcile_active_locked`], for a
+/// listing that must not take the writer lock (owner decision, 2026-11-07). It
+/// filters exactly as the writer's pass does but saves nothing: a record the
+/// writer would save is listed as its committed state until the writer's next
+/// reconcile records it. The archive catalog is only read (`contains_existing`),
+/// so a stale or missing catalog lists the row rather than writing the index.
+pub(super) fn read_active(snapshot: &Snapshot) -> Result<Vec<Value>> {
     let bindings = super::storage::records()?;
     let mut result = Vec::new();
-    let mut catalog=None;
+    // One read-only catalog connection for the listing, never one per record.
+    let catalog = archive_catalog::existing().unwrap_or(None);
     for record in bindings {
         // A live exact binding cannot be the crash-left copy of a completed run.
-        if matches(&record,panes_of(snapshot, &record)) || process_alive(&record) { result.push(record);continue; }
-        if catalog.is_none(){catalog=Some(archive_catalog::catalog()?);}
-        if archive_catalog::contains(catalog.as_ref().unwrap(), &record)? { save(&record)?; continue; }
-        if terminal_live(snapshot, &record).unwrap_or(true) || process_alive(&record)
-            || record.get("pausing").is_some() || record["paused"].as_bool().unwrap_or(false)
-            || !string(&record, "expected_id").is_empty() {
-            result.push(record); continue;
+        if matches(&record, panes_of(snapshot, &record)) || process_alive(&record) {
+            result.push(record);
+            continue;
         }
-        let clean = record["termination_signal"].is_null() && known_exit(&record) &&
-            ((string(&record,"agent")=="claude" && record.get("supervisor").is_none() && string(&record,"error").is_empty()) ||
-             (string(&record,"completion_source")=="supervisor" && string(&record,"completion_reason")=="clean_exit" && record["exit_code"]==0));
-        if clean { save(&record)?; } else { result.push(record); }
+        if catalog.as_ref().is_some_and(|db| archive_catalog::contains(db, &record).unwrap_or(false)) {
+            continue;
+        }
+        if terminal_live(snapshot, &record).unwrap_or(true)
+            || process_alive(&record)
+            || record.get("pausing").is_some()
+            || record["paused"].as_bool().unwrap_or(false)
+            || !string(&record, "expected_id").is_empty()
+        {
+            result.push(record);
+            continue;
+        }
+        let clean = record["termination_signal"].is_null()
+            && known_exit(&record)
+            && ((string(&record, "agent") == "claude"
+                && record.get("supervisor").is_none()
+                && string(&record, "error").is_empty())
+                || (string(&record, "completion_source") == "supervisor"
+                    && string(&record, "completion_reason") == "clean_exit"
+                    && record["exit_code"] == 0));
+        if !clean {
+            result.push(record);
+        }
     }
     Ok(result)
 }

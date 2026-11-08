@@ -844,6 +844,33 @@ impl Composers {
         self.request_answer(hub, ctx, question, card, answers, false)
     }
 
+    /// Task 198 (W5): "Allow all, don't ask again" on a subagent card
+    /// (QuestionCard.cpp:259-267): the first click asks to Confirm, the
+    /// second sends the card's broader Yes.
+    pub fn question_always(&self, card: &str) -> QuestionReply {
+        let mut hub = self.lock();
+        let Some((ctx, question)) = self.shown_question(&hub, card) else {
+            return QuestionReply::Busy;
+        };
+        if !self.button_ready(&hub, card, |v| &v.always) {
+            return QuestionReply::Busy;
+        }
+        let (Some(option), Some(answers)) = (rules::always_option(&question), rules::always_decision(&question)) else {
+            return QuestionReply::Busy;
+        };
+        let Some(draft) = hub.answers.drafts.get_mut(card) else {
+            return QuestionReply::Busy;
+        };
+        if draft.confirm != option {
+            draft.confirm = option;
+            self.save_answer(&mut hub, card, false, None);
+            drop(hub);
+            self.changed();
+            return QuestionReply::Busy;
+        }
+        self.request_answer(hub, ctx, question, card, answers, false)
+    }
+
     /// Skip on an optional Codex card.
     pub fn question_skip(&self, card: &str) -> QuestionReply {
         let hub = self.lock();
@@ -1284,6 +1311,11 @@ pub fn question_decide(
     allow: bool,
 ) -> QuestionReply {
     state.question_decide(&card, allow)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn question_always(state: tauri::State<'_, Composers>, card: String) -> QuestionReply {
+    state.question_always(&card)
 }
 
 #[tauri::command(rename_all = "snake_case")]

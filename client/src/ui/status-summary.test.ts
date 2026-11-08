@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { connectionError, statusSummary } from "./status-summary";
+import { connectionError, staleNote, statusSummary } from "./status-summary";
 
 // Task 72 (F1): a cold start's first seconds, while this computer's stream
 // builds its first snapshot, read as connecting, never as offline.
@@ -24,5 +24,13 @@ describe("the status bar's connection line", () => {
     expect(connectionError([{ id: "", status: "live" }, { id: "studio", status: "reconnecting" }])).toBe(true);
     expect(connectionError([{ id: "", status: "ended" }])).toBe(true);
     expect(connectionError([{ id: "", status: "live" }])).toBe(false);
+  });
+});
+
+describe("stale note (task 235)", () => {
+  it("names the oldest saved list while cached rows show, and nothing after", () => {
+    const at = (seconds: number) => `t${seconds}`;
+    expect(staleNote({}, at)).toBe("");
+    expect(staleNote({ "": 200, studio: 100 }, at)).toBe("Last list from t100, updating…");
   });
 });

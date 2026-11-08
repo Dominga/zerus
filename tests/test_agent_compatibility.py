@@ -1,4 +1,5 @@
 """Distribution integrity, isolated contracts and upstream capability reporting."""
+import ast
 import base64
 import hashlib
 import importlib.util
@@ -582,6 +583,69 @@ class AgentCompatibility(unittest.TestCase):
             for target in set(spec['members']) - {'win32-x64'}:
                 with self.subTest(agent=agent, target=target):
                     self.assertIs(compat.target_spec(agent, target), spec)
+
+    def test_windows_claude_manual_mode_reaches_every_native_launch(self):
+        # Read the maintained fixture without importing its native host/process setup.
+        tree = ast.parse((ROOT / 'tests/test_windows_native_agents.py').read_text(encoding='utf-8'))
+        classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
+        claude, native = classes['NativeWindowsClaude'], classes['NativeAgent']
+        args, = [node.value for node in claude.body if isinstance(node, ast.Assign)
+                 and any(isinstance(target, ast.Name) and target.id == 'ARGS' for target in node.targets)]
+        self.assertEqual(ast.literal_eval(args),
+                         ('--model', 'claude-sonnet-4-6', '--permission-mode', 'manual'),
+                         'Claude approval fixtures must not inherit the account bypass default')
+        self.assertEqual([ast.unparse(base) for base in claude.bases], ['NativeAgent', 'host.HostCase'])
+        methods = {node.name: node for node in claude.body if isinstance(node, ast.FunctionDef)}
+        self.assertNotIn('launch', methods, 'all Claude launches must use the maintained common path')
+
+        def self_call(node, name):
+            return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name) and node.func.value.id == 'self'
+                    and node.func.attr == name)
+
+        launch, = [node for node in native.body if isinstance(node, ast.FunctionDef) and node.name == 'launch']
+        forwarded, = [node.value for node in launch.body if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == 'args' for target in node.targets)]
+        self.assertEqual(ast.dump(forwarded), ast.dump(ast.parse('[*self.ARGS, *extra]', mode='eval').body))
+        command, = [node for node in ast.walk(launch) if self_call(node, 'hgs')]
+        self.assertEqual(ast.unparse(command.args[0]), 'self.AGENT')
+        # The hgs delimiter precedes the native args; an extra native delimiter
+        # can only follow ARGS, so explicit manual mode retains launch precedence.
+        self.assertEqual(ast.dump(command.args[-1]),
+                         ast.dump(ast.parse("f(*(['--', *args] if args else []))").body[0].value.args[0]))
+
+        launches = {}
+        for name, method in methods.items():
+            calls = [node for node in ast.walk(method) if self_call(node, 'launch')]
+            if calls:
+                self.assertTrue(all(len(call.args) == 1 and not call.keywords for call in calls))
+                launches[name] = [ast.literal_eval(call.args[0]) for call in calls]
+        self.assertEqual(launches, {
+            'test_project_powershell_wrapper_keeps_existing_tracking_and_exact_messages': ['prime-hooks', 'wrapper'],
+            'test_a_tracked_launch_reports_its_hooks_and_send_delivers_exact_messages': ['messages'],
+            'test_hgs_answers_ask_user_question': ['question'],
+            'test_hgs_answers_a_question_taller_than_its_unviewed_pane': ['tall'],
+            'test_hgs_approves_a_write_once': ['approval'],
+            'test_the_answer_channel_answers_bash_approvals': ['channel'],
+            'test_a_bash_panel_taller_than_80x24_is_answered_through_the_hook': ['clipped'],
+            'test_terminal_answers_end_the_hook': ['terminal'],
+            'test_a_killed_hook_leaves_the_approval_to_the_verified_screen': ['killed'],
+            'test_clear_context_starts_a_new_conversation_in_the_same_agent': ['clear'],
+            'test_pause_resume_and_terminate': ['lifecycle'],
+            'test_input_keys_reach_claude_through_the_host': ['keys'],
+        })
+        wrapper = methods['test_project_powershell_wrapper_keeps_existing_tracking_and_exact_messages']
+        writes = [node for node in ast.walk(wrapper) if isinstance(node, ast.Call)
+                  and isinstance(node.func, ast.Attribute) and node.func.attr == 'write_text']
+        script, = writes
+        self.assertEqual(ast.dump(script.args[0]),
+                         ast.dump(ast.parse('f"& \'{program}\' @args; exit $LASTEXITCODE\\n"', mode='eval').body))
+        settings, = [node.args[0] for node in ast.walk(methods['configure'])
+                     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                     and ast.unparse(node.func) == 'json.dumps' and isinstance(node.args[0], ast.Dict)
+                     and any(isinstance(key, ast.Constant) and key.value == 'permissions'
+                             for key in node.args[0].keys)]
+        self.assertEqual(ast.literal_eval(settings), {'permissions': {'defaultMode': 'default'}})
 
     def qualify_fixture(self, agent, target):
         """Run qualify() with stand-ins for the package, the executable and the suite

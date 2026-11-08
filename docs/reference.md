@@ -4679,8 +4679,9 @@ a color and an optional emoji. They are kept with the account on each of its
 computers (zerus-sa9qn.6), so every desktop and phone shows the same mark:
 `hgs [@host] account mark ID [--color #RRGGBB|none] [--emoji EMOJI|none]
 [--if-unset] [--revision REV]` saves them in `account-marks.json` beside
-`accounts.json` (64 KiB at most, private), which older `hgs` builds never read
-because they parse `accounts.json` strictly. `account ls` then reports
+`accounts.json` (64 KiB at most, private; a change that would exceed that
+changes nothing), which older `hgs` builds never read because they parse
+`accounts.json` strictly. `account ls` then reports
 `marks_supported: true` and each row's `mark` (`color` and `emoji`, null when
 unset); each `hgs ls` session row carries its recorded account's
 `account_mark` when one is set, which reaches phones with the listing. A
@@ -4691,7 +4692,8 @@ it as this desktop's preference for that member profile (`accounts/color/` and
 `accounts/mark/`), as before. Once, the desktop moves those preferences to the
 computers that keep marks with `--if-unset`, which fills only what a computer
 has no value for, then forgets its own: if two desktops disagree, the first one
-to move its value wins. Without a choice the color is a stable palette slot
+to move its value wins. A computer that is offline or busy is tried again on its
+own, after a minute and then less often, up to every 15 minutes. Without a choice the color is a stable palette slot
 derived from the label, so every desktop shows the same default. Settings > Sessions >
 **Account marks** shows emoji instead of letters for accounts that have one.
 **Show account labels on session cards** (on by default) turns the marks off on

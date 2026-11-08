@@ -170,10 +170,16 @@ pub(super) fn set(config: &Config, args: &[String], dry: bool) -> Result<Value> 
     if mark.color.is_empty() && mark.emoji.is_empty() && mark.other.is_empty() {
         marks.marks.remove(id);
     }
+    // What is written must read back: the same cap as the reader, checked
+    // before the original is replaced (zerus-etuiw).
+    let bytes = serde_json::to_vec(&marks).map_err(|_| Error::new(1, "Cannot encode account marks."))?;
+    if bytes.len() as u64 > LIMIT {
+        return Err(Error::new(1, "Account marks would exceed 64 KiB on this computer; nothing was changed."));
+    }
     if !dry {
         let mut f = tempfile::NamedTempFile::new_in(&config.dir)?;
         platform::make_private(f.as_file())?;
-        f.write_all(&serde_json::to_vec_pretty(&marks).map_err(|_| Error::new(1, "Cannot encode account marks."))?)?;
+        f.write_all(&bytes)?;
         f.as_file().sync_all()?;
         platform::persist(f, config.dir.join(FILE)).map_err(|e| Error::new(1, e.to_string()))?;
         platform::sync_dir(&config.dir)?;

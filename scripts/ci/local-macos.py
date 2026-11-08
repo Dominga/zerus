@@ -32,7 +32,7 @@ import urllib.request
 
 CI = None  # Initialized only from verified source bytes during preparation.
 SUPPORTED = {'client-native-macos-core', 'client-native-macos-tauri', 'connector-macos',
-             'cli-macos-debug', 'cli-macos-core', 'cli-macos-native'}
+             'cli-macos-debug', 'cli-macos-core', 'cli-macos-native', 'clippy-macos'}
 RUST_CACHE = ('echo "rustc=$(rustc{toolchain} -Vv | git hash-object --stdin | cut -c1-16)" >> "$GITHUB_OUTPUT"\n'
               'echo "epoch=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"')
 TOOLCHAINS = {'rustup toolchain install 1.99.1 --profile minimal',

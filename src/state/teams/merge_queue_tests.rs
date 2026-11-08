@@ -101,6 +101,7 @@ fn team(repo: &Repo) -> Team {
         name: "T".into(),
         lead: "lead".into(),
         folder: repo.lead.to_string_lossy().into_owned(),
+        line_branch: "master".into(),
         status: TeamStatus::Running,
         members: vec![
             Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), state: MemberState::Active, ..Default::default() },

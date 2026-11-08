@@ -539,6 +539,15 @@ where
     F: FnOnce() -> anyhow::Result<(Vec<String>, Vec<super::test_runners::Runner>)>,
 {
     let mut migrated = migrate_legacy_ranges(team);
+    // Task 377 (owner, 2026-11-08): the line's branch is recorded once, from
+    // the folder it was granted on; later checkouts there never change it.
+    if team.line_branch.trim().is_empty() && !team.settings.integration_folder.trim().is_empty() {
+        let folder = team.integration_folder();
+        if let Some(branch) = git_text(folder, &["symbolic-ref", "--quiet", "--short", "HEAD"]).filter(|branch| !branch.is_empty()) {
+            team.line_branch = branch;
+            migrated = true;
+        }
+    }
     // Task #267: a conflict's resolve task decided puts its landing back in the
     // queue; nothing lands while a conflict waits for its resolve task.
     let released = release_conflicts(team);

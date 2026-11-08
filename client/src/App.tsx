@@ -36,7 +36,6 @@ import { openGoTo, openShortcutHelp, goToOrigin, shortcutHelpOrigin } from "./st
 import { rememberRecentSession } from "./ui/sessions/goTo";
 import { updateCommands, updates } from "./store/updates";
 import { openUpdates } from "./store/desk";
-import { SessionUsageStrip } from "./ui/components/SessionUsageStrip";
 import { fleetRefresh, windowChrome, type BridgeMode } from "./bridge";
 import { installUiLanguage, tr, uiLanguage } from "./i18n";
 import { WaitingPage } from "./ui/teams/Waiting";
@@ -128,7 +127,7 @@ function StatusBar(props: { mode: () => BridgeMode | "starting" }) {
       <LoginItemButton />
       <CleanupChip />
       <span class="grow" />
-      <SessionUsageStrip />
+      {/* Task #351: the agent and usage block moved to the composer's usage chip; the status bar keeps no copy. */}
       {/* Task 243: with the controls in the title bar the version moves here, as Qt's placeRailControls. */}
       <Show when={skin().layout.chrome === "unified"}>
         <button type="button" class="status-version" data-tip={tr("%1\nOpen About", installedAppName(appBuildInfo()))} onClick={openAbout}>{railVersion(appBuildInfo()) || tr("About")}</button>

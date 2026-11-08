@@ -377,6 +377,12 @@
   /* Cancel send: a borderless link-like button (SessionsWindow.cpp:961). */
   .tchip.link { background: transparent; padding: 0 6px; }
   .tchip.link:hover { text-decoration: underline; }
+  /* Task #351: the composer's usage chip carries the two meters the status bar
+     used to draw, with the weekly percent and its reset beside them. */
+  .tchip.usage-chip { padding: 0 9px 0 7px; }
+  .tchip.usage-chip .usage-meters { height: 22px; color: inherit; }
+  .tchip.usage-chip .um-text, .tchip.usage-chip .um-summary, .tchip.usage-chip .um-countdown { color: inherit; }
+  .usage-balance { font-variant-numeric: tabular-nums; }
   /* Compacting context: a 48×5 indeterminate bar before its caption (ActivityView.cpp 1269-1279). */
   .cmp-progress { position: relative; flex: none; width: 48px; height: 5px; border-radius: 3px; overflow: hidden; background: color-mix(in srgb, currentColor 20%, transparent); }
   .cmp-progress::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 40%; border-radius: 3px; background: currentColor; animation: cmp-progress 1.4s ease-in-out infinite; }

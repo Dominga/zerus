@@ -47,18 +47,16 @@ export const SECTIONS: readonly Section[] = [
   { id: "files", label: "Files", icon: "hard-drive", component: FilesSection },
   { id: "worktrees", label: "Worktrees", icon: "folder-git-2", component: WorktreesSection, refresh: refreshWorktrees },
   { id: "approvals", label: trNoop("Automatic approvals"), icon: "shield-check", component: ApprovalsSection },
+  // SessionsWindow.cpp:2235, 2269, 2273 insert Teams, Model servers and Build
+  // folders before Voice input, in that order.
+  { id: "teams", label: "Teams", icon: "users", component: TeamsSection },
+  { id: "modelservers", label: trNoop("Model servers"), icon: "hard-drive", component: ModelServersSection },
+  { id: "disk", label: trNoop("Build folders"), icon: "trash-2", component: DiskSection },
   { id: "voice", label: trNoop("Voice input"), icon: "mic", component: VoiceSection, refresh: refreshVoice },
   { id: "keyboard", label: "Keyboard", icon: "keyboard", component: KeyboardSection },
   { id: "analytics", label: trNoop("Private analytics"), icon: "gauge", component: AnalyticsSection },
   { id: "extensions", label: trNoop("Extensions"), icon: "plug", component: ExtensionsSection },
   { id: "about", label: "About", icon: "info", component: AboutSection, refresh: refreshAbout },
-  // SessionsWindow.cpp:2235 appends the fork's Teams section after Settings'
-  // own nav, and Model servers after it (2241, task 67).
-  { id: "teams", label: "Teams", icon: "users", component: TeamsSection },
-  { id: "modelservers", label: trNoop("Model servers"), icon: "hard-drive", component: ModelServersSection },
-  // Task 108: the build folders Zerus holds and their cleanup, after Model
-  // servers as in Qt.
-  { id: "disk", label: trNoop("Build folders"), icon: "trash-2", component: DiskSection },
 ];
 
 /** The sections the client has so far, in Qt's order. */

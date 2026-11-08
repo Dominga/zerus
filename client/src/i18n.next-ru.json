@@ -2422,5 +2422,7 @@
 "Switch the working mode?": "Переключить режим работы?",
 "Propose switching this team to %1? Its settings follow the project's proposal.": "Предложить переключить команду на %1? Её настройки последуют предложению проекта.",
 "Switch to %1": "Переключить на %1",
-"the proposed working mode": "предложенный режим работы"
+"the proposed working mode": "предложенный режим работы",
+"This machine, 1 session": "Этот компьютер, 1 сеанс",
+"This machine, %1 sessions": "Этот компьютер, %1 сеансов"
 }

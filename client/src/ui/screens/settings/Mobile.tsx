@@ -35,7 +35,7 @@ export const listTitle = (list: { host: string; workspace_name: string }) =>
 
 const PhoneDialogs=lazy(()=>import("./PhoneDialogs"));
 const LegacyRelay=lazy(()=>import("./LegacyRelay"));
-function PhonesPanel(props: { view?: View; refresh: () => void; actions:PhoneActions }) {
+export function PhonesPanel(props: { view?: View; refresh: () => void; actions:PhoneActions }) {
   const [selected,setSelected]=createSignal<string>();
   const phones=()=>props.view?.phones, reading=()=>!!props.view?.phones_busy, busy=()=>reading()||props.actions.busy();
   const entries=createMemo(()=>phones()?.lists.flatMap(list=>list.phones.map(phone=>({list,phone,key:phoneKey(targetOf(list),phone.id)})))??[]);
@@ -48,6 +48,41 @@ function PhonesPanel(props: { view?: View; refresh: () => void; actions:PhoneAct
    <Actions><button class="btn" disabled={busy()||!phones()?.lists.length} onClick={e=>{const targets=phones()!.lists.map(targetOf);const selected=chosen();const at=selected?targets.findIndex(t=>targetKey(t)===targetKey(targetOf(selected.list))):0;props.actions.pair(targets,at,e.currentTarget);}}><Icon name="plus" size={14}/>{tr("Pair a phone…")}</button><button class="btn danger" disabled={busy()||!chosen()} onClick={e=>revoke(e.currentTarget)}>{tr("Revoke…")}</button><button class="btn" disabled={busy()||!props.view} onClick={props.refresh}><Icon name="refresh-cw" size={13}/>{tr("Refresh")}</button><Status kind={reading()?"busy":"muted"}>{reading()?tr("Checking phones…"):phones()?.lines.join("\n")}</Status></Actions>
    <Show when={props.actions.notice()}><Status>{props.actions.notice()}</Status></Show>
   </section>;
+}
+
+/** Task #318 (F12): the same Phones section on the Machines screen. */
+export function MachinesPhones() {
+  const [state, setState] = createSignal<MobileState>({});
+  const page = createMobile({
+    view: () => invoke<View>("mobile_view"),
+    open: () => invoke<View>("mobile_open"),
+    refreshWorkspace: () => invoke<View>("mobile_refresh_workspace"),
+    refreshPhones: () => invoke<View>("mobile_refresh_phones"),
+    setDelivery: (value) => invoke<View>("mobile_delivery_set", { value }),
+  }, setState);
+  const phoneActions = createPhoneActions({
+    open: (kind, target, phone) => invoke("mobile_phone_open", { kind, target, phone: phone ?? null }),
+    invite: (handle) => invoke("mobile_phone_invite", { handle }), revoke: (handle) => invoke("mobile_phone_revoke", { handle }),
+    close: (handle) => invoke("mobile_phone_close", { handle }), changed: () => page.changed(),
+  });
+  onCleanup(() => phoneActions.close());
+  onMount(() => {
+    if (!inTauri()) return;
+    let gone = false;
+    let stop: (() => void) | undefined;
+    listen("mobile-changed", () => page.changed())
+      .then((off) => { if (gone) off(); else { stop = off; page.changed(); } }, () => {});
+    page.open();
+    const timer = setInterval(() => page.changed(), 5000);
+    onCleanup(() => { gone = true; stop?.(); clearInterval(timer); });
+  });
+  return (
+    <>
+      <Show when={state().error}>{(text) => <Status kind="error">{text()}</Status>}</Show>
+      <PhonesPanel view={state().view} refresh={() => page.refreshPhones()} actions={phoneActions}/>
+      <Show when={phoneActions.prompt()}>{prompt => <Suspense><PhoneDialogs prompt={prompt()} actions={phoneActions}/></Suspense>}</Show>
+    </>
+  );
 }
 
 function DeliveryPanel(props: { view?: View; set: (value: string) => void }) {

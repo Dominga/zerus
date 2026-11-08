@@ -72,6 +72,21 @@ const row = (extra: Partial<Session> = {}): Session => ({
 const chip = (html: string) => html.match(/<span\b[^>]*\bclass="qchip[^"]*"[^>]*>[\s\S]*?<\/span>/)?.[0];
 const text = (html: string) => html.replace(/<[^>]*>/g, "");
 
+describe("the compact row's tooltip (Qt SessionCardDelegate.h:125-138, SessionList.cpp:189-196)", () => {
+  const attribute = (html: string, cls: string, name: string) =>
+    html.match(new RegExp(`<[^>]*class="${cls}[^"]*"[^>]*>`))?.[0].match(new RegExp(`\\b${name}="([^"]*)"`))?.[1]?.replace(/&#10;|&#x0?a;/gi, "\n");
+  it("names the title, the session, its status and the provider the row draws as an icon", () => {
+    const html = render(true, row({ caption: "Working" }));
+    expect(attribute(html, "sc-title", "title")).toBe("reviewer\ncodex/project/reviewer\nWorking\nCodex");
+    expect(attribute(html, "cc-expand", "title")).toBe("Expand session row\nreviewer\ncodex/project/reviewer\nWorking\nCodex");
+    expect(attribute(html, "cc-expand", "aria-description")).toBe("reviewer\ncodex/project/reviewer\nWorking\nCodex");
+  });
+  it("gives a name once when the title is the name", () => {
+    const html = render(true, row({ title: "codex/project/reviewer", caption: "Ready" }));
+    expect(attribute(html, "sc-title", "title")).toBe("codex/project/reviewer\nReady\nCodex");
+  });
+});
+
 describe("full and compact session question presentation", () => {
   it("shows a pending optional Codex question in compact as well as full view without making Ready blocking", () => {
     for (const compact of [false, true]) {

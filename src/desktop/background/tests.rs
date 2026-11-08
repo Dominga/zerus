@@ -96,8 +96,13 @@ impl Fixture {
             message: crate::desktop::task_message::Runtime::new(&config, &epoch, owner.clone())
                 .unwrap(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            send: crate::desktop::deferred_send::Runtime::new(&config, &epoch, owner.clone())
-                .unwrap(),
+            send: crate::desktop::deferred_send::Runtime::new(
+                &config,
+                &epoch,
+                owner.clone(),
+                Default::default(),
+            )
+            .unwrap(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             answer: crate::desktop::deferred_answer::Runtime::new(&config, &epoch, owner.clone())
                 .unwrap(),
@@ -105,8 +110,13 @@ impl Fixture {
             compact: crate::desktop::compact_to_send::Runtime::new(&config, &epoch, owner.clone())
                 .unwrap(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            resume: crate::desktop::session_resume::Runtime::new(&config, &epoch, owner.clone())
-                .unwrap(),
+            resume: crate::desktop::session_resume::Runtime::new(
+                &config,
+                &epoch,
+                owner.clone(),
+                Default::default(),
+            )
+            .unwrap(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             task_start: crate::desktop::task_start_reconcile::Runtime::new(
                 &config,

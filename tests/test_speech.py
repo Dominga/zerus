@@ -255,9 +255,11 @@ class SpeechService(unittest.TestCase):
         ssh = fake_bin / "ssh"
         ssh.write_text("""#!/usr/bin/env python3
 import json, pathlib, sys
-pathlib.Path(__file__).with_name('ssh-call.json').write_text(json.dumps(sys.argv[1:]))
 assert '-t' not in sys.argv and '-tt' not in sys.argv
 assert 'BatchMode=yes' in sys.argv and 'ConnectTimeout=3' in sys.argv
+if sys.argv[-1] == 'echo "hgs-remote-v2|%OS%|%SystemRoot%|$env:OS|$env:SystemRoot"':
+    print('hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot'); sys.exit(0)
+pathlib.Path(__file__).with_name('ssh-call.json').write_text(json.dumps(sys.argv[1:]))
 assert sys.argv[-2:] == ['retained-host', '~/.local/bin/hgs --help']
 print('usage: retained hgs (no speech ABI)')
 """)

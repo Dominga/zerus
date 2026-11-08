@@ -747,6 +747,22 @@ impl Validated {
         };
         Ok(*intent)
     }
+    /// The connection a deferred send or session resume was made for, read
+    /// before its admission. It grants and consumes nothing: the actor still
+    /// consumes this permit after BEGIN IMMEDIATE. A refusal before that
+    /// transaction reads it only to tell this epoch's own request from
+    /// another connection's, which it never answers not admitted
+    /// (zerus-tlb9q).
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn deferred_input_scope(
+        &self,
+    ) -> Option<&zerus_client_core::desktop::creation_clone::Scope> {
+        match &self.0 {
+            Request::DeferredSend { intent } => Some(&intent.scope),
+            Request::SessionResume { intent } => Some(&intent.scope),
+            _ => None,
+        }
+    }
     /// Only the deferred answer actor calls this, after BEGIN IMMEDIATE.
     /// Cached native Service mode was bound to this exact original request
     /// during admission.

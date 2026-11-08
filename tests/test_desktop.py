@@ -1735,7 +1735,8 @@ finally:
     @staticmethod
     def remove_catalog_reason_schema(db):
         # Rewind the later leaves too, never leaving one labelled older: the
-        # schema-34 session resume, schema-30 compact-to-send, schema-29
+        # schema-34 session resume, schema-32 startup attention index,
+        # schema-30 compact-to-send, schema-29
         # deferred answer, schema-28
         # deferred send, schema-27 task
         # message inputs, schema-26 task message, schema-25 termination
@@ -1743,6 +1744,7 @@ finally:
         # approval.
         db.execute('DROP TABLE desktop_session_resumes')
         db.execute('DROP TABLE desktop_session_resume_budget')
+        db.execute('DROP INDEX desktop_attention_catalog_run')
         db.execute('DROP TABLE desktop_compact_to_sends')
         db.execute('DROP TABLE desktop_compact_to_send_budget')
         db.execute('DROP TABLE desktop_deferred_answers')
@@ -1765,7 +1767,6 @@ finally:
 
     @classmethod
     def remove_attention_retention_schema(cls, db):
-        db.execute('DROP INDEX desktop_attention_catalog_run')
         # Rewind the later schema-21 leaf too, never leaving it labelled older.
         cls.remove_catalog_reason_schema(db)
         db.execute('DROP TRIGGER desktop_attention_edge_remove')

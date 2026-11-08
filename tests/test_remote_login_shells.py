@@ -196,8 +196,11 @@ class RemoteLoginShells(unittest.TestCase):
                 self.assertNotEqual(refused.returncode, 0, refused.stdout)
                 self.assertIn('update the selected computer to select sessions by ID', refused.stderr)
                 self.assertFalse((self.peer / 'argv.json').exists())
+        # A current peer lists every capability these calls need, including
+        # keep-warm's own (#1686, zerus-on03r).
         executable.write_text(older.replace("'  lifecycle-receipt-status-v1'",
-                                            "'  lifecycle-receipt-status-v1' '  session-id-selector-v1' '  session-reference-selector-v1'"))
+                                            "'  lifecycle-receipt-status-v1' '  session-id-selector-v1' '  session-reference-selector-v1'"
+                                            " '  session-keep-warm-v1'"))
         for call in calls:
             with self.subTest(call=call[1:3], peer='current'):
                 run(call)

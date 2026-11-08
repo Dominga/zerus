@@ -28,9 +28,12 @@ permissions:
   contents: read
 cache-mode: none
 
+# Pull requests: one run per PR, and a new head cancels the older run;
+# closing the PR cancels the rest (pr-closed.yml, zerus-b8zze).
+# Manual runs keep their per-ref group without cancellation.
 concurrency:
-  group: kimi-native-${{ github.ref }}
-  cancel-in-progress: false
+  group: ${{ github.event_name == 'pull_request' && format('kimi-native-pr-{0}', github.event.pull_request.number) || format('kimi-native-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   contracts:

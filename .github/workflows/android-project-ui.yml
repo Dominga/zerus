@@ -39,6 +39,13 @@ permissions:
 # This qualification consumes no cache; PR code receives no cache-write token.
 cache-mode: none
 
+# Pull requests: one run per PR, and a new head cancels the older run;
+# closing the PR cancels the rest (pr-closed.yml, zerus-b8zze).
+# Manual runs stay independent, as before.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('android-project-ui-pr-{0}', github.event.pull_request.number) || format('android-project-ui-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   project-ui:
     runs-on: ubuntu-24.04

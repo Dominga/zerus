@@ -2405,5 +2405,7 @@
   "1 critical task open": "1 критическая задача открыта",
   "%1 critical tasks open": "%1 критических задач открыто",
   "The phase's result waits for the critical follow-up": "Результат фазы ждёт критического продолжения",
-  " from #%1": " от #%1"
+  " from #%1": " от #%1",
+  "Continues attempt %1 - nothing was revoked": "Продолжает попытку %1 — ничего не отменено",
+  "attempt recovered": "попытка восстановлена"
 }

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   TeamActions, allDecided, barActions, barChips, discardConfirmation, leadStall, finishSummary, formAction, formText, moreItems, moveTargets,
-  openQuestions, pauseConfirmation, planApproval, questionClosed, retryConfirmation, sendBackMessage, stageName, stopConfirmation, subtreeImpact, subteamQuestion, taskButtons,
+  openQuestions, pauseConfirmation, planApproval, questionClosed, retryConfirmation, retryContinues, retryContinueText, sendBackMessage, stageName, stopConfirmation, subtreeImpact, subteamQuestion, taskButtons,
   type ActTask, type ActTeam,
 } from "./actions";
 import type { DecisionPort } from "./decisions";
@@ -255,6 +255,13 @@ describe("task card", () => {
     expect(moveTargets(t, 1)).toEqual([{ phase: 1, title: "Build", blocked: "" }, { phase: 2, title: "Polish", blocked: "" }]);
     // A started task does not move.
     expect(moveTargets(team(), 1)).toEqual([]);
+  });
+
+  it("Task 253: a retry that continues names the kept attempt", () => {
+    expect(retryContinues({ status: "continue", task: 4, attempt: 2 })).toBe(2);
+    expect(retryContinueText(2)).toBe("Continues attempt 2 - nothing was revoked");
+    expect(retryContinues({ status: "pending", task: 4, attempt: 2 })).toBeNull();
+    expect(retryContinues({ status: "continue" })).toBeNull();
   });
 
   it("each override form words Qt's question and sends its reason; no reason sends nothing", async () => {

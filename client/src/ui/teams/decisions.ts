@@ -1,5 +1,6 @@
 import { tr } from "../../i18n";
 import { withdrawnRefusal } from "../../teamRefusals";
+import { retryContinues, retryContinueText } from "./actions";
 import type { ComputerId, TeamAction, TeamCall, TeamChoice, TeamConfirmation, TeamMemberQuestion, TeamMemberView, TeamOutcome, TeamProposalView, TeamView, TeamWaitingItem } from "../../types";
 
 // The owner's decisions on a team (task 11), ported from Qt's
@@ -754,7 +755,13 @@ export class WaitingAnswer {
     const outcome = await act(this.port, { computer: this.computer, team: this.item.team, team_name: this.item.team_name, action }, this.uncertain);
     this.sending = false;
     if (outcome === "cancelled") { this.changed(); return outcome; }
-    if (outcome.outcome === "done") { this.uncertain = undefined; this.finish(); return outcome; }
+    if (outcome.outcome === "done") {
+      // Task #253: a retry on the task a member is working on keeps attempt K
+      // and says so; the row stays, since nothing was revoked.
+      const continued = action.kind === "retry" ? retryContinues(outcome.receipt) : null;
+      if (continued !== null) { this.notice = retryContinueText(continued); this.changed(); return outcome; }
+      this.uncertain = undefined; this.finish(); return outcome;
+    }
     if (outcome.outcome === "uncertain") { this.uncertain = outcome.request_id; this.notice = tr("It may have been sent: %1", hgsWords(outcome.detail)); }
     else { this.uncertain = undefined; this.notice = hgsWords("detail" in outcome ? outcome.detail : ""); }
     this.changed();

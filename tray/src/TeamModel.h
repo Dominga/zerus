@@ -560,6 +560,10 @@ struct Team {
     bool findingsKnown = false;
     QJsonObject findingsSummary;
     QString findingsNext;
+    // Task #308: the team's working mode, the project's proposal and what the
+    // settings miss of it.
+    struct WorkingMode { bool known = false; QString preset, proposalPreset, title; QStringList reasons, disagreeing; };
+    WorkingMode workingMode;
     // F13: "approved by Lead on the owner's word" and the sentence.
     QString approvedBy, ownerWord;
     // F5: a team in status "draft" is edited by the owner and the lead before

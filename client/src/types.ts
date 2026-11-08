@@ -1291,6 +1291,8 @@ export interface TeamFindingsPage { items: TeamFindingItem[]; next_cursor?: stri
 export interface TeamView {
   id: string; name: string; status: string; project: string; folder: string; goal: string; plan_mode: string; lead: string;
   revision: number; created: number; updated: number; waiting_for_lead: boolean; pending_phase: number | null;
+  /** Task #308: the team's working mode, the proposal and what its settings miss. */
+  working_mode?: { preset: string; proposal?: { preset: string; title: string; reasons: string[]; settings?: Record<string, unknown> } | null; disagreeing?: string[] };
   /** F7: the team a next goal came from, and the one it led to. */
   previous?: string; next?: string;
   /** Task #58: the phase that takes tasks as they come, and whether hgs sends each phase's mode. */
@@ -1405,6 +1407,8 @@ export type TeamAction =
   /** Task #230: the owner marks the lead's plan changes seen, or reverts one. */
   | { kind: "seen_lead_changes" }
   | { kind: "revert_lead_change"; change: string }
+  /** Task #308: proposes a working mode; its card allows the switch. */
+  | { kind: "propose_working_mode"; preset: string; reason?: string }
   /** Task #218: a member moves to another agent/account/model or to an existing session. */
   | { kind: "swap-member"; member: string; agent?: string; model?: string; effort?: string; account?: string; session?: TeamSessionView }
   | { kind: "take_over"; task: number }

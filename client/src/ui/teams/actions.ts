@@ -775,6 +775,11 @@ export class TeamActions {
     return this.run(`discard-phase:${phase}`, { kind: "discard_phase", phase, tasks, accepted: state === "queued" || state === "running" });
   }
   returnToDraft(phase: number) { return this.run(`return-to-draft:${phase}`, { kind: "return_to_draft", phase }); }
+  /** Task #308: asks the owner to allow the project's working mode. */
+  proposeWorkingMode(preset: string, reason = "") {
+    return this.run(`working-mode:${preset}`, { kind: "propose_working_mode", preset, reason },
+      { name: "teamWorkingModeConfirm", title: tr("Switch the working mode?"), text: tr("Propose switching this team to %1? Its settings follow the project's proposal.", preset), action: tr("Propose the switch") });
+  }
   /** Move earlier or later among the movable phases (drafts and accepted ones not started). */
   movePhase(phase: number, later: boolean) {
     const team = this.where().team;

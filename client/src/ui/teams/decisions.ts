@@ -69,6 +69,7 @@ export function proposalKindLabel(kind: string): string {
     case "swap-member": return tr("Swap");
     case "next-goal": return tr("Next goal");
     case "switch-plan-mode": return tr("Plan mode");
+    case "working-mode": return tr("Working mode");
     case "add-to-phase": return tr("Tasks");
     case "cancel-tasks": return tr("Cancel");
     case "question": return tr("Question");
@@ -150,6 +151,7 @@ export function proposalText(team: TeamView | undefined, proposal: TeamProposalV
       if (phase > 0) return proposal.mode === "standard" ? tr("Switch phase %1 to standard planning", phase) : tr("Switch phase %1 to free planning", phase);
       return proposal.mode === "standard" ? tr("Switch to standard planning") : tr("Switch to free planning");
     }
+    case "working-mode": return tr("Switch to %1", str(change.preset) || tr("the proposed working mode"));
     case "add-to-phase": {
       const count = arr(change.tasks).length;
       const phase = phaseName(team, num(change.phase));
@@ -198,6 +200,9 @@ export function proposalLines(team: TeamView | undefined, proposal: TeamProposal
       break;
     }
     case "next-goal": lines.push((proposal.goal ?? "").slice(0, 600)); break;
+    case "working-mode":
+      for (const reason of arr(change.reasons)) lines.push(str(reason));
+      break;
     case "add-to-phase":
       for (const value of arr(change.tasks)) {
         const task = obj(value);

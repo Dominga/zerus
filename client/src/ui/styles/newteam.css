@@ -111,3 +111,10 @@
 .nt-split .nt-member > .icon-btn { justify-self: start; }
 .nt-split .nt-member > .nt-error { grid-column: 1 / -1; }
 .nt-split .nt-lead-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); }
+
+/* Task #308: the project's working-mode proposal. */
+.nt-working-mode { border: 1px solid var(--z-color-border); border-radius: var(--z-radius-lg); padding: 8px 10px; display: flex; flex-direction: column; gap: 5px; }
+.nt-working-reasons { margin: 0; padding-left: 18px; color: var(--z-color-text-3); font-size: var(--fs-sm); }
+.team-working-mode { border: 1px solid color-mix(in srgb, var(--z-color-warn) 55%, var(--z-color-border)); background: color-mix(in srgb, var(--z-color-warn) 6%, var(--z-color-raised)); border-radius: var(--z-radius-lg); padding: 7px 10px; display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
+.team-working-mode b { color: var(--z-color-warn); }
+.team-working-mode ul { margin: 0; padding-left: 18px; font-size: var(--fs-sm); color: var(--z-color-text-3); }

@@ -1095,6 +1095,21 @@ Team parse(const QJsonObject &v)
         team.findingsNext = str(findings, "next_cursor");
     }
     if (v.value("findings_summary").isObject()) team.findingsSummary = v.value("findings_summary").toObject();
+    // Task #308: the working mode, its proposal and the settings that disagree.
+    if (v.value("working_mode").isObject()) {
+        const auto mode = v.value("working_mode").toObject();
+        team.workingMode.known = true;
+        team.workingMode.preset = str(mode, "preset");
+        team.workingMode.disagreeing.clear();
+        for (const auto &wrong : mode.value("disagreeing").toArray()) team.workingMode.disagreeing << wrong.toString();
+        if (mode.value("proposal").isObject()) {
+            const auto proposal = mode.value("proposal").toObject();
+            team.workingMode.proposalPreset = str(proposal, "preset");
+            team.workingMode.title = str(proposal, "title");
+            team.workingMode.reasons.clear();
+            for (const auto &reason : proposal.value("reasons").toArray()) team.workingMode.reasons << reason.toString();
+        }
+    }
     return team;
 }
 

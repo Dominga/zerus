@@ -29,6 +29,7 @@ import { TeamProposals } from "./ProposalCards";
 import { TeamReports } from "./TeamReports";
 import { WaitingBanner } from "./Waiting";
 import { Blockers, PhaseActions, TaskActions, TeamBarActions, TeamBarChips, TeamModeControl, TeamQuestions, createPlanEditing } from "./TeamActions";
+import { TeamActions as TeamActionModel } from "./actions";
 import { composer } from "../../store/composer";
 import type { ComputerId, TeamCall, TeamMemberView, TeamTaskView, TeamView } from "../../types";
 import type { Session } from "../sessions/types";
@@ -173,6 +174,24 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
         onCatalog={() => setCatalogOpen(true)} />
       <WaitingBanner />
       <TeamReports computer={props.computer} team={props.team} />
+      <Show when={props.team.working_mode?.disagreeing?.length ? props.team.working_mode.disagreeing : undefined}>
+        {(wrong) => (
+          <section class="team-working-mode" data-working-mode={props.team.working_mode!.preset}>
+            <b>{tr("Working mode: the project suggests %1", props.team.working_mode!.proposal?.title || props.team.working_mode!.proposal?.preset || props.team.working_mode!.preset)}</b>
+            <p>{tr("This team's settings differ: %1", wrong().join(", "))}</p>
+            <Show when={props.team.working_mode!.proposal?.reasons?.length}>
+              <ul><For each={props.team.working_mode!.proposal!.reasons}>{(reason) => <li>{reason}</li>}</For></ul>
+            </Show>
+            <button type="button" class="btn small" data-working-mode-switch
+              onClick={() => void new TeamActionModel(windowPort, () => ({ computer: props.computer, team: props.team }))
+                .proposeWorkingMode(props.team.working_mode!.proposal?.preset || props.team.working_mode!.preset,
+                  props.team.working_mode!.proposal?.title || "")}>
+              {tr("Propose the switch")}
+            </button>
+            <TeamProposals computer={props.computer} team={props.team} />
+          </section>
+        )}
+      </Show>
       <Show when={props.failure}><div class="team-strip danger" role="status"><Icon name="circle-alert" size={14} /><span class="ell">{props.failure}</span></div></Show>
       <Show when={state() === "stuck"}>
         <div class="team-strip warn" role="status">

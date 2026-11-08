@@ -662,6 +662,12 @@ void TestTeamsUiNewteam::embeddedNewTeamIsLedByTheSession()
     QVERIFY(tab.findChild<QLineEdit *>("teamNewFolder")->isReadOnly());
     QCOMPARE(tab.draftId(), QStringLiteral("draft-1"));
     QVERIFY(tab.findChild<QPushButton *>("teamNewDiscard")->isVisible());
+    // Task #308: the working mode follows the draft and offers the presets.
+    auto *working = tab.findChild<QComboBox *>("teamNewWorkingMode");
+    QVERIFY(working);
+    QVERIFY(working->findData(QStringLiteral("auto")) >= 0);
+    QVERIFY(working->findData(QStringLiteral("branch-pipeline")) >= 0);
+    QVERIFY(tab.findChild<QLabel *>("teamNewWorkingReasons"));
     // QA #347: a folder that is not a Git repository has one folder for every
     // member; the draft shows the policy as Shared, fixed, with the reason.
     {

@@ -70,10 +70,35 @@ export interface DraftMember {
   session: SessionView | null;
 }
 
+/** Task #308: the working mode hgs proposes for a project. */
+export interface WorkingModeProposal {
+  preset: string;
+  title: string;
+  reasons: string[];
+  settings?: Record<string, unknown>;
+  profile?: Record<string, unknown>;
+}
+
+/** Task #308: a running team's mode, its proposal and what the settings miss. */
+export interface WorkingModeStatus {
+  preset: string;
+  proposal?: WorkingModeProposal | null;
+  disagreeing?: string[];
+}
+
+/** Task #308: a draft's accepted preset (auto by default) and proposal. */
+export interface WorkingModeDraft {
+  accepted: string;
+  preset?: string | null;
+  proposal?: WorkingModeProposal | null;
+}
+
 export interface NewTeamView {
   team: string;
   name: string;
   goal: string;
+  /** Task #308 */
+  working_mode?: WorkingModeDraft | null;
   addendum: string;
   folder: string;
   settings: Record<string, unknown>;

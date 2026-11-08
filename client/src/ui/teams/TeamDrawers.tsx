@@ -1,11 +1,13 @@
 import { For, Show, createMemo, createSignal } from "solid-js";
 import { teams } from "../../store/teams";
 import { teamsOlder } from "../../bridge";
+import { toast } from "../../store/notices";
 import { Icon } from "../lib/icons";
 import { tr } from "../../i18n";
 import { feedClock, focusedLines, historyLine, inboxKind } from "./history";
+import { leadToolMissing } from "./decisions";
 import { roleStyle } from "./roles";
-import type { ComputerId, TeamFeedEvent, TeamView } from "../../types";
+import type { ComputerId, TeamFeedEvent, TeamInboxItem, TeamView } from "../../types";
 
 // Task 198 (W1): the lead's Inbox and the team's Feed under the plan, as Qt's
 // TeamWorkspace draws them (inboxStrip, feed drawer): each folds to one line
@@ -34,19 +36,72 @@ export function TeamInbox(props: { computer: ComputerId; team: TeamView }) {
           </Show>
         </header>
         <Show when={inboxOpen()}>
-          <div class="team-drawer-rows" style={{ "max-height": `${Math.min(170, items().length * 24 + 6)}px` }}>
+          <div class="team-drawer-rows" style={{ "max-height": `${Math.min(240, items().length * 24 + 6)}px` }}>
             <For each={items()}>{(item) => (
-              <div class="team-drawer-row" data-inbox={item.kind}>
-                <span class="team-pill" classList={{ warn: item.kind === "report" }}>{inboxKind(item.kind)}</span>
-                <span class="dim">{item.member}</span>
-                <Show when={item.task}><span class="muted">#{item.task}</span></Show>
-                <span class="ell grow" title={item.command}>{item.summary}</span>
-              </div>
+              <Show when={leadToolMissing(item)} fallback={
+                <div class="team-drawer-row" data-inbox={item.kind}>
+                  <span class="team-pill" classList={{ warn: item.kind === "report" }}>{inboxKind(item.kind)}</span>
+                  <span class="dim">{item.member}</span>
+                  <Show when={item.task}><span class="muted">#{item.task}</span></Show>
+                  <span class="ell grow" title={item.command}>{item.summary}</span>
+                </div>
+              }>
+                {(tool) => (
+                  <div class="team-drawer-row team-inbox-tool" data-inbox="tool_missing">
+                    <div class="team-inbox-tool-head">
+                      <span class="team-pill warn">{inboxKind(item.kind)}</span>
+                      <span class="dim">{item.member}</span>
+                      <Show when={item.task}><span class="muted">#{item.task}</span></Show>
+                      <b>{tr("%1's run needs %2", tool().who, tool().tool)}</b>
+                      <Show when={tool().project}><span class="dim">{tr("in %1", tool().project)}</span></Show>
+                    </div>
+                    <Show when={tool().why}><div class="team-inbox-tool-why">{tool().why}</div></Show>
+                    <Show when={tool().folder}><div class="dim team-inbox-tool-folder">{tr("Folder: %1", tool().folder)}</div></Show>
+                    <Show when={tool().install}><code class="team-proposal-command" data-tool-missing-install>{tool().install}</code></Show>
+                    <ToolMissingActions item={item} tool={tool()} />
+                  </div>
+                )}
+              </Show>
             )}</For>
           </div>
         </Show>
       </section>
     </Show>
+  );
+}
+
+/** Task 251: the lead's exact commands for a tool its run needs. hgs's
+ * `decide-tool` and `propose` require the lead actor; this window is the
+ * owner's, so the row hands the commands to the lead's session instead of
+ * sending them as the owner. */
+function ToolMissingActions(props: { item: TeamInboxItem; tool: NonNullable<ReturnType<typeof leadToolMissing>> }) {
+  const [copied, setCopied] = createSignal("");
+  const copy = async (text: string, which: "deny" | "ask") => {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(which);
+      toast(tr("Copied for the lead's session"), "");
+    } catch {
+      toast(tr("Could not copy the command"), "", "error", true);
+    }
+  };
+  return (
+    <div class="team-inbox-tool-actions">
+      <Show when={props.tool.denyCommand}>
+        <code class="team-proposal-command" data-tool-missing-deny>{props.tool.denyCommand}</code>
+        <button type="button" class="btn small danger" data-tool-missing="deny" onClick={() => void copy(props.tool.denyCommand, "deny")}>
+          {copied() === "deny" ? tr("Copied") : tr("Deny")}
+        </button>
+      </Show>
+      <Show when={props.tool.proposeCommand}>
+        <code class="team-proposal-command" data-tool-missing-propose>{props.tool.proposeCommand}</code>
+        <button type="button" class="btn small" data-tool-missing="ask" onClick={() => void copy(props.tool.proposeCommand, "ask")}>
+          {copied() === "ask" ? tr("Copied") : tr("Ask the owner")}
+        </button>
+      </Show>
+      <div class="dim team-inbox-tool-note">{tr("Copy a command and run it in the lead's session.")}</div>
+    </div>
   );
 }
 

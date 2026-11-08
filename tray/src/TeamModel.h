@@ -764,12 +764,17 @@ QString approveBlockedShort(const Team &team, int phase);
 bool leftMember(const Team &team, const QString &member);
 // C2: one thing on the lead's desk, as `hgs team inbox` lists it.
 struct InboxItem {
-    QString kind;      // report, question, permission, lead_task, stalled, budget
+    QString kind;      // report, question, permission, lead_task, stalled, budget, tool_missing
     QString member, summary, command;
+    // Task 251: the tool_missing detail (project, install command, propose
+    // command); empty for other kinds.
+    QString detail;
     int task = 0;
     double since = 0;
 };
 QList<InboxItem> parseInbox(const QJsonObject &value);
+// Task 251: the offer id a tool_missing inbox item names (empty otherwise).
+QString inboxToolOffer(const InboxItem &item);
 
 // #693: what of a `team status` (or a `team list` item) the views draw, as
 // compact JSON: without the revision and updated time every dispatcher write

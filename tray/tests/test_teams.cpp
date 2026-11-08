@@ -143,6 +143,7 @@ class TestTeams : public QObject {
     Q_OBJECT
 private slots:
     void initTestCase();
+    void installToolCardAndInboxOffer();
     void accountMoveReadsAccountsBlocksAndSteps();
     void subLeadsFormTheMemberTree();
     void pipelineFixtureReadsEveryStageState();
@@ -2148,6 +2149,35 @@ void TestTeams::stageQueuesStatesAndFeedLines()
 // members a move takes (the lead included, the default account under any of
 // its names), what keeps a member from its move or launch, and each member's
 // step from Moving to its result.
+void TestTeams::installToolCardAndInboxOffer()
+{
+    // Task #251: the owner's card names the tool, why, command and folder.
+    Team team;
+    Team::Proposal proposal;
+    proposal.kind = QStringLiteral("install-tool");
+    proposal.state = QStringLiteral("open");
+    proposal.change = QJsonObject{{"tool", "cmake"}, {"why", "the build needs it"}, {"saves", "10 min"},
+        {"command", QJsonArray{"apt", "install", "cmake"}}, {"folder", "/work/demo"}, {"project", "demo"}};
+    QCOMPARE(proposalText(team, proposal), QStringLiteral("Install cmake: the build needs it"));
+    const QStringList lines = proposalChanges(team, proposal);
+    QVERIFY(lines.contains(QStringLiteral("Command: apt install cmake")));
+    QVERIFY(lines.contains(QStringLiteral("Folder: /work/demo")));
+    QVERIFY(lines.contains(QStringLiteral("Project: demo")));
+    QVERIFY(lines.contains(QStringLiteral("It saves 10 min")));
+    // The lead's inbox item carries its detail, and the offer is read from the
+    // deny command (or the detail's propose command).
+    const QString command = QStringLiteral("{\"request_id\":\"r\",\"team\":\"team-1\",\"offer\":\"offer-1\",\"allow\":false,\"reason\":\"x\"} | hgs team decide-tool --json");
+    const auto inbox = parseInbox(QJsonObject{{"items", QJsonArray{QJsonObject{
+        {"kind", "tool_missing"}, {"task", 7}, {"member", "Dev"}, {"since", 1792868403.0},
+        {"summary", "Dev's run needs cmake in demo: the build needs it"}, {"command", command},
+        {"detail", "Project: demo (/work/demo).\nThe install command: apt install cmake\nAsk the owner to install it: {\"offer\":\"offer-1\"} | hgs team propose --json"}}}}});
+    QCOMPARE(inbox.size(), 1);
+    QCOMPARE(inbox[0].kind, QStringLiteral("tool_missing"));
+    QVERIFY(inbox[0].detail.contains(QStringLiteral("apt install cmake")));
+    QCOMPARE(inboxToolOffer(inbox[0]), QStringLiteral("offer-1"));
+    QCOMPARE(inboxToolOffer(InboxItem{}), QString());
+}
+
 void TestTeams::accountMoveReadsAccountsBlocksAndSteps()
 {
     using namespace Teams::AccountMove;

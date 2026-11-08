@@ -2466,5 +2466,14 @@
   "Not sent: the previous message is still being delivered. Wait for it, or check Terminal.": "Не отправлено: предыдущее сообщение ещё доставляется. Дождитесь его или проверьте терминал.",
   "Not sent: another message to this session is on its way.": "Не отправлено: другое сообщение этой сессии уже в пути.",
   "Delivery unconfirmed: check the conversation before sending again. %1": "Доставка не подтверждена: проверьте разговор перед повторной отправкой. %1",
-  "Not delivered: %1 The text is back in the composer.": "Не доставлено: %1 Текст возвращён в поле сообщения."
+  "Not delivered: %1 The text is back in the composer.": "Не доставлено: %1 Текст возвращён в поле сообщения.",
+  "Install %1: %2": "Установить %1: %2",
+  "Install %1": "Установить %1",
+  "a tool": "инструмент",
+  "%1's run needs %2": "Запуску %1 нужен %2",
+  "in %1": "в %1",
+  "Ask the owner": "Спросить владельца",
+  "Copied for the lead's session": "Скопировано для сеанса ведущего",
+  "Could not copy the command": "Не удалось скопировать команду",
+  "Copy a command and run it in the lead's session.": "Скопируйте команду и выполните её в сеансе ведущего."
 }

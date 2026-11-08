@@ -1,6 +1,6 @@
 import { withdrawnRefusal } from "../../teamRefusals";
 import { describe, expect, it } from "vitest";
-import { decidedWaiting,
+import { decidedWaiting, leadToolMissing, toolMissingAction,
   ProposalCards, WaitingAnswer, WaitingNotices, acceptanceSummary, act, approvePhaseCall, noticeToken, proposalCards, proposalKindLabel, toolOffer,
   waitingActionLabel, waitingAge, waitingCount, waitingKindIcon, waitingKindLabel, deferredRequest, splitDeferred, approves, opensCard, type DecisionPort, type QuestionChoice,
 } from "./decisions";
@@ -331,6 +331,10 @@ describe("proposal cards", () => {
         lines: ["Scratch teams a lead creates there start without your per-plan approval; you can revoke the rule in Settings > Teams (hgs team scratch-rules)."],
         change: { op: "scratch-rule", summary: "Let the lead's scratch teams in /work/p start at once, the folder trusted for claude",
           lines: ["Scratch teams a lead creates there start without your per-plan approval; you can revoke the rule in Settings > Teams (hgs team scratch-rules)."] } },
+      // Task 251: the lead's install-tool card names the tool and why, its
+      // exact command and the folder.
+      { kind: "install-tool", what: "Install cmake: the build needs it", lines: ["Project: demo", "It saves 10 min"],
+        change: { tool: "cmake", why: "the build needs it", saves: "10 min", command: ["apt", "install", "cmake"], folder: "/work/demo", project: "demo" } },
     ];
     const proposals = rows.map((row, n) => proposal({ id: `p${n + 1}`, kind: row.kind, summary: row.what, lines: row.lines,
       change: row.change ?? null, member: row.member ?? null, goal: row.goal ?? "", mode: row.mode ?? "" }));
@@ -345,6 +349,11 @@ describe("proposal cards", () => {
       expect(state.card.options).toEqual(row.options ?? []);
       expect(state.card.recommended).toBe(row.recommended ?? "");
     });
+    // Task 251: the install card carries the exact command and folder apart
+    // from its lines, and Allow decides it like any proposal.
+    const installer = rows.findIndex((row) => row.kind === "install-tool") + 1;
+    expect(card(cards, `p${installer}`)!.card.command).toBe("apt install cmake");
+    expect(card(cards, `p${installer}`)!.card.folder).toBe("/work/demo");
     // Allow is one decide-proposal bound to the card's hash, for every kind.
     for (const [n, row] of rows.entries()) {
       if (row.question) continue;
@@ -362,8 +371,26 @@ describe("proposal cards", () => {
     expect(f.sent.at(-1)!.action).toEqual({ kind: "decide_proposal", proposal: `p${question}`, accept: true, expected_hash: `h${question}`, answer: "20 GB" });
   });
 
-  it("aRefusedDecisionSaysWhyOnItsCard: in the team view and in Waiting for you; a later Deny goes through and the row leaves", async () => {
-    const words = "Task #3 depends on #9, which is neither in the plan nor among the new tasks";
+  it("task251: a tool_missing lead item names the tool, why, command, folder and offer", () => {
+    const item = {
+      kind: "tool_missing", member: "Dev", task: 7, since: 1,
+      summary: "Dev's run needs cmake in demo: the build needs it",
+      command: '{"request_id":"r","team":"t","offer":"offer-1","allow":false,"reason":"We work without cmake for now"} | hgs team decide-tool --json',
+      detail: "Project: demo (/work/demo).\nThe install command: apt install cmake\nAsk the owner to install it: {\"offer\":\"offer-1\"} | hgs team propose --json",
+    };
+    expect(leadToolMissing(item)).toEqual({
+      who: "Dev", tool: "cmake", project: "demo", why: "the build needs it", folder: "/work/demo",
+      install: "apt install cmake", offer: "offer-1", denyCommand: item.command,
+      proposeCommand: "{\"offer\":\"offer-1\"}",
+    });
+    expect(leadToolMissing({ ...item, kind: "report" })).toBeUndefined();
+    const tool = leadToolMissing(item)!;
+    expect(toolMissingAction(tool, "deny", "  no time  ", item.summary)).toEqual({ kind: "decide_tool", offer: "offer-1", allow: false, reason: "no time" });
+    expect(toolMissingAction(tool, "deny", "   ", item.summary)).toBeUndefined();
+    expect(toolMissingAction(tool, "ask", "", item.summary)).toEqual({ kind: "propose", proposal_kind: "install-tool", reason: item.summary, offer: "offer-1" });
+  });
+
+  it("aRefusedDecisionSaysWhyOnItsCard: in the team view and in Waiting for you; a later Deny goes through and the row leaves", async () => {    const words = "Task #3 depends on #9, which is neither in the plan nor among the new tasks";
     const refused = `Allow was refused, nothing was applied: ${words}`;
     const f = fake(answerTeam());
     f.refuse.set("decide_proposal", `hgs: ${words}`);

@@ -39,6 +39,7 @@ QString kindLabel(const QString &kind)
         return TeamProposalCards::tr("Phase");
     if (kind == "settings") return TeamProposalCards::tr("Setting");
     if (kind == "iron-rules") return TeamProposalCards::tr("Iron rules");
+    if (kind == "install-tool") return TeamProposalCards::tr("Tool");
     if (kind == "full-tests") return TeamProposalCards::tr("Tests");
     return kind;
 }

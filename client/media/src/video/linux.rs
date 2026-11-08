@@ -301,8 +301,13 @@ fn description(
     Ok(format!(
         // The preview and poster sinks keep one frame nobody pulls once stopping
         // starts; waiting for it on EOS would hold back the pipeline's EOS.
+        // The encoder gets limited-range BT.601 (zerus-6ioin): a webcam's MJPEG
+        // decodes to full range, which WebKitGTK's on-screen video ignores the
+        // flag of, crushing shadows and clipping whites. videoconvert does not
+        // rescale range between YUV formats, so the frame passes through RGB.
         "capsfilter name=camcaps ! {decode}videoconvert ! videorate ! video/x-raw,framerate=24/1 ! tee name=t \
-         t. ! queue ! videoconvert ! {h264} ! h264parse ! queue ! mux. \
+         t. ! queue ! videoconvert ! video/x-raw,format=RGBx ! videoconvert ! video/x-raw,colorimetry=bt601 \
+            ! {h264} ! h264parse ! queue ! mux. \
          t. ! queue leaky=downstream max-size-buffers=1 ! videorate drop-only=true max-rate={PREVIEW_FPS} \
             ! videocrop left={left} right={right} top={top} bottom={bottom} ! videoscale ! videoconvert \
             ! video/x-raw,format=I420,width={PREVIEW_SIDE},height={PREVIEW_SIDE} ! tee name=p \
@@ -906,5 +911,117 @@ mod tests {
                 "{caps}: {message:?}"
             );
         }
+    }
+
+    /// zerus-6ioin: a webcam's MJPEG decodes to full-range BT.601 samples,
+    /// which WebKitGTK's on-screen video path shows as TV range: crushed
+    /// shadows and clipped whites. The recording holds genuinely
+    /// limited-range samples, tagged as such, so a player that ignores the
+    /// full-range flag still shows the camera's levels.
+    #[test]
+    fn an_mjpeg_camera_is_recorded_in_limited_range() {
+        init().unwrap();
+        if let Some(reason) = missing() {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+        let Some(decoder) = ["avdec_h264", "openh264dec"]
+            .into_iter()
+            .find(|name| found(name))
+        else {
+            eprintln!("skipped: no H.264 decoder here");
+            return;
+        };
+        if !found("qtdemux") {
+            eprintln!("skipped: no qtdemux here");
+            return;
+        }
+        let folder = Folder::create().unwrap();
+        let path = folder.0.join("range.mp4");
+        let format = InputFormat {
+            sample_rate: 48_000,
+            channels: 1,
+            sample_format: SampleFormat::I16,
+        };
+        // The camera: a webcam's full-range JPEG of a frame that is white on
+        // the left half and black on the right.
+        let camera = "appsrc name=cam format=time \
+            caps=video/x-raw,format=RGB,width=640,height=480,framerate=30/1 \
+            ! videoconvert ! video/x-raw,format=I420,colorimetry=1:4:0:0 ! jpegenc ! ";
+        let recording = description(true, 640, 480, &audio_caps(format), &path).unwrap();
+        let pipeline = gst::parse::launch(&format!("{camera}{recording}"))
+            .unwrap()
+            .downcast::<gst::Pipeline>()
+            .unwrap();
+        let jpeg = gst::Caps::builder("image/jpeg")
+            .field("width", 640)
+            .field("height", 480)
+            .field("framerate", gst::Fraction::new(30, 1))
+            .build();
+        pipeline
+            .by_name("camcaps")
+            .unwrap()
+            .set_property("caps", &jpeg);
+        let cam: gst_app::AppSrc = element(&pipeline, "cam").unwrap();
+        let audio: gst_app::AppSrc = element(&pipeline, "audio").unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let mut frame = Vec::with_capacity(640 * 480 * 3);
+        for _ in 0..480 {
+            frame.extend(std::iter::repeat_n(255u8, 320 * 3));
+            frame.extend(std::iter::repeat_n(0u8, 320 * 3));
+        }
+        for index in 0..24u64 {
+            let mut buffer = gst::Buffer::from_slice(frame.clone());
+            let timing = buffer.get_mut().unwrap();
+            timing.set_pts(gst::ClockTime::from_mseconds(index * 1000 / 30));
+            timing.set_duration(gst::ClockTime::from_mseconds(33));
+            cam.push_buffer(buffer).unwrap();
+        }
+        cam.end_of_stream().unwrap();
+        audio
+            .push_buffer(gst::Buffer::from_slice(vec![0u8; 48_000 * 2]))
+            .unwrap();
+        audio.end_of_stream().unwrap();
+        let message = pipeline
+            .bus()
+            .unwrap()
+            .timed_pop_filtered(
+                gst::ClockTime::from_seconds(30),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            )
+            .expect("the recording ends");
+        pipeline.set_state(gst::State::Null).unwrap();
+        assert_eq!(message.type_(), gst::MessageType::Eos, "{message:?}");
+
+        // The decoder's own samples and caps, with no conversion after it.
+        let decode = gst::parse::launch(&format!(
+            "filesrc location=\"{}\" ! qtdemux ! h264parse ! {decoder} ! appsink name=out sync=false",
+            path.display()
+        ))
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        let out: gst_app::AppSink = element(&decode, "out").unwrap();
+        decode.set_state(gst::State::Playing).unwrap();
+        let sample = out
+            .try_pull_sample(gst::ClockTime::from_seconds(10))
+            .expect("a decoded frame");
+        let caps = sample.caps().unwrap().structure(0).unwrap().to_owned();
+        let luma: Vec<u8> = {
+            let map = sample.buffer().unwrap().map_readable().unwrap();
+            map[240 * 640..241 * 640].to_vec()
+        };
+        decode.set_state(gst::State::Null).unwrap();
+        assert_eq!(caps.get::<&str>("format").unwrap(), "I420", "{caps}");
+        let colorimetry = caps.get::<String>("colorimetry").unwrap_or_default();
+        assert!(
+            !colorimetry.starts_with("1:") && colorimetry != "jpeg",
+            "the stream is marked full range: {caps}"
+        );
+        let (white, black) = (i32::from(luma[160]), i32::from(luma[480]));
+        assert!(
+            (white - 235).abs() <= 4 && (black - 16).abs() <= 4,
+            "white {white} and black {black} are not limited range (235 and 16): {caps}"
+        );
     }
 }

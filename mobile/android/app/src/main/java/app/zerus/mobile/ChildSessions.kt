@@ -69,7 +69,7 @@ data class TeamCollapse(val stored: List<String> = emptyList(), val overrides: M
     }
 }
 
-/** An account mark: the catalog label, its letter and the label's default palette color (spec 1.6; colors and emoji stay desktop choices). */
+/** An account mark: the catalog label, its letter and the account's color, the label's default palette slot unless its computer keeps one (spec 1.6, zerus-sa9qn.6). */
 data class AccountMark(val label: String, val letter: String, val color: Long, val ink: Long, val provider: String)
 
 object ChildSessions {
@@ -292,7 +292,11 @@ object ChildSessions {
         val group = accounts.firstOrNull { group -> group.members.any {
             it.catalog.key == machine && it.account.provider == provider && it.account.id == id } } ?: return null
         val label = group.label.ifBlank { group.snapshot.account.identity.email }.ifBlank { provider }
-        val color = palette[labelSlot(label)]
+        val color = hostColor(session.raw) ?: palette[labelSlot(label)]
         return AccountMark(label, markLetter(label, provider), color, inkFor(color), provider)
     }
+
+    /** The color the row's computer keeps for its account (`account_mark.color`, `#rrggbb`), if any. */
+    fun hostColor(raw: JSONObject): Long? = (raw.optJSONObject("account_mark")?.opt("color") as? String)
+        ?.takeIf { Regex("^#[0-9a-f]{6}$").matches(it) }?.substring(1)?.toLong(16)?.or(0xFF000000)
 }

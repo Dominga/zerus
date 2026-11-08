@@ -61,6 +61,18 @@ elif args[3] == "permission-scope":
     (root / "catalog.json").write_text(json.dumps(catalog))
     print(json.dumps(catalog))
     sys.exit()
+elif args[3] == "mark":
+    # As the real CLI: marks live beside accounts.json; --if-unset fills
+    # only what the computer has no value for.
+    mark = profile.setdefault("mark", {"color": None, "emoji": None})
+    for field in ("color", "emoji"):
+        value = args[args.index("--" + field) + 1]
+        if "--if-unset" in args and mark[field]:
+            continue
+        mark[field] = None if value == "none" else value
+    (root / "catalog.json").write_text(json.dumps(catalog))
+    print(json.dumps(catalog))
+    sys.exit()
 elif args[3] == "model-defaults":
     model, effort = args[args.index("--model") + 1], args[args.index("--effort") + 1]
     assert (not model and not effort) or (model == "model-a" and effort in ("", "low", "high"))

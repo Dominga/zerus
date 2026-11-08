@@ -546,6 +546,8 @@ export interface Profile {
   model?: string; effort?: string;
   /** `account` (shared), `computer`, or empty when this computer keeps no scope. */
   permission_scope?: string;
+  /** The account's color and emoji as this computer keeps them, empty when unset; `marks_supported` is false for an older hgs (zerus-sa9qn.6). */
+  mark_color?: string; mark_emoji?: string; marks_supported?: boolean;
   usage: Usage; opencode: OpenCodeInfo | null;
 }
 export interface Account {

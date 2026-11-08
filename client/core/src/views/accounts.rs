@@ -174,6 +174,12 @@ pub struct Profile {
     /// `account` (shared by the account's computers), `computer`, or empty
     /// when this computer's hgs does not keep a scope.
     pub permission_scope: String,
+    /// The account's color and emoji as this computer keeps them, empty when
+    /// unset (zerus-sa9qn.6); `marks_supported` is false for an older hgs,
+    /// whose marks stay this desktop's preferences.
+    pub mark_color: String,
+    pub mark_emoji: String,
+    pub marks_supported: bool,
     pub usage: Usage,
     pub opencode: Option<OpenCode>,
 }
@@ -682,6 +688,17 @@ fn profile(entry: &FleetEntry, raw: &Value, state: &AccountsState) -> Profile {
             scope @ ("account" | "computer") => scope.to_owned(),
             _ => String::new(),
         },
+        mark_color: raw
+            .get("mark")
+            .map(|mark| text(mark, "color"))
+            .filter(|color| crate::account_actions::mark_color(color))
+            .unwrap_or_default(),
+        mark_emoji: raw
+            .get("mark")
+            .map(|mark| text(mark, "emoji"))
+            .filter(|emoji| crate::account_actions::mark_emoji(emoji))
+            .unwrap_or_default(),
+        marks_supported: raw.get("mark").is_some_and(Value::is_object),
         usage,
         opencode: opencode(raw),
         id: r.id,

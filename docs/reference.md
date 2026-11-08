@@ -805,8 +805,8 @@ and the same arrow before its title; a request that waited quietly notifies
 once when the parent is gone, and a completion seen meanwhile is not replayed.
 Cards show the account mark (circle, letter and label) resolved by the row's
 computer and recorded `account_id` against that computer's account catalog,
-in the label's default palette color: colors and emoji remain desktop choices
-until hosts store them. See
+in the color that computer keeps for the account (the row's `account_mark`),
+else the label's default palette color. See
 `docs/superpowers/specs/2026-11-07-account-labels-child-sessions-design.md`.
 
 ### Rename, Saved and Archive
@@ -4675,10 +4675,24 @@ to admit another account. Only expired entries can be replaced at capacity.
 with a colored circle holding the first letter or digit of the account's label:
 on collapsed rows before the title, and on expanded cards with the label in the
 footer. **Color and mark…**, beside **Rename…** in the account's details, chooses
-a color and an optional emoji. They are this desktop's preferences, stored for
-each member profile of the account (`accounts/color/` and `accounts/mark/`), like
-machine label colors; without a choice the color is a stable palette slot derived
-from the label, so every desktop shows the same default. Settings > Sessions >
+a color and an optional emoji. They are kept with the account on each of its
+computers (zerus-sa9qn.6), so every desktop and phone shows the same mark:
+`hgs [@host] account mark ID [--color #RRGGBB|none] [--emoji EMOJI|none]
+[--if-unset] [--revision REV]` saves them in `account-marks.json` beside
+`accounts.json` (64 KiB at most, private), which older `hgs` builds never read
+because they parse `accounts.json` strictly. `account ls` then reports
+`marks_supported: true` and each row's `mark` (`color` and `emoji`, null when
+unset); each `hgs ls` session row carries its recorded account's
+`account_mark` when one is set, which reaches phones with the listing. A
+malformed file shows no marks and refuses writes until it is repaired or
+removed; unknown fields of a newer `hgs` are kept. The desktop saves a mark on
+every reachable computer of the account. A computer with an older `hgs` keeps
+it as this desktop's preference for that member profile (`accounts/color/` and
+`accounts/mark/`), as before. Once, the desktop moves those preferences to the
+computers that keep marks with `--if-unset`, which fills only what a computer
+has no value for, then forgets its own: if two desktops disagree, the first one
+to move its value wins. Without a choice the color is a stable palette slot
+derived from the label, so every desktop shows the same default. Settings > Sessions >
 **Account marks** shows emoji instead of letters for accounts that have one.
 **Show account labels on session cards** (on by default) turns the marks off on
 every card, and an account's **Color and mark…** dialog can keep its own mark

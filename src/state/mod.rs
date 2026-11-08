@@ -603,6 +603,7 @@ fn finish_rows(sessions: &mut [Value], marks: &Value, names: &BTreeMap<String, S
     workspace::enrich(sessions, &workspace::snapshot_cwds(names));
     waits::decorate(sessions);
     parent_link::decorate(sessions);
+    crate::accounts::marks::decorate(sessions);
 }
 
 /// The rows a terminal listing starts from, before `merge_listing` adds what

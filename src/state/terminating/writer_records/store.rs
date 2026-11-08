@@ -54,13 +54,13 @@ fn create_file(path: &Path, bytes: &[u8]) -> Result<()> {
     file.sync_all().map_err(|_| REFUSED.into())
 }
 
-struct Directory {
+pub(super) struct Directory {
     path: PathBuf,
     file: File,
     identity: Identity,
 }
 impl Directory {
-    fn open(path: &Path) -> Result<Self> {
+    pub(super) fn open(path: &Path) -> Result<Self> {
         let file = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -79,7 +79,7 @@ impl Directory {
         value.current()?;
         Ok(value)
     }
-    fn current(&self) -> Result<()> {
+    pub(super) fn current(&self) -> Result<()> {
         if !platform::verify_private_directory(&self.file).map_err(|_| REFUSED)?
             || identity(&self.file)? != self.identity
             || self.file.metadata().map_err(|_| REFUSED)?.mode() & 0o700 != 0o700
@@ -105,6 +105,7 @@ pub(super) struct Lease {
     _directory: Arc<Directory>,
 }
 
+#[derive(Clone)]
 pub(super) struct Store {
     scope: Run,
     root: Arc<Directory>,

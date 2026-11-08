@@ -44,7 +44,7 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Sessions list, row actions and header | 25 | 2 | 2 | 2 owner decisions |
 | Archive and search | 10 | 4 | 1 | |
 | Composer and sending | 34 | 1 | | |
-| Activity | 13 | 3 | 1 | |
+| Activity | 15 | 2 | 0 | |
 | Questions and approvals | 12 | | | |
 | Notifications | 7 | 5 | | |
 | Tray, menu bar and Dock | 6 | 2 | 1 | 2 owner decisions |
@@ -53,7 +53,7 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Settings | 17 | | 1 | |
 | Machines, accounts, projects, new session, tasks and worktrees | 18 | | | |
 | Terminal, processes and platform session support | 8 | | | |
-| Total (192 rows) | 162 | 19 | 7 | 4 |
+| Total (192 rows) | 164 | 18 | 6 | 4 |
 
 ## Owner decisions
 
@@ -201,8 +201,8 @@ Keyboard commands for every area are listed once, under Shortcuts and navigation
 | Copy a reply as Markdown; select, copy, Select All, context menu | done | `ui/sessions/Activity.tsx:144-157,669,1128-1137` | `ActivityView.cpp:798-800,1542-1547,1851-1866` |
 | Activity width: drag, double-click reset, Full width and Reset width | done | `ui/sessions/Activity.tsx:84-141` | `ActivityView.cpp:1253-1255,1498-1540` |
 | Follow latest; Jump to latest (N new) | done | `ui/sessions/Activity.tsx:685-719,1097-1105`; `ui/sessions/Composer.tsx:267,288-291` | `ActivityView.cpp:1607-1636` |
-| Tool calls grouped and expandable to each event's full output | partial (`zerus-5wmh.13.8`) | expanded rows show a 110-character preview per event (`ui/sessions/transcript.ts:197-201,568`) | `ActivityView.cpp:1105-1140` |
-| View process link from a tool event to its recorded process | **missing** (`zerus-5wmh.13.8`) | no such link in the client UI | `ActivityView.cpp:1129-1134` |
+| Tool calls grouped and expandable to each event's full output | done; output shows 2,000 characters, then 20,000 more per Show more | `ui/sessions/transcript.ts:208-241`; `ui/sessions/ToolEvents.tsx:10-67`; `ui/sessions/tool-output.ts:6` | `ActivityView.cpp:1105-1140` |
+| View process link from a tool event to its recorded process | done | `ui/sessions/ToolEvents.tsx:16-18`; `ui/sessions/Activity.tsx:771-775`; `store/processes.ts:57,65,184`; `store/session.ts` | `ActivityView.cpp:1129-1134` |
 | Thinking and subagent reports as Markdown | done | `ui/sessions/Activity.tsx:570,576`; `ui/sessions/MarkdownBody.tsx` | `ActivityView.cpp:942-975` |
 | Session cleared marker; Question and Your answer blocks; queued and sent stamps | done | `ui/sessions/transcript.ts:512,554-560`; `ui/sessions/Activity.tsx:585-593,680` | `ActivityView.cpp:347-363,934-940,1029-1046` |
 | Local message stamps: Sending, Not sent, Submitted to terminal, Delivery not confirmed | done | `ui/sessions/transcript.ts:226-251` | `ActivityView.cpp:1053-1055` |

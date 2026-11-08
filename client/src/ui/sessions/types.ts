@@ -227,6 +227,19 @@ export interface InboxItem {
   removable: boolean;
 }
 
+/** One event of a tool row, shown when the row is expanded (ActivityView.cpp:1122-1140). */
+export interface ToolEvent {
+  /** The event's title, tool and subagent, e.g. "Tool finished / Bash". */
+  label: string;
+  at: string;
+  /** The output's length: a changed output changes the row without serializing it. */
+  size: number;
+  /** The recorded process the event started, when it names one. */
+  process?: string;
+  /** The whole recorded output, read only to show or copy the part that shows. */
+  detail: () => string;
+}
+
 export interface ActivityItem {
   id: string;
   kind: "user" | "agent" | "tool" | "tools" | "question" | "approval" | "system" | "receipt" | "thinking" | "report" | "voice" | "cleared" | "context" | "warm";
@@ -237,6 +250,8 @@ export interface ActivityItem {
   echoBody?: string;
   code?: string;
   lines?: string[];
+  /** A tool row's events with their output (zerus-5wmh.13.8.1). */
+  events?: ToolEvent[];
   attachments?: ItemAttachment[];
   sender?: string;
   /** Receipt line under a user message ("Sent", "Queued at this time"). */

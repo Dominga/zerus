@@ -85,6 +85,9 @@ pub(super) fn carry_fresh_start(previous: &Value, record: &mut Value) {
     if let Some(layout) = previous.get("layout") { record["layout"] = layout.clone(); }
     // A fresh conversation cannot downgrade the original Git-lock proof.
     if let Some(marker) = previous.get("worktree_protection") { record["worktree_protection"] = marker.clone(); }
+    // Preserve opaque transition evidence, even null or malformed. Rebuilding
+    // the same session must not erase a later admission check's negative fence.
+    if let Some(marker) = previous.get("layout_transition") { record["layout_transition"] = marker.clone(); }
     // The session keeps the parent that launched or adopted it (zerus-sa9qn.2).
     if let Some(parent) = previous.get("parent") { record["parent"] = parent.clone(); }
 }

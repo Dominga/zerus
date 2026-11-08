@@ -51,3 +51,23 @@ it("shows Usage details without a warning, and Clear context only with one", () 
   expect(fixture.openClear).toHaveBeenCalledTimes(1);
   expect(fixture.openInspector).not.toHaveBeenCalled();
 });
+
+it("returns keyboard focus to the chip after Usage details or Clear context (zerus-5wmh.13.7.1.1)", async () => {
+  const { host, button } = mount();
+  const chip = host.querySelector<HTMLButtonElement>(".tchip")!;
+  // click() without a pointer is Enter or Space on the chip: the popover focuses its first action.
+  chip.focus(); chip.click();
+  await Promise.resolve();
+  expect(document.activeElement).toBe(button("Usage details"));
+  button("Usage details")!.click();
+  expect(fixture.openInspector).toHaveBeenCalledExactlyOnceWith("details");
+  expect(document.activeElement).toBe(chip);
+  (fixture as unknown as { setWarning: (value: string) => void }).setWarning("The cache expires soon.");
+  chip.click();
+  await Promise.resolve();
+  button("Clear context")!.focus();
+  button("Clear context")!.click();
+  expect(fixture.openClear).toHaveBeenCalledTimes(1);
+  expect(host.querySelector(".cache-pop")).toBeNull();
+  expect(document.activeElement).toBe(chip);
+});

@@ -9,7 +9,9 @@ use std::cell::{Cell, RefCell};
 mod status;
 pub(super) use status::dispatch as status_dispatch;
 pub(crate) use status::machine as status_machine;
-pub(crate) use status::{observe_held, observe_original};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use status::observe_held;
+pub(crate) use status::observe_original;
 
 const INPUT_LIMIT: usize = 8192;
 
@@ -449,7 +451,7 @@ fn request_input(args: &[String], command: &str) -> Result<Request> {
 /// The exact action receipt `hgs session-action` writes for the original
 /// stdin `original` of `name` with `status` (and, when completed, the
 /// resumed `run` as its result target), for other modules' fixtures.
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn fixture_receipt(
     name: &str,
     original: &[u8],

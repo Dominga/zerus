@@ -274,6 +274,7 @@ pub(super) fn attention_message_summary(record: &Value, output: &mut Value, live
 /// the panels shown only on the terminal included. A Codex resume pending its
 /// first message shows its readiness only on its terminal, so it is never
 /// ready here (zerus-5wmh.66.4.10).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Readiness {
     /// The record shows the agent takes a message now.
@@ -283,6 +284,7 @@ pub(crate) enum Readiness {
     /// The resumed session failed, ends or left its conversation: no send.
     Ended,
 }
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn resumed_readiness(record: &Value) -> Readiness {
     if terminating::check_mutation(record).is_err()
         || !string(record, "error").is_empty()
@@ -1387,6 +1389,7 @@ mod tests {
     /// zerus-5wmh.66.4.9: a resumed session's record alone, never its
     /// terminal, decides whether a deferred send may start; only a confirmed,
     /// idle, live agent is ready, and a pending Codex resume never is.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_resumed_record_is_ready_only_when_confirmed_idle_and_alive() {
         let pid = std::process::id();

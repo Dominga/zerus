@@ -487,6 +487,7 @@ fn a_terminal_refusal_never_acquires_a_controlling_terminal() {
 /// zerus-5wmh.66.4.9: a service that read the receipt bytes itself from its
 /// held store gets exactly what the path observation gives for the same
 /// bytes, by the same rule; an absence is `unavailable`, never a retry.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn a_held_read_projects_exactly_as_the_path_observation() {
     let f = Fixture::new();

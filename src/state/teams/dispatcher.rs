@@ -9832,7 +9832,7 @@ pub(crate) fn refresh_unread(store: &mut Store, team: &Team) -> anyhow::Result<(
     let at = now();
     let mut fresh = Vec::new();
     for member in team.members.iter().filter(|member| member.unread.is_some()) {
-        let summary = super::working::summary(store.connection(), &team.id, &member.id, member.unread.as_ref(), at)?;
+        let summary = super::working::summary(store.connection(), &team.id, &member.id, member.unread.as_ref(), super::working::urgent_bound(team), at)?;
         if summary != member.unread {
             fresh.push((member.id.clone(), summary));
         }

@@ -1333,6 +1333,7 @@ fn the_owners_integration_folder_takes_the_merge_and_its_tests() {
     run_git(&repo.member, &["commit", "-q", "-m", "work"]);
     let mut team = team(&repo);
     team.settings.integration_folder = integration.to_string_lossy().into_owned();
+    team.line_branch = "phase3".into();
     assert_eq!(team.integration_folder(), integration.to_string_lossy());
     assert_eq!(accept(&mut team)["status"], "merge_queued");
     let database = database(&repo);

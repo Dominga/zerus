@@ -24,7 +24,9 @@ export interface ReferenceTarget {
   style: Style | undefined;
 }
 
-let nextDialog = 1;
+// Rust remembers recently closed dialog numbers (zerus-a0imb): a reloaded
+// webview must not reuse one, so they start at a random point.
+let nextDialog = 1 + Math.floor(Math.random() * 2 ** 40);
 
 export function FileReferenceDialog(props: {
   target: ReferenceTarget;

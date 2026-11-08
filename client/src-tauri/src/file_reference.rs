@@ -161,6 +161,9 @@ const SUPPORT_TTL: Duration = Duration::from_secs(300);
 const SUPPORT_ENTRIES: usize = 64;
 /// Remote calls running across all dialogs.
 const REMOTE_CAP: usize = 8;
+/// Closed dialogs remembered, so a call that arrives after its dialog's
+/// close starts nothing (zerus-a0imb); the oldest goes first.
+const CLOSED_KEPT: usize = 32;
 
 /// The remote check's answer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -188,6 +191,8 @@ struct Remote {
     reads: HashMap<(u64, bool), Arc<AtomicBool>>,
     running: usize,
     support: HashMap<String, (bool, Instant)>,
+    /// The most recently closed dialogs, at most [`CLOSED_KEPT`].
+    closed: std::collections::VecDeque<u64>,
 }
 
 static REMOTE: Mutex<Option<Remote>> = Mutex::new(None);
@@ -206,7 +211,9 @@ struct Slot {
 
 impl Slot {
     /// Ends an earlier call of the same dialog and kind; None when
-    /// [`REMOTE_CAP`] calls run.
+    /// [`REMOTE_CAP`] calls run. Taken before the call is queued, so a close
+    /// while it waits for a worker ends it; a closed dialog's place starts
+    /// ended (zerus-a0imb).
     fn take(dialog: u64, check: bool) -> Option<Slot> {
         remote(|state| {
             if let Some(earlier) = state.reads.remove(&(dialog, check)) {
@@ -216,13 +223,19 @@ impl Slot {
                 return None;
             }
             state.running += 1;
-            let cancel = Arc::new(AtomicBool::new(false));
+            let cancel = Arc::new(AtomicBool::new(state.closed.contains(&dialog)));
             state.reads.insert((dialog, check), Arc::clone(&cancel));
             Some(Slot {
                 key: (dialog, check),
                 cancel,
             })
         })
+    }
+}
+
+impl Slot {
+    fn ended(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
     }
 }
 
@@ -280,16 +293,21 @@ fn support_with(
     Some(supported)
 }
 
+/// The check in the place `slot` took before it was queued (None: too many run).
 fn remote_check_with(
-    dialog: u64,
+    slot: Option<Slot>,
     computer: &str,
     probe: impl FnOnce(&AtomicBool) -> Result<bool, ReadError>,
     read: impl FnOnce(&AtomicBool) -> Result<PathInfo, ReadError>,
 ) -> RemoteCheck {
-    let Some(slot) = Slot::take(dialog, true) else {
+    let Some(slot) = slot else {
         return RemoteCheck::Busy;
     };
-    let ended = || slot.cancel.load(Ordering::Relaxed);
+    let ended = || slot.ended();
+    // Closed while it waited for a worker: no call at all.
+    if ended() {
+        return RemoteCheck::Superseded;
+    }
     let supported = support_with(computer, &slot.cancel, probe);
     if ended() {
         return RemoteCheck::Superseded;
@@ -311,11 +329,14 @@ fn remote_check_with(
 }
 
 fn remote_support_with(
-    dialog: u64,
+    slot: Option<Slot>,
     computer: &str,
     probe: impl FnOnce(&AtomicBool) -> Result<bool, ReadError>,
 ) -> Option<bool> {
-    let slot = Slot::take(dialog, false)?;
+    let slot = slot?;
+    if slot.ended() {
+        return None;
+    }
     let supported = support_with(computer, &slot.cancel, probe);
     (!slot.cancel.load(Ordering::Relaxed))
         .then_some(supported)
@@ -331,8 +352,9 @@ pub async fn file_reference_remote_support(dialog: u64, computer: String) -> Opt
         return None;
     }
     let hgs = zerus_client_core::default_hgs();
+    let slot = Slot::take(dialog, false);
     tauri::async_runtime::spawn_blocking(move || {
-        remote_support_with(dialog, &computer, |cancel| {
+        remote_support_with(slot, &computer, |cancel| {
             reads::path_info_supported(&hgs, &id, cancel)
         })
     })
@@ -354,9 +376,10 @@ pub async fn file_reference_check_remote(
         return RemoteCheck::Unchecked;
     }
     let hgs = zerus_client_core::default_hgs();
+    let slot = Slot::take(dialog, true);
     tauri::async_runtime::spawn_blocking(move || {
         remote_check_with(
-            dialog,
+            slot,
             &computer,
             |cancel| reads::path_info_supported(&hgs, &id, cancel),
             |cancel| reads::path_info(&hgs, &id, &path, cancel),
@@ -366,7 +389,8 @@ pub async fn file_reference_check_remote(
     .unwrap_or(RemoteCheck::Busy)
 }
 
-/// The dialog closed: its remote calls end.
+/// The dialog closed: its remote calls end, queued ones too, and one that
+/// arrives later starts nothing.
 #[tauri::command]
 pub fn file_reference_cancel(dialog: u64) {
     remote(|state| {
@@ -374,6 +398,12 @@ pub fn file_reference_cancel(dialog: u64) {
             if let Some(cancel) = state.reads.remove(&(dialog, check)) {
                 cancel.store(true, Ordering::Relaxed);
             }
+        }
+        if !state.closed.contains(&dialog) {
+            if state.closed.len() >= CLOSED_KEPT {
+                state.closed.pop_front();
+            }
+            state.closed.push_back(dialog);
         }
     });
 }
@@ -605,7 +635,7 @@ mod tests {
         let probes = AtomicUsize::new(0);
         for _ in 0..2 {
             let answer = remote_check_with(
-                dialog(),
+                Slot::take(dialog(), true),
                 &peer,
                 |_| {
                     probes.fetch_add(1, Ordering::Relaxed);
@@ -617,7 +647,7 @@ mod tests {
         }
         assert_eq!(probes.load(Ordering::Relaxed), 1);
         assert_eq!(
-            remote_support_with(dialog(), &peer, |_| panic!("kept")),
+            remote_support_with(Slot::take(dialog(), false), &peer, |_| panic!("kept")),
             Some(false)
         );
         assert_eq!(running(), 0);
@@ -632,8 +662,13 @@ mod tests {
             probes.fetch_add(1, Ordering::Relaxed);
             Err(ReadError::TimedOut)
         };
-        assert_eq!(remote_support_with(dialog(), &peer, probe), None);
-        let answer = remote_check_with(dialog(), &peer, probe, |_| panic!("not supported"));
+        assert_eq!(
+            remote_support_with(Slot::take(dialog(), false), &peer, probe),
+            None
+        );
+        let answer = remote_check_with(Slot::take(dialog(), true), &peer, probe, |_| {
+            panic!("not supported")
+        });
         assert_eq!(answer, RemoteCheck::Unchecked);
         assert_eq!(probes.load(Ordering::Relaxed), 2);
     }
@@ -658,7 +693,12 @@ mod tests {
             ),
         ];
         for (reply, expected) in cases {
-            let answer = remote_check_with(dialog(), &peer, |_| Ok(true), move |_| reply);
+            let answer = remote_check_with(
+                Slot::take(dialog(), true),
+                &peer,
+                |_| Ok(true),
+                move |_| reply,
+            );
             assert_eq!(answer, expected);
         }
         assert_eq!(running(), 0);
@@ -671,19 +711,25 @@ mod tests {
         let id = dialog();
         let checking = {
             let peer = peer.clone();
-            std::thread::spawn(move || remote_check_with(id, &peer, |_| Ok(true), blocked))
+            std::thread::spawn(move || {
+                remote_check_with(Slot::take(id, true), &peer, |_| Ok(true), blocked)
+            })
         };
         until(|| remote(|state| state.reads.contains_key(&(id, true))));
         file_reference_cancel(id);
         assert_eq!(checking.join().unwrap(), RemoteCheck::Superseded);
 
+        // A closed dialog stays closed: the probe is another dialog's.
+        let other = dialog();
         let probing = std::thread::spawn(move || {
-            remote_support_with(id, &format!("{peer}-probe"), |cancel| {
-                blocked(cancel).map(|_| true)
-            })
+            remote_support_with(
+                Slot::take(other, false),
+                &format!("{peer}-probe"),
+                |cancel| blocked(cancel).map(|_| true),
+            )
         });
-        until(|| remote(|state| state.reads.contains_key(&(id, false))));
-        file_reference_cancel(id);
+        until(|| remote(|state| state.reads.contains_key(&(other, false))));
+        file_reference_cancel(other);
         assert_eq!(probing.join().unwrap(), None);
         assert_eq!(running(), 0);
         assert!(remote(|state| state.reads.is_empty()));
@@ -696,10 +742,17 @@ mod tests {
         let id = dialog();
         let earlier = {
             let peer = peer.clone();
-            std::thread::spawn(move || remote_check_with(id, &peer, |_| Ok(true), blocked))
+            std::thread::spawn(move || {
+                remote_check_with(Slot::take(id, true), &peer, |_| Ok(true), blocked)
+            })
         };
         until(|| remote(|state| state.reads.contains_key(&(id, true))));
-        let newer = remote_check_with(id, &peer, |_| Ok(true), |_| Ok(PathInfo::File { size: 1 }));
+        let newer = remote_check_with(
+            Slot::take(id, true),
+            &peer,
+            |_| Ok(true),
+            |_| Ok(PathInfo::File { size: 1 }),
+        );
         assert_eq!(newer, RemoteCheck::File);
         assert_eq!(earlier.join().unwrap(), RemoteCheck::Superseded);
         assert_eq!(running(), 0);
@@ -715,19 +768,21 @@ mod tests {
             .iter()
             .map(|&id| {
                 let peer = peer.clone();
-                std::thread::spawn(move || remote_check_with(id, &peer, |_| Ok(true), blocked))
+                std::thread::spawn(move || {
+                    remote_check_with(Slot::take(id, true), &peer, |_| Ok(true), blocked)
+                })
             })
             .collect();
         until(|| running() == REMOTE_CAP);
         let refused = remote_check_with(
-            dialog(),
+            Slot::take(dialog(), true),
             &peer,
             |_| panic!("no call"),
             |_| panic!("no call"),
         );
         assert_eq!(refused, RemoteCheck::Busy);
         assert_eq!(
-            remote_support_with(dialog(), &peer, |_| panic!("no call")),
+            remote_support_with(Slot::take(dialog(), false), &peer, |_| panic!("no call")),
             None
         );
         for &id in &ids {
@@ -761,5 +816,81 @@ mod tests {
             "the oldest answer went first"
         );
         assert_eq!(cached_support(&format!("{peer}-0"), now), Some(false));
+    }
+
+    // zerus-a0imb: a close while the call waits for a worker, or before it
+    // arrives, starts nothing.
+    #[test]
+    fn a_close_while_the_call_is_queued_ends_it_before_any_call() {
+        let _turn = serial();
+        let peer = computer();
+        let (check, probe) = (dialog(), dialog());
+        let queued_check = Slot::take(check, true);
+        let queued_probe = Slot::take(probe, false);
+        file_reference_cancel(check);
+        file_reference_cancel(probe);
+        assert_eq!(
+            remote_check_with(
+                queued_check,
+                &peer,
+                |_| panic!("no probe"),
+                |_| panic!("no read")
+            ),
+            RemoteCheck::Superseded
+        );
+        assert_eq!(
+            remote_support_with(queued_probe, &peer, |_| panic!("no probe")),
+            None
+        );
+        assert_eq!(running(), 0);
+        assert!(remote(|state| state.reads.is_empty()));
+    }
+
+    #[test]
+    fn a_call_arriving_after_its_dialog_closed_starts_nothing() {
+        let _turn = serial();
+        let peer = computer();
+        let id = dialog();
+        file_reference_cancel(id);
+        assert_eq!(
+            remote_check_with(
+                Slot::take(id, true),
+                &peer,
+                |_| panic!("no probe"),
+                |_| panic!("no read")
+            ),
+            RemoteCheck::Superseded
+        );
+        assert_eq!(
+            remote_support_with(Slot::take(id, false), &peer, |_| panic!("no probe")),
+            None
+        );
+        // Another dialog is unaffected.
+        let open = dialog();
+        assert_eq!(
+            remote_check_with(
+                Slot::take(open, true),
+                &peer,
+                |_| Ok(true),
+                |_| Ok(PathInfo::Missing)
+            ),
+            RemoteCheck::Missing
+        );
+        assert_eq!(running(), 0);
+    }
+
+    #[test]
+    fn closed_dialogs_are_remembered_within_a_bound() {
+        let _turn = serial();
+        let first = dialog();
+        file_reference_cancel(first);
+        for _ in 0..CLOSED_KEPT + 8 {
+            file_reference_cancel(dialog());
+        }
+        assert_eq!(remote(|state| state.closed.len()), CLOSED_KEPT);
+        let slot = Slot::take(first, true).unwrap();
+        assert!(!slot.ended(), "the oldest close is forgotten first");
+        file_reference_cancel(first);
+        assert!(slot.ended());
     }
 }

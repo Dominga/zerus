@@ -615,12 +615,15 @@ pub fn check_archive_page(
     if data.get("previous_cursor").is_some() || data.get("position").is_some() {
         let previous = data.get("previous_cursor").and_then(Value::as_str);
         let position = data.get("position").and_then(Value::as_f64);
+        // A capped total (zerus-080n8) counts only up to its cap, so a later
+        // window may start past it.
+        let capped = data.get("total_capped").and_then(Value::as_bool) == Some(true);
         let window = previous
             .is_some_and(|previous| previous.chars().count() <= ARCHIVE_CURSOR_CHARS)
             && position.is_some_and(|position| {
                 position >= 0.0
                     && position == position.floor()
-                    && position + rows.len() as f64 <= total.unwrap_or(0.0)
+                    && (capped || position + rows.len() as f64 <= total.unwrap_or(0.0))
             });
         if !window {
             error = Some(ARCHIVE_WINDOW_INVALID);
@@ -654,6 +657,8 @@ pub struct ArchivePage {
     pub next_cursor: String,
     pub previous_cursor: Option<String>,
     pub total: u64,
+    /// The host counted only up to a cap: show the total as "N+" (zerus-5wmh.13.17 (4)).
+    pub total_capped: bool,
     pub position: Option<u64>,
 }
 
@@ -760,6 +765,7 @@ fn page(data: &Value) -> ArchivePage {
         next_cursor: text("next_cursor").unwrap_or_default(),
         previous_cursor: text("previous_cursor"),
         total: data["total"].as_f64().unwrap_or(0.0) as u64,
+        total_capped: data.get("total_capped").and_then(Value::as_bool) == Some(true),
         position: data
             .get("position")
             .and_then(Value::as_f64)
@@ -1755,6 +1761,31 @@ mod tests {
             decode(&read, code(&inventory.to_string())).unwrap(),
             inventory
         );
+    }
+
+    #[test]
+    fn a_capped_total_is_kept_and_a_window_past_it_passes() {
+        // zerus-5wmh.13.17 (4): an hgs that counts only up to a cap (zerus-080n8)
+        // says so with `total_capped`; its later windows may start past that count.
+        let capped = page_with(|p| {
+            p["total"] = json!(3);
+            p["total_capped"] = json!(true);
+            p["previous_cursor"] = json!("p");
+            p["position"] = json!(10);
+        });
+        assert_eq!(verdict("", capped.clone()), None);
+        let typed = page(&capped);
+        assert!(typed.total_capped);
+        assert_eq!((typed.total, typed.position), (3, Some(10)));
+        // Without the flag the window still has to fit inside the total.
+        let uncapped = page_with(|p| {
+            p["previous_cursor"] = json!("p");
+            p["position"] = json!(10);
+        });
+        assert_eq!(verdict("", uncapped).as_deref(), Some(ARCHIVE_WINDOW_INVALID));
+        assert!(!page(&page_with(|_| {})).total_capped);
+        // The flag is a boolean; anything else is not a capped total.
+        assert!(!page(&page_with(|p| p["total_capped"] = json!("yes"))).total_capped);
     }
 
     #[test]

@@ -939,6 +939,10 @@ mod actor {
         location: Location,
         epoch: String,
         state: PathBuf,
+        config: Config,
+        owner: Arc<crate::platform::FileLock>,
+        /// The epoch's sealed negatives: every runtime of this epoch shares them.
+        fences: Arc<crate::desktop::not_admitted::Fences>,
     }
     impl Fixture {
         fn with(execute: Arc<Execute>) -> Self {
@@ -980,8 +984,26 @@ mod actor {
             .unwrap();
             let owner = Arc::new(location.lock().unwrap());
             let exclusion = Arc::new(location.handoff_lock().unwrap());
-            let mut runtime = runtime::Runtime::new(&config, &epoch, owner).unwrap();
-            let state = config.state.clone();
+            let fences = Arc::new(crate::desktop::not_admitted::Fences::default());
+            let mut runtime =
+                runtime::Runtime::new(&config, &epoch, owner.clone(), fences.clone()).unwrap();
+            Self::install(&mut runtime, &config.state, execute);
+            runtime.poll(&mut store, Some(exclusion.clone()));
+            Self {
+                _temp: temp,
+                store,
+                runtime,
+                exclusion,
+                location,
+                epoch,
+                state: config.state.clone(),
+                config,
+                owner,
+                fences,
+            }
+        }
+        fn install(runtime: &mut runtime::Runtime, state: &Path, execute: Option<Arc<Execute>>) {
+            let state = state.to_path_buf();
             match execute {
                 Some(execute) => runtime.fixture_executor(
                     MACHINE,
@@ -992,16 +1014,24 @@ mod actor {
                 None => runtime.fixture_machine(MACHINE),
             }
             runtime.fixture_mac_fence(false);
-            runtime.poll(&mut store, Some(exclusion.clone()));
-            Self {
-                _temp: temp,
-                store,
-                runtime,
-                exclusion,
-                location,
-                epoch,
-                state: config.state,
-            }
+        }
+        /// Destroys the runtime and builds it again under the same epoch,
+        /// as the service does when it restarts its background runtime.
+        fn rebuild(&mut self, execute: Arc<Execute>) {
+            let torn = std::mem::replace(
+                &mut self.runtime,
+                runtime::Runtime::new(
+                    &self.config,
+                    &self.epoch,
+                    self.owner.clone(),
+                    self.fences.clone(),
+                )
+                .unwrap(),
+            );
+            drop(torn);
+            Self::install(&mut self.runtime, &self.state, Some(execute));
+            self.runtime
+                .poll(&mut self.store, Some(self.exclusion.clone()));
         }
         fn original(&self) -> Verified {
             super::original(&self.location.configuration, &self.epoch)
@@ -2047,5 +2077,216 @@ else:
             (Step::NotStarted, Step::NotStarted, ledger::INTERRUPTED)
         );
         assert_eq!(ran.counts(), (0, 0));
+    }
+
+    /// `original`'s request with a resume that no longer verifies: refused
+    /// in the writer transaction after its empty read.
+    fn broken(original: &Verified) -> Intent {
+        let mut bad = original.intent.clone();
+        bad.resume = "{}".into();
+        bad
+    }
+    fn offer(f: &mut Fixture, intent: Intent) -> wire::Admission {
+        let request = json!(
+            zerus_client_core::desktop::ui_requests::Request::SessionResume {
+                intent: Box::new(intent),
+            }
+        );
+        serde_json::from_value(f.runtime.frontend(
+            &mut f.store,
+            ui_authority::Validated::fixture(&request),
+            Some(f.exclusion.clone()),
+        ))
+        .unwrap()
+    }
+    fn no_row(f: &Fixture, request_id: &str) -> bool {
+        ledger::load(&f.store.db, request_id).unwrap().is_none()
+    }
+    /// Polls a while: nothing sealed may start in that time.
+    fn idle(f: &mut Fixture) {
+        for _ in 0..20 {
+            f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+    fn ready() -> (Arc<Ran>, Fixture) {
+        let ran = Arc::new(Ran::default());
+        let f = Fixture::with(executor(ran.clone(), Resume::Completed { ready: true }));
+        (ran, f)
+    }
+
+    /// zerus-tlb9q, desktop-u's pin: a resume refused before its admission
+    /// with no row is answered not admitted and sealed for the epoch; an
+    /// otherwise admissible copy of the same request that arrives after it
+    /// gets the same answer and never runs. The lookup never answers it.
+    #[test]
+    fn a_resume_refused_before_admission_is_sealed_and_its_copy_never_runs() {
+        let (ran, mut f) = ready();
+        let original = f.original();
+        let id = original.plan.resume_request_id.clone();
+        let refused = offer(&mut f, broken(&original));
+        assert_eq!(
+            (refused.accepted, refused.durable, refused.code.as_str()),
+            (false, false, wire::NOT_ADMITTED)
+        );
+        assert!(refused.not_admitted(&original.intent), "{}", refused.code);
+        assert!(no_row(&f, &id) && f.fences.session_resume.sealed(&id));
+        let copy = f.admit(&original);
+        assert!(copy.not_admitted(&original.intent), "{}", copy.code);
+        idle(&mut f);
+        assert_eq!(ran.counts(), (0, 0), "the copy never ran");
+        assert!(no_row(&f, &id));
+        let asked = wire::Query::for_plan(original.intent.scope.clone(), &original.plan).unwrap();
+        let lookup = super::super::query(
+            &f.store,
+            &json!({"op": "session_resume_result", "query": asked}),
+        );
+        assert_eq!(
+            (lookup["found"].as_bool(), lookup.get("code")),
+            (Some(false), None)
+        );
+    }
+
+    /// The seal belongs to the epoch: the background runtime destroyed and
+    /// built again under the same epoch still refuses the sealed request,
+    /// and a request of another epoch's connection is never sealed.
+    #[test]
+    fn a_resume_runtime_rebuilt_in_the_same_epoch_keeps_the_seal() {
+        let (ran, mut f) = ready();
+        let original = f.original();
+        let id = original.plan.resume_request_id.clone();
+        assert!(offer(&mut f, broken(&original)).not_admitted(&original.intent));
+        f.rebuild(executor(ran.clone(), Resume::Completed { ready: true }));
+        let copy = f.admit(&original);
+        assert!(copy.not_admitted(&original.intent), "{}", copy.code);
+        idle(&mut f);
+        assert_eq!(ran.counts(), (0, 0));
+        assert!(no_row(&f, &id));
+        // The rebuilt runtime still admits a new request.
+        let other = f.original();
+        assert!(f.admit(&other).accepted);
+        f.until("settled", |f| f.row(&other).receipt.drained);
+        assert_eq!(ran.counts(), (1, 1));
+
+        // A request of another epoch's connection: unavailable, not sealed.
+        let stale = super::original(&f.location.configuration, &uuid::Uuid::new_v4().to_string());
+        let reply = f.admit(&stale);
+        assert_eq!(
+            (reply.accepted, reply.code.as_str()),
+            (false, "session_resume_unavailable")
+        );
+        assert!(!reply.not_admitted(&stale.intent));
+        assert!(!f
+            .fences
+            .session_resume
+            .sealed(&stale.plan.resume_request_id));
+        assert!(no_row(&f, &stale.plan.resume_request_id));
+    }
+
+    /// Before the writer transaction the refusal is proven by a fresh empty
+    /// read; a request whose row exists, a failure from the admission on and
+    /// a full fence all stay unavailable and unsealed.
+    #[test]
+    fn only_a_proven_absent_resume_is_not_admitted() {
+        // Refused before the transaction (the owner stops): proven absent.
+        let (_, mut f) = ready();
+        let original = f.original();
+        f.runtime.request_stop();
+        let stopped = f.admit(&original);
+        assert!(stopped.not_admitted(&original.intent), "{}", stopped.code);
+        assert!(no_row(&f, &original.plan.resume_request_id));
+        // Another connection's request refused there is never sealed.
+        let stale = super::original(&f.location.configuration, &uuid::Uuid::new_v4().to_string());
+        let reply = f.admit(&stale);
+        assert_eq!(reply.code, "session_resume_unavailable");
+        assert!(!f
+            .fences
+            .session_resume
+            .sealed(&stale.plan.resume_request_id));
+
+        // Refused before the transaction while another writer holds the
+        // store: nothing is proven.
+        let (_, mut f) = ready();
+        let original = f.original();
+        f.runtime.request_stop();
+        let mut other = rusqlite::Connection::open(f.location.root.join("state.sqlite3")).unwrap();
+        let held = other
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        f.store.db.busy_timeout(Duration::from_millis(1)).unwrap();
+        let busy = f.admit(&original);
+        drop(held);
+        assert_eq!(
+            (busy.accepted, busy.code.as_str()),
+            (false, "session_resume_unavailable")
+        );
+        assert!(!f
+            .fences
+            .session_resume
+            .sealed(&original.plan.resume_request_id));
+
+        // A row exists: the same refusal stays unavailable.
+        let (_, mut f) = ready();
+        let original = f.original();
+        assert!(f.admit(&original).accepted);
+        f.until("settled", |f| f.row(&original).receipt.drained);
+        let existing = offer(&mut f, broken(&original));
+        assert_eq!(
+            (existing.accepted, existing.code.as_str()),
+            (false, "session_resume_unavailable")
+        );
+        f.runtime.request_stop();
+        let stopped = f.admit(&original);
+        assert_eq!(stopped.code, "session_resume_unavailable");
+        assert!(!f
+            .fences
+            .session_resume
+            .sealed(&original.plan.resume_request_id));
+
+        // The admission itself fails: unavailable although no row is left,
+        // and nothing is sealed.
+        let (ran, mut f) = ready();
+        let original = f.original();
+        f.store
+            .db
+            .execute_batch(
+                "CREATE TEMP TRIGGER refuse BEFORE INSERT ON desktop_session_resumes \
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+        let failed = f.admit(&original);
+        assert_eq!(
+            (failed.accepted, failed.code.as_str()),
+            (false, "session_resume_unavailable")
+        );
+        assert!(no_row(&f, &original.plan.resume_request_id));
+        assert!(!f
+            .fences
+            .session_resume
+            .sealed(&original.plan.resume_request_id));
+        f.store.db.execute_batch("DROP TRIGGER refuse;").unwrap();
+        assert!(
+            f.admit(&original).accepted,
+            "an unavailable refusal seals nothing"
+        );
+        f.until("settled", |f| f.row(&original).receipt.drained);
+        assert_eq!(ran.counts(), (1, 1));
+
+        // A full fence mints no new negative; its sealed IDs stay sealed.
+        let (_, mut f) = ready();
+        for n in 0..crate::desktop::not_admitted::BOUND {
+            assert!(f.fences.session_resume.seal(&format!("sealed-{n}")));
+        }
+        let original = f.original();
+        let full = offer(&mut f, broken(&original));
+        assert_eq!(
+            (full.accepted, full.code.as_str()),
+            (false, "session_resume_unavailable")
+        );
+        assert!(!f
+            .fences
+            .session_resume
+            .sealed(&original.plan.resume_request_id));
+        assert!(f.fences.session_resume.sealed("sealed-0"));
     }
 }

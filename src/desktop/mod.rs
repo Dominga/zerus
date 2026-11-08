@@ -36,6 +36,9 @@ mod original_child;
 // The CLI state store one deferred original holds and reads.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod original_store;
+// The deferred-input kinds' sealed negatives, owned by the service epoch.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod not_admitted;
 mod owner;
 mod ownership;
 mod pending_reads;
@@ -659,6 +662,10 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
     .context(StartupRefused)?;
     let stopped = Arc::new(AtomicBool::new(false));
     let active = Arc::new(AtomicUsize::new(0));
+    // The sealed negatives of this epoch (zerus-tlb9q): every background
+    // runtime this epoch starts, the first and each later one, gets them.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let fences = Arc::new(not_admitted::Fences::default());
     let mut feed = feed::Broker::new(&epoch);
     let mut reads = catalog_read::Reader::default();
     let audit = Arc::new(approval_audit::worker::Worker::new(
@@ -740,8 +747,15 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
         }
         if background_mode && !background_blocked {
             background = Some(
-                background::Runtime::start(config, &epoch, &mut feed, owner.clone())
-                    .context(StartupRefused)?,
+                background::Runtime::start(
+                    config,
+                    &epoch,
+                    &mut feed,
+                    owner.clone(),
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    fences.clone(),
+                )
+                .context(StartupRefused)?,
             );
             // Store the runtime first: a writer startup error still drains the
             // fleet through the common shutdown path below.
@@ -821,6 +835,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         &epoch,
                         &mut feed,
                         owner.clone(),
+                        #[cfg(any(target_os = "linux", target_os = "macos"))]
+                        fences.clone(),
                     )?);
                     background.as_mut().unwrap().start_presence(&location)?;
                     background_blocked = false;

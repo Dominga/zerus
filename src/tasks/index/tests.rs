@@ -1367,7 +1367,11 @@ fn unrepaired(store: &ProjectStore) -> TaskDoc {
 }
 
 fn unrepaired_as(store: &ProjectStore, id: &str) -> TaskDoc {
-    let mut task = new_task(store, id, Stage::Todo, "V", "Repair me");
+    unrepaired_ranked(store, id, "V")
+}
+
+fn unrepaired_ranked(store: &ProjectStore, id: &str, rank: &str) -> TaskDoc {
+    let mut task = new_task(store, id, Stage::Todo, rank, "Repair me");
     assert!(task.floor().unwrap());
     task.lower_stored_schema_for_test(5);
     assert!(task.needs_schema_repair());
@@ -1491,4 +1495,125 @@ fn after_another_build_s_write_the_index_answers_only_once_every_row_was_read_ag
     let inventory = index.live_inventory().unwrap();
     assert_eq!(inventory, store.live_inventory().unwrap().0);
     assert_eq!(inventory.tasks.len(), 601);
+}
+
+#[test]
+fn an_older_build_reading_an_unrepaired_row_again_never_vouches_for_it() {
+    // review-win-e on #1748: an older build's read of the same row again
+    // (only its stamps and read time change, so no new revision) must not
+    // count as this build's repaired read of it.
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    for n in 0..600 {
+        write_plain(&store, &new_task(&store, &format!("T-{n:06}"), Stage::Todo, "V", "Plain"));
+    }
+    drop(Index::open(&store).unwrap());
+    let early = unrepaired_ranked(&store, "T-early1", "U");
+    let late = unrepaired_as(&store, "T-late01");
+    age(&store, early.uuid());
+    age(&store, late.uuid());
+    let stale = early.inventory_version();
+    // An older build stores both unrepaired; its clock dates `early` before
+    // this build's last write and the good rows earlier still.
+    LEGACY_DERIVE.with(|legacy| legacy.set(true));
+    let index = Index::open(&store).unwrap();
+    LEGACY_DERIVE.with(|legacy| legacy.set(false));
+    let since: i64 = index.meta("derived_at").unwrap().unwrap().parse().unwrap();
+    index.db.execute("UPDATE tasks SET checked = ?1 WHERE uuid != ?2", params![since - 2_000, late.uuid()]).unwrap();
+    index.db.execute("UPDATE tasks SET checked = ?1 WHERE uuid = ?2", params![since - 1_000, early.uuid()]).unwrap();
+    drop(index);
+    // This build sees the change and reads a first batch again.
+    drop(Index::open(&store).unwrap());
+    // The older build pages To do: `early` (rank U, first) is read again, unrepaired.
+    LEGACY_DERIVE.with(|legacy| legacy.set(true));
+    {
+        let mut index = Index::open(&store).unwrap();
+        index.page(Stage::Todo, 1, &Anchor::Start).unwrap();
+    }
+    LEGACY_DERIVE.with(|legacy| legacy.set(false));
+    // This build never serves `early` unrepaired, and answers once it repaired it.
+    let mut index = Index::open(&store).unwrap();
+    let mut answered = None;
+    for _ in 0..6 {
+        if let Ok(inventory) = index.live_inventory() {
+            assert_ne!(inventory.tasks[early.uuid()], stale, "an unrepaired row was served");
+            answered = Some(inventory);
+        }
+    }
+    assert_eq!(answered.unwrap(), store.live_inventory().unwrap().0);
+}
+
+#[test]
+fn an_index_from_before_the_repair_epoch_gains_it_in_place_and_reads_every_row_again() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    for n in 0..300 {
+        write_plain(&store, &new_task(&store, &format!("T-{n:06}"), Stage::Todo, "V", "Plain"));
+    }
+    let index = Index::open(&store).unwrap();
+    // The file as #1736 and #1748 left it: no epoch column, nothing pending.
+    index.db.execute_batch("ALTER TABLE tasks DROP COLUMN repaired; DELETE FROM meta WHERE key = 'uncertified';").unwrap();
+    let shape = |index: &Index| -> (i64, i64) {
+        let version: i64 = index.db.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let objects: i64 = index.db.query_row("SELECT count(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'", [], |r| r.get(0)).unwrap();
+        (version, objects)
+    };
+    let before = shape(&index);
+    drop(index);
+    let mut index = Index::open(&store).unwrap();
+    // Builds before the epoch keep the file: same user version and objects.
+    assert_eq!(shape(&index), before);
+    // 300 rows: the open read 256 of them again; the rest are pending, and
+    // the next read finishes them and answers exactly.
+    let pending = |index: &Index| -> i64 {
+        index.db.query_row("SELECT count(*) FROM tasks WHERE repaired IS NULL", [], |r| r.get(0)).unwrap()
+    };
+    assert_eq!(pending(&index), 44);
+    assert!(index.meta("uncertified").unwrap().is_some());
+    assert_eq!(index.live_inventory().unwrap(), store.live_inventory().unwrap().0);
+    assert_eq!(pending(&index), 0);
+    assert!(index.meta("uncertified").unwrap().is_none());
+}
+
+#[test]
+fn an_older_repair_build_cannot_mask_an_unrepaired_row_from_the_epoch() {
+    // review-win-d on #1753: a #1736/#1748 build repairs some rows itself and
+    // marks "derived_revision" current, after an older build stored
+    // unrepaired rows; that must not hide them from this build's epoch.
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    for n in 0..1000 {
+        write_plain(&store, &new_task(&store, &format!("T-{n:06}"), Stage::Todo, "V", "Plain"));
+    }
+    drop(Index::open(&store).unwrap());
+    let early = unrepaired_ranked(&store, "T-early1", "U");
+    let late = unrepaired_as(&store, "T-late01");
+    age(&store, early.uuid());
+    age(&store, late.uuid());
+    let stale = early.inventory_version();
+    // A #1724 build stores both unrepaired, with a clock straddling this
+    // build's last write.
+    LEGACY_DERIVE.with(|legacy| legacy.set(true));
+    let index = Index::open(&store).unwrap();
+    LEGACY_DERIVE.with(|legacy| legacy.set(false));
+    let since: i64 = index.meta("derived_at").unwrap().unwrap().parse().unwrap();
+    index.db.execute("UPDATE tasks SET checked = ?1 WHERE uuid != ?2", params![since - 2_000, late.uuid()]).unwrap();
+    index.db.execute("UPDATE tasks SET checked = ?1 WHERE uuid = ?2", params![since - 1_000, early.uuid()]).unwrap();
+    drop(index);
+    // A #1736/#1748 build repairs `late` and marks its own proof current.
+    PROOF_WRITER.with(|proof| proof.set(true));
+    let index = Index::open(&store).unwrap();
+    PROOF_WRITER.with(|proof| proof.set(false));
+    assert!(store.load(early.uuid()).unwrap().needs_schema_repair(), "the scenario needs `early` left unrepaired");
+    assert_eq!(index.meta("revision").unwrap(), index.meta("derived_revision").unwrap());
+    drop(index);
+    let mut index = Index::open(&store).unwrap();
+    let mut answered = None;
+    for _ in 0..8 {
+        if let Ok(inventory) = index.live_inventory() {
+            assert_ne!(inventory.tasks[early.uuid()], stale, "an unrepaired row was served");
+            answered = Some(inventory);
+        }
+    }
+    assert_eq!(answered.unwrap(), store.live_inventory().unwrap().0);
 }

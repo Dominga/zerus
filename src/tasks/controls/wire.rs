@@ -2,21 +2,39 @@ use serde::{Deserialize, Serialize};
 use zerus_desktop_ledger::task_controls::{
     Executor, Request, EXECUTOR_HOLDS, PAGE_ROWS, REQUEST_BYTES,
 };
+mod canonical;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct Begin {
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Begin {
     pub reference: String,
     pub attempt: String,
 }
 
-#[derive(Debug)]
-pub(super) enum Command {
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(
+    tag = "operation",
+    content = "input",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub(crate) enum Command {
     Begin(Begin),
     Plan(PlanRequest),
     Execute(Box<Plan>),
     Status(Status),
 }
 impl Command {
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Begin(b) => {
+                begin(&[b.reference.clone(), "--attempt".into(), b.attempt.clone()]).map(|_| ())
+            }
+            Self::Plan(p) => p.validate(),
+            Self::Execute(p) => p.validate(),
+            Self::Status(s) => s.validate(),
+        }
+    }
     pub fn identity(&self) -> (&'static str, Option<&str>, Option<&str>) {
         match self {
             Self::Begin(b) => ("begin_attempt", Some(&b.attempt), Some(&b.reference)),
@@ -36,7 +54,7 @@ impl Command {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum Action {
+pub(crate) enum Action {
     Pause,
     Resume,
     Yield,
@@ -45,7 +63,7 @@ pub(super) enum Action {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "scope", rename_all = "snake_case", deny_unknown_fields)]
-pub(super) enum Target {
+pub(crate) enum Target {
     Attempt {
         project: String,
         task: String,
@@ -58,7 +76,7 @@ pub(super) enum Target {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct PlanRequest {
+pub(crate) struct PlanRequest {
     pub schema: u32,
     pub request_id: String,
     pub action: Action,
@@ -71,14 +89,14 @@ pub(super) struct PlanRequest {
 /// evidence on execute. These serialized labels never authenticate a caller.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub(super) enum Caller {
+pub(crate) enum Caller {
     Person {},
     Executor { executor: Executor },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Plan {
+pub(crate) struct Plan {
     pub schema: u32,
     pub request: Request,
     pub caller: Caller,
@@ -90,7 +108,7 @@ pub(super) struct Plan {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "scope", rename_all = "snake_case", deny_unknown_fields)]
-pub(super) enum StatusScope {
+pub(crate) enum StatusScope {
     Request {
         request_id: String,
     },
@@ -102,12 +120,12 @@ pub(super) enum StatusScope {
 }
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Status {
+pub(crate) struct Status {
     pub schema: u32,
     pub target: StatusScope,
 }
 
-pub(super) fn begin(args: &[String]) -> Result<Begin, String> {
+pub(crate) fn begin(args: &[String]) -> Result<Begin, String> {
     let Some(reference) = args.first().filter(|s| !s.starts_with('-')) else {
         return Err("begin-attempt requires REF --attempt UUID".into());
     };
@@ -135,7 +153,7 @@ pub(super) fn begin(args: &[String]) -> Result<Begin, String> {
     })
 }
 
-pub(super) fn action(args: &[String]) -> Result<&str, String> {
+pub(crate) fn action(args: &[String]) -> Result<&str, String> {
     if args.len() != 2
         || args[1] != "--json"
         || !matches!(args[0].as_str(), "plan" | "execute" | "status")
@@ -147,7 +165,7 @@ pub(super) fn action(args: &[String]) -> Result<&str, String> {
     Ok(&args[0])
 }
 
-pub(super) fn read(action: &str, bytes: &[u8]) -> Result<Command, String> {
+pub(crate) fn read(action: &str, bytes: &[u8]) -> Result<Command, String> {
     if bytes.len() > REQUEST_BYTES {
         return Err("task-control request exceeds 16 KiB".into());
     }
@@ -201,7 +219,37 @@ impl PlanRequest {
     }
 }
 impl Plan {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "The service planner is connected in the next inactive native leaf"
+        )
+    )]
+    pub fn seal(mut self) -> Result<Self, String> {
+        // The service fills its current independently verified guards first.
+        // This digest is only an immutable binding, never proof of those guards.
+        self.request.admission = "0".repeat(64);
+        self.request.admission = self.admission()?;
+        self.validate()?;
+        Ok(self)
+    }
+    pub fn admission(&self) -> Result<String, String> {
+        self.validate_shape()?;
+        let mut value = serde_json::to_value(self).map_err(|e| e.to_string())?;
+        value["request"]
+            .as_object_mut()
+            .ok_or("Invalid task-control request")?
+            .remove("admission");
+        canonical::digest(&value)
+    }
     fn validate(&self) -> Result<(), String> {
+        if self.request.admission != self.admission()? {
+            return Err("The original task-control Plan guards changed".into());
+        }
+        Ok(())
+    }
+    fn validate_shape(&self) -> Result<(), String> {
         schema(self.schema)?;
         self.request.validate().map_err(|e| e.to_string())?;
         if !matches!(

@@ -7,6 +7,7 @@ fn id(n: u64) -> String {
 fn executor() -> Executor {
     Executor {
         computer: id(1),
+        session_id: id(9000),
         run: "original-run".into(),
         birth: "original-birth".into(),
         conversation: Some("original-conversation".into()),
@@ -38,6 +39,7 @@ fn slot(n: u64) -> Slot {
 fn request(n: u64) -> Request {
     Request {
         id: id(n + 300),
+        admission: "f".repeat(64),
         action: Action::Stop,
         executor: executor(),
         attempt: None,
@@ -66,9 +68,41 @@ fn connection() -> Connection {
 }
 
 #[test]
+fn changed_plan_guard_bindings_refuse_the_original_uuid_without_overwrite_or_replay() {
+    let mut db = connection();
+    let mut store = store::open_enabled(&mut db).unwrap();
+    let original = request(1);
+    assert!(matches!(
+        store.reserve(&original).unwrap(),
+        store::Reservation::New
+    ));
+    let retained = store.control(&original.id).unwrap().unwrap();
+    for guard in [
+        "caller",
+        "configuration",
+        "store_identity",
+        "cli_image",
+        "loaded_adapter",
+    ] {
+        let mut changed = original.clone();
+        changed.admission = hash(guard.as_bytes());
+        assert_ne!(changed.admission, original.admission);
+        assert!(store.reserve(&changed).is_err(), "{guard}");
+        assert_eq!(store.control(&original.id).unwrap(), Some(retained.clone()));
+        assert_eq!(store.controls(&executor(), None, 10).unwrap().rows.len(), 1);
+    }
+    assert_eq!(
+        store.reserve(&original).unwrap(),
+        store::Reservation::Existing(Box::new(retained))
+    );
+}
+
+#[test]
 fn executor_keys_include_birth_and_child_but_never_conversation() {
     let mut value = executor();
     let original = value.key().unwrap();
+    value.session_id = id(9001);
+    assert_eq!(value.key().unwrap(), original);
     value.conversation = None;
     assert_eq!(value.key().unwrap(), original);
     value.conversation = Some("a-later-conversation".into());
@@ -83,8 +117,50 @@ fn executor_keys_include_birth_and_child_but_never_conversation() {
         }
         assert_ne!(changed.key().unwrap(), original, "{part}");
     }
+    let mut unconfirmed = value.clone();
+    unconfirmed.session_id = uuid::Uuid::nil().to_string();
+    assert!(unconfirmed.validate().is_err());
     value.birth.clear();
     assert!(value.key().is_err());
+}
+
+#[test]
+fn a_different_session_selector_cannot_cross_or_clear_original_stop_holds() {
+    let mut db = connection();
+    let mut store = store::open_enabled(&mut db).unwrap();
+    let stop = request(1);
+    store.reserve(&stop).unwrap();
+    let held = hold(1, HoldKind::Stop, &stop);
+    store.hold(&held).unwrap();
+    let mut changed = executor();
+    changed.session_id = id(9001);
+    assert_eq!(changed.key().unwrap(), stop.executor.key().unwrap());
+    assert!(matches!(
+        store.dispatch(&changed, Dispatch::PersonSend, &[]).unwrap(),
+        Admission::Held(_)
+    ));
+    assert!(store
+        .dispatch(
+            &changed,
+            Dispatch::PersonSend,
+            std::slice::from_ref(&held.id)
+        )
+        .is_err());
+    let mut continuation = request(2);
+    continuation.executor = changed;
+    continuation.action = Action::Send;
+    continuation.attempt = Some(attempt(1));
+    continuation.task_version = Some("original-version".into());
+    continuation.observed_stops = vec![held.id.clone()];
+    store.reserve(&continuation).unwrap();
+    store
+        .settle(&continuation.id, Outcome::Submitted, None)
+        .unwrap();
+    assert!(store.settle_observed(&continuation.id).is_err());
+    assert_eq!(
+        store.holds(&executor(), None, 10).unwrap().rows[0].value,
+        held
+    );
 }
 
 #[test]
@@ -162,6 +238,7 @@ fn startup_cas_requires_the_exact_original_request_attempt_and_run_birth() {
         "birth",
         "child",
         "unconfirmed",
+        "session_id",
     ] {
         let mut guard = original.guard();
         let mut attempt = original.attempt.clone();
@@ -174,6 +251,7 @@ fn startup_cas_requires_the_exact_original_request_attempt_and_run_birth() {
             "birth" => executor.birth = "other-birth".into(),
             "child" => executor.child = Some("other-child".into()),
             "unconfirmed" => executor.conversation = None,
+            "session_id" => executor.session_id = id(9001),
             _ => {
                 if let Provenance::Dispatch { request_id, digest } = &mut provenance {
                     if part == "request" {
@@ -211,6 +289,7 @@ fn a_resumed_run_cannot_inherit_satisfy_or_clear_the_old_runs_slot_and_holds() {
     let mut resumed = executor();
     resumed.run = "new-resume-run".into();
     resumed.birth = "new-resume-birth".into();
+    assert_eq!(resumed.session_id, original.executor.session_id);
     assert!(store.slot(&resumed).unwrap().is_none());
     assert!(store.holds(&resumed, None, 10).unwrap().rows.is_empty());
     assert!(matches!(

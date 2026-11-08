@@ -37,6 +37,7 @@ pub fn open(db: &mut Connection) -> Result<Option<Store<'_>>> {
 #[serde(deny_unknown_fields)]
 pub struct Executor {
     pub computer: String,
+    pub session_id: String,
     pub run: String,
     pub birth: String,
     pub conversation: Option<String>,
@@ -45,6 +46,11 @@ pub struct Executor {
 impl Executor {
     pub fn validate(&self) -> Result<()> {
         uuid(&self.computer)?;
+        uuid(&self.session_id)?;
+        ensure!(
+            !uuid::Uuid::parse_str(&self.session_id)?.is_nil(),
+            "native session UUID is unconfirmed"
+        );
         text(&self.run, 512)?;
         text(&self.birth, 512)?;
         if let Some(conversation) = &self.conversation {
@@ -56,7 +62,8 @@ impl Executor {
         Ok(())
     }
 
-    /// Conversation is an effect guard. A newly bound or changed conversation
+    /// Session UUID is a lookup selector; conversation is an effect guard.
+    /// A newly bound or changed conversation
     /// must still find the original run's slot and executor-wide holds.
     pub fn key(&self) -> Result<String> {
         self.validate()?;
@@ -182,6 +189,8 @@ pub enum Action {
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub id: String,
+    /// Digest of the complete validated Plan's guards, never actor authority.
+    pub admission: String,
     pub action: Action,
     pub executor: Executor,
     pub attempt: Option<Attempt>,
@@ -199,6 +208,7 @@ impl Request {
     }
     fn encoded(&self) -> Result<String> {
         uuid(&self.id)?;
+        digest(&self.admission)?;
         self.executor.key()?;
         if !matches!(self.action, Action::Stop | Action::ReleaseStop) {
             ensure!(

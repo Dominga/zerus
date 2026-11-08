@@ -7,6 +7,7 @@ fn id(n: u64) -> String {
 fn executor() -> Executor {
     Executor {
         computer: id(1),
+        session_id: id(9000),
         run: "original-run".into(),
         birth: "original-birth".into(),
         conversation: Some("original-conversation".into()),
@@ -93,6 +94,30 @@ fn publication_is_idempotent_and_substitution_refuses_without_a_write() {
     changed.executor.run = "other-run".into();
     assert!(publisher.publish(&changed).is_err());
     assert_eq!(fs::read(file).unwrap(), bytes);
+}
+
+#[test]
+fn a_reused_run_with_a_different_session_selector_never_reuses_or_mutates_facts() {
+    let dir = fixture();
+    let guard = writer(dir.path());
+    let publisher = Publisher::open_enabled(dir.path(), &guard, &executor(), true).unwrap();
+    publisher.publish(&fact(2)).unwrap();
+    let file = path(dir.path(), &executor());
+    let original = fs::read(&file).unwrap();
+    let mut substituted = executor();
+    substituted.session_id = id(9001);
+    assert_eq!(substituted.key().unwrap(), executor().key().unwrap());
+    assert!(Publisher::open_enabled(dir.path(), &guard, &substituted, false).is_err());
+    assert!(Publisher::open_enabled(dir.path(), &guard, &substituted, true).is_err());
+    let mut changed = fact(3);
+    changed.executor = substituted;
+    assert!(publisher.publish(&changed).is_err());
+    let mut snapshot: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    snapshot["facts"][0]["executor"]["session_id"] = id(9001).into();
+    let damaged = serde_json::to_vec(&snapshot).unwrap();
+    fs::write(&file, &damaged).unwrap();
+    assert!(publisher.snapshot().is_err());
+    assert_eq!(fs::read(file).unwrap(), damaged);
 }
 
 #[test]

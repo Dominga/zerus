@@ -50,6 +50,7 @@ impl Snapshot {
     fn validate(&self, executor: &Executor) -> Result<()> {
         if self.schema != 1
             || self.executor.key().map_err(err)? != executor.key().map_err(err)?
+            || self.executor.session_id != executor.session_id
             || self.facts.len() > EXECUTOR_HOLDS
         {
             return Err("The original Stop fact scope or bound changed; review required".into());
@@ -62,6 +63,7 @@ impl Snapshot {
         {
             fact.validate()?;
             if fact.executor.key().map_err(err)? != executor.key().map_err(err)?
+                || fact.executor.session_id != executor.session_id
                 || !ids.insert(&fact.id)
             {
                 return Err("The original Stop fact identity changed; review required".into());
@@ -197,7 +199,9 @@ impl<'a> Publisher<'a> {
     /// or while recording a verified external interrupt. Never clears facts.
     pub fn publish(&self, fact: &Fact) -> Result<Snapshot> {
         fact.validate()?;
-        if fact.executor.key().map_err(err)? != self.executor.key().map_err(err)? {
+        if fact.executor.key().map_err(err)? != self.executor.key().map_err(err)?
+            || fact.executor.session_id != self.executor.session_id
+        {
             return Err("The Stop fact belongs to another run/birth/child".into());
         }
         let (mut snapshot, identity) = self.read()?;
@@ -242,7 +246,7 @@ impl<'a> Publisher<'a> {
     }
 }
 
-fn verify_writer(root: &Directory, writer: &storage::Guard) -> Result<()> {
+pub(super) fn verify_writer(root: &Directory, writer: &storage::Guard) -> Result<()> {
     let file = root.read_private(".lock")?;
     if platform::FileIdentity::of(&file).map_err(err)? != writer.identity().map_err(err)? {
         return Err("The original native state writer changed".into());

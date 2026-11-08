@@ -99,7 +99,7 @@ pub(crate) mod subagent_lifecycle;
 mod native_subagents;
 mod supervisor;
 mod tasks;
-mod task_controls;
+pub(crate) mod task_controls;
 mod telemetry;
 mod terminate;
 mod terminating;

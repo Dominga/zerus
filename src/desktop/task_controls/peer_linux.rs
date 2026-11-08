@@ -77,6 +77,17 @@ impl Process {
         }
         Self::from_handle(unsafe { File::from_raw_fd(fd) }, pid, until)
     }
+    fn recorded_start(&self, until: Instant) -> io::Result<String> {
+        // Legacy record text is second-resolution UTC lstart. Its PID lookup
+        // is bracketed by this ORIGINAL pidfd/proc-directory pin, never used
+        // to obtain the precise birth or replace the held kernel process.
+        self.current(until)?;
+        let value = crate::platform::process_start_time(self.birth.pid)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(refused)?;
+        self.current(until)?;
+        Ok(value)
+    }
     fn current(&self, until: Instant) -> io::Result<()> {
         budget(until)?;
         alive(&self.handle)?;
@@ -120,6 +131,10 @@ pub(super) struct Peer {
     ancestry: Vec<Process>,
 }
 impl Peer {
+    pub fn arguments(&self, until: Instant) -> io::Result<Vec<Vec<u8>>> {
+        self.current(until)?;
+        Ok(self.arguments.clone())
+    }
     /// `trusted` comes from the service's selected CLI, not a request path.
     pub fn capture(socket: &UnixStream, trusted: File, until: Instant) -> io::Result<Self> {
         budget(until)?;
@@ -204,12 +219,12 @@ impl Peer {
         if !self.ancestry.is_empty() {
             return Err(refused());
         }
-        let expected = birth.parse::<u64>().map_err(|_| refused())?;
         let mut child = self.process.birth.clone();
         let mut seen = std::collections::BTreeSet::from([child.pid]);
         for _ in 0..ANCESTORS {
             if child.pid == pid {
-                if child.ticks != expected {
+                let matched = self.ancestry.last().unwrap_or(&self.process);
+                if matched.recorded_start(until)? != birth {
                     return Err(refused());
                 }
                 return self.current(until);
@@ -302,7 +317,7 @@ fn birth(directory: &File) -> io::Result<Birth> {
         .1
         .split_whitespace()
         .collect();
-    if fields.len() < 20 || matches!(fields[0], "Z" | "X") {
+    if fields.len() < 20 || matches!(fields[0], "Z" | "X" | "T" | "t") {
         return Err(refused());
     }
     Ok(Birth {
@@ -321,6 +336,84 @@ fn command(directory: &File) -> io::Result<Vec<Vec<u8>>> {
         return Err(refused());
     }
     Ok(arguments)
+}
+
+/// A separately held native agent and its original resident supervisor. The
+/// loaded supervisor must be this service's selected trusted hgs image, not
+/// merely a newly installed executable at the same path. This proves no Person.
+pub(super) struct Resident {
+    agent: Process,
+    supervisor: Process,
+    agent_image: File,
+    agent_selected: Image,
+    executing: File,
+    trusted: File,
+    selected: Image,
+    arguments: Vec<Vec<u8>>,
+}
+impl Resident {
+    pub fn capture(
+        agent: u32,
+        agent_birth: &str,
+        supervisor: u32,
+        supervisor_start: &str,
+        supervisor_birth: &str,
+        trusted: File,
+        until: Instant,
+    ) -> io::Result<Self> {
+        if agent == supervisor {
+            return Err(refused());
+        }
+        let agent = Process::parent(agent, until)?;
+        let supervisor = Process::parent(supervisor, until)?;
+        if agent.recorded_start(until)? != agent_birth
+            || supervisor.recorded_start(until)? != supervisor_start
+            || supervisor.birth.ticks.to_string() != supervisor_birth
+            || agent.birth.parent != supervisor.birth.pid
+            || supervisor.birth.ticks > agent.birth.ticks
+        {
+            return Err(refused());
+        }
+        let agent_image = entry(&agent.directory, b"exe\0", false)?;
+        let agent_selected = image(&agent_image)?;
+        let executing = entry(&supervisor.directory, b"exe\0", false)?;
+        let selected = image(&executing)?;
+        if selected != image(&trusted)? {
+            return Err(refused());
+        }
+        let arguments = command(&supervisor.directory)?;
+        let resident = Self {
+            agent,
+            supervisor,
+            agent_image,
+            agent_selected,
+            executing,
+            trusted,
+            selected,
+            arguments,
+        };
+        resident.current(until)?;
+        Ok(resident)
+    }
+    pub fn current(&self, until: Instant) -> io::Result<()> {
+        self.agent.current(until)?;
+        self.supervisor.current(until)?;
+        if image(&self.agent_image)? != self.agent_selected
+            || image(&entry(&self.agent.directory, b"exe\0", false)?)? != self.agent_selected
+            || image(&self.executing)? != self.selected
+            || image(&self.trusted)? != self.selected
+            || image(&entry(&self.supervisor.directory, b"exe\0", false)?)? != self.selected
+            || command(&self.supervisor.directory)? != self.arguments
+        {
+            return Err(refused());
+        }
+        self.agent.current(until)?;
+        self.supervisor.current(until)
+    }
+    pub fn arguments(&self, until: Instant) -> io::Result<Vec<Vec<u8>>> {
+        self.current(until)?;
+        Ok(self.arguments.clone())
+    }
 }
 
 #[cfg(test)]

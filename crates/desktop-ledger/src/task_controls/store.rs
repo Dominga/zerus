@@ -187,6 +187,7 @@ impl Store<'_> {
         ensure!(
             slot.guard() == *expected
                 && slot.executor.key()? == confirmed.key()?
+                && slot.executor.session_id == confirmed.session_id
                 && slot.executor.conversation.is_none()
                 && slot.binding.is_none()
                 && slot.attempt == *attempt
@@ -355,14 +356,17 @@ impl Store<'_> {
         );
         for id in observed_stops {
             ensure!(
-                holds
-                    .iter()
-                    .any(|h| h.id == *id && h.kind == HoldKind::Stop),
+                holds.iter().any(|h| h.id == *id
+                    && h.kind == HoldKind::Stop
+                    && h.executor.session_id == executor.session_id),
                 "observed Stop hold changed"
             );
         }
         let (crossed, blocking): (Vec<_>, Vec<_>) = holds.into_iter().partition(|hold| {
-            kind.person() && hold.kind == HoldKind::Stop && observed_stops.contains(&hold.id)
+            kind.person()
+                && hold.kind == HoldKind::Stop
+                && hold.executor.session_id == executor.session_id
+                && observed_stops.contains(&hold.id)
         });
         if !blocking.is_empty() {
             return Ok(Admission::Held(blocking));
@@ -411,6 +415,7 @@ impl Store<'_> {
                 hold.validate()?;
                 ensure!(
                     hold.executor.key()? == request.executor.key()?
+                        && hold.executor.session_id == request.executor.session_id
                         && hold.kind == kind
                         && (kind != HoldKind::Pause
                             || (hold.attempt == request.attempt

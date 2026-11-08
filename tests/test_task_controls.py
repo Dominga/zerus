@@ -4,6 +4,7 @@ Only a scripted agent in DeliveryFixture's private tmux server is used. The
 connector's native call is `task mobile-send --json`, exercised directly here.
 """
 import json
+import hashlib
 import sqlite3
 import subprocess
 
@@ -86,13 +87,15 @@ class InactiveControlCommands(test_tasks.Fixture):
                 "target": {"scope": "attempt", "project": "not-resolved", "task": original, "attempt": original},
                 "observed_pauses": [], "observed_stops": []}
         self.assertEqual(self.call(["control", "plan", "--json"], plan)["request_id"], original)
-        executor = {"computer": original, "run": "original-run", "birth": "original-birth", "conversation": "original-conversation", "child": None}
+        executor = {"computer": original, "session_id": original, "run": "original-run", "birth": "original-birth", "conversation": "original-conversation", "child": None}
         execute = {"schema": 1, "request": {"id": original, "action": "pause", "executor": executor,
                    "attempt": {"project": "not-resolved", "task": original, "attempt": original,
                                "generation": 1, "fingerprint": "a" * 64},
                    "slot": {"id": original, "revision": 1}, "task_version": "original-version", "turn": "original-turn",
                    "observed_pauses": [], "observed_stops": []}, "caller": {"kind": "person"},
                    "configuration": "b" * 64, "store_identity": "c" * 64, "cli_image": "d" * 64, "loaded_adapter": "e" * 64}
+        encoded = json.dumps(execute, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        execute["request"]["admission"] = hashlib.sha256(b"zerus-task-control-admission-v1\0" + encoded).hexdigest()
         self.assertEqual(self.call(["control", "execute", "--json"], execute)["request_id"], original)
         execute["caller"]["surprise"] = 1
         self.call(["control", "execute", "--json"], execute, code="invalid_task_control")

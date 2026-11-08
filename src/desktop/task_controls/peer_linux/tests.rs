@@ -20,6 +20,9 @@ fn own_birth() -> String {
         .ticks
         .to_string()
 }
+fn own_start() -> String {
+    crate::platform::process_start_time(std::process::id()).unwrap()
+}
 struct Fixture {
     socket: UnixStream,
     child: Child,
@@ -115,7 +118,7 @@ fn the_original_socket_peer_proves_its_actual_native_ancestor() {
         until(),
     )
     .unwrap();
-    peer.executor(std::process::id(), &own_birth(), until())
+    peer.executor(std::process::id(), &own_start(), until())
         .unwrap();
     peer.current(until()).unwrap();
     assert!(peer
@@ -138,7 +141,7 @@ fn a_fabricated_ancestor_birth_or_trusted_image_never_authenticates() {
 fn a_same_birth_exec_cannot_keep_the_loaded_cli_proof() {
     let mut fixture = Fixture::new();
     let mut peer = Peer::capture(&fixture.socket, trusted(), until()).unwrap();
-    peer.executor(std::process::id(), &own_birth(), until())
+    peer.executor(std::process::id(), &own_start(), until())
         .unwrap();
     let original = peer.process.birth.clone();
     fixture.socket.write_all(b"x").unwrap();
@@ -159,7 +162,59 @@ fn proof_parsing_and_ancestry_obey_the_original_deadline() {
     assert!(Peer::capture(&fixture.socket, trusted(), Instant::now()).is_err());
     let mut peer = Peer::capture(&fixture.socket, trusted(), until()).unwrap();
     assert!(peer
-        .executor(std::process::id(), &own_birth(), Instant::now())
+        .executor(std::process::id(), &own_start(), Instant::now())
         .is_err());
     fixture.stop();
+}
+
+#[test]
+fn the_loaded_resident_supervisor_and_its_agent_stay_pinned_independently() {
+    let mut f = Fixture::new();
+    let directory = File::open(format!("/proc/{}", f.child.id())).unwrap();
+    let original = birth(&directory).unwrap();
+    let agent_start = crate::platform::process_start_time(f.child.id()).unwrap();
+    let supervisor_start = own_start();
+    let precise_birth = own_birth();
+    // Actual legacy run-record format and the precise native key are separate.
+    assert!(!agent_start.bytes().all(|b| b.is_ascii_digit()));
+    let capture = |a: &str, s: &str, b: &str, image: File| {
+        Resident::capture(f.child.id(), a, std::process::id(), s, b, image, until())
+    };
+    let resident = capture(&agent_start, &supervisor_start, &precise_birth, trusted()).unwrap();
+    resident.current(until()).unwrap();
+    assert!(capture("invalid", &supervisor_start, &precise_birth, trusted()).is_err());
+    assert!(capture(&agent_start, "invalid", &precise_birth, trusted()).is_err());
+    assert!(capture(&agent_start, &supervisor_start, "1", trusted()).is_err());
+    assert!(capture(
+        &agent_start,
+        &supervisor_start,
+        &supervisor_start,
+        trusted()
+    )
+    .is_err());
+    assert!(capture(
+        &agent_start,
+        &supervisor_start,
+        &precise_birth,
+        File::open("/bin/true").unwrap()
+    )
+    .is_err());
+    assert!(Resident::capture(
+        f.child.id(),
+        &agent_start,
+        f.child.id(),
+        &agent_start,
+        &original.ticks.to_string(),
+        trusted(),
+        until()
+    )
+    .is_err());
+    f.socket.write_all(b"x").unwrap();
+    let deadline = until();
+    while resident.current(deadline).is_ok() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(birth(&directory).unwrap(), original);
+    assert!(f.child.try_wait().unwrap().is_none());
 }

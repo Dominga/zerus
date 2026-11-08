@@ -222,6 +222,38 @@ fn part(update: &Update, offset: usize) -> Part {
 /// what this computer holds of the phone's view, so the phone can send what
 /// it lacks. Merges are idempotent, so a repeated request is safe.
 pub fn answer(store: &ProjectStore, request: Request) -> Result<Answer> {
+    answer_with(store, request, &mut StoreInventories(store))
+}
+
+/// Where an answer's inventories come from: the store's own
+/// ([`ProjectStore::phone_inventory`], [`ProjectStore::live_inventory`]) or an
+/// index of it the caller keeps current, which must give the same values.
+pub trait Inventories {
+    /// What a phone holding `theirs` is answered from, after the request's
+    /// updates were imported.
+    fn phone(&mut self, theirs: &Inventory) -> Result<Inventory>;
+    /// The digest of what a phone holds, once the answer is made.
+    fn live_digest(&mut self) -> Result<String>;
+}
+
+struct StoreInventories<'a>(&'a ProjectStore);
+
+impl Inventories for StoreInventories<'_> {
+    fn phone(&mut self, theirs: &Inventory) -> Result<Inventory> {
+        self.0.phone_inventory(theirs)
+    }
+
+    fn live_digest(&mut self) -> Result<String> {
+        Ok(self.0.live_inventory()?.0.digest())
+    }
+}
+
+/// [`answer`], with the inventories read from `inventories`.
+pub fn answer_with(
+    store: &ProjectStore,
+    request: Request,
+    inventories: &mut dyn Inventories,
+) -> Result<Answer> {
     request.check()?;
     if request.project != store.project_id() {
         return Err(Error::new(format!(
@@ -237,7 +269,7 @@ pub fn answer(store: &ProjectStore, request: Request) -> Result<Answer> {
     let imported = store.import_updates(updates)?;
     let range = request.range.unwrap_or_default();
     let theirs = request.inventory;
-    let ours = range.narrow(store.phone_inventory(&theirs)?);
+    let ours = range.narrow(inventories.phone(&theirs)?);
     let mut answered = Answer {
         schema: 1,
         imported: imported.changed,
@@ -277,7 +309,7 @@ pub fn answer(store: &ProjectStore, request: Request) -> Result<Answer> {
     if answered.part.is_none() && answered.updates.is_empty() {
         answered.inventory = Some(ours);
     }
-    answered.digest = store.live_inventory()?.0.digest();
+    answered.digest = inventories.live_digest()?;
     Ok(answered)
 }
 

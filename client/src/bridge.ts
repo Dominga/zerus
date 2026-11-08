@@ -1066,6 +1066,8 @@ export const questionNavigate = (direction: number) => desktop<void>("question_n
 export const questionAllowRetry = (card: string) => desktop<void>("question_allow_retry", { card });
 export const questionSubmit = (card: string) => desktop<QuestionReply>("question_submit", { card });
 export const questionDecide = (card: string, allow: boolean) => desktop<QuestionReply>("question_decide", { card, allow });
+/** Task 198 (W5): "Allow all, don't ask again" on a subagent card; the first call asks to Confirm. */
+export const questionAlways = (card: string) => desktop<QuestionReply>("question_always", { card });
 export const questionSkip = (card: string) => desktop<QuestionReply>("question_skip", { card });
 export const questionCold = (token: number, proceed: boolean) => desktop<QuestionReply>("question_cold", { token, proceed });
 /** The status line's Refresh: the open session is read again (Qt's sessionRefreshRequested). */

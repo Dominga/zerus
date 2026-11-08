@@ -69,6 +69,7 @@ function Answer(props: { item: TeamWaitingItem }) {
     setChoices(next);
   };
   const off = () => read().busy || read().done;
+  const blocked = () => props.item.action === "answer_permission" ? read().permissionBlocked?.() ?? "" : "";
   const offer = toolOffer(props.item);
   return (
     <div class="team-waiting-answer" onClick={(event) => event.stopPropagation()}>
@@ -95,9 +96,11 @@ function Answer(props: { item: TeamWaitingItem }) {
               <code class="team-waiting-command">{question().command || question().reason}</code>
               <div class="team-proposal-answers">
                 <input class="field" maxlength={2000} placeholder={tr("Why deny? The member receives this")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
-                <button class="btn small danger" disabled={off()} onClick={() => void read().answerPermission(false, reason())}>{tr("Deny")}</button>
-                <button class="btn small primary" disabled={off()} onClick={() => void read().answerPermission(true)}>{tr("Allow")}</button>
+                <button class="btn small danger" disabled={off() || !!blocked()} title={blocked() || undefined} data-permission="deny" onClick={() => void read().answerPermission(false, reason())}>{tr("Deny")}</button>
+                <button class="btn small primary" disabled={off() || !!blocked()} title={blocked() || undefined} data-permission="allow" onClick={() => void read().answerPermission(true)}>{question().subagent_confirmation ? tr("Allow all") : tr("Allow")}</button>
               </div>
+              {/* Task 198 (W3): a card that cannot answer says why, as Qt's tooltip does. */}
+              <Show when={blocked()}><div class="dim team-waiting-blocked" role="note">{blocked()}</div></Show>
             </div>
           }>
             <div class="team-waiting-card">

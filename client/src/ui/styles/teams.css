@@ -45,7 +45,24 @@
 
   /* The body: canvas | divider | side column. */
   .team-body { flex: 1; min-height: 0; display: flex; }
-  .team-canvas { flex: 1; min-width: 0; overflow: auto; padding: 12px 14px; }
+  .team-coordinator-draft { display: flex; align-items: flex-end; gap: 6px; padding: 6px 10px 10px; }
+  .team-coordinator-draft textarea { flex: 1; min-width: 0; resize: none; }
+  .team-main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+  .team-canvas { flex: 1; min-width: 0; min-height: 0; overflow: auto; padding: 12px 14px; }
+  /* Task 198 (W1): Qt's Inbox and Feed drawers under the plan. */
+  .team-drawer { flex: none; border-top: 1px solid var(--z-color-divider); padding: 4px 12px 6px; font-size: var(--fs-xs); }
+  .team-drawer-head { display: flex; align-items: center; gap: 6px; min-height: 26px; min-width: 0; }
+  .team-drawer-head b { font-size: var(--fs-sm); }
+  .team-drawer-latest { flex: 1; min-width: 0; color: var(--z-color-text-3); }
+  .team-drawer-rows { overflow-y: auto; display: flex; flex-direction: column; gap: 2px; padding: 2px 0 0 26px; }
+  .team-drawer-row { display: flex; align-items: center; gap: 6px; min-height: 22px; min-width: 0; }
+  .team-pill { flex: none; padding: 0 7px; border-radius: 9px; font-size: var(--fs-2xs); font-weight: 600; color: var(--z-color-accent); background: color-mix(in srgb, var(--z-color-accent) 14%, transparent); }
+  .team-pill.warn { color: var(--z-color-warn); background: color-mix(in srgb, var(--z-color-warn) 14%, transparent); }
+  .team-feed-time { flex: none; width: 38px; color: var(--z-color-dim); }
+  .team-feed-text { min-width: 0; color: var(--z-color-text-2); }
+  .team-feed-text.tone-warn { color: var(--z-color-warn); } .team-feed-text.tone-danger { color: var(--z-color-danger); }
+  .team-feed-text.tone-done, .team-feed-text.tone-active { color: var(--z-color-accent); } .team-feed-text.tone-muted { color: var(--z-color-muted); }
+  .team-feed-capped { padding: 4px 0; }
   .team-side { flex: none; min-width: 340px; max-width: 900px; display: flex; flex-direction: column; border-left: 1px solid var(--z-color-divider); }
   .team-side-inner { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 

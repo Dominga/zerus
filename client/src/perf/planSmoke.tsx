@@ -17,7 +17,10 @@ native.__TAURI_INTERNALS__ = {
 };
 
 import { render } from "solid-js/web";
+import { Show } from "solid-js";
 import { PlanView } from "../ui/teams/PlanView";
+import { TeamFeed, TeamInbox } from "../ui/teams/TeamDrawers";
+import { teams } from "../store/teams";
 import { applySkin, skins } from "../skin/runtime";
 import type { TeamTaskView, TeamView } from "../types";
 import type { PlanGraph } from "../ui/teams/types";
@@ -78,9 +81,37 @@ const graph: PlanGraph = {
 // prototypeLive: the backend's session asks for an approval.
 const problems = new Map([[2, { tone: "warn" as const, text: "Needs your answer" }]]);
 
+// Task 198 (W1): `drawers=1` adds the lead's Inbox and the team's Feed under the plan, as Qt's workspace.
+const drawers = query.get("drawers") === "1";
+if (drawers) {
+  teams.apply([
+    { computer: "", key: "inbox:team-1", kind: "inbox", payload: { team: "team-1", truncated: false, items: [
+      { kind: "report", member: "frontend", task: 4, summary: "Address validation is ready for review", since: NOW - 600, command: "hgs team accept --json", detail: {} },
+      { kind: "interim_report", member: "backend", task: 2, summary: "Cursor pagination done; card storage next", since: NOW - 300, command: "hgs team inbox", detail: {} },
+    ] } },
+    { computer: "", key: "feed:team-1", kind: "feed", payload: { team: "team-1", more: true, capped: false, events: [
+      { seq: 14, at: NOW - 120, kind: "reported", detail: { member: "frontend", by: "Frontend", task: 4, attempt: 1 } },
+      { seq: 13, at: NOW - 300, kind: "interim_report", detail: { member: "backend", by: "Backend", task: 2, attempt: 1, text: "Cursor pagination done" } },
+      { seq: 12, at: NOW - 900, kind: "started", detail: { member: "frontend", by: "Frontend", task: 3, attempt: 2 } },
+      { seq: 11, at: NOW - 1300, kind: "handed_out", detail: { by: "Zerus", to: "Frontend", task: 3, attempt: 2 } },
+      { seq: 10, at: NOW - 1500, kind: "unconfirmed", detail: { member: "tester", by: "Tester", task: 5, error: "the Terminal refused the paste" } },
+      { seq: 9, at: NOW - 2000, kind: "phase_approved", detail: { by: "Lead", phase: 2, tasks: 5 } },
+    ] } },
+  ]);
+}
+
 render(() => (
-  <PlanView team={team} graph={graph} problems={problems} now={() => NOW} initialMode={(query.get("mode") ?? "graph") as PlanMode}
-    working={(found) => found.assignee === "backend"} member={query.get("member") ?? undefined}
-    onApprovePhase={() => {}} onAutoAccept={() => {}} />
+  <div class="team-main" style={{ height: "100%" }}>
+    <div class="team-canvas">
+      <PlanView team={team} graph={graph} problems={problems} now={() => NOW} initialMode={(query.get("mode") ?? "graph") as PlanMode}
+        working={(found) => found.assignee === "backend"} member={query.get("member") ?? undefined}
+        onApprovePhase={() => {}} onAutoAccept={() => {}} />
+    </div>
+    <Show when={drawers}><TeamInbox computer="" team={team} /><TeamFeed computer="" team={team} /></Show>
+  </div>
 ), document.getElementById("root")!);
+if (drawers) setTimeout(() => {
+  document.querySelector<HTMLButtonElement>("[data-inbox-toggle]")?.click();
+  document.querySelector<HTMLButtonElement>("[data-feed-toggle]")?.click();
+}, 50);
 document.title = `Zerus plan smoke ${query.get("mode") ?? "graph"}: ready`;

@@ -8,6 +8,7 @@ import { SHARE, SIDE, dragShare, dragSide, teamLayout, type TeamLayout } from ".
 import { selected, setDetailTab, setSelectedKey, toast } from "../../store/ui";
 import { teamAction, teamTests, teamTimeline, teamsProfile } from "../../bridge";
 import { PlanView } from "./PlanView";
+import { TeamFeed, TeamInbox } from "./TeamDrawers";
 import { problemTasks as planProblemTasks } from "./planTasks";
 import { TeamCatalogEditor } from "./TeamCatalogEditor";
 import { TeamSettingsDialog } from "./TeamSettingsDialog";
@@ -146,6 +147,7 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
         </div>
       </Show>
       <div class="team-body" ref={body}>
+        <div class="team-main">
         <div class="team-canvas">
           <Show when={graph()} fallback={<TeamPhases computer={props.computer} team={props.team} />}>
             {(shown) => (
@@ -171,6 +173,10 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
               />
             )}
           </Show>
+        </div>
+        {/* Task 198 (W1): the lead's inbox and the team's feed under the plan, as Qt. */}
+        <TeamInbox computer={props.computer} team={props.team} />
+        <TeamFeed computer={props.computer} team={props.team} focusRole={props.team.members.find((member) => member.id === focus())?.role} />
         </div>
         <Divider orientation="vertical" label={tr("Side column width")} layout={teamLayout}
           value={teamLayout.sideWidth()} min={SIDE.min} max={SIDE.max}
@@ -402,13 +408,34 @@ function Coordinator(props: { computer: ComputerId; team: TeamView; lead?: TeamM
         <div class="activity-wrap team-conversation" style={{ "--col": "100%" } as JSX.CSSProperties}>
           <ActivityView source={source()} session={row} />
           <TeamProposals computer={props.computer} team={props.team} />
-          <Show when={own()}>
+          <Show when={own()} fallback={<CoordinatorDraft computer={props.computer} team={props.team} />}>
             <QueuePanel /><QuestionCard />
             <div class="cmp-col"><Composer /></div>
           </Show>
         </div>
       </Show>
     </section>
+  );
+}
+
+/**
+ * Task 198 (W4): Qt's coordinator conversation always has its input
+ * (TeamConversation.cpp:117-163). The Tauri client sends a session message
+ * only from that session's composer, one at a time, so while another session
+ * is selected this field takes the text and Write to coordinator carries it
+ * into the coordinator's own composer (the Team tab stays), where it is sent
+ * as any message, with its attachments, queue and question card.
+ */
+function CoordinatorDraft(props: { computer: ComputerId; team: TeamView }) {
+  const [text, setText] = createSignal("");
+  const carry = () => { const value = text().trim(); toCoordinator(props.computer, props.team, value); setText(""); };
+  return (
+    <div class="cmp-col team-coordinator-draft">
+      <textarea class="field" rows={2} data-coordinator-draft aria-label={tr("Message the coordinator")} placeholder={tr("Message the coordinator…")} value={text()}
+        onInput={(event) => setText(event.currentTarget.value)}
+        onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); carry(); } }} />
+      <button class="btn small primary" data-coordinator-send onClick={carry}>{tr("Write to coordinator")}</button>
+    </div>
   );
 }
 

@@ -749,12 +749,27 @@ export class WaitingAnswer {
     return this.send(this.item.action === "approve_phase" ? { kind: "approve", phase: fields.phase } : { kind: "approve" });
   }
 
+  /**
+   * Task 198 (W3): why Allow and Deny cannot answer, or "" (Qt
+   * TeamWaitingAnswer C4): without the question's hash, or without the card's
+   * answer ids, nothing could be sent, so the buttons say so instead.
+   */
+  permissionBlocked(): string {
+    const question = this.question();
+    if (!question || !this.member()) return tr("The question is no longer shown; answer it in the session.");
+    if (!question.question_id || !questionHash(question)) return tr("This hgs sends no question hash in status; answer it in the session.");
+    if (!nativeAnswer(question)) return tr("This hgs sends no answer ids for the question; answer it in the session.");
+    return "";
+  }
+
   /** A permission request: Allow or Deny with the card's own ids and the question's hash. */
   answerPermission(allow: boolean, reason = "") {
     const question = this.question();
     const member = this.member();
     const native = question && nativeAnswer(question);
-    if (!question || !member || !native) return Promise.resolve(undefined);
+    // Never silent: a click that cannot answer says why on the card.
+    const blocked = this.permissionBlocked();
+    if (blocked || !question || !member || !native) { this.notice = blocked; this.changed(); return Promise.resolve(undefined); }
     const text = allow ? "" : reason.trim();
     return this.send({ kind: "answer", member: member.id, question_id: question.question_id ?? "", expected_question_hash: questionHash(question),
       answers: [{ question_id: native.question_id, selected_option_ids: [allow ? native.allow : native.deny], text }] });

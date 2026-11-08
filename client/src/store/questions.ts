@@ -1,4 +1,4 @@
-import { createEffect, createRoot, createSignal } from "solid-js";
+import { createEffect, createRoot, createSignal, untrack } from "solid-js";
 import * as bridge from "../bridge";
 import { notify } from "./actions";
 import { composer } from "./composer";
@@ -21,6 +21,8 @@ export interface QuestionPort {
   allowRetry(card: string): Promise<void>;
   submit(card: string): Promise<QuestionReply>;
   decide(card: string, allow: boolean): Promise<QuestionReply>;
+  /** Task 198 (W5): "Allow all, don't ask again" (optional: an older port has none). */
+  always?(card: string): Promise<QuestionReply>;
   skip(card: string): Promise<QuestionReply>;
   cold(token: number, proceed: boolean): Promise<QuestionReply>;
   notify(text: string): void;
@@ -63,6 +65,10 @@ export function createQuestions(port: QuestionPort, clock: Clock = browserClock)
 
   /** A new card or a rebuilt one (its revision) starts the review again; a grown epoch alone does not. Only a review card ticks. */
   function apply(next: QuestionView | null | undefined) {
+    // Untracked: the composer's effect that calls this follows the composer's view only, not the card it sets.
+    untrack(() => applyNow(next));
+  }
+  function applyNow(next: QuestionView | null | undefined) {
     // A cold question goes with its card: Cancel, nothing sent (the hub drops it too).
     if (next?.card !== view()?.card) cancelCold();
     const id = next ? `${next.card}\n${next.revision}` : "";
@@ -107,6 +113,11 @@ export function createQuestions(port: QuestionPort, clock: Clock = browserClock)
       const at = coldEpoch;
       if (v && enabled(allow ? v.view.approve : v.view.deny)) reply(await port.decide(v.card, allow), v.card, at);
     },
+    /** Task 198 (W5): a subagent card's broader Yes; the core asks to Confirm first. */
+    async always() {
+      const v = view(), at = coldEpoch;
+      if (v && v.view.always && enabled(v.view.always) && port.always) reply(await port.always(v.card), v.card, at);
+    },
     async skip() { const v = view(), at = coldEpoch; if (v && enabled(v.view.skip)) reply(await port.skip(v.card), v.card, at); },
     async answerCold(proceed: boolean) {
       const d = dialog();
@@ -130,6 +141,7 @@ export const questions = createRoot(() => {
     allowRetry: (card) => bridge.questionAllowRetry(card),
     submit: (card) => bridge.questionSubmit(card),
     decide: (card, allow) => bridge.questionDecide(card, allow),
+    always: (card) => bridge.questionAlways(card),
     skip: (card) => bridge.questionSkip(card),
     cold: (token, proceed) => bridge.questionCold(token, proceed),
     notify: (text) => notify("error", text, true),

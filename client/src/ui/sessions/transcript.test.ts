@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildTranscript, createActivityProjections, localFileAvailable, mergeLocal, createTranscriptProjection, toolPreview } from "./transcript";
+import { buildTranscript, createActivityProjections, localFileAvailable, mergeLocal, createTranscriptProjection, toolPreview, TOOL_PREVIEW_SCAN } from "./transcript";
 import type { ActivityEvent, EventAttachment, LocalMessage } from "../../types";
 import type { ActivityItem, MediaMessage } from "./types";
 import { cardTarget, rowScope } from "./attachment-card";
@@ -450,5 +450,20 @@ describe("tool rows (ActivityView.cpp:1105-1140, zerus-5wmh.13.8.1)", () => {
     ];
     for (const text of texts) expect(toolPreview(text)).toBe(before(text));
     expect(toolPreview(undefined)).toBe("");
+  });
+
+  it("reads at most a bounded start of a whitespace-heavy output, and says when it stopped there (zerus-1nsc6)", () => {
+    const spaces = " ".repeat(5_000_000);
+    // Whitespace before, as, or after the preview: the preview reads only TOOL_PREVIEW_SCAN characters.
+    expect(toolPreview(`${spaces}abcd`)).toBe("…");
+    expect(toolPreview(spaces)).toBe("…");
+    expect(toolPreview(`${"x".repeat(110)}${spaces}`)).toBe(`${"x".repeat(109)}…`);
+    expect(toolPreview(`${"x".repeat(50)}${spaces}tail`)).toBe(`${"x".repeat(50)}…`);
+    // Within the bound, the preview is the one it always was.
+    expect(toolPreview(`${" ".repeat(TOOL_PREVIEW_SCAN - 10)}abcd`)).toBe("abcd");
+    expect(toolPreview(" ".repeat(TOOL_PREVIEW_SCAN))).toBe("");
+    const started = performance.now();
+    for (let i = 0; i < 100; i++) toolPreview(`${spaces}${i}`);
+    expect(performance.now() - started).toBeLessThan(2000);
   });
 });

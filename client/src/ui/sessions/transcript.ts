@@ -195,22 +195,30 @@ function media(e: ActivityEvent, id: string): MediaMessage {
 
 const GROUP_LIMIT = 24;
 const PREVIEW = 110;
+/** At most this much of an output is read for its preview, whatever its whitespace (zerus-1nsc6). */
+export const TOOL_PREVIEW_SCAN = 8_192;
 const SPACE = /\s/;
 /**
  * The text's whitespace runs as single spaces, trimmed and cut to 110
- * characters: read only as far as the preview shows, so a multi-megabyte
- * output costs no more than a short one (zerus-5wmh.13.8.1).
+ * characters: read only as far as the preview shows and never past its first
+ * TOOL_PREVIEW_SCAN characters, so a multi-megabyte output costs no more than
+ * a short one (zerus-5wmh.13.8.1). A preview that stopped at that bound with
+ * more text left ends with "…".
  */
 export function toolPreview(text: string | undefined): string {
   const source = text ?? "";
-  let flat = "", space = false;
-  for (let i = 0; i < source.length && flat.length <= PREVIEW; i++) {
+  const end = Math.min(source.length, TOOL_PREVIEW_SCAN);
+  let flat = "", space = false, i = 0;
+  for (; i < end && flat.length <= PREVIEW; i++) {
     const c = source[i];
     if (SPACE.test(c)) { space = flat.length > 0; continue; }
     if (space) { flat += " "; space = false; }
     flat += c;
   }
-  return flat.length > PREVIEW ? `${flat.slice(0, PREVIEW - 1)}…` : flat;
+  if (flat.length > PREVIEW || (i === TOOL_PREVIEW_SCAN && source.length > TOOL_PREVIEW_SCAN)) {
+    return `${flat.slice(0, PREVIEW - 1)}…`;
+  }
+  return flat;
 }
 const preview = toolPreview;
 

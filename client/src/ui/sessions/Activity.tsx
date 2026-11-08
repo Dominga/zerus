@@ -22,9 +22,9 @@ import { cardTarget, createOpen, readCards, rowScope } from "./attachment-card";
 import { createStore, reconcile } from "solid-js/store";
 import { Icon } from "../lib/icons";
 import { ToolRow, TOOL_OUTPUT, outputKey, type ProcessLinks } from "./ToolEvents";
-import { processes, recordedProcess } from "../../store/processes";
+import { processes, processViewKey, recordedProcess } from "../../store/processes";
 import { selected, toast, contentScale, subagentOpen, setSubagentOpen, setMenu, setDetailTab, type MenuEntry } from "../../store/ui";
-import { activity } from "../../store/session";
+import { activity, processesTarget } from "../../store/session";
 import { orderedRows } from "../../store/catalog";
 import { flag, num, setSetting } from "../../store/settings";
 import type { ActivitySource, AttachmentScope } from "../../store/activitySource";
@@ -829,10 +829,15 @@ export function ActivityView(props: { source?: ActivitySource }) {
   const [expanded, setExpanded] = createStore<Record<string, boolean>>({});
   /** Show more per tool event (`outputKey`), kept while its row is loaded so a row scrolled back keeps its height. */
   const [more, setMore] = createStore<Record<string, number>>({});
-  /** View process from the live main Activity while Processes is on (ActivityView.cpp:1129-1134). */
+  /**
+   * View process from the live main Activity while Processes is on
+   * (ActivityView.cpp:1129-1134): only in the Processes view of the session
+   * the tab follows now, checked when offered and again when used (zerus-u81tf).
+   */
+  const processView = () => { const target = processesTarget(); return target ? processViewKey(target) : undefined; };
   const processLinks = (): ProcessLinks | undefined => source() === activity && !subagentOpen() && flag("processes/enabled") ? {
-    linkable: (process) => recordedProcess(processes.view(), process),
-    open: (process) => { if (processes.reveal(process)) setDetailTab("processes"); },
+    linkable: (process) => recordedProcess(processes.view(), process, processView()),
+    open: (process) => { if (processes.reveal(process, processView())) setDetailTab("processes"); },
   } : undefined;
   let olderQueued = false;
   // Keep a named row and its offset while the end pin is released.

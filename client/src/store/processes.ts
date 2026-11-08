@@ -53,12 +53,18 @@ export function visibleItems(view: ProcessesView, collapsed: Readonly<Record<str
 }
 
 /** The process rows that show, in tree order: what a Shift range can reach (Qt's QTreeView ranges cover visible rows). */
+/** The view key the hub gives `target`'s Processes view (processes.rs `identity_of`, ProcessView.cpp:112). */
+export const processViewKey = (t: ProcessTarget) =>
+  [t.computer, t.name, t.archive_id ?? "", t.run_id, t.conversation_id, t.generation ?? ""].join("\n");
+
 /**
- * Whether `id` is a process id the Processes view lists for its session: a
- * View process link from Activity needs both (ActivityView.cpp:1129-1134).
+ * Whether `id` is a process id that `view` lists and `view` is the current
+ * session's own (`key`, its `processViewKey`): a View process link from
+ * Activity needs all three (ActivityView.cpp:1129-1134, zerus-u81tf).
  */
-export function recordedProcess(view: ProcessesView | undefined, id: unknown): id is string {
-  return typeof id === "string" && /^[a-f0-9]{32}$/.test(id) && !!view?.groups.some((g) => g.rows.some((r) => r.id === id));
+export function recordedProcess(view: ProcessesView | undefined, id: unknown, key: string | undefined): id is string {
+  return !!key && view?.key === key && typeof id === "string" && /^[a-f0-9]{32}$/.test(id)
+    && view.groups.some((g) => g.rows.some((r) => r.id === id));
 }
 
 export const visibleRows = (view: ProcessesView, collapsed: Readonly<Record<string, boolean>>) =>
@@ -172,11 +178,12 @@ export function createProcesses(port: ProcessesPort, now: () => number = () => D
     toggleGroup(group: string) { setGroup(group, !collapsed()[group]); },
     /**
      * View process from Activity: selects `id` alone, opening its group if
-     * it is collapsed. False when this view does not list it.
+     * it is collapsed. False unless this view is the current session's
+     * (`key`) and lists it: checked again when the link is used.
      */
-    reveal(id: string): boolean {
+    reveal(id: string, key: string | undefined): boolean {
       const v = view();
-      const group = v && recordedProcess(v, id) ? v.groups.find((g) => g.rows.some((r) => r.id === id)) : undefined;
+      const group = v && recordedProcess(v, id, key) ? v.groups.find((g) => g.rows.some((r) => r.id === id)) : undefined;
       if (!v || !group) return false;
       if (collapsed()[group.group]) setGroup(group.group, false);
       setFocused(id);

@@ -13,7 +13,7 @@ impl Settings {
             {
                 return false;
             }
-            let qt = state.seed.as_ref().map(|store| store.path().to_path_buf());
+            let qt = state.qt_path.clone();
             (state.contents.seed.clone(), qt)
         };
         qt_seen(seed.as_ref(), qt.as_deref())
@@ -178,6 +178,30 @@ mod tests {
         fs::set_permissions(&qt_path, fs::Permissions::from_mode(0o600)).unwrap();
         assert!(seed.is_none(), "{seed:?}");
         assert!(pending);
+    }
+    /// zerus-dzmdx: the loader consumes the Qt store it seeds from, so the
+    /// public query must keep its path. After a failed read (no seed), a store
+    /// that is gone by the first query is a positive not-found: no notice.
+    #[cfg(unix)]
+    #[test]
+    fn without_a_seed_the_retained_qt_path_decides_the_public_query() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped: permissions do not apply to root");
+            return;
+        }
+        let scratch = Scratch::new();
+        let qt_path = scratch.0.join("hgs-tray.conf");
+        fs::write(&qt_path, b"[workspace]\ntheme=dark\n").unwrap();
+        fs::set_permissions(&qt_path, fs::Permissions::from_mode(0o000)).unwrap();
+        let store = Settings::open(
+            scratch.0.join("settings.json"),
+            Some(QtStore::Ini(qt_path.clone())),
+        );
+        // The load (and its failed Qt read) has finished: no seed is recorded.
+        assert!(store.seed_record().is_none());
+        fs::remove_file(&qt_path).unwrap();
+        assert!(!store.qt_upgrade_notice_pending());
     }
     /// Without a seed record, one lstat decides: only a positive not-found
     /// hides the notice; any other failure is unknown and keeps it.

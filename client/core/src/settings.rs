@@ -886,6 +886,9 @@ struct State {
     writing: bool,
     closed: bool,
     seed: Option<QtStore>,
+    /// The Qt store's path, kept after the loader takes `seed`: the upgrade
+    /// notice's lstat fallback when no seed was recorded (zerus-dzmdx).
+    qt_path: Option<PathBuf>,
     error: Option<String>,
     revision: u64,
     capturing: bool,
@@ -915,6 +918,7 @@ impl Settings {
     /// Opens `<data_dir>/settings.json`. With `seed`, a store never seeded
     /// before takes Qt's values first (the switch identity only).
     pub fn open(path: PathBuf, seed: Option<QtStore>) -> Settings {
+        let qt_path = seed.as_ref().map(|store| store.path().to_path_buf());
         let shared = Arc::new(Shared {
             path,
             state: Mutex::new(State {
@@ -925,6 +929,7 @@ impl Settings {
                 writing: false,
                 closed: false,
                 seed,
+                qt_path,
                 error: None,
                 revision: 0,
                 capturing: false,

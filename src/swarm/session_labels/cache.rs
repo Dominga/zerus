@@ -166,26 +166,30 @@ fn read<T: serde::de::DeserializeOwned>(directory: &Path, kind: &str, slot: usiz
     );
     Ok(serde_json::from_slice(&bytes)?)
 }
+#[cfg(not(windows))]
 fn publish(directory: &Path, kind: &str, slot: usize, value: &impl Serialize) -> Result<()> {
     let bytes = serde_json::to_vec(value)?;
     ensure!(
         bytes.len() <= wire::MAX_BYTES,
         "label cache exceeds its bound"
     );
-    #[cfg(windows)]
-    {
-        // tempfile::persist uses classic MoveFileExW, which cannot replace a
-        // held old destination on Windows. The existing atomic writer uses
-        // fs::rename's POSIX replacement fallback and keeps that object alive.
-        zerus_client_core::fsx::write_private_atomic(&path(directory, kind, slot), &bytes, false)?;
-    }
-    #[cfg(not(windows))]
-    {
-        let mut file = tempfile::NamedTempFile::new_in(directory)?;
-        file.write_all(&bytes)?;
-        file.persist(path(directory, kind, slot))
-            .map_err(|error| error.error)?;
-    }
+    let mut file = tempfile::NamedTempFile::new_in(directory)?;
+    file.write_all(&bytes)?;
+    file.persist(path(directory, kind, slot))
+        .map_err(|error| error.error)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn publish(directory: &Path, kind: &str, slot: usize, value: &impl Serialize) -> Result<()> {
+    let bytes = serde_json::to_vec(value)?;
+    ensure!(
+        bytes.len() <= wire::MAX_BYTES,
+        "label cache exceeds its bound"
+    );
+    // tempfile::persist stops at classic MoveFileExW. The existing atomic
+    // writer also has fs::rename's POSIX replacement of an open destination.
+    zerus_client_core::fsx::write_private_atomic(&path(directory, kind, slot), &bytes, false)?;
     Ok(())
 }
 

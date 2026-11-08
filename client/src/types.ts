@@ -1384,6 +1384,8 @@ export type TeamAction =
   | { kind: "phase_mode"; phase: number; mode: "free" | "standard"; reason?: string }
   | { kind: "send_back_phase"; phase: number; comment: string }
   | { kind: "decide_tool"; offer: string; allow: boolean; reason?: string }
+  /** Task 251: the lead asks the owner to install a tool its run found missing. */
+  | { kind: "propose"; proposal_kind: "install-tool"; reason: string; offer: string }
   /** Task 97: the owner's answer to a deferred request; one message reaches the session. */
   | { kind: "answer_deferred"; id: string; decision: "allow" | "deny" | "answer"; text?: string }
   /** Task 88: the team's test configuration for its Tests settings: read it, or check a candidate override; neither writes. */

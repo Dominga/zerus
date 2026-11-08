@@ -63,6 +63,8 @@ function Card(props: { cards: ProposalCards; state: CardState; onAnswered?: () =
       </div>
       <div class="team-proposal-by dim">{when() ? tr("%1 asks, %2", card().by, when()) : tr("%1 asks", card().by)}</div>
       <For each={card().lines}>{(line) => <div class="team-proposal-change">{line}</div>}</For>
+      <Show when={card().command}><code class="team-proposal-command" data-proposal-command>{card().command}</code></Show>
+      <Show when={card().folder}><div class="team-proposal-change" data-proposal-folder>{tr("Folder: %1", card().folder)}</div></Show>
       <Show when={card().reason}><div class="team-proposal-reason">{tr("%1: %2", card().by, card().reason)}</div></Show>
       <Show when={props.state.notice}><div class="team-proposal-notice" role="status">{props.state.notice}</div></Show>
       <Show when={!props.state.gone} fallback={

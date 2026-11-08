@@ -6,6 +6,9 @@
 #include "TeamAttentionNotices.h"
 
 #include <QSpinBox>
+#include <QLineEdit>
+#include <QApplication>
+#include <QRegularExpression>
 #include <QPointer>
 #include <QSignalBlocker>
 #include "HgsClient.h"
@@ -1594,6 +1597,62 @@ QWidget *TeamWorkspace::inboxStrip(const Team &team, const QList<InboxItem> &ite
     // C2: oldest first, the command that answers it in the tooltip.
     auto *rows = new QWidget; auto *rv = new QVBoxLayout(rows); rv->setContentsMargins(0, 0, 0, 0); rv->setSpacing(2);
     for (const auto &item : items) {
+        // Task #251: a tool a team's run found missing waits for the lead: it
+        // denies it with a reason, or asks the owner to install it.
+        if (item.kind == QLatin1String("tool_missing")) {
+            const QString offer = Teams::inboxToolOffer(item);
+            auto *box = new QWidget; box->setObjectName("teamInboxTool"); box->setProperty("offer", offer);
+            auto *bv = new QVBoxLayout(box); bv->setContentsMargins(0, 2, 0, 2); bv->setSpacing(2);
+            auto *top = row(6);
+            top->addWidget(new Pill(kindOf(item), c.accent));
+            top->addWidget(label(item.member, c.text2, 11));
+            if (item.task > 0) top->addWidget(label(QStringLiteral("#%1").arg(item.task), c.muted, 11));
+            auto *summary = elided(item.summary, c.fg, 11);
+            summary->setObjectName("teamInboxSummary"); summary->setToolTip(item.command);
+            top->addWidget(summary, 1);
+            bv->addLayout(top);
+            QString install, folder, project;
+            const QRegularExpression installRe(QStringLiteral("The install command: (.+)"));
+            const QRegularExpression projectRe(QStringLiteral("Project: (.+?) \\(([^)]*)\\)"));
+            if (const auto match = installRe.match(item.detail); match.hasMatch()) install = match.captured(1).trimmed();
+            if (const auto match = projectRe.match(item.detail); match.hasMatch()) { project = match.captured(1); folder = match.captured(2); }
+            QStringList parts;
+            if (!project.isEmpty()) parts << tr("Project: %1").arg(project);
+            if (!folder.isEmpty()) parts << tr("Folder: %1").arg(folder);
+            if (!install.isEmpty()) parts << tr("Command: %1").arg(install);
+            if (!parts.isEmpty()) {
+                auto *detail = label(parts.join(QStringLiteral(" · ")), c.muted, 10, false, "teamInboxToolDetail");
+                detail->setWordWrap(true); detail->setTextInteractionFlags(Qt::TextSelectableByMouse);
+                bv->addWidget(detail);
+            }
+            // The commands require the lead actor; the owner's window hands
+            // them to the lead's session instead of sending them as the owner.
+            QString proposeCommand;
+            const QString proposeLead = QStringLiteral("Ask the owner to install it: ");
+            if (const int at = item.detail.indexOf(proposeLead); at >= 0) {
+                proposeCommand = item.detail.mid(at + proposeLead.size());
+                if (const int end = proposeCommand.indexOf(QStringLiteral(" | hgs team propose")); end >= 0) proposeCommand = proposeCommand.left(end);
+                proposeCommand = proposeCommand.trimmed();
+            }
+            auto *actions = row(6);
+            auto *deny = button(tr("Deny"), "teamInboxToolDeny"); deny->setProperty("dangerFill", true);
+            deny->setToolTip(item.command); deny->setEnabled(!item.command.isEmpty());
+            auto *ask = button(tr("Ask the owner"), "teamInboxToolAsk");
+            ask->setToolTip(proposeCommand); ask->setEnabled(!proposeCommand.isEmpty());
+            auto *status = label(QString(), c.muted, 10, false, "teamInboxToolStatus");
+            status->setWordWrap(true);
+            const auto copy = [status](const QString &text) {
+                QApplication::clipboard()->setText(text);
+                status->setText(tr("Copied"));
+            };
+            QObject::connect(deny, &QPushButton::clicked, this, [copy, item] { copy(item.command); });
+            QObject::connect(ask, &QPushButton::clicked, this, [copy, proposeCommand] { copy(proposeCommand); });
+            actions->addWidget(deny); actions->addWidget(ask); actions->addWidget(status);
+            bv->addLayout(actions);
+            bv->addWidget(label(tr("Copy a command and run it in the lead's session."), c.muted, 10, false, "teamInboxToolNote"));
+            rv->addWidget(box);
+            continue;
+        }
         auto *line = row(6);
         line->addWidget(new Pill(kindOf(item), item.kind == "report" ? c.warn : c.accent));
         line->addWidget(label(item.member, c.text2, 11));

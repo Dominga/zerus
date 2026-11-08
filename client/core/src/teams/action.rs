@@ -239,6 +239,14 @@ pub enum TeamAction {
         #[serde(default)]
         reason: String,
     },
+    /// Task 251: `hgs team propose --json` from the lead's tool_missing item:
+    /// ask the owner to install the offered tool (`kind` is install-tool).
+    Propose {
+        proposal_kind: String,
+        reason: String,
+        #[serde(default)]
+        offer: String,
+    },
     /// Task 97: the owner's answer to a request the owner queue deferred:
     /// `allow` or `deny` a permission, or `answer` with the owner's text. The
     /// session gets one message; the tool is never replayed.
@@ -669,6 +677,7 @@ impl TeamAction {
             Self::PhaseMode { .. } => "phase-mode",
             Self::SendBackPhase { .. } => "send-back-phase",
             Self::DecideTool { .. } => "decide-tool",
+            Self::Propose { .. } => "propose",
             Self::AnswerDeferred { .. } => "answer-deferred",
             Self::Disk { .. } => "disk",
             Self::TestConfig { .. } => "test-config",
@@ -1044,6 +1053,20 @@ impl TeamAction {
                 plain(comment, "A comment", TEXT_CHARS)
             }
             Self::DecideTool { offer, reason, .. } => {
+                word(offer, "tool offer")?;
+                plain(reason, "A reason", 2000)
+            }
+            Self::Propose {
+                proposal_kind,
+                reason,
+                offer,
+            } => {
+                if proposal_kind != "install-tool" {
+                    return Err("The lead asks the owner to install a tool.".into());
+                }
+                if reason.trim().is_empty() {
+                    return Err("A reason is required to ask the owner.".into());
+                }
                 word(offer, "tool offer")?;
                 plain(reason, "A reason", 2000)
             }
@@ -1471,6 +1494,17 @@ impl TeamAction {
                 put("allow", json!(allow));
                 if !allow && !reason.is_empty() {
                     put("reason", json!(reason));
+                }
+            }
+            Self::Propose {
+                proposal_kind,
+                reason,
+                offer,
+            } => {
+                put("kind", json!(proposal_kind));
+                put("reason", json!(reason.trim()));
+                if !offer.is_empty() {
+                    put("offer", json!(offer));
                 }
             }
             Self::TestConfig { action, tests } => {
@@ -2053,4 +2087,34 @@ mod tests {
             assert!(action.check().is_err(), "{action:?}");
         }
     }
+
+    #[test]
+    fn task251_propose_asks_the_owner_for_the_tools_install() {
+        let action = TeamAction::Propose {
+            proposal_kind: "install-tool".into(),
+            reason: "Dev's run needs cmake".into(),
+            offer: "offer-1".into(),
+        };
+        assert_eq!(action.op(), "propose");
+        assert!(action.check().is_ok());
+        let input = action.input();
+        assert_eq!(input["kind"], json!("install-tool"));
+        assert_eq!(input["offer"], json!("offer-1"));
+        assert_eq!(input["reason"], json!("Dev's run needs cmake"));
+        assert!(TeamAction::Propose {
+            proposal_kind: "add-member".into(),
+            reason: "x".into(),
+            offer: "offer-1".into(),
+        }
+        .check()
+        .is_err());
+        assert!(TeamAction::Propose {
+            proposal_kind: "install-tool".into(),
+            reason: "".into(),
+            offer: "offer-1".into(),
+        }
+        .check()
+        .is_err());
+    }
+
 }

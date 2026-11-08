@@ -1,6 +1,6 @@
 import { tr } from "../../i18n";
 import { withdrawnRefusal } from "../../teamRefusals";
-import type { ComputerId, TeamAction, TeamCall, TeamChoice, TeamConfirmation, TeamMemberQuestion, TeamMemberView, TeamOutcome, TeamProposalView, TeamView, TeamWaitingItem } from "../../types";
+import type { ComputerId, TeamAction, TeamCall, TeamChoice, TeamConfirmation, TeamInboxItem, TeamMemberQuestion, TeamMemberView, TeamOutcome, TeamProposalView, TeamView, TeamWaitingItem } from "../../types";
 
 // The owner's decisions on a team (task 11), ported from Qt's
 // TeamProposalCard.cpp, TeamWaitingAnswer.cpp, TeamWaitingPage.cpp and
@@ -78,6 +78,7 @@ export function proposalKindLabel(kind: string): string {
     case "discard-phase": case "return-to-draft": case "edit-draft": case "move-phase": case "unpause-phase": case "phase-acceptance":
     case "accept-phase": case "extend": return tr("Phase");
     case "iron-rules": return tr("Iron rules");
+    case "install-tool": return tr("Tool");
     case "full-tests": return tr("Tests");
     default: return kind;
   }
@@ -160,6 +161,11 @@ export function proposalText(team: TeamView | undefined, proposal: TeamProposalV
     }
     case "discard-phase": return tr("Discard %1", phaseName(team, num(change.phase)));
     case "question": return str(change.question);
+    case "install-tool": {
+      const tool = str(change.tool) || tr("a tool");
+      const why = str(change.why) || proposal.reason;
+      return why ? tr("Install %1: %2", tool, why) : tr("Install %1", tool);
+    }
     case "switch-setting": {
       const on = change.value === true;
       if (str(change.setting) === "build_broker") return on ? tr("Turn on the build broker") : tr("Turn off the build broker");
@@ -197,6 +203,13 @@ export function proposalLines(team: TeamView | undefined, proposal: TeamProposal
       break;
     }
     case "next-goal": lines.push((proposal.goal ?? "").slice(0, 600)); break;
+    case "install-tool": {
+      // The command and folder are drawn as the card's own line and code block.
+      const project = str(change.project);
+      if (project) lines.push(tr("Project: %1", project));
+      if (str(change.saves)) lines.push(tr("It saves %1", str(change.saves)));
+      break;
+    }
     case "add-to-phase":
       for (const value of arr(change.tasks)) {
         const task = obj(value);
@@ -233,6 +246,8 @@ export interface ProposalCard {
   id: string; hash: string; kind: string; by: string; reason: string; at: number; what: string; lines: string[];
   /** A question's options and its recommended one. */
   options: string[]; recommended: string;
+  /** Task 251: an install-tool card's exact command and folder (empty otherwise). */
+  command: string; folder: string;
 }
 
 export function proposalCards(team: TeamView | undefined): ProposalCard[] {
@@ -243,6 +258,8 @@ export function proposalCards(team: TeamView | undefined): ProposalCard[] {
       what: proposalText(team, proposal), lines: proposalLines(team, proposal),
       options: proposal.kind === "question" ? arr(change.options).map(str).filter(Boolean) : [],
       recommended: proposal.kind === "question" ? str(change.recommended) : "",
+      command: proposal.kind === "install-tool" ? arr(change.command).map(str).filter(Boolean).join(" ") : "",
+      folder: proposal.kind === "install-tool" ? str(change.folder) : "",
     };
   });
 }
@@ -1022,4 +1039,58 @@ export class ReportDecision {
   accept(row: ReportRow) { return this.send({ kind: "accept", task: row.task }); }
   reject(row: ReportRow, comment: string) { return comment.trim() ? this.send({ kind: "reject", task: row.task, reason: comment.trim() }) : Promise.resolve(undefined); }
   useLastReply(row: ReportRow) { return this.send({ kind: "use_last_reply", task: row.task, attempt: row.attempt }); }
+}
+
+// ---------------------------------------------------------------------------
+// Task 251: the lead's tool_missing inbox item
+
+/** The fields hgs puts in a lead's tool_missing item, parsed from its strings. */
+export interface LeadToolMissing {
+  who: string;
+  tool: string;
+  project: string;
+  why: string;
+  folder: string;
+  install: string;
+  offer: string;
+  /** The deny command hgs lists for the item (its offer is read from it). */
+  denyCommand: string;
+  /** The propose command hgs lists in the detail (the lead's Ask the owner). */
+  proposeCommand: string;
+}
+
+/**
+ * `tool_missing` as hgs words it: the summary is "<who>'s run needs <tool> in
+ * <project>: <why>"; the detail names the project and folder, the exact install
+ * command and the propose command, whose JSON carries the offer id (as does
+ * the deny command).
+ */
+export function leadToolMissing(item: Pick<TeamInboxItem, "kind" | "member" | "summary" | "command" | "detail">): LeadToolMissing | undefined {
+  if (item.kind !== "tool_missing") return undefined;
+  const summary = str(item.summary);
+  const detail = typeof item.detail === "string" ? item.detail : "";
+  const hit = /^(.*?)'s run needs (.+?) in (.+?): (.*)$/.exec(summary);
+  const offer = /"offer"\s*:\s*"([^"]+)"/.exec(item.command) ?? /"offer"\s*:\s*"([^"]+)"/.exec(detail);
+  const project = /Project: (.+?) \(/.exec(detail)?.[1] ?? hit?.[3] ?? "";
+  return {
+    who: hit?.[1] ?? item.member,
+    tool: hit?.[2] ?? "",
+    project,
+    why: hit?.[4] ?? "",
+    folder: /Project: .*? \(([^)]*)\)/.exec(detail)?.[1] ?? "",
+    install: /The install command: (.+)/.exec(detail)?.[1]?.trim() ?? "",
+    offer: offer?.[1] ?? "",
+    denyCommand: item.command,
+    proposeCommand: /Ask the owner to install it: (.*?)(?: \| hgs team propose|$)/s.exec(detail)?.[1]?.trim() ?? "",
+  };
+}
+
+/** Task 251: the lead's answer to a tool_missing offer: Deny with its reason, or ask the owner. */
+export function toolMissingAction(tool: LeadToolMissing, answer: "deny" | "ask", reason: string, summary: string): TeamAction | undefined {
+  if (!tool.offer) return undefined;
+  if (answer === "deny") {
+    const why = reason.trim();
+    return why ? { kind: "decide_tool", offer: tool.offer, allow: false, reason: why } : undefined;
+  }
+  return { kind: "propose", proposal_kind: "install-tool", reason: summary, offer: tool.offer };
 }

@@ -917,7 +917,7 @@ mod tests {
                 );
             }
         }
-        for first in [b'/', b'x'] {
+        for first in *b"/x" {
             let mut cwd = empty();
             unsafe { *cwd.vip_path.as_mut_ptr().cast::<u8>() = first };
             assert!(

@@ -4,7 +4,7 @@ use crate::state::teams::ops::{self, Actor};
 use crate::state::teams::test_queue::run_due;
 use crate::state::teams::test_runners::Runner;
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn run_git(dir: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
@@ -957,6 +957,62 @@ fn status_and_the_lead_inbox_name_accepted_work_that_is_not_landed() {
     assert_eq!(view["integration"]["landed"], json!([{"task":1,"commit":commit}]), "{}", view["integration"]);
     assert!(view["integration"]["unlanded"].as_array().unwrap().is_empty());
     assert!(crate::state::teams::inbox::items(&team).iter().all(|item| item.kind != "unlanded"));
+}
+
+/// Git runs merge drivers through its shell. A sandboxed member's test runner
+/// (low integrity) cannot start MSYS sh, so the driver is exercised where that
+/// shell works: CI and Zerus's own merge paths outside the member sandbox.
+fn merge_driver_available() -> bool {
+    Command::new("git")
+        .args(["-c", "alias.zerus-shell-probe=!exit 0", "zerus-shell-probe"])
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
+#[test]
+fn the_catalog_merge_driver_joins_disjoint_keys_through_the_queue() {
+    // Task 272: .gitattributes names the `i18n` driver; the queue passes it with
+    // `-c` at merge time, so both sides adding different supplement keys is not
+    // a text conflict.
+    if !merge_driver_available() {
+        eprintln!("skipped: this sandbox cannot start Git's shell, which runs merge drivers");
+        return;
+    }
+    let repo = repo();
+    let script = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/i18n-merge.py"))
+        .expect("scripts/i18n-merge.py");
+    let base = "{\n  \"shared key\": \"shared text\"\n}\n";
+    std::fs::create_dir_all(repo.lead.join("client/src")).unwrap();
+    std::fs::create_dir_all(repo.lead.join("scripts")).unwrap();
+    write(&repo.lead, ".gitattributes", "client/src/i18n.next-ru.json merge=i18n\n");
+    write(&repo.lead, "scripts/i18n-merge.py", &script);
+    write(&repo.lead, "client/src/i18n.next-ru.json", base);
+    run_git(&repo.lead, &["add", "."]);
+    run_git(&repo.lead, &["commit", "-q", "-m", "catalogs and driver"]);
+    // The member starts from that base (its branch has no commit yet).
+    run_git(&repo.member, &["merge", "-q", "--no-edit", &head(&repo)]);
+    write(&repo.member, "client/src/i18n.next-ru.json",
+          "{\n  \"member key\": \"member text\",\n  \"shared key\": \"shared text\"\n}\n");
+    run_git(&repo.member, &["commit", "-q", "-am", "member key"]);
+    write(&repo.lead, "client/src/i18n.next-ru.json",
+          "{\n  \"lead key\": \"lead text\",\n  \"shared key\": \"shared text\"\n}\n");
+    run_git(&repo.lead, &["commit", "-q", "-am", "lead key"]);
+
+    let mut team = team(&repo);
+    accept(&mut team);
+    let database = database(&repo);
+    settle(&mut team, &database, &repo.lead);
+
+    let task = team.task(1).unwrap();
+    let merge = task.merge.as_ref().map(|entry| format!("{}: {}", entry.state, entry.note)).unwrap_or_default();
+    let current = std::fs::read_to_string(repo.lead.join("client/src/i18n.next-ru.json")).unwrap_or_default();
+    assert_eq!(task.status, TaskStatus::Accepted, "decision: {} / merge: {merge} / file: {current}", task.decision_reason);
+    let merged = std::fs::read_to_string(repo.lead.join("client/src/i18n.next-ru.json")).unwrap();
+    assert!(!merged.contains("<<<<<<<"), "{merged}");
+    let catalog: serde_json::Value = serde_json::from_str(&merged).unwrap();
+    assert_eq!(catalog["member key"], "member text");
+    assert_eq!(catalog["lead key"], "lead text");
+    assert_eq!(catalog["shared key"], "shared text");
 }
 
 #[test]

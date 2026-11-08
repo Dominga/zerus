@@ -6096,7 +6096,10 @@ pub(crate) fn prepare_dependencies(team: &Team, task_id: u32, member_id: &str) -
             Err((false, _)) => {}
         }
         let message = format!("Merge the accepted work of #{} ({}) before task #{task_id}", work.task, short(&work.commit));
-        match git_bounded(&folder, &["merge", "--no-ff", "--no-edit", "-m", &message, &work.commit]) {
+        // The catalogs merge as data (scripts/i18n-merge.py); like the merge
+        // queue, this path passes the driver rather than trusting repo config.
+        let driver = super::merge_queue::i18n_driver_config();
+        match git_bounded(&folder, &["-c", driver.as_str(), "merge", "--no-ff", "--no-edit", "-m", &message, &work.commit]) {
             Ok(_) => merged.push(format!("#{} ({})", work.task, short(&work.commit))),
             Err((timed_out, error)) => {
                 let files = git_bounded(&folder, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
@@ -9101,11 +9104,13 @@ pub(crate) fn merge_lead(folder: &str, source: &str, branch: &str, timeout: Dura
         }
     }
     let merge = if fetch_from_source { "FETCH_HEAD" } else { branch };
+    let driver = super::merge_queue::i18n_driver_config();
     let mut command = std::process::Command::new("git");
     command
         .arg("-C")
         .arg(folder)
         .args(["-c", hooks.as_str(), "-c", "core.fsmonitor=false", "-c", "commit.gpgsign=false", "-c", "gpg.program="])
+        .args(["-c", driver.as_str()])
         .arg("--no-optional-locks")
         .args(["merge", "--no-edit", merge]);
     let remaining = deadline.saturating_duration_since(Instant::now()).max(Duration::from_secs(1));

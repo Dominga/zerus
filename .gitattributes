@@ -9,6 +9,13 @@ scripts/ci/kimi-native-manifests/*.json -text
 # a Windows checkout must not turn its line endings into CRLF (task 169).
 docs/licenses/canonicalpath-LICENSE.txt -text
 
+# The Next Russian catalogs merge as data, not as text: the reviewed supplement
+# as a key union and the generated catalog by regeneration
+# (scripts/i18n-merge.py, driver `i18n`; Zerus passes it on its merge paths,
+# contributors enable it with one git config line, see CONTRIBUTING.md).
+client/src/i18n.next-ru.json merge=i18n
+client/src/i18n.ru.json merge=i18n
+
 # Captured terminal screens intentionally preserve whitespace and blank lines.
 # They and the recorded screen data are embedded with include_str!, so checkouts
 # keep their bytes exactly (no CRLF conversion on Windows).

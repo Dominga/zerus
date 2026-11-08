@@ -2601,6 +2601,16 @@ is there, in one click.
   roster and their folders stay inside the root. A create outside the root,
   without the QA right, or before the standing rule is granted is refused;
   `scratch_parent` names the parent team, the creating task and the member.
+  - Task #231 (owner, 2026-11-08, on task 170's F2): a scratch team's members
+  get their own folders like a normal team. When the scratch team's folder is
+  a git repository (or inside one), `Create team` gives each member a worktree
+  or clone of it, cut as a sibling of the scratch team's folder - inside the
+  rule's folder, trusted by the same rule - and the `git-commit` template,
+  member branches, the predecessor's commit for a dependent task and the merge
+  queue work there. A lead's scratch team (rule 159) and a QA member's both
+  get this. A scratch folder that is not a git repository keeps today's shared
+  team folder, and the commit refusal says why: make the scratch folder a git
+  repository so each member gets its own folder.
   The parent lead sees each scratch team as `scratch_team_created` and
   `scratch_teams_stopped` in its feed and a `scratch_team` inbox item
   (created, stopped, or listed). When the creating task is accepted, rejected

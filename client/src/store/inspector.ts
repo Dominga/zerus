@@ -21,6 +21,21 @@ export function toggleInspectorCard(id: string) {
   void setSetting("workspace/inspectorClosed", JSON.stringify(next.slice(-128)));
 }
 export function openInspector(tab: InspectorTab) { setInspectorTab(tab); setInspectorOpen(true); }
+/**
+ * Qt's openInspectorCard (the composer's iron rules chip): the side panel
+ * shows one card unfolded and scrolled into view: `details` in the Details
+ * tab, `section` in the sections layout, each with whether it is folded by
+ * default.
+ */
+export function openInspectorCard(details: { id: string; folded?: boolean }, section: { id: string; folded?: boolean }) {
+  const card = skin().layout["side-panel"] === "sections" ? section : details;
+  if (card === section) setInspectorOpen(true);
+  else openInspector("details");
+  // A card folded by default is listed as "+id" once opened; one open by default is listed while folded.
+  const key = card.folded ? `+${card.id}` : card.id;
+  if (card.folded ? !inspectorClosed().has(key) : inspectorClosed().has(key)) toggleInspectorCard(key);
+  setTimeout(() => document.querySelector(`.inspector [data-section="${CSS.escape(card.id)}"]`)?.scrollIntoView({ block: "nearest" }), 60);
+}
 
 export function inspectorHint(message: string) {
   const keys = chord("panel.toggle");

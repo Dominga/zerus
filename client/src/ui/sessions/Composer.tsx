@@ -9,8 +9,13 @@ import { composer } from "../../store/composer";
 import { suggestions, suggestedInput } from "../../store/suggestions";
 import { contentScale, selected } from "../../store/ui";
 import { computerFresh, computerOffline } from "../../store/catalog";
-import { detailsFor, followedFor } from "../../store/actions";
+import { copyReference, detailsFor, followedFor } from "../../store/actions";
 import { onCommand } from "../../store/shortcuts";
+import { openInspectorCard } from "../../store/inspector";
+import { ironRuleCounts, ironRulesChip } from "../../store/ironRuleCounts";
+import { groupOf, INBOX } from "../../store/organization";
+import { FileReferenceDialog, type ReferenceTarget } from "./FileReferenceDialog";
+import { insertReference } from "./file-reference";
 import { actionEntries } from "./ActionDialogs";
 import { snapshotOf } from "./actions-ui";
 import { markReadChip, runMarkRead } from "./mark-entries";
@@ -186,6 +191,34 @@ export function Composer() {
     suggestions.set(row.catalogKey, active && typeof raw?.text === "string" ? raw.text : "", typeof raw?.at === "number" ? raw.at : 0);
   });
   const suggestion = () => child() ? undefined : suggestions.get(s().catalogKey, !!v()?.sending || !!v()?.waiting);
+  // Qt parity (I5b): the iron rules chip, from the count the Iron rules card
+  // reports, else the project's rules read once for this session.
+  const rulesChip = () => child() ? "" : ironRulesChip(ironRuleCounts.count(s().key));
+  createEffect(on(() => s().key, (key) => {
+    const group = groupOf(key), row = s();
+    void ironRuleCounts.ensure(key, row.computer, group === INBOX ? "" : group ?? "");
+  }));
+  // Qt parity (I5c): Copy session reference, while online with a run.
+  const referable = () => !child() && online() && !!(details()?.run_id || s().runId);
+  // Qt parity (I5a): Reference file, for the main composer only.
+  const [referencing, setReferencing] = createSignal<ReferenceTarget>();
+  const referenceMachine = () => s().computer === "" ? tr("this computer") : s().machine || s().computer;
+  const openReference = () => {
+    const view = v();
+    if (!view || child() || composer.locked()) return;
+    setReferencing({ handle: view.handle, local: s().computer === "", machine: referenceMachine(), host: s().computer });
+  };
+  /** Puts the reference where the cursor or selection is; "" when done, else why not. */
+  const referenced = (path: string) => {
+    const target = referencing(), view = v();
+    if (!target || !view || view.handle !== target.handle || composer.locked()) return "";
+    const selection = composer.selection();
+    const result = insertReference(composer.text(), selection.start, selection.end, path);
+    if ("error" in result) return result.error;
+    composer.input(result.text, result.caret, result.caret);
+    queueMicrotask(() => { editor.focus(); try { editor.setSelectionRange(result.caret, result.caret); } catch { /* not rendered */ } });
+    return "";
+  };
   const [compact, setCompact] = createSignal(false);
   let root!: HTMLDivElement;
   let editor!: HTMLTextAreaElement;
@@ -305,6 +338,10 @@ export function Composer() {
           <Show when={v()}><CacheChip compact={compact()} /></Show>
         </Show>
         <SessionUsageChip />
+        <Show when={referable()}>
+          <button type="button" class="tchip icon cmp-reference" title={tr("Copy session reference")} aria-label={tr("Copy session reference")}
+            onClick={() => { void copyReference(snapshotOf(s()), details()); }}><Icon name="link" size={13} /></button>
+        </Show>
       </div>
       <VoicePreview voice={voice} />
       <textarea ref={editor} class="cmp-editor" hidden={!input()} style={{ height: `${editorHeight() * contentScale()}px` }} aria-label={tr("Message to selected agent")}
@@ -318,7 +355,15 @@ export function Composer() {
           <button type="button" class="icon-btn cmp-attach" disabled={!v() || composer.locked() || !v()!.attachments_available} aria-label={tr("Attach files to message")}
             title={v()?.attachments_available === false ? v()!.attachments_reason : ATTACH()}
             onClick={() => { void composer.attachFiles(); }}><Icon name="paperclip" size={17} /></button>
-          <button type="button" class="icon-btn cmp-attach" disabled aria-label={tr("Reference an existing file")} title={tr("Arrives with file references.")}><Icon name="file-text" size={16} /></button>
+          <Show when={!child()}>
+            <button type="button" class="icon-btn cmp-attach" disabled={!v() || composer.locked()} aria-label={tr("Reference an existing file")}
+              title={s().computer === "" ? tr("Reference an existing file on this computer without uploading it") : tr("Reference an existing file on %1 without uploading it", referenceMachine())}
+              onClick={openReference}><Icon name="file-text" size={16} /></button>
+          </Show>
+          <Show when={rulesChip()}>
+            <button type="button" class="tchip cmp-rules" aria-label={rulesChip()} title={tr("Iron rules apply at session start and each team task; adapters without startup delivery also receive them with messages")}
+              onClick={() => openInspectorCard({ id: "details-rules" }, { id: "sec-rules", folded: true })}><Icon name="shield-check" size={12} />{rulesChip()}</button>
+          </Show>
         </span>
         <Show when={status().text}>
           <span class="cmp-status ell" classList={{ error: status().error, waiting: !status().error && !!v()?.waiting }} title={statusDetail()} aria-label={status().text}>{status().text}</span>
@@ -341,6 +386,7 @@ export function Composer() {
         <button type="button" class="btn primary" aria-label={tr("Send")} disabled={!composer.sendEnabled()} title={v()?.waiting ?? undefined}
           onClick={() => { void composer.send(); }}>{v() ? trText(v()!.send_label) : tr("Send")}<Icon name="arrow-up" size={13} /></button>
       </div>
+      <Show when={referencing()}>{(target) => <FileReferenceDialog target={target()} insert={referenced} onClose={() => setReferencing(undefined)} />}</Show>
     </div>
   );
 }

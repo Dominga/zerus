@@ -34,6 +34,7 @@ pub mod file_download;
 pub mod fleet;
 pub mod fork_update;
 pub mod fsx;
+pub mod git_changes;
 pub mod hgs_settings;
 pub mod image;
 pub mod input_queue;

@@ -459,6 +459,28 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
       setSelection({ start, end });
       if (!locked() && view()) changed();
     },
+    /**
+     * Qt's offerDraft (MessageComposer.cpp:614-624, Send report): puts
+     * `draft` into the composer of draft key `key` once it is the open,
+     * loaded one, with the cursor at its end; nothing is sent. It waits at
+     * most `wait` ms for that composer to open. Refused (false) when the
+     * draft is empty, the composer never opened, or a draft the user started
+     * or a message on its way wins: text, attachments, a send, a recording,
+     * a wait, a blocking session status or any other lock.
+     */
+    async offer(key: string, draft: string, wait = 4000): Promise<boolean> {
+      if (!key || !draft.trim()) return false;
+      const deadline = timers.now() + wait;
+      while (view()?.key !== key || opening() > 0 || !view()?.loaded) {
+        if (closing() || timers.now() >= deadline) return false;
+        await new Promise<void>((done) => { timers.later(() => done(), 50); });
+      }
+      const v = view()!;
+      if (text().trim() || v.attachments.length > 0 || v.sending || v.recording || v.waiting || v.session_blocks_input || locked()) return false;
+      batch(() => { setText(draft); setSelection({ start: draft.length, end: draft.length }); });
+      changed();
+      return true;
+    },
     flush, flushForExit,
     attachFiles: () => exclusive((h) => { const s = ordered(); return port.pick(h, s.start, s.end); }),
     /** Qt's canAttachFiles: the session takes attachments and nothing locks the composer. */

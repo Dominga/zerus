@@ -883,6 +883,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(content_search::Searches::default());
                 app.manage(native_ui::runtime::NativeUi::default());
                 app.manage(task_details::TaskReads::default());
+                app.manage(composer::changes::GitStatuses::default());
                 app.manage(task_details::TaskWrites::default());
                 app.manage(task_editor::TaskEditor::default());
                 app.manage(task_forms::TaskForms::default());
@@ -2023,6 +2024,10 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::composer_refresh,
         composer::composer_clear_control,
         composer::composer_tab,
+        composer::changes::git_status,
+        composer::changes::git_diff,
+        composer::reference::reference_local_file,
+        composer::reference::pick_reference_file,
         drops::dropped_files,
         composer::fetch::attachment_fetch,
         composer::fetch::attachment_media,

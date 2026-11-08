@@ -1277,3 +1277,15 @@ export const claudeAppResume = (host: string, session: string, name: string, for
 export const socraticodeStatus = (host: string, path: string, native: boolean) => desktop<import("./store/socraticode").SocratiCodePanel>("socraticode_status", { host, path, native });
 /** One of `install`, `install-qdrant`, `start`, `stop` or `connect`. */
 export const socraticodeAct = (action: import("./store/socraticode").SocratiCodeVerb, host: string, path: string, native: boolean) => desktop<import("./store/socraticode").Acted>("socraticode_act", { host, path, action, native });
+
+// Qt parity (I3, I5a): the inspector's Changes card and the composer's
+// Reference file (src-tauri composer/changes.rs and composer/reference.rs).
+
+/** `hgs [@host] git-status --path P --json`, read at most every 15 s per folder; a failed read is `{state: "unavailable"}`. */
+export const gitStatus = (computer: ComputerId, path: string) => desktop<Record<string, unknown>>("git_status", { computer, path });
+/** `hgs [@host] git-diff --path P --json`, read anew; a rejection is why the call failed. */
+export const gitDiff = (computer: ComputerId, path: string) => desktop<Record<string, unknown>>("git_diff", { computer, path });
+/** The path to insert for an existing file on this computer (`~/` expanded), null when it is not one. */
+export const referenceLocalFile = (path: string) => desktop<string | null>("reference_local_file", { path });
+/** The system file dialog for Reference file's Browse…; null when cancelled. */
+export const pickReferenceFile = () => desktop<string | null>("pick_reference_file", {});

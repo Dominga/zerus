@@ -23,11 +23,13 @@
 //! one for the life of the process, and tests keep theirs, since a store
 //! dropped on its own writer thread would wait for itself.
 
+pub mod changes;
 pub mod fetch;
 pub mod files;
 pub mod handed;
 pub mod questions;
 pub mod queue;
+pub mod reference;
 pub mod saved;
 pub mod send;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

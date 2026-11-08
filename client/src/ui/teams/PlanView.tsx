@@ -347,7 +347,9 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         <Show when={phase.phase.crit_gate}>{(gate) => <span class="pt-crit-gate" data-crit-gate title={gate()}>{short(gate(), 80)}</span>}</Show>
         <Show when={phase.phase.auto}><span class="pt-chip pt-chip-auto">{tr("Auto")}</span></Show>
         <Show when={phase.phase.barrier}><span class="pt-chip pt-chip-barrier">{tr("Barrier")}</span></Show>
-        <Show when={!closed && phase.phase.acceptance}><span class="pt-acceptance">{short(phase.phase.acceptance, 80)}</span></Show>
+        {/* Task 356: no acceptance label. The core's acceptance names who accepts the
+            phase (lead or owner), which Qt shows only in the phase menu
+            (Requires owner acceptance, checked), as this header's menu does. */}
         <For each={head.notes.filter((shown) => shown.id !== "health")}>{(shown) => (
           <span class={`pt-phase-note pt-phase-note-${shown.tone}`} data-note={shown.id} title={shown.tip || shown.text}>{short(shown.text, 80)}</span>
         )}</For>

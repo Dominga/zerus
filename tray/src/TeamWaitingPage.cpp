@@ -57,6 +57,7 @@ TeamWaitingPage::Item TeamWaitingPage::parse(const QJsonObject &item)
     out.toolState = item["state"].toString();
     out.deferred = item["deferred"].toString(); out.request = item["request"].toString(); out.text = item["text"].toString();
     out.session = item["session"].toString(); out.outcome = item["outcome"].toString(); out.questions = item["questions"].toArray();
+    out.changes = item["changes"].toArray();
     if (item["summary"].isObject()) {
         const auto summary = item["summary"].toObject();
         out.summary.known = true;
@@ -342,6 +343,21 @@ QWidget *TeamWaitingPage::rowFor(const Item &item)
             m_teams->act(QStringLiteral("resume"), QJsonObject{{"team", item.team}});
         });
         h->addWidget(resume);
+    }
+    if (item.kind == QLatin1String("lead_changes") && m_teams) {
+        auto *seen = button(tr("Seen"), "teamWaitingSeen");
+        QObject::connect(seen, &QPushButton::clicked, frame, [this, item] {
+            m_teams->act(QStringLiteral("seen-lead-changes"), QJsonObject{{"team", item.team}});
+        });
+        h->addWidget(seen);
+        if (!item.changes.isEmpty()) {
+            auto *revert = button(tr("Revert"), "teamWaitingRevert");
+            QObject::connect(revert, &QPushButton::clicked, frame, [this, item] {
+                const auto change = item.changes.first().toObject().value("id").toString();
+                if (!change.isEmpty()) m_teams->act(QStringLiteral("revert-lead-change"), QJsonObject{{"team", item.team}, {"change", change}});
+            });
+            h->addWidget(revert);
+        }
     }
     if (item.action == QLatin1String("open_disk")) {
         auto *disk = button(tr("Open Build folders"), "teamWaitingOpenDisk");

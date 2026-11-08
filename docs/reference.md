@@ -2583,6 +2583,16 @@ is there, in one click.
   permission) stays in the `dismissed` section with `blocking:true` and
   `blocks` naming the team or member it still blocks; the other dismissed items
   just rest there. `dismissed`/`dismissed_total` come beside the live page.
+- Task #286 (owner, 2026-11-08): a task's wait for the lead or the merger is
+  not in the owner's Waiting; it is a `task_waits` item in the lead's inbox.
+  Only when the lead leaves it unresolved for `Settings.owner_escalate_minutes`
+  (60 by default, 0 never, only the owner changes it) does the owner see one
+  `task_wait_escalated` item naming the lead and the task: it escalates once,
+  however long it stays. A merge-conflict wait (a predecessor's accepted commit
+  that conflicts in a folder) never reaches the owner: it is the lead's or the
+  merger's resolve task (#267). The lead-changes digest is one `lead_changes`
+  row, with `groups` holding the counts per kind (added, moved, cancelled,
+  re-issued) and the newest few of each; Seen clears it.
 - One owner rule for scratch teams, granted once by card
   (`{"kind":"scratch-rule","folder":"ABS","agents":["claude","codex"],"reason":"..."}`
   | `hgs team propose --json`, or the owner's own `hgs team scratch-rule

@@ -164,6 +164,12 @@ pub(crate) struct Settings {
     /// reaches the owner's attention list; 0 turns only that off.
     #[serde(default = "default_remind_owner_permission")]
     pub remind_owner_permission_minutes: u64,
+    /// Task #286 (owner, 2026-11-08): minutes a task's wait for the lead (or
+    /// the merger) may remain unresolved before it reaches the owner as one
+    /// escalation item naming the lead; 0 never escalates. A merge-conflict
+    /// wait never reaches the owner: it is the lead's or the merger's.
+    #[serde(default = "default_owner_escalate")]
+    pub owner_escalate_minutes: u64,
     /// Task 95 (owner, 2026-11-06): minutes the lead's decisions (reports,
     /// questions, permissions) may wait while its session does not work on
     /// them before the owner is told the lead stalled; 0 turns it off. Only
@@ -347,6 +353,11 @@ fn default_remind_owner() -> u64 {
 fn default_remind_owner_permission() -> u64 {
     10
 }
+/// Task #286: the owner hears of an unresolve lead wait after 60 minutes.
+pub(crate) const DEFAULT_OWNER_ESCALATE_MINUTES: u64 = 60;
+fn default_owner_escalate() -> u64 {
+    DEFAULT_OWNER_ESCALATE_MINUTES
+}
 /// Task 95: the owner hears of a stalled lead after 20 minutes.
 pub(crate) const DEFAULT_LEAD_STALL_MINUTES: u64 = 20;
 fn default_lead_stall() -> u64 {
@@ -392,6 +403,7 @@ impl Default for Settings {
             remind_lead_minutes: default_remind_lead(),
             remind_owner_minutes: default_remind_owner(),
             remind_owner_permission_minutes: default_remind_owner_permission(),
+            owner_escalate_minutes: default_owner_escalate(),
             lead_stall_minutes: default_lead_stall(),
             defer_minutes: default_defer(),
             background_red_minutes: default_background_red(),

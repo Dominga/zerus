@@ -2645,6 +2645,24 @@ mod tests {
         assert!(waits(&team, &done, true).is_none());
     }
 
+    /// Task #286: the screenshot's merge-conflict wait is the lead's inbox
+    /// item, never the owner's Waiting, however long it stays unresolved.
+    #[test]
+    fn a_merge_conflict_wait_lands_in_the_leads_inbox_not_the_owners_waiting() {
+        let mut team = team();
+        team.tasks[0].status = TaskStatus::Pending;
+        team.tasks[0].waits = Some(TaskWait::zerus(
+            "dependencies",
+            "refused",
+            "#229's accepted commit abcdef conflicts in src/x.rs; merge it into the member's branch (folder) and resolve it, or reassign the task, then retry",
+            500.0,
+        ));
+        let lead = super::items(&team);
+        assert!(lead.iter().any(|item| item.kind == "task_waits" && item.task == Some(1)), "{lead:?}");
+        let owner = super::super::owner_waiting::items(std::slice::from_ref(&team), 500.0 + 600.0 * 60.0);
+        assert!(!owner.iter().any(|item| item["kind"] == "task_wait_escalated"), "{owner:?}");
+    }
+
     #[test]
     fn a_barrier_phase_waits_for_the_earlier_tasks() {
         let mut team = team();

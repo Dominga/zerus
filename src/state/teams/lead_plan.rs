@@ -255,6 +255,49 @@ pub(crate) fn digest(team: &Team) -> Option<(String, f64, Value)> {
     Some((title, newest, json!(shown)))
 }
 
+/// Task #286: the digest's changes grouped by kind (added, moved, cancelled,
+/// re-issued, else changed), each with its count and its newest few, so the
+/// owner's Waiting reads one grouped row.
+pub(crate) fn groups(changes: &[Value]) -> Value {
+    let mut order: Vec<&str> = Vec::new();
+    let mut counted: std::collections::BTreeMap<&str, (usize, Vec<Value>)> = std::collections::BTreeMap::new();
+    for change in changes {
+        let kind = group_of(change);
+        if !order.contains(&kind) {
+            order.push(kind);
+        }
+        let entry = counted.entry(kind).or_insert((0, Vec::new()));
+        entry.0 += 1;
+        if entry.1.len() < 3 {
+            entry.1.push(change.clone());
+        }
+    }
+    json!(
+        order
+            .into_iter()
+            .map(|kind| {
+                let (count, newest) = &counted[kind];
+                json!({"kind":kind,"count":count,"newest":newest})
+            })
+            .collect::<Vec<Value>>()
+    )
+}
+
+fn group_of(change: &Value) -> &'static str {
+    let summary = change["summary"].as_str().unwrap_or_default();
+    match summary.split_whitespace().next().unwrap_or_default() {
+        "added" => "added",
+        "moved" => "moved",
+        "cancelled" => "cancelled",
+        "re-issued" | "reissued" | "reopened" | "returned" => "re-issued",
+        _ => match change["op"].as_str().unwrap_or_default() {
+            "add-to-phase" | "extend" => "added",
+            "move-task" | "move-phase" => "moved",
+            _ => "changed",
+        },
+    }
+}
+
 /// `hgs team lead-changes --json`: the recorded changes, newest first.
 pub(crate) fn list(team: &Team, limit: usize) -> Value {
     let shown: Vec<Value> = team

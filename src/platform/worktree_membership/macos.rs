@@ -249,10 +249,9 @@ fn files(pid: u32, deadline: Instant) -> io::Result<Files> {
     Ok(files)
 }
 
-/// The handles of a process's threads. None: the list filled its buffer, or
-/// two threads share a handle (0 for a thread without TSD), so not every
-/// thread can be read by its handle and the observation is unsettled.
-fn thread_handles(pid: u32) -> io::Result<Option<Vec<u64>>> {
+/// The native TSD values, retaining aliases for the private diagnostic.
+/// None means that the bounded native response was incomplete.
+fn read_thread_handles(pid: u32) -> io::Result<Option<Vec<u64>>> {
     let mut handles = vec![0u64; MAX_FILES + 1];
     let bytes = (handles.len() * size_of::<u64>()) as i32;
     clear_errno();
@@ -272,8 +271,17 @@ fn thread_handles(pid: u32) -> io::Result<Option<Vec<u64>>> {
         return Ok(None);
     }
     handles.truncate(used as usize / size_of::<u64>());
+    Ok(Some(handles))
+}
+
+/// Every unique TSD value, including zero, is addressable. Any repeated
+/// value is unsettled: PATHINFO selects only its first matching thread.
+fn thread_handles(pid: u32) -> io::Result<Option<Vec<u64>>> {
+    let Some(handles) = read_thread_handles(pid)? else {
+        return Ok(None);
+    };
     let distinct: BTreeSet<_> = handles.iter().copied().collect();
-    if distinct.len() != handles.len() || distinct.contains(&0) {
+    if distinct.len() != handles.len() {
         return Ok(None);
     }
     Ok(Some(handles))
@@ -293,14 +301,25 @@ fn thread_handles(pid: u32) -> io::Result<Option<Vec<u64>>> {
 /// failure leaves the observation unsettled, read again within ATTEMPTS and
 /// the read budget, then limit, never absence.
 ///
-/// The accepted residual (design-tima2's ruling, next to the Linux ones in
-/// linux.rs): a thread is read by its handle, its user TSD base. A live
-/// thread whose TSD base changes between the listing and its read, which
-/// only private APIs do, reads ESRCH and is taken as gone. A handle reused by
-/// a new thread is read as that new thread, which has no cwd of its own
-/// unless it set one.
+/// Addressability limit (coordinator ruling, zerus-q0cd5): these handles
+/// are user TSD values, not stable thread IDs. XNU's fill_taskthreadinfo
+/// selects the FIRST matching cthread_self. Raw Mach threads can share
+/// zero (or another value) and independently set their own cwd. Neither
+/// THREADID64INFO nor another unprivileged path API addresses all aliases.
+/// Every repeated value is therefore unsettled, zero included; a unique
+/// zero is read normally. No duplicate-zero exception proves absence.
+/// See pinned XNU bsd/kern/proc_info.c proc_pidthreadpathinfo and
+/// osfmk/kern/bsd_kern.c fill_taskthreadinfo:
+/// https://github.com/apple-oss-distributions/xnu/tree/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea
+///
+/// Accepted residual, next to the Linux ones in linux.rs: a live thread
+/// can change its TSD between listing and read; ESRCH is then taken as
+/// gone even though its own cwd can remain. Reuse of a successfully read
+/// value can likewise address a different thread. The process identity
+/// checks do not close this per-thread TSD-change window.
 fn thread_cwds(pid: u32, deadline: Instant) -> io::Result<(Vec<libc::vnode_info_path>, bool)> {
     'attempt: for _ in 0..ATTEMPTS {
+        bounded(0, deadline)?;
         let handles = match thread_handles(pid) {
             Ok(Some(handles)) => handles,
             Ok(None) => continue,
@@ -487,6 +506,8 @@ pub(super) fn programs_with_holder(
     if !pids.contains(&(std::process::id() as i32)) {
         return Err(limit());
     }
+    #[cfg(test)]
+    let pids = roster::select(pids)?;
     for pid in pids.into_iter().map(|pid| pid as u32) {
         // The observer deliberately holds the root FD, and is never a signal target.
         if pid <= 1 || pid == std::process::id() {
@@ -577,6 +598,8 @@ pub(in crate::platform) fn sample(deadline: Instant) -> Result<WorktreeProcesses
     if !pids.contains(&(std::process::id() as i32)) {
         return Err(error("the current process is missing"));
     }
+    #[cfg(test)]
+    let pids = roster::select(pids).map_err(|_| error("the fixture roster is incomplete"))?;
     let mut rows = WorktreeProcesses::default();
     let mut budget = PathBudget::default();
     for pid in pids.into_iter().map(|pid| pid as u32) {
@@ -660,6 +683,48 @@ pub(in crate::platform) fn sample(deadline: Instant) -> Result<WorktreeProcesses
     Ok(rows)
 }
 
+/// Only narrows an already enumerated native roster in fixture tests. All
+/// native roster bounds/current-process checks precede this adapter; every
+/// selected process still takes the production identity and membership path.
+#[cfg(test)]
+mod roster {
+    use super::*;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static OWNED: RefCell<Option<BTreeSet<i32>>> = const { RefCell::new(None) };
+    }
+
+    pub(super) struct Owned;
+
+    pub(super) fn owned(pids: &[u32]) -> Owned {
+        assert!(!pids.is_empty() && pids.len() <= 16);
+        let pids: BTreeSet<_> = pids
+            .iter()
+            .map(|pid| i32::try_from(*pid).unwrap())
+            .collect();
+        assert!(pids
+            .iter()
+            .all(|pid| *pid > 1 && *pid != std::process::id() as i32));
+        OWNED.with(|slot| assert!(slot.borrow_mut().replace(pids).is_none()));
+        Owned
+    }
+
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            OWNED.with(|slot| assert!(slot.borrow_mut().take().is_some()));
+        }
+    }
+
+    pub(super) fn select(pids: BTreeSet<i32>) -> io::Result<BTreeSet<i32>> {
+        OWNED.with(|slot| match slot.borrow().as_ref() {
+            Some(owned) if owned.is_subset(&pids) => Ok(owned.clone()),
+            Some(_) => Err(limit()),
+            None => Ok(pids),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -729,23 +794,41 @@ mod tests {
     struct Python(std::process::Child);
     impl Python {
         fn start(cwd: &Path, code: &str, args: &[&str]) -> Self {
-            use std::io::BufRead;
-            let mut child = std::process::Command::new("python3")
+            use std::{io::Read, os::fd::AsRawFd};
+            let mut command = std::process::Command::new("python3");
+            command
                 .arg("-I")
                 .arg("-c")
                 .arg(code)
                 .args(args)
                 .current_dir(cwd)
                 .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .spawn()
-                .unwrap();
-            let mut line = String::new();
-            std::io::BufReader::new(child.stdout.take().unwrap())
-                .read_line(&mut line)
-                .unwrap();
-            assert_eq!(line, "ready\n", "the control child did not start");
-            Python(child)
+                .stdout(std::process::Stdio::piped());
+            let mut child = Self(crate::platform::spawn_in_turn(&mut command).unwrap());
+            let until = Instant::now() + std::time::Duration::from_secs(30);
+            let output = child.0.stdout.as_mut().unwrap();
+            for expected in b"ready\n" {
+                let remaining = until.saturating_duration_since(Instant::now());
+                assert!(!remaining.is_zero(), "fixture setup deadline");
+                let mut fd = libc::pollfd {
+                    fd: output.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                assert!(
+                    unsafe {
+                        libc::poll(
+                            &mut fd,
+                            1,
+                            remaining.as_millis().clamp(1, i32::MAX as u128) as i32,
+                        )
+                    } > 0
+                );
+                let mut byte = [0];
+                output.read_exact(&mut byte).unwrap();
+                assert_eq!(byte[0], *expected, "the control child did not start");
+            }
+            child
         }
         fn pid(&self) -> u32 {
             self.0.id()
@@ -764,6 +847,86 @@ mod tests {
 
     fn soon() -> Instant {
         Instant::now() + std::time::Duration::from_secs(5)
+    }
+
+    /// Native PATHINFO addresses only the first zero-TSD thread. A second
+    /// raw Mach thread can hold the checkout without that read showing it.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn a_unique_zero_is_read_but_aliased_zero_threads_never_prove_absence() {
+        use crate::test_process::macos_raw_threads::RawChild;
+        let checkout = tempfile::tempdir().unwrap();
+        let root = checkout.path().canonicalize().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let outside = elsewhere.path().canonicalize().unwrap();
+        let scope = objects::Scope::open(&root, soon()).unwrap();
+        let inventory = scope.inventory(soon()).unwrap();
+
+        let zero_cwd = |pid| {
+            let mut value = MaybeUninit::<ThreadPath>::uninit();
+            let used = unsafe {
+                libc::proc_pidinfo(
+                    pid as i32,
+                    PROC_PIDTHREADPATHINFO,
+                    0,
+                    value.as_mut_ptr().cast(),
+                    size_of::<ThreadPath>() as i32,
+                )
+            };
+            assert_eq!(used, size_of::<ThreadPath>() as i32);
+            unsafe { value.assume_init() }.cwd
+        };
+        let single = RawChild::start(&outside, &root, 1);
+        let handles = read_thread_handles(single.pid()).unwrap().unwrap();
+        assert_eq!(handles.iter().filter(|h| **h == 0).count(), 1);
+        assert!(thread_handles(single.pid()).unwrap().is_some());
+        assert_eq!(vnode_path(&zero_cwd(single.pid())).unwrap(), root);
+        assert!(member(single.pid(), &inventory, soon()).unwrap());
+        {
+            let _owned = roster::owned(&[single.pid()]);
+            assert!(programs(&inventory, soon())
+                .unwrap()
+                .iter()
+                .any(|row| row.pid == single.pid()));
+            assert!(sample(soon())
+                .unwrap()
+                .paths
+                .iter()
+                .any(|(pid, path, _)| { *pid == single.pid() && path.starts_with(&root) }));
+        }
+        single.finish();
+
+        let aliased = RawChild::start(&outside, &root, 2);
+        let handles = read_thread_handles(aliased.pid()).unwrap().unwrap();
+        assert_eq!(handles.iter().filter(|h| **h == 0).count(), 2);
+        assert!(thread_handles(aliased.pid()).unwrap().is_none());
+        let process =
+            info::<libc::proc_vnodepathinfo>(aliased.pid(), libc::PROC_PIDVNODEPATHINFO).unwrap();
+        assert_eq!(vnode_path(&process.pvi_cdir).unwrap(), outside);
+        assert_eq!(
+            unsafe { *zero_cwd(aliased.pid()).vip_path.as_ptr().cast::<u8>() },
+            0,
+            "native PATHINFO(0) misses the second thread's own cwd"
+        );
+        assert_eq!(
+            member(aliased.pid(), &inventory, soon())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData,
+            "four unsettled observations end in limit"
+        );
+        {
+            let _owned = roster::owned(&[aliased.pid()]);
+            assert_eq!(
+                programs(&inventory, soon()).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+            let Err(error) = sample(soon()) else {
+                panic!("aliased threads cannot produce a complete sample");
+            };
+            assert!(error.contains("thread inspection is incomplete"));
+        }
+        aliased.finish();
     }
 
     /// zerus-q0cd5: a thread's own cwd (pthread_chdir_np) in the checkout,
@@ -795,6 +958,7 @@ mod tests {
         assert!(!member(away.pid(), &inventory, soon()).unwrap());
         assert!(!member(none.pid(), &inventory, soon()).unwrap());
         assert!(thread_cwds(none.pid(), soon()).unwrap().0.is_empty());
+        let _owned = roster::owned(&[inside.pid(), away.pid(), none.pid()]);
         let rows = programs(&inventory, soon()).unwrap();
         assert!(rows.iter().any(|row| row.pid == inside.pid()), "census");
         assert!(!rows
@@ -833,8 +997,11 @@ mod tests {
             "import threading,time\nthreading.stack_size(65536)\nfor _ in range(1000):\n    threading.Thread(target=time.sleep,args=(120,),daemon=True).start()\nprint('ready',flush=True)\ntime.sleep(120)\n",
             &[],
         );
-        let threads = thread_handles(many.pid()).unwrap().unwrap().len();
+        let handles = thread_handles(many.pid()).unwrap().unwrap();
+        assert!(!handles.contains(&0), "this fixture creates pthreads");
+        let threads = handles.len();
         assert!(threads >= 1000, "{threads} threads");
+        let owned = roster::owned(&[many.pid()]);
         let start = Instant::now();
         assert!(!member(many.pid(), &inventory, soon()).unwrap());
         let member_time = start.elapsed();
@@ -846,99 +1013,102 @@ mod tests {
         sample(soon()).unwrap();
         let sample_time = start.elapsed();
         notice(&format!(
-            "a process with {threads} threads: member() {} ms; full census {} ms; sample() {} ms",
+            "FIXTURE ONLY, {threads} pthreads: member() {} ms; fixture census {} ms; fixture sample() {} ms; no full-host Remove qualification",
             member_time.as_millis(),
             census_time.as_millis(),
             sample_time.as_millis()
         ));
         assert!(member_time < std::time::Duration::from_secs(2));
+        drop(owned);
+        let diagnostic = host_diagnostic(&inventory);
+        notice(&diagnostic);
     }
 
-    /// zerus-q0cd5, design-tima2's availability check (temporary): on this
-    /// host, which processes have duplicate or zero thread handles, and do
-    /// they persist across three samples a few seconds apart? Names only.
-    /// Reports through CI notices and never fails.
-    #[test]
-    fn survey_thread_handles_on_this_host() {
-        let mut pids = vec![0i32; 32_768];
-        let used = unsafe {
-            libc::proc_listallpids(
-                pids.as_mut_ptr().cast(),
-                (pids.len() * size_of::<i32>()) as i32,
-            )
+    /// An outcome, not a qualification assertion. In particular a host limit
+    /// is reported as INCOMPLETE and never converted to a clear census. The
+    /// preceding assertions exercise only the exact owned fixture roster.
+    fn host_diagnostic(inventory: &objects::Inventory) -> String {
+        let start = Instant::now();
+        let census = match programs(inventory, start + std::time::Duration::from_secs(2)) {
+            Ok(rows) => format!("COMPLETE ({} occupants)", rows.len()),
+            Err(error) => format!("INCOMPLETE ({:?}: {error})", error.kind()),
         };
-        let Ok(count) = usize::try_from(used) else {
-            notice("survey: proc_listallpids failed");
-            return;
-        };
-        pids.truncate(count.min(pids.len()));
-        let mut samples = Vec::new();
-        for round in 0..3 {
-            if round > 0 {
-                std::thread::sleep(std::time::Duration::from_secs(3));
+        let census_ms = start.elapsed().as_millis();
+        let aliases = alias_diagnostic();
+        format!(
+            "FULL-HOST DIAGNOSTIC ONLY: census {census}, {census_ms} ms; {aliases}; fixture results do not qualify full-host Remove"
+        )
+    }
+
+    fn alias_diagnostic() -> String {
+        let until = Instant::now() + std::time::Duration::from_secs(2);
+        let uid = unsafe { libc::getuid() };
+        let mut pids = BTreeSet::new();
+        for kind in [4, 5] {
+            let mut buffer = vec![0i32; 32_768];
+            let bytes = size_of_val(buffer.as_slice()) as i32;
+            let used = unsafe { libc::proc_listpids(kind, uid, buffer.as_mut_ptr().cast(), bytes) };
+            if used <= 0 || used >= bytes || !(used as usize).is_multiple_of(size_of::<i32>()) {
+                return "aliases INCOMPLETE (native roster)".into();
             }
-            let (mut readable, mut denied, mut gone) = (0, 0, 0);
-            let mut flagged = std::collections::BTreeMap::new();
-            for &pid in &pids {
-                if pid <= 0 {
-                    continue;
-                }
-                let mut handles = vec![0u64; MAX_FILES + 1];
-                let bytes = (handles.len() * size_of::<u64>()) as i32;
-                clear_errno();
-                let used = unsafe {
-                    libc::proc_pidinfo(
-                        pid,
-                        PROC_PIDLISTTHREADS,
-                        0,
-                        handles.as_mut_ptr().cast(),
-                        bytes,
-                    )
-                };
-                if used <= 0 {
-                    match errno().raw_os_error() {
-                        Some(libc::ESRCH) => gone += 1,
-                        _ => denied += 1,
-                    }
-                    continue;
-                }
-                readable += 1;
-                handles.truncate(used as usize / size_of::<u64>());
-                let distinct: BTreeSet<_> = handles.iter().copied().collect();
-                let zeros = handles.iter().filter(|h| **h == 0).count();
-                if distinct.len() != handles.len() || zeros > 0 {
-                    let mut name = [0u8; 256];
-                    let n = unsafe {
-                        libc::proc_name(pid, name.as_mut_ptr().cast(), name.len() as u32)
-                    };
-                    let name = String::from_utf8_lossy(&name[..n.max(0) as usize]).into_owned();
-                    flagged.insert(
-                        pid,
-                        format!(
-                            "{name} (threads {}, zero {zeros}, duplicate {})",
-                            handles.len(),
-                            handles.len() - distinct.len()
-                        ),
-                    );
-                }
+            pids.extend(
+                buffer
+                    .into_iter()
+                    .take(used as usize / size_of::<i32>())
+                    .filter(|p| *p > 0),
+            );
+            if pids.len() >= 32_768 {
+                return "aliases INCOMPLETE (roster bound)".into();
             }
-            notice(&format!(
-                "survey round {}: {} processes, {readable} readable, {denied} not readable, {gone} gone; {} with duplicate or zero thread handles: {:?}",
-                round + 1,
-                pids.len(),
-                flagged.len(),
-                flagged.values().collect::<Vec<_>>()
-            ));
-            samples.push(flagged);
         }
-        let persistent: Vec<_> = samples[0]
-            .iter()
-            .filter(|(pid, _)| samples[1..].iter().all(|s| s.contains_key(*pid)))
-            .map(|(_, name)| name.clone())
-            .collect();
-        notice(&format!(
-            "survey: {} processes kept duplicate or zero thread handles across all 3 rounds: {persistent:?}",
-            persistent.len()
-        ));
+        let (mut aliases, mut unavailable, mut gone) = (0, 0, 0);
+        let mut names = Vec::new();
+        for pid in pids {
+            if Instant::now() >= until {
+                return format!("aliases INCOMPLETE (deadline), {aliases} repeated, {unavailable} unavailable, {gone} gone; at most 20 names: {names:?}");
+            }
+            let handles = match read_thread_handles(pid as u32) {
+                Ok(Some(handles)) => handles,
+                Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
+                    gone += 1;
+                    continue;
+                }
+                _ => {
+                    unavailable += 1;
+                    continue;
+                }
+            };
+            let distinct: BTreeSet<_> = handles.iter().copied().collect();
+            if distinct.len() == handles.len() {
+                continue;
+            }
+            aliases += 1;
+            if names.len() < 20 {
+                let mut name = [0u8; 256];
+                let used =
+                    unsafe { libc::proc_name(pid, name.as_mut_ptr().cast(), name.len() as u32) };
+                let label = if used > 0 && used as usize <= name.len() {
+                    String::from_utf8_lossy(&name[..used as usize])
+                        .chars()
+                        .filter(|c| !c.is_control())
+                        .take(80)
+                        .collect::<String>()
+                } else {
+                    "<name unavailable>".into()
+                };
+                names.push(format!(
+                    "{label}: {} threads, {} zero, {} repeated",
+                    handles.len(),
+                    handles.iter().filter(|h| **h == 0).count(),
+                    handles.len() - distinct.len()
+                ));
+            }
+        }
+        let coverage = if unavailable == 0 {
+            "COMPLETE"
+        } else {
+            "INCOMPLETE (unavailable reads)"
+        };
+        format!("aliases {coverage}: {aliases} repeated, {unavailable} unavailable, {gone} gone; at most 20 names: {names:?}")
     }
 }

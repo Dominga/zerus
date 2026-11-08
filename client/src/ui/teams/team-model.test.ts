@@ -86,6 +86,10 @@ describe("member states", () => {
     const unconfirmed = team({ tasks: [task({ id: 6, status: "in_progress", attempt_state: "unconfirmed" })] });
     expect(memberStatus(unconfirmed, of(unconfirmed, "dev"))).toMatchObject({ kind: "unconfirmed", tone: "danger", problem: true });
     expect(memberStatus(open, { ...dev, phase: "no_report" })).toMatchObject({ kind: "no_report", tone: "warn", problem: true });
+    // Task 315 (205 F9): the open attempt got no report while the member's phase still says it works (Qt: attempt->noReport).
+    const silent = team({ tasks: [task({ id: 268, title: "Finish lore find speed", status: "in_progress", attempt_state: "delivered", no_report: true })] });
+    expect(memberStatus(silent, { ...of(silent, "dev"), phase: "working", queue: [268] }))
+      .toMatchObject({ kind: "no_report", text: "No report", tone: "warn", problem: true, task: 268 });
     expect(memberStatus(open, { ...dev, error: "hgs: DeepSeek host is still starting" })).toMatchObject({ kind: "failed", text: "Failed to start", problem: true });
     expect(memberStatus(open, { ...dev, stuck: true, minutes_without_progress: 12 })).toMatchObject({ kind: "stuck", text: "No progress for 12 min", problem: true });
     expect(memberStatus(open, { ...dev, state: "paused" })).toMatchObject({ kind: "paused", problem: false });

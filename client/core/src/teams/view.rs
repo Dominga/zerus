@@ -379,6 +379,46 @@ pub struct MemberView {
     /// U45: the models Zerus may switch it to before a task ({model, effort}).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<Value>,
+    /// Task 315 (Qt U17/C4, `members[].permission_answers`): its answered
+    /// permission requests, oldest first, the last [`PERMISSION_ANSWERS_KEPT`].
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub permission_answers: Vec<PermissionAnswerView>,
+}
+
+/// Task 315: one answered permission request of a member (Qt's
+/// `PermissionAnswer`): what was decided (`allow` or `deny`), who decided it
+/// (`owner`, `lead`, `rule`, `timeout`), when, the tool and command it asked
+/// about and the deny text.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct PermissionAnswerView {
+    pub question_id: String,
+    pub decision: String,
+    pub by: String,
+    pub reason: String,
+    pub tool: String,
+    pub command: String,
+    pub at: f64,
+}
+
+/// hgs keeps a member's last 20 answers; so does the card.
+pub const PERMISSION_ANSWERS_KEPT: usize = 20;
+
+fn permission_answers(value: &Value) -> Vec<PermissionAnswerView> {
+    let answers: Vec<PermissionAnswerView> = array(value, "permission_answers")
+        .iter()
+        .map(|answer| PermissionAnswerView {
+            question_id: name(answer, "question_id"),
+            decision: name(answer, "decision"),
+            by: name(answer, "by"),
+            reason: text(answer, "reason", LINE_CHARS),
+            tool: name(answer, "tool"),
+            command: text(answer, "command", LINE_CHARS),
+            at: number(answer, "at"),
+        })
+        .filter(|answer| !answer.decision.is_empty())
+        .collect();
+    let skip = answers.len().saturating_sub(PERMISSION_ANSWERS_KEPT);
+    answers.into_iter().skip(skip).collect()
 }
 
 /// Task 209: a member's native context reading as the member card shows it.
@@ -981,6 +1021,7 @@ fn member(value: &Value, lead: &str) -> MemberView {
             .filter(|choice| choice.get("model").and_then(Value::as_str).is_some_and(|model| !model.is_empty()))
             .map(|choice| json!({"model": name(choice, "model"), "effort": name(choice, "effort")}))
             .collect(),
+        permission_answers: permission_answers(value),
         budget: value.get("budget").filter(|budget| budget.is_object()).map(|budget| BudgetView {
             label: text(budget, "label", LINE_CHARS),
             state: name(budget, "state"),
@@ -2315,5 +2356,27 @@ mod tests {
         );
         assert_eq!(task(&json!({"id":2,"title":"T","lane":{"n":0,"label":"x"}})).lane, None);
         assert_eq!(task(&json!({"id":3,"title":"T"})).lane, None);
+    }
+
+    #[test]
+    fn a_member_carries_its_answered_permissions_as_qt_reads_them() {
+        let mut answers: Vec<Value> = (0..23)
+            .map(|n| json!({"question_id": format!("q{n}"), "decision": "allow", "by": "lead", "at": 100.0 + n as f64,
+                "tool": "Bash", "command": "cargo build"}))
+            .collect();
+        answers.push(json!({"question_id": "q-no-decision", "by": "owner", "at": 200.0}));
+        answers.push(json!({"question_id": "q-last", "decision": "deny", "by": "owner", "reason": "Not in this folder",
+            "tool": "Write", "at": 300.0}));
+        let view = member(&json!({"id": "dev", "permission_answers": answers}), "lead");
+        assert_eq!(view.permission_answers.len(), PERMISSION_ANSWERS_KEPT, "the last 20 with a decision");
+        assert_eq!(view.permission_answers[0].question_id, "q4");
+        let last = view.permission_answers.last().unwrap();
+        assert_eq!(
+            (last.decision.as_str(), last.by.as_str(), last.reason.as_str(), last.tool.as_str(), last.at),
+            ("deny", "owner", "Not in this folder", "Write", 300.0)
+        );
+        assert!(member(&json!({"id": "dev"}), "lead").permission_answers.is_empty());
+        let shown = serde_json::to_value(member(&json!({"id": "dev"}), "lead")).unwrap();
+        assert!(shown.get("permission_answers").is_none(), "an empty list is not sent");
     }
 }

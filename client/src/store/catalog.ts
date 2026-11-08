@@ -116,6 +116,7 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
   // The core words the caption as Qt does; a status that is not a kind is a caption too.
   const caption = text(v.caption) || (known ? captionOf(status, v) : text(v.status));
   const attention: Session["attention"] = status === "attention" ? (reason === "approval" ? "approval" : reason === "question" ? "question" : "reply") : undefined;
+  const quiet = quietTeamReply(computer, key, v);
   const base: Session = {
     key: rowId(computer, key),
     catalogKey: key,
@@ -136,7 +137,7 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     caption,
     phase: phase || undefined,
     summary: text(v.summary),
-    unread: !!v.unread && !quietTeamReply(computer, key, v),
+    unread: !!v.unread && !quiet,
     draft: false,
     muted: !!v.muted,
     attention,
@@ -204,7 +205,8 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     baseStatus: status,
     baseCaption: caption,
     baseAttention: attention,
-    baseUnread: !!v.unread && !quietTeamReply(computer, key, v),
+    baseUnread: !!v.unread && !quiet,
+    quietReply: quiet,
     baseSummary: text(v.summary),
     baseMuted: !!v.muted,
     readReplyId: optional(v.read_reply_id),

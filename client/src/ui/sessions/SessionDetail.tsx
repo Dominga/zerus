@@ -20,7 +20,7 @@ import { flag } from "../../store/settings";
 import type { TerminalStatus } from "../../types";
 import { Icon } from "../lib/icons";
 import { ActivityView, columnStyle } from "./Activity";
-import { AgentBadge, MachineBadge, captionText, statusOf, folderOf } from "./SessionCard";
+import { AgentBadge, MachineBadge, StatusBadge, captionText, headerState, statusOf, folderOf } from "./SessionCard";
 import { detailTab, page, selected, setDetailTab, setMenu, subagentOpen, type MenuEntry } from "../../store/ui";
 import { activity, subagentActivity } from "../../store/session";
 import { activityReadOnly, type ActivitySource } from "../../store/activitySource";
@@ -130,7 +130,10 @@ function Header() {
         <h1 class="ell" title={s().name}>{s().project} / {s().title}<Show when={subagentOpen()}> / {s().subagents?.find((k) => k.id === subagentOpen())?.name}</Show></h1>
         <Show when={s().computer !== "" && statusOf(s()) === "working" && !activity.loaded()}><span class="busy-arc" title={tr("Waiting for the remote read")} /></Show>
         <span class="grow" />
-        <span class={`hbadge t-${tone()}`}>{headerCaption()}</span>
+        {/* Task 315 (F3): the host's state, as the card shows it (Qt's header pill). */}
+        <Show when={headerState(s())} fallback={<span class={`hbadge t-${tone()}`}>{headerCaption()}</span>}>
+          {(state) => <span class="dh-state"><StatusBadge kind={state().kind} caption={state().caption} title={state().title} /></span>}
+        </Show>
         <button class="icon-btn" data-tip={folders().folder.hint} aria-label={tr("Open session folder in file manager")} disabled={folders().folder.disabled} onClick={() => folders().folder.action?.()}><Icon name="folder-open" size={16} /></button>
         <button class="icon-btn" data-tip={tr("Open shell in session folder")} aria-label={tr("Open shell in session folder")} disabled={folders().shell.disabled} onClick={() => folders().shell.action?.()}><Icon name="square-terminal" size={16} /></button>
         <button class="icon-btn" data-tip={identity().caption} aria-label={identity().caption} disabled={!identity().value} onClick={copyId}><Icon name="copy" size={15} /></button>

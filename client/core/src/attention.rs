@@ -225,11 +225,15 @@ fn identity(row: &ViewRow) -> String {
     }
 }
 
+/// Qt's `s.muted` as `FleetState` leaves it: the shared preference, or the
+/// desktop's team default (task 315, `team_mutes`).
 fn muted(row: &ViewRow) -> bool {
-    row.notify
-        .preferences
-        .as_ref()
-        .is_some_and(|preferences| preferences.muted)
+    row.team_muted
+        || row
+            .notify
+            .preferences
+            .as_ref()
+            .is_some_and(|preferences| preferences.muted)
 }
 
 fn baseline(row: &ViewRow) -> Option<&Map<String, Value>> {

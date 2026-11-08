@@ -49,6 +49,10 @@ export function statusCaption(s: Session): string {
   const state = cardState(s);
   if (state.kind && state.caption) return state.caption;
   if (s.status === "ready" && s.draft) return tr("Draft");
+  // Task 315 (F2): the unread badge reads "New reply", as Qt's card says it
+  // (SessionCardDelegate::statusOf), not the state under it ("Stopped").
+  const kind = badgeKind(s);
+  if (kind === "unread" || kind === "muted-unread") return tr("New reply");
   const seconds = elapsed(s);
   if (seconds === undefined) return captionText(s.caption);
   const h = Math.floor(seconds / 3600), m = Math.floor((seconds % 3600) / 60), sec = seconds % 60;
@@ -89,6 +93,23 @@ export function cardState(s: Session): CardState {
     && !blocked && s.state !== "archived" && !(s.draft && (key === "cooling" || key === "cold"))) return { shown, kind: key, caption: shown.badge };
   if (key === "user" && shown.badge === tr("Needs you") && !blocked) return { shown, kind: "attention", caption: shown.badge };
   return { shown };
+}
+
+/**
+ * Task 315 (F3): the detail header's pill (SessionsWindow.cpp:4932-4959) shows
+ * the card's state: Waiting for dependencies, Building, Cooling, Cold and
+ * Stopped unless the session needs action or is archived, and the lead's
+ * "Needs you" unless it needs action. Undefined: the header keeps its status.
+ */
+export function headerState(s: Session): { kind: BadgeKind; caption: string; title: string } | undefined {
+  const online = !computerOffline(s.computer);
+  const shown = presentState(stateFacts(s, online, visibleUnreadReply(s, computerFresh(s.computer)), keepWarmHours(s) * 3600), now());
+  const key = shown.key;
+  const needsYou = key === "user" && shown.badge === tr("Needs you") && !s.needsAction;
+  if (needsYou) return { kind: "attention", caption: shown.badge, title: shown.reason };
+  if ((key === "deps" || key === "build" || key === "cooling" || key === "cold" || key === "stopped") && !s.needsAction && s.state !== "archived")
+    return { kind: key, caption: shown.badge, title: shown.reason };
+  return undefined;
 }
 
 export function badgeKind(s: Session): BadgeKind {

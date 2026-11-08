@@ -13,7 +13,7 @@ vi.mock("../../store/catalog", async (orig) => ({
   computerOffline: (computer: string) => !mocks.online(computer),
 }));
 
-import { agentsLabel, badgeKind, cardState, childStatus, chipTooltip, chipWidth, emphasis, fitChips, lineThree, statusCaption, type RowChip } from "./SessionCard";
+import { agentsLabel, badgeKind, cardState, childStatus, chipTooltip, chipWidth, emphasis, fitChips, headerState, lineThree, statusCaption, type RowChip } from "./SessionCard";
 import { now } from "../../store/ui";
 import type { Session } from "./types";
 import { toSession } from "../../store/catalog";
@@ -40,6 +40,18 @@ describe("session card unread presentation", () => {
     mocks.online.mockReturnValue(true);
     expect(badgeKind(row())).toBe("neutral");
     expect(emphasis(row())).toBeUndefined();
+  });
+
+  it("names a finished unread reply New reply over the state under it, as Qt's card (task 315)", () => {
+    mocks.online.mockReturnValue(true);
+    // 205 F2: work-9b8fda6a, stopped with a reply nobody read; the host's state is the user's reply.
+    const stopped = row({ state: "stopped", status: "paused", caption: "Stopped", unreadCandidate: true,
+      sessionState: "user", stateReason: { kind: "reply", text: "" } });
+    expect([badgeKind(stopped), statusCaption(stopped)]).toEqual(["unread", "New reply"]);
+    expect(statusCaption({ ...stopped, muted: true } as Session)).toBe("New reply");
+    // Attention and work keep their own words.
+    expect(statusCaption(row({ status: "attention", caption: "Needs input", unreadCandidate: true }))).toBe("Needs input");
+    expect(statusCaption(row({ status: "ready", caption: "Ready" }))).toBe("Ready");
   });
 });
 
@@ -122,6 +134,22 @@ describe("session states on the card (U30, SessionCardDelegate cardStatus)", () 
     const idle = { status: "ready" as const, sessionState: "cooling", lastActive: now() - 60, draft: true };
     expect(badgeKind(facts(idle))).toBe("draft");
     expect(cardState(facts({ ...idle, draft: false })).kind).toBe("cooling");
+  });
+
+  it("gives the detail header the card's state, as Qt's header pill (task 315 F3)", () => {
+    // 205 F3: the lead's row said Waiting for reports while its header said Ready.
+    const lead = facts({ status: "ready", caption: "Ready", sessionState: "deps",
+      stateReason: { kind: "team_reports", text: "Waiting for reports: Frontend (SolidJS) #205" } });
+    expect(statusCaption(lead)).toBe("Waiting");
+    expect(headerState(lead)).toEqual({ kind: "deps", caption: "Waiting", title: "Waiting for reports: Frontend (SolidJS) #205" });
+    expect(headerState(facts({ status: "ready", sessionState: "stopped" }))?.caption).toBe("Stopped");
+    expect(headerState(facts({ status: "ready", sessionState: "user", stateReason: { kind: "team_lead", text: "Approve the plan" } })))
+      .toEqual({ kind: "attention", caption: "Needs you", title: "Approve the plan" });
+    // A request that needs action, an archived row and a working agent keep the header's own status.
+    expect(headerState(facts({ status: "attention", needsAction: true, sessionState: "deps" }))).toBeUndefined();
+    expect(headerState(facts({ sessionState: "deps", state: "archived" }))).toBeUndefined();
+    expect(headerState(facts({ sessionState: "working" }))).toBeUndefined();
+    expect(headerState(facts({ status: "ready" }))).toBeUndefined();
   });
 
   it("names the lead's Needs you as attention, with its reason on line 3", () => {

@@ -12,6 +12,8 @@ import { TextDialog } from "./TeamActions";
 import { SwapMemberDialog } from "./SwapMemberDialog";
 import { roleStyle } from "./roles";
 import { memberProgress, unreadBadge, type MemberStatus } from "./team-model";
+import { answerRow, newestAnswers, permissionSummary } from "./permissionAnswers";
+import { now } from "../../store/ui";
 import { accountLabel, limitText, memberMenu, memberAccount, moveAffected, reportsOf, scaleRoom, waitingForTask, type MemberMenuId } from "./members";
 import type { ComputerId, TeamMemberView, TeamPulseView, TeamView } from "../../types";
 
@@ -75,6 +77,9 @@ export function MemberCard(props: {
   const own = createMemo(() => memberProgress(props.team, props.member));
   const reports = () => reportsOf(props.team, props.member.id).length;
   const [tasksOpen, setTasksOpen] = createSignal(false);
+  // Task 315 (Qt U17): the answered permissions fold to one line and open to the newest five.
+  const [answersOpen, setAnswersOpen] = createSignal(false);
+  const answers = () => props.member.permission_answers ?? [];
   const [menu, setMenu] = createSignal<{ left: number; top: number; assign?: boolean } | undefined>();
   const [dialog, setDialog] = createSignal<MemberMenuId | "add" | undefined>();
   const [denyReason, setDenyReason] = createSignal("");
@@ -211,6 +216,29 @@ export function MemberCard(props: {
                 );
               }}</For>
               <Show when={props.member.queue.length > 5}><span class="dim">{tr("+%1 more", props.member.queue.length - 5)}</span></Show>
+            </div>
+          </Show>
+        </Show>
+        <Show when={answers().length > 0}>
+          <button type="button" class="team-member-tasks team-member-answers" data-action="member-permissions" aria-expanded={answersOpen()}
+            title={answersOpen() ? tr("%1 answers, click to fold them", answers().length) : tr("%1 answers, click to expand them", answers().length)}
+            onClick={(event) => { stop(event); setAnswersOpen(!answersOpen()); }}>
+            <Icon name={answersOpen() ? "chevron-down" : "chevron-right"} size={10} />
+            <span class="ell">{permissionSummary(answers(), now())}</span>
+          </button>
+          <Show when={answersOpen()}>
+            <div class="team-member-queue team-member-answer-list" onClick={stop}>
+              <For each={newestAnswers(answers()).shown}>{(answer) => {
+                const row = () => answerRow(answer, now());
+                return (
+                  <div class="team-member-answer" data-decision={answer.decision} title={row().tip}>
+                    <span class="ell" classList={{ warn: row().denied, accent: !row().denied }}>{row().decision}</span>
+                    <Show when={row().command}><span class="ell mono">{row().command}</span></Show>
+                    <Show when={row().reason}><span class="ell dim">{row().reason}</span></Show>
+                  </div>
+                );
+              }}</For>
+              <Show when={newestAnswers(answers()).more > 0}><span class="dim">{tr("+%1 more", newestAnswers(answers()).more)}</span></Show>
             </div>
           </Show>
         </Show>

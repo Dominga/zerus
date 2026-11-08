@@ -80,7 +80,8 @@ export function memberStatus(team: TeamView, member: TeamMemberView, live: Membe
   if (live.offline) return make("offline", tr("Offline"), tr("Offline"), "danger", task, true, "wifi-off");
   if (live.attention || member.question) return make("answer", tr("Needs your answer"), tr("Answer"), "warn", task, true);
   if (current?.attempt_state === "unconfirmed") return make("unconfirmed", tr("Delivery unconfirmed"), tr("Unconfirmed"), "danger", task, true);
-  if (member.phase === "no_report") return make("no_report", tr("No report"), tr("No report"), "warn", task, true, "message-square");
+  // Task 315 (F9): Qt reads the open attempt's own no_report; the member's phase may still say working.
+  if (member.phase === "no_report" || current?.no_report) return make("no_report", tr("No report"), tr("No report"), "warn", task, true, "message-square");
   if (member.phase === "asking") return make("asking", tr("Waiting for your answer"), tr("Answer"), "warn", task, true);
   // Task 98: its Terminal refuses hand-outs (a draft, a dialog or an unknown prompt).
   if ((member.input_refusals ?? 0) > 0) {

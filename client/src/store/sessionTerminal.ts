@@ -6,7 +6,7 @@ import { running } from "./batch";
 import type { MenuEntry } from "./ui";
 import type { Details } from "../types";
 import type { Session } from "../ui/sessions/types";
-import { menuState, snapshotOf, terminal, type ActionRow } from "../ui/sessions/actions-ui";
+import { STATE_CHANGED, menuState, snapshotOf, terminal, type ActionRow } from "../ui/sessions/actions-ui";
 import { toast } from "./notices";
 import { tr, trNoop } from "../i18n";
 
@@ -64,7 +64,20 @@ function resumeTerminalEntry(s: Session, row: ActionRow, details?: Details): Men
     action: () => {
       const live = stillListed(row);
       if (reason || !live || live.state !== row.state || !confirmResume) return;
-      void confirmResume(snapshotOf(live)).then((confirmed) => { if (confirmed) void resumeAndOpenTerminal(snapshotOf(live)); });
+      // The answer acts on exactly what the question showed (a live row is
+      // updated in place): a session that changed meanwhile is refused, and
+      // never turned into another operation such as Pause.
+      const shown = snapshotOf(live);
+      void confirmResume(shown).then((confirmed) => {
+        if (!confirmed) return;
+        const now = stillListed(shown);
+        if (!now) return;
+        if (now.state !== shown.state || now.runId !== shown.runId || (now.conversationId ?? "") !== (shown.conversationId ?? "")) {
+          notify("error", tr(STATE_CHANGED), true);
+          return;
+        }
+        void resumeAndOpenTerminal(shown);
+      });
     } };
 }
 

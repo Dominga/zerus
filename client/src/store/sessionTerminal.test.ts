@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSignal } from "solid-js";
+import { createStore } from "solid-js/store";
 
 // Resume and open terminal (zerus-5wmh.13.11.3; Qt SessionsWindow.cpp:5466-5476):
 // the row's own Resume, then the identity-bound terminal of that same session.
@@ -10,13 +11,16 @@ const fixture = vi.hoisted(() => ({
   notify: vi.fn(),
   open: vi.fn(async (_target: unknown): Promise<string | null> => null),
   offline: false,
+  /** The live row stillListed finds; the row asked for when unset. */
+  current: undefined as unknown,
 }));
-vi.mock("./actions", () => ({ change: fixture.change, notify: fixture.notify, stillListed: (row: unknown) => row, updating: () => false }));
+vi.mock("./actions", () => ({ change: fixture.change, notify: fixture.notify, stillListed: (row: unknown) => fixture.current ?? row, updating: () => false }));
 vi.mock("./batch", () => ({ running: () => false }));
 vi.mock("./catalog", () => ({ catalog: { order: [], rows: {} }, computerOffline: () => fixture.offline }));
 vi.mock("./notices", () => ({ toast: vi.fn() }));
 vi.mock("../bridge", () => ({ sessionTerminalOpen: fixture.open }));
 
+import { STATE_CHANGED } from "../ui/sessions/actions-ui";
 import { RESUMED_CHANGED, RESUMED_NOT_RUNNING, bindResumeTerminalConfirm, resumeAndOpenTerminal, resumedRow, sessionTerminalEntry, waitForResumed } from "./sessionTerminal";
 import type { Session } from "../ui/sessions/types";
 import type { ActionRow } from "../ui/sessions/actions-ui";
@@ -26,7 +30,7 @@ const saved = { key: "\nrun:old", computer: "", name: "claude/project/a", machin
   tracked: true, resumable: true, activity: "idle", processState: "stopped", allowed: "resume pause terminate kill" } as unknown as ActionRow;
 const resumed = (extra: Partial<ActionRow> = {}) => ({ ...saved, key: "\nrun:new", state: "running", runId: "new", ...extra } as ActionRow);
 
-beforeEach(() => { vi.useFakeTimers(); fixture.offline = false; });
+beforeEach(() => { vi.useFakeTimers(); fixture.offline = false; fixture.current = undefined; });
 afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
 
 describe("the same session after its resume", () => {
@@ -109,4 +113,37 @@ describe("the row menu's terminal entry", () => {
     expect(fixture.change).toHaveBeenCalledTimes(1);
     expect(fixture.change.mock.calls[0][0]).toMatchObject({ key: saved.key, state: "paused", sessionId: "session-1" });
   });
+});
+
+// review-win-d's control on #1817: a live row is updated in place, so the
+// answer must act on the snapshot the question showed.
+it("a confirmed Resume never becomes Pause when the session resumed elsewhere meanwhile", async () => {
+  const [live, setLive] = createStore<ActionRow>({ ...saved });
+  fixture.current = live;
+  let answer!: (value: boolean) => void;
+  const ask = vi.fn((_shown: ActionRow) => new Promise<boolean>((resolve) => { answer = resolve; }));
+  bindResumeTerminalConfirm(ask);
+  const item = sessionTerminalEntry(live as unknown as Session) as { action: () => void };
+  item.action();
+  expect(ask.mock.calls[0][0].state).toBe("paused");
+  // The original run resumes elsewhere while its confirmation is still open.
+  setLive("state", "running");
+  answer(true);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(fixture.change, "the confirmed paused snapshot must be kept or refused, never retargeted to running/Pause").not.toHaveBeenCalled();
+  expect(fixture.notify).toHaveBeenCalledExactlyOnceWith("error", STATE_CHANGED, true);
+});
+
+it("a confirmed Resume acts on the snapshot the question showed", async () => {
+  const [live] = createStore<ActionRow>({ ...saved });
+  fixture.current = live;
+  let answer!: (value: boolean) => void;
+  bindResumeTerminalConfirm(() => new Promise<boolean>((resolve) => { answer = resolve; }));
+  (sessionTerminalEntry(live as unknown as Session) as { action: () => void }).action();
+  answer(true);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(fixture.change).toHaveBeenCalledTimes(1);
+  const passed = fixture.change.mock.calls[0][0] as ActionRow;
+  expect(passed).not.toBe(live);
+  expect(passed).toMatchObject({ state: "paused", runId: "old", sessionId: "session-1" });
 });

@@ -110,12 +110,10 @@ describe("side lists (Qt 3617-3700)", () => {
     phases: [{ n: 1, state: "running", title: "Build" }, { n: 2, state: "draft", title: "Docs" }],
   } as unknown as Parameters<typeof sideLists>[0];
 
-  it("lists what needs an answer, each row opening its target", () => {
-    const lists = sideLists({ ...base, attention: [{ kind: "lead_stalled", summary: "The lead is stalled", task: 4 }] });
-    expect(lists.map((list) => list.id)).toEqual(["attention", "answers"]);
-    expect(lists[0].rows[0]).toMatchObject({ text: "The lead is stalled", target: { task: 4 } });
-    expect(lists[1].rows.map((row) => row.target)).toEqual([{ member: "api" }, { task: 4 }, { phase: 2 }]);
-    expect(lists[1].rows[1].text).toBe("#4 Saved cards — Which API?");
+  it("lists no Needs your attention or Needs your answer above Members (task 345)", () => {
+    // Every request is in its member's card, the Questions list or the plan.
+    const lists = sideLists({ ...base, attention: [{ kind: "lead_stalled", summary: "The lead is stalled", task: 4 }] } as never);
+    expect(lists).toEqual([]);
   });
 
   it("shows plan problems only while the team plans, errors first", () => {

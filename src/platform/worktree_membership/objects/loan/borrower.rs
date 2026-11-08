@@ -301,6 +301,14 @@ mod tests {
     }
     #[test]
     fn the_actual_original_peer_and_transferred_scope_live_through_the_receivers_release() {
+        // The receiver's census examines this multi-threaded test process as
+        // the holder. Without kcmp every thread's descriptor table is read
+        // itself, and the holder's pin seen through a thread refuses, as the
+        // lo8o1 holder rule intends (zerus-igl4q, design-tima2's ruling).
+        #[cfg(target_os = "linux")]
+        if !crate::platform::worktree_membership::kcmp_available() {
+            return;
+        }
         // Native DATA mechanism only. The test harness peer supplies neither
         // canonical frontend registration nor a stop/Force confirmation.
         use super::super::{

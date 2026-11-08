@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createComponent, createSignal } from "solid-js";
+import { createStore } from "solid-js/store";
 import { render } from "solid-js/web";
 const native = vi.hoisted(() => ({ setKeepWarm: vi.fn() }));
 vi.mock("../../bridge", () => ({ inTauri: () => true, setKeepWarm: native.setKeepWarm }));
@@ -205,4 +206,52 @@ it("a late failure for the previously selected session shows nothing on the new 
   await flush();
   expect(host.querySelector("[role=alert]")).toBeNull();
   expect(host.querySelector<HTMLButtonElement>("button[role=switch]")!.disabled).toBe(false);
+});
+
+// review-win-d's counterexamples for #1841 (zerus-zzuy0, zerus-trjfi).
+const chooseAt = (value: string) => {
+  const range = host.querySelector<HTMLInputElement>("input[type=range]")!;
+  range.value = value;
+  range.dispatchEvent(new Event("input"));
+  range.dispatchEvent(new Event("change"));
+};
+
+it("a row removed with a change pending never sends its queued choice to the session selected next (zerus-zzuy0)", async () => {
+  const replies: ((value: unknown) => void)[] = [];
+  native.setKeepWarm.mockImplementation(() => new Promise((resolve) => { replies.push(resolve); }));
+  const alpha = { ...session(warm({ enabled: true, until: Date.now() / 1000 + 10800, revision: 4 })), key: "alpha", name: "codex/p/alpha" } as Session;
+  const beta = { ...session(warm({ revision: 4 })), key: "beta", name: "codex/p/beta", runId: "run-b", conversationId: "conversation-b" } as Session;
+  const [selected, select] = createSignal(alpha);
+  dispose = render(() => createComponent(KeepWarmRow, { get session() { return selected(); }, inspected: {}, online: true }), host);
+  chooseAt("5"); await flush(); chooseAt("8"); await flush();
+  expect(native.setKeepWarm).toHaveBeenCalledTimes(1);
+  dispose(); dispose = undefined;
+  select(beta);
+  replies[0](warm({ enabled: true, until: Date.now() / 1000 + 5 * 3600, revision: 5 }));
+  await flush();
+  expect(native.setKeepWarm.mock.calls.map(([target]) => target.name)).toEqual([alpha.name]);
+});
+
+it("a queued choice goes with the revision its predecessor confirmed, so a change from another device is refused, not overwritten (zerus-trjfi)", async () => {
+  const replies: ((value: unknown) => void)[] = [];
+  native.setKeepWarm.mockImplementation(() => new Promise((resolve) => { replies.push(resolve); }));
+  const [live, setLive] = createStore({ ...session(warm({ enabled: true, until: Date.now() / 1000 + 10800, revision: 4 })), key: "alpha" } as Session);
+  dispose = render(() => createComponent(KeepWarmRow, { get session() { return live; }, inspected: {}, online: true }), host);
+  chooseAt("5"); await flush(); chooseAt("2"); await flush();
+  // Another device turned it off after the first write committed, before its revision 5 reply arrived here.
+  setLive("keepWarm", warm({ enabled: false, revision: 8 })); await flush();
+  replies[0](warm({ enabled: true, until: Date.now() / 1000 + 5 * 3600, revision: 5 })); await flush();
+  expect(native.setKeepWarm).toHaveBeenCalledTimes(2);
+  expect(native.setKeepWarm).toHaveBeenLastCalledWith(expect.objectContaining({ name: "codex/p/warm", run_id: "run-1" }), { kind: "hours", hours: 2 }, 5);
+});
+
+it("a queued choice is dropped when its predecessor's reply carries no state to continue from", async () => {
+  const replies: ((value: unknown) => void)[] = [];
+  native.setKeepWarm.mockImplementation(() => new Promise((resolve) => { replies.push(resolve); }));
+  mount(session(warm({ enabled: true, until: Date.now() / 1000 + 10800, revision: 4 })));
+  chooseAt("5"); await flush(); chooseAt("2"); await flush();
+  replies[0]({ ok: true });
+  await flush();
+  expect(native.setKeepWarm).toHaveBeenCalledTimes(1);
+  expect(host.querySelector(".kw-row")!.getAttribute("aria-busy")).toBeNull();
 });

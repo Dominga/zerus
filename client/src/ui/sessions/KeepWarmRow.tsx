@@ -3,7 +3,7 @@ import { Icon } from "../lib/icons";
 import { tr } from "../../i18n";
 import * as bridge from "../../bridge";
 import { errorText } from "../../store/actions";
-import type { KeepWarmState } from "../../types";
+import type { KeepWarmState, Target } from "../../types";
 import type { Session } from "./types";
 import { ALWAYS, choiceAt, durationLabel, durationMark, keepWarmOf, mergeKeepWarm, positionOf, remainingText, statusLine, tooltipLines } from "./keep-warm";
 
@@ -53,21 +53,33 @@ export function KeepWarmRow(props: { session: Session; inspected: unknown; onlin
   const remaining = () => remainingText(state(), now());
   const line = () => statusLine(state(), now());
 
+  // A removed row retires its reply and drops its queued choice (zerus-zzuy0).
+  onCleanup(() => { generation++; queued = undefined; });
+
   function choose(choice: bridge.KeepWarmChoice) {
     setDraft(undefined);
     setPending(choice);
     setError("");
     if (busy()) queued = choice;
-    else void send(choice);
+    else {
+      const s = props.session;
+      void send(choice, { computer: s.computer, name: s.name, run_id: s.runId ?? "", conversation_id: s.conversationId ?? "" }, state()?.revision ?? 0);
+    }
   }
-  async function send(choice: bridge.KeepWarmChoice) {
-    const s = props.session;
+  /**
+   * One write for `request`, the target its first choice was made for. A
+   * choice queued meanwhile goes to that same target with the revision this
+   * write's reply confirmed, never a newer one seen since, so a change from
+   * another device makes the host refuse it instead of being overwritten
+   * (zerus-trjfi). Without a confirmed revision the queued choice is dropped.
+   */
+  async function send(choice: bridge.KeepWarmChoice, request: Target, revision: number) {
     const mine = ++generation;
     setBusy(true);
+    let confirmedRevision: number | undefined;
     try {
-      const request = { computer: s.computer, name: s.name, run_id: s.runId ?? "", conversation_id: s.conversationId ?? "" };
-      const result = keepWarmOf(await bridge.setKeepWarm(request, choice, state()?.revision ?? 0));
-      if (mine === generation && result) { setNow(Date.now() / 1000); setConfirmed(result); }
+      const result = keepWarmOf(await bridge.setKeepWarm(request, choice, revision));
+      if (mine === generation && result) { setNow(Date.now() / 1000); setConfirmed(result); confirmedRevision = result.revision; }
     } catch (failure) {
       if (mine !== generation) return;
       // A refused change also drops the one waiting behind it: it was made over this one.
@@ -78,7 +90,7 @@ export function KeepWarmRow(props: { session: Session; inspected: unknown; onlin
       if (mine === generation) {
         const next = queued;
         queued = undefined;
-        if (next) void send(next);
+        if (next && confirmedRevision !== undefined) void send(next, request, confirmedRevision);
         else { setBusy(false); setPending(undefined); }
       }
     }

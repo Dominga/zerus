@@ -449,6 +449,16 @@ pub struct Admission {
     pub receipt: Option<Receipt>,
 }
 impl Admission {
+    /// This is a refusal reason, not an ID-wide no-effects witness. Generic
+    /// service errors can occur after commit and retain the Unknown outcome.
+    pub fn refusal_answer(&self, intent: &Intent) -> Option<crate::creation::Answer> {
+        let reason = self.refusal(intent)?;
+        Some(crate::creation::Answer {
+            ok: false,
+            data: serde_json::json!({"status":if self.code=="creation_worktree_unavailable" {"unconfirmed"}else{"refused"},"request_id":intent.worktree_request_id}),
+            error: reason.into(),
+        })
+    }
     pub fn refusal(&self, intent: &Intent) -> Option<&'static str> {
         if self.abi != ABI
             || self.request_id != intent.worktree_request_id
@@ -462,7 +472,7 @@ impl Admission {
         match self.code.as_str() {
             "creation_worktree_predecessor_unsettled" => Some("Worktree admission refused: the previous attempt is not a drained, confirmed failure. Stop setup and review its retained result before creating a new session."),
             "creation_worktree_capacity" => Some("Worktree admission refused: the desktop service's retained request capacity is full. No new attempt was admitted."),
-            "creation_worktree_unavailable" => Some("Worktree admission refused: the selected desktop service could not admit this request. Stop setup or review the original result before creating a new session."),
+            "creation_worktree_unavailable" => Some("The desktop service could not confirm this worktree request. Its result is unknown. Stop setup or check its original result; it will not be resent."),
             _ => None,
         }
     }

@@ -649,7 +649,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
             .context("prepare private desktop folders")?;
         let lock = Arc::new(location.lock().context("acquire desktop owner lock")?);
         let epoch = uuid::Uuid::new_v4().to_string();
-        let store = Store::open(&location, &epoch).context("open desktop store")?;
+        let store = Store::open_owned(&location, &epoch, &lock).context("open desktop store")?;
         // A status deadline must not start while startup still owns the actor
         // for migrations/recovery. Publish only once that work has completed.
         #[allow(unused_mut)]

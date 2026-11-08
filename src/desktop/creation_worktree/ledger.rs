@@ -63,8 +63,13 @@ pub(super) fn migrate(tx: &Transaction<'_>) -> Result<()> {
 /// In particular, RENAME COLUMN rewrites triggers: rebuild the original guard
 /// explicitly rather than accidentally leaving the scheduling slot immutable.
 pub(super) fn migrate_slots(tx: &Transaction<'_>) -> Result<()> {
-    tx.execute_batch("DROP TRIGGER desktop_creation_worktree_original;
-        ALTER TABLE desktop_creation_worktrees RENAME COLUMN creation_id TO creation_slot;
+    tx.execute_batch(
+        "DROP TRIGGER desktop_creation_worktree_original;
+        ALTER TABLE desktop_creation_worktrees RENAME COLUMN creation_id TO creation_slot;",
+    )?;
+    #[cfg(test)]
+    crate::desktop::store::rollback_backup::after_slot_rename();
+    tx.execute_batch("
         ALTER TABLE desktop_creation_worktrees ADD COLUMN creation_id TEXT NOT NULL DEFAULT '';
         UPDATE desktop_creation_worktrees SET creation_id=creation_slot;
         CREATE TRIGGER desktop_creation_worktree_original BEFORE UPDATE OF worktree_id,creation_id,fingerprint,source,plan,writer_epoch,created ON desktop_creation_worktrees BEGIN

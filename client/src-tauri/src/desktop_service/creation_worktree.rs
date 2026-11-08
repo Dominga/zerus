@@ -126,12 +126,8 @@ pub(crate) fn call(
                 )
                 .map_err(drop)?;
             let admission: wire::Admission = serde_json::from_slice(&bytes).map_err(drop)?;
-            if let Some(reason) = admission.refusal(&intent) {
-                return Ok(Some(creation::Answer {
-                    ok: false,
-                    data: json!({"status":"refused", "request_id":plan.worktree_request_id}),
-                    error: reason.into(),
-                }));
+            if let Some(answer) = admission.refusal_answer(&intent) {
+                return Ok(Some(answer));
             }
             if !admission.matches(&intent) {
                 return Err(());

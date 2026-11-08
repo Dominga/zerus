@@ -2,7 +2,7 @@
 use super::*;
 use std::fs::{File, OpenOptions};
 
-pub(in crate::state) struct Directory {
+pub(crate) struct Directory {
     pub path: PathBuf,
     file: File,
     #[cfg(windows)]
@@ -40,7 +40,7 @@ impl Directory {
 
     /// Native object identity, for metadata bindings. It is not a resource
     /// retirement, ownership, consent or effect permit.
-    pub(in crate::state) fn object(&self) -> Result<(u64, u64)> {
+    pub(crate) fn object(&self) -> Result<(u64, u64)> {
         crate::platform::FileIdentity::of(&self.file)
             .map(|id| (id.device, id.inode)).map_err(|e| e.to_string())
     }
@@ -77,7 +77,7 @@ impl Directory {
 
     /// Existing-directory reads share acquisition's pinned, no-link walk.
     /// No directory, lock or file is created by these methods.
-    pub(in crate::state) fn private(&self) -> Result<bool> {
+    pub(crate) fn private(&self) -> Result<bool> {
         crate::platform::verify_private_directory(&self.file).map_err(|e| e.to_string())
     }
 
@@ -95,14 +95,14 @@ impl Directory {
             && metadata.mode() & 0o022 == 0)
     }
 
-    pub(in crate::state) fn read_private(&self, name: &str) -> Result<File> {
+    pub(crate) fn read_private(&self, name: &str) -> Result<File> {
         self.read_private_optional(name)?
             .ok_or_else(|| "Missing private file".into())
     }
 
     /// Absence is observed relative to this SAME pinned directory. The caller
     /// decides whether absence has any meaning; it never establishes history.
-    pub(in crate::state) fn read_private_optional(&self, name: &str) -> Result<Option<File>> {
+    pub(crate) fn read_private_optional(&self, name: &str) -> Result<Option<File>> {
         if name.is_empty() || name.contains(['/', '\\', ':']) || name == "." || name == ".." {
             return Err("Invalid existing file name".into());
         }

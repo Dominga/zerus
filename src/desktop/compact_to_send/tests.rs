@@ -1374,6 +1374,41 @@ mod actor {
 
     /// The wait ends without a send when the slot ends, the session changes,
     /// the budget expires or the operation's deadline passes.
+    /// A slot read that ends after the wait's own budget, however it
+    /// began, starts nothing: the send never starts past the budget, even
+    /// when the slot completed meanwhile (the zerus-5wmh.66.4.9.1 class).
+    #[test]
+    fn a_completed_slot_read_that_ends_after_the_budget_never_sends() {
+        let ran = Arc::new(Ran::default());
+        let mut f = Fixture::with(executor(ran.clone(), true, "submitted", true));
+        f.runtime.fixture_wait(
+            Duration::from_millis(500),
+            Duration::from_millis(5),
+            runtime::CHAIN,
+        );
+        let original = f.original();
+        let plan = original.plan.clone();
+        let state = f.config.state.clone();
+        let first = Arc::new(AtomicUsize::new(0));
+        f.runtime.fixture_slot_hook(Arc::new(move || {
+            // The first read outlives the budget, and only then finds the
+            // compaction completed on an idle session.
+            if first.fetch_add(1, Ordering::SeqCst) == 0 {
+                std::thread::sleep(Duration::from_millis(700));
+                slot_record(&state, &plan, slot_of(&plan, "completed"), true);
+            }
+        }));
+        f.admit(&original);
+        f.until("settled", |f| f.row(&original).receipt.drained);
+        let receipt = f.row(&original).receipt;
+        assert_eq!(receipt.compaction.step, Step::Recorded);
+        assert_eq!(
+            (receipt.send.step, receipt.code.as_str()),
+            (Step::NotStarted, ledger::WAIT_EXPIRED)
+        );
+        assert_eq!(ran.counts(), (1, 0));
+    }
+
     #[test]
     fn the_wait_ends_without_a_send_for_its_closed_reason() {
         use super::super::slot::{SESSION_CHANGED, SLOT_ENDED};

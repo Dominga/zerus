@@ -974,22 +974,25 @@ impl Runtime {
         {
             return self.end_wait(store, &id, ledger::VETOED);
         }
+        // The wait's own budget ends at `until` (never past the operation's
+        // deadline): a ready read that ends after it, however it began,
+        // starts nothing.
+        let expired = if until >= consent.chain() {
+            ledger::CHAIN_EXPIRED
+        } else {
+            ledger::WAIT_EXPIRED
+        };
         match ready {
-            Some(Readiness::Ready) if Instant::now() < consent.chain() => {
+            Some(Readiness::Ready) if Instant::now() < until => {
                 return self.prepare(&row, Child::Send, consent, Some((roots, token)));
             }
-            Some(Readiness::Ready) => return self.end_wait(store, &id, ledger::CHAIN_EXPIRED),
+            Some(Readiness::Ready) => return self.end_wait(store, &id, expired),
             Some(Readiness::Ended(code)) => return self.end_wait(store, &id, code),
             Some(Readiness::Waiting) | None => {}
         }
         let now = Instant::now();
         if now >= until {
-            let code = if until >= consent.chain() {
-                ledger::CHAIN_EXPIRED
-            } else {
-                ledger::WAIT_EXPIRED
-            };
-            return self.end_wait(store, &id, code);
+            return self.end_wait(store, &id, expired);
         }
         if now < next {
             self.work = Some(Work::Waiting {

@@ -6,7 +6,7 @@ vi.mock("../../bridge", () => ({ reviewTaskCopy: vi.fn(), followTasks: vi.fn(), 
 vi.mock("../../store/actions", () => ({ copy: vi.fn(async () => ({ outcome: "done" })), notify: vi.fn() }));
 import { reviewTaskCopy } from "../../bridge";
 import { tasks } from "../../store/tasks";
-import { copyReviewBusy, setCopyReviewBusy, setCopyReviewOutcomes, setReviewingCopy, openCopyReview, reviewingCopy, confirmCopyReview } from "../../store/taskCopyReview";
+import { copyReviewBusy, copyReviewOutcome, createCopyReviewPanel, setCopyReviewBusy, setCopyReviewOutcomes, setReviewingCopy, reviewingCopy, confirmCopyReview } from "../../store/taskCopyReview";
 import TaskCopyReview from "./TaskCopyReview";
 import { translateWithCatalog } from "../../i18n";
 import russian from "../../i18n.ru.json";
@@ -72,7 +72,7 @@ it("shows a refusal reason and never retries an unknown transport outcome", asyn
   button("Review local copy…").click(); await flush(); button("Move copy aside").click(); await flush();
   expect(host.textContent).toContain("outcome is unknown");
   expect(button("Review local copy…").disabled).toBe(true);
-  await openCopyReview("p", uuid(), button("Review local copy…"));
+  await createCopyReviewPanel().open("p", uuid(), button("Review local copy…"));
   expect(reviewTaskCopy).toHaveBeenCalledTimes(4);
 });
 
@@ -96,4 +96,71 @@ it("names both losses in the Russian confirmation too", () => {
   const source = "Move aside the damaged local copy of task %1 and accept its next received copy? Attempt history and unsent local edits may be missing from that copy.";
   const text = translateWithCatalog(russian, "ru", source, uuid());
   expect(text).toContain(uuid()); expect(text).toContain("история попыток"); expect(text).toContain("неотправленные локальные правки");
+});
+
+it("retires a pending review read when its actual panel closes within the same project", async () => {
+  let finish!: (value: never) => void;
+  vi.mocked(reviewTaskCopy).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  button("Review local copy…").click();
+  expect(copyReviewBusy()).toBe(true);
+  dispose?.(); dispose = undefined;
+  finish(reply() as never); await flush();
+  expect(copyReviewBusy()).toBe(false);
+  expect(reviewingCopy()).toBeUndefined();
+});
+
+it("a retired read cannot clear the busy state or replace a newer panel's confirmed write", async () => {
+  let oldRead!: (value: never) => void, write!: (value: never) => void;
+  vi.mocked(reviewTaskCopy).mockImplementationOnce(() => new Promise((resolve) => { oldRead = resolve; }))
+    .mockResolvedValueOnce(reply() as never).mockImplementationOnce(() => new Promise((resolve) => { write = resolve; }));
+  try {
+    button("Review local copy…").click(); dispose?.(); dispose = undefined;
+    expect(copyReviewBusy()).toBe(false);
+    dispose = render(() => createComponent(TaskCopyReview, { project: "p", name: "Project" }), host);
+    button("Review local copy…").click(); await flush(); button("Move copy aside").click();
+    const current = reviewingCopy();
+    oldRead(reply() as never); await flush();
+    expect(copyReviewBusy()).toBe(true);
+    expect(reviewingCopy()).toBe(current);
+    expect(reviewTaskCopy).toHaveBeenCalledTimes(3);
+    write(reply("moved") as never); await flush();
+    expect(copyReviewOutcome("p", uuid())?.state).toBe("moved");
+    expect(copyReviewBusy()).toBe(false);
+  } finally { oldRead?.(reply() as never); write?.(reply("moved") as never); await flush(); }
+});
+
+it("ignores a retired read's error without publishing a refusal or disturbing a new read", async () => {
+  let fail!: (error: Error) => void, finish!: (value: never) => void;
+  vi.mocked(reviewTaskCopy).mockImplementationOnce(() => new Promise((_, reject) => { fail = reject; }))
+    .mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  try {
+    button("Review local copy…").click(); dispose?.(); dispose = undefined;
+    dispose = render(() => createComponent(TaskCopyReview, { project: "p", name: "Project" }), host);
+    button("Review local copy…").click(); fail(new Error("old read failed")); await flush();
+    expect(copyReviewBusy()).toBe(true);
+    expect(copyReviewOutcome("p", uuid())).toBeUndefined();
+    finish(reply() as never); await flush();
+    expect(reviewingCopy()).toBeDefined();
+    expect(copyReviewBusy()).toBe(false);
+  } finally { fail?.(new Error("old read failed")); finish?.(reply() as never); await flush(); }
+});
+
+it.each(["moved", "refused", "unknown"])("a confirmed %s outcome survives panel disposal without reopening its dialog", async (state) => {
+  let finish!: (value: never) => void;
+  vi.mocked(reviewTaskCopy).mockResolvedValueOnce(reply() as never)
+    .mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  try {
+    button("Review local copy…").click(); await flush(); button("Move copy aside").click();
+    dispose?.(); dispose = undefined;
+    expect(copyReviewBusy()).toBe(true);
+    dispose = render(() => createComponent(TaskCopyReview, { project: "p", name: "Project" }), host);
+    expect(host.querySelector("dialog")).toBeNull();
+    expect(button("Review local copy…").disabled).toBe(true);
+    finish(reply(state, { reason: "original result" }) as never); await flush();
+    expect(copyReviewBusy()).toBe(false);
+    expect(reviewingCopy()).toBeUndefined();
+    expect(copyReviewOutcome("p", uuid())).toEqual({ state, reason: "original result" });
+    expect(host.querySelector("[role=status]")?.textContent).toBeTruthy();
+    expect(reviewTaskCopy).toHaveBeenCalledTimes(2);
+  } finally { finish?.(reply(state) as never); await flush(); }
 });

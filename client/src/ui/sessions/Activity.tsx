@@ -35,6 +35,7 @@ import { buildTranscript, createActivityProjections, VOICE_STATE_LABEL, voiceSta
 import { DELETE_TEXT, DELETE_TITLE, retryReason, routeInspect } from "./local-actions";
 import { NOT_DELIVERED_HINT } from "./inbox-actions";
 import { createInboxRemoveScope, InboxRemove, RemoveQueuedDialog, type InboxRemovePorts, type InboxRemoveScope } from "./InboxRemove";
+import { emptyActivity } from "./activity-empty";
 import { markdownReady, markdownTree, type Inline, type MarkdownBlock } from "./markdown";
 import { activityAll, activityFlow, activityRange, measureActivityRows, activitySelectionIndexes, activitySelectionText, activityText, activityTexts, activityVirtualOffset, selectActivityAll, selectionCoversActivity } from "./activity-virtual";
 import { openExternal, openSessionFile } from "./sessionFiles";
@@ -830,6 +831,8 @@ export function ActivityView(props: { source?: ActivitySource }) {
     }));
   });
   const [expanded, setExpanded] = createStore<Record<string, boolean>>({});
+  /** The guidance an empty Activity shows (ActivityView.cpp:1145-1150). */
+  const empty = createMemo(() => emptyActivity(source().summary(), !!s()?.tracked));
   let olderQueued = false;
   // Keep a named row and its offset while the end pin is released.
   const selectionInside = () => {
@@ -1199,7 +1202,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
           </Show>
           <Show when={!states().archived} fallback={<div class="notice"><Icon name="archive" size={14} /><div>{tr("This conversation is archived.")}</div></div>}>
             <Show when={view.loaded || view.items.length} fallback={<div class="act-older hint">{tr("Reading activity…")}</div>}>
-              <Show when={view.items.length} fallback={<div class="act-older hint">{tr("No recorded activity yet.")}</div>}>
+              <Show when={view.items.length} fallback={<div class="act-empty"><b>{empty().title}</b><p class="muted">{empty().text}</p></div>}>
                 {/* Reserve the current virtual extent through range swaps. Without
                     it, a synchronous layout between removing rows and updating
                     spacers makes WebKit clamp scrollTop even during a gesture.

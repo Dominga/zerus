@@ -512,7 +512,6 @@
   "No migration report is available for this connection.": "Для этого подключения нет отчёта о миграции.",
   "No other session on this computer can be its parent.": "Ни одна другая сессия на этом компьютере не может быть её родителем.",
   "No phones": "Телефонов нет",
-  "No recorded activity yet.": "Записанной активности пока нет.",
   "No reply to the last keep-warm ping was seen. Keeping it warm resumes after your next message.": "Ответ на последний пинг прогрева не получен. Прогрев возобновится после вашего следующего сообщения.",
   "No saved limits, rate limited": "Сохранённых лимитов нет, запросы ограничены",
   "No session matches.": "Подходящих сессий нет.",

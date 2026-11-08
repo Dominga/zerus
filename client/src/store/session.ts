@@ -14,7 +14,7 @@ import { createActivity } from "./activity";
 import { createSubagentActivity } from "./subagentActivity";
 import { archive } from "./archive";
 import { applyGrouping } from "./organization";
-import { activityReadOnly } from "./activitySource";
+import { activityReadOnly, shellSession } from "./activitySource";
 import { compactRows, detailTab, page, selected, selectedKey, setCompactRows, setDetailTab, setReadSelectionKey, setSelectedKey, subagentOpen } from "./ui";
 import { startScreens } from "./screens";
 import { documentVisibility, pageHidden } from "./visibility";
@@ -105,7 +105,8 @@ createRoot(() => {
     // The first new-run frame may be its only state. Rust must bind the
     // composer's followed key before that frame can reach its observer.
     // Display/routing moves immediately; only the original subscribe waits.
-    activity.follow(s && !activityReadOnly(s.key) ? { id: s.key, computer: s.computer, key: s.catalogKey, name: s.name, runId: s.runId, conversationId: s.conversationId } : undefined, opened);
+    // A shell session records no activity: nothing to read (zerus-bz54l).
+    activity.follow(s && !activityReadOnly(s.key) && !shellSession(s) ? { id: s.key, computer: s.computer, key: s.catalogKey, name: s.name, runId: s.runId, conversationId: s.conversationId } : undefined, opened);
   }));
   // The detail tab that shows: behind Terminal a failed read waits Qt's
   // background interval (Settings > Processes), which Rust reads when told.

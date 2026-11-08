@@ -40,6 +40,7 @@ import { emptyActivity } from "./activity-empty";
 import { markdownReady } from "./markdown";
 import { ActivitySession, Body, HighlightQuery } from "./MarkdownBody";
 import { searchHitItems } from "./search-hit";
+import { ActivityPending } from "./ActivityPending";
 
 export { Body } from "./MarkdownBody";
 import { activityAll, activityFlow, activityRange, measureActivityRows, activitySelectionIndexes, activitySelectionText, activityText, activityTexts, activityVirtualOffset, selectActivityAll, selectionCoversActivity } from "./activity-virtual";
@@ -1095,9 +1096,14 @@ export function ActivityView(props: { source?: ActivitySource }) {
     <ActivityLayoutHeld.Provider value={layoutHeld}>
     <div class="activity" style={{ position: "relative" }}>
       <Show when={!placed()}>
-        <div class="act-col" style={{ position: "absolute", inset: "0", "min-height": "0", "pointer-events": "none" }} role="status">
+        <div class="act-col" style={{ position: "absolute", inset: "0", "min-height": "0", "pointer-events": "none", "z-index": "1" }} role="status">
           <div class="act-label eyebrow">{tr("Recorded activity — messages and tool excerpts")}</div>
-          <div class="act-older hint">{tr("Reading activity…")}</div>
+          {/* Placement waits for a first page, which a shell session and a
+              stalled read never have: their states show here, above the
+              hidden column and its scroller, and take clicks (zerus-soudn). */}
+          <Show when={!states().archived && !view.loaded && !view.items.length} fallback={<div class="act-older hint">{tr("Reading activity…")}</div>}>
+            <div style={{ "pointer-events": "auto" }}><ActivityPending source={source()} session={s()} /></div>
+          </Show>
         </div>
       </Show>
       <LocalDeleteDialog />
@@ -1162,7 +1168,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
             <div class="act-older hint">{tr("Older events have expired from the journal.")}</div>
           </Show>
           <Show when={!states().archived} fallback={<div class="notice"><Icon name="archive" size={14} /><div>{tr("This conversation is archived.")}</div></div>}>
-            <Show when={view.loaded || view.items.length} fallback={<div class="act-older hint">{tr("Reading activity…")}</div>}>
+            <Show when={view.loaded || view.items.length} fallback={<ActivityPending source={source()} session={s()} />}>
               <Show when={view.items.length} fallback={<div class="act-empty"><b>{empty().title}</b><p class="muted">{empty().text}</p></div>}>
                 {/* Reserve the current virtual extent through range swaps. Without
                     it, a synchronous layout between removing rows and updating

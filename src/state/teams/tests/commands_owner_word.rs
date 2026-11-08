@@ -115,36 +115,36 @@ fn scale_and_drain_need_the_owner_word_naming_them() {
     let scale = json!({"role":"Backend","agent":"codex","count":2});
     assert!(super::roster_word_rule(&team, "scale", &scale).needed());
     let mut without = scale.clone();
-    let error = super::check_roster_word(&team, "scale", &scale, &mut without, &caller, verify).unwrap_err().to_string();
+    let error = super::check_roster_word(&team, "scale", &scale, &mut without, &caller, None, verify).unwrap_err().to_string();
     assert!(error.contains("your word"), "{error}");
     let mut worded = scale.clone();
     worded["owner_word"] = json!({"text":"Please add two backend members to the roster"});
     let mut filled = worded.clone();
-    super::check_roster_word(&team, "scale", &worded, &mut filled, &caller, verify).unwrap();
+    super::check_roster_word(&team, "scale", &worded, &mut filled, &caller, None, verify).unwrap();
     assert_eq!((filled["roster_word"].clone(), filled["owner_word_change"].as_str()), (json!(true), Some("scaling Backend by 2")));
     // Another count or another role is not this scale.
     for text in ["Please add three backend members to the roster", "Please add two frontend members to the roster"] {
         let mut wrong = json!({"role":"Backend","agent":"codex","count":2,"owner_word":{"text":text}});
         let input = wrong.clone();
-        let error = super::check_roster_word(&team, "scale", &input, &mut wrong, &caller, verify).unwrap_err().to_string();
+        let error = super::check_roster_word(&team, "scale", &input, &mut wrong, &caller, None, verify).unwrap_err().to_string();
         assert!(error.contains("your word") || error.contains("does not name"), "{text}: {error}");
     }
     // drain: the owner's drain or remove sentence names the member.
     let drain = json!({"member":"frontend2"});
     assert!(super::roster_word_rule(&team, "drain", &drain).needed());
     let mut without = drain.clone();
-    let error = super::check_roster_word(&team, "drain", &drain, &mut without, &caller, verify).unwrap_err().to_string();
+    let error = super::check_roster_word(&team, "drain", &drain, &mut without, &caller, None, verify).unwrap_err().to_string();
     assert!(error.contains("your word"), "{error}");
     let mut worded = json!({"member":"frontend2","owner_word":{"text":"Please drain frontend2 from the roster"}});
     let input = worded.clone();
-    super::check_roster_word(&team, "drain", &input, &mut worded, &caller, verify).unwrap();
+    super::check_roster_word(&team, "drain", &input, &mut worded, &caller, None, verify).unwrap();
     assert_eq!(worded["roster_word"], true);
     let mut removal = json!({"member":"frontend2","owner_word":{"text":"Please remove frontend2 from the roster"}});
     let input = removal.clone();
-    super::check_roster_word(&team, "drain", &input, &mut removal, &caller, verify).unwrap();
+    super::check_roster_word(&team, "drain", &input, &mut removal, &caller, None, verify).unwrap();
     let mut other = json!({"member":"frontend2","owner_word":{"text":"Please drain backend from the roster"}});
     let input = other.clone();
-    assert!(super::check_roster_word(&team, "drain", &input, &mut other, &caller, verify).is_err());
+    assert!(super::check_roster_word(&team, "drain", &input, &mut other, &caller, None, verify).is_err());
     // Cancelling a drain is no roster change.
     assert!(!super::roster_word_rule(&team, "drain", &json!({"member":"frontend2","draining":false})).needed());
 }
@@ -206,20 +206,20 @@ fn one_owner_word_is_spent_on_one_roster_change() {
     let mut first = base.clone();
     first["owner_word"] = json!({"text":"Please remove dev from the roster"});
     let input = first.clone();
-    super::check_roster_word(&team, "remove-member", &input, &mut first, &caller, verify).unwrap();
+    super::check_roster_word(&team, "remove-member", &input, &mut first, &caller, None, verify).unwrap();
     // The operation spends the event on the team.
     let event = first["owner_word_event"].as_i64().unwrap();
     team.record_owner_word(event, "the roster change");
     let mut second = base.clone();
     second["owner_word"] = json!({"text":"Please remove dev from the roster"});
     let input = second.clone();
-    let error = super::check_roster_word(&team, "remove-member", &input, &mut second, &caller, verify).unwrap_err().to_string();
+    let error = super::check_roster_word(&team, "remove-member", &input, &mut second, &caller, None, verify).unwrap_err().to_string();
     assert!(error.contains("already used"), "{error}");
     // A new sentence works.
     let mut third = base.clone();
     third["owner_word"] = json!({"text":"Please remove dev from the roster again"});
     let input = third.clone();
-    super::check_roster_word(&team, "remove-member", &input, &mut third, &caller, verify).unwrap();
+    super::check_roster_word(&team, "remove-member", &input, &mut third, &caller, None, verify).unwrap();
 }
 
 /// U29 through `run`: a task joins a running phase only on the owner's
@@ -453,13 +453,13 @@ fn a_scratch_teams_lead_manages_its_members_without_a_card() {
         ("add-member", json!({"member":{"id":"dev3","role":"Backend","agent":"codex"}})),
     ] {
         let mut filled = input.clone();
-        super::check_roster_word(&team, op, &input, &mut filled, &caller, Some(&agents), verify).unwrap();
+        super::check_roster_word(&team, op, &input, &mut filled, &caller, Some(agents.as_slice()), verify).unwrap();
         assert_eq!(filled["roster_word"], true, "{op}");
     }
     // Outside the rule's agents: the card is still needed.
     let mut filled = json!({"member":{"id":"dev9","role":"Backend","agent":"kimi"}});
     let input = filled.clone();
-    let error = super::check_roster_word(&team, "add-member", &input, &mut filled, &caller, Some(&agents), verify)
+    let error = super::check_roster_word(&team, "add-member", &input, &mut filled, &caller, Some(agents.as_slice()), verify)
         .unwrap_err()
         .to_string();
     assert!(error.contains("your word"), "{error}");

@@ -42,9 +42,22 @@ fn outstanding<T>(work: impl FnOnce(&mut HashSet<u64>) -> T) -> T {
 }
 
 /// Qt's local rule: `~/` is the home folder; the path must be absolute.
+/// Like Qt's `homePath() + path.mid(1)`, the rest stays under home: further
+/// separators after `~/` (or, on Windows, a drive) never replace it.
 fn expanded(path: &str, home: Option<PathBuf>) -> Option<PathBuf> {
     let path = match path.strip_prefix("~/") {
-        Some(rest) => home?.join(rest),
+        Some(rest) => {
+            let mut joined = home?.into_os_string();
+            let ends_in_separator = joined
+                .as_encoded_bytes()
+                .last()
+                .is_some_and(|byte| std::path::is_separator(char::from(*byte)));
+            if !ends_in_separator {
+                joined.push(std::path::MAIN_SEPARATOR_STR);
+            }
+            joined.push(rest.trim_start_matches(std::path::is_separator));
+            PathBuf::from(joined)
+        }
         None => PathBuf::from(path),
     };
     path.is_absolute().then_some(path)
@@ -116,7 +129,9 @@ pub async fn file_reference_pick(app: tauri::AppHandle) -> Result<Option<String>
     let window = crate::main_window(&app);
     let picked = tauri::async_runtime::spawn_blocking(move || {
         // The window handle is asked of the main thread: never block it here.
-        let mut dialog = app.dialog().file().set_title("Reference an existing file");
+        let title =
+            crate::native_text::render(&zerus_client_core::text!("Reference an existing file"));
+        let mut dialog = app.dialog().file().set_title(title);
         if let Some(window) = &window {
             dialog = dialog.set_parent(window);
         }
@@ -185,6 +200,31 @@ mod tests {
             check_with(dialog(), &absolute("gone.md"), home(), BUDGET, |_| false),
             Check::Missing
         );
+    }
+
+    #[test]
+    fn more_separators_after_the_tilde_stay_under_home() {
+        // Qt's `homePath() + path.mid(1)`: `~//notes` is never `/notes`.
+        let under_home = home().unwrap().join("notes/plan.md");
+        for path in ["~//notes/plan.md", "~///notes/plan.md"] {
+            assert_eq!(
+                expanded(path, home()).map(|path| path.to_string_lossy().into_owned()),
+                Some(under_home.to_string_lossy().into_owned()),
+                "{path:?}"
+            );
+        }
+        assert_eq!(expanded("~/", home()), home());
+        // A home that already ends in a separator gains no second one.
+        let root = PathBuf::from(if cfg!(windows) { r"C:\" } else { "/" });
+        assert_eq!(
+            expanded("~/notes", Some(root.clone())).map(|path| path.into_os_string()),
+            Some(root.join("notes").into_os_string())
+        );
+        if cfg!(windows) {
+            // A drive after `~/` stays a name under home, as in Qt.
+            let drive = expanded(r"~/D:\notes", home()).unwrap();
+            assert!(drive.starts_with(home().unwrap()), "{drive:?}");
+        }
     }
 
     #[test]

@@ -18,6 +18,7 @@ use zerus_replica::{
 };
 
 mod answers;
+mod reports;
 mod attempts;
 mod cancellation;
 mod cutover;
@@ -41,7 +42,7 @@ fn paste_uncertain(message: &str) -> bool {
     message.starts_with(SENT_UNRECORDED) || message.starts_with("delivery uncertain")
 }
 
-const USAGE: &str = "usage: hgs task list --project P [--stage S] | list --project P --stage S --limit 1..200 [--after CURSOR|--before CURSOR] [--if-revision R] [--session ID [--host ALIAS]] | get REF [--history-limit 1..80 [--history-before CURSOR] [--attachments metadata]] | attachment REF --file N [--entry ID] | add --project P [--backlog] [--start] [--target SESSION|any [--host ALIAS]] [--title TITLE [--request-id UUID]] [--position N] | edit REF | rename REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | start-plan REF --json | start-deliver REF --json [--recover-only] | cancel REF [--reason TEXT] | cancel-execution REF --json (guard JSON on stdin) | handoff REF --session SESSION [--host ALIAS] | start REF | report REF [--progress|--ready] [--considered REV] | comment REF [--content-json] | message REF --request-id UUID --mode queue|send|reopen|note [--expect-dispatch ID] [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | review-copy --project P --uuid UUID [--confirm FINGERPRINT] --json | cutover --project P [--hold on|off [--confirm]] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
+const USAGE: &str = "usage: hgs task list --project P [--stage S] | list --project P --stage S --limit 1..200 [--after CURSOR|--before CURSOR] [--if-revision R] [--session ID [--host ALIAS]] | get REF [--history-limit 1..80 [--history-before CURSOR] [--attachments metadata]] | attachment REF --file N [--entry ID] | add --project P [--backlog] [--start] [--target SESSION|any [--host ALIAS]] [--title TITLE [--request-id UUID]] [--position N] | edit REF | rename REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | start-plan REF --json | start-deliver REF --json [--recover-only] | cancel REF [--reason TEXT] | cancel-execution REF --json (guard JSON on stdin) | handoff REF --session SESSION [--host ALIAS] | start REF | report REF [--progress|--ready] [--considered REV] | report-attempt REF --attempt UUID [--progress|--ready] [--considered REV] | comment REF [--content-json] | message REF --request-id UUID --mode queue|send|reopen|note [--expect-dispatch ID] [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | review-copy --project P --uuid UUID [--confirm FINGERPRINT] --json | cutover --project P [--hold on|off [--confirm]] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
   REF is T-xxxxxx with --project P, or PROJECT/T-xxxxxx; texts and --set settings are read from stdin;
   a change an agent makes prints one line, and --json prints the task";
 
@@ -50,7 +51,7 @@ const USAGE: &str = "usage: hgs task list --project P [--stage S] | list --proje
 const AGENT_INSTRUCTIONS: &str = concat!(
     "Zerus tasks are this project's shared task list. Run `hgs task` in your shell: it acts as your session, on your session's project; `hgs guide tasks` lists the commands. Texts go on stdin, for example hgs task report <ref> <<'EOF' ... EOF.\n\n",
     "Filing. When the person says \"поставь таск\", \"добавь задачу\", \"запиши задачу\", \"в очередь\", \"на потом\", \"file a task\", \"add to the queue\" or \"for later\", file it with `hgs task add`. Never put these into TodoWrite or your own plan. For work you are already doing, use `hgs task add --start` or `hgs task start <ref>`; this records In progress without sending a duplicate message. Plain add only queues later work. New tasks go to the end of To do unless the person names a place (--backlog, --position N).\n\n",
-    "Working. A message starting \"[Zerus task <ref>]\" is a task for you; do it like any request from the person. When the prompt says the task was sent before, read its history with `hgs task get <ref>` before you start. Acknowledge a dispatched task with `hgs task start <ref>` before working; this does not send it again. For a subagent plan, register the native worker first. If you need the person, ask in this conversation as usual. When the work is done, or you find that it cannot be done, report with `hgs task report <ref>`: what you changed, how you checked it, and what is left undone or why it cannot be done. An update while the work continues is `hgs task report <ref> --progress`; it keeps the task In progress.\n\n",
+    "Working. A message starting \"[Zerus task <ref>]\" is a task for you; do it like any request from the person. When the prompt says the task was sent before, read its history with `hgs task get <ref>` before you start. Acknowledge a dispatched task with `hgs task start <ref>` before working; this does not send it again. For a subagent plan, register the native worker first. If you need the person, ask in this conversation as usual. When the work is done, or you find that it cannot be done, report with the command supplied for that execution: pinned `hgs task report-attempt <ref> --attempt UUID` for managed work, or `hgs task report <ref>` for explicitly legacy work. Say what you changed, how you checked it, and what is left undone or why it cannot be done. Add --progress to that same command for an update while work continues; it keeps the task In progress. Keep the original attempt UUID from the task prompt or start acknowledgement; never substitute the latest attempt ID. An explicit legacy start prints the ordinary report command. A history-only report succeeded as a history write and did not move the task; do not retry that duplicate.\n\n",
     "Cancelled. \"[Zerus task <ref> cancelled]\" means stop that task now and follow the message.\n\n",
     "Managing. `hgs task list` and `hgs task get` show tasks and their history; move, stage, target, edit, send and cancel change them as the person can. Accept a task (`hgs task stage <ref> done`) only when the person asks you to.\n\n",
     "Comments. `hgs task comment <ref>` adds a note for people and agents; it is never pasted into a session."
@@ -455,7 +456,13 @@ fn place(store: &ProjectStore, task: &TaskDoc) -> Result<usize> {
 /// `out` with the line an agent reads (`answer`), for a change an agent made.
 fn with_answer(who: &Actor, action: &str, mut out: Value, place: usize, destination: &str) -> Value {
     if let Actor::Agent(own) = who {
-        out["answer"] = json!(answers::answer(action, &out, place, &own.session, destination));
+        let mut answer = if out["report_hint"].is_string() { out["report_hint"].as_str().unwrap().to_owned() }
+            else { answers::answer(action, &out, place, &own.session, destination) };
+        if let Some(command) = out["report_command"].as_str() {
+            if out["reporting"] == "legacy" { answer.push_str(" This is a legacy execution; no attempt UUID was created."); }
+            answer.push_str(&format!(" Report with `{command}`."));
+        }
+        out["answer"] = json!(answer);
     }
     out
 }
@@ -587,6 +594,7 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
         "add" => add(config, args),
         "attachment" => history::attachment(config, args),
         "message" => messages::execute(config, args),
+        "report-attempt" => reports::execute(config, args),
         "cancel-execution" => {
             let guard = cancellation::read()?;
             change_guarded(config, "cancel", args, None, Some(&guard))
@@ -1006,7 +1014,9 @@ fn add(config: &Config, args: &[String]) -> Result<Value> {
         store.save(&mut task).map_err(fail)?;
     }
     let at = place(&store, &task)?;
-    Ok(with_answer(&author, "add", json!({"task": view(&task, &name, true, &machines)?}), at, ""))
+    let mut out = json!({"task": view(&task, &name, true, &machines)?});
+    if created && flag(args, "--start") { reports::started(&mut out, &task, &name)?; }
+    Ok(with_answer(&author, "add", out, at, ""))
 }
 
 fn change(config: &Config, action: &str, args: &[String]) -> Result<Value> {
@@ -1026,7 +1036,7 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
     let text = match action {
         "edit" => Some(content.as_ref().expect("edit content").text.clone()),
         "comment" => Some(match &content { Some(content) => content.text.clone(), None => stdin_text("comment")? }),
-        "report" => Some(stdin_text("report")?),
+        "report" | "report-attempt" => Some(stdin_text("report")?),
         "rename" => Some(stdin_text("title")?.trim().to_owned()),
         _ => None,
     };
@@ -1180,6 +1190,7 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
     let text = text.unwrap_or_default();
     let mut extra = json!({});
     let mut destination = String::new();
+    let mut minimal_report_reply = false;
     match action {
         "worker" => { task.record_worker(worker_proof.as_ref().expect("worker proof"), &who, now()).map_err(fail)?; task.record_start(&who, now()).map_err(fail)?; },
         "start" => task.record_start(&who, now()).map_err(fail)?,
@@ -1191,7 +1202,7 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
             if let Some(files) = content.and_then(|content| content.attachments) { task.set_attachments(&files, &who, now()).map_err(fail)?; }
         }
         "comment" => task.comment_with_attachments(&text, &content.and_then(|content| content.attachments).unwrap_or_default(), &who, now()).map_err(fail)?,
-        "report" => {
+        "report" | "report-attempt" => {
             let progress = flag(args, "--progress");
             if progress && flag(args, "--ready") {
                 return Err(fail("choose --progress or --ready"));
@@ -1201,9 +1212,29 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
                     .ok_or_else(|| fail("--considered is a requirement revision from 1")))
                 .transpose()?;
             let kind = if progress { ReportKind::Progress } else { ReportKind::Ready };
-            let decision = task.report(&text, kind, considered, &who, now()).map_err(fail)?;
+            let origin = if action == "report-attempt" { option(args, "--attempt")? } else { None };
+            let managed_agent = task.execution_managed() && matches!(&who, Actor::Agent(_));
+            let decision = match origin {
+                Some(id) => task.report_attempt(id, &text, kind, considered, &who, now()),
+                None => task.report(&text, kind, considered, &who, now()),
+            }.map_err(fail)?;
             extra = json!({"moved_to_review": decision.moves, "report": if progress { "progress" } else { "ready" }});
             if let Some(stale) = decision.stale { extra["stale"] = json!(stale); }
+            if managed_agent || origin.is_some() {
+                let applied = decision.stale.is_none()
+                    && (decision.moves || (progress && task.stage().map_err(fail)? == Stage::Active));
+                extra["outcome"] = json!(if applied { "applied" } else { "not_applied" });
+                extra["history_saved"] = json!(true);
+                if !applied {
+                    // A full task view would disclose its latest attempt UUID
+                    // in execution/history. The successful history-only reply
+                    // deliberately contains no such retargeting information.
+                    if decision.stale == Some(zerus_replica::execution::Stale::OtherAttempt) {
+                        minimal_report_reply = true;
+                        extra["report_hint"] = json!(reports::HISTORY_HINT);
+                    }
+                }
+            }
         }
         "move" => {
             let position = if flag(args, "--top") {
@@ -1266,11 +1297,15 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         }
     })?;
     let at = if action == "move" { place(&store, &task)? } else { 0 };
-    let mut out = json!({"task": view(&task, project_name, guard.is_none(), &machines)?});
+    let reply_task = if minimal_report_reply {
+        json!({"ref":format!("{project_name}/{}",task.id()),"id":task.id(),"uuid":task.uuid(),"stage":task.stage().map_err(fail)?.as_str()})
+    } else { view(&task, project_name, guard.is_none(), &machines)? };
+    let mut out = json!({"task": reply_task});
     for (key, value) in extra.as_object().expect("object") {
         out[key] = value.clone();
     }
-    Ok(with_answer(&who, action, out, at, &destination))
+    if action == "start" { reports::started(&mut out, &task, project_name)?; }
+    Ok(with_answer(&who, if action == "report-attempt" { "report" } else { action }, out, at, &destination))
 }
 
 /// Binds the task's target and holder to the verified runs this computer

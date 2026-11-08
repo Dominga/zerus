@@ -36,6 +36,12 @@ Zerus product tasks received through `hgs task` are separate from Beads engineer
 tracking. For a direct request already being worked on, agents use `hgs task add
 --start` or `hgs task start REF`; plain add queues work for later. Reports by the
 exact pinned agent move its unsent queued task to In review as well.
+For managed work, use the report-attempt command pinned in the original task
+prompt or start acknowledgement, never a newer attempt ID from a lookup. An
+explicit legacy start prints the ordinary report command and creates no UUID.
+A history-only report succeeded as a history write but did not move the task;
+do not retry a duplicate or infer the latest attempt. Older managed prompts
+without the pinned command need the person's acceptance or a new resend.
 Use `bd remember --key <key> "<decision>"` for concise, shareable project memory.
 Do not create separate TODO or MEMORY files. Read current source before carrying
 forward a historical limitation.

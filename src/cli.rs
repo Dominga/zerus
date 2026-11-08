@@ -246,6 +246,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs task list --project P --stage S --limit N [--after|--before CURSOR] [--if-revision R]   one indexed page
        hgs task attachment REF --file N [--entry ID]   one task file's bytes, for metadata-only history pages
        hgs task exchange|digests --json                 the phone's task exchange (mobile)
+       hgs task report-attempt REF --attempt UUID [--progress|--ready] [--considered REV]   pinned execution report (report-attempt-v1)
        hgs task mobile-send|mobile-cancel|mobile-done --json   the phone's task actions (mobile)
        hgs clip                       PNG from this box's clipboard to stdout (rc 1: no image)
        hgs paste <session> <pane> [client]   the tmux C-v binding; not for hand use

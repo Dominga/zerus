@@ -691,7 +691,7 @@ class TaskDelivery(DeliveryFixture):
         messages = [e for e in sent["log"] if e["kind"] == "message"]
         self.assertEqual([e["delivery"]["state"] for e in messages], ["submitted", "note"])
         self.confirm()
-        self.as_agent("report", task["ref"], text="Ready for review")
+        self.as_agent("report-attempt", task["ref"], "--attempt", sent["execution"]["current"]["id"], text="Ready for review")
         self.hgs("stage", task["ref"], "todo")
         self.hgs("send", task["ref"])
         self.assertEqual(self.received().count("Include this clarification"), 1)
@@ -707,7 +707,7 @@ class TaskDelivery(DeliveryFixture):
         self.assertEqual(again["message"]["request_id"], identity)
         self.assertEqual(self.received().count("Active feedback"), 1)
         self.assertIn("different content", self.message(task, "Altered feedback", identity=identity, ok=False))
-        self.as_agent("report", task["ref"], text="Result for review")
+        self.as_agent("report-attempt", task["ref"], "--attempt", task["execution"]["current"]["id"], text="Result for review")
         reviewed = self.hgs("get", task["ref"])["task"]
         self.assertEqual(self.message(reviewed, "Just a note", mode="note")["task"]["stage"], "review")
         changed = self.message(reviewed, "Please revise", mode="reopen")
@@ -717,8 +717,12 @@ class TaskDelivery(DeliveryFixture):
 
     def reviewed(self, text):
         task = self.add(text, "--target", self.name)
-        self.hgs("send", task["ref"]); self.confirm()
-        self.as_agent("report", task["ref"], text="Result for review")
+        sent = self.hgs("send", task["ref"])["task"]; self.confirm()
+        origin = sent.get("execution", {}).get("current", {})
+        if origin.get("id") and not origin.get("legacy"):
+            self.as_agent("report-attempt", task["ref"], "--attempt", origin["id"], text="Result for review")
+        else:
+            self.as_agent("report", task["ref"], text="Result for review")
         return self.hgs("get", task["ref"])["task"]
 
     def notes(self, task, identity):
@@ -743,7 +747,7 @@ class TaskDelivery(DeliveryFixture):
         self.confirm()
         self.assertEqual(self.hgs("start-deliver", other["ref"], text=json.dumps(self.start_plan(other, id=shared)))["state"], "submitted")
         self.confirm()
-        self.as_agent("report", other["ref"], text="Result for review")
+        self.as_agent("report-attempt", other["ref"], "--attempt", shared, text="Result for review")
         other = self.hgs("get", other["ref"])["task"]
         self.assertIn("another intent", self.message(other, "Same words", mode="reopen", identity=shared, ok=False))
         identity = str(uuid.uuid4())
@@ -929,28 +933,29 @@ class TaskDelivery(DeliveryFixture):
                          (handed["receipt"]["request_id"], "handoff", "submitted"))
         self.wait_received("Check the new owner")
         self.assertIn("only the task's current session", self.hgs("handoff", task["ref"], "--session", "codex/another", session="codex/source", ok=False))
-        report = json.loads(self.as_agent("report", task["ref"], "--json", text="Ownership checked."))
+        report = json.loads(self.as_agent("report-attempt", task["ref"], "--attempt", current["id"], "--json", text="Ownership checked."))
         self.assertTrue(report["moved_to_review"])
         self.assertEqual(report["task"]["stage"], "review")
 
     def test_only_the_current_executor_moves_a_task_with_its_result(self):
         task = self.add("Check the new owner", "--start", session="codex/source")
-        self.hgs("handoff", task["ref"], "--session", self.name, "--json", session="codex/source")
+        handed = self.hgs("handoff", task["ref"], "--session", self.name, "--json", session="codex/source")
+        origin = handed["task"]["execution"]["current"]["id"]
         self.wait_received("Check the new owner")
         # The previous executor's late result is history: it does not move the task.
-        late = self.hgs("report", task["ref"], "--json", text="Finished earlier.", session="codex/source")
+        late = self.hgs("report-attempt", task["ref"], "--attempt", origin, "--json", text="Finished earlier.", session="codex/source")
         self.assertEqual((late["moved_to_review"], late["report"], late["stale"]), (False, "ready", "other_executor"))
         self.assertEqual((late["task"]["stage"], late["task"]["summary"]), ("active", ""))
         entry = late["task"]["log"][-1]
         self.assertEqual((entry["kind"], entry["text"], entry["stale"]), ("report", "Finished earlier.", "other_executor"))
-        self.assertEqual(self.says("report", task["ref"], text="Same again.", session="codex/source"),
+        self.assertEqual(self.says("report-attempt", task["ref"], "--attempt", origin, text="Same again.", session="codex/source"),
                          task["ref"] + " is In progress; your report was added to its history but cannot move it: "
                          + self.name + " executes it now.")
-        self.assertEqual(self.says("report", task["ref"], "--progress", text="Still here.", session="codex/source"),
+        self.assertEqual(self.says("report-attempt", task["ref"], "--attempt", origin, "--progress", text="Still here.", session="codex/source"),
                          task["ref"] + " is In progress; your progress was added to its history, outside its current"
                          " execution: " + self.name + " executes it now.")
         # The executor's progress keeps it In progress and records the revision it considered.
-        progress = json.loads(self.as_agent("report", task["ref"], "--progress", "--considered", "1", "--json",
+        progress = json.loads(self.as_agent("report-attempt", task["ref"], "--attempt", origin, "--progress", "--considered", "1", "--json",
                                             text="Half way."))
         self.assertEqual((progress["moved_to_review"], progress["report"]), (False, "progress"))
         self.assertNotIn("stale", progress)
@@ -964,7 +969,7 @@ class TaskDelivery(DeliveryFixture):
                       self.as_agent("report", task["ref"], "--considered", "0", text="None.", ok=False))
         self.assertEqual(self.hgs("get", task["ref"])["task"]["stage"], "active")
         # Its result moves it, with that summary.
-        done = json.loads(self.as_agent("report", task["ref"], "--ready", "--json", text="Ownership checked."))
+        done = json.loads(self.as_agent("report-attempt", task["ref"], "--attempt", origin, "--ready", "--json", text="Ownership checked."))
         self.assertEqual((done["moved_to_review"], done["report"]), (True, "ready"))
         self.assertEqual((done["task"]["stage"], done["task"]["summary"]), ("review", "Ownership checked."))
         self.assertNotIn("stale", done["task"]["log"][-1])
@@ -991,9 +996,10 @@ class TaskDelivery(DeliveryFixture):
         self.assertEqual(sent["receipt"]["status"], "submitted")
         self.wait_received("[Zerus task orchard/" + task["id"] + "]")
         self.wait_received("Add rate limiting")
-        self.wait_received("`hgs task report orchard/" + task["id"] + "`")
+        origin = sent["task"]["execution"]["current"]["id"]
+        self.wait_received("`hgs task report-attempt " + task["ref"] + " --attempt " + origin + "`")
         self.assertIn("already In progress in " + self.name, self.hgs("send", task["ref"], ok=False))
-        done = json.loads(self.as_agent("report", task["ref"], "--json", text="Token bucket; 6 tests."))
+        done = json.loads(self.as_agent("report-attempt", task["ref"], "--attempt", origin, "--json", text="Token bucket; 6 tests."))
         self.assertTrue(done["moved_to_review"])
         self.assertEqual((done["task"]["stage"], done["task"]["summary"]), ("review", "Token bucket; 6 tests."))
         again = json.loads(self.as_agent("report", task["ref"], "--json", text="Also updated the README."))
@@ -1701,19 +1707,21 @@ class AgentAnswers(DeliveryFixture):
         task = self.add("Add rate limiting", "--target", self.name)
         self.assertEqual(self.says("send", task["ref"]), task["ref"] + " sent to codex/task-test.")
         self.wait_received("Add rate limiting")
-        self.assertEqual(self.as_agent("report", task["ref"], text="Token bucket; 6 tests.").strip(),
+        origin = self.hgs("get", task["ref"])["task"]["execution"]["current"]["id"]
+        self.assertEqual(self.as_agent("report-attempt", task["ref"], "--attempt", origin, text="Token bucket; 6 tests.").strip(),
                          task["ref"] + " is In review.")
-        self.assertEqual(self.says("report", task["ref"], text="Also the README."),
+        self.assertEqual(self.says("report-attempt", task["ref"], "--attempt", origin, text="Also the README."),
                          task["ref"] + " is In review; your report was added to its history.")
         self.confirm()
         again = self.add("Measure the limits", "--target", self.name)
-        self.hgs("send", again["ref"])
+        sent = self.hgs("send", again["ref"])["task"]
+        cancelled_origin = sent["execution"]["current"]["id"]
         self.confirm()
         self.assertEqual(self.says("cancel", again["ref"], "--reason", "Wrong branch"),
                          again["ref"] + " is In review; codex/task-test got the cancel message.")
         cancelled = self.hgs("get", again["ref"])["task"]
         at = datetime.datetime.fromtimestamp(cancelled["cancelled_at"] / 1000, datetime.timezone.utc).strftime("%H:%M")
-        self.assertEqual(self.as_agent("report", again["ref"], text="Stopped halfway.").strip(),
+        self.assertEqual(self.as_agent("report-attempt", again["ref"], "--attempt", cancelled_origin, text="Stopped halfway.").strip(),
                          again["ref"] + " is In review (cancelled at " + at + "); your report was added to its history.")
 
     def test_a_refused_send_names_its_session(self):
@@ -1733,6 +1741,122 @@ class AgentAnswers(DeliveryFixture):
         self.assertNotIn("stdin", refusal)
 
 
+
+
+@unittest.skipUnless(TMUX and HGS.is_file(), "needs the CLI and isolated tmux fixture")
+class ReportAttemptCommands(DeliveryFixture):
+    def managed(self, text="A managed report execution"):
+        task = self.add(text, "--target", self.name)
+        sent = self.hgs("send", task["ref"], "--json")
+        current = sent["task"]["execution"]["current"]
+        self.assertFalse(current.get("legacy", False))
+        self.assertGreater(sent["task"]["execution"].get("attempts", 0), 0)
+        self.assertEqual(current["phase"], "submitted")
+        origin = current["id"]
+        command = "hgs task report-attempt " + task["ref"] + " --attempt " + origin
+        self.wait_received(command)
+        return sent["task"], origin, command
+
+    def test_identical_original_report_arguments_cannot_ready_a_new_generation(self):
+        task, first, command = self.managed()
+        ack = json.loads(self.as_agent("start", task["ref"], "--json"))
+        self.assertEqual((ack["reporting"], ack["report_attempt"], ack["report_command"]),
+                         ("attempt", first, command))
+        arguments = ("report-attempt", task["ref"], "--attempt", first, "--considered", "1", "--json")
+        result = json.loads(self.as_agent(*arguments, text="Exactly the original report arguments"))
+        self.assertEqual((result["outcome"], result["moved_to_review"]), ("applied", True))
+        after_ready = json.loads(self.as_agent("report-attempt", task["ref"], "--attempt", first,
+                                               "--progress", "--json", text="A note after the result"))
+        self.assertEqual((after_ready["outcome"], after_ready["task"]["stage"]), ("not_applied", "review"))
+        self.assertEqual(after_ready["task"]["execution"]["current"]["phase"], "ready")
+        self.confirm()
+        self.hgs("stage", task["ref"], "todo")
+        sent = self.hgs("send", task["ref"], "--json")
+        second = sent["task"]["execution"]["current"]["id"]
+        self.assertNotEqual(first, second)
+        late = json.loads(self.as_agent(*arguments, text="Exactly the original report arguments"))
+        self.assertEqual((late["outcome"], late["history_saved"], late["moved_to_review"], late["stale"]),
+                         ("not_applied", True, False, "other_attempt"))
+        self.assertNotIn(second, json.dumps(late))
+        current = self.hgs("get", task["ref"])["task"]
+        self.assertEqual((current["stage"], current["execution"]["current"]["id"]), ("active", second))
+        self.assertEqual(current["log"][-1]["reported_attempt"], first)
+        self.assertEqual(current["log"][-1]["considered"], 1)
+        self.assertNotEqual(current["execution"]["current"]["phase"], "ready")
+
+    def test_plain_managed_reports_save_history_with_exit_zero_without_current_uuid(self):
+        task, origin, _ = self.managed()
+        before = len(self.hgs("get", task["ref"])["task"]["log"])
+        plain = json.loads(self.as_agent("report", task["ref"], "--json", text="Unscoped JSON result"))
+        self.assertEqual((plain["outcome"], plain["history_saved"], plain["moved_to_review"]),
+                         ("not_applied", True, False))
+        self.assertIn("kept as history", plain["report_hint"])
+        self.assertIn("original task prompt", plain["report_hint"])
+        self.assertNotIn(origin, json.dumps(plain))
+        text = self.as_agent("report", task["ref"], text="A distinct unscoped text result")
+        self.assertIn("kept as history", text)
+        self.assertIn("task did not move", text)
+        self.assertNotIn(origin, text)
+        saved = self.hgs("get", task["ref"])["task"]
+        self.assertEqual(saved["stage"], "active")
+        self.assertEqual(len(saved["log"]), before + 2)
+        self.assertTrue(all(e["stale"] == "other_attempt" for e in saved["log"][-2:]))
+
+    def test_direct_managed_start_and_active_ack_return_their_original_command(self):
+        task, first, _ = self.managed()
+        self.as_agent("report-attempt", task["ref"], "--attempt", first, text="First result")
+        self.hgs("stage", task["ref"], "todo")
+        before = self.received()
+        started = json.loads(self.as_agent("start", task["ref"], "--json"))
+        origin = started["report_attempt"]
+        self.assertNotEqual(origin, first)
+        self.assertEqual(started["reporting"], "attempt")
+        self.assertIn(" --attempt " + origin, started["report_command"])
+        self.assertEqual(self.received(), before, "direct work must not paste a second prompt")
+        ack = json.loads(self.as_agent("start", task["ref"], "--json"))
+        self.assertEqual((ack["report_attempt"], ack["report_command"]), (origin, started["report_command"]))
+        text = self.as_agent("start", task["ref"])
+        self.assertIn(started["report_command"], text)
+
+    def test_legacy_add_start_ack_and_unsent_pinned_report_keep_the_legacy_rule(self):
+        started = json.loads(self.as_agent("add", "--project", "orchard", "--start", "--json", text="Direct legacy work"))
+        self.assertEqual(started["reporting"], "legacy")
+        self.assertNotIn("report_attempt", started)
+        self.assertEqual(started["report_command"], "hgs task report " + started["task"]["ref"])
+        self.assertTrue(started["task"]["execution"]["current"]["legacy"])
+        text = self.as_agent("start", started["task"]["ref"])
+        self.assertIn("legacy execution", text)
+        self.assertIn("no attempt UUID", text)
+        self.assertIn(started["report_command"], text)
+        ready = json.loads(self.as_agent("report", started["task"]["ref"], "--json", text="Legacy result"))
+        self.assertTrue(ready["moved_to_review"])
+        queued = json.loads(self.as_agent("add", "--project", "orchard", "--json", text="Never sent, already implemented"))["task"]
+        self.assertEqual(queued["stage"], "todo")
+        ready = json.loads(self.as_agent("report", queued["ref"], "--json", text="The exact pinned agent reports it"))
+        self.assertEqual((ready["moved_to_review"], ready["task"]["stage"]), (True, "review"))
+        self.assertEqual(ready["task"].get("execution", {}).get("attempts", 0), 0)
+
+    def test_scope_syntax_refuses_before_history_and_cli_help_has_a_capability_marker(self):
+        task, origin, _ = self.managed()
+        count = len(self.hgs("get", task["ref"])["task"]["log"])
+        for extra in [(), ("--attempt",), ("--attempt", "latest"),
+                      ("--attempt", origin, "--attempt", origin), ("--attempt", origin, "--unknown")]:
+            self.as_agent("report-attempt", task["ref"], *extra, text="Invalid request", ok=False)
+            self.assertEqual(len(self.hgs("get", task["ref"])["task"]["log"]), count)
+        help_text = subprocess.check_output([str(HGS), "--help"], env=self.env, text=True)
+        self.assertIn("report-attempt-v1", help_text)
+
+    def test_a_reopen_pins_its_new_attempt_before_native_hashing(self):
+        task, origin, _ = self.managed()
+        self.as_agent("report-attempt", task["ref"], "--attempt", origin, text="Ready for review")
+        self.confirm()
+        current = self.hgs("get", task["ref"])["task"]
+        identity = str(uuid.uuid4())
+        reopened = self.hgs("message", task["ref"], "--request-id", identity, "--mode", "reopen",
+                            "--expect-dispatch", current["dispatch_id"], "--json", text="A new review request")
+        state = reopened["task"]["execution"]["current"]
+        self.assertEqual((state["id"], state["phase"]), (identity, "submitted"))
+        self.wait_received("hgs task report-attempt " + task["ref"] + " --attempt " + identity)
 
 if __name__ == "__main__":
     unittest.main()

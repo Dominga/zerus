@@ -439,7 +439,7 @@ mod tests {
             103,
         )
         .unwrap();
-        a.record_report("Done", &Actor::Agent(to.clone()), 104)
+        a.report_attempt(SEND, "Done", zerus_replica::execution::ReportKind::Ready, None, &Actor::Agent(to.clone()), 104)
             .unwrap();
         let view = a.view().unwrap();
         assert_eq!(view.stage, Stage::Review);

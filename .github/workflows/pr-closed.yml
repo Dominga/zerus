@@ -107,16 +107,21 @@ jobs:
           def sweep(call, sleep, number, branch, repository, own_run, closed_at):
               """Cancel, wait, then force-cancel only the runs that ignored it.
 
-              A run first seen on the second listing gets an ordinary cancel."""
+              A run is its ID and attempt: a re-run keeps the ID and starts a new
+              attempt (zerus-b8zze.2.1). An attempt first seen on the second
+              listing, a re-run included, gets an ordinary cancel."""
               def select():
-                  return doomed(listing(call, branch), number, branch, repository, own_run, closed_at)
+                  runs = listing(call, branch)
+                  attempts = {run['id']: run.get('run_attempt', 1) for run in runs}
+                  return [(run_id, attempts[run_id])
+                          for run_id in doomed(runs, number, branch, repository, own_run, closed_at)]
               first = select()
-              failed = stop(call, first, 'cancel')
+              failed = stop(call, [run_id for run_id, _ in first], 'cancel')
               if first:
                   sleep(SETTLE)
                   second = select()
-                  failed += stop(call, [run for run in second if run in first], 'force-cancel')
-                  failed += stop(call, [run for run in second if run not in first], 'cancel')
+                  failed += stop(call, [run_id for run_id, attempt in second if (run_id, attempt) in first], 'force-cancel')
+                  failed += stop(call, [run_id for run_id, attempt in second if (run_id, attempt) not in first], 'cancel')
               if failed:
                   raise SystemExit(f'{failed} runs were not cancelled')
 

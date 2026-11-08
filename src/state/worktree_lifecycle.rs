@@ -5,10 +5,9 @@ use super::worktrees::{cache_file, git};
 use super::*;
 use fs2::FileExt;
 use std::fs::{self, OpenOptions};
-use std::io::Read;
 use std::time::{Duration, Instant};
 
-fn receipt_path(common: &Path, path: &Path) -> PathBuf {
+pub(super) fn receipt_path(common: &Path, path: &Path) -> PathBuf {
     cache_file(
         "owned",
         &format!("{}\n{}", common.display(), path.display()),
@@ -64,9 +63,7 @@ pub(super) fn record_owner(common: &Path, path: &Path, value: Value) -> Result<V
 
 pub(super) fn owned(common: &Path, path: &Path) -> Option<Value> {
     let read = |path: &Path| -> Option<Value> {
-        let mut bytes=Vec::new();
-        fs::File::open(path).ok()?.take(16385).read_to_end(&mut bytes).ok()?;
-        if bytes.len()>16384 { return None; }
+        let bytes=labels::read_file(path,16384).ok()??;
         serde_json::from_slice(&bytes).ok()
     };
     let value = read(&receipt_path(common,path))?;
@@ -91,7 +88,7 @@ pub(super) fn owned(common: &Path, path: &Path) -> Option<Value> {
         if e.kind() != std::io::ErrorKind::NotFound { return None; }
         // A missing checkout cannot run rev-parse. Verify Git's retained
         // backlink as well as both ownership receipts before forgetting it.
-        let backlink = fs::read_to_string(metadata.join("gitdir")).ok()?;
+        let backlink = String::from_utf8(labels::read_file(&metadata.join("gitdir"),16384).ok()??).ok()?;
         return (Path::new(backlink.trim_end_matches('\n')) == path.join(".git")).then_some(value);
     }
     let actual = git(

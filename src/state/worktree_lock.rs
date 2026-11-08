@@ -407,6 +407,11 @@ mod tests {
         control("archive");
     }
 
+    #[test]
+    fn ownership_files_are_regular_bounded_and_never_followed() {
+        control("owner_files");
+    }
+
     fn git(dir: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
             .args(args)
@@ -499,6 +504,41 @@ mod tests {
             assert_eq!(intents_left(), 0);
         };
         match case.as_str() {
+            "owner_files" => {
+                let receipt = worktree_lifecycle::receipt_path(&common,&checkout);
+                let marker = PathBuf::from(ownership["metadata"].as_str().unwrap()).join("zerus-owner.json");
+                for path in [&receipt,&marker] {
+                    let original = fs::read(path).unwrap();
+                    let foreign = base.join("foreign-owner.json");
+                    fs::write(&foreign,&original).unwrap();
+                    fs::remove_file(path).unwrap();
+                    let name=std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+                    // SAFETY: the fixture owns this absent NUL-free path.
+                    assert_eq!(unsafe {libc::mkfifo(name.as_ptr(),0o600)},0);
+                    assert!(worktree_lifecycle::owned(&common,&checkout).is_none());
+                    fs::remove_file(path).unwrap();
+                    std::os::unix::fs::symlink(&foreign,path).unwrap();
+                    assert!(worktree_lifecycle::owned(&common,&checkout).is_none());
+                    assert_eq!(fs::read(&foreign).unwrap(),original);
+                    fs::remove_file(path).unwrap();
+                    fs::write(path,vec![b'x';16385]).unwrap();
+                    assert!(worktree_lifecycle::owned(&common,&checkout).is_none());
+                    fs::write(path,&original).unwrap();
+                    assert_eq!(worktree_lifecycle::owned(&common,&checkout).unwrap(),ownership);
+                }
+                let backlink=PathBuf::from(ownership["metadata"].as_str().unwrap()).join("gitdir");
+                let original=fs::read(&backlink).unwrap();
+                let aside=base.join("aside");fs::rename(&checkout,&aside).unwrap();
+                assert_eq!(worktree_lifecycle::owned(&common,&checkout).unwrap(),ownership);
+                fs::remove_file(&backlink).unwrap();
+                let name=std::ffi::CString::new(backlink.to_str().unwrap()).unwrap();
+                // SAFETY: this fixture owns the removed metadata entry.
+                assert_eq!(unsafe {libc::mkfifo(name.as_ptr(),0o600)},0);
+                assert!(worktree_lifecycle::owned(&common,&checkout).is_none());
+                fs::remove_file(&backlink).unwrap();fs::write(&backlink,original).unwrap();
+                fs::rename(&aside,&checkout).unwrap();
+                assert_eq!(worktree_lifecycle::owned(&common,&checkout).unwrap(),ownership);
+            }
             "own" => {
                 place(&own);
                 assert_eq!(release_locked(&record), Release::Released(checkout.clone()));

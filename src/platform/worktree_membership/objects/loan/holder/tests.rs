@@ -62,16 +62,18 @@ fn the_readonly_holder_lives_across_a_physically_retired_phase_but_never_reloans
     // The census lists this test's own helper, not every process of this
     // user on the host, any of which can be caught while it exits
     // (zerus-89pkd). The assertions concern only the manifest's custody.
-    #[cfg(target_os = "linux")]
-    let roster = crate::platform::worktree_membership::test_roster::owned(&[fixture.child.id()]);
+    let next = Fixture::start("original");
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let roster = crate::platform::worktree_membership::test_roster::owned(&[next.child.id()]);
     let observed = holder.observe(1001, until()).unwrap();
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    roster.assert_completed();
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     drop(roster);
     assert_eq!(observed.capture, input.manifest.capture);
     assert_eq!(observed.checkout, input.manifest.checkout);
     assert_eq!(observed.expires, input.manifest.expires);
     assert_ne!(observed.id, input.manifest.id);
-    let next = Fixture::start("original");
     assert!(
         holder.arm(&input, next.original(), 1000, until()).is_err(),
         "retired request never borrows again"
@@ -288,10 +290,12 @@ fn a_fresh_readonly_list_preserves_original_custody_but_never_expands_the_old_co
     );
     // The census lists this test's own occupant (zerus-89pkd); the
     // assertions concern only it and the original custody.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let roster = crate::platform::worktree_membership::test_roster::owned(&[child.0.id()]);
     let fresh = holder.observe(1001, until()).unwrap();
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    roster.assert_completed();
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     drop(roster);
     assert!(fresh.programs.iter().any(|p| p.pid == child.0.id()));
     assert_eq!(fresh.capture, input.manifest.capture);

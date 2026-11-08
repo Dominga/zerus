@@ -559,6 +559,11 @@ pub(super) fn programs_with_holder(
         if before.identity != after.identity {
             return Err(limit());
         }
+        #[cfg(test)]
+        let membership = membership.map(|membership| {
+            roster::completed(pid);
+            membership
+        });
         if !membership? {
             continue;
         }
@@ -709,16 +714,35 @@ pub(in crate::platform) fn sample(deadline: Instant) -> Result<WorktreeProcesses
 /// native roster bounds/current-process checks precede this adapter; every
 /// selected process still takes the production identity and membership path.
 #[cfg(test)]
-mod roster {
+pub(crate) mod roster {
     use super::*;
     use std::cell::{Cell, RefCell};
 
     thread_local! {
         static OWNED: RefCell<Option<BTreeSet<i32>>> = const { RefCell::new(None) };
+        static COMPLETED: RefCell<BTreeSet<i32>> = const { RefCell::new(BTreeSet::new()) };
         static UNRESOLVED: Cell<bool> = const { Cell::new(false) };
     }
 
-    pub(super) struct Owned;
+    pub(crate) struct Owned {
+        requested: BTreeSet<i32>,
+    }
+    impl Owned {
+        pub(crate) fn assert_completed(&self) {
+            assert!(
+                !self.requested.is_empty(),
+                "an owned roster cannot be empty"
+            );
+            COMPLETED.with(|completed| {
+                let completed = completed.borrow();
+                let missing: Vec<_> = self.requested.difference(&completed).collect();
+                assert!(
+                    missing.is_empty(),
+                    "owned processes did not complete native membership and identity checks: {missing:?}"
+                );
+            });
+        }
+    }
 
     pub(super) struct Unresolved;
     pub(super) fn unresolved_paths() -> Unresolved {
@@ -739,7 +763,7 @@ mod roster {
         value
     }
 
-    pub(super) fn owned(pids: &[u32]) -> Owned {
+    pub(crate) fn owned(pids: &[u32]) -> Owned {
         assert!(!pids.is_empty() && pids.len() <= 16);
         let pids: BTreeSet<_> = pids
             .iter()
@@ -748,12 +772,33 @@ mod roster {
         assert!(pids
             .iter()
             .all(|pid| *pid > 1 && *pid != std::process::id() as i32));
-        OWNED.with(|slot| assert!(slot.borrow_mut().replace(pids).is_none()));
-        Owned
+        OWNED.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            assert!(slot.is_none(), "one owned roster per test thread");
+            COMPLETED.with(|completed| completed.borrow_mut().clear());
+            *slot = Some(pids.clone());
+        });
+        Owned { requested: pids }
+    }
+
+    pub(super) fn completed(pid: u32) {
+        let pid = i32::try_from(pid).unwrap();
+        OWNED.with(|slot| {
+            if slot
+                .borrow()
+                .as_ref()
+                .is_some_and(|owned| owned.contains(&pid))
+            {
+                COMPLETED.with(|completed| {
+                    completed.borrow_mut().insert(pid);
+                });
+            }
+        });
     }
 
     impl Drop for Owned {
         fn drop(&mut self) {
+            COMPLETED.with(|completed| completed.borrow_mut().clear());
             OWNED.with(|slot| assert!(slot.borrow_mut().take().is_some()));
         }
     }

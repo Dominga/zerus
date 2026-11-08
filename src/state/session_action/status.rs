@@ -215,6 +215,7 @@ pub(crate) fn observe_original(root: &Path, name: &str, original: &[u8]) -> Resu
 /// and the same exact matching rule. `None` is that read's verified absence.
 /// Input and output are DATA, never consent, a retry, current ownership or
 /// drain proof (zerus-5wmh.66.4.9).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn observe_held(name: &str, original: &[u8], receipt: Option<&[u8]>) -> Result<Value> {
     let request = decode_request(original, name)?;
     validate(&request, name)?;

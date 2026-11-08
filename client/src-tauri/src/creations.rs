@@ -137,6 +137,8 @@ pub struct CreationCard {
     launch_dispatched: bool,
     stop_requested: bool,
     worktree_receipts: bool,
+    worktree_pending: bool,
+    worktree_fenced: bool,
     can_resume: bool,
     can_edit: bool,
     bound_session: String,
@@ -166,6 +168,11 @@ impl CreationCard {
             launch_dispatched: flag(operation, "launch_dispatched"),
             stop_requested: flag(operation, "stop_requested"),
             worktree_receipts: flag(operation, "worktree_receipts"),
+            worktree_pending: !text(operation, "worktree_id").is_empty()
+                && !flag(operation, "worktree_done"),
+            worktree_fenced: operation["worktree_future_fence"].as_str()
+                == operation["worktree_id"].as_str()
+                && !text(operation, "worktree_id").is_empty(),
             can_resume: creation::can_resume(operation),
             can_edit,
             bound_session: text(operation, "bound_session").into(),
@@ -184,6 +191,7 @@ struct Services {
     service_clone: Option<ServiceClone>,
     /// The same native intent shape for the worktree leaf, never shared state.
     service_worktree: Option<ServiceClone>,
+    service_worktree_cancel: Option<ServiceClone>,
     /// Local detached launches of the closed agent set, in desktop-service
     /// mode only; every other launch keeps `launch`.
     service_launch: Option<ServiceLaunch>,
@@ -1001,9 +1009,11 @@ impl Worker {
                         Some(Ok((sender.clone(), id, value, fresh, wait)))
                     });
                     // A local receipt-backed checkout and its status reads go
-                    // to the service; cancel and remote calls stay direct.
+                    // to the service, including explicit cancellation of its
+                    // exact original. Remote calls retain their native route.
                     let clone_call = clone_call.or_else(|| {
-                        let sender = self.services.service_worktree.as_ref()?;
+                        let cancel = matches!(&call, creation::Call::WorktreeReceipt { host, action, .. } if host.is_empty() && action == "cancel");
+                        let sender = if cancel { self.services.service_worktree_cancel.as_ref()? } else { self.services.service_worktree.as_ref()? };
                         let (request_id, wait) = match &call {
                             creation::Call::CreateWorktree {
                                 host,
@@ -1016,7 +1026,7 @@ impl Worker {
                                 action,
                                 request_id,
                                 ..
-                            } if host.is_empty() && action == "status" => (request_id, false),
+                            } if host.is_empty() && matches!(action.as_str(), "status" | "cancel") => (request_id, false),
                             _ => return None,
                         };
                         let mut originals =
@@ -1644,6 +1654,22 @@ pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> Creati
                 },
             ) as ServiceClone
         });
+    let cancel_app = app.clone();
+    let service_worktree_cancel = (cfg!(target_os = "linux") && crate::desktop_service::mode())
+        .then(|| {
+            Arc::new(
+                move |id: &str, operation: &Value, _: bool, _: bool, shutdown: &AtomicBool| {
+                    crate::desktop_service::creation_worktree::cancel(
+                        cancel_app
+                            .state::<crate::commands::AppState>()
+                            .desktop_service(),
+                        id,
+                        operation,
+                        shutdown,
+                    )
+                },
+            ) as ServiceClone
+        });
     // Launches go to the service on Linux and macOS in desktop-service mode.
     let launch_app = app.clone();
     let service_launch = (cfg!(unix) && crate::desktop_service::mode()).then(|| {
@@ -1731,6 +1757,7 @@ pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> Creati
             call: Arc::new(move |call| creation::run_call(&call_hgs, call)),
             service_clone,
             service_worktree,
+            service_worktree_cancel,
             service_launch,
             service_launch_lookup,
             binding: Arc::new(move |computer| {
@@ -2024,6 +2051,7 @@ mod tests {
                 call: Arc::new(move |step| creation::run_call(&call, step)),
                 service_clone: None,
                 service_worktree: None,
+                service_worktree_cancel: None,
                 service_launch: None,
                 service_launch_lookup: None,
                 launch: Arc::new(move |operation| detached(&launch, &launch_invocation(operation))),

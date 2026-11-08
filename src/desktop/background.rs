@@ -284,6 +284,14 @@ impl Runtime {
         self.activations.wait(authority, queue)
     }
 
+    pub fn creation_worktree_receipt(&mut self, store: &Store, request: &Value) -> Value {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        return self
+            .worktree
+            .receipt_control(store, request, self.notifications.handoff());
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        { let _ = (store, request); json!({"accepted":false,"code":"creation_receipt_unavailable"}) }
+    }
     pub fn frontend_request(
         &mut self,
         store: &mut Store,

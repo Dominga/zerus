@@ -45,3 +45,27 @@ it("keeps an uncertain original check-only, without edit, Continue or automatic 
   expect(calls.action).toHaveBeenCalledExactlyOnceWith("original", "check");
   expect(calls.edit).not.toHaveBeenCalled();
 });
+
+
+it("lets an explicit Stop retry its metadata fence while the old result is unknown", async () => {
+  state.write({ ...failed(), state: "unknown", launch_dispatched: false, stop_requested: true, worktree_pending: true, can_edit: false });
+  const host = mount(); await flush();
+  const stop = [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Stop creating")!;
+  expect(stop.disabled).toBe(false); stop.click();
+  expect(calls.action).toHaveBeenCalledExactlyOnceWith("original", "stop");
+});
+
+it("shows stopped but historically unknown setup with separate Recreate and dismissal", async () => {
+  state.write({ ...failed(), state: "stopped", caption: "Creation stopped", launch_dispatched: false,
+    worktree_pending: true, worktree_fenced: true, stop_requested: true,
+    error: "Further starts are fenced. The earlier attempt's outcome is unknown. Review the destination.", can_edit: true });
+  const host = mount(); await flush();
+  expect(host.querySelector("textarea")?.value).toContain("outcome is unknown");
+  const buttons = [...host.querySelectorAll<HTMLButtonElement>("button")];
+  expect(buttons.some((b) => b.textContent === "Continue setup" || b.textContent === "Stop creating")).toBe(false);
+  buttons.find((b) => b.textContent === "Recreate…")!.click();
+  expect(calls.edit).toHaveBeenCalledExactlyOnceWith("original");
+  buttons.find((b) => b.textContent === "Hide status")!.click();
+  expect(calls.hide).toHaveBeenCalledExactlyOnceWith("original");
+  expect(calls.action).not.toHaveBeenCalled();
+});

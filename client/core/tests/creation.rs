@@ -377,7 +377,14 @@ fn a_generated_worktree_is_created_once_under_a_saved_id_then_verified() {
             host: String::new(),
             action: "status".into(),
             request_id: worktree.clone(),
-            expected_machine: MACHINE.into()
+            expected_machine: MACHINE.into(),
+            fingerprint: zerus_client_core::desktop::creation_worktree::Plan::from_operation(
+                &id,
+                &driver.op(&id)
+            )
+            .unwrap()
+            .request_fingerprint()
+            .unwrap(),
         }
     );
     driver.answer(
@@ -455,6 +462,40 @@ fn a_lost_worktree_is_read_again_and_never_recreated() {
         "Worktree recovered. Continue setup to start the session."
     );
     assert!(can_resume(&driver.op(&id)));
+}
+
+#[test]
+fn an_exact_admission_refusal_shows_failed_but_preserves_the_unsettled_original_id() {
+    let mut driver = Driver::loaded();
+    let id = driver.submit(plan(&auto_choices()));
+    driver.flush();
+    let (flight, _) = driver.call();
+    driver.answer(flight, identity("/srv/repo"));
+    let (flight, _) = driver.call();
+    driver.answer(flight, ok(catalog("/srv/repo")));
+    driver.flush();
+    let (flight, _) = driver.call();
+    let request = driver.op(&id)["worktree_id"].clone();
+    driver.answer(
+        flight,
+        Answer {
+            ok: false,
+            data: json!({"status":"refused","request_id":request}),
+            error: "Worktree admission refused: original result needs review.".into(),
+        },
+    );
+    assert_eq!(driver.state(&id), "failed");
+    assert_eq!(driver.op(&id)["worktree_id"], request);
+    assert!(driver.op(&id)["error"]
+        .as_str()
+        .unwrap()
+        .contains("admission refused"));
+    assert!(!can_resume(&driver.op(&id)));
+    assert!(
+        !driver.creations.can_edit(&id),
+        "explicit Stop must fence this retained UUID before Recreate"
+    );
+    assert!(driver.creations.resume(&id).is_empty());
 }
 
 #[test]

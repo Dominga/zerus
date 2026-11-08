@@ -1230,6 +1230,20 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         } else if hello
                             .request
                             .as_ref()
+                            .is_some_and(|v| v["op"] == "creation_worktree_receipt")
+                        {
+                            match &mut background {
+                                Some(runtime) => runtime.creation_worktree_receipt(
+                                    &store,
+                                    hello.request.as_ref().unwrap(),
+                                ),
+                                None => {
+                                    json!({"accepted":false,"code":"creation_receipt_unavailable"})
+                                }
+                            }
+                        } else if hello
+                            .request
+                            .as_ref()
                             .is_some_and(|v| v["op"] == "creation_worktree_result")
                         {
                             creation_worktree::query(&store, hello.request.as_ref().unwrap())

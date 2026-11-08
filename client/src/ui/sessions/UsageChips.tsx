@@ -1,4 +1,5 @@
 import { createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
+import { steadyTitle } from "../lib/steady-title";
 import { AgentBadge } from "./SessionCard";
 import { Icon } from "../lib/icons";
 import { ChipPopover } from "./ChipPopover";
@@ -38,16 +39,18 @@ export function AccountUsageChip(props: { session: Session }) {
     setPage("accounts");
     void loadAccounts();
   };
+  // The account tooltip holds still under the pointer (zerus-5ryrx).
+  const accountTip = steadyTitle(() => accountTooltip(u(), now()));
   return (
     <Show when={props.session.tracked && !props.session.archiveId}>
       <span class="session-usage-strip">
-        <button type="button" class="sb-usage account-usage" title={accountTooltip(u(), now())} aria-label={`${tr("Account usage")}\n${exhausted(u(), now())}\n${accountTooltip(u(), now())}`} onClick={openAccount}>
+        <button type="button" class="sb-usage account-usage" title={accountTip.title()} onPointerEnter={accountTip.enter} onPointerLeave={accountTip.leave} aria-label={`${tr("Account usage")}\n${exhausted(u(), now())}\n${accountTooltip(u(), now())}`} onClick={openAccount}>
           <Show when={u().provider}><AgentBadge agent={props.session.agent} /></Show>
           <UsageMeters windows={windowsAt(u().windows, now())} loading={usageLoading(u())} summary={footerUsageSummary(u())} indicator={text("workspace/usageIndicator") as UsageIndicator} />
           <Show when={rateLimitNotice(u(), now())}><span class="dim">{rateLimitNotice(u(), now())}</span></Show>
         </button>
         <button type="button" class="icon-btn small usage-refresh" disabled={!online() || u().refreshing || usageRetryWaiting(u(), now())} aria-label={tr("Refresh usage")}
-          title={usageRetryWaiting(u(), now()) ? rateLimitNotice(u(), now()) : u().refreshing ? tr("Updating account usage…") : tr("Refresh usage")} onClick={() => void refreshSessionUsage(true)}>
+          title={usageRetryWaiting(u(), now()) ? rateLimitNotice(u(), now(), true) : u().refreshing ? tr("Updating account usage…") : tr("Refresh usage")} onClick={() => void refreshSessionUsage(true)}>
           <Show when={!u().refreshing} fallback={<span class="su-spin"><Icon name="refresh-cw" size={12} /></span>}><Icon name="refresh-cw" size={12} /></Show>
         </button>
       </span>

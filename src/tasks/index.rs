@@ -527,7 +527,7 @@ fn connect(dir: &Path) -> Outcome<Connection> {
             CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE tasks(uuid TEXT NOT NULL UNIQUE, files TEXT NOT NULL, stage TEXT, rank TEXT,
                 short_id TEXT, row TEXT, error TEXT, checked INTEGER NOT NULL, trusted INTEGER NOT NULL,
-                owner TEXT, unassigned INTEGER NOT NULL DEFAULT 0, version TEXT, done INTEGER);
+                owner TEXT, unassigned INTEGER NOT NULL DEFAULT 0, version TEXT, done INTEGER, repaired INTEGER);
             CREATE INDEX tasks_order ON tasks(stage, rank, uuid);
             CREATE INDEX tasks_owner ON tasks(owner, stage, rank, uuid);
             CREATE INDEX tasks_unassigned ON tasks(stage, rank, uuid) WHERE unassigned = 1;
@@ -547,6 +547,21 @@ fn connect(dir: &Path) -> Outcome<Connection> {
             PRAGMA user_version={SCHEMA};
             COMMIT;"
         ))?;
+    }
+    // The repair epoch each row was read under (zerus-cg5h.21.2), which
+    // builds before it never write. Added in place: the user version and the
+    // objects stay, so those builds keep the file; until every row was read
+    // here, the index does not answer for the phone.
+    let present: bool =
+        db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name = 'repaired')", [], |r| r.get(0))?;
+    if !present {
+        db.execute_batch(
+            "BEGIN IMMEDIATE;
+            ALTER TABLE tasks ADD COLUMN repaired INTEGER;
+            INSERT OR REPLACE INTO meta VALUES('uncertified', '1');
+            DELETE FROM meta WHERE key = 'repair_floor';
+            COMMIT;",
+        )?;
     }
     Ok(db)
 }
@@ -579,6 +594,11 @@ impl<'a> Index<'a> {
         if matches!(failure, Failure::Damaged) {
             dispose(&dir);
         }
+    }
+
+    /// The current repair epoch (zerus-cg5h.21.2).
+    fn epoch(&self) -> Outcome<i64> {
+        Ok(self.meta("repair_epoch")?.and_then(|v| v.parse().ok()).unwrap_or(0))
     }
 
     fn meta(&self, key: &str) -> Outcome<Option<String>> {
@@ -618,12 +638,14 @@ impl<'a> Index<'a> {
             }
             // A clock set back can hide those rows: then every row is read again.
             rederive = foreign.is_empty();
-            // Clocks may also straddle that time (zerus-cg5h.21.2): every row
-            // is suspect and read again in bounded batches, and the phone's
-            // inventory is not read from the index until all were.
-            let mark = now.to_string();
-            self.db.execute("INSERT OR REPLACE INTO meta VALUES('suspect', ?1)", [&mark])?;
-            self.db.execute("INSERT OR REPLACE INTO meta VALUES('repair_floor', ?1)", [&mark])?;
+            // Clocks may also straddle that time, and a later read of the same
+            // row by such a build moves its stamps and read time without a new
+            // revision (zerus-cg5h.21.2): a new repair epoch, which only this
+            // build writes, makes every row pending until read here again, and
+            // the phone's inventory is not read from the index until then.
+            let epoch = self.epoch()? + 1;
+            self.db.execute("INSERT OR REPLACE INTO meta VALUES('repair_epoch', ?1)", [epoch.to_string()])?;
+            self.db.execute("INSERT OR REPLACE INTO meta VALUES('uncertified', '1')", [])?;
         }
         let full = !built
             || rederive
@@ -637,10 +659,8 @@ impl<'a> Index<'a> {
         // dated after now.
         let past = now - MAX_AGE_MS - 1;
         self.db.execute("UPDATE tasks SET checked=?1 WHERE checked > ?2", params![past, now])?;
-        for key in ["suspect", "repair_floor"] {
-            if self.meta(key)?.and_then(|v| v.parse::<i64>().ok()).is_some_and(|mark| mark > now) {
-                self.db.execute("INSERT OR REPLACE INTO meta VALUES(?1, ?2)", params![key, now.to_string()])?;
-            }
+        if self.meta("suspect")?.and_then(|v| v.parse::<i64>().ok()).is_some_and(|mark| mark > now) {
+            self.db.execute("INSERT OR REPLACE INTO meta VALUES('suspect', ?1)", [now.to_string()])?;
         }
         let moved = changes.generation != generation || changes.offset != offset;
         if built && changes.documents.is_none() && moved {
@@ -701,6 +721,29 @@ impl<'a> Index<'a> {
         if !rederive && !foreign.is_empty() {
             let list: Vec<String> = foreign.iter().cloned().collect();
             self.refresh(&list, None, Some(&foreign))?;
+        }
+        // Rows not yet read under the current repair epoch, a bounded batch
+        // at a time; the index answers for the phone again once none remain.
+        if ours && self.meta("uncertified")?.is_some() {
+            let epoch = self.epoch()?;
+            let pending: BTreeSet<String> = {
+                let mut query =
+                    self.db.prepare_cached("SELECT uuid FROM tasks WHERE repaired IS NULL OR repaired < ?1 LIMIT ?2")?;
+                let rows = query.query_map(params![epoch, BATCH], |r| r.get::<_, String>(0))?;
+                rows.collect::<rusqlite::Result<_>>()?
+            };
+            if !pending.is_empty() {
+                let list: Vec<String> = pending.iter().cloned().collect();
+                self.refresh(&list, None, Some(&pending))?;
+            }
+            let left: bool = self.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM tasks WHERE repaired IS NULL OR repaired < ?1)",
+                [epoch],
+                |r| r.get(0),
+            )?;
+            if !left {
+                self.db.execute("DELETE FROM meta WHERE key = 'uncertified'", [])?;
+            }
         }
         // The project document's version, as the phone's inventory holds it:
         // read again when the journal names it, and at a full check when its
@@ -780,6 +823,9 @@ impl<'a> Index<'a> {
     ) -> Outcome<()> {
         let dir = self.store.dir().to_owned();
         let read_at = now();
+        // The repair epoch rows read here are marked with; an emulated older
+        // build writes none (zerus-cg5h.21.2).
+        let epoch = (!legacy()).then(|| self.epoch()).transpose()?;
         for chunk in uuids.chunks(CHUNK) {
             let mut work = Vec::new();
             for uuid in chunk {
@@ -830,10 +876,16 @@ impl<'a> Index<'a> {
             let mut changed = false;
             for (uuid, files, derived, same, checked, trusted) in work {
                 if same {
-                    tx.execute(
-                        "UPDATE tasks SET files=?1, checked=?2, trusted=?3 WHERE uuid=?4",
-                        params![files, checked, trusted, uuid],
-                    )?;
+                    match epoch {
+                        Some(epoch) => tx.execute(
+                            "UPDATE tasks SET files=?1, checked=?2, trusted=?3, repaired=?5 WHERE uuid=?4",
+                            params![files, checked, trusted, uuid, epoch],
+                        )?,
+                        None => tx.execute(
+                            "UPDATE tasks SET files=?1, checked=?2, trusted=?3 WHERE uuid=?4",
+                            params![files, checked, trusted, uuid],
+                        )?,
+                    };
                     continue;
                 }
                 changed = true;
@@ -847,9 +899,9 @@ impl<'a> Index<'a> {
                     Some(Derived::Damaged(error, held)) => {
                         let (version, done) = held.map(|h| (h.version, h.done)).unzip();
                         tx.execute(
-                            "INSERT INTO tasks(uuid, files, error, checked, trusted, version, done)
-                             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                            params![uuid, files, error, checked, trusted, version, done],
+                            "INSERT INTO tasks(uuid, files, error, checked, trusted, version, done, repaired)
+                             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                            params![uuid, files, error, checked, trusted, version, done, epoch],
                         )?;
                     }
                     Some(Derived::Row { stage, rank, id, row, sends, held }) => {
@@ -857,9 +909,9 @@ impl<'a> Index<'a> {
                         let (version, done) = held.map(|h| (h.version, h.done)).unzip();
                         tx.execute(
                             "INSERT INTO tasks(uuid, files, stage, rank, short_id, row, checked, trusted, owner, unassigned,
-                                version, done)
-                             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                            params![uuid, files, stage, rank, id, row, checked, trusted, owner, unassigned, version, done],
+                                version, done, repaired)
+                             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                            params![uuid, files, stage, rank, id, row, checked, trusted, owner, unassigned, version, done, epoch],
                         )?;
                         for at in sends {
                             tx.execute("INSERT INTO sends VALUES(?1, ?2)", params![uuid, at])?;
@@ -894,14 +946,10 @@ impl<'a> Index<'a> {
     pub(super) fn live_inventory(&mut self) -> Outcome<Inventory> {
         self.sync()?;
         // After another build changed rows, every row must have been read
-        // here again under the repair rule (zerus-cg5h.21.2); until then the
-        // caller reads the store.
-        if let Some(floor) = self.meta("repair_floor")?.and_then(|v| v.parse::<i64>().ok()) {
-            let uncertain: bool =
-                self.db.query_row("SELECT EXISTS(SELECT 1 FROM tasks WHERE checked < ?1)", [floor], |r| r.get(0))?;
-            if uncertain {
-                return Err(Failure::Other);
-            }
+        // here again under the current repair epoch (zerus-cg5h.21.2); until
+        // then the caller reads the store.
+        if self.meta("uncertified")?.is_some() {
+            return Err(Failure::Other);
         }
         // Missing while the project document cannot be read: the caller
         // reads the store, which says why.

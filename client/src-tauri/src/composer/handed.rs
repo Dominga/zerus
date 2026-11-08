@@ -20,10 +20,12 @@
 //! shown with [`STILL_SENDING`] and a locked Cancel send, and its result ends
 //! it as a handed send's would.
 //!
-//! A "Resume and send" of a stopped Claude or Kimi session the service takes
-//! (zerus-5wmh.66.4.9, the session_resume kind) is handed over the same way
-//! from its start's call ([`Composers::hand_start`]). A fresh start, a resume
-//! with compaction and a Codex session stay direct.
+//! A "Resume and send" of a stopped Claude, Kimi or Codex session the
+//! service takes (zerus-5wmh.66.4.9 and .10, the session_resume kind) is
+//! handed over the same way from its start's call
+//! ([`Composers::hand_start`]). A fresh start and a resume with compaction
+//! stay direct, and so does a Codex session for a service that does not
+//! observe its resumed agent.
 use super::send::{Call, Delivery};
 use super::*;
 use crate::desktop_service::compact_to_send::{self, CompactAnswer};
@@ -610,7 +612,8 @@ impl Composers {
     /// exact resume stdin and send template, from the action that reserved
     /// and saved its version 3 checkpoint. False: the direct path starts and
     /// sends it, decided before any offer (a fresh start, a resume with
-    /// compaction, a Codex session or a version 1 checkpoint always). True:
+    /// compaction or a version 1 checkpoint always; a Codex session for a
+    /// service without the Codex readiness marker). True:
     /// the hand-over ended this continuation, whatever the service answered.
     pub(crate) fn hand_start(&self, key: &str, revision: u64) -> bool {
         let Some(route) = self.resume() else {

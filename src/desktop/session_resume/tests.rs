@@ -9,6 +9,13 @@ use zerus_client_core::desktop::session_resume::{Intent, Settled, Step, Verified
 use zerus_client_core::operation_recovery::deferred_input::{self as checkpoint, Checkpoint};
 
 const SESSION: &str = "claude/private-resume";
+/// A Codex session, whose readiness only the send's own observation shows
+/// (zerus-5wmh.66.4.10).
+const CODEX: &str = "codex/private-resume";
+/// The observation replies `hgs send --observe` prints.
+const OBSERVED_READY: &[u8] = br#"{"ready":true,"reason":""}"#;
+const OBSERVED_NOT_READY: &[u8] =
+    br#"{"ready":false,"reason":"terminal has a draft, dialog, or unrecognized prompt"}"#;
 const RUN: &str = "run-1";
 const RESUMED: &str = "00000000-0000-4000-8000-0000000000b1";
 const CONVERSATION: &str = "conversation-1";
@@ -139,6 +146,20 @@ fn session_record(state: &Path, name: &str, agent: &str, run: &str, fields: Valu
 /// The resumed run's record of a confirmed, idle, live Claude: ready.
 fn resumed_record(state: &Path, ready: bool) {
     resumed_record_of(state, SESSION, ready)
+}
+/// The resumed run's record of a resumed Codex pending its first message:
+/// it never shows by itself that the agent takes one.
+fn codex_pending_record(state: &Path, session: &str) {
+    let pid = std::process::id();
+    session_record(
+        state,
+        session,
+        "codex",
+        RESUMED,
+        json!({"run_identity_version": 1, "startup_kind": "resume", "supervisor": {},
+            "expected_id": CONVERSATION, "activity": "unknown", "phase": "unknown", "error": "",
+            "last_event_at": 0, "pid": pid, "process_start": started(pid)}),
+    );
 }
 /// [`resumed_record`] for the session `session`.
 fn resumed_record_of(state: &Path, session: &str, ready: bool) {
@@ -704,9 +725,13 @@ fn only_the_resumed_runs_ready_record_lets_the_send_start() {
     let state = state_root(&parent);
     let verified = original(&"a".repeat(64), &uuid::Uuid::new_v4().to_string());
     let plan = &verified.plan;
+    let later = || std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let never = |_: &[String], _: &[u8], _: std::time::Instant| -> Option<Vec<u8>> {
+        panic!("a Claude session is never observed")
+    };
     let read = |state: &Path| {
         let roots = receipt::Roots::open(state, receipt::RESUME_FOLDER).unwrap();
-        ready::read(&roots, plan, RESUMED)
+        ready::read(&roots, plan, RESUMED, later(), never)
     };
     // The original run's record still: not written yet.
     session_record(&state, SESSION, "claude", RUN, json!({}));
@@ -745,9 +770,98 @@ fn only_the_resumed_runs_ready_record_lets_the_send_start() {
     std::fs::create_dir(&state).unwrap();
     mode(&state, 0o700);
     assert_eq!(
-        ready::read(&roots, plan, RESUMED),
+        ready::read(&roots, plan, RESUMED, later(), never),
         Readiness::Ended(ROOT_CHANGED)
     );
+}
+
+/// zerus-5wmh.66.4.10: a resumed Codex pending its first message is ready
+/// only when the send's own observation, with exactly its arguments and
+/// stdin, says so in time; its record only says whether it ended, and an
+/// ended or unwritten record is never observed. Any other reply, none, or
+/// a late one keeps waiting; a session that ends during the observation
+/// ends the wait whatever the reply.
+#[test]
+fn a_resumed_codex_is_ready_only_by_the_sends_own_observation() {
+    use ready::{Readiness, READY_ENDED};
+    use std::cell::RefCell;
+    use std::time::{Duration, Instant};
+    let temp = tempfile::tempdir().unwrap();
+    let parent = temp.path().canonicalize().unwrap();
+    let state = state_root(&parent);
+    let verified = original_of(&"a".repeat(64), &uuid::Uuid::new_v4().to_string(), CODEX);
+    let plan = &verified.plan;
+    assert!(plan.observed());
+    let roots = receipt::Roots::open(&state, receipt::RESUME_FOLDER).unwrap();
+    let later = || Instant::now() + Duration::from_secs(5);
+    let asked: RefCell<Vec<(Vec<String>, Value)>> = RefCell::new(Vec::new());
+    let read = |reply: Option<&[u8]>, until: Instant| {
+        ready::read(&roots, plan, RESUMED, until, |args, input, _| {
+            asked
+                .borrow_mut()
+                .push((args.to_vec(), serde_json::from_slice(input).unwrap()));
+            reply.map(<[u8]>::to_vec)
+        })
+    };
+    // Its resumed record is not written yet: nothing is observed.
+    session_record(&state, CODEX, "codex", RUN, json!({}));
+    assert_eq!(read(Some(OBSERVED_READY), later()), Readiness::Waiting);
+    assert!(asked.borrow().is_empty());
+    // Pending its first message, the record alone never says ready.
+    codex_pending_record(&state, CODEX);
+    assert!(ready::current(&roots, plan, RESUMED));
+    assert_eq!(read(Some(OBSERVED_READY), later()), Readiness::Ready);
+    assert_eq!(
+        asked.borrow().as_slice(),
+        [(
+            vec![
+                "send".to_owned(),
+                CODEX.to_owned(),
+                "--observe".to_owned(),
+                "--json".to_owned()
+            ],
+            json!({"expected_run_id": RESUMED, "expected_conversation_id": CONVERSATION})
+        )]
+    );
+    let mut oversized = OBSERVED_READY.to_vec();
+    oversized.resize(ready::OBSERVATION_BYTES + 1, b' ');
+    for reply in [
+        Some(OBSERVED_NOT_READY),
+        None,
+        Some(&b"not json"[..]),
+        Some(&br#"{"ready":true}"#[..]),
+        Some(&br#"{"ready":true,"reason":"","more":1}"#[..]),
+        Some(&oversized[..]),
+    ] {
+        assert_eq!(read(reply, later()), Readiness::Waiting, "{reply:?}");
+    }
+    // A reply after its deadline never counts.
+    let past = Instant::now()
+        .checked_sub(Duration::from_millis(1))
+        .unwrap();
+    assert_eq!(read(Some(OBSERVED_READY), past), Readiness::Waiting);
+    // A session that ends during the observation ends the wait.
+    let ended = ready::read(&roots, plan, RESUMED, later(), |_, _, _| {
+        let pid = std::process::id();
+        session_record(
+            &state,
+            CODEX,
+            "codex",
+            RESUMED,
+            json!({"error": "saved binding changed before agent launch", "pid": pid,
+                "process_start": started(pid)}),
+        );
+        Some(OBSERVED_READY.to_vec())
+    });
+    assert_eq!(ended, Readiness::Ended(READY_ENDED));
+    // An ended record is never observed, and never current.
+    asked.borrow_mut().clear();
+    assert_eq!(
+        read(Some(OBSERVED_READY), later()),
+        Readiness::Ended(READY_ENDED)
+    );
+    assert!(asked.borrow().is_empty());
+    assert!(!ready::current(&roots, plan, RESUMED));
 }
 
 #[test]
@@ -892,6 +1006,11 @@ mod actor {
         fn original(&self) -> Verified {
             super::original(&self.location.configuration, &self.epoch)
         }
+        /// A Codex original, its session stopped at the original run.
+        fn codex(&self) -> Verified {
+            session_record(&self.state, CODEX, "codex", RUN, json!({}));
+            super::original_of(&self.location.configuration, &self.epoch, CODEX)
+        }
         fn admit(&mut self, original: &Verified) -> wire::Admission {
             let request = json!(
                 zerus_client_core::desktop::ui_requests::Request::SessionResume {
@@ -1024,6 +1143,152 @@ mod actor {
         f.runtime.request_stop();
         f.until("stopped", |f| f.runtime.drained());
         assert_eq!(ran.counts(), (1, 1), "each child once");
+    }
+
+    /// [`executor`] for a Codex: its resume leaves the resumed agent pending
+    /// its first message, which its record never shows ready.
+    fn codex_executor(ran: Arc<Ran>) -> Arc<Execute> {
+        let inner = executor(ran, Resume::Completed { ready: false });
+        Arc::new(move |state, plan, args, input, lock, resources| {
+            let ended = inner(state, plan, args, input, lock, resources);
+            if args[0] == "session-action" {
+                codex_pending_record(state, &plan.session);
+            }
+            ended
+        })
+    }
+    type Observe = Arc<dyn Fn(&[String], &[u8]) -> Option<Vec<u8>> + Send + Sync>;
+
+    /// zerus-5wmh.66.4.10: a resumed Codex's send starts only once the
+    /// send's own observation, with exactly its arguments and stdin, says the
+    /// agent takes it: the wait reads again until then, and the observation
+    /// runs once more right before the send. A Claude session is never
+    /// observed.
+    #[test]
+    fn a_resumed_codex_sends_only_once_its_observation_says_ready() {
+        let ran = Arc::new(Ran::default());
+        let mut f = Fixture::with(codex_executor(ran.clone()));
+        let observed = Arc::new(AtomicUsize::new(0));
+        let count = observed.clone();
+        let observer: Observe = Arc::new(move |args, input| {
+            assert_eq!(args, ["send", CODEX, "--observe", "--json"]);
+            assert_eq!(
+                serde_json::from_slice::<Value>(input).unwrap(),
+                json!({"expected_run_id": RESUMED, "expected_conversation_id": CONVERSATION})
+            );
+            let n = count.fetch_add(1, Ordering::SeqCst);
+            Some(
+                if n < 3 {
+                    OBSERVED_NOT_READY
+                } else {
+                    OBSERVED_READY
+                }
+                .to_vec(),
+            )
+        });
+        f.runtime
+            .fixture_observer(Some(observer), Duration::from_secs(5));
+        f.runtime.fixture_wait(
+            Duration::from_secs(5),
+            Duration::from_millis(5),
+            runtime::CHAIN,
+        );
+        let original = f.codex();
+        assert!(f.admit(&original).accepted);
+        f.until("settled", |f| f.row(&original).receipt.drained);
+        let row = f.row(&original);
+        assert_eq!(
+            (row.receipt.resume.step, row.receipt.send.step),
+            (Step::Recorded, Step::Recorded)
+        );
+        assert_eq!(ran.counts(), (1, 1));
+        // Three not ready, the ready one in the wait, then the one right
+        // before the send.
+        assert_eq!(observed.load(Ordering::SeqCst), 5);
+
+        // A Claude session's readiness is its record alone.
+        let ran = Arc::new(Ran::default());
+        let mut f = Fixture::with(executor(ran.clone(), Resume::Completed { ready: true }));
+        let observed = Arc::new(AtomicUsize::new(0));
+        let count = observed.clone();
+        f.runtime.fixture_observer(
+            Some(Arc::new(move |_: &[String], _: &[u8]| {
+                count.fetch_add(1, Ordering::SeqCst);
+                Some(OBSERVED_READY.to_vec())
+            })),
+            Duration::from_secs(5),
+        );
+        let original = f.original();
+        f.admit(&original);
+        f.until("settled", |f| f.row(&original).receipt.drained);
+        assert_eq!(f.row(&original).receipt.send.step, Step::Recorded);
+        assert_eq!(ran.counts(), (1, 1));
+        assert_eq!(observed.load(Ordering::SeqCst), 0, "never observed");
+    }
+
+    /// A resumed Codex whose observation never says it takes the message,
+    /// or that is never observed at all, never sends: the wait ends at its
+    /// budget and the send was never reserved. One whose observation turns
+    /// to not ready right before the send starts no send, which then never
+    /// started.
+    #[test]
+    fn a_resumed_codex_without_a_ready_observation_never_sends() {
+        for case in ["never", "unobserved", "before_send"] {
+            let ran = Arc::new(Ran::default());
+            let mut f = Fixture::with(codex_executor(ran.clone()));
+            let observed = Arc::new(AtomicUsize::new(0));
+            let count = observed.clone();
+            let observer: Option<Observe> = (case != "unobserved").then(|| {
+                let observer: Observe = Arc::new(move |_, _| {
+                    let n = count.fetch_add(1, Ordering::SeqCst);
+                    let ready = case == "before_send" && n == 0;
+                    Some(
+                        if ready {
+                            OBSERVED_READY
+                        } else {
+                            OBSERVED_NOT_READY
+                        }
+                        .to_vec(),
+                    )
+                });
+                observer
+            });
+            f.runtime.fixture_observer(observer, Duration::from_secs(5));
+            f.runtime.fixture_wait(
+                Duration::from_millis(80),
+                Duration::from_millis(5),
+                runtime::CHAIN,
+            );
+            let original = f.codex();
+            f.admit(&original);
+            f.until(case, |f| f.row(&original).receipt.drained);
+            let row = f.row(&original);
+            assert_eq!(row.receipt.resume.step, Step::Recorded, "{case}");
+            if case == "before_send" {
+                assert!(row.send.is_some(), "{case}: reserved before its turn");
+                assert_eq!(
+                    (row.receipt.send.step, row.receipt.send.code.as_str()),
+                    (Step::NotStarted, wire::NOT_STARTED),
+                    "{case}"
+                );
+                assert_eq!(observed.load(Ordering::SeqCst), 2, "{case}");
+            } else {
+                assert!(row.send.is_none(), "{case}: never reserved");
+                assert_eq!(
+                    (row.receipt.send.step, row.receipt.code.as_str()),
+                    (Step::NotStarted, ledger::WAIT_EXPIRED),
+                    "{case}"
+                );
+            }
+            assert_eq!(
+                row.receipt.result(&original.plan),
+                Some(Settled::NotSent {
+                    resume: Step::Recorded
+                }),
+                "{case}"
+            );
+            assert_eq!(ran.counts(), (1, 0), "{case}");
+        }
     }
 
     /// A refused, uncertain or silent resume never sends: without the
@@ -1340,17 +1605,149 @@ else:
     /// Prepares the pinned image's exact action receipt for `original`.
     #[cfg(target_os = "linux")]
     fn prepared(f: &Fixture, dir: &Path, original: &Verified) {
+        prepared_of(f, dir, original, SESSION)
+    }
+    /// [`prepared`] for the session `session`.
+    #[cfg(target_os = "linux")]
+    fn prepared_of(f: &Fixture, dir: &Path, original: &Verified, session: &str) {
         for folder in [receipt::RESUME_FOLDER, receipt::INPUT_FOLDER] {
             std::fs::create_dir(f.state.join(folder)).unwrap();
             mode(&f.state.join(folder), 0o700);
         }
         let value = crate::state::lifecycle_fixture_receipt(
-            SESSION,
+            session,
             original.intent.resume.as_bytes(),
             "completed",
             Some(RESUMED),
         );
         std::fs::write(dir.join("receipt"), value.to_string()).unwrap();
+    }
+
+    /// A pinned stand-in for `hgs` and a resumed Codex: its resume copies the
+    /// prepared action receipt and leaves the resumed agent pending its first
+    /// message; its observation (`send <session> --observe --json`) answers
+    /// in turn from `replies` (the last repeating) without custody or any
+    /// state write; its send writes its exact input receipt. Each call logs
+    /// its arguments, stdin, custody variable and whether it leads its own
+    /// process group.
+    #[cfg(target_os = "linux")]
+    fn codex_image(path: &Path, state: &Path, dir: &Path, replies: &[&[u8]]) {
+        let pid = std::process::id();
+        let replies: Vec<Value> = replies
+            .iter()
+            .map(|reply| serde_json::from_slice(reply).unwrap())
+            .collect();
+        std::fs::write(dir.join("replies"), json!(replies).to_string()).unwrap();
+        std::fs::write(
+            path,
+            format!(
+                r#"#!/usr/bin/env python3
+import fcntl,hashlib,json,os,sys
+data=sys.stdin.buffer.read()
+request=json.loads(data)
+state={state:?}
+dir={dir:?}
+argv=sys.argv[1:]
+custody=os.environ.get("HGS_SESSION_RESUME_CUSTODY_FD")
+with open(os.path.join(dir,"seen"),"a") as log:
+    log.write(json.dumps({{"argv":argv,"stdin":data.decode(),"custody":custody,"leader":os.getpgid(0)==os.getpid()}})+"\n")
+name=argv[1]
+if argv[2:]==["--observe","--json"]:
+    replies=json.load(open(os.path.join(dir,"replies")))
+    count=os.path.join(dir,"observed")
+    n=int(open(count).read()) if os.path.exists(count) else 0
+    open(count,"w").write(str(n+1))
+    print(json.dumps(replies[min(n,len(replies)-1)]))
+    sys.exit(0)
+fd=int(custody)
+fcntl.fcntl(fd,fcntl.F_SETFD,fcntl.fcntl(fd,fcntl.F_GETFD)|fcntl.FD_CLOEXEC)
+def write(path,value):
+    fd=os.open(path+".tmp",os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+    os.write(fd,value)
+    os.close(fd)
+    os.rename(path+".tmp",path)
+if argv[0]=="session-action":
+    write(os.path.join(state,"action_receipts",request["request_id"]+".json"),open(os.path.join(dir,"receipt"),"rb").read())
+    conversation=request["expected_conversation_id"]
+    record={{"name":name,"agent":"codex","run_id":"{resumed}","conversation_id":conversation,"run_identity_version":1,"startup_kind":"resume","supervisor":{{}},"expected_id":conversation,"activity":"unknown","phase":"unknown","error":"","last_event_at":0,"pid":{pid},"process_start":open(os.path.join(dir,"start")).read()}}
+    write(os.path.join(state,hashlib.sha256(name.encode()).hexdigest()+".json"),json.dumps(record).encode())
+else:
+    write(os.path.join(state,"input_receipts",request["request_id"]+".json"),json.dumps({{"request_id":request["request_id"],"name":name,"run_id":request["expected_run_id"],"conversation_id":request["expected_conversation_id"],"digest":hashlib.sha256(data).hexdigest(),"status":"submitted","transport":"terminal"}}).encode())
+"#,
+                state = state.to_str().unwrap(),
+                dir = dir.to_str().unwrap(),
+                pid = pid,
+                resumed = RESUMED,
+            ),
+        )
+        .unwrap();
+        mode(path, 0o700);
+        std::fs::write(dir.join("start"), started(pid)).unwrap();
+    }
+
+    /// zerus-5wmh.66.4.10: the pinned image observes a resumed Codex as its
+    /// own child, leading its own process group, with exactly the
+    /// observation's stdin and no custody, and the send follows only a ready
+    /// reply right before it; one that turns to not ready there starts no
+    /// send, which then never started.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_pinned_image_observes_a_resumed_codex_without_custody_before_its_send() {
+        for (replies, sends) in [
+            (vec![OBSERVED_NOT_READY, OBSERVED_READY], true),
+            (vec![OBSERVED_READY, OBSERVED_NOT_READY], false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("hgs");
+            let mut f = Fixture::unexecuted();
+            codex_image(&path, &f.state, dir.path(), &replies);
+            f.runtime.fixture_image(&path);
+            f.runtime.fixture_wait(
+                Duration::from_secs(5),
+                Duration::from_millis(5),
+                runtime::CHAIN,
+            );
+            let original = f.codex();
+            prepared_of(&f, dir.path(), &original, CODEX);
+            assert!(f.admit(&original).accepted);
+            f.until("settled", |f| f.row(&original).receipt.drained);
+            let row = f.row(&original);
+            let seen: Vec<Value> = std::fs::read_to_string(dir.path().join("seen"))
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let (observations, originals): (Vec<&Value>, Vec<&Value>) =
+                seen.iter().partition(|call| call["argv"][2] == "--observe");
+            for call in &observations {
+                assert_eq!(call["argv"], json!(["send", CODEX, "--observe", "--json"]));
+                assert_eq!(
+                    serde_json::from_str::<Value>(call["stdin"].as_str().unwrap()).unwrap(),
+                    json!({"expected_run_id": RESUMED, "expected_conversation_id": CONVERSATION})
+                );
+                assert_eq!(
+                    call["custody"],
+                    Value::Null,
+                    "an observation holds no custody"
+                );
+                assert_eq!(call["leader"], true, "its own process group");
+            }
+            assert!(originals.iter().all(|call| call["custody"].is_string()));
+            assert_eq!(row.receipt.resume.step, Step::Recorded);
+            if sends {
+                // Not ready, ready in the wait, ready right before the send.
+                assert_eq!(observations.len(), 3);
+                assert_eq!(row.receipt.send.step, Step::Recorded);
+                assert_eq!(originals.len(), 2);
+            } else {
+                assert_eq!(observations.len(), 2);
+                assert_eq!(
+                    (row.receipt.send.step, row.receipt.send.code.as_str()),
+                    (Step::NotStarted, wire::NOT_STARTED)
+                );
+                assert_eq!(originals.len(), 1, "only the resume ran");
+            }
+        }
     }
 
     /// The pinned image runs the resume with its exact stdin, then the send

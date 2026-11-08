@@ -7,9 +7,10 @@
 //!
 //! The composer routes a "Resume and send" here only from the same action
 //! that reserved and durably saved its version 3 checkpoint. One the service
-//! does not take (another computer, a subagent, a Codex, OpenCode or
-//! DeepSeek session, one too large for the control frame, or a service
-//! without the kind) is decided before any offer and goes the unchanged
+//! does not take (another computer, a subagent, an OpenCode or DeepSeek
+//! session, one too large for the control frame, a service without the
+//! kind, or a Codex session for a service without its readiness marker,
+//! zerus-5wmh.66.4.10) is decided before any offer and goes the unchanged
 //! direct way. Once offered, nothing falls back: a lost reply goes to the
 //! bounded read-only lookup, and a missing or Unknown result never resumes
 //! or sends again.
@@ -167,11 +168,17 @@ pub(crate) fn call(
         if !read.supports(wire::HELP_MARKER).map_err(|_| ())? {
             return Ok(ResumeAnswer::Direct);
         }
+        // A Codex session goes only to a service that observes its resumed
+        // agent (zerus-5wmh.66.4.10); an older service would refuse it only
+        // after the offer, so it goes the direct way, decided here.
+        if wire::observed(session) && !read.supports(wire::OBSERVE_MARKER).map_err(|_| ())? {
+            return Ok(ResumeAnswer::Direct);
+        }
         let Some(intent) = intent(&read.scope, session, checkpoint, resume, original) else {
             return Ok(ResumeAnswer::Direct);
         };
-        // The wire's own refusal before any offer: another agent (Codex
-        // included), a subagent, an original too large for the frame, or one
+        // The wire's own refusal before any offer: another agent (DeepSeek or
+        // OpenCode), a subagent, an original too large for the frame, or one
         // the CLI itself would refuse. The direct path decides those.
         let Ok(verified) = intent.clone().verify() else {
             return Ok(ResumeAnswer::Direct);

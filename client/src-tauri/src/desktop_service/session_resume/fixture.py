@@ -3,6 +3,8 @@
 # answers from fixture.json: `resume_admission` is the admission reply to
 # print (absent: the reply is lost) and `resume_receipts` the lookup
 # receipts, one per lookup with the last repeating (absent: none is found).
+# Its help shows the kind (unless `resume_no_abi`) and that it observes a
+# resumed Codex (unless `resume_no_observe`).
 # As the real service does, the generic `desktop request` lane refuses the
 # original itself.
 import sys
@@ -12,6 +14,9 @@ if sys.argv[1:] == ['--help']:
     c = json.loads((Path(__file__).parent / 'fixture.json').read_text())
     if not c.get('resume_no_abi'):
         print('Desktop deferred session resume ABI: desktop-deferred-session-resume-v1', flush=True)
+        if not c.get('resume_no_observe'):
+            print('Desktop deferred session resume Codex readiness: '
+                  'desktop-deferred-session-resume-codex-v1', flush=True)
 elif sys.argv[1:3] in [['desktop', 'frontend-request'], ['desktop', 'request']]:
     import io
     import json

@@ -2559,8 +2559,8 @@ impl Composers {
         // A compaction also reserves the send it waits for (version 2), so
         // the desktop service can take the whole compact-to-send; the
         // direct path reserves its send again when it sends. A resume the
-        // service may take (a local Claude or Kimi session, while a session
-        // resume route is set) reserves its send too, with the receipted
+        // service may take (a local Claude, Kimi or Codex session, while a
+        // session resume route is set) reserves its send too, with the receipted
         // resume (version 3); every other start keeps version 1.
         let resumable = start
             && choice == Some(StartChoice::Resume)

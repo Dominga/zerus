@@ -138,12 +138,11 @@ fn one_the_service_does_not_take_goes_direct_before_any_request() {
             ResumeAnswer::Direct
         );
         service.join().await.unwrap();
-        // The wire's own refusals before any offer: a Codex session (direct
-        // until zerus-5wmh.66.4.10), a DeepSeek session and an original too
-        // large for the control frame.
+        // The wire's own refusals before any offer: a DeepSeek or OpenCode
+        // session and an original too large for the control frame.
         let f = fixture(json!({}));
         let (service, _cache) = connected(&f).await;
-        for session in ["codex/example", "dsh/example"] {
+        for session in ["dsh/example", "opencode/example"] {
             assert_eq!(
                 offer(service.clone(), session, original("hello")).await,
                 ResumeAnswer::Direct,
@@ -156,6 +155,49 @@ fn one_the_service_does_not_take_goes_direct_before_any_request() {
             ResumeAnswer::Direct
         );
         assert!(calls(&f.0).is_empty(), "nothing was offered");
+        service.join().await.unwrap();
+    });
+}
+
+/// zerus-5wmh.66.4.10, design-tima2's pin: a Codex resume-then-send
+/// reaches the offer only on a service whose help shows that it observes a
+/// resumed Codex. Against an older service it goes the direct way, decided
+/// before the hand-over hook and before any request; the same original on
+/// a service with the marker is handed over and offered.
+#[test]
+fn a_codex_resume_reaches_the_offer_only_with_the_services_readiness_marker() {
+    if !private_case("desktop_service::session_resume::fixture_tests::a_codex_resume_reaches_the_offer_only_with_the_services_readiness_marker") {
+        return;
+    }
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({"resume_no_observe": true}));
+        let (service, _cache) = connected(&f).await;
+        let (answer, seen) =
+            offer_handing(service.clone(), "codex/example", original("hello"), true).await;
+        assert_eq!(answer, ResumeAnswer::Direct);
+        assert!(seen.is_empty(), "never reached the hand-over");
+        assert!(calls(&f.0).is_empty(), "nothing was offered");
+        // A Claude session still goes to that service.
+        let (_, seen) = offer_handing(service.clone(), SESSION, original("hello"), false).await;
+        assert_eq!(seen.len(), 1);
+        service.join().await.unwrap();
+
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        let (answer, seen) =
+            offer_handing(service.clone(), "codex/example", original("hello"), true).await;
+        assert_eq!(seen.len(), 1, "handed over");
+        assert_eq!(seen[0].session, "codex/example");
+        assert_ne!(answer, ResumeAnswer::Direct);
+        let offered: Vec<Value> = calls(&f.0)
+            .into_iter()
+            .filter(|call| call["value"]["request"]["op"] == "session_resume")
+            .collect();
+        assert_eq!(offered.len(), 1);
+        assert_eq!(
+            offered[0]["value"]["request"]["intent"]["session"],
+            "codex/example"
+        );
         service.join().await.unwrap();
     });
 }
@@ -311,7 +353,7 @@ fn a_refused_hand_over_sends_nothing_and_never_ran() {
         assert!(calls(&f.0).is_empty(), "nothing reached the service");
         // A direct decision never reaches the hook.
         let (answer, seen) =
-            offer_handing(service.clone(), "codex/example", original("x"), true).await;
+            offer_handing(service.clone(), "dsh/example", original("x"), true).await;
         assert_eq!(answer, ResumeAnswer::Direct);
         assert!(seen.is_empty());
         service.join().await.unwrap();

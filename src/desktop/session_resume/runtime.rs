@@ -5,6 +5,9 @@
 //! the same live operation waits, off the actor and within one never-renewed
 //! budget, for the resumed run's record to show its agent takes a message,
 //! and only then prepares, reserves and spawns the send bound to that run. A
+//! resumed Codex shows that only on its terminal: the send's own
+//! effect-free observation child decides it, in each read of the wait and
+//! once more right before the send's spawn turn (zerus-5wmh.66.4.10). A
 //! restart never resumes a wait.
 use super::child::{self, Ended};
 use super::ledger::{self, Child};
@@ -56,6 +59,9 @@ const PROBE_EVERY: Duration = Duration::from_millis(250);
 pub(super) const WAIT: Duration = Duration::from_secs(180);
 /// How often the waiting operation reads the resumed session again.
 const POLL_EVERY: Duration = Duration::from_millis(500);
+/// The deadline of one observation of a resumed Codex, never past the
+/// wait's own (zerus-5wmh.66.4.10).
+pub(super) const OBSERVATION_WAIT: Duration = Duration::from_secs(5);
 /// The whole operation from its own first turn, when it gets the work slot:
 /// both children, both receipt reads, the wait and a margin. Nothing starts
 /// after it. Time queued behind another operation does not count
@@ -63,6 +69,10 @@ const POLL_EVERY: Duration = Duration::from_millis(500);
 pub(super) const CHAIN: Duration = Duration::from_secs(270);
 #[cfg(test)]
 type Hook = Arc<dyn Fn() + Send + Sync>;
+/// Stands in for the observation child in tests: it receives exactly the
+/// arguments and stdin the child would be given, and returns its reply.
+#[cfg(test)]
+type Observer = Arc<dyn Fn(&[String], &[u8]) -> Option<Vec<u8>> + Send + Sync>;
 
 /// Stands in for the one child in tests: it receives the plan, exactly the
 /// arguments and stdin the child would be given, the custody lock and the
@@ -180,6 +190,11 @@ pub(in crate::desktop) struct Runtime {
     wait: Duration,
     poll_every: Duration,
     chain: Duration,
+    /// One observation's deadline ([`OBSERVATION_WAIT`]).
+    observation_wait: Duration,
+    /// Stands in for the observation child.
+    #[cfg(test)]
+    observer: Option<Observer>,
     /// Runs in the final spawn turn, before the consent veto.
     #[cfg(test)]
     spawn_hook: Option<Hook>,
@@ -223,6 +238,9 @@ impl Runtime {
             wait: WAIT,
             poll_every: POLL_EVERY,
             chain: CHAIN,
+            observation_wait: OBSERVATION_WAIT,
+            #[cfg(test)]
+            observer: None,
             #[cfg(test)]
             spawn_hook: None,
             #[cfg(test)]
@@ -509,6 +527,9 @@ impl Runtime {
                     let executor = self.executor.clone();
                     #[cfg(test)]
                     let hook = self.spawn_hook.clone();
+                    #[cfg(test)]
+                    let observer = self.observer.clone();
+                    let observation_wait = self.observation_wait;
                     #[cfg(target_os = "linux")]
                     let image = self.image.clone();
                     let name = match child {
@@ -526,10 +547,13 @@ impl Runtime {
                             &lock,
                             &guard,
                             &launch,
+                            observation_wait,
                             #[cfg(target_os = "linux")]
                             image,
                             #[cfg(test)]
                             executor,
+                            #[cfg(test)]
+                            observer,
                             #[cfg(test)]
                             hook,
                         );
@@ -1013,6 +1037,12 @@ impl Runtime {
             .context("session resume is not waiting")?;
         let loans = (self.owner.clone(), consent.clone(), token.clone());
         let store_roots = roots.clone();
+        let observation_wait = self.observation_wait;
+        let observing = consent.clone();
+        #[cfg(target_os = "linux")]
+        let image = self.image.clone();
+        #[cfg(test)]
+        let observer = self.observer.clone();
         #[cfg(test)]
         let hook = self.ready_hook.clone();
         let (send, result) = mpsc::sync_channel(1);
@@ -1024,7 +1054,22 @@ impl Runtime {
                 if let Some(hook) = &hook {
                     hook();
                 }
-                let _ = send.send(ready::read(&store_roots, &plan, &run));
+                // A resumed Codex's observation ends with the wait at the latest.
+                let deadline = (Instant::now() + observation_wait).min(until);
+                let readiness =
+                    ready::read(&store_roots, &plan, &run, deadline, |args, input, until| {
+                        observe(
+                            args,
+                            input,
+                            until,
+                            &observing,
+                            #[cfg(target_os = "linux")]
+                            image.as_ref(),
+                            #[cfg(test)]
+                            observer.as_ref(),
+                        )
+                    });
+                let _ = send.send(readiness);
             })?;
         self.work = Some(Work::Waiting {
             id,
@@ -1091,6 +1136,13 @@ impl Runtime {
     pub(super) fn fixture_machine(&mut self, machine: &str) {
         self.machine = Some(Machine::fixture(machine));
     }
+    /// Stands in for the observation child of a resumed Codex, with this
+    /// deadline for each observation.
+    #[cfg(test)]
+    pub(super) fn fixture_observer(&mut self, observer: Option<Observer>, wait: Duration) {
+        self.observer = observer;
+        self.observation_wait = wait;
+    }
     /// Runs `hook` first in each read of the waiting operation's resumed
     /// session.
     #[cfg(test)]
@@ -1132,6 +1184,36 @@ impl Runtime {
         self.image = Some(Arc::new(Pin::open(path).unwrap()));
     }
 }
+/// The send's observation child of a resumed Codex (zerus-5wmh.66.4.10):
+/// this computer's own pinned image in its own process group, with no
+/// custody, or the test observer. Its reply within `until`, or nothing;
+/// without a pinned image nothing runs.
+fn observe(
+    args: &[String],
+    input: &[u8],
+    until: Instant,
+    consent: &Consent,
+    #[cfg(target_os = "linux")] image: Option<&Arc<Pin>>,
+    #[cfg(test)] observer: Option<&Observer>,
+) -> Option<Vec<u8>> {
+    #[cfg(test)]
+    if let Some(observer) = observer {
+        return observer(args, input);
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(image) = image {
+        return child::observe(image.executable(), args, input, until, |command| {
+            // A consent stopped since the read began starts nothing.
+            if consent.cancel.load(Ordering::Acquire) || !image.current() {
+                return Err(std::io::ErrorKind::PermissionDenied.into());
+            }
+            image.inherit(command)
+        });
+    }
+    let _ = (args, input, until, consent);
+    None
+}
+
 /// One original child: `hgs session-action <session> --json` or `hgs send
 /// <session> --json`, each with its exact stdin. Nothing exists before the
 /// spawn, so every refusal here never started.
@@ -1143,27 +1225,60 @@ fn original(
     lock: &Arc<InheritedLock>,
     resources: &Arc<dyn Send + Sync>,
     launch: &Launch,
+    observation_wait: Duration,
     #[cfg(target_os = "linux")] image: Option<Arc<Pin>>,
     #[cfg(test)] executor: Option<Executor>,
+    #[cfg(test)] observer: Option<Observer>,
     #[cfg(test)] hook: Option<Hook>,
 ) -> Ended {
     let plan = &consent.original.plan;
     let (args, input) = (&launch.args, launch.input.as_slice());
+    // The send to a resumed Codex starts only after the send's own
+    // observation, run once more here before the spawn turn, says the
+    // resumed agent takes it now (zerus-5wmh.66.4.10). Every other child
+    // has no observation.
+    #[cfg(target_os = "linux")]
+    let observer_image = image.clone();
+    let observed = || {
+        child == Child::Resume
+            || !plan.observed()
+            || ready::read(
+                roots,
+                plan,
+                &launch.run,
+                (Instant::now() + observation_wait).min(consent.chain()),
+                |args, input, until| {
+                    observe(
+                        args,
+                        input,
+                        until,
+                        consent,
+                        #[cfg(target_os = "linux")]
+                        observer_image.as_ref(),
+                        #[cfg(test)]
+                        observer.as_ref(),
+                    )
+                },
+            ) == Readiness::Ready
+    };
     // Last before the spawn, after every slow check and the turn wait: the
     // selected session's actual record of the run this child expects (the
     // original run for the resume, the resumed one for the send) and, for
-    // the send, its readiness, read again from the retained original roots;
-    // then a consent stopped since the worker began (a revoke, a lost source,
-    // a stop).
+    // the send, its readiness by the record (for a resumed Codex: not
+    // ended), read again from the retained original roots; then a consent
+    // stopped since the worker began (a revoke, a lost source, a stop).
     let current = || {
         target::current(roots, plan, &launch.run)
-            && (child == Child::Resume || ready::read(roots, plan, &launch.run) == Readiness::Ready)
+            && (child == Child::Resume || ready::current(roots, plan, &launch.run))
             && !consent.cancel.load(Ordering::Acquire)
     };
     // The test executor receives exactly what the child would; it stands in
     // for the spawn turn, so the veto runs before it as in `child::run`.
     #[cfg(test)]
     if let Some(executor) = executor {
+        if !observed() {
+            return Ended::NotStarted;
+        }
         if let Some(hook) = &hook {
             hook();
         }
@@ -1172,6 +1287,10 @@ fn original(
             return Ended::NotStarted;
         }
         return executor(plan, args, input, lock, resources);
+    }
+    #[cfg(target_os = "linux")]
+    if image.is_some() && !observed() {
+        return Ended::NotStarted;
     }
     #[cfg(target_os = "linux")]
     if let Some(image) = image {
@@ -1199,7 +1318,7 @@ fn original(
     }
     // No pinned image (a unit-test image, or one already gone), and macOS,
     // whose admission refuses first: nothing starts.
-    let _ = (current, args, input, lock, resources);
+    let _ = (observed, current, args, input, lock, resources);
     #[cfg(test)]
     let _ = hook;
     Ended::NotStarted

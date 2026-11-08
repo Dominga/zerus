@@ -18,12 +18,14 @@
 //! A restored, imported, recovered or reconnected original never starts a
 //! child: it gets the read-only lookup only.
 //!
-//! v1 carries a local Claude or Kimi session only, and a resume only. A
-//! Codex session stays direct (zerus-5wmh.66.4.10): a resumed Codex stays
-//! pending until its first message, and the CLI shows its readiness only by
-//! querying its terminal, which the service does not do. A fresh start, a
-//! resume with compaction, DeepSeek and OpenCode, another computer and a
-//! subagent stay direct too, all decided before any offer.
+//! v1 carries a local Claude, Kimi or Codex session only, and a resume
+//! only. A resumed Codex stays pending until its first message, and the CLI
+//! shows its readiness only on its terminal, so the service asks the send's
+//! own effect-free observation (`hgs send <session> --observe --json`), and
+//! a client offers a Codex session only to a service that shows
+//! [`OBSERVE_MARKER`] (zerus-5wmh.66.4.10). A fresh start, a resume with
+//! compaction, DeepSeek and OpenCode, another computer and a subagent stay
+//! direct, all decided before any offer.
 use super::deferred_send::{self, Unsendable};
 use crate::{creation, operation_recovery::deferred_input};
 use serde::{Deserialize, Serialize};
@@ -35,6 +37,12 @@ pub const ABI: &str = "desktop-deferred-session-resume-v1";
 pub const HELP_MARKER: &str =
     "Desktop deferred session resume ABI: desktop-deferred-session-resume-v1";
 pub const PROFILE: &str = "deferred-session-resume-v1";
+/// The service also takes a Codex session, whose readiness only the send's
+/// own effect-free observation shows (zerus-5wmh.66.4.10). A client offers a
+/// Codex session only to a service whose help shows this marker; any other
+/// service gets it the direct way, decided before any offer.
+pub const OBSERVE_MARKER: &str =
+    "Desktop deferred session resume Codex readiness: desktop-deferred-session-resume-codex-v1";
 pub const REPLY_BYTES: usize = 24 << 10;
 /// The session action this kind runs.
 pub const ACTION: &str = "resume";
@@ -56,13 +64,18 @@ pub const RECEIPT_UNCERTAIN: &str = "session_resume_uncertain";
 pub const RECEIPT_MISMATCH: &str = "session_resume_receipt_mismatch";
 /// The CLI receipt is oversized or not a readable receipt.
 pub const RECEIPT_INVALID: &str = "session_resume_receipt_invalid";
-/// The session is not a Claude or Kimi session's: Codex (until
-/// zerus-5wmh.66.4.10), DeepSeek and OpenCode stay direct, before any offer.
+/// The session is not a Claude, Kimi or Codex session's: DeepSeek and
+/// OpenCode stay direct, before any offer.
 pub const AGENT_REFUSED: &str = "session_resume_agent_refused";
-/// The agents whose resumed session shows from its own record that it takes
-/// a message. A resumed Codex shows it only on its terminal, so it stays on
-/// the direct path (zerus-5wmh.66.4.10).
-pub const AGENTS: [&str; 2] = ["claude", "kimi"];
+/// The agents this kind takes: terminal agents whose resume starts a
+/// terminal and whose send types into it.
+pub const AGENTS: [&str; 3] = ["claude", "kimi", "codex"];
+/// Of [`AGENTS`], those whose resumed session shows only on its terminal
+/// that it takes a message: a resumed Codex stays pending until its first
+/// message. The send's own effect-free observation (`hgs send <session>
+/// --observe --json`) decides their readiness, and a client offers them
+/// only to a service that shows [`OBSERVE_MARKER`] (zerus-5wmh.66.4.10).
+pub const OBSERVED: [&str; 1] = ["codex"];
 /// The CLI's own bound on `hgs session-action`'s stdin.
 const MAX_RESUME: usize = 8192;
 
@@ -161,6 +174,20 @@ impl Plan {
     /// The send's arguments.
     pub fn send_args(&self) -> [String; 3] {
         ["send".into(), self.session.clone(), "--json".into()]
+    }
+    /// Whether the send's own observation decides the resumed session's
+    /// readiness ([`OBSERVED`]).
+    pub fn observed(&self) -> bool {
+        observed(&self.session)
+    }
+    /// The send's effect-free observation's arguments.
+    pub fn observe_args(&self) -> [String; 4] {
+        [
+            "send".into(),
+            self.session.clone(),
+            "--observe".into(),
+            "--json".into(),
+        ]
     }
     /// The send as a deferred send's plan, once bound to the resumed run:
     /// its `input_receipts` record is read by exactly that kind's rule.
@@ -263,9 +290,17 @@ pub struct Verified {
 fn local_name(value: &str) -> bool {
     super::creation_launch::session_name(value) && !value.contains('@')
 }
+/// Whether the session's agent is one whose readiness the send's own
+/// observation decides ([`OBSERVED`]).
+pub fn observed(session: &str) -> bool {
+    session
+        .split('/')
+        .next()
+        .is_some_and(|agent| OBSERVED.contains(&agent))
+}
 /// Whether the session's agent is one this kind takes ([`AGENTS`]): a
 /// terminal agent whose resume starts a terminal and whose send types into
-/// it, and whose record shows when it takes a message.
+/// it.
 fn terminal_agent(value: &str) -> bool {
     value
         .split('/')

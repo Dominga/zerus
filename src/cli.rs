@@ -78,6 +78,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        Desktop deferred answer update phase: desktop-deferred-answer-update-phase-v1
        Desktop deferred compact to send ABI: desktop-deferred-compact-to-send-v1
        Desktop deferred session resume ABI: desktop-deferred-session-resume-v1
+       Desktop deferred session resume Codex readiness: desktop-deferred-session-resume-codex-v1
        Desktop task start reconcile ABI: desktop-task-start-reconcile-v1
        Desktop pending read import ABI: desktop-pending-reads-v1
        Desktop activation ABI: desktop-activation-v1
@@ -126,6 +127,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] processes <session> [--archive <id>]   observed shell commands as JSON
        hgs [@host] processes <session> --output ID | --stop ID --run RUN --conversation ID [--generation ID]
        hgs [@host] send <session> --json   submit message/attachments from JSON stdin
+       hgs send <codex session> --observe --json   read whether a send to this computer's Codex session would be taken now, changing nothing
        hgs [@host] recovery action --scoped-json exact waiting-job control
        hgs [@host] history <session> --json bounded exact public history
        hgs [@host] history-projection <session> --json retired and refreshed history rows
@@ -311,6 +313,38 @@ fn mobile_peers(_: &Config, _: &[String]) -> Result<i32> {
         "One-hop mobile peer routing is unavailable on a Windows gateway; local Windows sessions are supported.",
     ))
 }
+/// The refusal of every `send ... --observe` but the supported one.
+const OBSERVE_ONLY: &str =
+    "hgs send --observe takes exactly `hgs send <codex session> --observe --json` on this computer";
+
+/// The one disposition of the send's effect-free observation
+/// (zerus-5wmh.66.4.10, .10.1). It runs first, before the helper
+/// rendezvous, any machine guard, `@host` or `--client` forwarding, a dry
+/// run, a session reference or `--session-id` selection, label repair,
+/// provider routing and stdin. Only the desktop service's own call goes on,
+/// straight to the observation: exactly `hgs send <session> --observe
+/// --json`, naming a local Codex session by its plain name. Any other argv
+/// with `send` and `--observe` before a `--` separator refuses with no
+/// effect. `None`: not an observation.
+fn observe_gate(args: &[String]) -> Option<Result<i32>> {
+    let head = args.split(|arg| arg == "--").next().unwrap_or_default();
+    if !(head.iter().any(|arg| arg == "--observe") && head.iter().any(|arg| arg == "send")) {
+        return None;
+    }
+    Some(match args {
+        [send, name, observe, json]
+            if send == "send"
+                && observe == "--observe"
+                && json == "--json"
+                && zerus_client_core::desktop::session_resume::observed(name)
+                && !name.contains('@') =>
+        {
+            platform::prepare_environment();
+            local_sessions().and_then(|()| state::observe_send(name).map_err(|e| Error::new(1, e)))
+        }
+        _ => Err(Error::new(2, OBSERVE_ONLY)),
+    })
+}
 fn state_command(verb: &str, args: &[String]) -> Result<i32> {
     let mut command = vec![verb.to_owned()];
     command.extend_from_slice(args);
@@ -481,6 +515,7 @@ fn unix_only_usage(line: &str) -> bool {
         zerus_client_core::desktop::deferred_answer::UPDATE_PHASE_MARKER,
         zerus_client_core::desktop::compact_to_send::HELP_MARKER,
         zerus_client_core::desktop::session_resume::HELP_MARKER,
+        zerus_client_core::desktop::session_resume::OBSERVE_MARKER,
         zerus_client_core::desktop::task_start_reconcile::HELP_MARKER,
         zerus_client_core::worktree_programs::custody::HELP_MARKER,
         zerus_client_core::worktree_programs::presentation::HELP_MARKER,
@@ -534,6 +569,7 @@ fn advertised(usage: Cow<'static, str>, linux: bool) -> Cow<'static, str> {
         zerus_client_core::desktop::deferred_answer::UPDATE_PHASE_MARKER,
         zerus_client_core::desktop::compact_to_send::HELP_MARKER,
         zerus_client_core::desktop::session_resume::HELP_MARKER,
+        zerus_client_core::desktop::session_resume::OBSERVE_MARKER,
     ];
     usage
         .lines()
@@ -563,6 +599,9 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
 }
 
 pub(crate) fn dispatch_at(args: Vec<String>, entered: Instant) -> Result<i32> {
+    if let Some(result) = observe_gate(&args) {
+        return result;
+    }
     // Keep an original helper alive until its parent has observed live code.
     // Only a bounded pipe prefix is consumed; ordinary dispatch/auth is intact.
     #[cfg(unix)]
@@ -3491,6 +3530,8 @@ mod tests {
         assert!(USAGE.lines().any(|line| line.trim() == compact_marker));
         let resume_marker = zerus_client_core::desktop::session_resume::HELP_MARKER;
         assert!(USAGE.lines().any(|line| line.trim() == resume_marker));
+        let observe_marker = zerus_client_core::desktop::session_resume::OBSERVE_MARKER;
+        assert!(USAGE.lines().any(|line| line.trim() == observe_marker));
         // Windows has no `hgs paste`, `hgs clip` or `hgs notify`, no Ctrl+V
         // that pulls a peer's image, and no POSIX creation-clone executor.
         // Its dry runs print the host's requests; every other line stays as is.
@@ -3569,6 +3610,10 @@ mod tests {
                     ""
                 )
                 .replace(
+                    "       Desktop deferred session resume Codex readiness: desktop-deferred-session-resume-codex-v1\n",
+                    ""
+                )
+                .replace(
                     "       Desktop task start reconcile ABI: desktop-task-start-reconcile-v1\n",
                     ""
                 )
@@ -3603,6 +3648,7 @@ mod tests {
         let phase = zerus_client_core::desktop::deferred_answer::UPDATE_PHASE_MARKER;
         let compact = zerus_client_core::desktop::compact_to_send::HELP_MARKER;
         let resume = zerus_client_core::desktop::session_resume::HELP_MARKER;
+        let observe = zerus_client_core::desktop::session_resume::OBSERVE_MARKER;
         let clone = zerus_client_core::desktop::creation_clone::HELP_MARKER;
         assert_eq!(advertised(usage_text(true), true), USAGE);
         let mac = advertised(usage_text(true), false);
@@ -3615,6 +3661,7 @@ mod tests {
         assert!(!mac.lines().any(|line| line.trim() == phase));
         assert!(!mac.lines().any(|line| line.trim() == compact));
         assert!(!mac.lines().any(|line| line.trim() == resume));
+        assert!(!mac.lines().any(|line| line.trim() == observe));
         assert!(mac.lines().any(|line| line.trim() == clone), "clone stays POSIX");
         assert_eq!(
             mac,
@@ -3655,9 +3702,13 @@ mod tests {
                     "       Desktop deferred session resume ABI: desktop-deferred-session-resume-v1\n",
                     ""
                 )
+                .replace(
+                    "       Desktop deferred session resume Codex readiness: desktop-deferred-session-resume-codex-v1\n",
+                    ""
+                )
         );
         for marker in [
-            marker, message, references, review, send, answer, phase, compact, resume,
+            marker, message, references, review, send, answer, phase, compact, resume, observe,
         ] {
             assert_eq!(
                 help_text().lines().any(|line| line.trim() == marker),

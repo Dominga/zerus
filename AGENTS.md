@@ -36,6 +36,9 @@ Zerus product tasks received through `hgs task` are separate from Beads engineer
 tracking. For a direct request already being worked on, agents use `hgs task add
 --start` or `hgs task start REF`; plain add queues work for later. Reports by the
 exact pinned agent move its unsent queued task to In review as well.
+Use exactly one acknowledgement command supplied by the original task prompt.
+After task-control activation, pinned `begin-attempt REF --attempt UUID` replaces
+plain `start` for managed work; plain start never binds a managed native turn.
 For managed work, use the report-attempt command pinned in the original task
 prompt or start acknowledgement, never a newer attempt ID from a lookup. An
 explicit legacy start prints the ordinary report command and creates no UUID.

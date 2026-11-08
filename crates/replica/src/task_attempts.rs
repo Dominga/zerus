@@ -586,6 +586,46 @@ impl TaskDoc {
         Ok(())
     }
 
+    /// Semantic acknowledgement of the original immutable attempt. Native
+    /// turn binding is a separate owning-computer admission; this data API
+    /// cannot grant interrupt authority. Plain start keeps its old policy.
+    pub fn begin_attempt(&mut self, origin: &str, actor: &Actor, now: i64) -> Result<()> {
+        self.writable()?;
+        if !canonical_uuid(origin) {
+            return Err(Error::new(
+                "begin-attempt requires the original canonical attempt UUID",
+            ));
+        }
+        let Actor::Agent(own) = actor else {
+            return Err(Error::new(
+                "only the exact executor may acknowledge its attempt",
+            ));
+        };
+        self.not_held()?;
+        let view = self.view()?;
+        let execution = view.execution.as_ref();
+        let current = execution.and_then(|e| e.current.as_ref());
+        let record = self.attempt(origin)?;
+        if view.stage != Stage::Active
+            || execution.is_some_and(|e| e.conflict)
+            || !current.is_some_and(|a| {
+                !a.legacy
+                    && a.id == origin
+                    && a.executor.as_ref() == Some(own)
+                    && matches!(a.phase, Phase::Submitted | Phase::Running)
+                    && record
+                        .as_ref()
+                        .is_some_and(|r| r.generation == a.generation && r.executor == *own)
+            })
+            || matches!(view.target, Target::Subagent { .. }) && view.worker.is_none()
+        {
+            return Err(Error::new(
+                "the original attempt is not current and delivered for this exact executor",
+            ));
+        }
+        self.acknowledge_attempt(&view, own, actor, now)
+    }
+
     /// The current attempt's executor acknowledges it. While its delivery is
     /// unknown that is evidence only: no history entry says it started.
     pub(super) fn acknowledge_attempt(
@@ -984,6 +1024,59 @@ mod tests {
             .unwrap()
             .moves
         );
+    }
+
+    // The original acknowledgement cannot retarget a newer assignment.
+    #[test]
+    fn scoped_begin_never_acknowledges_a_new_generation_for_the_same_executor() {
+        let mut task = task();
+        send(&mut task, ONE, "api");
+        settle(&mut task, ONE);
+        task.begin_attempt(ONE, &agent("api"), 12).unwrap();
+        assert!(
+            task.report_attempt(ONE, "Ready", ReportKind::Ready, None, &agent("api"), 13)
+                .unwrap()
+                .moves
+        );
+        task.set_stage(Stage::Todo, &Actor::Person, 14).unwrap();
+        send(&mut task, TWO, "api");
+        settle(&mut task, TWO);
+        let before = task.version();
+        assert!(task.begin_attempt(ONE, &agent("api"), 20).is_err());
+        assert_eq!(task.version(), before);
+        assert!(current(&task).began_at.is_none());
+        task.begin_attempt(TWO, &agent("api"), 21).unwrap();
+        assert_eq!(current(&task).id, TWO);
+        assert_eq!(current(&task).began_at, Some(21));
+    }
+
+    #[test]
+    fn scoped_begin_requires_delivery_and_the_exact_actor_without_writing_history() {
+        let mut task = task();
+        send(&mut task, ONE, "api");
+        let before = task.version();
+        assert!(task.begin_attempt(ONE, &agent("api"), 11).is_err());
+        assert_eq!(task.version(), before);
+        settle(&mut task, ONE);
+        for (origin, actor) in [
+            ("latest", agent("api")),
+            (ONE, Actor::Person),
+            (ONE, agent("other")),
+        ] {
+            let before = task.version();
+            assert!(task.begin_attempt(origin, &actor, 12).is_err());
+            assert_eq!(task.version(), before);
+        }
+        task.begin_attempt(ONE, &agent("api"), 13).unwrap();
+        let before = task.version();
+        task.begin_attempt(ONE, &agent("api"), 14).unwrap();
+        assert_eq!(task.version(), before);
+        task.push_event(ONE, EventKind::Paused, &Actor::Person, 15)
+            .unwrap();
+        let before = task.version();
+        assert!(task.begin_attempt(ONE, &agent("api"), 16).is_err());
+        assert_eq!(task.version(), before);
+        assert_eq!(current(&task).phase, Phase::Paused);
     }
 
     /// The receipt a reservation's own submitted input leaves.

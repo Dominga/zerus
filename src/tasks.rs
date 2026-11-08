@@ -19,6 +19,7 @@ use zerus_replica::{
 
 mod answers;
 mod reports;
+pub(crate) mod controls;
 mod attempts;
 mod cancellation;
 mod cutover;
@@ -61,7 +62,8 @@ const AGENT_INSTRUCTIONS: &str = concat!(
 /// instructions; other agents get them once their hooks are reviewed.
 pub(crate) fn session_context(agent: &str) -> Option<Value> {
     matches!(agent, "claude" | "codex").then(|| {
-        json!({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": AGENT_INSTRUCTIONS}})
+        let instructions = controls::session_instructions(AGENT_INSTRUCTIONS);
+        json!({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": instructions}})
     })
 }
 
@@ -521,6 +523,9 @@ pub(super) fn agent_starts_since(
 pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
     if dry {
         return Err(fail("task commands do not support --dry-run"));
+    }
+    if args.first().is_some_and(|action| matches!(action.as_str(), "control" | "begin-attempt")) {
+        return controls::dispatch(config, args);
     }
     // The phone's commands refuse in JSON, which the connector passes on.
     let phone = ["exchange", "mobile-send", "mobile-cancel", "mobile-done"];

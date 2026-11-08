@@ -57,3 +57,52 @@ class InactiveControls(test_tasks.DeliveryFixture):
         self.assertEqual(path.read_bytes(), before)
         for task in (first, second, third):
             self.assertEqual(self.hgs("get", task["ref"])["task"]["stage"], "active")
+
+
+class InactiveControlCommands(test_tasks.Fixture):
+    def call(self, args, payload=None, code="task_controls_inactive"):
+        result = subprocess.run([str(test_tasks.HGS), "task", *args],
+                                input=None if payload is None else json.dumps(payload),
+                                env=self.env, text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        answer = json.loads(result.stdout)
+        self.assertEqual((answer["schema"], answer["ok"], answer["code"], answer["attempted"]),
+                         (1, False, code, False))
+        return answer
+
+    def test_new_commands_remain_inactive_without_opening_task_or_desktop_stores(self):
+        original = "00000000-0000-4000-8000-000000000001"
+        desktop = self.state / "desktop"
+        desktop.mkdir(mode=0o700)
+        path = desktop / "state.sqlite3"
+        with sqlite3.connect(path) as db:
+            db.execute("CREATE TABLE desktop_task_control_meta(id PRIMARY KEY,version)")
+            db.execute("INSERT INTO desktop_task_control_meta VALUES(1,99)")
+        path.chmod(0o600)
+        before = path.read_bytes()
+        answer = self.call(["begin-attempt", "missing/T-234567", "--attempt", original, "--json"])
+        self.assertEqual(answer["request_id"], original)
+        plan = {"schema": 1, "request_id": original, "action": "pause",
+                "target": {"scope": "attempt", "project": "not-resolved", "task": original, "attempt": original},
+                "observed_pauses": [], "observed_stops": []}
+        self.assertEqual(self.call(["control", "plan", "--json"], plan)["request_id"], original)
+        executor = {"computer": original, "run": "original-run", "conversation": "original-conversation", "child": None}
+        execute = {"schema": 1, "request": {"id": original, "action": "pause", "executor": executor,
+                   "attempt": {"project": "not-resolved", "task": original, "attempt": original,
+                               "generation": 1, "fingerprint": "a" * 64},
+                   "slot": {"id": original, "revision": 1}, "task_version": "original-version", "turn": "original-turn",
+                   "observed_pauses": [], "observed_stops": []}, "caller": {"kind": "person"},
+                   "configuration": "b" * 64, "store_identity": "c" * 64, "cli_image": "d" * 64, "loaded_adapter": "e" * 64}
+        self.assertEqual(self.call(["control", "execute", "--json"], execute)["request_id"], original)
+        status = {"schema": 1, "target": {"scope": "request", "request_id": original}}
+        self.assertEqual(self.call(["control", "status", "--json"], status)["request_id"], original)
+        self.assertEqual(path.read_bytes(), before)
+        help_text = subprocess.check_output([str(test_tasks.HGS), "--help"], env=self.env, text=True)
+        self.assertIn("hgs task begin-attempt", help_text)
+        self.assertNotIn("task-control-v1", help_text.splitlines())
+
+    def test_bad_origin_and_spoofed_actor_are_refused_before_any_effect(self):
+        self.call(["begin-attempt", "p/T-234567", "--attempt", "latest", "--json"], code="invalid_task_control")
+        original = "00000000-0000-4000-8000-000000000001"
+        payload = {"schema": 1, "target": {"scope": "request", "request_id": original}, "actor": "person"}
+        self.call(["control", "status", "--json"], payload, code="invalid_task_control")

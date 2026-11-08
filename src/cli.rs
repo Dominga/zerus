@@ -248,6 +248,8 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs task attachment REF --file N [--entry ID]   one task file's bytes, for metadata-only history pages
        hgs task exchange|digests --json                 the phone's task exchange (mobile)
        hgs task report-attempt REF --attempt UUID [--progress|--ready] [--considered REV]   pinned execution report (report-attempt-v1)
+       hgs task begin-attempt REF --attempt UUID [--json]   inactive task-scoped acknowledgement
+       hgs task control plan|execute|status --json   inactive task controls (JSON stdin)
        hgs task mobile-send|mobile-cancel|mobile-done --json   the phone's task actions (mobile)
        hgs clip                       PNG from this box's clipboard to stdout (rc 1: no image)
        hgs paste <session> <pane> [client]   the tmux C-v binding; not for hand use
@@ -555,7 +557,11 @@ fn unix_only(command: &str, unix: bool) -> Result<()> {
 /// code a macOS task message, deferred send or deferred answer child runs, so
 /// only Linux advertises those ABIs.
 fn help_text() -> Cow<'static, str> {
-    advertised(usage_text(cfg!(unix)), cfg!(target_os = "linux"))
+    let usage = advertised(usage_text(cfg!(unix)), cfg!(target_os = "linux"));
+    match crate::tasks::controls::help_marker() {
+        Some(marker) => format!("{usage}\n{marker}\n").into(),
+        None => usage,
+    }
 }
 fn advertised(usage: Cow<'static, str>, linux: bool) -> Cow<'static, str> {
     if linux {

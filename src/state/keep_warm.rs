@@ -752,13 +752,15 @@ fn off_runtime(previous: &Value, state: &str, reason: &str, now: f64) -> Value {
     }
 }
 
-fn save_runtime(owner: &str, value: &Value) -> Result<()> {
+fn save_runtime(owner: &str, value: &Value, verify: &impl Fn() -> Result<()>) -> Result<()> {
+    verify()?;
     atomic(&runtime_path(owner).ok_or("invalid keep-warm owner")?, &value.to_string())
 }
 
 /// Turn an expired or orphaned setting off, unless it changed meanwhile.
-fn turn_off(owner: &str, entry: &Entry) -> Result<()> {
+fn turn_off(owner: &str, entry: &Entry, verify: &impl Fn() -> Result<()>) -> Result<()> {
     let _guard = lock(Some(&lock_path()))?;
+    verify()?;
     let mut store = read_store(&path())?;
     if let Some(current) = store.sessions.get_mut(owner).filter(|current| *current == entry) {
         current.enabled = false;
@@ -771,16 +773,18 @@ fn turn_off(owner: &str, entry: &Entry) -> Result<()> {
 
 /// Send one ping. The guarded submit re-checks everything under the input
 /// lock; only a refusal before any input lets a later round try again.
-fn send(owner: &str, entry: &Entry, record: &Value, mut runtime: Value, now: f64) -> Result<()> {
+fn send(owner: &str, entry: &Entry, record: &Value, mut runtime: Value, now: f64,
+        verify: &impl Fn() -> Result<()>) -> Result<()> {
     let request_id = uuid::Uuid::new_v4().to_string();
     // The ping belongs to the setting it was decided for (its revision).
     for (key, value) in [("state", json!("dispatching")), ("request_id", json!(request_id)), ("since", json!(now)),
         ("reason", json!("")), ("next_at", Value::Null), ("revision", json!(entry.revision))] {
         runtime[key] = value;
     }
-    save_runtime(owner, &runtime)?;
+    save_runtime(owner, &runtime, verify)?;
     let payload = json!({"request_id":request_id,"text":TEXT,"expected_run_id":record["run_id"],
         "expected_conversation_id":record["conversation_id"]});
+    verify()?;
     let result = input::submit_keep_warm(string(record, "name"), payload.to_string().as_bytes(), &request_id);
     match result {
         input::Submission::Receipt(_) => {
@@ -799,10 +803,11 @@ fn send(owner: &str, entry: &Entry, record: &Value, mut runtime: Value, now: f64
             runtime["reason"] = json!(format!("The last keep-warm delivery is unknown: {}. {RESUMES}", journal::clipped(&json!(error), 300)));
         }
     }
-    save_runtime(owner, &runtime)
+    save_runtime(owner, &runtime, verify)
 }
 
-fn round(owner: &str, entry: &Entry, panes: &Snapshot, now: f64) -> Result<()> {
+fn round(owner: &str, entry: &Entry, panes: &Snapshot, now: f64,
+         verify: &impl Fn() -> Result<()>) -> Result<()> {
     if !owner_valid(owner) {
         return Err("invalid keep-warm owner".into());
     }
@@ -810,7 +815,7 @@ fn round(owner: &str, entry: &Entry, panes: &Snapshot, now: f64) -> Result<()> {
         Ok(runtime) => runtime,
         Err(_) => {
             let Step::Hold { state, reason, since, .. } = unreadable(now) else { unreachable!() };
-            return save_runtime(owner, &json!({"state":state,"reason":reason,"since":since}));
+            return save_runtime(owner, &json!({"state":state,"reason":reason,"since":since}), verify);
         }
     };
     let record = bound_record(owner, entry)?;
@@ -824,8 +829,8 @@ fn round(owner: &str, entry: &Entry, panes: &Snapshot, now: f64) -> Result<()> {
         now);
     match step {
         Step::Off(state, reason) => {
-            turn_off(owner, entry)?;
-            save_runtime(owner, &off_runtime(&runtime, state, reason, now))
+            turn_off(owner, entry, verify)?;
+            save_runtime(owner, &off_runtime(&runtime, state, reason, now), verify)
         }
         Step::Hold { state, reason, next_at, since } => {
             let mut next = runtime.clone();
@@ -835,9 +840,9 @@ fn round(owner: &str, entry: &Entry, panes: &Snapshot, now: f64) -> Result<()> {
             for (key, value) in [("state", json!(state)), ("reason", json!(reason)), ("next_at", json!(next_at)), ("since", json!(since))] {
                 next[key] = value;
             }
-            if next != runtime { save_runtime(owner, &next) } else { Ok(()) }
+            if next != runtime { save_runtime(owner, &next, verify) } else { Ok(()) }
         }
-        Step::Send => send(owner, entry, record.as_ref().unwrap(), if runtime.is_object() { runtime } else { json!({}) }, now),
+        Step::Send => send(owner, entry, record.as_ref().unwrap(), if runtime.is_object() { runtime } else { json!({}) }, now, verify),
     }
 }
 
@@ -846,20 +851,37 @@ fn round(owner: &str, entry: &Entry, panes: &Snapshot, now: f64) -> Result<()> {
 /// skips, so one window never gets two pings.
 pub(super) fn tick() -> Result<()> {
     let Some(store) = load() else { return Ok(()) };
-    let enabled: Vec<(String, Entry)> = store.sessions.into_iter().filter(|(_, entry)| entry.enabled).collect();
-    if enabled.is_empty() {
+    if !store.sessions.values().any(|entry| entry.enabled) {
         return Ok(());
     }
     private_dir(&root().join("recovery/keep-warm"))?;
+    #[cfg(unix)]
+    let Some(_round) = storage::job_round::try_acquire(storage::job_round::Kind::KeepWarm)? else {
+        return Ok(());
+    };
+    #[cfg(not(unix))]
     let file = crate::platform::private_open(fs::OpenOptions::new().create(true).truncate(false).write(true))
         .open(root().join("recovery/keep-warm.lock")).map_err(|e| e.to_string())?;
+    #[cfg(not(unix))]
     if fs2::FileExt::try_lock_exclusive(&file).is_err() {
         return Ok(());
     }
+    #[cfg(not(unix))]
     let _round = crate::platform::FileLock::held(file);
+    let verify = || {
+        #[cfg(unix)]
+        { _round.verify() }
+        #[cfg(not(unix))]
+        { Ok(()) }
+    };
+    // A transition can finish after the preliminary read and before this
+    // round takes its exclusion. Only the snapshot inside the original round
+    // may supply owner keys or settings for work.
+    let Some(store) = load() else { return Ok(()) };
+    let enabled: Vec<(String, Entry)> = store.sessions.into_iter().filter(|(_, entry)| entry.enabled).collect();
     let panes = live()?;
     for (owner, entry) in enabled {
-        if let Err(error) = round(&owner, &entry, &panes, now()) {
+        if let Err(error) = round(&owner, &entry, &panes, now(), &verify) {
             eprintln!("hgs keep-warm: {error}");
         }
     }
@@ -898,6 +920,39 @@ fn eligible(record: &Value) -> std::result::Result<(), String> {
     if rule.supported { Ok(()) } else { Err(rule.reason.into()) }
 }
 
+fn setting_binding(record: &Value) -> Value {
+    json!([record["name"], record["agent"], record["run_id"],
+        record["conversation_id"], record["session_id"], record["layout"]])
+}
+
+// A setting can wait behind a rename or a future legacy-to-ID transaction.
+// Recheck its original storage after taking the setting lock, without taking
+// the state writer in the opposite order. A changed original is never a new
+// setting for the old key or another holder of the label.
+fn verify_setting_binding(original: &Value) -> Result<()> {
+    let current = match provider_binding::Provider::named(string(original, "name")) {
+        Some(provider) if storage::in_id_layout(original) =>
+            provider.read_id(string(original, "session_id"))?,
+        Some(provider) => provider.read_label(string(original, "name"))?,
+        None => {
+            let bytes = storage::binding_bytes(&storage::own_path(original)?)
+                .map_err(|e| e.to_string())?;
+            if bytes.len() as u64 > MAX_FILE {
+                return Err("Keep-warm binding exceeds its limit".into());
+            }
+            let current: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+            if current["version"] != 1 {
+                return Err("Unsupported keep-warm session binding".into());
+            }
+            current
+        }
+    };
+    if setting_binding(&current) != setting_binding(original) {
+        return Err("The session changed while keep-warm was waiting; refresh before changing it".into());
+    }
+    Ok(())
+}
+
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let [name, flag] = args else {
         return Err(USAGE.into());
@@ -921,6 +976,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let owner = storage::owner_key(&record);
     let (code, mut output, changed, entry) = {
         let _guard = lock(Some(&lock_path()))?;
+        verify_setting_binding(&record)?;
         let mut store = read_store(&path())?;
         let (code, output, changed) = update(&mut store, &owner, &record, &request, now(), || eligible(&record));
         if changed {

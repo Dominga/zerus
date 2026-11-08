@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { accountTooltip, current, dayTime, exhausted, exhaustedSummary, forecast, fromProjected, limitRecoveryNotice, pace, period, rateLimitNotice, remaining, severest, stateText, summaryText, usageChipPercent, usageRetryWaiting, windowText } from "./usage";
+import { accountTooltip, clock, current, dayTime, exhausted, exhaustedSummary, forecast, fromProjected, limitRecoveryNotice, pace, period, rateLimitNotice, remaining, severest, stateText, summaryText, usageChipPercent, usageRetryWaiting, windowText } from "./usage";
 import { NOW, projected, usageOf } from "../../store/testing";
 
 describe("usage windows (inventory 8.4, gaps 1-4 and 7)", () => {
@@ -8,7 +8,13 @@ describe("usage windows (inventory 8.4, gaps 1-4 and 7)", () => {
     expect(rateLimitNotice(u, NOW)).toBe("Limits 2 min ago, rate limited. Retry in 100 s");
     expect(usageRetryWaiting(u, NOW)).toBe(true);
     expect(accountTooltip(u, NOW)).toContain("5h: 42% used");
-    expect(accountTooltip(u, NOW)).toContain(rateLimitNotice(u, NOW));
+    // A tooltip names the retry's clock time; only the visible notice counts seconds (zerus-5ryrx).
+    expect(rateLimitNotice(u, NOW, true)).toBe(`Limits from ${clock(NOW - 120)}, rate limited. Retry at ${clock(NOW + 100)}`);
+    // A tooltip names clock times: it reads the same a minute later (zerus-f5gta).
+    expect(rateLimitNotice(u, NOW + 60, true)).toBe(rateLimitNotice(u, NOW, true));
+    expect(accountTooltip(u, NOW)).toContain(rateLimitNotice(u, NOW, true));
+    expect(accountTooltip(u, NOW)).not.toMatch(/Retry in \d+ s/);
+    expect(accountTooltip(u, NOW + 1)).toBe(accountTooltip(u, NOW));
     expect(summaryText(u)).toBe("Rate limited");
     expect(stateText(u)).toContain("sign-in is unchanged");
     expect(rateLimitNotice(u, NOW + 100)).toBe("Limits 3 min ago, rate limited. Refresh to check limits.");

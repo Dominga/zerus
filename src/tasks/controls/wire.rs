@@ -72,7 +72,7 @@ pub(super) struct PlanRequest {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Caller {
-    Person,
+    Person {},
     Executor { executor: Executor },
 }
 

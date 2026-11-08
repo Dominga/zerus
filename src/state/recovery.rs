@@ -729,6 +729,10 @@ pub(super) fn observe() -> Result<Vec<Value>> {
     Ok(snapshots)
 }
 fn tick() -> Result<()> {
+    #[cfg(unix)]
+    let Some(_round) = storage::job_round::try_acquire(storage::job_round::Kind::Recovery)? else {
+        return Ok(());
+    };
     crate::analytics::maintenance(&root());
     let mut sends = Vec::new();
     // Native inspection can wait on an agent. Never hold the global write lock
@@ -741,6 +745,8 @@ fn tick() -> Result<()> {
     let mut dismisses = Vec::new();
     {
         let _guard = lock(None)?;
+        #[cfg(unix)]
+        _round.verify()?;
         let p = policy()?;
         let heartbeat = root().join("recovery/heartbeat.json");
         let last = read_json(&heartbeat).unwrap_or(Value::Null);
@@ -806,9 +812,13 @@ fn tick() -> Result<()> {
         }
     }
     for s in dismisses {
+        #[cfg(unix)]
+        _round.verify()?;
         let _ = dsh::dismiss_recovery(&s);
     }
     for (s, mut job) in sends {
+        #[cfg(unix)]
+        _round.verify()?;
         let result = if s["agent"] == "dsh" {
             dsh::recover(&s, string(&job, "request_id"))
         } else {
@@ -821,6 +831,8 @@ fn tick() -> Result<()> {
             )
         };
         let _guard = lock(None)?;
+        #[cfg(unix)]
+        _round.verify()?;
         let key = owner(&s);
         let current = load_job(&key);
         if current["id"] != job["id"] || current["state"] != "dispatching" {

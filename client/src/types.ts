@@ -801,7 +801,17 @@ export interface ArchivePage {
   next_cursor: string;
   previous_cursor: string | null;
   total: number;
+  /** The host counted only up to a cap (zerus-080n8): the total shows as "N+". */
+  total_capped?: boolean;
   position: number | null;
+  /** zerus-080n8: the position is a lower bound. */
+  position_capped?: boolean;
+  /** zerus-080n8: the host's scan stopped at its budget before a full page; it continues. */
+  partial?: boolean;
+  /** zerus-080n8: rows the host looked at for this page. */
+  searched?: number;
+  /** zerus-5czy6: a bounded page; an exact one (an older host too) is not. */
+  bounded?: boolean;
 }
 
 /** One read of an archived session's recorded Activity (`archived_activity`, `hgs inspect --archive`). */

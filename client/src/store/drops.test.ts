@@ -198,7 +198,39 @@ describe("a drop on the session's panel", () => {
   });
 
   it("tells web URLs from local and Windows paths", () => {
-    for (const url of ["https://example.com/a.png", "http://example.com/", "ftp://example.com/a", "data://x"]) expect(nonFileUrl(url), url).toBe(true);
-    for (const path of ["/srv/a.png", "C:\\Users\\example\\a.png", "\\\\server\\share\\a.png", "/srv/http://odd", "relative/a"]) expect(nonFileUrl(path), path).toBe(false);
+    for (const url of ["https://example.com/a.png", "http://example.com/", "ftp://example.com/a", "data://x", "data:image/png;base64,AAAA", "about:blank", "mailto:someone@example.com"]) expect(nonFileUrl(url), url).toBe(true);
+    for (const path of ["/srv/a.png", "C:\\Users\\example\\a.png", "C:/Users/example/a.png", "\\\\server\\share\\a.png", "/srv/http://odd", "/srv/data:x", "relative/a"]) expect(nonFileUrl(path), path).toBe(false);
+  });
+
+  // zerus-tv0hj: the file check may answer after another session took the panel.
+  it("attaches nothing when the target changes while the file check runs", async () => {
+    let answer!: (ok: boolean) => void;
+    const h = harness({ files: () => new Promise<boolean>((resolve) => { answer = resolve; }) });
+    h.drops.enter(["/srv/private-note.txt"], 10, 10);
+    const dropping = h.drops.drop(["/srv/private-note.txt"], 10, 10);
+    h.set({ selected: "\nrun:b", composer: { key: "\nclaude/sample-project/other", canAttach: true } });
+    answer(true);
+    await dropping;
+    expect(h.calls).toEqual([]);
+  });
+
+  it("attaches nothing when the Terminal reconnects while the file check runs", async () => {
+    let answer!: (ok: boolean) => void;
+    const h = harness({ files: () => new Promise<boolean>((resolve) => { answer = resolve; }) });
+    h.set(terminalOn);
+    h.drops.enter(["/srv/a.txt"], 10, 10);
+    const dropping = h.drops.drop(["/srv/a.txt"], 10, 10);
+    h.set({ tab: "terminal", terminal: { connected: true, generation: 5 } });
+    answer(true);
+    await dropping;
+    expect(h.calls).toEqual([]);
+  });
+
+  // zerus-9vofc: a data URI is no file either.
+  it("says to copy and paste when a drop names only a data image", async () => {
+    const h = harness();
+    h.drops.enter(["data:image/png;base64,AAAA"], 10, 10);
+    await h.drops.drop(["data:image/png;base64,AAAA"], 10, 10);
+    expect(h.calls).toEqual([`info ${NO_FILES_NOTICE}`]);
   });
 });

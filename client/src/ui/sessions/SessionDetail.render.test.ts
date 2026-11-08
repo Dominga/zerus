@@ -28,7 +28,7 @@ vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} } }));
 import * as bridge from "../../bridge";
 import { App } from "../../App";
 import { receive, activity } from "../../store/session";
-import { selected, setSelectedKey, setDetailTab, detailTab, setSubagentOpen, setMenu, menu, setStateFilter } from "../../store/ui";
+import { selected, setSelectedKey, setDetailTab, detailTab, setSubagentOpen, setMenu, menu, setStateFilter, setSearch } from "../../store/ui";
 import { inspectorTab, type InspectorTab } from "../../store/inspector";
 import { settingsReady, setSetting, restoreSettings } from "../../store/settings";
 import { openCleanup, closeCleanup } from "../../store/terminationCleanup";
@@ -192,6 +192,34 @@ it("keeps the moved row actions in the real session header menu", async () => {
   }
 });
 
+describe("an archive search keeps the archive status and paging (zerus-5wmh.13.17 (4))", () => {
+  afterEach(() => setSearch(""));
+
+  it("shows the window, Newer and Older for the query's page, and a capped total as N+", async () => {
+    vi.mocked(bridge.archivePage).mockResolvedValue({ rows: [], next_cursor: "c", previous_cursor: "p", total: 10_000, total_capped: true, position: 50 } as never);
+    put(fixtureRow());
+    setStateFilter("archived"); await flush();
+    setSearch("needle"); await flush();
+    await vi.waitFor(() => expect(vi.mocked(bridge.archivePage).mock.calls.some((call) => call[4] === "needle")).toBe(true), { timeout: 3000 });
+    await vi.waitFor(() => expect(host.querySelector(".archive-status")?.textContent).toBe("0 shown of 10000+"), { timeout: 3000 });
+    expect([...host.querySelectorAll(".archive-nav")].map((b) => b.getAttribute("aria-label"))).toEqual(["Newer sessions", "Older sessions"]);
+    // The results list still shows the search (messages and the page's archive rows).
+    expect(host.querySelector(".search-results, [role=listbox]")).not.toBeNull();
+  });
+
+  it("never says no matches while the archive scan is still partial (zerus-080n8)", async () => {
+    vi.mocked(bridge.archivePage).mockResolvedValue({ rows: [], next_cursor: "c", previous_cursor: null, total: 0, total_capped: true, position: 0, partial: true, searched: 25_000, bounded: true } as never);
+    put(fixtureRow());
+    setStateFilter("archived"); await flush();
+    setSearch("needle"); await flush();
+    await vi.waitFor(() => expect(host.querySelector(".archive-status")?.textContent).toBe("0 shown, 25000 searched so far"), { timeout: 3000 });
+    await vi.waitFor(() => expect(host.querySelector(".content-search .empty h3")?.textContent).toBe("0 shown, 25000 searched so far"), { timeout: 3000 });
+    expect(host.querySelector(".content-search .empty p")?.textContent).toBe("Older continues the search.");
+    expect(host.textContent).not.toContain("No matching sessions");
+    expect(host.textContent).not.toContain("0+");
+  });
+});
+
 describe("a shown tool search hit (zerus-tso9j, zerus-2r73y)", () => {
   const toolHit = (row: ViewRow, detail: string): SearchHit => ({ name: row.name!, run_id: row.run_id!, conversation_id: row.conversation_id!, archive_id: "", message_id: "m",
     at: 1_793_000_000, role: "tool", snippet: "", event: { seq: 1, type: "PostToolUse", tool: "Bash", at: 1_793_000_000, detail }, content_truncated: false, session: null, group: "" });
@@ -208,6 +236,22 @@ describe("a shown tool search hit (zerus-tso9j, zerus-2r73y)", () => {
     [...host.querySelectorAll<HTMLButtonElement>(".search-preview button")].find((b) => b.textContent === "Show more")!.click(); await flush();
     expect(detail()!.textContent).toHaveLength(3_206);
     expect([...detail()!.querySelectorAll("mark")].map((m) => m.textContent)).toEqual(["needle"]);
+  });
+
+  it("marks the new query when another hit of the same session shows (zerus-2r73y.1)", async () => {
+    const row = fixtureRow(); const key = await open(row);
+    const marks = () => [...host.querySelectorAll(".search-preview mark")].map((m) => m.textContent);
+    const showHit = async (query: string, hit: SearchHit) => { setSearchPreview({ key, run: row.run_id!, conversation: row.conversation_id!, query, hit }); await flush(); };
+    await showHit("needle", toolHit(row, "needle and prefix"));
+    expect(marks()).toEqual(["needle"]);
+    await showHit("prefix", { ...toolHit(row, "prefix only here"), message_id: "m2", event: { seq: 2, type: "PostToolUse", tool: "Bash", at: 1_793_000_100, detail: "prefix only here" } });
+    expect(marks()).toEqual(["prefix"]);
+    // A reply hit (Markdown) follows the query the same way.
+    const reply = (n: number, detail: string): SearchHit => ({ ...toolHit(row, detail), message_id: `r${n}`, role: "assistant", event: { seq: 10 + n, type: "AgentMessage", at: 1_793_000_200 + n, detail } });
+    await showHit("alpha", reply(1, "alpha beta"));
+    await vi.waitFor(() => expect(marks()).toEqual(["alpha"]));
+    await showHit("beta", reply(2, "beta gamma"));
+    await vi.waitFor(() => expect(marks()).toEqual(["beta"]));
   });
 
   it("marks the query in a tool hit's output, and only inside the hit", async () => {

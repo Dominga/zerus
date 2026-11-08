@@ -11,13 +11,21 @@ use std::os::fd::FromRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::time::Instant;
 
+mod reservation;
+
+/// A negative allocation decision only. This does not select or mutate an
+/// existing first holder, nor prove that any record move completed.
+pub(in crate::state) fn legacy_key_available(name: &str) -> bool {
+    reservation::legacy_key_available(name)
+}
+
 /// Retains exclusion only. This is not admission, consent, a delivery receipt
 /// or proof of a completed move. Drop unlocks but deliberately keeps aliases,
 /// including after an interrupted preparation; recovery must not guess.
 pub(in crate::state) struct Domain {
     state: Directory,
     inputs: Directory,
-    binding: Directory,
+    binding: Option<Directory>,
     binding_name: String,
     record: Value,
     file: File,
@@ -25,6 +33,7 @@ pub(in crate::state) struct Domain {
     old: String,
     new: String,
     until: Instant,
+    reservation: reservation::Held,
 }
 
 impl Domain {
@@ -63,7 +72,9 @@ impl Domain {
         if read_original(&binding, &binding_name)? != *record {
             return Err("The original legacy session changed".into());
         }
-        let inputs = state.ensure_child("native-input")?;
+        // Never enter the create-capable old-lock open for an already reserved
+        // key or a replaced/missing original namespace.
+        let inputs = reservation::inputs_for_prepare(&state, record)?;
         if !inputs.private()? {
             return Err("The native input directory is not private".into());
         }
@@ -76,10 +87,13 @@ impl Domain {
         if metadata.len() != 0 {
             return Err("The original native input lock is not empty".into());
         }
+        // Reserve the old key durably BEFORE publishing the second name or
+        // allowing a later metadata move. A partial preparation stays negative.
+        let reservation = reservation::Held::create(&state, &inputs, record, identity(&metadata))?;
         let domain = Self {
             state,
             inputs,
-            binding,
+            binding: Some(binding),
             binding_name,
             record: record.clone(),
             original: identity(&metadata),
@@ -87,11 +101,59 @@ impl Domain {
             old,
             new,
             until,
+            reservation,
         };
         domain.verify_before_link()?;
+        domain.link()?;
+        domain.verify()?;
+        Ok(domain)
+    }
+
+    /// Recover exclusion from the immutable original before-image and its
+    /// retained proof, even after rename/archive removed the old record. This
+    /// opens the SAME lock object without creating/replacing either lock. It
+    /// proves only exclusion, never completed metadata or an input outcome.
+    pub(in crate::state) fn recover(record: &Value, until: Instant) -> Result<Self> {
+        deadline(until)?;
+        let state =
+            Directory::open(&crate::platform::canonical(root()).map_err(|e| e.to_string())?)?;
+        let inputs = state.child("native-input")?;
+        if !state.private()? || !inputs.private()? {
+            return Err("The original native input directories are not private".into());
+        }
+        let reservation = reservation::Held::load(&state, &inputs, record)?;
+        let old = format!("{}.lock", owner_key(record));
+        let new = format!("{}.lock", string(record, "session_id"));
+        let file = open_entry(&inputs, &old, true)?;
+        file.try_lock_exclusive()
+            .map_err(|e| format!("The retained native input is busy or unavailable: {e}"))?;
+        let domain = Self {
+            state,
+            inputs,
+            binding: None,
+            binding_name: String::new(),
+            record: record.clone(),
+            file,
+            original: reservation.original(),
+            old,
+            new,
+            until,
+            reservation,
+        };
+        domain.verify_scope()?;
+        // Never reconstruct even a missing SID name: a pre-link crash and a
+        // later deletion cannot be distinguished from this proof. Both remain
+        // negative allocations and require review, not a newly minted domain.
+        domain.verify()?;
+        Ok(domain)
+    }
+
+    fn link(&self) -> Result<()> {
+        let domain = self;
         let old = component(&domain.old)?;
         let new = component(&domain.new)?;
         let parent = domain.inputs.descriptor();
+        cut_write()?;
         // SAFETY: both fixed single-component names are under the same held
         // parent. linkat never replaces a destination or follows the source
         // symlink. Both resulting names are checked against the held file.
@@ -105,8 +167,7 @@ impl Domain {
         if unsafe { libc::fsync(parent) } != 0 {
             return Err(std::io::Error::last_os_error().to_string());
         }
-        domain.verify()?;
-        Ok(domain)
+        Ok(())
     }
 
     fn verify_before_link(&self) -> Result<()> {
@@ -116,9 +177,9 @@ impl Domain {
         Ok(())
     }
 
-    /// Fresh verification of both original names and the original record.
-    /// A later move will need a separate committed-record/recovery protocol;
-    /// this preparatory guard deliberately cannot claim that it completed one.
+    /// Fresh verification of the original objects and retained reservation.
+    /// Preparation also requires its unchanged legacy record. Recovery relies
+    /// on the exact original before-image in the proof; it does not recreate it.
     pub(in crate::state) fn verify(&self) -> Result<()> {
         self.verify_scope()?;
         self.verify_file(2)?;
@@ -132,11 +193,17 @@ impl Domain {
         deadline(self.until)?;
         self.state.verify()?;
         self.inputs.verify()?;
-        self.binding.verify()?;
+        if let Some(binding) = &self.binding {
+            binding.verify()?;
+            if read_original(binding, &self.binding_name)? != self.record {
+                return Err("The original legacy binding changed".into());
+            }
+        }
+        self.reservation
+            .verify(&self.state, &self.inputs, &self.record)?;
         if crate::platform::canonical(root()).map_err(|e| e.to_string())? != self.state.path
             || !self.state.private()?
             || !self.inputs.private()?
-            || read_original(&self.binding, &self.binding_name)? != self.record
         {
             return Err("The original native input scope changed".into());
         }
@@ -158,32 +225,40 @@ impl Domain {
     }
 
     fn verify_entry(&self, name: &str) -> Result<()> {
-        let name = component(name)?;
-        // SAFETY: a fixed component under the original directory; never follows
-        // links or waits on a special file. This narrow check allows the two
-        // intentional links without weakening any general private-file check.
-        let fd = unsafe {
-            libc::openat(
-                self.inputs.descriptor(),
-                name.as_ptr(),
-                libc::O_RDONLY
-                    | libc::O_NOFOLLOW
-                    | libc::O_NONBLOCK
-                    | libc::O_NOCTTY
-                    | libc::O_CLOEXEC,
-            )
-        };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error().to_string());
-        }
-        // SAFETY: this call owns the descriptor returned above.
-        let file = unsafe { File::from_raw_fd(fd) };
+        let file = open_entry(&self.inputs, name, false)?;
         let m = file.metadata().map_err(|e| e.to_string())?;
         if !m.is_file() || identity(&m) != self.original {
             return Err("A native input name no longer refers to the original object".into());
         }
         Ok(())
     }
+}
+
+fn open_entry(directory: &Directory, name: &str, writable: bool) -> Result<File> {
+    let name = component(name)?;
+    // SAFETY: one fixed component under the original parent. No creation,
+    // link-follow, device control or blocking FIFO open is requested. The two
+    // intentional links are verified by this narrow domain, never by relaxing
+    // the general private-file contract.
+    let fd = unsafe {
+        libc::openat(
+            directory.descriptor(),
+            name.as_ptr(),
+            (if writable {
+                libc::O_RDWR
+            } else {
+                libc::O_RDONLY
+            }) | libc::O_NOFOLLOW
+                | libc::O_NONBLOCK
+                | libc::O_NOCTTY
+                | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    // SAFETY: this call exclusively owns the new descriptor.
+    Ok(unsafe { File::from_raw_fd(fd) })
 }
 
 impl Drop for Domain {
@@ -298,6 +373,41 @@ mod tests {
     }
 
     #[test]
+    fn a_later_label_holder_has_its_own_domain_and_an_old_keep_warm_cannot_send() {
+        control("reservation_reuse");
+    }
+
+    #[test]
+    fn reservation_and_original_inodes_survive_archive_restore_and_recovery() {
+        control("reservation_archive");
+    }
+
+    #[test]
+    fn every_preparation_crash_cut_keeps_the_legacy_key_unavailable() {
+        control("reservation_cuts");
+    }
+
+    #[test]
+    fn a_record_already_moved_without_a_reservation_recovers_fail_closed() {
+        control("reservation_move_cut");
+    }
+
+    #[test]
+    fn missing_malformed_and_irregular_reservation_evidence_never_permits_reuse() {
+        control("reservation_evidence");
+    }
+
+    #[test]
+    fn a_rebuilt_empty_namespace_cannot_supply_negative_entry_absence() {
+        control("reservation_namespace");
+    }
+
+    #[test]
+    fn recovery_never_recreates_either_original_lock_name() {
+        control("reservation_missing_lock");
+    }
+
+    #[test]
     #[ignore = "run only by the bounded private controls"]
     fn fixture() {
         let Ok(case) = std::env::var("ZERUS_NATIVE_DOMAIN_CONTROL") else {
@@ -316,6 +426,272 @@ mod tests {
         let new = inputs.join(format!("{}.lock", string(&record, "session_id")));
         let until = || Instant::now() + Duration::from_secs(2);
         match case.as_str() {
+            "reservation_reuse" | "reservation_archive" => {
+                assert!(
+                    !legacy_key_available(string(&record, "name")),
+                    "unanchored absence is unknown"
+                );
+                // The worker opened its native-input descriptor BEFORE the
+                // metadata move and retains that same open file throughout.
+                let old_worker_file = lock_file(&old).unwrap();
+                let domain = Domain::prepare(&record, until()).unwrap();
+                let original = domain.original;
+                let proof_path = root()
+                    .join("native-input-reservations")
+                    .join(format!("{}.json", owner_key(&record)));
+                let proof_before = fs::read(&proof_path).unwrap();
+                let mut moved = record.clone();
+                moved["layout"] = json!("id");
+                // Private metadata cut only: the full record/job transaction
+                // and its production caller are deliberately still absent.
+                let sessions = Directory::open(&absolute_root().unwrap())
+                    .unwrap()
+                    .ensure_child("sessions")
+                    .unwrap();
+                labels::add(string(&moved, "name"), string(&moved, "session_id")).unwrap();
+                sessions
+                    .write_new(
+                        &format!("{}.json", string(&moved, "session_id")),
+                        moved.to_string().as_bytes(),
+                    )
+                    .unwrap();
+                archive::remove_synced(&binding).unwrap();
+                drop(domain);
+                assert!(!binding.exists());
+                assert!(!route_path(string(&record, "name")).exists());
+                assert!(!legacy_key_available(string(&record, "name")));
+                assert!(legacy_key_available("claude/example/unrelated"));
+                {
+                    let held = Domain::recover(&record, until()).unwrap();
+                    held.verify().unwrap();
+                    assert_eq!(held.original, original);
+                }
+                let old_name = string(&record, "name");
+                let renamed = "claude/example/moved";
+                labels::add(renamed, string(&moved, "session_id")).unwrap();
+                moved["name"] = json!(renamed);
+                write(&mut moved).unwrap();
+                labels::remove(old_name, string(&moved, "session_id")).unwrap();
+                let mut later = record.clone();
+                later["session_id"] = json!(uuid::Uuid::new_v4().to_string());
+                later["run_id"] = json!(uuid::Uuid::new_v4().to_string());
+                later["conversation_id"] = json!("later-conversation");
+                later["layout"] = json!("id");
+                publish_new_id(&mut later).unwrap();
+                let old_worker = Guard::exclusive(old_worker_file).unwrap();
+                let later_driver = startup_choice::driving(&later).unwrap();
+                assert_ne!(
+                    old_worker.identity().unwrap(),
+                    later_driver.identity().unwrap()
+                );
+                assert!(lock_until(&new, Instant::now()).unwrap().is_none());
+                assert_eq!(identity(&fs::metadata(&old).unwrap()), original);
+                assert_eq!(identity(&fs::metadata(&new).unwrap()), original);
+                drop(later_driver);
+                if case == "reservation_archive" {
+                    let archived = archive::save(&moved).unwrap();
+                    assert!(!id_record_path(string(&moved, "session_id"))
+                        .unwrap()
+                        .exists());
+                    let mut restored = archive::read_archive(renamed, &archived).unwrap();
+                    assert!(
+                        restored["layout"].is_null(),
+                        "existing archive schema stays unchanged"
+                    );
+                    assert!(!legacy_key_available(old_name));
+                    restored["layout"] = json!("id");
+                    restored.as_object_mut().unwrap().remove("archive_id");
+                    restored.as_object_mut().unwrap().remove("archived_at");
+                    restored["state"] = json!("stopped");
+                    publish_new_id(&mut restored).unwrap();
+                    assert_eq!(fs::read(&proof_path).unwrap(), proof_before);
+                }
+                assert_eq!(
+                    fs::read_dir(root().join("native-input-reservations"))
+                        .unwrap()
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    fs::metadata(inputs.join(format!("{}.lock", owner_key(&later))))
+                        .unwrap()
+                        .nlink(),
+                    1
+                );
+                assert!(!binding.exists());
+                drop(old_worker);
+                Domain::recover(&record, until()).unwrap().verify().unwrap();
+                assert_eq!(fs::read(&proof_path).unwrap(), proof_before);
+                if case == "reservation_reuse" {
+                    // An actual old worker request, with its captured original
+                    // name/run/conversation, reaches the maintained input
+                    // admission. Identity refusal precedes native inspection,
+                    // settings, receipt reservation and every terminal call.
+                    drop(_writer);
+                    let request_id = uuid::Uuid::new_v4().to_string();
+                    let request = json!({"request_id":request_id,"text":keep_warm::TEXT,
+                        "expected_run_id":record["run_id"],"expected_conversation_id":record["conversation_id"]});
+                    match input::submit_keep_warm(
+                        old_name,
+                        request.to_string().as_bytes(),
+                        &request_id,
+                    ) {
+                        input::Submission::NotOffered(witness) => {
+                            assert!(witness.reason.contains("identity changed"))
+                        }
+                        _ => panic!("the old worker must be refused before input"),
+                    }
+                    assert!(!root()
+                        .join("input_receipts")
+                        .join(format!("{request_id}.json"))
+                        .exists());
+                }
+            }
+            "reservation_cuts" => {
+                // Each cut has a distinct legacy session/namespace. No cut
+                // gets a newly reconstructed lock or a legacy reuse answer.
+                for budget in 0..=3 {
+                    let mut original = record.clone();
+                    original["name"] = json!(format!("claude/example/cut-{budget}"));
+                    original["session_id"] = json!(uuid::Uuid::new_v4().to_string());
+                    // Bootstrap is separate for each first-write cut.
+                    let selected = root();
+                    let sub = selected.join(format!("cut-{budget}"));
+                    private_dir(&sub).unwrap();
+                    unsafe { std::env::set_var("HGS_STATE_DIR", &sub) };
+                    let path = legacy_record_path(string(&original, "name"));
+                    atomic(&path, &original.to_string()).unwrap();
+                    cut::arm(budget);
+                    let result = Domain::prepare(&original, until());
+                    cut::disarm();
+                    drop(result);
+                    assert_eq!(
+                        serde_json::from_slice::<Value>(&fs::read(&path).unwrap()).unwrap(),
+                        original
+                    );
+                    assert!(!legacy_key_available(string(&original, "name")));
+                    let old = root()
+                        .join("native-input")
+                        .join(format!("{}.lock", owner_key(&original)));
+                    let sid = root()
+                        .join("native-input")
+                        .join(format!("{}.lock", string(&original, "session_id")));
+                    let old_identity = identity(&fs::metadata(&old).unwrap());
+                    if sid.exists() {
+                        assert_eq!(identity(&fs::metadata(&sid).unwrap()), old_identity);
+                        Domain::recover(&original, until())
+                            .unwrap()
+                            .verify()
+                            .unwrap();
+                    } else {
+                        assert!(Domain::recover(&original, until()).is_err());
+                        assert!(!sid.exists(), "recovery must not manufacture a lost alias");
+                    }
+                    unsafe { std::env::set_var("HGS_STATE_DIR", &selected) };
+                }
+            }
+            "reservation_evidence" => {
+                let domain = Domain::prepare(&record, until()).unwrap();
+                drop(domain);
+                let mut different_before = record.clone();
+                different_before["conversation_id"] = json!("different");
+                assert!(Domain::recover(&different_before, until()).is_err());
+                let path = root()
+                    .join("native-input-reservations")
+                    .join(format!("{}.json", owner_key(&record)));
+                let original = fs::read(&path).unwrap();
+                for contents in [b"null".as_slice(), b"{}", b"[]", b"garbage"] {
+                    fs::write(&path, contents).unwrap();
+                    assert!(!legacy_key_available(string(&record, "name")));
+                    assert!(Domain::recover(&record, until()).is_err());
+                }
+                fs::write(&path, original).unwrap();
+                fs::rename(&path, path.with_extension("retained")).unwrap();
+                assert!(
+                    !legacy_key_available(string(&record, "name")),
+                    "the original lock pair is independently negative"
+                );
+                assert!(Domain::recover(&record, until()).is_err());
+                use std::os::unix::fs::symlink;
+                symlink(path.with_extension("retained"), &path).unwrap();
+                assert!(!legacy_key_available(string(&record, "name")));
+                assert!(Domain::recover(&record, until()).is_err());
+                fs::remove_file(&path).unwrap();
+                let path_c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+                assert_eq!(unsafe { libc::mkfifo(path_c.as_ptr(), 0o600) }, 0);
+                let started = Instant::now();
+                assert!(!legacy_key_available(string(&record, "name")));
+                assert!(Domain::recover(&record, until()).is_err());
+                assert!(started.elapsed() < Duration::from_secs(1));
+            }
+            "reservation_namespace" => {
+                drop(Domain::prepare(&record, until()).unwrap());
+                let directory = root().join("native-input-reservations");
+                fs::rename(&directory, root().join("original-reservations")).unwrap();
+                private_dir(&directory).unwrap();
+                assert!(!legacy_key_available("claude/example/unused"));
+                assert!(Domain::recover(&record, until()).is_err());
+                fs::remove_dir(&directory).unwrap();
+                fs::rename(root().join("original-reservations"), &directory).unwrap();
+                fs::rename(&inputs, root().join("original-inputs")).unwrap();
+                private_dir(&inputs).unwrap();
+                assert!(!legacy_key_available("claude/example/unused"));
+                assert!(Domain::recover(&record, until()).is_err());
+                assert!(Domain::prepare(&record, until()).is_err());
+                assert_eq!(
+                    fs::read_dir(&inputs).unwrap().count(),
+                    0,
+                    "recovery must not create a new old lock"
+                );
+            }
+            "reservation_missing_lock" => {
+                drop(Domain::prepare(&record, until()).unwrap());
+                let original = identity(&fs::metadata(&old).unwrap());
+                fs::rename(&new, inputs.join("retained-sid.lock")).unwrap();
+                assert!(Domain::recover(&record, until()).is_err());
+                assert!(!new.exists());
+                assert_eq!(identity(&fs::metadata(&old).unwrap()), original);
+                fs::rename(inputs.join("retained-sid.lock"), &new).unwrap();
+                fs::rename(&old, inputs.join("retained-legacy.lock")).unwrap();
+                assert!(Domain::recover(&record, until()).is_err());
+                assert!(Domain::prepare(&record, until()).is_err());
+                assert!(!old.exists());
+                assert_eq!(identity(&fs::metadata(&new).unwrap()), original);
+            }
+            "reservation_move_cut" => {
+                // A private post-move/pre-reservation cut in the older dormant
+                // preparation shape: both original links exist, no negative
+                // entry was published, and the legacy record is already gone.
+                // New preparation orders its reservation first; recovery must
+                // still refuse this incomplete evidence without reconstructing.
+                let old_file = lock_file(&old).unwrap();
+                fs::hard_link(&old, &new).unwrap();
+                let original = identity(&old_file.metadata().unwrap());
+                let mut moved = record.clone();
+                moved["layout"] = json!("id");
+                let sessions = Directory::open(&absolute_root().unwrap())
+                    .unwrap()
+                    .ensure_child("sessions")
+                    .unwrap();
+                labels::add(string(&moved, "name"), string(&moved, "session_id")).unwrap();
+                sessions
+                    .write_new(
+                        &format!("{}.json", string(&moved, "session_id")),
+                        moved.to_string().as_bytes(),
+                    )
+                    .unwrap();
+                archive::remove_synced(&binding).unwrap();
+                assert!(!legacy_key_available(string(&record, "name")));
+                assert!(Domain::recover(&record, until()).is_err());
+                assert_eq!(
+                    read_id(string(&record, "session_id")).unwrap()["run_id"],
+                    record["run_id"]
+                );
+                assert_eq!(identity(&fs::metadata(&old).unwrap()), original);
+                assert_eq!(identity(&fs::metadata(&new).unwrap()), original);
+                assert!(!root().join("native-input-reservations").exists());
+                return;
+            }
             "busy" => {
                 let _actual_driver = startup_choice::driving(&record).unwrap();
                 let start = Instant::now();
@@ -446,6 +822,9 @@ mod tests {
                 assert!(guard.verify().is_err());
             }
             _ => panic!("unknown private control"),
+        }
+        if matches!(case.as_str(), "reservation_reuse" | "reservation_archive") {
+            return;
         }
         assert_eq!(
             fs::read(&binding).unwrap(),

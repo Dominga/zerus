@@ -6,7 +6,8 @@ import { agentKind } from "../../store/catalog";
 import { computerOf } from "./creations-ui";
 import type { CreationCard } from "../../types";
 import { searchTooltip } from "../../store/content-search-model";
-import { search, selectedKey } from "../../store/ui";
+import { search, selectedKey, stateFilter } from "../../store/ui";
+import { archive } from "../../store/archive";
 import { Icon } from "../lib/icons";
 import { AgentBadge, MachineBadge } from "./SessionCard";
 
@@ -21,7 +22,10 @@ export function SearchResults() {
   // Pending creations whose details match follow the sessions, as in Qt.
   const rows = createMemo((): ResultRow[] => [...searchItems().map((item) => ({ id: item.id, item })), ...searchCards().map((card) => ({ id: `creation:${card.id}`, card }))]);
   const activate = (row: ResultRow) => { if (row.item) activateSearchItem(row.item); else selectCreation(row.card.id); };
-  const chosen = (row: ResultRow) => current() === row.id || (!current() && (row.item ? selectedKey() === row.item.session.key : selectedCreation() === row.card.id));
+  // Before a cursor is chosen, the selected session's (or creation's) first row is the one current
+  // option of this single-select list (zerus-ge5xc).
+  const fallback = createMemo(() => (current() ? undefined : rows().find((row) => (row.item ? selectedKey() === row.item.session.key : selectedCreation() === row.card.id))?.id));
+  const chosen = (row: ResultRow) => current() === row.id || fallback() === row.id;
   const list = createVirtualizer({ get count() { return rows().length; }, getScrollElement: () => element?.isConnected ? element : null,
     estimateSize: (index) => rows()[index]?.item?.found ? 90 : 64, gap: 2, getItemKey: (index) => rows()[index]?.id ?? index, overscan: 6 });
   const virtualRows = createMemo(() => list.getVirtualItems());
@@ -53,9 +57,14 @@ export function SearchResults() {
       <button class="icon-btn small" aria-label={tr("Search again")} title={tr("Search again")} disabled={contentSearch.busy() || [...search().trim()].length < 2} onClick={contentSearch.refresh}><Icon name="refresh-cw" size={12} /></button>
     </div>
     <div class="content-search-list sp-scroll" ref={(el) => { element = el; requestAnimationFrame(() => list._willUpdate()); }} role="listbox" aria-label={tr("Matching sessions and messages")} aria-activedescendant={current() ? `content-search-${rows().findIndex((row) => row.id === current())}` : undefined} tabindex="0" onKeyDown={key}>
-      <Show when={rows().length} fallback={<Show when={!contentSearch.busy() && !contentSearch.errors().length}>
-        <div class="empty"><Icon name="search" size={26} /><h3>{tr("No matching sessions")}</h3><p>Nothing matches “{search().trim()}” in names, IDs or messages with the current filters.</p></div>
-      </Show>}>
+      <Show when={rows().length} fallback={
+        // zerus-080n8: while the archive scan is partial, nothing is known to be missing yet.
+        <Show when={stateFilter() === "archived" && archive.partial()} fallback={<Show when={!contentSearch.busy() && !contentSearch.errors().length}>
+          <div class="empty"><Icon name="search" size={26} /><h3>{tr("No matching sessions")}</h3><p>Nothing matches “{search().trim()}” in names, IDs or messages with the current filters.</p></div>
+        </Show>}>
+          <div class="empty"><Icon name="search" size={26} /><h3>{tr("%1 shown, %2 searched so far", 0, archive.searched())}</h3><p>{archive.partialNewer() ? tr("Newer continues the search.") : tr("Older continues the search.")}</p></div>
+        </Show>
+      }>
         <div style={{ height: `${list.getTotalSize()}px`, position: "relative" }}>
           <For each={keys()}>{(id) => {
             const virtual = () => positions().get(id);
@@ -67,7 +76,7 @@ export function SearchResults() {
               <div class="row"><b class="ell"><SearchHighlight text={c().tag} query={search().trim()} /></b><span class="grow" /><AgentBadge agent={agentKind(c().cmd)} narrow /><MachineBadge alias={computerOf(c())} computer={c().host} /></div>
               <span class="content-search-meta sh-meta ell">{c().caption}</span>
               <Show when={c().error}><span class="content-search-excerpt sh-snippet"><SearchHighlight text={c().error} query={search().trim()} /></span></Show>
-            </button>}</Show>}>{(found) => { const item = () => found(); return <button class="content-search-row search-hit" classList={{ selected: chosen(row()) }} data-index={virtual()?.index} ref={(el) => requestAnimationFrame(() => { if (el.isConnected) list.measureElement(el); })} id={`content-search-${virtual()?.index ?? 0}`} role="option" tabindex="-1" aria-selected={current() === item().id || (!current() && selectedKey() === item().session.key)}
+            </button>}</Show>}>{(found) => { const item = () => found(); return <button class="content-search-row search-hit" classList={{ selected: chosen(row()) }} data-index={virtual()?.index} ref={(el) => requestAnimationFrame(() => { if (el.isConnected) list.measureElement(el); })} id={`content-search-${virtual()?.index ?? 0}`} role="option" tabindex="-1" aria-selected={chosen(row())}
               style={{ transform: `translateY(${virtual()?.start ?? 0}px)` }}
               onClick={() => { setCurrent(item().id); activateSearchItem(item()); }} title={searchTooltip(item())}>
               <div class="row"><b class="ell"><SearchHighlight text={item().session.title} query={search().trim()} /></b><span class="grow" /><AgentBadge agent={item().session.agent} narrow /><MachineBadge alias={item().session.machine} computer={item().session.computer} /></div>

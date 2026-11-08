@@ -104,6 +104,8 @@ mod speech_settings;
 mod startup_error;
 mod startup_log;
 #[cfg(feature = "live")]
+mod task_copy_review;
+#[cfg(feature = "live")]
 mod task_details;
 #[cfg(feature = "live")]
 mod task_editor;
@@ -1716,6 +1718,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         task_forms::task_form_submit,
         task_forms::task_form_cancel,
         task_details::task_attachment_open,
+        task_copy_review::task_copy_review,
         actions::pending_read_marks,
         actions::queue_read_marks,
         actions::attention_marks,
@@ -1776,6 +1779,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         screens::account_edits::account_edit_open,
         screens::account_edits::account_edit_apply,
         screens::account_edits::account_edit_close,
+        screens::account_edits::account_mark_migrate,
         screens::account_edits::setup::account_setup_open,
         screens::account_edits::setup::account_setup_apply,
         screens::account_edits::setup::account_setup_close,

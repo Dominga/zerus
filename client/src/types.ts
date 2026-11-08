@@ -546,6 +546,8 @@ export interface Profile {
   model?: string; effort?: string;
   /** `account` (shared), `computer`, or empty when this computer keeps no scope. */
   permission_scope?: string;
+  /** The account's color and emoji as this computer keeps them, empty when unset; `marks_supported` is false for an older hgs (zerus-sa9qn.6). */
+  mark_color?: string; mark_emoji?: string; marks_supported?: boolean;
   usage: Usage; opencode: OpenCodeInfo | null;
 }
 export interface Account {
@@ -848,6 +850,8 @@ export interface ComposerView {
   attachments: AttachmentView[]; removed: string | null; attaching: boolean; sending: boolean; recording?: boolean; waiting: string | null; uncertain: boolean;
   /** The desktop service still sends this draft's message: no Allow retry, and its status is not an error. */
   delivery_pending?: boolean;
+  /** Advisory only: matching text in loaded history is never receipt evidence. */
+  history_text_match?: boolean;
   status: string; status_error: boolean; can_send: boolean; send_label: Text; available: boolean; unavailable_reason: string; block_reason: string | null;
   attachments_available: boolean; attachments_reason: string; session_status: string; session_status_error: boolean; session_blocks_input: boolean;
   /** The open session's last read failed (Qt's m_inspectError). */

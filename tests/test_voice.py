@@ -21,6 +21,10 @@ from test_speech import Server, load
 HGS, TMUX = input_fixture.HGS, input_fixture.TMUX
 
 
+class StatusBusy(Exception):
+    """A definite unavailable voice-status read, never a submit/retry result."""
+
+
 class VoiceInstaller(unittest.TestCase):
     def test_help_and_invalid_binary_never_write_user_configuration(self):
         script=Path(__file__).resolve().parents[1]/"scripts/install-voice-service.py"
@@ -108,9 +112,12 @@ class VoiceWorker(unittest.TestCase):
             return False
         self.wait_for(locked)
 
-    def command(self, argv, payload=None):
+    def command(self, argv, payload=None, *, timeout=15):
         run = subprocess.run([str(self.hgs), *argv], input=json.dumps(payload) if payload else None,
-            env=self.env, text=True, capture_output=True, timeout=15)
+            env=self.env, text=True, capture_output=True, timeout=timeout)
+        if argv[:1] == ["voice"] and isinstance(payload, dict) and payload.get("action") == "status" \
+                and run.returncode == 1 and not run.stdout and run.stderr.strip() == "hgs: database is locked":
+            raise StatusBusy("voice status database is locked")
         self.assertEqual(run.returncode, 0, run.stderr)
         return json.loads(run.stdout)
 
@@ -121,24 +128,36 @@ class VoiceWorker(unittest.TestCase):
             audio=dict(format="pcm_s16le", sample_rate=16000, channels=1,
                        data_base64=base64.b64encode(b"\x10\x01" * 16000).decode()))
 
-    def voice(self, payload):
-        return self.command(["voice", self.name, "--json"], payload)["message"]
+    def voice(self, payload, *, timeout=15):
+        return self.command(["voice", self.name, "--json"], payload, timeout=timeout)["message"]
 
-    def status(self, message, action="status"):
+    def status(self, message, action="status", *, timeout=15):
         return self.voice(dict(action=action, request_id=str(uuid.uuid4()), message_id=message,
-            expected_run_id=self.run_id, expected_conversation_id=self.conversation_id))
+            expected_run_id=self.run_id, expected_conversation_id=self.conversation_id), timeout=timeout)
 
     def settle(self, message, states, timeout=12):
         until = time.monotonic() + timeout
         result = None
+        busy = False
         while time.monotonic() < until:
             if self.worker.poll() is not None:
                 self.fail("private voice worker exited: " + (self.root / "worker.log").read_text())
-            result = self.status(message)
+            remaining = until - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                result = self.status(message, timeout=min(15, remaining))
+                busy = False
+            except StatusBusy:
+                # Only this observational poll may repeat, within its ORIGINAL
+                # deadline. Submissions, cancels and unknown results still fail.
+                busy = True
+                time.sleep(.1)
+                continue
             if result["state"] in states:
                 return result
             time.sleep(.1)
-        self.fail(f"voice did not settle: {result}")
+        self.fail(f"voice did not settle: {result}" + ("; status database is locked" if busy else ""))
 
     def emit_native(self, text, index, include_id=True):
         at=time.time()

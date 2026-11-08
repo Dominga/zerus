@@ -117,6 +117,13 @@ pub(super) struct Writer<W> {
     pub failed: bool,
 }
 impl<W: Write + Send + 'static> Writer<W> {
+    pub fn closed_before_worker() -> Self {
+        let mut value = Self::new(None);
+        value.joined = true; // No worker ever existed.
+        value.closed = true; // The guarded owner closed its original stdin.
+        value.failed = false;
+        value
+    }
     pub fn new(pipe: Option<W>) -> Self {
         Self {
             failed: pipe.is_none(),
@@ -167,6 +174,19 @@ impl<W: Write + Send + 'static> Writer<W> {
                     self.joined = true;
                 }
             }
+        }
+    }
+    pub fn close_empty(&mut self) -> bool {
+        if self.offered || self.closed || self.failed || self.worker.is_some() {
+            return false;
+        }
+        self.close_unoffered();
+        self.offered = true;
+        if self.closed && self.joined {
+            self.written = true; // Explicit zero-byte input/EOF, no write task.
+            true
+        } else {
+            false
         }
     }
     pub fn poll(&mut self) {

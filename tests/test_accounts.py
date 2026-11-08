@@ -304,6 +304,56 @@ class Accounts(unittest.TestCase):
         self.assertEqual({r['id']:r['permission_scope'] for r in self.ls()['profiles']}['work'],'computer')
         self.assertIn(b'repair or remove',self.run_hgs('account','permission-scope','work','--scope','account',ok=False).stderr)
 
+    def test_marks_are_kept_beside_the_catalog_and_migration_never_replaces_them(self):
+        # zerus-sa9qn.6: an account's color and emoji live with the account on
+        # its computer, outside accounts.json, which older hgs parses strictly.
+        self.add()
+        listed=self.ls()
+        self.assertTrue(listed['marks_supported'])
+        self.assertEqual({r['id']:r['mark'] for r in listed['profiles']}['work'],{'color':None,'emoji':None})
+        catalog=(self.config/'accounts.json').read_bytes()
+        def mark(*args,ok=True): return self.run_hgs('account','mark',*args,ok=ok)
+        changed=json.loads(mark('work','--color','#2B97FF','--emoji','🦊','--revision',listed['revision']).stdout)
+        self.assertEqual({r['id']:r['mark'] for r in changed['profiles']}['work'],{'color':'#2b97ff','emoji':'🦊'})
+        self.assertEqual((self.config/'accounts.json').read_bytes(),catalog)
+        self.assertEqual(changed['revision'],listed['revision'])
+        self.assertEqual(json.loads((self.config/'account-marks.json').read_text()),{'marks':{'work':{'color':'#2b97ff','emoji':'🦊'}}})
+        self.assertEqual(oct((self.config/'account-marks.json').stat().st_mode & 0o777),'0o600')
+        # A desktop moving its own choice here never replaces this computer's;
+        # it fills only what is unset.
+        mark('work','--emoji','none')
+        migrated=json.loads(mark('work','--color','#00aa7f','--emoji','🐙','--if-unset').stdout)
+        self.assertEqual({r['id']:r['mark'] for r in migrated['profiles']}['work'],{'color':'#2b97ff','emoji':'🐙'})
+        # Clearing both removes the entry; a native account has a mark too.
+        mark('work','--color','none','--emoji','')
+        self.assertEqual(json.loads((self.config/'account-marks.json').read_text()),{})
+        self.assertEqual({r['id']:r['mark'] for r in json.loads(mark('native-codex','--color','#8796aa').stdout)['profiles']}['native-codex']['color'],'#8796aa')
+        for args in (['work'],['work','--color','red'],['work','--color','#2b97f'],['work','--emoji','A'],['work','--emoji','🦊 🦊'],
+                     ['missing','--color','#2b97ff'],['work','--color','#2b97ff','--revision','stale']):
+            with self.subTest(args=args):
+                mark(*args,ok=False)
+        # A deleted profile's mark is forgotten on the next write; unknown
+        # fields from a newer hgs are kept.
+        marks=json.loads((self.config/'account-marks.json').read_text())
+        marks['marks']['gone']={'color':'#2b97ff'}; marks['marks']['native-codex']['later']=1; marks['version']=2
+        (self.config/'account-marks.json').write_text(json.dumps(marks))
+        mark('native-codex','--color','#a6cc38')
+        self.assertEqual(json.loads((self.config/'account-marks.json').read_text()),{'marks':{'native-codex':{'color':'#a6cc38','later':1}},'version':2})
+        # A write never leaves a file the reader refuses: a record at the
+        # 64 KiB cap with a newer hgs's field keeps it, and the edit refuses
+        # (zerus-etuiw).
+        full='{"padding":"'+'x'*(64*1024-len('{"padding":""}'))+'"}'
+        (self.config/'account-marks.json').write_text(full)
+        self.assertEqual(len((self.config/'account-marks.json').read_bytes()),64*1024)
+        self.assertEqual({r['id']:r['mark'] for r in self.ls()['profiles']}['native-codex'],{'color':None,'emoji':None})
+        self.assertIn(b'would exceed 64 KiB',mark('native-codex','--color','#2b97ff',ok=False).stderr)
+        self.assertEqual((self.config/'account-marks.json').read_text(),full)
+        # A malformed record shows no marks and refuses writes instead of
+        # dropping other accounts' choices.
+        (self.config/'account-marks.json').write_text('{"marks":')
+        self.assertEqual({r['id']:r['mark'] for r in self.ls()['profiles']}['native-codex'],{'color':None,'emoji':None})
+        self.assertIn(b'repair or remove',mark('native-codex','--color','#2b97ff',ok=False).stderr)
+
     def test_connected_accounts_default_to_bypass_and_keep_an_explicit_choice(self):
         # Owner, 2026-11-07 (T-6hcfnu): without an explicit choice Claude, Codex
         # and Kimi accounts bypass permissions; an explicit choice always wins.

@@ -28,6 +28,8 @@ export function createSessionView(read: ScopedRead, window: number, pageLimit: n
   const [error, setError] = createSignal("");
   const [unsupported, setUnsupported] = createSignal(false);
   let project = "", scope: TaskScope | undefined, watched: readonly Stage[] = [], generation = 0;
+  /** Changes of the list so far, and the change the shown totals were read at (zerus-0h8lg). */
+  let change = 0, countsAt = 0;
   let extent = none(0), fresh = none(false), reads = none(0), again = none(false);
 
   const busy = (stage: Stage, on: boolean) => setLoading({ ...loading(), [stage]: on });
@@ -38,9 +40,12 @@ export function createSessionView(read: ScopedRead, window: number, pageLimit: n
       seen.add(t.uuid); return [t];
     });
   };
-  const counted = (page: Page) => {
+  /** Totals of every stage from a reply read at change `seen`; never older than those shown. */
+  const counted = (page: Page, seen: number) => {
     const c = object(page.counts);
-    if (STAGES.every((s) => typeof c[s] === "number")) setCounts(Object.fromEntries(STAGES.map((s) => [s, c[s] as number])) as Record<Stage, number>);
+    if (seen < countsAt || !STAGES.every((s) => typeof c[s] === "number")) return;
+    countsAt = seen;
+    setCounts(Object.fromEntries(STAGES.map((s) => [s, c[s] as number])) as Record<Stage, number>);
   };
   const failed = (e: unknown) => { if (String(e).includes(UPDATE_FOR_SESSION_PAGES)) setUnsupported(true); else setError(String(e)); };
   const placed = (stage: Stage, rows: Task[], next: string | null) =>
@@ -53,7 +58,7 @@ export function createSessionView(read: ScopedRead, window: number, pageLimit: n
 
   /** Reads `stage` from its start up to the rows the user loaded, replacing them when still current. */
   async function reread(stage: Stage) {
-    const at = generation, mine = ++reads[stage], want = Math.max(window, extent[stage]), owner = project, as = scope!;
+    const at = generation, mine = ++reads[stage], want = Math.max(window, extent[stage]), owner = project, as = scope!, seen = change;
     fresh[stage] = true; busy(stage, true);
     try {
       let found: Task[] = [], after: string | null = null, pages = 0;
@@ -62,7 +67,7 @@ export function createSessionView(read: ScopedRead, window: number, pageLimit: n
         if (at !== generation || mine !== reads[stage]) return;
         const cursor = text(object(page.page).next) || null;
         found = unique([...found, ...(Array.isArray(page.tasks) ? page.tasks : [])], stage);
-        counted(page);
+        counted(page, seen);
         // A cursor that does not advance ends the read rather than looping on it.
         after = cursor && cursor !== after ? cursor : null;
       } while (after && found.length < want && ++pages < maxPages);
@@ -100,7 +105,7 @@ export function createSessionView(read: ScopedRead, window: number, pageLimit: n
       const next = nextProject && nextScope ? [nextProject, nextScope.host, nextScope.sessionId].join("\n") : "";
       if (next !== key()) {
         generation++;
-        project = nextProject ?? ""; scope = nextScope;
+        project = nextProject ?? ""; scope = nextScope; countsAt = change;
         extent = none(0); fresh = none(false); again = none(false);
         batch(() => {
           setKey(next); setView({ rows: none([]), next: none(null), read: none(false) }); setCounts(null);
@@ -112,21 +117,35 @@ export function createSessionView(read: ScopedRead, window: number, pageLimit: n
     },
     /** The project's list changed: every stage is read again when shown. */
     changed() {
+      change++;
       fresh = none(false);
       for (const s of watched) refresh(s);
+    },
+    /**
+     * Nothing shows the view now (the Tasks panel closed, zerus-fgyiy): no
+     * stage is read until `show` names stages again, and reads in flight are
+     * dropped. Its rows stay for the write guards.
+     */
+    suspend() {
+      watched = [];
+      for (const s of STAGES) {
+        if (!loading()[s]) continue;
+        reads[s]++; fresh[s] = false; again[s] = false;
+      }
+      setLoading(none(false));
     },
     /** The next page of `stage` in this view. */
     async more(stage: Stage) {
       const after = view().next[stage];
       if (!key() || !after || loading()[stage]) return;
-      const at = generation, mine = ++reads[stage];
+      const at = generation, mine = ++reads[stage], seen = change;
       busy(stage, true);
       try {
         const page = await read(project, stage, window, after, scope!) as Page;
         if (at !== generation || mine !== reads[stage]) return;
         const rows = unique([...view().rows[stage], ...(Array.isArray(page.tasks) ? page.tasks : [])], stage);
         extent = { ...extent, [stage]: rows.length };
-        counted(page);
+        counted(page, seen);
         batch(() => { placed(stage, rows, text(object(page.page).next) || null); setError(""); });
       } catch (e) {
         if (at === generation && mine === reads[stage]) failed(e);

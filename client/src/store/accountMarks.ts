@@ -2,12 +2,16 @@ import { createMemo } from "solid-js";
 import type { Account, AccountsView, Profile } from "../types";
 import { accountsPage } from "./accounts";
 import { settings, setSetting, type Settings } from "./settings";
+import type { accountEditApply, accountEditOpen } from "../bridge";
 import { accountChoices, rowBinding, type BoundRow } from "../ui/sessions/scope-filters";
 
 // Account marks on session cards (zerus-sa9qn.1, spec
 // docs/superpowers/specs/2026-11-07-account-labels-child-sessions-design.md
-// section 1.6). The label is the host catalog's; the color and emoji are this
-// desktop's preferences for each member profile, like machine colors.
+// section 1.6). The label is the host catalog's. The color and emoji are kept
+// with the account on each of its computers (zerus-sa9qn.6), so every desktop
+// and phone shows the same mark; a computer with an older hgs keeps them as
+// this desktop's preferences for its member profile, as before. Hiding one
+// account's mark stays this desktop's choice.
 
 export const ACCOUNT_COLOR = "accounts/color/";
 export const ACCOUNT_MARK = "accounts/mark/";
@@ -86,12 +90,21 @@ export function inkFor(hex: string): string {
   return ratio(DARK_INK) >= ratio(LIGHT_INK) ? DARK_INK : LIGHT_INK;
 }
 
-/** The appearance a desktop keeps for an account: the first member profile's choice wins. */
-export function accountAppearance(values: Readonly<Settings>, members: readonly Pick<Profile, "host" | "id">[]): { color: string; emoji: string; hidden: boolean } {
+/** A member profile with what its computer keeps of the account's mark. */
+export type MarkMember = Pick<Profile, "host" | "id"> & Partial<Pick<Profile, "key" | "online" | "mark_color" | "mark_emoji" | "marks_supported">>;
+
+/**
+ * An account's appearance: the first member profile's choice wins. A
+ * member's computer value wins over this desktop's, which stands in until it
+ * moves there (migrateMarks) or for a computer with an older hgs.
+ */
+export function accountAppearance(values: Readonly<Settings>, members: readonly MarkMember[]): { color: string; emoji: string; hidden: boolean } {
   let color = "", emoji = "", hidden = false;
   for (const m of members) {
     const token = profileToken(m.host, m.id);
-    const c = values[ACCOUNT_COLOR + token], e = values[ACCOUNT_MARK + token];
+    const hosted = !!m.marks_supported;
+    const c = hosted && validColor(m.mark_color) ? m.mark_color : values[ACCOUNT_COLOR + token];
+    const e = hosted && m.mark_emoji && validEmoji(m.mark_emoji) ? m.mark_emoji : values[ACCOUNT_MARK + token];
     if (!color && validColor(c)) color = c.toLowerCase();
     if (!emoji && typeof e === "string" && validEmoji(e)) emoji = e.trim();
     // The account's choice is stored on every member; any of them hides it.
@@ -145,16 +158,70 @@ const index = createMemo(() => markIndex(accountsPage()));
 /** The card's account mark (reactive on the Accounts catalog and the desktop's appearance settings). */
 export const sessionMark = (row: BoundRow) => rowMark(row, index(), settings);
 
-/** Store one account's color and emoji on every member profile; null clears the choice. */
-export async function saveAccountAppearance(account: Pick<Account, "members">, color: string | null, emoji: string | null, hidden = false) {
+/** This desktop could not keep its part of the appearance; the dialog translates it. */
+export const MARK_NOT_SAVED = "The account appearance could not be saved. Try again.";
+/** Where an account mark is saved: a mark edit of the account's computers. */
+export interface MarkPort { open: typeof accountEditOpen; apply: typeof accountEditApply }
+
+/**
+ * Save one account's color and emoji with the account on each of its
+ * computers (zerus-sa9qn.6); null clears them. A computer with an older hgs
+ * keeps them as this desktop's preference; a computer that saved them makes
+ * this desktop forget its own. Hiding stays this desktop's. Returns what
+ * went wrong, nothing when every computer has the mark.
+ */
+export async function saveAccountAppearance(account: Pick<Account, "key" | "members">, color: string | null, emoji: string | null, hidden: boolean,
+  port: MarkPort): Promise<string[]> {
   if (color !== null && !validColor(color)) throw new Error("Invalid color");
   if (emoji !== null && !validEmoji(emoji)) throw new Error("Invalid emoji");
+  const errors: string[] = [];
+  let local = account.members.filter((m) => !m.marks_supported).map((m) => m.key);
+  let marked: string[] = [];
+  const hosted = account.members.filter((m) => m.marks_supported);
+  if (hosted.length) {
+    const selected = hosted.find((m) => m.online) ?? hosted[0];
+    try {
+      const view = await port.open(account.key, selected.key, "mark");
+      const result = await port.apply(view.handle, { color: color?.toLowerCase() ?? "", emoji: emoji?.trim() ?? "" });
+      local = [...local, ...(result.local ?? [])];
+      marked = result.marked ?? [];
+      errors.push(...result.errors);
+    } catch (error) { errors.push(String(error)); }
+  }
   let stored = true;
   for (const m of account.members) {
     const token = profileToken(m.host, m.id);
-    stored = (await setSetting(ACCOUNT_COLOR + token, color === null ? null : color.toLowerCase())) && stored;
-    stored = (await setSetting(ACCOUNT_MARK + token, emoji === null ? null : emoji.trim())) && stored;
+    const own = local.includes(m.key);
+    if (own || marked.includes(m.key)) {
+      stored = (await setSetting(ACCOUNT_COLOR + token, own && color !== null ? color.toLowerCase() : null)) && stored;
+      stored = (await setSetting(ACCOUNT_MARK + token, own && emoji !== null ? emoji.trim() : null)) && stored;
+    }
     stored = (await setSetting(ACCOUNT_HIDE + token, hidden ? true : null)) && stored;
   }
-  return stored;
+  if (!stored) errors.push(MARK_NOT_SAVED);
+  return errors;
+}
+
+/** One member profile's mark this desktop still keeps for a computer that keeps marks. */
+export interface PendingMark { key: string; token: string; color: string; emoji: string; move: boolean }
+
+/**
+ * This desktop's marks to move to the computers that keep them, once
+ * (zerus-sa9qn.6, pure): every reachable member whose computer keeps marks
+ * and that this desktop still has a color or emoji for. `move` is false when
+ * nothing would change there: the computer already has those values, so they
+ * win and the desktop's are only forgotten.
+ */
+export function pendingMarks(values: Readonly<Settings>, view: Pick<AccountsView, "accounts">): PendingMark[] {
+  const pending = new Map<string, PendingMark>();
+  for (const account of view.accounts) for (const m of account.members) {
+    if (!m.marks_supported || !m.online || pending.has(m.key)) continue;
+    const token = profileToken(m.host, m.id);
+    const c = values[ACCOUNT_COLOR + token], e = values[ACCOUNT_MARK + token];
+    if (c === undefined && e === undefined) continue;
+    const color = validColor(c) ? c.toLowerCase() : "";
+    const emoji = typeof e === "string" && validEmoji(e) ? e.trim() : "";
+    pending.set(m.key, { key: m.key, token, color, emoji, move: (!!color && !m.mark_color) || (!!emoji && !m.mark_emoji) });
+  }
+  return [...pending.values()];
 }

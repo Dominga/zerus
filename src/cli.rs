@@ -180,6 +180,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] account model-defaults ID --model MODEL [--effort LEVEL] [--revision REV]   defaults for new sessions
        hgs [@host] account permissions ID --mode bypass|provider|default [--revision REV]   default: bypass for Claude, Codex and Kimi
        hgs [@host] account permission-scope ID --scope account|computer [--revision REV]   share the permission mode across the account's computers, or keep it per computer
+       hgs [@host] account mark ID [--color #RRGGBB|none] [--emoji EMOJI|none] [--if-unset] [--revision REV]   the account's color and emoji on session cards everywhere
        hgs [@host] account set-key native-dsh --json   save API key from private JSON stdin
        hgs [@host] account start native-opencode   start the shared OpenCode service if none runs; inspection never starts it
        hgs [@host] account favorite native-opencode --model PROVIDER/MODEL --favorite on|off --request-id UUID   star an OpenCode model on that computer

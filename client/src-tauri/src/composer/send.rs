@@ -7559,6 +7559,93 @@ mod continuations {
             "an old message event does not settle a newer compaction's receipt"
         );
         assert!(view.uncertain && view.text == "same draft");
+        assert!(
+            view.history_text_match,
+            "same text is only an advisory, never the newer receipt"
+        );
+    }
+
+    #[test]
+    fn history_hint_is_exact_scoped_and_updates_without_local_rows() {
+        let root = dir("history-advisory");
+        let store = drafts(&root);
+        let (c, fake) = send_hub_on(&store);
+        *lock(&fake.outcome) = Box::new(|_, _| Outcome::Uncertain {
+            detail: "reply lost".into(),
+        });
+        let view = opened(&c, ready());
+        c.send_message(view.handle, 1, view.text_epoch, "exact draft".into(), 0, 0);
+        let view = until(&c, |v| !v.sending && v.uncertain);
+        store.flush();
+        let held = on_disk(&root).unwrap();
+        assert!(!view.history_text_match);
+        assert!(c.lock().local.delete(KEY, &view.local[0].id));
+        c.take_view();
+        let replace = |kind: &str, text: &str, agent: &str| {
+            let mut batch = Batch::default();
+            batch.activity.push(ActivityOut {
+                computer: ComputerId::from("studio"),
+                key: "run:run-1".into(),
+                kind: "replace".into(),
+                payload: json!({"events":[{"type":kind,"detail":text,"agent_id":agent}]}),
+            });
+            batch
+        };
+        c.observe(&replace("UserPromptSubmit", "exact draft", ""));
+        assert!(
+            c.take_view()
+                .expect("history-only update publishes the hint")
+                .history_text_match
+        );
+        for (kind, text, agent, shown) in [
+            ("UserPromptSubmit", "exact draft suffix", "", false),
+            ("UserPromptSubmit", " exact draft", "", false),
+            ("ToolUse", "exact draft", "", false),
+            ("UserPromptSubmit", "exact draft", "other-child", false),
+            ("UserPromptQueued", "exact draft", "", true),
+        ] {
+            c.observe(&replace(kind, text, agent));
+            let view = c.current().unwrap();
+            assert_eq!(view.history_text_match, shown);
+            assert!(view.uncertain && view.text == "exact draft");
+            assert_eq!(c.lock().composers[KEY].checkpoint.as_ref(), Some(&held));
+        }
+        for field in ["run_id", "conversation_id"] {
+            let mut wrong = ready();
+            wrong[field] = json!("another");
+            c.lock().followed.details = Some(Arc::new(wrong));
+            assert!(!c.current().unwrap().history_text_match);
+        }
+        c.lock().followed.details = Some(Arc::new(ready()));
+        let view = c.current().unwrap();
+        c.edit(
+            view.handle,
+            view.rev + 1,
+            view.text_epoch,
+            "edited".into(),
+            0,
+            0,
+        );
+        assert!(!c.current().unwrap().history_text_match);
+        let view = c.current().unwrap();
+        c.edit(
+            view.handle,
+            view.rev + 1,
+            view.text_epoch,
+            "exact draft".into(),
+            0,
+            0,
+        );
+        assert!(c.current().unwrap().history_text_match);
+        store.flush();
+        assert_eq!(
+            on_disk(&root).as_ref(),
+            Some(&held),
+            "no inferred receipt or checkpoint change"
+        );
+        assert_eq!(lock(&fake.calls).len(), 1, "no new send from the hint");
+        c.allow_retry(view.handle);
+        assert!(!c.current().unwrap().history_text_match);
     }
 
     /// History carries only text: it never settles a held identity, not
@@ -7599,11 +7686,16 @@ mod continuations {
             view.uncertain && view.text == "maybe sent",
             "the draft stays"
         );
+        assert!(
+            view.history_text_match,
+            "advisory only, despite the removed local row"
+        );
         assert_eq!(on_disk(&root).as_ref(), Some(&held), "its identity stays");
         // Only the user's Allow retry ends it.
         c.allow_retry(view.handle);
         eventually(|| on_disk(&root).is_none());
         let view = c.current().unwrap();
+        assert!(!view.history_text_match, "Allow retry hides the advisory");
         // A definite failure holds no identity: its text alone clears it.
         *lock(&fake.outcome) = Box::new(|_, _| Outcome::Failed {
             detail: "refused".into(),

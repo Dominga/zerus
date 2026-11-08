@@ -805,8 +805,8 @@ and the same arrow before its title; a request that waited quietly notifies
 once when the parent is gone, and a completion seen meanwhile is not replayed.
 Cards show the account mark (circle, letter and label) resolved by the row's
 computer and recorded `account_id` against that computer's account catalog,
-in the label's default palette color: colors and emoji remain desktop choices
-until hosts store them. See
+in the color that computer keeps for the account (the row's `account_mark`),
+else the label's default palette color. See
 `docs/superpowers/specs/2026-11-07-account-labels-child-sessions-design.md`.
 
 ### Rename, Saved and Archive
@@ -1622,6 +1622,13 @@ session error makes the message field read-only and muted while preserving its
 draft, focus and selection; informational notices leave editing available. When
 the composer is hidden, the same diagnostic uses the existing workspace footer.
 Other operation notices retain their priority there.
+
+An uncertain draft holding a deferred-input identity shows a quiet **This text
+may already have been delivered** hint when its exact text appears in the loaded
+history of that run and conversation. The hint is derived from the existing
+bounded history window and disappears when it no longer matches, including on
+edit or Allow retry. It changes no draft, checkpoint or uncertainty state: text
+equality is never request-ID receipt evidence and never clears or retries input.
 
 Reads from the selected remote machine show a yellow loading circle beside the
 session name only after two seconds. It remains visible while an actual read is
@@ -4142,6 +4149,26 @@ while the mark remains, and removing the mark as well accepts the next copy
 sent, which may lack attempts. Any
 entry at the mark's path counts as a mark, even one that cannot be read.
 
+For an explicit local review, `hgs task review-copy --project P --uuid UUID
+--json` inspects only that exact kept damaged copy. It returns a fingerprint;
+`hgs task review-copy --project P --uuid UUID --confirm FINGERPRINT --json`
+confirms moving its `.loro` and `.updates` into a private sibling
+`<uuid>.review-<UUID>` directory and removing its `.managed` mark last. Only a
+person can confirm. A healthy copy, changed fingerprint, link, special file,
+missing store or unexpected project identity is refused. Missing task files are
+explicitly part of the review; a mark-only copy can be reviewed. The store lock
+wait is bounded to two seconds, and inspection reads at most 64 MiB across the
+three files with a five-second inspection budget. Other tasks are not read or
+changed. The next incoming copy uses the existing importer; review sends and
+starts nothing. The files moved aside remain available for manual examination.
+
+In desktop Tasks, the damaged-files notice shows at most five kept-copy review
+cards, with project, known title and a copyable exact UUID. **Review local copy…**
+opens a confirmation naming the possible loss of attempt history and unsent
+local edits; **Cancel** has default focus. The card retains moved, refused with
+reason, or unknown outcomes. Unknown is never automatically retried; inspect
+the files manually. **Dismiss** removes a moved outcome from the view only.
+
 What this recovery supports, alone or combined: running an older Zerus
 after a rollback (its importer may fold, append or rewrite the task files as
 it always did), a crash at any point, damaged or truncated files, and an
@@ -4397,7 +4424,17 @@ phone's changes and answers a page of what the phone lacks, at most 512 KiB of
 updates, with a larger task in parts. A task the phone holds keeps coming to it
 after it becomes Done. A request may cover a range of task UUIDs, so a large
 inventory goes in parts; a refusal prints `{"schema": 1, "ok": false, "error":
-…}` with exit status 1. The phone's Send now and Cancel run on the session's
+…}` with exit status 1. Both read what the phone holds from the project's task
+index, which keeps each task's version and the project document's version, so
+a call reads again only what the change journal or the periodic full check
+finds changed, and neither rewrites the store's inventory cache; when the index
+cannot answer, they read the documents as before, with the same digest. The
+index reads a task as the inventory does: a task whose execution schema an
+older replica's merge lowered is repaired and saved first, so a phone receives
+the repair; an index whose rows a build without that rule read reads every
+row again once, and after such a build sharing the index stores rows, the
+index answers only once every row was read here again (in its bounded batches,
+whatever the clocks); until then both read the documents. The phone's Send now and Cancel run on the session's
 computer as `hgs task mobile-send --json` and `mobile-cancel --json`, which do
 what `send` and `cancel` do and answer only the task's stage (a refusal says
 `"uncertain": true` when the prompt was pasted but could not be recorded);
@@ -4668,10 +4705,26 @@ to admit another account. Only expired entries can be replaced at capacity.
 with a colored circle holding the first letter or digit of the account's label:
 on collapsed rows before the title, and on expanded cards with the label in the
 footer. **Color and mark…**, beside **Rename…** in the account's details, chooses
-a color and an optional emoji. They are this desktop's preferences, stored for
-each member profile of the account (`accounts/color/` and `accounts/mark/`), like
-machine label colors; without a choice the color is a stable palette slot derived
-from the label, so every desktop shows the same default. Settings > Sessions >
+a color and an optional emoji. They are kept with the account on each of its
+computers (zerus-sa9qn.6), so every desktop and phone shows the same mark:
+`hgs [@host] account mark ID [--color #RRGGBB|none] [--emoji EMOJI|none]
+[--if-unset] [--revision REV]` saves them in `account-marks.json` beside
+`accounts.json` (64 KiB at most, private; a change that would exceed that
+changes nothing), which older `hgs` builds never read because they parse
+`accounts.json` strictly. `account ls` then reports
+`marks_supported: true` and each row's `mark` (`color` and `emoji`, null when
+unset); each `hgs ls` session row carries its recorded account's
+`account_mark` when one is set, which reaches phones with the listing. A
+malformed file shows no marks and refuses writes until it is repaired or
+removed; unknown fields of a newer `hgs` are kept. The desktop saves a mark on
+every reachable computer of the account. A computer with an older `hgs` keeps
+it as this desktop's preference for that member profile (`accounts/color/` and
+`accounts/mark/`), as before. Once, the desktop moves those preferences to the
+computers that keep marks with `--if-unset`, which fills only what a computer
+has no value for, then forgets its own: if two desktops disagree, the first one
+to move its value wins. A computer that is offline or busy is tried again on its
+own, after a minute and then less often, up to every 15 minutes. Without a choice the color is a stable palette slot
+derived from the label, so every desktop shows the same default. Settings > Sessions >
 **Account marks** shows emoji instead of letters for accounts that have one.
 **Show account labels on session cards** (on by default) turns the marks off on
 every card, and an account's **Color and mark…** dialog can keep its own mark

@@ -187,6 +187,13 @@ class ChildSessionsTest {
         val work = ChildSessions.accountMark(row(JSONObject().put("account_id", "work").put("cmd", "claude")), groups)!!
         assertEquals("Work", work.label); assertEquals("W", work.letter); assertEquals("claude", work.provider)
         assertEquals(0xFF8EA9F4, work.color)
+        // The color the computer keeps for the account wins (zerus-sa9qn.6); an invalid one is ignored.
+        val kept = ChildSessions.accountMark(row(JSONObject().put("account_id", "work").put("cmd", "claude")
+            .put("account_mark", JSONObject().put("color", "#ffcf33").put("emoji", "🦊"))), groups)!!
+        assertEquals(0xFFFFCF33, kept.color); assertEquals(0xFF10151B, kept.ink)
+        for (bad in listOf("#FFCF33", "red", "#ffcf3")) assertEquals(0xFF8EA9F4,
+            ChildSessions.accountMark(row(JSONObject().put("account_id", "work").put("cmd", "claude")
+                .put("account_mark", JSONObject().put("color", bad))), groups)!!.color)
         // An unnamed account is labeled by its email.
         assertEquals("p@example.com", ChildSessions.accountMark(row(JSONObject().put("account_id", "plain").put("cmd", "claude")), groups)!!.label)
         // DeepSeek sessions record dsh profiles.

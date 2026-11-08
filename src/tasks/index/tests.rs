@@ -1295,7 +1295,8 @@ fn the_index_holds_the_inventory_of_every_loaded_task_and_the_project() {
     assert_eq!(damaged, 1);
     drop(index);
     // Saves through the store: a note, a task completed, the project's settings.
-    let uuids: Vec<String> = store.uuids().unwrap();
+    // The project's damaged file has a random UUID: take loaded tasks only.
+    let uuids: Vec<String> = store.uuids().unwrap().into_iter().filter(|uuid| store.load(uuid).is_ok()).collect();
     let mut noted = store.load(&uuids[0]).unwrap();
     noted.comment("More detail", &Actor::Person, 5).unwrap();
     store.save(&mut noted).unwrap();
@@ -1325,4 +1326,169 @@ fn the_index_holds_the_inventory_of_every_loaded_task_and_the_project() {
     let index = Index::open(&store).unwrap();
     assert_holds_the_inventory(&store, &index);
     assert_eq!(index.revision().unwrap(), revision);
+}
+
+#[test]
+fn the_phone_s_inventories_come_from_the_index_without_reading_every_task() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = project(temp.path());
+    for uuid in store.uuids().unwrap() {
+        age(&store, &uuid);
+    }
+    let mut index = Index::open(&store).unwrap();
+    assert_eq!(index.live_inventory().unwrap(), store.live_inventory().unwrap().0);
+    // A phone holding a Done task and one this computer never had.
+    let (all, _) = store.inventory().unwrap();
+    let done = all.tasks.keys().find(|uuid| !store.live_inventory().unwrap().0.tasks.contains_key(*uuid)).unwrap();
+    let mut theirs = Inventory::default();
+    theirs.tasks.insert(done.clone(), Default::default());
+    theirs.tasks.insert(ids::new_uuid(), Default::default());
+    assert_eq!(index.phone_inventory(&theirs).unwrap(), store.phone_inventory(&theirs).unwrap());
+    assert!(index.phone_inventory(&theirs).unwrap().tasks.contains_key(done));
+    // A quiet read decodes no task and stamps only the task folder.
+    let (_, decoded, stamped) = counted(|| index.live_inventory().unwrap());
+    assert_eq!((decoded, stamped), (0, 1));
+    // A save through the store is in the next read: only that task is decoded.
+    let uuid = store.live_inventory().unwrap().0.tasks.keys().next().unwrap().clone();
+    let mut task = store.load(&uuid).unwrap();
+    task.comment("From the phone's side", &Actor::Person, 9).unwrap();
+    aged_save(&store, &mut task);
+    let (live, decoded, _) = counted(|| index.live_inventory().unwrap());
+    assert_eq!(decoded, 1);
+    assert_eq!(live, store.live_inventory().unwrap().0);
+    assert_eq!(live.digest(), store.live_inventory().unwrap().0.digest());
+}
+
+/// A task cut over to the execution schema whose stored schema an older
+/// replica's merged upgrade lowered, saved as such: the store's inventory
+/// repairs it before reading its version (zerus-cg5h.21, review-win-e).
+fn unrepaired(store: &ProjectStore) -> TaskDoc {
+    unrepaired_as(store, "T-repair")
+}
+
+fn unrepaired_as(store: &ProjectStore, id: &str) -> TaskDoc {
+    let mut task = new_task(store, id, Stage::Todo, "V", "Repair me");
+    assert!(task.floor().unwrap());
+    task.lower_stored_schema_for_test(5);
+    assert!(task.needs_schema_repair());
+    store.save(&mut task).unwrap();
+    assert!(store.load(task.uuid()).unwrap().needs_schema_repair());
+    task
+}
+
+#[test]
+fn the_index_repairs_a_task_before_it_holds_its_version() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let stale = unrepaired(&store);
+    let index = Index::open(&store).unwrap();
+    // The index's read repaired and saved it, as the store's inventory does.
+    let saved = store.load(stale.uuid()).unwrap();
+    assert!(!saved.needs_schema_repair());
+    let (_, live, _) = held(&index);
+    assert_eq!(live.tasks[stale.uuid()], saved.inventory_version());
+    assert_ne!(live.tasks[stale.uuid()], stale.inventory_version());
+    assert_holds_the_inventory(&store, &index);
+    // Its stamps are those of the repaired files.
+    let files: String = index.db.query_row("SELECT files FROM tasks WHERE uuid=?1", [stale.uuid()], |r| r.get(0)).unwrap();
+    assert_eq!(files, stamped(store.dir(), stale.uuid(), now()).0);
+}
+
+#[test]
+fn rows_an_older_build_held_are_read_again_with_the_repair() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let stale = unrepaired(&store);
+    // A warm index of the build before this rule (#1724): rows read
+    // without the repair, and no mark of the rule.
+    LEGACY_DERIVE.with(|legacy| legacy.set(true));
+    let index = Index::open(&store).unwrap();
+    LEGACY_DERIVE.with(|legacy| legacy.set(false));
+    assert_eq!(held(&index).1.tasks[stale.uuid()], stale.inventory_version());
+    index.db.execute("DELETE FROM meta WHERE key = 'derived'", []).unwrap();
+    drop(index);
+    let index = Index::open(&store).unwrap();
+    assert!(!store.load(stale.uuid()).unwrap().needs_schema_repair());
+    assert_holds_the_inventory(&store, &index);
+}
+
+#[test]
+fn a_row_an_older_build_writes_later_is_read_again_with_the_repair() {
+    // review-win-e R2 on #1736: this build's index is current, then an older
+    // build sharing the file reads a task without the repair and stores its
+    // row; the next read here must not serve that row.
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    drop(Index::open(&store).unwrap());
+    let stale = unrepaired(&store);
+    age(&store, stale.uuid());
+    LEGACY_DERIVE.with(|legacy| legacy.set(true));
+    let index = Index::open(&store).unwrap();
+    LEGACY_DERIVE.with(|legacy| legacy.set(false));
+    assert_eq!(held(&index).1.tasks[stale.uuid()], stale.inventory_version());
+    drop(index);
+    let mut index = Index::open(&store).unwrap();
+    assert_eq!(index.live_inventory().unwrap(), store.live_inventory().unwrap().0);
+    assert_holds_the_inventory(&store, &index);
+    // Once the repaired files settle, a read is quiet again: nothing is
+    // decoded and only the folder is stamped.
+    age(&store, stale.uuid());
+    index.live_inventory().unwrap();
+    let (_, decoded, stamped) = counted(|| index.live_inventory().unwrap());
+    assert_eq!((decoded, stamped), (0, 1));
+}
+
+#[test]
+fn rows_an_older_build_stored_on_both_sides_of_the_last_read_here_are_all_read_again() {
+    // review-win-e on #1736 R3 (zerus-cg5h.21.2): an older build whose
+    // clock was set back and then caught up stores unrepaired rows dated
+    // before and after this build's last write. No clock may decide which
+    // are read again: the index's inventory is not used until every row was.
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    drop(Index::open(&store).unwrap());
+    let (early, late) = (unrepaired_as(&store, "T-early1"), unrepaired_as(&store, "T-late01"));
+    age(&store, early.uuid());
+    age(&store, late.uuid());
+    LEGACY_DERIVE.with(|legacy| legacy.set(true));
+    let index = Index::open(&store).unwrap();
+    LEGACY_DERIVE.with(|legacy| legacy.set(false));
+    let since: i64 = index.meta("derived_at").unwrap().unwrap().parse().unwrap();
+    index.db.execute("UPDATE tasks SET checked = ?1 WHERE uuid = ?2", params![since - 1_000, early.uuid()]).unwrap();
+    drop(index);
+    let mut index = Index::open(&store).unwrap();
+    let held = index.live_inventory();
+    let expected = store.live_inventory().unwrap().0;
+    // Either not used (the phone reads the store) or already exact.
+    if let Ok(inventory) = held {
+        assert_eq!(inventory, expected);
+    }
+    // Once every row was read again here, the index answers, exactly.
+    for _ in 0..4 {
+        index.live_inventory().ok();
+    }
+    assert_eq!(index.live_inventory().unwrap(), store.live_inventory().unwrap().0);
+    assert!(!store.load(early.uuid()).unwrap().needs_schema_repair());
+}
+
+#[test]
+fn after_another_build_s_write_the_index_answers_only_once_every_row_was_read_again() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    for n in 0..600 {
+        write_plain(&store, &new_task(&store, &format!("T-{n:06}"), Stage::Todo, "V", "Plain"));
+    }
+    drop(Index::open(&store).unwrap());
+    let stale = unrepaired(&store);
+    age(&store, stale.uuid());
+    LEGACY_DERIVE.with(|legacy| legacy.set(true));
+    drop(Index::open(&store).unwrap());
+    LEGACY_DERIVE.with(|legacy| legacy.set(false));
+    let mut index = Index::open(&store).unwrap();
+    // 601 rows, at most 256 read again per read (the open was one): the
+    // store answers until every row was read here again.
+    assert!(matches!(index.live_inventory(), Err(Failure::Other)));
+    let inventory = index.live_inventory().unwrap();
+    assert_eq!(inventory, store.live_inventory().unwrap().0);
+    assert_eq!(inventory.tasks.len(), 601);
 }

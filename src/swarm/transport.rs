@@ -802,8 +802,7 @@ pub fn worker() -> Result<()> {
     if let Err(error) = service::record(&config) {
         eprintln!("hgs swarm: record the worker version: {error:#}");
     }
-    let mut schedule: BTreeMap<String, (u64, u64)> = BTreeMap::new();
-    let mut last_digest = String::new();
+    let mut schedule = Schedule::default();
     loop {
         // An upgrade replaced this program: exit so that the service manager
         // starts the new version. Catalog errors never end the loop.
@@ -814,47 +813,206 @@ pub fn worker() -> Result<()> {
         match Config::load()
             .map_err(anyhow::Error::from)
             .and_then(|config| {
-                let mut store = LockedStore::load(&config)?;
-                store.save()?;
-                let catalog = store.data.catalog.digest();
-                let peers: Vec<_> = store.data.peers.keys().cloned().collect();
-                drop(store);
-                // A local change to the catalog or to any task syncs at once.
-                let digest = catalog + &replica::fingerprint(&config).unwrap_or_default();
-                let changed = digest != last_digest;
-                for alias in peers {
-                    let (due, failures) = schedule.get(&alias).copied().unwrap_or_default();
-                    if now() < due && !(changed && failures == 0) {
-                        continue;
-                    }
-                    match sync_peer(&config, &alias) {
-                        Ok(()) => {
-                            schedule.insert(alias, (now() + 30, 0));
-                        }
-                        Err(error) => {
-                            let mut store = LockedStore::load(&config)?;
-                            if let Some(peer) = store.data.peers.get_mut(&alias) {
-                                peer.error = format!("{error:#}");
-                            }
-                            store.save()?;
-                            let failures = (failures + 1).min(5);
-                            schedule
-                                .insert(alias, (now() + (15 * (1 << failures)).min(300), failures));
-                        }
-                    }
-                }
+                schedule.round(&mut Live(&config))?;
                 if super::session_labels::due_local(&config) {
                     let _ = super::session_labels::refresh_local(
                         &config,
                         Instant::now() + Duration::from_secs(2),
                     );
                 }
-                last_digest = LockedStore::load(&config)?.data.catalog.digest() + &replica::fingerprint(&config).unwrap_or_default();
                 Ok(())
             }) {
             Ok(()) => {}
             Err(error) => eprintln!("hgs swarm: {error:#}"),
         }
         thread::sleep(Duration::from_secs(3));
+    }
+}
+
+/// When the worker contacts each member.
+#[derive(Default)]
+struct Schedule {
+    /// Per member alias: when its periodic sync is due, and its consecutive
+    /// failures.
+    members: BTreeMap<String, (u64, u64)>,
+    /// The local change digest read at the start of the last complete round.
+    last_digest: String,
+}
+
+/// What a worker round reads and does: this computer and its members in the
+/// worker, a fake in tests.
+trait Members {
+    /// The local change digest (the catalog and the tasks of every project)
+    /// and the aliases of the members.
+    fn local(&mut self) -> Result<(String, Vec<String>)>;
+    fn now(&self) -> u64;
+    fn sync(&mut self, alias: &str) -> Result<()>;
+    /// Records that the sync with `alias` failed.
+    fn failed(&mut self, alias: &str, error: &anyhow::Error) -> Result<()>;
+}
+
+impl Schedule {
+    /// One round: syncs each member that is due and, after a local change to
+    /// the catalog or to any task, at once each member that is not backing off.
+    fn round(&mut self, members: &mut impl Members) -> Result<()> {
+        let (digest, aliases) = members.local()?;
+        let changed = digest != self.last_digest;
+        for alias in aliases {
+            let (due, failures) = self.members.get(&alias).copied().unwrap_or_default();
+            if members.now() < due && !(changed && failures == 0) {
+                continue;
+            }
+            match members.sync(&alias) {
+                Ok(()) => {
+                    self.members.insert(alias, (members.now() + 30, 0));
+                }
+                Err(error) => {
+                    members.failed(&alias, &error)?;
+                    let failures = (failures + 1).min(5);
+                    self.members.insert(
+                        alias,
+                        (members.now() + (15 * (1 << failures)).min(300), failures),
+                    );
+                }
+            }
+        }
+        // The digest read at the START of this round, never one read after
+        // it: a change made while the round ran, by a person or by the round's
+        // own imports, then differs and syncs on the next round instead of
+        // waiting for the periodic one (zerus-jrvnr). An import costs at most
+        // one round that finds nothing new.
+        self.last_digest = digest;
+        Ok(())
+    }
+}
+
+/// This computer and its members, as the worker syncs them.
+struct Live<'a>(&'a Config);
+
+impl Members for Live<'_> {
+    fn local(&mut self) -> Result<(String, Vec<String>)> {
+        let mut store = LockedStore::load(self.0)?;
+        store.save()?;
+        let catalog = store.data.catalog.digest();
+        let aliases = store.data.peers.keys().cloned().collect();
+        drop(store);
+        let digest = catalog + &replica::fingerprint(self.0).unwrap_or_default();
+        Ok((digest, aliases))
+    }
+    fn now(&self) -> u64 {
+        now()
+    }
+    fn sync(&mut self, alias: &str) -> Result<()> {
+        sync_peer(self.0, alias)
+    }
+    fn failed(&mut self, alias: &str, error: &anyhow::Error) -> Result<()> {
+        let mut store = LockedStore::load(self.0)?;
+        if let Some(peer) = store.data.peers.get_mut(alias) {
+            peer.error = format!("{error:#}");
+        }
+        store.save()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Members whose syncs, and a person, change the local digest.
+    #[derive(Default)]
+    struct Fake {
+        /// The local change digest.
+        digest: u64,
+        clock: u64,
+        /// Each sync, by round.
+        synced: Vec<Vec<String>>,
+        /// Called during each sync with the round number and the alias.
+        during: Option<fn(&mut Fake, usize, &str)>,
+        failing: BTreeSet<String>,
+    }
+
+    impl Members for Fake {
+        fn local(&mut self) -> Result<(String, Vec<String>)> {
+            Ok((self.digest.to_string(), vec!["b".into(), "c".into()]))
+        }
+        fn now(&self) -> u64 {
+            self.clock
+        }
+        fn sync(&mut self, alias: &str) -> Result<()> {
+            self.synced.last_mut().unwrap().push(alias.into());
+            if let Some(during) = self.during {
+                during(self, self.synced.len(), alias);
+            }
+            ensure!(!self.failing.contains(alias), "{alias} is unreachable");
+            Ok(())
+        }
+        fn failed(&mut self, _: &str, _: &anyhow::Error) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Fake {
+        fn round(&mut self, schedule: &mut Schedule) {
+            self.synced.push(Vec::new());
+            schedule.round(self).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_change_made_while_a_round_runs_syncs_on_the_next_round_once() {
+        let mut fake = Fake {
+            during: Some(|fake, round, alias| {
+                // A person adds a task while the first round talks to b, and
+                // the periodic fourth round imports from c.
+                if (round, alias) == (1, "b") || (round, alias) == (4, "c") {
+                    fake.digest += 1;
+                }
+            }),
+            ..Fake::default()
+        };
+        let mut schedule = Schedule::default();
+        for round in 1..=6 {
+            if round == 4 {
+                fake.clock += 30;
+            }
+            fake.round(&mut schedule);
+        }
+        // Each change syncs every member on the next round, which finds
+        // nothing new; the round after it is quiet again.
+        assert_eq!(
+            fake.synced,
+            [
+                vec!["b", "c"],
+                vec!["b", "c"],
+                vec![],
+                vec!["b", "c"],
+                vec!["b", "c"],
+                vec![]
+            ],
+            "a change made during a round waited for the periodic sync"
+        );
+    }
+
+    #[test]
+    fn without_a_change_only_due_members_sync_and_a_failing_one_backs_off() {
+        let mut fake = Fake {
+            failing: ["c".to_owned()].into(),
+            ..Fake::default()
+        };
+        let mut schedule = Schedule::default();
+        fake.round(&mut schedule);
+        fake.round(&mut schedule);
+        fake.clock += 30;
+        fake.round(&mut schedule);
+        // A local change syncs b at once; c waits for its backoff.
+        fake.digest += 1;
+        fake.round(&mut schedule);
+        fake.clock += 30;
+        fake.round(&mut schedule);
+        assert_eq!(
+            fake.synced,
+            [vec!["b", "c"], vec![], vec!["b", "c"], vec!["b"], vec!["b"]]
+        );
+        assert_eq!(schedule.members["c"].1, 2);
     }
 }

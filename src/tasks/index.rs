@@ -20,7 +20,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
-use zerus_replica::ids;
+use zerus_replica::{ids, Inventory};
 
 /// v2 (ROWS 5): rows carry their owner session for session-filtered pages
 /// (zerus-cg5h.26). A new file, not a new version of v1: an older hgs keeps
@@ -40,6 +40,11 @@ const ROWS: i64 = 5;
 /// a row remembers whether its task loaded, which the mark decides. An index
 /// made under another mark rule (before the seal, for one) is built again.
 const SCHEMA: i64 = ROWS * 1000 + zerus_replica::MARK_FORMAT;
+/// The rule rows are read under, kept in meta: "repaired-1" reads a task as
+/// the store's inventory does, repairing a lowered execution schema first
+/// (zerus-cg5h.21). Rows of an index without it are read again once; the
+/// row shape is unchanged, so this needs no other index file.
+const DERIVED: &str = "repaired-1";
 /// The histories kept: the most recently read tasks.
 const HISTORIES: i64 = 16;
 /// The one-task history cache this index replaces.
@@ -115,6 +120,8 @@ thread_local! {
     pub(super) static STAMPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Task histories read from their documents into the index.
     pub(super) static MATERIALIZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Reads rows as the build before the repair rule did, without it.
+    pub(super) static LEGACY_DERIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// A file's length, modification time and inode, or `-` when it is missing,
@@ -256,11 +263,31 @@ fn held(task: &TaskDoc) -> Option<Held> {
     })
 }
 
-fn derive(store: &ProjectStore, uuid: &str) -> Derived {
+/// Whether this read emulates the build before the repair rule (tests).
+fn legacy() -> bool {
+    #[cfg(test)]
+    return LEGACY_DERIVE.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    false
+}
+
+/// A task's row and the stamps of its files, read as the store's inventory
+/// reads it (zerus-cg5h.21): a task whose execution schema an older
+/// replica's merged upgrade lowered is repaired and saved first, and the
+/// version read and the stamps taken are one observation.
+fn derive(store: &ProjectStore, uuid: &str, stamp: impl FnOnce() -> (String, bool)) -> (Derived, (String, bool)) {
+    if legacy() {
+        return (derive_from(store.load(uuid)), stamp());
+    }
+    let (loaded, stamps) = store.observe(uuid, stamp);
+    (derive_from(loaded), stamps)
+}
+
+fn derive_from(loaded: zerus_replica::Result<TaskDoc>) -> Derived {
     #[cfg(test)]
     DECODED.with(|n| n.set(n.get() + 1));
     let damaged = |error: String, held| Derived::Damaged(cut(&error, ERROR_BYTES).to_owned(), held);
-    let task = match store.load(uuid) {
+    let task = match loaded {
         Ok(task) => task,
         Err(error) => return damaged(error.to_string(), None),
     };
@@ -574,7 +601,32 @@ impl<'a> Index<'a> {
         let now = now();
         let quiet = changes.documents.as_ref().is_some_and(BTreeSet::is_empty);
         let periodic = now < checked || now - checked >= FULL_CHECK_MS;
+        // An index whose rows a build without the repair rule read (#1724)
+        // reads every row again once. After that, a build without the rule
+        // that shares the file can still store rows: any row change this
+        // build did not make leaves "derived_revision" behind "revision", and
+        // the rows stored since this build's last write ("derived_at", by the
+        // checked index) are read again. A quiet read compares two values.
+        let ours = !legacy();
+        let mut rederive = ours && self.meta("derived")?.as_deref() != Some(DERIVED);
+        let mut foreign: BTreeSet<String> = BTreeSet::new();
+        if ours && !rederive && built && self.meta("revision")? != self.meta("derived_revision")? {
+            let since: i64 = self.meta("derived_at")?.and_then(|v| v.parse().ok()).unwrap_or(0);
+            let mut query = self.db.prepare_cached("SELECT uuid FROM tasks WHERE checked >= ?1")?;
+            for uuid in query.query_map([since], |r| r.get::<_, String>(0))? {
+                foreign.insert(uuid?);
+            }
+            // A clock set back can hide those rows: then every row is read again.
+            rederive = foreign.is_empty();
+            // Clocks may also straddle that time (zerus-cg5h.21.2): every row
+            // is suspect and read again in bounded batches, and the phone's
+            // inventory is not read from the index until all were.
+            let mark = now.to_string();
+            self.db.execute("INSERT OR REPLACE INTO meta VALUES('suspect', ?1)", [&mark])?;
+            self.db.execute("INSERT OR REPLACE INTO meta VALUES('repair_floor', ?1)", [&mark])?;
+        }
         let full = !built
+            || rederive
             || changes.documents.is_none()
             // The folder changed while the journal says nothing did: a
             // writer that does not keep the journal.
@@ -585,8 +637,10 @@ impl<'a> Index<'a> {
         // dated after now.
         let past = now - MAX_AGE_MS - 1;
         self.db.execute("UPDATE tasks SET checked=?1 WHERE checked > ?2", params![past, now])?;
-        if self.meta("suspect")?.and_then(|v| v.parse::<i64>().ok()).is_some_and(|mark| mark > now) {
-            self.db.execute("INSERT OR REPLACE INTO meta VALUES('suspect', ?1)", [now.to_string()])?;
+        for key in ["suspect", "repair_floor"] {
+            if self.meta(key)?.and_then(|v| v.parse::<i64>().ok()).is_some_and(|mark| mark > now) {
+                self.db.execute("INSERT OR REPLACE INTO meta VALUES(?1, ?2)", params![key, now.to_string()])?;
+            }
         }
         let moved = changes.generation != generation || changes.offset != offset;
         if built && changes.documents.is_none() && moved {
@@ -608,7 +662,14 @@ impl<'a> Index<'a> {
             let mut uuids: BTreeSet<String> = self.store.uuids()?.into_iter().collect();
             uuids.extend(known.keys().cloned());
             let uuids: Vec<String> = uuids.into_iter().collect();
-            self.refresh(&uuids, Some(&known), changes.documents.as_ref())?;
+            let every: BTreeSet<String>;
+            let noted = if rederive {
+                every = uuids.iter().cloned().collect();
+                Some(&every)
+            } else {
+                changes.documents.as_ref()
+            };
+            self.refresh(&uuids, Some(&known), noted)?;
         } else if let Some(documents) = &changes.documents {
             let uuids: Vec<String> = documents.iter().filter(|d| ids::is_uuid(d)).cloned().collect();
             self.refresh(&uuids, None, Some(documents))?;
@@ -637,6 +698,10 @@ impl<'a> Index<'a> {
             let list: Vec<String> = suspect.iter().cloned().collect();
             self.refresh(&list, None, Some(&suspect))?;
         }
+        if !rederive && !foreign.is_empty() {
+            let list: Vec<String> = foreign.iter().cloned().collect();
+            self.refresh(&list, None, Some(&foreign))?;
+        }
         // The project document's version, as the phone's inventory holds it:
         // read again when the journal names it, and at a full check when its
         // file changed; kept apart from the rows and their revision.
@@ -655,6 +720,9 @@ impl<'a> Index<'a> {
             if full {
                 set.execute(params!["checked", now.to_string()])?;
             }
+            if full && ours {
+                set.execute(params!["derived", DERIVED])?;
+            }
             match project {
                 Some((files, Some(version))) => {
                     set.execute(params!["project_files", files])?;
@@ -667,6 +735,11 @@ impl<'a> Index<'a> {
                 None => (),
             }
             tx.execute("INSERT OR IGNORE INTO meta VALUES('revision', ?1)", [ids::new_uuid()])?;
+            if ours {
+                // Every row is now as this build reads it.
+                tx.execute("INSERT OR REPLACE INTO meta SELECT 'derived_revision', value FROM meta WHERE key = 'revision'", [])?;
+                tx.execute("INSERT OR REPLACE INTO meta VALUES('derived_at', ?1)", [super::now().to_string()])?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -710,10 +783,12 @@ impl<'a> Index<'a> {
         for chunk in uuids.chunks(CHUNK) {
             let mut work = Vec::new();
             for uuid in chunk {
-                let (now, settled) = stamped(&dir, uuid, read_at);
                 // When it was read orders the background queue; whether its
                 // files were settled decides if a page may trust it.
-                let (checked, trusted) = (read_at, settled);
+                let checked = read_at;
+                // A task the journal names is read whatever its stamps, and
+                // stamped only with that read.
+                let forced = noted.is_some_and(|noted| noted.contains(uuid));
                 #[allow(clippy::type_complexity)]
                 let stored: Option<(String, Option<String>, Option<String>, Option<Held>)> = self
                     .db
@@ -725,15 +800,21 @@ impl<'a> Index<'a> {
                         Ok((r.get(0)?, r.get(1)?, r.get(2)?, held))
                     })
                     .optional()?;
-                let stamps = match known {
-                    Some(known) => known.get(uuid).cloned(),
-                    None => stored.as_ref().map(|s| s.0.clone()),
-                };
-                let unchanged = stamps.as_deref() == Some(now.as_str()) || (stamps.is_none() && gone(&now));
-                if unchanged && !noted.is_some_and(|noted| noted.contains(uuid)) {
-                    continue;
+                if !forced {
+                    let (now, _) = stamped(&dir, uuid, read_at);
+                    let stamps = match known {
+                        Some(known) => known.get(uuid).cloned(),
+                        None => stored.as_ref().map(|s| s.0.clone()),
+                    };
+                    let unchanged = stamps.as_deref() == Some(now.as_str()) || (stamps.is_none() && gone(&now));
+                    if unchanged {
+                        continue;
+                    }
                 }
-                let derived = (!gone(&now)).then(|| derive(self.store, uuid));
+                // A repair saves the task: its row keeps the stamps taken
+                // with that read, and a task whose files are gone has none.
+                let (derived, (now, trusted)) = derive(self.store, uuid, || stamped(&dir, uuid, read_at));
+                let derived = (!gone(&now)).then_some(derived);
                 // Read again to the same row: only its stamps and time change.
                 let same = match (&derived, &stored) {
                     (Some(Derived::Row { row, held, .. }), Some((_, Some(old), None, was))) => row == old && held == was,
@@ -787,11 +868,71 @@ impl<'a> Index<'a> {
                 }
             }
             if changed {
-                tx.execute("INSERT OR REPLACE INTO meta VALUES('revision', ?1)", [ids::new_uuid()])?;
+                // This build's own change keeps the repair evidence current,
+                // unless another build changed rows since (see `sync`).
+                let clean: bool = !legacy()
+                    && tx.query_row(
+                        "SELECT (SELECT value FROM meta WHERE key = 'revision') IS (SELECT value FROM meta WHERE key = 'derived_revision')",
+                        [],
+                        |r| r.get(0),
+                    )?;
+                let revision = ids::new_uuid();
+                tx.execute("INSERT OR REPLACE INTO meta VALUES('revision', ?1)", [&revision])?;
+                if clean {
+                    tx.execute("INSERT OR REPLACE INTO meta VALUES('derived_revision', ?1)", [&revision])?;
+                }
             }
             tx.commit()?;
         }
         Ok(())
+    }
+
+    /// What a phone holds of this project (zerus-cg5h.21), as
+    /// `ProjectStore::live_inventory` reads it: the project document and
+    /// every loaded task that is not Done, read again only where the journal
+    /// or the periodic check finds a change.
+    pub(super) fn live_inventory(&mut self) -> Outcome<Inventory> {
+        self.sync()?;
+        // After another build changed rows, every row must have been read
+        // here again under the repair rule (zerus-cg5h.21.2); until then the
+        // caller reads the store.
+        if let Some(floor) = self.meta("repair_floor")?.and_then(|v| v.parse::<i64>().ok()) {
+            let uncertain: bool =
+                self.db.query_row("SELECT EXISTS(SELECT 1 FROM tasks WHERE checked < ?1)", [floor], |r| r.get(0))?;
+            if uncertain {
+                return Err(Failure::Other);
+            }
+        }
+        // Missing while the project document cannot be read: the caller
+        // reads the store, which says why.
+        let project = self.meta("project_version")?.ok_or(Failure::Other)?;
+        let mut inventory = Inventory {
+            project: serde_json::from_str(&project).map_err(|_| Failure::Damaged)?,
+            tasks: BTreeMap::new(),
+        };
+        let mut query = self.db.prepare_cached("SELECT uuid, version FROM tasks WHERE done = 0 AND version IS NOT NULL")?;
+        let rows = query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (uuid, version) = row?;
+            inventory.tasks.insert(uuid, serde_json::from_str(&version).map_err(|_| Failure::Damaged)?);
+        }
+        Ok(inventory)
+    }
+
+    /// What a phone holding `theirs` is answered from, as
+    /// `ProjectStore::phone_inventory` reads it: the live view and every
+    /// loaded task it already holds, Done ones included.
+    pub(super) fn phone_inventory(&mut self, theirs: &Inventory) -> Outcome<Inventory> {
+        let mut inventory = self.live_inventory()?;
+        let mut query = self.db.prepare_cached("SELECT version FROM tasks WHERE uuid = ?1 AND done = 1 AND version IS NOT NULL")?;
+        let mut held = Vec::new();
+        for uuid in theirs.tasks.keys().filter(|uuid| !inventory.tasks.contains_key(*uuid)) {
+            if let Some(version) = query.query_row([uuid], |r| r.get::<_, String>(0)).optional()? {
+                held.push((uuid.clone(), serde_json::from_str(&version).map_err(|_| Failure::Damaged)?));
+            }
+        }
+        inventory.tasks.extend(held);
+        Ok(inventory)
     }
 
     /// Changes whenever any indexed row changes, including after a rebuild.

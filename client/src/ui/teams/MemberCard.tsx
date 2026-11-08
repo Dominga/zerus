@@ -11,7 +11,7 @@ import { TeamActions } from "./actions";
 import { TextDialog } from "./TeamActions";
 import { SwapMemberDialog } from "./SwapMemberDialog";
 import { roleStyle } from "./roles";
-import { memberProgress, unreadBadge, type MemberStatus } from "./team-model";
+import { memberProgress, memberStateColor, unreadBadge, type MemberStatus } from "./team-model";
 import { answerRow, newestAnswers, permissionSummary } from "./permissionAnswers";
 import { now } from "../../store/ui";
 import { accountLabel, limitText, memberMenu, memberAccount, moveAffected, reportsOf, scaleRoom, waitingForTask, type MemberMenuId } from "./members";
@@ -77,6 +77,9 @@ export function MemberCard(props: {
   const own = createMemo(() => memberProgress(props.team, props.member));
   const reports = () => reportsOf(props.team, props.member.id).length;
   const [tasksOpen, setTasksOpen] = createSignal(false);
+  // Task #347: the card shows a header and one status line; the account, pulse,
+  // marks, tasks and unread wait behind this fold (a request stays in full).
+  const [detailsOpen, setDetailsOpen] = createSignal(false);
   // Task 315 (Qt U17): the answered permissions fold to one line and open to the newest five.
   const [answersOpen, setAnswersOpen] = createSignal(false);
   const answers = () => props.member.permission_answers ?? [];
@@ -121,7 +124,7 @@ export function MemberCard(props: {
   const assignable = () => props.team.tasks.filter((task) => !["accepted", "rejected", "cancelled", "done"].includes(task.status) && task.assignee !== props.member.id);
   const stop = (event: Event) => event.stopPropagation();
   return (
-    <div class="team-member team-member-card" data-member={props.member.id} data-kind={props.status.kind} role="button" tabindex="0"
+    <div class="team-member team-member-card" data-member={props.member.id} data-kind={props.status.kind} data-state-color={memberStateColor(props.status.kind)} role="button" tabindex="0"
       classList={{ problem: props.status.problem, [`tone-${props.status.tone}`]: true, lead: props.member.lead, focused: props.focused, sub: !!props.member.sub, planned: props.status.kind === "not_created" }}
       style={{ "margin-left": `${Math.max(0, props.depth - 1) * 14}px` }}
       title={props.focused ? tr("Show every member") : tr("Show only %1's tasks", role())}
@@ -138,45 +141,60 @@ export function MemberCard(props: {
             </button>
           </Show>
           <Show when={props.member.question}><span class="team-q" title={tr("A question waits in its session")}>?1</span></Show>
-          <Show when={unreadBadge(props.member)}>{(badge) => (
-            <span class="team-unread mono" classList={{ urgent: badge().urgent }} title={badge().tip}>{badge().text}</span>
-          )}</Show>
           <span class="dim ell team-model">{props.member.model || props.member.agent}</span>
-          <Show when={props.team.status !== "draft"}>
-            <span class="dim ell team-account" data-account={memberAccount(props.member)}
-              title={props.member.session && props.member.session_account != null ? tr("Its session runs on %1", accountLabel(props.member)) : tr("Account: %1", accountLabel(props.member))}>
-              {accountLabel(props.member)}
-            </span>
-          </Show>
           <span class="grow" />
-          <span class="mono dim" title={tr("%1 of %2 tasks accepted", own().accepted, own().total)}>{own().accepted}/{own().total}</span>
+          <span class="mono dim team-member-progress" title={tr("%1 of %2 tasks accepted", own().accepted, own().total)}>{own().accepted}/{own().total}</span>
+          <button type="button" class="icon-btn team-member-details" data-action="member-details" aria-expanded={detailsOpen()}
+            aria-label={tr("Member details")} title={tr("Member details")}
+            onClick={(event) => { stop(event); setDetailsOpen(!detailsOpen()); }}>
+            <Icon name={detailsOpen() ? "chevron-down" : "chevron-right"} size={12} />
+          </button>
           <button type="button" class="icon-btn team-member-more" data-action="member-more" aria-label={tr("Member actions")} title={tr("Member actions")}
             aria-haspopup="menu" disabled={read().busy}
             onClick={(event) => { stop(event); const box = event.currentTarget.getBoundingClientRect(); if (menu()) setMenu(undefined); else open(box.left - 220, box.bottom + 4); }}>
             <Icon name="ellipsis" size={14} />
           </button>
         </div>
-        <Show when={props.focused}><div class="team-member-focus">{tr("Only its tasks are shown, click the card for all")}</div></Show>
-        <Show when={props.member.pulse}>{(pulse) => (
-          <div class="team-member-pulse" classList={{ blocked: !!pulse().blocked }} title={pulseText(pulse())}>
-            <For each={pulseLines(pulse())}>{(line) => <span class="ell">{line}</span>}</For>
+        <Show when={detailsOpen()}>
+          <Show when={props.focused}><div class="team-member-focus">{tr("Only its tasks are shown, click the card for all")}</div></Show>
+          <Show when={props.member.pulse}>{(pulse) => (
+            <div class="team-member-pulse" classList={{ blocked: !!pulse().blocked }} title={pulseText(pulse())}>
+              <For each={pulseLines(pulse())}>{(line) => <span class="ell">{line}</span>}</For>
+            </div>
+          )}</Show>
+          <div class="team-member-line sub">
+            <Show when={unreadBadge(props.member)}>{(badge) => (
+              <span class="team-unread mono" classList={{ urgent: badge().urgent }} title={badge().tip}>{badge().text}</span>
+            )}</Show>
+            <Show when={props.team.status !== "draft"}>
+              <span class="dim ell team-account" data-account={memberAccount(props.member)}
+                title={props.member.session && props.member.session_account != null ? tr("Its session runs on %1", accountLabel(props.member)) : tr("Account: %1", accountLabel(props.member))}>
+                {accountLabel(props.member)}
+              </span>
+            </Show>
           </div>
-        )}</Show>
+          <Show when={waitingForTask(props.team, props.member)}>
+            <div class="team-member-line sub" onClick={stop}>
+              <button type="button" class="btn ghost small" data-action="member-assign"
+                onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); open(box.left, box.bottom + 4, true); }}>{tr("Assign task…")}</button>
+              <button type="button" class="btn ghost small" data-action="member-ask-lead"
+                onClick={() => toComposer(props.computer, props.team.members.find((found) => found.lead), tr("I added %1 to the team. Plan a task for it and reassign it with hgs team reassign.", role()))}>
+                {tr("Ask lead to plan for it")}</button>
+            </div>
+          </Show>
+        </Show>
         <Show when={waitingForTask(props.team, props.member)} fallback={
           <div class="team-member-line sub">
             <span class={`team-status tone-${props.status.tone}`} title={props.status.text}><Icon name={props.status.icon} size={12} />{props.status.short}</span>
             <span class="ell team-member-text" title={props.member.error || props.status.text}>{props.member.error || props.status.text}</span>
           </div>
         }>
-          <div class="team-member-line sub" onClick={stop}>
-            <span class="dim">{tr("Waiting for a task")}</span>
-            <button type="button" class="btn ghost small" data-action="member-assign"
-              onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); open(box.left, box.bottom + 4, true); }}>{tr("Assign task…")}</button>
-            <button type="button" class="btn ghost small" data-action="member-ask-lead"
-              onClick={() => toComposer(props.computer, props.team.members.find((found) => found.lead), tr("I added %1 to the team. Plan a task for it and reassign it with hgs team reassign.", role()))}>
-              {tr("Ask lead to plan for it")}</button>
+          <div class="team-member-line sub">
+            <span class="team-status" title={tr("Waiting for a task")}><Icon name="hourglass" size={12} />{tr("Waiting")}</span>
+            <span class="ell team-member-text">{tr("Waiting for a task")}</span>
           </div>
         </Show>
+        <Show when={detailsOpen()}>
         <Show when={props.member.draining || props.member.limited || props.member.host_shared || (props.member.services?.length ?? 0) > 0 || props.member.budget}>
           <div class="team-member-marks">
             <Show when={props.member.draining}>
@@ -241,6 +259,7 @@ export function MemberCard(props: {
               <Show when={newestAnswers(answers()).more > 0}><span class="dim">{tr("+%1 more", newestAnswers(answers()).more)}</span></Show>
             </div>
           </Show>
+        </Show>
         </Show>
         <Show when={permission() && (permission()!.command || permission()!.tool || permission()!.subagent_confirmation)}>
           <div class="team-member-permission" data-member={props.member.id} onClick={stop}>

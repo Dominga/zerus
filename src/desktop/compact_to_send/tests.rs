@@ -1675,7 +1675,13 @@ mod actor {
             .fixture_wait(wait, Duration::from_millis(5), chain);
         f.runtime
             .fixture_prepare_hook(Arc::new(|| std::thread::sleep(Duration::from_millis(30))));
-        let (first, second) = (f.original(), f.original());
+        // The queue runs by admission millisecond, then request ID: with the
+        // first's ID lower, a tie between the two admissions still runs the
+        // first first (zerus-mupq4).
+        let (first, second) = match (f.original(), f.original()) {
+            (a, b) if a.plan.compaction_request_id < b.plan.compaction_request_id => (a, b),
+            (a, b) => (b, a),
+        };
         *first_id.lock().unwrap() = first.plan.compaction_request_id.clone();
         assert!(f.admit(&first).accepted);
         assert!(f.admit(&second).accepted);

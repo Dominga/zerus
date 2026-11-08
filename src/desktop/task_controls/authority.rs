@@ -127,9 +127,12 @@ impl Peer {
 pub(super) struct Executor {
     peer: Peer,
     resident: Resident,
-    pub executor: zerus_desktop_ledger::task_controls::Executor,
+    executor: zerus_desktop_ledger::task_controls::Executor,
 }
 impl Executor {
+    pub fn executor(&self) -> &zerus_desktop_ledger::task_controls::Executor {
+        &self.executor
+    }
     pub fn current(&self, until: Instant) -> io::Result<()> {
         self.peer.current(until)?;
         self.resident.current(until)

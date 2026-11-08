@@ -3039,6 +3039,9 @@ fn brief_text_rules(team: &Team, rules: &str) -> String {
                 bounded(&previous["transcript"]),
             );
         }
+        // Task #279: the owner's standing rules, cited from the owner's own
+        // messages, are recalled in every lead brief.
+        text += &super::decisions::rules_block(team);
         return text;
     }
     let members: Vec<Value> = team

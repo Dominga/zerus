@@ -1878,6 +1878,15 @@ pub(crate) struct Decision {
     /// The question's content words: a later decision with the same supersedes it.
     #[serde(default)]
     pub topic: String,
+    /// Task #279: "rule" for a standing rule the owner stated, empty for an
+    /// ordinary decision; a rule is recalled in every lead brief and in the
+    /// hand-out of every task it binds.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+    /// Task #279: the owner's message a standing rule cites: its id in the lead
+    /// session's journal, the quote it was verified by, and when it was said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_message: Option<serde_json::Value>,
 }
 
 /// Task 156: lore's hits over decisions for one task, and what they were for.

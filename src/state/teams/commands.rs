@@ -2251,17 +2251,31 @@ fn decide_command(input: &Value) -> anyhow::Result<Value> {
     let mut store = Store::open(true)?;
     let team = store.load(&team_id)?.context("Unknown team")?;
     let caller = actor(&team, "decide", input)?;
+    let mut cited_at: Option<f64> = None;
     let by = match &caller {
         Actor::Human => "owner".to_owned(),
         _ if caller.is_lead(&team) => {
-            let rule = super::owner_word::WordRule { phrases: &[""], expect: "the owner's own words with the decision".into(), ..Default::default() };
-            let word = super::owner_word::verify_roster(&team, input.get("owner_word").context("The lead records a decision on the owner's word: add \"owner_word\":{\"text\":\"the owner's words\"}")?, &rule, super::super::now())?;
-            format!("the lead on the owner's word \"{}\"", word.text.chars().take(200).collect::<String>())
+            // Task #279 (owner, 2026-11-08): a standing rule is recorded at any
+            // age by citing the owner's message by its id and quote; the
+            // 30-minute word stays for a fresh sentence.
+            if let Some(message) = input.get("owner_message").filter(|message| message.is_object()) {
+                let word = super::owner_word::verify_cited(&team, message)?;
+                cited_at = Some(word.at);
+                let id = message["id"].as_i64().or_else(|| message["id"].as_str().and_then(|text| text.trim().parse().ok())).unwrap_or(word.event);
+                format!("the lead on your message {id} \"{}\"", word.text.chars().take(200).collect::<String>())
+            } else {
+                let rule = super::owner_word::WordRule { phrases: &[""], expect: "the owner's own words with the decision".into(), ..Default::default() };
+                let word = super::owner_word::verify_roster(&team, input.get("owner_word").context("The lead records a decision on the owner's word: add \"owner_word\":{\"text\":\"the owner's words\"}, or cite one of the owner's messages with \"owner_message\":{\"id\":N,\"quote\":\"...\"} (hgs team decisions --json {\"action\":\"owner-messages\"} lists them)")?, &rule, super::super::now())?;
+                format!("the lead on the owner's word \"{}\"", word.text.chars().take(200).collect::<String>())
+            }
         }
         _ => bail!("Only you, or the lead on your word, record a decision"),
     };
     let mut new = super::decisions::from_input(&team, input)?;
     new.by = by;
+    if let (Some(at), Some(message)) = (cited_at, new.owner_message.as_mut()) {
+        message["at"] = json!(at);
+    }
     store.mutate(Some((&request, input)), &team_id, None, |team, events| {
         let id = super::decisions::record(team, new.clone(), super::super::now(), events);
         let decision = team.decisions.iter().find(|found| found.id == id).cloned().unwrap_or_default();
@@ -2288,7 +2302,13 @@ fn decisions_command(input: &Value) -> anyhow::Result<Value> {
             ensure!(!spec.is_empty(), "Name the spec: {{\"action\":\"spec\",\"spec\":\"docs/lore.md\"}}");
             Ok(json!({"team":team.id,"spec":spec,"section":super::decisions::spec_section(&team, spec)}))
         }
-        other => bail!("A decisions action is list or spec, not {other}"),
+        // Task #279: the owner's messages of the lead session, with the ids a
+        // decision cites (read only).
+        "owner-messages" => {
+            let limit = input["limit"].as_u64().unwrap_or(40) as usize;
+            Ok(json!({"team":team.id,"messages":super::owner_word::messages(&team, limit)?}))
+        }
+        other => bail!("A decisions action is list, spec or owner-messages, not {other}"),
     }
 }
 
@@ -6000,6 +6020,11 @@ mod commands_scratch;
 #[cfg(test)]
 #[path = "tests/inbox_notices.rs"]
 mod inbox_notices;
+
+#[cfg(test)]
+#[path = "tests/commands_standing_rules.rs"]
+mod commands_standing_rules;
+
 
 
 

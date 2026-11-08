@@ -72,6 +72,57 @@ mod sandbox;
 fn sandbox_check() -> Option<String> {
     sandbox::reason()
 }
+
+/// Task #247: the sandbox warning's Quit Zerus, through the same draft flush a
+/// menu quit runs.
+#[tauri::command]
+fn app_quit(app: tauri::AppHandle) {
+    exit_flush::quit_with_flush(&app, 0);
+}
+
+/// Task #247: Qt's `sandbox-folder grant FOLDER --json [--elevated]` for the
+/// creation panel's Fix folder rights (SessionsWindow.cpp:2036). The command
+/// changes only the owner's own access to that folder; hgs validates the path.
+#[tauri::command]
+async fn sandbox_folder_grant(folder: String, elevated: bool) -> Result<serde_json::Value, String> {
+    let mut args = vec![
+        "sandbox-folder".to_owned(),
+        "grant".to_owned(),
+        folder.clone(),
+        "--json".to_owned(),
+    ];
+    if elevated {
+        args.insert(3, "--elevated".to_owned());
+    }
+    let invocation = zerus_client_core::Invocation {
+        args,
+        stdin: None,
+        timeout: std::time::Duration::from_secs(180),
+        request_id: None,
+    };
+    let exit = zerus_client_core::run_limited(
+        &zerus_client_core::default_hgs(),
+        &invocation,
+        &[],
+        4 * 1024 * 1024,
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    Ok(match exit {
+        zerus_client_core::Exit::Code {
+            code: 0,
+            stdout,
+            ..
+        } => serde_json::json!({
+            "ok": true,
+            "receipt": serde_json::from_slice::<serde_json::Value>(&stdout).unwrap_or(serde_json::Value::Null),
+        }),
+        zerus_client_core::Exit::Code { stderr, .. } => serde_json::json!({"ok": false, "error": stderr.trim()}),
+        zerus_client_core::Exit::Abnormal { stderr } => serde_json::json!({"ok": false, "error": stderr.trim()}),
+        zerus_client_core::Exit::TimedOut => serde_json::json!({"ok": false, "error": "The request timed out."}),
+        zerus_client_core::Exit::StartFailed(error) => serde_json::json!({"ok": false, "error": error}),
+        zerus_client_core::Exit::WriteFailed => serde_json::json!({"ok": false, "error": "The request did not reach hgs."}),
+    })
+}
 #[cfg(feature = "live")]
 mod mobile;
 #[cfg(feature = "live")]
@@ -149,6 +200,7 @@ mod window_geometry;
 #[doc(hidden)]
 pub mod window_layer;
 pub mod window_chrome;
+pub mod git_status;
 #[doc(hidden)]
 pub mod window_theme;
 mod window_visibility;
@@ -695,7 +747,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
         .manage(window_visibility::Visibility::default())
         .manage(window_theme::Theme::default())
         .manage(lifecycle::Lifecycle { menu_bar })
-        .manage(exit_flush::ExitFlush::default());
+        .manage(exit_flush::ExitFlush::default())
+        .manage(git_status::GitStatus::default());
     #[cfg(target_os = "macos")]
     let builder = builder
         .menu(exit_flush::app_menu)
@@ -1693,6 +1746,8 @@ fn main_commands(
 fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         commands::start,
+        app_quit,
+        sandbox_folder_grant,
         commands::fleet_refresh,
         commands::next_batch,
         commands::follow,
@@ -1755,6 +1810,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         window_layer::window_layer_state,
         window_chrome::window_chrome,
         window_chrome::window_control,
+        git_status::git_status_request,
         settings::hgs_version,
         settings::hgs_setting,
         settings::open_repository,
@@ -2124,6 +2180,8 @@ fn desk_take_pending() -> serde_json::Value {
 fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         commands::start,
+        app_quit,
+        sandbox_folder_grant,
         commands::fleet_refresh,
         commands::next_batch,
         commands::follow,

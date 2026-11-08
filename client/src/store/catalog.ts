@@ -1,5 +1,6 @@
 import { batch, createSignal } from "solid-js";
 import { applyMachines } from "./machines";
+import { gitFor, gitPath } from "./gitStatus";
 import { createStore, produce, reconcile, unwrap } from "solid-js/store";
 import type { Batch, ComputerId, RowOut, ViewRow } from "../types";
 import type { AgentKind, Session, Status } from "../ui/sessions/types";
@@ -213,6 +214,8 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     sharedNotifications: !!v.shared_notifications,
     notificationRevision: typeof v.notification_revision === "number" ? v.notification_revision : undefined,
   };
+  // Task 252: the folder's git status once the list asked for it (store/gitStatus.ts).
+  base.git = gitFor(base, computerFresh(computer));
   return Object.assign(base, marks.overlay(base));
 }
 
@@ -456,11 +459,24 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
     return unwrap(catalog).computers;
   };
 
-  return { catalog, applyBatch, onReplaced, setDraftKeys, hasDraftKey: (key: string) => drafts.has(key), revision, plainRows, plainComputers };
+  /** Task 252: maps the rows of one folder again after its git status arrived (or aged). */
+  const refreshGit = (computer: ComputerId, path?: string) => {
+    let touched = false;
+    for (const id of catalog.order) {
+      const row = catalog.rows[id];
+      if (!row || row.computer !== computer || (path !== undefined && gitPath(row) !== path)) continue;
+      const git = gitFor(row, computerFresh(computer));
+      if (JSON.stringify(git) === JSON.stringify(row.git)) continue;
+      setCatalog("rows", id, "git", git);
+      touched = true;
+    }
+    if (touched) changed();
+  };
+  return { catalog, applyBatch, onReplaced, setDraftKeys, hasDraftKey: (key: string) => drafts.has(key), revision, plainRows, plainComputers, refreshGit };
 }
 
 /** The app's catalog. Tests build their own with `createCatalog`. */
-export const { catalog, applyBatch, onReplaced, setDraftKeys, hasDraftKey, plainRows, plainComputers } = createCatalog(appMarks, applyMachines);
+export const { catalog, applyBatch, onReplaced, setDraftKeys, hasDraftKey, plainRows, plainComputers, refreshGit } = createCatalog(appMarks, applyMachines);
 
 /** Rows in display order. */
 export const orderedRows = () => catalog.order.map((id) => catalog.rows[id]).filter(Boolean);

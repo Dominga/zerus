@@ -38,6 +38,7 @@ import { QuestionCard } from "./QuestionCard";
 import { QueuePanel } from "./QueuePanel";
 import { HeldMessage } from "./HeldMessage";
 import { onCommand } from "../../store/shortcuts";
+import { stepArea, stepTab } from "../../store/navigation";
 import { composer } from "../../store/composer";
 import { createSubagentIdentity } from "../../store/subagentIdentity";
 import { selectedTask } from "../../store/taskNavigation";
@@ -228,6 +229,72 @@ const tabs = () => {
   return s ? detailTabs(s.key, all) : all;
 };
 
+const visible = (el: Element | null): el is HTMLElement => !!el && (el as HTMLElement).offsetParent !== null && !(el as HTMLElement).hidden;
+const FOCUSABLE = "textarea:not([hidden]):not([disabled]), input:not([disabled]), button:not([disabled]), [tabindex]:not([tabindex='-1']), select:not([disabled])";
+/** What focus lands on in an area: its first focusable element, else the area itself. */
+function focusInto(area: HTMLElement | null) {
+  if (!area) return;
+  const target = [...area.querySelectorAll<HTMLElement>(FOCUSABLE)].find(visible);
+  if (target) { target.focus(); return; }
+  if (!area.hasAttribute("tabindex")) area.tabIndex = -1;
+  area.focus();
+}
+/** The current view's focus target (Qt viewFocusTarget): Activity's message field or its scroll, another tab's first control. */
+function focusView() {
+  requestAnimationFrame(() => {
+    const editor = document.querySelector<HTMLElement>(".detail .tab-body .cmp-editor");
+    if (detailTab() === "activity" && visible(editor)) { editor.focus(); return; }
+    focusInto(document.querySelector<HTMLElement>(".detail .tab-body"));
+  });
+}
+
+/** Task 242 (Qt stepTab): the next shown tab of the selected session, wrapping. */
+function stepDetailTab(direction: 1 | -1) {
+  if (page() !== "sessions" || !selected()) return;
+  const next = stepTab(tabs(), detailTab(), direction);
+  if (!next) return;
+  if (next === "terminal") terminal.opened();
+  setDetailTab(next);
+  focusView();
+}
+
+/** Task 242 (Qt tab.terminal): Terminal and back to Activity's message field. */
+function toggleTerminal() {
+  if (page() !== "sessions" || !selected()) return;
+  if (detailTab() !== "terminal") {
+    if (!tabs().find((tab) => tab.id === "terminal")?.show) return;
+    terminal.opened();
+    setDetailTab("terminal");
+    requestAnimationFrame(() => focusInto(document.querySelector<HTMLElement>(".detail .tab-body")));
+  } else {
+    setDetailTab("activity");
+    focusView();
+  }
+}
+
+/**
+ * Task 242 (Qt stepFocus, F6): the Sessions page's areas in order, the session
+ * list, the current view, the message field and the side panel. The innermost
+ * area holding focus is the current one (the message field lies in Activity).
+ */
+function stepFocusArea(direction: 1 | -1) {
+  if (page() !== "sessions") return;
+  const areas: { area: HTMLElement; focus: () => void }[] = [];
+  const list = document.querySelector<HTMLElement>(".sessions-pane .sp-scroll");
+  if (visible(list)) areas.push({ area: list, focus: () => list.focus() });
+  const view = document.querySelector<HTMLElement>(".detail .tab-body");
+  if (selected() && visible(view)) areas.push({ area: view, focus: () => focusInto(view) });
+  const editor = document.querySelector<HTMLElement>(".detail .tab-body .cmp-editor");
+  if (visible(editor) && !(editor as HTMLTextAreaElement).disabled) areas.push({ area: editor.closest<HTMLElement>(".cmp-col") ?? editor, focus: () => editor.focus() });
+  const inspector = document.querySelector<HTMLElement>(".detail .inspector");
+  if (visible(inspector)) areas.push({ area: inspector, focus: () => focusInto(inspector.querySelector<HTMLElement>(".insp-scroll, .insp-body") ?? inspector) });
+  const active = document.activeElement;
+  let current = -1;
+  areas.forEach((entry, index) => { if (active && entry.area.contains(active)) current = index; });
+  const next = stepArea(areas.length, current, direction);
+  if (next >= 0) areas[next].focus();
+}
+
 // A tab that disappears returns to Activity (SessionsWindow.cpp:4019-4020).
 createRoot(() => createEffect(() => { if (!tabs().find((t) => t.id === detailTab())?.show) setDetailTab("activity"); }));
 
@@ -248,6 +315,15 @@ export function SessionDetail() {
   });
   const toggle = onCommand("panel.toggle", () => { if (page() === "sessions" && selected()) setInspectorOpen(!inspectorOpen()); });
   onCleanup(toggle);
+  // Task 242 (Qt stepTab, tab.terminal, stepFocus): Ctrl+Tab, Ctrl+backtick and F6.
+  const offTabs = [
+    onCommand("tab.next", () => stepDetailTab(1)),
+    onCommand("tab.previous", () => stepDetailTab(-1)),
+    onCommand("tab.terminal", toggleTerminal),
+    onCommand("focus.next", () => stepFocusArea(1)),
+    onCommand("focus.previous", () => stepFocusArea(-1)),
+  ];
+  onCleanup(() => offTabs.forEach((undo) => undo()));
   createEffect(() => {
     if (page() !== "sessions" || !selected()) return;
     // Window scope on every detail tab (SessionsWindowShortcuts.cpp:202,242).

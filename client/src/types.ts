@@ -374,6 +374,8 @@ export type Action =
   | { kind: "mark_read"; reply_id: string | null; attention_signature: string | null }
   | { kind: "pause" }
   | { kind: "resume" }
+  | { kind: "resume_stale"; with_lost_dialogue?: boolean; accept_stale?: boolean }
+  | { kind: "remove_queued"; message_id: string }
   | { kind: "rename"; new_name: string; archive_id: string | null }
   | { kind: "archive" }
   | { kind: "terminate" }

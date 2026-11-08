@@ -390,6 +390,27 @@ fn waiting_for_lead(team: &Team) -> bool {
     team.status == TeamStatus::Running && ops::all_decided(team)
 }
 
+/// Task #246: Dismiss (or Show dismissed > Restore) one Waiting row. The owner's
+/// only; a dismissal keeps the item's state, so the row returns only when the
+/// state changes. The row's id, team and state come from `hgs team waiting`.
+fn waiting_dismiss(input: &Value, action: &str) -> anyhow::Result<Value> {
+    let id = text(input, "id");
+    ensure!(!id.is_empty(), "A Waiting item id is required");
+    let (dsh, session, run) = caller_identities();
+    owner_caller(input, false, dsh.is_some(), session.is_some(), run.is_some())
+        .context("Only you dismiss a Waiting row: add \"by\":\"human\" from your own shell or the desktop")?;
+    let store = Store::open(true)?;
+    if action == "dismiss" {
+        let state = text(input, "state");
+        ensure!(!state.is_empty(), "Dismissing a Waiting row needs its state (the state field of the item)");
+        store.dismiss(id, text(input, "team"), state, super::super::now(), "human")?;
+        Ok(json!({"dismissed":id,"state":state}))
+    } else {
+        ensure!(store.undismiss(id)?, "No dismissal for this Waiting item");
+        Ok(json!({"restored":id}))
+    }
+}
+
 /// The phase record still waiting for the owner, if any. A team that is over
 /// shows none, even if an old record was left in draft.
 fn pending_phase(team: &Team) -> Option<u32> {
@@ -5361,6 +5382,12 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         }
         // U50: what waits for the owner across every team, read only.
         "waiting" => {
+            // Task #246: the owner dismisses or restores a row; every other
+            // call is the read.
+            let action = text(input, "action");
+            if action == "dismiss" || action == "undismiss" {
+                return waiting_dismiss(input, action);
+            }
             // #742: a missing tool's offer waits for the owner with or without a team.
             let mut tools = crate::test_discipline::tools::waiting_items();
             // Task 97: Waiting for you > Deferred, with or without a team; a
@@ -5373,12 +5400,13 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                     eprintln!("hgs: the team dispatcher did not start: {error}");
                 }
             }
+            let before = Some(&input["before"]).filter(|cursor| !cursor.is_null());
             if !store::path().exists() {
                 let items = super::owner_waiting::sorted(tools);
-                let before = Some(&input["before"]).filter(|cursor| !cursor.is_null());
-                return Ok(super::owner_waiting::page(&items, before, input["limit"].as_u64()));
+                return Ok(super::owner_waiting::page_with_dismissed(&items, &[], before, input["limit"].as_u64()));
             }
             let store = Store::open(false)?;
+            let dismissals = store.dismissed().unwrap_or_default();
             let mut teams = active_team_records(&store)?;
             // Task 111: a proposal that can no longer apply never waits for you.
             for team in &mut teams {
@@ -5390,8 +5418,8 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             super::owner_steps::mark_cards(&mut items, &teams, super::owner_steps::owner_present());
             items.extend(tools);
             let items = super::owner_waiting::sorted(items);
-            let before = Some(&input["before"]).filter(|cursor| !cursor.is_null());
-            Ok(super::owner_waiting::page(&items, before, input["limit"].as_u64()))
+            let (active, dismissed) = super::owner_waiting::split(items, &dismissals);
+            Ok(super::owner_waiting::page_with_dismissed(&active, &dismissed, before, input["limit"].as_u64()))
         }
         "list" => {
             let path = store::path();
@@ -6025,6 +6053,10 @@ mod commands_tools;
 #[cfg(test)]
 #[path = "tests/commands_scratch.rs"]
 mod commands_scratch;
+
+#[cfg(test)]
+#[path = "tests/commands_waiting.rs"]
+mod commands_waiting;
 #[cfg(test)]
 #[path = "tests/inbox_notices.rs"]
 mod inbox_notices;

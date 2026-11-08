@@ -391,3 +391,9 @@
     border-left: 1px solid var(--z-list-tree-line); border-bottom: 1px solid var(--z-list-tree-line); border-bottom-left-radius: 6px; }
   .scard.team-member.team-last::after { height: 32px; }
   .scard.team-member.team-first::after { top: -6px; }
+
+/* Task #247: Qt's TerminalScreen context menu (Copy selection, Paste). */
+.term-menu { position: fixed; z-index: 60; min-width: 150px; display: flex; flex-direction: column; padding: 4px; border: 1px solid var(--z-color-card-border); border-radius: 8px; background: var(--z-color-surface); box-shadow: 0 8px 22px rgb(0 0 0 / 0.25); }
+.term-menu button { text-align: left; padding: 5px 10px; border: 0; border-radius: 6px; background: none; color: var(--z-color-text); font-size: var(--fs-sm); cursor: pointer; }
+.term-menu button:hover:not(:disabled) { background: var(--z-color-hover); }
+.term-menu button:disabled { opacity: 0.5; cursor: default; }

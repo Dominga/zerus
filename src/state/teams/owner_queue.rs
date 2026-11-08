@@ -503,7 +503,10 @@ fn item(entry: &Entry) -> Value {
         "kind":"deferred","title":title,"since":entry.deferred_at,"action":"answer_deferred","deferred":entry.id,
         "request":entry.kind,"text":entry.text,"tool":entry.tool,"command":entry.command,"questions":entry.questions,
         "session":entry.session,"host":entry.host,"member":entry.role,"member_id":entry.member,"asked_at":entry.asked_at,
-        "safe":entry.safe,"delivery":entry.delivery,"outcome":safe})
+        "safe":entry.safe,"delivery":entry.delivery,"outcome":safe,
+        // Task #246: the request id and when it was deferred; a new request or
+        // a new deferral returns the row.
+        "state":format!("deferred:{}:{}", entry.id, entry.deferred_at)})
 }
 
 /// The phone's alerts for the session rows (`mobile_attention`): a team's

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { LocalMessage, QueueView } from "../../types";
 import type { Session } from "./types";
 import { cardTarget } from "./attachment-card";
-import { queueEntries, queuePresentation, queuedMessages, sanitizedQueueText } from "./queue-message";
+import { queueEntries, queuePresentation, queuedMessageRemovable, queuedMessages, sanitizedQueueText } from "./queue-message";
 
 const text = "**Review** [Image #1]";
 const submitted = '**Review** [Image #1] (Inspect the attached image at "/synthetic/attachments/message-one/01-shot.png")';
@@ -114,5 +114,16 @@ describe("native queue receipt source fences", () => {
     const stale = { ...target, id: "other" };
     expect(queuePresentation(queue(), session, { ...view, local: [] }, stale, summary(), false).items[0].attachments).toBeUndefined();
     expect(queuePresentation(queue(), session, view, stale, summary(), false).items[0].attachments?.[0].request_id).toBe("receipt-one");
+  });
+});
+
+describe("removing a queued message", () => {
+  it("offers Remove only for an online OpenCode session with a queue id", () => {
+    const queue = { id: "msg-1", text: "", hint: "", can_send_now: true, enabled: true, label: "Send now" };
+    expect(queuedMessageRemovable({ agent: "opencode", status: "working" }, queue)).toBe(true);
+    expect(queuedMessageRemovable({ agent: "opencode", status: "offline" }, queue)).toBe(false);
+    expect(queuedMessageRemovable({ agent: "claude", status: "working" }, queue)).toBe(false);
+    expect(queuedMessageRemovable({ agent: "opencode", status: "working" }, { ...queue, id: "" })).toBe(false);
+    expect(queuedMessageRemovable({ agent: "opencode", status: "working" }, queue, true)).toBe(false);
   });
 });

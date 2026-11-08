@@ -30,7 +30,21 @@ export const PROGRESS = trNoop("Session creation progress");
 export const BUTTON = {
   resume: trNoop("Continue setup"), check: trNoop("Check result"), stop: trNoop("Stop creating"), stopAfter: trNoop("Stop after preparation"),
   edit: trNoop("Edit choices…"), hide: trNoop("Hide status"), back: trNoop("Return to filters"),
+  fix: trNoop("Fix folder rights"), fixing: trNoop("Fixing folder rights…"), elevated: trNoop("Waiting for the administrator prompt…"), fixed: trNoop("Folder rights fixed"),
 } as const;
+
+/** The folder a "the DeepSeek sandbox needs full control of FOLDER (missing …)" creation error names (SessionsWindow::sandboxFolderOf). */
+export function sandboxFolderOf(error: string): string {
+  const lead = "the DeepSeek sandbox needs full control of ";
+  const at = error.indexOf(lead);
+  if (at < 0) return "";
+  const start = at + lead.length;
+  const end = error.indexOf(" (missing ", start);
+  return end > start ? error.slice(start, end).trim() : "";
+}
+
+/** Fix folder rights shows when a local creation's error names the sandbox folder (renderCreation). */
+export const fixFolderRights = (c: Pick<CreationCard, "host" | "error">): boolean => !c.host && sandboxFolderOf(c.error) !== "";
 
 /** A creation's row key in the list. */
 export const creationRowId = (id: string) => `${ROW}${id}`;

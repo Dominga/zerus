@@ -120,6 +120,12 @@ export const teamRead = (computer: ComputerId, team: string) =>
 export const teamsOlder = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_older", { computer }) : Promise.resolve(false);
 /** Task 75: why this process is sandboxed, null on a normal desktop. */
 export const sandboxCheck = () => inTauri() ? invoke<string | null>("sandbox_check") : Promise.resolve(null);
+/** Task #247: the sandbox warning's Quit Zerus (the same draft flush as a menu quit). */
+export const quitApp = () => inTauri() ? invoke<void>("app_quit") : Promise.resolve();
+/** Task #247: Qt's `hgs sandbox-folder grant FOLDER --json [--elevated]` (creation panel, Fix folder rights). */
+export const sandboxFolderGrant = (folder: string, elevated: boolean) =>
+  inTauri() ? invoke<{ ok: boolean; error?: string; receipt?: unknown }>("sandbox_folder_grant", { folder, elevated })
+    : Promise.resolve({ ok: false, error: "Folder rights need the desktop app." });
 /** Task 69: moves one local session to another account after the owner confirms. */
 export const sessionSwitchAccount = (session: string, account: string, request: string) =>
   inTauri() ? invoke<Record<string, unknown>>("session_switch_account", { session, account, request }) : Promise.reject(new Error("Accounts need the desktop app."));
@@ -861,6 +867,13 @@ export const worktreeCleanupPrepare = (id: string, revision: number, selected: n
 export const worktreeCleanupConfirm = (id: string, confirmation: string, consent: boolean) => desktop<import("./store/worktreeCleanup").WorktreeReview>("worktree_cleanup_confirm", { id, confirmation, consent });
 export const worktreeCleanupClose = (id: string) => desktop<void>("worktree_cleanup_close", { id });
 export const onWorktreeCleanupChanged = (changed: () => void) => inTauri() ? listen("worktree-cleanup-changed", changed) : Promise.resolve(() => {});
+/** Task 252: one folder's git status (`hgs git-status`), as the desktop read it. */
+export interface GitStatusAnswer { computer: ComputerId; path: string; status: Record<string, unknown> }
+/** Task 252: asks the desktop to read these folders' git status (throttled there); answers what it already has. */
+export const gitStatusRequest = (computer: ComputerId, paths: string[]) =>
+  inTauri() ? invoke<GitStatusAnswer[]>("git_status_request", { computer, paths }) : Promise.resolve([] as GitStatusAnswer[]);
+export const onGitStatus = (receive: (answer: GitStatusAnswer) => void) =>
+  inTauri() ? listen<GitStatusAnswer>("git-status", (event) => receive(event.payload)) : Promise.resolve(() => {});
 /**
  * Create worktree: the new checkout and `catalog` (the folder's catalog the dialog opened with, naming the repository)
  * listing it as verified; a rejection is Qt's text. Never retried.

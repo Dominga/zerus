@@ -2,9 +2,12 @@
 //! (docs/superpowers/specs/2026-10-28-team-customization.md section 7). It
 //! reads only what the teams record (the attention list, phases, proposals,
 //! holds and decisions) and stores nothing; `hgs team waiting --json` pages it
-//! newest first.
+//! newest first. Task #246: every item carries a `state` fingerprint and the
+//! owner may dismiss an item with the state they saw; it stays out of the list
+//! (and the count) until that state changes.
 use super::model::{PhaseState, TaskStatus, Team, TeamStatus};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 /// A page holds at most this many items.
 pub(crate) const MAX_PAGE: usize = 200;
@@ -15,9 +18,91 @@ const DEFAULT_PAGE: usize = 50;
 pub(crate) fn items(teams: &[Team], now: f64) -> Vec<Value> {
     let mut out = Vec::new();
     for team in teams {
+        let start = out.len();
         team_items(team, now, &mut out);
+        for found in &mut out[start..] {
+            let kind = found["kind"].as_str().unwrap_or_default();
+            let state = match kind {
+                // Task #246: a plan or phase waits for a new revision only.
+                "plan_draft" => format!("plan:{}", team.revision),
+                "phase_draft" | "phase_acceptance" => format!("{kind}:{}:{}", found["phase"], team.revision),
+                // A re-pause has a new time; an unrelated edit does not.
+                "team_paused" => format!("paused:{}", found["paused_at"]),
+                "report_escalated" => format!("report:{}:{}", found["task"], found["since"]),
+                "permission_escalated" => format!("permission:{}:{}", found["member_id"], found["since"]),
+                "owner_word_asked" => {
+                    if found.get("proposal").is_some() {
+                        format!("proposal:{}:{}", found["proposal"], found["since"])
+                    } else {
+                        format!("addition:{}:{}", found["phase"], found["since"])
+                    }
+                }
+                "task_waits_owner" => format!("task:{}:{}", found["task"], found["since"]),
+                "lead_changes" => format!("digest:{}", found["since"]),
+                "crit_added" => format!("crit:{}:{}", found["task"], found["since"]),
+                "team_finished" => format!("finished:{}", found["since"]),
+                "test_full_run" => format!("full:{}", found["since"]),
+                "test_quarantine" => format!("quarantine:{}:{}", found["id"], found["since"]),
+                _ => format!("{kind}:{}:{}", found["id"], found["since"]),
+            };
+            found["state"] = json!(state);
+        }
     }
     sorted(out)
+}
+
+/// Task #246: a dismissal is kept with the item's state at that moment. The
+/// item stays out of the live list while its state is unchanged; a changed
+/// state (a new plan revision, a second pause, a lower disk band, a new offer)
+/// returns it. A decision that blocks work stays in the dismissed section with
+/// the team or member it still blocks.
+pub(crate) fn split(items: Vec<Value>, dismissals: &[Value]) -> (Vec<Value>, Vec<Value>) {
+    let by_id: BTreeMap<&str, &Value> = dismissals.iter().filter_map(|record| Some((record["id"].as_str()?, record))).collect();
+    let mut active = Vec::new();
+    let mut dismissed = Vec::new();
+    for item in items {
+        let Some(record) = item["id"].as_str().and_then(|id| by_id.get(id)) else {
+            active.push(item);
+            continue;
+        };
+        if record["state"] != item["state"] {
+            active.push(item);
+            continue;
+        }
+        let mut gone = item;
+        gone["dismissed_at"] = record["at"].clone();
+        if blocking(&gone) {
+            gone["blocking"] = json!(true);
+            gone["blocks"] = json!(blocks(&gone));
+        }
+        dismissed.push(gone);
+    }
+    (active, sorted(dismissed))
+}
+
+/// The decisions that still block a team or member when dismissed.
+fn blocking(item: &Value) -> bool {
+    matches!(
+        item["kind"].as_str().unwrap_or_default(),
+        "plan_draft" | "phase_draft" | "phase_acceptance" | "owner_word_asked" | "permission_escalated"
+    )
+}
+
+fn blocks(item: &Value) -> String {
+    let team = item["team_name"].as_str().filter(|name| !name.is_empty()).unwrap_or("the team");
+    match item["member"].as_str().filter(|member| !member.is_empty()) {
+        Some(member) => format!("{team}/{member}"),
+        None => team.to_owned(),
+    }
+}
+
+/// The live page plus the dismissed items apart, with their own count. The
+/// badge and the notifications read `total`, which never counts a dismissal.
+pub(crate) fn page_with_dismissed(active: &[Value], dismissed: &[Value], before: Option<&Value>, limit: Option<u64>) -> Value {
+    let mut page = page(active, before, limit);
+    page["dismissed"] = json!(dismissed.iter().take(MAX_PAGE).cloned().collect::<Vec<_>>());
+    page["dismissed_total"] = json!(dismissed.len());
+    page
 }
 
 /// Newest first, ties in id order: the page order, also of items from beyond
@@ -359,7 +444,7 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::teams::model::{Attempt, AttemptState, Hold, Member, PendingAddition, Phase, Report, Task, TaskWait};
+    use crate::state::teams::model::{Attempt, AttemptState, Hold, Member, PendingAddition, Phase, Report, Task, TaskWait, TeamPause};
 
     fn team(id: &str, status: TeamStatus) -> Team {
         Team {
@@ -567,5 +652,74 @@ mod tests {
         assert_eq!(page(&arrived, None, Some(1))["items"][0]["team"], "t50");
         // A page never exceeds the bound.
         assert_eq!(page(&arrived, None, Some(10_000))["items"].as_array().unwrap().len(), arrived.len().min(MAX_PAGE));
+    }
+    /// Task #246: an item's state is the situation the owner dismissed; only
+    /// its change returns the row.
+    #[test]
+    fn every_item_carries_the_state_that_returns_it() {
+        let mut paused = team("t", TeamStatus::Paused);
+        paused.paused = Some(TeamPause { at: 100.0, by: "You".into(), ..Default::default() });
+        let stored = items(&[paused.clone()], 200.0).into_iter().find(|item| item["kind"] == "team_paused").unwrap();
+        assert_eq!(stored["state"], "paused:100.0", "{stored}");
+        // A second pause is a new situation.
+        paused.paused = Some(TeamPause { at: 300.0, ..Default::default() });
+        let again = items(&[paused], 400.0).into_iter().find(|item| item["kind"] == "team_paused").unwrap();
+        assert_eq!(again["state"], "paused:300.0");
+        // A plan waits for a new revision.
+        let mut planning = team("p", TeamStatus::Planning);
+        planning.settings.approval = super::super::model::Approval::Review;
+        planning.revision = 7;
+        assert_eq!(items(&[planning.clone()], 100.0)[0]["state"], "plan:7");
+        planning.revision = 8;
+        assert_eq!(items(&[planning], 100.0)[0]["state"], "plan:8");
+    }
+
+    /// Task #246: a dismissal hides the row while its state is the same; a
+    /// changed state returns it, and the old record stops hiding anything.
+    #[test]
+    fn a_dismissal_hides_the_row_until_its_state_changes() {
+        let mut paused = team("t", TeamStatus::Paused);
+        paused.paused = Some(TeamPause { at: 100.0, ..Default::default() });
+        let list = items(&[paused.clone()], 200.0);
+        let item = list.iter().find(|item| item["kind"] == "team_paused").unwrap().clone();
+        let dismissal = json!({"id":item["id"],"state":item["state"],"at":150.0,"team":"t"});
+        let (active, dismissed) = split(list, &[dismissal.clone()]);
+        assert!(active.is_empty(), "{active:?}");
+        assert_eq!(dismissed.len(), 1);
+        assert_eq!(dismissed[0]["dismissed_at"], 150.0);
+        assert!(dismissed[0].get("blocking").is_none(), "a paused team blocks nothing");
+        paused.paused = Some(TeamPause { at: 300.0, ..Default::default() });
+        let (active, dismissed) = split(items(&[paused], 400.0), &[dismissal]);
+        assert_eq!(active.len(), 1, "the second pause returns the row");
+        assert!(dismissed.is_empty());
+    }
+
+    /// Task #246: a dismissed owner decision stays in the dismissed section,
+    /// naming what it still blocks.
+    #[test]
+    fn a_dismissed_decision_names_what_it_still_blocks() {
+        let mut planning = team("t", TeamStatus::Planning);
+        planning.settings.approval = super::super::model::Approval::Review;
+        let list = items(&[planning], 100.0);
+        let item = list[0].clone();
+        let (active, dismissed) = split(list, &[json!({"id":item["id"],"state":item["state"],"at":10.0})]);
+        assert!(active.is_empty());
+        assert_eq!(dismissed[0]["blocking"], true, "{dismissed:?}");
+        assert_eq!(dismissed[0]["blocks"], "Team t");
+        // The live count excludes it; the dismissed count keeps it apart.
+        let page = page_with_dismissed(&active, &dismissed, None, None);
+        assert_eq!((page["total"].as_u64(), page["dismissed_total"].as_u64()), (Some(0), Some(1)));
+    }
+
+    #[test]
+    fn the_store_keeps_and_removes_a_dismissal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = super::super::store::Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
+        store.dismiss("t/team_paused/100", "t", "paused:100.0", 5.0, "human").unwrap();
+        let read = store.dismissed().unwrap();
+        assert_eq!(read.len(), 1);
+        assert_eq!((read[0]["id"].as_str(), read[0]["state"].as_str()), (Some("t/team_paused/100"), Some("paused:100.0")));
+        assert!(store.undismiss("t/team_paused/100").unwrap());
+        assert!(store.dismissed().unwrap().is_empty());
     }
 }

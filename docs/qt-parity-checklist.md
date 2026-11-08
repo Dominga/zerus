@@ -44,7 +44,7 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Sessions list, row actions and header | 25 | 2 | 2 | 2 owner decisions |
 | Archive and search | 10 | 4 | 1 | |
 | Composer and sending | 34 | 1 | | |
-| Activity | 15 | 2 | 0 | |
+| Activity | 16 | 1 | 0 | |
 | Questions and approvals | 12 | | | |
 | Notifications | 7 | 5 | | |
 | Tray, menu bar and Dock | 6 | 2 | 1 | 2 owner decisions |
@@ -53,7 +53,7 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Settings | 17 | | 1 | |
 | Machines, accounts, projects, new session, tasks and worktrees | 18 | | | |
 | Terminal, processes and platform session support | 8 | | | |
-| Total (192 rows) | 164 | 18 | 6 | 4 |
+| Total (192 rows) | 165 | 17 | 6 | 4 |
 
 ## Owner decisions
 
@@ -210,7 +210,7 @@ Keyboard commands for every area are listed once, under Shortcuts and navigation
 | Attachment, voice and video cards: play, seek, transcript; playback stops when hidden | done | `ui/sessions/Activity.tsx:254-490`; `store/mediaPlayback.ts` | `ActivityView.cpp:759-782,979-1028,2153-2187` |
 | Recorded-context fallback; Older events have expired | done | `ui/sessions/transcript.ts:212-216`; `ui/sessions/Activity.tsx:1176-1178` | `ActivityView.cpp:753-757,905-916` |
 | A message search hit opens in Activity with the query highlighted | partial (`zerus-5wmh.13.17`) | shown as plain highlighted text, without Markdown, links or Copy as Markdown; the jump caption does not become Back to latest activity (`ui/sessions/Activity.tsx:1158-1162`) | `SessionsWindow.cpp:382-392,436-458`; `ActivityView.cpp:1592-1605` |
-| Empty-state guidance (ready for the first message, sign in first, open the terminal) | partial (`zerus-5wmh.13.8`) | one generic line: `ui/sessions/Activity.tsx:1181` | `ActivityView.cpp:1145-1150` |
+| Empty-state guidance (ready for the first message, sign in first, open the terminal) | done | `ui/sessions/activity-empty.ts:9-21`; `ui/sessions/Activity.tsx:1151` | `ActivityView.cpp:1145-1150` |
 | Subagent activity with a way back to the main activity | done | `ui/sessions/Activity.tsx:1151-1157` | `SessionsWindow.cpp:1041-1062` |
 
 ### Questions and approvals

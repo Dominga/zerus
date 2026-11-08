@@ -41,8 +41,12 @@ export const TERMINAL_HINT = trNoop("Drop files to insert their paths in Termina
 export const COMPOSER_HINT = trNoop("Drop files to attach to this message");
 export const NO_FILES_NOTICE = trNoop("Nothing was attached: this drop has no files. To attach an image from another app, copy it and paste it into the message.");
 
-/** A dropped web or other non-file URL, which Linux reports among the paths; a local or UNC path is not one. */
-export const nonFileUrl = (path: string) => /^[a-z][a-z0-9+.-]*:\/\//i.test(path);
+/**
+ * A dropped web, data or other URI, which Linux reports among the paths: a
+ * scheme of two or more characters and a colon (`https://…`, `data:image/…`).
+ * A local, UNC or drive path (`C:\…`, a single letter) is not one (zerus-9vofc).
+ */
+export const nonFileUrl = (path: string) => /^[a-z][a-z0-9+.-]+:/i.test(path);
 /** The dropped paths that may name files. */
 const filePaths = (paths: string[]) => paths.filter((path) => !nonFileUrl(path));
 
@@ -122,6 +126,10 @@ export function createDrops(deps: DropDeps) {
         return;
       }
       if (!(await d.files)) return;
+      // The check may answer after the target changed: the drop goes only to
+      // the target it entered and was dropped on (zerus-tv0hj).
+      const now = routeDrop(deps.state());
+      if (now.kind !== r.kind || now.key !== r.key) return;
       if (r.kind === "composer") {
         deps.reveal();
         await deps.attach(paths);

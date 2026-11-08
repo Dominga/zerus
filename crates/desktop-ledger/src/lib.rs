@@ -6,6 +6,7 @@ pub mod diagnostics;
 pub mod native;
 pub mod operations;
 pub mod reads;
+pub mod task_controls;
 
 use anyhow::{ensure, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createContentSearch, identityMatches, metadataMatches, mergeSessionMatch, searchCount, SEARCH_HITS, SEARCH_HOSTS, type SearchHit, type SearchReply } from "./content-search-model";
+import { createContentSearch, identityMatches, matchedIdentity, metadataMatches, mergeSessionMatch, searchCount, searchTooltip, SEARCH_HITS, SEARCH_HOSTS, type SearchHit, type SearchReply } from "./content-search-model";
 import type { Session } from "../ui/sessions/types";
 
 const host = (n: number, online = true) => ({ computer: `host-${n}`, machine: `machine-${n}`, online });
@@ -30,6 +30,34 @@ describe("bounded public-content search", () => {
     expect(searchCount(3, 2)).toBe("3 messages, 2 sessions");
     expect(searchCount(1, 1, 1)).toBe("1 message, 1 session, 1 creation");
     expect(searchCount(0, 0, 2)).toBe("0 messages, 0 sessions, 2 creations");
+  });
+  it("matches a child's conversation ID and names the ID that matched, as Qt does (SessionSearch.cpp:239-268)", () => {
+    const row = { name: "claude/demo/sample", title: "Demo", machine: "workstation", runId: "run-one", conversationId: "conversation-one", archiveId: "archive-one",
+      subagents: [{ id: "agent-one", conversationId: "child-conversation-one", name: "child", state: "ready", summary: "" }, { id: "agent-two", name: "other", state: "ready", summary: "" }] } as unknown as Session;
+    expect(metadataMatches(row, "CHILD-CONVERSATION")).toBe(true);
+    expect(matchedIdentity(row, "child-conversation")).toBe("Child session ID: child-conversation-one");
+    expect(matchedIdentity(row, "AGENT-TWO")).toBe("Agent ID: agent-two");
+    // The first in Qt's order: session, run, archive, then each child's agent and conversation IDs.
+    expect(matchedIdentity(row, "-one")).toBe("Session ID: conversation-one");
+    expect(matchedIdentity(row, "run-")).toBe("Run ID: run-one");
+    expect(matchedIdentity(row, "archive-")).toBe("Archive ID: archive-one");
+    expect(matchedIdentity(row, "agent-one")).toBe("Agent ID: agent-one");
+    // Names, titles and models are not identities.
+    expect(matchedIdentity(row, "demo")).toBeUndefined();
+    expect(matchedIdentity(row, "workstation")).toBeUndefined();
+  });
+  it("keeps the matched ID when a message hit replaces a session's row, and lists the IDs in the tooltip", () => {
+    const row = { key: "k", name: "claude/demo/sample", title: "Demo", machine: "workstation", runId: "run-one", conversationId: "conversation-one" } as unknown as Session;
+    const items: { id: string; session: Session; found?: { computer: string; machine: string; hit: SearchHit }; matched?: string }[] = [];
+    const positions = new Map<string, number>();
+    mergeSessionMatch(items, positions, { id: "metadata", session: row, matched: "Run ID: run-one" }, 10);
+    mergeSessionMatch(items, positions, { id: "hit", session: row, found: { computer: "", machine: "workstation", hit: hit("m1") } }, 10);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ id: "metadata", matched: "Run ID: run-one" });
+    expect(items[0].found?.hit.message_id).toBe("m1");
+    expect(searchTooltip(items[0])).toBe("claude/demo/sample\nDemo\nworkstation\nSession ID: conversation-one\nRun ID: run-one\nneedle");
+    const child = { ...items[0], matched: "Child session ID: child-one", found: undefined };
+    expect(searchTooltip(child)).toBe("claude/demo/sample\nDemo\nworkstation\nSession ID: conversation-one\nRun ID: run-one\nChild session ID: child-one");
   });
   it("waits 350 ms and two characters, then runs four computers at most", async () => {
     const f = fixture(); const hosts = Array.from({ length: 8 }, (_, n) => host(n));

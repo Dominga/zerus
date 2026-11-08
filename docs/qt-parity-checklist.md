@@ -34,6 +34,7 @@ Statuses:
 | **missing** | No Zerus Next equivalent. |
 | unverified | The code path is not obvious and needs a live check. |
 | removed by owner decision | Deliberately not carried over; the row names the decision. |
+| intentional difference | Deliberately different in Zerus Next; the row gives the reason, who decided and any bead that keeps the choice open. |
 
 Every partial, missing and unverified row names the bead that tracks it.
 
@@ -41,8 +42,8 @@ Every partial, missing and unverified row names the bead that tracks it.
 
 | Area | done | partial | missing | other |
 | --- | --- | --- | --- | --- |
-| Sessions list, row actions and header | 25 | 2 | 2 | 2 owner decisions |
-| Archive and search | 11 | 4 | 0 | |
+| Sessions list, row actions and header | 27 | | 1 | 2 owner decisions, 1 intentional difference |
+| Archive and search | 12 | 3 | 0 | |
 | Composer and sending | 34 | 1 | | |
 | Activity | 16 | 1 | 0 | |
 | Questions and approvals | 12 | | | |
@@ -50,10 +51,10 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Tray, menu bar and Dock | 6 | 2 | 1 | 2 owner decisions |
 | Shortcuts and navigation | 6 | | | |
 | Lifecycle and updates | 6 | 2 | 1 | |
-| Settings | 17 | | 1 | |
+| Settings | 17 | | | 1 intentional difference |
 | Machines, accounts, projects, new session, tasks and worktrees | 18 | | | |
 | Terminal, processes and platform session support | 8 | | | |
-| Total (192 rows) | 166 | 17 | 5 | 4 |
+| Total (192 rows) | 169 | 14 | 3 | 6 |
 
 ## Owner decisions
 
@@ -72,12 +73,12 @@ Every partial, missing and unverified row names the bead that tracks it.
 | `zerus-5wmh.13.14` | P2 | Windows: focus-aware banners, update alert, tray theme, watchdog, startup note |
 | `zerus-5wmh.13.7.5` | P3 | Drop image data (no file path) into the composer |
 | `zerus-5wmh.13.8` | P3 | Activity rendering: full tool output, View process, Markdown, inline-code links, empty state |
-| `zerus-5wmh.13.11` | P3 | Compact-row tooltip, global Compact session rows, saved-session terminal, batch folder removal |
 | `zerus-5wmh.13.15` | P3 | Tray Refresh entry, Linux without a tray host, Linux launch during service start |
-| `zerus-5wmh.13.16` | P3 | Alert text language and the in-window 99+ cap |
+| `zerus-5wmh.13.16` | P3 | Alert text language; the labeled rail's exact-count tooltip (`zerus-nfmh1`) |
 | `zerus-5wmh.13.17` | P3 | Search result refinements after the search port (`zerus-5wmh.66.2.2`) |
 | `zerus-5wmh.18` | existing | Selection Move to project, with project organisation |
 | `zerus-5wmh.66.10` | existing | Desktop presence for phone alerts |
+| `zerus-5wmh.13.11.4` | P4 | Deferred: batch Terminate folder removal, one confirmation holding every session's program manifest |
 
 Keyboard commands for every area are listed once, under Shortcuts and navigation.
 
@@ -97,7 +98,7 @@ Keyboard commands for every area are listed once, under Shortcuts and navigation
 | Session card: status with working clock, unread mark, question chip, folder and branch, Git marks, machine, model, account, mute and review-later marks | done | `ui/sessions/SessionCard.tsx:372-425` | `SessionCardDelegate.h` |
 | Subagent toggle; child rows open subagent Activity | done | `ui/sessions/SessionCard.tsx:319-330`; `ui/sessions/SessionList.tsx:850-856` | `SessionList.cpp:415-423` |
 | Compact and expanded rows; double-click toggles | done | `ui/sessions/SessionList.tsx:870-871`; `ui/sessions/SessionCard.tsx:557` | `SessionList.cpp:184-196,371-393` |
-| Compact-row tooltip with the hidden state, detail, folder, machine and Git lines | partial (`zerus-5wmh.13.11`) | the title tooltip shows the name only: `ui/sessions/SessionCard.tsx:553` | `SessionList.cpp:245-249` |
+| Compact-row tooltip with the title, status and provider the row shows only in part; session cards have no tooltip | done (adds the session name when it differs from the title) | on the title and after the expand button's "Expand session row", also its accessible description: `ui/sessions/SessionCard.tsx:549-566` | `SessionCardDelegate.h:125-138`; `SessionList.cpp:189-196,240-252`; `SessionsWindowRows.cpp:357-359` |
 | Strip tiles: tooltip and context menu | done | `ui/sessions/SessionList.tsx:1023-1024` | `SessionList.cpp:267-286` |
 | Ctrl or Cmd-click and Shift-click selection; Esc clears it | done | `ui/sessions/SessionList.tsx:326-337,603-608` | `SessionList.cpp:296-312,588` |
 | Keyboard range selection with Shift+Up, Down, Home, End | done | `ui/sessions/SessionList.tsx:635-640`; from the range's far end, the open conversation kept: `ui/sessions/organize.ts:31-47` | `SessionList.cpp:589-602` |
@@ -106,7 +107,7 @@ Keyboard commands for every area are listed once, under Shortcuts and navigation
 | Enter on a row jumps to the latest Activity | done (a focused button in the list keeps its own Enter) | `ui/sessions/SessionList.tsx:676-680`; `store/ui.ts:61-71`, taken by the mounted Activity: `ui/sessions/Activity.tsx:989` | `SessionsWindow.cpp:565,5499-5504` |
 | Selection bar and menu: Mark read, Mark needs attention, Compact, Expand, Pause, Resume or Restore, Archive, Forget and Terminate with confirmation | done | `ui/sessions/selection.ts:11-31,113-136`; `store/batch.ts:134-145`; `ui/sessions/ActionDialogs.tsx:326-345` | `SessionSelection.cpp:52-218,258-286` |
 | Selection Move to project | **missing** (`zerus-5wmh.18`) | disabled with "Arrives with project organisation." (`ui/sessions/selection.ts:19`; `ui/sessions/selection-ui.ts:59-66`); a single row can move | `SessionSelection.cpp:184-195` |
-| Selection Terminate: remove working folders after stopping | **missing** (`zerus-5wmh.13.11`) | the batch dialog has no such option (`ui/sessions/selection.ts:111-112`) | `SessionSelection.cpp:274-283` |
+| Selection Terminate: remove working folders after stopping | intentional difference (`zerus-5wmh.13.11.4`) | batch Terminate offers no folder removal in this pass (`ui/sessions/selection.ts:111-112`); per-session Terminate with its program manifest, ownership nonce, separate Force and removed, kept and unknown outcomes stays the way to remove folders, as the Terminate and Remove working folder rules in `AGENTS.md` set them for one session (design-tima2, 2026-11-08; the batch design is kept in the bead) | `SessionSelection.cpp:274-283` |
 | Footer: creation status, Mark all as read, Saved drafts | done | `ui/sessions/SessionList.tsx:702-712` | `SessionsWindow.cpp:459-489` |
 | Footer summary (N shown, N working, N attention) | removed by owner decision | dropped on owner feedback of 2026-11-07 (PR #1685) | `SessionsWindowRows.cpp:473-479` |
 | Creation rows with Hide launch status | done | `ui/sessions/CreationCard.tsx:26-31,35` | `SessionsWindow.cpp:502-511` |
@@ -117,7 +118,7 @@ Keyboard commands for every area are listed once, under Shortcuts and navigation
 | --- | --- | --- | --- |
 | Row menu: Compact or Expand, Copy connect or restore command, Mute, Mark read or needs attention, Start fresh, Clear, Rename, Move to project, Terminate and Forget | done | `ui/sessions/SessionList.tsx:211-253`; `ui/sessions/ActionDialogs.tsx:77-130`; `ui/sessions/mark-entries.ts:45-51`; `ui/sessions/OrganizationDialogs.tsx:25-42` | `SessionsWindow.cpp:5291-5380` |
 | Row menu: Pause, Resume, Restore; Fork; Move to archive; Open folder and shell; Show running commands; native DeepSeek UI; Copy name, reference and folder | removed by owner decision | in the header menu (`ui/sessions/SessionDetail.tsx:106-126`); the row menu keeps the owner's ten actions (`zerus-423fh`, 2026-11-07) | `SessionsWindow.cpp:5295-5376` |
-| Open terminal for a saved session (resume in a terminal after confirmation) | partial (`zerus-5wmh.13.11`) | running sessions only: `store/sessionTerminal.ts:14-17` | `SessionsWindow.cpp:5295,5466-5476` |
+| Open terminal for a saved session (resume in a terminal after confirmation) | done (never resumes by name) | Resume and open terminal: one confirmation (`ui/sessions/ActionDialogs.tsx:307-323`), the row's own Resume, then the identity-bound terminal once the same session runs, within 30 seconds: `store/sessionTerminal.ts:56-132` | `SessionsWindow.cpp:5295,5466-5476` |
 | Header: title, loading indicator, status, provider and machine, folder, branch, worktree, model | done | `ui/sessions/SessionDetail.tsx:130-157` | `SessionsWindow.cpp:575-662` |
 | Header icons and Session actions menu (folder, shell, copy IDs, Rename, Fork, connect command, Pause or Resume, Clear, Start fresh, archive, Terminate) | done | `ui/sessions/SessionDetail.tsx:106-142` | `SessionsWindow.cpp:608-654` |
 | Goal button; account usage for the selected session | done | `ui/sessions/SessionDetail.tsx:299`; `ui/components/SessionUsageStrip.tsx:7-11` | `SessionsWindow.cpp:663-676` |
@@ -141,7 +142,7 @@ Keyboard commands for every area are listed once, under Shortcuts and navigation
 | --- | --- | --- | --- |
 | Search box for sessions and archive; Esc clears; strip search button | done | `ui/sessions/SessionList.tsx:656-666,956` | `SessionsWindow.cpp:382-395` |
 | Matching on name, machine, model, effort, folder, branch, worktree, session, run and archive IDs | done | `store/content-search-model.ts:85-90` | `SessionSearch.cpp:239,274-275` |
-| Child conversation IDs match and the result says which ID matched | partial (`zerus-5wmh.13.17`) | only subagent IDs match; the result shows no matched ID (`store/content-search-model.ts:88`; `ui/sessions/SearchResults.tsx:49-51`) | `SessionSearch.cpp:239-268` |
+| Child conversation IDs match and the result says which ID matched | done | `store/content-search-model.ts:98,127`; `ui/sessions/subagents.ts:37`; `ui/sessions/SearchResults.tsx:56` | `SessionSearch.cpp:239-268` |
 | Message content search across machines, honoring the filters, with status and Search again | done | `store/contentSearch.ts:22-71`; `store/content-search-model.ts:27-79` | `SessionSearch.cpp:75-213,309-314` |
 | One result row per matching message | partial (`zerus-5wmh.13.17`) | one row per session with the newest excerpt only (`store/content-search-model.ts:94-104`) | `SessionSearch.cpp:276-282` |
 | Result rows with highlights, badges, author and time; keyboard navigation; opening a hit shows the saved message | done | `ui/sessions/SearchResults.tsx:26-55`; `store/contentSearch.ts:72-84` | `SessionSearch.cpp:132,253-262`; `SessionsWindow.cpp:434-456` |
@@ -249,7 +250,7 @@ In the default native alert mode the Zerus Next app posts alerts itself while it
 | Short tray messages (a new session's terminal advisory, the terminal did not open) | Linux, Windows | done | `tauri/desk.rs:1183-1235`: a desktop notification on Linux and the tray balloon on Windows, the window's notice where the app does not own them; macOS keeps `osascript`; callers `tauri/creations.rs:1783,1792` | `TrayAgent.cpp:655-830` |
 | Phone alerts wait while the owner is at the desktop | Linux, macOS | partial (`zerus-5wmh.66.10`) | the app reports no presence; only the registered `hgs` service does (`src/desktop/presence_worker.rs`) | `TrayAgent.cpp:279-290`; `DesktopPresence.cpp` |
 | Alert text in the interface language | all | partial (`zerus-5wmh.13.16`) | English constants: `core/attention.rs:20-22,444-448`; `crates/freedesktop-notify/src/lib.rs:34` | `AttentionTracker.cpp:125-134`; `LinuxAttentionNotifier.cpp:52` |
-| In-window attention badge capped at 99+ | all | partial (`zerus-5wmh.13.16`) | raw count: `ui/components/Rail.tsx:49-51` | `SessionsWindow.cpp:304-306,3374-3381` |
+| In-window attention badge capped at 99+ | all | partial (`zerus-nfmh1`) | capped at 99+, the exact count in the Sessions button's name and icon-mode tooltip: `ui/components/Rail.tsx:46-51`, `ui/components/rail-badge.ts`; labeled skins show no tooltip, so no exact count on hover | `SessionsWindow.cpp:304-306,3374-3381` |
 
 ### Tray, menu bar and Dock
 
@@ -301,7 +302,7 @@ In the default native alert mode the Zerus Next app posts alerts itself while it
 | Settings page and its sections (Worktrees added later) | done | `ui/screens/settings/sections.ts:36-50`; `ui/screens/Settings.tsx:11-53` | `SettingsPage.h:43,140-145` |
 | Theme (system, dark, light), interface language with restart hint, usage indicator style, content scale with reset, Activity width and full width | done (adds skins and skin import) | `ui/screens/settings/Appearance.tsx:148-194`; `core/settings.rs:157` | `SettingsPage.h:46-96`; `UiLanguage.h:33-34` |
 | Keep Zerus above other windows (KWin on Linux) | done | `ui/screens/settings/Appearance.tsx:202-205`; `tauri/window_layer.rs`; `tauri/platform/linux_window_layer.rs` | `SettingsPage.h:92-94`; `KWinWindowLayer.cpp` |
-| Compact session rows: one switch for the whole list | **missing** (`zerus-5wmh.13.11`) | the key is stored (`core/settings.rs:181`) but has no control and nothing reads it; only per-row compacting exists (`store/ui.ts:58-68`) | `SettingsPage.h:98`; `SessionsWindow.cpp:428,1692` |
+| Compact session rows: Qt's denser card layout for the whole list (94 instead of 104 px cards) | intentional difference | Zerus Next always uses Qt's compact card density (`ui/sessions/model.ts:24`), Qt's effective default: its window read the key with default true at startup. Per-row Compact and Expand all cover the rest, and the stored key stays for compatibility (`core/settings.rs:181`); design-tima2, 2026-11-08 | `SettingsPage.h:98`; `SessionsWindow.cpp:428,1692`; `SessionCardDelegate.h:26,70` |
 | Expand the collapsed list on hover; hide projects without active sessions; animate working sessions; show completed subagents; notify about optional questions | done | `ui/screens/settings/Sessions.tsx:30-54` | `SettingsPage.h:98-106` |
 | Automatic recovery rules, session-limit mode, delays, sync status | done | `ui/screens/settings/Recovery.tsx:156-175` | `RecoverySettings.h:99-132` |
 | Processes tab and timings | done | `ui/screens/settings/Processes.tsx:10-36` | `SettingsPage.h:109-121` |

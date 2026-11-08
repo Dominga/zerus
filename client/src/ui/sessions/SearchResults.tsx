@@ -5,6 +5,7 @@ import { searchCards, selectCreation, selectedCreation } from "../../store/creat
 import { agentKind } from "../../store/catalog";
 import { computerOf } from "./creations-ui";
 import type { CreationCard } from "../../types";
+import { searchTooltip } from "../../store/content-search-model";
 import { search, selectedKey } from "../../store/ui";
 import { Icon } from "../lib/icons";
 import { AgentBadge, MachineBadge } from "./SessionCard";
@@ -68,9 +69,9 @@ export function SearchResults() {
               <Show when={c().error}><span class="content-search-excerpt sh-snippet"><SearchHighlight text={c().error} query={search().trim()} /></span></Show>
             </button>}</Show>}>{(found) => { const item = () => found(); return <button class="content-search-row search-hit" classList={{ selected: chosen(row()) }} data-index={virtual()?.index} ref={(el) => requestAnimationFrame(() => { if (el.isConnected) list.measureElement(el); })} id={`content-search-${virtual()?.index ?? 0}`} role="option" tabindex="-1" aria-selected={current() === item().id || (!current() && selectedKey() === item().session.key)}
               style={{ transform: `translateY(${virtual()?.start ?? 0}px)` }}
-              onClick={() => { setCurrent(item().id); activateSearchItem(item()); }} title={`${item().session.name}\n${item().found?.hit.snippet ?? ""}`}>
+              onClick={() => { setCurrent(item().id); activateSearchItem(item()); }} title={searchTooltip(item())}>
               <div class="row"><b class="ell"><SearchHighlight text={item().session.title} query={search().trim()} /></b><span class="grow" /><AgentBadge agent={item().session.agent} narrow /><MachineBadge alias={item().session.machine} computer={item().session.computer} /></div>
-              <span class="content-search-meta sh-meta ell">{[item().session.archiveId ? "Archive" : "", item().found ? item().found!.hit.role === "user" ? "You" : item().found!.hit.role === "assistant" ? "Agent" : "Tool" : item().session.model,
+              <span class="content-search-meta sh-meta ell">{[item().session.archiveId ? "Archive" : "", item().found ? item().found!.hit.role === "user" ? "You" : item().found!.hit.role === "assistant" ? "Agent" : "Tool" : item().matched ?? item().session.model,
                 item().found ? dayTime(item().found!.hit.at) : ""].filter(Boolean).join(" / ")}</span>
               <Show when={item().found}><span class="content-search-excerpt sh-snippet"><SearchHighlight text={item().found!.hit.snippet} query={search().trim()} /></span></Show>
             </button>}}</Show>;

@@ -44,7 +44,7 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Sessions list, row actions and header | 22 | 2 | 5 | 2 owner decisions |
 | Archive and search | 10 | 4 | 1 | |
 | Composer and sending | 31 | 4 | | |
-| Activity | 12 | 3 | 2 | |
+| Activity | 13 | 3 | 1 | |
 | Questions and approvals | 12 | | | |
 | Notifications | 7 | 5 | | |
 | Tray, menu bar and Dock | 6 | 2 | 1 | 2 owner decisions |
@@ -53,7 +53,7 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Settings | 17 | | 1 | |
 | Machines, accounts, projects, new session, tasks and worktrees | 18 | | | |
 | Terminal, processes and platform session support | 8 | | | |
-| Total (192 rows) | 153 | 24 | 11 | 4 |
+| Total (192 rows) | 156 | 22 | 10 | 4 |
 
 ## Owner decisions
 
@@ -69,7 +69,6 @@ Every partial, missing and unverified row names the bead that tracks it.
 
 | Bead | Priority | Gap |
 | --- | --- | --- |
-| `zerus-5wmh.13.6` | P2 | OpenCode queued-message stamps, waiting hint and Remove |
 | `zerus-5wmh.13.14` | P2 | Windows: focus-aware banners, update alert, tray theme, watchdog, startup note |
 | `zerus-5wmh.13.7` | P3 | Composer and voice small controls |
 | `zerus-5wmh.13.8` | P3 | Activity rendering: full tool output, View process, Markdown, inline-code links, empty state |
@@ -206,9 +205,9 @@ Keyboard commands for every area are listed once, under Shortcuts and navigation
 | Tool calls grouped and expandable to each event's full output | partial (`zerus-5wmh.13.8`) | expanded rows show a 110-character preview per event (`ui/sessions/transcript.ts:197-201,568`) | `ActivityView.cpp:1105-1140` |
 | View process link from a tool event to its recorded process | **missing** (`zerus-5wmh.13.8`) | no such link in the client UI | `ActivityView.cpp:1129-1134` |
 | Thinking and subagent reports as Markdown | done | `ui/sessions/Activity.tsx:570,576`; `ui/sessions/MarkdownBody.tsx` | `ActivityView.cpp:942-975` |
-| Session cleared marker; Question and Your answer blocks; queued and sent stamps | done | `ui/sessions/transcript.ts:512,543-549`; `ui/sessions/Activity.tsx:575-583,667` | `ActivityView.cpp:347-363,934-940,1029-1046` |
+| Session cleared marker; Question and Your answer blocks; queued and sent stamps | done | `ui/sessions/transcript.ts:512,554-560`; `ui/sessions/Activity.tsx:585-593,680` | `ActivityView.cpp:347-363,934-940,1029-1046` |
 | Local message stamps: Sending, Not sent, Submitted to terminal, Delivery not confirmed | done | `ui/sessions/transcript.ts:226-251` | `ActivityView.cpp:1053-1055` |
-| OpenCode queue: Queued or Not delivered stamp, waiting hint, Remove queued message with confirmation | **missing** (`zerus-5wmh.13.6`) | `core/input_queue.rs:546-558` (`inbox_removable`) has no caller; no UI reads `delivery_state` | `ActivityView.cpp:1036-1038,1072-1087`; `SessionsWindow.cpp:4433-4467` |
+| OpenCode queue: Queued or Not delivered stamp, waiting hint, Remove queued message with confirmation | done | `ui/sessions/transcript.ts:538-547`; `ui/sessions/Activity.tsx:608-609`; `ui/sessions/InboxRemove.tsx:21,43`; `tauri/composer/inbox.rs:53` | `ActivityView.cpp:1036-1038,1072-1087`; `SessionsWindow.cpp:4433-4467` |
 | Attachment, voice and video cards: play, seek, transcript; playback stops when hidden | done | `ui/sessions/Activity.tsx:254-490`; `store/mediaPlayback.ts` | `ActivityView.cpp:759-782,979-1028,2153-2187` |
 | Recorded-context fallback; Older events have expired | done | `ui/sessions/transcript.ts:212-216`; `ui/sessions/Activity.tsx:1176-1178` | `ActivityView.cpp:753-757,905-916` |
 | A message search hit opens in Activity with the query highlighted | partial (`zerus-5wmh.13.17`) | shown as plain highlighted text, without Markdown, links or Copy as Markdown; the jump caption does not become Back to latest activity (`ui/sessions/Activity.tsx:1158-1162`) | `SessionsWindow.cpp:382-392,436-458`; `ActivityView.cpp:1592-1605` |

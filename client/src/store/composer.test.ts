@@ -56,6 +56,7 @@ function fakes(reply: SendReply = { kind: "sending" }, opened: ComposerView | nu
     localRetry: async (h, id) => { calls.push(`retry ${h} ${id}`); return retryReply; },
     localDelete: async (h, id) => { calls.push(`delete ${h} ${id}`); },
     localInspect: async (h, id) => { calls.push(`inspect ${h} ${id}`); return { kind: "terminal" }; },
+    inboxRemove: async (h, run, conversation, id) => { calls.push(`inbox ${h} ${run} ${conversation} ${id}`); return { outcome: "removed" }; },
   };
   const notify: Notices = (tone, text, sticky) => { notices.push(`${tone} ${sticky ? "sticky" : "timed"} ${text}`); };
   let clock = 0;
@@ -1101,6 +1102,30 @@ describe("the batch envelope", () => {
     expect(isEmptyBatch(normalize({ composer_events: events }))).toBe(false);
     expect(normalize({ composer_events: events }).composer_events).toEqual(events);
     expect(normalize({ draft_keys: [KEY] }).draft_keys).toEqual([KEY]);
+  });
+
+  describe("Remove of a not-delivered OpenCode message (zerus-5wmh.13.6)", () => {
+    it("asks Rust for exactly the composer, run, conversation and message the dialog opened for", async () => {
+      const f = fakes();
+      await createRoot(async () => {
+        const c = createComposer(f.port, f.timers, images(1, 1), f.notify);
+        c.apply(view({}));
+        expect(await c.inboxRemove(1, "run-1", "conv-1", "msg_queued01")).toEqual({ outcome: "removed" });
+        expect(f.calls).toEqual(["inbox 1 run-1 conv-1 msg_queued01"]);
+      });
+    });
+
+    it("a call that failed in transport may have removed it: uncertain, never retried", async () => {
+      const f = fakes();
+      let calls = 0;
+      const port: ComposerPort = { ...f.port, inboxRemove: () => { calls++; return Promise.reject(new Error("ipc closed")); } };
+      await createRoot(async () => {
+        const c = createComposer(port, f.timers, images(1, 1), f.notify);
+        c.apply(view({}));
+        expect(await c.inboxRemove(1, "run-1", "conv-1", "msg_queued01")).toEqual({ outcome: "uncertain", detail: "ipc closed" });
+        expect(calls).toBe(1);
+      });
+    });
   });
 
   describe("local rows (Task 7)", () => {

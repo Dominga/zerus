@@ -367,6 +367,9 @@ pub const KEYS: &[Key] = &[
         seeded: false,
     },
     key("ui/catalogHideUnusedRoles", Kind::Flag(false)),
+    // Task 200 (Qt TeamTemplateList, F6): New team's favourite templates by
+    // id, a string list as Qt keeps it, starred first in the template list.
+    key("teams/templateFavourites", Kind::Chords),
     Key {
         name: "teams/heatModes",
         kind: Kind::Text("{}"),

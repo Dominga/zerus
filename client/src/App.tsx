@@ -31,6 +31,7 @@ import { catalog } from "./store/catalog";
 import { contentScale, page, selectedKey, setContentScale, setPage, setUnifiedChrome, toast } from "./store/ui";
 import { num, setSetting } from "./store/settings";
 import { installShortcutRouter, onCommand } from "./store/shortcuts";
+import { installWindowCommands } from "./ui/sessions/windowCommands";
 import { openGoTo, openShortcutHelp, goToOrigin, shortcutHelpOrigin } from "./store/goTo";
 import { rememberRecentSession } from "./ui/sessions/goTo";
 import { updateCommands, updates } from "./store/updates";
@@ -171,7 +172,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
     ["zoom.reset", () => zoom(1)],
   ];
   onMount(() => {
-    const off = [installShortcutRouter(), ...commands.map(([id, run]) => onCommand(id, run))];
+    const off = [installShortcutRouter(), ...commands.map(([id, run]) => onCommand(id, run)), installWindowCommands()];
     onCleanup(() => off.forEach((undo) => undo()));
   });
   // Task 243: the Compact skins draw one title bar with the controls instead of the

@@ -11,6 +11,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Task 288: a team's tasks and attempts in their own rows.
+mod rows;
+
 /// Feed entries per page.
 pub(crate) const PAGE: i64 = 50;
 
@@ -100,7 +103,19 @@ pub(crate) struct Store {
     /// Task 287: the worker's changes to one team in this tick, written in one
     /// transaction at its end (`begin_batch`, `end_batch`).
     batch: Option<Batch>,
+    /// Task 288: the teams this store read or wrote, as of their revision, so
+    /// a change reads the team before the lock and, under it, only the rows
+    /// written since.
+    cache: std::cell::RefCell<std::collections::HashMap<String, rows::Snapshot>>,
+    /// Task 288: the store has the `layout` column (a read-only open of a
+    /// store no hgs of this version has written reads the whole records).
+    /// Known at a write open; a read-only open asks at its first read, so the
+    /// open itself never waits for a writer.
+    has_layout: std::cell::Cell<Option<bool>>,
 }
+
+/// Task 288: teams a store keeps a copy of.
+const CACHED_TEAMS: usize = 8;
 
 /// Task 287: a team's working copy while the worker ticks it. Each change is
 /// applied to the copy at once (its closure runs once, as before); the copy
@@ -110,7 +125,7 @@ pub(crate) struct Store {
 struct Batch {
     team: String,
     base_revision: u64,
-    base: Value,
+    base: Team,
     working: Team,
     events: Vec<(f64, Vec<Event>)>,
     changed: bool,
@@ -502,13 +517,17 @@ impl Store {
                     task INTEGER NOT NULL,done TEXT NOT NULL,next TEXT NOT NULL,blocked TEXT NOT NULL,at REAL NOT NULL,
                     source TEXT NOT NULL,expires REAL);
                 CREATE INDEX IF NOT EXISTS working_pulses_member ON working_pulses(team,member,task,at);
-                CREATE INDEX IF NOT EXISTS working_pulses_team_at ON working_pulses(team,at);",
+                CREATE INDEX IF NOT EXISTS working_pulses_team_at ON working_pulses(team,at);
+                -- Task #246: the owner's dismissed Waiting rows, with the state seen.
+                CREATE TABLE IF NOT EXISTS dismissed(id TEXT PRIMARY KEY,team TEXT NOT NULL,state TEXT NOT NULL,
+                    at REAL NOT NULL,by TEXT NOT NULL);",
             )?;
             // Task 134: the working tier's team messages (docs/lore.md 11.5).
             db.execute_batch(super::working::SCHEMA)?;
         }
         if write {
             members_column(&db)?;
+            rows::ensure_schema(&db)?;
         }
         if write {
             // Build an indexed projection once; triggers keep it in the same
@@ -540,7 +559,38 @@ impl Store {
             }
             if migration { db.execute_batch("COMMIT")?; }
         }
-        Ok(Self { db, batch: None })
+        let has_layout = std::cell::Cell::new(write.then_some(true));
+        if write {
+            // Task 288: every team not yet in rows, one transaction each.
+            rows::migrate(&db)?;
+        }
+        Ok(Self { db, batch: None, cache: std::cell::RefCell::new(std::collections::HashMap::new()), has_layout })
+    }
+
+    /// Task #246: the owner's dismissed Waiting rows: id, team, the state at
+    /// dismissal and when. A missing table (an older store read before its next
+    /// write open) is no dismissal.
+    pub(crate) fn dismissed(&self) -> anyhow::Result<Vec<Value>> {
+        let mut statement = self.db.prepare("SELECT id,team,state,at,by FROM dismissed ORDER BY at DESC")?;
+        let rows = statement.query_map([], |row| {
+            Ok(json!({"id":row.get::<_,String>(0)?,"team":row.get::<_,String>(1)?,"state":row.get::<_,String>(2)?,
+                "at":row.get::<_,f64>(3)?,"by":row.get::<_,String>(4)?}))
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Task #246: dismiss a Waiting item; the owner's (the caller checks).
+    pub(crate) fn dismiss(&self, id: &str, team: &str, state: &str, at: f64, by: &str) -> anyhow::Result<()> {
+        self.db.execute(
+            "INSERT OR REPLACE INTO dismissed(id,team,state,at,by) VALUES(?1,?2,?3,?4,?5)",
+            params![id, team, state, at, by],
+        )?;
+        Ok(())
+    }
+
+    /// Task #246: Show dismissed > Restore; false when nothing was dismissed.
+    pub(crate) fn undismiss(&self, id: &str) -> anyhow::Result<bool> {
+        Ok(self.db.execute("DELETE FROM dismissed WHERE id=?1", [id])? > 0)
     }
 
     /// Task 133: writes a member's pulse (docs/lore.md 11.2, 11.5). One by the
@@ -680,9 +730,67 @@ impl Store {
         if let Some(batch) = self.batch.as_ref().filter(|batch| batch.team == id) {
             return Ok(Some(batch.working.clone()));
         }
-        let payload: Option<String> =
-            self.db.query_row("SELECT payload FROM teams WHERE id=?1", params![id], |row| row.get(0)).optional()?;
-        payload.map(|text| serde_json::from_str(&text).context("Invalid team record")).transpose()
+        self.current(id)
+    }
+
+    /// Task 288: the team as stored now, from this store's copy brought up to
+    /// date (only the rows written since its revision are read), else read
+    /// whole and kept.
+    /// Whether the store has the `layout` column (see `has_layout`).
+    fn layout(&self) -> anyhow::Result<bool> {
+        if let Some(known) = self.has_layout.get() {
+            return Ok(known);
+        }
+        let known: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('teams') WHERE name='layout')", [], |row| row.get(0))?;
+        self.has_layout.set(Some(known));
+        Ok(known)
+    }
+
+    fn current(&self, id: &str) -> anyhow::Result<Option<Team>> {
+        if !self.layout()? {
+            let payload: Option<String> =
+                self.db.query_row("SELECT payload FROM teams WHERE id=?1", params![id], |row| row.get(0)).optional()?;
+            return payload.map(|text| serde_json::from_str(&text).context("Invalid team record")).transpose();
+        }
+        let mut cache = self.cache.borrow_mut();
+        if let Some(snapshot) = cache.get_mut(id) {
+            if rows::refresh(&self.db, id, snapshot)? {
+                return Ok(Some(snapshot.team.clone()));
+            }
+            cache.remove(id);
+            return Ok(None);
+        }
+        let Some(snapshot) = rows::read(&self.db, id)? else { return Ok(None) };
+        let team = snapshot.team.clone();
+        if cache.len() >= CACHED_TEAMS {
+            cache.clear();
+        }
+        cache.insert(id.to_owned(), snapshot);
+        Ok(Some(team))
+    }
+
+    /// Task 288: keeps the copy of a team this store just wrote.
+    fn remember(&self, id: &str, team: Team, saved: rows::Saved) {
+        let mut cache = self.cache.borrow_mut();
+        let base = cache.remove(id);
+        if cache.len() >= CACHED_TEAMS {
+            cache.clear();
+        }
+        cache.insert(id.to_owned(), rows::after(base, team, saved));
+    }
+
+    /// Task 288: a team as a list query read its row: assembled from its rows.
+    fn decoded(&self, rows: Vec<(String, i64, f64, Option<i64>, String)>) -> anyhow::Result<Vec<Team>> {
+        rows.into_iter().map(|(id, revision, updated, layout, payload)| rows::decode(&self.db, &id, revision, updated, layout, &payload)).collect()
+    }
+
+    /// The columns a list query reads for `decoded`.
+    fn listed(&self) -> anyhow::Result<&'static str> {
+        Ok(if self.layout()? {
+            "id,revision,updated,layout,payload"
+        } else {
+            "id,revision,updated,NULL,payload"
+        })
     }
 
     /// Startup reads at most two matching records, never the whole roster.
@@ -712,23 +820,24 @@ impl Store {
         if !exists {
             return Ok(None);
         }
-        let mut query = self.db.prepare("SELECT DISTINCT t.payload FROM teams t JOIN
+        let mut query = self.db.prepare("SELECT DISTINCT t.id FROM teams t JOIN
             (SELECT team FROM team_rule_members WHERE name=?1 AND run=?2 AND conversation=?3 AND name<>'' AND host=?5
              UNION SELECT team FROM team_rule_members WHERE launch=?4 AND launch<>'' AND host=?5) m ON t.id=m.team
             WHERE t.status IN ('draft','planning','running','paused') LIMIT 2")?;
-        let rows = query
+        let found = query
             .query_map(params![name, run, conversation, launch, host], |row| {
                 row.get::<_, String>(0)
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(query);
         anyhow::ensure!(
-            rows.len() <= 1,
+            found.len() <= 1,
             "Session belongs to more than one active team"
         );
-        let Some(payload) = rows.first() else {
+        let Some(id) = found.first() else {
             return Ok(None);
         };
-        let team: Team = serde_json::from_str(payload)?;
+        let Some(team) = self.current(id)? else { return Ok(None) };
         let member = team
             .members
             .iter()
@@ -746,41 +855,48 @@ impl Store {
 
     /// Every team, most recently changed first, at most `limit`.
     pub(crate) fn teams(&self, include_archived: bool, limit: i64) -> anyhow::Result<Vec<Team>> {
-        let mut statement = self.db.prepare(
-            "SELECT payload FROM teams WHERE ?1 OR status!='archived' ORDER BY updated DESC LIMIT ?2",
-        )?;
+        let mut statement = self.db.prepare(&format!(
+            "SELECT {} FROM teams WHERE ?1 OR status!='archived' ORDER BY updated DESC LIMIT ?2",
+            self.listed()?
+        ))?;
         // Task 105: the rows are read first and parsed after the statement
         // ends, so the read never holds the store while megabytes of JSON parse.
-        let rows = statement
-            .query_map(params![include_archived, limit], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<String>>>()?;
+        let found = statement
+            .query_map(params![include_archived, limit], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(statement);
-        rows.iter().map(|row| Ok(serde_json::from_str(row)?)).collect()
+        self.decoded(found)
     }
 
     /// Task 128: the teams whose memory the background writer looks at: the
     /// running ones and the ones finished since `since` (their last pass
     /// closes the plan), most recently changed first, at most `limit`.
     pub(crate) fn memory_teams(&self, since: f64, limit: i64) -> anyhow::Result<Vec<Team>> {
-        let mut statement = self.db.prepare(
-            "SELECT payload FROM teams WHERE status IN ('planning','running','paused') OR (status IN ('done','stopped') AND updated >= ?1) ORDER BY updated DESC LIMIT ?2",
-        )?;
-        let rows = statement.query_map(params![since, limit], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
+        let mut statement = self.db.prepare(&format!(
+            "SELECT {} FROM teams WHERE status IN ('planning','running','paused') OR (status IN ('done','stopped') AND updated >= ?1) ORDER BY updated DESC LIMIT ?2",
+            self.listed()?
+        ))?;
+        let found = statement
+            .query_map(params![since, limit], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(statement);
-        rows.iter().map(|row| Ok(serde_json::from_str(row)?)).collect()
+        self.decoded(found)
     }
 
     /// The teams that still run: Planning, Running or Paused, most recently
     /// changed first, at most `limit`. Uses the (status, updated) index, so a
     /// finished team's status never reads every team (C1).
     pub(crate) fn active_teams(&self, limit: i64) -> anyhow::Result<Vec<Team>> {
-        let mut statement = self.db.prepare(
-            "SELECT payload FROM teams WHERE status IN ('planning','running','paused') ORDER BY updated DESC LIMIT ?1",
-        )?;
+        let mut statement = self.db.prepare(&format!(
+            "SELECT {} FROM teams WHERE status IN ('planning','running','paused') ORDER BY updated DESC LIMIT ?1",
+            self.listed()?
+        ))?;
         // Task 105: read first, parse after the statement ends (see teams).
-        let rows = statement.query_map(params![limit], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
+        let found = statement
+            .query_map(params![limit], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(statement);
-        rows.iter().map(|row| Ok(serde_json::from_str(row)?)).collect()
+        self.decoded(found)
     }
 
     /// The sum of the active teams' revisions, without reading their payloads:
@@ -917,11 +1033,14 @@ impl Store {
         team.revision = 1;
         team.created = at;
         team.updated = at;
-        write(&transaction, &team)?;
+        // Task 288: a new team is stored in rows.
+        let saved = rows::save(&transaction, None, &mut team)?;
         append(&transaction, &team.id, at, &events)?;
         let receipt = json!({"status":"created","request_id":request_id,"team":team.id,"revision":team.revision});
         record(&transaction, request_id, input, &receipt, at)?;
         commit(transaction)?;
+        let id = team.id.clone();
+        self.remember(&id, team, saved);
         Ok(receipt)
     }
 
@@ -970,20 +1089,23 @@ impl Store {
         caller: &'static std::panic::Location<'static>,
         change: impl FnOnce(&rusqlite::Transaction, &mut Team, &mut Vec<Event>) -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
+        // Task 288: the team is read before the lock; under it only the rows
+        // written since are read.
+        let mut team = self.current(team_id)?.context("Unknown team")?;
         let transaction = begin(&self.db, caller, team_id)?;
-        let payload: String = transaction
-            .query_row("SELECT payload FROM teams WHERE id=?1", params![team_id], |row| row.get(0))
-            .optional()?
-            .context("Unknown team")?;
-        let mut team: Team = serde_json::from_str(&payload).context("Invalid team record")?;
+        let team_now = self.locked(&transaction, team_id, team.revision)?;
+        if let Some(fresh) = team_now {
+            team = fresh;
+        }
         let mut events = Vec::new();
         let answer = change(&transaction, &mut team, &mut events)?;
         let at = now();
         team.revision += 1;
         team.updated = at;
-        write(&transaction, &team)?;
+        let saved = rows::save(&transaction, self.cache.borrow().get(team_id), &mut team)?;
         append(&transaction, team_id, at, &events)?;
         commit(transaction)?;
+        self.remember(team_id, team, saved);
         Ok(answer)
     }
 
@@ -1017,17 +1139,19 @@ impl Store {
         caller: &'static std::panic::Location<'static>,
         change: impl FnOnce(&mut Team, &mut Vec<Event>) -> anyhow::Result<Value>,
     ) -> anyhow::Result<Value> {
+        // Task 288: the team is read before the lock; under it only the rows
+        // written since are read.
+        let read = self.current(team_id)?;
         let transaction = begin(&self.db, caller, team_id)?;
         if let Some((id, input)) = request {
             if let Some(receipt) = replay(&transaction, id, input)? {
                 return Ok(receipt);
             }
         }
-        let payload: String = transaction
-            .query_row("SELECT payload FROM teams WHERE id=?1", params![team_id], |row| row.get(0))
-            .optional()?
-            .context("Unknown team")?;
-        let mut team: Team = serde_json::from_str(&payload).context("Invalid team record")?;
+        let mut team = read.context("Unknown team")?;
+        if let Some(fresh) = self.locked(&transaction, team_id, team.revision)? {
+            team = fresh;
+        }
         if let Some(expected) = expected_revision {
             ensure!(team.revision == expected, "The team changed; refresh and try again");
         }
@@ -1037,7 +1161,7 @@ impl Store {
         after_change(&mut team, &mut events, at);
         team.revision += 1;
         team.updated = at;
-        write(&transaction, &team)?;
+        let saved = rows::save(&transaction, self.cache.borrow().get(team_id), &mut team)?;
         append(&transaction, team_id, at, &events)?;
         if receipt.is_object() {
             receipt["team"] = json!(team_id);
@@ -1050,11 +1174,33 @@ impl Store {
             record(&transaction, id, input, &receipt, at)?;
         }
         commit(transaction)?;
+        self.remember(team_id, team, saved);
         Ok(receipt)
     }
 }
 
 impl Store {
+    /// Task 288: under the write lock, the team when another writer changed it
+    /// since the copy read before the lock (`revision`): only the rows written
+    /// since are read. None when the copy is current. The measurement's
+    /// "before" (the whole-record layout) reads the whole record here, as
+    /// every change did before task 288.
+    fn locked(&self, transaction: &Connection, team_id: &str, revision: u64) -> anyhow::Result<Option<Team>> {
+        if rows::legacy() {
+            let payload: String = transaction
+                .query_row("SELECT payload FROM teams WHERE id=?1", params![team_id], |row| row.get(0))
+                .optional()?
+                .context("Unknown team")?;
+            return Ok(Some(serde_json::from_str(&payload).context("Invalid team record")?));
+        }
+        let stored: Option<i64> = transaction.query_row("SELECT revision FROM teams WHERE id=?1", params![team_id], |row| row.get(0)).optional()?;
+        let stored = stored.context("Unknown team")?;
+        if stored as u64 == revision {
+            return Ok(None);
+        }
+        Ok(Some(self.current(team_id)?.context("Unknown team")?))
+    }
+
     /// Task 287 (owner, 2026-11-08): `hgs team inbox` marking messages read
     /// rewrote the whole team record. A change of the working tier's rows that
     /// leaves the team record alone: its rows and its events, in one short
@@ -1078,12 +1224,8 @@ impl Store {
     /// or one of the working tier, writes the batch first and goes on after).
     pub(crate) fn begin_batch(&mut self, team_id: &str) -> anyhow::Result<()> {
         self.end_batch()?;
-        let payload: Option<String> =
-            self.db.query_row("SELECT payload FROM teams WHERE id=?1", params![team_id], |row| row.get(0)).optional()?;
-        let Some(payload) = payload else { return Ok(()) };
-        let base: Value = serde_json::from_str(&payload).context("Invalid team record")?;
-        let working: Team = serde_json::from_value(base.clone()).context("Invalid team record")?;
-        self.batch = Some(Batch { team: team_id.to_owned(), base_revision: working.revision, base, working, events: Vec::new(), changed: false });
+        let Some(working) = self.current(team_id)? else { return Ok(()) };
+        self.batch = Some(Batch { team: team_id.to_owned(), base_revision: working.revision, base: working.clone(), working, events: Vec::new(), changed: false });
         Ok(())
     }
 
@@ -1141,48 +1283,52 @@ impl Store {
     /// prepared before the lock; under it only the revision is checked.
     fn flush(&mut self, batch: Batch, caller: &'static std::panic::Location<'static>) -> anyhow::Result<()> {
         let Batch { team: team_id, base_revision, base, mut working, events, .. } = batch;
-        let ours = serde_json::to_value(&working)?;
+        // The values of the merge, made only when another writer interleaved.
+        let mut values: Option<(Value, Value)> = None;
         let mut expected = base_revision;
         for round in 0..4 {
-            working.revision = expected + 1;
-            let payload = serde_json::to_string(&working)?;
-            let members = serde_json::to_string(&working.members)?;
-            let status = serde_json::to_value(working.status)?;
             let transaction = begin(&self.db, caller, &team_id)?;
             let stored: Option<i64> =
                 transaction.query_row("SELECT revision FROM teams WHERE id=?1", params![team_id], |row| row.get(0)).optional()?;
             let Some(stored) = stored else { return Ok(()) };
-            if stored as u64 == expected || round == 3 {
-                let (payload, members, status) = if stored as u64 == expected {
-                    (payload, members, status.as_str().unwrap_or_default().to_owned())
-                } else {
-                    // The last round merges under the lock rather than lose the changes.
-                    let fresh: String = transaction.query_row("SELECT payload FROM teams WHERE id=?1", params![team_id], |row| row.get(0))?;
-                    working = merged(&base, &ours, &serde_json::from_str(&fresh)?)?;
-                    working.revision = stored as u64 + 1;
-                    let status = serde_json::to_value(working.status)?;
-                    (serde_json::to_string(&working)?, serde_json::to_string(&working.members)?, status.as_str().unwrap_or_default().to_owned())
-                };
-                write_raw(&transaction, &team_id, working.revision, &status, working.updated, &payload, &members)?;
-                for (at, events) in &events {
-                    append(&transaction, &team_id, *at, events)?;
+            if stored as u64 != expected {
+                if round < 3 {
+                    // Another writer changed the team: merge over its record, outside the lock.
+                    drop(transaction);
+                    if !self.merge_fresh(&team_id, &base, &mut values, &mut working, &mut expected)? {
+                        return Ok(());
+                    }
+                    continue;
                 }
-                commit(transaction)?;
-                return Ok(());
+                // The last round merges under the lock rather than lose the changes.
+                if !self.merge_fresh(&team_id, &base, &mut values, &mut working, &mut expected)? {
+                    return Ok(());
+                }
             }
-            drop(transaction);
-            // Another writer changed the team: merge over its record, outside the lock.
-            let Some(fresh) = self.raw(&team_id)? else { return Ok(()) };
-            expected = fresh["revision"].as_u64().unwrap_or(stored as u64);
-            working = merged(&base, &ours, &fresh)?;
+            working.revision = expected + 1;
+            // Task 288: only the rows the tick changed, against the copy it started from.
+            let saved = rows::save(&transaction, self.cache.borrow().get(&team_id), &mut working)?;
+            for (at, events) in &events {
+                append(&transaction, &team_id, *at, events)?;
+            }
+            commit(transaction)?;
+            self.remember(&team_id, working, saved);
+            return Ok(());
         }
         Ok(())
     }
 
-    fn raw(&self, team_id: &str) -> anyhow::Result<Option<Value>> {
-        let payload: Option<String> =
-            self.db.query_row("SELECT payload FROM teams WHERE id=?1", params![team_id], |row| row.get(0)).optional()?;
-        payload.map(|text| serde_json::from_str(&text).context("Invalid team record")).transpose()
+    /// The batch's changes (from `base` to `working`) merged over the team
+    /// as stored now; false when the team is gone.
+    fn merge_fresh(&self, team_id: &str, base: &Team, values: &mut Option<(Value, Value)>, working: &mut Team, expected: &mut u64) -> anyhow::Result<bool> {
+        let Some(fresh) = self.current(team_id)? else { return Ok(false) };
+        if values.is_none() {
+            *values = Some((serde_json::to_value(base)?, serde_json::to_value(&*working)?));
+        }
+        let (base_value, ours) = values.as_ref().expect("made");
+        *working = merged(base_value, ours, &serde_json::to_value(&fresh)?)?;
+        *expected = fresh.revision;
+        Ok(true)
     }
 }
 
@@ -1311,30 +1457,7 @@ fn keyed(list: &[Value]) -> Option<Vec<String>> {
     (unique.len() == keys.len()).then_some(keys)
 }
 
-fn write(transaction: &rusqlite::Transaction, team: &Team) -> anyhow::Result<()> {
-    let status = serde_json::to_value(team.status)?;
-    write_raw(
-        transaction,
-        &team.id,
-        team.revision,
-        status.as_str().unwrap_or_default(),
-        team.updated,
-        &serde_json::to_string(team)?,
-        &serde_json::to_string(&team.members)?,
-    )
-}
 
-/// The record with its members (task 287: the projection's trigger reads them
-/// from their own column, and only when they changed).
-fn write_raw(transaction: &rusqlite::Transaction, id: &str, revision: u64, status: &str, updated: f64, payload: &str, members: &str) -> anyhow::Result<()> {
-    transaction.execute(
-        "INSERT INTO teams(id,revision,status,updated,payload,members,members_rev) VALUES(?1,?2,?3,?4,?5,?6,?2)
-         ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,status=excluded.status,updated=excluded.updated,payload=excluded.payload,
-             members=excluded.members,members_rev=excluded.members_rev",
-        params![id, revision as i64, status, updated, payload, members],
-    )?;
-    Ok(())
-}
 
 fn append(transaction: &rusqlite::Transaction, team: &str, at: f64, events: &[Event]) -> anyhow::Result<()> {
     for event in events {
@@ -1904,6 +2027,301 @@ mod tests {
         let store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
         let sql: String = store.db.query_row("SELECT sql FROM sqlite_master WHERE name='team_rules_update'", [], |row| row.get(0)).unwrap();
         assert!(sql.contains("members_rev"), "{sql}");
+    }
+
+    /// Task 288: a team of `tasks` tasks with `attempts` attempts each, about
+    /// a kilobyte an attempt, as a long-running team's record grows.
+    fn big_team(id: &str, tasks: u32, attempts: u32) -> Team {
+        use super::super::model::{Attempt, AttemptState, Task};
+        let mut team = team(id);
+        for task in 1..=tasks {
+            team.tasks.push(Task {
+                id: task,
+                title: format!("Task {task}"),
+                assignee: "dev".into(),
+                attempts: (1..=attempts)
+                    .map(|n| Attempt {
+                        id: format!("{task:08}-0000-4000-8000-{n:012}"),
+                        n,
+                        member: "dev".into(),
+                        state: AttemptState::Reported,
+                        error: format!("attempt {n} of task {task}: ").repeat(30),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            });
+        }
+        team
+    }
+
+    fn row_counts(store: &Store, team: &str) -> (i64, i64) {
+        store
+            .db
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM team_tasks WHERE team=?1),(SELECT COUNT(*) FROM team_attempts WHERE team=?1)",
+                params![team],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    /// Task 288: a large team stored whole (as every store before task 288
+    /// holds it) moves to rows at the next write open, in one transaction; the
+    /// assembled view equals the old JSON; a second open changes nothing; an
+    /// older hgs refuses the migrated head instead of writing it back without
+    /// its tasks.
+    #[test]
+    fn a_large_store_migrates_to_rows_once_and_reads_the_same() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("teams/teams.sqlite3");
+        rows::set_legacy(true);
+        {
+            let mut store = Store::open_at(&path, true).unwrap();
+            store.create(REQUEST, &json!({}), big_team("t1", 400, 3), vec![]).unwrap();
+            store.create("22222222-2222-4222-8222-222222222222", &json!({}), big_team("t2", 20, 1), vec![]).unwrap();
+        }
+        rows::set_legacy(false);
+        let db = Connection::open(&path).unwrap();
+        let (layout, payload): (Option<i64>, String) =
+            db.query_row("SELECT layout,payload FROM teams WHERE id='t1'", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        drop(db);
+        assert!(layout.is_none(), "stored whole, not migrated yet");
+        let old: Team = serde_json::from_str(&payload).unwrap();
+        take_lock_lines();
+        let store = Store::open_at(&path, true).unwrap();
+        assert_eq!(take_lock_lines().len(), 2, "one transaction a team");
+        let loaded = store.load("t1").unwrap().unwrap();
+        assert_eq!(serde_json::to_value(&loaded).unwrap(), serde_json::to_value(&old).unwrap(), "the assembled view equals the old JSON");
+        assert_eq!(row_counts(&store, "t1"), (400, 1200));
+        let head: String = store.db.query_row("SELECT payload FROM teams WHERE id='t1'", [], |row| row.get(0)).unwrap();
+        assert!(head.len() * 50 < payload.len(), "the head keeps the small shared fields: {} of {} bytes", head.len(), payload.len());
+        assert!(serde_json::from_str::<Team>(&head).is_err(), "an older hgs refuses the head");
+        // The list reads assemble the same teams.
+        let listed = store.teams(true, 10).unwrap();
+        assert_eq!(serde_json::to_value(listed.iter().find(|team| team.id == "t1").unwrap()).unwrap(), serde_json::to_value(&old).unwrap());
+        drop(store);
+        // Idempotent: the next open finds nothing to migrate.
+        let again = Store::open_at(&path, true).unwrap();
+        assert!(take_lock_lines().is_empty(), "a second open migrates nothing");
+        assert_eq!(serde_json::to_value(again.load("t1").unwrap().unwrap()).unwrap(), serde_json::to_value(&old).unwrap());
+        // A team whose task ids repeat keeps the whole record.
+        let mut twice = team("t3");
+        twice.tasks = big_team("x", 2, 1).tasks;
+        twice.tasks[1].id = 1;
+        let mut again = again;
+        again.create("33333333-3333-4333-8333-333333333333", &json!({}), twice.clone(), vec![]).unwrap();
+        assert_eq!(row_counts(&again, "t3"), (0, 0));
+        assert_eq!(again.load("t3").unwrap().unwrap().tasks.len(), 2);
+    }
+
+    /// Task 288: a change writes only the rows it touches: one attempt's row
+    /// for an attempt's change, the task's own row for its own fields, the
+    /// head only when a shared field changed; another store brings its copy up
+    /// to date from the rows written since and reads the same team.
+    #[test]
+    fn a_change_writes_only_its_rows_and_another_store_reads_them() {
+        use super::super::model::Task;
+        let (dir, mut store) = store();
+        let path = dir.path().join("teams/teams.sqlite3");
+        store.create(REQUEST, &json!({}), big_team("t1", 200, 3), vec![]).unwrap();
+        let mut other = Store::open_at(&path, true).unwrap();
+        assert_eq!(other.load("t1").unwrap().unwrap().tasks.len(), 200, "the other store keeps a copy");
+        let written = |store: &Store, revision: i64| -> (i64, i64, i64) {
+            store
+                .db
+                .query_row(
+                    "SELECT (SELECT COUNT(*) FROM team_tasks WHERE team='t1' AND rev=?1),(SELECT COUNT(*) FROM team_attempts WHERE team='t1' AND rev=?1),
+                        (SELECT head_rev FROM teams WHERE id='t1')",
+                    params![revision],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap()
+        };
+        store
+            .mutate(None, "t1", None, |team, _| {
+                team.task_mut(7).unwrap().attempts[1].error = "changed".into();
+                Ok(Value::Null)
+            })
+            .unwrap();
+        assert_eq!(written(&store, 2), (0, 1, 1), "one attempt row; no task row; the head as it was");
+        store
+            .mutate(None, "t1", None, |team, _| {
+                team.task_mut(3).unwrap().title = "Renamed task".into();
+                Ok(Value::Null)
+            })
+            .unwrap();
+        assert_eq!(written(&store, 3), (1, 0, 1), "the task's own row only");
+        store
+            .mutate(None, "t1", None, |team, _| {
+                team.goal = "A new goal".into();
+                Ok(Value::Null)
+            })
+            .unwrap();
+        assert_eq!(written(&store, 4).2, 4, "a shared field writes the head");
+        // Removed, added, moved, attempts cut and added.
+        store
+            .mutate(None, "t1", None, |team, _| {
+                team.tasks.retain(|task| task.id != 5);
+                let last = team.tasks.pop().unwrap();
+                team.tasks.insert(0, last);
+                team.tasks.push(Task { id: 999, title: "New".into(), ..Default::default() });
+                team.task_mut(9).unwrap().attempts.truncate(1);
+                let more = team.task_mut(10).unwrap().attempts[0].clone();
+                team.task_mut(10).unwrap().attempts.push(more);
+                Ok(Value::Null)
+            })
+            .unwrap();
+        // The other store's copy follows the rows written since, and equals a fresh read.
+        let followed = other.load("t1").unwrap().unwrap();
+        let fresh = Store::open_at(&path, false).unwrap().load("t1").unwrap().unwrap();
+        assert_eq!(serde_json::to_value(&followed).unwrap(), serde_json::to_value(&fresh).unwrap());
+        assert_eq!(serde_json::to_value(&followed).unwrap(), serde_json::to_value(store.load("t1").unwrap().unwrap()).unwrap());
+        assert_eq!(followed.tasks[0].id, 200);
+        assert!(followed.task(5).is_none() && followed.task(999).is_some());
+        assert_eq!((followed.task(9).unwrap().attempts.len(), followed.task(10).unwrap().attempts.len()), (1, 4));
+        assert_eq!(followed.task(3).unwrap().title, "Renamed task");
+        assert_eq!(followed.goal, "A new goal");
+        // A change through the other store starts from its followed copy.
+        other
+            .mutate(None, "t1", None, |team, _| {
+                team.task_mut(999).unwrap().title = "From the other store".into();
+                Ok(Value::Null)
+            })
+            .unwrap();
+        assert_eq!(store.load("t1").unwrap().unwrap().task(999).unwrap().title, "From the other store");
+        assert_eq!(row_counts(&store, "t1"), (200, 596));
+    }
+
+    /// Task 288: members' calls while the worker ticks a large team never wait
+    /// a second for the write lock: the team is read before the lock and a
+    /// change writes only its rows.
+    #[test]
+    fn member_calls_never_wait_a_second_behind_worker_ticks() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let (dir, mut store) = store();
+        let path = dir.path().join("teams/teams.sqlite3");
+        store.create(REQUEST, &json!({}), big_team("t1", 600, 3), vec![]).unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+        let worker = {
+            let (path, done) = (path.clone(), done.clone());
+            std::thread::spawn(move || {
+                let mut store = Store::open_at(&path, true).unwrap();
+                let mut ticks = 0u32;
+                while !done.load(Ordering::SeqCst) && ticks < 400 {
+                    store.begin_batch("t1").unwrap();
+                    for step in 0..5u32 {
+                        store
+                            .mutate(None, "t1", None, |team, _| {
+                                let task = 1 + (ticks * 5 + step) % 600;
+                                team.task_mut(task).unwrap().attempts[0].error = format!("tick {ticks}");
+                                Ok(Value::Null)
+                            })
+                            .unwrap();
+                    }
+                    store.end_batch().unwrap();
+                    ticks += 1;
+                    // The worker pauses between teams (task 287's TEAM_YIELD)
+                    // and ticks seconds apart; SQLite queues nobody.
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                ticks
+            })
+        };
+        let members: Vec<_> = (0..3u32)
+            .map(|member| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let mut store = Store::open_at(&path, true).unwrap();
+                    for call in 0..12u32 {
+                        let input = json!({"member":member,"call":call});
+                        store
+                            .mutate(Some((&uuid::Uuid::new_v4().to_string(), &input)), "t1", None, |team, _| {
+                                team.task_mut(100 + member * 100 + call).unwrap().title = format!("member {member} call {call}");
+                                Ok(json!({}))
+                            })
+                            .unwrap();
+                    }
+                    take_lock_lines().iter().map(|line| line["waited_ms"].as_u64().unwrap_or(0)).max().unwrap_or(0)
+                })
+            })
+            .collect();
+        let waits: Vec<u64> = members.into_iter().map(|member| member.join().unwrap()).collect();
+        done.store(true, Ordering::SeqCst);
+        let ticks = worker.join().unwrap();
+        assert!(ticks > 0);
+        assert!(waits.iter().all(|wait| *wait < 1000), "the longest waits of the members' calls: {waits:?} ms");
+        let saved = store.load("t1").unwrap().unwrap();
+        assert_eq!(saved.task(100).unwrap().title, "member 0 call 0");
+        assert_eq!(saved.task(311).unwrap().title, "member 2 call 11");
+    }
+
+    /// Task 288's measurement: lock holds on a copy of a live store
+    /// (ZERUS_STORE_COPY, read only), its largest active team, before (the
+    /// whole-record layout of task 287) and after (rows): 20 member changes
+    /// with a request id and 20 worker ticks each way. The live store is never
+    /// written: it is copied with VACUUM INTO.
+    #[test]
+    #[ignore]
+    fn lock_times_on_a_copy_before_and_after_rows() {
+        let Some(source) = std::env::var_os("ZERUS_STORE_COPY") else { return };
+        let live = Connection::open_with_flags(&source, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let (target, bytes): (String, i64) = live
+            .query_row("SELECT id,length(payload) FROM teams WHERE status IN ('running','paused','planning') ORDER BY length(payload) DESC LIMIT 1", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        let stats = |mut values: Vec<u64>| {
+            values.sort_unstable();
+            let at = |q: f64| values[((values.len() - 1) as f64 * q).round() as usize];
+            json!({"median_ms":at(0.5),"p95_ms":at(0.95),"max_ms":values[values.len() - 1]})
+        };
+        let mut measured = serde_json::Map::new();
+        for (name, legacy) in [("before", true), ("after", false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("teams.sqlite3");
+            live.execute("VACUUM INTO ?1", params![path.display().to_string()]).unwrap();
+            rows::set_legacy(legacy);
+            take_lock_lines();
+            let started = Instant::now();
+            let mut store = Store::open_at(&path, true).unwrap();
+            let opened_ms = started.elapsed().as_millis() as u64;
+            let migration: Vec<u64> = take_lock_lines().iter().filter_map(|line| line["held_ms"].as_u64()).collect();
+            for round in 0..20 {
+                let input = json!({"round":round});
+                store
+                    .mutate(Some((&uuid::Uuid::new_v4().to_string(), &input)), &target, None, |team, _| {
+                        if let Some(task) = team.tasks.last_mut() {
+                            task.reopen_note = format!("measured {round}");
+                        }
+                        Ok(json!({}))
+                    })
+                    .unwrap();
+            }
+            let member: Vec<u64> = take_lock_lines().iter().filter_map(|line| line["held_ms"].as_u64()).collect();
+            for round in 0..20 {
+                store.begin_batch(&target).unwrap();
+                store
+                    .mutate(None, &target, None, |team, _| {
+                        team.stop_reason = format!("tick {round}");
+                        if let Some(attempt) = team.tasks.iter_mut().rev().find_map(|task| task.attempts.last_mut()) {
+                            attempt.error = format!("tick {round}");
+                        }
+                        Ok(Value::Null)
+                    })
+                    .unwrap();
+                store.end_batch().unwrap();
+            }
+            let worker: Vec<u64> = take_lock_lines().iter().filter_map(|line| line["held_ms"].as_u64()).collect();
+            rows::set_legacy(false);
+            measured.insert(
+                name.into(),
+                json!({"member_change":stats(member),"worker_tick":stats(worker),"open_ms":opened_ms,
+                    "migration_held_ms":migration.iter().max().copied().unwrap_or(0)}),
+            );
+        }
+        println!("{}", json!({"task":288,"team":target,"record_bytes":bytes,"lock_held":measured}));
     }
 
     #[test]

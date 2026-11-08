@@ -196,3 +196,33 @@ describe("team settings", () => {
     expect(settingsChanges({ intake: "code" }, { intake: null as unknown as string })).toEqual({ intake: null });
   });
 });
+
+describe("reopening a draft (task 200, Qt TeamNewTab::openDraft)", () => {
+  it("shows the draft as its view brings it, sends nothing and saves against its revision", async () => {
+    const port = new Port();
+    const store = createNewTeam(port);
+    store.openNew();
+    store.edit("goal", "unsaved, from another form");
+    store.openDraft(TEAM);
+    expect(store.draftId()).toBe(TEAM);
+    expect(store.fields().goal).toBe("");
+    expect(store.dirty().size).toBe(0);
+    expect(port.calls).toEqual([]);
+    store.applyView(draftView());
+    expect([store.fields().name, store.fields().goal, store.fields().folder, store.revision()]).toEqual(["Orbit", "Ship it", draftView().folder, 3]);
+    store.edit("goal", "Ship it soon");
+    await store.flush();
+    expect(port.calls).toHaveLength(1);
+    expect(port.calls[0]).toMatchObject({ team: TEAM, action: { kind: "draft_update", revision: 3 } });
+  });
+
+  it("keeps the open draft when it is asked again and ignores an empty id", () => {
+    const store = createNewTeam(new Port());
+    store.openDraft(TEAM);
+    store.applyView(draftView());
+    store.edit("name", "Orbit two");
+    store.openDraft(TEAM);
+    store.openDraft("");
+    expect([store.draftId(), store.fields().name, store.dirty().has("name")]).toEqual([TEAM, "Orbit two", true]);
+  });
+});

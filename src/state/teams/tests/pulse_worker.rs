@@ -111,10 +111,34 @@ fn the_queue_is_bounded() {
     assert_eq!(*calls.last().unwrap(), JOBS as u32 + 3, "the newest job is kept");
 }
 
+/// Task 185: the tick queues the turn-end pulse for the worker and never
+/// builds it; the session read is the worker's.
+/// Task 298: the tick reads a lead's or a member's session once more since task
+/// 161 - the wait detection that parks a repeated read-only check loop
+/// (`Step::DetectWait`, throttled by `DETECT_EVERY`). That is not the pulse
+/// build, so the check keeps guarding the pulse path: the tick queues it, it
+/// prunes the pulses, it never calls the builder, and the pulse's own
+/// `inspect --after 0` lives in the worker.
 #[test]
 fn the_tick_queues_the_build_and_never_reads_the_session_itself() {
     let source = include_str!("../dispatcher.rs");
-    assert_eq!(source.matches("pulse_worker::SAMPLER.queue(job)").count(), 1);
+    assert_eq!(source.matches("pulse_worker::SAMPLER.queue(job)").count(), 1, "the tick queues the pulse build");
     assert_eq!(source.matches("store.prune_pulses(").count(), 1, "pulses are pruned on the tick, never at a turn end");
-    assert!(!source.contains("[\"inspect\", &session.name, \"--after\", \"0\"]"), "the tick must not read the session itself");
+    assert!(!source.contains("pulse_worker::build"), "the tick must not build a pulse itself");
+    let worker = include_str!("../pulse_worker.rs");
+    assert!(worker.contains("[\"inspect\", &job.session, \"--after\", \"0\", \"--skip-processes\"]"), "the worker reads the member's session");
+    // The one session read on the tick is the wait detection of task 161, and
+    // only there; the pulse build's read never ran on the tick and still does
+    // not.
+    let lines: Vec<&str> = source.lines().collect();
+    for (index, line) in lines.iter().enumerate() {
+        if !line.contains("[\"inspect\", &session.name, \"--after\", \"0\"]") {
+            continue;
+        }
+        let context = &lines[index..(index + 12).min(lines.len())];
+        assert!(
+            context.iter().any(|line| line.contains("repeated_check")),
+            "the only session read on the tick is task 161's wait detection: {line}"
+        );
+    }
 }

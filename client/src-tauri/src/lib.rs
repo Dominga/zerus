@@ -2051,6 +2051,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         newsession::create_directory,
         newsession::pick_local_folder,
         newsession::local_folder_exists,
+        newsession::local_folder_probe,
         newsession::opencode_models,
         newsession::opencode_favorite,
         newsession::opencode_start,

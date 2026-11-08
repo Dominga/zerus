@@ -138,6 +138,7 @@ private slots:
     void noWorkAheadSwitchOrBadge();
     void thePlanHidesCancelledTasksAndNeverSendsTheCopy();
     void aTaskThatHasNotStartedMovesToAnotherPhase();
+    void aRetryThatContinuesSaysSo();
     void anAutoAcceptedDraftReadsAsDraftUntilItStarts();
     void addedLateTaskIsOutOfScopeEverywhere();
     void spawnedFromHasItsOwnLinkAndLegend();
@@ -2187,6 +2188,34 @@ void TestTeamsUiPlan::aTaskThatHasNotStartedMovesToAnotherPhase()
     // A team without later phases offers none either, as before.
     card.setTask(parse(team()), 5, live, true);
     QVERIFY(moves().isEmpty());
+}
+
+void TestTeamsUiPlan::aRetryThatContinuesSaysSo()
+{
+    auto json = phasedTeam();
+    auto tasks = json["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) {
+        auto task = tasks[i].toObject();
+        if (task["id"].toInt() != 4) continue;
+        task["status"] = "in_progress";
+        task["attempts"] = QJsonArray{QJsonObject{{"n", 2}, {"id", "a42"}, {"member", "backend"}, {"state", "delivered"}, {"sent_at", 1700.0}}};
+        tasks[i] = task;
+    }
+    json["tasks"] = tasks;
+    const auto t = parse(json);
+    TeamTaskCard card;
+    card.resize(420, 700); card.show();
+    card.confirm = [](const QString &, const QString &, const QString &, const QString &) { return true; };
+    card.actThen = [](const QString &op, const QJsonObject &, const TeamTaskCard::Done &done) {
+        if (op == "retry") done(true, QStringLiteral("continue"));
+    };
+    card.setTask(t, 4, live, true);
+    auto *more = card.findChild<QMenu *>("teamTaskMoreMenu");
+    QVERIFY(more);
+    for (auto *action : more->actions()) if (action->text() == QStringLiteral("Retry")) { action->trigger(); break; }
+    auto *notice = card.findChild<QLabel *>("teamTaskNotice");
+    QVERIFY(notice);
+    QCOMPARE(notice->text(), QStringLiteral("Continues attempt 2 - nothing was revoked"));
 }
 
 void TestTeamsUiPlan::anAutoAcceptedDraftReadsAsDraftUntilItStarts()

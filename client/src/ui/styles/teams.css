@@ -220,6 +220,11 @@
   .team-member-queue-row { display: flex; gap: 6px; min-width: 0; padding: 1px 4px; border-radius: 4px; font-size: 11px; text-align: left; color: var(--z-color-text-2); }
   .team-member-queue-row.current { color: var(--z-color-text); font-weight: 600; }
   .team-member-queue-row:hover { background: var(--z-color-hover); }
+  /* Task 315: the answered permissions under the member, as Qt's U17 rows. */
+  .team-member-answers { max-width: 100%; min-width: 0; text-align: left; }
+  .team-member-answer { display: flex; flex-direction: column; min-width: 0; padding: 1px 4px; font-size: 11px; color: var(--z-color-text-2); }
+  .team-member-answer .warn { color: var(--z-color-warn, var(--z-color-text)); }
+  .team-member-answer .accent { color: var(--z-color-accent, var(--z-color-text)); }
   .team-member-permission { display: flex; flex-direction: column; gap: 4px; padding: 5px 8px 6px; border-radius: 7px; cursor: default;
     background: color-mix(in srgb, var(--z-color-warn) 10%, transparent); border: 1px solid color-mix(in srgb, var(--z-color-warn) 40%, transparent); }
   .team-member-permission .field { min-width: 0; height: 24px; font-size: 11px; }

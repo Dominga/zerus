@@ -100,6 +100,7 @@ pub mod task_start;
 pub mod task_view;
 pub mod tasks;
 pub mod tasks_write;
+pub mod team_mutes;
 pub mod team_notices;
 pub mod teams;
 pub mod terminal;

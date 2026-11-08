@@ -2500,5 +2500,9 @@
   "Switch the working mode?": "Переключить режим работы?",
   "Propose switching this team to %1? Its settings follow the project's proposal.": "Предложить переключить команду на %1? Её настройки последуют предложению проекта.",
   "Switch to %1": "Переключить на %1",
-  "the proposed working mode": "предложенный режим работы"
+  "the proposed working mode": "предложенный режим работы",
+  "%1 s ago": "%1 с назад",
+  "Permissions: %1 allowed, %2 denied, last: %3, %4": "Разрешения: разрешено %1, запрещено %2, последнее: %3, %4",
+  "%1 answers, click to expand them": "Ответов: %1, нажмите, чтобы раскрыть",
+  "%1 answers, click to fold them": "Ответов: %1, нажмите, чтобы свернуть"
 }

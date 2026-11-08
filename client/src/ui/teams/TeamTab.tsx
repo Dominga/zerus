@@ -488,8 +488,9 @@ function openRow(row: Session | undefined) {
 }
 
 /**
- * Task 199 (Qt TeamWorkspace.cpp 3617-3700): Needs your attention, Needs your
- * answer and Plan problems; each row opens what it names.
+ * Task 199 (Qt TeamWorkspace.cpp 3617-3700): Plan problems; each row opens
+ * what it names. Task 345 removed Needs your attention and Needs your answer:
+ * each member's card carries its request.
  */
 function SideLists(props: { team: TeamView; onGo: (target: SideTarget) => void }) {
   const lists = createMemo(() => sideLists(props.team));

@@ -88,6 +88,42 @@ impl Plan {
         };
         plan.valid().then_some(plan)
     }
+    /// Correlation DATA for the owning computer's direct metadata command,
+    /// including remote and Windows paths. This returns only a hash; it does
+    /// not construct a local service plan or relax `valid`/`Intent::verify`.
+    pub fn receipt_fingerprint(id: &str, value: &Value) -> Option<String> {
+        if !creation::valid_operation(id, value) {
+            return None;
+        }
+        let text = |key| value[key].as_str().map(str::to_owned);
+        let plan = Self {
+            worktree_request_id: text("worktree_id")?,
+            expected_machine: text("expected_machine")?,
+            path: text("worktree_source").or_else(|| text("target"))?,
+            common_dir: text("worktree_common")?,
+            branch: text("branch")?,
+            destination: text("destination")?,
+        };
+        let absolute = |path: &String| {
+            path.len() <= PATH_BYTES
+                && !path.chars().any(char::is_control)
+                && paths::absolute(
+                    path,
+                    if paths::windows_shaped(path) {
+                        Style::Windows
+                    } else {
+                        Style::Posix
+                    },
+                )
+        };
+        (uuid(&plan.worktree_request_id)
+            && uuid(&plan.expected_machine)
+            && branch(&plan.branch)
+            && [&plan.path, &plan.common_dir, &plan.destination]
+                .iter()
+                .all(|p| absolute(p)))
+        .then(|| hash(&serde_json::to_vec(&plan.arguments()).expect("fixed receipt arguments")))
+    }
     pub fn valid(&self) -> bool {
         uuid(&self.worktree_request_id)
             && uuid(&self.expected_machine)
@@ -654,10 +690,23 @@ impl ControlReply {
 }
 /// A future-start fence is deliberately NOT a failed/no-effects receipt. It
 /// cannot settle historical uncertainty, reconstruct consent or release custody.
+pub fn fenced_operation(id: &str, operation: &Value, value: &Value) -> bool {
+    Plan::receipt_fingerprint(id, operation).is_some_and(|fingerprint| {
+        fence_fields(
+            value,
+            operation["worktree_id"].as_str().unwrap_or(""),
+            &fingerprint,
+        )
+    })
+}
 pub fn fenced(value: &Value, plan: &Plan) -> bool {
+    plan.request_fingerprint()
+        .is_some_and(|fingerprint| fence_fields(value, &plan.worktree_request_id, &fingerprint))
+}
+fn fence_fields(value: &Value, id: &str, fingerprint: &str) -> bool {
     value["schema"] == 1
-        && value["request_id"] == plan.worktree_request_id
-        && value["fingerprint"].as_str() == plan.request_fingerprint().as_deref()
+        && value["request_id"] == id
+        && value["fingerprint"].as_str() == Some(fingerprint)
         && value["status"] == "fenced"
         && value["future_starts_fenced"] == true
         && value["past_outcome"] == "unknown"
@@ -1108,6 +1157,54 @@ mod tests {
         let mut intent = checkpoint();
         intent.original = " ".repeat(SOURCE_BYTES + 1);
         assert!(intent.verify().is_err());
+    }
+
+    #[test]
+    fn direct_receipt_hashes_preserve_remote_and_windows_identity_without_service_admission() {
+        let intent = checkpoint();
+        for (host, source, common, destination) in [
+            ("peer", "/srv/repo", "/srv/repo/.git", "/srv/new"),
+            (
+                "peer",
+                r"C:\fixture\repo",
+                r"C:\fixture\repo\.git",
+                r"C:\fixture\new",
+            ),
+        ] {
+            let mut operation: Value = serde_json::from_str(&intent.original).unwrap();
+            operation["host"] = json!(host);
+            operation["target"] = json!(source);
+            operation["worktree_common"] = json!(common);
+            operation["destination"] = json!(destination);
+            assert!(Plan::from_operation(&intent.creation_id, &operation).is_none());
+            let invocation = worktrees::create_invocation(
+                &ComputerId::from(host),
+                source,
+                common,
+                operation["branch"].as_str().unwrap(),
+                BASE,
+                destination,
+                &intent.worktree_request_id,
+                true,
+                MACHINE,
+            );
+            let after = invocation.args.iter().position(|s| s == "create").unwrap() + 1;
+            let original: Vec<_> = invocation.args[after..]
+                .iter()
+                .filter(|s| *s != "--receipt")
+                .cloned()
+                .collect();
+            let fingerprint = hash(&serde_json::to_vec(&original).unwrap());
+            assert_eq!(
+                Plan::receipt_fingerprint(&intent.creation_id, &operation),
+                Some(fingerprint.clone())
+            );
+            let value = json!({"schema":1,"request_id":intent.worktree_request_id,"fingerprint":fingerprint,"status":"fenced","future_starts_fenced":true,"past_outcome":"unknown"});
+            assert!(fenced_operation(&intent.creation_id, &operation, &value));
+            let mut changed = operation.clone();
+            changed["branch"] = json!("another");
+            assert!(!fenced_operation(&intent.creation_id, &changed, &value));
+        }
     }
 
     #[test]

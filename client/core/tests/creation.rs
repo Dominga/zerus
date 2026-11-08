@@ -492,8 +492,8 @@ fn an_exact_admission_refusal_shows_failed_but_preserves_the_unsettled_original_
         .contains("admission refused"));
     assert!(!can_resume(&driver.op(&id)));
     assert!(
-        !driver.creations.can_edit(&id),
-        "explicit Stop must fence this retained UUID before Recreate"
+        driver.creations.can_edit(&id),
+        "only a separate reviewed creation, never an original resume"
     );
     assert!(driver.creations.resume(&id).is_empty());
 }

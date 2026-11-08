@@ -47,8 +47,8 @@ it("keeps an uncertain original check-only, without edit, Continue or automatic 
 });
 
 
-it("lets an explicit Stop retry its metadata fence while the old result is unknown", async () => {
-  state.write({ ...failed(), state: "unknown", launch_dispatched: false, stop_requested: true, worktree_pending: true, can_edit: false });
+it.each(["unknown", "recover"])("lets an explicit Stop retry its metadata fence from %s", async (phase) => {
+  state.write({ ...failed(), state: phase, launch_dispatched: false, stop_requested: true, worktree_pending: true, can_edit: false });
   const host = mount(); await flush();
   const stop = [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Stop creating")!;
   expect(stop.disabled).toBe(false); stop.click();

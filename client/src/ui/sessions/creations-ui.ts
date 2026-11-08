@@ -109,7 +109,7 @@ export function panelButtons(c: CreationCard): PanelButtons {
     resume: c.can_resume,
     check: s === "unknown" || s === "recover" || s === "confirming",
     stop: !c.launch_dispatched && s !== "stopped" && (s !== "failed" || c.worktree_pending === true) && s !== "storage_error",
-    stopEnabled: !c.stop_requested || s === "unknown",
+    stopEnabled: !c.stop_requested || s === "unknown" || s === "recover",
     stopText: s === "cloning" || (s === "worktree" && !c.worktree_receipts) ? BUTTON.stopAfter : BUTTON.stop,
     edit: c.can_edit,
   };

@@ -238,6 +238,15 @@ fn published(before: &Before, hash: &str) -> Value {
     record
 }
 
+fn preflight_record_bounds(before: &Before, hash: &str) -> Result<()> {
+    for form in [marked as fn(&Before, &str) -> Value, protected, published] {
+        if encoded(&form(before, hash))?.len() > ID_RECORD_BYTES as usize {
+            return Err("The promoted session record exceeds its existing storage bound".into());
+        }
+    }
+    Ok(())
+}
+
 impl<'a> Held<'a> {
     fn acquire(writer: &'a Guard, sid: &str, until: Instant, fresh: bool) -> Result<Self> {
         deadline(until)?;
@@ -523,10 +532,13 @@ pub(in crate::state) fn begin(writer: &Guard, original: &Value, until: Instant) 
     if bytes.len() > JOURNAL_BYTES {
         return Err("The original transition journal exceeds its bound".into());
     }
+    let hash = digest(&bytes);
+    // All forms must remain readable at the unchanged cap BEFORE the first
+    // original-record rewrite; a maximum-sized before-image is insufficient.
+    preflight_record_bounds(&before, &hash)?;
     held.write_new(&held.transaction, "before.json", &bytes)?;
     // A retained marker on the original record fences this target even if a
     // later journal read is unavailable. It is negative data, not permission.
-    let hash = digest(&bytes);
     let mut current = marked(&before, &hash);
     held.verify()?;
     cut_write()?;
@@ -551,6 +563,7 @@ pub(in crate::state) fn recover(writer: &Guard, sid: &str, until: Instant) -> Re
         return Err("The original transition SID changed".into());
     }
     let hash = digest(&bytes);
+    preflight_record_bounds(&before, &hash)?;
     let expected = published(&before, &hash);
     let proof = Complete {
         version: 1,

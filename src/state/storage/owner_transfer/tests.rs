@@ -31,7 +31,12 @@ fn control(case: &str) {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command.spawn().unwrap();
-    let until = Instant::now() + Duration::from_secs(20);
+    let until = Instant::now()
+        + Duration::from_secs(if case == "review-record-headroom" {
+            60
+        } else {
+            20
+        });
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;
@@ -70,6 +75,14 @@ fn exact_original_record_jobs_settings_and_input_domain_move_together() {
 #[test]
 fn the_existing_stopped_runtime_with_a_null_ping_counter_is_carried_unchanged() {
     control("stopped-runtime");
+}
+#[test]
+fn every_derived_record_is_bounded_before_the_original_is_rewritten() {
+    control("review-record-bound");
+}
+#[test]
+fn a_record_near_the_bound_with_headroom_keeps_every_original_field() {
+    control("review-record-headroom");
 }
 #[test]
 fn a_busy_original_input_or_worker_refuses_before_the_pending_marker() {
@@ -188,8 +201,8 @@ impl Fixture {
         let mut stripped = after.clone();
         stripped.as_object_mut().unwrap().remove("layout");
         stripped.as_object_mut().unwrap().remove(MARKER);
-        assert_eq!(
-            stripped, self.original,
+        assert!(
+            stripped == self.original,
             "original history/parent/native identity must not change"
         );
         assert!(is_id_layout_record(after, &self.sid));
@@ -236,6 +249,50 @@ fn fixture() {
     let writer = lock(None).unwrap();
     let until = Instant::now() + Duration::from_secs(15);
     let legacy = legacy_record_path(string(&data.original, "name"));
+    if ["review-record-bound", "review-record-headroom"].contains(&case.as_str()) {
+        // Original independent zerus-xrm5q counter, retained at the exact
+        // existing cap; no fixture cap increase or weaker assertion.
+        data.original["future_record_data"] = json!("");
+        let size = ID_RECORD_BYTES as usize
+            - if case == "review-record-headroom" {
+                1024
+            } else {
+                0
+            };
+        let padding = size - encoded(&data.original).unwrap().len();
+        data.original["future_record_data"] = json!("x".repeat(padding));
+        assert_eq!(encoded(&data.original).unwrap().len(), size);
+        valid_record(&data.original).unwrap();
+        atomic(&legacy, &data.original.to_string()).unwrap();
+        let until = Instant::now() + Duration::from_secs(120);
+        let result = begin(&writer, &data.original, until);
+        if case == "review-record-headroom" {
+            let after =
+                result.expect("sufficient headroom must not reject an otherwise valid original");
+            data.check(&after);
+            assert!(
+                fs::metadata(id_record_path(&data.sid).unwrap())
+                    .unwrap()
+                    .len()
+                    <= ID_RECORD_BYTES
+            );
+            return;
+        }
+        let current = fs::read(&legacy).unwrap();
+        assert!(result.is_err());
+        assert_eq!(
+            current.len(),
+            ID_RECORD_BYTES as usize,
+            "refusal must keep the accepted original readable at its cap"
+        );
+        assert!(
+            value(&current).unwrap() == data.original,
+            "refusal must not rewrite the original"
+        );
+        assert!(recover(&writer, &data.sid, until).is_err());
+        assert_eq!(fs::read(&legacy).unwrap(), current);
+        return;
+    }
     if case == "stopped-runtime" {
         // This is the actual off_runtime shape before any ping, not repaired
         // or defaulted into a new automatic delivery.

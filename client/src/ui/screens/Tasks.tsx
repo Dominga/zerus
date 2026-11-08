@@ -10,7 +10,7 @@ import { selectedTask, openTask, requestTaskRename } from "../../store/taskNavig
 import { tasks } from "../../store/tasks";
 import { flag, setSetting } from "../../store/settings";
 import { now, selected, setMenu } from "../../store/ui";
-import { RECENT_DONE, STAGES, STAGE_ICON, STAGE_LABEL, stageLabel, TASK_PAGE, assignmentLabel, boardRows, belongsTo, executorRef, sessionIdentity, taskPageOffset, type Stage, type Task } from "./tasks-ui";
+import { RECENT_DONE, STAGES, STAGE_ICON, STAGE_LABEL, stageLabel, TASK_PAGE, assignmentLabel, boardRows, boardTask, belongsTo, executorRef, sessionIdentity, taskPageOffset, type Stage, type Task } from "./tasks-ui";
 import { openTaskAssignment, assigningTask, canAssign, draggedTask, setDraggedTask, taskDragStart, readTaskDrag, TASK_MIME, assign, taskAssignmentAt } from "../../store/taskAssignment";
 import { POINTER_DRAG, pointerDrag } from "../lib/pointerDrag";
 import { ACTION_ICON, ACTION_LABEL, actionLabel, actOnTask, boardActions, canDrag, primaryAction, reorderGap, stageDropAction, writingTask } from "../../store/taskBoard";
@@ -37,6 +37,8 @@ export function TasksPanel() {
     const scope = s && id ? { host: s.computer, sessionId: id } : undefined, stages = stagesOf(stage());
     untrack(() => tasks.session.show(owner, scope, stages));
   });
+  // A closed panel reads no more pages of the view.
+  onCleanup(() => tasks.session.suspend());
   const view = tasks.session;
   const stageRows = (filter: Filter, old = false) => {
     const own = sessionTaskRows();
@@ -66,15 +68,16 @@ export function TasksPanel() {
   createEffect(() => { if (at() >= visible().length) setAt(Math.max(0, Math.floor((visible().length - 1) / TASK_PAGE) * TASK_PAGE)); });
   let revealed = "";
   createEffect(() => {
-    const id = selectedTask(), task = id && id.project === project()?.id ? rows().find((t) => t.uuid === id.uuid) : undefined;
+    const id = selectedTask(), task = id && id.project === project()?.id ? boardTask(rows(), sessionTaskRows(), id.uuid) : undefined;
     const key = id ? `${id.project}\n${id.uuid}` : "";
     if (!task || key === revealed) return;
     revealed = key;
     if (!(stage() === "current" && ["review", "active"].includes(task.stage))) setStage(task.stage as Stage);
-    if (only() && !belongsTo(task, only()!)) void setSetting("tasks/onlySession", false);
+    const own = sessionTaskRows();
+    if (only() && !(own ? boardTask([], own, task.uuid) : belongsTo(task, only()!))) void setSetting("tasks/onlySession", false);
     if (task.stage === "done" && stageRows("done", true).some((t) => t.uuid === task.uuid)) setOlder(true);
   });
-  const drag = () => draggedTask()?.project === project()?.id ? rows().find((t) => t.uuid === draggedTask()?.uuid) : undefined;
+  const drag = () => draggedTask()?.project === project()?.id ? boardTask(rows(), sessionTaskRows(), draggedTask()?.uuid) : undefined;
   const [dropTile, setDropTile] = createSignal<Filter>();
   let scroller!: HTMLDivElement, cards!: HTMLDivElement, timer: number | undefined, step = 0;
   const [lineAt, setLineAt] = createSignal<number>();

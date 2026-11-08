@@ -10,10 +10,11 @@ To start a team:
   {"request_id":"U","name":"Checkout","goal":"...","folder":"DIR"} | hgs team create --json
 
 Plan a goal. Tasks one member can finish in a sitting, each with a title, checkable
-criteria, an assignee or "role", deps on tasks accepted first and "estimate_minutes"
-(required). Tasks writing the same "output" paths never run apart: chain them; name
-files or a module (a folder is advisory). A follow-up for a miss carries "origin":ID and
-no dep. A member without the rights or tool a task needs is refused, naming who can.
+criteria, an assignee or "role", deps on tasks accepted first and "estimate_minutes".
+Every task gets an estimate. Tasks writing the same "output" paths never run apart:
+chain them; name files or a module (a folder is advisory). A follow-up for a miss
+carries "origin":ID and no dep. A member without the rights or tool a task needs is
+refused, naming who can.
   {"request_id":"U","team":"ID","phases":[{"n":1,"title":"Cart"}],
    "members":[{"id":"api","role":"Backend","agent":"codex"}],
    "tasks":[{"id":1,"title":"Add /cart","criteria":["tests pass"],"assignee":"api",
@@ -24,12 +25,11 @@ Run phases alongside. An approved phase runs alongside earlier ones; a task star
 when its deps are accepted, its barrier passes, no card holds it and the files an
 open task writes are free. Add a stream:
   {"request_id":"U","team":"ID","phase_title":"Docs","tasks":[...]} | hgs team extend --json
-A new phase is a draft. Auto drafts approve a clean one. Review drafts need the
+A new phase is a draft. Auto drafts (U61) approve a clean one. Review drafts need the
 owner, and no draft runs before approval. "barrier":true waits for earlier phases.
 pause-phase {phase, reason} holds one. Accepted phase not started: return-to-draft
 re-approves it. A phase needing the owner's acceptance holds later ones until
-accept-phase. A phase is standard or free (the owner closes a free one).
-Zerus names starved members hourly.
+accept-phase (a card). A phase is standard or free (the owner closes a free one).
 
 Spawn from a task or review: {"team":"ID","origin":12,"severity":"crit","tasks":[...]}
 | hgs team spawn --json. A Crit joins its origin's running phase at once,

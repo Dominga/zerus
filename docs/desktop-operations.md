@@ -556,8 +556,25 @@ are read again from the held root before the consent veto and the runner's
 deadline, bounded by the operation's own. A restart never resumes a wait or
 starts the send. Linux advertises `desktop-deferred-session-resume-v1`; macOS
 refuses every original before any row (`session_resume_native_image_unavailable`)
-and Windows refuses it too (`session_resume_unsupported`). No client offers it
-yet; the composer's routing follows separately.
+and Windows refuses it too (`session_resume_unsupported`).
+
+The composer offers it only from a "Resume and send" of a stopped local Claude
+or Kimi session, while the desktop service route is set (Linux and macOS in
+desktop-service mode). Only then does the waiting save reserve a version 3
+checkpoint; a fresh start, a resume with compaction, another computer's
+session, a subagent and a Codex session keep version 1 and the direct
+`hgs resume` path. When the start call would run, the whole resume-then-send
+goes to the service if a live service advertises the kind and the original
+verifies; otherwise the direct path starts it, decided before any offer. From
+the hand-over the draft is the delivery the service holds, like a handed
+"Compact and continue": its row shows the message sending, the status shows
+the service's line, and Cancel send stays shown but locked. Once offered,
+nothing falls back: a lost reply goes to the read-only lookup, and Unknown is
+never sent again. A recorded send clears the draft. A send that never started
+keeps the draft and releases its identity: after a refused resume with "The
+session was not resumed", after a resume whose agent never became ready with
+the direct path's own "The agent did not become ready" line. A send that may
+have started stays uncertain until Allow retry. A reload only looks it up.
 
 A draft holds one such identity until it is resolved. A definite outcome
 resolves it, as does a cancellation before its call was dispatched or, for a

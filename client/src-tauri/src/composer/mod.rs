@@ -32,7 +32,7 @@ pub mod queue;
 pub mod saved;
 pub mod send;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub use handed::{CompactRoute, DeferredRoute};
+pub use handed::{CompactRoute, DeferredRoute, ResumeRoute};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use questions::AnswerRoute;
 #[cfg(feature = "media")]
@@ -681,6 +681,9 @@ pub(crate) struct Shared {
     /// The selected service's compact-to-send route: Linux and macOS in
     /// desktop-service mode only.
     pub(crate) compact: Mutex<Option<Arc<handed::CompactRoute>>>,
+    /// The selected service's session resume route: Linux and macOS in
+    /// desktop-service mode only.
+    pub(crate) resume: Mutex<Option<Arc<handed::ResumeRoute>>>,
     /// Its deferred answer route, if any.
     pub(crate) answer_route: Mutex<Option<Arc<questions::AnswerRoute>>>,
     /// The ticker sleeps (tests wait for it).
@@ -738,6 +741,7 @@ impl Composers {
             opened: Condvar::new(),
             deferred: Mutex::new(None),
             compact: Mutex::new(None),
+            resume: Mutex::new(None),
             answer_route: Mutex::new(None),
             #[cfg(test)]
             parked: Default::default(),
@@ -1725,10 +1729,7 @@ impl Composers {
             || (status == session.session_status && session.session_status_error);
         // Qt's `locked` includes the session status's lock (1149).
         let locked = composer.busy() || !composer.loaded || session.session_blocks_input;
-        let compact_handed = composer
-            .handed
-            .as_ref()
-            .is_some_and(handed::Handed::compacts);
+        let continuation_handed = composer.handed.as_ref().is_some_and(handed::Handed::locked);
         Some(ComposerView {
             handle: composer.handle,
             key: composer.key.clone(),
@@ -1805,15 +1806,15 @@ impl Composers {
             local: hub.local.rows(&composer.key).to_vec(),
             cancel_send: hub.compacts.contains_key(key)
                 || hub.start.as_ref().is_some_and(|(p, _)| p.key == key)
-                || compact_handed,
-            cancel_locked: compact_handed,
+                || continuation_handed,
+            cancel_locked: continuation_handed,
             compacting: hub.compacts.contains_key(key),
             // Only while the composer shows nothing of it: a held message
             // that comes back (unconfirmed, failed, reloaded) is the draft.
             held: composer
                 .handed
                 .as_ref()
-                .filter(|handed| composer.sending && handed.compacts())
+                .filter(|handed| composer.sending && handed.locked())
                 .map(|handed| HeldView {
                     request_id: handed.plan.row().to_owned(),
                     text: composer.draft.text.clone(),

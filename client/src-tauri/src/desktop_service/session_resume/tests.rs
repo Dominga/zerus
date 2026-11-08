@@ -121,8 +121,11 @@ fn the_composers_exact_stdins_verify_and_the_plan_is_found_again_after_a_reload(
     // Another draft under the same checkpoint is never this original's plan.
     let (_, other) = stdins(SESSION, &checkpoint, "hello!", &[]).unwrap();
     assert_eq!(plan(SESSION, &checkpoint, &resume, &other), None);
-    // Codex, DeepSeek and OpenCode sessions are never this kind's.
-    for session in ["codex/example", "dsh/example", "opencode/example"] {
+    // A Codex session is this kind's, observed (zerus-5wmh.66.4.10);
+    // DeepSeek and OpenCode sessions never are.
+    let codex = plan("codex/example", &checkpoint, &resume, &send).expect("a Codex plan");
+    assert!(codex.observed() && !verified.plan.observed());
+    for session in ["dsh/example", "opencode/example"] {
         assert_eq!(
             plan(session, &checkpoint, &resume, &send),
             None,

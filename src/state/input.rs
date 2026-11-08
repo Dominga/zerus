@@ -273,7 +273,8 @@ pub(super) fn attention_message_summary(record: &Value, output: &mut Value, live
 /// condition only: `hgs send` checks every gate again under its input lock,
 /// the panels shown only on the terminal included. A Codex resume pending its
 /// first message shows its readiness only on its terminal, so it is never
-/// ready here (zerus-5wmh.66.4.10).
+/// ready here: the service asks `hgs send <session> --observe --json` for it
+/// (zerus-5wmh.66.4.10).
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Readiness {
@@ -870,6 +871,74 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
+/// The observation's stdin: one exact run and conversation of the session
+/// (zerus-5wmh.66.4.10).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ObserveRequest {
+    expected_run_id: String,
+    #[serde(default)]
+    expected_conversation_id: String,
+}
+/// The observation's largest stdin.
+const MAX_OBSERVE_INPUT: u64 = 8 << 10;
+/// The longest refusal an observation reply carries, in characters.
+const MAX_OBSERVE_REASON: usize = 1024;
+
+/// `hgs send <session> --observe --json`: whether `hgs send` would take a
+/// message for this exact run and conversation now, by its own gates (the
+/// record, the exact live process, a pending resume's own verification and
+/// the empty native composer), read without any effect. It takes no input
+/// lock, types nothing (pending settings included), and writes no receipt,
+/// attachment, diagnostic capture, record, attention or read mark. A
+/// continuation condition only (zerus-5wmh.66.4.10): `hgs send` checks every
+/// gate again under its input lock before its first byte. Only a Codex
+/// session, whose readiness only its terminal shows, is observed; the CLI's
+/// first disposition (`cli::observe_gate`) is the only caller.
+pub(super) fn observe_dispatch(name: &str) -> Result<i32> {
+    if !zerus_client_core::desktop::session_resume::observed(name) || name.contains('@') {
+        return Err("hgs send --observe reads a local Codex session only".into());
+    }
+    let mut input = Vec::new();
+    io::stdin()
+        .take(MAX_OBSERVE_INPUT + 1)
+        .read_to_end(&mut input)
+        .map_err(|e| e.to_string())?;
+    if input.len() as u64 > MAX_OBSERVE_INPUT {
+        return Err("observation payload exceeds 8 KiB".into());
+    }
+    let request: ObserveRequest =
+        serde_json::from_slice(&input).map_err(|e| format!("invalid observation payload: {e}"))?;
+    if request.expected_run_id.is_empty()
+        || request.expected_run_id.len() > 128
+        || request.expected_conversation_id.len() > 128
+    {
+        return Err("expected_run_id is required; refresh the session first".into());
+    }
+    // Among sessions that share the label, the request's own identities
+    // select, as for a send, but read only: no index repair.
+    let (ready, reason) =
+        match super::resolve_label_unrepaired(name).and_then(|()| observe(name, &request)) {
+            Ok(()) => (true, String::new()),
+            Err(error) => (false, error.chars().take(MAX_OBSERVE_REASON).collect()),
+        };
+    println!("{}", json!({"ready": ready, "reason": reason}));
+    Ok(0)
+}
+
+/// The send's own gates before its lock, read only: the record and its
+/// process ([`checked_input`], which verifies a pending resume), then the
+/// empty composer without the send's diagnostic capture.
+fn observe(name: &str, request: &ObserveRequest) -> Result<()> {
+    let record = checked_input(
+        name,
+        &request.expected_run_id,
+        &request.expected_conversation_id,
+        true,
+    )?;
+    checked_terminal(&record, true)
+}
+
 /// Plain text for the session's current run and conversation (task prompts).
 pub(super) fn submit_task(session: &zerus_replica::SessionKey, text: &str, attachments: &[Value]) -> Result<Value> {
     let name = session.session.as_str();
@@ -1385,6 +1454,24 @@ fn paste_shown(screen: &str, pasted: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// zerus-5wmh.66.4.10.1: a send carrying --observe that reaches the state
+    /// dispatch by any route but the CLI's first gate (`cli::observe_gate`)
+    /// refuses there, before the OpenCode and DeepSeek routing whose own
+    /// sends would ignore the flag.
+    #[test]
+    fn a_send_with_observe_refuses_before_provider_routing() {
+        for args in [
+            ["send", "dsh/example/session", "--observe", "--json"],
+            ["send", "opencode/example/session", "--observe", "--json"],
+            ["send", "codex/example/session", "--observe", "--json"],
+            ["send", "codex/example/session", "--json", "--observe"],
+        ] {
+            let args: Vec<String> = args.map(str::to_owned).into();
+            let refusal = crate::state::dispatch(&args).unwrap_err();
+            assert!(refusal.contains("is taken only as"), "{args:?}: {refusal}");
+        }
+    }
 
     /// zerus-5wmh.66.4.9: a resumed session's record alone, never its
     /// terminal, decides whether a deferred send may start; only a confirmed,

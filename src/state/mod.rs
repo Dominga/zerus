@@ -35,9 +35,11 @@ mod goals;
 mod hooks;
 pub(crate) mod hook_health;
 mod input;
-pub(crate) use input::{
-    resumed_readiness, Lookup as ReceiptLookup, Readiness as ResumedReadiness, Submission,
-};
+pub(crate) use input::{Lookup as ReceiptLookup, Submission};
+// The session resume actor's readiness rule (zerus-5wmh.66.4.9), on its
+// platforms only.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use input::{resumed_readiness, Readiness as ResumedReadiness};
 mod input_queue;
 mod journal;
 mod keep_warm;
@@ -102,12 +104,13 @@ mod terminate;
 mod terminating;
 mod untracked_shell;
 mod session_action;
-pub(crate) use session_action::{
-    observe_held as observe_held_lifecycle_receipt, observe_original as observe_lifecycle_receipt,
-    status_machine as lifecycle_receipt_machine,
-};
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 pub(crate) use session_action::fixture_receipt as lifecycle_fixture_receipt;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use session_action::observe_held as observe_held_lifecycle_receipt;
+pub(crate) use session_action::{
+    observe_original as observe_lifecycle_receipt, status_machine as lifecycle_receipt_machine,
+};
 mod shown_path;
 mod startup_choice;
 mod terminal;

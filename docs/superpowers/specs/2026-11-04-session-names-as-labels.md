@@ -337,14 +337,42 @@ P3e's controls for the lock:
 - the exact release by the owned last holder;
 - v0.47.0's maintenance, run literally, refusing the locked checkout.
 
+The P3e publication foundation is dormant: no production creator calls it and
+it does not open the duplicate-label writer gate. Its create-only publisher
+requires the caller's writer/input exclusion and a preallocated canonical ID;
+an existing identity is never recreated or overwritten. A bounded, verified
+label-index superset and the original owned checkout's Git veto precede the
+canonical ID record. An interrupted publication keeps its veto for review.
+
+The protection-receipt directory is held without following aliases, and its
+native object is part of the receipt. Reads and atomic writes use that held
+directory. Losing the receipt cannot downgrade an ID-layout record to the legacy
+text-only release rule. Before a shared transfer to a legacy holder, the exact
+census-bound record receives a durable negative `worktree_protection` marker;
+its provider exclusion is try-only, and resume/fresh rebuilds carry the marker.
+Missing or inconsistent proof keeps the lock for review. The marker grants no
+publication, removal or signal authority.
+
+A private receipt binds that veto to the ownership nonce and the native state,
+checkout, common-directory, metadata and lock objects. A missing Ready lock
+means an unlock or interruption, never permission to relock. Shared retirement
+transfers the fixed-length reason through the same original file descriptor,
+under the writer and nonblocking repository exclusion, without an unlocked gap.
+Unknown holder identities keep the veto. Last-holder release checks the original
+file again after taking it; the existing recovery puts an unfinished take back.
+An explicit person's unlock is respected, and only a confirmed Zerus release
+permits a later new publication. None of this is removal or signal consent.
+
 Initial terminal creation and fork allocate one session UUID and run UUID before
 the native fork/terminal spawn. A separate internal declaration binds the public
 `HGS_SESSION_ID`/`HGS_RUN_ID` handoff; the current helper consumes it before native
 help, refuses a mismatched final record, and never adopts a caller's inherited
 public session ID as a child's allocation. Resume keeps its saved ID and clears
 the new-launch declaration. This allocation alone does not publish the ID layout.
-The remaining storage/native transitions and required outer CLI writer bit still
-precede P3e activation, and the canonical connector deployment stays owner-gated.
+
+Native constructor/transition continuity and the required outer CLI writer bit
+remain prerequisites before P3e activation; the canonical connector deployment
+is still owner-approved separately.
 
 ### Acceptance controls (desktop-u G1)
 

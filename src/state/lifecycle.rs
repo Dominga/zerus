@@ -300,6 +300,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
                 "fork_lineage_labels",
                 "cleared_conversations",
                 "session_id",
+                "worktree_protection",
                 "launch_label",
                 "layout",
                 "parent",

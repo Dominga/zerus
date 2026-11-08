@@ -89,9 +89,19 @@ fn valid_process_consent(proof: &str, row: &Value, common: &Path, at: u64) -> bo
 /// Folders a Zerus session record refers to.
 pub(super) struct Reference {
     pub(super) name: String,
+    pub(super) session_id: String,
     pub(super) folders: Vec<PathBuf>,
     /// The ID of the checkout ownership recorded at the session's launch.
     pub(super) owner: String,
+    /// Actual enumerated metadata, only for a negative protection annotation.
+    /// This is not an action record, native permission or caller-selected path.
+    pub(super) binding: Option<BindingMetadata>,
+}
+
+pub(super) struct BindingMetadata {
+    pub(super) directory: String,
+    pub(super) file: String,
+    pub(super) digest: String,
 }
 
 enum ProcessReview {
@@ -173,8 +183,10 @@ fn reference(record: &Value) -> Reference {
         .collect();
     Reference {
         name: string(record, "name").to_owned(),
+        session_id: string(record, "session_id").to_owned(),
         folders,
         owner: string(&record["worktree_owner"], "id").to_owned(),
+        binding: None,
     }
 }
 
@@ -210,7 +222,11 @@ fn binding_reference(directory: &str, path: &Path) -> Result<Option<Reference>> 
         }
     }
     if value["rename_shadow"] == true { return Ok(None); }
-    Ok(Some(reference(&value)))
+    let mut result=reference(&value);
+    result.binding=Some(BindingMetadata {directory:directory.into(),
+        file:path.file_name().and_then(|f|f.to_str()).ok_or("Invalid binding filename")?.into(),
+        digest:format!("{:x}",Sha256::digest(&bytes))});
+    Ok(Some(result))
 }
 
 pub(super) fn bindings() -> Result<Vec<Reference>> {
@@ -1140,7 +1156,7 @@ fn settle_until(common: &Path, path: &Path, until: Instant) -> Settled {
     }
 }
 
-fn repository_lock(common: &Path) -> Result<std::fs::File> {
+pub(super) fn repository_lock(common: &Path) -> Result<std::fs::File> {
     let cache = cache_file("repo", &common.to_string_lossy());
     private_dir(cache.parent().unwrap())?;
     crate::platform::private_open(

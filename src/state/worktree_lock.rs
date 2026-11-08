@@ -1,7 +1,8 @@
 //! zerus-ucck P3c: releasing a session's own Git worktree lock when the
 //! session leaves, by archive or forget (the spec's worktree lock, rule 6).
-//! Nothing creates such a lock before P3e. This build only releases one, so
-//! that none lingers after a rollback to it.
+//! Dormant P3e publication can prepare such a veto, but no production creator
+//! calls it yet. Archive/forget retain the floor's release behavior, so a lock
+//! does not linger after its last verified holder leaves.
 //!
 //! Git has no compare-and-unlock, so a release takes the lock. It renames
 //! Git's `locked` file to a private name beside it, checks that the text is
@@ -12,6 +13,9 @@
 use super::*;
 use std::fs;
 use std::io::{self, Read};
+
+mod protection;
+pub(super) use protection::Protection;
 
 /// The private name of a taken lock, beside Git's `locked`.
 const TAKEN: &str = "locked.zerus-release-";
@@ -111,6 +115,10 @@ pub(super) fn release_locked(record: &Value) -> Release {
     if !verified {
         return kept("its Zerus ownership cannot be verified".into());
     }
+    let protection = match protection::existing(record) {
+        Ok(protection) => protection,
+        Err(error) => return kept(error),
+    };
     // L3: another live or saved session that uses the checkout keeps it, and
     // so does evidence that cannot be read.
     match worktree_cleanup::bindings() {
@@ -120,19 +128,45 @@ pub(super) fn release_locked(record: &Value) -> Release {
             ))
         }
         Ok(references) => {
-            if let Some(other) = references.iter().find(|reference| {
+            let users: Vec<_> = references.iter().filter(|reference| {
                 reference.owner == string(owner, "id")
                     || reference
                         .folders
                         .iter()
                         .any(|folder| folder.starts_with(&checkout))
-            }) {
+            }).collect();
+            if let Some(other) = users.first() {
+                if let Some(protection) = protection {
+                    // Never transfer to a guessed label or an unbound folder
+                    // occupant. Unavailable identity keeps the original veto.
+                    if users.iter().any(|r| r.owner != string(owner,"id")
+                        || !session_id::canonical(&r.session_id) || r.session_id == id) {
+                        return kept("a shared holder's exact identity needs review".into());
+                    }
+                    let next = users.iter().min_by_key(|r| &r.session_id).unwrap();
+                    return match protection.transfer(next) {
+                        Ok(()) => kept(format!("{} still uses it; its protective lock was transferred",other.name)),
+                        Err(error) => kept(error),
+                    };
+                }
                 return kept(format!("{} still uses it", other.name));
             }
         }
     }
-    match take(&lock, id) {
-        Ok(true) => Release::Released(checkout),
+    if let Some(protection) = &protection {
+        if let Err(error) = protection.verify() {return kept(error);}
+    }
+    let original = match protection.as_ref().map(Protection::original_object).transpose() {
+        Ok(original) => original,
+        Err(error) => return kept(error),
+    };
+    match take_original(&lock, id, original.as_ref()) {
+        Ok(true) => {
+            if let Some(protection) = &protection {
+                if let Err(error) = protection.released() {return kept(error);}
+            }
+            Release::Released(checkout)
+        }
         Ok(false) => Release::None,
         Err(error) => kept(error),
     }
@@ -163,12 +197,23 @@ pub(super) fn left(record: &Value) {
 /// lock went before the take. Every failure after the take puts the lock
 /// back, and one that cannot be put back yet stays in its intent for
 /// `recover_locked`.
+#[cfg(all(test, unix))]
 fn take(lock: &Path, id: &str) -> Result<bool> {
+    take_original(lock,id,None)
+}
+
+fn same_object(path: &Path, original: &Value) -> bool {
+    let Ok(file) = crate::platform::no_follow(fs::OpenOptions::new().read(true)).open(path) else {return false;};
+    file.metadata().is_ok_and(|m| m.is_file())
+        && crate::platform::FileIdentity::of(&file).is_ok_and(|id| json!([id.device,id.inode]) == *original)
+}
+
+fn take_original(lock: &Path, id: &str, original: Option<&Value>) -> Result<bool> {
     let dir = lock.parent().ok_or("invalid lock path")?;
     let nonce = uuid::Uuid::new_v4();
     let taken = dir.join(format!("{TAKEN}{nonce}"));
     let intent = intents().join(format!("{nonce}.json"));
-    let value = json!({"version":1,"lock":lock,"taken":taken,"session_id":id});
+    let value = json!({"version":1,"lock":lock,"taken":taken,"session_id":id,"original_object":original});
     atomic(&intent, &format!("{value}\n"))?;
     let taking =
         storage::cut_write().and_then(|()| fs::rename(lock, &taken).map_err(|e| e.to_string()));
@@ -191,11 +236,14 @@ fn take(lock: &Path, id: &str) -> Result<bool> {
             Ok(Some(text)) if exact(&text, id) => {}
             _ => return Err("the lock changed before its release; it was put back".into()),
         }
+        if original.is_some_and(|original| !same_object(&taken,original)) {
+            return Err("the original protective lock was replaced before release; it was put back".into());
+        }
         storage::cut_write()?;
         fs::remove_file(&taken).map_err(|e| e.to_string())
     })();
     if let Err(error) = checked {
-        return Err(match restore(lock, &taken, id) {
+        return Err(match restore_original(lock, &taken, id, original) {
             Ok(()) => {
                 let _ = archive::remove_synced(&intent);
                 error
@@ -214,7 +262,12 @@ fn take(lock: &Path, id: &str) -> Result<bool> {
 /// one appeared meanwhile, a taken lock with the session's exact text may go,
 /// since the checkout stays locked. Any other stays beside it for review and
 /// is never deleted (L2).
+#[cfg(all(test, unix))]
 fn restore(lock: &Path, taken: &Path, id: &str) -> Result<()> {
+    restore_original(lock,taken,id,None)
+}
+
+fn restore_original(lock: &Path, taken: &Path, id: &str, original: Option<&Value>) -> Result<()> {
     let dir = lock.parent().ok_or("invalid lock path")?;
     storage::cut_write()?;
     match fs::hard_link(taken, lock) {
@@ -223,7 +276,8 @@ fn restore(lock: &Path, taken: &Path, id: &str) -> Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             if !same_file(taken, lock)
-                && !matches!(lock_text(taken), Ok(Some(text)) if exact(&text, id))
+                && (!matches!(lock_text(taken), Ok(Some(text)) if exact(&text, id))
+                    || original.is_some_and(|original| !same_object(taken,original)))
             {
                 return Err(format!(
                     "another lock appeared; the taken one stays at {} for review",
@@ -245,7 +299,14 @@ fn restore(lock: &Path, taken: &Path, id: &str) -> Result<()> {
 
 /// A release intent: Git's `locked`, its taken name beside it, and the
 /// session. An intent that is not exactly one of these is never acted on.
-fn load(path: &Path) -> Option<(PathBuf, PathBuf, String)> {
+struct Intent {
+    lock: PathBuf,
+    taken: PathBuf,
+    id: String,
+    original: Option<Value>,
+}
+
+fn load(path: &Path) -> Option<Intent> {
     let mut bytes = Vec::new();
     crate::platform::no_follow(fs::OpenOptions::new().read(true))
         .open(path)
@@ -257,13 +318,17 @@ fn load(path: &Path) -> Option<(PathBuf, PathBuf, String)> {
     let lock = PathBuf::from(value["lock"].as_str()?);
     let taken = PathBuf::from(value["taken"].as_str()?);
     let id = value["session_id"].as_str()?.to_owned();
+    let original = value.get("original_object").filter(|v| !v.is_null()).cloned();
+    if original.as_ref().is_some_and(|v| !v.as_array().is_some_and(|a| a.len() == 2 && a.iter().all(|v| v.as_u64().is_some()))) {
+        return None;
+    }
     (value["version"] == 1
         && lock.is_absolute()
         && lock.file_name()? == "locked"
         && taken.parent() == lock.parent()
         && taken.file_name()?.to_str()?.starts_with(TAKEN)
         && session_id::canonical(&id))
-    .then_some((lock, taken, id))
+    .then_some(Intent { lock, taken, id, original })
 }
 
 /// Called right after the writer lock is taken: puts back every lock a
@@ -278,10 +343,10 @@ pub(super) fn recover_locked() {
         if path.extension().is_none_or(|extension| extension != "json") {
             continue;
         }
-        let Some((lock, taken, id)) = load(&path) else {
+        let Some(intent) = load(&path) else {
             continue;
         };
-        if restore(&lock, &taken, &id).is_ok() {
+        if restore_original(&intent.lock, &intent.taken, &intent.id, intent.original.as_ref()).is_ok() {
             let _ = archive::remove_synced(&path);
         }
     }
@@ -413,6 +478,82 @@ mod tests {
         control("owner_files");
     }
 
+    #[test]
+    fn new_id_publication_is_create_only_and_retains_its_git_veto() {
+        control("publication");
+    }
+
+    #[test]
+    fn shared_id_holders_transfer_one_original_lock_without_an_unlocked_gap() {
+        control("publication_shared");
+    }
+
+    #[test]
+    fn a_foreign_lock_or_manual_unlock_never_becomes_new_publication_protection() {
+        control("publication_choices");
+    }
+
+    #[test]
+    fn replaced_checkout_and_same_text_lock_objects_refuse_publication_and_release() {
+        control("publication_objects");
+    }
+
+    #[test]
+    fn every_publication_cut_keeps_the_record_unexposed_or_durably_protected() {
+        control_within("publication_cuts",std::time::Duration::from_secs(60));
+    }
+
+    #[test]
+    fn a_destination_appearing_after_the_census_is_never_replaced() {
+        control("publication_destination");
+    }
+
+    #[test]
+    fn publication_refuses_descendant_aliases_without_creating_foreign_entries() {
+        control("publication_namespace");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires the checksum-verified v0.47.0 Arch release via HGS_TEST_OLD_CLI"]
+    fn literal_v047_maintenance_keeps_an_id_only_session_worktree() {
+        control_within("publication_old",std::time::Duration::from_secs(60));
+    }
+
+    #[test]
+    fn review_receipt_directory_alias_never_writes_foreign_entries() {
+        control("review_receipt_alias");
+    }
+    #[test]
+    fn review_missing_receipt_never_downgrades_original_lock_proof() {
+        control("review_missing_receipt");
+    }
+
+    #[test]
+    fn a_receipt_directory_swapped_after_acquisition_never_receives_a_write() {
+        control("review_receipt_swap");
+    }
+    #[test]
+    fn a_protected_legacy_shared_holder_never_loses_its_original_lock_fence() {
+        control("review_shared_root");
+    }
+    #[test]
+    fn a_shared_dsh_holder_is_marked_under_its_own_nonblocking_exclusion() {
+        control("review_shared_dsh");
+    }
+    #[test]
+    fn a_shared_opencode_holder_is_marked_under_its_own_nonblocking_exclusion() {
+        control("review_shared_opencode");
+    }
+
+    #[test]
+    fn independent_provider_lock_alias_never_creates_foreign_entries() {
+        control("independent_provider_alias");
+    }
+    #[test]
+    fn a_provider_lock_fifo_refuses_promptly_without_changing_the_binding() {
+        control_within("provider_fifo",std::time::Duration::from_secs(5));
+    }
     fn git(dir: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
             .args(args)
@@ -505,6 +646,315 @@ mod tests {
             assert_eq!(intents_left(), 0);
         };
         match case.as_str() {
+            "independent_provider_alias" | "provider_fifo" => {
+                let _writer=storage::lock(None).unwrap();
+                let mut legacy=record.clone();
+                let legacy_id=uuid::Uuid::new_v4().to_string();
+                legacy["session_id"]=json!(legacy_id);
+                legacy["run_id"]=json!("legacy-run");
+                legacy["name"]=json!("dsh/example/legacy");
+                legacy["backend"]=json!("dsh");
+                legacy["conversation_id"]=json!("session-native");
+                let binding=root().join("dsh/bindings").join(format!("{}.json",storage::label_key(string(&legacy,"name"))));
+                atomic(&binding,&legacy.to_string()).unwrap();
+                let mut candidate=record.clone();candidate["layout"]=json!("id");
+                storage::publish_new_id(&mut candidate).unwrap();
+                storage::remove_record(&candidate).unwrap();
+                let foreign=base.join("foreign-provider-locks");fs::create_dir(&foreign).unwrap();
+                let aux=root().join("dsh/bindings.lock");
+                assert!(!aux.exists());
+                if case == "provider_fifo" {
+                    let name=std::ffi::CString::new(aux.to_str().unwrap()).unwrap();
+                    // SAFETY: this fixture owns this absent NUL-free entry.
+                    assert_eq!(unsafe{libc::mkfifo(name.as_ptr(),0o600)},0);
+                } else {
+                    std::os::unix::fs::symlink(foreign.join("created.lock"),&aux).unwrap();
+                }
+                let result=release_locked(&candidate);
+                let entries=fs::read_dir(&foreign).unwrap().count();
+                assert_eq!(entries,0,"provider exclusion followed a lock alias: {result:?}");
+                assert_eq!(fs::read_to_string(&lock).unwrap(),format!("{own}\n"));
+                assert_eq!(serde_json::from_slice::<Value>(&fs::read(&binding).unwrap()).unwrap(),legacy);
+            }
+
+            "review_receipt_alias" => {
+                let _writer = storage::lock(None).unwrap();
+                let foreign = base.join("foreign-protection");
+                fs::create_dir(&foreign).unwrap();
+                std::os::unix::fs::symlink(&foreign,root().join("worktree-protections")).unwrap();
+                let mut candidate=record.clone(); candidate["layout"]=json!("id");
+                let result=storage::publish_new_id(&mut candidate);
+                let entries=fs::read_dir(&foreign).unwrap().count();
+                assert!(result.is_err() && entries==0,
+                    "receipt alias was followed: result={result:?}, foreign entries={entries}");
+            }
+            "review_missing_receipt" => {
+                let _writer=storage::lock(None).unwrap();
+                let mut candidate=record.clone();candidate["layout"]=json!("id");
+                storage::publish_new_id(&mut candidate).unwrap();
+                let retained=lock.with_extension("retained-original");
+                fs::rename(&lock,&retained).unwrap();
+                atomic(&lock,&format!("{own}\n")).unwrap();
+                let a=crate::platform::file_identity(&retained).unwrap();
+                let b=crate::platform::file_identity(&lock).unwrap();
+                assert_ne!((a.device,a.inode),(b.device,b.inode));
+                let receipt=root().join("worktree-protections")
+                    .join(format!("{}.json",storage::label_key(string(&ownership,"id"))));
+                fs::remove_file(receipt).unwrap();
+                storage::remove_record(&candidate).unwrap();
+                let result=release_locked(&candidate);
+                assert!(matches!(result,Release::Kept(..)) && lock.exists(),
+                    "missing proof allowed replacement lock release: {result:?}; exists={}",lock.exists());
+            }
+
+            "publication" | "publication_old" => {
+                let mut writer = Some(storage::lock(None).unwrap());
+                let mut candidate = record.clone(); candidate["layout"] = json!("id");
+                let file = storage::id_record_path(&id).unwrap();
+                storage::publish_new_id(&mut candidate).unwrap();
+                assert_eq!(fs::read_to_string(&lock).unwrap(),format!("{own}\n"));
+                assert_eq!(serde_json::from_slice::<Value>(&fs::read(&file).unwrap()).unwrap(),candidate);
+                assert_eq!(storage::read_id(&id).unwrap()["session_id"],id);
+                assert!(labels::listed_in(&root(),string(&candidate,"name")).unwrap().contains(&id));
+                if case == "publication_old" {
+                    use sha2::{Digest,Sha256};
+                    let old=PathBuf::from(std::env::var_os("HGS_TEST_OLD_CLI").expect("provide the verified v0.47.0 CLI"));
+                    let bytes=labels::read_file(&old,64<<20).unwrap().unwrap();
+                    assert_eq!(format!("{:x}",Sha256::digest(bytes)),
+                        "146731d47b4aa7c9787096bb12cf3d9054e0b043194fca245fa5a27f2988bbf5");
+                    drop(writer.take());
+                    let reviewed=Command::new(&old).args(["worktrees","review","--path"])
+                        .arg(&main).arg("--worktree").arg(&checkout).arg("--json").output().unwrap();
+                    assert!(reviewed.status.success(),"{}",String::from_utf8_lossy(&reviewed.stderr));
+                    let value:Value=serde_json::from_slice(&reviewed.stdout).unwrap();
+                    let row=value["worktrees"].as_array().unwrap().iter().find(|r|r["path"]==json!(checkout)).unwrap();
+                    assert_eq!(row["sessions"],json!([]),"old maintenance must not know the ID holder");
+                    assert_eq!(row["verdict"],"blocked");
+                    assert!(row["reasons"].as_array().unwrap().iter().any(|r|r["code"]=="locked"));
+                    let lock_before=fs::read(&lock).unwrap();
+                    let removed=Command::new(&old).args(["worktrees","remove","--path"])
+                        .arg(&checkout).arg("--common-dir").arg(&common)
+                        .arg("--fingerprint").arg(row["fingerprint"].as_str().unwrap())
+                        .args(["--automatic","--json"]).output().unwrap();
+                    assert!(!removed.status.success());
+                    assert!(String::from_utf8_lossy(&removed.stderr).contains("Locked by Git"),
+                        "{}",String::from_utf8_lossy(&removed.stderr));
+                    assert_eq!(fs::read(&lock).unwrap(),lock_before);assert!(checkout.is_dir());
+                    writer=Some(storage::lock(None).unwrap());
+                }
+                let before = fs::read(&file).unwrap();
+                let mut changed = candidate.clone(); changed["run_id"] = json!("another-run");
+                assert!(storage::publish_new_id(&mut changed).is_err());
+                assert_eq!(fs::read(&file).unwrap(),before);
+                let removed = Command::new("git").current_dir(&main)
+                    .args(["worktree","remove"]).arg(&checkout).output().unwrap();
+                assert!(!removed.status.success()); assert!(checkout.is_dir());
+                storage::remove_record(&candidate).unwrap();
+                assert_eq!(release_locked(&candidate),Release::Released(checkout.clone()));
+                assert!(!lock.exists());
+                assert_eq!(git(&main,&["rev-parse","refs/heads/work"]).trim(),head.trim());
+                // A later explicit publication after our confirmed release is
+                // different from relocking after the person's manual unlock.
+                let mut later=record.clone(); later["layout"]=json!("id");
+                later["session_id"]=json!(uuid::Uuid::new_v4().to_string());
+                storage::publish_new_id(&mut later).unwrap();
+                fs::rename(&checkout,base.join("removed-by-person")).unwrap();
+                storage::remove_record(&later).unwrap();
+                assert_eq!(release_locked(&later),Release::Released(checkout.clone()));
+                assert!(!lock.exists());
+                drop(writer);
+            }
+            "review_receipt_swap" => {
+                let _writer=storage::lock(None).unwrap();
+                let mut candidate=record.clone(); candidate["layout"]=json!("id");
+                let receipts=root().join("worktree-protections");
+                let original=base.join("original-receipts");
+                let foreign=base.join("foreign-receipts");fs::create_dir(&foreign).unwrap();
+                let destination=receipts.clone();let outside=foreign.clone();
+                storage::BEFORE_NEW_ID.with(|hook| *hook.borrow_mut()=Some(Box::new(move || {
+                    fs::rename(&destination,&original).unwrap();
+                    std::os::unix::fs::symlink(&outside,&destination).unwrap();
+                })));
+                assert!(storage::publish_new_id(&mut candidate).is_err());
+                assert_eq!(fs::read_dir(&foreign).unwrap().count(),0);
+                assert!(!storage::id_record_path(&id).unwrap().exists());
+                assert_eq!(fs::read_to_string(&lock).unwrap(),format!("{own}\n"));
+            }
+            "review_shared_root" | "review_shared_dsh" | "review_shared_opencode" => {
+                let _writer=storage::lock(None).unwrap();
+                let provider=case.strip_prefix("review_shared_").unwrap();
+                let mut legacy=record.clone();
+                let legacy_id=uuid::Uuid::new_v4().to_string();
+                legacy["session_id"]=json!(legacy_id); legacy["run_id"]=json!("legacy-run");
+                let directory=match provider {
+                    "root" => {legacy["name"]=json!("claude/example/legacy");root()},
+                    "dsh" => {legacy["name"]=json!("dsh/example/legacy");legacy["backend"]=json!("dsh");
+                        legacy["conversation_id"]=json!("session-native");root().join("dsh/bindings")},
+                    "opencode" => {legacy["name"]=json!("opencode/example/legacy");legacy["backend"]=json!("opencode");
+                        legacy["conversation_id"]=json!("ses_native");root().join("opencode/bindings")},
+                    _ => unreachable!(),
+                };
+                let binding=directory.join(format!("{}.json",storage::label_key(string(&legacy,"name"))));
+                atomic(&binding,&legacy.to_string()).unwrap();
+                let mut candidate=record.clone();candidate["layout"]=json!("id");
+                storage::publish_new_id(&mut candidate).unwrap();
+                let object=crate::platform::file_identity(&lock).unwrap();
+                storage::remove_record(&candidate).unwrap();
+                if provider != "root" {
+                    let aux=root().join(provider).join("bindings.lock");
+                    let held=storage::lock(Some(&aux)).unwrap();
+                    assert!(matches!(release_locked(&candidate),Release::Kept(_,reason) if reason.contains("busy")));
+                    assert_eq!(fs::read_to_string(&lock).unwrap(),format!("{own}\n"));
+                    assert_eq!(serde_json::from_slice::<Value>(&fs::read(&binding).unwrap()).unwrap(),legacy);
+                    drop(held);
+                }
+                assert!(matches!(release_locked(&candidate),Release::Kept(..)));
+                let after=crate::platform::file_identity(&lock).unwrap();
+                assert_eq!((object.device,object.inode),(after.device,after.inode));
+                assert_eq!(fs::read_to_string(&lock).unwrap(),format!("zerus:{legacy_id}\n"));
+                let marked:Value=serde_json::from_slice(&fs::read(&binding).unwrap()).unwrap();
+                let mut expected=legacy.clone();expected["worktree_protection"]=ownership["id"].clone();
+                assert_eq!(marked,expected,"only negative retention metadata may change");
+                let receipt=root().join("worktree-protections").join(format!("{}.json",storage::label_key(string(&ownership,"id"))));
+                let proof=fs::read(&receipt).unwrap();
+                let original=lock.with_extension("retained-original");fs::rename(&lock,&original).unwrap();
+                let reason=format!("zerus:{legacy_id}\n");atomic(&lock,&reason).unwrap();
+                fs::remove_file(&receipt).unwrap();fs::remove_file(&binding).unwrap();
+                assert!(matches!(release_locked(&marked),Release::Kept(..)));
+                assert_eq!(fs::read_to_string(&lock).unwrap(),reason);
+                // The same valid proof and original object still permit the
+                // final release; a negative marker never grants one by itself.
+                fs::remove_file(&lock).unwrap();fs::rename(&original,&lock).unwrap();
+                atomic(&receipt,std::str::from_utf8(&proof).unwrap()).unwrap();
+                assert_eq!(release_locked(&marked),Release::Released(checkout.clone()));
+                assert!(!lock.exists());
+            }
+            "publication_destination" => {
+                let _writer=storage::lock(None).unwrap();
+                let mut candidate=record.clone();candidate["layout"]=json!("id");
+                let path=storage::id_record_path(&id).unwrap();
+                let mut foreign=candidate.clone();foreign["run_id"]=json!("foreign-run");
+                let bytes=foreign.to_string();let expected=bytes.clone();let destination=path.clone();
+                storage::BEFORE_NEW_ID.with(|hook| *hook.borrow_mut()=Some(Box::new(move || {
+                    fs::write(destination,bytes).unwrap();
+                })));
+                assert!(storage::publish_new_id(&mut candidate).is_err());
+                assert_eq!(fs::read_to_string(path).unwrap(),expected);
+                assert_eq!(fs::read_to_string(&lock).unwrap(),format!("{own}\n"));
+            }
+            "publication_namespace" => {
+                let _writer=storage::lock(None).unwrap();
+                let foreign=base.join("foreign-namespace");fs::create_dir(&foreign).unwrap();
+                for entry in ["sessions","labels","dsh"] {
+                    let alias=root().join(entry);
+                    std::os::unix::fs::symlink(&foreign,&alias).unwrap();
+                    let mut candidate=record.clone();candidate["layout"]=json!("id");
+                    if entry=="dsh" {
+                        candidate["name"]=json!("dsh/example/shared");candidate["backend"]=json!("dsh");
+                        candidate["conversation_id"]=json!("session-native");
+                    }
+                    assert!(storage::publish_new_id(&mut candidate).is_err());
+                    assert_eq!(fs::read_dir(&foreign).unwrap().count(),0);
+                    assert!(!lock.exists());
+                    fs::remove_file(alias).unwrap();
+                }
+            }
+            "publication_shared" => {
+                let _writer = storage::lock(None).unwrap();
+                let mut one = record.clone(); one["layout"] = json!("id");
+                storage::publish_new_id(&mut one).unwrap();
+                let object = crate::platform::file_identity(&lock).unwrap();
+                let mut two = record.clone(); two["layout"] = json!("id");
+                let two_id = uuid::Uuid::new_v4().to_string(); two["session_id"] = json!(two_id);
+                two["run_id"] = json!("second-run"); two["conversation_id"] = json!("second-conversation");
+                storage::publish_new_id(&mut two).unwrap();
+                assert_eq!(fs::read_to_string(&lock).unwrap(),format!("{own}\n"));
+                storage::remove_record(&one).unwrap();
+                assert!(matches!(release_locked(&one),Release::Kept(..)));
+                let after = crate::platform::file_identity(&lock).unwrap();
+                assert_eq!((object.device,object.inode),(after.device,after.inode));
+                assert_eq!(fs::read_to_string(&lock).unwrap(),format!("zerus:{two_id}\n"));
+                assert_eq!(release_locked(&one),Release::None);
+                assert!(storage::read_id(&two_id).is_ok());
+                storage::remove_record(&two).unwrap();
+                assert_eq!(release_locked(&two),Release::Released(checkout.clone()));
+                assert!(!lock.exists());
+            }
+            "publication_choices" => {
+                let _writer = storage::lock(None).unwrap();
+                let mut candidate = record.clone(); candidate["layout"] = json!("id");
+                place("A person's lock");
+                let before = fs::read(&lock).unwrap();
+                assert!(storage::publish_new_id(&mut candidate).is_err());
+                assert_eq!(fs::read(&lock).unwrap(),before);
+                assert!(!storage::id_record_path(&id).unwrap().exists());
+                unlock();
+                storage::publish_new_id(&mut candidate).unwrap();
+                unlock();
+                let mut another = candidate.clone(); another["session_id"] = json!(uuid::Uuid::new_v4().to_string());
+                assert!(storage::publish_new_id(&mut another).is_err());
+                assert!(!lock.exists());
+                assert!(!storage::id_record_path(string(&another,"session_id")).unwrap().exists());
+                assert!(storage::read_id(&id).is_ok());
+            }
+            "publication_objects" => {
+                let _writer = storage::lock(None).unwrap();
+                let held = Protection::acquire(&record).unwrap().unwrap();
+                let original_object = held.original_object().unwrap();
+                let git_file=fs::read(checkout.join(".git")).unwrap();
+                let aside = base.join("checkout-aside");
+                fs::rename(&checkout,&aside).unwrap();fs::create_dir(&checkout).unwrap();
+                fs::write(checkout.join(".git"),git_file).unwrap();
+                // Matching Git metadata/nonce is insufficient: this is still
+                // a different native checkout object from the held original.
+                assert_eq!(worktree_lifecycle::owned(&common,&checkout).unwrap(),ownership);
+                assert!(held.verify().is_err());
+                fs::remove_file(checkout.join(".git")).unwrap();
+                fs::remove_dir(&checkout).unwrap();fs::rename(&aside,&checkout).unwrap();
+                held.verify().unwrap();
+                let original = lock.with_extension("original");
+                fs::rename(&lock,&original).unwrap();
+                atomic(&lock,&format!("{own}\n")).unwrap();
+                let replaced = fs::read(&lock).unwrap();
+                assert!(held.verify().is_err()); drop(held);
+                assert!(take_original(&lock,&id,Some(&original_object)).is_err());
+                assert!(matches!(release_locked(&record),Release::Kept(..)));
+                assert_eq!(fs::read(&lock).unwrap(),replaced);
+                assert!(original.is_file());
+                assert!(!storage::id_record_path(&id).unwrap().exists());
+            }
+            "publication_cuts" => {
+                let _writer = storage::lock(None).unwrap();
+                for budget in 0..14 {
+                    let mut candidate = record.clone(); candidate["layout"] = json!("id");
+                    let id = uuid::Uuid::new_v4().to_string();candidate["session_id"] = json!(id);
+                    storage::cut::arm(budget);
+                    let result = storage::publish_new_id(&mut candidate);
+                    storage::cut::disarm();
+                    let file = storage::id_record_path(&id).unwrap();
+                    if file.exists() {
+                        assert_eq!(fs::read_to_string(&lock).unwrap(),format!("zerus:{id}\n"));
+                        assert!(labels::listed_in(&root(),string(&candidate,"name")).unwrap().contains(&id));
+                        assert_eq!(storage::read_id(&id).unwrap()["session_id"],id);
+                        storage::remove_record(&candidate).unwrap();
+                    } else {
+                        assert!(result.is_err());
+                        if lock.exists() {
+                            // An interrupted veto is retained, never adopted by
+                            // a fresh identity or cleaned up automatically.
+                            let before=fs::read(&lock).unwrap();
+                            let mut retry=candidate.clone();retry["session_id"]=json!(uuid::Uuid::new_v4().to_string());
+                            assert!(storage::publish_new_id(&mut retry).is_err());
+                            assert_eq!(fs::read(&lock).unwrap(),before);
+                        }
+                    }
+                    // Explicit teardown of this test's private synthetic veto.
+                    if lock.exists() {fs::remove_file(&lock).unwrap();}
+                    let receipt=root().join("worktree-protections")
+                        .join(format!("{}.json",storage::label_key(string(&ownership,"id"))));
+                    if receipt.exists() {fs::remove_file(receipt).unwrap();}
+                }
+            }
             "owner_files" => {
                 let receipt = worktree_lifecycle::receipt_path(&common,&checkout);
                 let marker = PathBuf::from(ownership["metadata"].as_str().unwrap()).join("zerus-owner.json");

@@ -136,10 +136,12 @@ pub const DATA_ENV: &str = "HGS_PROJECT_LAUNCH_DATA";
 // All script/argument data stays out of PowerShell source and is removed from
 // the environment before the user's script starts. -NoProfile and the policy
 // apply only to this new process; no machine policy or user profile is changed.
+// PowerShell's $null binds to ""; .NET 9 retains empty environment entries.
+// https://learn.microsoft.com/en-us/dotnet/core/compatibility/core-libraries/9.0/empty-env-variable
 #[cfg(any(windows, test))]
 pub const BOOTSTRAP: &str = r#"try {
     $launch = [Environment]::GetEnvironmentVariable('HGS_PROJECT_LAUNCH_DATA', 'Process') | ConvertFrom-Json
-    [Environment]::SetEnvironmentVariable('HGS_PROJECT_LAUNCH_DATA', $null, 'Process')
+    [Environment]::SetEnvironmentVariable('HGS_PROJECT_LAUNCH_DATA', [NullString]::Value, 'Process')
     [string]$script = $launch.script
     [string[]]$arguments = $launch.arguments
     & $script @arguments

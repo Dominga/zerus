@@ -10,7 +10,7 @@ import type {
 } from "../ui/teams/types";
 import { membersWithIds } from "./newTeamForm";
 
-export const DRAFT_FIELDS = ["name", "goal", "addendum", "settings", "members", "tasks"] as const;
+export const DRAFT_FIELDS = ["name", "goal", "addendum", "settings", "members", "tasks", "working_mode"] as const;
 export type DraftField = (typeof DRAFT_FIELDS)[number];
 
 export interface NewTeamFields {
@@ -21,6 +21,8 @@ export interface NewTeamFields {
   settings: TeamSettings;
   members: DraftMember[];
   tasks: TaskView[];
+  /** Task #308: auto, a preset, or none for the settings as they are. */
+  working_mode: string;
 }
 
 export const emptyFields = (): NewTeamFields => ({
@@ -31,6 +33,7 @@ export const emptyFields = (): NewTeamFields => ({
   settings: {},
   members: [],
   tasks: [],
+  working_mode: "auto",
 });
 
 export interface NewTeamPort {
@@ -80,10 +83,12 @@ export function mergeDraft(
 ): NewTeamFields {
   const merged: NewTeamFields = { ...local };
   for (const field of DRAFT_FIELDS) {
+    if (field === "working_mode") continue;
     if (!dirty.has(field)) {
       (merged as unknown as Record<string, unknown>)[field] = view[field as keyof NewTeamView];
     }
   }
+  if (!dirty.has("working_mode")) merged.working_mode = view.working_mode?.accepted ?? "auto";
   merged.folder = view.folder || local.folder;
   return merged;
 }

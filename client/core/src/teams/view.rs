@@ -855,6 +855,9 @@ pub struct TeamView {
     pub name: String,
     pub status: String,
     pub project: String,
+    /// Task #308: the team's working mode and the project proposal.
+    #[serde(skip_serializing_if = "Value::is_null")]
+    pub working_mode: Value,
     pub folder: String,
     pub goal: String,
     pub plan_mode: String,
@@ -1216,6 +1219,7 @@ pub fn team(value: &Value) -> TeamView {
         name: name(value, "name"),
         status: name(value, "status"),
         project: name(value, "project"),
+        working_mode: value.get("working_mode").filter(|mode| mode.is_object()).map_or(Value::Null, |mode| bounded(Some(mode))),
         folder: text(value, "folder", LINE_CHARS),
         goal: text(value, "goal", TEXT_CHARS),
         plan_mode: name(value, "plan_mode"),
@@ -1434,6 +1438,9 @@ pub struct NewTeamView {
     pub addendum: String,
     pub folder: String,
     pub settings: Value,
+    /// Task #308: the proposed working mode, its reasons and the accepted preset.
+    #[serde(skip_serializing_if = "Value::is_null")]
+    pub working_mode: Value,
     pub members: Vec<DraftMember>,
     pub tasks: Vec<TaskView>,
     pub draft: DraftView,
@@ -1454,6 +1461,7 @@ pub fn new_team(value: &Value, view: &TeamView) -> Option<NewTeamView> {
         addendum: text(value, "lead_protocol", TEXT_CHARS),
         folder: view.folder.clone(),
         settings: view.settings.clone(),
+        working_mode: bounded(value.get("working_mode")),
         members: array(value, "members")
             .iter()
             .take(MEMBERS_KEPT)

@@ -258,6 +258,13 @@ describe("task card", () => {
     expect(moveTargets(team(), 1)).toEqual([]);
   });
 
+  it("Task #308: proposes the project's working mode with its reason", async () => {
+    const f = fake();
+    await actionsOf(f, team()).proposeWorkingMode("branch-pipeline", "A code repository with tests");
+    expect(f.sent.at(-1)?.action).toEqual({ kind: "propose_working_mode", preset: "branch-pipeline", reason: "A code repository with tests" });
+    expect(f.asked.at(-1)).toMatchObject({ name: "teamWorkingModeConfirm" });
+  });
+
   it("Task #296: finds the next team's lead once its list arrives", () => {
     const list = { teams: [{ id: "t9", members: [
       { id: "dev", role: "Backend", agent: "codex", state: "active", computer: "", lead: false, session: { host: "", name: "codex/x/dev", run_id: "r", conversation_id: "c" } },

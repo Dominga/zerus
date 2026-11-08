@@ -326,6 +326,12 @@ pub enum TeamAction {
         name: String,
         parent: Parent,
     },
+    /// Task #308: proposes a working mode; the owner allows it on its card.
+    ProposeWorkingMode {
+        preset: String,
+        #[serde(default)]
+        reason: String,
+    },
     /// Task #230: the owner marks the lead's plan changes seen, or reverts one.
     SeenLeadChanges,
     RevertLeadChange {
@@ -700,6 +706,7 @@ impl TeamAction {
             Self::Finding { .. } => "finding",
             Self::NextGoal { .. } => "next-goal",
             Self::Create { .. } => "create",
+            Self::ProposeWorkingMode { .. } => "propose",
             Self::SeenLeadChanges => "seen-lead-changes",
             Self::RevertLeadChange { .. } => "revert-lead-change",
             Self::WaitingDismiss { .. } | Self::WaitingRestore { .. } => "waiting",
@@ -1169,6 +1176,12 @@ impl TeamAction {
                 if team.is_empty() { Ok(()) } else { word(team, "team id") }
             }
             Self::WaitingRestore { id } => word(id, "Waiting item id"),
+            Self::ProposeWorkingMode { preset, reason } => {
+                if !matches!(preset.as_str(), "branch-pipeline" | "branch-per-task" | "shared-folder") {
+                    return Err("The working mode is branch-pipeline, branch-per-task or shared-folder.".into());
+                }
+                plain(reason, "A reason", 2000)
+            }
             Self::Release { task: id } | Self::Retry { task: id } => task(*id),
             Self::DecideProposal {
                 proposal,
@@ -1607,6 +1620,13 @@ impl TeamAction {
             Self::WaitingRestore { id } => {
                 put("action", json!("undismiss"));
                 put("id", json!(id));
+            }
+            Self::ProposeWorkingMode { preset, reason } => {
+                put("kind", json!("working-mode"));
+                put("preset", json!(preset));
+                if !reason.trim().is_empty() {
+                    put("reason", json!(reason));
+                }
             }
             Self::Release { task } | Self::Retry { task } => put("task", json!(task)),
             Self::DecideProposal {

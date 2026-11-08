@@ -2485,5 +2485,21 @@
   "added": "добавлено",
   "moved": "перенесено",
   "re-issued": "выдано заново",
-  "changed": "изменено"
+  "changed": "изменено",
+  " · from #%1": " — от #%1",
+  "Working mode": "Режим работы",
+  "The project suggests %1": "Проект предлагает %1",
+  "How members work": "Как работают участники",
+  "Auto: follow the project (%1)": "Авто: следовать проекту (%1)",
+  "Branch pipeline": "Ветка и конвейер",
+  "Branch per task": "Ветка на задачу",
+  "One shared folder": "Одна общая папка",
+  "Keep the settings as they are": "Оставить настройки как есть",
+  "Working mode: the project suggests %1": "Режим работы: проект предлагает %1",
+  "This team's settings differ: %1": "Настройки команды отличаются: %1",
+  "Propose the switch": "Предложить переключение",
+  "Switch the working mode?": "Переключить режим работы?",
+  "Propose switching this team to %1? Its settings follow the project's proposal.": "Предложить переключить команду на %1? Её настройки последуют предложению проекта.",
+  "Switch to %1": "Переключить на %1",
+  "the proposed working mode": "предложенный режим работы"
 }

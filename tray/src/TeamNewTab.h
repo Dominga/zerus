@@ -158,6 +158,9 @@ private:
     QCheckBox *m_worktrees = nullptr, *m_review = nullptr;
     // B6: auto (the lead picks), shared or a worktree per member.
     QComboBox *m_folderPolicy = nullptr, *m_phaseApproval = nullptr;
+    // Task #308: auto, a preset, or none; the proposal's reasons below it.
+    QComboBox *m_workingMode = nullptr;
+    QLabel *m_workingReasons = nullptr;
     // N10: the path is finished (focus out or Enter); typing keeps auto.
     bool m_folderCommitted = true;
     // N10: the shared choice came from the non-Git folder rule.

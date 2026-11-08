@@ -115,6 +115,8 @@ pub(crate) fn original_member(
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use linux::roster as test_roster;
 #[cfg(target_os = "linux")]
 pub(super) use linux::sample;
 #[cfg(target_os = "macos")]

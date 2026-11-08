@@ -1761,6 +1761,9 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         clipboard::clipboard_files,
         file_reference::file_reference_check,
         file_reference::file_reference_pick,
+        file_reference::file_reference_remote_support,
+        file_reference::file_reference_check_remote,
+        file_reference::file_reference_cancel,
         organization::move_to_project,
         organization::create_project,
         organization::rename_project,
@@ -2004,6 +2007,9 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         clipboard::clipboard_files,
         file_reference::file_reference_check,
         file_reference::file_reference_pick,
+        file_reference::file_reference_remote_support,
+        file_reference::file_reference_check_remote,
+        file_reference::file_reference_cancel,
         desk_take_pending,
     ]
 }

@@ -1,4 +1,5 @@
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
+import { steadyTitle } from "../lib/steady-title";
 import { tr, trNoop } from "../../i18n";
 import { AGENT_LABEL, Icon } from "../lib/icons";
 import { computerFresh, computerOffline } from "../../store/catalog";
@@ -44,13 +45,18 @@ const CAPTIONS = new Set<string>([
 export const captionText = (caption: string) => (CAPTIONS.has(caption) ? tr(caption) : caption);
 
 /** The Qt caption (SessionPresentation::status) with the Working clock, as Qt shows it. */
-export function statusCaption(s: Session): string {
+/**
+ * The status a row shows, with its Working time. `seconds: false` is for a
+ * title or tooltip, which never carries a live seconds counter (zerus-5ryrx):
+ * minutes only, as past the first hour.
+ */
+export function statusCaption(s: Session, seconds = true): string {
   if (statusOf(s) === "offline") return tr("Offline");
   if (s.status === "ready" && s.draft) return tr("Draft");
-  const seconds = elapsed(s);
-  if (seconds === undefined) return captionText(s.caption);
-  const h = Math.floor(seconds / 3600), m = Math.floor((seconds % 3600) / 60), sec = seconds % 60;
-  return `${captionText(s.caption)} (${h ? `${h}h ${m}m` : `${m}m ${String(sec).padStart(2, "0")}s`})`;
+  const worked = elapsed(s);
+  if (worked === undefined) return captionText(s.caption);
+  const h = Math.floor(worked / 3600), m = Math.floor((worked % 3600) / 60), sec = worked % 60;
+  return `${captionText(s.caption)} (${h ? `${h}h ${m}m` : seconds ? `${m}m ${String(sec).padStart(2, "0")}s` : `${m}m`})`;
 }
 
 /** Short state for strip tiles: elapsed time while working, otherwise the caption. */
@@ -303,8 +309,9 @@ export function GitMarks(props: { session: Session }) {
   const marks = createMemo(() => props.session.git ? gitMarks(props.session.git, now() * 1000) : [], [], {
     equals: (a, b) => a.length === b.length && a.every((m, i) => m.icon === b[i].icon && m.count === b[i].count && m.tone === b[i].tone),
   });
+  const tip = steadyTitle(() => (props.session.git ? gitTooltip(props.session, now() * 1000) : ""));
   return (
-    <span class="gmarks" title={props.session.git ? gitTooltip(props.session, now() * 1000) : ""}>
+    <span class="gmarks" title={tip.title()} onPointerEnter={tip.enter} onPointerLeave={tip.leave}>
       <For each={marks()}>{(m) => (
         <span class={`gmark t-${m.tone}`} classList={{ counted: !!m.count }}>
           <Icon name={m.icon} size={16} />
@@ -547,11 +554,14 @@ function CompactTeam(props: { team: Team; onToggle?: () => void }) {
  * row draws as an icon only. The session's name follows a title that differs.
  */
 export function compactDescription(s: Session): string {
-  return [s.title, s.name !== s.title ? s.name : "", statusCaption(s), AGENT_LABEL[s.agent]].filter(Boolean).join("\n");
+  return [s.title, s.name !== s.title ? s.name : "", statusCaption(s, false), AGENT_LABEL[s.agent]].filter(Boolean).join("\n");
 }
 
 export function CompactCard(props: { session: Session; selected: boolean; onExpand: () => void; team?: Team; onToggleTeam?: () => void }) {
   const s = () => props.session;
+  // Tooltips hold still under the pointer (zerus-5ryrx).
+  const described = steadyTitle(() => compactDescription(s()));
+  const expand = steadyTitle(() => `${tr("Expand session row")}\n${compactDescription(s())}`);
   return (
     <div class="scard compact" classList={{ selected: props.selected, two: !!props.team }} data-emphasis={emphasis(s())}
       aria-description={tr("Collapsed session row. Press Right to expand.")}>
@@ -559,11 +569,11 @@ export function CompactCard(props: { session: Session; selected: boolean; onExpa
       <span class="cc-tile"><AgentTile agent={s().agent} size={22} /></span>
       <Show when={sessionMark(s())}>{(m) => <span class="cc-mark" title={markTooltip(s(), m())}><AccountMarkCircle mark={m()} size={14} /></span>}</Show>
       <Show when={s().parent?.state === "live"}><SupervisedMark session={s()} /></Show>
-      <span class="sc-title ell" style={titleReserve(s().title, 60)} title={compactDescription(s())}>{s().title}</span>
+      <span class="sc-title ell" style={titleReserve(s().title, 60)} title={described.title()} onPointerEnter={described.enter} onPointerLeave={described.leave}>{s().title}</span>
       <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
       <StatusBadge kind={badgeKind(s())} caption={statusCaption(s())} />
       <OptionalQuestionsChip session={s()} />
-      <button class="cc-expand" title={`${tr("Expand session row")}\n${compactDescription(s())}`} aria-description={compactDescription(s())}
+      <button class="cc-expand" title={expand.title()} onPointerEnter={expand.enter} onPointerLeave={expand.leave} aria-description={compactDescription(s())}
         onClick={(e) => { e.stopPropagation(); props.onExpand(); }} onDblClick={(e) => e.stopPropagation()}>
         <Icon name="expand-row" size={16} />
       </button>

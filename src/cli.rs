@@ -234,6 +234,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        launch-parent-v1
        hgs [@host] dirs [--hidden] [path]   directories as JSON (default: home)
        hgs [@host] dirs --create <path> [--request-id UUID]   create one folder (existing parent)
+       hgs [@host] path-info --path <path>   whether a path exists, its kind and size (JSON schema 1); reads no content
        hgs [@host] kill <session> [--archive <id>]
        hgs [@host] rename <session> <new-full-name> [--archive <id>]
        hgs [@host] archives --json [--bounded]   date-filtered archive pages (JSON stdin); --bounded caps counts at 10,000 and each scan at 25,000 rows
@@ -296,7 +297,7 @@ fn local_sessions() -> Result<()> {
 // Repository preparation owns only its checkout and receipt. Like the existing
 // configuration/control commands, it does not require or enable a session host.
 fn needs_local_sessions(command: &str) -> bool {
-    !matches!(command, "ls" | "watch" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "analytics" | "graph" | "wait" | "mobile" | "hooks" | "repository" | "session-action-status" | "subagent")
+    !matches!(command, "ls" | "watch" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "analytics" | "graph" | "wait" | "mobile" | "hooks" | "repository" | "session-action-status" | "subagent" | "path-info")
 }
 
 /// Fails unless this process may run what the processes of a session run:
@@ -1005,6 +1006,7 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
     match command.as_str() {
         "hooks" => state::hook_health::dispatch(&config, args, dry),
         "analytics" => crate::analytics::dispatch(&config, args, dry),
+        "path-info" => crate::path_info::command(args, dry),
         "speech" => crate::speech::dispatch(&config, args, dry),
         "mobile" => crate::phones::dispatch(&config, args, dry),
         "__dsh-ui-url" => {
@@ -1718,7 +1720,7 @@ fn remote_via(
         "--expect-machine" => {
             let expected=require(&args,0,"Missing expected machine identity")?;
             let actual=require(&args,1,"Missing guarded command")?;
-            let terminal=!has(&args,"-d")&&!matches!(actual,"dirs"|"worktrees"|"repository"|"session-action-status"|"--help"|"dsh"|"opencode");
+            let terminal=!has(&args,"-d")&&!matches!(actual,"dirs"|"path-info"|"worktrees"|"repository"|"session-action-status"|"--help"|"dsh"|"opencode");
             flags=vec!["-o".into(),"BatchMode=yes".into(),"-o".into(),"ConnectTimeout=3".into()];
             if terminal { flags.insert(0,"-t".into()); }
             let mut all=vec!["--expect-machine".into(),expected.into(),"--client".into(),config.host().into()];
@@ -1726,7 +1728,7 @@ fn remote_via(
         }
         "session-action-status" if machine.is_none() => return Err(Error::new(2,"A remote lifecycle receipt read requires --expect-machine ID before session-action-status")),
         "archives" | "session-action-status" | "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "repository" | "dirs" | "project" | "archive" | "rename"
-        | "send" | "send-now" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "guide" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "notifications" | "keep-warm" | "speech" | "analytics" | "voice" | "hooks" | "parent" | "--help" => {
+        | "send" | "send-now" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "guide" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "notifications" | "keep-warm" | "speech" | "analytics" | "voice" | "hooks" | "parent" | "path-info" | "--help" => {
             flags = vec![
                 "-o".into(),
                 "BatchMode=yes".into(),
@@ -1777,10 +1779,20 @@ fn remote_via(
         Some(machine) => ["--expect-machine".to_owned(), machine.to_owned()].into_iter().chain(remote_args).collect(),
         None => remote_args,
     };
+    let wrapped_path_info = command == "--expect-machine" && args.get(1).is_some_and(|actual| actual == "path-info");
     let remote = if let Some(markers) = selector_markers(command, &args)? {
         // An older peer would read the flag as a session name; it must
         // advertise the selector, and what the command needs already, first.
         gated(&markers, &remote_args)
+    } else if command == "path-info" || wrapped_path_info {
+        // An older peer would read an unknown command as an agent launch, so
+        // the actual command's marker gates it, wrapped by --expect-machine
+        // too (zerus-3skhm). A path's ~ reaches the peer's hgs as written:
+        // hgs expands ~/ itself and refuses ~user, which the peer's shell
+        // would expand (zerus-ie12o).
+        let words = remote_args.iter().map(|word| if word.starts_with('~') { format!("'{}'", word.replace('\'', "'\\''")) } else { platform::join(&[word]) }).collect::<Vec<_>>().join(" ");
+        let guarded = if wrapped_path_info || machine.is_some() { "~/.local/bin/hgs --help 2>/dev/null | grep -qF 'guarded-create-v1' && " } else { "" };
+        platform::remote_sh(&format!("if {guarded}~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] path-info --path'; then exec ~/.local/bin/hgs {words}; else echo 'hgs: update the selected computer to check file paths' >&2; exit 1; fi"))
     } else if command == "--expect-machine" && args.get(1).is_some_and(|actual| actual=="session-action-status") {
         // Probe the same executable, without reading the JSON stream. An old
         // peer must never interpret this reader's name as a program to launch.
@@ -1835,6 +1847,7 @@ fn remote_via(
     let remote = if global_dry || has(&args, "--dry-run") { remote } else {
         let mut markers: Vec<(&str, bool)> = match command {
             "--expect-machine" if args.get(1).is_some_and(|v| v == "session-action-status") => vec![("guarded-create-v1", false), ("lifecycle-receipt-status-v1", true)],
+            "--expect-machine" if wrapped_path_info => vec![("guarded-create-v1", false), ("hgs [@host] path-info --path", false)],
             "--expect-machine" => vec![("guarded-create-v1", false)],
             "subagent" => vec![("Subagent retirement ABI: subagent-retire-v1", false)],
             "repository" => vec![("repository-clone-v1", false)],
@@ -1843,6 +1856,7 @@ fn remote_via(
             "keep-warm" => vec![("session-keep-warm-v1", true)],
             "hooks" => vec![("hooks-health-v1", false)],
             "analytics" => vec![("hgs [@host] analytics --json", false)],
+            "path-info" => vec![("hgs [@host] path-info --path", false)],
             "watch" => vec![(zerus_watch_protocol::HELP_MARKER, false)],
             "guide" => vec![("hgs [@host] guide", false)],
             _ => vec![],

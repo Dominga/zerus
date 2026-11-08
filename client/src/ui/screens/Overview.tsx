@@ -1,4 +1,5 @@
 import { For, Index, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { steadyTitle } from "../lib/steady-title";
 import { useNow } from "../../store/latest";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { Icon } from "../lib/icons";
@@ -86,13 +87,15 @@ function AccountCard(props: { a: Account; now: number }) {
   // An agent that is not installed reads as unavailable (DashboardPage.cpp:262).
   const usage = () => (props.a.installed ? props.a.usage : { ...props.a.usage, status: "unavailable" });
   const hosts = () => props.a.members.filter((m, i, all) => all.findIndex((x) => x.host === m.host) === i);
+  // The usage tooltip holds still under the pointer (zerus-5ryrx).
+  const tip = steadyTitle(() => accountTooltip(usage(), props.now));
   const open = () => {
     setRequestedProfile(props.a.members[0]?.key);
     setAccountMachine("*");
     setPage("accounts");
   };
   return (
-    <button class="ov-acard box" data-tone={accountTone(props.a, props.now)} title={accountTooltip(usage(), props.now)} onClick={open}>
+    <button class="ov-acard box" data-tone={accountTone(props.a, props.now)} title={tip.title()} onPointerEnter={tip.enter} onPointerLeave={tip.leave} onClick={open}>
       <span class="ov-al1">
         <b class="ell">{props.a.label}</b>
         <span class="grow" />

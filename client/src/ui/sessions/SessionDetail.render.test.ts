@@ -238,6 +238,22 @@ describe("a shown tool search hit (zerus-tso9j, zerus-2r73y)", () => {
     expect([...detail()!.querySelectorAll("mark")].map((m) => m.textContent)).toEqual(["needle"]);
   });
 
+  it("marks the new query when another hit of the same session shows (zerus-2r73y.1)", async () => {
+    const row = fixtureRow(); const key = await open(row);
+    const marks = () => [...host.querySelectorAll(".search-preview mark")].map((m) => m.textContent);
+    const showHit = async (query: string, hit: SearchHit) => { setSearchPreview({ key, run: row.run_id!, conversation: row.conversation_id!, query, hit }); await flush(); };
+    await showHit("needle", toolHit(row, "needle and prefix"));
+    expect(marks()).toEqual(["needle"]);
+    await showHit("prefix", { ...toolHit(row, "prefix only here"), message_id: "m2", event: { seq: 2, type: "PostToolUse", tool: "Bash", at: 1_793_000_100, detail: "prefix only here" } });
+    expect(marks()).toEqual(["prefix"]);
+    // A reply hit (Markdown) follows the query the same way.
+    const reply = (n: number, detail: string): SearchHit => ({ ...toolHit(row, detail), message_id: `r${n}`, role: "assistant", event: { seq: 10 + n, type: "AgentMessage", at: 1_793_000_200 + n, detail } });
+    await showHit("alpha", reply(1, "alpha beta"));
+    await vi.waitFor(() => expect(marks()).toEqual(["alpha"]));
+    await showHit("beta", reply(2, "beta gamma"));
+    await vi.waitFor(() => expect(marks()).toEqual(["beta"]));
+  });
+
   it("marks the query in a tool hit's output, and only inside the hit", async () => {
     const detail = await show("a needle tool output with NEEDLE twice");
     expect([...detail()!.querySelectorAll("mark")].map((m) => m.textContent)).toEqual(["needle", "NEEDLE"]);

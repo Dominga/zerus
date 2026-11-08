@@ -4598,13 +4598,9 @@
   "The original mode result is unavailable. Keep its request ID and check again.": "Исходный результат смены режима недоступен. Сохраните идентификатор запроса и проверьте снова.",
   "The original settings source changed or could not be verified.": "Исходные настройки изменились или не прошли проверку.",
   "The owner's findings: fixed, dropped, deferred, reopened, urgent or replanned": "Находки владельца: исправленные, отброшенные, отложенные, открытые снова, срочные или перепланированные",
-<<<<<<< HEAD
   "The pending close ends with this switch.": "Отложенное закрытие завершится этим переключением.",
   "The phase closes when the build passes; a failed build keeps it open and reaches the lead.": "Фаза закроется, когда сборка пройдёт; провалившаяся сборка оставит её открытой и дойдёт до лида.",
-||||||| merged common ancestors
-=======
   "The phase's result waits for the critical follow-up": "Результат фазы ждёт критического продолжения",
->>>>>>> 07ac835dd
   "The plan has no tasks yet": "В плане пока нет задач",
   "The plan no longer waits for your approval; nothing was sent.": "План больше не ждёт вашего одобрения; ничего не отправлено.",
   "The plan waits for your approval": "План ждёт вашего одобрения",

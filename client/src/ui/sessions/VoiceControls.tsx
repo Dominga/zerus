@@ -30,6 +30,13 @@ export function VoiceToolbar(props: { voice: SessionVoice; compact: boolean }) {
       <Icon name={recording() ? icon(shown()?.voice_icon ?? "stop") : video() ? "video" : "mic"} size={13} />
       {recording() ? shown()?.voice_label : shown()?.state === "starting" || shown()?.state === "saving" ? shown()?.voice_label : video() ? tr("Video") : tr("Voice")}
     </button>
+    {/* Qt's Stop and preview (SpeechComposer.cpp:90-92,469): stops and keeps the
+        recording for review, like Space or Esc. Where the record button
+        itself stops to preview, it would only repeat that button. */}
+    <Show when={shown()?.stop_preview && shown()?.voice_icon !== "stop"}>
+      <button type="button" class="tchip" title={tr("Stop and keep the recording for review. Space or Esc does the same.")}
+        onClick={() => { void props.voice.input({ kind: "stop", forget_send: false }); }}><Icon name="square" size={13} /><Show when={!props.compact}>{tr("Stop and preview")}</Show></button>
+    </Show>
     <button type="button" class="tchip icon" disabled={changingMode() || !shown()?.mode_enabled || recording()}
       aria-label={video() ? tr("Switch to voice recording") : tr("Switch to video recording")} data-tip={video() ? tr("Switch to voice recording") : tr("Switch to video recording")}
       onClick={() => {

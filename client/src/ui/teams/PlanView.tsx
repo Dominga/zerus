@@ -4,8 +4,8 @@ import { Icon } from "../lib/icons";
 import { tr } from "../../i18n";
 import type { PlanGraph, TeamView } from "./types";
 import type { TeamBuildsView, TeamProfileView, TeamTaskView, TeamTestsView, TeamTimelineView } from "../../types";
-import { HeatLegend, HeatLine, PlanModeBar, ProfilePanel, TestsPanel, runStatusLabel, stageLabel } from "./plan-panels";
-import { ProfileTime } from "./TimeView";
+import { HeatLegend, HeatLine, PlanModeBar, TestsPanel, runStatusLabel, stageLabel } from "./plan-panels";
+import { ProfilePage } from "./profile-page";
 import { LanesView, type LaneEdit } from "./LanesView";
 import { spawnedFrom, heatModeSeed, stageChips, type PlanMode } from "./planModes";
 import { settings, settingsReady } from "../../store/settings";
@@ -75,6 +75,9 @@ export interface PlanViewProps {
   now?: () => number;
   /** The mode it opens in (Graph by default). */
   initialMode?: PlanMode;
+  /** Task 342: the tests open it with cancelled tasks shown or finished ones hidden. */
+  initialShowCancelled?: boolean;
+  initialHideFinished?: boolean;
   /** Task #226: the Lanes mode's rename and move go through edit-draft; false on a refusal. */
   onLaneEdit?: (phase: number, updates: LaneEdit[]) => Promise<boolean>;
   class?: string;
@@ -84,17 +87,18 @@ const HEADER_H = 44;
 const COLLAPSED_H = 44;
 const SCROLLBAR = 12;
 
-/** The card tone class, from Qt's task tones. */
+/** The card tone class: task 342 (owner, 2026-11-08) gives the plan's five task
+ * states a colour each - done green, in work a light blue, in review a deeper
+ * blue, not started a pale grey and cancelled a grey hatch - while a problem or
+ * a wait keeps its amber/red. */
 function toneClass(tone: string): string {
-  if (tone === "active") return "working";
-  if (tone === "assigned") return "assigned";
+  if (tone === "active") return "work";
+  if (tone === "review") return "review";
   if (tone === "done") return "done";
   if (tone === "danger") return "danger";
   if (tone === "warn") return "warn";
-  // A dim task (a draft, a cancelled one) is muted: "pt-card-dim" is the
-  // hover chain's dimming.
-  if (tone === "dim") return "muted";
-  return "pending";
+  if (tone === "cancelled") return "cancelled";
+  return "notstarted";
 }
 
 function short(value: string, limit = 150): string {
@@ -146,13 +150,13 @@ function PhaseScroll(props: { key: string; class: string; children: JSX.Element;
 export function PlanView(props: PlanViewProps): JSX.Element {
   const now = () => props.now?.() ?? Date.now() / 1000;
   const [mode, setMode] = createSignal<PlanMode>(props.initialMode ?? "graph");
-  const [includeCancelled, setIncludeCancelled] = createSignal(false);
+  const [includeCancelled, setIncludeCancelled] = createSignal(props.initialShowCancelled ?? false);
   const [filter, setFilter] = createSignal<PlanFilter>("all");
   const [ownMember, setOwnMember] = createSignal("");
   const member = () => props.member ?? ownMember();
   const chooseMember = (id: string) => (props.onMember ? props.onMember(id) : setOwnMember(id));
   const hideKey = "zerus.teams.hideFinished";
-  const [hideFinished, setHideFinished] = createSignal(stored(hideKey) === "1");
+  const [hideFinished, setHideFinished] = createSignal(props.initialHideFinished ?? stored(hideKey) === "1");
   const switchHide = (on: boolean) => { setHideFinished(on); store(hideKey, on ? "1" : null); };
   const [zoom, setZoom] = createSignal(1);
   // Task 197 (P6): Off, Lateness or Tokens, remembered per team in this
@@ -179,7 +183,8 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     new Set(props.team.phases.filter((phase) => phase.status === "done").map((phase) => phase.n)),
   );
   const [hover, setHover] = createSignal<number | null>(null);
-  const [selected, setSelected] = createSignal<number | null>(null);
+  // Task 342: the tests open a task on mount; otherwise a click selects it.
+  const [selected, setSelected] = createSignal<number | null>(props.openTask?.task ?? null);
   createEffect(() => {
     const request = props.openTask;
     if (!request) return;
@@ -189,7 +194,8 @@ export function PlanView(props: PlanViewProps): JSX.Element {
   const problems = () => props.problems ?? new Map<number, TaskProblem>();
   const planning = () => props.team.status === "planning";
   const byId = createMemo(() => new Map(props.team.tasks.map((task) => [task.id, task])));
-  const visibleTask = (task: TeamTaskView | undefined) => !!task && (includeCancelled() || task.status !== "cancelled");
+  const visibleTask = (task: TeamTaskView | undefined) =>
+    !!task && (includeCancelled() || task.status !== "cancelled") && !(hideFinished() && task.status === "accepted");
   const allPhases = createMemo(() => phasePlans(props.team, props.graph));
   // U58 and owner 2026-10-30: cancelled tasks and the phases they emptied
   // stay out unless shown; Hide finished leaves out every decided phase.
@@ -455,7 +461,9 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           <span class="pt-title">{task.title || tr("Task %1", task.id)}</span>
           <Show when={task.pipeline_run?.open}>{(stage) => <span class="pt-badge" data-stage={stage().kind}>{stageName(stage().kind)}</span>}</Show>
           <Show when={external.length > 0}>
-            <span class="pt-deps" title={tr("Depends on tasks in other phases")}>↤{external.map((id) => `#${id}`).join(" ")}</span>
+            <span class="pt-deps" title={`${tr("Depends on tasks in other phases")}\n${external.map((id) => `#${id}`).join(" ")}`}>
+              ↤{external.slice(0, 2).map((id) => `#${id}`).join(" ")}{external.length > 2 ? ` +${external.length - 2}` : ""}
+            </span>
           </Show>
         </span>
         <span class="pt-card-l2">
@@ -658,7 +666,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     const phase = phaseOf(task.id);
     const blocks = props.team.tasks.filter((candidate) => candidate.deps.some((dep) => dep.task === task.id));
     return (
-      <aside class="pt-detail" aria-label={tr("Task %1: %2", task.id, task.title)}>
+      <aside class={`pt-detail pt-detail-${tone(task)}`} data-task-tone={tone(task)} aria-label={tr("Task %1: %2", task.id, task.title)}>
         <div class="pt-detail-head">
           <span class={`pt-dot pt-dot-${tone(task)}`} />
           <span class="pt-id">#{task.id}</span>
@@ -792,6 +800,14 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           </Show>
         </Show>
         <span class="pt-grow" />
+        {/* Task 342 (owner, 2026-11-08): the five task states, as the cards tint. */}
+        <span class="pt-legend pt-state-legend" aria-label={tr("Task states")} data-state-legend>
+          <span class="pt-legend-item"><i class="pt-swatch pt-swatch-done" />{tr("Done")}</span>
+          <span class="pt-legend-item"><i class="pt-swatch pt-swatch-work" />{tr("In progress")}</span>
+          <span class="pt-legend-item"><i class="pt-swatch pt-swatch-review" />{tr("In review")}</span>
+          <span class="pt-legend-item"><i class="pt-swatch pt-swatch-notstarted" />{tr("Not started")}</span>
+          <span class="pt-legend-item"><i class="pt-swatch pt-swatch-cancelled" />{tr("Cancelled")}</span>
+        </span>
         <Show when={mode() === "graph"}>
           <span class="pt-legend" aria-label={tr("Link legend")}>
             <span class="pt-legend-item"><i class="pt-legend-dep" />{tr("Depends on")}</span>
@@ -813,24 +829,10 @@ export function PlanView(props: PlanViewProps): JSX.Element {
       <Show when={heatView()}>
         <HeatLegend profile={props.profile} />
       </Show>
-      {/* Task #219: Board, Layers, Profile and Tests keep a phase header each, with its Standard | Free toggle. */}
-      <Show when={mode() !== "graph" && phases().length > 0}>
-        <div class="pm-phase-strip" aria-label={tr("Phases")}>
-          <For each={phases()}>
-            {(phase) => {
-              const status = phaseStatus(phase.phase);
-              return (
-                <div class="pm-phase-head" data-phase={phase.phase.n} data-mode={phase.phase.mode ?? "standard"}>
-                  <span class="pm-phase-n">{phase.phase.n}</span>
-                  <b class="pm-phase-name">{phase.phase.title || tr("Phase %1", phase.phase.n)}</b>
-                  <span class={`pt-chip pt-chip-${status.kind}`}>{statusLabel(status.kind)}</span>
-                  {props.phaseActions?.(phase.phase.n)}
-                </div>
-              );
-            }}
-          </For>
-        </div>
-      </Show>
+      {/* Task 335 (owner, 2026-11-08): no phase strip above the plan. Qt has
+          none: each view with phase headers carries the Standard/Free toggle in
+          the phase's own header (Board and Layers below, Lanes in its header),
+          and Profile and Tests have no phase headers, as in Qt. */}
       <Show when={mode() === "graph"}>
         <div class="pt-plan-body">
           <div class="pt-plan-scroll" ref={scroller} onPointerLeave={() => setHover(null)}>
@@ -900,14 +902,13 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         </div>
       </Show>
       <Show when={mode() === "lanes"}>
-        <LanesView team={props.team} includeCancelled={includeCancelled()} profile={props.profile} onOpen={open} onEdit={props.onLaneEdit} />
+        <LanesView team={props.team} includeCancelled={includeCancelled()} hideFinished={hideFinished()} profile={props.profile} onOpen={open} onEdit={props.onLaneEdit}
+          phaseActions={props.phaseActions} />
       </Show>
       <Show when={mode() === "profile"}>
         <div class="pm-profile-scroll">
-          <Show when={props.loadTimeline}>{(load) => (
-            <ProfileTime team={props.team} load={load()} profile={props.profile} statusName={runStatusLabel} onOpen={open} />
-          )}</Show>
-          <ProfilePanel profile={props.profile} team={props.team.id} />
+          <ProfilePage team={props.team} profile={props.profile} loadTimeline={props.loadTimeline}
+            statusName={runStatusLabel} onOpen={open} />
           {detail()}
         </div>
       </Show>
@@ -919,3 +920,4 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     </section>
   );
 }
+

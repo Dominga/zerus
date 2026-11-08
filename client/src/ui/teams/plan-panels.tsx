@@ -291,7 +291,12 @@ export function ProfileLegend(): JSX.Element {
   );
 }
 
-export function ProfilePanel(props: { profile?: TeamProfileView | null; team?: string; scope?: string }): JSX.Element {
+/**
+ * Task #339: the totals come first, above the lanes, as Qt's summaryTiles sits
+ * before the timeline card in TeamProfile::timePage; the export button stays
+ * in the same bar.
+ */
+export function ProfileSummary(props: { profile?: TeamProfileView | null; team?: string; scope?: string }): JSX.Element {
   const [status, setStatus] = createSignal("");
   const exportJson = () => {
     const team = props.team ?? "";
@@ -305,7 +310,7 @@ export function ProfilePanel(props: { profile?: TeamProfileView | null; team?: s
     }
   };
   return (
-    <div class="pm-profile">
+    <div class="pm-profile pm-profile-summary">
       <div class="pm-profile-head">
         <span class="grow" />
         <Show when={props.team}>
@@ -315,13 +320,29 @@ export function ProfilePanel(props: { profile?: TeamProfileView | null; team?: s
       </div>
       <Show when={props.profile} fallback={<p class="pm-empty">{tr("Reading the profile…")}</p>}>
         {(profile) => (
+          <div class="pm-tiles">
+            <div class="pm-tile"><span>{tr("Elapsed")}</span><b>{formatSeconds(profile().elapsed_s ?? 0)}</b></div>
+            <div class="pm-tile"><span>{tr("Worked")}</span><b>{formatSeconds(profile().worked_s ?? 0)}</b></div>
+            <div class="pm-tile"><span>{tr("Accepted")}</span><b>{profile().accepted}/{profile().tasks}</b></div>
+            <div class="pm-tile"><span>{tr("Tokens")}</span><b>{formatTokens(profile().tokens)}</b><Show when={profile().tokens_partial}><i class="pm-note">{tr("partial")}</i></Show></div>
+          </div>
+        )}
+      </Show>
+    </div>
+  );
+}
+
+/**
+ * Task #339: the Top losses and the roles follow the lanes and their legend,
+ * as Qt's losses column follows the timeline card; the legend itself moved to
+ * the Time section, directly under the lanes it explains.
+ */
+export function ProfileDetails(props: { profile?: TeamProfileView | null }): JSX.Element {
+  return (
+    <div class="pm-profile pm-profile-details">
+      <Show when={props.profile}>
+        {(profile) => (
           <>
-            <div class="pm-tiles">
-              <div class="pm-tile"><span>{tr("Elapsed")}</span><b>{formatSeconds(profile().elapsed_s ?? 0)}</b></div>
-              <div class="pm-tile"><span>{tr("Worked")}</span><b>{formatSeconds(profile().worked_s ?? 0)}</b></div>
-              <div class="pm-tile"><span>{tr("Accepted")}</span><b>{profile().accepted}/{profile().tasks}</b></div>
-              <div class="pm-tile"><span>{tr("Tokens")}</span><b>{formatTokens(profile().tokens)}</b><Show when={profile().tokens_partial}><i class="pm-note">{tr("partial")}</i></Show></div>
-            </div>
             <h3>{tr("Top losses")}</h3>
             <Show when={profile().losses.length > 0} fallback={<p class="pm-empty">{tr("No losses recorded")}</p>}>
               <For each={profile().losses.slice(0, 20)}>
@@ -337,7 +358,6 @@ export function ProfilePanel(props: { profile?: TeamProfileView | null; team?: s
                 )}
               </For>
             </Show>
-            <ProfileLegend />
             <h3>{tr("Roles")}</h3>
             <For each={profile().roles.slice(0, 50)}>
               {(role) => (
@@ -367,6 +387,19 @@ export function TestsPanel(props: {
   onForce?: (suite: string) => Promise<string>;
 }): JSX.Element {
   const rows = () => testsRows(props.tests);
+  // Task 324 (Qt TeamTests): "%1 suites failing" counts the suites whose latest
+  // run failed or timed out, each suite once.
+  const failingSuites = () => {
+    const seen = new Set<string>();
+    let failed = 0;
+    for (const run of rows().runs) {
+      if (seen.has(run.suite)) continue;
+      seen.add(run.suite);
+      const kind = testStatus(run.status);
+      if (kind === "failed" || kind === "timed-out") failed += 1;
+    }
+    return failed;
+  };
   const [open, setOpen] = createSignal("");
   const [tab, setTab] = createSignal<"tests" | "builds">("tests");
   const [forcing, setForcing] = createSignal<Record<string, boolean>>({});
@@ -389,6 +422,15 @@ export function TestsPanel(props: {
         <BuildsPanel builds={props.builds} error={props.buildsError} />
       </Show>
       <Show when={tab() === "tests" && props.tests} fallback={<Show when={tab() === "tests"}><p class="pm-empty">{tr("Reading the tests…")}</p></Show>}>
+        {/* Task 324 (Qt TeamTests): the hint, the counters and the Queue section in Qt's order. */}
+        <p class="pm-note" data-tests-hint>{tr("Test requests wait in a queue; Zerus runs them when the machine has room and keeps each result with its excerpt.")}</p>
+        <div class="pm-tests-counts" data-tests-counts>
+          <span classList={{ "pm-pill": true, "pm-count-on": rows().running.length > 0 }} data-count="running">{tr("%n running", rows().running.length)}</span>
+          <span classList={{ "pm-pill": true, "pm-count-on": rows().waiting.length > 0 }} data-count="waiting">{tr("%n waiting", rows().waiting.length)}</span>
+          <Show when={failingSuites() > 0}>
+            <span class="pm-pill danger" data-count="failing">{failingSuites() === 1 ? tr("1 suite failing") : tr("%1 suites failing", failingSuites())}</span>
+          </Show>
+        </div>
         <Show when={testSuites(props.tests).length > 0}>
           <h3>{tr("Suites")}</h3>
           <For each={testSuites(props.tests)}>{(suite) => {
@@ -423,8 +465,9 @@ export function TestsPanel(props: {
           <h3>{tr("Running now")}</h3>
           <For each={rows().running}>{(item) => <TestQueueRow item={item} />}</For>
         </Show>
-        <Show when={rows().waiting.length > 0}>
-          <h3>{tr("Waiting")}</h3>
+        {/* Task 324: Qt's Queue section is always there; "Nothing waits." is its empty line. */}
+        <h3>{tr("Queue")}</h3>
+        <Show when={rows().waiting.length > 0} fallback={<p class="pm-empty" data-tests-queue-empty>{tr("Nothing waits.")}</p>}>
           <For each={rows().waiting}>{(item) => <TestQueueRow item={item} />}</For>
         </Show>
         <h3>{tr("Recent runs")}</h3>

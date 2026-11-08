@@ -23,7 +23,14 @@ describe("planTasks", () => {
     expect(taskState(task(1, "in_progress", { attempt_state: "delivered", no_report: true }))).toMatchObject({ text: "No report", problem: true });
     expect(taskState(task(1, "draft")).tone).toBe("dim");
     expect(taskState(task(1, "assigned")).tone).toBe("assigned");
-    expect(taskState(task(1, "in_review")).tone).toBe("active");
+    // Task 342 (owner, 2026-11-08): what waits for a decision is in review, a
+    // blue of its own, not the done green of a task nobody accepted yet.
+    expect(taskState(task(1, "submitted")).tone).toBe("review");
+    expect(taskState(task(1, "in_review")).tone).toBe("review");
+    expect(taskState(task(1, "in_test")).tone).toBe("review");
+    expect(taskState(task(1, "accepted")).tone).toBe("done");
+    expect(taskState(task(1, "in_progress")).tone).toBe("active");
+    expect(taskState(task(1, "cancelled")).tone).toBe("cancelled");
     expect(taskState(task(1, "rejected")).tone).toBe("danger");
   });
 

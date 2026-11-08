@@ -815,7 +815,9 @@ struct Live {
 };
 using LiveLookup = std::function<Live(const Member &)>;
 
-enum class Tone { Neutral, Active, Assigned, Done, Muted, Dim, Warn, Danger, Planning };
+// Task 342 (owner, 2026-11-08): Review and Cancelled join the tones so a plan card
+// tells done, in work, in review, not started and cancelled apart by colour.
+enum class Tone { Neutral, Active, Assigned, Done, Muted, Dim, Warn, Danger, Planning, Review, Cancelled };
 
 struct Status {
     QString kind;        // working, submitted, idle, no_report, unconfirmed, offline, answer, paused, ...

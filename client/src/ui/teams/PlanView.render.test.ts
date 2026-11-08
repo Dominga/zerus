@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
+import type { JSX } from "solid-js";
 import type { TeamTaskView, TeamView } from "../../types";
 import type { PlanGraph } from "./types";
 
@@ -280,4 +281,110 @@ describe("the plan's Graph, Board and Layers (task 197)", () => {
     const qa = render({ team, graph, problems, now, initialMode: "layers", member: "qa" });
     expect([...qa.matchAll(/class="pm-layer-row[^"]*"[^>]*data-task="(\d+)"/g)].map((match) => Number(match[1]))).toEqual([3]);
   });
+
+  it("keeps the title visible and folds a long dependency list (task 333)", () => {
+    const base = fixture().team;
+    const tasks: TeamTaskView[] = [];
+    for (let id = 1; id <= 18; id++) tasks.push(task(id, "accepted", { phase: 1, title: `Dep ${id}` }));
+    const deps = (ids: number[]) => ids.map((id) => ({ task: id, hard: true }));
+    tasks.push(task(204, "pending", { phase: 2, title: "Long dependency card", deps: deps(Array.from({ length: 18 }, (_, i) => i + 1)) }));
+    tasks.push(task(205, "pending", { phase: 2, title: "One dependency", deps: deps([1]) }));
+    tasks.push(task(206, "pending", { phase: 2, title: "Two dependencies", deps: deps([1, 2]) }));
+    const team = { ...base, tasks, phases: [{ ...base.phases[0], n: 1, title: "Deps", total: 18 }, { ...base.phases[1], n: 2, title: "Cards", total: 3 }] };
+    const graph: PlanGraph = {
+      team: "t1", layers: 2,
+      nodes: tasks.map((found) => ({ id: found.id, title: found.title, status: found.status, assignee: found.assignee, role: "", phase: found.phase,
+        layer: found.phase === 1 ? 0 : 1, ready: false, in_cycle: false })),
+      edges: tasks.flatMap((found) => found.deps.map((dep) => ({ from: dep.task, to: found.id, hard: dep.hard }))),
+    };
+    const html = render({ team, graph, problems: new Map(), now });
+    const card = plain(html.slice(html.indexOf('data-task="204"')));
+    expect(card).toContain("Long dependency card");
+    expect(card).toContain("↤#1 #2 +16");
+    expect(card.indexOf("Long dependency card")).toBeLessThan(card.indexOf("pt-deps"));
+    expect(card).toContain("#18");
+    const one = plain(html.slice(html.indexOf('data-task="205"')));
+    expect(one).toContain("↤#1");
+    expect(one).not.toContain("+0");
+    const two = plain(html.slice(html.indexOf('data-task="206"')));
+    expect(two).toContain("↤#1 #2");
+    expect(two).not.toContain("+0");
+  });
+
+  // Task 335 (owner, 2026-11-08): the strip of phase chips 219 added above the
+  // plan is gone. Qt keeps the Standard/Free toggle in each phase's own header;
+  // Board and Layers draw that header, Lanes its own, and Profile and Tests
+  // have no phase headers at all.
+  it("has no phase strip above the plan and keeps the toggle in each phase header", () => {
+    const { team, graph } = fixture();
+    const phaseActions = ((n: number) => `TOGGLE-${n}`) as unknown as (n: number) => JSX.Element;
+    for (const initialMode of ["graph", "board", "layers", "lanes", "profile", "tests"]) {
+      const html = render({ team, graph, problems, now, initialMode, phaseActions });
+      expect(html, initialMode).not.toContain("pm-phase-strip");
+    }
+    for (const initialMode of ["board", "layers", "lanes"]) {
+      const html = render({ team, graph, problems, now, initialMode, phaseActions });
+      // Each phase's header, once: no repeated chip row above the view.
+      for (const n of [1, 2]) expect(html, `${initialMode}/${n}`).toContain(`TOGGLE-${n}`);
+      expect(html, initialMode).not.toContain("TOGGLE-undefined");
+    }
+  });
+
+  // Task 342 (owner, 2026-11-08): the five task states are told apart by colour
+  // in every plan mode - done green, in work light blue, in review a deeper
+  // blue, not started a pale grey and cancelled a grey hatch - and the plan
+  // header carries their legend.
+  it("tints each task by its state and names the five states in a legend", () => {
+    const { team, graph } = fixture();
+    team.tasks[0].status = "accepted";
+    team.tasks[1].status = "in_progress";
+    team.tasks[3].status = "submitted";
+    team.tasks[4].status = "pending";
+    team.tasks[5].status = "cancelled";
+    team.tasks[3].deps = [];
+    const graphHtml = render({ team, graph, problems, now, initialShowCancelled: true });
+    for (const cls of ["pt-card-done", "pt-card-work", "pt-card-review", "pt-card-notstarted", "pt-card-cancelled"]) {
+      expect(graphHtml, cls).toContain(`pt-card-${cls.slice(8)}`);
+    }
+    // The same tones on Board and Layers, where the cards are rows.
+    for (const initialMode of ["board", "layers"]) {
+      const html = render({ team, graph, problems, now, initialMode, initialShowCancelled: true });
+      for (const cls of ["pt-tone-done", "pt-tone-work", "pt-tone-review", "pt-tone-notstarted", "pt-tone-cancelled"]) {
+        expect(html, `${initialMode}/${cls}`).toContain(cls);
+      }
+    }
+    // The legend: one swatch per state, in the plan header of every mode.
+    for (const initialMode of ["graph", "board", "layers", "lanes", "profile"]) {
+      const html = render({ team, graph, problems, now, initialMode, initialShowCancelled: true });
+      expect(html, initialMode).toContain("data-state-legend");
+      for (const label of ["Done", "In progress", "In review", "Not started", "Cancelled"]) expect(html, initialMode).toContain(label);
+      expect(html, initialMode).toContain("pt-swatch-cancelled");
+    }
+    // The side panel takes the selected task's colour.
+    const detail = render({ team, graph, problems, now, initialShowCancelled: true, openTask: { task: 1 } });
+    expect(detail).toContain("pt-detail-done");
+    expect(detail).toContain('data-task-tone="done"');
+  });
+
+  // Task 342: Hide finished hides accepted tasks in every plan mode, not only
+  // the phases whose every task is decided.
+  it("Hide finished leaves accepted tasks out of every plan mode", () => {
+    const { team, graph } = fixture();
+    const modes = ["graph", "board", "layers"];
+    for (const initialMode of modes) {
+      const shown = render({ team, graph, problems, now, initialMode });
+      expect(shown, initialMode).toContain('data-task="1"');
+      const hidden = render({ team, graph, problems, now, initialMode, initialHideFinished: true });
+      expect(hidden, initialMode).not.toContain('data-task="1"');
+      // The tasks still open stay.
+      expect(hidden, initialMode).toContain('data-task="2"');
+    }
+    const lanes = render({ team, graph, problems, now, initialMode: "lanes" });
+    expect(lanes).toContain("pm-lanes");
+    expect(lanes).toContain("API");
+    const lanesHidden = render({ team, graph, problems, now, initialMode: "lanes", initialHideFinished: true });
+    expect(lanesHidden).not.toContain("API");
+    expect(lanesHidden).toContain("Store");
+  });
 });
+

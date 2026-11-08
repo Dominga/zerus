@@ -164,6 +164,10 @@ function Header() {
 
 type Tab = { id: string; label: string };
 const TABS: readonly Tab[] = [{ id: "activity", label: "Activity" }, { id: "terminal", label: "Terminal" }];
+/** Task #331: the strip renders these fixed ids, never a fresh tab object, so
+ * a status poll, a team read or an unread change cannot remount a button and
+ * restart the active tab's underline animation. */
+export const TAB_ORDER = ["activity", "terminal", "native", "processes", "taskview", "team"] as const;
 
 /** The selected child's bounded page, an archive's recorded page, or the live parent follow. */
 export const activitySourceFor = (key: string): ActivitySource => (subagentOpen() ? subagentActivity : activityReadOnly(key) ? archiveActivity : activity);
@@ -227,6 +231,8 @@ const tabs = () => {
     // Task 9: the selected session's team (its lead's or a member's session).
     // Task 200 (Qt F5): a draft is not a team yet; its lead's tab is New team, which shows the draft again.
     { id: "team" as const, label: selectedTeam()?.status === "draft" ? tr("New team") : tr("Team"), show: !!selectedTeam() && !subagentOpen() },
+    // Task #326 (N2): Qt also offers "+ New team" on a session that has no team.
+    { id: "newteam" as const, label: tr("+ New team"), show: !selectedTeam() && !subagentOpen() && selected()?.computer === "" && selected()?.state !== "archived" },
   ];
   const s = selected();
   return s ? detailTabs(s.key, all) : all;
@@ -345,9 +351,15 @@ export function SessionDetail() {
                 lead header does; the Team tab has its own bar. */}
             <Show when={detailTab() !== "team"}><LeadTeamHeader /></Show>
             <div class="detail-tabs tabs" role="tablist">
-              <For each={tabs().filter((t) => t.show)}>{(t) => (
-                <button class="tab" role="tab" classList={{ on: detailTab() === t.id }} aria-selected={detailTab() === t.id} onClick={() => { if (t.id === "terminal") terminal.opened(); setDetailTab(t.id); }}>{t.label}<Show when={t.id === "team" && teamAnswers(selectedTeam()) > 0}><span class="tab-count" data-tip={tr("Needs your answer")}>?{teamAnswers(selectedTeam())}</span></Show></button>
-              )}</For>
+              <For each={TAB_ORDER}>{(id) => {
+                const tab = () => tabs().find((found) => found.id === id);
+                return (
+                  <button class="tab" role="tab" data-tab-id={id} hidden={!tab()?.show} classList={{ on: detailTab() === id }}
+                    aria-selected={detailTab() === id} onClick={() => { if (id === "terminal") terminal.opened(); setDetailTab(id); }}>
+                    {tab()?.label}<Show when={id === "team" && teamAnswers(selectedTeam()) > 0}><span class="tab-count" data-tip={tr("Needs your answer")}>?{teamAnswers(selectedTeam())}</span></Show>
+                  </button>
+                );
+              }}</For>
               <span class="grow" />
               <Show when={!inspectorOpen()}><button class="icon-btn small" data-cmd="show-side-panel" aria-label={tr("Show side panel")} data-tip={inspectorHint(tr("Show tasks, plan, agents, details and worktrees"))} data-tip-pos="left" onClick={() => setInspectorOpen(true)}><Icon name="panel-right" size={15} /></button></Show>
             </div>
@@ -379,6 +391,7 @@ export function SessionDetail() {
                 <Match when={detailTab() === "processes"}><ProcessesTab /></Match>
                 <Match when={detailTab() === "team" && selectedTeam()?.status === "draft" && selected()!.computer === "" && selectedTeam()}>{(team) => <NewTeamPage embedded draft={team().id} />}</Match>
                 <Match when={detailTab() === "team" && selectedTeam()}>{(team) => <TeamTab computer={selected()!.computer} team={team().id} />}</Match>
+                <Match when={detailTab() === "newteam" && !selectedTeam() && selected()?.computer === ""}><NewTeamPage embedded /></Match>
               </Switch>
             </div>
           </div>

@@ -5,6 +5,7 @@ import type { TeamPhaseView, TeamProfileView, TeamTimelineView, TeamView, Timeli
 import { durationText, taskHeat } from "./heat";
 import { colorOf, kindKey, labelOn, styleOf, type Pattern } from "./profile-palette";
 import { roleColor } from "./roles";
+import { ProfileLegend } from "./plan-panels";
 import {
   TL, atOf, clamp, createTimelineReads, defaultPhase, estimateRows, fit, heightFor, panBy, pixelsToSeconds, shown, spanAt, spanTip, taskLabel,
   scopeChoices, testTone, ticks, titleOf, xOf, zoomBy, type Hit, type Viewport,
@@ -311,6 +312,9 @@ export function TimeSection(props: {
           <>
             <TimeCanvas view={view()} profile={props.profile} statusName={props.statusName} onOpen={props.onOpen} />
             <Show when={view().truncated}><p class="pm-note warn">{tr("Only the first %1 tasks are drawn", SPAN_PAGES_DRAWN)}</p></Show>
+            {/* Task #339: the legend sits with the lanes it explains, as Qt's
+                teamProfileLegend directly under the timeline card. */}
+            <ProfileLegend />
             <Estimates view={view()} onOpen={props.onOpen} />
           </>
         )}

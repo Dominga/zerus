@@ -2249,6 +2249,10 @@ pub(crate) fn execute_as(plan: &Plan, folder: &Path, timeout: Duration, env: &[(
         }
         outcome
     };
+    // Task 320: a cargo build at the worker's level never builds through a
+    // shared sccache server a sandboxed process started in its restricted token.
+    let cargo = matches!(plan.template.as_str(), "cargo-build" | "cargo-test" | "cargo-clippy");
+    let restarted_before = cargo && super::super::build_cache_server::ensure_unrestricted();
     let mut outcome = attempt(&mut command);
     // Task #35: one more run for a compiler that real-time scanning stopped.
     if let Some(signature) = scanning_failure(&plan.template, &outcome) {
@@ -2264,7 +2268,7 @@ pub(crate) fn execute_as(plan: &Plan, folder: &Path, timeout: Duration, env: &[(
     // Task 261: a cargo build the shared sccache server could not write (it
     // was started in a restricted token) runs once more after the worker
     // restarted the server.
-    if matches!(plan.template.as_str(), "cargo-build" | "cargo-test" | "cargo-clippy")
+    if cargo
         && super::super::build_cache_server::worth_restart(outcome.exit, &format!("{}\n{}", outcome.tail, outcome.excerpt))
         && !timeout.saturating_sub(started.elapsed()).is_zero()
         && super::super::build_cache_server::restart().is_ok()
@@ -2272,6 +2276,9 @@ pub(crate) fn execute_as(plan: &Plan, folder: &Path, timeout: Duration, env: &[(
         outcome = attempt(&mut build(&plan.program, &plan.argv));
         // At the end: a long output's tail keeps it, and the dispatcher reads it.
         outcome.tail = last_chars(&format!("{}\n{}", outcome.tail, super::super::build_cache_server::RESTART_NOTE), TAIL_BYTES);
+    }
+    if restarted_before {
+        outcome.tail = last_chars(&format!("{}\n{}", outcome.tail, super::super::build_cache_server::RESTARTED_BEFORE_NOTE), TAIL_BYTES);
     }
     outcome.ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     if !cache.note.is_empty() {

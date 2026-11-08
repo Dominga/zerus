@@ -104,29 +104,25 @@
 .pt-card:hover, .pt-card-on { background: var(--z-color-card-hover); border-color: var(--z-color-accent-muted); box-shadow: 0 0 0 1px var(--z-color-accent-muted) inset; }
 .pt-card-lit { border-color: color-mix(in srgb, var(--z-color-accent) 45%, var(--z-color-card-border)); }
 .pt-card-dim { opacity: .42; }
-.pt-card-pending { --pt-tone: var(--z-color-muted); }
-.pt-card-working { --pt-tone: var(--z-color-accent); }
-.pt-card-review { --pt-tone: var(--z-color-violet); }
-.pt-card-submitted { --pt-tone: var(--z-color-status-working); }
-.pt-card-done { --pt-tone: var(--z-color-status-ready); }
-.pt-card-danger { --pt-tone: var(--z-color-status-error); }
-.pt-card-muted { --pt-tone: var(--z-color-dim); }
 .pt-card-l1, .pt-card-l2, .pt-card-l3 { display: flex; align-items: center; gap: 5px; min-width: 0; }
 .pt-card-l1 { font-size: var(--fs-sm); }
 .pt-card-l2, .pt-card-l3 { font-size: var(--fs-2xs); color: var(--z-color-muted); }
 .pt-dot { flex: none; width: 7px; height: 7px; border-radius: 4px; background: var(--z-color-muted); }
-.pt-dot-working { background: var(--z-color-accent); }
-.pt-dot-review { background: var(--z-color-violet); }
-.pt-dot-done { background: var(--z-color-status-ready); }
+.pt-dot-working { background: var(--z-color-plan-work); }
+.pt-dot-work { background: var(--z-color-plan-work); }
+.pt-dot-notstarted { background: var(--z-color-plan-notstarted); }
+.pt-dot-cancelled { background: var(--z-color-plan-cancelled); }
+.pt-dot-review { background: var(--z-color-plan-review); }
+.pt-dot-done { background: var(--z-color-plan-done); }
 .pt-dot-danger { background: var(--z-color-status-error); }
 .pt-dot-submitted { background: var(--z-color-status-working); }
 .pt-id { flex: none; color: var(--z-color-text-3); font-variant-numeric: tabular-nums; }
-.pt-title { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pt-title { flex: 1 1 auto; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pt-badge { flex: none; padding: 0 5px; border-radius: 6px; background: var(--z-color-accent-bg); color: var(--z-color-accent); font-size: 9px; font-weight: 700; text-transform: uppercase; }
 .pt-role { flex: none; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--z-color-text-2); }
 .pt-model { flex: none; max-width: 72px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--z-color-dim); }
 .pt-meta { color: var(--z-color-muted); }
-.pt-deps { margin-left: auto; color: var(--z-color-warn); white-space: nowrap; }
+.pt-deps { flex: none; margin-left: auto; color: var(--z-color-warn); white-space: nowrap; }
 /* Task #60: a follow-up's "spawned from" link; it never blocks, so it is muted. */
 .pt-origin { color: var(--z-color-text-3, inherit); white-space: nowrap; font-style: italic; }
 .pt-chip-origin { cursor: pointer; }
@@ -144,6 +140,14 @@
 .pt-detail-head { display: flex; align-items: center; gap: 6px; }
 .pt-detail-head b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pt-detail-meta { display: flex; flex-wrap: wrap; gap: 5px; }
+.pt-detail { border-left: 3px solid transparent; }
+.pt-detail-work { border-left-color: var(--z-color-plan-work); }
+.pt-detail-review { border-left-color: var(--z-color-plan-review); }
+.pt-detail-done { border-left-color: var(--z-color-plan-done); }
+.pt-detail-notstarted { border-left-color: var(--z-color-plan-notstarted); }
+.pt-detail-cancelled { border-left-color: var(--z-color-plan-cancelled); }
+.pt-detail-notstarted { border-left-color: var(--z-color-plan-notstarted); }
+.pt-detail-cancelled { border-left-color: var(--z-color-plan-cancelled); }
 .pt-detail-note { color: var(--z-color-text-2); font-size: var(--fs-sm); line-height: 1.45; }
 .pt-detail-section { display: flex; flex-direction: column; gap: 4px; }
 .pt-detail-label { color: var(--z-color-label); font-size: var(--fs-xs); }
@@ -234,18 +238,28 @@
 .pt-legend-item { display: inline-flex; gap: 4px; align-items: center; }
 .pt-legend-dep, .pt-legend-origin { display: inline-block; width: 16px; height: 0; border-top: 1.5px solid var(--z-color-border); }
 .pt-legend-origin { border-top: 1.5px dashed var(--z-color-violet); }
+.pt-swatch { display: inline-block; width: 9px; height: 9px; border-radius: 3px; flex: none; border: 1px solid transparent; }
+.pt-swatch-done { background: var(--z-color-plan-done); border-color: var(--z-color-plan-done); }
+.pt-swatch-work { background: var(--z-color-plan-work); border-color: var(--z-color-plan-work); }
+.pt-swatch-review { background: var(--z-color-plan-review); border-color: var(--z-color-plan-review); }
+.pt-swatch-notstarted { background: var(--z-color-plan-notstarted); border-color: var(--z-color-plan-notstarted); }
+.pt-swatch-cancelled { background: repeating-linear-gradient(45deg, var(--z-color-plan-cancelled) 0 3px, transparent 3px 6px); border-color: var(--z-color-plan-cancelled); }
 .pm-origin { color: var(--z-color-violet); font-size: var(--fs-2xs); }
 
 /* Task 92: the profile's Time view (Qt's TeamProfileTimeline), one canvas. */
-.pm-profile-scroll { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
-.pm-profile-scroll > .pm-profile { flex: none; overflow: visible; }
+.pm-profile-scroll { flex: 1; min-height: 0; overflow: auto; }
+/* Task #339: the totals, the lanes and the Top losses in Qt's order. */
+.pm-profile-summary { flex: none; overflow: visible; }
+.pm-profile-details { flex: none; overflow: visible; }
 .tl-section { padding: 12px 14px 0; }
 .tl-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .tl-head h3 { font-size: var(--fs-sm); color: var(--z-color-text-2); margin: 0; }
 .tl-scope { max-width: 100%; font-size: var(--fs-xs); }
 .tl { margin-top: 8px; border: 1px solid var(--z-color-card-border); border-radius: var(--z-radius-md); background: var(--z-color-card); }
 .tl-zoom { display: flex; align-items: center; gap: 6px; padding: 6px 8px 0; }
-.tl-host { position: relative; overflow: hidden; max-height: 70vh; overflow-y: auto; }
+/* Task #339: as tall as its lanes, as Qt's card; the page scrolls, and the
+   legend follows the last lane with no band between them. */
+.tl-host { position: relative; overflow: hidden; }
 .tl-host canvas { display: block; cursor: default; }
 .tl-host.panning canvas { cursor: grab; }
 .tl-host.panning canvas:active { cursor: grabbing; }
@@ -253,6 +267,8 @@
   background: var(--z-color-surface); border: 1px solid var(--z-color-card-border); color: var(--z-color-text); font-size: var(--fs-xs);
   box-shadow: 0 4px 14px rgb(0 0 0 / 0.25); white-space: pre-wrap; }
 .tl-tip-head { font-weight: 600; }
+/* Task #339: the legend hugs the lanes card it explains, as Qt's legend. */
+.tl-section .pm-legend { margin: 8px 0 0; }
 .tl-estimates { margin: 10px 0 0; padding: 8px 10px; border: 1px solid var(--z-color-card-border); border-radius: var(--z-radius-md); font-size: var(--fs-xs); }
 .tl-estimates-head { display: flex; align-items: center; gap: 8px; color: var(--z-color-muted); }
 .tl-estimates-table { width: 100%; border-collapse: collapse; margin-top: 6px; }
@@ -338,9 +354,6 @@
 .pt-edge-head { fill: var(--z-color-dim); stroke: none; }
 .pt-origin-edge { fill: none; stroke: var(--z-color-violet); stroke-width: 1.2; stroke-dasharray: 4 3; opacity: .8; }
 .pt-card { z-index: 1; justify-content: center; gap: 4px; background: color-mix(in srgb, var(--z-color-danger) calc(var(--heat, 0) * 22%), var(--z-color-surface)); }
-.pt-card-assigned { --pt-tone: var(--z-color-status-working); }
-.pt-card-warn { --pt-tone: var(--z-color-warn); }
-.pt-card-dim { --pt-tone: var(--z-color-dim); }
 .pt-card-off { opacity: .3; }
 .pt-card-problem { border-color: color-mix(in srgb, var(--pt-tone) 65%, var(--z-color-card-border)); background: color-mix(in srgb, var(--pt-tone) 9%, var(--z-color-surface)); }
 .pt-card-draft { border-style: dashed; }
@@ -349,19 +362,26 @@
 .pt-card-l2 .agent-badge { flex: none; }
 .pt-role.role-badge { max-width: 110px; overflow: hidden; text-overflow: ellipsis; }
 .pt-time { display: inline-flex; gap: 5px; min-width: 0; overflow: hidden; white-space: nowrap; color: var(--z-color-muted); font-size: var(--fs-2xs); }
+/* Task 342 (owner, 2026-11-08): the five task states in every plan mode - the
+   card's accent (left bar, border) and its tint. Done is green, in work a light
+   blue, in review a deeper blue, not started a pale grey and cancelled a grey
+   hatch; a problem or a wait keeps its amber/red. */
+.pt-card-notstarted, .pt-tone-notstarted { --pt-tone: var(--z-color-plan-notstarted); --pm-tone: var(--z-color-plan-notstarted); background: var(--z-color-plan-notstarted-bg); }
+.pt-card-work, .pt-tone-work { --pt-tone: var(--z-color-plan-work); --pm-tone: var(--z-color-plan-work); background: var(--z-color-plan-work-bg); }
+.pt-card-review, .pt-tone-review { --pt-tone: var(--z-color-plan-review); --pm-tone: var(--z-color-plan-review); background: var(--z-color-plan-review-bg); }
+.pt-card-done, .pt-tone-done { --pt-tone: var(--z-color-plan-done); --pm-tone: var(--z-color-plan-done); background: var(--z-color-plan-done-bg); }
+.pt-card-cancelled, .pt-tone-cancelled {
+  --pt-tone: var(--z-color-plan-cancelled); --pm-tone: var(--z-color-plan-cancelled);
+  background: repeating-linear-gradient(45deg, var(--z-color-plan-cancelled-bg) 0 5px, transparent 5px 10px), var(--z-color-surface);
+}
+.pt-card-danger, .pt-tone-danger { --pt-tone: var(--z-color-status-error); --pm-tone: var(--z-color-status-error); }
+.pt-card-warn, .pt-tone-warn { --pt-tone: var(--z-color-warn); --pm-tone: var(--z-color-warn); }
 .pt-activity { overflow: hidden; text-overflow: ellipsis; }
 .pt-worked { flex: none; font-variant-numeric: tabular-nums; }
 .pt-worked.over, .pm-layer-time.over { color: var(--z-color-warn); }
 .pt-problem { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-2xs); color: var(--z-color-warn); }
 .pt-problem-danger { color: var(--z-color-status-error); }
 .pt-problem-warn { color: var(--z-color-warn); }
-.pt-tone-pending { --pm-tone: var(--z-color-muted); --pt-tone: var(--z-color-muted); }
-.pt-tone-working { --pm-tone: var(--z-color-accent); --pt-tone: var(--z-color-accent); }
-.pt-tone-assigned { --pm-tone: var(--z-color-status-working); --pt-tone: var(--z-color-status-working); }
-.pt-tone-done { --pm-tone: var(--z-color-status-ready); --pt-tone: var(--z-color-status-ready); }
-.pt-tone-danger { --pm-tone: var(--z-color-status-error); --pt-tone: var(--z-color-status-error); }
-.pt-tone-warn { --pm-tone: var(--z-color-warn); --pt-tone: var(--z-color-warn); }
-.pt-tone-dim { --pm-tone: var(--z-color-dim); --pt-tone: var(--z-color-dim); }
 
 /* The toolbar (P6). */
 .pt-plan { flex: 1 1 auto; min-width: 0; }
@@ -424,10 +444,6 @@
 .team-phase-toggle button:not(:disabled):hover { color: var(--z-color-text); }
 .team-phase-proposed { margin-left: 5px; padding: 1px 5px; border-radius: 5px; font-size: var(--fs-2xs); color: var(--z-color-warn); border: 1px solid color-mix(in srgb, var(--z-color-warn) 45%, transparent); }
 .team-phase-mode-notice { margin-left: 6px; font-size: var(--fs-xs); }
-.pm-phase-strip { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 10px; border-bottom: 1px solid var(--z-color-divider); overflow-x: auto; }
-.pm-phase-head { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid var(--z-color-card-border); border-radius: 8px; background: var(--z-color-card); white-space: nowrap; }
-.pm-phase-n { display: grid; place-items: center; min-width: 17px; height: 17px; border-radius: 5px; background: var(--z-color-field); color: var(--z-color-muted); font-size: var(--fs-2xs); }
-.pm-phase-name { max-width: 24ch; overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-xs); }
 
 /* Task #226: the plan's lanes, as Qt's lane sections. */
 .pm-lanes { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 10px; padding: 10px; }
@@ -484,3 +500,5 @@
 .pt-row:has(> .pt-phase-draft) > :is(.pt-free-accepted, .pt-phase-body) { border-style: dashed; border-color: color-mix(in srgb, var(--z-color-warn) 50%, var(--z-color-card-border)); }
 .pt-row:has(> .pt-phase-rejected) > :is(.pt-free-accepted, .pt-phase-body) { border-color: color-mix(in srgb, var(--z-color-danger) 45%, var(--z-color-card-border)); }
 .pt-row:has(> .pt-phase-awaiting) > :is(.pt-free-accepted, .pt-phase-body) { border-color: color-mix(in srgb, var(--z-color-warn) 55%, var(--z-color-card-border)); }
+
+

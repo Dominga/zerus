@@ -1,5 +1,8 @@
 import { createEffect, type Accessor } from "solid-js";
-import type { Folder, Project, ProjectsView } from "../../types";
+import type { Folder, Project, ProjectsView, TeamSummary } from "../../types";
+import type { Session } from "../sessions/types";
+import { sessionIs } from "../../store/teamsView";
+import { tr } from "../../i18n";
 
 // Pure rules of the Projects screen (ProjectsDialog.cpp), and the effect that
 // shows the project Project settings… asks for.
@@ -45,3 +48,21 @@ export function showAskedProject(asked: Accessor<string | undefined>, done: () =
     done();
   });
 }
+
+/** The sessions of a project: the rows the shared grouping puts in it. */
+export function projectSessions(project: string, rows: readonly Session[], groups: Record<string, { group: string } | undefined>): Session[] {
+  return project ? rows.filter((row) => groups[row.key]?.group === project) : [];
+}
+
+/** Qt's project header line: its sessions, how many are in teams, and how many teams it has. */
+export interface ProjectCounts { sessions: number; inTeams: number; teams: number }
+
+export function projectCounts(project: string, sessions: readonly Session[], teams: readonly TeamSummary[]): ProjectCounts {
+  const teamRows = teams.filter((team) => team.project === project && team.status !== "archived");
+  // The Projects page reads this computer's team list, so a member's session is one of its own.
+  const inTeams = sessions.filter((row) => teamRows.some((team) => team.members.some((member) => sessionIs(member.session, "", row)))).length;
+  return { sessions: sessions.length, inTeams, teams: teamRows.length };
+}
+
+/** "2 sessions, 0 in teams, 0 teams", as Qt's project page prints it (no dot separators). */
+export const countsText = (counts: ProjectCounts) => tr("%1 sessions, %2 in teams, %3 teams", counts.sessions, counts.inTeams, counts.teams);

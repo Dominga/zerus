@@ -1310,13 +1310,13 @@ Status taskStatus(const Task &task)
     else if (task.status == "pending") { s.text = tr("Pending"); s.tone = Tone::Muted; }
     else if (task.status == "assigned") { s.text = tr("Assigned"); s.tone = Tone::Assigned; }
     else if (task.status == "in_progress") { s.text = tr("In progress"); s.tone = Tone::Active; }
-    else if (task.status == "submitted") { s.text = tr("Submitted"); s.tone = Tone::Done; }
+    else if (task.status == "submitted") { s.text = tr("Submitted"); s.tone = Tone::Review; }
     // U36: the stages between the report and the lead.
-    else if (task.status == "in_review") { s.text = tr("In review"); s.tone = Tone::Active; }
-    else if (task.status == "in_test") { s.text = tr("In test"); s.tone = Tone::Active; }
+    else if (task.status == "in_review") { s.text = tr("In review"); s.tone = Tone::Review; }
+    else if (task.status == "in_test") { s.text = tr("In test"); s.tone = Tone::Review; }
     else if (task.status == "accepted") { s.text = tr("Accepted"); s.tone = Tone::Done; }
     else if (task.status == "rejected") { s.text = tr("Rejected"); s.tone = Tone::Danger; }
-    else if (task.status == "cancelled") { s.text = tr("Cancelled"); s.tone = Tone::Dim; }
+    else if (task.status == "cancelled") { s.text = tr("Cancelled"); s.tone = Tone::Cancelled; }
     else s.text = task.status;
     s.shortText = s.text;
     if (n > 1 && !task.finished()) s.text += tr(" · attempt %1").arg(n);

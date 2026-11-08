@@ -1252,12 +1252,21 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     }
     // U52: a member session that exited on its own is launched again into its
     // own conversation, at most three times an hour. A paused, archived,
-    // limited or swapped session is never restarted, and neither is one that
-    // has not been seen live since (a failed relaunch does not loop). The
-    // lead too (owner, 2026-11-05): a team whose lead exited has nobody to
-    // read its reports.
-    if team.settings.restart_crashed && team.status == TeamStatus::Running {
+    // limited or swapped session is never restarted, and a member with nothing
+    // to do needs a live sighting since its last restart (a failed relaunch
+    // does not loop). Task #334 (owner, 2026-11-08): an exit that leaves a
+    // member holding or handed a task relaunches it even when no tick saw the
+    // session live - an install restarted the agents while their members were
+    // paused - and a member the owner or the lead resumed is launched again
+    // the same way, so neither waits for a relaunch card. The lead too
+    // (owner, 2026-11-05): a team whose lead exited has nobody to read its
+    // reports.
+    if team.status == TeamStatus::Running {
         for member in &team.members {
+            let resumed = member.relaunch_exited;
+            if !team.settings.restart_crashed && !resumed {
+                continue;
+            }
             if member.agent == "opencode"
                 || member.state != MemberState::Active
                 || member.session.is_none()
@@ -1266,13 +1275,19 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 continue;
             }
             let Some(found) = session_of(member, seen) else { continue };
-            if found.live || found.state != "stopped" || found.limited.is_some() || !member.seen.is_some_and(|seen| seen.live) {
+            if found.live || found.state != "stopped" || found.limited.is_some() {
+                continue;
+            }
+            let works = holds_work(team, &member.id);
+            if !works && !resumed && !member.seen.is_some_and(|seen| seen.live) {
                 continue;
             }
             let restarted = member.restarts.iter().filter(|at| now - **at <= RESTART_WINDOW).count();
             if restarted < RESTARTS_PER_HOUR {
                 steps.push(Step::Restart { member: member.id.clone() });
-            } else if !member.crash_told {
+            } else if resumed || !member.crash_told {
+                // The resume's request is spent either way: the lead hears and
+                // the member stays stopped until the next hour or a relaunch.
                 steps.push(Step::CrashStopped { member: member.id.clone() });
             }
         }
@@ -2226,6 +2241,19 @@ fn task_owes(task: &Task) -> bool {
     matches!(task.status, TaskStatus::Draft | TaskStatus::Pending | TaskStatus::Assigned | TaskStatus::InProgress)
 }
 
+/// Task #334: the member holds or was handed a task - one of its own attempts
+/// is open, or a pipeline stage was delivered to it - so its exit loses work
+/// that must go on. An attempt a crash already gave back is not work here: its
+/// relaunch did not come up, so the ordinary live-sighting guard applies and a
+/// failing agent does not restart for ever.
+fn holds_work(team: &Team, member_id: &str) -> bool {
+    team.tasks
+        .iter()
+        .filter_map(|task| task.open_attempt())
+        .any(|attempt| attempt.member == member_id && !(attempt.state == AttemptState::Unconfirmed && attempt.error.contains("the session crashed")))
+        || super::stages::busy(team).iter().any(|busy| *busy == member_id)
+}
+
 /// U56/#728: interrupts a stuck member's session and resumes it in its own
 /// conversation; the lead (with lead_restarts_stuck) and the owner have this
 /// route. A member without a session keeps today's failed-launch relaunch.
@@ -2408,6 +2436,7 @@ fn clear_restarted(store: &mut Store, team_id: &str, member_id: &str, role: &str
     change(store, team_id, |team, events| {
         let Some(found) = team.members.iter_mut().find(|found| found.id == member_id) else { return Ok(()) };
         found.restart_pending = false;
+        found.relaunch_exited = false;
         found.stuck = None;
         found.seen = None;
         found.seen_phase.clear();
@@ -8671,10 +8700,14 @@ fn tell_lead_starved(store: &mut Store, team: &Team, members: &[String]) -> anyh
 /// U52: the crashed member's session is launched again into the same
 /// conversation, folder and name, and its open attempt is returned as
 /// unconfirmed for the lead. The restart is counted before it is attempted, so
-/// an agent that keeps failing cannot loop.
+/// an agent that keeps failing cannot loop. Task #334: the same launch covers
+/// an exit that interrupted a held task and a member the owner or the lead
+/// resumed, and the feed says which.
 fn restart_crashed(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Result<()> {
     let session = team.member(member_id).and_then(|member| member.session.clone()).context("the member has no session")?;
     let at = now();
+    let resumed = team.member(member_id).is_some_and(|member| member.relaunch_exited);
+    let why = if resumed { "resumed" } else if holds_work(team, member_id) { "exited with a task" } else { "crashed" };
     change(store, &team.id, |team, events| {
         let role = team.role_of(member_id);
         let found = team.members.iter_mut().find(|found| found.id == member_id).context("unknown member")?;
@@ -8685,6 +8718,7 @@ fn restart_crashed(store: &mut Store, team: &Team, member_id: &str) -> anyhow::R
         }
         found.crash = Some(at);
         found.crash_told = false;
+        found.relaunch_exited = false;
         for task in &mut team.tasks {
             let task_id = task.id;
             if let Some(attempt) = task.open_attempt_mut().filter(|attempt| attempt.member == member_id) {
@@ -8693,7 +8727,7 @@ fn restart_crashed(store: &mut Store, team: &Team, member_id: &str) -> anyhow::R
                 events.push(Event::new("unconfirmed", json!({"task":task_id,"attempt":attempt.n,"error":attempt.error})));
             }
         }
-        events.push(Event::new("member_restarted", json!({"member":role,"at":at})));
+        events.push(Event::new("member_restarted", json!({"member":role,"at":at,"why":why})));
         Ok(())
     })?;
     let outcome = hgs(&session.host, &["resume", session.name.as_str(), "-d"], None, Duration::from_secs(120));
@@ -8980,7 +9014,9 @@ pub(crate) fn terminal_only(error: &str) -> bool {
 }
 
 /// U52: too many crashes this hour leave the session stopped; the lead hears
-/// once, through the inbox item `crash_told` shows.
+/// once, through the inbox item `crash_told` shows. Task #334: a resume that
+/// arrives at the bound is spent too - the lead hears once, and the member
+/// waits for the next hour or a relaunch instead of looping.
 fn crash_stopped(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Result<()> {
     let at = now();
     change(store, &team.id, |team, events| {
@@ -8988,6 +9024,7 @@ fn crash_stopped(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Res
         let found = team.members.iter_mut().find(|found| found.id == member_id).context("unknown member")?;
         found.crash = Some(at);
         found.crash_told = true;
+        found.relaunch_exited = false;
         let restarts = found.restarts.iter().filter(|restart| at - **restart <= RESTART_WINDOW).count();
         events.push(Event::new("member_crashed", json!({"member":role,"restarts":restarts})));
         Ok(())
@@ -9877,6 +9914,8 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             if *live {
                 // U52: a session that runs again can crash again later.
                 found.crash_told = false;
+                // #334: a launched resume needs nothing while the session runs.
+                found.relaunch_exited = false;
             }
             Ok(())
         }),

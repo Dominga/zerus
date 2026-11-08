@@ -26,5 +26,6 @@ template each task gets its own branch from base_branch (default: the lead's
 branch); without one a member keeps one branch. A dirty folder waits.
 
 Scale and drain are cards (hgs guide team-propose). restart_crashed (on) restarts a
-crashed member 3 times an hour; an exit typed in the member's terminal counts, so turn
+crashed member 3 times an hour - also one whose exit interrupted a held task, and one
+you resume after its agent exited; an exit typed in the member's terminal counts, so turn
 it off before stopping a member by hand.

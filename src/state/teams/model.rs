@@ -831,6 +831,11 @@ pub(crate) struct Member {
     /// after too many crashes this hour.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub crash_told: bool,
+    /// Task #334: the owner or the lead resumed this member while its agent
+    /// had exited. The next tick launches the same conversation again (within
+    /// the hourly restart bound) instead of leaving it stopped.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub relaunch_exited: bool,
 }
 
 /// U45: a model a member may run a task on, with its effort (empty: the

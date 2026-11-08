@@ -620,7 +620,6 @@
   "Folder filter": "Фильтр по папке",
   "Folder held by another task": "Папка занята другой задачей",
   "Folder is not a Git repository: every member works in this folder, so the policy is shared.": "Папка не является репозиторием Git: все участники работают в этой папке, поэтому политика общая.",
-  "Folder management is unavailable for this computer.": "Управление папками недоступно для этого компьютера.",
   "Folder missing": "Папка отсутствует",
   "For dark appearance": "Для тёмной темы",
   "For example /mnt, the configured mount root": "Например, /mnt, настроенный корень монтирования",
@@ -1368,7 +1367,7 @@
   "Side panel": "Боковая панель",
   "Side panel collapsed": "Боковая панель свёрнута",
   "Side panel docked": "Боковая панель закреплена",
-  "Side panel tabs": "Вкладки боковой панели",
+  "Side panel tabs": "Боковая панель с вкладками",
   "Side panel width": "Ширина боковой панели",
   "Sign-in needed": "Нужен вход",
   "Sign-in unusable": "Вход нельзя использовать",
@@ -2122,7 +2121,6 @@
   "Usage limit: continues after the reset (%1)": "Лимит использования: продолжит после сброса (%1)",
   "Usage limit: %1": "Лимит использования: %1",
   "Passed on retry": "Прошёл при повторе",
-  "Side panel tabs": "Боковая панель с вкладками",
   "Side panel sections": "Боковая панель с разделами",
   "System title bar": "Системный заголовок окна",
   "One title bar with the controls": "Один заголовок с элементами управления",
@@ -2510,5 +2508,12 @@
   "%1 answers, click to expand them": "Ответов: %1, нажмите, чтобы раскрыть",
   "%1 answers, click to fold them": "Ответов: %1, нажмите, чтобы свернуть",
   "This machine, 1 session": "Этот компьютер, 1 сеанс",
-  "This machine, %1 sessions": "Этот компьютер, %1 сеансов"
+  "This machine, %1 sessions": "Этот компьютер, %1 сеансов",
+  "+ New team": "+ Новая команда",
+  "Auto: follow the project": "Авто: следовать проекту",
+  "One additional rule per line (20 maximum)": "Одно дополнительное правило в строке (не более 20)",
+  "Task states": "Состояния задач",
+  "New team…": "Новая команда…",
+  "No sessions in this project yet.": "В этом проекте пока нет сеансов.",
+  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд"
 }

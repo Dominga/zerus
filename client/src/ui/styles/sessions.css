@@ -385,12 +385,14 @@
   .team-status.stuck { color: var(--z-color-warn); background: color-mix(in srgb, var(--z-color-warn) 11%, transparent); }
   .team-answers { font-weight: 600; color: var(--z-color-text-3); }
   .team-members { color: var(--z-list-dim); }
-  /* A member under its lead: indented 22 px with Qt's connector line. */
-  .scard.team-member { left: 24px; }
-  .scard.team-member::after { content: ""; position: absolute; left: -11px; top: -6px; width: 10px; height: 32px;
-    border-left: 1px solid var(--z-list-tree-line); border-bottom: 1px solid var(--z-list-tree-line); border-bottom-left-radius: 6px; }
-  .scard.team-member.team-last::after { height: 32px; }
-  .scard.team-member.team-first::after { top: -6px; }
+  /* Task #330: a member under its lead spans the row, its content indented
+     22 px, so the hover highlight covers the whole card at the pane edge. */
+  .scard.team-member { left: 2px; right: 2px; padding-left: 22px; }
+  .scard.team-member::before { content: ""; position: absolute; left: 12px; top: -8px; bottom: -6px; width: 1px;
+    background: var(--z-list-tree-line); }
+  .scard.team-member.team-last::before { bottom: 50%; }
+  .scard.team-member::after { content: ""; position: absolute; left: 12px; top: 50%; width: 10px; height: 1px;
+    background: var(--z-list-tree-line); }
 
 /* Task #247: Qt's TerminalScreen context menu (Copy selection, Paste). */
 .term-menu { position: fixed; z-index: 60; min-width: 150px; display: flex; flex-direction: column; padding: 4px; border: 1px solid var(--z-color-card-border); border-radius: 8px; background: var(--z-color-surface); box-shadow: 0 8px 22px rgb(0 0 0 / 0.25); }

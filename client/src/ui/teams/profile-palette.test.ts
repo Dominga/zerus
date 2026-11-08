@@ -116,8 +116,10 @@ describe("the profile palette", () => {
     expect(legend).toMatch(/flex-wrap: wrap;/);
     expect(item).toMatch(/white-space: nowrap;/);
     for (const text of [legend, item, rule(".pm-legend-title")]) expect(text).not.toMatch(/overflow|text-overflow|max-width|width:/);
-    expect(rule(".pm-profile-scroll")).toMatch(/flex-direction: column;/);
-    expect(rule(".pm-profile-scroll > .pm-profile")).toMatch(/overflow: visible;/);
+    // Task #339: the page scrolls vertically and the panel never clips the
+    // legend; the lanes, their legend and the estimates share one column.
+    expect(rule(".pm-profile-scroll")).toMatch(/overflow: auto;/);
+    expect(rule(".pm-profile-details")).toMatch(/overflow: visible;/);
     // One item per palette kind, named in full, so a new kind is in it too.
     const panels = fs.readFileSync(new URL("client/src/ui/teams/plan-panels.tsx", repo), "utf8");
     expect(panels).toContain("<For each={KIND_STYLES}>{(style) => <span class=\"pm-legend-item\"");

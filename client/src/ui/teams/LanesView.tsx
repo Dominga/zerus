@@ -19,9 +19,13 @@ export interface LaneEdit {
 export function LanesView(props: {
   team: TeamView;
   includeCancelled: boolean;
+  /** Task 342: Hide finished leaves accepted tasks out here too. */
+  hideFinished?: boolean;
   profile?: TeamProfileView | null;
   onOpen?: (id: number) => void;
   onEdit?: (phase: number, updates: LaneEdit[]) => Promise<boolean>;
+  /** Task 335: the phase's own common actions, with the Standard/Free toggle. */
+  phaseActions?: (n: number) => JSX.Element;
 }): JSX.Element {
   const [collapsed, setCollapsed] = createSignal<Set<string>>(new Set());
   const [menu, setMenu] = createSignal<{ phase: number; lane?: number; task?: number } | null>(null);
@@ -32,11 +36,14 @@ export function LanesView(props: {
   onCleanup(() => setMenu(null));
 
   // The team's own phases; a phase with no tasks in any lane is still shown
-  // when it has tasks at all (lane 0). Empty phases are dropped.
+  // when it has tasks at all (lane 0). Empty phases are dropped. Task 342: a
+  // finished (accepted) task leaves the lanes while Hide finished is on, as it
+  // leaves every other plan mode.
   const sections = createMemo(() => {
     void version();
+    const tasks = props.hideFinished ? props.team.tasks.filter((task) => task.status !== "accepted") : props.team.tasks;
     return props.team.phases
-      .map((phase) => ({ phase, lanes: laneGroups(props.team.tasks, phase.n, props.includeCancelled) }))
+      .map((phase) => ({ phase, lanes: laneGroups(tasks, phase.n, props.includeCancelled) }))
       .filter((section) => section.lanes.length > 0);
   });
   const editable = (phase: number) => !!props.onEdit && laneEditable(props.team, phase);
@@ -86,6 +93,8 @@ export function LanesView(props: {
               <span class="pt-pn">{section.phase.n}</span>
               <b>{section.phase.title || tr("Phase %1", section.phase.n)}</b>
               <span class="pm-count">{section.lanes.reduce((sum, lane) => sum + lane.tasks.length, 0)}</span>
+              {/* Task 335: the phase's own Standard/Free toggle sits in its header, as in Qt. */}
+              {props.phaseActions?.(section.phase.n)}
               <span class="pm-lane-tip">{tr("Lanes only shape the plan; hand-out still follows dependencies and phases")}</span>
             </header>
             <For each={section.lanes}>

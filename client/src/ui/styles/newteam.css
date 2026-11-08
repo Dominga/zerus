@@ -45,6 +45,16 @@
   z-index: 4;
 }
 .nt-settings .nt-body { gap: 12px; }
+/* Task 324 (Qt IronRulesEditor): the rules are a real text box, 2 to 6 rows
+   high, never the one-line bar the bare textarea fell back to; Qt caps it at
+   110 px. */
+.nt-settings textarea.nt-rules {
+  flex: none; box-sizing: border-box; min-height: 58px; max-height: 110px; width: 100%;
+  padding: 6px 8px; border: 1px solid var(--z-color-card-border); border-radius: var(--z-radius-md);
+  background: var(--z-color-field); color: var(--z-color-text); font-size: var(--fs-sm);
+  line-height: 1.4; resize: vertical;
+}
+.nt-settings .nt-field textarea.nt-rules { min-height: 46px; }
 /* Task 42: Qt's New team fields. */
 .nt-inline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .nt-inline .grow { flex: 1; min-width: 0; }
@@ -129,6 +139,9 @@
 /* Task #314 (F10): New team fills the window; only the form body scrolls and
    the footer stays visible instead of a second page scrollbar. */
 .newteam-page, .newteam-page.embedded { width: 100%; max-width: none; box-sizing: border-box; overflow: hidden; }
+/* Task #328 (F10b): the rail page ends above the 28 px status bar, so its
+   footer is fully visible. */
+.newteam-page:not(.embedded) { padding-bottom: 34px; }
 .newteam-page .nt { width: 100%; max-width: none; }
 .newteam-page .nt-split { width: 100%; min-width: 0; }
 .newteam-page .nt-body, .newteam-page .nt-lead-pane { min-width: 0; }

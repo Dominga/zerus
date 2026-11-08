@@ -1,5 +1,7 @@
 import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 import { clean as cleanPath } from "../sessions/paths";
+import { absolute, of } from "../sessions/path-forms";
+import { machineCards } from "../../store/machines";
 import { enhance } from "./ProjectCatalogDialog";
 import { Icon } from "../lib/icons";
 import { FolderBrowserDialog } from "../components/FolderBrowser";
@@ -18,9 +20,11 @@ export default function ProjectFolderDialog(props: { prompt: FolderPrompt; busy:
   const [path, setPath] = createSignal(p.original?.path ?? "");
   const [browsing, setBrowsing] = createSignal(false);
   const machine = () => place()?.computer || place()?.host || "";
-  const clean = (value: string) => cleanPath(value.trim(), "posix");
+  // N6: the path takes the selected computer's form (a local Windows drive or a UNC share names a folder too).
+  const style = () => of(machineCards[computer()]?.platform, computer() === "", "posix");
+  const clean = (value: string) => cleanPath(value.trim(), style());
   const duplicate = () => props.folders.some((f) => f.key !== p.original?.key && f.machine === machine() && clean(f.path) === clean(path()));
-  const valid = () => !!place() && path().trim().startsWith("/") && !/[\r\n\0]/u.test(path()) && !duplicate();
+  const valid = () => !!place() && absolute(path().trim(), style()) && !/[\r\n\0]/u.test(path()) && !duplicate();
   let dialog!: HTMLDialogElement;
   onMount(() => { dialog.showModal(); queueMicrotask(() => dialog.querySelector<HTMLElement>("select, input")?.focus()); });
   onCleanup(() => { dialog.close(); queueMicrotask(() => { if (p.origin.isConnected) p.origin.focus(); else document.querySelector<HTMLElement>('.proj-table tr[aria-selected="true"]')?.focus(); }); });

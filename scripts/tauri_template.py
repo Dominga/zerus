@@ -17,6 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT = ROOT / "client"
+NPM = "npm.cmd" if sys.platform == "win32" else "npm"
 SWITCH_ID = "com.hgdev.hgs-tray"
 DEV_ID_PREFIX = "dev.zerus.next"
 
@@ -57,7 +58,7 @@ def run(command: list[str], cwd: Path = ROOT) -> int:
 
 
 def build() -> int:
-    result = run(["npm", "--prefix", "client", "run", "tauri", "--", "build", "--no-bundle"])
+    result = run([NPM, "--prefix", "client", "run", "tauri", "--", "build", "--no-bundle"])
     if result:
         return result
     return check_identity()
@@ -85,7 +86,7 @@ def check_identity() -> int:
 
 
 def dev() -> int:
-    return run(["npm", "--prefix", "client", "run", "tauri", "--", "dev"])
+    return run([NPM, "--prefix", "client", "run", "tauri", "--", "dev"])
 
 
 def launch() -> int:

@@ -431,7 +431,8 @@ class WindowsNativeTransport(unittest.TestCase):
                     if sustained and time.monotonic() >= next_ping:
                         child.stdin.write(struct.pack('<I', 0xffffffff)); child.stdin.flush()
                         next_ping = time.monotonic()+2
-                    self.assertIsNone(child.poll(), (root/'stderr').read_bytes())
+                    status = child.poll()
+                    self.assertIsNone(status, (root/'stderr').read_bytes() if status is not None else None)
                     self.assertLess(time.monotonic(), deadline, 'original fake did not become ready')
                     time.sleep(.02)
                 if not slow: self.assertEqual(json.loads(ready.read_text(encoding='utf-8'))['argv'], words)

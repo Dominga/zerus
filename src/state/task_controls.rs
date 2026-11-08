@@ -6,6 +6,35 @@ mod stop_facts;
 pub(crate) use stop_facts::{Captured, Fact, Source};
 pub(in crate::state) mod writer;
 
+/// A worker owns the native exclusion only for this capture. Returned evidence
+/// retains unlocked original objects, never the writer's FileLock. No desktop
+/// connection or actor transaction can enter this function.
+pub(crate) fn observe_and_capture(
+    config: &crate::config::Config,
+    expected: &zerus_desktop_ledger::task_controls::Executor,
+    until: std::time::Instant,
+) -> Result<(observation::Observed, Captured), String> {
+    if !zerus_desktop_ledger::task_controls::TASK_CONTROLS {
+        return Err("task_controls_inactive".into());
+    }
+    let computer = super::lifecycle_receipt_machine(config)?;
+    let original = writer::open(&config.state, until)?.ok_or("task_controls_inactive")?;
+    let observed = observation::read(
+        original.root()?,
+        original.guard()?,
+        &computer,
+        expected,
+        observation::Conversation::Exact,
+    )?
+    .ok_or("task_controls_inactive")?;
+    let captured = capture_stops(original.root()?, original.guard()?, &observed.executor)?
+        .ok_or("task_controls_inactive")?;
+    original.verify()?;
+    drop(original);
+    captured.verify()?;
+    Ok((observed, captured))
+}
+
 /// Existing-run capture only, under the caller's original native exclusion.
 /// Missing history refuses; inspection never creates an empty outbox.
 pub(crate) fn capture_stops(

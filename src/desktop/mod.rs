@@ -79,7 +79,7 @@ pub(crate) mod session_resume;
 pub(crate) mod task_message;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod task_start_reconcile;
-mod task_controls;
+pub(crate) mod task_controls;
 mod termination_outcome;
 mod transport;
 mod ui_authority;
@@ -599,6 +599,7 @@ fn projection(
             "feed_producers":1,"feed_frame_bytes":feed::LINE_BYTES,"connections":protocol::CONNECTIONS},
         "components":{"fleet":"awaiting_handoff","presence":"awaiting_handoff","reads":"awaiting_handoff","attention":"awaiting_handoff","approvals":"awaiting_handoff"}});
     delivery::decorate_passive(store, &mut value);
+    task_controls::decorate(&mut value);
     value["desktop_ownership"] = ownership::status(store, &location.configuration)
         .and_then(|v| Ok(serde_json::to_value(v)?))
         .unwrap_or(Value::Null);
@@ -606,6 +607,7 @@ fn projection(
 }
 
 enum Event {
+    TaskControl(Box<task_controls::Incoming>),
     ApprovalAudit(Hello, mpsc::SyncSender<approval_audit::worker::Reply>),
     ImportOwner(String, mpsc::SyncSender<import_evidence::held::Loan>),
     Command(Hello, Arc<Queue>, Option<Box<ui_authority::Authorized>>),
@@ -740,6 +742,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
     let mut collect_at = Instant::now();
     let mut failed = false;
     let mut background_blocked = false;
+    // Pure memory only; no task ledger/native work is opened on startup.
+    let mut task_runtime = task_controls::enabled().then(task_controls::Runtime::default);
     #[cfg(any(windows, all(test, target_os = "linux")))]
     let mut retirement_drained = false;
     let run_result = (|| -> Result<()> {
@@ -862,6 +866,16 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
             }
             frontend.tick(&location);
             store.recover_operation_custody(&location);
+            if let Some(runtime) = task_runtime.as_mut() {
+                runtime.poll(
+                    config,
+                    &location,
+                    &mut store,
+                    !upgrade.requested() && background.as_ref().is_some_and(|r| !r.drained()),
+                    &epoch,
+                    seq,
+                );
+            }
             #[cfg(all(test, target_os = "linux"))]
             upgrade::actor_tests::replacement_error(&upgrade, &fault_send, &active);
             match receive.recv_timeout(if full_batch {
@@ -869,6 +883,31 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
             } else {
                 Duration::from_millis(200)
             }) {
+                Ok(Event::TaskControl(incoming)) => {
+                    if let Some(runtime) = task_runtime.as_mut() {
+                        let custody = if !upgrade.requested() {
+                            background
+                                .as_ref()
+                                .filter(|r| !r.drained())
+                                .and_then(background::Runtime::handoff)
+                                .zip(
+                                    ownership::grant(&store, &location.configuration)
+                                        .ok()
+                                        .flatten(),
+                                )
+                                .map(|(handoff, grant)| task_controls::Custody {
+                                    service: owner.clone(),
+                                    handoff,
+                                    grant,
+                                })
+                        } else {
+                            None
+                        };
+                        runtime.admit(
+                            config, &location, &mut store, *incoming, custody, &epoch, seq,
+                        );
+                    }
+                }
                 Ok(Event::ImportOwner(configuration, reply)) => {
                     seq += 1;
                     let owner = if !upgrade.requested() && configuration == location.configuration {
@@ -1611,6 +1650,9 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
         upgrade::actor_tests::connection_wait(replaced, &active);
         thread::sleep(Duration::from_millis(10));
     }
+    if let Some(runtime) = task_runtime.as_mut() {
+        runtime.drain();
+    }
     let drained = if replaced {
         // Even an unrelated listener/store error during replacement must not
         // turn the normal four-second shutdown wait into abandonment. An
@@ -1675,6 +1717,8 @@ fn client(
     ingress: Arc<feed::Ingress>,
     location: &ui_authority::Scope,
 ) -> Result<()> {
+    let task_deadline =
+        task_controls::enabled().then(|| Instant::now() + task_controls::server_total());
     // Unix peer credentials require no input. Windows pipe impersonation can
     // require a completed read, so that authentication remains after the hello.
     #[cfg(unix)]
@@ -1682,11 +1726,20 @@ fn client(
     stream.set_read_timeout(Some(TIMEOUT))?;
     stream.set_write_timeout(Some(TIMEOUT))?;
     let mut reader = BufReader::new(stream.try_clone()?);
-    let bytes =
-        protocol::line(&mut reader, protocol::CONTROL_BYTES)?.context("missing desktop hello")?;
+    let bytes = if let Some(until) = task_deadline {
+        task_controls::read_until(&mut reader, protocol::CONTROL_BYTES, until)?
+    } else {
+        protocol::line(&mut reader, protocol::CONTROL_BYTES)?
+    }
+    .context("missing desktop hello")?;
     #[cfg(windows)]
     transport::authenticate(&stream)?;
     let hello: Hello = serde_json::from_slice(&bytes).context("invalid desktop hello")?;
+    if task_controls::enabled() && hello.op == task_controls::OP {
+        ensure!(!stopped.load(Ordering::SeqCst), "desktop is stopping");
+        drop(reader);
+        return task_controls::client(stream, &bytes, send, location, task_deadline.unwrap());
+    }
     if hello.op == import_evidence::held::OP {
         // The finalizer's Session owns the only original connection handle;
         // its stream cleanup precedes release of the runtime Owner loan.
@@ -1815,6 +1868,38 @@ fn connection(location: &Location, op: &str, request: Option<Value>) -> Result<O
         "desktop request exceeds its limit"
     );
     stream.write_all(&bytes)?;
+    Ok(Some(stream))
+}
+// A new private overload for the task-control end-to-end budget. Existing
+// callers retain their exact connection/timeouts and wire bytes.
+fn connection_until(
+    location: &Location,
+    op: &str,
+    request: Option<Value>,
+    until: Instant,
+) -> Result<Option<Stream>> {
+    ensure!(
+        Instant::now() < until,
+        "task-control request deadline expired"
+    );
+    location.check_existing()?;
+    let Some(mut stream) = transport::connect_until(location, until)? else {
+        return Ok(None);
+    };
+    let remaining = until.saturating_duration_since(Instant::now());
+    ensure!(
+        !remaining.is_zero(),
+        "task-control request deadline expired"
+    );
+    stream.set_read_timeout(Some(remaining))?;
+    stream.set_write_timeout(Some(remaining))?;
+    let hello = json!({"abi":ABI,"configuration":location.configuration,"op":op,"request":request});
+    let bytes = protocol::encode(&hello)?;
+    ensure!(
+        bytes.len() <= protocol::CONTROL_BYTES,
+        "desktop request exceeds its limit"
+    );
+    task_controls::write_until(&mut stream, &bytes, until)?;
     Ok(Some(stream))
 }
 fn exchange(location: &Location, op: &str, request: Option<Value>) -> Result<Option<Value>> {

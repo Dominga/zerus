@@ -158,7 +158,19 @@ fn dormant_helpers_keep_instructions_and_existing_report_prompt_bytes() {
         ID.into(),
         "--json".into(),
     ];
-    let refusal = command(&args).unwrap();
+    let config = Config {
+        home: "/nonexistent/task-control-home".into(),
+        dir: "/nonexistent/task-control-config".into(),
+        state: "/nonexistent/task-control-state".into(),
+        selves: vec![],
+        peers: vec![],
+        base_peers: vec![],
+        peers_from_environment: false,
+        machines: Default::default(),
+        tab: false,
+        tab_colors: String::new(),
+    };
+    let refusal = command(&config, &args).unwrap();
     assert_eq!(refusal["code"], "task_controls_inactive");
     assert_eq!(refusal["attempted"], false);
     assert_eq!(refusal["request_id"], ID);

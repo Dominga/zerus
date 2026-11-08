@@ -31,6 +31,7 @@ class InactiveBridge(unittest.TestCase):
 
     def test_task_control_keeps_the_exact_existing_unsupported_response_while_off(self):
         process, service = self.serve()
+        self.assertNotIn("task_controls", service)
         control = self.request(service["configuration"], "not_an_operation", None)
         original = json.loads(control)
         self.assertEqual(original["value"], dict(code="unsupported_operation"))
@@ -47,5 +48,6 @@ class InactiveBridge(unittest.TestCase):
         with closing(sqlite3.connect(self.desktop / "state.sqlite3")) as db:
             self.assertEqual(db.execute("SELECT count(*) FROM sqlite_schema WHERE name LIKE 'desktop_task_control_%'").fetchone()[0], 0)
         self.assertFalse((self.state / "task-stop-facts").exists())
+        self.assertFalse((self.config / "swarm").exists())
         self.assertFalse((self.root / "unexpected-tool").exists())
         self.assertIsNone(process.poll())

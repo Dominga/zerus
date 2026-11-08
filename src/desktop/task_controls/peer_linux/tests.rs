@@ -218,3 +218,20 @@ fn the_loaded_resident_supervisor_and_its_agent_stay_pinned_independently() {
     assert_eq!(birth(&directory).unwrap(), original);
     assert!(f.child.try_wait().unwrap().is_none());
 }
+
+#[test]
+fn a_cli_image_guard_is_shared_by_fresh_invocations_but_never_survives_peer_death() {
+    let mut first = Fixture::new();
+    let mut second = Fixture::new();
+    let peer = Peer::capture(&first.socket, trusted(), until()).unwrap();
+    let other = Peer::capture(&second.socket, trusted(), until()).unwrap();
+    assert_ne!(first.child.id(), second.child.id());
+    assert_eq!(
+        peer.image_guard(until()).unwrap(),
+        other.image_guard(until()).unwrap()
+    );
+    first.stop();
+    assert!(peer.image_guard(until()).is_err());
+    assert!(other.image_guard(until()).is_ok());
+    second.stop();
+}

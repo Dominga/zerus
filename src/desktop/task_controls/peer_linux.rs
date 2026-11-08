@@ -131,6 +131,11 @@ pub(super) struct Peer {
     ancestry: Vec<Process>,
 }
 impl Peer {
+    /// Stable executable-object identity, not a particular invocation/PID.
+    pub fn image_guard(&self, until: Instant) -> io::Result<String> {
+        self.current(until)?;
+        image_guard(&self.image)
+    }
     pub fn arguments(&self, until: Instant) -> io::Result<Vec<Vec<u8>>> {
         self.current(until)?;
         Ok(self.arguments.clone())
@@ -352,6 +357,18 @@ pub(super) struct Resident {
     arguments: Vec<Vec<u8>>,
 }
 impl Resident {
+    pub fn guard(&self, until: Instant) -> io::Result<String> {
+        self.current(until)?;
+        crate::tasks::controls::wire::canonical::tagged_digest(
+            b"zerus-task-control-resident-linux-v1\0",
+            &serde_json::json!({"schema":1,"image":image_guard(&self.selected)?,
+                "agent_image":image_guard(&self.agent_selected)?,
+                "agent":{"pid":self.agent.birth.pid,"birth":self.agent.birth.ticks},
+                "supervisor":{"pid":self.supervisor.birth.pid,"birth":self.supervisor.birth.ticks},
+                "argv":self.arguments}),
+        )
+        .map_err(io::Error::other)
+    }
     pub fn capture(
         agent: u32,
         agent_birth: &str,
@@ -414,6 +431,16 @@ impl Resident {
         self.current(until)?;
         Ok(self.arguments.clone())
     }
+}
+
+fn image_guard(image: &Image) -> io::Result<String> {
+    crate::tasks::controls::wire::canonical::tagged_digest(
+        b"zerus-task-control-image-linux-v1\0",
+        &serde_json::json!({"schema":1,"device":image.identity.device,
+            "inode":image.identity.inode,"bytes":image.bytes,
+            "changed":image.changed,"modified":image.modified}),
+    )
+    .map_err(io::Error::other)
 }
 
 #[cfg(test)]

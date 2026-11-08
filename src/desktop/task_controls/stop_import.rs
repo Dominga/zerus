@@ -19,7 +19,7 @@ struct Guard<'a> {
     store_identity: &'a str,
 }
 
-fn entry(
+pub(super) fn entry(
     fact: &Fact,
     configuration: &str,
     store_identity: &str,

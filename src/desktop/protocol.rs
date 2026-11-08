@@ -24,8 +24,19 @@ pub struct Hello {
 /// Read one complete line without allocating beyond the bound. Truncated and
 /// oversize requests close their connection; their payload is never diagnosed.
 pub fn line(reader: &mut impl BufRead, limit: usize) -> Result<Option<Vec<u8>>> {
+    line_checked(reader, limit, |_| Ok(()))
+}
+
+/// The local task-control lane carries its unchanged budget across every
+/// partial read. Ordinary callers keep the original no-op check.
+pub(super) fn line_checked<R: BufRead>(
+    reader: &mut R,
+    limit: usize,
+    mut check: impl FnMut(&R) -> Result<()>,
+) -> Result<Option<Vec<u8>>> {
     let mut bytes = Vec::new();
     loop {
+        check(reader)?;
         let part = reader.fill_buf()?;
         if part.is_empty() {
             ensure!(bytes.is_empty(), "incomplete desktop frame");
@@ -40,6 +51,7 @@ pub fn line(reader: &mut impl BufRead, limit: usize) -> Result<Option<Vec<u8>>> 
         bytes.extend_from_slice(&part[..count]);
         reader.consume(count);
         if end.is_some() {
+            check(reader)?;
             return Ok(Some(bytes));
         }
     }

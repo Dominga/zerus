@@ -35,6 +35,17 @@ pub(super) struct Peer {
     native: NativePeer,
 }
 impl Peer {
+    pub fn image_guard(&self, until: Instant) -> io::Result<String> {
+        #[cfg(target_os = "linux")]
+        {
+            self.native.image_guard(until)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = until;
+            Err(refused())
+        }
+    }
     pub fn bind(
         mut self,
         command: &Command,
@@ -130,6 +141,20 @@ pub(super) struct Executor {
     executor: zerus_desktop_ledger::task_controls::Executor,
 }
 impl Executor {
+    pub fn guards(&self, until: Instant) -> io::Result<(String, String)> {
+        self.current(until)?;
+        #[cfg(target_os = "linux")]
+        {
+            Ok((
+                self.peer.image_guard(until)?,
+                self.resident.native.guard(until)?,
+            ))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(refused())
+        }
+    }
     pub fn executor(&self) -> &zerus_desktop_ledger::task_controls::Executor {
         &self.executor
     }

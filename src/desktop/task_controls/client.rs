@@ -23,6 +23,7 @@ pub(super) fn request(config: &Config, command: Command) -> Result<Value> {
     if !TASK_CONTROLS {
         anyhow::bail!("Task controls are inactive. Nothing was attempted.");
     }
+    let deadline = Instant::now() + TOTAL;
     let envelope = Envelope::new(command).map_err(anyhow::Error::msg)?;
     let location = Location::new(config)?;
     let computer = config
@@ -30,7 +31,6 @@ pub(super) fn request(config: &Config, command: Command) -> Result<Value> {
         .first()
         .map(String::as_str)
         .unwrap_or("this computer");
-    let deadline = Instant::now() + TOTAL;
     Ok(invoke(&envelope, computer, |op, body| {
         exchange(&location, op, body, deadline)
     }))
@@ -43,13 +43,13 @@ fn exchange(
     deadline: Instant,
 ) -> Result<Option<Value>> {
     anyhow::ensure!(Instant::now() < deadline, "task-control request deadline");
-    let Some(stream) = super::super::connection(location, operation, body)? else {
+    let Some(stream) = super::super::connection_until(location, operation, body, deadline)? else {
         return Ok(None);
     };
     let remaining = deadline.saturating_duration_since(Instant::now());
     anyhow::ensure!(!remaining.is_zero(), "task-control request deadline");
     stream.set_read_timeout(Some(remaining))?;
-    let bytes = protocol::line(&mut BufReader::new(stream), REPLY_BYTES)?
+    let bytes = super::read_until(&mut BufReader::new(stream), REPLY_BYTES, deadline)?
         .context("task-control service disconnected")?;
     let frame: Value = serde_json::from_slice(&bytes)?;
     anyhow::ensure!(

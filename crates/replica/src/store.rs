@@ -416,7 +416,7 @@ impl Admitted<'_> {
     /// Read every retained byte without folding or repairing a readable
     /// prefix. Replacement proofs must refuse a cut, corrupt or unapplied
     /// block, as the existing agent-start counter and copy review do.
-    pub(crate) fn load_complete(&mut self, uuid: &str) -> Result<TaskDoc> {
+    pub fn load_complete(&mut self, uuid: &str) -> Result<TaskDoc> {
         let task = self.store.counted(uuid)?;
         if task.applied_version().is_none() {
             return Err(Error::failed("the local task has unapplied changes"));

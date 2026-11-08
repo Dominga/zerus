@@ -18,6 +18,7 @@ use zerus_replica::{
     canonical_version, ids, version_includes, Admitted, Document, ProjectStore, TaskDoc, Update, Version,
     TASK_SCHEMA,
 };
+pub(crate) mod start_mode;
 
 /// The fence capability a hello advertises: it relays, and (from C3c2) it
 /// answers the per-task proof.
@@ -1312,6 +1313,17 @@ fn floor_scanning(
     deadline: Instant,
     scan: usize,
 ) -> Result<Floor> {
+    floor_matching(config, project, uuid, deadline, scan, None)
+}
+
+fn floor_matching(
+    config: &Config,
+    project: &str,
+    uuid: &str,
+    deadline: Instant,
+    scan: usize,
+    expected: Option<start_mode::Mode>,
+) -> Result<Floor> {
     let busy = || {
         Ok(Floor::Refused(Closed {
             node: None,
@@ -1329,20 +1341,34 @@ fn floor_scanning(
     let Some(mut admitted) = store.admit_until(deadline) else {
         return busy();
     };
-    let Ok(mut task) = admitted.load(uuid) else {
+    let loaded = if expected.is_some() {
+        admitted.load_complete(uuid)
+    } else {
+        admitted.load(uuid)
+    };
+    let Ok(mut task) = loaded else {
         return Ok(Floor::Refused(Closed {
             node: None,
             reason: "damaged",
         }));
     };
     if task.execution_managed() {
+        if expected == Some(start_mode::Mode::Legacy) {
+            return Ok(Floor::Refused(start_mode::changed()));
+        }
         return Ok(Floor::Managed);
     }
     let floor = match gate {
         Bootstrap::Satisfied => {
+            if expected == Some(start_mode::Mode::Legacy) {
+                return Ok(Floor::Refused(start_mode::changed()));
+            }
             task.floor()?;
             admitted.save(&mut task)?;
             Floor::Written
+        }
+        Bootstrap::Open(_) if expected == Some(start_mode::Mode::Managed) => {
+            Floor::Refused(start_mode::changed())
         }
         Bootstrap::Open(closed) => Floor::Legacy(closed),
         Bootstrap::Unknown(closed) => Floor::Refused(closed),
@@ -1380,9 +1406,31 @@ pub(crate) fn admit_attempt<R>(
     deadline: Instant,
     reserve: impl FnOnce(&mut Admitted<'_>, &mut TaskDoc) -> Result<std::result::Result<R, Closed>>,
 ) -> Result<Admission<R>> {
+    admit_matching(config, net, project, uuid, deadline, None, reserve)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn admit_matching<R>(
+    config: &Config,
+    net: &dyn Net,
+    project: &str,
+    uuid: &str,
+    deadline: Instant,
+    expected: Option<start_mode::Mode>,
+    reserve: impl FnOnce(&mut Admitted<'_>, &mut TaskDoc) -> Result<std::result::Result<R, Closed>>,
+) -> Result<Admission<R>> {
     let entered = std::cell::Cell::new(false);
     let mut reserve = Some(reserve);
     let mut run = |admitted: &mut Admitted<'_>, task: &mut TaskDoc| {
+        if expected.is_some() && admitted.load_complete(uuid).is_err() {
+            return Ok(Err(Closed {
+                node: None,
+                reason: "damaged",
+            }));
+        }
+        if expected == Some(start_mode::Mode::Legacy) {
+            return Ok(Err(start_mode::changed()));
+        }
         entered.set(true);
         (reserve.take().expect("reserved at most once"))(admitted, task)
     };
@@ -1403,7 +1451,12 @@ pub(crate) fn admit_attempt<R>(
         Err(error) if entered.get() => return Ok(uncertain(error)),
         Err(error) => return Err(error),
     }
-    match floor_within(config, project, uuid, deadline)? {
+    let floored = if expected.is_some() {
+        floor_matching(config, project, uuid, deadline, SCAN_ENTRIES, expected)?
+    } else {
+        floor_within(config, project, uuid, deadline)?
+    };
+    match floored {
         Floor::Managed | Floor::Written => {}
         Floor::Legacy(closed) => return Ok(Admission::Legacy(closed)),
         Floor::Refused(closed) => return Ok(Admission::Refused(closed)),

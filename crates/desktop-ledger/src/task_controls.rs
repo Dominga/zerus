@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 pub use store::{Entry, Page, Reservation, Store};
 
-/// The only activation gate. No environment switch or per-request override.
-pub const TASK_CONTROLS: bool = false;
+// The same single gate, also available to pure Core without a SQLite dependency.
+pub use zerus_desktop_read_policy::task_controls::TASK_CONTROLS;
 pub const REQUEST_BYTES: usize = 16 << 10;
 pub const RECORD_BYTES: usize = 32 << 10;
 pub const PAGE_ROWS: usize = 128;

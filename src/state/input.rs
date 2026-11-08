@@ -14,6 +14,7 @@ use std::io::Write;
 use std::time::Duration;
 
 mod diagnostic;
+pub(crate) mod task_refusal;
 
 const MAX_TEXT: usize = 64 * 1024;
 const MAX_FILE: usize = 10 * 1024 * 1024;

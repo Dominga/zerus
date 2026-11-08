@@ -913,7 +913,10 @@ pub(crate) fn waiting_items() -> Vec<Value> {
         let title = format!("Drive {key} has {} free, under {}; Zerus's build folders there hold {}", gigabytes(free), gigabytes(limit), gigabytes(held));
         let since = registry.low_since.get(&key).copied().unwrap_or_else(now);
         out.push(json!({"id":format!("disk/{key}"),"team":"","team_name":key,"kind":"disk_low","title":title,"since":since,
-            "action":"open_disk","drive":key,"free":free,"total":total,"threshold":limit,"held":held}));
+            "action":"open_disk","drive":key,"free":free,"total":total,"threshold":limit,"held":held,
+            // Task #246: the drive and its threshold band; a lower band or a
+            // new low brings the row back.
+            "state":format!("disk:{key}:{limit}")}));
     }
     out
 }

@@ -28,6 +28,116 @@ const WAIT_SECONDS: f64 = 90.0;
 /// A claim whose runner never settled is not running once its bound and this
 /// grace have passed (the runner ended, the computer restarted).
 const GRACE_SECONDS: f64 = 120.0;
+
+/// Task #290 (owner, 2026-11-08): a run's command needs the environment the
+/// team's build templates have. A template starts from the team worker's
+/// environment (the owner's shell, with the developer variables); `hgs run`
+/// starts its runner from the agent's own process, which may lack them, so
+/// cl.exe dies with `D8050 ... failed to get command line into debug records`
+/// and cc-rs fails. The claim carries what MSVC needs - TEMP and TMP,
+/// SystemRoot and its friends, PATH's system folders, the Visual Studio
+/// developer variables (read once from vcvars when they are unset) and the
+/// build cache's variables - and the command inherits the rest.
+#[cfg(windows)]
+fn msvc_env(temporary: Option<&std::path::Path>) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = Vec::new();
+    let system_root = std::env::var("SystemRoot").ok().filter(|value| !value.is_empty()).unwrap_or_else(|| r"C:\Windows".into());
+    let mut path = std::env::var("PATH").unwrap_or_default();
+    for dir in [format!(r"{system_root}\System32"), system_root.clone()] {
+        if !path.to_ascii_lowercase().contains(&dir.to_ascii_lowercase()) {
+            path = if path.is_empty() { dir } else { format!("{dir};{path}") };
+        }
+    }
+    // The developer variables first: vcvars' PATH is prepended below its own.
+    let developer = developer_env();
+    if let Some((_, tools_path)) = developer.iter().find(|(key, _)| key.eq_ignore_ascii_case("PATH")) {
+        path = format!("{tools_path};{path}");
+    }
+    env.push(("SystemRoot".into(), system_root.clone()));
+    env.push(("windir".into(), system_root.clone()));
+    env.push(("SystemDrive".into(), system_root.chars().take(2).collect()));
+    env.push(("ComSpec".into(), format!(r"{system_root}\System32\cmd.exe")));
+    env.push(("PATHEXT".into(), std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD;.VBS;.JS;.WS".into())));
+    let temp = temporary
+        .map(|folder| folder.display().to_string())
+        .or_else(|| std::env::var("TEMP").ok().filter(|value| !value.is_empty()))
+        .or_else(|| std::env::var("TMP").ok().filter(|value| !value.is_empty()))
+        .unwrap_or_else(|| format!(r"{system_root}\Temp"));
+    env.push(("TEMP".into(), temp.clone()));
+    env.push(("TMP".into(), temp));
+    env.push(("PATH".into(), path));
+    for (key, value) in developer.into_iter().filter(|(key, _)| !key.eq_ignore_ascii_case("PATH")) {
+        env.push((key, value));
+    }
+    env
+}
+
+#[cfg(not(windows))]
+fn msvc_env(_temporary: Option<&std::path::Path>) -> Vec<(String, String)> {
+    Vec::new()
+}
+
+/// The Visual Studio developer variables, read once from `vcvarsall.bat x64`
+/// when this process lacks them: the compiler's INCLUDE, LIB and LIBPATH, its
+/// tool folders, and the PATH that holds cl.exe. Empty when Visual Studio is
+/// not found or its shell already runs here.
+#[cfg(windows)]
+fn developer_env() -> Vec<(String, String)> {
+    use std::sync::OnceLock;
+    static ENV: OnceLock<Vec<(String, String)>> = OnceLock::new();
+    ENV.get_or_init(|| {
+        if std::env::var("VCToolsInstallDir").is_ok() || std::env::var("INCLUDE").is_ok() {
+            // The caller's own developer shell already carries them.
+            return Vec::new();
+        }
+        let Some(vcvars) = vcvars_path() else { return Vec::new() };
+        let Ok(output) = Command::new("cmd.exe")
+            .args(["/D", "/S", "/C", &format!("\"{}\" x64 >nul 2>nul && set", vcvars.display())])
+            .output()
+        else {
+            return Vec::new();
+        };
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut found = Vec::new();
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once('=') else { continue };
+            let key = key.trim().to_ascii_uppercase();
+            // Only the developer variables: TEMP, PATH and the rest keep the
+            // run's own values (PATH is merged by msvc_env).
+            if matches!(key.as_str(), "INCLUDE" | "LIB" | "LIBPATH" | "VCTOOLSINSTALLDIR" | "VCTOOLSVERSION"
+                | "VSINSTALLDIR" | "WINDOWSSDKDIR" | "WINDOWSSDKVERSION" | "UCRTCONTENTROOT" | "UNIVERSALCRTSDKDIR"
+                | "VCTOOLSREDISTDIR" | "EXTENSIONSDKDIR" | "WINDOWSSDKBINPATH" | "PATH")
+            {
+                found.push((key, value.to_owned()));
+            }
+        }
+        found
+    }).clone()
+}
+
+/// Where `vcvarsall.bat` lives, as `vswhere` names it.
+#[cfg(windows)]
+fn vcvars_path() -> Option<std::path::PathBuf> {
+    let program_files = std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| r"C:\Program Files (x86)".into());
+    let vswhere = std::path::PathBuf::from(program_files).join(r"Microsoft Visual Studio\Installer\vswhere.exe");
+    let output = Command::new(vswhere)
+        .args(["-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            "-find", r"VC\Auxiliary\Build\vcvarsall.bat"])
+        .output()
+        .ok()?;
+    let path = String::from_utf8_lossy(&output.stdout).lines().map(str::trim).find(|line| !line.is_empty())?.to_owned();
+    Some(std::path::PathBuf::from(path))
+}
+
+/// Task #290: a run whose compiler could not start says so in its result, not
+/// only in a tail nobody reads: MSVC's D8050 and the debug-record message a
+/// restricted token or a bad temp folder gives.
+fn compiler_cannot_start(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("d8050")
+        || lower.contains("failed to get command line into debug records")
+        || (lower.contains("cannot execute") && lower.contains("c1.dll"))
+}
 /// The runner records its process this soon after the claim.
 const START_SECONDS: f64 = 30.0;
 const LISTED: usize = 20;
@@ -159,6 +269,11 @@ fn start(input: &Value, wait: bool) -> Result<Value> {
         claim["team"] = json!(job.team);
         claim["task"] = json!(job.task);
         claim["attempt"] = json!(job.attempt);
+    }
+    // Task #290: the environment MSVC needs, as the team's templates have it.
+    let env: serde_json::Map<String, Value> = msvc_env(None).into_iter().map(|(key, value)| (key, json!(value))).collect();
+    if !env.is_empty() {
+        claim["env"] = Value::Object(env);
     }
     storage::atomic(&running_path(&id), &claim.to_string())?;
     if let Err(error) = spawn(&id) {
@@ -315,9 +430,14 @@ pub(crate) fn start_for_sandbox(id: &str, input: &Value, session: Value, folder:
     private_dir(&dir())?;
     prune();
     let temp = temp.display().to_string();
+    let mut env: serde_json::Map<String, Value> = msvc_env(Some(std::path::Path::new(&temp))).into_iter().map(|(key, value)| (key, json!(value))).collect();
+    // The member's own folder is the one place its sandbox may write.
+    env.insert("TEMP".into(), json!(temp));
+    env.insert("TMP".into(), json!(temp));
+    env.insert("npm_config_cache".into(), json!(npm.display().to_string()));
     let mut claim = json!({"request_id":id,"label":label,"command":command,"cwd":cwd.display().to_string(),
         "session":session,"started":now(),"timeout_secs":minutes * 60,"source":"hgs_run",
-        "env":{"TEMP":temp,"TMP":temp,"npm_config_cache":npm.display().to_string()}});
+        "env":env});
     // Task 261: the shared sccache server is started here, by the worker's
     // normal token, before the run; a run that cannot rely on it builds
     // without the wrapper rather than start a server in its restricted token.
@@ -579,6 +699,17 @@ fn worker(id: &str) -> Result<i32> {
     done["ms"] = json!(outcome.ms);
     done["timed_out"] = json!(outcome.timed_out);
     done["error"] = json!(outcome.error);
+    // Task #290: a compiler that could not start is named as such in the
+    // result, with the environment that carries what MSVC needs.
+    if outcome.exit != Some(0) {
+        let text = format!("{}\n{}\n{}", outcome.tail, outcome.excerpt, outcome.error);
+        if compiler_cannot_start(&text) {
+            done["error"] = json!("the compiler could not start in this run's environment (MSVC cl.exe: D8050 or \
+                its c1.dll could not be executed); the run carries TEMP, TMP, SystemRoot, PATH and the Visual Studio \
+                developer variables, so check the folder and the token the command runs under");
+            done["compiler_cannot_start"] = json!(true);
+        }
+    }
     done["ended"] = json!(now());
     storage::atomic(&result_path(id), &done.to_string())?;
     let _ = fs::remove_file(running_path(id));
@@ -1382,4 +1513,75 @@ pub(crate) mod tests {
         assert!(error.contains("around a pause"), "{error}");
         assert!(fields(&json!({"label":"cargo test","command":"cargo test --locked","cwd":cwd})).is_ok());
     }
+
+    /// Task #290 (owner, 2026-11-08): a run's environment keeps what MSVC
+    /// needs, as the team's cargo templates have it: TEMP and TMP, SystemRoot
+    /// and its friends, PATH's system folders, and the Visual Studio developer
+    /// variables when the caller's own shell does not carry them.
+    #[test]
+    fn a_windows_runs_environment_keeps_what_msvc_needs() {
+        #[cfg(windows)]
+        {
+            let env = msvc_env(None);
+            let value = |key: &str| env.iter().find(|(found, _)| found.eq_ignore_ascii_case(key)).map(|(_, value)| value.clone());
+            assert!(value("SystemRoot").is_some_and(|root| !root.is_empty()), "{env:?}");
+            assert!(value("ComSpec").is_some_and(|cmd| cmd.to_ascii_lowercase().ends_with("cmd.exe")), "{env:?}");
+            let temp = value("TEMP").expect("a run names its temporary folder");
+            assert_eq!(temp, value("TMP").expect("TMP follows TEMP"), "{env:?}");
+            let path = value("PATH").expect("PATH stays");
+            assert!(path.to_ascii_lowercase().contains(&format!(r"{}\system32", value("SystemRoot").unwrap().to_ascii_lowercase())), "{path}");
+            // The member's own temporary folder wins over the caller's.
+            let member = msvc_env(Some(std::path::Path::new(r"C:\work\member\.zerus-team\tmp")));
+            assert_eq!(member.iter().find(|(key, _)| key == "TEMP").map(|(_, value)| value.as_str()), Some(r"C:\work\member\.zerus-team\tmp"));
+        }
+        #[cfg(not(windows))]
+        assert!(msvc_env(None).is_empty(), "Unix keeps its own environment");
+    }
+
+    /// Task #290: a compiler that cannot start is named in the result.
+    #[test]
+    fn a_run_whose_compiler_cannot_start_says_so() {
+        for text in [
+            "cl : Command line error D8050 : cannot execute 'C:\\VS\\Hostx64\\x64\\c1.dll': failed to get command line into debug records",
+            "thread 'main' panicked: failed to get command line into debug records",
+            "cannot execute c1.dll",
+        ] {
+            assert!(compiler_cannot_start(text), "{text}");
+        }
+        assert!(!compiler_cannot_start("error[E0308]: mismatched types"), "an ordinary build error is not this");
+        assert!(!compiler_cannot_start("test result: ok. 3 passed"));
+    }
+
+    /// Task #290: a real cargo build with a C dependency runs through
+    /// `hgs run`'s runner and its environment. It compiles the `cc` crate's
+    /// hello-world twice in a temporary folder; Windows only, and ignored in
+    /// the ordinary suite because it needs cargo's registry cache.
+    #[test]
+    #[cfg_attr(not(windows), ignore)]
+    #[cfg(windows)]
+    fn a_cargo_build_with_a_c_dependency_succeeds_through_hgs_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        crate::platform::set_test_sandboxed(Some(false));
+        TEST_CALLER.with(|caller| *caller.borrow_mut() = Some(Some(json!({"name":"test/run","run_id":"r-290","conversation_id":"c-290"}))));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("Cargo.toml"),
+            "[package]\nname = \"cc_run\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[build-dependencies]\ncc = \"1\"\n").unwrap();
+        std::fs::write(root.join("build.rs"),
+            "fn main() {\n    cc::Build::new().file(\"c/hello.c\").compile(\"hello\");\n}\n").unwrap();
+        std::fs::create_dir_all(root.join("c")).unwrap();
+        std::fs::write(root.join("c/hello.c"), "int hello(void) { return 0; }\n").unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() { println!(\"ok\"); }\n").unwrap();
+        // The runner is the hgs test binary: the worker runs inline.
+        let id = "99999999-9999-4999-8999-999999999999";
+        INLINE_RUNNER.with(|flag| flag.set(true));
+        let done = start(&json!({"request_id":id,"label":"cc build","command":"cargo build --offline",
+            "cwd":root.display().to_string(),"timeout_minutes":10}), true).unwrap();
+        INLINE_RUNNER.with(|flag| flag.set(false));
+        crate::platform::set_test_sandboxed(None);
+        TEST_CALLER.with(|caller| *caller.borrow_mut() = None);
+        assert_eq!(done["exit"], 0, "{done}");
+    }
 }
+
+

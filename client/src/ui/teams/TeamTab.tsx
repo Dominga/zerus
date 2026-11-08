@@ -5,7 +5,7 @@ import { agentKind, computerOffline } from "../../store/catalog";
 import { coordinatorActivity, activity } from "../../store/session";
 import { memberRow, showCatalog, showTeam, teams } from "../../store/teams";
 import { SHARE, SIDE, dragShare, dragSide, teamLayout, type TeamLayout } from "../../store/teamLayout";
-import { selected, setDetailTab, setSelectedKey, toast } from "../../store/ui";
+import { selected, setDetailTab, setPage, setSelectedKey, toast } from "../../store/ui";
 import { teamAction, teamBuilds, teamTests, teamTimeline, teamsProfile } from "../../bridge";
 import { AddMemberDialog, MemberCard, toComposer } from "./MemberCard";
 import { focusedTasks, memberTree } from "./members";
@@ -258,7 +258,7 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
         <TeamSettingsDialog team={props.team} onClose={() => setSettingsOpen(false)} />
       </Show>
       <Show when={catalogOpen()}>
-        <TeamCatalogEditor onOpenDesigner={() => setCatalogOpen(false)} />
+        <TeamCatalogEditor onOpenDesigner={() => { setCatalogOpen(false); setPage("designer"); }} />
       </Show>
     </>
   );
@@ -432,19 +432,54 @@ function SideLists(props: { team: TeamView; onGo: (target: SideTarget) => void }
   );
 }
 
-function Coordinator(props: { computer: ComputerId; team: TeamView; lead?: TeamMemberView; status?: MemberStatus }) {
+/**
+ * The lead's conversation where another view shows it (the coordinator pane,
+ * and task 200's New team Chat): the selected session's own follow and
+ * composer when it is the lead; otherwise the lead's read-only follow.
+ *
+ * Task 198 (W4): Qt's coordinator conversation always has its input
+ * (TeamConversation.cpp:117-163). The Tauri client sends a session message
+ * only from that session's composer, one at a time, so while another session
+ * is selected this field takes the text and its button carries it into the
+ * lead's own composer (the Team tab stays), where it is sent as any message,
+ * with its attachments, queue and question card.
+ */
+export function LeadConversation(props: { computer: ComputerId; lead?: Pick<TeamMemberView, "session">; label: string; placeholder: string; send: string; children?: JSX.Element }) {
   const row = () => memberRow(props.computer, props.lead);
-  /** The selected session is the coordinator: its own follow and composer serve here. */
+  /** The selected session is the lead: its own follow and composer serve here. */
   const own = () => !!row() && row()!.key === selected()?.key;
   const source = () => (own() ? activity : coordinatorActivity);
-  // The coordinator's conversation is read only while this pane shows it.
-  const follow = () => {
+  // The lead's conversation is read only while this pane shows it.
+  createEffect(() => {
     const lead = row();
     const target = lead && !own() ? { id: lead.key, computer: lead.computer, key: lead.catalogKey, name: lead.name, runId: lead.runId, conversationId: lead.conversationId } : undefined;
     coordinatorActivity.follow(target);
-  };
-  createEffect(follow);
+  });
   onCleanup(() => coordinatorActivity.follow(undefined));
+  const [text, setText] = createSignal("");
+  const carry = () => { toComposer(props.computer, props.lead, text().trim()); setText(""); };
+  return (
+    <div class="activity-wrap team-conversation" style={{ "--col": "100%" } as JSX.CSSProperties}>
+      <ActivityView source={source()} session={row} />
+      {props.children}
+      <Show when={own()} fallback={
+        <div class="cmp-col team-coordinator-draft">
+          <textarea class="field" rows={2} data-coordinator-draft aria-label={props.label} placeholder={props.placeholder} value={text()}
+            onInput={(event) => setText(event.currentTarget.value)}
+            onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); carry(); } }} />
+          <button class="btn small primary" data-coordinator-send onClick={carry}>{props.send}</button>
+        </div>
+      }>
+        <QueuePanel /><QuestionCard />
+        <div class="cmp-col"><Composer /></div>
+      </Show>
+    </div>
+  );
+}
+
+function Coordinator(props: { computer: ComputerId; team: TeamView; lead?: TeamMemberView; status?: MemberStatus }) {
+  const row = () => memberRow(props.computer, props.lead);
+  const own = () => !!row() && row()!.key === selected()?.key;
   return (
     <section class="team-coordinator" aria-label={tr("Coordinator")}>
       <div class="team-section-head">
@@ -458,37 +493,11 @@ function Coordinator(props: { computer: ComputerId; team: TeamView; lead?: TeamM
         </Show>
       </div>
       <Show when={row()} fallback={<p class="dim team-empty">{props.lead?.session ? tr("The coordinator's session is not on the session list.") : tr("The coordinator has no session yet.")}</p>}>
-        <div class="activity-wrap team-conversation" style={{ "--col": "100%" } as JSX.CSSProperties}>
-          <ActivityView source={source()} session={row} />
+        <LeadConversation computer={props.computer} lead={props.lead} label={tr("Message the coordinator")} placeholder={tr("Message the coordinator…")} send={tr("Write to coordinator")}>
           <TeamProposals computer={props.computer} team={props.team} />
-          <Show when={own()} fallback={<CoordinatorDraft computer={props.computer} team={props.team} />}>
-            <QueuePanel /><QuestionCard />
-            <div class="cmp-col"><Composer /></div>
-          </Show>
-        </div>
+        </LeadConversation>
       </Show>
     </section>
-  );
-}
-
-/**
- * Task 198 (W4): Qt's coordinator conversation always has its input
- * (TeamConversation.cpp:117-163). The Tauri client sends a session message
- * only from that session's composer, one at a time, so while another session
- * is selected this field takes the text and Write to coordinator carries it
- * into the coordinator's own composer (the Team tab stays), where it is sent
- * as any message, with its attachments, queue and question card.
- */
-function CoordinatorDraft(props: { computer: ComputerId; team: TeamView }) {
-  const [text, setText] = createSignal("");
-  const carry = () => { const value = text().trim(); toCoordinator(props.computer, props.team, value); setText(""); };
-  return (
-    <div class="cmp-col team-coordinator-draft">
-      <textarea class="field" rows={2} data-coordinator-draft aria-label={tr("Message the coordinator")} placeholder={tr("Message the coordinator…")} value={text()}
-        onInput={(event) => setText(event.currentTarget.value)}
-        onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); carry(); } }} />
-      <button class="btn small primary" data-coordinator-send onClick={carry}>{tr("Write to coordinator")}</button>
-    </div>
   );
 }
 

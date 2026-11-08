@@ -1467,6 +1467,24 @@ output and records the run under the session; the same `request_id` never runs
 twice, and asking again reads its state. `hgs run --list --json` lists the
 session's newest runs.
 
+Task 290 (owner, 2026-11-08): a run's command gets the environment the team's
+build templates have. A template starts from the team worker's environment (the
+owner's shell); `hgs run` starts its runner from the calling agent's own
+process, whose environment may lack the developer variables, and then MSVC's
+cl.exe dies with `D8050 ... failed to get command line into debug records`
+(stacker, ring) although the same cargo builds from the owner's shell. The
+claim now carries TEMP and TMP, SystemRoot, windir, SystemDrive, ComSpec and
+PATHEXT, PATH with the system folders, and the Visual Studio developer
+variables (`INCLUDE`, `LIB`, `LIBPATH`, the tools and Windows SDK folders and
+their PATH) read once from `vcvarsall.bat x64` through `vswhere` when the
+caller's shell does not already carry them; a sandboxed member's run still
+points TEMP and TMP into its own folder and keeps the build cache server's
+variables. The command inherits the rest of the environment as before. When a
+run fails and its output is the compiler-startup signature (D8050, the
+debug-record message, or `cannot execute ... c1.dll`), the result says so in
+`error` and carries `"compiler_cannot_start": true` instead of leaving only a
+tail to read.
+
 On Windows a Git Bash wrapper (`bash -c`, `env`, `nohup`, `timeout`, `xargs`,
 `sh -c`, `npx -c`) ends a Windows process between the session and hgs, so the
 process ancestry stops at a process that no longer exists. hgs then asks the
@@ -2571,6 +2589,18 @@ is there, in one click.
   card names what waits on it (`waiting_tasks`, and "(#N wait for it)" in its
   title). Without a desktop's presence nothing is held. The desktop posts a
   batch as one notice and withdraws it with its last card.
+- Task #246 (owner, 2026-11-08): every Waiting row can be dismissed. `hgs team
+  waiting --json` gives each item a `state`: a drive's threshold band, a paused
+  team's `paused_at`, a plan or phase's team revision, a tool offer's state, a
+  deferred request's id and time, and so on. `{"action":"dismiss","id","team",
+  "state"}` (owner only; `by":"human"` from a shell or the desktop) hides the
+  row and takes it out of `items`/`total`, the badge and the notifications
+  until that state changes; then the row returns by itself. `{"action":
+  "undismiss","id"}` (Show dismissed > Restore) brings it back at once. A
+  decision that blocks work (phase or plan approval, a proposal or question, a
+  permission) stays in the `dismissed` section with `blocking:true` and
+  `blocks` naming the team or member it still blocks; the other dismissed items
+  just rest there. `dismissed`/`dismissed_total` come beside the live page.
 - One owner rule for scratch teams, granted once by card
   (`{"kind":"scratch-rule","folder":"ABS","agents":["claude","codex"],"reason":"..."}`
   | `hgs team propose --json`, or the owner's own `hgs team scratch-rule
@@ -3080,6 +3110,43 @@ and fails with "The team database stayed busy for 60 s". Since task 287:
   change. The members are kept in their own column with the revision that
   wrote them. A write by an older hgs, which sets neither, still rebuilds it
   from the record.
+
+### A team's tasks and attempts are rows
+
+Since task 288 a team record keeps only its shared fields (members, phases,
+settings and the like) in `teams.payload`. Each task, without its attempts, is
+a row of `team_tasks` (its id, its place `ord` in the plan), and each attempt
+is a row of `team_attempts` (its task and its place in the task). Every row
+carries `rev`, the team revision that last wrote it; the `teams` row carries
+`layout` (2 for rows) and `head_rev`. The store assembles the same team as
+before for every reader (`load`, the list reads, the member lookup), with
+the revision per team as before.
+
+A change works on a copy of the team the store keeps. The copy is read
+before the write lock. Under the lock only the revision is checked, and when
+another writer changed the team meanwhile, only the rows written since are
+read. The change then writes the rows it changed: one attempt's row for an
+attempt, the task's row for the task's own fields, its place for a move, and
+the shared fields only when one of them changed. A team of 4.7 MB of tasks no
+longer reads, serializes and writes them all under the lock.
+Measured on a copy of the live store (team 33fbafeb, a 5.75 MB record,
+release build, 20 changes each), the lock was held as follows (median, p95
+and max):
+
+| Change | Whole record | Rows |
+| --- | --- | --- |
+| Member change with a request id | 49, 70, 84 ms | 27, 30, 34 ms |
+| Worker tick | 25, 42, 42 ms | 13, 16, 17 ms |
+
+The one-time migration held the lock for 89 ms.
+
+The first write open of a store migrates each team stored whole, one
+transaction a team, so an interrupted migration goes on at the next open and a
+migrated team is never migrated again. A team whose task ids repeat keeps the
+whole record (`layout` 1). An older hgs cannot read a migrated team. Its
+shared fields hold `"tasks"` as a sentence, not a list, so the older hgs
+answers "Invalid team record" and never writes the team back without its
+tasks. Every hgs and desktop on the computer is updated together.
 
 ### A stalled lead tells the owner
 

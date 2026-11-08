@@ -47,12 +47,12 @@ fn an_idle_members_ready_task_names_the_task_writing_its_files() {
     assert_eq!(reason["kind"], "team_output", "{reason}");
     assert_eq!(reason["text"], "Waiting for #1 API: it writes the same files as #2");
     assert_eq!(reason["holders"], json!([1]));
-    // Status names it too, not the member.
+    // Status names it too, not the member: a running holder keeps task 263's wording.
     let waits = super::super::inbox::waits(&team, team.task(2).unwrap(), true).unwrap();
-    assert_eq!((waits["for"].as_str(), waits["on"].clone(), waits["unblock"].as_str()), (Some("deps"), json!([1]), Some("finish #1")), "{waits}");
+    assert_eq!((waits["for"].as_str(), waits["on"].clone(), waits["unblock"].as_str()), (Some("outputs"), json!([1]), Some("wait for #1 to finish")), "{waits}");
     // And look says what Zerus does next.
     let next = super::super::look::next_action(&team, team.member("dev2").unwrap(), "idle");
-    assert_eq!(next, "Its task #2 waits for #1, which writes the same files; Zerus hands it out when #1 ends.");
+    assert_eq!(next, "Its ready task #2 is held by #1's outputs; wait for #1 to finish.");
     // #1 ends: the next tick hands #2 to its idle member.
     team.task_mut(1).unwrap().status = TaskStatus::Accepted;
     team.task_mut(1).unwrap().attempts[0].state = AttemptState::Reported;

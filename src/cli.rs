@@ -127,7 +127,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] processes <session> [--archive <id>]   observed shell commands as JSON
        hgs [@host] processes <session> --output ID | --stop ID --run RUN --conversation ID [--generation ID]
        hgs [@host] send <session> --json   submit message/attachments from JSON stdin
-       hgs send <session> --observe --json   read whether a send to this computer's terminal agent would be taken now, changing nothing
+       hgs send <codex session> --observe --json   read whether a send to this computer's Codex session would be taken now, changing nothing
        hgs [@host] recovery action --scoped-json exact waiting-job control
        hgs [@host] history <session> --json bounded exact public history
        hgs [@host] history-projection <session> --json retired and refreshed history rows
@@ -312,6 +312,38 @@ fn mobile_peers(_: &Config, _: &[String]) -> Result<i32> {
         2,
         "One-hop mobile peer routing is unavailable on a Windows gateway; local Windows sessions are supported.",
     ))
+}
+/// The refusal of every `send ... --observe` but the supported one.
+const OBSERVE_ONLY: &str =
+    "hgs send --observe takes exactly `hgs send <codex session> --observe --json` on this computer";
+
+/// The one disposition of the send's effect-free observation
+/// (zerus-5wmh.66.4.10, .10.1). It runs first, before the helper
+/// rendezvous, any machine guard, `@host` or `--client` forwarding, a dry
+/// run, a session reference or `--session-id` selection, label repair,
+/// provider routing and stdin. Only the desktop service's own call goes on,
+/// straight to the observation: exactly `hgs send <session> --observe
+/// --json`, naming a local Codex session by its plain name. Any other argv
+/// with `send` and `--observe` before a `--` separator refuses with no
+/// effect. `None`: not an observation.
+fn observe_gate(args: &[String]) -> Option<Result<i32>> {
+    let head = args.split(|arg| arg == "--").next().unwrap_or_default();
+    if !(head.iter().any(|arg| arg == "--observe") && head.iter().any(|arg| arg == "send")) {
+        return None;
+    }
+    Some(match args {
+        [send, name, observe, json]
+            if send == "send"
+                && observe == "--observe"
+                && json == "--json"
+                && zerus_client_core::desktop::session_resume::observed(name)
+                && !name.contains('@') =>
+        {
+            platform::prepare_environment();
+            local_sessions().and_then(|()| state::observe_send(name).map_err(|e| Error::new(1, e)))
+        }
+        _ => Err(Error::new(2, OBSERVE_ONLY)),
+    })
 }
 fn state_command(verb: &str, args: &[String]) -> Result<i32> {
     let mut command = vec![verb.to_owned()];
@@ -567,6 +599,9 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
 }
 
 pub(crate) fn dispatch_at(args: Vec<String>, entered: Instant) -> Result<i32> {
+    if let Some(result) = observe_gate(&args) {
+        return result;
+    }
     // Keep an original helper alive until its parent has observed live code.
     // Only a bounded pipe prefix is consumed; ordinary dispatch/auth is intact.
     #[cfg(unix)]
@@ -947,16 +982,6 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
         if let Some(origin) = state::session_graph::send_origin() {
             return state::session_graph::forward_send(&target, args, origin);
         }
-    }
-    // The send's observation reads this computer's terminal agent sessions
-    // only: an older remote `hgs` would not know the flag
-    // (zerus-5wmh.66.4.10.1).
-    if command == "send" && has(args, "--observe") && !target.is_empty() && !config.is_self(&target)
-    {
-        return Err(Error::new(
-            2,
-            "hgs send --observe reads this computer's sessions only",
-        ));
     }
     if !target.is_empty() && !config.is_self(&target) {
         return remote(&config, &target, command, args, dry);

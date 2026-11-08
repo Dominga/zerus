@@ -895,6 +895,28 @@ impl Unresolved {
 /// its text and its `--json` value, with exit status 5. A candidate set that
 /// cannot be proven complete is refused the same way, never settled on the
 /// label's first holder.
+/// `hgs send <session> --observe --json` for the CLI's own first
+/// disposition (`cli::observe_gate`, zerus-5wmh.66.4.10.1).
+pub(crate) fn observe_send(name: &str) -> Result<i32> {
+    input::observe_dispatch(name)
+}
+
+/// [`resolve_label`] for the send's effect-free observation: the same
+/// candidates and the same deferral to the request's identities as a send
+/// (`LabelGuard::Request`), without the index repair, which may write.
+pub(super) fn resolve_label_unrepaired(name: &str) -> Result<()> {
+    let candidates = labels::candidates(name)?;
+    match (candidates.first, candidates.by_id.as_slice()) {
+        (_, []) => {}
+        (false, [only]) => session_id::select(name, string(only, "session_id")),
+        _ => {
+            let report = ambiguity_report(name, &candidates);
+            session_id::defer(name, report.0, report.1);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn resolve_label(name: &str, guard: LabelGuard) -> std::result::Result<(), Unresolved> {
     labels::repair();
     let candidates = labels::candidates(name)
@@ -1209,11 +1231,16 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     if command == "interrupt" { return interrupt::dispatch(args); }
     if command == "processes" { return processes::dispatch(args); }
     if command == "parent" { return parent_link::dispatch(args); }
-    // The send's effect-free observation (zerus-5wmh.66.4.10) is decided
-    // before any provider routing: an OpenCode or DeepSeek send takes no
-    // observation and would ignore the flag and send (zerus-5wmh.66.4.10.1).
+    // The send's effect-free observation is taken only by the CLI's own
+    // first disposition (`cli::observe_gate`), never here: a send carrying
+    // --observe by another route (the private `__state` ABI, a caller of
+    // this dispatch) refuses before provider routing, whose own sends would
+    // ignore the flag (zerus-5wmh.66.4.10.1).
     if command == "send" && args.iter().any(|arg| arg == "--observe") {
-        return input::observe_command(args);
+        return Err(
+            "hgs send --observe is taken only as `hgs send <codex session> --observe --json`"
+                .into(),
+        );
     }
     if args.first().is_some_and(|name| opencode::exists(name)) { return opencode::dispatch(command,args); }
     if args.first().is_some_and(|name| dsh::exists(name)) {

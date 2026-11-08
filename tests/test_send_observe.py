@@ -12,7 +12,10 @@ DeepSeek session, or another computer, takes no observation and refuses
 before any effect (zerus-5wmh.66.4.10.1).
 """
 import json
+import os
+from pathlib import Path
 import subprocess
+import tempfile
 import time
 import unittest
 import uuid
@@ -24,6 +27,10 @@ import test_input as fixtures
 HGS = fixtures.HGS
 tree = test_answer_observe.tree
 DRAFT = 'terminal has a draft, dialog, or unrecognized prompt; open Terminal and return to an empty agent prompt'
+# `cli::OBSERVE_ONLY`: the refusal of every send --observe but the supported one.
+OBSERVE_ONLY = 'takes exactly `hgs send <codex session> --observe --json` on this computer'
+# `zerus_client_core::run::rendezvous::ARG`.
+RENDEZVOUS = '--desktop-helper-rendezvous-v1'
 
 
 class SendObservation(unittest.TestCase):
@@ -124,7 +131,7 @@ class SendObservation(unittest.TestCase):
                                 input=json.dumps(dict(expected_run_id=self.run_id)), text=True,
                                 capture_output=True, env=self.env, timeout=30)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("this computer's sessions only", result.stderr)
+        self.assertIn(OBSERVE_ONLY, result.stderr)
         self.assertEqual(tree(self.root), before)
 
     def test_invalid_stdin_is_refused_and_changes_nothing(self):
@@ -176,9 +183,104 @@ def opencode_observation_refuses_by_its_name(self):
         result = provider_send(self, name, '--observe', '--json',
                                body=dict(expected_run_id='run', expected_conversation_id='session'))
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('terminal agent sessions only', result.stderr)
+        self.assertIn(OBSERVE_ONLY, result.stderr)
     self.assertEqual(tree(self.root), before)
     self.assertEqual(self.calls, [])
+
+
+def gate_setup(self):
+    """The DeepSeek fixture, plus a fake `ssh` and a stdin file outside the
+    fixture tree: what would be forwarded, and whether stdin was read."""
+    test_dsh_session_actions.DeepSeekScopedActions.setUp(self)
+    outside = tempfile.TemporaryDirectory(prefix='hgs-observe-gate-')
+    self.addCleanup(outside.cleanup)
+    self.outside = Path(outside.name)
+    (self.outside / 'bin').mkdir()
+    self.forwarded = self.outside / 'forwarded'
+    ssh = self.outside / 'bin/ssh'
+    ssh.write_text(f'#!/bin/sh\necho "$@" >> {self.forwarded}\n')
+    ssh.chmod(0o755)
+    self.env['PATH'] = str(self.outside / 'bin') + ':' + self.env['PATH']
+    self.env['HGS_PEERS'] = 'remote'
+
+
+def gate_run(self, argv, body):
+    """`hgs ARGV` with `body` on a file stdin: its result, and how far it
+    read that stdin (the shared file offset)."""
+    path = self.outside / 'stdin.json'
+    path.write_text(json.dumps(body))
+    with path.open('rb') as stdin:
+        result = subprocess.run([str(HGS), *argv], stdin=stdin, text=True, capture_output=True,
+                                env=self.env, timeout=30)
+        return result, os.lseek(stdin.fileno(), 0, os.SEEK_CUR)
+
+
+def every_other_entry_refuses_with_no_effect(self):
+    """design-tima2 / review-win-e R2 on #1777 (zerus-5wmh.66.4.10.1): one
+    first gate takes only `hgs send <codex session> --observe --json`. Every
+    other way a send carrying --observe can enter hgs refuses before any
+    effect: nothing forwarded, no RPC call, no stdin read, and no lock, ID
+    repair or receipt anywhere in the fixture tree."""
+    session_id = self.record['session_id']
+    machine = str(uuid.uuid4())
+    remote_reference = ('zerus://session?machine=' + machine +
+                        '&host=remote&name=codex%2Fexample&conversation=c&run=r')
+    codex = 'codex/example/session'
+    cases = {
+        'a Claude session': ['send', 'claude/example/session', '--observe', '--json'],
+        'a Kimi session': ['send', 'kimi/example/session', '--observe', '--json'],
+        'a DeepSeek session': ['send', self.name, '--observe', '--json'],
+        'an OpenCode session': ['send', 'opencode/example/session', '--observe', '--json'],
+        'another computer': ['@remote', 'send', codex, '--observe', '--json'],
+        'a session reference': ['send', remote_reference, '--observe', '--json'],
+        'a remote reference through @host': ['@remote', 'send', remote_reference, '--observe', '--json'],
+        'a session ID': ['send', '--session-id', session_id, '--observe', '--json'],
+        'a name and a session ID': ['send', codex, '--session-id', session_id, '--observe', '--json'],
+        'a dry run': ['--dry-run', 'send', codex, '--observe', '--json'],
+        'a forwarded client': ['--client', 'remote', 'send', codex, '--observe', '--json'],
+        'a guarded mobile call': ['--expect-machine', machine, 'send', codex, '--observe', '--json'],
+        'the private state ABI': ['__state', 'send', codex, '--observe', '--json'],
+        'the helper rendezvous': [RENDEZVOUS, 'send', codex, '--observe', '--json'],
+        'another order': ['send', codex, '--json', '--observe'],
+        'no --json': ['send', codex, '--observe'],
+        'an extra word': ['send', codex, '--observe', '--json', 'more'],
+        'a name with a host': ['send', codex + '@remote', '--observe', '--json'],
+        # Task send and handoff deliver in process (`input::submit_task`): no
+        # flag reaches a send that way, and the task command never observes.
+        'a task send': ['task', 'send', 'zerus-0000', '--observe'],
+    }
+    bodies = {
+        'a send body': dict(request_id=str(uuid.uuid4()), text='an observation must not send', attachments=[],
+                            expected_run_id='run', expected_conversation_id='session-synthetic'),
+        'an observation body': dict(expected_run_id='run', expected_conversation_id='session-synthetic'),
+    }
+    before = tree(self.root)
+    for case, argv in cases.items():
+        for kind, body in bodies.items():
+            with self.subTest(case=case, body=kind):
+                result, read = gate_run(self, argv, body)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(result.stdout, '')
+                self.assertIn(OBSERVE_ONLY, result.stderr)
+                self.assertEqual(read, 0, 'stdin was read')
+    self.assertFalse(self.forwarded.exists(), 'forwarded to another computer')
+    self.assertEqual(self.calls, [], 'contacted the DeepSeek host')
+    self.assertEqual(tree(self.root), before, 'wrote into the fixture tree')
+    # Controls: the same harness sees a forward and a stdin read.
+    gate_run(self, ['@remote', 'send', codex, '--json'], bodies['a send body'])
+    self.assertTrue(self.forwarded.exists(), 'an ordinary remote send forwards')
+    result, read = gate_run(self, ['send', codex, '--observe', '--json'], bodies['an observation body'])
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assertFalse(json.loads(result.stdout)['ready'])
+    self.assertGreater(read, 0, 'the supported observation reads its stdin')
+    self.assertEqual(tree(self.root), before)
+
+
+ObservationGate = type('ObservationGate', (test_dsh_session_actions.DeepSeekScopedActions,), {
+    **{name: None for name in dir(test_dsh_session_actions.DeepSeekScopedActions) if name.startswith('test')},
+    'setUp': gate_setup,
+    'test_every_other_entry_refuses_with_no_effect': every_other_entry_refuses_with_no_effect,
+})
 
 
 # The DeepSeek suite's private synthetic Unix RPC host; its own tests are not run again.

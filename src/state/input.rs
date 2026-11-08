@@ -885,25 +885,6 @@ const MAX_OBSERVE_INPUT: u64 = 8 << 10;
 /// The longest refusal an observation reply carries, in characters.
 const MAX_OBSERVE_REASON: usize = 1024;
 
-/// Any `hgs send` carrying `--observe`, decided before any provider routing
-/// (zerus-5wmh.66.4.10.1): exactly `hgs send <session> --observe --json` for
-/// a terminal agent's session, or a refusal before stdin is read. An
-/// OpenCode or DeepSeek session takes no observation: its own send path
-/// would ignore the flag, so it refuses by its name alone, with no provider
-/// contact.
-pub(super) fn observe_command(args: &[String]) -> Result<i32> {
-    if args.len() != 3 || args[1] != "--observe" || args[2] != "--json" {
-        return Err("usage: hgs send <session> --observe --json (JSON from stdin)".into());
-    }
-    if matches!(args[0].split('/').next(), Some("opencode" | "dsh"))
-        || opencode::exists(&args[0])
-        || dsh::exists(&args[0])
-    {
-        return Err("hgs send --observe reads terminal agent sessions only".into());
-    }
-    observe_dispatch(&args[0])
-}
-
 /// `hgs send <session> --observe --json`: whether `hgs send` would take a
 /// message for this exact run and conversation now, by its own gates (the
 /// record, the exact live process, a pending resume's own verification and
@@ -911,8 +892,13 @@ pub(super) fn observe_command(args: &[String]) -> Result<i32> {
 /// lock, types nothing (pending settings included), and writes no receipt,
 /// attachment, diagnostic capture, record, attention or read mark. A
 /// continuation condition only (zerus-5wmh.66.4.10): `hgs send` checks every
-/// gate again under its input lock before its first byte.
-fn observe_dispatch(name: &str) -> Result<i32> {
+/// gate again under its input lock before its first byte. Only a Codex
+/// session, whose readiness only its terminal shows, is observed; the CLI's
+/// first disposition (`cli::observe_gate`) is the only caller.
+pub(super) fn observe_dispatch(name: &str) -> Result<i32> {
+    if !zerus_client_core::desktop::session_resume::observed(name) || name.contains('@') {
+        return Err("hgs send --observe reads a local Codex session only".into());
+    }
     let mut input = Vec::new();
     io::stdin()
         .take(MAX_OBSERVE_INPUT + 1)
@@ -929,10 +915,13 @@ fn observe_dispatch(name: &str) -> Result<i32> {
     {
         return Err("expected_run_id is required; refresh the session first".into());
     }
-    let (ready, reason) = match observe(name, &request) {
-        Ok(()) => (true, String::new()),
-        Err(error) => (false, error.chars().take(MAX_OBSERVE_REASON).collect()),
-    };
+    // Among sessions that share the label, the request's own identities
+    // select, as for a send, but read only: no index repair.
+    let (ready, reason) =
+        match super::resolve_label_unrepaired(name).and_then(|()| observe(name, &request)) {
+            Ok(()) => (true, String::new()),
+            Err(error) => (false, error.chars().take(MAX_OBSERVE_REASON).collect()),
+        };
     println!("{}", json!({"ready": ready, "reason": reason}));
     Ok(0)
 }
@@ -1465,6 +1454,24 @@ fn paste_shown(screen: &str, pasted: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// zerus-5wmh.66.4.10.1: a send carrying --observe that reaches the state
+    /// dispatch by any route but the CLI's first gate (`cli::observe_gate`)
+    /// refuses there, before the OpenCode and DeepSeek routing whose own
+    /// sends would ignore the flag.
+    #[test]
+    fn a_send_with_observe_refuses_before_provider_routing() {
+        for args in [
+            ["send", "dsh/example/session", "--observe", "--json"],
+            ["send", "opencode/example/session", "--observe", "--json"],
+            ["send", "codex/example/session", "--observe", "--json"],
+            ["send", "codex/example/session", "--json", "--observe"],
+        ] {
+            let args: Vec<String> = args.map(str::to_owned).into();
+            let refusal = crate::state::dispatch(&args).unwrap_err();
+            assert!(refusal.contains("is taken only as"), "{args:?}: {refusal}");
+        }
+    }
 
     /// zerus-5wmh.66.4.9: a resumed session's record alone, never its
     /// terminal, decides whether a deferred send may start; only a confirmed,

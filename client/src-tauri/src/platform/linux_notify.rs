@@ -494,6 +494,7 @@ fn post(shared: &Shared, connection: &Connection, nonce: u64, notice: Notice) {
             current.owner.as_str().try_into()?,
             notice.title.as_str(),
             &escape_body(&notice.body),
+            &crate::native_text::render(&zerus_client_core::text!("Open session")),
         )
     })();
     let mut state = lock(&shared.state);

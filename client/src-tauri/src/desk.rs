@@ -412,7 +412,12 @@ impl Attention {
         };
         let checkpoint = zerus_client_core::attention_store::Observation::loaded(&bytes, &saved);
         Self {
-            tracker: Tracker::new(saved),
+            tracker: {
+                let mut tracker = Tracker::new(saved);
+                // Notice text in the interface language (zerus-5wmh.13.16.2).
+                tracker.set_render(crate::native_text::render);
+                tracker
+            },
             path,
             checkpoint,
             lifetime: None,

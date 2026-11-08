@@ -2545,5 +2545,7 @@
   "%1 started for %2, but it did not confirm the handoff. Check it; Zerus does not retry.": "%1 запущена для %2, но не подтвердила передачу. Проверьте её; Zerus не повторяет попытку.",
   "The move to %1 failed (%2). Resume the old session from Activity.": "Перенос в %1 не удался (%2). Возобновите старую сессию из Активности.",
   "The move to %1 failed (%2); the old session resumed.": "Перенос в %1 не удался (%2); старая сессия возобновлена.",
-  "the move gave no receipt": "перенос не вернул квитанцию"
+  "the move gave no receipt": "перенос не вернул квитанцию",
+  "Member details": "Подробности об участнике",
+  "State colours: working, building and running tests are blue; waiting for its own job, for the lead or for a person is amber; needs your answer, blocked or failed is red; idle or done is grey; paused or offline is muted and hatched.": "Цвета состояний: работа, сборка и тесты синие; ожидание своей задачи, ведущего или человека янтарное; нужен ваш ответ, заблокировано или ошибка красные; простой или готово серые; пауза или офлайн приглушённые и штрихованные."
 }

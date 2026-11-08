@@ -24,7 +24,13 @@ DEV_ID_PREFIX = "dev.zerus.next"
 
 def binary() -> Path:
     name = "zerus-client.exe" if sys.platform == "win32" else "zerus-client"
-    return CLIENT / "src-tauri" / "target" / "release" / name
+    # Task 317: a build into another CARGO_TARGET_DIR is launched from there,
+    # never the older binary left in the default target.
+    target = os.environ.get("CARGO_TARGET_DIR", "")
+    base = Path(target) if target else CLIENT / "src-tauri" / "target"
+    if not base.is_absolute():
+        base = CLIENT / "src-tauri" / base
+    return base / "release" / name
 
 
 def identity_allows_launch(info: dict) -> bool:

@@ -4,14 +4,13 @@ import { tr } from "../../i18n";
 import { markdownReady, markdownTree, type Inline, type MarkdownBlock } from "./markdown";
 import { openExternal, openSessionFile } from "./sessionFiles";
 import type { Session } from "./types";
-import { SearchHighlight } from "./SearchHighlight";
+import { HighlightQuery, SearchHighlight } from "./SearchHighlight";
 
 // Inline Markdown stays text except its links: HTTP(S) uses the system
 // opener, and local/file references open the session's File reference dialog.
 
 export const ActivitySession = createContext<() => Session | undefined>();
-/** The query a shown search hit highlights in its message (zerus-5wmh.13.17.5); empty elsewhere. */
-export const HighlightQuery = createContext("");
+export { HighlightQuery };
 const marked = (text: string, query: string): JSX.Element => (query ? <SearchHighlight text={text} query={query} /> : text);
 
 function inlines(parts: Inline[], session?: () => Session | undefined, query = ""): JSX.Element[] {

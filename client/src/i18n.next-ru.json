@@ -52,6 +52,16 @@
   "%1: polling…": "%1: опрос…",
   "%1: unreachable": "%1: недоступен",
   "%1–%2 of %3 worktrees": "Рабочие деревья %1–%2 из %3",
+  "%n creation(s)": [
+    "%n создание",
+    "%n создания",
+    "%n созданий"
+  ],
+  "%n message(s)": [
+    "%n сообщение",
+    "%n сообщения",
+    "%n сообщений"
+  ],
   "%n session(s)": [
     "%n сессия",
     "%n сессии",
@@ -91,6 +101,8 @@
   "Accounts changed on this machine. Refresh before saving.": "Учётные записи на этом компьютере изменились. Обновите, прежде чем сохранять.",
   "Action cancelled.": "Действие отменено.",
   "Active: working, scheduled, waiting, needs attention or a draft": "Активные: работают, запланированы, ждут, требуют внимания или содержат черновик",
+  "Activity did not load": "Активность не загрузилась",
+  "Activity is not recorded for shell sessions. Use Terminal to work in this shell.": "Для сессий оболочки активность не записывается. Работайте в этой оболочке через терминал.",
   "Activity is unavailable from the desktop service. Retry to reconnect.": "Активность недоступна в фоновой службе. Повторите подключение.",
   "Activity, processes and project tasks are unavailable with this background service connection.": "История, процессы и задачи проекта недоступны при этом подключении к фоновой службе.",
   "Add %1 to machines": "Добавить %1 на компьютеры",
@@ -525,6 +537,7 @@
   "No migration report is available for this connection.": "Для этого подключения нет отчёта о миграции.",
   "No other session on this computer can be its parent.": "Ни одна другая сессия на этом компьютере не может быть её родителем.",
   "No phones": "Телефонов нет",
+  "No recorded activity": "Нет записанной активности",
   "No reply to the last keep-warm ping was seen. Keeping it warm resumes after your next message.": "Ответ на последний пинг прогрева не получен. Прогрев возобновится после вашего следующего сообщения.",
   "No saved limits, rate limited": "Сохранённых лимитов нет, запросы ограничены",
   "No session matches.": "Подходящих сессий нет.",
@@ -1043,6 +1056,7 @@
   "The session is no longer available.": "Сессия больше недоступна.",
   "The session reference is on the clipboard": "Ссылка на сессию скопирована в буфер обмена",
   "The session was not resumed. Check Terminal; your draft was kept without sending.": "Сессия не была возобновлена. Проверьте терминал; черновик сохранён без отправки.",
+  "The session's computer did not answer in time.": "Компьютер сессии не ответил вовремя.",
   "The start is still being delivered": "Запуск ещё не доставлен",
   "The system asks for reduced motion, so Zerus reduces it whatever this setting says.": "Система запрашивает уменьшение анимации, поэтому Zerus уменьшает её независимо от этой настройки.",
   "The task changed. Nothing was changed. Refresh the task.": "Задача изменилась. Ничего не изменено. Обновите задачу.",

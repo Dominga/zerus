@@ -5,6 +5,7 @@ import os
 import hashlib
 import pathlib
 import subprocess
+import time
 import unittest
 import uuid
 
@@ -30,20 +31,24 @@ class LaunchIdentity(test_fork.Base):
             test_pause.AGENT = original
 
     def use_required_helper(self, changed_run=False):
-        """Observe actual production new/fork counts; saved-ID reader uses
-        the existing fixture injection until its own constructor is updated."""
+        """Observe actual production counts without rewriting the recipe."""
         helper = self.root / 'required-helper' / 'hgs'
         helper.parent.mkdir()
         source = r'''#!/usr/bin/env python3
 import os, sys, json, pathlib, subprocess, uuid
 argv = sys.argv[1:]
+if argv == ['--help']:
+    barrier = pathlib.Path(__BARRIER__)
+    if barrier.exists():
+        barrier.with_suffix('.entered').touch()
+        while barrier.exists():
+            __import__('time').sleep(0.01)
 if argv and argv[0] == '--run':
     received = argv[1]
     with pathlib.Path(__CALLS__).open('a') as log:
         log.write(json.dumps(dict(count=received, sid=os.environ.get('HGS_SESSION_ID'),
-                                 run=os.environ.get('HGS_RUN_ID'), new=os.environ.get('HGS_LAUNCH_SESSION_ID'))) + '\n')
-    if received.isdigit() and os.environ.get('HGS_RESUME_SESSION_ID'):
-        argv[1] = 'sid1:' + os.environ['HGS_SESSION_ID'] + ':' + os.environ['HGS_RUN_ID'] + ':' + received
+                                 run=os.environ.get('HGS_RUN_ID'), new=os.environ.get('HGS_LAUNCH_SESSION_ID'),
+                                 saved=os.environ.get('HGS_RESUME_SESSION_ID'))) + '\n')
     if __CHANGED__:
         fields = argv[1].split(':')
         assert len(fields) == 4 and fields[0] == 'sid1'
@@ -61,6 +66,7 @@ os.execv(__HGS__, [__HGS__] + argv)
         source = source.replace('__CALLS__', repr(str(self.root / 'helper-calls.jsonl')))
         source = source.replace('__RESULT__', repr(str(self.root / 'helper-result')))
         source = source.replace('__CHANGED__', repr(changed_run))
+        source = source.replace('__BARRIER__', repr(str(self.root / 'hold-helper-help')))
         helper.write_text(source)
         helper.chmod(0o700)
         self.env['HGS_EXECUTABLE'] = str(helper)
@@ -79,7 +85,7 @@ os.execv(__HGS__, [__HGS__] + argv)
         for call in fresh:
             self.assertEqual(call['count'], f"sid1:{call['sid']}:{call['run']}:0")
 
-    def test_selected_helper_required_count_keeps_a_saved_id_on_resume(self):
+    def test_selected_helper_required_count_keeps_a_saved_id_on_resume_and_fresh(self):
         self.use_required_helper()
         for agent in ('claude', 'codex', 'kimi'):
             with self.subTest(agent=agent):
@@ -95,6 +101,199 @@ os.execv(__HGS__, [__HGS__] + argv)
                 self.assertEqual(resumed['conversation_id'], original['conversation_id'])
                 self.assertNotEqual(resumed['run_id'], original['run_id'])
                 self.assertEqual(self.terminal_identity(name)['HGS_SESSION_ID'], original['session_id'])
+                self.hgs('pause', name)
+                self.hgs('resume', name, '--fresh', '-d')
+                self.wait(lambda: self.binding(name).get('conversation_id') not in (None, original['conversation_id'])
+                          and self.binding(name).get('activity') == 'idle')
+                fresh = self.binding(name)
+                self.assertEqual(fresh['session_id'], original['session_id'])
+                self.assertEqual(fresh['layout'], 'id')
+                self.assertNotEqual(fresh['run_id'], resumed['run_id'])
+        calls = [json.loads(line) for line in (self.root / 'helper-calls.jsonl').read_text().splitlines()]
+        saved = [call for call in calls if call.get('saved')]
+        self.assertEqual(len(saved), 6)
+        for call in saved:
+            self.assertEqual(call['count'], f"sid1:{call['sid']}:{call['run']}:0")
+            self.assertEqual(call['saved'], call['sid'])
+            self.assertEqual(call['new'], '')
+
+    @unittest.skipUnless(os.environ.get('HGS_TEST_OLD_CLI'), 'requires the verified old CLI fixture')
+    def test_a_saved_id_never_reaches_a_literal_old_helpers_other_legacy_holder(self):
+        old = pathlib.Path(os.environ['HGS_TEST_OLD_CLI'])
+        self.assertEqual(hashlib.sha256(old.read_bytes()).hexdigest(),
+                         '146731d47b4aa7c9787096bb12cf3d9054e0b043194fca245fa5a27f2988bbf5')
+        name = self.start('codex')
+        self.wait(lambda: self.binding(name).get('activity') == 'idle')
+        self.hgs('pause', name)
+        sid, held = self.move_to_id_layout(name)
+        before = held()
+        # Two durable sessions can refer to the same native conversation.
+        # The old helper ignores the SID and would replace this other holder.
+        other = dict(before, session_id=str(uuid.uuid4()), run_id=str(uuid.uuid4()))
+        other.pop('layout')
+        state = self.root / 'state'
+        digest = hashlib.sha256(name.encode()).hexdigest()
+        legacy = state / (digest + '.json')
+        legacy.write_text(json.dumps(other) + '\n')
+        (state / 'ids' / (other['session_id'] + '.json')).write_text(
+            json.dumps(dict(version=1, name=name, kind='legacy')) + '\n')
+        index = (json.dumps(dict(version=1, label=name, ids=[sid, other['session_id']])) + '\n').encode()
+        (state / 'labels' / (digest + '.json')).write_bytes(index)
+        manifest = state / 'labels' / '.complete'
+        if manifest.exists():
+            proof = json.loads(manifest.read_text())
+            proof['labels'][digest] = hashlib.sha256(index).hexdigest()
+            manifest.write_text(json.dumps(proof) + '\n')
+        original_bytes = legacy.read_bytes()
+        argv = (self.root / 'argv.jsonl').read_bytes()
+        self.env['HGS_EXECUTABLE'] = str(old)
+        for mode in ([], ['--fresh']):
+            output = subprocess.run([str(test_pause.HGS), 'resume', '--session-id', sid, *mode, '-d'],
+                                    env=self.env, text=True, capture_output=True, timeout=10)
+            self.assertEqual(output.returncode, 1, output.stdout + output.stderr)
+            self.assertIn('On test, the selected hgs helper cannot confirm', output.stderr)
+            self.assertIn('Update hgs on test', output.stderr)
+            self.assertEqual(held(), before)
+            self.assertEqual(legacy.read_bytes(), original_bytes)
+            self.assertEqual((self.root / 'argv.jsonl').read_bytes(), argv)
+            self.assertNotEqual(subprocess.run([str(self.bin / 'tmux'), 'has-session', '-t', '=' + name],
+                                              env=self.env, capture_output=True).returncode, 0)
+
+    def test_legacy_restore_and_dry_recipes_never_probe_the_selected_helper(self):
+        helper = self.bin / 'legacy-helper'
+        calls = self.root / 'legacy-helper-calls'
+        helper.write_text('''#!/usr/bin/env python3
+import os,sys,pathlib,json
+if sys.argv[1:2] in (['--run'], ['--help']):
+    with pathlib.Path(__CALLS__).open('a') as log:
+        log.write(json.dumps(sys.argv[1:3])+'\\n')
+if sys.argv[1:] == ['--help']:
+    print('legacy helper without the capability')
+    sys.exit(0)
+os.execv(__HGS__,[__HGS__]+sys.argv[1:])
+'''.replace('__CALLS__', repr(str(calls))).replace('__HGS__', repr(str(test_pause.HGS))))
+        helper.chmod(0o700)
+        self.env['HGS_EXECUTABLE'] = str(helper)
+        record, _ = self.saved_v1('codex')
+        name = record['name']
+        self.assertNotIn('session_id', record)
+        self.resume(name)
+        self.hgs('pause', name)
+        self.hgs('resume', name, '--fresh', '-d')
+        self.wait(lambda: self.binding(name).get('activity') == 'idle'
+                  and self.binding(name).get('conversation_id') not in (None, record['conversation_id']))
+        self.hgs('pause', name)
+        self.hgs('archive', name)
+        archive = json.loads(next((self.root / 'state' / 'archives').glob('*.json')).read_text())
+        self.hgs('resume', name, '--archive', archive['archive_id'], '-d')
+        self.wait(lambda: self.binding(name).get('activity') == 'idle' and not self.binding(name).get('expected_id'))
+        self.hgs('pause', name)
+        sid, held = self.move_to_id_layout(name)
+        before, history = held(), (self.root / 'argv.jsonl').read_bytes()
+        seen = calls.read_bytes()
+        for mode in ([], ['--fresh']):
+            self.hgs('resume', '--session-id', sid, *mode, '--dry-run')
+            self.assertEqual(calls.read_bytes(), seen)
+        rows = [json.loads(line) for line in calls.read_text().splitlines()]
+        self.assertEqual(rows, [['--run', '0']] * 3)
+        # A negative answer is safe for a legacy recipe, but never for this
+        # now ID-only original. Nothing is handed to --run on either attempt.
+        for mode in ([], ['--fresh']):
+            out = subprocess.run([str(test_pause.HGS), 'resume', '--session-id', sid, *mode, '-d'],
+                                 env=self.env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+            self.assertIn('Update hgs on test', out.stderr)
+        self.assertEqual(held(), before)
+        self.assertEqual((self.root / 'argv.jsonl').read_bytes(), history)
+        self.assertEqual([json.loads(line) for line in calls.read_text().splitlines()],
+                         rows + [['--help'], ['--help']])
+
+    def test_saved_identity_changes_during_the_probe_refuse_before_terminal_start(self):
+        import fcntl
+        self.use_required_helper()
+        for fresh in (False, True):
+            for field, value in (('session_id', str(uuid.uuid4())), ('layout', 'legacy'),
+                                 ('name', 'codex/p/changed'), ('terminal_name', 'codex/p/other')):
+                with self.subTest(fresh=fresh, field=field):
+                    tag = ('fresh-' if fresh else 'resume-') + field
+                    name = self.start('codex', tag)
+                    self.wait(lambda: self.binding(name).get('activity') == 'idle')
+                    self.hgs('pause', name)
+                    sid, held = self.move_to_id_layout(name)
+                    path = self.root / 'state' / 'sessions' / (sid + '.json')
+                    original = path.read_bytes()
+                    history = (self.root / 'argv.jsonl').read_bytes()
+                    barrier = self.root / 'hold-helper-help'
+                    entered = barrier.with_suffix('.entered')
+                    entered.unlink(missing_ok=True)
+                    barrier.touch()
+                    args = ['resume', '--session-id', sid, *(['--fresh'] if fresh else []), '-d']
+                    child = subprocess.Popen([str(test_pause.HGS), *args], env=self.env,
+                                             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    try:
+                        deadline = time.monotonic() + 5
+                        while not entered.exists() and child.poll() is None and time.monotonic() < deadline:
+                            time.sleep(0.005)
+                        self.assertTrue(entered.exists(), 'the original probe was not entered')
+                        with (self.root / 'state' / '.lock').open('r+b') as writer:
+                            # The help exchange must not hold the state writer.
+                            fcntl.flock(writer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            record = held()
+                            record[field] = value
+                            staging = path.with_suffix('.tmp')
+                            staging.write_text(json.dumps(record) + '\n')
+                            os.replace(staging, path)
+                        barrier.unlink()
+                        stdout, stderr = child.communicate(timeout=10)
+                        self.assertNotEqual(child.returncode, 0, stdout + stderr)
+                        self.assertEqual((self.root / 'argv.jsonl').read_bytes(), history)
+                        self.assertNotEqual(subprocess.run([str(self.bin / 'tmux'), 'has-session', '-t', '=' + name],
+                                                          env=self.env, capture_output=True).returncode, 0)
+                    finally:
+                        barrier.unlink(missing_ok=True)
+                        if child.poll() is None:
+                            child.communicate(timeout=10)
+                        path.write_bytes(original)
+
+    def test_an_uncertain_saved_id_capability_never_uses_the_integer_recipe(self):
+        name = self.start('codex')
+        self.wait(lambda: self.binding(name).get('activity') == 'idle')
+        self.hgs('pause', name)
+        sid, held = self.move_to_id_layout(name)
+        before, history = held(), (self.root / 'argv.jsonl').read_bytes()
+        dispatched = self.root / 'unexpected-saved-dispatch'
+        for kind in ('invalid', 'overflow', 'timeout', 'replacement'):
+            with self.subTest(kind=kind):
+                helper = self.bin / ('saved-helper-' + kind)
+                if kind == 'invalid':
+                    helper.write_text('not an executable image or script\n')
+                    helper.chmod(0o700)
+                else:
+                    helper.write_text('''#!/usr/bin/env python3
+import os,sys,time,pathlib
+if sys.argv[1:] == ['--help']:
+    print('session-launch-identity-v1',flush=True)
+    if __KIND__ == 'overflow':
+        print('x'*(70<<10))
+    elif __KIND__ == 'timeout':
+        time.sleep(10)
+    else:
+        path=pathlib.Path(sys.argv[0]);new=path.with_suffix('.new')
+        new.write_bytes(path.read_bytes());new.chmod(0o700);os.replace(new,path)
+    sys.exit(0)
+pathlib.Path(__DISPATCHED__).touch()
+os.execv(__HGS__,[__HGS__]+sys.argv[1:])
+'''.replace('__KIND__', repr(kind)).replace('__DISPATCHED__', repr(str(dispatched)))
+                       .replace('__HGS__', repr(str(test_pause.HGS))))
+                    helper.chmod(0o700)
+                self.env['HGS_EXECUTABLE'] = str(helper)
+                result = subprocess.run([str(test_pause.HGS), 'resume', '--session-id', sid, '-d'],
+                                        env=self.env, text=True, capture_output=True, timeout=6)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn('Update hgs on test', result.stderr)
+                self.assertFalse(dispatched.exists())
+                self.assertEqual(held(), before)
+                self.assertEqual((self.root / 'argv.jsonl').read_bytes(), history)
 
     def test_a_required_helper_refuses_a_changed_run_before_bootstrap(self):
         self.use_required_helper(changed_run=True)

@@ -1,6 +1,8 @@
 //! Capability DATA, cached per exact helper image in the launching process.
-//! Unavailable observations preserve the integer recipe; none grants native
-//! admission, consent, custody or ID-layout publication.
+//! Unavailable observations preserve the integer recipe for legacy/new
+//! sessions. An existing ID-layout session needs a positive answer: an old
+//! helper could otherwise select its label's different legacy holder.
+//! None grants native admission, consent, custody or ID-layout publication.
 use super::*;
 #[cfg(unix)]
 use std::{
@@ -103,6 +105,14 @@ impl Observed {
         } else {
             Ok(count.to_string())
         }
+    }
+    pub(crate) fn saved_count(&self, session: &str, run: &str) -> Result<String> {
+        if !self.required {
+            let config = crate::config::Config::load().map_err(|e| e.message)?;
+            let host = config.host();
+            return Err(format!("On {host}, the selected hgs helper cannot confirm this saved session's ID. Update hgs on {host} before resuming it."));
+        }
+        required_count(session, run, 0)
     }
     pub(crate) fn environment(&self, allocation: &Allocation) -> [(&'static str, String); 3] {
         if self.required || cfg!(windows) {
@@ -282,6 +292,16 @@ mod tests {
                 .count(allocation.session(), allocation.run(), 3)
                 .unwrap(),
             "3"
+        );
+        assert!(helper
+            .saved_count(allocation.session(), allocation.run())
+            .unwrap_err()
+            .contains("cannot confirm this saved session's ID"));
+        assert_eq!(
+            Observed { required: true }
+                .saved_count(allocation.session(), allocation.run())
+                .unwrap(),
+            required_count(allocation.session(), allocation.run(), 0).unwrap()
         );
         assert_eq!(
             helper.environment(&allocation),

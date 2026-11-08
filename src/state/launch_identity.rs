@@ -75,9 +75,102 @@ impl Allocation {
     }
 }
 
+/// A required private argv form, carried in the existing `--run` count
+/// slot. Older helpers parse only an integer and refuse BEFORE bootstrap.
+/// Nothing emits this in production until ID-layout writers are enabled.
+#[allow(dead_code)]
+pub(crate) fn required_count(session: &str, run: &str, count: usize) -> Result<String> {
+    if !valid_id(session) || !valid_id(run) {
+        return Err("The required launch identity is unavailable".into());
+    }
+    Ok(format!("sid1:{session}:{run}:{count}"))
+}
+
+fn valid_id(id: &str) -> bool {
+    session_id::canonical(id) && uuid::Uuid::parse_str(id).is_ok_and(|id| !id.is_nil())
+}
+
+pub(crate) struct Count {
+    pub(crate) value: usize,
+    pub(crate) required: bool,
+}
+
+/// The legacy integer grammar is unchanged. A versioned form never falls
+/// back to it, or to an untracked launch, when any identity is unavailable.
+pub(crate) fn resume_count(raw: &str) -> Result<Count> {
+    let count = parse_count(raw)?;
+    if let Some((session, run)) = count.1 {
+        let new = nonempty_env(DECLARATION);
+        let saved = nonempty_env("HGS_RESUME_SESSION_ID");
+        if nonempty_env("HGS_SESSION_ID").as_deref() != Some(session)
+            || nonempty_env("HGS_RUN_ID").as_deref() != Some(run)
+            || nonempty_env("HGS_SESSION").is_none()
+            || std::env::var("HGS_TRACKING").as_deref() == Ok("0")
+            || !matches!((new.as_deref(),saved.as_deref()),
+                (Some(id),None) | (None,Some(id)) if id == session)
+        {
+            return Err("The required launch identity changed; nothing was started".into());
+        }
+    }
+    Ok(Count {
+        value: count.0,
+        required: count.1.is_some(),
+    })
+}
+
+fn parse_count(raw: &str) -> Result<(usize, Option<(&str, &str)>)> {
+    let number = |value: &str| {
+        value
+            .parse::<usize>()
+            .map_err(|_| "invalid --run resume-argument count".to_owned())
+    };
+    let Some(bound) = raw.strip_prefix("sid1:") else {
+        return Ok((number(raw)?, None));
+    };
+    if raw.len() > 128 {
+        return Err("The required launch count exceeds its bound".into());
+    }
+    let parts = bound.split(':').collect::<Vec<_>>();
+    let [session, run, count] = parts.as_slice() else {
+        return Err("The required launch count is malformed".into());
+    };
+    if !valid_id(session) || !valid_id(run) {
+        return Err("The required launch identity is invalid".into());
+    }
+    Ok((number(count)?, Some((session, run))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn required_counts_bind_both_ids_and_never_become_legacy_counts() {
+        let allocation = Allocation::fresh();
+        let raw = required_count(allocation.session(), allocation.run(), 3).unwrap();
+        assert_eq!(
+            parse_count(&raw).unwrap(),
+            (3, Some((allocation.session(), allocation.run())))
+        );
+        for bad in [
+            format!("{raw}:extra"),
+            raw.replace("sid1:", "sid2:"),
+            format!("sid1:{}:{}:NaN", allocation.session(), allocation.run()),
+            format!("sid1:{}:{}:0", uuid::Uuid::nil(), allocation.run()),
+            format!(
+                "sid1:{}:{}:0",
+                allocation.session(),
+                "ABCDEF01-2345-4678-9abc-def012345678"
+            ),
+            "sid1:".to_owned(),
+            format!("sid1:{}", "x".repeat(129)),
+        ] {
+            assert!(parse_count(&bad).is_err(), "{bad}");
+        }
+        assert_eq!(parse_count("0").unwrap(), (0, None));
+        assert_eq!(parse_count("03").unwrap(), (3, None));
+        assert!(required_count("", allocation.run(), 0).is_err());
+    }
 
     #[test]
     fn a_new_launch_holds_one_distinct_session_and_run_before_spawn() {

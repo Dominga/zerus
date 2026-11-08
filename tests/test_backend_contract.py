@@ -40,6 +40,11 @@ except ImportError:  # Windows: the host backend attaches on a pseudoconsole ins
 REPO = Path(__file__).resolve().parents[1]
 EXE = ".exe" if sys.platform == "win32" else ""
 HGS = Path(os.environ.get("HGS_TEST_BIN", REPO / f"target/debug/hgs{EXE}")).resolve()
+# The approved default (owner, 2026-11-07; PR #1695): a Claude start without an
+# account choice runs with its provider's bypass switch after the caller's own
+# arguments (accounts::apply_permissions). Spawned argv only; the saved resume
+# recipe stays as launched.
+BYPASS = ["--permission-mode", "bypassPermissions"]
 FAKE_AGENT = Path(os.environ.get("HGS_TEST_FAKE_AGENT", REPO / f"target/debug/examples/fake_agent{EXE}")).resolve()
 TMUX = shutil.which("tmux")
 # Windows: no console window for any hgs the tests start (docs/windows-host-testing.md).
@@ -635,9 +640,10 @@ class Sessions(Contract):
                               cwd=str(self.project)))
         self.assertTrue(row["run_id"])
         self.assertTrue(started - 2 <= row["created"] <= time.time() + 1, row["created"])
-        # The agent runs in the session folder on a terminal of its own, with nothing typed.
+        # The agent runs in the session folder on a terminal of its own, with nothing typed,
+        # and only the default bypass switch of its own.
         self.assertEqual((self.agent_arguments(agent), agent["cwd"], agent["tty"], agent["raw"]),
-                         ([], str(self.project), True, True))
+                         (BYPASS, str(self.project), True, True))
         self.assertEqual(self.received(agent["pid"]), b"")
         # An untracked command is listed and runs the same way, without a conversation.
         self.assertEqual({key: rows[plain].get(key) for key in ("cmd", "project", "tag", "attached", "clients")},
@@ -708,7 +714,7 @@ class Sessions(Contract):
         resumed = self.wait_for(lambda: next((event for event in self.events(kind="start")
                                               if event["pid"] not in (pid, kept_agent["pid"])), None), "the resume")
         self.assertEqual((self.agent_arguments(resumed), resumed["session_id"], resumed["resumed"], resumed["cwd"]),
-                         (["--resume", row["conversation_id"]], row["conversation_id"], True, str(self.project)))
+                         (["--resume", row["conversation_id"], *BYPASS], row["conversation_id"], True, str(self.project)))
         live = self.wait_for(lambda: (live := self.sessions()[name]).get("runtime_state") == "live"
                              and live.get("activity") == "idle" and live["run_id"] != row["run_id"] and live,
                              "the resumed session")

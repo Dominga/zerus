@@ -103,6 +103,9 @@ def main():
     require(manifest["source_commit"] == commit, f"Bundle commit {manifest['source_commit']} is not {commit}.")
     require(manifest["version"] == version and manifest["cli_version"] == cli_version,
             "Bundle versions differ from VERSION/Cargo.toml.")
+    # WhiteWh fork, task #388: a fork zip is the Tauri desktop and hgs, no Qt.
+    require(manifest.get("fork") is None or manifest.get("desktop") == "tauri",
+            "A fork zip ships only the Tauri desktop.")
     require_no_debug_seams(args.zip)
     with zipfile.ZipFile(args.zip) as archive:
         entries = archive.infolist()

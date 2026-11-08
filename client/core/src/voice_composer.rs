@@ -1992,6 +1992,10 @@ pub struct Shown {
     pub notice_visible: bool,
     pub notice_label: String,
     pub notice_detail: String,
+    /// The notice is the microphone permission's: its chip opens the
+    /// recovery dialog rather than the notice text (Qt's `showResult`).
+    #[serde(default)]
+    pub notice_permission: bool,
 }
 
 /// What the controls show (`update`), with whether the preview plays.
@@ -2135,6 +2139,7 @@ pub fn shown(composer: &VoiceComposer, playing: bool) -> Shown {
                 && ((current.draft_only && !c.transcript.is_empty()) || !selected.is_empty())
                 && (c.video.is_empty() || c.video_supported)),
         notice_visible: !notice_detail.is_empty(),
+        notice_permission: notice_kind == NoticeKind::MicrophonePermission,
         notice_label: if notice_kind == NoticeKind::MicrophonePermission {
             "Microphone access"
         } else {

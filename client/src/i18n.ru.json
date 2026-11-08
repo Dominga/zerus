@@ -3289,6 +3289,7 @@
   "Voice": "Голос",
   "Voice counts are separate from agent turns. Accepted audio and total queue/processing time have units; percentile latency is unavailable. Speech collection is managed independently on its processing host.": "Голосовые счётчики ведутся отдельно от ходов агентов. Для принятого звука и общего времени в очереди и обработки указаны единицы; перцентили задержки недоступны. Сбор речевой статистики управляется отдельно на её компьютере обработки.",
   "Voice input": "Голосовой ввод",
+  "Voice message": "Голосовое сообщение",
   "Voice message failed": "Не удалось отправить голосовое сообщение",
   "Voice notice": "Голосовой ввод",
   "Voice on processing computers": "Голос на компьютерах обработки",

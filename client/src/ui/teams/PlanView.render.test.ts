@@ -184,6 +184,20 @@ describe("the plan's Graph, Board and Layers (task 197)", () => {
     expect(html).not.toContain('data-scroll="graph/t1/2"');
   });
 
+  it("shows one health figure and no 'lead' label in the phase header, in every mode (task 356)", () => {
+    const { team, graph } = fixture();
+    // The core names who accepts a phase in acceptance: lead or owner.
+    team.phases[0].acceptance = "lead";
+    team.phases[1].acceptance = "owner";
+    for (const initialMode of ["graph", "board", "layers"]) {
+      const html = plain(render({ team, graph, problems, now, initialMode }));
+      const head = html.slice(html.indexOf('data-phase-head="1"'), html.indexOf('data-phase-head="2"'));
+      expect(head.match(/Healthy \d+\/\d+/g), initialMode).toEqual(["Healthy 4/5"]);
+      expect(html, initialMode).not.toContain("pt-acceptance");
+      expect(html, initialMode).not.toMatch(/>\s*(lead|owner)\s*</);
+    }
+  });
+
   it("gives a folded phase card its closing border and four round corners, with one frame when open (task 332)", async () => {
     const { team, graph } = fixture();
     team.phases[1].status = "done";

@@ -26,9 +26,10 @@ import type { Session } from "../ui/sessions/types";
 import type { ActionRow } from "../ui/sessions/actions-ui";
 
 const saved = { key: "\nrun:old", computer: "", name: "claude/project/a", machine: "arch", cmd: "claude", state: "paused",
-  runId: "old", sessionId: "session-1", conversationId: "conversation-1", terminalSupported: true, terminalReported: true,
+  // As the CLI reports a paused row: no live pane, so no terminal yet (zerus-5o1ns).
+  runId: "old", sessionId: "session-1", conversationId: "conversation-1", terminalSupported: false, terminalReported: true,
   tracked: true, resumable: true, activity: "idle", processState: "stopped", allowed: "resume pause terminate kill" } as unknown as ActionRow;
-const resumed = (extra: Partial<ActionRow> = {}) => ({ ...saved, key: "\nrun:new", state: "running", runId: "new", ...extra } as ActionRow);
+const resumed = (extra: Partial<ActionRow> = {}) => ({ ...saved, key: "\nrun:new", state: "running", runId: "new", terminalSupported: true, ...extra } as ActionRow);
 
 beforeEach(() => { vi.useFakeTimers(); fixture.offline = false; fixture.current = undefined; });
 afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
@@ -87,16 +88,20 @@ describe("Resume and open terminal", () => {
 describe("the row menu's terminal entry", () => {
   const entry = (row: Partial<ActionRow>) => sessionTerminalEntry({ ...saved, ...row } as unknown as Session) as { label: string; disabled?: boolean; hint?: string; action: () => void };
 
-  it("is Resume and open terminal for a saved session, and Open terminal for a running one", () => {
+  it("is Resume and open terminal for a paused or stopped session without a live pane, and Open terminal for a running one", () => {
+    // The CLI reports terminal_supported false for every saved row (zerus-5o1ns).
     expect(entry({})).toMatchObject({ label: "Resume and open terminal", disabled: false });
-    expect(entry({ state: "running", runId: "live" })).toMatchObject({ label: "Open terminal", disabled: false });
+    expect(entry({ state: "stopped", processState: "exited" })).toMatchObject({ label: "Resume and open terminal", disabled: false });
+    expect(entry({ state: "running", runId: "live", terminalSupported: true })).toMatchObject({ label: "Open terminal", disabled: false });
   });
 
-  it("says why it is off: offline, no Terminal, or no identity to resume by", () => {
+  it("says why it is off: offline, an agent without Terminal, OpenCode without attach, or no identity to resume by", () => {
     fixture.offline = true;
     expect(entry({})).toMatchObject({ disabled: true, hint: "Machine unavailable. Reconnect when it is online." });
     fixture.offline = false;
-    expect(entry({ terminalSupported: false })).toMatchObject({ disabled: true, hint: "Terminal is unavailable for this session." });
+    expect(entry({ cmd: "dsh" })).toMatchObject({ disabled: true, hint: "This native adapter does not provide Terminal." });
+    expect(entry({ cmd: "opencode", terminalAttachReported: true, terminalAttachSupported: false })).toMatchObject({ disabled: true, hint: "Terminal is unavailable for this session." });
+    expect(entry({ cmd: "opencode", terminalAttachReported: true, terminalAttachSupported: true })).toMatchObject({ disabled: false });
     expect(entry({ sessionId: undefined, conversationId: undefined })).toMatchObject({ disabled: true, hint: "Refresh this session's identity before opening its terminal." });
   });
 

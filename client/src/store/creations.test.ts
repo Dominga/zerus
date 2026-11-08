@@ -542,6 +542,24 @@ describe("the footer and the search", () => {
     t.dispose();
   });
 
+  it("lists the cards a search shows, for the search results (SessionSearch.cpp:287-305, zerus-5wmh.13.17.3)", async () => {
+    const t = setup([card("a"), card("b"), card("c", { show_pending: false })], { details: { a: "tag-a\n\nFolder: /workspace/match", b: "tag-b", c: "tag-c match" } });
+    await t.started;
+    expect(t.store.searchCards()).toEqual([]);
+    t.setScope({ filter: "all", hosts: [], query: "MATCH", projects: [] });
+    await flush();
+    expect(t.store.searchCards().map((c) => c.id)).toEqual(["a"]);
+    t.setScope({ filter: "active", hosts: [], query: "match", projects: [] });
+    await flush();
+    expect(t.store.searchCards().map((c) => c.id)).toEqual(["a"]);
+    for (const filter of ["archived", "paused", "attention"] as const) {
+      t.setScope({ filter, hosts: [], query: "match", projects: [] });
+      await flush();
+      expect(t.store.searchCards()).toEqual([]);
+    }
+    t.dispose();
+  });
+
   it("reads each card's details once per change while searching", async () => {
     const t = setup([card("a"), card("b")], { details: { a: "tag-a\n\nFolder: /workspace/match", b: "tag-b" } });
     await t.started;

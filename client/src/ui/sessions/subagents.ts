@@ -23,8 +23,8 @@ export function childInactive(child: Record<string, unknown>, countsComplete = f
 }
 
 const validId = (id: string) => id.length > 0 && id.length <= 160 && !/[/\\\u0000-\u001f\u007f]/.test(id);
-/** A child conversation ID search can match: printable and at most 256 characters. */
-const validConversation = (id: string) => id.length > 0 && id.length <= 256 && !/[\u0000-\u001f\u007f]/.test(id);
+/** A child conversation ID search can match: at most 256 characters and no control character (C0, DEL or C1). */
+const validConversation = (id: string) => id.length > 0 && id.length <= 256 && !/\p{Cc}/u.test(id);
 
 /** Stable native-child rows, never the hook-profile fallback. */
 export function childRows(map: SubagentMap | undefined, countsComplete = false): Subagent[] {

@@ -37,6 +37,7 @@ conservative change selection, including both sides of renames.
 | Native desktop client | Linux with the CLI; macOS/Windows with their desktop jobs | Linux `client/media` audio/video tests, including synthetic GStreamer recordings, and `client/src-tauri` tests under headless Xvfb plus clippy with video; native macOS `client/core` tests, `client/media` video checks and `client/src-tauri` clippy (its test suite runs on the local Mac gate until `zerus-5wmh.78` is fixed); native Windows `client/core` tests, `client/media` video checks and `client/src-tauri` clippy (its test suite stays pending `zerus-5wmh.52`), all on standard runners with Rust 1.99.1 |
 | Arch package | Always | Production package with the recipe's `check()`, namcap, staged and installed bundle checks; the only producer of the `arch-x86_64-<commit>` candidate artifact |
 | macOS CLI | Always | Native CLI integration and the maintained Next core/Tauri checks |
+| macOS CLI Clippy | Always | Rust 1.99.1 Clippy of the root `hgs` for macOS with all targets (`--all-targets -D warnings`), check only on a standard runner; it restores the CLI cache and never saves (zerus-3ldf4, zerus-8evem) |
 | Windows client and desktop | Affected PR; full nightly/stable | Rust tests, Rust 1.99 clippy for the Windows target, Windows client and session host integration tests, Tauri build with video and frontend notices, and the portable zip checked from an isolated extraction |
 | Windows real agents | Affected PR; full nightly/stable | One latest `win32-x64` Claude Code and Codex release in isolated session hosts of the release build, each against a local fake API; skipped or empty suites fail |
 | CI gate | Always | Requires every selected suite to succeed; fails on unexpected skips, cancellation and errors |
@@ -200,7 +201,7 @@ save them.
 | Family | Job | Key after the prefix | Saved when | Bound |
 | --- | --- | --- | --- | --- |
 | `msrv-v2-` | Quick checks | OS/arch, hash of `rustc -Vv`, month, `Cargo.lock` hash | Exact key missed; Rust checks passed | Shared Cargo target, incremental state and debug symbols disabled; monthly restart |
-| `cli-`, `windows-cli-` | CLI, Windows | OS/arch, hash of `rustc -Vv`, month, `Cargo.lock` hash | Exact key missed; Rust build passed | Monthly restart |
+| `cli-`, `windows-cli-` | CLI, Windows (macOS CLI Clippy restores `cli-` only) | OS/arch, hash of `rustc -Vv`, month, `Cargo.lock` hash | Exact key missed; Rust build passed | Monthly restart |
 | `connector-` | Rust mobile connector | OS/arch, hash of `rustc +1.99.1 -Vv`, month, `services/mobile/connector/Cargo.lock` hash | Exact key missed; connector tests passed | Monthly restart; about 400 MB before compression, without incremental state |
 | `client-native-` | Native desktop client | OS/arch, hash of `rustc +1.99.1 -Vv`, month, hashes of the three client lockfiles | Exact key missed; native checks passed | Monthly restart; Cargo registry and Git checkouts only, so multi-GB native target directories are never cached |
 | `arch-cargo-v1-` | Arch package | Month, hash of `Cargo.lock` and the connector's lock | Exact key missed; package built | Cargo registry only |

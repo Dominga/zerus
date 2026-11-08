@@ -104,11 +104,21 @@ impl Fixture {
             )
             .unwrap(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            answer: crate::desktop::deferred_answer::Runtime::new(&config, &epoch, owner.clone())
-                .unwrap(),
+            answer: crate::desktop::deferred_answer::Runtime::new(
+                &config,
+                &epoch,
+                owner.clone(),
+                Default::default(),
+            )
+            .unwrap(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            compact: crate::desktop::compact_to_send::Runtime::new(&config, &epoch, owner.clone())
-                .unwrap(),
+            compact: crate::desktop::compact_to_send::Runtime::new(
+                &config,
+                &epoch,
+                owner.clone(),
+                Default::default(),
+            )
+            .unwrap(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             resume: crate::desktop::session_resume::Runtime::new(
                 &config,

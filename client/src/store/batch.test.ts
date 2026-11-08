@@ -671,6 +671,18 @@ describe("Mute or Unmute for the selection (zerus-qhtxf)", () => {
     });
   });
 
+  it("counts a row already muted as already muted even when its setting cannot change now (zerus-qhtxf.1)", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup([rowOut("a"), rowOut("b", { muted: true }), rowOut("c")], { silent: ["claude/p/b", "claude/p/c"] });
+      const run = a.run("mute", a.listed("a", "b", "c"));
+      await flush(); a.mutes[0].resolve({ outcome: "changed" });
+      await run;
+      expect(a.mutes.map((m) => m.name)).toEqual(["claude/p/a"]);
+      expect(a.texts()).toEqual(["Mute notifications: 1 changed, 1 already muted, 1 refused.\nbox / claude/p/c: notifications cannot change for this session now"]);
+      dispose();
+    });
+  });
+
   it("unmutes every row of an all-muted selection", async () => {
     await createRoot(async (dispose) => {
       const a = setup([rowOut("a", { muted: true }), rowOut("b", { muted: true })]);

@@ -12,6 +12,7 @@ import { flag } from "../../store/settings";
 import type { TerminalStatus } from "../../types";
 import { Icon } from "../lib/icons";
 import { ActivityView, columnStyle } from "./Activity";
+import { KeepWarmChip } from "./KeepWarmChip";
 import { AgentBadge, MachineBadge, captionText, statusOf, folderOf } from "./SessionCard";
 import { detailTab, page, selected, setDetailTab, setMenu, subagentOpen, type MenuEntry } from "../../store/ui";
 import { activity, subagentActivity } from "../../store/session";
@@ -155,6 +156,7 @@ function Header() {
         </Show>
         <Show when={s().worktree}><span class="dh-chip ell" title={tr("Linked worktree %1", s().worktree!)}><Icon name="folder-git-2" size={13} />{tr("worktree %1", s().worktree!)}</span></Show>
         <span class="grow" />
+        <KeepWarmChip session={s()} />
         <span class="dh-model ell">{s().model} {s().effort ?? ""}</span>
       </div>
     </header>

@@ -25,7 +25,7 @@ import { STATE_CHANGED } from "./actions-ui";
 import { running } from "../../store/batch";
 import { grouping, headerOf, moveProject, setProjectCollapsed, setProjectToShow, sortProject } from "../../store/organization";
 import { TOOL_WIDTH, clearArchiveMenuEntry, machineMenu, runSelection, selectedRows, selectionContextMenu, selectionCount } from "./selection-live";
-import { barTools, splitTools, toolEntry } from "./selection-ui";
+import { anyUnmuted, barTools, splitTools, toolEntry } from "./selection-ui";
 import { actionEntries, copyEntries, freshActionEntry, muteEntry } from "./ActionDialogs";
 import { markAllEntry, markAllTip, markEntry, runMarkAll } from "./mark-entries";
 import { moveEntry, openCreateProjectDialog, openDeleteProjectDialog, openRenameProjectDialog } from "./OrganizationDialogs";
@@ -407,7 +407,7 @@ function SelectionBar() {
     onCleanup(() => ro.disconnect());
   };
   const rows = createMemo(() => selectedRows(listRows()));
-  const tools = createMemo(() => barTools(selectionCount(rows()), rows().length, running()));
+  const tools = createMemo(() => barTools(selectionCount(rows()), rows().length, running(), anyUnmuted(rows())));
   const split = createMemo(() => splitTools(tools(), Math.max(1, Math.floor(width() / TOOL_WIDTH))));
   // Each tool keeps its button while the catalog refreshes (zerus-92hkz): the
   // list is keyed by action and the button reads its current tool, so a

@@ -46,17 +46,14 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Composer and sending | 30 | 4 | 1 | |
 | Activity | 10 | 5 | 2 | |
 | Questions and approvals | 12 | | | |
-| Notifications | 6 | 6 | | |
+| Notifications | 7 | 5 | | |
 | Tray, menu bar and Dock | 6 | 2 | 1 | 2 owner decisions |
 | Shortcuts and navigation | 6 | | | |
 | Lifecycle and updates | 6 | 2 | 1 | |
 | Settings | 17 | | 1 | |
 | Machines, accounts, projects, new session, tasks and worktrees | 18 | | | |
 | Terminal, processes and platform session support | 8 | | | |
-| Total (192 rows) | 151 | 25 | 12 | 4 |
-
-The gap a person is likely to meet first in daily use is short tray messages
-that never appear on Linux and Windows (`zerus-5wmh.13.13`).
+| Total (192 rows) | 152 | 24 | 12 | 4 |
 
 ## Owner decisions
 
@@ -74,7 +71,6 @@ that never appear on Linux and Windows (`zerus-5wmh.13.13`).
 | --- | --- | --- |
 | `zerus-5wmh.13.5` | P2 | Reference an existing file from the composer |
 | `zerus-5wmh.13.6` | P2 | OpenCode queued-message stamps, waiting hint and Remove |
-| `zerus-5wmh.13.13` | P2 | Short tray messages call `osascript` on Linux and Windows |
 | `zerus-5wmh.13.14` | P2 | Windows: focus-aware banners, update alert, tray theme, watchdog, startup note |
 | `zerus-5wmh.13.7` | P3 | Composer and voice small controls |
 | `zerus-5wmh.13.8` | P3 | Activity rendering: full tool output, View process, Markdown, inline-code links, empty state |
@@ -253,7 +249,7 @@ In the default native alert mode the Zerus Next app posts alerts itself while it
 | macOS sound and native notification center; Linux actions, hints, daemon restarts and Wayland activation; Windows balloon | per platform | done | `tauri/platform/macos_notify.rs:52-151`; `tauri/platform/linux_notify.rs:427-610`; `tauri/platform/windows/tray.rs:118-128,407-440` | `MacAttentionNotifier.mm`; `LinuxAttentionNotifier.cpp`; `WindowsAttentionNotifier.cpp` |
 | Alerts continue with the window closed | all | done | `tauri/lib.rs:1196,1221,1249` | `TrayAgent.cpp:137-160` |
 | Update available alert, once per release | Windows | partial (`zerus-5wmh.13.14`) | macOS and Linux post it (`tauri/updates.rs:739-761`); the Windows hook does nothing (`tauri/updates.rs:924-925`) | `TrayAgent.cpp:164-175` |
-| Short tray messages (a new session's terminal advisory, the terminal did not open) | Linux, Windows | partial (`zerus-5wmh.13.13`) | `tauri/desk.rs:1180-1196` always runs `osascript` (callers `tauri/creations.rs:1782,1790`); on Linux and Windows the message reaches stderr at most | `TrayAgent.cpp:655-830` |
+| Short tray messages (a new session's terminal advisory, the terminal did not open) | Linux, Windows | done | `tauri/desk.rs:1183-1235`: a desktop notification on Linux and the tray balloon on Windows, the window's notice where the app does not own them; macOS keeps `osascript`; callers `tauri/creations.rs:1783,1792` | `TrayAgent.cpp:655-830` |
 | Phone alerts wait while the owner is at the desktop | Linux, macOS | partial (`zerus-5wmh.66.10`) | the app reports no presence; only the registered `hgs` service does (`src/desktop/presence_worker.rs`) | `TrayAgent.cpp:279-290`; `DesktopPresence.cpp` |
 | Alert text in the interface language | all | partial (`zerus-5wmh.13.16`) | English constants: `core/attention.rs:20-22,444-448`; `crates/freedesktop-notify/src/lib.rs:34` | `AttentionTracker.cpp:125-134`; `LinuxAttentionNotifier.cpp:52` |
 | In-window attention badge capped at 99+ | all | partial (`zerus-5wmh.13.16`) | raw count: `ui/components/Rail.tsx:49-51` | `SessionsWindow.cpp:304-306,3374-3381` |

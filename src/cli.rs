@@ -3079,8 +3079,7 @@ fn launch(
             // The live agent that runs this launch, proven by its process
             // ancestry; empty otherwise (zerus-sa9qn.2).
             format!("{}={}", state::parent_link::ENV, state::parent_link::launcher_value()),
-            "HGS_RUN_ID=".into(),
-            "HGS_SESSION_ID=".into(),
+            "HGS_RESUME_SESSION_ID=".into(),
             "HGS_EXPECTED_ID=".into(),
             "HGS_ARCHIVE_ID=".into(),
             "HGS_FRESH_REPLACES=".into(),
@@ -3091,6 +3090,8 @@ fn launch(
             ),
             "HGS_TRACKING=1".into(),
         ]);
+        let allocation=state::launch_identity::Allocation::fresh();
+        spec.env.extend(allocation.environment().into_iter().map(|(key,value)|format!("{key}={value}")));
         for key in ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME"] {
             spec.env
                 .push(format!("{key}={}", env::var(key).unwrap_or_default()));

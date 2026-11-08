@@ -102,6 +102,8 @@ fn kimi_fork(record: &Value) -> Result<String> {
     for key in [
         "HGS_SESSION",
         "HGS_SESSION_ID",
+        launch_identity::DECLARATION,
+        "HGS_RESUME_SESSION_ID",
         "HGS_RUN_ID",
         "HGS_AGENT",
         "HGS_REQUESTED_ID",
@@ -230,6 +232,9 @@ pub(super) fn start_scoped(
         occupied.insert(string(&record, "name").into());
     }
     let target = choose_name(name, tag, &occupied)?;
+    // Allocate before either the native Kimi fork or terminal spawn. The
+    // launch environment carries this exact identity into its own bootstrap.
+    let allocation=launch_identity::Allocation::fresh();
     let agent = string(&record, "agent");
     // Check the saved recipe before the only operation that can create history.
     fork_argv(&record, None)?;
@@ -247,7 +252,7 @@ pub(super) fn start_scoped(
     let executable = runner_executable()?;
     let hint_environment = crate::config::agent_hint_environment(agent);
     let launch = supervisor_command(&record, &executable, argv, &hint_environment);
-    let new_run=uuid::Uuid::new_v4().to_string();
+    let new_run=allocation.run().to_owned();
     let lineage = journal::fork_lineage(&record);
     let mut environment = BTreeMap::from([
         ("HGS_SESSION", target.clone()),
@@ -260,6 +265,7 @@ pub(super) fn start_scoped(
         ),
         ("HGS_EXECUTABLE", executable),
         ("HGS_RUN_ID", new_run.clone()),
+        ("HGS_RESUME_SESSION_ID", String::new()),
         ("HGS_EXPECTED_ID", String::new()),
         ("HGS_REQUESTED_ID", new_id.clone().unwrap_or_default()),
         ("HGS_ARCHIVE_ID", String::new()),
@@ -288,6 +294,7 @@ pub(super) fn start_scoped(
             nonempty_env("HGS_CLIENT").unwrap_or_else(|| "local".into()),
         ),
     ]);
+    environment.extend(allocation.environment());
     for key in ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME"] {
         environment.insert(key, String::new());
     }

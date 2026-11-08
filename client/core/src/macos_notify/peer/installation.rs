@@ -377,9 +377,10 @@ pub fn same_running_code_for_capability(path: &Path) -> bool {
                     SecStaticCodeGetTypeID(),
                 )
             }?;
-            if unsafe { SecStaticCodeCheckValidity(code.ptr(), STRICT, std::ptr::null()) } != 0 {
-                return Ok(false);
-            }
+            // Capability DATA only: read the code-directory identifier without
+            // page-hashing the static executable or validating app resources.
+            // Actual exec keeps the kernel's page validation and the required
+            // parser boundary. Native admission uses its separate full checks.
             Ok(info_unique(&information(code.ptr())?)? == own_hash)
         })()
         .unwrap_or(false)

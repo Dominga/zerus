@@ -43,7 +43,7 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Area | done | partial | missing | other |
 | --- | --- | --- | --- | --- |
 | Sessions list, row actions and header | 27 | | 1 | 2 owner decisions, 1 intentional difference |
-| Archive and search | 13 | 2 | 0 | |
+| Archive and search | 14 | 1 | 0 | |
 | Composer and sending | 34 | 1 | | |
 | Activity | 17 | 0 | 0 | |
 | Questions and approvals | 12 | | | |
@@ -54,7 +54,7 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Settings | 17 | | | 1 intentional difference |
 | Machines, accounts, projects, new session, tasks and worktrees | 18 | | | |
 | Terminal, processes and platform session support | 8 | | | |
-| Total (192 rows) | 171 | 12 | 3 | 6 |
+| Total (192 rows) | 172 | 11 | 3 | 6 |
 
 ## Owner decisions
 
@@ -144,7 +144,7 @@ Keyboard commands for every area are listed once, under Shortcuts and navigation
 | Matching on name, machine, model, effort, folder, branch, worktree, session, run and archive IDs | done | `store/content-search-model.ts:85-90` | `SessionSearch.cpp:239,274-275` |
 | Child conversation IDs match and the result says which ID matched | done | `store/content-search-model.ts:98,127`; `ui/sessions/subagents.ts:37`; `ui/sessions/SearchResults.tsx:56` | `SessionSearch.cpp:239-268` |
 | Message content search across machines, honoring the filters, with status and Search again | done | `store/contentSearch.ts:22-71`; `store/content-search-model.ts:27-79` | `SessionSearch.cpp:75-213,309-314` |
-| One result row per matching message | partial (`zerus-5wmh.13.17`) | one row per session with the newest excerpt only (`store/content-search-model.ts:94-104`) | `SessionSearch.cpp:276-282` |
+| One result row per matching message | done; at most 20 messages per session | `store/content-search-model.ts:120`; `store/contentSearch.ts:64` | `SessionSearch.cpp:276-282` |
 | Result rows with highlights, badges, author and time; keyboard navigation; opening a hit shows the saved message | done | `ui/sessions/SearchResults.tsx:26-55`; `store/contentSearch.ts:72-84` | `SessionSearch.cpp:132,253-262`; `SessionsWindow.cpp:434-456` |
 | Back to latest activity while a search result is shown | done | `ui/sessions/search-hit.ts` (`jumpButton`); `ui/sessions/Composer.tsx:267`; `ui/sessions/Activity.tsx:666` | `ActivityView.cpp:1631-1636` |
 | Pending session creations in search results | done | `store/creations.ts:303`; `ui/sessions/SearchResults.tsx:21`; `store/content-search-model.ts` (`searchCount`) | `SessionSearch.cpp:119,287-305` |

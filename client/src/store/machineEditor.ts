@@ -1,7 +1,7 @@
 import { createComputed, createMemo, createRoot, createSignal, on, untrack, type Accessor } from "solid-js";
 import { machineChange, machinePickKey, machineSsh } from "../bridge";
 import { toast } from "./notices";
-import type { MachineChangeRequest, MachineConnection, MachineReference, MachinesView } from "../types";
+import type { MachineChangeRequest, MachineConnection, MachineReference, MachinesView, WslProfile } from "../types";
 import { loadMachines, machinesPage } from "./machines";
 import { fleetRefresh } from "../bridge";
 import { tr } from "../i18n";
@@ -10,7 +10,8 @@ export const NEW_MACHINE = "@new";
 export const LOCAL_MACHINE = "@local";
 export interface MachineDraft extends Omit<MachineConnection, "port"> { alias: string; port: string; revision: string; dirty: boolean }
 export type MachinePrompt = { kind: "discard"; next: string; refresh: boolean } | { kind: "remove"; alias: string; revision: string };
-const blank = (): MachineDraft => ({ alias: "", hostname: "", user: "", port: "", identity_file: "", enabled: true, revision: "", dirty: false });
+export const BLANK_WSL: WslProfile = { distribution: "", user: "", hgs_path: "" };
+const blank = (): MachineDraft => ({ alias: "", transport: "ssh", wsl: null, test_runner: "", hostname: "", user: "", port: "", identity_file: "", enabled: true, revision: "", dirty: false });
 export interface MachineTools { pickKey: () => Promise<string | null>; ssh: (reference: MachineReference) => Promise<string | null> }
 const aliasValid = (alias: string) => /^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,79}$/.test(alias);
 
@@ -25,16 +26,33 @@ export function createMachineEditor(view: Accessor<MachinesView>, write: (reques
   const busy = () => writing() || !!tool() || view().busy;
   const isNew = () => selected() === NEW_MACHINE;
   const duplicate = () => isNew() && (draft().alias.trim() === view().local || view().machines.some((m) => m.alias === draft().alias.trim()));
-  const valid = () => aliasValid(draft().alias.trim()) && /^\d{0,5}$/.test(draft().port) && Number(draft().port) <= 65535;
+  const wslValid = () => {
+    const wsl = draft().wsl;
+    return draft().transport !== "wsl-local" || (!!wsl && /^[A-Za-z0-9_.-]{1,128}$/.test(wsl.distribution) && /^[A-Za-z0-9_.-]{1,128}$/.test(wsl.user)
+      && wsl.hgs_path.startsWith("/") && !wsl.hgs_path.startsWith("//") && !wsl.hgs_path.split("/").includes("..")
+      && !draft().hostname && !draft().user && !draft().port && !draft().identity_file);
+  };
+  const valid = () => aliasValid(draft().alias.trim()) && /^\d{0,5}$/.test(draft().port) && Number(draft().port) <= 65535 && wslValid();
   const seed = (key: string) => {
     const row = view().machines.find((m) => m.alias === key);
     setDraft({ ...blank(), alias: key === NEW_MACHINE ? "" : key === LOCAL_MACHINE ? view().local : key,
+      transport: row?.transport ?? "ssh", wsl: row?.wsl ?? null, test_runner: row?.test_runner ?? "",
       hostname: row?.hostname ?? "", user: row?.user ?? "", port: row?.port ? String(row.port) : "", identity_file: row?.identity_file ?? "", enabled: row?.enabled ?? true, revision: view().connection_revision ?? "" });
   };
   const apply = (next: string) => { setSelected(next); seed(next); setNotice(undefined); };
   const edit = <K extends keyof MachineDraft>(key: K, value: MachineDraft[K]) => {
     if (busy() || selected() === LOCAL_MACHINE) return;
     setDraft((old) => ({ ...old, [key]: value, dirty: true }));
+  };
+  /** The connection type switches which fields the form shows (MachinesPage.cpp:229-238, 454-459). */
+  const setTransport = (transport: "ssh" | "wsl-local") => {
+    if (busy() || selected() === LOCAL_MACHINE) return;
+    setDraft((old) => ({ ...old, transport, wsl: transport === "wsl-local" ? (old.wsl ?? { ...BLANK_WSL }) : null, dirty: true }));
+  };
+  /** One explicit WSL field; the profile is created on the first edit. */
+  const editWsl = (key: keyof WslProfile, value: string) => {
+    if (busy() || selected() === LOCAL_MACHINE) return;
+    setDraft((old) => ({ ...old, wsl: { ...(old.wsl ?? BLANK_WSL), [key]: value }, dirty: true }));
   };
   const choose = (next: string, refresh = false) => {
     if (busy() || prompt() || (next === selected() && !refresh)) return;
@@ -63,8 +81,11 @@ export function createMachineEditor(view: Accessor<MachinesView>, write: (reques
   const save = () => {
     if (!valid() || duplicate() || !view().loaded || !draft().revision || !(draft().dirty || isNew())) return Promise.resolve(false);
     const d = untrack(draft);
+    const wsl = d.transport === "wsl-local";
     return mutation({ alias: d.alias.trim(), revision: d.revision, change: { kind: "set", create: isNew(), connection: {
-      hostname: d.hostname.trim(), user: d.user.trim(), port: Number(d.port) || null, identity_file: d.identity_file.trim(), enabled: d.enabled,
+      transport: d.transport, wsl: wsl ? d.wsl : null, test_runner: d.test_runner,
+      hostname: wsl ? "" : d.hostname.trim(), user: wsl ? "" : d.user.trim(), port: wsl ? null : Number(d.port) || null,
+      identity_file: wsl ? "" : d.identity_file.trim(), enabled: d.enabled,
     } } });
   };
   const reset = () => draft().dirty || isNew() ? Promise.resolve(false) : mutation({ alias: selected(), revision: draft().revision, change: { kind: "reset" } });
@@ -106,7 +127,7 @@ export function createMachineEditor(view: Accessor<MachinesView>, write: (reques
     if (selected() !== LOCAL_MACHINE && !isNew() && !view().machines.some((m) => m.alias === selected())) apply(LOCAL_MACHINE);
     else seed(selected());
   }));
-  return { selected, draft, notice, prompt, busy, isNew, valid, duplicate, edit, choose, save, reset, remove, confirm, cancel, pickKey, openSsh, clearNotice: () => setNotice(undefined) };
+  return { selected, draft, notice, prompt, busy, isNew, valid, duplicate, edit, setTransport, editWsl, choose, save, reset, remove, confirm, cancel, pickKey, openSsh, clearNotice: () => setNotice(undefined) };
 }
 
 export const machineEditor = createRoot(() => createMachineEditor(machinesPage, machineChange, loadMachines, fleetRefresh, {

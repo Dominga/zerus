@@ -1,7 +1,7 @@
 //! The secret scan of docs/lore.md 11.9 for the team working tier: a pulse, a
 //! note, a message and a handoff brief are stored redacted, never refused (the
 //! bus must not lose a message). hgs does not link the lore crate, so this is a
-//! copy of `crates/lore/src/secrets.rs`'s scanner; both copies run the same
+//! copy of CodeLore's `src/secrets.rs` scanner; both copies run the same
 //! vectors from `tests/fixtures/secret-scan-vectors.json`. Best-effort: it finds
 //! these patterns and high-entropy strings; it does not prove a text has no
 //! secret.

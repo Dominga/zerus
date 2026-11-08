@@ -30,6 +30,16 @@ fn digest(found: &[Step]) -> Option<Vec<String>> {
     })
 }
 
+/// Task 259: the lead hears of an idle member with ready work at once, so the
+/// hourly digest is its message only once that item was told.
+fn tell_idle_items(team: &mut Team) {
+    for item in inbox::items(team).into_iter().filter(|item| item.kind == "idle_with_ready_work") {
+        if !team.inbox.told.contains(&item.key) {
+            team.inbox.told.push(item.key);
+        }
+    }
+}
+
 #[test]
 fn a_waiting_role_without_a_ready_task_of_its_kind_is_not_starved() {
     // qa is a Tester: review, QA, acceptance and merge roles wait by design.
@@ -124,6 +134,9 @@ fn one_team_digest_an_hour_names_every_member_due_and_concrete_actions() {
         &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
     assert!(steps(&team, &seen, 10.0).contains(&Step::Starving { member: "dev2".into() }));
     team.members.iter_mut().find(|member| member.id == "dev2").unwrap().starved_since = Some(10.0);
+    // Task 259: the idle item reaches the lead first (dev2 could take the
+    // pinned #1); once told, the digest is the lead's next message.
+    tell_idle_items(&mut team);
     // Not before 20 minutes; then one digest for the team.
     assert!(digest(&steps(&team, &seen, LATE - 1.0)).is_none());
     assert_eq!(digest(&steps(&team, &seen, LATE)), Some(vec!["dev2".to_owned()]));
@@ -143,6 +156,7 @@ fn one_team_digest_an_hour_names_every_member_due_and_concrete_actions() {
     for id in [1, 2] {
         team.task_mut(id).unwrap().assignee = "dev2".into();
     }
+    tell_idle_items(&mut team);
     assert!(digest(&steps(&team, &idle_dev, LATE + 30.0 * 60.0)).is_none(), "within the hour");
     assert_eq!(digest(&steps(&team, &idle_dev, LATE + 61.0 * 60.0)), Some(vec!["dev".to_owned()]));
 }

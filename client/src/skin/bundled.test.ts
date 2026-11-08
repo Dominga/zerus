@@ -15,4 +15,12 @@ describe("bundled skins", () => {
     expect(() => resolveSkins(files)).not.toThrow();
     expect(resolveSkins(files).map((skin) => skin.id)).toEqual(files.map((file) => file.id));
   });
+  it("give the Compact skins Qt's side panel of sections and keep tabs for the others (task 206)", () => {
+    const files = [zerusDark, zerusLight, fjord, paper, whitewhDark, whitewhLight] as SkinFile[];
+    expect(Object.fromEntries(resolveSkins(files).map((skin) => [skin.id, skin.layout["side-panel"]]))).toEqual({
+      "zerus-dark": "tabs", "zerus-light": "tabs", fjord: "tabs", paper: "tabs", "whitewh-dark": "sections", "whitewh-light": "sections",
+    });
+    const odd = { ...(whitewhDark as SkinFile), id: "odd", layout: { "side-panel": "drawer" } } as unknown as SkinFile;
+    expect(() => resolveSkins([zerusDark as SkinFile, odd])).toThrow(/side-panel/);
+  });
 });

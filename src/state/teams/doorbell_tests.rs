@@ -18,13 +18,32 @@ fn a_message_rings_first_then_once_more_past_its_bound_and_the_lead_hears_after(
     assert!(due(&member(Some(urgent)), 100.0 + working::URGENT_BOUND_SECONDS), "an urgent one rings again sooner");
     let twice = Unread { rings: 2, rung_at: Some(200.0), ..once };
     assert!(!due(&member(Some(twice.clone())), 1e9), "at most two rings");
-    assert!(unread_stalled(&member(Some(twice.clone())), 200.0 + working::RING_AGAIN_SECONDS - 1.0).is_none());
-    let why = unread_stalled(&member(Some(twice)), 200.0 + working::RING_AGAIN_SECONDS).unwrap();
+    let bound = working::URGENT_BOUND_SECONDS;
+    assert!(unread_stalled(&member(Some(twice.clone())), 200.0 + working::RING_AGAIN_SECONDS - 1.0, bound).is_none());
+    let why = unread_stalled(&member(Some(twice)), 200.0 + working::RING_AGAIN_SECONDS, bound).unwrap();
     assert!(why.contains("rang twice"), "{why}");
     // An urgent message the member's turn kept from ringing past the bound.
     let held = Unread { urgent: 1, ..fresh };
-    let why = unread_stalled(&member(Some(held)), 100.0 + working::URGENT_BOUND_SECONDS).unwrap();
+    let why = unread_stalled(&member(Some(held)), 100.0 + working::URGENT_BOUND_SECONDS, bound).unwrap();
     assert!(why.contains("urgent") && why.contains("stop it natively"), "{why}");
+}
+
+#[test]
+fn a_planned_summary_rings_and_stalls_by_each_messages_own_times() {
+    // Task 186: the summary's schedule, not the oldest message's rings.
+    let planned = Unread { count: 2, oldest: "w-message-1".into(), oldest_at: 50.0, rings: 2, rung_at: Some(60.0), planned: true,
+        ring_at: Some(500.0), ..Default::default() };
+    assert!(!due(&member(Some(planned.clone())), 499.0));
+    assert!(due(&member(Some(planned.clone())), 500.0), "a newer message rings though the oldest rang twice");
+    assert!(!due(&member(Some(Unread { ring_at: None, rings: 0, ..planned.clone() })), 1e9), "nothing to ring");
+    let stalled = Unread { ring_at: None, stall_at: Some(900.0), ..planned.clone() };
+    assert!(unread_stalled(&member(Some(stalled.clone())), 899.0, 600.0).is_none());
+    assert!(unread_stalled(&member(Some(stalled)), 900.0, 600.0).unwrap().contains("rang twice"));
+    // An urgent one that reached no safe point: past the team's urgent_bound.
+    let held = Unread { ring_at: None, held_urgent_at: Some(100.0), ..planned };
+    assert!(unread_stalled(&member(Some(held.clone())), 279.0, 180.0).is_none());
+    let why = unread_stalled(&member(Some(held)), 280.0, 180.0).unwrap();
+    assert!(why.contains("undelivered") && why.contains("3 min"), "{why}");
 }
 
 #[test]

@@ -901,7 +901,11 @@ void TestTeamsUiSettings::teamSettingsAllowLandingAndEditMemberModels()
     QVERIFY(rowOf("tester")->findChild<QLabel *>("teamSettingsMemberModelsNone"));
     // Tester may also switch to kimi-k2.5; the same choice twice adds nothing.
     auto *model = rowOf("tester")->findChild<QComboBox *>("teamSettingsMemberModelAdd");
-    QCOMPARE(model->count(), int(Teams::knownModels("kimi").size()));   // the agent's known models are offered
+    // #218: the agent's account catalog is offered once read (the fixture's
+    // native-kimi has two models), not only the six known ones.
+    QTRY_COMPARE(model->count(), 2);
+    QVERIFY(model->findText("kimi-code/kimi-for-coding") >= 0);
+    QVERIFY(model->findText("kimi-code/k3.1-pro") >= 0);
     const auto addTester = [&] {
         model->setEditText("kimi-k2.5");
         rowOf("tester")->findChild<QPushButton *>("teamSettingsMemberModelAddButton")->click();

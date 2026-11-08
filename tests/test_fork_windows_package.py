@@ -4,6 +4,7 @@ GUI for one release as qt/zerus-qt.exe, a fallback started by hand."""
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -61,6 +62,7 @@ class ForkPackageTests(unittest.TestCase):
 
     def fork(self, output, *extra):
         arguments = ["--connector", self.directory / "zerus-mobile-connector.exe", "--cli", self.directory / "hgs.exe",
+                     "--lore", self.directory / "lore.exe",
                      "--gui", self.directory / "hgs-tray.exe", "--output", output, "--crt-dir", self.crt,
                      "--rust-licenses", self.rust, "--frontend-licenses", self.frontend, "--conpty", self.conpty, *extra]
         environment = {key: value for key, value in os.environ.items() if not key.startswith(("QT_", "HGS_", "ZERUS_FORK_"))}
@@ -113,9 +115,9 @@ class ForkWorkflowTests(unittest.TestCase):
 
     def test_the_fork_builds_and_packages_the_tauri_app_with_its_identity(self):
         build = self.step("name: Build the Tauri Windows desktop with the fork channel")
-        self.assertIn("npm run tauri -- build --ci --no-bundle --config src-tauri/tauri.windows.conf.json --features video", build)
+        self.assertIn("npm run tauri -- build --ci --no-bundle --config src-tauri/tauri.windows.switch.conf.json --features video", build)
         package = self.step("name: Portable zip from the tested executables")
-        for part in ["package-windows.py --fork", "--gui target/windows-next/release/hgs-tray.exe",
+        for part in ["package-windows.py --fork", "--lore target/lore/release/lore.exe", "--gui target/windows-next/release/hgs-tray.exe",
                      "--mobile-relay services/mobile/relay/target/release/zerus-relay.exe",
                      "--qt-fallback .ci-build/gui/hgs-tray.exe", '--qt-root "$QT_ROOT_DIR"',
                      "--frontend-licenses artifacts/windows-frontend-licenses",
@@ -173,11 +175,13 @@ class LocalLegForkIdentityTests(unittest.TestCase):
     def test_the_ctest_leg_uses_two_workers(self):
         # Task 213: four suites fail under four workers and pass alone.
         text = (ROOT / "scripts/release-candidate.py").read_text(encoding="utf-8")
-        self.assertIn('"--parallel", "2"', text)
+        self.assertIn('"--parallel", os.environ.get("ZERUS_TEST_JOBS", "2")', text)
         self.assertNotIn('"--parallel", "4"', text)
+        self.assertNotIn('ZERUS_TEST_JOBS", "4"', text)
         self.assertIn("--fork-build", text)
         self.assertIn("--fork-feed", text)
 
 
 if __name__ == "__main__":
     unittest.main()
+

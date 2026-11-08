@@ -15,6 +15,7 @@ use zerus_client_core::paths::{self, Style};
 use zerus_client_core::{file_download, session_file_reference, terminal_launch, ComputerId};
 mod downloads;
 use downloads::{Answer, Downloads};
+pub mod media;
 mod ssh;
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -70,6 +71,8 @@ pub struct SessionFiles {
     dialogs: Mutex<HashMap<u64, Dialog>>,
     trim: mpsc::SyncSender<()>,
     trim_busy: AtomicBool,
+    /// Task 248: the media files the webview may read, by token.
+    media: Mutex<media::Grants>,
 }
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -123,6 +126,7 @@ impl SessionFiles {
             dialogs: Mutex::new(HashMap::new()),
             trim,
             trim_busy: AtomicBool::new(false),
+            media: Mutex::new(media::Grants::default()),
         });
         let weak = Arc::downgrade(&me);
         // One resettable grace timer, rather than a sleeping task per download.

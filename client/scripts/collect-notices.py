@@ -8,10 +8,13 @@ import shutil
 ROOT = Path(__file__).resolve().parents[1]
 # Vite emits its module-preload helper into the built web interface.
 BUILD_RUNTIME = {"node_modules/vite"}
+# Files the client bundles itself rather than through npm: (name, version, license, notice file).
+# The provider logos (src/assets/agent-icons) are LobeHub lobe-icons.
+BUNDLED_ASSETS = (("lobe-icons", "agent-logos", "MIT", "src/assets/agent-icons/LICENSE"),)
 
 
-def collect(client, destination):
-    lock = json.loads((client / "package-lock.json").read_text())
+def collect(client, destination, assets=()):
+    lock =json.loads((client / "package-lock.json").read_text())
     inventory = []
     for relative, package in sorted(lock["packages"].items()):
         if not relative or package.get("link") or package.get("dev") and relative not in BUILD_RUNTIME:
@@ -35,6 +38,14 @@ def collect(client, destination):
             shutil.copyfile(notice, folder / notice.name)
         inventory.append({"name": info["name"], "version": info["version"],
                           "license": info.get("license"), "notices": [p.name for p in notices]})
+    for name, version, license_name, notice in assets:
+        source = client / notice
+        if not source.is_file():
+            raise ValueError(f"No license text found for bundled {name}")
+        folder = destination / f"{name}-{version}"
+        folder.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, folder / source.name)
+        inventory.append({"name": name, "version": version, "license": license_name, "notices": [source.name]})
     if not inventory:
         raise ValueError("The frontend runtime dependency inventory is empty")
     (destination / "inventory.json").write_text(json.dumps({"packages": inventory}, indent=2) + "\n")
@@ -45,7 +56,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("destination", type=Path)
     args = parser.parse_args()
-    print(f"Collected notices for {len(collect(ROOT, args.destination))} frontend dependencies.")
+    print(f"Collected notices for {len(collect(ROOT, args.destination, BUNDLED_ASSETS))} frontend dependencies.")
 
 
 if __name__ == "__main__":

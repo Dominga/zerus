@@ -185,6 +185,7 @@ fn actions() -> Vec<(TeamAction, &'static str, Value)> {
                 confirm: "add-1".into(),
                 confirmation: "add".into(),
                 decline: false,
+                tasks: vec![],
             },
             "add-to-phase",
             json!({"phase": 1, "confirm": "add-1", "confirmation": "add"}),
@@ -195,9 +196,118 @@ fn actions() -> Vec<(TeamAction, &'static str, Value)> {
                 confirm: "add-1".into(),
                 confirmation: "add".into(),
                 decline: true,
+                tasks: vec![],
             },
             "add-to-phase",
             json!({"phase": 1, "confirm": "add-1", "decline": true}),
+        ),
+        // Task 199: the member menu and "+ Member" (Qt TeamWorkspace::memberMenu).
+        (TeamAction::PauseMember { member: "api".into() }, "pause-member", json!({"member": "api"})),
+        (TeamAction::ResumeMember { member: "api".into() }, "resume-member", json!({"member": "api"})),
+        (TeamAction::Relaunch { member: "api".into() }, "relaunch", json!({"member": "api"})),
+        (
+            TeamAction::Drain { member: "api".into(), role: "Backend".into(), cancel: true },
+            "drain",
+            json!({"member": "api", "draining": false}),
+        ),
+        (
+            TeamAction::ReportsTo { member: "api".into(), parent: "arch".into() },
+            "reports-to",
+            json!({"member": "api", "parent": "arch"}),
+        ),
+        (TeamAction::SubLead { member: "arch".into(), sub: true }, "sub-lead", json!({"member": "arch", "sub": true})),
+        (
+            TeamAction::Scale { role: " Backend ".into(), agent: "codex".into(), count: 2, model: "gpt-5".into(), effort: String::new(), account: String::new() },
+            "scale",
+            json!({"role": "Backend", "agent": "codex", "count": 2, "model": "gpt-5"}),
+        ),
+        (
+            TeamAction::SwapMember { member: "api".into(), agent: String::new(), model: "opus".into(), effort: "high".into(), account: String::new(), fresh: false },
+            "swap-member",
+            json!({"member": "api", "model": "opus", "effort": "high"}),
+        ),
+        (
+            TeamAction::SwapMember { member: "api".into(), agent: String::new(), model: String::new(), effort: String::new(), account: String::new(), fresh: true },
+            "swap-member",
+            json!({"member": "api", "fresh": true}),
+        ),
+        (
+            TeamAction::MoveAccount { provider: "claude".into(), from_account: "native-claude".into(), to_account: "work".into() },
+            "swap-member",
+            json!({"provider": "claude", "from_account": "native-claude", "to_account": "work"}),
+        ),
+        (
+            TeamAction::AddMember { member: json!({"id": "qa", "role": "Tester", "agent": "kimi"}) },
+            "add-member",
+            json!({"members": [{"id": "qa", "role": "Tester", "agent": "kimi"}]}),
+        ),
+        (
+            TeamAction::IntakeKey { label: " watcher ".into(), revoke: String::new() },
+            "intake-key",
+            json!({"label": "watcher"}),
+        ),
+        (
+            TeamAction::ForceTest { suite: "client-core".into() },
+            "test",
+            json!({"action": "submit", "suite": "client-core", "forced": true, "asked_by": "You"}),
+        ),
+        // Task 196: the phase header's actions (Qt TeamWorkspace).
+        (
+            TeamAction::AddToPhase {
+                phase: 2,
+                confirm: String::new(),
+                confirmation: String::new(),
+                decline: false,
+                tasks: vec![json!({"title": "Docs", "assignee": "dev"})],
+            },
+            "add-to-phase",
+            json!({"phase": 2, "tasks": [{"title": "Docs", "assignee": "dev"}]}),
+        ),
+        (
+            TeamAction::RejectPhase { phase: 3, comment: " Split it ".into(), revision: Some(14) },
+            "reject-phase",
+            json!({"phase": 3, "comment": "Split it", "revision": 14}),
+        ),
+        (
+            TeamAction::UndoRejectPhase { phase: 3 },
+            "undo-reject-phase",
+            json!({"phase": 3}),
+        ),
+        (
+            TeamAction::MovePhase { phase: 3, to: 2, position: "before".into() },
+            "move-phase",
+            json!({"phase": 3, "to": 2, "position": "before"}),
+        ),
+        (
+            TeamAction::PausePhase { phase: 3, reason: " after the release ".into() },
+            "pause-phase",
+            json!({"phase": 3, "reason": "after the release"}),
+        ),
+        (
+            TeamAction::UnpausePhase { phase: 3 },
+            "unpause-phase",
+            json!({"phase": 3}),
+        ),
+        (
+            TeamAction::PhaseAcceptance { phase: 3, owner: true },
+            "phase-acceptance",
+            json!({"phase": 3, "acceptance": "owner"}),
+        ),
+        (
+            TeamAction::PhaseAcceptance { phase: 3, owner: false },
+            "phase-acceptance",
+            json!({"phase": 3, "acceptance": "lead"}),
+        ),
+        (
+            TeamAction::EditDraft {
+                phase: 3,
+                revision: Some(14),
+                title: Some(" Ship ".into()),
+                barrier: None,
+                tasks_update: vec![json!({"id": 9, "deps": [{"task": 8, "kind": "hard"}]})],
+            },
+            "edit-draft",
+            json!({"phase": 3, "revision": 14, "title": "Ship", "tasks_update": [{"id": 9, "deps": [{"task": 8, "kind": "hard"}]}]}),
         ),
         (
             TeamAction::AcceptPhase { phase: 1 },
@@ -635,6 +745,11 @@ fn destructive_actions_and_approvals_ask_first_and_send_nothing() {
             confirm_widening: false,
             alongside: false,
         },
+        TeamAction::DiscardPhase { phase: 3, tasks: 4, accepted: false },
+        TeamAction::ReturnToDraft { phase: 3 },
+        TeamAction::Drain { member: "api".into(), role: "Backend".into(), cancel: false },
+        TeamAction::RemoveMember { member: "api".into(), role: "Backend".into() },
+        TeamAction::IntakeKey { label: "watcher".into(), revoke: "k1".into() },
     ] {
         reply(&fake, action.op(), "", json!({"stdout": {"status": "ok"}}));
         let outcome = run(
@@ -1084,4 +1199,128 @@ fn a_test_runs_report_reaches_the_tests_mode_bounded() {
     assert_eq!(report["results"][0]["status"], "failed");
     assert!(report["results"][0]["message"].as_str().unwrap().chars().count() < 5000);
     assert!(view.runs[1].report.is_null());
+}
+
+/// Task 196: Discard phase and Return to draft ask in Qt's words (an accepted
+/// phase says so), then send only the phase; bad phase numbers, moves, pause
+/// reasons and new tasks are refused before anything runs.
+#[test]
+fn phase_actions_ask_in_qt_words_and_refuse_bad_requests() {
+    let ask = |action: TeamAction| match prepare(&TeamCall { confirmed: false, ..call(action) }) {
+        Err(TeamOutcome::Confirm { confirmation }) => confirmation,
+        other => panic!("asks first: {other:?}"),
+    };
+    let draft = ask(TeamAction::DiscardPhase { phase: 3, tasks: 4, accepted: false });
+    assert_eq!((draft.name.as_str(), draft.title.as_str(), draft.action.as_str()), ("teamDiscardPhaseConfirm", "Discard phase?", "Discard phase"));
+    assert_eq!(draft.text, "Discard phase 3 and its 4 tasks?");
+    let accepted = ask(TeamAction::DiscardPhase { phase: 3, tasks: 4, accepted: true });
+    assert!(accepted.text.starts_with("Phase 3 is already accepted.") && accepted.text.contains("cannot be undone"), "{}", accepted.text);
+    let back = ask(TeamAction::ReturnToDraft { phase: 3 });
+    assert_eq!((back.name.as_str(), back.action.as_str()), ("teamReturnPhaseConfirm", "Return to draft"));
+    assert!(back.text.contains("Phase 3 goes back to a draft"), "{}", back.text);
+    let (invocation, request_id) = prepare(&call(TeamAction::DiscardPhase { phase: 3, tasks: 4, accepted: true })).unwrap();
+    assert_eq!(invocation.args, ["team", "discard-phase", "--json"]);
+    let sent: Value = serde_json::from_slice(invocation.stdin.as_deref().unwrap()).unwrap();
+    assert_eq!(sent, json!({"phase": 3, "team": TEAM, "by": "human", "request_id": request_id}));
+    let long = "x".repeat(401);
+    for bad in [
+        TeamAction::RejectPhase { phase: 3, comment: "  ".into(), revision: None },
+        TeamAction::RejectPhase { phase: 0, comment: "why".into(), revision: None },
+        TeamAction::UndoRejectPhase { phase: 0 },
+        TeamAction::MovePhase { phase: 3, to: 3, position: "before".into() },
+        TeamAction::MovePhase { phase: 3, to: 2, position: "under".into() },
+        TeamAction::PausePhase { phase: 3, reason: long },
+        TeamAction::AddToPhase { phase: 2, confirm: String::new(), confirmation: String::new(), decline: false, tasks: vec![json!({"title": ""})] },
+        TeamAction::AddToPhase { phase: 2, confirm: String::new(), confirmation: String::new(), decline: false, tasks: (0..21).map(|n| json!({"title": format!("T{n}")})).collect() },
+    ] {
+        assert!(matches!(prepare(&call(bad.clone())), Err(TeamOutcome::Failed { .. })), "{bad:?}");
+    }
+}
+
+/// Task 196: an edit of the plan while the team plans reads the team, sends
+/// the whole plan (members without the lead, tasks without cancelled ones, the
+/// change applied) at the revision the owner saw, and sends nothing when the
+/// team no longer plans or cannot be read.
+#[test]
+fn a_plan_edit_sends_the_whole_plan_with_the_change_at_the_owners_revision() {
+    use zerus_client_core::teams::plan_edit::PlanChange;
+    let fake = fake("team_actions_plan_edit");
+    let status = json!({
+        "status": "planning", "lead": "lead", "revision": 7,
+        "members": [
+            {"id": "lead", "role": "Lead", "agent": "claude", "lead": true},
+            {"id": "dev", "role": "Developer", "agent": "codex", "model": "gpt", "secret_runtime": "no"}
+        ],
+        "tasks": [
+            {"id": 1, "phase": 1, "title": "Core", "assignee": "dev", "deps": [], "status": "draft", "estimate_minutes": 30, "estimate_source": "lead"},
+            {"id": 2, "phase": 1, "title": "UI", "assignee": "dev", "deps": [], "status": "draft", "estimate_minutes": 20, "estimate_source": "auto"},
+            {"id": 3, "phase": 2, "title": "Old", "assignee": "dev", "deps": [], "status": "cancelled"}
+        ],
+        "phases": [{"n": 2, "title": "Polish", "barrier": true}]
+    });
+    reply(&fake, "status", "", json!({"stdout": status}));
+    reply(&fake, "plan", "", json!({"stdout": {"status": "ok"}}));
+    let edit = |change: PlanChange| call(TeamAction::PlanEdit { revision: 7, change });
+    let link: PlanChange = serde_json::from_value(json!({"edit": "link", "dependency": 1, "task": 2, "add": true})).unwrap();
+    let outcome = run(&fake.path(), &edit(link));
+    let TeamOutcome::Done { request_id, .. } = &outcome else { panic!("{outcome:?}") };
+    let log = requests(&fake);
+    assert_eq!(log.iter().map(|(op, _)| op.as_str()).collect::<Vec<_>>(), ["status", "plan"]);
+    let plan = &log[1].1;
+    assert_eq!(plan["revision"], json!(7));
+    assert_eq!(plan["request_id"], json!(request_id));
+    assert_eq!(plan["members"], json!([{"id": "dev", "role": "Developer", "agent": "codex", "model": "gpt"}]));
+    let tasks = plan["tasks"].as_array().unwrap();
+    assert_eq!(tasks.iter().map(|task| task["id"].as_u64().unwrap()).collect::<Vec<_>>(), [1, 2], "the cancelled task is not in the plan");
+    assert_eq!(tasks[1]["deps"], json!([{"task": 1, "kind": "hard"}]));
+    assert_eq!(tasks[0]["estimate_minutes"], json!(30), "the lead's estimate stays");
+    assert!(tasks[1].get("estimate_minutes").is_none(), "an automatic estimate is not the lead's");
+    assert_eq!(plan["phases"], json!([{"n": 2, "title": "Polish", "barrier": true}]));
+    // A new task takes the next id over every task, the cancelled ones too.
+    let new: PlanChange = serde_json::from_value(json!({"edit": "task", "task": {"title": "Docs", "assignee": "dev", "phase": 2}})).unwrap();
+    assert!(matches!(run(&fake.path(), &edit(new)), TeamOutcome::Done { .. }));
+    let plan = &requests(&fake)[3].1;
+    let added = plan["tasks"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!((added["id"].clone(), added["title"].clone(), added["phase"].clone()), (json!(4), json!("Docs"), json!(2)));
+    // A team that no longer plans sends nothing.
+    reply(&fake, "status", "", json!({"stdout": {"status": "running", "members": [], "tasks": []}}));
+    let remove: PlanChange = serde_json::from_value(json!({"edit": "remove_task", "task": 1})).unwrap();
+    let outcome = run(&fake.path(), &edit(remove));
+    assert!(matches!(&outcome, TeamOutcome::Failed { detail, .. } if detail.contains("no longer plans")), "{outcome:?}");
+    assert_eq!(requests(&fake).len(), 5, "only the read ran");
+}
+
+/// Task 199: Drain and Remove ask in Qt's words (Remove names the team),
+/// then send only the member; bad member requests never run.
+#[test]
+fn member_actions_ask_in_qt_words_and_refuse_bad_requests() {
+    let ask = |action: TeamAction| match prepare(&TeamCall { confirmed: false, ..call(action) }) {
+        Err(TeamOutcome::Confirm { confirmation }) => confirmation,
+        other => panic!("asks first: {other:?}"),
+    };
+    let drain = ask(TeamAction::Drain { member: "api".into(), role: "Backend".into(), cancel: false });
+    assert_eq!((drain.name.as_str(), drain.title.as_str(), drain.action.as_str()), ("teamDrainMemberConfirm", "Drain member?", "Drain"));
+    assert!(drain.text.starts_with("Backend finishes its current task and review"), "{}", drain.text);
+    let remove = ask(TeamAction::RemoveMember { member: "api".into(), role: "Backend".into() });
+    assert_eq!((remove.name.as_str(), remove.action.as_str()), ("teamRemoveMemberConfirm", "Remove"));
+    assert_eq!(remove.text, "Remove Backend from Zerus Next for the fork? Its session keeps running; it gets no more tasks.");
+    // Cancelling a drain asks nothing.
+    assert!(prepare(&TeamCall { confirmed: false, ..call(TeamAction::Drain { member: "api".into(), role: String::new(), cancel: true }) }).is_ok());
+    let (invocation, request_id) = prepare(&call(TeamAction::RemoveMember { member: "api".into(), role: "Backend".into() })).unwrap();
+    assert_eq!(invocation.args, ["team", "remove-member", "--json"]);
+    let sent: Value = serde_json::from_slice(invocation.stdin.as_deref().unwrap()).unwrap();
+    assert_eq!(sent, json!({"member": "api", "team": TEAM, "by": "human", "request_id": request_id}));
+    let empty = || String::new();
+    for bad in [
+        TeamAction::PauseMember { member: empty() },
+        TeamAction::ReportsTo { member: "api".into(), parent: "api".into() },
+        TeamAction::Scale { role: "Backend".into(), agent: "codex".into(), count: 0, model: empty(), effort: empty(), account: empty() },
+        TeamAction::Scale { role: " ".into(), agent: "codex".into(), count: 1, model: empty(), effort: empty(), account: empty() },
+        TeamAction::SwapMember { member: "api".into(), agent: empty(), model: empty(), effort: empty(), account: empty(), fresh: false },
+        TeamAction::MoveAccount { provider: "claude".into(), from_account: "work".into(), to_account: "work".into() },
+        TeamAction::AddMember { member: json!({"role": "Tester"}) },
+        TeamAction::AddMember { member: json!("qa") },
+    ] {
+        assert!(matches!(prepare(&call(bad.clone())), Err(TeamOutcome::Failed { .. })), "{bad:?}");
+    }
 }

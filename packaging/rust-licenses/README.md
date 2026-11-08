@@ -74,6 +74,7 @@ URL and the checksum.
 | `webview2-com` | https://github.com/wravery/webview2-rs/blob/edc2caf886175ccaebe86078c9cfe1ae2a187328/LICENSE | `0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73` |
 | `webview2-com-macros` | https://github.com/wravery/webview2-rs/blob/dffa41a8a46d3f5565eefbff2de57d38d399f158/LICENSE | `0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73` |
 | `webview2-com-sys` | https://github.com/wravery/webview2-rs/blob/edc2caf886175ccaebe86078c9cfe1ae2a187328/LICENSE | `0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73` |
+| `pulp-wasm-simd-flag` | the LICENSE of its parent crate pulp 0.22.3 (crates.io package; same repository https://github.com/sarah-quinones/pulp, MIT) | `d64f878c89bd5f1e5ada7e4aad57690b122727cf5229b7b87ea1980c188da1d9` |
 
 `serde_columnar` and `serde_columnar_derive` are offered under "MIT OR
 Apache-2.0"; Zerus uses them under MIT, the license their repository carries.

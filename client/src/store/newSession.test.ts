@@ -394,6 +394,14 @@ describe("repository source (NewSessionDialog.cpp 590-639)", () => {
     expect(t.world.creating()).toEqual([]);
   });
 
+  // A cold card's + New (SessionsWindow.cpp:1749): the same agent, project and folder, named <name>-2.
+  it("opensWithTheNameAColdCardGives", async () => {
+    const t = setup((w) => { w.projects = [project("example", "Example", [folder("f1", "pc", "/workspace/example")], { is_default: true })]; });
+    await t.open({ agent: "codex", project: "example", path: "/workspace/example", name: "api-refactor-2" });
+    expect(t.state()).toMatchObject({ name: "api-refactor-2", folderPath: "/workspace/example" });
+    expect(t.state().projects[t.state().project].id).toBe("example");
+  });
+
   it("sourceSwitchKeepsControls", async () => {
     const t = setup((w) => { w.projects = [project("example", "Example", [folder("f1", "pc", "/workspace/example")], { is_default: true })]; });
     await t.open({ agent: "codex", project: "example" });

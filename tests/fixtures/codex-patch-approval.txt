@@ -1,0 +1,11 @@
+  Would you like to apply this patch?
+
+  *** Begin Patch
+  *** Update File: src/state/codex_approval.rs
+  @@
+  -    let old = 1;
+  +    let new = 1;
+  *** End Patch
+
+› 1. Yes, proceed (y)
+  2. No, and tell Codex what to do differently (esc)

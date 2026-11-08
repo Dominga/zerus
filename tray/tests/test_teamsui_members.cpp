@@ -879,6 +879,16 @@ void TestTeamsUiMembers::deliveryShots()
 void TestTeamsUiMembers::swapMemberAsksFirstAndListsTheOldSession()
 {
     setTeam(proposalsTeam(QDateTime::currentSecsSinceEpoch() + 3600));
+    // #218: the agent's accounts and each account's model catalog.
+    { QFile accounts(script() + ".accounts"); QVERIFY(accounts.open(QIODevice::WriteOnly));
+      accounts.write(R"({"profiles":[
+        {"id":"native-dsh","provider":"dsh","label":"DeepSeek","account_status":{"status":"ok"}},
+        {"id":"native-codex","provider":"codex","label":"Codex","account_status":{"status":"ok"}},
+        {"id":"work-codex","provider":"codex","label":"Codex work","account_status":{"status":"ok"}}]})"); }
+    { QFile models(script() + ".models"); QVERIFY(models.open(QIODevice::WriteOnly));
+      models.write(R"({"native-dsh":[{"value":"deepseek-v4-pro","effort_options":["low","high"]}],
+        "native-codex":[{"value":"gpt-5.5-codex","effort_options":["low","medium"]},{"value":"gpt-5.5","effort_options":["high"]}],
+        "work-codex":[{"value":"work-model","effort_options":["xhigh"]}]})"); }
     HgsClient client(FakeCli::program(script()));
     TeamController controller(&client);
     TeamPanel panel(&controller);
@@ -917,8 +927,28 @@ void TestTeamsUiMembers::swapMemberAsksFirstAndListsTheOldSession()
     QCOMPARE(session->count(), 1);
     QCOMPARE(session->itemData(0).toJsonObject()["name"].toString(), QStringLiteral("claude/checkout/spare"));
     auto *agent = dialog->findChild<QComboBox *>("teamSwapAgent");
+    auto *model = dialog->findChild<QComboBox *>("teamSwapModel");
+    auto *effort = dialog->findChild<QComboBox *>("teamSwapEffort");
+    auto *account = dialog->findChild<QComboBox *>("teamSwapAccount");
+    // The member's own values are preselected and its account's catalog fills
+    // the model's efforts (not the fixed four). This member is a dsh (its
+    // model stays the roster's gpt-5.5-codex; the catalog adds the dsh one).
+    QTRY_COMPARE(model->currentText(), QStringLiteral("gpt-5.5-codex"));
+    QTRY_VERIFY(model->findText("deepseek-v4-pro") >= 0);
+    model->setCurrentText("deepseek-v4-pro");
+    QTRY_VERIFY(effort->findText("high") >= 0);
     agent->setCurrentIndex(agent->findData("codex"));
-    dialog->findChild<QComboBox *>("teamSwapModel")->setCurrentText("gpt-5.5");
+    QTRY_VERIFY(account->findData("work-codex") >= 0);
+    QTRY_VERIFY(model->findText("gpt-5.5-codex") >= 0);
+    account->setCurrentIndex(account->findData("work-codex"));
+    QTRY_VERIFY(model->findText("work-model") >= 0);
+    QCOMPARE(model->currentText(), QStringLiteral("gpt-5.5-codex"));
+    model->setCurrentText("work-model");
+    QTRY_VERIFY(effort->findText("xhigh") >= 0);
+    account->setCurrentIndex(account->findData("native-codex"));
+    QTRY_VERIFY(model->findText("gpt-5.5") >= 0);
+    model->setCurrentText("gpt-5.5");
+    QTRY_VERIFY(effort->findText("high") >= 0);
     shot(dialog, "h6-swap-dialog");
     // Cancel at the confirmation sends nothing and keeps the dialog.
     armConfirm(&panel, true);

@@ -20,6 +20,8 @@
 // когда крышку ноута закрыли, что и есть запрещённая ложь вниз. См. FleetState.cpp.
 class FleetState {
 public:
+    // WhiteWh fork, task 244: a lead's reply to a team notice is read unless its mode is Full.
+    static void quietTeamReply(const QString &host, SessionInfo &s);
     // static const qint64 в заголовке не ODR-используется большинством выражений, но
     // QCOMPARE/QVERIFY в тестах берут его по ссылке — без определения это падает на
     // линковке. constexpr в C++17 неявно inline для static-членов класса, поэтому

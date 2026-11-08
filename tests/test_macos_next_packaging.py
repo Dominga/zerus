@@ -93,7 +93,7 @@ class NextPackaging(unittest.TestCase):
                         self.assertEqual((Path(args[-1]) / relative).read_bytes(),
                                          (ROOT / "scripts" / name).read_bytes())
             argv = ["package-macos.py", "--gui", "tauri", "--app", str(app), "--cli", str(cli),
-                    "--connector", str(cli), "--licenses", str(root / "rust"),
+                    "--lore", str(cli), "--connector", str(cli), "--licenses", str(root / "rust"),
                     "--client-licenses", str(root / "client-rust"), "--frontend-licenses", str(root / "frontend"),
                     "--version", VERSION, "--release", DEV_BASE + "-dev.17", "--output", str(output)]
             with mock.patch.object(sys, "argv", argv), mock.patch.object(package, "run", side_effect=run):
@@ -105,6 +105,7 @@ class NextPackaging(unittest.TestCase):
             self.assertEqual(final["ZerusReleaseVersion"], DEV_BASE + "-dev.17")
             self.assertEqual(info_path.read_bytes(), original)
             self.assertEqual((bundle / "Contents/MacOS/hgs").read_bytes(), MAGIC)
+            self.assertEqual((bundle / "Contents/MacOS/lore").read_bytes(), MAGIC)
             self.assertFalse((bundle / "Contents/Resources/licenses/qt").exists())
             self.assertFalse((bundle / "Contents/Resources/licenses/libvterm-LICENSE").exists())
             for name in ("rust", "client-rust", "frontend"):
@@ -185,7 +186,7 @@ class NextPackaging(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, output, "")
         with mock.patch.object(check.subprocess, "run", side_effect=run):
             self.assertEqual(check.tauri_selftest(Path("/synthetic/Zerus.app"), VERSION, VERSION), [])
-        self.assertEqual([args[-1] for args in calls], ["--version", "--version", "--version", "--build-info"])
+        self.assertEqual([args[-1] for args in calls], ["--version", "--version", "--version", "--version", "--build-info"])
         self.assertNotIn("--selftest", [item for args in calls for item in args])
 
     def test_feed_metadata_keeps_the_required_legacy_qt_version_for_every_channel(self):
@@ -281,3 +282,4 @@ class FrontendNotices(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

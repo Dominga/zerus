@@ -83,7 +83,7 @@ fn ordinary_legacy_results_remain_polled_and_release_after_owned_exit() {
         closed.wait_until(Instant::now() + Duration::from_secs(3)),
         Observation::Idle
     );
-    assert_eq!(fake.runs("peer", &["ls", "--json"]).len(), 1);
+    assert_eq!(fake.runs("peer", &["ls", "--json", "--local", "--no-archives"]).len(), 1);
 }
 #[test]
 fn invalid_alias_refuses_before_a_helper_and_releases_admission() {

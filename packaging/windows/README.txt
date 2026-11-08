@@ -19,7 +19,7 @@ Use
   again to bring it back. For portable login start, put a shortcut in
   shell:startup with --background appended to its Target. The per-user
   installer also offers an optional Start at login choice, off by default.
-- The CLI works from a terminal as .\hgs.exe '@myserver' ls in PowerShell.
+- The CLI works from a terminal as .\hgs.exe '@myserver' ls in PowerShell. lore.exe beside it serves the local knowledge base; its model weights are fetched when needed and are never part of this folder.
   With this folder on PATH, use hgs.exe '@myserver' ls. In Git Bash set
   MSYS_NO_PATHCONV=1 before passing remote paths such as /workspace/project.
 - Configuration remains in %USERPROFILE%\.config\hgs (HOME when set).
@@ -60,3 +60,4 @@ components. This distribution includes:
 - Locked frontend runtime dependency notices, including Vite's emitted preload
   helper (licenses\frontend).
 WebView2 Evergreen is installed separately under Microsoft's terms.
+

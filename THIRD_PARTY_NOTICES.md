@@ -40,6 +40,11 @@ New session and the team views show the Codex, Claude, Kimi, DeepSeek, OpenCode 
 LobeHub. Its license is retained in `tray/resources/agent-icons/LICENSE`, also in
 the embedded Qt resource; the Ollama logo is recolored to `#e6e8eb`, and the team views
 paint the monochrome parts of the Kimi and OpenCode logos in the theme's text color.
+The Tauri desktop client shows the same logos: the files are copied unchanged into
+`client/src/assets/agent-icons` (Codex, Claude, DeepSeek, Kimi, OpenCode and Ollama,
+with the license), inlined into the built interface, and monochrome parts follow the
+theme's text color. `client/scripts/collect-notices.py` ships that license in every
+desktop package beside the npm dependency notices (`licenses/frontend/lobe-icons-agent-logos`).
 
 ## CanonicalPath lexical path identity
 

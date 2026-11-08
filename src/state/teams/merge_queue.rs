@@ -8,7 +8,7 @@
 //! merge is under test at a time, so a rollback never drops another's work,
 //! and a phase integration only checks what came after the last tested merge.
 
-use super::model::{AttemptState, Decider, MergeEntry, MergeLog, MergeRange, MergeWaitReason, OpenNotRun, Task, TaskStatus, Team};
+use super::model::{AttemptState, Decider, MemberState, MergeEntry, MergeLog, MergeRange, MergeWaitReason, OpenNotRun, Task, TaskStatus, Team};
 use super::store::Event;
 use super::test_queue::{Request, TestStore};
 use serde_json::{json, Value};
@@ -19,6 +19,165 @@ use std::time::{Duration, Instant};
 
 /// How long one git step of the queue may take.
 const GIT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Task #267: the integration line's branch and head: the one base every
+/// hand-out starts from, and the line accepted work lands on.
+pub(crate) fn integration_branch(team: &Team) -> Option<String> {
+    let folder = team.integration_folder();
+    if folder.is_empty() {
+        return None;
+    }
+    git_text(folder, &["symbolic-ref", "--quiet", "--short", "HEAD"]).filter(|branch| !branch.is_empty())
+}
+
+/// The integration line's current head, or None when it cannot be read.
+pub(crate) fn integration_head(team: &Team) -> Option<String> {
+    let folder = team.integration_folder();
+    if folder.is_empty() {
+        return None;
+    }
+    git_text(folder, &["rev-parse", "HEAD"]).filter(|head| !head.is_empty())
+}
+
+/// Task #267: once a conflict's resolve task is decided, its landing is back in
+/// the queue and retries even when nothing else changed.
+fn release_conflicts(team: &mut Team) -> bool {
+    let decided: Vec<(u32, u32)> = team
+        .tasks
+        .iter()
+        .filter_map(|task| {
+            let entry = task.merge.as_ref().filter(|entry| entry.state == "conflict")?;
+            let resolve = entry.resolve_task?;
+            team.tasks.iter().any(|other| other.id == resolve && other.status.finished()).then_some((task.id, resolve))
+        })
+        .collect();
+    for (id, resolve) in &decided {
+        if let Some(entry) = team.task_mut(*id).and_then(|task| task.merge.as_mut()) {
+            entry.state = "queued".into();
+            entry.retry = true;
+            entry.resolve_task = None;
+            entry.wait_reason = MergeWaitReason::Other;
+            entry.note.clear();
+        }
+    }
+    !decided.is_empty()
+}
+
+/// Task #267: whether a commit is on the integration line.
+pub(crate) fn landed(team: &Team, commit: &str) -> bool {
+    !commit.is_empty() && ancestry(team.integration_folder(), commit) == Ancestry::Yes
+}
+
+/// Task #267: the integration line for status and the lead's inbox: its branch
+/// and head, the accepted work that is on it, and every accepted task that is
+/// not, with the reason (the queue's state, its resolve task, or no queue).
+pub(crate) fn landing(team: &Team) -> Value {
+    let folder = team.integration_folder();
+    let branch = integration_branch(team).unwrap_or_default();
+    let head = integration_head(team).unwrap_or_default();
+    let mut landed = Vec::new();
+    let mut unlanded = Vec::new();
+    for task in team.tasks.iter().filter(|task| task.status == TaskStatus::Accepted || task.merge.is_some()) {
+        let commit = task
+            .attempts
+            .iter()
+            .rev()
+            .find(|attempt| attempt.state == AttemptState::Reported && !attempt.folder_head.is_empty())
+            .map(|attempt| attempt.folder_head.clone())
+            .unwrap_or_default();
+        let merged = task.merge.as_ref().map(|entry| entry.merged.clone()).unwrap_or_default();
+        // The landed commit is the merge the queue kept, or (a task accepted
+        // before the queue, or outside it) its own commit once it is on the line.
+        let on_line = if !merged.is_empty() {
+            !folder.is_empty() && ancestry(folder, &merged) == Ancestry::Yes
+        } else {
+            !commit.is_empty() && !folder.is_empty() && ancestry(folder, &commit) == Ancestry::Yes
+        };
+        if on_line {
+            landed.push(json!({"task":task.id,"commit":if merged.is_empty() { commit.clone() } else { merged.clone() }}));
+            continue;
+        }
+        if task.status != TaskStatus::Accepted {
+            continue;
+        }
+        let (state, why, resolve) = match task.merge.as_ref() {
+            Some(entry) if !entry.note.is_empty() => (entry.state.clone(), entry.note.clone(), entry.resolve_task),
+            Some(entry) => (
+                entry.state.clone(),
+                match entry.state.as_str() {
+                    "queued" => "queued for the integration line".to_owned(),
+                    "testing" => "merged into the integration line; its affected tests run".to_owned(),
+                    "conflict" => "the integration line conflicts; a resolve task waits".to_owned(),
+                    other => format!("the queue is {other}"),
+                },
+                entry.resolve_task,
+            ),
+            None => ("not_queued".to_owned(), "accepted, but no landing is queued".to_owned(), None),
+        };
+        unlanded.push(json!({"task":task.id,"commit":commit,"state":state,"why":why,"resolve":resolve}));
+    }
+    json!({"folder":folder,"branch":branch,"head":head,"landed":landed,"unlanded":unlanded})
+}
+
+/// Task #267: ONE resolve task per conflict, for the reviewer (the lead when the
+/// team has none), naming both commits and the files. The conflicting landing
+/// stays undecided, and later landings wait behind this task.
+fn resolve_task(team: &mut Team, id: u32, entry: &MergeEntry, head: &str, files: &[String], events: &mut Vec<Event>) -> anyhow::Result<u32> {
+    let short = |commit: &str| commit.chars().take(9).collect::<String>();
+    let next = team.tasks.iter().map(|task| task.id).max().unwrap_or(0).checked_add(1).ok_or_else(|| anyhow::anyhow!("Task numbers are exhausted"))?;
+    let phase_n = team.task(id).map(|task| task.phase).unwrap_or(1);
+    let reviewer = team
+        .members
+        .iter()
+        .filter(|member| member.state == MemberState::Active && member.id != team.lead)
+        .find(|member| member.role.eq_ignore_ascii_case("reviewer"))
+        .map(|member| member.id.clone())
+        .unwrap_or_else(|| team.lead.clone());
+    let files_text = if files.is_empty() { "the files git named".to_owned() } else { files.join(", ") };
+    let task = Task {
+        id: next,
+        phase: phase_n,
+        title: format!("Resolve the integration conflict of #{id}"),
+        description: format!(
+            "The accepted work of #{id} ({}) conflicts with the integration line {} in: {}.\n\n\
+             Merge the integration line into the work of #{id} (the git-merge-lead template), resolve these files, commit and report. \
+             The queue lands #{id} once this task is decided; later landings wait behind it.",
+            short(&entry.commit),
+            short(head),
+            files_text
+        ),
+        criteria: vec![format!("The integration line merges into #{} without conflicts, and its affected tests pass on the landing", id)],
+        output: files.to_vec(),
+        origin: Some(id),
+        assignee: reviewer.clone(),
+        status: TaskStatus::Pending,
+        ..Default::default()
+    };
+    let resolve = task.id;
+    team.tasks.push(task);
+    if let Some(record) = team.phases.iter_mut().find(|phase| phase.n == phase_n) {
+        record.tasks.push(resolve);
+        record.tasks.sort_unstable();
+    }
+    events.push(Event::new("merge_resolve_task", json!({"task":id,"resolve":resolve,"reviewer":reviewer,"files":files,"commit":entry.commit,"head":head})));
+    Ok(resolve)
+}
+
+/// The catalog merge driver `.gitattributes` names `i18n`: the reviewed
+/// supplement merges as a key union and the generated catalog is regenerated
+/// (scripts/i18n-merge.py). Zerus passes it with `-c` on its own merge paths and
+/// never writes it into a repository config: C2 refuses a repository's own merge
+/// drivers, which are arbitrary commands.
+pub(crate) const I18N_MERGE_DRIVER: &str = if cfg!(windows) {
+    "python scripts/i18n-merge.py %O %A %B %L %P"
+} else {
+    "python3 scripts/i18n-merge.py %O %A %B %L %P"
+};
+
+/// The `-c` argument that enables [`I18N_MERGE_DRIVER`] for one Git command.
+pub(crate) fn i18n_driver_config() -> String {
+    format!("merge.i18n.driver={I18N_MERGE_DRIVER}")
+}
 
 /// A bounded per-suite tested-point map; the merge log is bounded too.
 const MERGE_SUITES: usize = 64;
@@ -149,7 +308,8 @@ pub(crate) fn merge(lead: &str, entry: &MergeEntry, message: &str) -> Merged {
     if git(lead, &["merge-base", "--is-ancestor", &entry.commit, "HEAD"]).exit == Some(0) {
         return Merged::Done { merged: prev.clone(), prev };
     }
-    let outcome = git(lead, &["merge", "--no-edit", "-m", message, &entry.commit]);
+    let driver = i18n_driver_config();
+    let outcome = git(lead, &["-c", driver.as_str(), "merge", "--no-edit", "-m", message, &entry.commit]);
     if outcome.exit == Some(0) {
         let merged = git_text(lead, &["rev-parse", "HEAD"]).unwrap_or_default();
         return Merged::Done { prev, merged };
@@ -373,6 +533,10 @@ where
     F: FnOnce() -> anyhow::Result<(Vec<String>, Vec<super::test_runners::Runner>)>,
 {
     let mut migrated = migrate_legacy_ranges(team);
+    // Task #267: a conflict's resolve task decided puts its landing back in the
+    // queue; nothing lands while a conflict waits for its resolve task.
+    let released = release_conflicts(team);
+    migrated = migrated || released;
     let legacy: Vec<_> = team.tasks.iter().filter_map(|task| task.merge.as_ref()
         .filter(|entry| matches!(entry.state.as_str(), "waiting" | "reverting"))
         .map(|entry| (task.id, task.status, entry.clone()))).collect();
@@ -430,6 +594,11 @@ where
             );
         }
         return Ok(true);
+    }
+    // Task #267: one landing at a time, in acceptance order: while a conflict
+    // waits for its resolve task, later landings queue behind it.
+    if team.tasks.iter().any(|task| task.merge.as_ref().is_some_and(|entry| entry.state == "conflict")) {
+        return Ok(migrated);
     }
     let Some(id) = team
         .tasks
@@ -493,16 +662,27 @@ where
             Ok(true)
         }
         Merged::Conflict(files) => {
-            return_to_author(
-                team,
-                id,
-                &format!(
-                    "The merge into the lead branch conflicts in: {}. Merge the lead branch into your folder (the git-merge-lead template), resolve these files, commit and report again.",
-                    files.join(", ")
-                ),
-                events,
+            // Task #267: ONE resolve task for the reviewer, naming both
+            // commits and the files; the landing stays undecided and later
+            // landings wait behind it instead of meeting the same conflict.
+            let head = integration_head(team).unwrap_or_default();
+            let resolve = match team.task(id).and_then(|task| task.merge.as_ref()).and_then(|entry| entry.resolve_task) {
+                Some(resolve) if team.tasks.iter().any(|task| task.id == resolve && !task.status.finished()) => resolve,
+                _ => resolve_task(team, id, &entry, &head, &files, events)?,
+            };
+            let note = format!(
+                "the integration line {} conflicts in {}; resolve task #{resolve} waits",
+                head.chars().take(9).collect::<String>(),
+                if files.is_empty() { "the files git named".to_owned() } else { files.join(", ") }
             );
-            events.push(Event::new("merge_conflict", json!({"task":id,"files":files})));
+            if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
+                found.state = "conflict".into();
+                found.conflict_files = files.clone();
+                found.resolve_task = Some(resolve);
+                found.note = note;
+                found.wait_reason = MergeWaitReason::Conflict;
+            }
+            events.push(Event::new("merge_conflict", json!({"task":id,"files":files,"resolve":resolve,"head":head})));
             Ok(true)
         }
         Merged::Failed(text) => {
@@ -1105,3 +1285,4 @@ pub(crate) fn view(task: &Task) -> Option<Value> {
 #[cfg(test)]
 #[path = "merge_queue_tests.rs"]
 mod tests;
+

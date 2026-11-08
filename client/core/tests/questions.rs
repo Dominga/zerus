@@ -1222,3 +1222,69 @@ fn an_answer_checkpoint_lives_until_a_definite_outcome() {
     uncertain.allow_retry();
     assert!(uncertain.checkpoint.is_none() && !uncertain.uncertain);
 }
+
+/// Task 198 (W5): a subagent confirmation card, as Qt's QuestionCard and
+/// SubagentRequest answer it: one row per subagent, its own Yes and No for
+/// Allow all and Deny, and the broader "don't ask again" behind Confirm.
+fn subagent_card(listed: bool) -> Question {
+    let mut raw = json!({"question_id": "sub", "question_hash": "h-sub", "run_id": "run-1", "conversation_id": "conv-1",
+        "source": "hook", "created_at": 1.0, "can_answer": true, "approval": true, "subagent_confirmation": true,
+        "subagent_calls": ["c1", "c2"],
+        "questions": [{"id": "q_0",
+            "question": "Start 2 subagents: Explore (model haiku): read the payments service; code-reviewer (model opus, effort high): review the diff; note both",
+            "options": [{"id": "yes", "label": "Yes"},
+                        {"id": "always", "label": "Yes, and don\u{2019}t ask again for subagents", "scope": "broader"},
+                        {"id": "no", "label": "No"}]}]});
+    if listed {
+        raw["subagents"] = json!([{"type": "Explore", "model": "haiku", "description": "read the payments service"}]);
+    }
+    question(raw)
+}
+
+#[test]
+fn a_subagent_card_lists_its_subagents_and_answers_with_its_own_options() {
+    let form = subagent_card(false);
+    assert!(form.subagents);
+    let view = card(&form, &AnswerDraft::default(), &ctx());
+    assert_eq!(view.heading.english(), "Start 2 subagents");
+    assert_eq!(view.status.english(), "Allow all starts every subagent listed; Deny stops them all.");
+    let rows: Vec<_> = view.subagents.iter().map(|c| (c.kind.as_str(), c.model.as_str(), c.effort.as_str(), c.task.as_str())).collect();
+    assert_eq!(rows, vec![
+        ("Explore", "haiku", "", "read the payments service"),
+        ("code-reviewer", "opus", "high", "review the diff; note both"),
+    ]);
+    assert_eq!(view.approve.label.english(), "Allow all");
+    assert!(view.always.visible && view.always.enabled);
+    assert_eq!(view.always.label.english(), "Allow all, don't ask again");
+    assert_eq!(serde_json::to_value(decision(&form, true).unwrap()).unwrap(),
+        json!([{"question_id": "q_0", "selected_option_ids": ["yes"], "text": ""}]));
+    assert_eq!(serde_json::to_value(decision(&form, false).unwrap()).unwrap(),
+        json!([{"question_id": "q_0", "selected_option_ids": ["no"], "text": ""}]));
+    assert_eq!(q::always_option(&form).as_deref(), Some("always"));
+    assert_eq!(serde_json::to_value(q::always_decision(&form).unwrap()).unwrap(),
+        json!([{"question_id": "q_0", "selected_option_ids": ["always"], "text": ""}]));
+    // The first click asks to Confirm: the draft remembers the option.
+    let draft = AnswerDraft { confirm: "always".into(), ..AnswerDraft::default() };
+    assert_eq!(card(&form, &draft, &ctx()).always.label.english(), "Confirm");
+    // A listed card uses its list; its count is the larger of rows and calls.
+    let listed = card(&subagent_card(true), &AnswerDraft::default(), &ctx());
+    assert_eq!(listed.subagents.len(), 1);
+    assert_eq!(listed.heading.english(), "Start 2 subagents");
+}
+
+#[test]
+fn an_ordinary_approval_has_no_always_button_and_no_subagent_rows() {
+    let mut raw = ask("plain", false, 1.0);
+    raw["approval"] = json!(true);
+    raw["questions"][0]["options"] = json!([{"id": "allow", "label": "Allow"}, {"id": "deny", "label": "Deny"}]);
+    let form = question(raw);
+    let view = card(&form, &AnswerDraft::default(), &ctx());
+    assert!(!view.always.visible);
+    assert!(view.subagents.is_empty());
+    assert_eq!(view.approve.label.english(), "Approve once");
+    assert_eq!(q::always_option(&form), None);
+    // A subagent card without Yes/No ids cannot be answered by the buttons.
+    let mut odd = subagent_card(false).raw;
+    odd["questions"][0]["options"] = json!([{"id": "x", "label": "Maybe"}]);
+    assert_eq!(decision(&question(odd), true), None);
+}

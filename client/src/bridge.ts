@@ -2,7 +2,7 @@ import { withdrawnRefusal } from "./teamRefusals";
 import { desktopService } from "./store/desktopService";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type ActivityEvent, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalEvent, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget, type Answer, type ComposerTab, type ComposerView, type Inspect, type SendReply, type SessionRef, type AttachmentRef, type Fetched, type TaskFileSource, type ConflictsPage, type DraftSource, type SavedDraftDetail, type SavedDraftsPage, type QuestionEdit, type QuestionReply, type ClearControl, emptyUsage, type TerminalFinished, type SessionUsageRef, type Usage } from "./types";
+import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type ActivityEvent, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalEvent, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget, type Answer, type ComposerTab, type ComposerView, type Inspect, type SendReply, type SessionRef, type AttachmentRef, type Fetched, type TaskFileSource, type ConflictsPage, type DraftSource, type SavedDraftDetail, type SavedDraftsPage, type QuestionEdit, type QuestionReply, type ClearControl, emptyUsage, type TerminalFinished, type SessionUsageRef, type Usage, type HgsSettingName, type HgsSettingOutcome } from "./types";
 import type { CreatedWorktree, CreationAction, CreationAdmission, CreationCard, CreationEvent, FolderOut, LaunchAccounts, LaunchChoices, LaunchPlan, LaunchStart, MachineMeta, NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, RepositoryFields } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
@@ -130,9 +130,14 @@ export const teamWaitingNotify = (raised: { token: string; title: string; body: 
   inTauri() ? invoke<void>("team_waiting_notify", { raised, cleared }) : Promise.resolve();
 /** Task 41/32: asks the core to read the watched team's profile. */
 export const teamsProfile = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_profile", { computer }) : Promise.resolve(false);
-/** Task 41: the Tests mode's queue and one bounded result page through the core. */
+/** The hgs-owned settings Settings > Sessions shows (SettingsPage.h:242-250): a read or the person's write. */
+export const hgsSetting = (call: { setting: HgsSettingName; value?: boolean; request_id?: string | null }) =>
+  inTauri() ? invoke<HgsSettingOutcome>("hgs_setting", { call }) : Promise.reject(new Error("hgs settings need the desktop app."));/** Task 41: the Tests mode's queue and one bounded result page through the core. */
 export const teamTests = (computer: ComputerId, team: string, before: number | null) =>
   inTauri() ? invoke<import("./types").TeamTestsView>("team_tests", { computer, team, before }) : Promise.reject(new Error("Teams need the desktop app."));
+/** Task 199: the Tests tab's Builds through the core, read while the tab shows them. */
+export const teamBuilds = (computer: ComputerId, team: string) =>
+  inTauri() ? invoke<import("./types").TeamBuildsView>("team_builds", { computer, team }) : Promise.reject(new Error("Teams need the desktop app."));
 /** Task 92: the profile's Time view of one scope (a phase, or the plan with null), read on request through the core. */
 export const teamTimeline = (computer: ComputerId, team: string, phase: number | null) =>
   inTauri() ? invoke<import("./types").TeamTimelineView>("team_timeline", { computer, team, phase }) : Promise.reject(new Error("Teams need the desktop app."));
@@ -688,7 +693,17 @@ export async function accountEditClose(handle: string): Promise<void> {
 export type AccountSetupKind="add"|"login"|"install"|"start"|"key";
 export interface AccountSetupHost {key:string;machine:string;label:string;online:boolean;providers:string[];saved:{id:string;provider:string;label:string;installed:boolean}[];listed:string[];deepseek_installed:boolean}
 export interface AccountSetupView {handle:string;kind:AccountSetupKind;hosts:AccountSetupHost[];host:string;provider:string;label:string}
-export interface AccountSetupValues {host?:string;provider?:string;saved?:string;label?:string;api_key?:string}
+export interface AccountSetupValues {host?:string;provider?:string;saved?:string;label?:string;api_key?:string;
+ ollama_model?:string;ollama_endpoint?:string;ollama_context?:number;ollama_prepare?:string}
+export interface AccountBindRequest {host:string;request_id:string;name:string;conversation_id:string;directory:string;agent_home?:string;preview?:boolean;expected_identity?:string}
+export async function accountBindExisting(request:AccountBindRequest):Promise<unknown> {
+  if(!inTauri())throw new Error(DESKTOP_ONLY);
+  return invoke("account_bind_existing",{request});
+}
+export async function accountOllamaModels(host:string,endpoint:string):Promise<{models?:{name?:string}[]}|unknown> {
+  if(!inTauri())throw new Error(DESKTOP_ONLY);
+  return invoke("account_ollama_models",{host,endpoint});
+}
 export interface AccountSetupResult {notices:string[];errors:string[];profile:string|null}
 export async function accountSetupOpen(kind:AccountSetupKind,account="",profile=""):Promise<AccountSetupView> {
   if(!inTauri())throw new Error(DESKTOP_ONLY);
@@ -763,6 +778,12 @@ export async function machinePickSource(): Promise<string | null> {
 export async function machineCheck(alias: string): Promise<MachinesView> {
   if (!inTauri()) return emptyMachines(DESKTOP_ONLY);
   return invoke<MachinesView>("machine_check", { alias });
+}
+
+/** "Test session host" (MachinesPage.cpp:215-219): one `hgs session-host status --json` on this computer. */
+export async function machineTestHost(): Promise<import("./types").HostTest> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke<import("./types").HostTest>("machine_test_host");
 }
 
 export async function projectsView(): Promise<ProjectsView> {
@@ -955,8 +976,8 @@ export const windowVisibility: PageVisibility = {
 };
 
 /** A session the menu bar or a notification opens: its computer and catalog key. */
-/** `attention`: a clicked notification's session, shown on its Activity tab (Qt's `showAttentionSession`). */
-export type OpenSession = { computer: ComputerId; key: string; attention?: boolean; preserveFilters?: boolean; expected?: { run: string; conversation: string } };
+/** `attention`: a clicked notification's session, shown on its Activity tab (Qt's `showAttentionSession`); `terminal`: a tray-menu row, attached in Terminal. */
+export type OpenSession = { computer: ComputerId; key: string; attention?: boolean; terminal?: boolean; preserveFilters?: boolean; expected?: { run: string; conversation: string } };
 /** A notice for the window. */
 export type DeskNotice = { title: string; text: string };
 export type DeskPending = { open: OpenSession | null; notices: DeskNotice[]; updates?: boolean };
@@ -969,6 +990,9 @@ function onEvent<T>(name: string, listener: (payload: T) => void): Promise<() =>
 
 /** `open-session`: the menu bar or a notification opens a session; resolves with the stop once listening. */
 export const onOpenSession = (listener: (target: OpenSession) => void) => onEvent<OpenSession>("open-session", listener);
+/** A clicked Team Waiting notice (task 258): open the Waiting for you list. */
+export type OpenTeam = { team: string; item: string };
+export const onOpenTeam = (listener: (target: OpenTeam) => void) => onEvent<OpenTeam>("open-team", listener);
 /** `open-updates`: an update notice or menu item opens Settings > Updates. */
 export const onOpenUpdates = (listener: () => void) => onEvent<void>("open-updates", listener);
 /** `desk-notice`: a notice for the window; resolves with the stop once listening. */
@@ -1066,6 +1090,8 @@ export const questionNavigate = (direction: number) => desktop<void>("question_n
 export const questionAllowRetry = (card: string) => desktop<void>("question_allow_retry", { card });
 export const questionSubmit = (card: string) => desktop<QuestionReply>("question_submit", { card });
 export const questionDecide = (card: string, allow: boolean) => desktop<QuestionReply>("question_decide", { card, allow });
+/** Task 198 (W5): "Allow all, don't ask again" on a subagent card; the first call asks to Confirm. */
+export const questionAlways = (card: string) => desktop<QuestionReply>("question_always", { card });
 export const questionSkip = (card: string) => desktop<QuestionReply>("question_skip", { card });
 export const questionCold = (token: number, proceed: boolean) => desktop<QuestionReply>("question_cold", { token, proceed });
 /** The status line's Refresh: the open session is read again (Qt's sessionRefreshRequested). */
@@ -1147,6 +1173,12 @@ export const sessionFileAct = (id: number, action: "open_file" | "open_folder" |
 export const sessionFileClose = (id: number) => desktop<void>("session_file_close", { id });
 export const onSessionFileChanged = (listener: (view: SessionFileView) => void) => onEvent<SessionFileView>("session-file-changed", listener);
 export const onSessionFileNotice = (listener: (notice: { text: string; warn: boolean }) => void) => onEvent<{ text: string; warn: boolean }>("session-file-notice", listener);
+/** Task 248: a picture, animation or video an agent names (src-tauri session_files/media.rs). */
+export const sessionMedia = (request: number, computer: string, href: string, cwd: string, open: boolean) =>
+  desktop<import("./ui/sessions/media").MediaAnswer>("session_media", { request, computer, href, cwd, open });
+export const sessionMediaExternal = (token: string, remote: boolean) => desktop<void>("session_media_external", { token, remote });
+export const onSessionMedia = (listener: (answer: import("./ui/sessions/media").MediaAnswer) => void) =>
+  onEvent<import("./ui/sessions/media").MediaAnswer>("session-media", listener);
 
 // Saved drafts (src-tauri composer/saved.rs). Qt's and the dev app's stores
 // are only read; each page is one bounded read.

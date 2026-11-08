@@ -37,7 +37,7 @@ import { WaitingPage } from "./ui/teams/Waiting";
 import { NewTeamPage } from "./ui/teams/NewTeamPage";
 import { CatalogPage } from "./ui/teams/CatalogPage";
 import { TeamDesigner } from "./ui/teams/TeamDesigner";
-import { connected, connectionError as hasConnectionError, statusSummary } from "./ui/status-summary";
+import { connected, connectionError as hasConnectionError, staleNote, statusSummary } from "./ui/status-summary";
 import { ModelServersScreen } from "./ui/screens/ModelServers";
 import { TeamConfirmDialog } from "./ui/teams/TeamConfirmDialog";
 
@@ -87,8 +87,11 @@ function StatusBar(props: { mode: () => BridgeMode | "starting" }) {
   // Task 72 (F1): a computer still connecting is said to be connecting, never offline.
   const connectionError = createMemo(() => hasConnectionError(computers()));
   const summary = createMemo(() => statusSummary(computers(), label));
+  // Task 235: the rows on screen are the last list on disk until the live listing replaces them.
+  const staleSince = createMemo(() => staleNote(catalog.stale));
   return (
     <footer class="statusbar">
+      <Show when={staleSince()}>{(note) => <span class="stale-note" data-stale title={tr("These rows are the last session list Zerus saw; the live list replaces them as each computer answers.")}>{note()}</span>}</Show>
       <Show when={computers().length} fallback={<Show when={!servicePaused(desktopService.state()) && !firstChoicePending(desktopService.state())}><span>{props.mode() === "starting" ? tr("Starting…") : tr("Connecting…")}</span></Show>}>
         {connectionError() ? (
           <>

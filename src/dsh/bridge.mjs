@@ -623,7 +623,10 @@ export function apply(ctx, config) {
     if (closing) throw new Error('Native host is stopping');
     const p = request.params ?? {};
     switch (request.method) {
+      // Task 234: loadedSessions lets a listing reuse a stopped session's row
+      // (building one replays its stored history) until this host loads it.
       case 'ping': return { protocol: 1, version: '0.2.1-rc.2', generation, accountPermissions: true, sessionActions: true, sessionRows: true, fileAttachments: true,
+        loadedSessions: typeof ctx.sessions?.keys === 'function' ? [...ctx.sessions.keys()].slice(0, 5000) : undefined,
         nativeOperations: ['fork', 'history-search', 'schedules', 'permission-preset', 'permissions'], schedule: Boolean(scheduleService()) };
       case 'list': {
         const list = await api.list({}, new AbortController().signal);

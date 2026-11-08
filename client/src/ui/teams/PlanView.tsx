@@ -1,33 +1,25 @@
-import { For, Show, createEffect, createMemo, createSignal, onMount, type JSX } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { Icon } from "../lib/icons";
 import { tr } from "../../i18n";
 import type { PlanGraph, TeamView } from "./types";
-import type { TeamProfileView, TeamTestsView, TeamTimelineView } from "../../types";
-import { BoardView, HeatLegend, HeatLine, LayersView, PlanModeBar, ProfilePanel, TestsPanel, runStatusLabel, stageLabel } from "./plan-panels";
+import type { TeamBuildsView, TeamProfileView, TeamTaskView, TeamTestsView, TeamTimelineView } from "../../types";
+import { HeatLegend, HeatLine, PlanModeBar, ProfilePanel, TestsPanel, runStatusLabel, stageLabel } from "./plan-panels";
 import { ProfileTime } from "./TimeView";
-import { spawnedFrom, heatSeed, stageChips, type PlanMode } from "./planModes";
+import { spawnedFrom, heatModeSeed, stageChips, type PlanMode } from "./planModes";
 import { settings, settingsReady } from "../../store/settings";
-import { taskHeat } from "./heat";
+import { heatOf, taskHeat, type HeatMode, type TaskHeat } from "./heat";
+import { chain, externalBlocks, externalDeps, phaseNeedsApproval, phasePlans, phaseStatus, type PlanPhase } from "./plan";
+import { NODE_H, NODE_W, orthoPath, placePhase, routeEdges, type PhaseLayout, type Route } from "./planLayout";
 import {
-  CARD_H,
-  ROW_H,
-  buildRows,
-  chain,
-  edgePath,
-  edgeState,
-  externalBlocks,
-  externalDeps,
-  phaseNeedsApproval,
-  phasePlans,
-  phaseStatus,
-  rowEdges,
-  rowOrigins,
-  type PlacedNode,
-  type PlanPhase,
-  type PlanRow,
-} from "./plan";
+  activityText, assigneeAgent, assigneeRole, boardColumn, boardKeys, boardTitle, matches, phaseFinished, statusIcon, taskState, taskTime,
+  type BoardKey, type PlanFilter, type TaskProblem,
+} from "./planTasks";
+import { AgentBadge } from "../sessions/SessionCard";
+import { agentKind } from "../../store/catalog";
+import { roleStyle } from "./roles";
 import { stageName } from "./actions";
+import { phaseHeader } from "./phaseHeader";
 import "../styles/plan.css";
 
 export interface PlanViewProps {
@@ -50,42 +42,69 @@ export interface PlanViewProps {
   taskActions?: (id: number) => JSX.Element;
   /** Task #58: a phase header's mode chip and switch (ui/teams/TeamActions.tsx PhaseModeControl). */
   phaseActions?: (n: number) => JSX.Element;
+  /** Task 197 (P2): the tasks with a problem and its reason (Qt problemTasks/problemTexts). */
+  problems?: ReadonlyMap<number, TaskProblem>;
+  /**
+   * Task 196: editing the plan (Qt planning mode and a draft's edits): which
+   * tasks take a dependency, a drag from a card's right edge onto another
+   * links them, an edge's click removes it (asked first), and a click on a
+   * card edits it while the team plans.
+   */
+  editing?: {
+    canLink: (task: number) => boolean;
+    link: (dependency: number, task: number) => void;
+    unlink: (dependency: number, task: number) => void;
+    editTask?: (id: number) => void;
+  };
+  /** Task 199: a task the side column opens (a queue row, Needs your answer); each new object opens it again. */
+  openTask?: { task: number } | null;
+  /** Task 199: the Tests mode's Builds tab and Force run (TestsPanel). */
+  builds?: TeamBuildsView | null;
+  buildsError?: string;
+  onLoadBuilds?: () => void;
+  onForceTest?: (suite: string) => Promise<string>;
+  /** Task 197: whether the task's member works on it now (its session is busy). */
+  working?: (task: TeamTaskView) => boolean;
+  /** Task 197 (P8): only one member's tasks; empty for every member. */
+  member?: string;
+  onMember?: (member: string) => void;
+  /** Task 197 (P6): the team's Auto-accept drafts switch. */
+  onAutoAccept?: (on: boolean) => void;
+  /** The clock (seconds) the time lines read; tests set it. */
+  now?: () => number;
+  /** The mode it opens in (Graph by default). */
+  initialMode?: PlanMode;
   class?: string;
 }
 
-const TONE: Record<string, string> = {
-  todo: "pending",
-  pending: "pending",
-  ready: "pending",
-  working: "working",
-  in_progress: "working",
-  running: "working",
-  review: "review",
-  reviewing: "review",
-  submitted: "submitted",
-  done: "done",
-  accepted: "done",
-  failed: "danger",
-  blocked: "danger",
-  problem: "danger",
-  cancelled: "muted",
-  archived: "muted",
-};
+const HEADER_H = 44;
+const COLLAPSED_H = 44;
+const SCROLLBAR = 12;
 
-function tone(status: string): string {
-  return TONE[status] ?? "pending";
+/** The card tone class, from Qt's task tones. */
+function toneClass(tone: string): string {
+  if (tone === "active") return "working";
+  if (tone === "assigned") return "assigned";
+  if (tone === "done") return "done";
+  if (tone === "danger") return "danger";
+  if (tone === "warn") return "warn";
+  // A dim task (a draft, a cancelled one) is muted: "pt-card-dim" is the
+  // hover chain's dimming.
+  if (tone === "dim") return "muted";
+  return "pending";
 }
 
 function short(value: string, limit = 150): string {
   return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
 }
 
-function memberModel(team: TeamView, assignee: string): string {
-  const member = team.members.find((candidate) => candidate.id === assignee);
-  return member?.model || member?.agent || "";
-}
-
 function statusLabel(kind: string): string {
+  // Task 196: Qt's phase state badges.
+  if (kind === "rejected") return tr("Sent back");
+  if (kind === "awaiting") return tr("Awaiting your acceptance");
+  if (kind === "queued") return tr("Accepted, queued");
+  if (kind === "planned") return tr("In the plan");
+  if (kind === "cancelled") return tr("Cancelled");
   if (kind === "done") return tr("Done");
   if (kind === "running") return tr("Running");
   if (kind === "approved") return tr("Approved");
@@ -94,35 +113,61 @@ function statusLabel(kind: string): string {
   return tr("Open");
 }
 
-function readFlag(key: string): boolean {
-  try { return localStorage.getItem(key) === "1"; } catch { return false; }
+function stored(key: string): string | null {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
+function store(key: string, value: string | null) {
+  try { if (value === null) localStorage.removeItem(key); else localStorage.setItem(key, value); } catch { /* storage unavailable */ }
+}
+
+// Task 197 (P3): a phase scrolled sideways keeps its place through every
+// render and mode switch (Qt keepScroll "phasegraph/<team>/<phase>").
+const scrolls = new Map<string, number>();
+
+/** A horizontally scrolling phase body that keeps its scroll position. */
+function PhaseScroll(props: { key: string; class: string; children: JSX.Element; style?: JSX.CSSProperties }): JSX.Element {
+  let element!: HTMLDivElement;
+  onMount(() => {
+    const left = scrolls.get(props.key);
+    if (left) element.scrollLeft = left;
+  });
+  return (
+    <div ref={element} class={props.class} style={props.style} data-scroll={props.key}
+      onScroll={() => scrolls.set(props.key, element.scrollLeft)}>
+      {props.children}
+    </div>
+  );
 }
 
 export function PlanView(props: PlanViewProps): JSX.Element {
-  const [mode, setMode] = createSignal<PlanMode>("graph");
+  const now = () => props.now?.() ?? Date.now() / 1000;
+  const [mode, setMode] = createSignal<PlanMode>(props.initialMode ?? "graph");
   const [includeCancelled, setIncludeCancelled] = createSignal(false);
-  // Task 82: the lateness heat, off by default and remembered per team in
-  // this browser only (a convenience; nothing depends on it).
+  const [filter, setFilter] = createSignal<PlanFilter>("all");
+  const [ownMember, setOwnMember] = createSignal("");
+  const member = () => props.member ?? ownMember();
+  const chooseMember = (id: string) => (props.onMember ? props.onMember(id) : setOwnMember(id));
+  const hideKey = "zerus.teams.hideFinished";
+  const [hideFinished, setHideFinished] = createSignal(stored(hideKey) === "1");
+  const switchHide = (on: boolean) => { setHideFinished(on); store(hideKey, on ? "1" : null); };
+  const [zoom, setZoom] = createSignal(1);
+  // Task 197 (P6): Off, Lateness or Tokens, remembered per team in this
+  // browser; Qt's imported per-team mode starts it once.
   const heatKey = () => `zerus.teams.heat.${props.team.id}`;
-  const [heatOn, setHeatOn] = createSignal(readFlag(heatKey()));
-  const switchHeat = (on: boolean) => {
-    setHeatOn(on);
-    try { if (on) localStorage.setItem(heatKey(), "1"); else localStorage.removeItem(heatKey()); } catch { /* storage unavailable */ }
-  };
-  // Task 103: Qt's imported per-team heat starts this switch on once; this
-  // browser's own choice, once made, always wins.
+  const [heatMode, setHeatMode] = createSignal<HeatMode>(heatModeSeed(props.team.id, stored(heatKey()), "{}"));
+  const switchHeat = (next: HeatMode) => { setHeatMode(next); store(heatKey(), next === "off" ? "off" : next); };
   onMount(() => {
     void settingsReady.then(() => {
-      try {
-        if (localStorage.getItem(heatKey()) === null && heatSeed(props.team.id, null, String(settings["teams/heatModes"] ?? "{}"))) {
-          setHeatOn(true);
-          localStorage.setItem(heatKey(), "1");
-        }
-      } catch { /* storage unavailable */ }
+      if (stored(heatKey()) === null) {
+        const seeded = heatModeSeed(props.team.id, null, String(settings["teams/heatModes"] ?? "{}"));
+        if (seeded !== "off") { setHeatMode(seeded); store(heatKey(), seeded); }
+      }
     });
   });
-  const heatView = () => heatOn() && (mode() === "graph" || mode() === "board" || mode() === "layers");
+  const heatView = () => heatMode() !== "off" && (mode() === "graph" || mode() === "board" || mode() === "layers");
   const heatProfile = () => (heatView() ? props.profile : null);
+  const heat = (id: number): TaskHeat | null => (heatView() ? heatOf(heatMode(), props.profile, id) : null);
   createEffect(() => {
     if (mode() === "tests") props.onLoadTests?.(null);
     if (mode() === "profile" || heatView()) props.onLoadProfile?.();
@@ -132,24 +177,45 @@ export function PlanView(props: PlanViewProps): JSX.Element {
   );
   const [hover, setHover] = createSignal<number | null>(null);
   const [selected, setSelected] = createSignal<number | null>(null);
-  const phases = createMemo(() => phasePlans(props.team, props.graph));
-  const rows = createMemo(() => buildRows(phases(), collapsed()));
+  createEffect(() => {
+    const request = props.openTask;
+    if (!request) return;
+    setMode("graph");
+    setSelected(request.task);
+  });
+  const problems = () => props.problems ?? new Map<number, TaskProblem>();
+  const planning = () => props.team.status === "planning";
+  const byId = createMemo(() => new Map(props.team.tasks.map((task) => [task.id, task])));
+  const visibleTask = (task: TeamTaskView | undefined) => !!task && (includeCancelled() || task.status !== "cancelled");
+  const allPhases = createMemo(() => phasePlans(props.team, props.graph));
+  // U58 and owner 2026-10-30: cancelled tasks and the phases they emptied
+  // stay out unless shown; Hide finished leaves out every decided phase.
+  const phases = createMemo(() => allPhases().filter((phase) => {
+    const tasks = phase.tasks.filter((task) => visibleTask(task));
+    if (phase.tasks.length > 0 && tasks.length === 0) return false;
+    return !(hideFinished() && phaseFinished(phase.tasks));
+  }));
+  const finishedCount = createMemo(() => allPhases().filter((phase) => phaseFinished(phase.tasks)).length);
+  const layouts = createMemo(() => new Map(phases().map((phase) => {
+    const nodes = phase.nodes.filter((placed) => visibleTask(placed.task));
+    const ids = new Set(nodes.map((placed) => placed.node.id));
+    const edges = phase.edges.filter((edge) => ids.has(edge.from) && ids.has(edge.to));
+    const layout = placePhase(nodes.map((placed) => ({ id: placed.node.id, layer: placed.node.layer })), edges, 320);
+    const origins = nodes
+      .map((placed) => ({ from: spawnedFrom(placed.node, placed.task) ?? 0, to: placed.node.id }))
+      .filter((link) => link.from > 0 && ids.has(link.from) && link.from !== link.to);
+    return [phase.phase.n, { layout, routes: routeEdges(layout, edges), originRoutes: routeEdges(layout, origins), edges }] as const;
+  })));
   const selectedTask = createMemo(() => props.team.tasks.find((task) => task.id === selected()));
   const lit = createMemo(() => (hover() === null ? null : chain(props.team.tasks, hover()!)));
-  const byId = createMemo(() => new Map(props.team.tasks.map((task) => [task.id, task])));
+  const matchesTask = (task: TeamTaskView | undefined) => !!task && matches(task, filter(), problems(), member(), planning());
+  const working = (task: TeamTaskView) => props.working?.(task) ?? false;
+  const memberName = () => {
+    const found = props.team.members.find((candidate) => candidate.id === member());
+    return found?.role || member();
+  };
 
-  let scroller: HTMLDivElement | undefined;
-  const virtualizer = createVirtualizer({
-    get count() {
-      return rows().length;
-    },
-    getScrollElement: () => (scroller?.isConnected ? scroller : null),
-    estimateSize: (index) => rows()[index]?.height ?? ROW_H,
-    getItemKey: (index) => rows()[index]?.key ?? index,
-    overscan: 6,
-  });
-  const virtualRows = createMemo(() => virtualizer.getVirtualItems());
-
+  const isCollapsed = (n: number) => collapsed().has(n);
   const toggle = (n: number) => {
     const next = new Set(collapsed());
     if (next.has(n)) next.delete(n);
@@ -158,210 +224,397 @@ export function PlanView(props: PlanViewProps): JSX.Element {
   };
   const collapseAll = () => setCollapsed(new Set<number>(phases().map((phase) => phase.phase.n)));
   const expandAll = () => setCollapsed(new Set<number>());
+  const allOpen = () => phases().every((phase) => !collapsed().has(phase.phase.n));
   const open = (id: number) => {
     if (props.onOpenTask) props.onOpenTask(id);
     else setSelected(id);
   };
-  const phaseOf = (id: number) => phases().find((phase) => phase.tasks.some((task) => task.id === id));
+  const phaseOf = (id: number) => allPhases().find((phase) => phase.tasks.some((task) => task.id === id));
 
-  const header = (phase: PlanPhase, row: PlanRow) => {
+  // The graph windows whole phases: a phase's links never vanish while it
+  // scrolls (task 197 P1; the old rows drew one SVG per layer).
+  let scroller: HTMLDivElement | undefined;
+  const phaseHeight = (phase: PlanPhase) => {
+    if (isCollapsed(phase.phase.n)) return COLLAPSED_H + 8;
+    const layout = layouts().get(phase.phase.n)?.layout;
+    return HEADER_H + (layout ? Math.ceil(layout.height * zoom()) + SCROLLBAR : 0) + 8;
+  };
+  const virtualizer = createVirtualizer({
+    get count() {
+      return phases().length;
+    },
+    getScrollElement: () => (scroller?.isConnected ? scroller : null),
+    estimateSize: (index) => (phases()[index] ? phaseHeight(phases()[index]) : HEADER_H),
+    getItemKey: (index) => phases()[index]?.phase.n ?? index,
+    overscan: 3,
+  });
+  createEffect(() => {
+    // A collapse, a zoom or new tasks change a phase's height.
+    collapsed(); zoom(); layouts();
+    virtualizer.measure();
+  });
+  // Before the scroller is laid out (the first paint, a server render) every
+  // phase is placed by its own height; the virtualizer windows them after.
+  const windowed = createMemo(() => {
+    const items = virtualizer.getVirtualItems();
+    if (items.length > 0 || phases().length === 0) return items.map((item) => ({ index: item.index, start: item.start }));
+    let start = 0;
+    return phases().map((phase, index) => {
+      const item = { index, start };
+      start += phaseHeight(phase);
+      return item;
+    });
+  });
+  const fit = () => {
+    const widest = Math.max(320, ...[...layouts().values()].map((entry) => entry.layout.width));
+    const room = (scroller?.clientWidth ?? widest) - 32;
+    setZoom(Math.max(0.4, Math.min(1, room / widest)));
+  };
+  const stepZoom = (delta: number) => setZoom((value) => Math.max(0.4, Math.min(1.6, Math.round((value + delta) * 10) / 10)));
+
+  // Task 196: a drag from a card's right edge onto another card makes that
+  // task depend on this one (Qt's graph editing).
+  const startLink = (event: PointerEvent, from: number) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const handle = event.currentTarget as HTMLElement;
+    try { handle.setPointerCapture(event.pointerId); } catch { /* a synthetic event */ }
+    const done = (up: PointerEvent) => {
+      handle.removeEventListener("pointerup", done);
+      const target = document.elementFromPoint(up.clientX, up.clientY)?.closest("[data-task]");
+      const to = Number(target?.getAttribute("data-task"));
+      if (to && to !== from && props.editing?.canLink(to)) props.editing.link(from, to);
+    };
+    handle.addEventListener("pointerup", done);
+  };
+
+  /** Qt's phase header: title, chips, "Healthy N/M", the progress, and the
+   * draft's decision. A collapsed phase is this one line with its tasks' titles. */
+  const header = (phase: PlanPhase, collapsible = true, actions?: JSX.Element) => {
     const status = phaseStatus(phase.phase);
-    const total = phase.phase.total || phase.tasks.length;
-    const done = Math.min(total, phase.phase.done || phase.tasks.filter((task) => tone(task.status) === "done").length);
-    const isCollapsed = collapsed().has(phase.phase.n);
+    // Task 196: Qt's header by state: its notes, the collapsed one-line summary and the lead's note.
+    const head = phaseHeader(props.team, phase.phase);
+    const note = phase.phase.note?.trim() ?? "";
+    const tasks = phase.tasks.filter((task) => visibleTask(task));
+    const total = tasks.length;
+    const done = tasks.filter((task) => task.status === "accepted").length;
+    const closed = collapsible && isCollapsed(phase.phase.n);
+    const healthy = tasks.filter((task) => !problems().has(task.id)).length;
+    const running = status.kind === "running" || status.kind === "approved" || status.kind === "open";
     return (
       <div
-        class={`pt-phase pt-phase-${status.kind}${row.end ? " pt-row-end" : ""}`}
-        style={{ "min-width": `${Math.max(phase.width, 320)}px` }}
-        role="button"
-        tabindex="0"
+        class={`pt-phase pt-phase-${status.kind}`}
+        classList={{ "pt-phase-closed": closed }}
+        role={collapsible ? "button" : undefined}
+        tabindex={collapsible ? "0" : undefined}
         aria-label={tr("Phase %1", phase.phase.n)}
-        aria-expanded={!isCollapsed}
-        onClick={() => toggle(phase.phase.n)}
+        aria-expanded={collapsible ? !closed : undefined}
+        data-phase-head={phase.phase.n}
+        onClick={() => { if (collapsible) toggle(phase.phase.n); }}
         onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
+          if (collapsible && (event.key === "Enter" || event.key === " ")) {
             event.preventDefault();
             toggle(phase.phase.n);
           }
         }}
       >
-        <Icon name={isCollapsed ? "chevron-right" : "chevron-down"} size={14} />
+        <Show when={collapsible}><Icon name={closed ? "chevron-right" : "chevron-down"} size={14} /></Show>
         <span class="pt-pn">{phase.phase.n}</span>
         <b class="pt-phase-title">{phase.phase.title || tr("Phase %1", phase.phase.n)}</b>
         <span class={`pt-chip pt-chip-${status.kind}`}>{statusLabel(status.kind)}</span>
-        <Show when={phase.phase.acceptance}>
-          <span class="pt-acceptance">{short(phase.phase.acceptance, 80)}</span>
+        <Show when={phase.phase.auto}><span class="pt-chip pt-chip-auto">{tr("Auto")}</span></Show>
+        <Show when={phase.phase.barrier}><span class="pt-chip pt-chip-barrier">{tr("Barrier")}</span></Show>
+        <Show when={closed} fallback={<Show when={phase.phase.acceptance}><span class="pt-acceptance">{short(phase.phase.acceptance, 80)}</span></Show>}>
+          <span class="pt-inline" data-inline={phase.phase.n}>{tasks.slice(0, 12).map((task) => `#${task.id} ${task.title}`).join(", ")}</span>
         </Show>
-        <Show when={phase.phase.auto}>
-          <span class="pt-chip pt-chip-auto">{tr("Auto")}</span>
+        <For each={head.notes}>{(shown) => (
+          <span class={`pt-phase-note pt-phase-note-${shown.tone}`} data-note={shown.id} title={shown.tip || shown.text}>{short(shown.text, 80)}</span>
+        )}</For>
+        <Show when={closed && head.summary}>
+          <span class="pt-phase-summary" data-summary="1" title={head.summary.split(", #").join("\n#")}>{short(head.summary, 140)}</span>
         </Show>
-        <Show when={phase.phase.barrier}>
-          <span class="pt-chip pt-chip-barrier">{tr("Barrier")}</span>
-        </Show>
-        {props.phaseActions?.(phase.phase.n)}
+        {actions ?? props.phaseActions?.(phase.phase.n)}
         <span class="pt-grow" />
-        <Show when={phase.phase.health}>
-          <span class="pt-health">{short(phase.phase.health, 60)}</span>
+        <Show when={running && total > 0 && status.kind !== "done"}>
+          <span class="pt-healthy" classList={{ warn: healthy < total }} data-healthy={`${healthy}/${total}`} title={phase.phase.health || undefined}>
+            {tr("Healthy %1/%2", healthy, total)}
+          </span>
         </Show>
+        <Show when={phase.phase.health && !running}><span class="pt-health">{short(phase.phase.health, 60)}</span></Show>
         <Show when={total > 0}>
           <span class="pt-progress" aria-label={tr("%1 of %2", done, total)}>
             <For each={Array.from({ length: Math.min(12, total) }, (_, index) => index < Math.round((done / total) * Math.min(12, total)))}>
               {(on) => <i class={on ? "on" : ""} />}
             </For>
           </span>
-          <span class="pt-count">
-            {done}/{total}
-          </span>
+          <span class="pt-count">{done}/{total}</span>
         </Show>
-        <Show when={phaseNeedsApproval(phase.phase)}>
+        <Show when={!closed && note}>
+          <span class="pt-phase-lead-note" data-note="lead" title={note}>{tr("Lead's note: %1", short(note, 160))}</span>
+        </Show>
+        <Show when={phaseNeedsApproval(phase.phase) && !props.phaseActions}>
           <span class="pt-approval">{tr("Needs approval")}</span>
           <Show when={props.onApprovePhase}>
-            <button
-              type="button"
-              class="btn small"
-              onClick={(event) => {
-                event.stopPropagation();
-                props.onApprovePhase?.(phase.phase.n);
-              }}
-            >
-              {tr("Approve")}
-            </button>
+            <button type="button" class="btn small" data-approve={phase.phase.n}
+              onClick={(event) => { event.stopPropagation(); props.onApprovePhase?.(phase.phase.n); }}>{tr("Approve")}</button>
           </Show>
           <Show when={props.onDiscardPhase}>
-            <button
-              type="button"
-              class="btn ghost small"
-              onClick={(event) => {
-                event.stopPropagation();
-                props.onDiscardPhase?.(phase.phase.n);
-              }}
-            >
-              {tr("Discard")}
-            </button>
+            <button type="button" class="btn ghost small"
+              onClick={(event) => { event.stopPropagation(); props.onDiscardPhase?.(phase.phase.n); }}>{tr("Discard")}</button>
           </Show>
         </Show>
       </div>
     );
   };
 
-  const card = (placed: PlacedNode, phase: PlanPhase) => {
-    const task = placed.task;
-    const state = task ? tone(task.status) : "pending";
-    const blocks = task ? externalDeps(phase.phase.n, task, byId()) : [];
-    const waits = task?.waits?.trim();
-    const attempt = task?.attempts ? tr("Attempt %1", task.attempts) : "";
-    const stateText = task?.attempt_state?.trim() || "";
-    const classes = ["pt-card", `pt-card-${state}`];
-    const stages = stageChips(task?.pipeline_run);
-    const heat = taskHeat(heatProfile(), placed.node.id);
+  /** The second line's end: the problem's reason, else the activity and the
+   * time against the estimate (Qt's activity label and taskTime). */
+  const timeBits = (task: TeamTaskView) => {
+    const problem = problems().get(task.id);
+    if (problem) return <span class={`pt-problem pt-problem-${toneClass(problem.tone)}`} data-problem={task.id} title={problem.text}>{problem.text}</span>;
+    const activity = activityText(task, working(task));
+    const time = taskTime(task, now());
+    return (
+      <span class="pt-time" data-time={task.id}>
+        <Show when={activity}><span class="pt-activity">{activity}</span></Show>
+        <Show when={time.text}><span class="pt-worked" classList={{ over: time.over }}>{time.text}</span></Show>
+      </span>
+    );
+  };
+
+  const tone = (task: TeamTaskView) => {
+    const problem = problems().get(task.id);
+    return toneClass(problem ? problem.tone : taskState(task).tone);
+  };
+
+  /** A graph node: Qt's Wide node, two lines. */
+  const node = (task: TeamTaskView, phase: PlanPhase, rect: { x: number; y: number }) => {
+    const external = externalDeps(phase.phase.n, task, byId());
+    const taskHeatNow = heat(task.id);
     const litNow = lit();
-    if (litNow) classes.push(litNow.has(placed.node.id) ? (hover() === placed.node.id ? "pt-card-on" : "pt-card-lit") : "pt-card-dim");
-    if (task?.pinned) classes.push("pt-card-pinned");
+    const problem = problems().get(task.id);
+    const classes = ["pt-card", `pt-card-${tone(task)}`];
+    if (litNow) classes.push(litNow.has(task.id) ? (hover() === task.id ? "pt-card-on" : "pt-card-lit") : "pt-card-dim");
+    if (!matchesTask(task)) classes.push("pt-card-off");
+    if (problem) classes.push("pt-card-problem");
+    if (task.status === "draft") classes.push("pt-card-draft");
+    const stages = stageChips(task.pipeline_run);
     return (
       <button
         type="button"
         class={classes.join(" ")}
-        style={{ left: `${placed.x}px`, top: "0px", "--heat": String(heat?.tint ?? 0) }}
-        title={heat?.tip || undefined}
-        data-task={placed.node.id}
-        data-lit={litNow ? (litNow.has(placed.node.id) ? "lit" : "dim") : "none"}
-        aria-label={tr("Task %1: %2", placed.node.id, placed.node.title || task?.title || "")}
-        onPointerEnter={() => setHover(placed.node.id)}
-        onFocus={() => setHover(placed.node.id)}
+        style={{ left: `${rect.x}px`, top: `${rect.y}px`, width: `${NODE_W}px`, height: `${NODE_H}px`, "--heat": String(taskHeatNow?.tint ?? 0) }}
+        title={[`#${task.id} ${task.title}`, problem?.text ?? taskState(task).text, taskHeatNow?.tip ?? ""].filter(Boolean).join("\n")}
+        data-task={task.id}
+        data-lit={litNow ? (litNow.has(task.id) ? "lit" : "dim") : "none"}
+        aria-label={tr("Task %1: %2", task.id, task.title)}
+        onPointerEnter={() => setHover(task.id)}
+        onFocus={() => setHover(task.id)}
         onBlur={() => setHover(null)}
-        onClick={() => open(placed.node.id)}
+        onClick={() => (props.editing?.editTask ? props.editing.editTask(task.id) : open(task.id))}
       >
+        <Show when={props.editing?.canLink(task.id) || (props.editing && task.status !== "cancelled" && props.editing.editTask)}>
+          <span
+            class="pt-link-handle"
+            role="presentation"
+            title={tr("Drag from a node's right edge onto a task to connect them")}
+            onClick={(event) => event.stopPropagation()}
+            onPointerDown={(event) => startLink(event, task.id)}
+          />
+        </Show>
         <span class="pt-card-l1">
-          <span class={`pt-dot pt-dot-${state}`} />
-          <span class="pt-id">#{placed.node.id}</span>
-          <span class="pt-title">{placed.node.title || task?.title || tr("Task %1", placed.node.id)}</span>
-          <Show when={task?.pinned}>
-            <span class="pt-badge">{tr("Pinned")}</span>
-          </Show>
-          <Show when={task?.held}>
-            <span class="pt-badge">{tr("Held")}</span>
-          </Show>
-          <Show when={task?.pipeline_run?.open}>{(open) => (
-            <span class="pt-badge" data-stage={open().kind} title={tr("Pipeline stage")}>{stageName(open().kind)}</span>
-          )}</Show>
-          <Show when={!task?.pipeline_run && task?.pipeline && task.pipeline !== "none"}>
-            <span class="pt-badge" title={tr("Pipeline")}>{task!.pipeline}</span>
+          <span class="pt-state"><Icon name={statusIcon(task, !!problem)} size={12} /></span>
+          <span class="pt-id">#{task.id}</span>
+          <span class="pt-title">{task.title || tr("Task %1", task.id)}</span>
+          <Show when={task.pipeline_run?.open}>{(stage) => <span class="pt-badge" data-stage={stage().kind}>{stageName(stage().kind)}</span>}</Show>
+          <Show when={external.length > 0}>
+            <span class="pt-deps" title={tr("Depends on tasks in other phases")}>↤{external.map((id) => `#${id}`).join(" ")}</span>
           </Show>
         </span>
         <span class="pt-card-l2">
-          <span class="pt-role">{placed.node.role || task?.assignee || tr("Unassigned")}</span>
-          <Show when={memberModel(props.team, task?.assignee ?? "")}>
-            <span class="pt-model">{memberModel(props.team, task?.assignee ?? "")}</span>
-          </Show>
-          <Show when={attempt || stateText}>
-            <span class="pt-meta">{stateText || attempt}</span>
-          </Show>
-          <span class="pt-grow" />
-          <HeatLine heat={heat} compact />
-          <Show when={spawnedFrom(placed.node, task)}>{(origin) => (
-            <span class="pt-origin" data-origin={origin()} title={tr("Spawned from #%1; it does not wait for it", origin())}>
-              {tr("Spawned from #%1", origin())}
-            </span>
-          )}</Show>
-          <Show when={blocks.length > 0}>
-            <span class="pt-deps" title={tr("Depends on tasks in other phases")}>
-              ↤{blocks.map((id) => `#${id}`).join(" ")}
-            </span>
+          <span class="pt-role role-badge" style={roleStyle(assigneeRole(props.team, task))}>{assigneeRole(props.team, task)}</span>
+          <Show when={assigneeAgent(props.team, task)}><AgentBadge agent={agentKind(assigneeAgent(props.team, task))} narrow /></Show>
+          <Show when={taskHeatNow} fallback={timeBits(task)}>
+            <HeatLine heat={taskHeatNow} compact />
           </Show>
         </span>
-        <span class="pt-card-l3">
-          <Show when={stages.length > 0} fallback={<Show when={waits} fallback={<span class="pt-muted">{placed.node.ready ? tr("ready") : short(placed.node.status, 24)}</span>}><span class="pt-waits">{short(waits!, 76)}</span></Show>}>
-            <span class="pt-stages">
-              <For each={stages}>
-                {(stage) => <span class={`pt-stage pt-stage-${stage.state}`}>{stageLabel(stage.kind)}{stage.attempt > 1 ? ` ${stage.attempt}` : ""}</span>}
-              </For>
-            </span>
-          </Show>
-        </span>
+        <Show when={stages.length > 0}>
+          <span class="pt-stages">
+            <For each={stages}>{(stage) => <span class={`pt-stage pt-stage-${stage.state}`}>{stageLabel(stage.kind)}</span>}</For>
+          </span>
+        </Show>
       </button>
     );
   };
 
-  const layer = (phase: PlanPhase, row: PlanRow) => {
-    const edges = rowEdges(phase, row);
-    const origins = rowOrigins(phase, row);
-    const marker = `pt-origin-arrow-${phase.phase.n}-${row.layer}`;
+  const routeClass = (route: Route, litNow: ReadonlySet<number> | null) => {
+    const state = !litNow ? "" : litNow.has(route.from) && litNow.has(route.to) ? "lit" : "dim";
+    return `pt-edge ${state}${route.back ? " back" : ""}`;
+  };
+
+  /** One expanded phase's graph: one SVG for every link of the phase, its
+   * cards over it, scrolled sideways on its own. */
+  const graphBody = (phase: PlanPhase, layout: PhaseLayout, routes: Route[], originRoutes: Route[]) => {
     const litNow = lit();
-    // Node y values are phase-local; row.top is the whole plan's offset, which
-    // grows with every phase above and sent edges far outside their phase
-    // (owner's screenshot, 2026-11-07). The row's own phase-local top anchors them.
-    const localTop = row.nodes[0]?.y ?? 0;
+    const marker = `pt-origin-arrow-${props.team.id}-${phase.phase.n}`;
     return (
-      <div
-        class={`pt-layer${row.end ? " pt-row-end" : ""}`}
-        style={{ width: `${Math.max(phase.width, 320)}px`, height: `${CARD_H}px` }}
-      >
-        <svg class="pt-edges" width={Math.max(phase.width, 320)} height={ROW_H} aria-hidden="true">
-          <defs>
-            <marker id={marker} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-              <path d="M 0 0 L 8 4 L 0 8" class="pt-origin-head" />
-            </marker>
-          </defs>
-          <For each={edges}>
-            {(entry) => (
-              <path
-                d={edgePath(entry.from, entry.to, localTop)}
-                class={`pt-edge ${edgeState(entry.edge, litNow)}`}
-              />
-            )}
+      <PhaseScroll key={`graph/${props.team.id}/${phase.phase.n}`} class="pt-phase-body" style={{ height: `${Math.ceil(layout.height * zoom()) + SCROLLBAR}px` }}>
+        <div class="pt-phase-sizer" style={{ width: `${Math.ceil(layout.width * zoom())}px`, height: `${Math.ceil(layout.height * zoom())}px` }}>
+          <div class="pt-phase-canvas" style={{ width: `${layout.width}px`, height: `${layout.height}px`, transform: `scale(${zoom()})` }}>
+            {/* Qt's band layers: each layer's columns shaded, numbered inside the phase. */}
+            <For each={layout.labels}>
+              {(label, index) => (
+                <>
+                  <span class="pt-layer-band" classList={{ odd: index() % 2 === 1 }} style={{ left: `${label.x}px`, width: `${label.w}px` }} />
+                  <span class="pt-layer-label" style={{ left: `${label.x}px`, width: `${label.w}px` }} data-layer={label.layer}>
+                    <b>{tr("Layer %1", index() + 1)}</b><span>{label.count}</span>
+                  </span>
+                </>
+              )}
+            </For>
+            <svg class="pt-edges" width={layout.width} height={layout.height} aria-hidden="true" data-edges={phase.phase.n}>
+              <defs>
+                <marker id={marker} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                  <path d="M 0 0 L 8 4 L 0 8" class="pt-origin-head" />
+                </marker>
+                <marker id={`${marker}-dep`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                  <path d="M 0 0 L 8 4 L 0 8 z" class="pt-edge-head" />
+                </marker>
+              </defs>
+              <For each={routes}>
+                {(route) => <path d={orthoPath(route.points)} class={routeClass(route, litNow)} marker-end={`url(#${marker}-dep)`} data-edge={`${route.from}-${route.to}`} />}
+              </For>
+              <Show when={props.editing}>
+                <For each={routes.filter((route) => props.editing!.canLink(route.to))}>
+                  {(route) => (
+                    <path
+                      d={orthoPath(route.points)}
+                      class="pt-edge-hit"
+                      data-edge={`${route.from}-${route.to}`}
+                      onClick={() => props.editing!.unlink(route.from, route.to)}
+                    ><title>{tr("Remove the dependency of #%1 on #%2", route.to, route.from)}</title></path>
+                  )}
+                </For>
+              </Show>
+              <For each={originRoutes}>
+                {(route) => <path d={orthoPath(route.points)} class="pt-origin-edge" marker-end={`url(#${marker})`} data-origin={route.from} />}
+              </For>
+            </svg>
+            <For each={phase.tasks.filter((task) => visibleTask(task) && layout.rects.has(task.id))}>
+              {(task) => node(task, phase, layout.rects.get(task.id)!)}
+            </For>
+          </div>
+        </div>
+      </PhaseScroll>
+    );
+  };
+
+  /** Task 197 (P7): a Board card. */
+  const boardCard = (task: TeamTaskView) => {
+    const problem = problems().get(task.id);
+    const taskHeatNow = heat(task.id);
+    return (
+      <button type="button" class={`pm-card pm-board-card pt-tone-${tone(task)}`} classList={{ problem: !!problem, draft: task.status === "draft" }}
+        style={taskHeatNow ? { "--heat": String(taskHeatNow.tint) } : undefined}
+        data-task={task.id} title={[`#${task.id} ${task.title}`, problem?.text ?? taskState(task).text, taskHeatNow?.tip ?? ""].filter(Boolean).join("\n")}
+        onClick={() => open(task.id)}>
+        <span class="pm-card-line">
+          <span class="pt-state"><Icon name={statusIcon(task, !!problem)} size={13} /></span>
+          <span class="pm-id">#{task.id}</span>
+          <Show when={task.deps.length > 0}><span class="pm-deps">←{task.deps.map((dep) => `#${dep.task}`).join(" ")}</span></Show>
+          <b class="pm-title">{task.title}</b>
+        </span>
+        <span class="pm-card-meta">
+          <span class="pt-role role-badge" style={roleStyle(assigneeRole(props.team, task))}>{assigneeRole(props.team, task)}</span>
+          <Show when={assigneeAgent(props.team, task)}><AgentBadge agent={agentKind(assigneeAgent(props.team, task))} narrow /></Show>
+          {timeBits(task)}
+        </span>
+        <Show when={taskHeatNow}><HeatLine heat={taskHeatNow} /></Show>
+        <Show when={stageChips(task.pipeline_run).length > 0}>
+          <span class="pm-stages">
+            <For each={stageChips(task.pipeline_run)}>{(stage) => <span class={`pm-stage pm-stage-${stage.state || "waiting"}`}>{stageLabel(stage.kind)}</span>}</For>
+          </span>
+        </Show>
+      </button>
+    );
+  };
+
+  /** Task 197 (P7): one phase's columns, the same in every phase so they
+   * line up; the column titles stay pinned while the board scrolls. */
+  const boardPhase = (phase: PlanPhase, keys: BoardKey[]) => {
+    const tasks = phase.tasks.filter((task) => visibleTask(task) && (!member() || task.assignee === member()));
+    const column = (key: BoardKey) => tasks.filter((task) => boardColumn(task, problems().has(task.id)) === key);
+    return (
+      <PhaseScroll key={`board/${props.team.id}/${phase.phase.n}`} class="pm-board-phase">
+        <div class="pm-board" style={{ "grid-template-columns": `repeat(${keys.length}, minmax(190px, 1fr))` }}>
+          <For each={keys}>
+            {(key) => {
+              const shown = column(key);
+              return (
+                <section class="pm-column" classList={{ empty: shown.length === 0, problems: key === "problems" && shown.length > 0 }} data-column={key} aria-label={boardTitle(key)}>
+                  <header class="pm-column-head"><b>{boardTitle(key).toUpperCase()}</b><span class="grow" /><span class="pm-count">{shown.length}</span></header>
+                  <div class="pm-column-body">
+                    <For each={shown.slice(0, 200)}>{(task) => boardCard(task)}</For>
+                    <Show when={shown.length === 0}><span class="pm-empty-dash">-</span></Show>
+                    <Show when={shown.length > 200}><p class="pm-more">{tr("%1 more not shown", shown.length - 200)}</p></Show>
+                  </div>
+                </section>
+              );
+            }}
           </For>
-          <For each={origins}>
-            {(entry) => (
-              <path
-                d={edgePath(entry.from, entry.to, localTop)}
-                class="pt-origin-edge"
-                marker-end={`url(#${marker})`}
-                data-origin={entry.origin}
-              />
-            )}
-          </For>
-        </svg>
-        <For each={row.nodes.filter((placed) => includeCancelled() || placed.node.status !== "cancelled")}>{(placed) => card(placed, phase)}</For>
+        </div>
+      </PhaseScroll>
+    );
+  };
+
+  /** Task 197 (P8): one phase's tasks as compact rows by layer then id. */
+  const layersPhase = (phase: PlanPhase) => {
+    // Qt's layer rows: the phase's own layers numbered from L1 (phaseLayers),
+    // each row labelled, in layer then id order.
+    const all = phase.nodes.filter((placed) => visibleTask(placed.task));
+    const own = new Map([...new Set(all.map((placed) => placed.node.layer))].sort((a, b) => a - b).map((layer, index) => [layer, index] as const));
+    const nodes = all.filter((placed) => matchesTask(placed.task));
+    const layers = [...new Set(nodes.map((placed) => placed.node.layer))].sort((a, b) => a - b);
+    return (
+      <div class="pm-layers-phase">
+        <For each={layers}>
+          {(layer) => {
+            const rows = nodes.filter((placed) => placed.node.layer === layer).sort((a, b) => a.node.id - b.node.id);
+            return (
+              <div class="pm-layer-group" data-layer={layer}>
+                <For each={rows}>
+                  {(placed) => {
+                    const task = placed.task!;
+                    const problem = problems().get(task.id);
+                    const time = taskTime(task, now());
+                    const activity = activityText(task, working(task));
+                    const taskHeatNow = heat(task.id);
+                    return (
+                      <button type="button" class={`pm-layer-row pt-tone-${tone(task)}`} classList={{ problem: !!problem }} data-task={task.id}
+                        style={taskHeatNow ? { "--heat": String(taskHeatNow.tint) } : undefined}
+                        title={[problem?.text ?? taskState(task).text, taskHeatNow?.tip ?? ""].filter(Boolean).join("\n")} onClick={() => open(task.id)}>
+                        <span class="pm-layer-label">{tr("L%1", (own.get(layer) ?? 0) + 1)}</span>
+                        <span class="pt-state"><Icon name={statusIcon(task, !!problem)} size={12} /></span>
+                        <span class="pm-id">#{task.id}</span>
+                        <Show when={task.deps.length > 0}><span class="pm-deps">←{task.deps.map((dep) => `#${dep.task}`).join(" ")}</span></Show>
+                        <span class="pm-layer-title">{task.title}</span>
+                        <Show when={problem} fallback={<span class="pm-layer-activity">{activity}</span>}>
+                          <span class={`pt-problem pt-problem-${toneClass(problem!.tone)}`}>{problem!.text}</span>
+                        </Show>
+                        <span class="grow" />
+                        <Show when={taskHeatNow}><HeatLine heat={taskHeatNow} compact /></Show>
+                        <span class="pm-layer-time" classList={{ over: time.over }}>{time.text}</span>
+                        <span class="pt-role role-badge" style={roleStyle(assigneeRole(props.team, task))}>{assigneeRole(props.team, task)}</span>
+                        <span class="pm-layer-agent"><Show when={assigneeAgent(props.team, task)}><AgentBadge agent={agentKind(assigneeAgent(props.team, task))} narrow /></Show></span>
+                      </button>
+                    );
+                  }}
+                </For>
+              </div>
+            );
+          }}
+        </For>
+        <Show when={layers.length === 0}><p class="pm-empty">{tr("No task matches")}</p></Show>
       </div>
     );
   };
@@ -374,7 +627,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     return (
       <aside class="pt-detail" aria-label={tr("Task %1: %2", task.id, task.title)}>
         <div class="pt-detail-head">
-          <span class={`pt-dot pt-dot-${tone(task.status)}`} />
+          <span class={`pt-dot pt-dot-${tone(task)}`} />
           <span class="pt-id">#{task.id}</span>
           <b>{task.title}</b>
           <span class="pt-grow" />
@@ -383,7 +636,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           </button>
         </div>
         <div class="pt-detail-meta">
-          <span class="pt-chip">{short(task.status || "pending", 24)}</span>
+          <span class="pt-chip">{taskState(task).text}</span>
           <span class="pt-chip">{tr("Phase %1", phase?.phase.n ?? task.phase)}</span>
           <span class="pt-chip">{task.assignee || tr("Unassigned")}</span>
           <Show when={task.origin}>{(origin) => (
@@ -394,12 +647,13 @@ export function PlanView(props: PlanViewProps): JSX.Element {
             <span class="pt-chip">{tr("%1 min", task.estimate_minutes)}</span>
           </Show>
         </div>
+        <Show when={problems().get(task.id)}>{(problem) => <p class="pt-detail-note pt-problem">{problem().text}</p>}</Show>
         <Show when={taskHeat(heatProfile(), task.id)}>
-          {(heat) => (
+          {(found) => (
             <div class="pt-detail-section pt-detail-heat">
               <span class="pt-detail-label">{tr("Lateness")}</span>
-              <HeatLine heat={heat()} />
-              <For each={heat().tip.split("\n")}>{(line) => <p class="pt-detail-p">{line}</p>}</For>
+              <HeatLine heat={found()} />
+              <For each={found().tip.split("\n")}>{(line) => <p class="pt-detail-p">{line}</p>}</For>
             </div>
           )}
         </Show>
@@ -453,50 +707,116 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     );
   };
 
+  // Esc clears the member filter (Qt: "press Esc to show every member again").
+  const onKey = (event: KeyboardEvent) => { if (event.key === "Escape" && member()) chooseMember(""); };
+  onMount(() => window.addEventListener("keydown", onKey));
+  onCleanup(() => window.removeEventListener("keydown", onKey));
+  const boardKeyList = createMemo(() => boardKeys(props.team, problems()));
+  const autoAccept = () => props.team.settings?.auto_accept === true;
+  const shownMode = () => mode() === "graph" || mode() === "board" || mode() === "layers";
+
   return (
     <section class={`pt-plan${props.class ? ` ${props.class}` : ""}`} aria-label={tr("Plan")}>
       <header class="pt-plan-bar">
-        <PlanModeBar
-          mode={mode()}
-          includeCancelled={includeCancelled()}
-          onMode={setMode}
-          onCancelled={setIncludeCancelled}
-          heat={heatOn()}
-          onHeat={switchHeat}
-        />
+        <PlanModeBar mode={mode()} includeCancelled={includeCancelled()} onMode={setMode} onCancelled={setIncludeCancelled} />
+        <Show when={shownMode()}>
+          <Show when={mode() !== "board" && !planning()}>
+            <div class="pm-segment" role="radiogroup" aria-label={tr("Show")} data-filter={filter()}>
+              <For each={[["all", tr("All")], ["active", tr("Active")], ["problems", tr("Problems")]] as const}>
+                {([value, label]) => (
+                  <button type="button" role="radio" aria-checked={filter() === value} classList={{ on: filter() === value }}
+                    data-filter-value={value} onClick={() => setFilter(value)}>{label}</button>
+                )}
+              </For>
+            </div>
+          </Show>
+          <Show when={member()}>
+            <button type="button" class="pm-focus" data-member-filter={member()}
+              title={tr("A click on a member's card shows only its tasks. Click here or press Esc to show every member again.")}
+              onClick={() => chooseMember("")}>{tr("Only %1's tasks", memberName())}<Icon name="x" size={11} /></button>
+          </Show>
+          <label class="pm-check" title={tr("Tint each task by how late it is against the plan, or by the tokens it lost")}>
+            <span>{tr("Heat")}</span>
+            <select class="pm-heat-mode" value={heatMode()} onChange={(event) => switchHeat(event.currentTarget.value as HeatMode)}>
+              <option value="off">{tr("Off")}</option>
+              <option value="time">{tr("Lateness")}</option>
+              <option value="tokens">{tr("Tokens")}</option>
+            </select>
+          </label>
+          <Show when={finishedCount() > 0 || hideFinished()}>
+            <label class="pm-check" title={finishedCount() === 1 ? tr("1 phase has every task decided") : tr("%1 phases have every task decided", finishedCount())}>
+              <input type="checkbox" class="pm-hide-finished" checked={hideFinished()} onChange={(event) => switchHide(event.currentTarget.checked)} />
+              {tr("Hide finished")}
+            </label>
+          </Show>
+          <Show when={props.onAutoAccept}>
+            <label class="pm-check" title={autoAccept() ? tr("Auto accepts a draft phase at its first hand-out") : tr("A draft phase waits for your approval")}>
+              <input type="checkbox" class="pm-auto-accept" checked={autoAccept()} onChange={(event) => props.onAutoAccept?.(event.currentTarget.checked)} />
+              {tr("Auto-accept drafts")}
+            </label>
+          </Show>
+        </Show>
         <span class="pt-grow" />
-        <span class="pt-legend" aria-label={tr("Link legend")}>
-          <span class="pt-legend-item"><i class="pt-legend-dep" />{tr("Depends on")}</span>
-          <span class="pt-legend-item"><i class="pt-legend-origin" />{tr("Spawned from")}</span>
-        </span>
-        <span class="pt-plan-summary">
-          <span>{tr("Phases: %1", phases().length)}</span>
-          <span>{tr("Tasks: %1", props.team.tasks.length)}</span>
-        </span>
         <Show when={mode() === "graph"}>
-          <button type="button" class="btn ghost small" onClick={collapseAll}>{tr("Collapse all")}</button>
-          <button type="button" class="btn ghost small" onClick={expandAll}>{tr("Expand all")}</button>
+          <span class="pt-legend" aria-label={tr("Link legend")}>
+            <span class="pt-legend-item"><i class="pt-legend-dep" />{tr("Depends on")}</span>
+            <span class="pt-legend-item"><i class="pt-legend-origin" />{tr("Spawned from")}</span>
+          </span>
+          <span class="pm-zoom">
+            <button type="button" class="icon-btn small" aria-label={tr("Zoom out")} onClick={() => stepZoom(-0.1)}><Icon name="minus" size={12} /></button>
+            <span class="pm-zoom-value" data-zoom={zoom()}>{Math.round(zoom() * 100)}%</span>
+            <button type="button" class="icon-btn small" aria-label={tr("Zoom in")} onClick={() => stepZoom(0.1)}><Icon name="plus" size={12} /></button>
+            <button type="button" class="btn ghost small" onClick={fit}>{tr("Fit")}</button>
+          </span>
+        </Show>
+        <Show when={shownMode()}>
+          <button type="button" class="btn ghost small" data-expand-all onClick={() => (allOpen() ? collapseAll() : expandAll())}>
+            {allOpen() ? tr("Collapse all") : tr("Expand all")}
+          </button>
         </Show>
       </header>
       <Show when={heatView()}>
         <HeatLegend profile={props.profile} />
       </Show>
+      {/* Task #219: Board, Layers, Profile and Tests keep a phase header each, with its Standard | Free toggle. */}
+      <Show when={mode() !== "graph" && phases().length > 0}>
+        <div class="pm-phase-strip" aria-label={tr("Phases")}>
+          <For each={phases()}>
+            {(phase) => {
+              const status = phaseStatus(phase.phase);
+              return (
+                <div class="pm-phase-head" data-phase={phase.phase.n} data-mode={phase.phase.mode ?? "standard"}>
+                  <span class="pm-phase-n">{phase.phase.n}</span>
+                  <b class="pm-phase-name">{phase.phase.title || tr("Phase %1", phase.phase.n)}</b>
+                  <span class={`pt-chip pt-chip-${status.kind}`}>{statusLabel(status.kind)}</span>
+                  {props.phaseActions?.(phase.phase.n)}
+                </div>
+              );
+            }}
+          </For>
+        </div>
+      </Show>
       <Show when={mode() === "graph"}>
         <div class="pt-plan-body">
           <div class="pt-plan-scroll" ref={scroller} onPointerLeave={() => setHover(null)}>
-            <div class="pt-plan-canvas" style={{ height: `${virtualizer.getTotalSize()}px` }}>
-              <For each={virtualRows()}>
+            <div class="pt-plan-canvas" style={{ height: `${Math.max(virtualizer.getTotalSize(), ...windowed().map((item) => item.start + phaseHeight(phases()[item.index])))}px` }}>
+              <For each={windowed()}>
                 {(item) => {
-                  const row = rows()[item.index];
-                  if (!row) return null;
+                  const phase = () => phases()[item.index];
                   return (
-                    <div
-                      class={`pt-row pt-row-${row.kind}`}
-                      style={{ top: `${item.start}px`, height: `${item.size}px` }}
-                      data-phase={row.phase.phase.n}
-                    >
-                      {row.kind === "header" ? header(row.phase, row) : layer(row.phase, row)}
-                    </div>
+                    <Show when={phase()}>{(shown) => {
+                      const entry = () => layouts().get(shown().phase.n);
+                      // Task 196: made once per row, so an open menu or dialog survives a poll.
+                      const actions = props.phaseActions?.(shown().phase.n);
+                      return (
+                        <div class="pt-row" style={{ top: `${item.start}px` }} data-phase={shown().phase.n}>
+                          {header(shown(), true, actions)}
+                          <Show when={!isCollapsed(shown().phase.n) && entry()}>
+                            {graphBody(shown(), entry()!.layout, entry()!.routes, entry()!.originRoutes)}
+                          </Show>
+                        </div>
+                      );
+                    }}</Show>
                   );
                 }}
               </For>
@@ -506,10 +826,34 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         </div>
       </Show>
       <Show when={mode() === "board"}>
-        <BoardView phases={phases()} includeCancelled={includeCancelled()} profile={heatProfile()} onOpen={open} />
+        <div class="pt-plan-body">
+          <div class="pt-plan-scroll pm-board-scroll">
+            <For each={phases()}>
+              {(phase) => (
+                <div class="pm-phase" data-phase={phase.phase.n}>
+                  {header(phase)}
+                  <Show when={!isCollapsed(phase.phase.n)}>{boardPhase(phase, boardKeyList())}</Show>
+                </div>
+              )}
+            </For>
+          </div>
+          {detail()}
+        </div>
       </Show>
       <Show when={mode() === "layers"}>
-        <LayersView phases={phases()} includeCancelled={includeCancelled()} profile={heatProfile()} onOpen={open} />
+        <div class="pt-plan-body">
+          <div class="pt-plan-scroll pm-layers-scroll">
+            <For each={phases()}>
+              {(phase) => (
+                <div class="pm-phase" data-phase={phase.phase.n}>
+                  {header(phase)}
+                  <Show when={!isCollapsed(phase.phase.n)}>{layersPhase(phase)}</Show>
+                </div>
+              )}
+            </For>
+          </div>
+          {detail()}
+        </div>
       </Show>
       <Show when={mode() === "profile"}>
         <div class="pm-profile-scroll">
@@ -520,7 +864,8 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         </div>
       </Show>
       <Show when={mode() === "tests"}>
-        <TestsPanel tests={props.tests} onMore={() => props.onLoadTests?.(props.tests?.next ?? null)} />
+        <TestsPanel tests={props.tests} onMore={() => props.onLoadTests?.(props.tests?.next ?? null)}
+          builds={props.builds} buildsError={props.buildsError} onLoadBuilds={props.onLoadBuilds} onForce={props.onForceTest} />
       </Show>
     </section>
   );

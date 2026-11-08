@@ -26,7 +26,7 @@ REFERENCES = {"LC_LOAD_DYLIB", "LC_LOAD_WEAK_DYLIB", "LC_REEXPORT_DYLIB", "LC_LO
 MACH_O = {b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xce",
           b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"}
 CONNECTOR = "Contents/MacOS/zerus-mobile-connector"
-EXECUTABLES = ["Contents/MacOS/hgs-tray", "Contents/MacOS/hgs", CONNECTOR, "Contents/Resources/bin/zerus-setup"]
+EXECUTABLES = ["Contents/MacOS/hgs-tray", "Contents/MacOS/hgs", "Contents/MacOS/lore", CONNECTOR, "Contents/Resources/bin/zerus-setup"]
 
 NAME = re.compile(r"^\s*name (.*) \(offset \d+\)$")
 RPATH = re.compile(r"^\s*path (.*) \(offset \d+\)$")
@@ -258,7 +258,7 @@ def tauri_selftest(bundle, version, release=None, commit=None):
             environment[key] = str(directory)
         executable = str(bundle / TAURI_EXECUTABLE)
         if release is not None:
-            for name in ("Contents/MacOS/hgs", CONNECTOR):
+            for name in ("Contents/MacOS/hgs", "Contents/MacOS/lore", CONNECTOR):
                 result = subprocess.run([str(bundle / name), "--version"], env=environment,
                                         capture_output=True, text=True, timeout=60)
                 if result.returncode:

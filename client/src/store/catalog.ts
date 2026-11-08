@@ -8,6 +8,17 @@ import { connectionOf } from "./overview";
 import { childRows } from "../ui/sessions/subagents";
 import { draftKey, nameDraftKey } from "./draftKeys";
 import { tr } from "../i18n";
+import { settings } from "./settings";
+import { sessionNoticeMode } from "../ui/sessions/leadNotices";
+
+/** Task 244: a lead's reply to a turn only the team's pastes opened is not
+ * unread unless the lead's mode for team notices is Full (no mark, count or
+ * Waiting reply badge); the owner's own turns stay as they are. */
+export function quietTeamReply(computer: ComputerId, key: string, v: Pick<ViewRow, "team_lead" | "reply_team_notice">,
+  values: Record<string, unknown> = settings): boolean {
+  return !!v.team_lead && !!v.reply_team_notice
+    && sessionNoticeMode(values["teams/leadNoticeSessions"], rowId(computer, key), values["teams/leadNotices"]) !== "full";
+}
 
 // The catalog: every live session row of every computer, keyed by
 // computer + "\n" + catalog key. A batch is one reactive transaction. An
@@ -33,10 +44,12 @@ export interface CatalogState {
   /** Arrival order. The list groups rows by the organization's projects and ranks, ties in this order (ui/sessions/model.ts). */
   order: string[];
   computers: Record<ComputerId, ComputerState>;
+  /** Task 235: computers whose rows are the last list on disk (when it was saved, epoch seconds) until their live listing replaces them. */
+  stale: Record<ComputerId, number>;
 }
 
 const KINDS = new Set<Status>(["attention", "working", "background", "scheduled", "ready", "error", "offline", "paused", "waiting", "starting", "ended"]);
-const AGENTS = new Set<AgentKind>(["claude", "codex", "kimi", "deepseek", "opencode", "sh"]);
+const AGENTS = new Set<AgentKind>(["claude", "codex", "kimi", "deepseek", "opencode", "ollama", "sh"]);
 
 /** The presentation kind of a view row; Qt gives `sh` its own Shell badge. */
 export function agentKind(agent: string | undefined): AgentKind {
@@ -122,12 +135,20 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     caption,
     phase: phase || undefined,
     summary: text(v.summary),
-    unread: !!v.unread,
+    unread: !!v.unread && !quietTeamReply(computer, key, v),
     draft: false,
     muted: !!v.muted,
     attention,
     scheduleNext: undefined,
     backgroundJobs: typeof v.background === "number" ? v.background : undefined,
+    sessionState: optional(v.session_state),
+    stateReason: v.state_reason,
+    build: v.build,
+    lastActive: typeof v.last_active === "number" ? v.last_active : undefined,
+    replyAt: typeof v.reply_at === "number" ? v.reply_at : undefined,
+    cacheTtl: v.cache_ttl,
+    services: v.services?.length ? v.services : undefined,
+    backgroundCommand: optional(v.background_command),
     subagents: v.subagents ? childRows(v.subagents, v.subagent_counts_complete) : undefined,
     subagentCountsComplete: !!v.subagent_counts_complete,
     reviewLater: false,
@@ -182,7 +203,7 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     baseStatus: status,
     baseCaption: caption,
     baseAttention: attention,
-    baseUnread: !!v.unread,
+    baseUnread: !!v.unread && !quietTeamReply(computer, key, v),
     baseSummary: text(v.summary),
     baseMuted: !!v.muted,
     readReplyId: optional(v.read_reply_id),
@@ -201,7 +222,7 @@ const REPLACED_MS = 10_000;
 /** `marks` given: the catalog applies them and they refresh it. Without, rows get the app's overlay and nothing is attached. */
 export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void) {
   const marks = given ?? appMarks;
-  const [catalog, setCatalog] = createStore<CatalogState>({ rows: {}, order: [], computers: {} });
+  const [catalog, setCatalog] = createStore<CatalogState>({ rows: {}, order: [], computers: {}, stale: {} });
   // Bumped with every change to the rows, their order or the computers, once
   // per batch: whole-catalog aggregates track this instead of each field of
   // every row (zerus-5wmh.66.50).
@@ -293,6 +314,8 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
   // The core's order: computers, replaces, removes, upserts (Activity goes to its own store).
   function applyBatch(b: Batch) {
     batch(() => {
+      // Task 235: a computer's cached rows are stale until its live listing replaces them.
+      for (const [computer, saved] of Object.entries(b.stale ?? {})) setCatalog("stale", computer, saved ?? undefined!);
       for (const c of b.computers) setCatalog("computers", c.computer, { id: c.computer, status: c.status, attempt: c.attempt ?? 0 });
       onMachines?.(b);
       const fresh: string[] = [];

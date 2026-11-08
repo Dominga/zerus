@@ -31,6 +31,8 @@ prepare() {
     cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
     cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')" \
         --manifest-path services/mobile/connector/Cargo.toml
+    cargo fetch --locked --manifest-path crates/lore-bin/Cargo.toml \
+        --target "$(rustc -vV | sed -n 's/^host: //p')"
     cargo fetch --locked --manifest-path client/src-tauri/Cargo.toml \
         --target "$(rustc -vV | sed -n 's/^host: //p')"
     (cd client && npm ci --no-audit --no-fund)
@@ -40,11 +42,13 @@ build() {
     cd "$srcdir/zerus-$pkgver"
     export RUSTUP_TOOLCHAIN=stable CARGO_TARGET_DIR="$PWD/target"
     cargo build --frozen --release
+    cargo build --frozen --release --manifest-path crates/lore-bin/Cargo.toml --target-dir target
     cargo build --frozen --release --manifest-path services/mobile/connector/Cargo.toml
     (cd client && npm exec -- tauri build --no-bundle \
         --config "$PWD/src-tauri/tauri.switch.linux.conf.json" --features video -- --frozen)
     python scripts/collect-licenses.py "$srcdir/licenses" \
         --manifest-path Cargo.toml --manifest-path services/mobile/connector/Cargo.toml \
+        --manifest-path crates/lore-bin/Cargo.toml \
         --manifest-path client/src-tauri/Cargo.toml --manifest-features client/src-tauri/Cargo.toml=video
 }
 
@@ -62,7 +66,7 @@ check() {
 package() {
     cd "$srcdir/zerus-$pkgver"
     python scripts/package-linux.py --destdir "$pkgdir" \
-        --cli target/release/hgs --gui target/release/hgs-tray \
+        --cli target/release/hgs --lore target/release/lore --gui target/release/hgs-tray \
         --connector target/release/zerus-mobile-connector \
         --licenses "$srcdir/licenses" --package-name "$pkgname"
 }

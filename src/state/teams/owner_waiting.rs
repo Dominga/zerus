@@ -89,6 +89,25 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
         found["paused_by"] = json!(team.paused.as_ref().map(|pause| pause.by.clone()).unwrap_or_default());
         out.push(found);
     }
+    // Task 186 (docs/lore.md 11.11): an urgent message to the lead that has
+    // reached no safe point within the team's urgent_bound is the owner's:
+    // Zerus never stops the lead, the owner may.
+    if let Some((held, minutes)) = super::doorbell::lead_undelivered(team, now) {
+        let lead = team.member(&team.lead).map(|lead| team.name_of(&lead.id)).unwrap_or_else(|| "The lead".into());
+        let mut found = item(
+            team,
+            "lead_message_undelivered",
+            &(held as u64).to_string(),
+            format!("URGENT team message to {lead} is undelivered: the lead has worked {minutes} min without a safe point"),
+            held,
+            "open_terminal",
+        );
+        found["member_id"] = json!(team.lead);
+        // Its Terminal is where the owner may stop the lead natively.
+        found["session"] = json!(team.member(&team.lead).and_then(|lead| lead.session.as_ref()).map(|session| session.name.clone()).unwrap_or_default());
+        found["urgent"] = json!(true);
+        out.push(found);
+    }
     // The attention list already decides when a report or a permission is
     // escalated to the owner, and which draft phase is next.
     for attention in super::inbox::attention(team, now) {
@@ -155,6 +174,16 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
                 found["member"] = json!(member);
                 out.push(found);
             }
+            // Task 277 (owner, 2026-11-08): your own urgent message to a member
+            // that stayed unread; the button opens the team to see it.
+            "urgent_message" => {
+                let member_id = attention["member_id"].as_str().unwrap_or_default().to_owned();
+                let mut found = item(team, "urgent_message", &member_id, summary, at, "open_team");
+                found["member"] = attention["member"].clone();
+                found["member_id"] = attention["member_id"].clone();
+                found["minutes"] = attention["minutes"].clone();
+                out.push(found);
+            }
             // Task 95: the lead stalled while its decisions wait. The round is
             // part of the id, so each round (at most hourly) is notified once
             // by the desktops, which notify a waiting id once.
@@ -200,6 +229,22 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
         let mut found = item(team, "lead_changes", "digest", title, at, "open_team");
         found["changes"] = changes;
         found["seen"] = json!(format!("{{\"team\":\"{}\",\"by\":\"human\"}} | hgs team seen-lead-changes --json", team.id));
+        out.push(found);
+    }
+    // Task #229: the lead's critical follow-ups, one item each, blocking nothing
+    // for the owner but naming the task, its phase and its origin; the desktop's
+    // notification for a Waiting item comes from here.
+    for task in team.tasks.iter().filter(|task| task.severity == "crit" && !task.status.finished()) {
+        let origin = task.origin.map(|origin| format!(" (from #{origin})")).unwrap_or_default();
+        let title = format!("The lead added critical task #{} to phase {}{origin}: {}", task.id, task.phase, task.title);
+        let at = task.added_late.as_ref().map_or(team.updated, |late| late.at);
+        let mut found = item(team, "crit_added", &task.id.to_string(), title, at, "open_task");
+        found["task"] = json!(task.id);
+        found["phase"] = json!(task.phase);
+        found["severity"] = json!("crit");
+        if let Some(origin) = task.origin {
+            found["origin"] = json!(origin);
+        }
         out.push(found);
     }
     // F8: the lead's open proposals wait for the owner's Accept or Reject.

@@ -77,6 +77,7 @@ def main() -> int:
     fork_build, fork_feed = fork_identity(args.fork_build, args.fork_feed)
     print(f"fork identity: build {fork_build or 'none (experimental)'}, feed {fork_feed or 'none (experimental)'}", flush=True)
     run(["cargo", "build", "--locked", "--release", "--bin", "hgs"], dry=args.dry_run)
+    run(["cargo", "build", "--locked", "--release", "--manifest-path", "crates/lore-bin/Cargo.toml", "--target-dir", "target/lore"], dry=args.dry_run)
     run(["cargo", "build", "--locked", "--release", "--manifest-path", "services/mobile/connector/Cargo.toml"], dry=args.dry_run)
     run(["cargo", "build", "--locked", "--release", "--manifest-path", "services/mobile/relay/Cargo.toml"], dry=args.dry_run)
     conpty = Path(os.environ.get("RUNNER_TEMP", ROOT / ".zerus-team/tmp")) / "conpty"
@@ -90,7 +91,7 @@ def main() -> int:
     print(f"tauri fork channel: ZERUS_FORK_BUILD={fork_build or '(unset)'} ZERUS_FORK_FEED_URL={fork_feed or '(unset)'}", flush=True)
     run(
         ["npm", "run", "tauri", "--", "build", "--ci", "--no-bundle",
-         "--config", "src-tauri/tauri.windows.conf.json", "--features", "video"],
+         "--config", "src-tauri/tauri.windows.switch.conf.json", "--features", "video"],
         cwd=client,
         env={"CARGO_TARGET_DIR": str(target), "CARGO_BUILD_JOBS": "4",
              "ZERUS_FORK_BUILD": fork_build,
@@ -100,7 +101,7 @@ def main() -> int:
     run(["python", "client/scripts/collect-notices.py", "artifacts/windows-frontend-licenses"], dry=args.dry_run)
     run(["python", "scripts/package-windows.py", "--fork",
          "--fork-build", fork_build, "--fork-feed", fork_feed,
-         "--cli", "target/release/hgs.exe",
+         "--cli", "target/release/hgs.exe", "--lore", "target/lore/release/lore.exe",
          "--gui", "target/windows-next/release/hgs-tray.exe",
          "--connector", "services/mobile/connector/target/release/zerus-mobile-connector.exe",
          "--mobile-relay", "services/mobile/relay/target/release/zerus-relay.exe",
@@ -115,5 +116,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-

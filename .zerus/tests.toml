@@ -182,13 +182,13 @@ kind = "cargo"
 root = "crates/watch-protocol"
 sources = ["crates/watch-protocol/**"]
 
-# RustCodeLore: the CodeLore implementation of docs/lore.md, with its own lock
-# and its own target folder like the other storage crates.
+# The lore binary Zerus ships: the pinned CodeLore dependency's wrapper (task 256), with
+# its own lock and target folder. The lore suite itself runs in the CodeLore repository.
 [[provider]]
 name = "lore"
 kind = "cargo"
-root = "crates/lore"
-sources = ["crates/lore/**"]
+root = "crates/lore-bin"
+sources = ["crates/lore-bin/**", "tests/fixtures/secret-scan-vectors.json"]
 command = "cargo test --locked --target-dir ../../target/lore {targets}"
 
 # The Qt desktop: CMake's link lists and the include graph name the files each

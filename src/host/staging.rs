@@ -41,6 +41,9 @@ use std::{
 pub const EXECUTABLE: &str = "hgs.exe";
 /// The bundled ConPTY pair (D6), staged only together.
 pub const PAIR: [&str; 2] = ["conpty.dll", "OpenConsole.exe"];
+/// Team and project memory run crates/lore's binary; hgs looks for it beside
+/// its own executable (task 260), so a package's copy is staged the same way.
+pub const LORE: &str = if cfg!(windows) { "lore.exe" } else { "lore" };
 /// Below the images folder: the name of the image the next host starts from.
 pub const POINTER: &str = "current";
 /// In an image: the hgs version of its executable.
@@ -328,6 +331,35 @@ pub struct CliReport {
     pub kept: Vec<PathBuf>,
 }
 
+/// Stage `source`'s lore sidecar beside the stable CLI `cli`, when the package
+/// carries one. A missing sidecar leaves whatever already sits there; the same
+/// build is not rewritten. The copy is verified like the CLI's own.
+fn stage_lore(source: &Path, cli: &Path) -> Result<(), StageError> {
+    let source = source.parent().unwrap_or(Path::new("")).join(LORE);
+    if !source.is_file() {
+        return Ok(());
+    }
+    let target = cli.with_file_name(LORE);
+    let hash = sha256(&source).map_err(at(&source))?;
+    if sha256(&target).ok().as_deref() == Some(hash.as_str()) {
+        return Ok(());
+    }
+    let folder = cli
+        .parent()
+        .ok_or_else(|| StageError::Io(cli.to_owned(), io::ErrorKind::InvalidInput.into()))?;
+    fs::create_dir_all(folder).map_err(at(folder))?;
+    let mut temporary = tempfile::Builder::new()
+        .prefix(NEW_PREFIX)
+        .tempfile_in(folder)
+        .map_err(at(folder))?;
+    let path = temporary.path().to_owned();
+    copy_verified(&source, temporary.as_file_mut(), &path, &hash)?;
+    // lore is a short-lived child of hgs, so a plain replace is enough; a busy
+    // file is reported instead of guessed.
+    platform::persist(temporary, &target).map_err(|error| StageError::Io(target, error.error))?;
+    platform::sync_dir(folder).map_err(at(folder))
+}
+
 /// Stage `source` as the stable CLI at `target`.
 pub fn stage_cli(source: &Path, target: &Path) -> Result<CliReport, StageError> {
     let hash = sha256(source).map_err(at(source))?;
@@ -366,6 +398,8 @@ pub fn stage_cli(source: &Path, target: &Path) -> Result<CliReport, StageError> 
         }
         let _ = platform::sync_dir(folder);
     }
+    // Task 260: the stable CLI runs the team worker, which runs lore.
+    stage_lore(source, target)?;
     let (removed, kept) = remove_aside(folder);
     Ok(CliReport {
         path: target.to_owned(),
@@ -510,6 +544,16 @@ fn parts(source: &Path) -> Result<(Vec<Part>, Pair), StageError> {
                 source: path,
             });
         }
+    }
+    // Task 260: team and project memory run lore beside hgs; a package that
+    // carries it stages it into the image too, hash-checked like the rest.
+    let lore = folder.join(LORE);
+    if lore.is_file() {
+        parts.push(Part {
+            name: LORE,
+            sha256: hash(&lore)?,
+            source: lore,
+        });
     }
     Ok((parts, pair))
 }
@@ -1228,6 +1272,61 @@ mod tests {
         let error = stage_cli(&dir.path().join("missing.exe"), &target).unwrap_err();
         assert!(matches!(error, StageError::Io(..)), "{error}");
         assert_eq!(fs::read(&target).unwrap(), b"build two");
+    }
+
+    #[test]
+    fn the_stable_cli_stages_lore_beside_it_when_the_package_carries_it() {
+        let dir = private_tempdir();
+        let cli = dir.path().join("bin").join(EXECUTABLE);
+        let one = source(dir.path(), "one", b"build one", &[]);
+
+        // A build without lore stages none.
+        stage_cli(&one, &cli).unwrap();
+        assert!(!cli.with_file_name(LORE).exists());
+
+        // A package's lore is copied beside the CLI and verified like the CLI.
+        fs::write(one.parent().unwrap().join(LORE), b"lore one").unwrap();
+        stage_cli(&one, &cli).unwrap();
+        assert_eq!(fs::read(cli.with_file_name(LORE)).unwrap(), b"lore one");
+        assert_eq!(fs::read(&cli).unwrap(), b"build one");
+
+        // A newer lore replaces it even while the CLI itself is unchanged.
+        fs::write(one.parent().unwrap().join(LORE), b"lore two").unwrap();
+        stage_cli(&one, &cli).unwrap();
+        assert_eq!(fs::read(cli.with_file_name(LORE)).unwrap(), b"lore two");
+    }
+
+    #[test]
+    fn an_image_carries_the_lore_beside_the_executable_it_stages() {
+        let dir = private_tempdir();
+        let images = dir.path().join("host");
+        let packaged = source(dir.path(), "packaged", b"build", &PAIR);
+        fs::write(packaged.parent().unwrap().join(LORE), b"lore one").unwrap();
+
+        let report = stage_image(&packaged, &images, "1.0.0").unwrap();
+        let image = &report.image.path;
+        assert_eq!(
+            names(image),
+            vec![
+                "OpenConsole.exe".to_owned(),
+                "conpty.dll".to_owned(),
+                EXECUTABLE.to_owned(),
+                LORE.to_owned(),
+                VERSION_FILE.to_owned(),
+            ]
+        );
+        assert_eq!(fs::read(image.join(LORE)).unwrap(), b"lore one");
+
+        // Changed lore alone rebuilds the content-addressed image.
+        fs::write(packaged.parent().unwrap().join(LORE), b"lore two").unwrap();
+        let again = stage_image(&packaged, &images, "1.0.0").unwrap();
+        assert!(again.changed);
+        assert_eq!(fs::read(again.image.path.join(LORE)).unwrap(), b"lore two");
+
+        // A build without lore stages none.
+        let plain = source(dir.path(), "plain", b"plain", &[]);
+        let plain_report = stage_image(&plain, &images, "1.0.0").unwrap();
+        assert!(!plain_report.image.path.join(LORE).exists());
     }
 
     #[test]

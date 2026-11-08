@@ -221,3 +221,25 @@ describe("question cards", () => {
     dispose();
   }));
 });
+
+// Task 198 (W5): a subagent card's "Allow all, don't ask again" goes to the
+// core, which asks to Confirm first; a card without the button sends nothing.
+describe("the subagent card's broader Yes (task 198)", () => {
+  it("asks the core only while the button shows and is enabled", () => createRoot(async (dispose) => {
+    const calls: string[] = [];
+    const port = { edit: async () => {}, page: async () => {}, navigate: async () => {}, allowRetry: async () => {}, submit: async () => ({ kind: "busy" }),
+      decide: async () => ({ kind: "busy" }), always: async (card: string) => { calls.push(`always ${card}`); return { kind: "busy" }; }, skip: async () => ({ kind: "busy" }),
+      cold: async () => ({ kind: "busy" }), notify: () => {} } as unknown as QuestionPort;
+    const store = createQuestions(port);
+    const button = (visible: boolean, enabled: boolean) => ({ visible, enabled, label: { source: "Allow all, don't ask again", args: [] }, review_label: null });
+    const view = (always: ReturnType<typeof button> | undefined) => ({ card: "c1", revision: 1, epoch: 1, view: { review: false, always } }) as never;
+    store.apply(view(button(true, true)));
+    await store.always();
+    store.apply(view(button(true, false)));
+    await store.always();
+    store.apply(view(undefined));
+    await store.always();
+    expect(calls).toEqual(["always c1"]);
+    dispose();
+  }));
+});

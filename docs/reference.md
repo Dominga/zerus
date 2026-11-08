@@ -3934,7 +3934,14 @@ them, and each read of the index reads up to 256 others again, those read
 longest ago first, so every row, and with it every stage count, is read again
 within 10 minutes plus ceil(tasks / 256) reads. The index holds at most 256
 MiB whatever its page size; a larger one is built again. Short-ID lookups,
-list places and the agent start limit use the same index.
+list places and the agent start limit use the same index. Adding, moving and
+staging a task place it from the index too, without reading every task, while
+the index is certified current (no row change by another build pending under
+the repair epoch) and holds no damaged task: every task file's stamp is
+checked first, as the periodic full check does (so a task a writer without the
+journal added or moved is read again), and the two neighbouring tasks are read
+from their documents to confirm their stage and rank. Otherwise, or when the stage needs its ranks
+renumbered, the whole write reads the documents as before.
 
 Send pastes the task prompt into its session through the same input path as
 `hgs send`; the task becomes In progress, and Zerus does not

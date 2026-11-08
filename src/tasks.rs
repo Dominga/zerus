@@ -424,6 +424,21 @@ fn label_view(mut value: Value, project_name: &str, with_log: bool, files: &[Val
 }
 
 /// The place of `task` in its list, counting from 1.
+/// Runs a write that places a task with the task index as its placement
+/// (zerus-cg5h.24); the index closes before the caller saves.
+fn placed<T>(store: &ProjectStore, write: impl FnOnce(Option<&dyn zerus_replica::Placement>) -> Result<T>) -> Result<T> {
+    let mut index = index::Index::open(store);
+    // Every task file is checked first, for writers without the journal; an
+    // index that cannot check them does not place.
+    if let Some(failure) = index.as_mut().and_then(|i| i.check_files().err()) {
+        if let Some(index) = index.take() {
+            index.discard(&failure);
+        }
+    }
+    let placement = index.as_ref().map(index::IndexPlacement::new);
+    write(placement.as_ref().map(|p| p as &dyn zerus_replica::Placement))
+}
+
 fn place(store: &ProjectStore, task: &TaskDoc) -> Result<usize> {
     if let Some(Ok(Some(at))) = index::Index::open(store).map(|index| index.place(task.uuid())) {
         return Ok(at);
@@ -977,14 +992,15 @@ fn add(config: &Config, args: &[String]) -> Result<Value> {
     };
     let position = position_index(args)?.map_or(Position::End, Position::Index);
     let store = store(config, &id)?;
-    let (mut task, created) = if let Some(title) = title {
-        store.new_named_task(title, &text, content.attachments.as_deref().unwrap_or_default(), stage, target, author.clone(), &position, &name, now(), option(args, "--request-id")?, flag(args, "--start")).map_err(fail)?
+    let request = option(args, "--request-id")?;
+    let (mut task, created) = placed(&store, |placement| if let Some(title) = title {
+        store.new_named_task_placed(placement, title, &text, content.attachments.as_deref().unwrap_or_default(), stage, target, author.clone(), &position, &name, now(), request, flag(args, "--start")).map_err(fail)
     } else {
-        if option(args, "--request-id")?.is_some() { return Err(fail("--request-id requires --title")); }
-        let mut task = store.new_task(&text, stage, target, author.clone(), &position, &name, now()).map_err(fail)?;
-        if let Some(files) = content.attachments { task.set_attachments(&files, &author, now()).map_err(fail)?; }
-        (task, true)
-    };
+        if request.is_some() { return Err(fail("--request-id requires --title")); }
+        let mut task = store.new_task_placed(placement, &text, stage, target, author.clone(), &position, &name, now()).map_err(fail)?;
+        if let Some(files) = &content.attachments { task.set_attachments(files, &author, now()).map_err(fail)?; }
+        Ok((task, true))
+    })?;
     if created {
         if title.is_none() && flag(args, "--start") { task.record_start(&author, now()).map_err(fail)?; }
         store.save(&mut task).map_err(fail)?;
@@ -1201,11 +1217,11 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
             } else {
                 return Err(fail(USAGE));
             };
-            store.reorder(&mut task, &position).map_err(fail)?;
+            placed(&store, |placement| store.reorder_placed(placement, &mut task, &position).map_err(fail))?;
         }
         "stage" => {
             let to = Stage::parse(args.get(1).ok_or_else(|| fail(USAGE))?).map_err(fail)?;
-            store.change_stage(&mut task, to, &who, now()).map_err(fail)?;
+            placed(&store, |placement| store.change_stage_placed(placement, &mut task, to, &who, now()).map_err(fail))?;
         }
         "target" => {
             let value = args.get(1).ok_or_else(|| fail(USAGE))?;

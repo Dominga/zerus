@@ -1617,3 +1617,146 @@ fn an_older_repair_build_cannot_mask_an_unrepaired_row_from_the_epoch() {
     }
     assert_eq!(answered.unwrap(), store.live_inventory().unwrap().0);
 }
+
+/// A task an add places through the task index, as `hgs task add` does
+/// (zerus-cg5h.24).
+fn add_placed(store: &ProjectStore, position: &Position) -> TaskDoc {
+    let mut index = Index::open(store).unwrap();
+    index.check_files().unwrap();
+    let placement = IndexPlacement::new(&index);
+    let mut task = store
+        .new_task_placed(Some(&placement), "Placed", Stage::Todo, Target::Any, Actor::Person, position, "example", 1)
+        .unwrap();
+    drop(index);
+    store.save(&mut task).unwrap();
+    task
+}
+
+#[test]
+fn the_index_places_a_task_as_the_documents_do_reading_only_its_neighbours() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    for n in 0..60 {
+        write_plain(&store, &new_task(&store, &format!("T-{n:06}"), Stage::Todo, &format!("V{}", n % 7 + 1), "Plain"));
+    }
+    let index = Index::open(&store).unwrap();
+    let placement = IndexPlacement::new(&index);
+    use zerus_replica::Placement as _;
+    let order = placement.order(Stage::Todo).unwrap().unwrap();
+    let documents: Vec<(String, String, String)> =
+        store.ordered(Stage::Todo).unwrap().iter().map(|t| (t.uuid().to_owned(), t.id(), t.rank())).collect();
+    assert_eq!(order.iter().map(|p| (p.uuid.clone(), p.id.clone(), p.rank.clone())).collect::<Vec<_>>(), documents);
+    let list = store.ordered(Stage::Todo).unwrap();
+    for position in [Position::Top, Position::End, Position::Index(30), Position::Before(list[10].id()), Position::After(list[20].id())] {
+        let expected = store.rank_for(Stage::Todo, &position, None).unwrap();
+        let before = zerus_replica::load_count_for_test();
+        let task = store
+            .new_task_placed(Some(&placement), "Placed", Stage::Todo, Target::Any, Actor::Person, &position, "example", 1)
+            .unwrap();
+        assert!(zerus_replica::load_count_for_test() - before <= 2, "{position:?}");
+        assert_eq!(task.rank(), expected, "{position:?}");
+    }
+}
+
+#[test]
+fn a_short_id_an_older_build_took_without_the_journal_is_never_reused() {
+    // design-tima2's control for zerus-cg5h.24: an older build adds a task
+    // without the journal; the next add must not draw its short ID again.
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    write_plain(&store, &new_task(&store, "T-000001", Stage::Todo, "V", "Plain"));
+    drop(Index::open(&store).unwrap());
+    // The older build's task file only: no journal note, no index row; and a
+    // save by this build in the same window, so the journal is not quiet.
+    write_plain(&store, &new_task(&store, "T-taken1", Stage::Todo, "W", "Older"));
+    let mut busy = new_task(&store, "T-busy01", Stage::Todo, "Y", "Saved here");
+    store.save(&mut busy).unwrap();
+    zerus_replica::ids::force_short_ids_for_test(&["T-taken1", "T-fresh1"]);
+    assert_eq!(add_placed(&store, &Position::End).id(), "T-fresh1");
+    // The same when that build also stored its row in the index: the index
+    // is then uncertified and the whole write reads the documents.
+    write_plain(&store, &new_task(&store, "T-taken2", Stage::Todo, "X", "Older again"));
+    LEGACY_DERIVE.with(|legacy| legacy.set(true));
+    drop(Index::open(&store).unwrap());
+    LEGACY_DERIVE.with(|legacy| legacy.set(false));
+    zerus_replica::ids::force_short_ids_for_test(&["T-taken2", "T-fresh2"]);
+    let before = zerus_replica::load_count_for_test();
+    assert_eq!(add_placed(&store, &Position::End).id(), "T-fresh2");
+    assert!(zerus_replica::load_count_for_test() - before >= 4, "the documents were read");
+}
+
+#[test]
+fn an_uncertified_or_damaged_index_leaves_the_whole_write_to_the_documents() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    for n in 0..20 {
+        write_plain(&store, &new_task(&store, &format!("T-{n:06}"), Stage::Todo, "V", "Plain"));
+    }
+    let index = Index::open(&store).unwrap();
+    use zerus_replica::Placement as _;
+    assert!(IndexPlacement::new(&index).order(Stage::Todo).unwrap().is_some());
+    index.db.execute("INSERT OR REPLACE INTO meta VALUES('uncertified', '1')", []).unwrap();
+    let placement = IndexPlacement::new(&index);
+    assert!(placement.order(Stage::Todo).unwrap().is_none());
+    assert!(placement.short_id_used("T-000001").unwrap().is_none());
+    let before = zerus_replica::load_count_for_test();
+    store
+        .new_task_placed(Some(&placement), "Placed", Stage::Todo, Target::Any, Actor::Person, &Position::Index(5), "example", 1)
+        .unwrap();
+    assert!(zerus_replica::load_count_for_test() - before >= 20);
+    drop(index);
+    // A damaged task file: its document may name a short ID the index lacks.
+    fs::write(store.dir().join("tasks").join(format!("{}.loro", ids::new_uuid())), b"not a task").unwrap();
+    let index = Index::open(&store).unwrap();
+    assert!(IndexPlacement::new(&index).order(Stage::Todo).unwrap().is_none());
+}
+
+
+#[test]
+fn an_older_journalless_move_never_places_from_a_stale_stage() {
+    // review-win-d on #1767 (zerus-j0os4): an older writer moves an existing
+    // task without the journal while a save here keeps the journal busy;
+    // the next add must still go after the actual last task.
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let a = new_task(&store, "T-000001", Stage::Todo, "V", "A");
+    let mut b = new_task(&store, "T-000002", Stage::Todo, "U", "B");
+    write_plain(&store, &a);
+    write_plain(&store, &b);
+    drop(Index::open(&store).unwrap());
+    b.set_rank("z").unwrap();
+    write_plain(&store, &b);
+    let mut a = store.load(a.uuid()).unwrap();
+    a.comment("Saved here", &Actor::Person, 2).unwrap();
+    store.save(&mut a).unwrap();
+    let mut index = Index::open(&store).unwrap();
+    index.check_files().unwrap();
+    let expected = store.rank_for(Stage::Todo, &Position::End, None).unwrap();
+    let placement = IndexPlacement::new(&index);
+    let task = store
+        .new_task_placed(Some(&placement), "New", Stage::Todo, Target::Any, Actor::Person, &Position::End, "example", 3)
+        .unwrap();
+    assert_eq!(task.rank(), expected, "the next add must still go after the actual last task");
+}
+
+#[test]
+fn task_file_checks_never_postpone_a_due_project_version_refresh() {
+    // review-win-d on #1767 (zerus-k2388): checking only task files before a
+    // placement must not count as the periodic check, which also reads the
+    // project document again.
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let mut doc = store.project().unwrap();
+    doc.set_settings(&zerus_replica::Settings { agent_limit: 3, ..doc.settings() }).unwrap();
+    store.save_project(&doc).unwrap();
+    let mut index = Index::open(&store).unwrap();
+    assert_holds_the_inventory(&store, &index);
+    // An older writer updates the project without the journal.
+    doc.set_settings(&zerus_replica::Settings { agent_limit: 4, ..doc.settings() }).unwrap();
+    fs::write(store.dir().join("project.loro"), doc.snapshot().unwrap()).unwrap();
+    // The periodic check is due; a task-file check alone must not satisfy it.
+    index.db.execute("UPDATE meta SET value='0' WHERE key='checked'", []).unwrap();
+    index.check_files().unwrap();
+    let actual = index.live_inventory().unwrap();
+    assert_eq!(actual, store.live_inventory().unwrap().0, "task-only checking renewed the project-version clock");
+}

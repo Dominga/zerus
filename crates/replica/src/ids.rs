@@ -2,8 +2,29 @@
 //! characters name the task for people and agents, without coordination.
 const ALPHABET: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static FORCED: std::cell::RefCell<std::collections::VecDeque<String>> = const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+}
+
+/// Makes the next short IDs drawn on this thread these, in order (tests of
+/// this and other crates: a draw that collides with a task).
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn force_short_ids_for_test(ids: &[&str]) {
+    FORCED.with(|forced| {
+        forced
+            .borrow_mut()
+            .extend(ids.iter().map(|id| (*id).to_owned()))
+    });
+}
+
 /// A random short ID. Callers redraw it when it collides with a local task.
 pub fn short_id() -> String {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(id) = FORCED.with(|forced| forced.borrow_mut().pop_front()) {
+        return id;
+    }
     let bytes = uuid::Uuid::new_v4().into_bytes();
     let mut value = u64::from_le_bytes(bytes[..8].try_into().expect("eight bytes"));
     let mut id = String::from("T-");

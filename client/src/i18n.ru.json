@@ -1,7 +1,4 @@
 {
-  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
-  "New team…": "Новая команда…",
-  "No sessions in this project yet.": "В этом проекте пока нет сеансов.",
   "\n\n%1 unavailable or inapplicable sessions will be left as they are.": "\n\nНедоступные или неприменимые сессии (%1) останутся без изменений.",
   "\n\nOnly these saved or archived entries are removed. Live sessions and native conversation history are kept.": "\n\nБудут удалены только эти сохранённые или архивные записи. Работающие сессии и история разговоров агента сохранятся.",
   "\n\nRunning processes will stop. Tracked Codex, Claude and Kimi conversations are kept in Archive; native conversation history is kept.": "\n\nЗапущенные процессы остановятся. Отслеживаемые разговоры Codex, Claude и Kimi сохраняются в Архиве; история разговоров агента сохраняется.",
@@ -265,6 +262,7 @@
   "%1 sessions are on offline or stale machines. Their last known status is shown on the machine cards.": "Сессий на компьютерах, которые не в сети или давно не отвечали: %1. Их последний известный статус отображается на карточках машин.",
   "%1 sessions moved to project.": "В проект перенесено сессий: %1.",
   "%1 sessions need attention": "Сессий, требующих внимания: %1",
+  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
   "%1 share %2": "%1 делят %2",
   "%1 shown, %2 working, %3 attention": "%1 показано, %2 работает, %3 внимание",
   "%1 since %2": "%1 с %2",
@@ -1947,7 +1945,6 @@
   "Folder is not a Git repository: every member works in this folder, so the policy is shared.": "Папка не является репозиторием Git: все участники работают в этой папке, поэтому политика общая.",
   "Folder kept": "Папка сохранена",
   "Folder link (%1)": "Ссылка на папку (%1)",
-  "Folder management is unavailable for this computer.": "Управление папками недоступно для этого компьютера.",
   "Folder missing": "Папка отсутствует",
   "Folder name": "Имя папки",
   "Folder privacy": "Закрытость папки",
@@ -2742,6 +2739,7 @@
   "New tasks join it and run as they are added, with the same pipelines, reports and acceptance.": "Новые задачи входят в неё и идут по мере добавления, с теми же конвейерами, отчётами и приёмкой.",
   "New team": "Новая команда",
   "New team, the plan's settings and the team catalog are on the team's own bar; the catalog is also here.": "Новая команда, настройки плана и каталог команды — на панели команды; каталог также здесь.",
+  "New team…": "Новая команда…",
   "New version": "Новая версия",
   "New work is planned in a new phase, approved by you; nothing joins this one without a plan edit.": "Новая работа планируется в новой фазе и принимается вами; без правки плана в эту фазу ничего не войдёт.",
   "New work is planned in phases again, each approved by you and closed with its integration and build.": "Новая работа снова планируется фазами, каждая принимается вами и закрывается со своей интеграцией и сборкой.",
@@ -2855,6 +2853,7 @@
   "No session matches.": "Подходящих сессий нет.",
   "No session selected": "Сессия не выбрана",
   "No sessions are working, need attention or have drafts.": "Нет сессий, которые работают, требуют внимания или содержат черновики.",
+  "No sessions in this project yet.": "В этом проекте пока нет сеансов.",
   "No sessions need attention": "Нет сессий, которым нужно внимание",
   "No sessions yet": "Сессий пока нет",
   "No shell commands recorded yet": "Команды оболочки еще не записаны",
@@ -3192,7 +3191,6 @@
   "Phase %1 still has %2 running; close it when they are decided": "В фазе %1 ещё идёт %2; закройте её, когда они будут решены",
   "Phase %1 waits for you": "Фаза %1 ждёт вас",
   "Phase %1: %2": "Фаза %1: %2",
-  "Phase %1: %2, draft waits for your Accept": "Фаза %1: %2, черновик ждёт вашего принятия",
   "Phase 1": "Фаза 1",
   "Phase acceptance": "Приёмка фазы",
   "Phase actions": "Действия с фазой",
@@ -4547,25 +4545,7 @@
   "The background service has not confirmed this settings change.": "Фоновая служба не подтвердила это изменение настроек.",
   "The background service was refreshed.": "Фоновая служба обновлена.",
   "The branch %1 is kept.": "Ветка %1 сохраняется.",
-  "The branch name: {
-  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
-  "New team…": "Новая команда…",
-  "No sessions in this project yet.": "В этом проекте пока нет сеансов.",id} is the task, {
-  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
-  "New team…": "Новая команда…",
-  "No sessions in this project yet.": "В этом проекте пока нет сеансов.",member} the member and {
-  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
-  "New team…": "Новая команда…",
-  "No sessions in this project yet.": "В этом проекте пока нет сеансов.",team8} the team's first eight characters": "Имя ветки: {
-  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
-  "New team…": "Новая команда…",
-  "No sessions in this project yet.": "В этом проекте пока нет сеансов.",id} — задача, {
-  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
-  "New team…": "Новая команда…",
-  "No sessions in this project yet.": "В этом проекте пока нет сеансов.",member} — участник, {
-  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
-  "New team…": "Новая команда…",
-  "No sessions in this project yet.": "В этом проекте пока нет сеансов.",team8} — первые восемь символов команды",
+  "The branch name: {id} is the task, {member} the member and {team8} the team's first eight characters": "Имя ветки: {id} — задача, {member} — участник, {team8} — первые восемь символов команды",
   "The build broker is off: members sharing a folder build in it directly. The owner turns it on in the team's settings.": "Брокер сборок выключен: участники с общей папкой собирают прямо в ней. Владелец включает его в настройках команды.",
   "The builds the team ran and their queue": "Сборки команды и их очередь",
   "The catalog is not read yet.": "Каталог ещё не прочитан.",
@@ -5601,19 +5581,7 @@
   "on this computer": "на этом компьютере",
   "on time": "вовремя",
   "open native DeepSeek UI": "открыть собственный пользовательский интерфейс DeepSeek",
-  "optional, argv templates; {
-  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
-  "New team…": "Новая команда…",
-  "No sessions in this project yet.": "В этом проекте пока нет сеансов.",model} is the model, {
-  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
-  "New team…": "Новая команда…",
-  "No sessions in this project yet.": "В этом проекте пока нет сеансов.",server} the server": "необязательно, шаблоны argv; {
-  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
-  "New team…": "Новая команда…",
-  "No sessions in this project yet.": "В этом проекте пока нет сеансов.",model} — модель, {
-  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
-  "New team…": "Новая команда…",
-  "No sessions in this project yet.": "В этом проекте пока нет сеансов.",server} — сервер",
+  "optional, argv templates; {model} is the model, {server} the server": "необязательно, шаблоны argv; {model} — модель, {server} — сервер",
   "or plain lines:  small: running   large: stopped   memory: 12.5/64 GB": "или простые строки:  small: running   large: stopped   memory: 12.5/64 GB",
   "or this share of the drive (%)": "или такую долю диска (%)",
   "partial": "частично",

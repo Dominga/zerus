@@ -620,7 +620,6 @@
   "Folder filter": "Фильтр по папке",
   "Folder held by another task": "Папка занята другой задачей",
   "Folder is not a Git repository: every member works in this folder, so the policy is shared.": "Папка не является репозиторием Git: все участники работают в этой папке, поэтому политика общая.",
-  "Folder management is unavailable for this computer.": "Управление папками недоступно для этого компьютера.",
   "Folder missing": "Папка отсутствует",
   "For dark appearance": "Для тёмной темы",
   "For example /mnt, the configured mount root": "Например, /mnt, настроенный корень монтирования",
@@ -2510,5 +2509,8 @@
   "+ New team": "+ Новая команда",
   "Auto: follow the project": "Авто: следовать проекту",
   "One additional rule per line (20 maximum)": "Одно дополнительное правило в строке (не более 20)",
-  "Task states": "Состояния задач"
+  "Task states": "Состояния задач",
+  "New team…": "Новая команда…",
+  "No sessions in this project yet.": "В этом проекте пока нет сеансов.",
+  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд"
 }

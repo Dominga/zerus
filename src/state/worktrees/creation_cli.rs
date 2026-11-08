@@ -1,5 +1,5 @@
 //! Presentation of the already-recorded result for plain UUID CLI callers.
-//! The receipt lane and every creation effect have finished before this runs.
+//! The receipt call has returned; the original job may still be running.
 use crate::state::Result;
 use serde_json::Value;
 

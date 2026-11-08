@@ -281,3 +281,16 @@ fn review_malformed_liveness_is_unknown_and_never_observed_as_live() {
         );
     }
 }
+
+#[test]
+fn legacy_liveness_absence_null_and_live_strings_remain_compatible() {
+    let mut f = Fixture::new();
+    for state in [Value::Null, json!("live"), json!("active")] {
+        f.record["state"] = state;
+        f.save();
+        assert!(f.read(&executor(), Conversation::Exact).is_ok());
+    }
+    f.record.as_object_mut().unwrap().remove("state");
+    f.save();
+    assert!(f.read(&executor(), Conversation::Exact).is_ok());
+}

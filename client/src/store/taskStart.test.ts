@@ -76,6 +76,25 @@ it("settles a receipt or releases the exact reviewed snapshot, with the specifie
   expect(notify).toHaveBeenCalledWith("error", "Could not release the start record.", true);
 });
 
+it("shows a terminal native refusal and leaves the next Start as a separate explicit action", async () => {
+  const review = { task, view: view() };
+  const reason = "Refused: acknowledgement mode changed. Start again to prepare a new request.";
+  vi.mocked(taskStartRelease).mockResolvedValueOnce(view({ pending: false, phase: "released", outcome: "refused", error: reason }));
+  expect(await releaseTaskStart(review)).toBe(true);
+  expect(taskStartRelease).toHaveBeenCalledExactlyOnceWith(review.view);
+  expect(notify).toHaveBeenCalledExactlyOnceWith("error", reason, true);
+  expect(taskStart).not.toHaveBeenCalled();
+  expect(toast).not.toHaveBeenCalled();
+});
+
+it("does not treat a still-pending refusal as a successful release", async () => {
+  const review = { task, view: view() };
+  vi.mocked(taskStartRelease).mockResolvedValueOnce(view({ pending: true, phase: "review", outcome: "refused" }));
+  expect(await releaseTaskStart(review)).toBe(false);
+  expect(notify).toHaveBeenCalledWith("error", "Could not release the start record.", true);
+  expect(taskStart).not.toHaveBeenCalled();
+});
+
 it("checks only an explicit original receipt and never releases or sends after a lost check", async () => {
   const review = { task, view: view({ check_available: true }) };
   vi.mocked(taskStartCheck).mockRejectedValueOnce(new Error("response lost"));

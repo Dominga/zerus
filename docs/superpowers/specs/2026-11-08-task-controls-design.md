@@ -48,6 +48,41 @@ direction returns a durable original-request-bound refusal before native
 input, visible to the person. Retry creates a fresh request. The frozen payload
 is never rewritten or resent, and a missing receipt is not no-delivery proof.
 
+The owning Start-mode leaf records a mismatch in the existing native
+`input_receipts/<request_id>.json` journal as schema-1
+`refused_before_input`. It binds the complete frozen plan with sorted compact
+UTF-8, integer-only JSON and SHA-256 under `zerus-task-start-refusal-v1\0`.
+The native body digest remains the existing native-input digest. Neither digest
+authorizes Person, a floor, an attempt or a retry. The original native input
+exclusion protects a positively absent, bounded no-follow receipt path; file
+and namespace durability must complete after atomic no-replace publication
+before a definite refusal is returned. Any write/sync uncertainty is Unknown;
+an existing pending, submitted, other, partial or unreadable record is never
+overwritten. Matching retained refusals are lookup-only; a changed plan/body
+under the same ID still refuses permanently. No receipt-age pruning is added.
+Old readers reject the unsupported status as present/Unknown, never absent.
+The exact-main CLI reader is qualified before adding this writer. Windows
+namespace durability is not yet qualified (`zerus-cg5h.4.8.2`), so its new
+writer returns Unknown; successful ordinary previews do not qualify that path.
+
+Only a complete synced retained read-back can construct the local Start reply's
+`refusal` proof: exactly `schema: 1`, `request_id`, `plan_digest`, and the closed
+reason `acknowledgement_mode_changed`. Core recomputes the digest from its own
+frozen outbox plan and checks the original ID; a reply cannot supply a plan or
+authorize release with its digest alone. Missing/extra/malformed fields,
+another plan/body, a missing outbox entry, or Unknown keep the pending Start.
+A proven recovery checkpoints the original Start as terminal `released` with
+the visible refusal reason; the native UUID tombstone remains permanent. Only
+a new explicit Start with a fresh UUID proceeds. No proof reaches phone,
+connector or relay operations, and Windows emits none while durability is
+unqualified. The single const-false gate lives in the already-shared pure
+read-policy crate and is re-exported by the ledger, keeping Core free of SQLite.
+It gates both proof emission and recovery; there is no runtime override.
+
+This inactive Start leaf does not connect the task-control service route,
+actor/effect workers, begin binding, native Pause or Stop-fact import. Those
+remain subsequent `.4.7` work before the `.4.8` activation decision.
+
 Pause/Resume/Stop-hold activation is one owner-visible step with `.4.8`'s queue,
 after coordinator-owned Arch/Mac preview and isolated contract qualification
 against the latest supported native agents. No GUI scheduler is introduced.

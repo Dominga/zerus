@@ -74,7 +74,6 @@ fn create(tx: &Transaction<'_>) -> Result<()> {
       CREATE UNIQUE INDEX desktop_task_control_executor ON desktop_task_control_slots(executor) WHERE active=1;
       CREATE UNIQUE INDEX desktop_task_control_task ON desktop_task_control_slots(project,task) WHERE active=1;
       CREATE INDEX desktop_task_control_slots_page ON desktop_task_control_slots(active,seq);
-      CREATE INDEX desktop_task_control_attempt ON desktop_task_control_slots(json_extract(payload,'$.attempt.attempt')) WHERE active=1;
       CREATE TABLE desktop_task_control_requests(
         seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,executor TEXT NOT NULL,payload TEXT NOT NULL);
       CREATE INDEX desktop_task_control_requests_page ON desktop_task_control_requests(executor,seq);
@@ -98,34 +97,6 @@ fn create(tx: &Transaction<'_>) -> Result<()> {
 }
 
 impl Store<'_> {
-    /// Begin carries an immutable attempt UUID, not a current executor hint.
-    /// At most two indexed hits are read; ambiguity refuses rather than
-    /// selecting by sequence, a label, the latest run or a document scan.
-    pub fn slot_for_attempt(&self, attempt: &str) -> Result<Option<Slot>> {
-        uuid(attempt)?;
-        let mut statement = self.db.prepare(&format!(
-            "SELECT CASE WHEN length(CAST(payload AS BLOB))<={RECORD_BYTES} THEN payload END
-             FROM desktop_task_control_slots
-             WHERE json_extract(payload,'$.attempt.attempt')=?1 AND active=1 LIMIT 2"
-        ))?;
-        let mut rows = statement.query([attempt])?;
-        let Some(row) = rows.next()? else {
-            return Ok(None);
-        };
-        let payload: Option<String> = row.get(0)?;
-        let slot: Slot = serde_json::from_str(&payload.context("oversized task-control slot")?)?;
-        slot.validate()?;
-        ensure!(
-            slot.attempt.attempt == attempt,
-            "original task-control attempt changed"
-        );
-        ensure!(
-            rows.next()?.is_none(),
-            "ambiguous original task-control attempt; review required"
-        );
-        Ok(Some(slot))
-    }
-
     pub fn slot(&self, executor: &Executor) -> Result<Option<Slot>> {
         let value = read(
             self.db,

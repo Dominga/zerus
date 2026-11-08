@@ -13,16 +13,21 @@ use std::{
 use zerus_desktop_ledger::task_controls::TASK_CONTROLS;
 
 type Result<T> = std::result::Result<T, String>;
-pub(super) struct Writer {
+pub(in crate::state) struct Writer {
     root: Directory,
     guard: storage::Guard,
     until: Instant,
 }
-pub(super) fn open(root: &Path, until: Instant) -> Result<Option<Writer>> {
+pub(in crate::state) fn open(root: &Path, until: Instant) -> Result<Option<Writer>> {
     if !TASK_CONTROLS {
         return Ok(None);
     }
     Writer::open_enabled(root, until).map(Some)
+}
+
+#[cfg(test)]
+pub(in crate::state) fn test_open(root: &Path, until: Instant) -> Result<Writer> {
+    Writer::open_enabled(root, until)
 }
 impl Writer {
     fn open_enabled(root: &Path, until: Instant) -> Result<Self> {
@@ -76,7 +81,9 @@ impl Writer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, fs::OpenOptions};
+    #[cfg(unix)]
+    use std::fs;
+    use std::fs::OpenOptions;
     fn fixture() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         platform::restrict_dir(dir.path()).unwrap();

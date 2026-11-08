@@ -3,4 +3,4 @@
 #![allow(dead_code)] // Removed as the runtime entry points are connected.
 pub(crate) mod observation;
 mod stop_facts;
-mod writer;
+pub(in crate::state) mod writer;

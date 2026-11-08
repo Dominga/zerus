@@ -19,6 +19,23 @@ pub(in crate::state) fn fail_publication_sync(path: Option<PathBuf>) {
 }
 
 impl Directory {
+    /// Namespace durability, rather than the platform's compatibility no-op.
+    /// A caller requiring this proof must retain Unknown when unavailable.
+    pub(in crate::state) fn sync(&self) -> Result<()> {
+        self.verify()?;
+        #[cfg(unix)]
+        {
+            self.file.sync_all().map_err(|e| e.to_string())?;
+            #[cfg(test)]
+            if SYNC_FAILURE.with(|slot| slot.borrow().as_ref() == Some(&self.path)) {
+                return Err("fixture directory sync failure".into());
+            }
+            self.verify()
+        }
+        #[cfg(windows)]
+        Err("Native namespace durability is unverified on this computer".into())
+    }
+
     /// The native writer already exists. Task-control admission must not
     /// create it or follow an alias while trying to acquire its exclusion.
     pub(in crate::state) fn existing_private_lock(&self, name: &str) -> Result<File> {

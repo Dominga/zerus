@@ -25,6 +25,7 @@ pub(crate) struct OriginalDone {
     invocation: Invocation,
     receipt: Value,
     original_call: Weak<OriginalCall>,
+    completion: Arc<run::Completion>,
     not_after: std::time::Instant,
 }
 impl OriginalDone {
@@ -34,8 +35,10 @@ impl OriginalDone {
     }
     /// This ONE original Terminate call only. Not a general undrained-work
     /// exception: each later mutator/loan has its own physical settlement gate.
+    /// Done is constructed only after the synchronous original runner returns;
+    /// Completion separately proves its child and retained I/O workers.
     pub(crate) fn original_call_joined(&self) -> bool {
-        self.original_call.upgrade().is_none()
+        self.completion.join() == run::Retirement::Retired && self.original_call.upgrade().is_none()
     }
     pub(crate) fn current(&self) -> bool {
         std::time::Instant::now() < self.not_after && self.context.current()
@@ -103,15 +106,16 @@ impl Controller {
             _source: source,
         });
         let original_call = Arc::downgrade(&call);
+        let completion = Arc::new(run::Completion::new());
         let current = self.context.clone();
         let command = helper_invocation(invocation);
-        let exit = run::run_accounted_frozen(
+        let exit = run::run_accounted_frozen_with_completion(
             self.context.image.executable(),
             &command,
             &self.context.environment,
             NATIVE_RECEIPT_LIMIT,
             &AtomicBool::new(false),
-            call,
+            (call, Some(completion.clone())),
             move |command| current.spawn(command),
         )
         .ok()
@@ -135,6 +139,7 @@ impl Controller {
             invocation: self.invocation.clone(),
             receipt: receipt.clone(),
             original_call,
+            completion,
             not_after,
         };
         (outcome, Some(source))

@@ -330,10 +330,7 @@ fn explicit_discard_only_retires_the_exact_never_offered_metadata() {
     let f = Fixture::new();
     drop(prepared(&f));
     let original = fs::read(&f.file).unwrap();
-    assert_eq!(
-        retry_busy(|| saved(&f).discard_prepared(NEXT)),
-        Err(Error::Unavailable)
-    );
+    assert_eq!(saved(&f).discard_prepared(NEXT), Err(Error::Unavailable));
     assert_eq!(saved(&f).phase(), Phase::Prepared);
     // The original outbox may have changed or gone away. This API discards
     // only confirmed never-offered journal metadata, not that outbox.
@@ -369,7 +366,7 @@ fn explicit_discard_only_retires_the_exact_never_offered_metadata() {
     drop(next);
     let bytes = fs::read(f.file.with_extension("reconcile")).unwrap();
     assert_eq!(
-        retry_busy(|| saved(&f).discard_prepared(&next_id)),
+        saved(&f).discard_prepared(&next_id),
         Err(Error::OfferedUnknown)
     );
     assert_eq!(fs::read(f.file.with_extension("reconcile")).unwrap(), bytes);
@@ -429,16 +426,15 @@ fn missing_journal_beside_its_original_lock_never_creates_another_reconciliation
     )
     .is_err());
     assert_eq!(
-        retry_busy(|| Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(NEXT)))
-            .err(),
+        Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(NEXT)).err(),
         Some(Error::Unavailable)
     );
     assert_eq!(
-        retry_busy(|| Journal::prepare_after_discard(
+        Journal::prepare_after_discard(
             f.capture().unwrap(),
             &CheckId::fixture_initial(NEXT),
             &f.intent.reconcile_id
-        ))
+        )
         .err(),
         Some(Error::Unavailable)
     );

@@ -2408,7 +2408,6 @@
   " from #%1": " от #%1",
   "Continues attempt %1 - nothing was revoked": "Продолжает попытку %1 — ничего не отменено",
   "attempt recovered": "попытка восстановлена",
-  " · from #%1": " — от #%1",
   "Lead's changes": "Изменения лида",
   "Revert the newest change: %1": "Отменить последнее изменение: %1"
 }

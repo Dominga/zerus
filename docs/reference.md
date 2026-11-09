@@ -10387,6 +10387,12 @@ it makes, not one the lead must remember.
   (`.uproject`, `.uplugin`, `Content/`, `Binaries/`), the test subsystem's
   suite providers and whether `[merge_queue]` is on, and the folder's branch
   (the integration line at planning).
+  Task #451 (owner, 2026-11-09): files under `design/`, a docs image (an image
+  extension under `docs/`) and files under `tests/fixtures/` are
+  **previews** - they count in the tracked files and bytes, never as binaries,
+  large assets or engine markers. A source repository with many suites and source
+  files is never proposed one shared folder because of its design previews,
+  docs screenshots or fixtures.
 - The **presets**:
   - `branch-pipeline` - a branch per task cut from `base_branch` (the
     integration line), the `code` pipeline (review -> tests), accepted work
@@ -10403,9 +10409,10 @@ it makes, not one the lead must remember.
     with no test subsystem.
   - `shared-folder` - one folder for every member, the soft file locks per task
     output (task 155), no branches or merges, the build broker for builds. It
-    pays for a binary or asset project: 2 GiB or more tracked, 512 MiB or more of
-    binaries, a binary share of 20% or more, Git LFS, 20 or more large assets, or
-    an engine project.
+    pays for a binary or asset project, and task #451 requires a real signal:
+    Git LFS, engine markers, 20 or more large assets (binaries of 5 MiB or
+    more), 2 GiB or more tracked, 512 MiB or more of binaries or a binary share
+    of 20% or more - with the previews above never counted.
 - **Writing it**. The settings a preset writes are `branch_per_task`
   (`task/{id}`), `base_branch` and `folder_policy` (`worktree`) for the branch
   presets, and `folder_policy` `shared`, no branch per task, the build broker for
@@ -10435,6 +10442,17 @@ it makes, not one the lead must remember.
   `hgs team settings` for the fields the lead cannot change). A card whose mode
   is already in force, or whose project now profiles to another mode, withdraws
   by itself.
+  Task #451 (owner, 2026-11-09): the block's own press answers. **Propose the
+  switch** is the owner's own `hgs team propose` (`kind:"working-mode"`,
+  `preset:"auto"`), so it may propose without the lead; hgs re-reads the
+  project's profile, replaces the cached proposal the block showed with it, and
+  answers `{"status":"proposed", ...}` with the card, or
+  `{"status":"already", "working_mode":...}` when the settings already follow
+  the project (no card; the block leaves by itself). A refusal shows its reason.
+  The tick re-reads a cached profile older than ten minutes
+  (`MODE_CHECK_SECONDS`) while a block is showing, so a block left over from an
+  older profile or an older hgs stops proposing the wrong mode. Keep hides the
+  block only after hgs kept it; a failed call keeps it with its reason.
 - The lead guide (`hgs guide team-lead`) is size-bounded; the presets and their
   reasons are read from the draft and `hgs team status` instead.
 

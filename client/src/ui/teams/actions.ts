@@ -790,10 +790,15 @@ export class TeamActions {
     return this.run(`discard-phase:${phase}`, { kind: "discard_phase", phase, tasks, accepted: state === "queued" || state === "running" });
   }
   returnToDraft(phase: number) { return this.run(`return-to-draft:${phase}`, { kind: "return_to_draft", phase }); }
-  /** Task #308: asks the owner to allow the project's working mode. */
-  proposeWorkingMode(preset: string, reason = "") {
-    return this.run(`working-mode:${preset}`, { kind: "propose_working_mode", preset, reason },
-      { name: "teamWorkingModeConfirm", title: tr("Switch the working mode?"), text: tr("Propose switching this team to %1? Its settings follow the project's proposal.", preset), action: tr("Propose the switch") });
+  /**
+   * Task #308/#451: the working-mode block's Propose the switch. "auto" asks
+   * hgs to re-read the project's profile, so a block left over from an older
+   * profile proposes the mode the project selects now, never a stale preset;
+   * the receipt says whether a card was made or the settings already follow it.
+   */
+  proposeWorkingMode() {
+    return this.run("working-mode:propose", { kind: "propose_working_mode", preset: "auto", reason: "" },
+      { name: "teamWorkingModeConfirm", title: tr("Switch the working mode?"), text: tr("Ask hgs to re-read the project's profile and propose the working mode it selects? You decide the switch on its card."), action: tr("Propose the switch") });
   }
   /**
    * Task #337: the owner keeps the team's settings for the project's profile;

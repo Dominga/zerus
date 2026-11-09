@@ -258,10 +258,12 @@ describe("task card", () => {
     expect(moveTargets(team(), 1)).toEqual([]);
   });
 
-  it("Task #308: proposes the project's working mode with its reason", async () => {
+  it("Task #308/#451: proposes the project's working mode as it is now", async () => {
     const f = fake();
-    await actionsOf(f, team()).proposeWorkingMode("branch-pipeline", "A code repository with tests");
-    expect(f.sent.at(-1)?.action).toEqual({ kind: "propose_working_mode", preset: "branch-pipeline", reason: "A code repository with tests" });
+    await actionsOf(f, team()).proposeWorkingMode();
+    // Task #451: never a cached preset: hgs re-reads the project's profile and
+    // proposes the mode it selects now, so a stale block corrects itself.
+    expect(f.sent.at(-1)?.action).toEqual({ kind: "propose_working_mode", preset: "auto", reason: "" });
     expect(f.asked.at(-1)).toMatchObject({ name: "teamWorkingModeConfirm" });
   });
 

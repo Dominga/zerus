@@ -675,7 +675,9 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
                     super::working_mode::apply(&mut settings, &preset, &proposal.profile.branch)?;
                     working_mode = preset;
                 }
-                Some(proposal.value())
+                let mut cached = proposal.value();
+                cached["checked_at"] = json!(now());
+                Some(cached)
             }
             None if mode == "auto" => Some(json!({"preset":""})),
             None => bail!("The working mode needs a Git repository to profile: {}", folder.display()),
@@ -5833,7 +5835,9 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
             let folder = std::path::PathBuf::from(team.folder.trim());
             match super::working_mode::propose(&folder) {
                 Some(proposal) => {
-                    team.mode_proposal = Some(proposal.value());
+                    let mut cached = proposal.value();
+                    cached["checked_at"] = json!(now());
+                    team.mode_proposal = Some(cached);
                     let preset = match team.working_mode.trim() {
                         "" | "auto" => proposal.preset.clone(),
                         "none" => String::new(),
@@ -6017,8 +6021,14 @@ fn install_tool_change(team: &Team, input: &Value) -> anyhow::Result<Value> {
 
 /// F8: the lead proposes a membership change; the owner decides.
 fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
-    ensure!(actor.is_lead(team), "Only the lead proposes a change to your team");
     let kind = text(input, "kind").to_owned();
+    // Task #451 (owner, 2026-11-09): the working-mode block's Propose the
+    // switch is the owner's own press; its card is the owner's to allow, so it
+    // does not need a lead. Every other kind stays the lead's to propose.
+    ensure!(
+        actor.is_lead(team) || (kind == "working-mode" && *actor == Actor::Human),
+        "Only the lead proposes a change to your team"
+    );
     ensure!(
         ["add-member", "remove-member", "swap-member", "next-goal", "switch-plan-mode",
          "add-to-phase", "cancel-tasks", "discard-phase", "question", "switch-setting", "iron-rules", "install-tool",
@@ -6027,9 +6037,9 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
         "A proposal is one of: add-member, remove-member, swap-member, next-goal, switch-plan-mode, add-to-phase, cancel-tasks, discard-phase, question, switch-setting, iron-rules, install-tool, working-mode, {}",
         OWNER_OPS.join(", ")
     );
-    let reason = clean(text(input, "reason").trim(), 2000, "A proposal reason")?;
+    let mut reason = clean(text(input, "reason").trim(), 2000, "A proposal reason")?;
     // #740: a question carries its own words; any other proposal its reason.
-    ensure!(!reason.is_empty() || kind == "question", "A proposal needs its reason");
+    ensure!(!reason.is_empty() || kind == "question" || kind == "working-mode", "A proposal needs its reason");
     // U59: a plan-mode proposal names the mode.
     let mut mode = String::new();
     // Task #58: a plan-mode proposal that names a phase switches that phase only.
@@ -6084,11 +6094,18 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
         },
         // Task 270 (owner, 2026-11-08): the working mode follows the project;
         // the card carries the preset, the settings it writes and its reasons.
+        // Task #451 (owner, 2026-11-09): "auto" (or no preset) is the profile as
+        // it is now, re-read on the press, and the cached proposal the block
+        // showed is replaced by it. The settings already following the project
+        // make no card: the receipt says so, and the block goes away.
         "working-mode" => {
-            let preset = text(input, "preset").trim().to_lowercase();
+            if reason.is_empty() {
+                reason = "the working-mode block's Propose the switch".to_owned();
+            }
+            let requested = text(input, "preset").trim().to_lowercase();
             ensure!(
-                super::working_mode::PRESETS.contains(&preset.as_str()),
-                "A working-mode proposal names one of: {}",
+                requested.is_empty() || requested == "auto" || super::working_mode::PRESETS.contains(&requested.as_str()),
+                "A working-mode proposal names one of: {}, or auto",
                 super::working_mode::PRESETS.join(", ")
             );
             ensure!(
@@ -6098,7 +6115,32 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
             let folder = std::path::PathBuf::from(team.folder.trim());
             let proposal = super::working_mode::propose(&folder)
                 .context("The project cannot be profiled: its folder is not a Git repository")?;
+            let preset = if requested.is_empty() || requested == "auto" { proposal.preset.clone() } else { requested };
+            // #451: a stale lead step (a preset the project no longer profiles
+            // to) is refused with the mode the project selects now, not turned
+            // into a card that would withdraw at once.
+            ensure!(
+                preset == proposal.preset,
+                "The project's profile selects {} now, not {preset}",
+                proposal.preset
+            );
             mode = preset.clone();
+            // The block's next read shows the profile as it is now, not the one
+            // cached when the team was planned.
+            let mut fresh = proposal.value();
+            fresh["checked_at"] = json!(now());
+            team.mode_proposal = Some(fresh);
+            let wrong = super::working_mode::wrong_settings(team, &preset);
+            if wrong.is_empty() {
+                events.push(Event::new("working_mode_current", json!({"preset":preset,"by":actor.label(team)})));
+                return Ok(json!({
+                    "status":"already",
+                    "working_mode":preset,
+                    "title":proposal.title,
+                    "reasons":proposal.reasons,
+                    "settings":super::working_mode::settings_for(&preset, &proposal.profile),
+                }));
+            }
             json!({"preset":preset,"settings":super::working_mode::settings_for(&preset, &proposal.profile),
                 "base_branch":proposal.profile.branch,"reasons":proposal.reasons})
         }

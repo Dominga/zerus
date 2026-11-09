@@ -844,9 +844,11 @@ export function PlanView(props: PlanViewProps): JSX.Element {
                   <Dropdown class="pm-heat-pick" aria-label={tr("Heat")} value={heatMode()} onChange={(next) => switchHeat(next as HeatMode)}
                     options={[{ value: "off", label: tr("Off") }, { value: "time", label: tr("Lateness") }, { value: "tokens", label: tr("Tokens") }]} />
                 </label>
-                <Show when={finishedCount() > 0 || hideFinished()}>
+                {/* Owner, 2026-11-10: it also hides accepted tasks (task 342), so it shows
+                    whenever a task is accepted, not only once a whole phase is decided. */}
+                <Show when={finishedCount() > 0 || hideFinished() || props.team.tasks.some((task) => task.status === "accepted")}>
                   <button type="button" class="pm-toggle" classList={{ on: hideFinished() }} aria-pressed={hideFinished()} data-toggle="finished"
-                    title={finishedCount() === 1 ? tr("1 phase has every task decided") : tr("%1 phases have every task decided", finishedCount())}
+                    title={finishedCount() === 0 ? tr("Hide accepted tasks") : finishedCount() === 1 ? tr("1 phase has every task decided") : tr("%1 phases have every task decided", finishedCount())}
                     onClick={() => switchHide(!hideFinished())}>
                     <Icon name="eye-off" size={12} />{tr("Hide finished")}
                   </button>

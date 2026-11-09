@@ -178,6 +178,8 @@ describe("the plan's Graph, Board and Layers (task 197)", () => {
     expect(html).not.toContain('class="pm-heat-mode"');
     expect(html).toContain("Auto-accept drafts");
     expect(html).toContain('data-toggle="auto-accept"');
+    // Owner, 2026-11-10: Hide finished shows while a task is accepted, before any phase is decided.
+    expect(html).toContain('data-toggle="finished"');
     expect(html).toContain('aria-pressed="false"');
     expect(html).toContain('data-zoom="1"');
     expect(html).toContain("Fit");

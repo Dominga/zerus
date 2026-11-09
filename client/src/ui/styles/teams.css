@@ -46,6 +46,7 @@
   .team-progress .submitted { background: color-mix(in srgb, var(--z-color-accent-muted) 55%, transparent); }
   .team-progress .active { background: var(--z-color-accent); }
   .team-progress .problem { background: var(--z-color-warn); }
+  .team-progress .rest { background: transparent; }
   .team-count { color: var(--z-color-text-2); white-space: nowrap; }
   .team-age { white-space: nowrap; flex: none; }
   .team-bar-actions { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; position: relative; }

@@ -83,6 +83,9 @@ export function TeamBar(props: {
     { key: "submitted", n: counts().submitted },
     { key: "active", n: counts().active },
     { key: "problem", n: counts().problems },
+    // Owner, 2026-11-10: the tasks not yet in work keep their share of the
+    // track, so 6 of 17 never fills the whole bar.
+    { key: "rest", n: Math.max(0, counts().total - counts().accepted - counts().submitted - counts().active - counts().problems) },
   ].filter((segment) => segment.n > 0);
   const countsTip = () => [tr("Accepted %1", counts().accepted), tr("Submitted %1", counts().submitted),
     tr("In progress %1", counts().active), tr("Problems %1", counts().problems)].join(", ");

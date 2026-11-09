@@ -234,6 +234,8 @@ export interface NotificationOwnership {
   native_recovery?: boolean;
   /** Task 180: the check that refused the native takeover, by its fixed code. */
   native_recovery_reason?: { code: string; check: string };
+  /** Task #440: when the window restarts itself to finish starting (unix ms). */
+  native_recovery_restart_at?: number;
   /** Native helper observation only; never permission to start a writer. */
   activation?: { pending: boolean; running: boolean; needs_resume: boolean; code: string;
     review?: ModeReview | null; automatic_blocked?: boolean; request_id?: string | null; active?: boolean; business_ready?: boolean;

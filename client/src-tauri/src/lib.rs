@@ -194,6 +194,9 @@ mod startup_error;
 mod second_start;
 mod applog;
 mod startup_log;
+// Task #440: the window leaves startup recovery by itself.
+#[allow(dead_code)]
+mod startup_relaunch;
 // Its text needs the interface catalog, so its portable tests need `live` too.
 #[cfg(all(feature = "live", any(windows, test)))]
 mod startup_note;
@@ -881,9 +884,19 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
             // The one source of the client's data directory (Decision 5).
             app.manage(identity);
             #[cfg(all(feature = "live", any(target_os = "linux", target_os = "macos", windows)))]
-            if let Some(proof) = native_ownership { app.manage(proof); }
+            if let Some(proof) = native_ownership {
+                // Task #440: a start whose native takeover succeeded starts
+                // the relaunch count over.
+                startup_relaunch::reset(&data_dir(app.handle()));
+                app.manage(proof);
+            }
             #[cfg(all(feature = "live", any(target_os = "linux", target_os = "macos", windows)))]
-            if let Some(recovery) = startup.native_recovery { app.manage(recovery); }
+            if let Some(recovery) = startup.native_recovery {
+                // Task #440: a window in startup recovery re-checks with
+                // backoff and leaves it by itself (startup_relaunch).
+                startup_relaunch::watch(app.handle().clone(), recovery.reason);
+                app.manage(recovery);
+            }
             #[cfg(feature = "live")]
             {
                 let dir = data_dir(app.handle());

@@ -5805,6 +5805,7 @@
   "Zerus no longer tracks this folder. Review again to see what remains.": "Zerus больше не отслеживает эту папку. Проверьте снова, чтобы увидеть, что осталось.",
   "Zerus notice": "Уведомление Zerus",
   "Zerus removes only the build folders it created or was told to use, never a folder of yours, never sources, and never a folder a build or test is using; a removal that may have half happened waits for your review.": "Zerus удаляет только папки сборки, которые сам создал или которые ему указали, никогда ваши папки, никогда исходники и никогда папку, которой пользуется сборка или тест; удаление, которое могло пройти наполовину, ждёт вашей проверки.",
+  "Zerus restarts its window to finish starting. Your drafts are saved.": "Zerus перезапускает окно, чтобы завершить запуск. Черновики сохранены.",
   "Zerus runs the %1 stage's command": "Zerus выполняет команду стадии «%1»",
   "Zerus runs your sessions through a background service, which is paused on this computer. Settings shows its current state.": "Zerus работает с сессиями через фоновый сервис, который на этом компьютере приостановлен. Его текущее состояние показано в настройках.",
   "Zerus runs your sessions through a background service, which stays paused until you resume it.": "Zerus работает с сессиями через фоновый сервис. Он остаётся приостановленным, пока вы его не возобновите.",

@@ -982,6 +982,32 @@ impl Store {
 
 // Kept separate so the schema-34 ceiling can be exercised against a real
 // migrated store. This is the same read-only refusal older binaries use.
+/// Task #440: whether a start would get past the store and its rollback
+/// backup, read-only: the schema probe and the backup folder's state, nothing
+/// written, no lock taken. The window re-checks this after its takeover's
+/// desktop service child failed, before it starts itself again.
+pub(super) fn store_check(location: &Location) -> serde_json::Value {
+    let path = location.root.join("state.sqlite3");
+    let schema = match schema_before_write(&path, SCHEMA) {
+        Ok(schema) => schema,
+        Err(_) => return serde_json::json!({"opens":false,"code":"schema_refused"}),
+    };
+    let backup = location.root.join("schema-34-rollback");
+    let code = match schema {
+        Some(1..=34) => match std::fs::read_dir(&backup) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => "backup_needed",
+            Err(_) => "backup_unreadable",
+            Ok(mut entries) if entries.next().is_none() => "empty_leftover",
+            Ok(_) if backup.join("manifest.json").is_file() => "backup_present",
+            Ok(_) => "backup_incomplete",
+        },
+        Some(_) => "current",
+        None => "absent",
+    };
+    let opens = !matches!(code, "backup_incomplete" | "backup_unreadable");
+    serde_json::json!({"opens":opens,"code":code,"schema":schema})
+}
+
 fn schema_before_write(path: &Path, maximum: i64) -> Result<Option<i64>> {
     if !path.try_exists()? {
         return Ok(None);

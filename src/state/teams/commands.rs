@@ -856,6 +856,7 @@ pub(crate) fn bound_status(value: &mut Value, team: &Team) {
                 object.remove("added");
                 object.remove("removed");
                 object.remove("changed");
+                object.remove("phases_changed");
             }
             if let Some(summary) = change.get("summary").and_then(|summary| summary.as_str()) {
                 let clipped = clip(summary, 300);

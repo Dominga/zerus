@@ -849,7 +849,7 @@ impl Store {
     fn live_task(&self, team: &str, task: u32) -> anyhow::Result<Option<Value>> {
         if self.layout()? {
             let layout: Option<i64> = self.db.query_row("SELECT layout FROM teams WHERE id=?1", params![team], |row| row.get(0)).optional()?.flatten();
-            if layout == Some(rows::ROWS) {
+            if rows::is_rows(layout) {
                 let head: Option<String> = self.db.query_row(
                     "SELECT CASE WHEN length(CAST(payload AS BLOB))<=8388608 THEN payload ELSE NULL END FROM team_tasks WHERE team=?1 AND task=?2",
                     params![team, task], |row| row.get::<_, Option<String>>(0)).optional()?.flatten();
@@ -1278,6 +1278,7 @@ impl Store {
         let input = request.map_or(Value::Null, |(_, input)| input.clone());
         restore_phase(&transaction, &mut team, &input)?;
         resolve_dependencies(&transaction, &mut team, &input)?;
+        load_lead_change(&transaction, &mut team, &input)?;
         let mut events = Vec::new();
         let mut receipt = change(&mut team, &mut events)?;
         let at = now();
@@ -1582,6 +1583,19 @@ fn restore_phase(db: &Connection, team: &mut Team, input: &Value) -> anyhow::Res
 
 /// Resolve referenced missing dependencies, prerequisites and origins by archive primary key.
 /// This one helper serves loads and mutations, including proposed input.
+/// Task #4 (team ede724c4): the snapshots of the lead change a request names
+/// (`revert-lead-change`), read from `team_lead_changes` into the team before
+/// the change runs; the write puts them back into their row's keeping.
+fn load_lead_change(db: &Connection, team: &mut Team, input: &Value) -> anyhow::Result<()> {
+    let Some(id) = input["change"].as_str().map(str::trim) else { return Ok(()) };
+    let Some(change) = team.lead_changes.iter_mut().find(|change| change.id == id && change.history_missing()) else { return Ok(()) };
+    if let Some(history) = rows::lead_change_history(db, &team.id, id)? {
+        change.tasks_before = history.tasks_before;
+        change.phases_before = history.phases_before;
+    }
+    Ok(())
+}
+
 fn resolve_dependencies(db: &Connection, team: &mut Team, input: &Value) -> anyhow::Result<()> {
     let mut ids: std::collections::BTreeSet<u32> = team
         .tasks
@@ -2824,6 +2838,219 @@ mod tests {
             );
         }
         println!("{}", json!({"task":288,"team":target,"record_bytes":bytes,"lock_held":measured}));
+    }
+
+    /// Task #4 (team ede724c4): a team with lead changes whose snapshots are
+    /// in memory, as an ops change records them.
+    fn team_with_lead_changes(id: &str) -> Team {
+        use super::super::model::LeadChange;
+        let mut team = big_team(id, 5, 1);
+        team.phases.push(Phase { n: 1, tasks: vec![1, 2, 3, 4, 5], ..Default::default() });
+        for n in 1..=3u32 {
+            let mut before = team.tasks[n as usize].clone();
+            before.title = format!("Before change {n}");
+            team.lead_changes.push(LeadChange {
+                id: format!("lc{n}"),
+                op: "edit-draft".into(),
+                summary: format!("edited #{} Task {}", before.id, before.id),
+                by: "lead".into(),
+                at: f64::from(n),
+                tasks_before: vec![before],
+                phases_before: vec![Phase { n: 1, tasks: vec![1, 2, 3], ..Default::default() }],
+                ..Default::default()
+            });
+        }
+        team.lead_changes.push(LeadChange { id: "lc4".into(), op: "use-last-reply".into(), summary: "a report".into(), by: "lead".into(), at: 4.0, ..Default::default() });
+        team
+    }
+
+    /// Rewrites a stored team as task 288's layout 2 holds it: the whole head
+    /// with the lead changes' snapshots, no `team_lead_changes` rows.
+    fn as_task_288(store: &Store, team: &Team, payload: Option<&str>) {
+        let mut head = serde_json::to_value(team).unwrap();
+        head["tasks"] = json!("stored in team_tasks (Zerus team store layout 2): this hgs is too old to read this team");
+        head["revision"] = json!(0);
+        head["updated"] = json!(0.0);
+        let head = payload.map_or_else(|| head.to_string(), str::to_owned);
+        store.db.execute("UPDATE teams SET payload=?2,layout=2 WHERE id=?1", params![team.id, head]).unwrap();
+        store.db.execute("DELETE FROM team_lead_changes WHERE team=?1", params![team.id]).unwrap();
+    }
+
+    fn history_rows(store: &Store, team: &str) -> i64 {
+        store.db.query_row("SELECT COUNT(*) FROM team_lead_changes WHERE team=?1", params![team], |row| row.get(0)).unwrap()
+    }
+
+    /// Task #4 (team ede724c4): a team of task 288's layout 2 moves its lead
+    /// changes' snapshots to `team_lead_changes` at the next write open, one
+    /// transaction a team; the task rows stay; the view keeps every change's
+    /// summary fields and the ids it changed, and the snapshots read back on
+    /// demand. A team that cannot migrate never fails the open and migrates
+    /// at a later open; a second open migrates nothing; an hgs of task 288
+    /// refuses the migrated head.
+    #[test]
+    fn a_layout_2_team_moves_its_lead_change_history_to_rows_once() {
+        let (dir, mut store) = store();
+        let path = dir.path().join("teams/teams.sqlite3");
+        let original = team_with_lead_changes("t1");
+        store.create(REQUEST, &json!({}), original.clone(), vec![]).unwrap();
+        store.create("22222222-2222-4222-8222-222222222222", &json!({}), team_with_lead_changes("t2"), vec![]).unwrap();
+        assert_eq!(history_rows(&store, "t1"), 3, "a new team keeps its snapshots in rows");
+        // As this hgs keeps it in memory: the ids instead of the snapshots.
+        let expected = store.load("t1").unwrap().unwrap();
+        assert!(expected.lead_changes.iter().all(|change| change.tasks_before.is_empty() && change.phases_before.is_empty()));
+        assert_eq!((expected.lead_changes[0].changed.clone(), expected.lead_changes[0].phases_changed.clone()), (vec![2], vec![1]));
+        let with_history = |team: &Team| {
+            let mut old = team.clone();
+            old.lead_changes = original.lead_changes.clone();
+            old
+        };
+        let t2 = store.load("t2").unwrap().unwrap();
+        let tasks_written: i64 = store.db.query_row("SELECT MAX(rev) FROM team_tasks WHERE team='t1'", [], |row| row.get(0)).unwrap();
+        as_task_288(&store, &with_history(&expected), None);
+        // t2's head is unreadable: it stays as it is and never fails the open.
+        as_task_288(&store, &t2, Some("{not json"));
+        let old_head: String = store.db.query_row("SELECT payload FROM teams WHERE id='t1'", [], |row| row.get(0)).unwrap();
+        assert!(old_head.contains("tasks_before"));
+        drop(store);
+        take_lock_lines();
+        let store = Store::open_at(&path, true).unwrap();
+        assert_eq!(take_lock_lines().len(), 2, "one transaction a team");
+        let (layout, head): (i64, String) = store.db.query_row("SELECT layout,payload FROM teams WHERE id='t1'", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(layout, rows::ROWS);
+        assert!(!head.contains("tasks_before") && !head.contains("phases_before"), "{head}");
+        assert!(head.contains(r#""changed":[2]"#) && head.contains(r#""phases_changed":[1]"#), "{head}");
+        assert!(head.len() * 2 < old_head.len(), "{} of {} bytes", head.len(), old_head.len());
+        assert_eq!(history_rows(&store, "t1"), 3);
+        let rewritten: i64 = store.db.query_row("SELECT MAX(rev) FROM team_tasks WHERE team='t1'", [], |row| row.get(0)).unwrap();
+        assert_eq!(rewritten, tasks_written, "the task rows stay as they were");
+        let loaded = store.load("t1").unwrap().unwrap();
+        assert_eq!(serde_json::to_value(&loaded).unwrap(), serde_json::to_value(&expected).unwrap());
+        let history = rows::lead_change_history(&store.db, "t1", "lc2").unwrap().unwrap();
+        assert_eq!((history.tasks_before, history.phases_before), (original.lead_changes[1].tasks_before.clone(), original.lead_changes[1].phases_before.clone()));
+        // An hgs of task 288 reads a layout other than 2 as a whole record: refused.
+        assert!(serde_json::from_str::<Team>(&head).is_err(), "an older hgs refuses the head");
+        let left: Option<i64> = store.db.query_row("SELECT layout FROM teams WHERE id='t2'", [], |row| row.get(0)).unwrap();
+        assert_eq!(left, Some(rows::TASK_ROWS), "the unreadable team stays for a later open");
+        // Resumes: once t2 reads, the next open migrates t2 alone.
+        as_task_288(&store, &with_history(&t2), None);
+        drop(store);
+        let store = Store::open_at(&path, true).unwrap();
+        assert_eq!(take_lock_lines().len(), 1, "only the team left");
+        assert_eq!(history_rows(&store, "t2"), 3);
+        drop(store);
+        let mut store = Store::open_at(&path, true).unwrap();
+        assert!(take_lock_lines().is_empty(), "a second open migrates nothing");
+        // A read-only store reads the same team.
+        let reader = Store::open_at(&path, false).unwrap();
+        assert_eq!(serde_json::to_value(reader.load("t1").unwrap().unwrap()).unwrap(), serde_json::to_value(&loaded).unwrap());
+        // A head change leaves the history rows alone; a trimmed change loses its row.
+        store
+            .mutate(None, "t1", None, |team, _| {
+                team.goal = "A new goal".into();
+                Ok(Value::Null)
+            })
+            .unwrap();
+        let revs: i64 = store.db.query_row("SELECT MAX(rev) FROM team_lead_changes WHERE team='t1'", [], |row| row.get(0)).unwrap();
+        assert!(revs < store.load("t1").unwrap().unwrap().revision as i64, "no history row rewritten");
+        store
+            .mutate(None, "t1", None, |team, _| {
+                team.lead_changes.remove(0);
+                Ok(Value::Null)
+            })
+            .unwrap();
+        assert_eq!(history_rows(&store, "t1"), 2);
+        // The whole-record layout (task ids that repeat) carries the snapshots
+        // again, and no row is left behind.
+        store
+            .mutate(None, "t1", None, |team, _| {
+                team.tasks[1].id = team.tasks[0].id;
+                Ok(Value::Null)
+            })
+            .unwrap();
+        let whole: String = store.db.query_row("SELECT payload FROM teams WHERE id='t1'", [], |row| row.get(0)).unwrap();
+        let whole: Team = serde_json::from_str(&whole).unwrap();
+        assert_eq!(whole.lead_changes[0].tasks_before, original.lead_changes[1].tasks_before);
+        assert_eq!(history_rows(&store, "t1"), 0);
+    }
+
+    /// Task #4's measurement on `ZERUS_STORE_COPY` (read only; copied with
+    /// VACUUM INTO): the largest team's head before and after the migration,
+    /// the migration's lock hold, and that its lead changes, status view and a
+    /// revert answer the same. `ZERUS_STORE_OUT` keeps both copies (before.sqlite3,
+    /// after.sqlite3) for timing `hgs team status` on them.
+    #[test]
+    #[ignore]
+    fn lead_change_history_on_a_copy() {
+        let Some(source) = std::env::var_os("ZERUS_STORE_COPY") else { return };
+        let live = Connection::open_with_flags(&source, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let target: String = std::env::var("ZERUS_STORE_TEAM").unwrap_or_else(|_| {
+            live.query_row("SELECT id FROM teams ORDER BY length(payload) DESC LIMIT 1", [], |row| row.get(0)).unwrap()
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let out = std::env::var_os("ZERUS_STORE_OUT").map(std::path::PathBuf::from).unwrap_or_else(|| dir.path().to_path_buf());
+        let (before, after) = (out.join("before/teams/teams.sqlite3"), out.join("after/teams/teams.sqlite3"));
+        for path in [&before, &after] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let _ = std::fs::remove_file(path);
+            live.execute("VACUUM INTO ?1", params![path.display().to_string()]).unwrap();
+        }
+        let head_bytes = |path: &Path| -> (i64, Option<i64>) {
+            Connection::open(path).unwrap().query_row("SELECT length(payload),layout FROM teams WHERE id=?1", params![target], |row| Ok((row.get(0)?, row.get(1)?))).unwrap()
+        };
+        let old = Store::open_at(&before, false).unwrap().load(&target).unwrap().unwrap();
+        take_lock_lines();
+        let started = Instant::now();
+        let store = Store::open_at(&after, true).unwrap();
+        let open_ms = started.elapsed().as_millis();
+        let held: Vec<u64> = take_lock_lines().iter().filter_map(|line| line["held_ms"].as_u64()).collect();
+        let new = store.load(&target).unwrap().unwrap();
+        let status = |team: &Team| {
+            let mut value = super::super::commands::view_with(team, &[], None);
+            super::super::commands::bound_status(&mut value, team);
+            value
+        };
+        assert_eq!(super::super::lead_plan::list(&new, 300), super::super::lead_plan::list(&old, 300), "lead-changes answers the same");
+        assert_eq!(status(&new), status(&old), "status answers the same");
+        // The newest revertible change, reverted on both: the same team (the
+        // before copy writes the whole record, as before task 288).
+        let change = new.lead_changes.iter().rev().find(|change| change.reverted_at.is_none() && change.op != "use-last-reply").map(|change| change.id.clone());
+        // The newest revertible change, reverted on both: before on the team
+        // as layout 2 holds it (the snapshots in memory), after through the
+        // migrated store (read on demand).
+        let mut reverted = Vec::new();
+        if let Some(change) = &change {
+            let input = json!({"change":change,"by":"human"});
+            let answer = |answer: anyhow::Result<Value>| {
+                answer
+                    .map(|mut value| {
+                        for key in ["request_id", "team", "revision"] {
+                            value.as_object_mut().map(|object| object.remove(key));
+                        }
+                        value
+                    })
+                    .map_err(|error| error.to_string())
+            };
+            let mut team = old.clone();
+            let done = super::super::lead_plan::revert(&mut team, &input, &super::super::ops::Actor::Human, &mut Vec::new());
+            reverted.push((answer(done), serde_json::to_value(&team.tasks).unwrap(), serde_json::to_value(&team.phases).unwrap()));
+            let mut store = Store::open_at(&after, true).unwrap();
+            let done = store.mutate(Some((&uuid::Uuid::new_v4().to_string(), &input)), &target, None, |team, events| {
+                super::super::lead_plan::revert(team, &input, &super::super::ops::Actor::Human, events)
+            });
+            let team = store.load(&target).unwrap().unwrap();
+            reverted.push((answer(done), serde_json::to_value(&team.tasks).unwrap(), serde_json::to_value(&team.phases).unwrap()));
+            assert_eq!(reverted[0].0, reverted[1].0, "the revert answers the same");
+            if reverted[0].0.is_ok() {
+                assert_eq!(reverted[0], reverted[1], "the revert restores the same");
+            }
+        }
+        drop(store);
+        let (old_bytes, old_layout) = head_bytes(&before);
+        let (new_bytes, new_layout) = head_bytes(&after);
+        let rows: i64 = Connection::open(&after).unwrap().query_row("SELECT COUNT(*) FROM team_lead_changes WHERE team=?1", params![target], |row| row.get(0)).unwrap();
+        println!("{}", json!({"task":4,"team":target,"lead_changes":new.lead_changes.len(),"history_rows":rows,
+            "head_bytes":{"before":old_bytes,"after":new_bytes},"layout":{"before":old_layout,"after":new_layout},
+            "open_ms":open_ms,"migration_held_ms":held.iter().max(),"reverted":change,"revert":reverted.first().map(|r| r.0.clone())}));
     }
 
     #[test]

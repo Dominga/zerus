@@ -442,36 +442,12 @@ impl DriveObservation {
         let initialization: Option<DriveInitWitness> =
             serde_json::from_value(value["initialization"].clone())
                 .map_err(|_| "invalid drive initialization proof")?;
-        if parent_operations.len() > 1024
-            || parent_operations
-                .iter()
-                .any(|(id, parent)| id != &parent.id || !parent.valid())
-            || initialization.as_ref().is_some_and(|proof| !proof.valid())
-        {
-            return Err("invalid drive raw proof".into());
+        if parent_operations.len() > 1024 {
+            return Err("too many raw drive parents".into());
         }
-        if operation_found {
-            let operation = operation
-                .as_ref()
-                .ok_or("missing committed drive operation")?;
-            let initialization = initialization
-                .as_ref()
-                .ok_or("missing committed drive initialization")?;
-            if !operation.valid()
-                || operation.id != operation_id.as_deref().unwrap_or_default()
-                || operation.parents.len() != parent_operations.len()
-                || operation.parents.iter().any(|id| {
-                    parent_operations.get(id).is_none_or(|parent| {
-                        parent.folder_id != operation.folder_id || parent.clock >= operation.clock
-                    })
-                })
-                || initialization.store_nonce != store_nonce.as_deref().unwrap_or_default()
-                || initialization.node_id != node_id
-                || initialization.swarm_id != swarm_id
-            {
-                return Err("drive operation proof does not match its source".into());
-            }
-        } else if operation.is_some() || !parent_operations.is_empty() || initialization.is_some() {
+        if !operation_found
+            && (operation.is_some() || !parent_operations.is_empty() || initialization.is_some())
+        {
             return Err("unexpected drive operation proof".into());
         }
         match status.as_str() {
@@ -493,7 +469,7 @@ impl DriveObservation {
         {
             return Err("an unavailable drive read is not empty authority".into());
         }
-        Ok(Self {
+        let observation = Self {
             schema: 1,
             node_id,
             swarm_id,
@@ -509,7 +485,11 @@ impl DriveObservation {
             operation,
             parent_operations,
             initialization,
-        })
+        };
+        if operation_found {
+            DriveSettlementReceipt::from_observation(&observation)?;
+        }
+        Ok(observation)
     }
 
     pub fn source_matches(&self, node_id: &str, swarm_id: &str) -> bool {
@@ -526,68 +506,25 @@ impl DriveObservation {
     }
 
     pub fn matches_request(&self, request: &DriveSetRequest, prior: &DriveObservation) -> bool {
+        let Ok(basis) = DriveSourceBasis::from_observation(prior) else {
+            return false;
+        };
+        self.matches_basis(request, &basis)
+    }
+
+    fn matches_basis(&self, request: &DriveSetRequest, basis: &DriveSourceBasis) -> bool {
         if request.validate().is_err()
+            || basis.validate(request).is_err()
             || self.status != "ready"
             || !self.complete
             || !self.source_matches(&request.expected_node_id, &request.expected_swarm_id)
-            || !prior.source_matches(&request.expected_node_id, &request.expected_swarm_id)
             || !self.contains_operation(&request.request_id)
         {
             return false;
         }
-        let Some(operation) = &self.operation else {
-            return false;
-        };
-        let Some(witness) = &self.initialization else {
-            return false;
-        };
-        let Some(folder_id) = request.desired.id.as_deref() else {
-            return false;
-        };
-        let parents = request
-            .versions
-            .get(&format!("drive_folders_v1:{folder_id}"))
-            .cloned()
-            .unwrap_or_default();
-        if operation.actor != request.expected_node_id
-            || operation.folder_id != folder_id
-            || operation.parents != parents
-            || operation
-                .value
-                .as_ref()
-                .is_none_or(|value| value.id.is_some() || !same_record(value, &request.desired))
-            || request.original.as_ref().is_some_and(|original| {
-                parents.iter().any(|id| {
-                    self.parent_operations.get(id).is_none_or(|parent| {
-                        parent
-                            .value
-                            .as_ref()
-                            .is_none_or(|value| value.id.is_some() || !same_record(value, original))
-                    })
-                })
-            })
-        {
-            return false;
-        }
-        match request.store_context {
-            DriveStoreContext::ExistingStore => {
-                self.store_nonce == request.store_nonce && prior.store_nonce == request.store_nonce
-            }
-            DriveStoreContext::TrustedFirstAdd => {
-                prior.store_nonce.is_none()
-                    && self.store_nonce.as_deref() == Some(&witness.store_nonce)
-                    && matches!(
-                        &witness.cause,
-                        Some(DriveInitCause::TrustedFirstAdd {
-                            original_request_uuid,
-                            folder_uuid,
-                            canonical_request_sha256,
-                        }) if original_request_uuid == &request.request_id
-                            && folder_uuid == folder_id
-                            && canonical_request_sha256 == &request.canonical_request_sha256
-                    )
-            }
-        }
+        DriveSettlementReceipt::from_observation(self)
+            .and_then(|receipt| receipt.matches_request(request, basis))
+            .is_ok()
     }
 }
 
@@ -615,13 +552,39 @@ fn identities(value: &Value, name: &str) -> Result<BTreeSet<String>, String> {
     Ok(values.into_iter().collect())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DriveBasisStatus {
+    Uninitialized,
+    ReadyComplete,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DriveDraft {
-    pub version: u32,
-    pub request: DriveSetRequest,
-    pub observation: DriveObservation,
-    pub settled_bytes: usize,
+struct DriveSourceBasis {
+    node_id: String,
+    swarm_id: String,
+    store_nonce: Option<String>,
+    status: DriveBasisStatus,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct DriveDraft {
+    request: DriveSetRequest,
+    basis: DriveSourceBasis,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DriveSettlementReceipt {
+    schema: u32,
+    node_id: String,
+    swarm_id: String,
+    store_nonce: String,
+    operation: DriveStatusOperation,
+    #[serde(deserialize_with = "unique_status_operations")]
+    parent_operations: BTreeMap<String, DriveStatusOperation>,
+    initialization: DriveInitWitness,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -632,15 +595,255 @@ pub struct DriveDraft {
     deny_unknown_fields
 )]
 enum DriveCheckpoint {
-    Pending(DriveDraft),
+    Pending {
+        version: u32,
+        request: DriveSetRequest,
+        basis: DriveSourceBasis,
+    },
     Settled {
         version: u32,
-        draft: DriveDraft,
-        proof: Box<DriveObservation>,
+        request: DriveSetRequest,
+        basis: DriveSourceBasis,
+        receipt: Box<DriveSettlementReceipt>,
     },
 }
 
+fn unique_status_operations<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, DriveStatusOperation>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Operations;
+    impl<'de> serde::de::Visitor<'de> for Operations {
+        type Value = BTreeMap<String, DriveStatusOperation>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a map with unique raw drive parent keys")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            let mut operations = BTreeMap::new();
+            while let Some((id, operation)) = map.next_entry::<String, DriveStatusOperation>()? {
+                if let std::collections::btree_map::Entry::Vacant(entry) = operations.entry(id) {
+                    entry.insert(operation);
+                } else {
+                    return Err(serde::de::Error::custom("duplicate raw drive parent key"));
+                }
+            }
+            Ok(operations)
+        }
+    }
+    deserializer.deserialize_map(Operations)
+}
+
+#[derive(Default)]
+struct EncodedSize(usize);
+
+impl std::io::Write for EncodedSize {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_add(bytes.len())
+            .ok_or_else(|| std::io::Error::other("drive checkpoint size overflow"))?;
+        if self.0 > MAX_DRAFT_BYTES {
+            return Err(std::io::Error::other("drive checkpoint is too large"));
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn encoded_size<T: Serialize>(value: &T) -> Result<usize, String> {
+    let mut size = EncodedSize::default();
+    serde_json::to_writer(&mut size, value).map_err(|error| error.to_string())?;
+    Ok(size.0)
+}
+
+impl DriveSourceBasis {
+    fn from_observation(observation: &DriveObservation) -> Result<Self, String> {
+        let status = match (observation.status.as_str(), observation.complete) {
+            ("uninitialized", false) if observation.store_nonce.is_none() => {
+                DriveBasisStatus::Uninitialized
+            }
+            ("ready", true) if observation.store_nonce.is_some() => DriveBasisStatus::ReadyComplete,
+            _ => return Err("drive observation is not admitted source authority".into()),
+        };
+        let basis = Self {
+            node_id: observation.node_id.clone(),
+            swarm_id: observation.swarm_id.clone(),
+            store_nonce: observation.store_nonce.clone(),
+            status,
+        };
+        if !canonical_uuid(&basis.node_id) || !canonical_uuid(&basis.swarm_id) {
+            return Err("invalid drive source basis".into());
+        }
+        Ok(basis)
+    }
+
+    fn validate(&self, request: &DriveSetRequest) -> Result<(), String> {
+        if self.node_id != request.expected_node_id
+            || self.swarm_id != request.expected_swarm_id
+            || self.store_nonce != request.store_nonce
+        {
+            return Err("drive request and original source differ".into());
+        }
+        match (request.store_context, self.status) {
+            (DriveStoreContext::TrustedFirstAdd, DriveBasisStatus::Uninitialized)
+            | (DriveStoreContext::ExistingStore, DriveBasisStatus::ReadyComplete) => Ok(()),
+            _ => Err("drive request and original initialization state differ".into()),
+        }
+    }
+}
+
+impl DriveSettlementReceipt {
+    fn from_observation(observation: &DriveObservation) -> Result<Self, String> {
+        let operation = observation
+            .operation
+            .clone()
+            .ok_or("missing drive settlement operation")?;
+        if !observation.operation_found
+            || observation.operation_id.as_deref() != Some(operation.id.as_str())
+        {
+            return Err("drive operation proof was not found".into());
+        }
+        let receipt = Self {
+            schema: observation.schema,
+            node_id: observation.node_id.clone(),
+            swarm_id: observation.swarm_id.clone(),
+            store_nonce: observation
+                .store_nonce
+                .clone()
+                .ok_or("drive settlement has no store nonce")?,
+            operation,
+            parent_operations: observation.parent_operations.clone(),
+            initialization: observation
+                .initialization
+                .clone()
+                .ok_or("missing drive initialization proof")?,
+        };
+        receipt.validate()?;
+        Ok(receipt)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.schema != 1
+            || !canonical_uuid(&self.node_id)
+            || !canonical_uuid(&self.swarm_id)
+            || !canonical_uuid(&self.store_nonce)
+            || !self.operation.valid()
+            || !self.initialization.valid()
+            || self.initialization.node_id != self.node_id
+            || self.initialization.swarm_id != self.swarm_id
+            || self.initialization.store_nonce != self.store_nonce
+            || self.operation.parents.len() != self.parent_operations.len()
+        {
+            return Err("invalid drive settlement receipt".into());
+        }
+        if self.operation.parents.iter().any(|id| {
+            self.parent_operations.get(id).is_none_or(|parent| {
+                id != &parent.id
+                    || !parent.valid()
+                    || parent.folder_id != self.operation.folder_id
+                    || parent.clock >= self.operation.clock
+            })
+        }) {
+            return Err("drive direct-parent proof is incomplete".into());
+        }
+        if encoded_size(self)? > MAX_DRAFT_BYTES {
+            return Err("drive settlement receipt is too large".into());
+        }
+        Ok(())
+    }
+
+    fn matches_request(
+        &self,
+        request: &DriveSetRequest,
+        basis: &DriveSourceBasis,
+    ) -> Result<(), String> {
+        self.validate()?;
+        basis.validate(request)?;
+        let folder_id = request.desired.id.as_deref().unwrap_or_default();
+        let parents = request
+            .versions
+            .get(&format!("drive_folders_v1:{folder_id}"))
+            .cloned()
+            .unwrap_or_default();
+        if self.node_id != request.expected_node_id
+            || self.swarm_id != request.expected_swarm_id
+            || self.operation.id != request.request_id
+            || self.operation.actor != request.expected_node_id
+            || self.operation.folder_id != folder_id
+            || self.operation.parents != parents
+            || self
+                .operation
+                .value
+                .as_ref()
+                .is_none_or(|value| value.id.is_some() || !same_record(value, &request.desired))
+            || request.original.as_ref().is_some_and(|original| {
+                parents.iter().any(|id| {
+                    self.parent_operations.get(id).is_none_or(|parent| {
+                        parent
+                            .value
+                            .as_ref()
+                            .is_none_or(|value| value.id.is_some() || !same_record(value, original))
+                    })
+                })
+            })
+        {
+            return Err("drive receipt does not match its immutable request".into());
+        }
+        match request.store_context {
+            DriveStoreContext::ExistingStore
+                if self.store_nonce != request.store_nonce.as_deref().unwrap_or_default() =>
+            {
+                return Err("drive existing-store nonce changed".into());
+            }
+            DriveStoreContext::TrustedFirstAdd
+                if !matches!(
+                    &self.initialization.cause,
+                    Some(DriveInitCause::TrustedFirstAdd {
+                        original_request_uuid,
+                        folder_uuid,
+                        canonical_request_sha256,
+                    }) if original_request_uuid == &request.request_id
+                        && folder_uuid == folder_id
+                        && canonical_request_sha256 == &request.canonical_request_sha256
+                ) =>
+            {
+                return Err("drive first-add origin does not match its request".into());
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
 impl DriveCheckpoint {
+    fn draft(&self) -> DriveDraft {
+        match self {
+            Self::Pending { request, basis, .. } | Self::Settled { request, basis, .. } => {
+                DriveDraft {
+                    request: request.clone(),
+                    basis: basis.clone(),
+                }
+            }
+        }
+    }
+
+    fn same_original(&self, draft: &DriveDraft) -> bool {
+        let actual = self.draft();
+        actual.request.request_id == draft.request.request_id
+            && actual.request == draft.request
+            && actual.basis == draft.basis
+    }
+
     fn encode(&self) -> Result<Vec<u8>, String> {
         let bytes = serde_json::to_vec(self).map_err(|error| error.to_string())?;
         if bytes.len() > MAX_DRAFT_BYTES {
@@ -649,56 +852,39 @@ impl DriveCheckpoint {
         Ok(bytes)
     }
 
+    fn validate(&self) -> Result<(), String> {
+        let (version, receipt) = match self {
+            Self::Pending { version, .. } => (*version, None),
+            Self::Settled {
+                version, receipt, ..
+            } => (*version, Some(receipt)),
+        };
+        if version != 3 {
+            return Err("unsupported drive checkpoint version".into());
+        }
+        let draft = self.draft();
+        preflight(&draft)?;
+        if let Some(receipt) = receipt {
+            receipt.matches_request(&draft.request, &draft.basis)?;
+            let ceiling = settled_ceiling(&draft);
+            if encoded_size(self)? > encoded_size(&ceiling)? {
+                return Err("drive settled proof exceeds its exact ceiling".into());
+            }
+        }
+        Ok(())
+    }
+
     fn load(path: &Path) -> Result<Option<Self>, String> {
         let Some(bytes) = read_checkpoint(path)? else {
             return Ok(None);
         };
         let checkpoint: Self = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-        match &checkpoint {
-            Self::Pending(draft) => {
-                validate_draft(draft)?;
-            }
-            Self::Settled {
-                version,
-                draft,
-                proof,
-            } => {
-                if *version != 1 {
-                    return Err("invalid settled drive checkpoint".into());
-                }
-                validate_draft(draft)?;
-                if !proof.matches_request(&draft.request, &draft.observation)
-                    || checkpoint.encode()?.len() > draft.settled_bytes
-                {
-                    return Err("settled drive proof does not match its original".into());
-                }
-            }
-        }
+        checkpoint.validate()?;
         Ok(Some(checkpoint))
     }
 }
 
-fn validate_draft(draft: &DriveDraft) -> Result<(), String> {
-    if draft.version != 2 {
-        return Err("unsupported drive draft version".into());
-    }
-    draft.request.validate()?;
-    if draft.settled_bytes > MAX_DRAFT_BYTES
-        || (DriveCheckpoint::Settled {
-            version: 1,
-            draft: draft.clone(),
-            proof: Box::new(settlement_budget_proof(draft)),
-        })
-        .encode()?
-        .len()
-            != draft.settled_bytes
-    {
-        return Err("invalid drive settlement reserve".into());
-    }
-    Ok(())
-}
-
-fn settlement_budget_proof(draft: &DriveDraft) -> DriveObservation {
+fn settled_ceiling(draft: &DriveDraft) -> DriveCheckpoint {
     let request = &draft.request;
     let folder_id = request.desired.id.clone().unwrap_or_default();
     let parents = request
@@ -737,47 +923,57 @@ fn settlement_budget_proof(draft: &DriveDraft) -> DriveObservation {
             )
         })
         .collect();
-    let mut proof = draft.observation.clone();
-    proof.status = "ready".into();
-    proof.complete = true;
-    proof.store_nonce = Some(
-        request
-            .store_nonce
-            .clone()
-            .unwrap_or_else(|| "ffffffff-ffff-4fff-8fff-ffffffffffff".into()),
-    );
-    proof
-        .records
-        .insert(folder_id.clone(), request.desired.clone());
-    proof.versions.insert(
-        format!("drive_folders_v1:{folder_id}"),
-        vec![request.request_id.clone()],
-    );
-    proof.operation_id = Some(request.request_id.clone());
-    proof.operation_found = true;
-    proof.operation = Some(operation(
-        request.request_id.clone(),
-        u64::MAX - 1,
-        parents,
-        Some(DriveRecord {
-            id: None,
-            ..request.desired.clone()
-        }),
-    ));
-    proof.parent_operations = parent_operations;
-    proof.initialization = Some(DriveInitWitness {
-        schema: 2,
+    let store_nonce = request
+        .store_nonce
+        .clone()
+        .unwrap_or_else(|| "ffffffff-ffff-4fff-8fff-ffffffffffff".into());
+    let receipt = DriveSettlementReceipt {
+        schema: 1,
         node_id: request.expected_node_id.clone(),
         swarm_id: request.expected_swarm_id.clone(),
-        store_nonce: proof.store_nonce.clone().unwrap_or_default(),
-        initialized: true,
-        cause: Some(DriveInitCause::TrustedFirstAdd {
-            original_request_uuid: request.request_id.clone(),
-            folder_uuid: folder_id,
-            canonical_request_sha256: request.canonical_request_sha256.clone(),
-        }),
-    });
-    proof
+        store_nonce: store_nonce.clone(),
+        operation: operation(
+            request.request_id.clone(),
+            u64::MAX - 1,
+            parents,
+            Some(DriveRecord {
+                id: None,
+                ..request.desired.clone()
+            }),
+        ),
+        parent_operations,
+        initialization: DriveInitWitness {
+            schema: 2,
+            node_id: request.expected_node_id.clone(),
+            swarm_id: request.expected_swarm_id.clone(),
+            store_nonce,
+            initialized: true,
+            cause: Some(DriveInitCause::TrustedFirstAdd {
+                original_request_uuid: request.request_id.clone(),
+                folder_uuid: folder_id,
+                canonical_request_sha256: request.canonical_request_sha256.clone(),
+            }),
+        },
+    };
+    DriveCheckpoint::Settled {
+        version: 3,
+        request: request.clone(),
+        basis: draft.basis.clone(),
+        receipt: Box::new(receipt),
+    }
+}
+
+fn preflight(draft: &DriveDraft) -> Result<(), String> {
+    draft.request.validate()?;
+    draft.basis.validate(&draft.request)?;
+    let pending = DriveCheckpoint::Pending {
+        version: 3,
+        request: draft.request.clone(),
+        basis: draft.basis.clone(),
+    };
+    encoded_size(&pending)?;
+    encoded_size(&settled_ceiling(draft))?;
+    Ok(())
 }
 
 fn read_checkpoint(path: &Path) -> Result<Option<Vec<u8>>, String> {
@@ -848,6 +1044,7 @@ pub struct DriveController {
     observation: Option<DriveObservation>,
     observation_current: bool,
     checkpoint: Option<DriveCheckpoint>,
+    recovery: Option<DriveDraft>,
     draft_path: PathBuf,
     unavailable: bool,
     last_poll: Option<Instant>,
@@ -866,7 +1063,10 @@ impl DriveController {
         };
         if allowed {
             match DriveCheckpoint::load(&controller.draft_path) {
-                Ok(checkpoint) => controller.checkpoint = checkpoint,
+                Ok(checkpoint) => {
+                    controller.recovery = checkpoint.as_ref().map(DriveCheckpoint::draft);
+                    controller.checkpoint = checkpoint;
+                }
                 Err(_) => controller.unavailable = true,
             }
         }
@@ -886,10 +1086,7 @@ impl DriveController {
     }
 
     fn draft(&self) -> Option<&DriveDraft> {
-        match &self.checkpoint {
-            Some(DriveCheckpoint::Pending(draft)) => Some(draft),
-            _ => None,
-        }
+        self.recovery.as_ref()
     }
 
     pub fn pending(&self) -> bool {
@@ -976,6 +1173,7 @@ impl DriveController {
     }
 
     fn publish(&self, checkpoint: &DriveCheckpoint) -> Result<(), String> {
+        checkpoint.validate()?;
         let bytes = checkpoint.encode()?;
         #[cfg(test)]
         if let Some(publisher) = self.publisher {
@@ -986,31 +1184,13 @@ impl DriveController {
     }
 
     fn begin_draft(&self, request: DriveSetRequest) -> Result<DriveDraft, String> {
-        let observation = self
+        let basis = self
             .observation
-            .clone()
-            .ok_or("drive observation unavailable")?;
-        let mut draft = DriveDraft {
-            version: 2,
-            request,
-            observation,
-            settled_bytes: 0,
-        };
-        for _ in 0..4 {
-            let bytes = DriveCheckpoint::Settled {
-                version: 1,
-                draft: draft.clone(),
-                proof: Box::new(settlement_budget_proof(&draft)),
-            }
-            .encode()?
-            .len();
-            if bytes == draft.settled_bytes {
-                break;
-            }
-            draft.settled_bytes = bytes;
-        }
-        DriveCheckpoint::Pending(draft.clone()).encode()?;
-        validate_draft(&draft)?;
+            .as_ref()
+            .and_then(|observation| DriveSourceBasis::from_observation(observation).ok())
+            .ok_or("drive observation is not admitted source authority")?;
+        let draft = DriveDraft { request, basis };
+        preflight(&draft)?;
         Ok(draft)
     }
 
@@ -1018,7 +1198,7 @@ impl DriveController {
         if self.unavailable || self.pending() {
             return Err("an earlier drive request is still unresolved".into());
         }
-        if matches!(&self.checkpoint, Some(DriveCheckpoint::Settled { draft, .. }) if draft.request.request_id == request.request_id)
+        if matches!(&self.checkpoint, Some(DriveCheckpoint::Settled { request: original, .. }) if original.request_id == request.request_id)
         {
             return Err("a settled drive identity is historical, never replayed".into());
         }
@@ -1062,28 +1242,34 @@ impl DriveController {
             Ok(None) if self.checkpoint.is_none() => {}
             Ok(Some(actual @ DriveCheckpoint::Settled { .. }))
                 if Some(&actual) == self.checkpoint.as_ref()
-                    && matches!(&actual, DriveCheckpoint::Settled { draft, .. } if draft.request.request_id != request.request_id) =>
+                    && matches!(&actual, DriveCheckpoint::Settled { request: original, .. } if original.request_id != request.request_id) =>
                 {}
             _ => return Err("the durable drive checkpoint changed".into()),
         }
-        let pending = DriveCheckpoint::Pending(draft.clone());
+        let pending = DriveCheckpoint::Pending {
+            version: 3,
+            request: draft.request.clone(),
+            basis: draft.basis.clone(),
+        };
+        self.checkpoint = Some(pending.clone());
+        self.recovery = Some(draft.clone());
+        self.reconcile_until = Some(Instant::now() + READ_TIMEOUT);
         if let Err(error) = self.publish(&pending) {
             match DriveCheckpoint::load(&self.draft_path) {
-                Ok(Some(DriveCheckpoint::Pending(actual))) if actual == draft => {
-                    self.checkpoint = Some(DriveCheckpoint::Pending(actual));
-                    self.reconcile_until = Some(Instant::now() + READ_TIMEOUT);
+                Ok(Some(actual)) if actual.same_original(&draft) => {
+                    self.checkpoint = Some(actual);
                 }
-                _ => {
-                    self.checkpoint = None;
+                Ok(Some(actual)) => {
+                    self.checkpoint = Some(actual);
                     self.unavailable = true;
                 }
+                Ok(None) => {}
+                Err(_) => self.unavailable = true,
             }
             return Err(format!(
                 "drive pending publication has no apply invocation: {error}"
             ));
         }
-        self.checkpoint = Some(pending);
-        self.reconcile_until = Some(Instant::now() + READ_TIMEOUT);
         let invocation = self.invocation(
             vec![
                 "swarm".into(),
@@ -1104,27 +1290,25 @@ impl DriveController {
             .draft()
             .cloned()
             .ok_or("no outstanding drive request")?;
+        let receipt = DriveSettlementReceipt::from_observation(&observation)?;
+        receipt.matches_request(&draft.request, &draft.basis)?;
         let settled = DriveCheckpoint::Settled {
-            version: 1,
-            draft: draft.clone(),
-            proof: Box::new(observation.clone()),
+            version: 3,
+            request: draft.request.clone(),
+            basis: draft.basis.clone(),
+            receipt: Box::new(receipt),
         };
-        let encoded = settled.encode()?;
-        if encoded.len() > draft.settled_bytes {
-            return Err("the settled drive proof exceeds its preflight reserve".into());
+        if encoded_size(&settled)? > encoded_size(&settled_ceiling(&draft))? {
+            return Err("drive settled proof exceeds its exact ceiling".into());
         }
-        let already_settled = match DriveCheckpoint::load(&self.draft_path)? {
-            Some(DriveCheckpoint::Pending(actual)) if actual == draft => {
+        match DriveCheckpoint::load(&self.draft_path)? {
+            Some(actual) if actual.same_original(&draft) => {
                 self.publish(&settled)?;
-                true
             }
-            Some(actual) if actual == settled => true,
-            _ => false,
-        };
-        if !already_settled {
-            return Err("the original durable drive checkpoint is unavailable".into());
+            _ => return Err("the original durable drive checkpoint is unavailable".into()),
         }
         self.checkpoint = Some(settled);
+        self.recovery = None;
         self.reconcile_until = None;
         self.observation = Some(observation.clone());
         self.observation_current = true;
@@ -1171,7 +1355,7 @@ impl DriveController {
             Err(_) => return Ok(self.unknown(&draft.request.request_id)),
         };
         if !Self::valid_envelope(&value, &draft, &observation)
-            || !observation.matches_request(&draft.request, &draft.observation)
+            || !observation.matches_basis(&draft.request, &draft.basis)
         {
             return Ok(self.unknown(&draft.request.request_id));
         }
@@ -1185,7 +1369,7 @@ impl DriveController {
             .cloned()
             .ok_or("no outstanding drive request")?;
         let observation = DriveObservation::from_reply(&value)?;
-        if !observation.matches_request(&draft.request, &draft.observation) {
+        if !observation.matches_basis(&draft.request, &draft.basis) {
             return Err("the original drive result is unknown".into());
         }
         self.finish(observation)
@@ -1330,7 +1514,7 @@ mod tests {
         proof
     }
 
-    fn envelope(request: &DriveSetRequest, observation: &DriveObservation) -> Value {
+    pub(crate) fn envelope(request: &DriveSetRequest, observation: &DriveObservation) -> Value {
         serde_json::json!({
             "schema":1,
             "node_id":request.expected_node_id,
@@ -1374,7 +1558,8 @@ mod tests {
             Some(DriveCheckpoint::Settled { .. })
         ));
         let mut restarted = DriveController::new(path.clone(), true);
-        assert!(!restarted.pending());
+        assert!(restarted.pending());
+        assert!(restarted.observation().is_none());
         let mut later = request();
         later.request_id = "70000000-0000-4000-8000-000000000007".into();
         later = later.sealed().unwrap();
@@ -1426,7 +1611,10 @@ mod tests {
         let request = first_request();
         controller.begin(request.clone()).unwrap();
         let proof = landed(&initial, &request);
-        assert!(proof.matches_request(&request, &initial));
+        assert!(proof.matches_basis(
+            &request,
+            &DriveSourceBasis::from_observation(&initial).unwrap()
+        ));
         for cause in [
             None,
             Some(DriveInitCause::NegotiatedInitialImport),
@@ -1438,7 +1626,10 @@ mod tests {
         ] {
             let mut wrong = proof.clone();
             wrong.initialization.as_mut().unwrap().cause = cause;
-            assert!(!wrong.matches_request(&request, &initial));
+            assert!(!wrong.matches_basis(
+                &request,
+                &DriveSourceBasis::from_observation(&initial).unwrap()
+            ));
             assert!(controller
                 .acknowledge_status(serde_json::to_value(wrong).unwrap())
                 .is_err());
@@ -1461,15 +1652,18 @@ mod tests {
         assert!(controller.pending());
         assert!(matches!(
             DriveCheckpoint::load(&path).unwrap(),
-            Some(DriveCheckpoint::Pending(_))
+            Some(DriveCheckpoint::Pending { .. })
         ));
         assert!(controller.begin(request()).is_err());
         let proof = landed(&observation(), &request());
-        assert!(controller
-            .acknowledge_status(serde_json::to_value(proof.clone()).unwrap())
-            .is_err());
-        assert!(controller.pending());
+        for _ in 0..2 {
+            assert!(controller
+                .acknowledge_status(serde_json::to_value(proof.clone()).unwrap())
+                .is_err());
+            assert!(controller.pending());
+        }
         let settled = std::fs::read(&path).unwrap();
+        controller.publisher = Some(crate::fsx::write_private_durable);
         controller
             .acknowledge_status(serde_json::to_value(proof).unwrap())
             .unwrap();
@@ -1493,7 +1687,11 @@ mod tests {
             .acknowledge_status(serde_json::to_value(landed(&observation(), &request())).unwrap())
             .unwrap();
         let settled = std::fs::read(&path).unwrap();
-        let mut restarted = DriveController::with_publisher(path.clone(), unknown_publication);
+        let mut restarted = DriveController::new(path.clone(), true);
+        restarted
+            .acknowledge_status(serde_json::to_value(landed(&observation(), &request())).unwrap())
+            .unwrap();
+        restarted.publisher = Some(unknown_publication);
         restarted.observe(observation()).unwrap();
         let mut later = request();
         later.request_id = "70000000-0000-4000-8000-000000000007".into();
@@ -1551,8 +1749,8 @@ mod recovery_phase_tests {
         controller.observe(tests::observation()).unwrap();
         assert!(controller.begin(tests::request()).is_err());
         assert!(!path.exists());
-        assert!(controller.unavailable);
-        assert!(!controller.pending());
+        assert!(!controller.unavailable);
+        assert!(controller.pending());
         assert!(controller.begin(tests::request()).is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1582,7 +1780,179 @@ mod recovery_phase_tests {
         drop(restarted);
         let historical = DriveController::new(path.clone(), true);
         assert!(historical.observation().is_none());
-        assert!(!historical.pending());
+        assert!(historical.pending());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod growth_and_structure_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn edit_request() -> DriveSetRequest {
+        let mut request = tests::request();
+        request.original = Some(DriveRecord {
+            path: "C:/Old".into(),
+            ..request.desired.clone()
+        });
+        request.desired.path = "D:/Edited".into();
+        let folder = request.desired.id.clone().unwrap();
+        request.versions = BTreeMap::from([(
+            format!("drive_folders_v1:{folder}"),
+            vec!["70000000-0000-4000-8000-000000000007".into()],
+        )]);
+        request.source = Some(request.destination.clone());
+        request.sealed().unwrap()
+    }
+
+    fn settled(path: &Path, request: &DriveSetRequest) -> DriveObservation {
+        let mut controller = DriveController::new(path.to_path_buf(), true);
+        controller.observe(tests::observation()).unwrap();
+        controller.begin(request.clone()).unwrap();
+        let proof = tests::landed(&tests::observation(), request);
+        controller
+            .acknowledge_status(serde_json::to_value(&proof).unwrap())
+            .unwrap();
+        assert!(!controller.pending());
+        proof
+    }
+
+    #[test]
+    fn unrelated_projection_growth_never_changes_original_receipt_or_recovery() {
+        let dir = tests::scratch();
+        let request = tests::request();
+        let mut receipts = Vec::new();
+        for use_apply in [false, true] {
+            let path = dir.join(format!("{use_apply}.json"));
+            let mut controller = DriveController::new(path.clone(), true);
+            controller.observe(tests::observation()).unwrap();
+            controller.begin(request.clone()).unwrap();
+            let mut proof = tests::landed(&tests::observation(), &request);
+            let own_operation = proof.operation.clone();
+            for _ in 0..3 {
+                let id = uuid::Uuid::new_v4().to_string();
+                proof.records.insert(
+                    id.clone(),
+                    DriveRecord {
+                        id: Some(id.clone()),
+                        project: "alpha".into(),
+                        machine: "40000000-0000-4000-8000-000000000004".into(),
+                        path: format!("E:/{}", "x".repeat(6000)),
+                        name: String::new(),
+                    },
+                );
+                proof.versions.insert(
+                    format!("drive_folders_v1:{id}"),
+                    vec![uuid::Uuid::new_v4().to_string()],
+                );
+            }
+            assert_eq!(proof.operation, own_operation);
+            if use_apply {
+                controller
+                    .acknowledge(Ok(tests::envelope(&request, &proof)))
+                    .unwrap();
+            } else {
+                controller
+                    .acknowledge_status(serde_json::to_value(&proof).unwrap())
+                    .unwrap();
+            }
+            assert!(!controller.pending());
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(!String::from_utf8_lossy(&bytes).contains("E:/"));
+            receipts.push(bytes);
+            let mut restored = DriveController::new(path.clone(), true);
+            assert!(restored.pending());
+            assert!(restored.observation().is_none());
+            restored
+                .acknowledge_status(serde_json::to_value(&proof).unwrap())
+                .unwrap();
+            assert!(!restored.pending());
+            assert_eq!(restored.observation(), Some(&proof));
+        }
+        assert_eq!(receipts[0], receipts[1]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn exact_ceiling_overflow_refuses_before_pending_or_invocation() {
+        let dir = tests::scratch();
+        let path = dir.join("drive.json");
+        let mut request = edit_request();
+        request.original.as_mut().unwrap().path = format!("C:/{}", "a".repeat(8189));
+        let folder = request.desired.id.clone().unwrap();
+        request.versions = BTreeMap::from([(
+            format!("drive_folders_v1:{folder}"),
+            (1..=1024)
+                .map(|index| format!("{index:08x}-0000-4000-8000-000000000000"))
+                .collect(),
+        )]);
+        request = request.sealed().unwrap();
+        let mut controller = DriveController::new(path.clone(), true);
+        controller.observe(tests::observation()).unwrap();
+        assert!(controller.begin(request).is_err());
+        assert!(!path.exists());
+        assert!(!controller.pending());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn malformed_stored_raw_receipts_stay_manual_and_valid_v3_recovers() {
+        let dir = tests::scratch();
+        let path = dir.join("drive.json");
+        let request = edit_request();
+        let proof = settled(&path, &request);
+        let original = std::fs::read(&path).unwrap();
+        let historical = DriveController::new(path.clone(), true);
+        assert!(historical.pending());
+        assert!(historical.observation().is_none());
+        assert!(DriveCheckpoint::load(&path).is_ok());
+        drop(historical);
+
+        let value: Value = serde_json::from_slice(&original).unwrap();
+        let mut clock_zero = value.clone();
+        clock_zero["record"]["receipt"]["operation"]["clock"] = json!(0);
+        let mut missing = value.clone();
+        missing["record"]["receipt"]["parent_operations"] = json!({});
+        let mut extra = value.clone();
+        let parent_id = request.versions.values().next().unwrap()[0].clone();
+        let parent = extra["record"]["receipt"]["parent_operations"][&parent_id].clone();
+        let new_id = "80000000-0000-4000-8000-000000000008";
+        extra["record"]["receipt"]["parent_operations"]
+            .as_object_mut()
+            .unwrap()
+            .insert(new_id.into(), parent);
+        let parent_json = serde_json::to_string(&proof.parent_operations[&parent_id]).unwrap();
+        let needle = format!("\"{parent_id}\":{parent_json}");
+        let duplicate = String::from_utf8(original.clone())
+            .unwrap()
+            .replace(&needle, &format!("{needle},\"{parent_id}\":{parent_json}"));
+        let mut old_version = value;
+        old_version["record"]["version"] = json!(2);
+        for (index, malformed) in [
+            serde_json::to_vec(&clock_zero).unwrap(),
+            serde_json::to_vec(&missing).unwrap(),
+            serde_json::to_vec(&extra).unwrap(),
+            duplicate.into_bytes(),
+            serde_json::to_vec(&old_version).unwrap(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            std::fs::write(&path, malformed).unwrap();
+            assert!(
+                DriveCheckpoint::load(&path).is_err(),
+                "malformed case {index}"
+            );
+            assert!(DriveController::new(path.clone(), true).unavailable);
+        }
+        std::fs::write(&path, &original).unwrap();
+        let mut recovered = DriveController::new(path.clone(), true);
+        assert!(recovered.pending());
+        recovered
+            .acknowledge_status(serde_json::to_value(proof).unwrap())
+            .unwrap();
+        assert!(!recovered.pending());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

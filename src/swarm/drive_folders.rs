@@ -50,7 +50,38 @@ pub struct DriveGraph {
     pub schema: u32,
     pub swarm_id: String,
     pub store_nonce: String,
+    #[serde(deserialize_with = "unique_operations")]
     pub operations: BTreeMap<String, DriveOperation>,
+}
+
+fn unique_operations<'de, D>(deserializer: D) -> Result<BTreeMap<String, DriveOperation>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Operations;
+    impl<'de> serde::de::Visitor<'de> for Operations {
+        type Value = BTreeMap<String, DriveOperation>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a map with unique drive operation keys")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            let mut operations = BTreeMap::new();
+            while let Some((id, operation)) = map.next_entry::<String, DriveOperation>()? {
+                if let std::collections::btree_map::Entry::Vacant(entry) = operations.entry(id) {
+                    entry.insert(operation);
+                } else {
+                    return Err(serde::de::Error::custom("duplicate drive operation key"));
+                }
+            }
+            Ok(operations)
+        }
+    }
+    deserializer.deserialize_map(Operations)
 }
 
 #[derive(Clone, Debug)]
@@ -2381,5 +2412,63 @@ mod correction_tests {
         assert_eq!(status["status"], "unavailable");
         assert_eq!(status["operation_found"], false);
         assert!(std::fs::metadata(dir.path().join(FILE)).unwrap().len() > MAX_EXCHANGE_BYTES);
+    }
+
+    #[test]
+    fn duplicate_raw_operation_keys_fail_closed_before_projection_or_writes() {
+        let (_dir, mut store, machine) = fixture();
+        apply_locked(&store, request(&store, &machine, "C:/Original")).unwrap();
+        let graph_path = store.path.with_file_name(FILE);
+        let graph: Value = serde_json::from_slice(&std::fs::read(&graph_path).unwrap()).unwrap();
+        let (id, operation) = graph["operations"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .next()
+            .unwrap();
+        let mut rewritten = operation.clone();
+        rewritten["value"]["path"] = json!("D:/Rewritten");
+        let witness_before = std::fs::read(store.path.with_file_name(INIT_FILE)).unwrap();
+        let main_before = std::fs::read(&store.path).unwrap();
+        for (first, second) in [
+            (operation.clone(), rewritten.clone()),
+            (rewritten, operation.clone()),
+            (operation.clone(), operation.clone()),
+        ] {
+            let duplicate = format!(
+                "{{\"schema\":1,\"swarm_id\":{},\"store_nonce\":{},\"operations\":{{{}:{},{}:{}}}}}",
+                json!(graph["swarm_id"]),
+                json!(graph["store_nonce"]),
+                json!(id),
+                first,
+                json!(id),
+                second
+            );
+            std::fs::write(&graph_path, duplicate.as_bytes()).unwrap();
+            assert!(matches!(
+                DriveStore::load(
+                    store.path.parent().unwrap(),
+                    &MainContext::from_store(&store.data)
+                ),
+                DriveState::Unavailable
+            ));
+            assert_eq!(get_locked(&store, None).unwrap()["status"], "unavailable");
+            assert!(apply_locked(&store, request(&store, &machine, "F:/Unrelated")).is_err());
+            let peer = catalog::new_id();
+            store.data.peers.insert(
+                "example-peer".into(),
+                super::super::store::Peer {
+                    node: peer.clone(),
+                    ..Default::default()
+                },
+            );
+            assert!(merge_operations(&store, &peer, Vec::new(), true).is_err());
+            assert_eq!(std::fs::read(&graph_path).unwrap(), duplicate.as_bytes());
+            assert_eq!(
+                std::fs::read(store.path.with_file_name(INIT_FILE)).unwrap(),
+                witness_before
+            );
+            assert_eq!(std::fs::read(&store.path).unwrap(), main_before);
+        }
     }
 }

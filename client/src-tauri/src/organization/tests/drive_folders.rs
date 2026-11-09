@@ -369,3 +369,134 @@ fn held_refresh_rejects_source_and_card_drift_before_durable_admission() {
         real.finish(organization);
     }
 }
+
+const LEGACY_NODE: &str = "10000000-0000-4000-8000-000000000001";
+const LEGACY_PEER: &str = "20000000-0000-4000-8000-000000000002";
+
+fn legacy_setup(folders: Value) -> (Fake, Pump, Organization) {
+    let fake = Fake::landing();
+    let pump = Pump::default();
+    card(&pump, "", "local-host", LEGACY_NODE, "linux");
+    card(&pump, "peer", "peer-host", LEGACY_PEER, "windows");
+    let org = fake.organization(&pump, true);
+    let mut value = full("remote-unc");
+    value["node_id"] = json!(LEGACY_NODE);
+    value["swarm_id"] = json!("catalog-one");
+    value["organization"]["projects"][0]["folders"] = folders;
+    org.set_source(snapshot_of(&value));
+    org.observe(&state_of(&value));
+    (fake, pump, org)
+}
+
+fn legacy_place() -> folders::Place {
+    folders::Place {
+        computer: "peer".into(),
+        host: "peer-host".into(),
+        machine_id: Some(LEGACY_PEER.into()),
+    }
+}
+
+fn legacy_outcome(org: &Organization, change: folders::Change) -> String {
+    let changed = folders::change(
+        org.clone(),
+        "alpha".into(),
+        change,
+        "11111111-2222-4333-8444-555555555555".into(),
+    );
+    serde_json::to_value(changed).unwrap()["outcome"]
+        .as_str()
+        .unwrap()
+        .into()
+}
+
+#[test]
+fn actual_change_routes_both_unc_spellings_and_posix_to_the_legacy_writer() {
+    for (raw, stored) in [
+        ("\\\\server\\share\\Repo\\", "//server/share/Repo"),
+        ("//server/share/Repo/", "//server/share/Repo"),
+    ] {
+        let (fake, _pump, org) = legacy_setup(json!([]));
+        assert_eq!(
+            legacy_outcome(
+                &org,
+                folders::Change::Add {
+                    place: legacy_place(),
+                    path: raw.into(),
+                    name: String::new(),
+                },
+            ),
+            "done".to_owned()
+        );
+        let calls = fake.applies();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            input(&calls[0])["desired"]["projects"][0]["folders"][0]["path"],
+            stored
+        );
+        fake.finish(org);
+    }
+
+    for raw in ["\\\\server\\share\\New\\", "//server/share/New/"] {
+        let record = json!({"id":FOLDER,"machine":"peer","machine_id":LEGACY_PEER,"machine_name":"peer-host","path":"//server/share/Old","name":""});
+        let (fake, _pump, org) = legacy_setup(json!([record.clone()]));
+        let original = zerus_client_core::swarm::folder_value(&record).unwrap();
+        assert_eq!(
+            legacy_outcome(
+                &org,
+                folders::Change::Edit {
+                    original,
+                    place: legacy_place(),
+                    path: raw.into(),
+                    name: String::new(),
+                },
+            ),
+            "done".to_owned()
+        );
+        let calls = fake.applies();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            input(&calls[0])["desired"]["projects"][0]["folders"][0]["path"],
+            "//server/share/New"
+        );
+        fake.finish(org);
+    }
+
+    let (fake, pump, org) = legacy_setup(json!([]));
+    card(&pump, "peer", "peer-host", LEGACY_PEER, "linux");
+    assert_eq!(
+        legacy_outcome(
+            &org,
+            folders::Change::Add {
+                place: legacy_place(),
+                path: "/srv/repo/../work/".into(),
+                name: String::new(),
+            },
+        ),
+        "done".to_owned()
+    );
+    assert_eq!(
+        input(&fake.applies()[0])["desired"]["projects"][0]["folders"][0]["path"],
+        "/srv/work"
+    );
+    fake.finish(org);
+}
+
+#[test]
+fn actual_change_keeps_device_and_drive_relative_paths_refused() {
+    for path in ["\\\\?\\C:\\Work", "C:Work", "\\Work"] {
+        let (fake, _pump, org) = legacy_setup(json!([]));
+        assert_eq!(
+            legacy_outcome(
+                &org,
+                folders::Change::Add {
+                    place: legacy_place(),
+                    path: path.into(),
+                    name: String::new(),
+                },
+            ),
+            "refused"
+        );
+        assert!(fake.applies().is_empty());
+        fake.finish(org);
+    }
+}

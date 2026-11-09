@@ -186,7 +186,7 @@ fn drive_path(change: &Change) -> bool {
         Change::Add { path, .. } | Change::Edit { path, .. } => path,
         _ => return false,
     };
-    paths::absolute(path, Style::Windows) && !path.starts_with('/')
+    paths::absolute(path, Style::Windows) && !path.starts_with('/') && !path.starts_with(r"\\")
 }
 
 pub(super) fn drive_proof(

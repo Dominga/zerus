@@ -418,10 +418,20 @@ pub(crate) fn builtin_pipelines() -> Vec<Pipeline> {
 
 pub(crate) fn load() -> anyhow::Result<Catalog> {
     match fs::read_to_string(path()) {
-        Ok(text) => serde_json::from_str(&text).context("Invalid team catalog"),
+        Ok(text) => parse(&text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(builtin()),
         Err(e) => Err(e.into()),
     }
+}
+
+/// Task #404: a catalog saved before the presets existed has no pipelines; the
+/// built-in presets are its default, so a plan or extend naming 'docs' works.
+fn parse(text: &str) -> anyhow::Result<Catalog> {
+    let mut catalog: Catalog = serde_json::from_str(text).context("Invalid team catalog")?;
+    if catalog.pipelines.is_empty() {
+        catalog.pipelines = builtin_pipelines();
+    }
+    Ok(catalog)
 }
 
 fn load_draft() -> anyhow::Result<Draft> {
@@ -1173,6 +1183,23 @@ mod tests {
             assert!(!trust_designer(agent, "C:\\designer", &config).unwrap(), "{agent}");
         }
         assert!(!config.exists(), "nothing writes a Claude account config for another agent");
+    }
+
+    /// Task #404: a catalog file saved before the presets existed (no
+    /// "pipelines") still offers the built-in presets, so an extend naming
+    /// 'docs' or 'code' is accepted; a catalog with its own keeps them.
+    #[test]
+    fn a_catalog_without_pipelines_gets_the_builtin_presets() {
+        let catalog = parse(r#"{"version":1,"roles":[{"id":"lead","name":"Lead"}]}"#).unwrap();
+        let ids: Vec<&str> = catalog.pipelines.iter().map(|pipeline| pipeline.id.as_str()).collect();
+        assert_eq!(ids, ["code", "docs", "check"], "{ids:?}");
+        // The extend path's check takes them: this is the 'Unknown pipeline
+        // docs' refusal the task named.
+        crate::state::teams::pipeline::check_choice("docs", &catalog).unwrap();
+        crate::state::teams::pipeline::check_choice("code", &catalog).unwrap();
+        let own = parse(r#"{"version":1,"pipelines":[{"id":"mine","name":"Mine"}]}"#).unwrap();
+        assert_eq!(own.pipelines.len(), 1, "{:?}", own.pipelines);
+        assert_eq!(own.pipelines[0].id, "mine");
     }
 
     #[test]

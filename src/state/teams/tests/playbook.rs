@@ -238,3 +238,14 @@ fn the_items_reach_the_leads_inbox_and_clear() {
     let items = crate::state::teams::inbox::all_items(&team);
     assert!(!items.iter().any(|item| item.key == "playbook:d"), "{items:?}");
 }
+
+/// Task #404 (owner, 2026-11-09): the brief that comes back after a compaction
+/// carries the lead's speed rules.
+#[test]
+fn the_brief_says_to_answer_the_owner_first_and_run_long_work_in_the_background() {
+    let team = team();
+    let text = brief(&team).to_lowercase();
+    for rule in ["answer the owner first", "one team command per tool call", "run in the background", "hgs team status --task", "bottleneck"] {
+        assert!(text.contains(rule), "no rule: {rule}");
+    }
+}

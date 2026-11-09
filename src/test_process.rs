@@ -8,6 +8,9 @@ use std::{
 
 const READY: &[u8] = b"\nzerus-fixture-echo-ready\n";
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) mod macos_raw_threads;
+
 pub(crate) fn echo_command() -> Command {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command

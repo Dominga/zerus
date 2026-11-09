@@ -3771,6 +3771,31 @@ permission denials are omitted only from this explicit-Remove discovery; a
 readable cwd or open file still establishes membership. The existing generic
 worktree review and background cleanup keep their conservative process policy.
 
+On macOS these reads include each thread's own working directory, not just
+the process directory. The native thread-path API selects by user TSD value
+(`cthread_self`), not a stable thread ID, and returns the first match. Every
+unique value, including zero, is read. Any repeated value, zero or nonzero,
+leaves the observation unsettled: at most four attempts within the existing
+deadline, then incomplete coverage, never an empty census. Raw Mach threads
+can share zero while holding different working directories; the thread-ID64
+API supplies no path to resolve that ambiguity. No TSD mutation, suspension
+or elevated task port is used. The accepted residual is a live thread changing
+its TSD between listing and read: an ESRCH can be taken as an exited thread,
+or a reused value can address a different thread. Process birth checks do not
+close that per-thread window. This follows the pinned [XNU thread-path
+implementation](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/proc_info.c)
+and the coordinator's zerus-q0cd5 addressability ruling. Private fixture PID
+tests qualify their own processes only; a full-host diagnostic reporting a
+limit remains incomplete and does not qualify full-host Remove.
+Native vnode evidence is retained independently of its pathname: XNU may
+return a filled vnode while path reconstruction fails. Exact object membership
+still applies, while the generic sampler refuses an empty or relative path.
+A path without interpretable native vnode metadata is unsettled. The native
+zeroed reported-no-vnode response is accepted only as that observation: XNU
+uses it both for no own cwd and for a failed vnode acquisition during churn,
+which the API cannot distinguish. This additional kernel-acquisition residual
+does not prove perpetual absence or exempt aliased thread handles.
+
 After the original confirmation closes, cleanup runs in the background only
 following exact successful termination. A compact workspace notice shows progress,
 then **Working folder removed**, **Working folder kept** with a short reason, or

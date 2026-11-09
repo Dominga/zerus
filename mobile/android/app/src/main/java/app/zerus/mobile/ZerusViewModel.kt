@@ -3269,25 +3269,28 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         lastOwnSend = target to id
         var attempted = false; var rejected: RelayException? = null
         try {
-            val files = attachmentStore.payload(message.attachments)
-            check(fresh(target) && connections.any { it.id == connection.id }) { "The session changed before transport. Review the saved message." }
-            if (intent != null) {
-                val cleared = written.drafts.first { it.key == original.key }
-                check(continuation?.requestId == intent.requestId && intent.permitsTransport(selected?.target, navigationId, android.os.SystemClock.elapsedRealtime(), cleared, draft(target)) &&
-                    ContextPolicies.compactStatus(messageState.contextOperations.first { it.requestId == intent.requestId }, activity!!) == "completed") { "Compact continuation was canceled. The captured message was not sent and remains recoverable." }
+            val receipt = withTimeout(45_000) {
+                val files = attachmentStore.payload(message.attachments)
+                check(fresh(target) && connections.any { it.id == connection.id }) { "The session changed before transport. Review the saved message." }
+                if (intent != null) {
+                    val cleared = written.drafts.first { it.key == original.key }
+                    check(continuation?.requestId == intent.requestId && intent.permitsTransport(selected?.target, navigationId, android.os.SystemClock.elapsedRealtime(), cleared, draft(target)) &&
+                        ContextPolicies.compactStatus(messageState.contextOperations.first { it.requestId == intent.requestId }, activity!!) == "completed") { "Compact continuation was canceled. The captured message was not sent and remains recoverable." }
+                }
+                val payload = target.json().put("request_id", id).put("text", message.text).put("attachments", files)
+                if (expectedCompactionId.isNotBlank()) payload.put("expected_compaction_id", expectedCompactionId)
+                attempted = true
+                val initial = try { api.submit(connection, target, "send", payload, id) }
+                catch (e: RelayException) { if (e.status in listOf(400, 401, 403, 404, 409, 413, 429)) rejected = e; throw e }
+                api.await(connection, initial)
             }
-            val payload = target.json().put("request_id", id).put("text", message.text).put("attachments", files)
-            if (expectedCompactionId.isNotBlank()) payload.put("expected_compaction_id", expectedCompactionId)
-            attempted = true
-            val initial = try { api.submit(connection, target, "send", payload, id) }
-            catch (e: RelayException) { if (e.status in listOf(400, 401, 403, 404, 409, 413, 429)) rejected = e; throw e }
-            settleOutgoing(message, api.await(connection, initial))
+            settleOutgoing(message, receipt)
         } catch (e: Exception) {
-            val failure = rejected?.message ?: if (attempted) "Delivery is unconfirmed. Check its receipt before sending again." else
+            val failure = rejected?.message ?: if (attempted) "Delivery is unconfirmed. Check its receipt or dismiss the warning to continue." else
                 (e as? AttachmentException)?.message ?: "The saved message was not sent. Review it before trying again."
             try { durable({ state -> MessageChanges.result(state, id) { it.copy(status = if (attempted && rejected == null) "uncertain" else "failed", error = failure) } }) }
             catch (_: Exception) { error = "Could not save the delivery result. The original outgoing message remains recoverable. Check its receipt." }
-            if (e is CancellationException) throw e
+            if (e is CancellationException && e !is kotlinx.coroutines.TimeoutCancellationException) throw e
         } finally { if (intent != null) { continuationEnqueuing = ""; continuation = null }; deliveryFlights -= id; syncOutgoing() }
     }
     private suspend fun settleOutgoing(message: OutgoingMessage, receipt: JSONObject) {
@@ -3305,18 +3308,30 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val flight = "outgoing:${message.requestId}"
         if (flight in receiptFlights || message.status == "sending") return@launch
         receiptFlights += flight
-        try { kotlinx.coroutines.withTimeout(45_000) { settleOutgoing(message, api.await(connection, api.receipt(connection, message.requestId))) } }
+        try {
+            val receipt = withTimeout(45_000) { api.await(connection, api.receipt(connection, message.requestId)) }
+            settleOutgoing(message, receipt)
+        }
+        catch (_: kotlinx.coroutines.TimeoutCancellationException) { if (!automatic) error = "Receipt check timed out. You can dismiss the warning and continue; the original message remains saved." }
         catch (e: CancellationException) { throw e }
         catch (_: Exception) { if (!automatic) error = "Receipt unavailable. The outgoing message remains saved." }
         finally { receiptFlights -= flight }
     }
+    fun dismissOutgoing(message: OutgoingMessage) = viewModelScope.launch {
+        val flight = "dismiss:${message.requestId}"
+        if (!storageReady || flight in receiptFlights || message.requestId in deliveryFlights) return@launch
+        receiptFlights += flight
+        try { durable({ state -> MessageChanges.dismissOutgoing(state, message, recoverInterruptedSending = true) }) }
+        catch (_: Exception) { error = "Could not save the dismissal. Your message and current composition are preserved." }
+        finally { receiptFlights -= flight }
+    }
     fun prepareOutgoing(message: OutgoingMessage) {
-        if ("outgoing:${message.requestId}" in receiptFlights) return
+        if (message.status != "failed" || "outgoing:${message.requestId}" in receiptFlights) return
         val restored = Draft(message.target, message.text, attachments = message.attachments)
         val parkedId = UUID.randomUUID().toString()
         try { editState { state ->
             val current = state.outgoing.find { it.requestId == message.requestId }
-            if (current == null || current.status !in listOf("failed", "uncertain")) state else {
+            if (current != message || current.status != "failed") state else {
                 val editor = state.drafts.find { it.target == message.target && it.questionId.isBlank() && it.detachedId.isBlank() }
                 val parked = editor?.takeIf { it.text.isNotBlank() || it.attachments.isNotEmpty() }?.copy(detachedId = parkedId)
                 state.copy(drafts = state.drafts.filterNot { it.key == restored.key } + listOfNotNull(parked) + restored,

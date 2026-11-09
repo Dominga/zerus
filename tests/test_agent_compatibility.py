@@ -1,4 +1,5 @@
 """Distribution integrity, isolated contracts and upstream capability reporting."""
+import ast
 import base64
 import hashlib
 import importlib.util
@@ -18,6 +19,131 @@ spec.loader.exec_module(compat)
 
 
 class AgentCompatibility(unittest.TestCase):
+    def memory_runner(self, cases):
+        """The actual runner with a supplied pure suite, never native discovery."""
+        import os
+        import threading
+
+        class Captured(io.StringIO):
+            visible = ''
+
+            def flush(self):
+                self.visible = self.getvalue()
+                super().flush()
+
+        output, error, namespace = Captured(), Captured(), {}
+        suite = unittest.TestSuite(cases(error))
+        with patch.object(os, 'environ', {}), patch('sys.argv', ['memory-runner']), \
+                patch.object(unittest.defaultTestLoader, 'loadTestsFromNames', return_value=suite), \
+                patch.object(compat.subprocess, 'Popen', side_effect=AssertionError('no child process')) as spawn, \
+                patch.object(threading, 'Timer') as timer, patch('sys.stdout', output), patch('sys.stderr', error), \
+                self.assertRaises(SystemExit) as exited:
+            exec(compile(compat.NATIVE_RUNNER, '<native-runner-control>', 'exec'), namespace)
+        spawn.assert_not_called()
+        timer.assert_not_called()
+        return namespace['result'], exited.exception.code, output.getvalue(), error
+
+    @staticmethod
+    def diagnostics(text):
+        return [json.loads(line.removeprefix('ZERUS_NATIVE_DIAGNOSTIC=')) for line in text.splitlines()
+                if line.startswith('ZERUS_NATIVE_DIAGNOSTIC=')]
+
+    def test_native_runner_retains_failure_and_error_before_cleanup(self):
+        observed = []
+
+        def cases(error):
+            class Failure(unittest.TestCase):
+                def runTest(case):
+                    case.addCleanup(lambda: observed.append(('failure', case.id(), error.visible)))
+                    case.fail('original readiness assertion')
+
+            class Error(unittest.TestCase):
+                def runTest(case):
+                    case.addCleanup(lambda: observed.append(('error', case.id(), error.visible)))
+                    raise RuntimeError('original readiness exception')
+
+            return [Failure(), Error()]
+
+        result, status, output, error = self.memory_runner(cases)
+        self.assertEqual((result.testsRun, len(result.failures), len(result.errors), len(result.skipped)), (2, 1, 1, 0))
+        self.assertEqual(status, 1)
+        self.assertEqual(output, 'ZERUS_NATIVE_RESULT={"tests": 2, "skipped": 0}\n')
+        self.assertEqual(len(observed), 2)
+        for kind, identity, before_cleanup in observed:
+            with self.subTest(kind=kind):
+                rows = [row for row in self.diagnostics(before_cleanup) if row['id'] == identity]
+                self.assertEqual([row['event'] for row in rows], ['start', kind])
+                record, = result.failures if kind == 'failure' else result.errors
+                self.assertEqual(record[0].id(), identity)
+                self.assertEqual(rows[1]['traceback'], record[1])
+                self.assertFalse(rows[1]['truncated'])
+                self.assertIn('original readiness', rows[1]['traceback'])
+        self.assertEqual([row['event'] for row in self.diagnostics(error.getvalue())],
+                         ['start', 'failure', 'end', 'start', 'error', 'end'])
+
+    def test_native_runner_bounds_long_unicode_details_and_keeps_the_full_result(self):
+        head, tail = 'start-漢字🙂-', '-end-Привет'
+        message = head + '界' * 20000 + tail
+
+        def cases(error):
+            class Failure(unittest.TestCase):
+                def runTest(case):
+                    case.fail(message)
+            return [Failure()]
+
+        result, status, output, error = self.memory_runner(cases)
+        row, = [row for row in self.diagnostics(error.getvalue()) if row['event'] == 'failure']
+        full = result.failures[0][1]
+        self.assertEqual(status, 1)
+        self.assertTrue(row['truncated'])
+        self.assertEqual(len(row['traceback']), 8192)
+        self.assertTrue(row['traceback'].startswith(full[:3000]))
+        self.assertTrue(row['traceback'].endswith(full[-3000:]))
+        self.assertIn(head, row['traceback'])
+        self.assertIn(tail, row['traceback'])
+        self.assertIn('traceback truncated', row['traceback'])
+        self.assertIn(message, full)
+        self.assertIn(message, error.getvalue(), 'standard unittest output keeps the complete failure')
+        fields = result.addFailure.__globals__['traceback_fields']
+        for length in (8191, 8192, 8193):
+            with self.subTest(length=length):
+                text = '頭' + '界' * (length - 2) + '尾'
+                bounded = fields(text)
+                self.assertEqual(len(bounded['traceback']), min(length, 8192))
+                self.assertEqual(bounded['truncated'], length > 8192)
+                self.assertTrue(bounded['traceback'].startswith('頭'))
+                self.assertTrue(bounded['traceback'].endswith('尾'))
+                if length <= 8192:
+                    self.assertEqual(bounded['traceback'], text)
+
+    def test_native_runner_keeps_success_skip_and_unexpected_success_classification(self):
+        def case(outcome):
+            class Probe(unittest.TestCase):
+                def runTest(probe):
+                    if outcome == 'skip':
+                        probe.skipTest('pure skipped fixture')
+            if outcome in ('expected failure', 'unexpected success'):
+                Probe.runTest = unittest.expectedFailure(Probe.runTest)
+            if outcome == 'expected failure':
+                def failed(probe):
+                    probe.fail('expected pure failure')
+                Probe.runTest = unittest.expectedFailure(failed)
+            return Probe()
+
+        for outcome, expected in [('success', (1, 0, 0, 0, 0)), ('skip', (1, 1, 0, 0, 1)),
+                                  ('unexpected success', (1, 0, 1, 0, 1)), ('expected failure', (1, 0, 0, 1, 0))]:
+            with self.subTest(outcome=outcome):
+                result, status, output, error = self.memory_runner(lambda error: [case(outcome)])
+                self.assertEqual((result.testsRun, len(result.skipped), len(result.unexpectedSuccesses),
+                                  len(result.expectedFailures), int(bool(status))), expected)
+                self.assertEqual((len(result.failures), len(result.errors)), (0, 0))
+                self.assertEqual([row['event'] for row in self.diagnostics(error.getvalue())], ['start', 'end'])
+                self.assertEqual(json.loads(output.removeprefix('ZERUS_NATIVE_RESULT=')),
+                                 dict(tests=1, skipped=len(result.skipped)))
+        result, status, output, error = self.memory_runner(lambda error: [])
+        self.assertEqual((result.testsRun, status), (0, 1))
+        self.assertEqual(output, 'ZERUS_NATIVE_RESULT={"tests": 0, "skipped": 0}\n')
+
     def registry(self, version='9.8.7'):
         manifest = json.loads(compat.MANIFEST.read_text())
         responses = {}
@@ -458,6 +584,70 @@ class AgentCompatibility(unittest.TestCase):
                 with self.subTest(agent=agent, target=target):
                     self.assertIs(compat.target_spec(agent, target), spec)
 
+    def test_windows_claude_manual_mode_reaches_every_native_launch(self):
+        # Read the maintained fixture without importing its native host/process setup.
+        tree = ast.parse((ROOT / 'tests/test_windows_native_agents.py').read_text(encoding='utf-8'))
+        classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
+        claude, native = classes['NativeWindowsClaude'], classes['NativeAgent']
+        args, = [node.value for node in claude.body if isinstance(node, ast.Assign)
+                 and any(isinstance(target, ast.Name) and target.id == 'ARGS' for target in node.targets)]
+        self.assertEqual(ast.literal_eval(args),
+                         ('--model', 'claude-sonnet-4-6', '--permission-mode', 'manual'),
+                         'Claude approval fixtures must not inherit the account bypass default')
+        self.assertEqual([ast.unparse(base) for base in claude.bases], ['NativeAgent', 'host.HostCase'])
+        methods = {node.name: node for node in claude.body if isinstance(node, ast.FunctionDef)}
+        self.assertNotIn('launch', methods, 'all Claude launches must use the maintained common path')
+
+        def self_call(node, name):
+            return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name) and node.func.value.id == 'self'
+                    and node.func.attr == name)
+
+        launch, = [node for node in native.body if isinstance(node, ast.FunctionDef) and node.name == 'launch']
+        forwarded, = [node.value for node in launch.body if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == 'args' for target in node.targets)]
+        self.assertEqual(ast.dump(forwarded), ast.dump(ast.parse('[*self.ARGS, *extra]', mode='eval').body))
+        command, = [node for node in ast.walk(launch) if self_call(node, 'hgs')]
+        self.assertEqual(ast.unparse(command.args[0]), 'self.AGENT')
+        # The hgs delimiter precedes the native args; an extra native delimiter
+        # can only follow ARGS, so explicit manual mode retains launch precedence.
+        self.assertEqual(ast.dump(command.args[-1]),
+                         ast.dump(ast.parse("f(*(['--', *args] if args else []))").body[0].value.args[0]))
+
+        launches = {}
+        for name, method in methods.items():
+            calls = [node for node in ast.walk(method) if self_call(node, 'launch')]
+            if calls:
+                self.assertTrue(all(len(call.args) == 1 and not call.keywords for call in calls))
+                launches[name] = [ast.literal_eval(call.args[0]) for call in calls]
+        self.assertEqual(launches, {
+            'test_project_powershell_wrapper_keeps_existing_tracking_and_exact_messages': ['prime-hooks', 'wrapper'],
+            'test_a_tracked_launch_reports_its_hooks_and_send_delivers_exact_messages': ['messages'],
+            'test_hgs_answers_ask_user_question': ['question'],
+            'test_hgs_answers_a_question_taller_than_its_unviewed_pane': ['tall'],
+            'test_hgs_approves_a_write_once': ['approval'],
+            'test_the_answer_channel_answers_bash_approvals': ['channel'],
+            'test_a_bash_panel_taller_than_80x24_is_answered_through_the_hook': ['clipped'],
+            'test_terminal_answers_end_the_hook': ['terminal'],
+            'test_a_killed_hook_leaves_the_approval_to_the_verified_screen': ['killed'],
+            'test_clear_context_starts_a_new_conversation_in_the_same_agent': ['clear'],
+            'test_pause_resume_and_terminate': ['lifecycle'],
+            'test_a_team_swap_moves_the_lead_through_u53': ['swap'],
+            'test_input_keys_reach_claude_through_the_host': ['keys'],
+        })
+        wrapper = methods['test_project_powershell_wrapper_keeps_existing_tracking_and_exact_messages']
+        writes = [node for node in ast.walk(wrapper) if isinstance(node, ast.Call)
+                  and isinstance(node.func, ast.Attribute) and node.func.attr == 'write_text']
+        script, = writes
+        self.assertEqual(ast.dump(script.args[0]),
+                         ast.dump(ast.parse('f"& \'{program}\' @args; exit $LASTEXITCODE\\n"', mode='eval').body))
+        settings, = [node.args[0] for node in ast.walk(methods['configure'])
+                     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                     and ast.unparse(node.func) == 'json.dumps' and isinstance(node.args[0], ast.Dict)
+                     and any(isinstance(key, ast.Constant) and key.value == 'permissions'
+                             for key in node.args[0].keys)]
+        self.assertEqual(ast.literal_eval(settings), {'permissions': {'defaultMode': 'default'}})
+
     def qualify_fixture(self, agent, target):
         """Run qualify() with stand-ins for the package, the executable and the suite
         interpreter; returns the report row, the suite runs, the results folder and the
@@ -608,11 +798,15 @@ class AgentCompatibility(unittest.TestCase):
             stack.assert_called_once_with(file=error, all_threads=True)
             rows = [json.loads(line.removeprefix('ZERUS_NATIVE_DIAGNOSTIC=')) for line in error.getvalue().splitlines()
                     if line.startswith('ZERUS_NATIVE_DIAGNOSTIC=')]
-            self.assertEqual([row['event'] for row in rows], ['start', 'before-aggregate-timeout', 'end'])
+            self.assertEqual([row['event'] for row in rows],
+                             ['start', 'before-aggregate-timeout'] + ([] if passing else ['failure']) + ['end'])
             self.assertEqual(rows[0], dict(event='start', id=case.id(), started_monotonic=101))
             self.assertEqual(rows[1], dict(event='before-aggregate-timeout', monotonic=105,
                                           current=dict(id=case.id(), started_monotonic=101), case_elapsed=4))
-            self.assertEqual(rows[2], dict(event='end', id=case.id(), ended_monotonic=106, elapsed=5))
+            self.assertEqual(rows[-1], dict(event='end', id=case.id(), ended_monotonic=106, elapsed=5))
+            if not passing:
+                self.assertEqual(rows[2], dict(event='failure', id=case.id(),
+                                              traceback=namespace['result'].failures[0][1], truncated=False))
             self.assertIsNone(namespace['current'])
             self.assertEqual(output.getvalue(), 'ZERUS_NATIVE_RESULT={"tests": 1, "skipped": 0}\n')
 

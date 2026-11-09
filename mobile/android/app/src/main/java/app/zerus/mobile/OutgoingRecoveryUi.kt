@@ -11,7 +11,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
-@Composable internal fun OutgoingRecovery(message: OutgoingMessage, checking: Boolean, onCheck: () -> Unit, onReview: () -> Unit) {
+internal const val OUTGOING_WARNING_DISMISSAL_NOTICE =
+    "This only removes the warning from this phone. Delivery may still be confirmed later."
+
+@Composable internal fun OutgoingRecovery(message: OutgoingMessage, checking: Boolean, onCheck: () -> Unit, onReview: () -> Unit,
+    dismissing: Boolean = false) {
+    if (message.deliveryDismissed) return
     Surface(color = MaterialTheme.colorScheme.surfaceContainer, shape = MaterialTheme.shapes.medium) {
         Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically) {
@@ -25,7 +30,7 @@ import androidx.compose.ui.unit.dp
                 if (checking) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
                 else Icon(Icons.Default.Refresh, "Check previous message delivery")
             }
-            IconButton(onClick = onReview, enabled = !checking, modifier = Modifier.size(48.dp)) {
+            IconButton(onClick = onReview, enabled = !dismissing, modifier = Modifier.size(48.dp)) {
                 Icon(Icons.Default.MoreVert, "Review previous message")
             }
         }

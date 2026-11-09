@@ -219,7 +219,7 @@ describe("every tab row keeps its spacing in the packaged app (task 463)", () =>
     // Before the unlayered base, those tabs had no padding at all.
     expect(labelSpacing(["cat-tabs", "tabs"], before).padding).toEqual([0, 0]);
     expect(sheets["base.css"]).toMatch(/^\.tabs \{ display: flex; gap: 2px; align-items: flex-end; \}$/m);
-    expect(sheets["base.css"]).toMatch(/^\.tab \{\n  position: relative; height: 30px; padding: 0 10px;/m);
+    expect(sheets["base.css"]).toMatch(/^\.tab \{\r?\n  position: relative; height: 30px; padding: 0 10px;/m);
     // The selected tab keeps its own colour and weight, or the unlayered .tab
     // would mute it.
     expect(sheets["base.css"]).toMatch(/^\.tab\.on \{ color: var\(--z-color-text\); font-weight: 600; \}$/m);

@@ -11,6 +11,7 @@ mod claude_trust;
 mod claude_permission;
 mod claude_resume;
 mod claude_usage_limit;
+mod claude_bypass;
 mod claude_question;
 mod claude_statusline;
 mod claude_subagents;

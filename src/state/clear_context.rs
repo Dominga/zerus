@@ -622,7 +622,7 @@ pub(super) fn dismissable(record: &Value, live: bool) -> bool {
         && !awaiting_start(record)
         && !compact_context::pending(record)
 }
-const STARTUP_CHOICES: [&str; 4] = ["claude_resume", "claude_permission_mode", "claude_folder_trust", "claude_usage_limit"];
+const STARTUP_CHOICES: [&str; 5] = ["claude_resume", "claude_permission_mode", "claude_folder_trust", "claude_bypass_warning", "claude_usage_limit"];
 /// Esc can end a launch at a startup chooser; Activity answers those instead.
 pub(super) fn startup_choice(cards: &Value) -> bool {
     cards.as_array().into_iter().flatten().any(|card| STARTUP_CHOICES.contains(&string(card,"source")))

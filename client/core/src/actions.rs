@@ -1425,6 +1425,11 @@ fn startup_request(question: &Value) -> bool {
         || (source == "claude_permission_mode"
             && transport == "claude_tui"
             && id == format!("claude-permissions:{hash}"))
+        // Task #466: Claude's bypass-permissions startup warning, answerable
+        // before a conversation exists.
+        || (source == "claude_bypass_warning"
+            && transport == "claude_tui"
+            && id == format!("claude-bypass:{hash}"))
         || (source == "codex_hooks_trust"
             && transport == "codex_tui"
             && id == format!("codex-hooks-trust:{hash}"))

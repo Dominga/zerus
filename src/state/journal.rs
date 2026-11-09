@@ -860,7 +860,7 @@ pub(super) fn notification_summary(record: &Value, live_pane: bool) -> Result<Va
 /// panel wins. Dispatch refuses each of them (`input::checked_input`).
 pub(super) fn terminal_chooser(record: &Value) -> Option<(Value, &'static str, &'static str)> {
     type Current = fn(&Value) -> Option<Value>;
-    let choosers: [(Current, &str, &str); 13] = [
+    let choosers: [(Current, &str, &str); 14] = [
         // First: any panel a later, known chooser recognizes wins.
         (claude_approval::idle_choice, "input", "Claude is waiting for your choice in Terminal"),
         (claude_approval::current, "approval", "Claude is waiting for your tool or safety approval"),
@@ -868,6 +868,7 @@ pub(super) fn terminal_chooser(record: &Value) -> Option<(Value, &'static str, &
         (claude_usage_limit::current, "input", "Claude is waiting for your usage-limit choice"),
         (claude_permission::current, "approval", "Claude is waiting for your default permission mode choice"),
         (claude_trust::current, "approval", "Claude is waiting for folder trust approval"),
+        (claude_bypass::current, "approval", "Claude is waiting for your Bypass Permissions choice"),
         (codex_trust::current, "approval", "Codex is waiting for folder trust approval"),
         (codex_hooks_trust::current, "approval", "Codex is waiting for hook trust review"),
         (codex_update::current, "input", "Codex is waiting for an update choice"),

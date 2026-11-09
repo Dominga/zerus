@@ -3165,6 +3165,16 @@ preparation is revalidated before startup. A definitely ended startup can retry
 only startup with a new launch identity. **Edit choices** opens a reviewed new
 request while preserving the original attempt and resources.
 
+A failed repository verification after a successful worktree receipt keeps the
+already-created checkout, branch and original receipt. Its message distinguishes
+that read failure from creation failure. One bounded private
+`last_catalog_failure` records the read stage, sanitized state/detail and typed
+staleness, completeness and sample time (null means unavailable), and remains
+after later continuation. A catalog timeout does not establish repository
+corruption. **Continue setup** revalidates the retained checkout and can then
+start the session; it is not a read-only check and never repeats an unknown
+original effect.
+
 A matching service receipt with a fully drained, unsuccessful launch-command
 exit shows **Creation failed** and its reason. Its dispatched launch identity
 is kept: **Continue setup** never repeats it. **Edit choices** opens a separate,

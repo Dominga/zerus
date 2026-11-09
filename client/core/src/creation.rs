@@ -1859,11 +1859,47 @@ impl Creations {
     }
 
     fn catalog_answer(&mut self, id: &str, answer: Answer) {
+        fn catalog_failure(data: &Value, detail: &str, post_create: bool) -> Value {
+            let bounded = |text: &str, limit| {
+                diagnostic(text)
+                    .chars()
+                    .take(limit)
+                    .map(|c| if c.is_control() { ' ' } else { c })
+                    .collect::<String>()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            // One small private record, not the response, its rows or history.
+            // Null means that the producer did not supply a typed observation.
+            let state = bounded(data["state"].as_str().unwrap_or("unavailable"), 64);
+            json!({
+                "stage": if post_create { "post_create_catalog" } else { "pre_create_catalog" },
+                "state": if state.is_empty() { "unavailable" } else { &state },
+                "detail": bounded(detail, 512),
+                "stale": data["stale"].as_bool(),
+                "partial": data["partial"].as_bool(),
+                "sampled_at": data["sampled_at"].as_f64().filter(|at| at.is_finite() && *at >= 0.0),
+            })
+        }
+        const CREATED_UNVERIFIED: &str = "The checkout was already created, but repository verification is unavailable. Its files and original receipt are kept.";
+        let mut value = self.get(id);
+        let post_create = flag(&value, "worktree_done");
         if !answer.ok {
-            return self.failed(id, &answer.error, false);
+            value["last_catalog_failure"] =
+                catalog_failure(&Value::Null, &answer.error, post_create);
+            self.put(id, value);
+            return self.failed(
+                id,
+                if post_create {
+                    CREATED_UNVERIFIED
+                } else {
+                    &answer.error
+                },
+                false,
+            );
         }
         let result = answer.data;
-        let mut value = self.get(id);
         if flag(&value, "stop_requested") {
             return self.stopped(id);
         }
@@ -1871,9 +1907,16 @@ impl Creations {
             || flag(&result, "stale")
             || text(&result, "common_dir").is_empty()
         {
+            value["last_catalog_failure"] =
+                catalog_failure(&result, text(&result, "detail"), post_create);
+            self.put(id, value);
             return self.failed(
                 id,
-                "The repository could not be confirmed. Choose the working folder again.",
+                if post_create {
+                    CREATED_UNVERIFIED
+                } else {
+                    "The repository could not be confirmed. Choose the working folder again."
+                },
                 false,
             );
         }

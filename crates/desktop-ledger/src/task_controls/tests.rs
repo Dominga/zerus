@@ -1072,3 +1072,5 @@ fn a_removed_attempt_index_refuses_at_lookup_without_a_scan_or_schema_repair() {
 }
 
 mod stop_import;
+
+mod service;

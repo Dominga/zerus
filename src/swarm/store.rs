@@ -568,6 +568,7 @@ impl LockedStore {
         if let Some(primary) = &self.data.id_memberships {
             replace(&path.with_extension("session-ids.json"), &primary.bytes()?)?;
         }
+        super::drive_folders::backup(&path)?;
         Ok(path)
     }
 }

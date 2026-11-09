@@ -813,6 +813,13 @@ export async function terminalDrop(view: string, generation: number, target: Dro
   if (!inTauri()) throw "Dropping files needs the desktop app.";
   return invoke<string | null>("terminal_drop", { view, generation, target, paths });
 }
+/** Only event PNG bytes; Rust owns staging, exact attach checks and the final path write. */
+export async function terminalPasteImage(view: string, generation: number, target: TerminalTarget, png: Uint8Array): Promise<void> {
+  if (!inTauri()) throw "Pasting an image needs the desktop app.";
+  const guard = JSON.stringify({ computer: target.computer, name: target.name, run_id: target.run_id, conversation_id: target.conversation_id })
+    .replace(/[^\x20-\x7e]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  await invoke("terminal_paste_image", png, { headers: { "x-zerus-view": view, "x-zerus-generation": String(generation), "x-zerus-image-target": guard } });
+}
 /** Whether every dropped path names a file (Qt's LocalFile::readable); a folder refuses the drop. */
 export async function droppedFiles(paths: string[]): Promise<boolean> {
   if (!inTauri()) return false;

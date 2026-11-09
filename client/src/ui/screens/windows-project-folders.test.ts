@@ -43,4 +43,21 @@ describe("the Windows Projects read projection", () => {
     expect(localFolderExists).not.toHaveBeenCalled();
     expect(launch.folderLaunch({ ...folder, machine: "peer", machine_id: "other", path: "//server/share" }).problem).toBe("");
   });
+  it("derives each folder Place style from its own computer metadata", async () => {
+    const previous = { ...machineCards };
+    machineCards[""] = { ...local, host: "local-linux", platform: "linux", machine_id: "local-node" };
+    machineCards["windows-peer"] = { ...local, host: "windows-peer", machine_id: "remote-node" };
+    try {
+      await createRoot(async (dispose) => {
+        const edits = createProjectFolders(() => [project], vi.fn());
+        await edits.open("alpha", undefined, {} as HTMLElement);
+        expect(edits.prompt()?.places.find((place) => place.computer === "windows-peer")?.style).toBe("windows");
+        expect(edits.prompt()?.places.find((place) => place.computer === "")?.style).toBe("posix");
+        dispose();
+      });
+    } finally {
+      for (const key of Object.keys(machineCards)) delete machineCards[key];
+      Object.assign(machineCards, previous);
+    }
+  });
 });

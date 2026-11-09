@@ -55,7 +55,7 @@ fn original_helper_fixture() {
             // parent, the test process), not every process of this user on
             // the host (zerus-89pkd). The holder's exact root pin is then
             // still examined and excluded, never vacuously absent.
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             let roster = crate::platform::worktree_membership::test_roster::owned(&[
                 std::os::unix::process::parent_id(),
             ]);
@@ -63,7 +63,9 @@ fn original_helper_fixture() {
                 borrowed.programs(&intent).unwrap().is_empty(),
                 "the verified holder root pin is not an occupant"
             );
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            roster.assert_completed();
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             drop(roster);
             let mut changed = intent.clone();
             changed.pipeline = uuid::Uuid::new_v4().to_string();

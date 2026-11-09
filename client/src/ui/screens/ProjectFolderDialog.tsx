@@ -1,7 +1,7 @@
 import { Dropdown } from "../lib/Dropdown";
 import { TextInput } from "../lib/TextField";
 import { Show, createSignal, onCleanup, onMount } from "solid-js";
-import { clean as cleanPath } from "../sessions/paths";
+import { absolute, clean as cleanPath, same } from "../sessions/paths";
 import { Icon } from "../lib/icons";
 import { FolderBrowserDialog } from "../components/FolderBrowser";
 import * as bridge from "../../bridge";
@@ -19,9 +19,10 @@ export default function ProjectFolderDialog(props: { prompt: FolderPrompt; busy:
   const [path, setPath] = createSignal(p.original?.path ?? "");
   const [browsing, setBrowsing] = createSignal(false);
   const machine = () => place()?.computer || place()?.host || "";
-  const clean = (value: string) => cleanPath(value.trim(), "posix");
-  const duplicate = () => props.folders.some((f) => f.key !== p.original?.key && f.machine === machine() && clean(f.path) === clean(path()));
-  const valid = () => !!place() && path().trim().startsWith("/") && !/[\r\n\0]/u.test(path()) && !duplicate();
+  const style = () => place()?.style ?? "posix";
+  const clean = (value: string) => cleanPath(value.trim(), style());
+  const duplicate = () => props.folders.some((f) => f.key !== p.original?.key && f.machine === machine() && same(clean(f.path), clean(path()), style()));
+  const valid = () => !!place() && absolute(path().trim(), style()) && !/[\r\n\0]/u.test(path()) && !duplicate();
   let dialog!: HTMLDialogElement;
   onMount(() => { dialog.showModal(); queueMicrotask(() => dialog.querySelector<HTMLElement>('[role="combobox"], input')?.focus()); });
   onCleanup(() => { dialog.close(); queueMicrotask(() => { if (p.origin.isConnected) p.origin.focus(); else document.querySelector<HTMLElement>('.proj-table tr[aria-selected="true"]')?.focus(); }); });

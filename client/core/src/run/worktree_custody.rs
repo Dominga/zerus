@@ -36,6 +36,9 @@ pub struct Owner {
     armed: Option<Binding>,
     original: Option<crate::worktree_programs::Manifest>,
     observations: usize,
+    completion: Arc<Completion>,
+    close_started: bool,
+    retirement: Option<Retirement>,
 }
 fn seconds() -> u64 {
     std::time::SystemTime::now()
@@ -113,6 +116,8 @@ impl Owner {
         let (events, received) = mpsc::sync_channel::<Reply>(1);
         let program = program.to_owned();
         let first = open.clone();
+        let completion = Arc::new(Completion::new());
+        let worker_completion = completion.clone();
         let worker = thread::Builder::new()
             .name("zerus-worktree-pins".into())
             .spawn(move || {
@@ -125,6 +130,7 @@ impl Owner {
                 let original = spawn.clone();
                 let frozen = environment.clone();
                 let child = ChildCharge::new(owned.clone());
+                worker_completion.track(child.exited.clone());
                 let result = run_inner(
                     &program,
                     &help,
@@ -142,6 +148,7 @@ impl Owner {
                         retain_all: true,
                         child_exited: Some(child.exited.clone()),
                         clear_environment: true,
+                        completion: Some(worker_completion.clone()),
                         ..Pipes::default()
                     },
                 );
@@ -172,6 +179,7 @@ impl Owner {
                 let input_stop = stop.clone();
                 let output_stop = stop.clone();
                 let child = ChildCharge::new(owned.clone());
+                worker_completion.track(child.exited.clone());
                 let result = run_inner(
                     &program,
                     &call,
@@ -217,31 +225,53 @@ impl Owner {
                             }
                         })),
                         output: Some(Box::new(move |pipe| {
+                            fn drain(reader: &mut BufReader<ChildStdout>) -> bool {
+                                let mut chunk = [0; 8192];
+                                loop {
+                                    match reader.read(&mut chunk) {
+                                        Ok(0) => return true,
+                                        Ok(_) => {}
+                                        Err(_) => return false,
+                                    }
+                                }
+                            }
                             let mut reader = BufReader::new(pipe);
                             for _ in 0..MAX_REPLIES {
                                 if output_stop.load(Ordering::Acquire) || Instant::now() >= deadline
                                 {
-                                    return false;
+                                    return drain(&mut reader);
                                 }
                                 let mut bytes = Vec::new();
-                                if reader
+                                match reader
                                     .by_ref()
                                     .take((wire::FRAME_BYTES + 1) as u64)
                                     .read_until(b'\n', &mut bytes)
-                                    .is_err()
-                                    || !bytes.ends_with(b"\n")
                                 {
-                                    return false;
+                                    Ok(_) if bytes.ends_with(b"\n") => {}
+                                    Ok(_)
+                                        if output_stop.load(Ordering::Acquire)
+                                            || Instant::now() >= deadline =>
+                                    {
+                                        return drain(&mut reader);
+                                    }
+                                    Ok(_) | Err(_) => return false,
                                 }
-                                let Ok(mut frame) = Reply::decode(&bytes, seconds()) else {
-                                    return false;
+                                let mut frame = match Reply::decode(&bytes, seconds()) {
+                                    Ok(frame) => frame,
+                                    Err(_)
+                                        if output_stop.load(Ordering::Acquire)
+                                            || Instant::now() >= deadline =>
+                                    {
+                                        return drain(&mut reader);
+                                    }
+                                    Err(_) => return false,
                                 };
                                 let closed = matches!(frame, Reply::Closed { .. });
                                 loop {
                                     if output_stop.load(Ordering::Acquire)
                                         || Instant::now() >= deadline
                                     {
-                                        return false;
+                                        return drain(&mut reader);
                                     }
                                     match events.try_send(frame) {
                                         Ok(()) => break,
@@ -249,12 +279,27 @@ impl Owner {
                                             frame = value;
                                             thread::sleep(POLL);
                                         }
+                                        Err(_)
+                                            if output_stop.load(Ordering::Acquire)
+                                                || Instant::now() >= deadline =>
+                                        {
+                                            return drain(&mut reader);
+                                        }
                                         Err(_) => return false,
                                     }
                                 }
                                 if closed {
                                     let mut byte = [0];
-                                    return reader.read(&mut byte).is_ok_and(|n| n == 0);
+                                    return match reader.read(&mut byte) {
+                                        Ok(0) => true,
+                                        Ok(_)
+                                            if output_stop.load(Ordering::Acquire)
+                                                || Instant::now() >= deadline =>
+                                        {
+                                            drain(&mut reader)
+                                        }
+                                        Ok(_) | Err(_) => false,
+                                    };
                                 }
                             }
                             false
@@ -264,6 +309,7 @@ impl Owner {
                         retain_all: true,
                         child_exited: Some(child.exited.clone()),
                         clear_environment: true,
+                        completion: Some(worker_completion.clone()),
                         ..Pipes::default()
                     },
                 );
@@ -292,6 +338,9 @@ impl Owner {
             armed: None,
             original: None,
             observations: 0,
+            completion,
+            close_started: false,
+            retirement: None,
         })
     }
     fn fail<T>(&self, error: Error) -> Result<T, Error> {
@@ -317,12 +366,11 @@ impl Owner {
                     thread::sleep(POLL);
                 }
                 if self.worker.as_ref().is_some_and(|w| w.is_finished()) {
-                    let result = self
-                        .worker
-                        .take()
-                        .unwrap()
-                        .join()
-                        .unwrap_or(Err(Error::Unsettled));
+                    let joined = self.worker.take().unwrap().join();
+                    if joined.is_err() {
+                        self.retirement = Some(Retirement::Failed);
+                    }
+                    let result = joined.unwrap_or(Err(Error::Unsettled));
                     if Arc::strong_count(&self.resources) == 1 {
                         return self.fail(result.err().unwrap_or(Error::Invalid));
                     }
@@ -493,34 +541,67 @@ impl Owner {
         if self.armed.is_some() {
             return self.fail(Error::Unsettled);
         }
+        if self.close_started {
+            return match self.join() {
+                Retirement::Retired => Ok(()),
+                Retirement::Pending => self.fail(Error::Unsettled),
+                Retirement::Failed => self.fail(Error::Unsettled),
+            };
+        }
+        self.close_started = true;
         match self.exchange(
             Control::Close {
                 pipeline: self.pipeline.clone(),
             },
             self.deadline,
         )? {
-            Reply::Closed { pipeline } if pipeline == self.pipeline => self.finish(),
+            Reply::Closed { pipeline } if pipeline == self.pipeline => {
+                while (self
+                    .worker
+                    .as_ref()
+                    .is_some_and(|worker| !worker.is_finished())
+                    || self.completion.join() == Retirement::Pending)
+                    && Instant::now() < self.deadline
+                {
+                    thread::sleep(POLL);
+                }
+                match self.join() {
+                    Retirement::Retired => Ok(()),
+                    Retirement::Pending => self.fail(Error::Unsettled),
+                    Retirement::Failed => self.fail(Error::Unsettled),
+                }
+            }
             _ => self.fail(Error::Invalid),
         }
     }
-    fn finish(&mut self) -> Result<(), Error> {
-        while self.worker.as_ref().is_some_and(|w| !w.is_finished())
-            && Instant::now() < self.deadline
-        {
-            thread::sleep(POLL);
+    pub fn join(&mut self) -> Retirement {
+        if let Some(result) = self.retirement {
+            return result;
         }
-        if !self.worker.as_ref().is_some_and(|w| w.is_finished()) {
-            return self.fail(Error::Unsettled);
-        }
-        let result = self
+        if self
             .worker
-            .take()
-            .unwrap()
-            .join()
-            .unwrap_or(Err(Error::Unsettled));
-        if result.is_err() || Arc::strong_count(&self.resources) != 1 {
-            return self.fail(Error::Unsettled);
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+        {
+            return Retirement::Pending;
         }
+        if let Some(worker) = self.worker.take() {
+            if worker.join().is_err() {
+                return self.complete(Retirement::Failed);
+            }
+        }
+        match self.completion.join() {
+            Retirement::Retired => {}
+            Retirement::Pending => return Retirement::Pending,
+            Retirement::Failed => return self.complete(Retirement::Failed),
+        }
+        if Arc::strong_count(&self.resources) != 1 {
+            return Retirement::Pending;
+        }
+        self.complete(Retirement::Retired)
+    }
+    fn complete(&mut self, result: Retirement) -> Retirement {
+        self.retirement = Some(result);
         result
     }
 }

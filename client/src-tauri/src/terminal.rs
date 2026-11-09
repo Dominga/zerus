@@ -41,6 +41,13 @@ const ACK_WAIT: Duration = Duration::from_secs(1);
 const DROP_CHANGED: &str =
     "Terminal changed during file transfer. Drop the files again in the intended session.";
 
+/// A POSIX file reference is one paste event, not a sequence of approval keys.
+/// No Enter is added. Windows keeps the existing write path below.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn literal_path_packet(quoted: &str) -> Vec<u8> {
+    format!("\x1b[200~{quoted}\x1b[201~").into_bytes()
+}
+
 /// `SessionsWindow::dropTerminalFiles` (2645-2659): a peer's guarded stage
 /// identity, or this computer's paths when `computer` is empty.
 #[derive(Clone, Debug, Deserialize)]
@@ -105,6 +112,96 @@ pub struct TerminalTarget {
     pub name: String,
     pub run_id: String,
     pub machine: String,
+    /// Image staging data only; it never changes attach/reconnect selection.
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImageTarget {
+    computer: String,
+    name: String,
+    run_id: String,
+    conversation_id: String,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl ImageTarget {
+    fn of(target: &TerminalTarget) -> Option<Self> {
+        if target.run_id.is_empty() {
+            return None;
+        }
+        Some(Self {
+            computer: target.computer.clone(),
+            name: target.name.clone(),
+            run_id: target.run_id.clone(),
+            conversation_id: target.conversation_id.clone()?,
+        })
+    }
+
+    fn action_target(&self) -> zerus_client_core::Target {
+        zerus_client_core::Target {
+            computer: self.computer.clone(),
+            name: self.name.clone(),
+            run_id: self.run_id.clone(),
+            conversation_id: self.conversation_id.clone(),
+        }
+    }
+}
+
+/// Reserved synchronously at native command entry, before its blocking task is queued.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct ImageAdmission(ImageCurrent);
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Drop for ImageAdmission {
+    fn drop(&mut self) {
+        lock(&self.0.terminals.0.dropping).remove(&self.0.generation);
+    }
+}
+
+/// Strongly retains the original presentation identity: hide/show cannot revive it.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone)]
+struct ImageCurrent {
+    terminals: Terminals,
+    view: String,
+    generation: u64,
+    target: ImageTarget,
+    epoch: Arc<()>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl ImageCurrent {
+    fn matches(&self, open: &Open) -> bool {
+        open.generation == self.generation
+            && open.shown
+            && open.attach.process_id().is_some()
+            && ImageTarget::of(&open.target).as_ref() == Some(&self.target)
+            && Arc::ptr_eq(&self.epoch, &open.image_epoch)
+    }
+
+    fn current(&self) -> bool {
+        lock(&self.terminals.0.views)
+            .get(&self.view)
+            .is_some_and(|open| self.matches(open))
+    }
+
+    fn paste(&self, path: &str) -> Result<(), String> {
+        let views = lock(&self.terminals.0.views);
+        let open = views
+            .get(&self.view)
+            .filter(|open| self.matches(open))
+            .ok_or(DROP_CHANGED)?;
+        // This cut has Unix source hosts and POSIX peer receipts only.
+        open.attach
+            .write(&literal_path_packet(&terminal::paste_paths(
+                &[path.to_owned()],
+                false,
+            )?))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -198,6 +295,8 @@ struct Open {
     resizes: usize,
     /// A hidden Terminal tab keeps its attach but cannot accept file drops.
     shown: bool,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    image_epoch: Arc<()>,
 }
 
 struct Inner {
@@ -285,6 +384,10 @@ impl Terminals {
     /// Called under the views lock, as transfer admission is. A retained
     /// attach keeps its transfer exclusion through rename and run enrichment.
     fn keep_target(&self, open: &mut Open, target: TerminalTarget) {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if ImageTarget::of(&open.target) != ImageTarget::of(&target) {
+            open.image_epoch = Arc::new(());
+        }
         if let Some(transfer) = lock(&self.0.dropping).get_mut(&open.generation) {
             *transfer = target.clone();
         }
@@ -345,6 +448,8 @@ impl Terminals {
                 size: (cols, rows),
                 resizes: 0,
                 shown: true,
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                image_epoch: Arc::new(()),
             },
         );
         Ok(Connected {
@@ -363,6 +468,10 @@ impl Terminals {
     ) -> Option<Connected> {
         let mut views = lock(&self.0.views);
         let open = views.get_mut(view)?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            open.image_epoch = Arc::new(());
+        }
         self.keep_target(open, target.clone());
         open.set_size(size.0, size.1);
         let mut delivery = lock(&open.pipe.delivery);
@@ -436,6 +545,10 @@ impl Terminals {
             .filter(|open| open.generation == generation)
         {
             open.shown = shown;
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if !shown {
+                open.image_epoch = Arc::new(());
+            }
         }
     }
 
@@ -445,10 +558,152 @@ impl Terminals {
     pub fn paste(&self, view: &str, generation: u64, text: &str) -> Result<(), String> {
         match lock(&self.0.views).get(view) {
             Some(open) if open.generation == generation && open.shown => {
-                open.attach.write(text.as_bytes())
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                {
+                    open.attach.write(&literal_path_packet(text))
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                {
+                    open.attach.write(text.as_bytes())
+                }
             }
             _ => Err(DROP_CHANGED.into()),
         }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn admit_image(
+        &self,
+        view: &str,
+        generation: u64,
+        expected: &ImageTarget,
+    ) -> Result<ImageAdmission, String> {
+        if !self.0.allowed {
+            return Err(crate::actions::REPLAY_NEEDS_HGS.into());
+        }
+        let current = {
+            let views = lock(&self.0.views);
+            let open = views
+                .get(view)
+                .filter(|open| {
+                    open.generation == generation
+                        && open.shown
+                        && open.attach.process_id().is_some()
+                        && ImageTarget::of(&open.target).as_ref() == Some(expected)
+                })
+                .ok_or(DROP_CHANGED)?;
+            let mut dropping = lock(&self.0.dropping);
+            if dropping.contains_key(&generation)
+                || dropping.values().any(|held| {
+                    held.computer == open.target.computer
+                        && (held.name == open.target.name
+                            || (!held.run_id.is_empty() && held.run_id == open.target.run_id))
+                })
+            {
+                return Err("Wait for the current file transfer to finish.".into());
+            }
+            dropping.insert(generation, open.target.clone());
+            ImageCurrent {
+                terminals: self.clone(),
+                view: view.into(),
+                generation,
+                target: ImageTarget::of(&open.target).ok_or(DROP_CHANGED)?,
+                epoch: Arc::clone(&open.image_epoch),
+            }
+        };
+        Ok(ImageAdmission(current))
+    }
+
+    /// Only the event's PNG. Both local and peer copies use the existing stage contract.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    async fn image_with<F>(
+        &self,
+        admission: ImageAdmission,
+        png: Vec<u8>,
+        cache: &std::path::Path,
+        dispatch: impl FnOnce(zerus_client_core::Target, PathBuf, String, Arc<[u8]>, ImageCurrent) -> F,
+    ) -> Result<(), String>
+    where
+        F: std::future::Future<Output = Result<zerus_client_core::Outcome, String>>,
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        use zerus_client_core::attachments::{pasted_image, MAX_ATTACHMENT_BYTES};
+        if !self.0.allowed {
+            return Err(crate::actions::REPLAY_NEEDS_HGS.into());
+        }
+        if png.is_empty() || png.len() > MAX_ATTACHMENT_BYTES {
+            return Err("Each file must be readable, nonempty, and at most 10 MiB.".into());
+        }
+        let image = pasted_image(png)?;
+        if image.bytes[16..20] == [0; 4] || image.bytes[20..24] == [0; 4] {
+            return Err("Could not read the pasted image.".into());
+        }
+        let original: Arc<[u8]> = image.bytes.into();
+        let current = &admission.0;
+        if !current.current() {
+            return Err(DROP_CHANGED.into());
+        }
+        std::fs::create_dir_all(cache).map_err(|e| e.to_string())?;
+        let source = tempfile::Builder::new()
+            .prefix("zerus-terminal-image-")
+            .tempdir_in(cache)
+            .map_err(|e| e.to_string())?;
+        std::fs::set_permissions(source.path(), std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| e.to_string())?;
+        let path = source.path().join("pasted-image.png");
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| e.to_string())?;
+        if !current.current() {
+            return Err(DROP_CHANGED.into());
+        }
+        file.write_all(&original)
+            .and_then(|()| file.flush())
+            .map_err(|e| e.to_string())?;
+        let request = uuid::Uuid::new_v4().to_string();
+        let result = dispatch(
+            current.target.action_target(),
+            path,
+            request.clone(),
+            Arc::clone(&original),
+            current.clone(),
+        )
+        .await?;
+        let zerus_client_core::Outcome::Done { receipt, .. } = result else {
+            return Err(match result {
+                zerus_client_core::Outcome::Failed { detail }
+                | zerus_client_core::Outcome::Uncertain { detail } => detail,
+                _ => unreachable!(),
+            });
+        };
+        if receipt["status"] != "staged"
+            || receipt["request_id"] != request
+            || receipt["name"] != current.target.name
+            || receipt["run_id"] != current.target.run_id
+            || receipt["conversation_id"] != current.target.conversation_id
+        {
+            return Err("Invalid acknowledgement. Check Terminal before retrying.".into());
+        }
+        let paths = staged_paths(&receipt, 1)?;
+        let staged = &receipt["files"][0];
+        if !paths[0].starts_with('/')
+            || staged["name"] != "pasted-image.png"
+            || staged["mime"] != "image/png"
+            || staged["bytes"].as_u64() != Some(original.len() as u64)
+        {
+            return Err("Invalid transferred file path".into());
+        }
+        // Only these owned source objects are removed. Target copies keep StageFiles' lifetime.
+        // Holding them through dispatch also survives loss of the outer WebView future.
+        let pasted = current.paste(&paths[0]);
+        drop(file);
+        drop(source);
+        pasted
     }
 
     /// `dropTerminalFiles` and its finish (SessionsWindow.cpp:2645-2659,
@@ -693,6 +948,67 @@ fn drop_origin(origin: &str, view: &str) -> Result<(), String> {
         return Err("Terminal drops are available only in the main view.".into());
     }
     Ok(())
+}
+
+/// Raw event bytes, never an ambient clipboard request or a caller-selected source path.
+#[tauri::command]
+pub async fn terminal_paste_image(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+    terminals: State<'_, Terminals>,
+    actions: State<'_, crate::actions::Actions>,
+    request: Request<'_>,
+) -> Result<(), String> {
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (app, webview, terminals, actions, request);
+        Err("Pasting image files into Terminal is not supported on this computer.".into())
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let header = |name| request.headers().get(name).and_then(|v| v.to_str().ok());
+        let view = header("x-zerus-view")
+            .ok_or("missing x-zerus-view")?
+            .to_owned();
+        drop_origin(webview.label(), &view)?;
+        let generation = header("x-zerus-generation")
+            .and_then(|n| n.parse::<u64>().ok())
+            .ok_or("missing x-zerus-generation")?;
+        let guard = header("x-zerus-image-target")
+            .filter(|s| s.len() <= 16 * 1024)
+            .ok_or("Invalid Terminal image target")?;
+        let target: ImageTarget =
+            serde_json::from_str(guard).map_err(|_| "Invalid Terminal image target")?;
+        let InvokeBody::Raw(raw) = request.body() else {
+            return Err("Expected PNG bytes".into());
+        };
+        if raw.len() > zerus_client_core::attachments::MAX_ATTACHMENT_BYTES {
+            return Err("Attachment exceeds 10 MiB".into());
+        }
+        let admission = terminals.admit_image(&view, generation, &target)?;
+        let png = raw.clone();
+        let cache = crate::cache_dir(&app);
+        let (terminals, actions) = (terminals.inner().clone(), actions.inner().clone());
+        // An owned blocking task runs to completion even if the IPC future disappears.
+        blocking(move || {
+            tauri::async_runtime::block_on(terminals.image_with(
+                admission,
+                png,
+                &cache,
+                |target, path, request, original, current| {
+                    crate::actions::dispatch_terminal_image_as(
+                        &actions,
+                        target,
+                        path,
+                        request,
+                        original,
+                        move || current.current(),
+                    )
+                },
+            ))
+        })
+        .await?
+    }
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -944,6 +1260,462 @@ mod tests {
             name: "claude/sample-project/review".into(),
             run_id: run.into(),
             machine: "studio".into(),
+            conversation_id: Some("conversation-1".into()),
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    mod image_tests {
+        use super::*;
+        use std::sync::mpsc;
+
+        fn png() -> Vec<u8> {
+            include_bytes!("../icons/32x32.png").to_vec()
+        }
+
+        // The parent never holds a writable executable FD across another test's fork.
+        fn script(path: &Path, body: &str) {
+            assert!(std::process::Command::new("/usr/bin/python3").args([
+                "-c", "import pathlib,sys;p=pathlib.Path(sys.argv[1]);p.write_text(sys.argv[2]);p.chmod(0o700)",
+                path.to_str().unwrap(), body,
+            ]).status().unwrap().success());
+        }
+
+        struct Fixture {
+            t: Terminals,
+            sink: Arc<Collect>,
+            dir: tempfile::TempDir,
+            log: PathBuf,
+            stage: PathBuf,
+            retained: PathBuf,
+            generation: u64,
+            target: TerminalTarget,
+        }
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                self.t.stop_all();
+            }
+        }
+        impl Fixture {
+            fn new(local: bool) -> Self {
+                let dir = tempfile::tempdir().unwrap();
+                let log = dir.path().join("pty-input");
+                let attach = dir.path().join("attach.py");
+                script(
+                    &attach,
+                    &format!(
+                        r#"#!/usr/bin/python3
+import os,sys,tty
+tty.setraw(0)
+sys.stdout.write('{{"COLORTERM":"truecolor"}}\r\n');sys.stdout.flush()
+while True:
+    b=os.read(0,65536)
+    if not b: break
+    with open({},'ab',buffering=0) as f: f.write(b)
+    if b==b'\x04': break
+    sys.stdout.write('GOT\r\n');sys.stdout.flush()
+"#,
+                        serde_json::to_string(log.to_str().unwrap()).unwrap()
+                    ),
+                );
+                let retained = dir.path().join("target image's.png");
+                let stage = dir.path().join("stage.py");
+                script(
+                    &stage,
+                    &format!(
+                        r#"#!/usr/bin/python3
+import sys,json,base64,pathlib
+r=json.load(sys.stdin)
+a=r['attachments'][0];data=base64.b64decode(a['data_base64'])
+p=pathlib.Path({});p.write_bytes(data)
+with p.with_suffix('.calls').open('a') as log: log.write(r['request_id']+'\n')
+value=dict(status='staged',request_id=r['request_id'],name=sys.argv[sys.argv.index('attachment')+1],run_id=r['expected_run_id'],conversation_id=r['expected_conversation_id'],files=[dict(path=str(p),name=a['name'],mime=a['mime'],bytes=len(data))])
+print(json.dumps(value))
+"#,
+                        serde_json::to_string(retained.to_str().unwrap()).unwrap()
+                    ),
+                );
+                let t = Terminals::new(attach, true);
+                let sink = Arc::new(Collect::default());
+                let mut target = target("run-1");
+                target.computer = if local { "" } else { "peer" }.into();
+                let c = t
+                    .connect("main", target.clone(), 80, 24, sink.clone())
+                    .unwrap();
+                hello(&t, c.generation, &sink);
+                std::fs::write(
+                    dir.path().join("ambient-other-viewer.png"),
+                    b"different ambient image B",
+                )
+                .unwrap();
+                Self {
+                    t,
+                    sink,
+                    dir,
+                    log,
+                    stage,
+                    retained,
+                    generation: c.generation,
+                    target,
+                }
+            }
+            fn native_oracle(&self, image: &Path, label: &str) {
+                if [
+                    "HGS_TERMINAL_IMAGE_CODEX_RECEIPT",
+                    "HGS_TERMINAL_IMAGE_OTHER_RECEIPTS",
+                    "HGS_TERMINAL_IMAGE_TMUX_COMPOSITION",
+                ]
+                .iter()
+                .all(|key| std::env::var_os(key).is_none())
+                {
+                    println!("NATIVE_IMAGE_ORACLE not selected; fake-PTY/source evidence only");
+                    return;
+                }
+                use sha2::Digest;
+                let packet = self.dir.path().join("native-packet.json");
+                std::fs::write(
+                    &packet,
+                    serde_json::to_vec(&json!({
+                        "wire": String::from_utf8(self.input()).unwrap(), "image_file": image,
+                        "image_sha256": format!("{:x}", sha2::Sha256::digest(png())),
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+                let mut command = std::process::Command::new("/usr/bin/python3");
+                command
+                    .arg(
+                        Path::new(env!("CARGO_MANIFEST_DIR"))
+                            .join("../../tests/test_terminal_image_native.py"),
+                    )
+                    .env("HGS_TERMINAL_IMAGE_PACKET", packet);
+                if let Some(root) = std::env::var_os("HGS_TERMINAL_IMAGE_NATIVE_EVIDENCE") {
+                    command.env(
+                        "HGS_TERMINAL_IMAGE_NATIVE_EVIDENCE",
+                        PathBuf::from(root).join(label),
+                    );
+                }
+                let out = command.output().unwrap();
+                println!(
+                    "{}{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                assert!(
+                    out.status.success(),
+                    "actual native literal-paste no-approval contract failed"
+                );
+            }
+            fn admit(&self) -> ImageAdmission {
+                self.t
+                    .admit_image(
+                        "main",
+                        self.generation,
+                        &ImageTarget::of(&self.target).unwrap(),
+                    )
+                    .unwrap()
+            }
+            fn input(&self) -> Vec<u8> {
+                std::fs::read(&self.log).unwrap_or_default()
+            }
+            fn run(
+                &self,
+                admission: ImageAdmission,
+                before: impl FnOnce(&Path, &ImageCurrent),
+            ) -> Result<(), String> {
+                let state = crate::actions::Actions::new(self.dir.path().join("marks.json"));
+                let helper = self.stage.clone();
+                tauri::async_runtime::block_on(self.t.image_with(admission, png(), self.dir.path(),
+                    |target, path, request, original, current| {
+                        before(&path, &current);
+                        crate::actions::terminal_image_test_dispatch(&state, target, path, request, original,
+                            move || current.current(), move |_, inv| {
+                                use sha2::Digest;
+                                println!("IMAGE_STAGE argv={:?} timeout={:?} stdin_bytes={} event_sha256={:x}", inv.args, inv.timeout, inv.stdin.as_ref().unwrap().len(), sha2::Sha256::digest(png()));
+                                let exit = zerus_client_core::run(&helper, inv);
+                                match &exit {
+                                    zerus_client_core::Exit::Code { code, stdout, stderr } => println!("IMAGE_STAGE code={code} stdout={} stderr={stderr}", String::from_utf8_lossy(stdout)),
+                                    other => println!("IMAGE_STAGE result={other:?}"),
+                                }
+                                exit
+                            })
+                    }))
+            }
+        }
+
+        #[test]
+        fn image_local_and_peer_stage_exact_event_bytes_then_one_path_without_enter() {
+            let _tree = crate::PROCESS_TREE.read().unwrap();
+            for local in [true, false] {
+                let f = Fixture::new(local);
+                let mut source = None;
+                f.run(f.admit(), |path, _| {
+                    use std::os::unix::fs::PermissionsExt;
+                    source = Some(path.to_owned());
+                    assert_eq!(std::fs::read(path).unwrap(), png());
+                    assert_eq!(
+                        std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                        0o600
+                    );
+                })
+                .unwrap();
+                until(&f.t, f.generation, &f.sink, |s| s.text().contains("GOT"));
+                assert_eq!(std::fs::read(&f.retained).unwrap(), png());
+                assert_eq!(
+                    std::fs::read_to_string(f.retained.with_extension("calls"))
+                        .unwrap()
+                        .lines()
+                        .count(),
+                    1
+                );
+                assert!(
+                    !source.unwrap().exists(),
+                    "only the private source is removed"
+                );
+                let expected =
+                    terminal::paste_paths(&[f.retained.to_string_lossy().into_owned()], false)
+                        .unwrap();
+                assert_eq!(f.input(), literal_path_packet(&expected));
+                assert!(!f.input().iter().any(|b| matches!(b, 10 | 13 | 22)));
+                if local {
+                    f.native_oracle(&f.retained, "image");
+                }
+                assert!(!lock(&f.t.0.dropping).contains_key(&f.generation));
+            }
+        }
+
+        #[test]
+        fn ordinary_posix_drop_uses_one_literal_packet_without_enter() {
+            let _tree = crate::PROCESS_TREE.read().unwrap();
+            for local in [true, false] {
+                let f = Fixture::new(local);
+                let path = f.dir.path().join("dropped image's.png");
+                std::fs::write(&path, png()).unwrap();
+                let mut selected = drop_target();
+                selected.computer = f.target.computer.clone();
+                tauri::async_runtime::block_on(f.t.drop_files_with(
+                    "main",
+                    f.generation,
+                    selected,
+                    vec![path.to_string_lossy().into_owned()],
+                    |target, action| {
+                        assert!(!local, "local ordinary user files still skip staging");
+                        let request = uuid::Uuid::new_v4().to_string();
+                        let inv =
+                            zerus_client_core::actions::invocation(&target, &action, &request)
+                                .unwrap();
+                        let exit = zerus_client_core::run(&f.stage, &inv);
+                        std::future::ready(Ok(zerus_client_core::actions::classify(
+                            &target, &action, &inv, exit,
+                        )))
+                    },
+                ))
+                .unwrap();
+                until(&f.t, f.generation, &f.sink, |s| s.text().contains("GOT"));
+                let target = if local { &path } else { &f.retained };
+                let quoted =
+                    terminal::paste_paths(&[target.to_string_lossy().into_owned()], false).unwrap();
+                assert_eq!(f.input(), literal_path_packet(&quoted));
+                assert!(!f.input().iter().any(|b| matches!(b, 10 | 13 | 22)));
+                assert_eq!(std::fs::read(target).unwrap(), png());
+                if local {
+                    f.native_oracle(target, "ordinary-drop");
+                }
+            }
+        }
+
+        #[test]
+        fn image_replaced_source_and_stale_stage_never_start_the_helper_or_paste() {
+            let _tree = crate::PROCESS_TREE.read().unwrap();
+            for change in ["bytes", "hide-show", "conversation", "rebind", "eof"] {
+                let f = Fixture::new(true);
+                let result = f.run(f.admit(), |path, _| match change {
+                    "bytes" => std::fs::write(path, b"different ambient/viewer image B").unwrap(),
+                    "hide-show" => {
+                        f.t.set_shown("main", f.generation, false);
+                        f.t.set_shown("main", f.generation, true);
+                    }
+                    "conversation" => {
+                        let mut next = f.target.clone();
+                        next.conversation_id = Some("other".into());
+                        assert!(!f.t.retarget("main", &next));
+                    }
+                    "rebind" => {
+                        f.t.connect("main", f.target.clone(), 80, 24, f.sink.clone())
+                            .unwrap();
+                    }
+                    "eof" => {
+                        f.t.write("main", f.generation, &[4]).unwrap();
+                        until(&f.t, f.generation, &f.sink, |_| {
+                            f.t.generation("main").is_none()
+                        });
+                    }
+                    _ => unreachable!(),
+                });
+                assert!(result.is_err(), "{change}");
+                assert!(!f.retained.exists(), "helper must not run: {change}");
+                assert_eq!(
+                    f.input(),
+                    if change == "eof" { vec![4] } else { vec![] },
+                    "{change}"
+                );
+            }
+        }
+
+        #[test]
+        fn image_native_admission_precedes_blocking_start_and_hide_show_cannot_renew_it() {
+            let _tree = crate::PROCESS_TREE.read().unwrap();
+            let f = Fixture::new(true);
+            let admission = f.admit();
+            assert!(f
+                .t
+                .admit_image("main", f.generation, &ImageTarget::of(&f.target).unwrap())
+                .is_err());
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let count = Arc::clone(&calls);
+            let t = f.t.clone();
+            let cache = f.dir.path().to_owned();
+            let (ready, started) = mpsc::sync_channel(1);
+            let (release, wait) = mpsc::sync_channel(1);
+            let outer = blocking(move || {
+                ready.send(()).unwrap();
+                wait.recv_timeout(Duration::from_secs(5)).unwrap();
+                tauri::async_runtime::block_on(t.image_with(
+                    admission,
+                    png(),
+                    &cache,
+                    |_, _, _, _, _| {
+                        count.fetch_add(1, Ordering::Relaxed);
+                        std::future::ready(Err("must not dispatch".into()))
+                    },
+                ))
+            });
+            started.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(lock(&f.t.0.dropping).contains_key(&f.generation));
+            f.t.set_shown("main", f.generation, false);
+            f.t.set_shown("main", f.generation, true);
+            release.send(()).unwrap();
+            assert!(tauri::async_runtime::block_on(outer).unwrap().is_err());
+            assert_eq!(calls.load(Ordering::Relaxed), 0);
+            assert_eq!(f.input(), Vec::<u8>::new());
+            assert!(!f.retained.exists());
+            assert!(!lock(&f.t.0.dropping).contains_key(&f.generation));
+        }
+
+        #[test]
+        fn image_owned_blocking_operation_keeps_source_and_exclusion_after_outer_future_loss() {
+            let _tree = crate::PROCESS_TREE.read().unwrap();
+            let f = Fixture::new(true);
+            let admission = f.admit();
+            let t = f.t.clone();
+            let cache = f.dir.path().to_owned();
+            let (started, at_start) = mpsc::sync_channel(1);
+            let (release, wait) = mpsc::sync_channel(1);
+            let (done, finished) = mpsc::sync_channel(1);
+            let outer = blocking(move || {
+                let result = tauri::async_runtime::block_on(t.image_with(
+                    admission,
+                    png(),
+                    &cache,
+                    |_, path, _, _, current| {
+                        started.send(path.clone()).unwrap();
+                        wait.recv_timeout(Duration::from_secs(5)).unwrap();
+                        assert!(path.exists());
+                        assert!(!current.current());
+                        std::future::ready(Err("transfer refused after hide".into()))
+                    },
+                ));
+                done.send(result).unwrap();
+            });
+            let source = at_start.recv_timeout(Duration::from_secs(5)).unwrap();
+            drop(outer);
+            assert!(source.exists());
+            assert!(lock(&f.t.0.dropping).contains_key(&f.generation));
+            f.t.set_shown("main", f.generation, false);
+            release.send(()).unwrap();
+            assert!(finished
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .is_err());
+            assert!(!source.exists());
+            assert!(!lock(&f.t.0.dropping).contains_key(&f.generation));
+            assert_eq!(f.input(), Vec::<u8>::new());
+        }
+
+        #[test]
+        fn image_hide_show_during_actual_helper_transfer_retains_copy_but_pastes_nothing() {
+            use std::os::unix::net::UnixListener;
+            let _tree = crate::PROCESS_TREE.read().unwrap();
+            let f = Fixture::new(true);
+            let gate = f.dir.path().join("gate");
+            let listener = UnixListener::bind(&gate).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let body = std::fs::read_to_string(&f.stage).unwrap().replace("print(json.dumps(value))", &format!(
+                "import socket\ns=socket.socket(socket.AF_UNIX);s.settimeout(5);s.connect({});s.sendall(b'R');assert s.recv(1)==b'G';s.close()\nprint(json.dumps(value))",
+                serde_json::to_string(gate.to_str().unwrap()).unwrap()));
+            script(&f.stage, &body);
+            std::thread::scope(|scope| {
+                let worker = scope.spawn(|| f.run(f.admit(), |_, _| {}));
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                && Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(Duration::from_millis(5))
+                        }
+                        Err(e) => panic!("helper gate: {e}"),
+                    }
+                };
+                use std::io::{Read, Write};
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut ready = [0];
+                stream.read_exact(&mut ready).unwrap();
+                assert_eq!(ready, [b'R']);
+                f.t.set_shown("main", f.generation, false);
+                f.t.set_shown("main", f.generation, true);
+                stream.write_all(b"G").unwrap();
+                assert!(worker.join().unwrap().is_err());
+            });
+            assert_eq!(std::fs::read(&f.retained).unwrap(), png());
+            assert_eq!(f.input(), Vec::<u8>::new());
+        }
+
+        #[test]
+        fn image_failed_and_invalid_original_receipts_never_paste_or_retry() {
+            let _tree = crate::PROCESS_TREE.read().unwrap();
+            for mutation in [
+                "value['request_id']='wrong'",
+                "value['run_id']='new-run'",
+                "value['conversation_id']='new-cid'",
+                "value['name']='other'",
+                "value['status']='submitted'",
+                "value['files']=[]",
+                "value['files'][0]['mime']='text/plain'",
+                "value['files'][0]['bytes']=1",
+                "value['files'][0]['path']='relative.png'",
+                "value['files'].append(value['files'][0])",
+                "raise SystemExit(1)",
+            ] {
+                let f = Fixture::new(true);
+                let body = std::fs::read_to_string(&f.stage).unwrap().replace(
+                    "print(json.dumps(value))",
+                    &format!("{mutation}\nprint(json.dumps(value))"),
+                );
+                script(&f.stage, &body);
+                assert!(f.run(f.admit(), |_, _| {}).is_err(), "{mutation}");
+                assert_eq!(f.input(), Vec::<u8>::new(), "{mutation}");
+                assert_eq!(
+                    std::fs::read(&f.retained).unwrap(),
+                    png(),
+                    "target copy is retained after refusal"
+                );
+                assert!(!lock(&f.t.0.dropping).contains_key(&f.generation));
+            }
         }
     }
 
@@ -998,7 +1770,8 @@ mod tests {
         t.paste("main", c.generation, &text).unwrap();
         t.write("main", c.generation, b"\r").unwrap();
         until(&t, c.generation, &sink, |s| {
-            s.text().contains("echo '/home/example/it'\\''s.txt'")
+            s.text()
+                .contains("echo \x1b[200~'/home/example/it'\\''s.txt' \x1b[201~")
         });
         t.disconnect("main");
         assert_eq!(t.generation("main"), None);
@@ -1111,7 +1884,7 @@ mod tests {
         until(&t, c.generation, &sink, |s| s.text().contains("end"));
         assert!(sink
             .text()
-            .contains("echo '/home/example/source'\\''s.txt' end"));
+            .contains("echo \x1b[200~'/home/example/source'\\''s.txt' \x1b[201~end"));
         t.disconnect("main");
     }
 
@@ -1150,7 +1923,7 @@ mod tests {
         until(&t, c.generation, &sink, |s| s.text().contains("end"));
         assert!(sink
             .text()
-            .contains("echo '/home/example/staged'\\''s.txt' end"));
+            .contains("echo \x1b[200~'/home/example/staged'\\''s.txt' \x1b[201~end"));
         assert!(!sink.text().contains("source"));
         t.disconnect("main");
     }
@@ -1647,7 +2420,7 @@ mod tests {
         t.paste("main", current.generation, "shown").unwrap();
         t.write("main", current.generation, b"\r").unwrap();
         until(&t, current.generation, &sink, |s| {
-            s.text().contains("echo shown")
+            s.text().contains("echo \x1b[200~shown\x1b[201~")
         });
         t.disconnect("main");
     }

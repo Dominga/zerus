@@ -15,7 +15,7 @@ use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -237,6 +237,27 @@ pub fn run_accounted_frozen(
     resources: Arc<dyn Send + Sync>,
     spawn: impl FnOnce(&mut Command) -> std::io::Result<Child> + Send + 'static,
 ) -> Result<Exit, Stopped> {
+    run_accounted_frozen_with_completion(
+        hgs,
+        inv,
+        environment,
+        stdout_cap,
+        cancel,
+        (resources, None),
+        spawn,
+    )
+}
+
+pub fn run_accounted_frozen_with_completion(
+    hgs: &Path,
+    inv: &Invocation,
+    environment: &FrozenEnvironment,
+    stdout_cap: usize,
+    cancel: &AtomicBool,
+    custody: (Arc<dyn Send + Sync>, Option<Arc<Completion>>),
+    spawn: impl FnOnce(&mut Command) -> std::io::Result<Child> + Send + 'static,
+) -> Result<Exit, Stopped> {
+    let (resources, completion) = custody;
     let environment = environment.clone();
     accounted(
         hgs,
@@ -247,6 +268,7 @@ pub fn run_accounted_frozen(
         resources,
         Pipes {
             clear_environment: true,
+            completion,
             spawn: Some(Box::new(move |command| {
                 environment.apply(command);
                 spawn(command)
@@ -267,7 +289,11 @@ fn accounted(
     if cancel.load(Ordering::Acquire) {
         return Err(Stopped::Cancelled);
     }
-    let child_exited = Arc::new(AtomicBool::new(false));
+    let child_exited = pipes
+        .completion
+        .as_ref()
+        .map(|completion| completion.child())
+        .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
     let _child = ChildCharge {
         resources: Some(resources.clone()),
         exited: child_exited.clone(),
@@ -316,6 +342,105 @@ type StreamOutput = Box<dyn FnOnce(ChildStdout) -> bool + Send>;
 type Spawn = fn(&mut Command) -> std::io::Result<Child>;
 type GuardedSpawn = Box<dyn FnOnce(&mut Command) -> std::io::Result<Child> + Send>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Retirement {
+    Retired,
+    Pending,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IoState {
+    Running,
+    Closed,
+    Eof,
+    Failed,
+}
+
+struct IoWorker {
+    handle: thread::JoinHandle<()>,
+    status: Arc<Mutex<IoState>>,
+}
+
+#[derive(Default)]
+pub struct Completion {
+    workers: Mutex<Vec<IoWorker>>,
+    children: Mutex<Vec<Arc<AtomicBool>>>,
+    outcome: Mutex<Option<Retirement>>,
+}
+
+impl Completion {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn child(&self) -> Arc<AtomicBool> {
+        let mut children = self.children.lock().unwrap_or_else(PoisonError::into_inner);
+        if children.len() >= 2 {
+            *self.outcome.lock().unwrap_or_else(PoisonError::into_inner) = Some(Retirement::Failed);
+        }
+        let child = Arc::new(AtomicBool::new(false));
+        children.push(child.clone());
+        child
+    }
+
+    pub fn track(&self, child: Arc<AtomicBool>) {
+        let mut children = self.children.lock().unwrap_or_else(PoisonError::into_inner);
+        if !children.iter().any(|current| Arc::ptr_eq(current, &child)) {
+            if children.len() >= 2 {
+                *self.outcome.lock().unwrap_or_else(PoisonError::into_inner) =
+                    Some(Retirement::Failed);
+            }
+            children.push(child);
+        }
+    }
+
+    fn register(&self, handle: thread::JoinHandle<()>, status: Arc<Mutex<IoState>>) {
+        let mut workers = self.workers.lock().unwrap_or_else(PoisonError::into_inner);
+        if workers.len() >= 6 {
+            *self.outcome.lock().unwrap_or_else(PoisonError::into_inner) = Some(Retirement::Failed);
+            return;
+        }
+        workers.push(IoWorker { handle, status });
+    }
+
+    fn finish(&self, result: Retirement) -> Retirement {
+        let mut outcome = self.outcome.lock().unwrap_or_else(PoisonError::into_inner);
+        if outcome.is_none() {
+            *outcome = Some(result);
+        }
+        outcome.expect("terminal completion recorded")
+    }
+
+    pub fn join(&self) -> Retirement {
+        if let Some(result) = *self.outcome.lock().unwrap_or_else(PoisonError::into_inner) {
+            return result;
+        }
+        let mut workers = self.workers.lock().unwrap_or_else(PoisonError::into_inner);
+        if workers.iter().any(|worker| !worker.handle.is_finished()) {
+            return Retirement::Pending;
+        }
+        for worker in workers.drain(..) {
+            if worker.handle.join().is_err() {
+                return self.finish(Retirement::Failed);
+            }
+            let status = *worker.status.lock().unwrap_or_else(PoisonError::into_inner);
+            match status {
+                IoState::Closed | IoState::Eof => {}
+                IoState::Failed => return self.finish(Retirement::Failed),
+                IoState::Running => return self.finish(Retirement::Failed),
+            }
+        }
+        drop(workers);
+        let children = self.children.lock().unwrap_or_else(PoisonError::into_inner);
+        if children.is_empty() || children.iter().any(|child| !child.load(Ordering::Acquire)) {
+            return self.finish(Retirement::Failed);
+        }
+        drop(children);
+        self.finish(Retirement::Retired)
+    }
+}
+
 #[derive(Default)]
 struct Pipes {
     input: Option<StreamInput>,
@@ -328,6 +453,7 @@ struct Pipes {
     stderr_cap: Option<usize>,
     child_exited: Option<Arc<AtomicBool>>,
     clear_environment: bool,
+    completion: Option<Arc<Completion>>,
     #[cfg(any(windows, test))]
     hidden_stop: Option<Arc<hidden::State>>,
     /// Runs in the writer thread right after it signals completion.
@@ -734,6 +860,9 @@ fn run_inner(
     if pipes.require_complete
         && (child.stdin.is_none() || child.stdout.is_none() || child.stderr.is_none())
     {
+        if let Some(completion) = &pipes.completion {
+            completion.finish(Retirement::Failed);
+        }
         return Ok(stop(
             child,
             Exit::Abnormal {
@@ -744,6 +873,7 @@ fn run_inner(
     }
     let deadline = Instant::now() + inv.timeout;
 
+    let completion = pipes.completion.clone();
     let stdin = child.stdin.take();
     let input = inv.stdin.clone();
     let (write_tx, write_rx) = mpsc::channel();
@@ -752,9 +882,13 @@ fn run_inner(
     } else {
         None
     };
+    let writer_state = completion
+        .as_ref()
+        .map(|_| Arc::new(Mutex::new(IoState::Running)));
+    let writer_state_for_thread = writer_state.clone();
     #[cfg(test)]
     let after_written = pipes.after_written;
-    thread::spawn(move || {
+    let writer = thread::spawn(move || {
         let ok = match (stdin, pipes.input, input) {
             (Some(pipe), Some(write), _) => write(pipe),
             (Some(mut pipe), None, Some(bytes)) => {
@@ -765,12 +899,18 @@ fn run_inner(
         // The pipe is closed: release the group before signalling, as the
         // readers do, so a completed exchange holds no hidden admission.
         drop(input_guard);
+        if let Some(state) = &writer_state_for_thread {
+            *state.lock().unwrap_or_else(PoisonError::into_inner) = IoState::Closed;
+        }
         let _ = write_tx.send(ok);
         #[cfg(test)]
         if let Some(hook) = after_written {
             hook();
         }
     });
+    if let Some(completion) = &completion {
+        completion.register(writer, writer_state.expect("completion state"));
+    }
     let (done_tx, done_rx) = mpsc::channel();
     let over = Arc::new(AtomicBool::new(false));
     let limit = (stdout_cap < usize::MAX).then(|| (stdout_cap, Arc::clone(&over)));
@@ -780,16 +920,27 @@ fn run_inner(
         let done = done_tx.clone();
         let completed = decoded.clone();
         let guard = pipes.readers.clone();
-        thread::spawn(move || {
+        let state = completion
+            .as_ref()
+            .map(|_| Arc::new(Mutex::new(IoState::Running)));
+        let output_state = state.clone();
+        let worker = thread::spawn(move || {
             let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 stdout.is_some_and(consume)
             }))
             .unwrap_or(false);
             // Release the pipe group before waking a possible replacement.
             drop(guard);
+            if let Some(state) = &output_state {
+                *state.lock().unwrap_or_else(PoisonError::into_inner) =
+                    if ok { IoState::Eof } else { IoState::Failed };
+            }
             completed.store(if ok { 1 } else { 2 }, Ordering::Release);
             let _ = done.send(ok);
         });
+        if let Some(completion) = &completion {
+            completion.register(worker, state.expect("completion state"));
+        }
         Arc::default()
     } else {
         reader(
@@ -806,6 +957,7 @@ fn run_inner(
             } else {
                 None
             },
+            completion.clone(),
         )
     };
     let err = reader(
@@ -814,6 +966,7 @@ fn run_inner(
         done_tx,
         strict_outputs.then(|| (stderr_cap, Arc::clone(&over))),
         pipes.readers,
+        completion,
     );
     let too_large = |err: &Shared| {
         Stopped::TooLarge(TooLarge {
@@ -1025,10 +1178,15 @@ fn reader(
     done: Sender<bool>,
     limit: Option<(usize, Arc<AtomicBool>)>,
     guard: Option<Arc<dyn Send + Sync>>,
+    completion: Option<Arc<Completion>>,
 ) -> Shared {
     let buffer: Shared = Arc::default();
     let shared = Arc::clone(&buffer);
-    thread::spawn(move || {
+    let state = completion
+        .as_ref()
+        .map(|_| Arc::new(Mutex::new(IoState::Running)));
+    let reader_state = state.clone();
+    let worker = thread::spawn(move || {
         let mut eof = false;
         if let Some(mut pipe) = pipe {
             let mut chunk = [0u8; 8192];
@@ -1056,9 +1214,113 @@ fn reader(
             }
         }
         drop(guard);
+        if let Some(state) = &reader_state {
+            *state.lock().unwrap_or_else(PoisonError::into_inner) =
+                if eof { IoState::Eof } else { IoState::Failed };
+        }
         let _ = done.send(eof);
     });
+    if let Some(completion) = completion {
+        completion.register(worker, state.expect("completion state"));
+    }
     buffer
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+
+    fn settle(completion: &Completion) -> Retirement {
+        let until = Instant::now() + Duration::from_secs(1);
+        loop {
+            let result = completion.join();
+            if result != Retirement::Pending || Instant::now() >= until {
+                return result;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn unknown_child_exit_is_sticky_failed() {
+        let completion = Completion::new();
+        completion.child();
+        let worker = thread::spawn(|| {});
+        completion.register(worker, Arc::new(Mutex::new(IoState::Eof)));
+        assert_eq!(settle(&completion), Retirement::Failed);
+        assert_eq!(completion.join(), Retirement::Failed);
+    }
+
+    #[test]
+    fn a_read_error_is_not_eof() {
+        let completion = Completion::new();
+        completion.child().store(true, Ordering::Release);
+        let worker = thread::spawn(|| {});
+        completion.register(worker, Arc::new(Mutex::new(IoState::Failed)));
+        assert_eq!(settle(&completion), Retirement::Failed);
+    }
+
+    #[test]
+    fn an_empty_completion_is_not_a_physical_witness() {
+        assert_eq!(Completion::new().join(), Retirement::Failed);
+    }
+
+    #[test]
+    fn a_panicked_worker_is_not_eof() {
+        let completion = Completion::new();
+        completion.child().store(true, Ordering::Release);
+        let worker = thread::spawn(|| panic!("synthetic worker panic"));
+        completion.register(worker, Arc::new(Mutex::new(IoState::Eof)));
+        assert_eq!(settle(&completion), Retirement::Failed);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_missing_required_pipe_is_sticky_failed() {
+        let completion = Arc::new(Completion::new());
+        let child_exited = completion.child();
+        let invocation = Invocation {
+            args: Vec::new(),
+            stdin: None,
+            timeout: Duration::from_secs(1),
+            request_id: None,
+        };
+        let result = run_inner(
+            Path::new("/bin/true"),
+            &invocation,
+            &[],
+            &[],
+            1024,
+            None,
+            Pipes {
+                require_complete: true,
+                child_exited: Some(child_exited),
+                completion: Some(completion.clone()),
+                spawn: Some(Box::new(|command| command.stdin(Stdio::null()).spawn())),
+                ..Pipes::default()
+            },
+        );
+        assert!(matches!(result, Ok(Exit::Abnormal { .. })));
+        assert_eq!(completion.join(), Retirement::Failed);
+    }
+
+    #[test]
+    fn pending_completion_becomes_retired_without_a_second_join() {
+        let completion = Completion::new();
+        completion.child().store(true, Ordering::Release);
+        let state = Arc::new(Mutex::new(IoState::Running));
+        let worker_state = state.clone();
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        let worker = thread::spawn(move || {
+            release_rx.recv().unwrap();
+            *worker_state.lock().unwrap_or_else(PoisonError::into_inner) = IoState::Eof;
+        });
+        completion.register(worker, state);
+        assert_eq!(completion.join(), Retirement::Pending);
+        release_tx.send(()).unwrap();
+        assert_eq!(settle(&completion), Retirement::Retired);
+        assert_eq!(completion.join(), Retirement::Retired);
+    }
 }
 
 #[cfg(test)]

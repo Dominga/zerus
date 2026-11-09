@@ -147,6 +147,7 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     parent: v.parent ?? undefined,
     quiet: !!v.quiet,
     conversationId: optional(v.conversation_id),
+    terminalConversationId: typeof v.conversation_id === "string" ? v.conversation_id : undefined,
     compactKeys: v.compact_keys,
     cmd: text(v.agent),
     accountProvider: text(v.account_provider) || (v.agent === "deepseek" ? "dsh" : text(v.agent)),

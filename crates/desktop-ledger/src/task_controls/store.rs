@@ -36,7 +36,15 @@ pub struct Page<T> {
 }
 
 /// Private to this module tree. Only fixtures can reach this without the gate.
+#[cfg(test)]
 pub(super) fn open_enabled(db: &mut Connection) -> Result<Store<'_>> {
+    open_enabled_checked(db, |_| Ok(()))
+}
+
+pub(super) fn open_enabled_checked(
+    db: &mut Connection,
+    verify: impl FnOnce(&Connection) -> Result<()>,
+) -> Result<Store<'_>> {
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let exists: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='desktop_task_control_meta')",
@@ -61,8 +69,38 @@ pub(super) fn open_enabled(db: &mut Connection) -> Result<Store<'_>> {
         ensure!(!existing, "incomplete task-control ledger must be reviewed");
         create(&tx)?;
     }
+    verify(&tx)?;
     tx.commit()?;
     Ok(Store { db })
+}
+
+pub(super) fn existing_enabled(db: &mut Connection) -> Result<Option<Store<'_>>> {
+    let tx = db.transaction_with_behavior(TransactionBehavior::Deferred)?;
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='desktop_task_control_meta')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        let partial: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE substr(name,1,21)='desktop_task_control_')",
+            [], |row| row.get(0),
+        )?;
+        ensure!(!partial, "incomplete task-control ledger must be reviewed");
+        return Ok(None);
+    }
+    let version: i64 = tx.query_row(
+        "SELECT version FROM desktop_task_control_meta WHERE id=1",
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        version == 2,
+        "task-control records require a different writer version"
+    );
+    schema::validate(&tx)?;
+    tx.commit()?;
+    Ok(Some(Store { db }))
 }
 
 fn create(tx: &Transaction<'_>) -> Result<()> {

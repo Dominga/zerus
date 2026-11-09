@@ -180,17 +180,41 @@ describe("account marks", () => {
   });
 });
 
-describe("compact parents (owner 2026-11-07)", () => {
-  it("adds a second line with the child sessions summary only to a parent", () => {
+describe("parent child-session counters", () => {
+  const badge = (html: string, kind: "team-asking" | "team-needs") =>
+    new RegExp(`<span\\b[^>]*class="team-badge ${kind}"[^>]*>[\\s\\S]*?<span aria-hidden="true">[^<]*<\\/span>`).exec(html)?.[0] ?? "";
+
+  it("adds a second line with the child sessions summary only to a compact parent", () => {
     const team = { total: 8, working: 3, collapsed: true, needsYou: 1, asking: 0, errors: 2 };
     const html = render(true, row(), true, team);
     expect(html).toContain("cc-team");
     expect(text(html)).toContain("3 of 8 working");
-    expect(text(html)).toContain("Needs you: 1");
+    expect(text(html)).not.toContain("Needs you:");
     expect(text(html)).toContain("Errors: 2");
     expect(text(html)).not.toContain("Asking");
     expect(html).toContain('aria-expanded="false"');
     expect(render(true, row())).not.toContain("cc-team");
+  });
+
+  it("uses question and attention icons with one visible count in both views", () => {
+    for (const compact of [false, true]) {
+      const html = render(compact, row(), true, { total: 8, working: 3, collapsed: false, needsYou: 1, asking: 2, errors: 2 });
+      const asking = badge(html, "team-asking"), needs = badge(html, "team-needs");
+      expect(asking).toContain('role="img"');
+      expect(asking).toContain('aria-label="Asking: 2"');
+      expect(asking).toContain('title="Child sessions waiting for their parent\'s answer"');
+      expect(asking).toContain('<circle cx="12" cy="12" r="9"');
+      expect(asking).toContain("M10 10C10 7 15 7 15 10");
+      expect(text(asking)).toBe("2");
+      expect(needs).toContain('role="img"');
+      expect(needs).toContain('aria-label="Needs you: 1"');
+      expect(needs).toContain('title="Child sessions with a request only you can answer"');
+      expect(needs).toContain("M6 10C6 3 18 3 18 10");
+      expect(text(needs)).toBe("1");
+      expect(text(html)).not.toContain("Asking:");
+      expect(text(html)).not.toContain("Needs you:");
+      if (compact) expect(text(html)).toContain("Errors: 2");
+    }
   });
 
   it("keeps the toggle and every count in words when the counters shorten (zerus-sa9qn.11)", () => {

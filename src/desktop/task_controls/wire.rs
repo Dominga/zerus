@@ -4,7 +4,7 @@ use crate::tasks::controls::wire::Command;
 use serde::{Deserialize, Serialize};
 use zerus_desktop_ledger::task_controls::REQUEST_BYTES;
 
-pub(super) const OP: &str = "task_control";
+pub(in crate::desktop) const OP: &str = "task_control";
 pub(super) const VERSION: u32 = 1;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -15,6 +15,27 @@ pub(super) struct Envelope {
     pub command: Command,
 }
 impl Envelope {
+    /// Keep original JSON: a generic Hello Value would erase duplicate fields
+    /// and whitespace before the closed, bounded envelope reader.
+    pub fn hello(bytes: &[u8], configuration: &str) -> Result<Self, String> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Hello<'a> {
+            abi: &'a str,
+            configuration: &'a str,
+            op: &'a str,
+            #[serde(borrow)]
+            request: &'a serde_json::value::RawValue,
+        }
+        let hello: Hello<'_> = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+        if hello.abi != crate::desktop::protocol::ABI
+            || hello.configuration != configuration
+            || hello.op != OP
+        {
+            return Err("Invalid original task-control service scope".into());
+        }
+        Self::read(hello.request.get().as_bytes())
+    }
     pub fn new(command: Command) -> Result<Self, String> {
         let id = match &command {
             Command::Plan(p) => p.request_id.clone(),
@@ -124,5 +145,34 @@ mod tests {
         let mut changed = original;
         changed["request_id"] = uuid::Uuid::new_v4().to_string().into();
         assert!(read(&changed).is_err());
+    }
+}
+
+#[cfg(test)]
+mod hello_tests {
+    use super::*;
+    #[test]
+    fn original_hello_preserves_duplicate_field_and_raw_size_refusals() {
+        let id = "00000000-0000-4000-8000-000000000001";
+        let body = format!(
+            r#"{{"schema":1,"request_id":"{id}","command":{{"operation":"status","input":{{"schema":1,"target":{{"scope":"request","request_id":"{id}"}}}}}}}}"#
+        );
+        let hello = |body: &str| {
+            format!(
+                r#"{{"abi":"desktop-v1","configuration":"{}","op":"task_control","request":{body}}}"#,
+                "a".repeat(64)
+            )
+        };
+        assert!(Envelope::hello(hello(&body).as_bytes(), &"a".repeat(64)).is_ok());
+        let duplicate = body.replacen("\"schema\":1", "\"schema\":1,\"schema\":1", 1);
+        assert!(Envelope::hello(hello(&duplicate).as_bytes(), &"a".repeat(64)).is_err());
+        let duplicate = body.replace(
+            "\"scope\":\"request\"",
+            "\"scope\":\"executor\",\"scope\":\"request\"",
+        );
+        assert!(Envelope::hello(hello(&duplicate).as_bytes(), &"a".repeat(64)).is_err());
+        let padded = body.replacen('{', &("{".to_owned() + &" ".repeat(REQUEST_BYTES)), 1);
+        assert!(Envelope::hello(hello(&padded).as_bytes(), &"a".repeat(64)).is_err());
+        assert!(Envelope::hello(hello(&body).as_bytes(), &"b".repeat(64)).is_err());
     }
 }

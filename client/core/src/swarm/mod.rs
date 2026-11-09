@@ -21,6 +21,7 @@ pub mod conflicts;
 pub mod connection;
 pub mod dialog;
 pub mod draft;
+pub mod drive_folders;
 pub mod edit;
 pub mod folder_edit;
 pub mod grouping;

@@ -44,6 +44,48 @@ function fakes() {
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("terminal store", () => {
+  it("binds an image to the same shown Screen, run and conversation, with no generic input", async () => {
+    const f = fakes(), images: unknown[][] = [];
+    f.port.pasteImage = async (...args) => { images.push(args); };
+    const t = createTerminal(f.port, f.timers, f.visibility);
+    await t.setTarget({ ...target(), conversation_id: "cid" }, ok);
+    t.show(f.screen); await tick();
+    const lease = t.captureImage(f.screen)!;
+    const bytes = new Uint8Array([1, 2, 3]); await lease.paste(bytes);
+    expect(images).toEqual([["main", 7, { ...target(), conversation_id: "cid" }, bytes]]);
+    expect(f.calls.filter((c) => c.startsWith("write"))).toEqual([]);
+  });
+
+  it("never revives a pending image across presentation and binding changes", async () => {
+    for (const change of ["hide-show", "window", "disconnect", "reconnect", "run", "conversation", "session", "screen", "finished"] as const) {
+      const f = fakes(), images: unknown[] = [];
+      f.port.pasteImage = async (...args) => { images.push(args); };
+      const t = createTerminal(f.port, f.timers, f.visibility);
+      await t.setTarget({ ...target(), conversation_id: "cid" }, ok); t.show(f.screen); await tick();
+      const lease = t.captureImage(f.screen)!;
+      if (change === "hide-show") { t.hide(); t.show(f.screen); }
+      if (change === "window") { f.setHidden(true); f.setHidden(false); }
+      if (change === "disconnect") await t.disconnect();
+      if (change === "reconnect") await t.reconnect();
+      if (change === "run") await t.setTarget({ ...target("run-2"), conversation_id: "cid" }, ok);
+      if (change === "conversation") { f.setChanged(false); await t.setTarget({ ...target(), conversation_id: "other" }, ok); }
+      if (change === "session") await t.setTarget({ ...target(), name: "other", conversation_id: "cid" }, ok);
+      if (change === "screen") t.show({ ...f.screen });
+      if (change === "finished") f.emit({ kind: "finished", status: "gone", code: 0 });
+      await tick(); await lease.paste(new Uint8Array([1]));
+      expect(images, change).toEqual([]);
+      expect(lease.current(), change).toBe(false);
+    }
+  });
+
+  it("distinguishes unknown conversation identity from a known empty conversation", async () => {
+    const f = fakes(); f.port.pasteImage = async () => {};
+    const t = createTerminal(f.port, f.timers, f.visibility);
+    await t.setTarget(target(), ok); t.show(f.screen); await tick();
+    expect(t.captureImage(f.screen)).toBeUndefined();
+    f.setChanged(false); await t.setTarget({ ...target(), conversation_id: "" }, ok);
+    expect(t.captureImage(f.screen)).toBeDefined();
+  });
   it("connects when the tab shows and acknowledges each write to the screen", async () => {
     const f = fakes();
     await createRoot(async () => {

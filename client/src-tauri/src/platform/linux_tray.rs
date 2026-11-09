@@ -128,7 +128,7 @@ impl Tray {
             shown: HashMap::new(),
             next: 0,
             revision: 0,
-            tooltip: "Zerus".into(),
+            tooltip: String::new(),
             icons: Vec::new(),
             foreground,
             tracking: false,
@@ -251,6 +251,19 @@ impl BadgeService {
 
 #[derive(Clone)]
 struct ItemService(Arc<Mutex<Tray>>);
+/// Ordinary text stays plain. When escaping is needed, an empty supported tag
+/// selects styled text and U+2028 references preserve the original line breaks.
+fn tooltip_description(text: &str) -> String {
+    if text.chars().any(|c| matches!(c, '&' | '<' | '>' | '"')) {
+        format!(
+            "<b></b>{}",
+            zerus_client_core::linux_notify::escape_body(text).replace('\n', "&#8232;")
+        )
+    } else {
+        text.to_owned()
+    }
+}
+
 #[zbus::interface(name = "org.kde.StatusNotifierItem")]
 impl ItemService {
     fn activate(&self, _x: i32, _y: i32) {
@@ -326,12 +339,13 @@ impl ItemService {
     }
     #[zbus(property)]
     fn tool_tip(&self) -> (String, Vec<Icon>, String, String) {
+        let title = crate::desk::tooltip_title();
         let tray = lock(&self.0);
         (
             String::new(),
             tray.icons.clone(),
-            tray.tooltip.clone(),
-            String::new(),
+            title,
+            tooltip_description(&tray.tooltip),
         )
     }
 }
@@ -1112,6 +1126,58 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
 
+    #[test]
+    fn ordinary_tooltip_descriptions_preserve_plain_bytes() {
+        for body in [
+            "new tooltip",
+            "0 active, 0 need attention, 0 sessions total\n0 here\n1 on mac",
+            "0 активных, 0 требуют внимания, 0 всего\n0 здесь",
+            "Zerus: reconnecting to hgs on this computer",
+        ] {
+            assert_eq!(tooltip_description(body), body);
+        }
+    }
+
+    #[test]
+    fn tooltip_descriptions_keep_literal_markup_and_multiline_text() {
+        let body = "1 active, 1 needs attention, 3 sessions total\n<b>studio</b> & <i>peer</i>: not polled yet\n\"quoted\" &amp;";
+        let escaped = tooltip_description(body);
+        assert_eq!(
+            escaped,
+            "<b></b>1 active, 1 needs attention, 3 sessions total&#8232;&lt;b&gt;studio&lt;/b&gt; &amp; &lt;i&gt;peer&lt;/i&gt;: not polled yet&#8232;&quot;quoted&quot; &amp;amp;"
+        );
+        assert!(escaped.starts_with("<b></b>"));
+        assert_eq!(escaped.matches("&#8232;").count(), 2);
+        assert!(!escaped.contains("&#10;"));
+        assert!(!escaped.contains("&#8233;"));
+        assert!(!escaped.contains('\n'));
+        assert!(!escaped.contains("<br"));
+    }
+
+    #[test]
+    fn every_escaped_character_selects_styled_mode_once() {
+        for (body, expected) in [
+            (
+                "first & second\nthird",
+                "<b></b>first &amp; second&#8232;third",
+            ),
+            (
+                "first \"second\"\nthird",
+                "<b></b>first &quot;second&quot;&#8232;third",
+            ),
+            (
+                "first > second\nthird",
+                "<b></b>first &gt; second&#8232;third",
+            ),
+            ("&lt;\nгость", "<b></b>&amp;lt;&#8232;гость"),
+        ] {
+            let escaped = tooltip_description(body);
+            assert_eq!(escaped, expected);
+            assert_eq!(escaped.matches("<b></b>").count(), 1);
+            assert_eq!(escaped.matches("&#8232;").count(), 1);
+        }
+    }
+
     fn badge_updates(connection: &Connection, owner: &str) -> zbus::MessageStream {
         let rule = zbus::MatchRule::builder()
             .msg_type(zbus::message::Type::Signal)
@@ -1325,7 +1391,8 @@ mod tests {
         );
         let item = Proxy::new(&client, owner.as_str(), PATH, SNI).unwrap();
         let tooltip: (String, Vec<Icon>, String, String) = item.get_property("ToolTip").unwrap();
-        assert_eq!(tooltip.2, "new tooltip");
+        assert_eq!(tooltip.2, crate::desk::tooltip_title());
+        assert_eq!(tooltip.3, "new tooltip");
         item.call::<_, _, ()>("ProvideXdgActivationToken", &("after-badge-close",))
             .unwrap();
         item.call::<_, _, ()>("Activate", &(0_i32, 0_i32)).unwrap();
@@ -1539,7 +1606,7 @@ mod tests {
         offer_native(
             &native,
             Face::counts(1, 1, false),
-            "1 needs attention\n1 here".into(),
+            "1 needs attention\n1 here\n<b>studio</b> & <i>peer</i>: not polled yet".into(),
             entries("claude/p/a"),
             None,
         );
@@ -1552,7 +1619,11 @@ mod tests {
             5
         );
         let tooltip: (String, Vec<Icon>, String, String) = item.get_property("ToolTip").unwrap();
-        assert_eq!(tooltip.2, "1 needs attention\n1 here");
+        assert_eq!(tooltip.2, crate::desk::tooltip_title());
+        assert_eq!(
+            tooltip.3,
+            "<b></b>1 needs attention&#8232;1 here&#8232;&lt;b&gt;studio&lt;/b&gt; &amp; &lt;i&gt;peer&lt;/i&gt;: not polled yet"
+        );
         item.call::<_, _, ()>("ProvideXdgActivationToken", &("fixture-activation",))
             .unwrap();
         item.call::<_, _, ()>("Activate", &(10_i32, 20_i32))

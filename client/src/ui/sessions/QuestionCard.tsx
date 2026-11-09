@@ -117,12 +117,7 @@ function Card(props: { arrived: boolean }) {
         </div>
       </Show>
       <Show when={c().tabs_visible}>
-        <div class="qcard-tabs tabs" role="tablist">
-          <Index each={c().forms}>{(f, i) => (
-            <button type="button" class="tab" role="tab" classList={{ on: i === page() }} aria-selected={i === page()}
-              onClick={() => choose(i)}>{trText(f().tab)}</button>
-          )}</Index>
-        </div>
+        <QuestionTabs tabs={c().forms.map((form) => trText(form.tab))} page={page()} onChoose={choose} />
       </Show>
       {/* Task 198 (W5): a subagent card lists what it would start, one row each; Allow all and Deny answer it (QuestionCard.cpp:627-655). */}
       <Show when={c().subagents?.length} fallback={<Show when={formId()} keyed>{(id) => <Form id={id} onKey={onKey} />}</Show>}>
@@ -140,20 +135,66 @@ function Card(props: { arrived: boolean }) {
       <div class="qcard-actions">
         <p class="qcard-status" classList={{ error: c().status_error }} title={trText(c().status)} role="status" aria-live="polite">{trText(c().status)}</p>
         {/* A card only Terminal can answer makes Open Terminal its primary action. */}
-        <button type="button" class="btn small" classList={{ primary: c().read_only, ghost: !c().read_only }}
-          disabled={native() ? !nativeBinding(selected()) : !terminal.texts()?.available} title={terminalTip()}
-          onClick={() => { if (native()) openNative(); else { terminal.opened(); setDetailTab("terminal"); } }}>{trText(q().terminal_label)}</button>
-        <Show when={c().skip.visible}><button type="button" class="btn small ghost" title={trText(c().skip_tip)} disabled={!questions.enabled(c().skip)} onClick={() => void questions.skip()}>{trText(c().skip.label)}</button></Show>
-        <Show when={c().retry}><button type="button" class="btn small ghost" title={trText(c().retry_tip)} onClick={() => void questions.allowRetry()}>{tr("Allow retry")}</button></Show>
-        <Show when={c().previous.visible}><button type="button" class="btn small ghost" disabled={!c().previous.enabled} onClick={() => void questions.page(c().page - 1)}>{trText(c().previous.label)}</button></Show>
-        <Show when={c().next.visible}><button type="button" class="btn small ghost accent" disabled={!c().next.enabled} onClick={() => void questions.page(c().page + 1)}>{trText(c().next.label)}</button></Show>
-        <Show when={c().submit.visible}><button type="button" class="btn small primary" disabled={!questions.enabled(c().submit)} onClick={() => void questions.submit()}>{questions.label(c().submit)}</button></Show>
-        <Show when={c().deny.visible}><button type="button" class="btn small ghost" disabled={!questions.enabled(c().deny)} onClick={() => void questions.decide(false)}>{trText(c().deny.label)}</button></Show>
-        <Show when={c().always?.visible}><button type="button" class="btn small ghost" data-question-always title={tr("Starts every subagent listed and stops asking before later subagents in this session.")}
-          disabled={!questions.enabled(c().always!)} onClick={() => void questions.always()}>{questions.label(c().always!)}</button></Show>
-        <Show when={c().approve.visible}><button type="button" class="btn small primary" disabled={!questions.enabled(c().approve)} onClick={() => void questions.decide(true)}>{questions.label(c().approve)}</button></Show>
+        <QuestionAction label={trText(q().terminal_label)} kind={c().read_only ? "primary" : "ghost"} tip={terminalTip()}
+          disabled={native() ? !nativeBinding(selected()) : !terminal.texts()?.available}
+          onClick={() => { if (native()) openNative(); else { terminal.opened(); setDetailTab("terminal"); } }} />
+        <Show when={c().skip.visible}><QuestionAction label={trText(c().skip.label)} tip={trText(c().skip_tip)}
+          disabled={!questions.enabled(c().skip)} onClick={() => void questions.skip()} /></Show>
+        <Show when={c().retry}><QuestionAction label={tr("Allow retry")} tip={trText(c().retry_tip)} onClick={() => void questions.allowRetry()} /></Show>
+        <Show when={c().previous.visible}><QuestionAction label={trText(c().previous.label)} disabled={!c().previous.enabled}
+          onClick={() => void questions.page(c().page - 1)} /></Show>
+        <Show when={c().next.visible}><QuestionAction label={trText(c().next.label)} kind="accent" disabled={!c().next.enabled}
+          onClick={() => void questions.page(c().page + 1)} /></Show>
+        <Show when={c().submit.visible}><QuestionAction label={questions.label(c().submit)} kind="primary" disabled={!questions.enabled(c().submit)}
+          onClick={() => void questions.submit()} /></Show>
+        <Show when={c().deny.visible}><QuestionAction label={trText(c().deny.label)} disabled={!questions.enabled(c().deny)}
+          onClick={() => void questions.decide(false)} /></Show>
+        <Show when={c().always?.visible}><QuestionAction label={questions.label(c().always!)} always
+          tip={tr("Starts every subagent listed and stops asking before later subagents in this session.")}
+          disabled={!questions.enabled(c().always!)} onClick={() => void questions.always()} /></Show>
+        <Show when={c().approve.visible}><QuestionAction label={questions.label(c().approve)} kind="primary" disabled={!questions.enabled(c().approve)}
+          onClick={() => void questions.decide(true)} /></Show>
       </div>
     </div></div>
+  );
+}
+
+/** One footer action of the card (task 449): always the skin's button, with the
+ *  card's own decision as its primary one. */
+export function QuestionAction(props: {
+  label: string; kind?: "primary" | "ghost" | "accent"; tip?: string; disabled?: boolean; always?: boolean; onClick: () => void;
+}) {
+  const kind = () => props.kind ?? "ghost";
+  return (
+    <button type="button" class="btn small" classList={{ primary: kind() === "primary", ghost: kind() !== "primary", accent: kind() === "accent" }}
+      title={props.tip} disabled={props.disabled} data-question-always={props.always ? "" : undefined}
+      onClick={() => props.onClick()}>{props.label}</button>
+  );
+}
+
+/** Rust writes a filled form's tab as `text!("✓ %1", title)`, so the mark is part
+ *  of the label; the card draws it as its own span (task 449). */
+function tabParts(label: string) {
+  const match = /^✓\s*(.*)$/su.exec(label);
+  return match ? { check: "✓", label: match[1] } : { check: "", label };
+}
+
+/** The card's question tabs (task 449): the skin's tabs with a real gap between
+ *  them and the answered form's check mark apart from its title. */
+export function QuestionTabs(props: { tabs: string[]; page: number; onChoose: (index: number) => void }) {
+  return (
+    <div class="qcard-tabs tabs" role="tablist">
+      <Index each={props.tabs}>{(tab, i) => {
+        const parts = createMemo(() => tabParts(tab()));
+        return (
+          <button type="button" class="tab" role="tab" classList={{ on: i === props.page }} aria-selected={i === props.page}
+            onClick={() => props.onChoose(i)}>
+            <Show when={parts().check}><span class="tab-check" aria-hidden="true">{parts().check}</span></Show>
+            <span class="tab-label">{parts().label}</span>
+          </button>
+        );
+      }}</Index>
+    </div>
   );
 }
 

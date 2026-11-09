@@ -4,6 +4,22 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class UnreadPresentationTest {
+    @Test fun openingRestoresCanonicalDataAnchorsThroughRetainedPresentationAliases() {
+        val native = Event("native", "Agent", "Reply", "")
+        val canonical = native.copy(id = "history:canonical", originalId = native.id)
+        val previous = ConversationRowKeys.reconcile("target", null, listOf(native))
+        val rows = ConversationRowKeys.reconcile("target", previous, listOf(canonical))
+        val keys = ConversationViewport.keys(listOf(canonical), eventKey = { rows.key(it.id) })
+        val saved = SavedConversationViewport(canonical.id, 37)
+        val memory = ConversationAnchor("event:" + canonical.id, 37, false)
+        for (remembered in listOf(null, memory)) {
+            val opened = UnreadPresentation.opening(remembered, saved, "", keys, rows::key)
+            assertFalse(opened.unavailableSaved)
+            assertEquals(ConversationAnchor("event:native", 37, false), opened.anchor)
+        }
+        assertEquals(canonical.id, saved.eventId)
+    }
+
     private val keys = listOf("history:status","event:old","history:unread","event:new","history:tail")
     @Test fun exactTotalsAndKnownLowerBoundsAreDifferent() {
         assertEquals("12",UnreadPresentation.badge(12,3)!!.text)

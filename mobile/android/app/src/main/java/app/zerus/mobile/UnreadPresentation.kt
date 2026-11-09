@@ -20,8 +20,11 @@ object UnreadPresentation {
     /** Navigation never turns a conversation-wide unread count into a distance below the viewport. */
     fun latest(loading: Boolean = false) = if (loading) LatestNavigation("Loading latest…", "Loading latest messages")
         else LatestNavigation("Latest", "Jump to latest messages")
-    fun opening(memory: ConversationAnchor?, saved: SavedConversationViewport?, boundary: String, keys: List<String>): OpeningReadingPosition {
-        val remembered = memory?.takeIf { !it.following } ?: saved?.takeUnless { it.following }?.let { ConversationAnchor("event:" + it.eventId,it.offset,false) }
+    fun opening(memory: ConversationAnchor?, saved: SavedConversationViewport?, boundary: String, keys: List<String>,
+        eventKey: (String) -> String = { "event:$it" }): OpeningReadingPosition {
+        val remembered = memory?.takeIf { !it.following }?.let { anchor ->
+            if (anchor.itemKey.startsWith("event:")) anchor.copy(itemKey = eventKey(anchor.itemKey.removePrefix("event:"))) else anchor
+        } ?: saved?.takeUnless { it.following }?.let { ConversationAnchor(eventKey(it.eventId),it.offset,false) }
         if(remembered != null && remembered.itemKey in keys) return OpeningReadingPosition(remembered)
         if(boundary.isNotBlank() && "history:unread" in keys) return OpeningReadingPosition(ConversationAnchor("history:unread",0,false),remembered != null)
         // A missing saved position never silently drops the reader at the newest message.

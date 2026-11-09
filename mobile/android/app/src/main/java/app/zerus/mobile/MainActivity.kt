@@ -864,8 +864,14 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     SideEffect { previousRowKeys = rowKeys }
     val keys = ConversationViewport.keys(events, unreadBoundary, warning.isNotBlank(), boundedNotice.isNotBlank(),
         conversationLoading, queueVisible, questions.isNotEmpty(), eventKey = { rowKeys.key(it.id) })
-    val currentRowKeys by rememberUpdatedState(rowKeys)
-    val currentEventIds by rememberUpdatedState(events.mapTo(mutableSetOf()) { it.id })
+    val rowKeysHolder = remember(target.key) { mutableStateOf(rowKeys) }
+    val eventIdsHolder = remember(target.key) { mutableStateOf(events.mapTo(mutableSetOf()) { it.id }) }
+    SideEffect {
+        rowKeysHolder.value = rowKeys
+        eventIdsHolder.value = events.mapTo(mutableSetOf()) { it.id }
+    }
+    val currentRowKeys by rowKeysHolder
+    val currentEventIds by eventIdsHolder
     fun displayedEventId(key: String): String? {
         if (!key.startsWith("event:")) return null
         return (currentRowKeys.eventIdByKey[key] ?: key.removePrefix("event:")).takeIf { it in currentEventIds }
@@ -966,7 +972,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         // Ledger hydration must not cause a second jump after the reader deliberately scrolls.
         if (firstOpen && !explicitSend && !readReady) return@LaunchedEffect
         if (firstOpen && !explicitSend) {
-            val opening = UnreadPresentation.opening(initialAnchor, savedViewport, unreadBoundary, keys)
+            val opening = UnreadPresentation.opening(initialAnchor, savedViewport, unreadBoundary, keys, rowKeys::key)
             unavailableSaved = opening.unavailableSaved
             follow = follow.copy(anchor = opening.anchor, following = opening.anchor?.following ?: true)
         }

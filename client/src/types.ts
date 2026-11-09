@@ -1521,6 +1521,8 @@ export type TeamAction =
   | { kind: "intake_key"; label?: string; revoke?: string }
   | { kind: "accept_phase"; phase: number }
   | { kind: "phase_mode"; phase: number; mode: "free" | "standard"; reason?: string }
+  /** Task #12: the team's own mode, the default of phases without their own (`hgs team phase-mode` without a phase). */
+  | { kind: "team_mode"; mode: "free" | "standard"; reason?: string }
   | { kind: "send_back_phase"; phase: number; comment: string }
   | { kind: "decide_tool"; offer: string; allow: boolean; reason?: string }
   /** Task 251: the lead asks the owner to install a tool its run found missing. */

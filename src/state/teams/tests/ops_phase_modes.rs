@@ -185,3 +185,218 @@ fn the_lead_switches_a_phase_only_through_the_owners_card() {
         .unwrap();
     assert_eq!((team.plan_mode, free_phase(&team)), (PlanMode::Free, Some(2)), "the open phase follows the team's mode");
 }
+
+/// Task #12 (owner, 2026-11-10): while the team plans, the owner's choices
+/// are stored: without a phase the team's own mode, the default of every
+/// phase without a mode of its own; with a phase that phase's own mode.
+/// Status reads them back, so the plan's switch and each phase's toggle agree
+/// after a reload, and the approval starts in them.
+#[test]
+fn while_planning_the_owner_stores_the_teams_mode_and_each_phases_own() {
+    let (mut team, _) = create(
+        "t",
+        &json!({"name":"T","lead":{"id":"lead","agent":"claude"}}),
+    )
+    .unwrap();
+    let none = BTreeSet::new();
+    let mut events = Vec::new();
+    let plan_input = json!({"members":[{"id":"dev","role":"Backend","agent":"codex"}],
+        "tasks":[{"id":1,"title":"A","assignee":"dev"},{"id":2,"title":"B","assignee":"dev","phase":2},{"id":3,"title":"C","assignee":"dev","phase":3}],
+        "phases":[{"n":2,"title":"Two"},{"n":3,"title":"Three"}]});
+    plan(
+        &mut team,
+        &plan_input,
+        &Actor::Member("lead".into()),
+        &mut events,
+    )
+    .unwrap();
+    assert_eq!(team.status, TeamStatus::Planning);
+    assert_eq!(
+        phase_modes_view(&team),
+        json!({"1":"standard","2":"standard","3":"standard"})
+    );
+    // The team's switch: every phase without its own mode follows.
+    let switched = apply(
+        &mut team,
+        "phase-mode",
+        &json!({"mode":"free"}),
+        &Actor::Human,
+        &none,
+        &mut events,
+    )
+    .unwrap();
+    assert_eq!(
+        (switched["status"].as_str(), switched["plan_mode"].as_str()),
+        (Some("switched"), Some("free"))
+    );
+    assert_eq!(
+        switched["phase_modes"],
+        json!({"1":"free","2":"free","3":"free"})
+    );
+    assert_eq!(team.plan_mode, PlanMode::Free);
+    // One phase's toggle: that phase only.
+    apply(
+        &mut team,
+        "phase-mode",
+        &json!({"phase":2,"mode":"standard"}),
+        &Actor::Human,
+        &none,
+        &mut events,
+    )
+    .unwrap();
+    assert_eq!(
+        phase_modes_view(&team),
+        json!({"1":"free","2":"standard","3":"free"})
+    );
+    // The team back to standard: phase 2 keeps its own mode, the others follow.
+    apply(
+        &mut team,
+        "phase-mode",
+        &json!({"mode":"standard"}),
+        &Actor::Human,
+        &none,
+        &mut events,
+    )
+    .unwrap();
+    assert_eq!(
+        phase_modes_view(&team),
+        json!({"1":"standard","2":"standard","3":"standard"})
+    );
+    apply(
+        &mut team,
+        "phase-mode",
+        &json!({"mode":"free"}),
+        &Actor::Human,
+        &none,
+        &mut events,
+    )
+    .unwrap();
+    assert_eq!(
+        phase_modes_view(&team),
+        json!({"1":"free","2":"standard","3":"free"}),
+        "phase 2 keeps its own standard"
+    );
+    // A phase set to the team's mode follows the team again.
+    apply(
+        &mut team,
+        "phase-mode",
+        &json!({"phase":2,"mode":"free"}),
+        &Actor::Human,
+        &none,
+        &mut events,
+    )
+    .unwrap();
+    assert!(team.phase_modes.is_empty(), "{:?}", team.phase_modes);
+    // A reload reads the same.
+    let back: Team = serde_json::from_value(serde_json::to_value(&team).unwrap()).unwrap();
+    assert_eq!(phase_modes_view(&back), phase_modes_view(&team));
+    assert_eq!(back.plan_mode, PlanMode::Free);
+    // Only the owner chooses; an unknown phase is named.
+    let error = apply(
+        &mut team,
+        "phase-mode",
+        &json!({"mode":"standard"}),
+        &Actor::Member("lead".into()),
+        &none,
+        &mut events,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("Only you switch"), "{error}");
+    let error = apply(
+        &mut team,
+        "phase-mode",
+        &json!({"phase":9,"mode":"standard"}),
+        &Actor::Human,
+        &none,
+        &mut events,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("Unknown phase 9"), "{error}");
+    // The approval keeps the stored choice when the desktop sends none.
+    approve(&mut team, &json!({}), &Actor::Human, &none, &mut events).unwrap();
+    assert_eq!(
+        (team.plan_mode, team.phase_mode(1)),
+        (PlanMode::Free, PlanMode::Free)
+    );
+}
+
+/// Task #12: while the team runs, its switch reaches the phases that follow
+/// it and never a phase with a mode of its own; one phase stays the free one.
+#[test]
+fn a_running_teams_switch_keeps_every_phases_own_mode() {
+    let mut team = two_running_phases();
+    let none = BTreeSet::new();
+    let mut events = Vec::new();
+    // The team goes free: every phase follows it, the open phase 2 included.
+    let switched = apply(
+        &mut team,
+        "phase-mode",
+        &json!({"mode":"free"}),
+        &Actor::Human,
+        &none,
+        &mut events,
+    )
+    .unwrap();
+    assert_eq!(switched["plan_mode"], "free");
+    assert_eq!(
+        (team.phase_mode(1), team.phase_mode(2), free_phase(&team)),
+        (PlanMode::Free, PlanMode::Free, Some(2))
+    );
+    // Phase 2 locks to its own standard; the team stays free, phase 1 follows it.
+    apply(
+        &mut team,
+        "phase-mode",
+        &json!({"phase":2,"mode":"standard"}),
+        &Actor::Human,
+        &none,
+        &mut events,
+    )
+    .unwrap();
+    assert_eq!(
+        (team.phase_mode(1), team.phase_mode(2)),
+        (PlanMode::Free, PlanMode::Standard)
+    );
+    apply(
+        &mut team,
+        "phase-mode",
+        &json!({"mode":"standard"}),
+        &Actor::Human,
+        &none,
+        &mut events,
+    )
+    .unwrap();
+    assert_eq!(
+        (team.plan_mode, team.phase_mode(1), team.phase_mode(2)),
+        (PlanMode::Standard, PlanMode::Standard, PlanMode::Standard)
+    );
+    // Phase 2 opens by its own mode; the team going free cannot open another.
+    apply(
+        &mut team,
+        "phase-mode",
+        &json!({"phase":2,"mode":"free"}),
+        &Actor::Human,
+        &none,
+        &mut events,
+    )
+    .unwrap();
+    assert_eq!(team.phase_modes.get(&2), Some(&PlanMode::Free));
+    let switched = apply(
+        &mut team,
+        "phase-mode",
+        &json!({"mode":"free"}),
+        &Actor::Human,
+        &none,
+        &mut events,
+    )
+    .unwrap();
+    assert_eq!(
+        switched["plan_mode"], "free",
+        "the open phase is the free one already"
+    );
+    assert_eq!(free_phase(&team), Some(2));
+    assert!(events
+        .iter()
+        .any(|event| event.kind == "plan_mode_switched" && event.payload["by"] == "You"));
+}

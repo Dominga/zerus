@@ -1991,6 +1991,8 @@
   "Every lead plans by these rules; they are sent with its brief.": "Каждый лид планирует по этим правилам; они отправляются вместе с его заданием.",
   "Every member has a session already; none starts.": "У всех участников уже есть сессии; ни одна не запускается.",
   "Every member of the agent whose session runs on the first account moves to the second, the lead included. Each one stops once it is idle and resumes on the new account in its own conversation, folder and name; a busy one is never interrupted.": "Все участники агента, сессия которого идёт на первом аккаунте, переходят на второй, включая лида. Каждый останавливается, когда освобождается, и продолжает на новом аккаунте в своей беседе, папке и с тем же именем; занятой участник не прерывается.",
+  "Every phase without a mode of its own switches to free planning; a phase with its own mode keeps it.": "Все фазы без собственного режима переходят на свободное планирование; фаза со своим режимом его сохраняет.",
+  "Every phase without a mode of its own switches to standard planning; a phase with its own mode keeps it.": "Все фазы без собственного режима переходят на обычное планирование; фаза со своим режимом его сохраняет.",
   "Every stage is through; %1 decides.": "Все стадии пройдены; решает %1.",
   "Every stage passed, %1 waits for %2": "Все этапы пройдены, %1 ждёт %2",
   "Every task is decided": "Все задачи решены",

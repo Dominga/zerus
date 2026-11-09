@@ -915,6 +915,8 @@
   "Every folder of Zerus's": "Все папки Zerus",
   "Every lead plans by these rules; they are sent with its brief.": "Каждый лид планирует по этим правилам; они отправляются вместе с его заданием.",
   "Every member has a session already; none starts.": "У всех участников уже есть сессии; ни одна не запускается.",
+  "Every phase without a mode of its own switches to free planning; a phase with its own mode keeps it.": "Все фазы без собственного режима переходят на свободное планирование; фаза со своим режимом его сохраняет.",
+  "Every phase without a mode of its own switches to standard planning; a phase with its own mode keeps it.": "Все фазы без собственного режима переходят на обычное планирование; фаза со своим режимом его сохраняет.",
   "Every stage passed, %1 waits for %2": "Все этапы пройдены, %1 ждёт %2",
   "Every task is decided. The summary goes to the lead and the team becomes Done.": "Все задачи решены. Итог уйдёт лиду, и команда станет завершённой.",
   "Exact absolute directory inside the selected environment": "Точный абсолютный каталог внутри выбранной среды",

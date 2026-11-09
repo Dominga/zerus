@@ -51,6 +51,7 @@ pub(super) fn migrate(tx: &Transaction<'_>) -> Result<()> {
 }
 
 pub(super) struct Row {
+    charge: i64,
     pub verified: Verified,
     pub receipt: Receipt,
     pub writer_epoch: String,
@@ -84,15 +85,16 @@ pub(super) fn load(db: &Connection, id: &str) -> Result<Option<Row>> {
         String,
         String,
         String,
-        bool,
+        i64,
         Option<String>,
         Option<String>,
+        String,
     );
     let saved: Option<Saved> = db
         .query_row(
             "SELECT substr(source,1,65537),substr(checkpoint,1,16385),substr(plan,1,16385),
              substr(receipt,1,24577),substr(fingerprint,1,65),substr(writer_epoch,1,37),phase,
-             drained,substr(ticket,1,4097),substr(custody,1,8193)
+             drained,substr(ticket,1,4097),substr(custody,1,8193),substr(session,1,513)
              FROM desktop_deferred_sends WHERE request_id=?1",
             [id],
             |r| {
@@ -107,6 +109,7 @@ pub(super) fn load(db: &Connection, id: &str) -> Result<Option<Row>> {
                     r.get(7)?,
                     r.get(8)?,
                     r.get(9)?,
+                    r.get(10)?,
                 ))
             },
         )
@@ -122,14 +125,27 @@ pub(super) fn load(db: &Connection, id: &str) -> Result<Option<Row>> {
         drained,
         ticket,
         custody,
+        session,
     )) = saved
     else {
         return Ok(None);
     };
+    let charge = charge(&source, &checkpoint, &plan)?;
+    ensure!(
+        matches!(drained, 0 | 1)
+            && receipt.len() <= wire::REPLY_BYTES
+            && ticket.as_ref().is_none_or(|value| value.len() <= 4096)
+            && custody
+                .as_ref()
+                .is_none_or(|value| value.len() <= CUSTODY_BYTES),
+        "deferred send saved bounds changed"
+    );
+    let drained = drained == 1;
     let receipt: Receipt = serde_json::from_str(&receipt)?;
     ensure!(
         receipt.valid()
             && receipt.binding.request_id == id
+            && receipt.binding.session == session
             && receipt.binding.fingerprint().as_deref() == Some(fingerprint.as_str())
             && word(receipt.phase) == phase
             && receipt.drained == drained,
@@ -148,7 +164,12 @@ pub(super) fn load(db: &Connection, id: &str) -> Result<Option<Row>> {
     let verified = intent.verify().map_err(anyhow::Error::msg)?;
     let plan: Plan = serde_json::from_str(&plan)?;
     ensure!(
-        verified.plan == plan && verified.binding == receipt.binding,
+        verified.plan == plan
+            && verified.binding == receipt.binding
+            && receipt
+                .outcome
+                .as_ref()
+                .is_none_or(|outcome| outcome.matches(&plan)),
         "deferred send plan changed"
     );
     ensure!(
@@ -180,12 +201,213 @@ pub(super) fn load(db: &Connection, id: &str) -> Result<Option<Row>> {
         );
     }
     Ok(Some(Row {
+        charge,
         verified,
         receipt,
         writer_epoch,
         ticket,
         custody,
     }))
+}
+
+/// The reservation includes the maximum future receipt, ticket and custody.
+/// Stored original strings, not a re-serialization, determine its exact size.
+fn charge(source: &str, checkpoint: &str, plan: &str) -> Result<i64> {
+    ensure!(
+        source.len() <= SOURCE_BYTES
+            && checkpoint.len() <= CHECKPOINT_BYTES
+            && plan.len() <= PLAN_BYTES,
+        "deferred send original exceeds its bound"
+    );
+    [
+        source.len(),
+        checkpoint.len(),
+        plan.len(),
+        wire::REPLY_BYTES,
+        CUSTODY_BYTES,
+        4096,
+        1024,
+    ]
+    .into_iter()
+    .try_fold(0_i64, |sum, size| {
+        sum.checked_add(i64::try_from(size).ok()?)
+            .filter(|sum| *sum <= BYTES)
+    })
+    .context("deferred send reservation exceeds its bound")
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Budget {
+    rows: i64,
+    bytes: i64,
+    active: i64,
+}
+impl Budget {
+    fn bounded(self) -> bool {
+        (0..=ROWS).contains(&self.rows)
+            && (0..=BYTES).contains(&self.bytes)
+            && (0..=ACTIVE).contains(&self.active)
+    }
+    fn read(db: &Connection) -> Result<Self> {
+        let mut query = db.prepare_cached(
+            "SELECT id,rows,bytes,active FROM desktop_deferred_send_budget LIMIT 2",
+        )?;
+        let entries = query
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    Self {
+                        rows: r.get(1)?,
+                        bytes: r.get(2)?,
+                        active: r.get(3)?,
+                    },
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        ensure!(
+            entries.len() == 1 && entries[0].0 == 1 && entries[0].1.bounded(),
+            "deferred send budget changed"
+        );
+        Ok(entries[0].1)
+    }
+    fn reserve(self, charge: i64) -> Option<Self> {
+        let next = Self {
+            rows: self.rows.checked_add(1)?,
+            bytes: self.bytes.checked_add(charge)?,
+            active: self.active.checked_add(1)?,
+        };
+        next.bounded().then_some(next)
+    }
+    fn release(self, charge: i64) -> Result<Self> {
+        let next = Self {
+            rows: self
+                .rows
+                .checked_sub(1)
+                .context("deferred send row budget underflow")?,
+            bytes: self
+                .bytes
+                .checked_sub(charge)
+                .context("deferred send byte budget underflow")?,
+            active: self
+                .active
+                .checked_sub(1)
+                .context("deferred send active budget underflow")?,
+        };
+        ensure!(next.bounded(), "deferred send budget underflow");
+        Ok(next)
+    }
+    fn store(self, tx: &Transaction<'_>, old: Self) -> Result<()> {
+        ensure!(
+            self.bounded()
+                && tx.execute(
+                    "UPDATE desktop_deferred_send_budget SET rows=?1,bytes=?2,active=?3
+             WHERE id=1 AND rows=?4 AND bytes=?5 AND active=?6",
+                    params![
+                        self.rows,
+                        self.bytes,
+                        self.active,
+                        old.rows,
+                        old.bytes,
+                        old.active
+                    ]
+                )? == 1,
+            "deferred send budget conflict"
+        );
+        Ok(())
+    }
+}
+
+/// The pending index supplies at most 33 originals, without sorting or
+/// scanning historical IDs. Every outstanding charge is checked from its row.
+fn outstanding(db: &Connection) -> Result<(Budget, u64)> {
+    let mut budget = Budget::default();
+    let mut custody = 0;
+    for id in charged_ids(db)? {
+        let row = load(db, &id)?.context("deferred send outstanding original disappeared")?;
+        ensure!(
+            !row.receipt.drained,
+            "deferred send outstanding state changed"
+        );
+        budget = budget
+            .reserve(row.charge)
+            .context("deferred send outstanding budget exceeds bound")?;
+        custody += u64::from(row.custody.is_some());
+    }
+    Ok((budget, custody))
+}
+fn live_budget(db: &Connection) -> Result<Budget> {
+    let saved = Budget::read(db)?;
+    let (actual, _) = outstanding(db)?;
+    ensure!(saved == actual, "deferred send reservation budget changed");
+    Ok(saved)
+}
+
+/// Only owned Store startup calls this, in its original IMMEDIATE transaction.
+/// Matching live accounting never touches historical rows. A legacy conversion
+/// needs complete, bounded, validated coverage and the exact old formula; no
+/// receipt or original is changed, deleted or made executable by the conversion.
+fn reconcile(tx: &Transaction<'_>) -> Result<()> {
+    let saved = Budget::read(tx)?;
+    let (actual, _) = outstanding(tx)?;
+    if saved == actual {
+        return Ok(());
+    }
+    ensure!(
+        saved.active == actual.active && saved.rows >= actual.rows && saved.bytes >= actual.bytes,
+        "deferred send legacy budget changed"
+    );
+    let mut legacy = Budget::default();
+    let mut after: Option<String> = None;
+    loop {
+        const PAGE: usize = 64;
+        let ids: Vec<String> = if let Some(after) = &after {
+            tx.prepare_cached("SELECT substr(request_id,1,37) FROM desktop_deferred_sends WHERE request_id>?1 ORDER BY request_id LIMIT 64")?
+                .query_map([after], |r| r.get(0))?.collect::<std::result::Result<_,_>>()?
+        } else {
+            // Include a malformed NULL/empty first ID: never skip it as a cursor.
+            tx.prepare_cached("SELECT substr(request_id,1,37) FROM desktop_deferred_sends ORDER BY request_id LIMIT 64")?
+                .query_map([], |r| r.get(0))?.collect::<std::result::Result<_,_>>()?
+        };
+        for id in &ids {
+            let row = load(tx, id)?.context("deferred send legacy original disappeared")?;
+            legacy.rows = legacy
+                .rows
+                .checked_add(1)
+                .context("deferred send history row overflow")?;
+            legacy.bytes = legacy
+                .bytes
+                .checked_add(row.charge)
+                .context("deferred send history byte overflow")?;
+            legacy.active = legacy
+                .active
+                .checked_add(i64::from(!row.receipt.drained))
+                .context("deferred send history active overflow")?;
+            ensure!(
+                legacy.bounded(),
+                "deferred send legacy coverage exceeds bound"
+            );
+        }
+        if ids.len() < PAGE {
+            break;
+        }
+        after = ids.last().cloned();
+    }
+    ensure!(legacy == saved, "deferred send legacy accounting mismatch");
+    actual.store(tx, saved)
+}
+
+/// A capacity-only decision before admission, in the same writer transaction
+/// and native lease. Errors are not a capacity proof and grant no negative.
+pub(super) fn capacity(tx: &Transaction<'_>, verified: &Verified) -> Result<bool> {
+    let budget = live_budget(tx)?;
+    let plan = encoded(&verified.plan, PLAN_BYTES)?;
+    Ok(budget
+        .reserve(charge(
+            &verified.intent.original,
+            &verified.intent.checkpoint,
+            &plan,
+        )?)
+        .is_some())
 }
 
 /// Called in the same IMMEDIATE transaction as the final opaque native permit
@@ -223,25 +445,16 @@ pub(super) fn admit(
     };
     ensure!(receipt.valid(), "invalid original deferred send");
     let encoded_receipt = encoded(&receipt, wire::REPLY_BYTES)?;
-    // Reserve space for the largest later receipt and exact custody in
-    // advance; no completed ID is evicted to make room for another effect.
-    let charge = i64::try_from(
-        verified.intent.original.len()
-            + verified.intent.checkpoint.len()
-            + plan.len()
-            + wire::REPLY_BYTES
-            + CUSTODY_BYTES
-            + 4096
-            + 1024,
+    let charge = charge(
+        &verified.intent.original,
+        &verified.intent.checkpoint,
+        &plan,
     )?;
-    ensure!(
-        tx.execute(
-            "UPDATE desktop_deferred_send_budget SET rows=rows+1,bytes=bytes+?1,active=active+1
-             WHERE id=1 AND rows<?2 AND bytes<=?3-?1 AND active<?4",
-            params![charge, ROWS, BYTES, ACTIVE]
-        )? == 1,
-        "deferred send capacity unavailable"
-    );
+    let budget = live_budget(tx)?;
+    budget
+        .reserve(charge)
+        .context("deferred send capacity unavailable")?
+        .store(tx, budget)?;
     tx.execute(
         "INSERT INTO desktop_deferred_sends(request_id,session,fingerprint,source,checkpoint,plan,
          receipt,writer_epoch,phase,drained,created) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'queued',0,?9)",
@@ -266,7 +479,7 @@ pub(super) fn admit(
 pub(super) fn pending(db: &Connection) -> Result<Option<Row>> {
     let id: Option<String> = db
         .query_row(
-            "SELECT request_id FROM desktop_deferred_sends WHERE drained=0
+            "SELECT substr(request_id,1,37) FROM desktop_deferred_sends INDEXED BY desktop_deferred_sends_pending WHERE drained=0
              ORDER BY phase,created,request_id LIMIT 1",
             [],
             |r| r.get(0),
@@ -276,45 +489,60 @@ pub(super) fn pending(db: &Connection) -> Result<Option<Row>> {
         .transpose()
 }
 pub(super) fn undrained(db: &Connection) -> Result<u64> {
-    let count: u64 = db.query_row(
-        "SELECT active FROM desktop_deferred_send_budget WHERE id=1",
-        [],
-        |r| r.get(0),
-    )?;
-    let actual: u64 = db.query_row(
-        "SELECT count(*) FROM desktop_deferred_sends WHERE drained=0",
-        [],
-        |r| r.get(0),
-    )?;
+    let saved = Budget::read(db)?;
+    let (actual, _) = outstanding(db)?;
+    // Read-only startup probes can still see verified legacy cumulative rows
+    // and bytes; only the owned startup transaction may reconcile those.
     ensure!(
-        count == actual && count <= ACTIVE as u64,
+        saved.active == actual.active,
         "deferred send resource budget changed"
     );
-    Ok(count)
+    Ok(u64::try_from(actual.active)?)
 }
 pub(super) fn summary(db: &Connection) -> Result<serde_json::Value> {
-    let undrained = undrained(db)?;
-    let (rows, unsettled, custody): (u64, u64, u64) = db.query_row(
-        "SELECT count(*),coalesce(sum(phase NOT IN ('recorded','failed')),0),
-         coalesce(sum(drained=0 AND custody IS NOT NULL),0) FROM desktop_deferred_sends",
-        [],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?;
+    let saved = Budget::read(db)?;
+    let (actual, custody) = outstanding(db)?;
     ensure!(
-        rows <= ROWS as u64 && custody <= undrained,
-        "deferred send summary bound changed"
+        saved.active == actual.active,
+        "deferred send resource budget changed"
     );
+    // Indexed metadata only, with one overflow sentinel. Historical IDs are
+    // retained without becoming an unbounded foreground scan or queue.
+    let mut query = db.prepare_cached("SELECT substr(phase,1,10),drained FROM desktop_deferred_sends ORDER BY request_id LIMIT 4097")?;
+    let mut rows = query.query([])?;
+    let mut count = 0_u64;
+    let mut unsettled = 0_u64;
+    while let Some(row) = rows.next()? {
+        count += 1;
+        if count > ROWS as u64 {
+            break;
+        }
+        let phase: String = row.get(0)?;
+        let drained: i64 = row.get(1)?;
+        ensure!(
+            matches!(
+                phase.as_str(),
+                "queued" | "running" | "recorded" | "failed" | "unknown"
+            ) && matches!(drained, 0 | 1),
+            "deferred send history metadata changed"
+        );
+        unsettled += u64::from(!matches!(phase.as_str(), "recorded" | "failed"));
+    }
+    let complete = count <= ROWS as u64;
     Ok(
-        serde_json::json!({"profile":wire::PROFILE,"rows":rows,"unsettled":unsettled,"undrained":undrained,
-        "original_custody":custody,"display_only":true,"authority":false}),
+        serde_json::json!({"profile":wire::PROFILE,"rows":complete.then_some(count),
+        "unsettled":complete.then_some(unsettled),"history_complete":complete,
+        "undrained":actual.active,"original_custody":custody,"display_only":true,"authority":false}),
     )
 }
 pub(super) fn charged_ids(db: &Connection) -> Result<Vec<String>> {
-    let mut query = db.prepare(
-        "SELECT request_id FROM desktop_deferred_sends WHERE drained=0 ORDER BY request_id LIMIT 33",
+    let mut query = db.prepare_cached(
+        "SELECT substr(request_id,1,37) FROM desktop_deferred_sends INDEXED BY desktop_deferred_sends_pending
+         WHERE drained=0 ORDER BY phase,created,request_id LIMIT 33",
     )?;
-    let rows = query.query_map([], |r| r.get(0))?;
-    let ids: Vec<String> = rows.collect::<std::result::Result<_, _>>()?;
+    let ids = query
+        .query_map([], |r| r.get(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
     ensure!(
         ids.len() <= ACTIVE as usize,
         "deferred send active bound changed"
@@ -324,7 +552,7 @@ pub(super) fn charged_ids(db: &Connection) -> Result<Vec<String>> {
 pub(super) fn custody_pending(db: &Connection, after: &str) -> Result<Option<Row>> {
     let id: Option<String> = db
         .query_row(
-            "SELECT request_id FROM desktop_deferred_sends WHERE drained=0 AND custody IS NOT NULL
+            "SELECT substr(request_id,1,37) FROM desktop_deferred_sends INDEXED BY desktop_deferred_sends_custody WHERE drained=0 AND custody IS NOT NULL
              AND request_id>?1 ORDER BY request_id LIMIT 1",
             [after],
             |r| r.get(0),
@@ -335,17 +563,8 @@ pub(super) fn custody_pending(db: &Connection, after: &str) -> Result<Option<Row
 }
 pub(super) fn startup(db: &mut Connection) -> Result<()> {
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let ids: Vec<String> = {
-        let mut query = tx.prepare(
-            "SELECT request_id FROM desktop_deferred_sends WHERE drained=0 ORDER BY request_id LIMIT 33",
-        )?;
-        let rows = query.query_map([], |r| r.get(0))?;
-        rows.collect::<std::result::Result<_, _>>()?
-    };
-    ensure!(
-        ids.len() <= ACTIVE as usize,
-        "deferred send active bound changed"
-    );
+    reconcile(&tx)?;
+    let ids = charged_ids(&tx)?;
     for id in ids {
         let row = load(&tx, &id)?.context("deferred send disappeared")?;
         if row.receipt.phase != Phase::Unknown {
@@ -358,7 +577,8 @@ pub(super) fn startup(db: &mut Connection) -> Result<()> {
 
 fn state(tx: &Transaction<'_>, old: &Row, next: &Receipt) -> Result<()> {
     ensure!(
-        next.valid()
+        !old.receipt.drained
+            && next.valid()
             && next.binding == old.receipt.binding
             && next.admission_epoch == old.receipt.admission_epoch
             && next.revision
@@ -369,6 +589,11 @@ fn state(tx: &Transaction<'_>, old: &Row, next: &Receipt) -> Result<()> {
                     .context("deferred send revision exhausted")?,
         "deferred send state changed"
     );
+    let budget = live_budget(tx)?;
+    let released = next
+        .drained
+        .then(|| budget.release(old.charge))
+        .transpose()?;
     ensure!(
         tx.execute(
             "UPDATE desktop_deferred_sends SET receipt=?1,phase=?2,drained=?3
@@ -384,15 +609,10 @@ fn state(tx: &Transaction<'_>, old: &Row, next: &Receipt) -> Result<()> {
         )? == 1,
         "deferred send state conflict"
     );
-    if next.drained && !old.receipt.drained {
-        ensure!(
-            tx.execute(
-                "UPDATE desktop_deferred_send_budget SET active=active-1 WHERE id=1 AND active>0",
-                []
-            )? == 1,
-            "deferred send budget changed"
-        );
+    if let Some(released) = released {
+        released.store(tx, budget)?;
     }
+
     Ok(())
 }
 
@@ -541,6 +761,9 @@ pub(super) fn drained(
 /// Restart or revoke never makes a queued or imported record executable. An
 /// original reservation keeps its exact custody for read-only reconciliation.
 pub(super) fn retire(tx: &Transaction<'_>, row: &Row) -> Result<()> {
+    if row.receipt.drained {
+        return Ok(());
+    }
     let mut next = row.receipt.clone();
     next.phase = Phase::Unknown;
     next.revision += 1;

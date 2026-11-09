@@ -14,7 +14,9 @@ const MACHINE: &str = "22222222-2222-4222-8222-222222222222";
 
 /// A saved send checkpoint with the exact stdin the client builds for it.
 fn original(configuration: &str, epoch: &str) -> Verified {
-    let text = "hello";
+    original_text(configuration, epoch, "hello")
+}
+fn original_text(configuration: &str, epoch: &str, text: &str) -> Verified {
     let checkpoint = Checkpoint::reserve(checkpoint::Intent {
         kind: checkpoint::Kind::Send,
         draft_revision: 3,
@@ -242,6 +244,267 @@ fn capacity_refusal_is_atomic_and_retirement_never_rearms_a_queued_original() {
     assert!(retired.receipt.result(&verified.plan).is_none());
     let replay = admit(&mut store, &verified, &writer);
     assert_eq!(replay.receipt, retired.receipt);
+}
+
+fn budget(db: &rusqlite::Connection) -> (i64, i64, i64) {
+    db.query_row(
+        "SELECT rows,bytes,active FROM desktop_deferred_send_budget WHERE id=1",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .unwrap()
+}
+fn retained_rows(db: &rusqlite::Connection) -> Vec<String> {
+    db.prepare("SELECT json_array(request_id,session,fingerprint,source,checkpoint,plan,receipt,writer_epoch,phase,drained,ticket,custody,created) FROM desktop_deferred_sends ORDER BY request_id")
+        .unwrap().query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+}
+/// Synthetic valid old cumulative accounting, never an installed database.
+/// The histories are already physically retired observations; one stays Unknown.
+fn legacy_history(
+    store: &mut Store,
+    configuration: &str,
+    epoch: &str,
+    count: usize,
+) -> Vec<Verified> {
+    let writer = uuid::Uuid::new_v4().to_string();
+    let base = original_text(configuration, epoch, "hello");
+    let overhead = base.intent.original.len()
+        + base.intent.checkpoint.len()
+        + serde_json::to_string(&base.plan).unwrap().len()
+        + 24576
+        + 8192
+        + 4096
+        + 1024;
+    let per = (16 << 20) / count;
+    let text = "x".repeat(per.checked_sub(overhead + 32).unwrap());
+    let tx = store
+        .db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    let mut originals = Vec::new();
+    let mut bytes = 0_i64;
+    for i in 0..count {
+        let v = original_text(configuration, epoch, &text);
+        let unknown = i + 1 == count;
+        let receipt = wire::Receipt {
+            binding: v.binding.clone(),
+            admission_epoch: epoch.into(),
+            revision: 3,
+            phase: if unknown {
+                Phase::Unknown
+            } else {
+                Phase::Recorded
+            },
+            drained: true,
+            code: if unknown {
+                super::receipt::MISSING.into()
+            } else {
+                String::new()
+            },
+            outcome: (!unknown).then(|| wire::Outcome {
+                request_id: v.plan.request_id.clone(),
+                status: wire::SUBMITTED.into(),
+                input_sha256: v.plan.input_sha256.clone(),
+            }),
+        };
+        assert!(receipt.valid());
+        let plan = serde_json::to_string(&v.plan).unwrap();
+        bytes += i64::try_from(
+            v.intent.original.len()
+                + v.intent.checkpoint.len()
+                + plan.len()
+                + 24576
+                + 8192
+                + 4096
+                + 1024,
+        )
+        .unwrap();
+        tx.execute("INSERT INTO desktop_deferred_sends(request_id,session,fingerprint,source,checkpoint,plan,receipt,writer_epoch,phase,drained,created) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,1,?10)",
+            rusqlite::params![v.plan.request_id,v.plan.session,v.binding.fingerprint().unwrap(),
+                v.intent.original,v.intent.checkpoint,plan,serde_json::to_string(&receipt).unwrap(),writer,
+                if unknown { "unknown" } else { "recorded" },i as i64]).unwrap();
+        assert!(ledger::load(&tx, &v.plan.request_id).unwrap().is_some());
+        originals.push(v);
+    }
+    assert!(bytes < 16 << 20 && (16 << 20) - bytes < 24576 + 8192 + 4096 + 1024);
+    tx.execute(
+        "UPDATE desktop_deferred_send_budget SET rows=?1,bytes=?2,active=0 WHERE id=1",
+        rusqlite::params![count as i64, bytes],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    originals
+}
+
+#[test]
+fn budget_retirement_returns_only_its_original_reservation_once() {
+    let (_temp, location, mut store, epoch) = fixture();
+    let v = original(&location.configuration, &epoch);
+    let writer = uuid::Uuid::new_v4().to_string();
+    let row = admit(&mut store, &v, &writer);
+    assert_eq!(budget(&store.db).0, 1);
+    assert!(budget(&store.db).1 > 0);
+    let tx = store
+        .db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    ledger::retire(&tx, &row).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(budget(&store.db), (0, 0, 0));
+    let saved = retained_rows(&store.db);
+    assert_eq!(admit(&mut store, &v, &writer).receipt.phase, Phase::Unknown);
+    ledger::startup(&mut store.db).unwrap();
+    ledger::startup(&mut store.db).unwrap();
+    assert_eq!(budget(&store.db), (0, 0, 0));
+    assert_eq!(retained_rows(&store.db), saved);
+}
+
+#[test]
+fn budget_full_legacy_history_reconciles_without_changing_an_original() {
+    let (_temp, location, mut store, epoch) = fixture();
+    let old = legacy_history(&mut store, &location.configuration, &epoch, 387);
+    let saved = retained_rows(&store.db);
+    let unknown = ledger::load(&store.db, &old.last().unwrap().plan.request_id)
+        .unwrap()
+        .unwrap()
+        .receipt;
+    ledger::startup(&mut store.db).unwrap();
+    assert_eq!(
+        budget(&store.db),
+        (0, 0, 0),
+        "retired history is not an outstanding reservation"
+    );
+    assert_eq!(retained_rows(&store.db), saved);
+    let fresh = original(&location.configuration, &epoch);
+    assert_eq!(
+        admit(&mut store, &fresh, &uuid::Uuid::new_v4().to_string())
+            .receipt
+            .phase,
+        Phase::Queued
+    );
+    let charged = budget(&store.db);
+    assert_eq!(charged.0, 1);
+    for v in [&old[0], old.last().unwrap()] {
+        let expected = ledger::load(&store.db, &v.plan.request_id)
+            .unwrap()
+            .unwrap()
+            .receipt;
+        assert_eq!(
+            admit(&mut store, v, &uuid::Uuid::new_v4().to_string()).receipt,
+            expected
+        );
+        assert_eq!(budget(&store.db), charged);
+    }
+    assert_eq!(
+        ledger::load(&store.db, &old.last().unwrap().plan.request_id)
+            .unwrap()
+            .unwrap()
+            .receipt,
+        unknown
+    );
+}
+
+#[test]
+fn budget_failed_legacy_validation_write_or_commit_preserves_every_original() {
+    for failure in ["counter", "receipt", "write", "commit"] {
+        let (_temp, location, mut store, epoch) = fixture();
+        let old = legacy_history(&mut store, &location.configuration, &epoch, 387);
+        match failure {
+            "counter" => { store.db.execute("UPDATE desktop_deferred_send_budget SET bytes=bytes-1",[]).unwrap(); }
+            "receipt" => { store.db.execute("UPDATE desktop_deferred_sends SET receipt='{}' WHERE request_id=?1",[&old[0].plan.request_id]).unwrap(); }
+            "write" => store.db.execute_batch("CREATE TEMP TRIGGER refuse_budget BEFORE UPDATE ON desktop_deferred_send_budget BEGIN SELECT RAISE(ABORT,'refused'); END;").unwrap(),
+            "commit" => store.db.execute_batch("PRAGMA foreign_keys=ON;
+                CREATE TABLE budget_parent(id INTEGER PRIMARY KEY);
+                CREATE TABLE budget_child(id INTEGER REFERENCES budget_parent(id) DEFERRABLE INITIALLY DEFERRED);
+                CREATE TEMP TRIGGER refuse_commit AFTER UPDATE ON desktop_deferred_send_budget BEGIN INSERT INTO budget_child VALUES(1); END;").unwrap(),
+            _ => unreachable!(),
+        }
+        let before = budget(&store.db);
+        let rows = retained_rows(&store.db);
+        assert!(ledger::startup(&mut store.db).is_err(), "{failure}");
+        assert_eq!(budget(&store.db), before, "{failure}");
+        assert_eq!(retained_rows(&store.db), rows, "{failure}");
+        if failure == "commit" {
+            assert_eq!(
+                store
+                    .db
+                    .query_row("SELECT count(*) FROM budget_child", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+    }
+}
+
+#[test]
+fn budget_history_overflow_is_bounded_and_store_reports_null_not_zero() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    let (_temp, location, mut store, epoch) = fixture();
+    let complete = store.operation_status();
+    assert_eq!(complete["unsettled"], 0);
+    assert_eq!(complete["kinds"]["deferred_send"]["history_complete"], true);
+    let tx = store
+        .db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    for i in 0..4097 {
+        let v = original(&location.configuration, &epoch);
+        let receipt = wire::Receipt {
+            binding: v.binding.clone(),
+            admission_epoch: epoch.clone(),
+            revision: 2,
+            phase: Phase::Unknown,
+            drained: true,
+            code: "deferred_send_interrupted".into(),
+            outcome: None,
+        };
+        tx.execute("INSERT INTO desktop_deferred_sends(request_id,session,fingerprint,source,checkpoint,plan,receipt,writer_epoch,phase,drained,created) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'unknown',1,?9)",
+            rusqlite::params![v.plan.request_id,v.plan.session,v.binding.fingerprint().unwrap(),
+                v.intent.original,v.intent.checkpoint,serde_json::to_string(&v.plan).unwrap(),
+                serde_json::to_string(&receipt).unwrap(),epoch,i]).unwrap();
+    }
+    tx.commit().unwrap();
+    let steps = Arc::new(AtomicUsize::new(0));
+    let counted = steps.clone();
+    store.db.progress_handler(
+        1,
+        Some(move || counted.fetch_add(1, Ordering::Relaxed) > 2000),
+    );
+    ledger::startup(&mut store.db).unwrap();
+    store.db.progress_handler(0, None::<fn() -> bool>);
+    assert!(
+        steps.load(Ordering::Relaxed) < 2000,
+        "valid live counters never scan history"
+    );
+    let status = store.operation_status();
+    assert!(status["unsettled"].is_null());
+    let send = &status["kinds"]["deferred_send"];
+    assert_eq!(send["history_complete"], false);
+    assert!(send["rows"].is_null() && send["unsettled"].is_null());
+    assert_eq!(
+        (send["undrained"].clone(), send["original_custody"].clone()),
+        (json!(0), json!(0))
+    );
+    assert_eq!(budget(&store.db), (0, 0, 0));
+}
+
+/// A fixture generator, not native or runtime qualification. It exports only
+/// internally constructed synthetic legacy rows for the real CLI startup test.
+#[test]
+#[ignore = "explicit synthetic seed generator for the private real-CLI control"]
+fn budget_export_synthetic_legacy_rows() {
+    let configuration = std::env::var("ZERUS_SEND_BUDGET_CONFIG").unwrap();
+    assert_eq!(configuration.len(), 64);
+    let output = std::env::var("ZERUS_SEND_BUDGET_EXPORT").unwrap();
+    let (_temp, _location, mut store, epoch) = fixture();
+    let originals = legacy_history(&mut store, &configuration, &epoch, 387);
+    let value = json!({"rows":retained_rows(&store.db),"budget":budget(&store.db),
+        "unknown":originals.last().unwrap().plan.request_id,"epoch":epoch});
+    std::fs::write(output, value.to_string()).unwrap();
 }
 
 /// A reserved, running original with its exact custody, as the actor leaves
@@ -1261,6 +1524,11 @@ print(json.dumps(record))
         .unwrap();
         mode(&path, 0o700);
         f.runtime.fixture_image(&path);
+        let old = legacy_history(&mut f.store, &f.location.configuration, &f.epoch, 387);
+        let preserved = retained_rows(&f.store.db);
+        ledger::startup(&mut f.store.db).unwrap();
+        assert_eq!(retained_rows(&f.store.db), preserved);
+        assert_eq!(budget(&f.store.db), (0, 0, 0));
         let original = f.original();
         assert!(f.admit(&original).accepted);
         f.until("settled", |f| f.row(&original).receipt.drained);
@@ -1269,12 +1537,19 @@ print(json.dumps(record))
             (receipt.phase, receipt.code.as_str()),
             (Phase::Recorded, "")
         );
-        let seen: Value = serde_json::from_slice(&std::fs::read(&seen).unwrap()).unwrap();
+        let seen_path = seen.clone();
+        let seen_bytes = std::fs::read(&seen_path).unwrap();
+        let seen: Value = serde_json::from_slice(&seen_bytes).unwrap();
         assert_eq!(seen["argv"], json!(["send", SESSION, "--json"]));
         assert_eq!(seen["stdin"], original.intent.original.as_str());
         assert!(seen["custody"]
             .as_str()
             .is_some_and(|fd| fd.parse::<u32>().is_ok()));
+        assert_eq!(budget(&f.store.db), (0, 0, 0));
+        assert_eq!(f.row(old.last().unwrap()).receipt.phase, Phase::Unknown);
+        let again = f.admit(&original);
+        assert_eq!(again.receipt.unwrap().phase, Phase::Recorded);
+        assert_eq!(std::fs::read(&seen_path).unwrap(), seen_bytes);
     }
 
     /// The original child writes a reply, starts a descendant that keeps its
@@ -1919,6 +2194,115 @@ os._exit(0)"#;
     /// otherwise admissible copy of the same request that arrives after it
     /// gets the same answer and never runs. The lookup never answers it.
     #[test]
+    fn budget_over_six_hundred_lifecycles_keep_unknown_and_duplicate_receipts() {
+        let (sent, mut f) = counting();
+        let unknown = f.original();
+        let row = super::admit(&mut f.store, &unknown, &uuid::Uuid::new_v4().to_string());
+        let tx = f
+            .store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        ledger::retire(&tx, &row).unwrap();
+        tx.commit().unwrap();
+        let retained = f.row(&unknown).receipt;
+        let mut first = None;
+        for i in 0..601 {
+            let original = f.original();
+            assert!(f.admit(&original).accepted);
+            f.until("original physically drains", |f| {
+                f.row(&original).receipt.drained
+            });
+            let receipt = f.row(&original).receipt;
+            assert_eq!(receipt.phase, Phase::Recorded);
+            assert_eq!(budget(&f.store.db), (0, 0, 0), "cycle {i}");
+            if first.is_none() {
+                first = Some((original, receipt));
+            }
+        }
+        f.until("all original loans settle", |f| {
+            f.runtime.status()["admitted"] == 0
+        });
+        assert_eq!(sent.load(Ordering::SeqCst), 601);
+        let (original, receipt) = first.unwrap();
+        assert_eq!(f.admit(&original).receipt, Some(receipt.clone()));
+        assert_eq!(f.admit(&unknown).receipt, Some(retained.clone()));
+        assert_eq!(sent.load(Ordering::SeqCst), 601);
+        f.runtime =
+            runtime::Runtime::new(&f.config, &f.epoch, f.owner.clone(), f.fences.clone()).unwrap();
+        f.runtime.fixture_mac_fence(false);
+        f.runtime.fixture_executor(
+            MACHINE,
+            Arc::new(|_, _, _, _, _| panic!("historical duplicate cannot execute")),
+        );
+        f.store = Store::open(&f.location, &f.epoch).unwrap();
+        zerus_desktop_ledger::authorize(
+            &mut f.store.db,
+            &uuid::Uuid::new_v4().to_string(),
+            &f.epoch,
+        )
+        .unwrap();
+        f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+        assert_eq!(f.admit(&original).receipt, Some(receipt));
+        assert_eq!(f.admit(&unknown).receipt, Some(retained));
+        assert_eq!(budget(&f.store.db), (0, 0, 0));
+        assert_eq!(sent.load(Ordering::SeqCst), 601);
+    }
+
+    #[test]
+    fn budget_corruption_or_ambiguous_commit_is_unavailable_not_not_admitted() {
+        for failure in ["counter", "commit"] {
+            let (sent, mut f) = counting();
+            let original = f.original();
+            if failure == "counter" {
+                f.store
+                    .db
+                    .execute("UPDATE desktop_deferred_send_budget SET bytes=1", [])
+                    .unwrap();
+            } else {
+                f.store.db.execute_batch("PRAGMA foreign_keys=ON;
+                    CREATE TABLE send_parent(id INTEGER PRIMARY KEY);
+                    CREATE TABLE send_child(id INTEGER REFERENCES send_parent(id) DEFERRABLE INITIALLY DEFERRED);
+                    CREATE TEMP TRIGGER fail_send_commit AFTER INSERT ON desktop_deferred_sends BEGIN INSERT INTO send_child VALUES(1); END;").unwrap();
+            }
+            let result = f.admit(&original);
+            assert_eq!(result.code, "deferred_send_unavailable", "{failure}");
+            assert!(!result.not_admitted(&original.intent));
+            assert!(!f.fences.deferred_send.sealed(&original.plan.request_id));
+            assert!(no_row(&f, &original.plan.request_id));
+            assert_eq!(sent.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[test]
+    fn budget_capacity_is_proven_not_admitted_before_any_child_or_write() {
+        let (sent, mut f) = counting();
+        for _ in 0..32 {
+            let v = f.original();
+            assert!(f.admit(&v).accepted);
+        }
+        let protected = retained_rows(&f.store.db);
+        let refused = f.original();
+        let reply = f.admit(&refused);
+        assert!(
+            reply.not_admitted(&refused.intent),
+            "capacity must be a proven pre-admission refusal: {}",
+            reply.code
+        );
+        assert!(no_row(&f, &refused.plan.request_id));
+        assert_eq!(retained_rows(&f.store.db), protected);
+        assert_eq!(sent.load(Ordering::SeqCst), 0);
+        assert_eq!(budget(&f.store.db).2, 32);
+        f.runtime.request_stop();
+        f.until("queued originals retire without input", |f| {
+            f.runtime.drained()
+        });
+        assert_eq!(budget(&f.store.db), (0, 0, 0));
+        assert!(f.admit(&refused).not_admitted(&refused.intent));
+        assert_eq!(sent.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn a_request_refused_before_admission_is_sealed_and_its_copy_never_runs() {
         let (sent, mut f) = counting();
         let original = f.original();
@@ -2140,7 +2524,12 @@ fn the_target_check_finds_a_session_in_the_id_layout() {
     let verified = original(&"a".repeat(64), &uuid::Uuid::new_v4().to_string());
     let plan = &verified.plan;
     session_record(&state, SESSION, "claude", "run-other", "conversation-other");
-    let current = || target::current(&super::receipt::Roots::open(&state, super::receipt::FOLDER).unwrap(), plan);
+    let current = || {
+        target::current(
+            &super::receipt::Roots::open(&state, super::receipt::FOLDER).unwrap(),
+            plan,
+        )
+    };
     assert!(!current(), "the label's holder runs another run");
     let private = |path: &Path, body: &Value| {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -2148,7 +2537,10 @@ fn the_target_check_finds_a_session_in_the_id_layout() {
         std::fs::write(path, body.to_string()).unwrap();
         mode(path, 0o600);
     };
-    let ids = ["3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f", "7be01d44-6b7e-4c2a-9d1f-0a1b2c3d4e5f"];
+    let ids = [
+        "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f",
+        "7be01d44-6b7e-4c2a-9d1f-0a1b2c3d4e5f",
+    ];
     let session = |id: &str, layout: bool| {
         let mut record = json!({"name": SESSION, "agent": "claude", "run_id": RUN,
             "conversation_id": CONVERSATION, "session_id": id});
@@ -2162,7 +2554,10 @@ fn the_target_check_finds_a_session_in_the_id_layout() {
     let key = format!("{:x}", sha2::Sha256::digest(SESSION.as_bytes()));
     let index = state.join("labels").join(format!("{key}.json"));
     let manifest = state.join("labels").join(".complete");
-    private(&index, &json!({"version": 1, "label": SESSION, "ids": [ids[0]]}));
+    private(
+        &index,
+        &json!({"version": 1, "label": SESSION, "ids": [ids[0]]}),
+    );
     assert!(!current(), "an index no manifest proves: refused");
     // The manifest lists the label with its file's digest (#1437 review).
     let prove = || {
@@ -2172,9 +2567,18 @@ fn the_target_check_finds_a_session_in_the_id_layout() {
     prove();
     assert!(current());
     let stale = uuid::Uuid::new_v4().to_string();
-    private(&index, &json!({"version": 1, "label": SESSION, "ids": [ids[0], stale]}));
-    assert!(!current(), "a changed index no longer matches its manifest entry");
-    private(&index, &json!({"version": 1, "label": SESSION, "ids": [ids[0]]}));
+    private(
+        &index,
+        &json!({"version": 1, "label": SESSION, "ids": [ids[0], stale]}),
+    );
+    assert!(
+        !current(),
+        "a changed index no longer matches its manifest entry"
+    );
+    private(
+        &index,
+        &json!({"version": 1, "label": SESSION, "ids": [ids[0]]}),
+    );
     prove();
     session(ids[0], false);
     assert!(!current(), "a record without the ID layout");
@@ -2182,7 +2586,10 @@ fn the_target_check_finds_a_session_in_the_id_layout() {
     session(ids[1], true);
     private(&index, &json!({"version": 1, "label": SESSION, "ids": ids}));
     prove();
-    assert!(!current(), "two sessions carry the plan's run: never one of them");
+    assert!(
+        !current(),
+        "two sessions carry the plan's run: never one of them"
+    );
 }
 
 /// #1437 review (desktop-u G1): a listed candidate that is there but cannot be
@@ -2196,28 +2603,47 @@ fn the_target_check_never_ignores_an_unreadable_listed_candidate() {
     let verified = original(&"a".repeat(64), &uuid::Uuid::new_v4().to_string());
     let plan = &verified.plan;
     session_record(&state, SESSION, "claude", "run-other", "conversation-other");
-    let current = || target::current(&super::receipt::Roots::open(&state, super::receipt::FOLDER).unwrap(), plan);
+    let current = || {
+        target::current(
+            &super::receipt::Roots::open(&state, super::receipt::FOLDER).unwrap(),
+            plan,
+        )
+    };
     let private = |path: &Path, bytes: &[u8]| {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         mode(path.parent().unwrap(), 0o700);
         std::fs::write(path, bytes).unwrap();
         mode(path, 0o600);
     };
-    let (a, b) = (uuid::Uuid::new_v4().to_string(), uuid::Uuid::new_v4().to_string());
+    let (a, b) = (
+        uuid::Uuid::new_v4().to_string(),
+        uuid::Uuid::new_v4().to_string(),
+    );
     let record = json!({"name": SESSION, "agent": "claude", "run_id": RUN,
         "conversation_id": CONVERSATION, "session_id": a, "layout": "id"});
-    private(&state.join("sessions").join(format!("{a}.json")), record.to_string().as_bytes());
+    private(
+        &state.join("sessions").join(format!("{a}.json")),
+        record.to_string().as_bytes(),
+    );
     let key = format!("{:x}", sha2::Sha256::digest(SESSION.as_bytes()));
     let index = json!({"version": 1, "label": SESSION, "ids": [a, b]}).to_string();
-    private(&state.join("labels").join(format!("{key}.json")), index.as_bytes());
+    private(
+        &state.join("labels").join(format!("{key}.json")),
+        index.as_bytes(),
+    );
     let digest = format!("{:x}", sha2::Sha256::digest(index.as_bytes()));
     private(
         &state.join("labels").join(".complete"),
-        json!({"version": 1, "labels": {&key: digest}}).to_string().as_bytes(),
+        json!({"version": 1, "labels": {&key: digest}})
+            .to_string()
+            .as_bytes(),
     );
     assert!(current(), "a listed session whose file is gone is stale");
     private(&state.join("sessions").join(format!("{b}.json")), b"{");
-    assert!(!current(), "the target check skipped an unreadable listed session");
+    assert!(
+        !current(),
+        "the target check skipped an unreadable listed session"
+    );
 }
 
 /// #1437 review (desktop-u, R2): a matching label holder is counted with the
@@ -2231,7 +2657,12 @@ fn the_target_check_counts_the_label_holder_with_its_twins() {
     let verified = original(&"a".repeat(64), &uuid::Uuid::new_v4().to_string());
     let plan = &verified.plan;
     session_record(&state, SESSION, "claude", RUN, CONVERSATION);
-    let current = || target::current(&super::receipt::Roots::open(&state, super::receipt::FOLDER).unwrap(), plan);
+    let current = || {
+        target::current(
+            &super::receipt::Roots::open(&state, super::receipt::FOLDER).unwrap(),
+            plan,
+        )
+    };
     assert!(current(), "no ID layout: the label's record decides");
     let private = |path: &Path, bytes: &[u8]| {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -2242,16 +2673,30 @@ fn the_target_check_counts_the_label_holder_with_its_twins() {
     let sessions = state.join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
     mode(&sessions, 0o700);
-    assert!(!current(), "the ID layout exists and nothing proves the label");
+    assert!(
+        !current(),
+        "the ID layout exists and nothing proves the label"
+    );
     let key = format!("{:x}", sha2::Sha256::digest(SESSION.as_bytes()));
     let manifest = state.join("labels").join(".complete");
-    private(&manifest, json!({"version": 1, "labels": {}}).to_string().as_bytes());
+    private(
+        &manifest,
+        json!({"version": 1, "labels": {}}).to_string().as_bytes(),
+    );
     assert!(current(), "the manifest proves the label has no twin");
     let id = uuid::Uuid::new_v4().to_string();
     let index = json!({"version": 1, "label": SESSION, "ids": [id]}).to_string();
-    private(&state.join("labels").join(format!("{key}.json")), index.as_bytes());
+    private(
+        &state.join("labels").join(format!("{key}.json")),
+        index.as_bytes(),
+    );
     let digest = format!("{:x}", sha2::Sha256::digest(index.as_bytes()));
-    private(&manifest, json!({"version": 1, "labels": {&key: digest}}).to_string().as_bytes());
+    private(
+        &manifest,
+        json!({"version": 1, "labels": {&key: digest}})
+            .to_string()
+            .as_bytes(),
+    );
     let twin = sessions.join(format!("{id}.json"));
     private(&twin, b"{");
     assert!(!current(), "a listed twin that cannot be read");
@@ -2261,15 +2706,24 @@ fn the_target_check_counts_the_label_holder_with_its_twins() {
         .to_string()
     };
     private(&twin, record("run-other").as_bytes());
-    assert!(current(), "a twin on another run: the label's record is the one");
+    assert!(
+        current(),
+        "a twin on another run: the label's record is the one"
+    );
     private(&twin, record(RUN).as_bytes());
-    assert!(!current(), "the label's record and a twin both carry the plan: never one of them");
+    assert!(
+        !current(),
+        "the label's record and a twin both carry the plan: never one of them"
+    );
     // A label record that cannot be read is never absent, even when a twin
     // alone would carry the plan.
     let label = state.join(format!("{key}.json"));
     let kept = std::fs::read(&label).unwrap();
     private(&label, b"{");
-    assert!(!current(), "a label record that cannot be read is never absent");
+    assert!(
+        !current(),
+        "a label record that cannot be read is never absent"
+    );
     private(&label, &kept);
     private(&twin, record("run-other").as_bytes());
     assert!(current());
@@ -2287,7 +2741,12 @@ fn the_target_check_refuses_every_malformed_listed_index() {
     let verified = original(&"a".repeat(64), &uuid::Uuid::new_v4().to_string());
     let plan = &verified.plan;
     session_record(&state, SESSION, "claude", RUN, CONVERSATION);
-    let current = || target::current(&super::receipt::Roots::open(&state, super::receipt::FOLDER).unwrap(), plan);
+    let current = || {
+        target::current(
+            &super::receipt::Roots::open(&state, super::receipt::FOLDER).unwrap(),
+            plan,
+        )
+    };
     let private = |path: &Path, bytes: &[u8]| {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         mode(path.parent().unwrap(), 0o700);
@@ -2297,15 +2756,23 @@ fn the_target_check_refuses_every_malformed_listed_index() {
     let id = uuid::Uuid::new_v4().to_string();
     let twin = json!({"name": SESSION, "agent": "claude", "run_id": "run-other",
         "conversation_id": CONVERSATION, "session_id": id, "layout": "id"});
-    private(&state.join("sessions").join(format!("{id}.json")), twin.to_string().as_bytes());
+    private(
+        &state.join("sessions").join(format!("{id}.json")),
+        twin.to_string().as_bytes(),
+    );
     let key = format!("{:x}", sha2::Sha256::digest(SESSION.as_bytes()));
     let prove = |index: Value| {
         let bytes = index.to_string();
-        private(&state.join("labels").join(format!("{key}.json")), bytes.as_bytes());
+        private(
+            &state.join("labels").join(format!("{key}.json")),
+            bytes.as_bytes(),
+        );
         let digest = format!("{:x}", sha2::Sha256::digest(bytes.as_bytes()));
         private(
             &state.join("labels").join(".complete"),
-            json!({"version": 1, "labels": {&key: digest}}).to_string().as_bytes(),
+            json!({"version": 1, "labels": {&key: digest}})
+                .to_string()
+                .as_bytes(),
         );
     };
     prove(json!({"version": 1, "label": SESSION, "ids": [id]}));
@@ -2424,7 +2891,12 @@ fn the_target_check_refuses_a_listed_candidate_without_its_identity() {
     let verified = original(&"a".repeat(64), &uuid::Uuid::new_v4().to_string());
     let plan = &verified.plan;
     session_record(&state, SESSION, "claude", RUN, CONVERSATION);
-    let current = || target::current(&super::receipt::Roots::open(&state, super::receipt::FOLDER).unwrap(), plan);
+    let current = || {
+        target::current(
+            &super::receipt::Roots::open(&state, super::receipt::FOLDER).unwrap(),
+            plan,
+        )
+    };
     let private = |path: &Path, bytes: &[u8]| {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         mode(path.parent().unwrap(), 0o700);
@@ -2434,9 +2906,17 @@ fn the_target_check_refuses_a_listed_candidate_without_its_identity() {
     let id = uuid::Uuid::new_v4().to_string();
     let key = format!("{:x}", sha2::Sha256::digest(SESSION.as_bytes()));
     let index = json!({"version": 1, "label": SESSION, "ids": [id]}).to_string();
-    private(&state.join("labels").join(format!("{key}.json")), index.as_bytes());
+    private(
+        &state.join("labels").join(format!("{key}.json")),
+        index.as_bytes(),
+    );
     let digest = format!("{:x}", sha2::Sha256::digest(index.as_bytes()));
-    private(&state.join("labels").join(".complete"), json!({"version": 1, "labels": {&key: digest}}).to_string().as_bytes());
+    private(
+        &state.join("labels").join(".complete"),
+        json!({"version": 1, "labels": {&key: digest}})
+            .to_string()
+            .as_bytes(),
+    );
     let twin = state.join("sessions").join(format!("{id}.json"));
     let other = json!({"name": SESSION, "agent": "claude", "run_id": "run-other",
         "conversation_id": CONVERSATION, "session_id": id, "layout": "id"});

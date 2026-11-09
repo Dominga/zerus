@@ -799,8 +799,9 @@ impl Store {
                 compact,
                 resume,
             )) => {
-                let unsettled = |v: &serde_json::Value| v["unsettled"].as_u64().unwrap_or(0);
-                serde_json::json!({"unsettled":totals.unsettled+unsettled(&clone)+unsettled(&worktree)+unsettled(&launch)+unsettled(&message)+unsettled(&send)+unsettled(&answer)+unsettled(&compact)+unsettled(&resume),"undrained":undrained,
+                let unsettled = checked_unsettled(totals.unsettled,
+                    [&clone,&worktree,&launch,&message,&send,&answer,&compact,&resume]);
+                serde_json::json!({"unsettled":unsettled,"undrained":undrained,
                 "kinds":{"task_start_reconcile":{"unsettled":totals.unsettled,"undrained":totals.undrained},"creation_clone":clone,"creation_worktree":worktree,"creation_launch":launch,"task_message":message,"deferred_send":send,"deferred_answer":answer,"compact_to_send":compact,"session_resume":resume},
                 "admissions_paused":true,"recovery_error":self.operation_recovery_error || self.creation_recovery_error})
             }
@@ -1023,8 +1024,22 @@ fn around_open(path: &Path, opened: bool) {
     });
 }
 
+fn checked_unsettled<'a>(initial: u64, leaves: impl IntoIterator<Item=&'a serde_json::Value>) -> Option<u64> {
+    leaves.into_iter().try_fold(initial, |sum, leaf| sum.checked_add(leaf["unsettled"].as_u64()?))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn incomplete_or_invalid_operation_counts_never_become_zero() {
+        use serde_json::json;
+        assert_eq!(super::checked_unsettled(3,[&json!({"unsettled":2})]),Some(5));
+        for leaf in [json!({}),json!({"unsettled":null}),json!({"unsettled":-1}),json!({"unsettled":0.5}),json!({"unsettled":"0"})] {
+            assert_eq!(super::checked_unsettled(3,[&leaf]),None);
+        }
+        assert_eq!(super::checked_unsettled(u64::MAX,[&json!({"unsettled":1})]),None);
+        assert_eq!(super::checked_unsettled(u64::MAX,[&json!({"unsettled":0})]),Some(u64::MAX));
+    }
     use super::*;
     use rusqlite::params;
 

@@ -1498,6 +1498,13 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             if task.status != TaskStatus::Submitted {
                 continue;
             }
+            // Task #443: a report the lead accepted whose work waits for its
+            // landing (the queue's, or a hand landing) is decided: it never
+            // reminds anyone; the lead's status names it in one "accepted,
+            // waiting to land" line.
+            if super::merge_queue::waits_for_landing(task) {
+                continue;
+            }
             let Some(attempt) = task.attempts.iter().rev().find(|attempt| attempt.state == AttemptState::Reported) else { continue };
             let age = attempt.report.as_ref().map(|report| now - report.at).unwrap_or(0.0);
             if sub {
@@ -2535,6 +2542,21 @@ fn clear_restarted(store: &mut Store, team_id: &str, member_id: &str, role: &str
 /// written while a merge only waits for its tests.
 fn merge_queue_tick(store: &mut Store, team_id: &str, now: f64) -> anyhow::Result<()> {
     let team = store.load(team_id)?.with_context(|| format!("Unknown team {team_id}"))?;
+    // Task #443 (owner, 2026-11-09): accepted work whose commit is already on
+    // the line is landed by itself - no second accept with "merged":true. One
+    // Git read, and none when nothing waits.
+    let mut changed = false;
+    if team.status == TeamStatus::Running {
+        let landed = super::merge_queue::landed_by_ancestry(&team, now);
+        if !landed.is_empty() {
+            change(store, team_id, |team, events| super::merge_queue::record_landed(team, &landed, now, events).map(|_| ()))?;
+            changed = true;
+        }
+    }
+    let team = match changed {
+        true => store.load(team_id)?.with_context(|| format!("Unknown team {team_id}"))?,
+        false => team,
+    };
     if team.status != TeamStatus::Running || !team.tasks.iter().any(|task| task.merge.is_some()) {
         return Ok(());
     }

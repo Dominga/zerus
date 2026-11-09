@@ -8,7 +8,7 @@
 //! merge is under test at a time, so a rollback never drops another's work,
 //! and a phase integration only checks what came after the last tested merge.
 
-use super::model::{AttemptState, Decider, MemberState, MergeEntry, MergeLog, MergeRange, MergeWaitReason, OpenNotRun, Task, TaskStatus, Team};
+use super::model::{AttemptState, Decider, Landed, MemberState, MergeEntry, MergeLog, MergeRange, MergeWaitReason, OpenNotRun, Task, TaskStatus, Team};
 use super::store::Event;
 use super::test_queue::{Request, TestStore};
 use serde_json::{json, Value};
@@ -104,6 +104,180 @@ fn rejected_commits(team: &Team) -> Vec<String> {
         .collect()
 }
 
+/// Task #443: the revision whose history is "on the line": the configured
+/// branch when the line is on, or the team folder's HEAD when the line is off
+/// (no `integration_folder`, the owner's p92: a hand landing in the team's own
+/// folder).
+fn line_revision(team: &Team) -> String {
+    if team.settings.integration_folder.trim().is_empty() {
+        return "HEAD".to_owned();
+    }
+    integration_branch(team).map_or_else(|| "HEAD".to_owned(), |line| format!("refs/heads/{line}"))
+}
+
+/// Task #443: every commit on the line in one read.
+fn line_commits(team: &Team) -> Option<std::collections::HashSet<String>> {
+    let folder = team.integration_folder();
+    if folder.is_empty() {
+        return None;
+    }
+    super::dispatcher::git_at(folder, &["rev-list", &line_revision(team)])
+        .map(|text| text.lines().map(str::to_owned).collect())
+}
+
+/// Task #443: the commit whose landing the task waits for: the queue's entry,
+/// else the reported commit its accept recorded.
+fn landing_commit(task: &Task) -> &str {
+    task.merge
+        .as_ref()
+        .map(|entry| entry.commit.as_str())
+        .filter(|commit| !commit.is_empty())
+        .or_else(|| {
+            task.attempts
+                .iter()
+                .rev()
+                .find(|attempt| attempt.state == AttemptState::Reported && !attempt.folder_head.is_empty())
+                .map(|attempt| attempt.folder_head.as_str())
+        })
+        .unwrap_or_default()
+}
+
+/// Task #443 (owner, 2026-11-09): a task whose report the lead accepted and
+/// whose work waits for a landing nobody decided is settled: the queue's
+/// landing (queued or testing, with no failure note - it will land it) or a
+/// hand landing (an accept outside the queue, no merge entry). It is never a
+/// "decision waiting": it gets no report reminder and no digest item; the
+/// lead's status names it in one "accepted, waiting to land" line with its
+/// age. A conflict, a blocked landing or a failed one stays the lead's
+/// decision (its `merge_waiting` item and the report).
+pub(crate) fn waits_for_landing(task: &Task) -> bool {
+    if task.landed.is_some() || landing_commit(task).is_empty() {
+        return false;
+    }
+    match task.merge.as_ref() {
+        Some(entry) => entry.note.is_empty() && matches!(entry.state.as_str(), "queued" | "testing"),
+        None => task.status == TaskStatus::Accepted,
+    }
+}
+
+/// Task #443: when the landing started waiting: the queue's accept, or the
+/// lead's accept outside the queue.
+fn landing_since(task: &Task) -> f64 {
+    if let Some(entry) = task.merge.as_ref() {
+        return entry.at;
+    }
+    task.attempts
+        .iter()
+        .rev()
+        .find(|attempt| attempt.state == AttemptState::Reported)
+        .and_then(|attempt| attempt.decided_at.or_else(|| attempt.report.as_ref().map(|report| report.at)))
+        .unwrap_or_default()
+}
+
+thread_local! {
+    /// Task #443: when each line was last read for its landed work. A commit
+    /// becomes an ancestor only when the line moves, and one `rev-list` over a
+    /// long history is not a tick's cost to pay every three seconds: the check
+    /// runs at most once in `LANDING_EVERY` seconds per team.
+    static LANDING_CHECKED: std::cell::RefCell<std::collections::HashMap<String, f64>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Task #443: how often a tick reads the line for work it already holds.
+const LANDING_EVERY: f64 = 20.0;
+
+/// Task #443: whether this tick reads the line for `team` (at most once in
+/// `LANDING_EVERY` seconds).
+fn landing_due(team: &Team, now: f64) -> bool {
+    let key = format!("{}\n{}", team.id, team.integration_folder());
+    LANDING_CHECKED.with(|checked| {
+        let mut checked = checked.borrow_mut();
+        if checked.get(&key).is_some_and(|at| now - at < LANDING_EVERY) {
+            return false;
+        }
+        checked.insert(key, now);
+        true
+    })
+}
+
+/// Task #443: the accepted work whose commit is already on the line but whose
+/// record still waits: (task, commit), the tasks Zerus accepts and marks
+/// landed by itself. One Git read, none when nothing waits, and at most one in
+/// `LANDING_EVERY` seconds; a landed commit needs no second accept with
+/// "merged":true.
+pub(crate) fn landed_by_ancestry(team: &Team, now: f64) -> Vec<(u32, String)> {
+    let waiting: Vec<(u32, String)> = team
+        .tasks
+        .iter()
+        .filter(|task| waits_for_landing(task))
+        .map(|task| (task.id, landing_commit(task).to_owned()))
+        .filter(|(_, commit)| !commit.is_empty())
+        .collect();
+    if waiting.is_empty() || !landing_due(team, now) {
+        return Vec::new();
+    }
+    let Some(on_line) = line_commits(team) else { return Vec::new() };
+    waiting.into_iter().filter(|(_, commit)| on_line.contains(commit)).collect()
+}
+
+/// Task #443: accepts the task and records its landing by itself (no second
+/// accept with "merged":true); the lead's status and the playbook read
+/// `task.landed` from here on.
+pub(crate) fn record_landed(team: &mut Team, landed: &[(u32, String)], now: f64, events: &mut Vec<Event>) -> anyhow::Result<bool> {
+    let mut changed = false;
+    for (id, commit) in landed {
+        let Some(task) = team.task(*id) else { continue };
+        if task.landed.as_ref().is_some_and(|landed| landed.commit == *commit) {
+            continue;
+        }
+        if task.status == TaskStatus::Submitted {
+            let short: String = commit.chars().take(9).collect();
+            let reason = format!("Zerus landed it by itself: {short} is on the integration line");
+            let input = json!({"task":id,"reason":reason,"merged":true});
+            let actor = super::ops::Actor::Member(team.lead.clone());
+            super::ops::apply(team, "accept", &input, &actor, &Default::default(), events)?;
+        }
+        let Some(task) = team.task_mut(*id) else { continue };
+        task.landed = Some(Landed { commit: commit.clone(), by: "Zerus".into(), at: now });
+        changed = true;
+    }
+    if changed {
+        events.push(Event::new("tasks_landed", json!({"by":"Zerus","tasks":landed.iter().map(|(id, _)| *id).collect::<Vec<_>>()})));
+    }
+    Ok(changed)
+}
+
+/// Task #443: the accepted work waiting to land, as ONE line of the lead's
+/// status with each task's age, and its entries; None when nothing waits. The
+/// record only: the tick's `landed_by_ancestry` drops the landed tasks, and no
+/// status poll starts Git for this line.
+pub(crate) fn waiting_to_land(team: &Team, now: f64) -> Option<Value> {
+    let mut waiting: Vec<(u32, String, f64, String)> = team
+        .tasks
+        .iter()
+        .filter(|task| waits_for_landing(task))
+        .map(|task| {
+            let state = task.merge.as_ref().map(|entry| entry.state.clone()).unwrap_or_else(|| "not_queued".into());
+            (task.id, landing_commit(task).to_owned(), landing_since(task), state)
+        })
+        .filter(|(_, commit, _, _)| !commit.is_empty())
+        .collect();
+    waiting.sort_by(|a, b| a.2.total_cmp(&b.2));
+    if waiting.is_empty() {
+        return None;
+    }
+    let minutes = |since: f64| ((now - since).max(0.0) / 60.0).round() as u64;
+    let named: Vec<String> = waiting.iter().take(8).map(|(id, _, since, _)| format!("#{id} ({} min)", minutes(*since))).collect();
+    let more = waiting.len().saturating_sub(named.len());
+    let mut line = format!("accepted, waiting to land: {}", named.join(", "));
+    if more > 0 {
+        line.push_str(&format!(" and {more} more"));
+    }
+    Some(json!({"line":line, "more":more,
+        "tasks":waiting.iter().map(|(id, commit, since, state)| json!({"task":id,"commit":commit,
+            "age":minutes(*since),"state":state})).collect::<Vec<_>>()}))
+}
+
 /// Task #267: the integration line for status and the lead's inbox: its branch
 /// and head, the accepted work that is on it, and every accepted task that is
 /// not, with the reason (the queue's state, its resolve task, or no queue).
@@ -115,15 +289,12 @@ pub(crate) fn landing(team: &Team) -> Value {
     let mut unlanded = Vec::new();
     // Task #393: the line's commits in one read. A status or an inbox over
     // hundreds of accepted tasks names each task's commit and checks it
-    // against this set, instead of starting Git once per task.
-    let line_commits: Option<std::collections::HashSet<String>> = if folder.is_empty() {
-        None
-    } else {
-        super::dispatcher::git_at(folder, &["rev-list", "HEAD"])
-            .map(|text| text.lines().map(str::to_owned).collect())
-    };
+    // against this set, instead of starting Git once per task. Task #443: the
+    // configured branch is the line; when the line is off it is the team
+    // folder's HEAD.
+    let line_set = line_commits(team);
     let on_the_line = |commit: &str| -> bool {
-        match &line_commits {
+        match &line_set {
             Some(set) => set.contains(commit),
             None => !commit.is_empty() && ancestry(folder, commit) == Ancestry::Yes,
         }

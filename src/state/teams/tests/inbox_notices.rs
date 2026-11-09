@@ -138,6 +138,45 @@ fn a_seen_notice_stays_away_across_a_restart_and_returns_when_it_changes() {
 }
 
 #[test]
+fn an_accepted_landing_is_no_decision_and_is_never_a_report() {
+    // Task #443 (owner, 2026-11-09): a report the lead accepted whose work
+    // waits for its landing is decided: the queue's landing, or a hand one.
+    let mut team = screenshot_team();
+    team.task_mut(1).unwrap().merge = Some(MergeEntry {
+        state: "queued".into(),
+        author: "dev".into(),
+        commit: "46de9c4d5a6345395d221dcaa3eaf48aed0a1d71".into(),
+        at: 25.0,
+        ..Default::default()
+    });
+    assert!(item(&team, "report").is_none(), "a queued landing is no decision: {:?}", crate::state::teams::inbox::items(&team));
+    // The idle nag names no decision and the report's text.
+    let stall = LeadStall { since: 1.0, reason: "idle".into(), items: 0, members: 0, oldest: 25.0, round: 1, notified_at: 0.0, ..Default::default() };
+    let text = crate::state::teams::look::lead_idle_text(&team, &stall, crate::state::now());
+    assert!(!text.contains("done") && !text.contains("#1"), "the waiting landing was named: {text}");
+    assert_eq!(
+        crate::state::teams::merge_queue::waiting_to_land(&team, 25.0 + 26.0 * 60.0).expect("the waiting line")["line"],
+        json!("accepted, waiting to land: #1 (26 min)")
+    );
+    // The hand landing (an accept outside the queue) is none either.
+    let mut hand = screenshot_team();
+    hand.task_mut(1).unwrap().status = TaskStatus::Accepted;
+    assert!(item(&hand, "report").is_none());
+    // Once landed it leaves the line too.
+    hand.task_mut(1).unwrap().landed = Some(Landed { commit: "46de9c4".into(), by: "Zerus".into(), at: 30.0 });
+    assert!(crate::state::teams::merge_queue::waiting_to_land(&hand, 100.0).is_none());
+    // A failed or conflicted landing stays the lead's decision.
+    let mut failed = screenshot_team();
+    failed.task_mut(1).unwrap().merge = Some(MergeEntry {
+        state: "queued".into(),
+        note: "the merge could not be rolled back".into(),
+        commit: "46de9c4d5a6345395d221dcaa3eaf48aed0a1d71".into(),
+        ..Default::default()
+    });
+    assert!(item(&failed, "report").is_some(), "a failed landing is decided by the lead");
+}
+
+#[test]
 fn the_lead_keeps_a_task_after_its_dependency_was_cancelled() {
     let mut team = screenshot_team();
     assert!(item(&team, "dependency_cancelled").is_some());

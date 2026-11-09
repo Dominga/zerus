@@ -935,6 +935,12 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
     if !team.settings.integration_folder.trim().is_empty() {
         value["integration"] = super::merge_queue::landing(team);
     }
+    // Task #443 (owner, 2026-11-09): accepted work waiting to land is decided,
+    // never a decision waiting: the lead's status names it in one line with
+    // its age, whether the line is on or off (a hand landing).
+    if let Some(waiting) = super::merge_queue::waiting_to_land(team, now) {
+        value["waiting_to_land"] = waiting;
+    }
     // U62 (#715): the full-run policy and the owner's one-time grant.
     value["full_tests"] = json!(team.settings.full_tests);
     value["full_tests_grant"] = json!(team.full_tests_grant);

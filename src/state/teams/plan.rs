@@ -735,6 +735,30 @@ fn health_of(team: &Team, scope: &[Task]) -> Health {
     if open.len() > 25 {
         health.warnings.push(format!("(22) {} tasks in one phase; offer a phase split above 25", open.len()));
     }
+    // Task #400 (owner, 2026-11-09): with many open tasks one reviewer and a
+    // plan that sends every report to the lead are the bottleneck; a big team
+    // keeps two reviewers, two mergers and a sub-lead, and its tasks carry a
+    // review pipeline.
+    let many = open.len() > 8;
+    if many {
+        let reviewers = team
+            .members
+            .iter()
+            .filter(|member| member.state != MemberState::Removed && member.role.to_lowercase().contains("review"))
+            .count();
+        if reviewers < 2 {
+            health.warnings.push(format!(
+                "(25) {} reviewer(s) serve {} open tasks; keep two reviewers and two mergers and a sub-lead whose members report to it",
+                reviewers,
+                open.len()
+            ));
+        }
+        if open.iter().all(|task| matches!(task.pipeline.as_str(), "" | "none" | "check")) {
+            health.warnings.push(
+                "(25) every open task uses 'check': each report waits for the lead; give tasks a 'docs' (review, auto) or 'code' (review, test, lead) pipeline".to_owned(),
+            );
+        }
+    }
     // U28 (9): lane weight, volume times the kind's cost (a desktop task ~3).
     let mut weights: BTreeMap<String, usize> = BTreeMap::new();
     for task in &open {
@@ -1510,6 +1534,29 @@ mod tests {
         assert!(health(&suites).warnings.iter().any(|w| w.starts_with("(18)")), "{:?}", health(&suites).warnings);
     }
 
+
+    /// Task #400 (owner, 2026-11-09): a big plan with one reviewer, or with
+    /// every report going through the lead, asks for two reviewers and a
+    /// review pipeline.
+    #[test]
+    fn a_big_plan_asks_for_a_second_reviewer_and_review_pipelines() {
+        let tasks: Vec<Task> = (1..=10).map(|id| task(id, &[], InProgress)).collect();
+        let mut big = team(tasks);
+        big.members.push(Member { id: "rev".into(), role: "Reviewer & Merger".into(), agent: "codex".into(), state: MemberState::Active, ..Default::default() });
+        let warnings = health(&big).warnings;
+        assert!(warnings.iter().any(|w| w.starts_with("(25)") && w.contains("reviewer")), "{warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("every open task uses 'check'")), "{warnings:?}");
+        // Two reviewers and a review pipeline: the notes go.
+        big.members.push(Member { id: "rev2".into(), role: "Reviewer".into(), agent: "codex".into(), state: MemberState::Active, ..Default::default() });
+        big.members.push(Member { id: "merger".into(), role: "Merger".into(), agent: "codex".into(), state: MemberState::Active, ..Default::default() });
+        for task in &mut big.tasks {
+            task.pipeline = "code".into();
+        }
+        assert!(!health(&big).warnings.iter().any(|w| w.starts_with("(25)")), "{:?}", health(&big).warnings);
+        // A small plan keeps no note.
+        let small = team((1..=3).map(|id| task(id, &[], InProgress)).collect());
+        assert!(!health(&small).warnings.iter().any(|w| w.starts_with("(25)")), "{:?}", health(&small).warnings);
+    }
 
     #[test]
     fn cycles_are_found_and_layers_ignore_their_back_edges() {

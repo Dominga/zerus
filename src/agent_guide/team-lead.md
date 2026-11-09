@@ -46,18 +46,21 @@ its role; "hold":true keeps it until hgs team release. No report: use-last-reply
 (the lead or the member's sub-lead may; a member cannot; the digest names it).
 Remove your old builds at report; not another's.
 Only hgs team report reports; a question comes by hgs team ask, answered with hgs team reply.
-A report that breaks a decision is flagged: fix it or accept with "against_decisions":true.
+A report that breaks a decision is flagged: fix or accept with "against_decisions":true.
 Pipelines (review, test) pass or return; you decide at round 3. Never merge, build or test a
 member's work by hand; app: tauri-*; package. Watch with hgs team status --json; stuck: retry,
 reassign or cancel. hgs team answer takes a native question: allow only what the task needs,
 else ask.
+
+Above 8 members or 20 open tasks: two reviewers, two mergers, a sub-lead; tasks take 'docs'
+(review, auto) or 'code' (review, test, lead).
 
 Park a blocked task. Waiting is always a park, never a loop or an order. A member
 asks how long CI, an install, a card or a time takes: answer with a park; it is freed and gets
 the task back in the same attempt when met:
   {"team":"ID","question":"q1","text":"","park":{"condition":{"kind":"ci",
    "repo":"O/R","run":123},"eta_minutes":40}} | hgs team reply --json
-You hear met, failed or overdue; park or unpark: hgs guide team-park.
+You hear met, failed or overdue; park or unpark: team-park.
 
 Record a decision. An owner's card answer is recorded by Zerus; what the owner told you in
 chat you cite at any age (hgs team decisions --json {"action":"owner-messages"} gives ids

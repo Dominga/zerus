@@ -779,7 +779,7 @@ export interface LaunchAccounts {
 }
 
 // The Terminal tab (src-tauri/src/terminal.rs).
-export interface TerminalTarget { computer: ComputerId; name: string; run_id: string; machine: string }
+export interface TerminalTarget { computer: ComputerId; name: string; run_id: string; machine: string; conversation_id?: string }
 export interface TerminalConnected { generation: number; status: string; reused: boolean }
 export interface TerminalStatus { supported: boolean; available: boolean; reason: string; idle: string; connecting: string; disconnected: string }
 /** The next raw output is history; parse it before accepting input. */

@@ -1,5 +1,43 @@
-import { describe, expect, it, vi } from "vitest";
-import { clipboardKeyHandler, copyKey, terminalMenu } from "./terminal-clipboard";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { clipboardKeyHandler, copyKey, IMAGE_BYTES, normalizeTerminalImage, terminalMenu } from "./terminal-clipboard";
+
+afterEach(() => vi.unstubAllGlobals());
+
+const png = (width = 2, height = 3) => {
+  const bytes = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 0, 0, 0, 0, 0]);
+  const view = new DataView(bytes.buffer); view.setUint32(16, width); view.setUint32(20, height); return bytes;
+};
+
+describe("the event's bounded image data", () => {
+  it("preserves PNG bytes exactly without reading an ambient clipboard or decoding", async () => {
+    const decode = vi.fn(); vi.stubGlobal("createImageBitmap", decode);
+    const bytes = png(); expect(await normalizeTerminalImage(new Blob([bytes], { type: "image/png" }))).toEqual(bytes);
+    expect(decode).not.toHaveBeenCalled();
+  });
+  it("refuses an overbound input before reading or decoding it, and rejects malformed dimensions", async () => {
+    const source = new Blob(["x"], { type: "image/png" });
+    Object.defineProperty(source, "size", { value: IMAGE_BYTES + 1 });
+    const read = vi.spyOn(source, "arrayBuffer");
+    await expect(normalizeTerminalImage(source)).rejects.toThrow("10 MiB"); expect(read).not.toHaveBeenCalled();
+    for (const bytes of [new Uint8Array(24), png(0), png(8000, 8000)]) {
+      await expect(normalizeTerminalImage(new Blob([bytes], { type: "image/png" }))).rejects.toThrow();
+    }
+  });
+  it("converts one bounded non-PNG bitmap and closes its original resource", async () => {
+    const bitmap = { width: 2, height: 3, close: vi.fn() }, draw = vi.fn(), bytes = png();
+    const decode = vi.fn(async () => bitmap); vi.stubGlobal("createImageBitmap", decode);
+    vi.stubGlobal("OffscreenCanvas", class { getContext() { return { drawImage: draw }; } async convertToBlob() { return new Blob([bytes]); } });
+    expect(await normalizeTerminalImage(new Blob(["jpeg"], { type: "image/jpeg" }))).toEqual(bytes);
+    expect(decode).toHaveBeenCalledTimes(1); expect(draw).toHaveBeenCalledExactlyOnceWith(bitmap, 0, 0); expect(bitmap.close).toHaveBeenCalledTimes(1);
+  });
+  it("closes failed conversions and refuses excessive output without reading it", async () => {
+    const bitmap = { width: 2, height: 3, close: vi.fn() }; vi.stubGlobal("createImageBitmap", async () => bitmap);
+    const output = new Blob([png()]); Object.defineProperty(output, "size", { value: IMAGE_BYTES + 1 }); const read = vi.spyOn(output, "arrayBuffer");
+    vi.stubGlobal("OffscreenCanvas", class { getContext() { return { drawImage() {} }; } async convertToBlob() { return output; } });
+    await expect(normalizeTerminalImage(new Blob(["jpeg"], { type: "image/jpeg" }))).rejects.toThrow();
+    expect(read).not.toHaveBeenCalled(); expect(bitmap.close).toHaveBeenCalledTimes(1);
+  });
+});
 
 const key = (key: string, code: string, mods: Partial<Record<"ctrlKey" | "metaKey" | "altKey" | "shiftKey", boolean>> = {}) =>
   ({ key, code, ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, ...mods });

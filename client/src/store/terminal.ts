@@ -28,6 +28,8 @@ export interface TerminalPort {
   retarget(view: string, target: TerminalTarget): Promise<boolean>;
   /** The tab of attach `generation` shows or hides (a dropped file's paste refuses while it hides). */
   shown(view: string, generation: number, shown: boolean): void;
+  /** An event PNG, staged and pasted by Rust only while this original attach still shows. */
+  pasteImage?(view: string, generation: number, target: TerminalTarget, png: Uint8Array): Promise<void>;
 }
 
 export interface Screen {
@@ -104,12 +106,14 @@ export function createTerminal(port: TerminalPort, timers: Timers = realTimers, 
   let held = false;
   /** Bumps on every connect, disconnect and target change: older Channels are ignored. */
   let serial = 0;
+  let imageRevision = 0;
   let writes: Promise<void> = Promise.resolve();
   let pendingSize: { cols: number; rows: number } | undefined;
   let lastResize = Number.NEGATIVE_INFINITY;
   let resizeTimer: (() => void) | undefined;
 
   const ready = () => !!target && !!texts()?.available;
+  const imageBinding = (t: TerminalTarget | undefined) => JSON.stringify(t && [t.computer, t.name, t.run_id, t.conversation_id]);
 
   interface Restore { next: boolean; parsing: boolean; connected?: TerminalConnected; cols: number; rows: number }
   const restored = (mine: number, restore: Restore) => {
@@ -258,6 +262,7 @@ export function createTerminal(port: TerminalPort, timers: Timers = realTimers, 
     generation: () => generation,
     /** The selected session's target and texts (on every change of either). */
     async setTarget(next: TerminalTarget | undefined, nextTexts: TerminalStatus | undefined) {
+      if (imageBinding(next) !== imageBinding(target)) imageRevision++;
       setTexts(nextTexts);
       if (!next || !nextTexts) { await disconnect(); target = undefined; setStatus(""); return; }
       // Input stops reaching the previous session before the await.
@@ -295,6 +300,7 @@ export function createTerminal(port: TerminalPort, timers: Timers = realTimers, 
     texts,
     /** The tab hides; the attach keeps running. */
     hide() {
+      imageRevision++;
       screen = undefined;
       if (generation !== 0) port.shown(VIEW, generation, false);
     },
@@ -305,6 +311,20 @@ export function createTerminal(port: TerminalPort, timers: Timers = realTimers, 
       if ((source && source !== screen) || phase() !== "connected" || !bytes.length) return;
       const gen = generation;
       writes = writes.then(() => port.write(VIEW, gen, bytes)).catch((error) => { setStatus(message(error)); });
+    },
+    /** Capture BEFORE image decoding. A hidden/remounted screen never regains this lease. */
+    captureImage(source: Screen) {
+      if (source !== screen || phase() !== "connected" || !generation || visibility.hidden()
+        || !target?.run_id || target.conversation_id === undefined || !port.pasteImage) return undefined;
+      const captured = { ...target }, gen = generation, mine = serial, revision = imageRevision;
+      const current = () => source === screen && phase() === "connected" && !visibility.hidden()
+        && gen === generation && mine === serial && revision === imageRevision && imageBinding(captured) === imageBinding(target);
+      return {
+        current,
+        async paste(png: Uint8Array) {
+          if (current()) await port.pasteImage!(VIEW, gen, captured, png);
+        },
+      };
     },
     resized,
     /**
@@ -327,5 +347,5 @@ export type TerminalStore = ReturnType<typeof createTerminal>;
 /** The app's Terminal, on the bridge. */
 export const terminal = createTerminal({
   connect: bridge.terminalConnect, write: bridge.terminalWrite, resize: bridge.terminalResize,
-  ack: bridge.terminalAck, disconnect: bridge.terminalDisconnect, retarget: bridge.terminalRetarget, shown: (view, generation, shown) => bridge.terminalShown(view, generation, shown),
+  ack: bridge.terminalAck, disconnect: bridge.terminalDisconnect, retarget: bridge.terminalRetarget, shown: (view, generation, shown) => bridge.terminalShown(view, generation, shown), pasteImage: bridge.terminalPasteImage,
 });

@@ -5435,8 +5435,26 @@ would expand inside double quotes. Remote drops first copy files to the session 
 files, 10 MiB each and 20 MiB total. The copy is bound to the session's run and
 conversation. An untracked shell (`hgs sh -d`) has neither: its copy is bound to
 the live session's creation time and refused when a tracked run owns the session.
-Changing tab, session or connection during transfer cancels insertion.
+Changing tab, session or connection during transfer cancels insertion. Zerus
+Next on Linux and macOS frames the quoted paths as one literal terminal paste,
+so path characters are not individual native approval shortcuts. It still sends
+no Enter. Generic typing, text paste and Windows file-drop framing are unchanged.
 **Open externally** and **Copy connect command** retain access from other clients.
+
+In Zerus Next on Linux and macOS, an image-bearing browser paste event stays in
+the selected Terminal. On Arch with WebKitGTK, use **Shift+Insert** for an image
+on the clipboard; Ctrl+Shift+V retains the engine's text-paste behavior and
+Ctrl+V remains the native agent's key. Its captured image is normalized to PNG (at most 10 MiB
+before and after conversion, and 32 megapixels), then copied through the same
+run/conversation-bound staging command even for a local session. One quoted
+retained image-file path is inserted without Enter; the composer and Activity
+are unchanged. Accompanying text is not inserted. Unreadable image data, unknown
+identity, a changed/hidden/remounted terminal or an unconfirmed transfer inserts
+nothing and is never retried automatically. This inserts a file reference; it
+does not prove the native agent imported the image. Windows image-event staging
+and non-POSIX peer paths are unsupported. The quoted image path uses the same
+literal-paste framing as POSIX file drops. Existing text paste, native Ctrl+V
+keys and the text-only application Paste menu are unchanged.
 
 On Unix, **Terminate** can close an untracked Shell row after confirmation. The
 confirmation captures the tmux socket and server, session ID and creation time,

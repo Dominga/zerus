@@ -76,9 +76,10 @@
   .rowhit.dragged .scard { opacity: .45; }
   .sp-scroll.organizing .rowhit:hover .scard:not(.selected) { background: transparent; }
 
-  /* A project is a folder framed in its own colour (owner, 2026-11-09): the frame
-     wraps the header and every card, folded or unfolded, 2 px inside its rows. */
-  .group-frame { position: absolute; left: 0; right: 0; top: 0; border: 1px solid var(--frame); border-radius: 10px; pointer-events: none; }
+  /* A project is a folder framed in its own colour around the header row alone
+     (owner, 2026-11-09 after the first build: the colour belongs to the folder's
+     header, not to its cards). */
+  .group-frame { position: absolute; left: 0; right: 0; top: 0; border: 1px solid var(--frame); border-radius: 8px; pointer-events: none; }
 
   /* Project header: 40 px row, band (2,5,-2,-3) radius 6, contents inset 9. */
   .group-band { position: absolute; left: 2px; right: 2px; top: 5px; height: 32px; display: flex; align-items: center; gap: 6px; padding: 0 9px; border-radius: 6px; text-align: left; }

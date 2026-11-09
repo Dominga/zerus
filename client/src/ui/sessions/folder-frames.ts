@@ -12,32 +12,25 @@ export interface FolderFrame {
   frame: string;
 }
 
-/** The frame's inner padding: 2 px above and below the folder's header and cards. */
+/** The frame hugs the header band: 4 px from the row's top, 2 px left below it. */
+export const FRAME_TOP = 4;
 export const FRAME_INSET = 2;
 
 /**
- * A frame per project header, wrapping the header and every row of the project
- * in list order (a folded project is its header alone). Offsets come from the
- * fixed row heights the virtualizer places rows with, so a frame needs no
- * measurement; the rows keep their own 2 px inset, which is the folder's
- * normal inner padding.
+ * A frame per project header, around the header row alone (owner, 2026-11-09:
+ * the colour belongs to the folder's header, not to its cards). Offsets come
+ * from the fixed row heights the virtualizer places rows with, so a frame needs
+ * no measurement; a folded project looks the same.
  */
-export function groupFrames(rows: readonly Row[], heights: readonly number[]): FolderFrame[] {
+export function headerFrames(rows: readonly Row[], heights: readonly number[]): FolderFrame[] {
   const out: FolderFrame[] = [];
-  const offsets: number[] = [];
-  let total = 0;
-  for (const h of heights) {
-    offsets.push(total);
-    total += h;
-  }
+  let top = 0;
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    if (row.type !== "header") continue;
-    let end = i + 1;
-    while (end < rows.length && rows[end].type !== "header") end++;
-    const start = offsets[i] ?? 0;
-    const bottom = end < rows.length ? offsets[end] ?? total : total;
-    out.push({ id: row.id, top: start + FRAME_INSET, height: Math.max(0, bottom - start - FRAME_INSET * 2), frame: folderFrameColor(row) });
+    if (row.type === "header") {
+      out.push({ id: row.id, top: top + FRAME_TOP, height: Math.max(0, (heights[i] ?? 40) - FRAME_TOP - FRAME_INSET * 2), frame: folderFrameColor(row) });
+    }
+    top += heights[i] ?? 0;
   }
   return out;
 }

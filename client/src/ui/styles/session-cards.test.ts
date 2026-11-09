@@ -29,11 +29,11 @@ it("draws every session card from the skin's card and card-border tokens (task #
   expect(selected["border-color"]).toContain("var(--z-color-card-selected-border)");
 });
 
-it("frames a project in its own colour, around the header and its cards (task #457)", () => {
+it("frames a project in its own colour around its header row, with the folds and the pointer safe (task #457)", () => {
   const frame = declarations(".group-frame");
   expect(frame.position).toBe("absolute");
   expect(frame.border).toBe("1px solid var(--frame)");
-  expect(frame["border-radius"]).toBe("10px");
+  expect(frame["border-radius"]).toBe("8px");
   // The frame's layer must never take the pointer from a card or header.
   expect(frame["pointer-events"]).toBe("none");
 });

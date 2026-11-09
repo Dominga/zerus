@@ -52,25 +52,26 @@ afterEach(async () => {
 });
 
 describe("a project's frame in the session list (task #457)", () => {
-  it("wraps the header and every card of the project, in the folder's own colour", async () => {
+  it("frames the project's header row alone, in the folder's own colour", async () => {
     const [alpha, beta] = await mount([header("alpha", "#3fb950"), card("a0"), card("a1"), header("beta", null), card("b0")]);
     const group = ROW_HEIGHT.header + NORMAL_CARD_HEIGHT * 2;
+    const height = ROW_HEIGHT.header - 8;
     expect(alpha.dataset.frame).toBe("h:alpha");
     expect(alpha.style.getPropertyValue("--frame")).toBe("#3fb950");
-    expect(alpha.style.height).toBe(`${group - 4}px`);
-    expect(alpha.style.transform).toBe("translateY(2px)");
+    expect(alpha.style.height).toBe(`${height}px`);
+    expect(alpha.style.transform).toBe("translateY(4px)");
     // beta follows alpha's rows, in the neutral border: the folder has no colour.
     expect(beta.dataset.frame).toBe("h:beta");
     expect(beta.style.getPropertyValue("--frame")).toBe("var(--z-color-border)");
-    expect(beta.style.transform).toBe(`translateY(${group + 2}px)`);
-    expect(beta.style.height).toBe(`${ROW_HEIGHT.header + NORMAL_CARD_HEIGHT - 4}px`);
+    expect(beta.style.transform).toBe(`translateY(${group + 4}px)`);
+    expect(beta.style.height).toBe(`${height}px`);
   });
 
-  it("keeps a frame around a folded project's header alone", async () => {
+  it("draws the same frame for a folded project's header", async () => {
     const [alpha, beta] = await mount([header("alpha", "#3fb950", true), header("beta", null), card("b0")]);
-    expect(alpha.style.height).toBe(`${ROW_HEIGHT.header - 4}px`);
-    expect(beta.style.transform).toBe(`translateY(${ROW_HEIGHT.header + 2}px)`);
-    expect(beta.style.height).toBe(`${ROW_HEIGHT.header + NORMAL_CARD_HEIGHT - 4}px`);
+    expect(alpha.style.height).toBe(`${ROW_HEIGHT.header - 8}px`);
+    expect(beta.style.transform).toBe(`translateY(${ROW_HEIGHT.header + 4}px)`);
+    expect(beta.style.height).toBe(`${ROW_HEIGHT.header - 8}px`);
   });
 
   it("draws the frames under the rows and lets the pointer through", async () => {

@@ -1,4 +1,4 @@
-import { Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { tr } from "../../i18n";
 import { Icon } from "../lib/icons";
 import { memberRow } from "../../store/teams";
@@ -45,7 +45,6 @@ export function TeamBar(props: {
   const [now, setNow] = createSignal(Date.now() / 1000);
   const clock = setInterval(() => setNow(Date.now() / 1000), 60_000);
   onCleanup(() => clearInterval(clock));
-  const share = (n: number) => (counts().total ? `${(n / counts().total) * 100}%` : "0%");
   // Task #427: one row; below 1100 px the lower-priority actions fold into a
   // More menu instead of overlapping, and below 900 px the team actions fold
   // too. The render tests pass the width; the window's width otherwise.
@@ -57,18 +56,24 @@ export function TeamBar(props: {
   });
   const width = () => props.width ?? viewport();
   const compact = (): "none" | "low" | "high" => (width() < 900 ? "high" : width() < 1100 ? "low" : "none");
+  // Task #438: one continuous segmented track: no gaps between the segments, a
+  // minimum width for a non-zero one, rounded only at the track's two ends.
+  const segments = () => [
+    { key: "accepted", n: counts().accepted },
+    { key: "submitted", n: counts().submitted },
+    { key: "active", n: counts().active },
+    { key: "problem", n: counts().problems },
+  ].filter((segment) => segment.n > 0);
+  const countsTip = () => [tr("Accepted %1", counts().accepted), tr("Submitted %1", counts().submitted),
+    tr("In progress %1", counts().active), tr("Problems %1", counts().problems)].join(", ");
   return (
     <header class="team-bar" classList={{ "team-bar-compact": compact() !== "none" }} data-compact={compact()} data-strip>
       <Icon name="users" size={16} />
       <b class="team-name ell" title={props.team.goal || props.team.name}>{props.team.name}</b>
       <span class={`team-badge tone-${stateTone(props.state)}`} data-state={props.state}>{stateLabel(props.state)}</span>
       <TeamModeControl computer={props.computer} team={props.team} />
-      <div class="team-progress" role="img" aria-label={tr("%1 of %2 tasks accepted", counts().accepted, counts().total)}
-        title={tr("%1 of %2 tasks accepted", counts().accepted, counts().total)}>
-        <i class="seg accepted" style={{ width: share(counts().accepted) }} />
-        <i class="seg submitted" style={{ width: share(counts().submitted) }} />
-        <i class="seg active" style={{ width: share(counts().active) }} />
-        <i class="seg problem" style={{ width: share(counts().problems) }} />
+      <div class="team-progress" role="img" aria-label={countsTip()} title={countsTip()}>
+        <For each={segments()}>{(segment) => <i class={`seg ${segment.key}`} style={{ "flex-grow": String(segment.n) }} />}</For>
       </div>
       <span class="mono team-count">{counts().accepted}/{counts().total}</span>
       <Show when={compact() === "none"}>

@@ -37,7 +37,7 @@ export function TeamBar(props: {
   problemTasks: ReadonlySet<number>;
   onPhase: (phase: number) => void;
   onSettings: () => void;
-  onCatalog: () => void;
+  onCatalog?: () => void;
   /** Task #427: the strip's width (tests); the window's width otherwise. */
   width?: number;
 }) {
@@ -98,7 +98,7 @@ export function TeamBar(props: {
       <span class="mono team-count">{counts().accepted}/{counts().total}</span>
       <Show when={compact() === "none"}>
         <button type="button" class="btn ghost small" data-strip-action="settings" onClick={props.onSettings}>{tr("Team settings")}</button>
-        <button type="button" class="btn ghost small" data-strip-action="catalog" onClick={props.onCatalog}>{tr("Catalog")}</button>
+        <Show when={props.onCatalog}><button type="button" class="btn ghost small" data-strip-action="catalog" onClick={props.onCatalog}>{tr("Catalog")}</button></Show>
       </Show>
       <Show when={props.team.created > 0}><span class="dim team-age" data-strip-time title={tr("Since the team was created")}>{duration(now() - props.team.created)}</span></Show>
       <span class="grow" />

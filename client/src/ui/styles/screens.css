@@ -253,3 +253,7 @@
   .su-rsdetail { color: var(--z-color-dim); font-size: var(--fs-xs); font-weight: 400; }
 
 }
+
+/* Owner, 2026-11-09: the count column is always there (unlayered: packaged layer order). */
+.proj-item .proj-count { min-width: 24px; text-align: center; }
+.proj-item .proj-count.empty { visibility: hidden; }

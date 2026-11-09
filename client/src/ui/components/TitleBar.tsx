@@ -9,7 +9,6 @@ import { expandAllCollapsedEntry } from "../sessions/background-menu";
 import { windowLayer, setWindowLayer } from "../../store/windowLayer";
 import { newSessionFromRail } from "../sessions/newsession-view";
 import { shortcutTooltip } from "../../store/shortcuts";
-import { openGoTo } from "../../store/goTo";
 import { tr } from "../../i18n";
 import { waiting } from "../../store/teams";
 import { modelServers } from "../../store/modelServers";
@@ -70,10 +69,8 @@ export function TitleBar(props: { mode?: () => BridgeMode | "starting"; logTitle
         )}</For>
       </div>
       <span class="grow" data-tauri-drag-region />
-      <button class="tb-search" aria-label={tr("Search sessions, IDs and messages")} onClick={openGoTo}>
-        <Icon name="search" size={14} />
-        <span class="tb-search-text">{tr("Search sessions, IDs and messages…")}</span>
-      </button>
+      {/* Owner, 2026-11-09: no search in the title bar; the session list has
+          its own search, and Ctrl+K still opens Go to. */}
       {/* Task 409: the client log's last line, beside the search; clicking it
           opens the whole log (the title bar takes the place of the status bar).
           Task 424: the line and its icon are pale grey (muted), brighter only on

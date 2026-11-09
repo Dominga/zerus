@@ -2,6 +2,7 @@ import { For, Show, createEffect, createMemo, createResource, createSignal, onCl
 import type { JSX } from "solid-js";
 import { tr } from "../../i18n";
 import { Icon } from "../lib/icons";
+import { Spinner } from "../components/Status";
 import { pickLocalFolder, projectMemory } from "../../bridge";
 import { memberRow, showTeam, teams } from "../../store/teams";
 import { followDraft } from "../../store/newTeamFollow";
@@ -490,7 +491,7 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
                 </select>
               </div>
               <div class="nt-start">
-                <button type="button" class="btn primary" data-start-planning disabled={store.busy() || starting() || !!startWhy()} title={startWhy()} onClick={() => void start()}>{tr("Start planning")}</button>
+                <button type="button" class="btn primary" data-start-planning disabled={store.busy() || starting() || !!startWhy()} title={startWhy()} onClick={() => void start()}><Show when={store.busy() || starting()}><Spinner size={12} /> </Show>{tr("Start planning")}</button>
               </div>
               <p class="nt-hint">{tr("Nothing is created until you press it. Start planning makes a draft and gives the lead its brief; worktrees and members come only with Create team.")}</p>
             </fieldset>

@@ -803,9 +803,11 @@ fn hiding_never_starts_a_second_waiting_read() {
 }
 
 #[test]
-fn with_heads_the_inbox_and_feed_wait_for_the_watched_teams_revision() {
-    // Task #10: the watched team's inbox and feed are read only when its
-    // revision moved; the status keeps its minute-long safety read.
+fn with_heads_the_inbox_and_feed_are_read_within_a_minute_without_a_revision_move() {
+    // Task #10, attempt 2: a message to the lead or a feed event is written
+    // without a revision bump, so with the stream's heads the watched team's
+    // inbox and feed keep the minute-long safety read; a moved revision
+    // still makes them due at once.
     use std::sync::Arc;
     let heads = |rev: i64| {
         Some(Arc::new(
@@ -819,42 +821,22 @@ fn with_heads_the_inbox_and_feed_wait_for_the_watched_teams_revision() {
     model.follow(follow_team(), start);
     model.heads(heads(1), start);
     assert_eq!(due_reads(&mut model, start).len(), 5);
-    for minutes in 1..=5 {
-        let at = start + (super::STREAM_POLL + POLL) * minutes;
-        assert_eq!(
-            due_reads(&mut model, at),
-            ["list", "status", "waiting"],
-            "minute {minutes}"
-        );
-    }
-    let at = start + super::STREAM_POLL * 6;
+    assert!(
+        due_reads(&mut model, start + POLL * 3).is_empty(),
+        "no polling every 3 s"
+    );
+    // No revision move: the inbox and the feed are read again within STREAM_POLL.
+    let reads = due_reads(&mut model, start + super::STREAM_POLL);
+    assert!(
+        reads.contains(&"inbox".to_owned()) && reads.contains(&"feed".to_owned()),
+        "{reads:?}"
+    );
+    // The watched team's revision moved: at once, not a minute later.
+    let at = start + super::STREAM_POLL + POLL;
     model.heads(heads(2), at);
     assert_eq!(
         due_reads(&mut model, at),
         ["feed", "inbox", "list", "status", "waiting"]
-    );
-    // An action's refresh reads them too (the others keep their pace, as before).
-    model.refresh(at + POLL);
-    assert_eq!(due_reads(&mut model, at + POLL), ["feed", "inbox"]);
-    // Another team moved: not them.
-    let other = Some(Arc::new(
-        [(TEAM.to_owned(), 2), ("other".to_owned(), 2)]
-            .into_iter()
-            .collect::<super::Heads>(),
-    ));
-    model.heads(other, at + POLL * 2);
-    assert_eq!(due_reads(&mut model, at + POLL * 2), ["list", "waiting"]);
-    // Watching another team forgets what was parked for the first one.
-    model.follow(
-        TeamsFollow {
-            team: Some("other".into()),
-            ..follow_team()
-        },
-        at + POLL * 3,
-    );
-    assert_eq!(
-        due_reads(&mut model, at + POLL * 3),
-        ["feed", "inbox", "status"]
     );
 }
 
@@ -1022,12 +1004,11 @@ fn with_the_streams_team_heads_a_team_is_read_when_its_revision_moved() {
         "the list again, at once"
     );
     assert_eq!(model.next(at + POLL), None);
-    // The safety read after a minute: the list, Waiting and the team's
-    // status (its live sessions are not in a revision); its inbox and feed
-    // wait for its revision to move (task #10).
+    // The safety read after a minute, the inbox and feed included: their
+    // messages and events are written without a revision bump.
     assert_eq!(
-        due_reads(&mut model, at + super::STREAM_POLL + POLL),
-        ["list", "status", "waiting"]
+        due_reads(&mut model, at + super::STREAM_POLL + POLL).len(),
+        5
     );
     // The stream lost its heads (a gap, an older peer): polling again.
     model.heads(None, at + super::STREAM_POLL * 2);

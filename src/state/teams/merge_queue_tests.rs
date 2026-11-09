@@ -1610,3 +1610,53 @@ fn ctest_queue_missing_probe_program_or_placeholder_is_not_run() {
         assert!(database.last_green(&team.id, "gui", "").unwrap().is_none());
     }
 }
+
+// Task 377 (owner, 2026-11-08): the line is a named branch. A folder left on
+// another checkout lands nothing: the task keeps its queue note, the lead gets
+// a merge_wrong_checkout event, and the task is not reopened.
+#[test]
+fn a_checkout_that_is_not_the_line_holds_the_landing_with_a_notice() {
+    let repo = repo();
+    let mut team = team(&repo);
+    team.settings.integration_folder = repo.lead.to_string_lossy().into_owned();
+    // The line's name, while the folder's checkout is master.
+    team.line_branch = "release".into();
+    assert_eq!(accept(&mut team)["status"], "merge_queued");
+    let database = database(&repo);
+    let mut events = Vec::new();
+    let landed = step_here(&mut team, &database, 100.0, &mut events).unwrap();
+    assert!(!landed, "nothing lands on a wrong checkout");
+    let entry = team.task(1).unwrap().merge.clone().expect("the queued landing");
+    assert!(entry.note.contains("release") && entry.note.contains("master"), "{}", entry.note);
+    assert!(entry.merged.is_empty(), "no merge was made");
+    let kinds: Vec<&str> = events.iter().map(|event| event.kind.as_str()).collect();
+    assert!(kinds.contains(&"merge_wrong_checkout"), "{kinds:?}");
+}
+
+// Task 377 (owner, 2026-11-08): a merge runs the project's declared generators
+// and folds their output into the merge commit, so a generated catalog keeps
+// both sides' strings instead of whichever side the merge happened to keep.
+#[test]
+fn a_merge_regenerates_the_projects_generated_files_into_its_commit() {
+    let repo = repo();
+    // The project declares a generator; the line's copy of its output is stale.
+    let path = repo.lead.join(".zerus/tests.toml");
+    let config = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, format!("generate = [\"echo fresh > generated.txt\"]\n{config}")).unwrap();
+    write(&repo.lead, "generated.txt", "stale\n");
+    run_git(&repo.lead, &["add", "."]);
+    run_git(&repo.lead, &["commit", "-q", "-m", "the project declares its generator"]);
+    let mut team = team(&repo);
+    team.settings.integration_folder = repo.lead.to_string_lossy().into_owned();
+    assert_eq!(accept(&mut team)["status"], "merge_queued");
+    let database = database(&repo);
+    let events = settle(&mut team, &database, &repo.lead);
+    assert_eq!(team.task(1).unwrap().status, TaskStatus::Accepted, "{events:?}");
+    let generated = std::fs::read_to_string(repo.lead.join("generated.txt")).unwrap();
+    assert_eq!(generated.trim(), "fresh", "the generator ran over the stale copy");
+    // The regenerated file is part of the merge commit, not a dirty leftover.
+    let head = head(&repo);
+    let files = run_git(&repo.lead, &["show", "--name-only", "--pretty=format:", &head]);
+    assert!(files.lines().any(|file| file == "generated.txt"), "{files}");
+    assert!(run_git(&repo.lead, &["status", "--porcelain"]).is_empty(), "the merge commit carries it");
+}

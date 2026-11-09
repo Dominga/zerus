@@ -3,6 +3,11 @@
 # owner may override any of it in the team settings.
 version = 1
 
+# Task 377: files this project generates (its Russian catalog derives from the
+# Qt .ts and the Next supplement); every queue merge and git-merge-lead run
+# them again and fold their output into the merge commit.
+generate = ["python client/scripts/generate-i18n-catalog.py"]
+
 [map]
 file = ".zerus/test-map.json"
 durations = ".zerus/test-durations.json"

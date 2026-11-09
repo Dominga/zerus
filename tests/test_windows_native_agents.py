@@ -766,7 +766,7 @@ class NativeAgent:
 class NativeWindowsClaude(NativeAgent, host.HostCase):
     AGENT = "claude"
     BINARY = CLAUDE
-    ARGS = ("--model", "claude-sonnet-4-6")
+    ARGS = ("--model", "claude-sonnet-4-6", "--permission-mode", "manual")
     COMPOSER = "❯"
     CLEARS_WITH_KEYS = True
 

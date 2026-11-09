@@ -358,13 +358,28 @@ extension ConversationModel {
         }
     }
 
-    /// Restores a failed or unconfirmed message to the composer for explicit review; the current text is parked as a saved draft.
+    /// Only clears this phone's sending block; the original receipt can still settle later.
+    func dismissOutgoing(_ message: OutgoingMessage) async {
+        guard message.status == "uncertain", !deliveryFlights.contains(message.requestId) else { return }
+        do {
+            // A failed result write can leave a settled send stored as "sending";
+            // recover only this exact row, after the original flight is absent.
+            _ = try await app.durableMessages { state in
+                OutgoingRecoveryPolicies.dismiss(state, message, recoverInterruptedSending: true)
+            }
+        } catch {
+            app.error = "Could not save the dismissal. The original message and your composition are kept."
+        }
+    }
+
+    /// Restores a failed message to the composer for explicit review; the current text is parked as a saved draft.
     func prepareOutgoing(_ message: OutgoingMessage) {
+        guard message.status == "failed" else { return }
         guard !receiptFlights.contains("outgoing:\(message.requestId)") else { return }
         let restored = Draft(target: message.target, text: message.text, attachments: message.attachments)
         let parkedId = UUID().uuidString.lowercased()
         app.editMessages { state in
-            guard let current = state.outgoing.first(where: { $0.requestId == message.requestId }), ["failed", "uncertain"].contains(current.status) else { return state }
+            guard let current = state.outgoing.first(where: { $0.requestId == message.requestId }), current.status == "failed" else { return state }
             let editor = state.drafts.first { $0.target == message.target && $0.questionId.isEmpty && $0.detachedId.isEmpty }
             var parked: Draft?
             if let editor, !editor.text.isEmpty || !editor.attachments.isEmpty {

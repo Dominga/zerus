@@ -221,3 +221,151 @@ fn project_folder_change_persists_add_and_edit_with_a_stable_id() {
     );
     real.finish(organization);
 }
+
+impl Real {
+    fn instrument_held_get(&self) -> (PathBuf, PathBuf) {
+        let marker = self.dir.join("get-started");
+        let calls = self.dir.join("calls.log");
+        let binary = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/hgs");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{0}'\nif [ \"$*\" = 'swarm drive-folders get --json' ]; then\n  touch '{1}'\n  sleep 0.2\nfi\nexport HOME='{2}'\nexport HGS_CONFIG_DIR='{3}'\nexport HGS_STATE_DIR='{4}'\nexport HGS_SELF='example-local'\nexport HGS_PEERS=''\nexec '{5}' \"$@\"\n",
+            calls.display(),
+            marker.display(),
+            self.dir.display(),
+            self.dir.join("config").display(),
+            self.dir.join("state").display(),
+            binary.canonicalize().unwrap().display(),
+        );
+        std::fs::write(&self.hgs, script).unwrap();
+        std::fs::set_permissions(&self.hgs, std::fs::Permissions::from_mode(0o700)).unwrap();
+        (marker, calls)
+    }
+}
+
+#[test]
+fn held_refresh_rejects_source_and_card_drift_before_durable_admission() {
+    #[derive(Clone, Copy)]
+    enum Drift {
+        Offline,
+        Host,
+        Uuid,
+        Generation,
+        Digest,
+    }
+
+    for drift in [
+        Drift::Offline,
+        Drift::Host,
+        Drift::Uuid,
+        Drift::Generation,
+        Drift::Digest,
+    ] {
+        let real = Real::new();
+        let (marker, calls) = real.instrument_held_get();
+        let pump = Pump::default();
+        card(
+            &pump,
+            "",
+            "example-local",
+            real.snapshot["node_id"].as_str().unwrap(),
+            "linux",
+        );
+        card(
+            &pump,
+            "windows-peer",
+            "windows-peer",
+            &real.machine,
+            "windows",
+        );
+        let organization = Organization::new(
+            pump.clone(),
+            real.hgs.clone(),
+            true,
+            real.dir.join("layout.json"),
+            real.dir.join("draft.json"),
+            false,
+        );
+        let current = Arc::new(Mutex::new(real.snapshot.clone()));
+        let source = current.clone();
+        organization.set_source(Arc::new(move || {
+            let value = source.lock().unwrap().clone();
+            Some(OrganizationSnapshot {
+                node_id: value["node_id"].as_str().unwrap().into(),
+                swarm_id: value["swarm_id"].as_str().unwrap().into(),
+                digest: value["digest"].as_str().unwrap().into(),
+                base: value["organization"].clone(),
+                versions: value["versions"].clone(),
+            })
+        }));
+        organization.observe(&state_of(&real.snapshot));
+        let changed = organization.clone();
+        let changed_pump = pump.clone();
+        let changed_source = current.clone();
+        let changed_snapshot = real.snapshot.clone();
+        let changed_machine = real.machine.clone();
+        let interrupt = std::thread::spawn(move || {
+            wait_until("the held drive get", || marker.exists());
+            match drift {
+                Drift::Offline => changed_pump.push(Change::Computer {
+                    computer: ComputerId("windows-peer".into()),
+                    status: ComputerStatus::Ended,
+                }),
+                Drift::Host | Drift::Uuid => {
+                    let node = match drift {
+                        Drift::Host => changed_machine,
+                        _ => uuid::Uuid::new_v4().to_string(),
+                    };
+                    let host = match drift {
+                        Drift::Host => "changed-host".into(),
+                        _ => "windows-peer".into(),
+                    };
+                    changed_pump.push(Change::Machine {
+                        computer: ComputerId("windows-peer".into()),
+                        machine: MachineMeta {
+                            machine_id: Some(node),
+                            host: Some(host),
+                            platform: Some("windows".into()),
+                            ok: Some(true),
+                            ..Default::default()
+                        },
+                    });
+                }
+                Drift::Generation => changed.set_source(snapshot_of(&changed_snapshot)),
+                Drift::Digest => {
+                    let mut value = changed_snapshot;
+                    value["digest"] = json!("changed-catalog-digest");
+                    *changed_source.lock().unwrap() = value.clone();
+                    changed.observe(&state_of(&value));
+                }
+            }
+        });
+        let outcome = folders::change(
+            organization.clone(),
+            "alpha".into(),
+            folders::Change::Add {
+                place: folders::Place {
+                    computer: "windows-peer".into(),
+                    host: "windows-peer".into(),
+                    machine_id: Some(real.machine.clone()),
+                },
+                path: "C:/Held".into(),
+                name: String::new(),
+            },
+            FOLDER.into(),
+        );
+        interrupt.join().unwrap();
+        assert_eq!(
+            serde_json::to_value(&outcome).unwrap()["outcome"],
+            "refused"
+        );
+        let calls = std::fs::read_to_string(calls).unwrap();
+        assert!(!calls.contains("drive-folders apply"), "{calls}");
+        assert!(!real.dir.join("organization-drive-draft.json").exists());
+        assert!(!real.dir.join("config/swarm/drive-folders.json").exists());
+        assert!(!real
+            .dir
+            .join("config/swarm/drive-folders-init.json")
+            .exists());
+        real.finish(organization);
+    }
+}

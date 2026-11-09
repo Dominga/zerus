@@ -6,8 +6,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use zerus_client_core::swarm::drive_folders::{
+    DriveInitCause, DriveInitWitness as InitWitness, DriveRecord as ApplyRecord,
+    DriveSetRequest as ApplyRequest, DriveStoreContext, MachineProof,
+};
 
 pub const CAPABILITY: &str = "drive_folders_v1";
 pub const FILE: &str = "drive-folders.json";
@@ -47,16 +51,6 @@ pub struct DriveGraph {
     pub swarm_id: String,
     pub store_nonce: String,
     pub operations: BTreeMap<String, DriveOperation>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct InitWitness {
-    pub schema: u32,
-    pub node_id: String,
-    pub swarm_id: String,
-    pub store_nonce: String,
-    pub initialized: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -124,7 +118,7 @@ impl MainContext {
 #[derive(Clone, Debug)]
 pub enum DriveState {
     Uninitialized,
-    Ready(DriveStore),
+    Ready(Box<DriveStore>),
     Unavailable,
 }
 
@@ -219,9 +213,23 @@ impl DriveGraph {
             serde_json::to_vec(self)?.len() as u64 <= MAX_BYTES,
             "drive graph is too large"
         );
+        let mut ordered: Vec<_> = self.operations.values().collect();
+        ordered.sort_by(|a, b| (a.clock, &a.actor, &a.id).cmp(&(b.clock, &b.actor, &b.id)));
+        let mut roots = BTreeSet::new();
+        let mut projects = BTreeMap::new();
+        let mut tombstone_descendants = BTreeSet::new();
         for (id, operation) in &self.operations {
             ensure!(id == &operation.id, "invalid drive operation identity");
+        }
+        for operation in ordered {
             ensure!(operation.valid(), "invalid drive operation");
+            if operation.parents.is_empty() {
+                ensure!(
+                    roots.insert(operation.folder_id.clone()),
+                    "drive folder identity has a detached reused root"
+                );
+            }
+            let mut tombstone_descendant = false;
             for parent in &operation.parents {
                 let parent = self
                     .operations
@@ -231,6 +239,27 @@ impl DriveGraph {
                     parent.folder_id == operation.folder_id && parent.clock < operation.clock,
                     "invalid drive causal parent"
                 );
+                tombstone_descendant |= tombstone_descendants.contains(parent.id.as_str());
+            }
+            ensure!(
+                operation.value.is_some() || !operation.parents.is_empty(),
+                "a drive folder cannot start with a tombstone"
+            );
+            ensure!(
+                operation.value.is_none() || !tombstone_descendant,
+                "drive tombstone descendant resurrects a folder"
+            );
+            if let Some(value) = &operation.value {
+                let project = projects
+                    .entry(operation.folder_id.clone())
+                    .or_insert_with(|| value.project.clone());
+                ensure!(
+                    project == &value.project,
+                    "drive folder project ownership is permanent"
+                );
+            }
+            if operation.value.is_none() || tombstone_descendant {
+                tombstone_descendants.insert(operation.id.clone());
             }
         }
         Ok(())
@@ -273,6 +302,7 @@ impl DriveGraph {
         Some(resolve_heads(heads, main_ids))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn write(
         &mut self,
         actor: &str,
@@ -325,9 +355,11 @@ impl DriveGraph {
             ensure!(!current.conflict, "drive folder has a conflict");
             let mut expected = self.heads(folder_id);
             expected.sort();
-            let mut actual = parents.clone();
-            actual.sort();
-            ensure!(actual == expected, "drive folder head is stale");
+            ensure!(
+                parents.windows(2).all(|pair| pair[0] < pair[1]),
+                "drive parent order is not canonical"
+            );
+            ensure!(parents == expected, "drive folder head is stale");
         }
         let operation = DriveOperation {
             id: request_id.into(),
@@ -343,9 +375,11 @@ impl DriveGraph {
             parents,
             value: Some(value),
         };
-        self.operations
+        let mut next = self.clone();
+        next.operations
             .insert(operation.id.clone(), operation.clone());
-        self.validate()?;
+        next.validate()?;
+        *self = next;
         Ok(WriteOutcome {
             operation,
             changed: true,
@@ -393,17 +427,46 @@ fn resolve_heads(heads: Vec<&DriveOperation>, main_ids: &BTreeSet<String>) -> Re
         .find(|operation| operation.value.is_none())
         .or_else(|| heads.last());
     let distinct: BTreeSet<_> = heads.iter().map(|operation| &operation.value).collect();
+    let mut head_ids: Vec<_> = heads.iter().map(|operation| operation.id.clone()).collect();
+    head_ids.sort();
     Resolved {
         value: selected
             .map(|operation| operation.value.clone())
             .unwrap_or_default(),
-        heads: heads.iter().map(|operation| operation.id.clone()).collect(),
+        heads: head_ids,
         variants: heads.iter().map(|operation| (*operation).clone()).collect(),
         conflict: distinct.len() > 1,
         ownership_conflict: heads
             .first()
             .is_some_and(|operation| main_ids.contains(&operation.folder_id)),
     }
+}
+
+fn valid_witness(witness: &InitWitness, base: &MainContext, store_nonce: &str) -> bool {
+    witness.initialized
+        && witness.node_id == base.node_id
+        && witness.swarm_id == base.swarm_id
+        && witness.store_nonce == store_nonce
+        && match (witness.schema, &witness.cause) {
+            (1, None) => true,
+            (2, Some(DriveInitCause::NegotiatedInitialImport)) => true,
+            (
+                2,
+                Some(DriveInitCause::TrustedFirstAdd {
+                    original_request_uuid,
+                    folder_uuid,
+                    canonical_request_sha256,
+                }),
+            ) => {
+                valid_id(original_request_uuid)
+                    && valid_id(folder_uuid)
+                    && canonical_request_sha256.len() == 64
+                    && canonical_request_sha256
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            }
+            _ => false,
+        }
 }
 
 impl DriveStore {
@@ -417,11 +480,7 @@ impl DriveStore {
                     let witness: InitWitness = serde_json::from_slice(&witness_bytes)?;
                     let graph: DriveGraph = serde_json::from_slice(&graph_bytes)?;
                     ensure!(
-                        witness.schema == 1
-                            && witness.initialized
-                            && witness.node_id == base.node_id
-                            && witness.swarm_id == base.swarm_id
-                            && witness.store_nonce == graph.store_nonce,
+                        valid_witness(&witness, base, &graph.store_nonce),
                         "invalid drive initialization witness"
                     );
                     graph.validate()?;
@@ -435,7 +494,7 @@ impl DriveStore {
                     })
                 })();
                 match parsed {
-                    Ok(store) => DriveState::Ready(store),
+                    Ok(store) => DriveState::Ready(Box::new(store)),
                     Err(_) => DriveState::Unavailable,
                 }
             }
@@ -444,18 +503,29 @@ impl DriveStore {
     }
 
     fn create(base: &MainContext, dir: &Path, graph: DriveGraph) -> Result<Self> {
+        Self::create_with_cause(base, dir, graph, DriveInitCause::NegotiatedInitialImport)
+    }
+
+    fn create_with_cause(
+        base: &MainContext,
+        dir: &Path,
+        graph: DriveGraph,
+        cause: DriveInitCause,
+    ) -> Result<Self> {
         ensure!(
             matches!(Self::load(dir, base), DriveState::Uninitialized),
             "drive store is already initialized or unavailable"
         );
         graph.validate()?;
         let witness = InitWitness {
-            schema: 1,
+            schema: 2,
             node_id: base.node_id.clone(),
             swarm_id: base.swarm_id.clone(),
             store_nonce: graph.store_nonce.clone(),
             initialized: true,
+            cause: Some(cause),
         };
+        ensure!(valid_witness(&witness, base, &graph.store_nonce));
         let witness_bytes = serde_json::to_vec(&witness)?;
         ensure!(
             witness_bytes.len() as u64 <= MAX_INIT_BYTES,
@@ -473,8 +543,9 @@ impl DriveStore {
         })
     }
 
-    pub fn save(&mut self, _base: &MainContext) -> Result<()> {
+    pub fn save(&mut self, base: &MainContext) -> Result<()> {
         self.graph.validate()?;
+        ensure!(valid_witness(&self.witness, base, &self.graph.store_nonce));
         let witness_bytes = serde_json::to_vec(&self.witness)?;
         ensure!(
             self.witness_original.as_ref().ok() == Some(&witness_bytes)
@@ -503,36 +574,6 @@ fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
     super::store::replace(path, bytes)
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ApplyRecord {
-    id: Option<String>,
-    project: String,
-    machine: String,
-    path: String,
-    name: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MachineProof {
-    node: String,
-    platform: String,
-    verified: bool,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ApplyRequest {
-    original: Option<ApplyRecord>,
-    desired: ApplyRecord,
-    versions: BTreeMap<String, Vec<String>>,
-    request_id: String,
-    store_nonce: Option<String>,
-    source: Option<MachineProof>,
-    destination: MachineProof,
-}
-
 fn proof(proof: &MachineProof, machine: &str) -> Result<()> {
     ensure!(
         proof.verified && proof.platform == "windows" && proof.node == machine,
@@ -556,6 +597,15 @@ fn token(folder_id: &str) -> String {
     format!("{CAPABILITY}:{folder_id}")
 }
 
+fn raw_operation_proof(store: &DriveStore, operation: &DriveOperation) -> Value {
+    let parents: BTreeMap<_, _> = operation
+        .parents
+        .iter()
+        .map(|id| (id.clone(), store.graph.operations[id].clone()))
+        .collect();
+    json!({"operation":operation,"parent_operations":parents,"initialization":store.witness})
+}
+
 fn observation(store: &DriveStore, main: &MainContext, operation_id: Option<&str>) -> Value {
     let frontier = store.graph.frontier();
     let complete_count = frontier.len() <= MAX_VIEW;
@@ -574,18 +624,17 @@ fn observation(store: &DriveStore, main: &MainContext, operation_id: Option<&str
                 complete = false;
             }
             let remaining = MAX_VIEW - variant_count;
-            if resolved.variants.len() > remaining {
-                complete = false;
-            }
+            let emitted = resolved.variants.len().min(remaining);
+            complete &= emitted == resolved.variants.len();
             conflicts.insert(
                 folder_id,
                 resolved
                     .variants
                     .into_iter()
-                    .take(remaining)
+                    .take(emitted)
                     .collect::<Vec<_>>(),
             );
-            variant_count += remaining;
+            variant_count += emitted;
             continue;
         }
         if resolved.heads.len() > MAX_VIEW {
@@ -601,17 +650,82 @@ fn observation(store: &DriveStore, main: &MainContext, operation_id: Option<&str
             }
         }
     }
-    let operation_found = operation_id.is_some_and(|id| store.graph.operations.contains_key(id));
+    let operation = operation_id.and_then(|id| store.graph.operations.get(id));
+    let raw = operation.map(|operation| raw_operation_proof(store, operation));
     json!({"schema":1,"node_id":main.node_id,"swarm_id":main.swarm_id,"store_nonce":store.graph.store_nonce,
         "status":if complete { "ready" } else { "incomplete" },"records":records,"versions":versions,
         "conflicts":conflicts,"unavailable":unavailable,"complete":complete,
-        "operation_id":operation_id,"operation_found":operation_found})
+        "operation_id":operation_id,"operation_found":operation.is_some(),
+        "operation":raw.as_ref().map(|proof| &proof["operation"]),
+        "parent_operations":raw.as_ref().map(|proof| &proof["parent_operations"]).unwrap_or(&Value::Object(serde_json::Map::new())),
+        "initialization":raw.as_ref().map(|proof| &proof["initialization"])})
 }
 
 fn empty_observation(main: &MainContext, status: &str, operation_id: Option<&str>) -> Value {
     json!({"schema":1,"node_id":main.node_id,"swarm_id":main.swarm_id,"store_nonce":null,
         "status":status,"records":[],"versions":{},"conflicts":{},"unavailable":[],"complete":false,
-        "operation_id":operation_id,"operation_found":false})
+        "operation_id":operation_id,"operation_found":false,"operation":null,
+        "parent_operations":{},"initialization":null})
+}
+
+fn incomplete_observation(
+    main: &MainContext,
+    store_nonce: &str,
+    operation_id: Option<&str>,
+) -> Value {
+    let mut value = empty_observation(main, "incomplete", operation_id);
+    value["store_nonce"] = json!(store_nonce);
+    value
+}
+
+#[derive(Default)]
+struct EncodedSize(usize);
+
+impl Write for EncodedSize {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_add(bytes.len())
+            .ok_or_else(|| std::io::Error::other("encoded response size overflow"))?;
+        if self.0 > MAX_EXCHANGE_BYTES as usize {
+            return Err(std::io::Error::other("encoded drive response is too large"));
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn ensure_response_bound(value: &Value) -> Result<()> {
+    let mut size = EncodedSize::default();
+    serde_json::to_writer(&mut size, value)?;
+    size.write_all(b"\n")?;
+    Ok(())
+}
+
+fn bounded_read(value: Value, main: &MainContext, store_nonce: Option<&str>) -> Result<Value> {
+    match ensure_response_bound(&value) {
+        Ok(()) => Ok(value),
+        Err(_) if operation_is_requested(&value) => {
+            let unavailable =
+                empty_observation(main, "unavailable", value["operation_id"].as_str());
+            ensure_response_bound(&unavailable)?;
+            Ok(unavailable)
+        }
+        Err(_) => {
+            let nonce =
+                store_nonce.ok_or_else(|| anyhow::anyhow!("drive response is too large"))?;
+            let incomplete = incomplete_observation(main, nonce, None);
+            ensure_response_bound(&incomplete)?;
+            Ok(incomplete)
+        }
+    }
+}
+
+fn operation_is_requested(value: &Value) -> bool {
+    !value["operation_id"].is_null()
 }
 
 fn load_state(store: &super::store::LockedStore) -> (MainContext, DriveState) {
@@ -626,11 +740,16 @@ pub fn get_locked(store: &super::store::LockedStore, operation_id: Option<&str>)
     if let Some(id) = operation_id {
         ensure!(valid_id(id), "invalid requested drive operation");
     }
-    Ok(match state {
+    let nonce = match &state {
+        DriveState::Ready(store) => Some(store.graph.store_nonce.clone()),
+        _ => None,
+    };
+    let value = match state {
         DriveState::Ready(store) => observation(&store, &main, operation_id),
         DriveState::Uninitialized => empty_observation(&main, "uninitialized", operation_id),
         DriveState::Unavailable => empty_observation(&main, "unavailable", operation_id),
-    })
+    };
+    bounded_read(value, &main, nonce.as_deref())
 }
 
 fn requested_parents(request: &ApplyRequest, folder_id: &str, add: bool) -> Result<Vec<String>> {
@@ -654,6 +773,7 @@ fn requested_parents(request: &ApplyRequest, folder_id: &str, add: bool) -> Resu
     ensure!(
         !parents.is_empty()
             && parents.len() <= MAX_PARENTS
+            && parents.windows(2).all(|pair| pair[0] < pair[1])
             && parents.iter().all(|id| valid_id(id)),
         "invalid drive edit frontier"
     );
@@ -665,47 +785,20 @@ fn duplicate(
     main: &MainContext,
     request: &ApplyRequest,
     desired: &DriveRecord,
-) -> Result<Option<Value>> {
+) -> Result<Option<DriveOperation>> {
     let Some(existing) = store.graph.operations.get(&request.request_id) else {
         return Ok(None);
     };
-    ensure!(
-        valid_id(&request.request_id),
-        "invalid drive request identity"
-    );
     let folder_id = request.desired.id.as_deref().unwrap_or_default();
-    let add = request.original.is_none();
-    let parents = requested_parents(request, folder_id, add)?;
-    proof(&request.destination, &request.desired.machine)?;
-    if let Some(original) = &request.original {
-        let source = request
-            .source
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("missing source computer proof"))?;
-        proof(source, &original.machine)?;
-    } else {
-        ensure!(
-            request.source.is_none(),
-            "a new drive folder has no source computer"
-        );
-    }
+    let parents = requested_parents(request, folder_id, request.original.is_none())?;
     ensure!(
-        request
-            .store_nonce
-            .as_deref()
-            .is_none_or(|nonce| nonce == store.graph.store_nonce)
-            && existing.actor == main.node_id
+        existing.actor == main.node_id
             && existing.folder_id == folder_id
             && existing.parents == parents
             && existing.value.as_ref() == Some(desired),
         "drive operation identity does not match its original"
     );
     if let Some(original) = &request.original {
-        ensure!(
-            original.id.as_deref() == Some(folder_id)
-                && request.desired.id.as_deref() == Some(folder_id),
-            "drive folder identity changed"
-        );
         let original = record(original)?;
         ensure!(
             !existing.parents.is_empty()
@@ -716,89 +809,107 @@ fn duplicate(
                         .get(parent)
                         .is_some_and(|operation| operation.value.as_ref() == Some(&original))
                 }),
-            "drive edit original does not match its operation"
+            "drive edit original does not match its raw parents"
         );
     }
-    Ok(Some(
-        json!({"schema":1,"node_id":main.node_id,"swarm_id":main.swarm_id,"store_nonce":store.graph.store_nonce,
-        "operation_id":existing.id,"duplicate":true,"observation":observation(store, main, Some(&existing.id))}),
-    ))
+    Ok(Some(existing.clone()))
+}
+
+fn apply_reply(
+    store: &DriveStore,
+    main: &MainContext,
+    request: &ApplyRequest,
+    operation: &DriveOperation,
+    duplicate: bool,
+) -> Result<Value> {
+    let raw = raw_operation_proof(store, operation);
+    let observed = observation(store, main, Some(&operation.id));
+    ensure!(
+        observed["complete"] == true,
+        "the resulting drive acknowledgement is incomplete"
+    );
+    let reply = json!({"schema":1,"node_id":main.node_id,"swarm_id":main.swarm_id,
+        "store_nonce":store.graph.store_nonce,"operation_id":operation.id,"duplicate":duplicate,
+        "canonical_request_sha256":request.canonical_request_sha256,
+        "operation":raw["operation"],"parent_operations":raw["parent_operations"],
+        "initialization":raw["initialization"],"observation":observed});
+    ensure_response_bound(&reply)?;
+    Ok(reply)
 }
 
 fn apply_locked(locked: &super::store::LockedStore, request: ApplyRequest) -> Result<Value> {
-    let (main, state) = load_state(locked);
+    let main = MainContext::from_store(&locked.data);
     main.validate()?;
+    request.validate().map_err(|error| anyhow::anyhow!(error))?;
     ensure!(
-        valid_id(&request.request_id),
-        "invalid drive request identity"
+        request.expected_node_id == main.node_id && request.expected_swarm_id == main.swarm_id,
+        "drive request belongs to another locked writer"
     );
     let desired = record(&request.desired)?;
-    let folder_id = request
-        .desired
-        .id
-        .as_deref()
-        .filter(|id| valid_id(id))
-        .ok_or_else(|| anyhow::anyhow!("a fresh stable drive folder identity is required"))?
-        .to_owned();
-    let dir = locked.path.parent().unwrap();
-    let mut store = match state {
-        DriveState::Ready(store) => {
-            if let Some(reply) = duplicate(&store, &main, &request, &desired)? {
-                return Ok(reply);
-            }
-            ensure!(
-                request.store_nonce.as_deref() == Some(store.graph.store_nonce.as_str()),
-                "drive store changed"
-            );
-            store
-        }
-        DriveState::Uninitialized => {
-            ensure!(
-                request.original.is_none() && request.store_nonce.is_none(),
-                "drive initialization requires a new folder"
-            );
-            let graph = DriveGraph::empty(&main.swarm_id, &catalog::new_id());
-            DriveStore {
-                graph,
-                witness: InitWitness {
-                    schema: 1,
-                    node_id: main.node_id.clone(),
-                    swarm_id: main.swarm_id.clone(),
-                    store_nonce: String::new(),
-                    initialized: true,
-                },
-                dir: dir.to_path_buf(),
-                graph_original: Err(Unread::Missing),
-                witness_original: Err(Unread::Missing),
-            }
-        }
-        DriveState::Unavailable => anyhow::bail!("drive graph is unavailable"),
-    };
-    let initialized = !store.witness.store_nonce.is_empty();
-    if initialized {
-        ensure!(
-            observation(&store, &main, None)["complete"] == true,
-            "drive observation is incomplete"
-        );
-    }
+    let folder_id = request.desired.id.clone().unwrap_or_default();
+    ensure!(
+        !main.folder_ids.contains(&folder_id),
+        "drive folder ownership conflict"
+    );
     proof(&request.destination, &request.desired.machine)?;
     ensure!(
         main.current(&desired),
         "drive folder project or computer is unavailable"
     );
+    let dir = locked.path.parent().unwrap();
+    let state = DriveStore::load(dir, &main);
+    let initialized = matches!(state, DriveState::Ready(_));
+    let mut store = match state {
+        DriveState::Ready(store) => {
+            ensure!(
+                request.store_context == DriveStoreContext::ExistingStore
+                    && request.store_nonce.as_deref() == Some(store.graph.store_nonce.as_str()),
+                "drive store changed or initialization context is wrong"
+            );
+            if let Some(operation) = duplicate(&store, &main, &request, &desired)? {
+                return apply_reply(&store, &main, &request, &operation, true);
+            }
+            store
+        }
+        DriveState::Uninitialized => {
+            ensure!(
+                request.store_context == DriveStoreContext::TrustedFirstAdd
+                    && request.original.is_none()
+                    && request.store_nonce.is_none(),
+                "trusted first add requires definite two-file absence"
+            );
+            let graph = DriveGraph::empty(&main.swarm_id, &catalog::new_id());
+            let witness = InitWitness {
+                schema: 2,
+                node_id: main.node_id.clone(),
+                swarm_id: main.swarm_id.clone(),
+                store_nonce: graph.store_nonce.clone(),
+                initialized: true,
+                cause: Some(DriveInitCause::TrustedFirstAdd {
+                    original_request_uuid: request.request_id.clone(),
+                    folder_uuid: folder_id.clone(),
+                    canonical_request_sha256: request.canonical_request_sha256.clone(),
+                }),
+            };
+            Box::new(DriveStore {
+                graph,
+                witness,
+                dir: dir.to_path_buf(),
+                graph_original: Err(Unread::Missing),
+                witness_original: Err(Unread::Missing),
+            })
+        }
+        DriveState::Unavailable => anyhow::bail!("drive graph is unavailable"),
+    };
     ensure!(
-        request.desired.id.as_deref() == Some(folder_id.as_str()),
-        "drive folder identity changed"
+        observation(&store, &main, None)["complete"] == true,
+        "drive observation is incomplete"
     );
     let add = request.original.is_none();
     if let Some(original) = &request.original {
         ensure!(
             original.id.as_deref() == Some(folder_id.as_str()),
             "invalid original folder identity"
-        );
-        ensure!(
-            original.project == desired.project,
-            "drive folder project changed"
         );
         let source = request
             .source
@@ -822,12 +933,24 @@ fn apply_locked(locked: &super::store::LockedStore, request: ApplyRequest) -> Re
             resolved.value.as_ref() == Some(&original_value),
             "original drive folder changed"
         );
-    } else {
-        ensure!(
-            request.source.is_none(),
-            "a new drive folder has no source computer"
-        );
     }
+    let duplicate_location = store
+        .graph
+        .frontier()
+        .into_iter()
+        .filter(|(id, _)| add || id != &folder_id)
+        .flat_map(|(_, heads)| heads)
+        .filter_map(|operation| operation.value.as_ref())
+        .any(|current| {
+            current.project == desired.project
+                && current.machine == desired.machine
+                && zerus_client_core::paths::same(
+                    &current.path,
+                    &desired.path,
+                    zerus_client_core::paths::Style::Windows,
+                )
+        });
+    ensure!(!duplicate_location, "drive folder location already exists");
     let parents = requested_parents(&request, &folder_id, add)?;
     let operation = store.graph.write(
         &main.node_id,
@@ -838,19 +961,24 @@ fn apply_locked(locked: &super::store::LockedStore, request: ApplyRequest) -> Re
         add,
         &main.folder_ids,
     )?;
+    ensure!(operation.changed, "drive duplicate was not correlated");
+    let reply = apply_reply(&store, &main, &request, &operation.operation, false)?;
     if initialized {
-        if operation.changed {
-            store.save(&main)?;
-        }
+        store.save(&main)?;
     } else {
-        store.witness.store_nonce = store.graph.store_nonce.clone();
-        store = DriveStore::create(&main, dir, store.graph)?;
+        *store = DriveStore::create_with_cause(
+            &main,
+            dir,
+            store.graph,
+            store
+                .witness
+                .cause
+                .clone()
+                .unwrap_or(DriveInitCause::NegotiatedInitialImport),
+        )?;
+        ensure!(store.witness.store_nonce == reply["store_nonce"]);
     }
-    Ok(
-        json!({"schema":1,"node_id":main.node_id,"swarm_id":main.swarm_id,"store_nonce":store.graph.store_nonce,
-        "operation_id":operation.operation.id,"duplicate":!operation.changed,
-        "observation":observation(&store, &main, Some(&operation.operation.id))}),
-    )
+    Ok(reply)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1007,20 +1135,32 @@ fn merge_operations(
     }
 }
 
+fn graph_inventory(main: &MainContext, graph: &DriveGraph) -> Result<DriveInventory> {
+    let inventory = DriveInventory {
+        schema: 1,
+        node_id: main.node_id.clone(),
+        swarm_id: main.swarm_id.clone(),
+        store_nonce: Some(graph.store_nonce.clone()),
+        status: "ready".into(),
+        known: graph.operations.keys().cloned().collect(),
+        digest: known_digest(&main.swarm_id, &graph.operations.keys().cloned().collect()),
+    };
+    valid_inventory(&inventory)?;
+    Ok(inventory)
+}
+
 pub fn exchange_locked(
     locked: &super::store::LockedStore,
     request: ExchangeRequest,
 ) -> Result<ExchangeResponse> {
-    ensure!(
-        serde_json::to_vec(&request)?.len() as u64 <= MAX_EXCHANGE_BYTES,
-        "drive exchange is too large"
-    );
+    ensure_response_bound(&serde_json::to_value(&request)?)?;
     ensure!(
         request.kinds == BTreeSet::from([CAPABILITY.to_owned()]),
         "drive capability was not negotiated"
     );
     validate_batch(&request.source, &request.operations)?;
     let main = MainContext::from_store(&locked.data);
+    main.validate()?;
     ensure!(
         request.source.swarm_id == main.swarm_id && main.peers.contains(&request.source.node_id),
         "drive peer is not enrolled"
@@ -1036,36 +1176,76 @@ pub fn exchange_locked(
         );
     }
     let known = request.source.known.clone();
-    merge_operations(
-        locked,
-        &request.source.node_id,
-        request.operations,
-        request.initialize,
-    )?;
-    let (_, state) = load_state(locked);
-    let (operations, complete) = match &state {
-        DriveState::Ready(store) => {
-            let missing: Vec<_> = store
-                .graph
-                .operations
-                .values()
-                .filter(|operation| !known.contains(&operation.id))
-                .collect();
-            let complete = missing.len() <= MAX_BATCH;
-            (store.graph.missing(&known), complete)
+    let dir = locked.path.parent().unwrap();
+    let (mut store, initialize) = match load_state(locked).1 {
+        DriveState::Ready(mut store) => {
+            store.graph.merge(&main.swarm_id, request.operations)?;
+            (Some(store), false)
         }
-        DriveState::Uninitialized => (Vec::new(), true),
-        DriveState::Unavailable => anyhow::bail!("drive graph became unavailable"),
+        DriveState::Uninitialized if request.initialize => {
+            let mut graph = DriveGraph::empty(&main.swarm_id, &catalog::new_id());
+            graph.merge(&main.swarm_id, request.operations)?;
+            (
+                Some(Box::new(DriveStore {
+                    graph,
+                    witness: InitWitness {
+                        schema: 2,
+                        node_id: main.node_id.clone(),
+                        swarm_id: main.swarm_id.clone(),
+                        store_nonce: String::new(),
+                        initialized: true,
+                        cause: Some(DriveInitCause::NegotiatedInitialImport),
+                    },
+                    dir: dir.to_path_buf(),
+                    graph_original: Err(Unread::Missing),
+                    witness_original: Err(Unread::Missing),
+                })),
+                true,
+            )
+        }
+        DriveState::Uninitialized => (None, false),
+        DriveState::Unavailable => anyhow::bail!("drive graph is unavailable"),
+    };
+    let (source, operations, complete) = if let Some(store) = &store {
+        let missing: Vec<_> = store
+            .graph
+            .operations
+            .values()
+            .filter(|operation| !known.contains(&operation.id))
+            .collect();
+        (
+            graph_inventory(&main, &store.graph)?,
+            store.graph.missing(&known),
+            missing.len() <= MAX_BATCH,
+        )
+    } else {
+        (
+            DriveInventory {
+                schema: 1,
+                node_id: main.node_id.clone(),
+                swarm_id: main.swarm_id.clone(),
+                store_nonce: None,
+                status: "uninitialized".into(),
+                known: BTreeSet::new(),
+                digest: String::new(),
+            },
+            Vec::new(),
+            true,
+        )
     };
     let response = ExchangeResponse {
-        source: inventory_locked(locked)?,
+        source,
         operations,
         complete,
     };
-    ensure!(
-        serde_json::to_vec(&response)?.len() as u64 <= MAX_EXCHANGE_BYTES,
-        "drive exchange is too large"
-    );
+    ensure_response_bound(&serde_json::to_value(&response)?)?;
+    if let Some(store) = &mut store {
+        if initialize {
+            DriveStore::create(&main, dir, store.graph.clone())?;
+        } else {
+            store.save(&main)?;
+        }
+    }
     Ok(response)
 }
 
@@ -1075,10 +1255,7 @@ pub fn accept_exchange(
     response: ExchangeResponse,
     initialize: bool,
 ) -> Result<DriveInventory> {
-    ensure!(
-        serde_json::to_vec(&response)?.len() as u64 <= MAX_EXCHANGE_BYTES,
-        "drive exchange is too large"
-    );
+    ensure_response_bound(&serde_json::to_value(&response)?)?;
     validate_batch(&response.source, &response.operations)?;
     let main = MainContext::from_store(&locked.data);
     ensure!(
@@ -1119,7 +1296,7 @@ fn exchange(config: &Config, request: ExchangeRequest) -> Result<Value> {
     )?)?)
 }
 
-fn input() -> Result<Value> {
+fn input<T: serde::de::DeserializeOwned>() -> Result<T> {
     let mut bytes = Vec::new();
     std::io::stdin()
         .take(MAX_EXCHANGE_BYTES + 1)
@@ -1139,8 +1316,8 @@ pub fn dispatch(config: &Config, args: &[String]) -> Result<Value> {
     let args = &args[..args.len() - 1];
     match args {
         [action] if action == "inventory" => inventory(config),
-        [action] if action == "apply" => apply(config, serde_json::from_value(input()?)?),
-        [action] if action == "exchange" => exchange(config, serde_json::from_value(input()?)?),
+        [action] if action == "apply" => apply(config, input()?),
+        [action] if action == "exchange" => exchange(config, input()?),
         [action] if action == "get" => get(config, None),
         [action, flag, operation] if action == "get" && flag == "--operation" => get(config, Some(operation)),
         _ => anyhow::bail!("usage: hgs swarm drive-folders get [--operation UUID] | apply | inventory | exchange --json"),
@@ -1153,7 +1330,20 @@ pub fn watch_files(config: &Config) -> Vec<PathBuf> {
 }
 
 pub fn watch_snapshot(config: &Config) -> Result<Value> {
-    get(config, None)
+    let mut value = get(config, None)?;
+    if serde_json::to_vec(&value)?.len() + 1 > 1024 * 1024 {
+        value["status"] = json!("incomplete");
+        value["complete"] = json!(false);
+        value["records"] = json!([]);
+        value["versions"] = json!({});
+        value["conflicts"] = json!({});
+        value["unavailable"] = json!([]);
+        value["operation"] = json!(null);
+        value["parent_operations"] = json!({});
+        value["initialization"] = json!(null);
+    }
+    ensure!(serde_json::to_vec(&value)?.len() + 1 <= 1024 * 1024);
+    Ok(value)
 }
 
 pub fn allow_join(store: &super::store::LockedStore, same: bool) -> Result<()> {
@@ -1537,14 +1727,32 @@ mod route_tests {
 
     fn add(machine: &str) -> ApplyRequest {
         ApplyRequest {
+            schema: 1,
             original: None,
             desired: input_record(Some(catalog::new_id()), machine, "C:/Work"),
             versions: BTreeMap::new(),
+            parent_order: zerus_client_core::swarm::drive_folders::DriveParentOrder::Lexicographic,
             request_id: catalog::new_id(),
             store_nonce: None,
+            store_context: DriveStoreContext::TrustedFirstAdd,
+            expected_node_id: String::new(),
+            expected_swarm_id: String::new(),
             source: None,
             destination: proof(machine).unwrap(),
+            canonical_request_sha256: String::new(),
         }
+    }
+
+    fn call(store: &super::super::store::LockedStore, mut request: ApplyRequest) -> Result<Value> {
+        request.expected_node_id = store.data.node_id.clone();
+        request.expected_swarm_id = store.data.catalog.swarm_id.clone();
+        request.store_context = if request.store_nonce.is_some() {
+            DriveStoreContext::ExistingStore
+        } else {
+            DriveStoreContext::TrustedFirstAdd
+        };
+        let request = request.sealed().map_err(|error| anyhow::anyhow!(error))?;
+        apply_locked(store, request)
     }
 
     fn link(a: &mut super::super::store::LockedStore, b: &mut super::super::store::LockedStore) {
@@ -1575,7 +1783,7 @@ mod route_tests {
         let main_before = std::fs::read(&store.path).unwrap();
         let first = add(&machine);
         let folder = first.desired.id.clone().unwrap();
-        let reply = apply_locked(&store, first).unwrap();
+        let reply = call(&store, first).unwrap();
         assert_eq!(reply["observation"]["records"][0]["id"], folder);
         assert_eq!(std::fs::read(&store.path).unwrap(), main_before);
 
@@ -1591,22 +1799,23 @@ mod route_tests {
             store_nonce: observed["store_nonce"].as_str().map(str::to_owned),
             source: proof(&machine),
             destination: proof(&machine).unwrap(),
+            ..add(&machine)
         };
         let operation = edit.request_id.clone();
-        let edited = apply_locked(&store, edit.clone()).unwrap();
+        let edited = call(&store, edit.clone()).unwrap();
         assert_eq!(edited["observation"]["records"][0]["id"], folder);
         assert_eq!(edited["observation"]["records"][0]["path"], "D:/Edited");
         let operation_status = get_locked(&store, Some(&operation)).unwrap();
         assert_eq!(operation_status["operation_found"], true);
-        let duplicate = apply_locked(&store, edit.clone()).unwrap();
+        let duplicate = call(&store, edit.clone()).unwrap();
         assert_eq!(duplicate["duplicate"], true);
 
         let mut different = edit.clone();
         different.desired.path = "E:/Different".into();
-        assert!(apply_locked(&store, different).is_err());
+        assert!(call(&store, different).is_err());
         let mut different_proof = edit.clone();
         different_proof.destination.verified = false;
-        assert!(apply_locked(&store, different_proof).is_err());
+        assert!(call(&store, different_proof).is_err());
         let drive_before = std::fs::read(store.path.with_file_name(FILE)).unwrap();
         let witness_before = std::fs::read(store.path.with_file_name(INIT_FILE)).unwrap();
         let node = store.data.node_id.clone();
@@ -1664,13 +1873,13 @@ mod route_tests {
         let (_dir, _config, store, machine) = fixture();
         let mut invalid = add(&machine);
         invalid.desired.path = "/srv/repo".into();
-        assert!(apply_locked(&store, invalid).is_err());
+        assert!(call(&store, invalid).is_err());
         assert!(!store.path.with_file_name(FILE).exists());
         assert!(!store.path.with_file_name(INIT_FILE).exists());
 
         let first = add(&machine);
         let folder = first.desired.id.clone().unwrap();
-        apply_locked(&store, first).unwrap();
+        call(&store, first).unwrap();
         let observed = get_locked(&store, None).unwrap();
         let original: ApplyRecord = serde_json::from_value(observed["records"][0].clone()).unwrap();
         let edit = ApplyRequest {
@@ -1681,9 +1890,10 @@ mod route_tests {
             store_nonce: observed["store_nonce"].as_str().map(str::to_owned),
             source: proof(&machine),
             destination: proof(&machine).unwrap(),
+            ..add(&machine)
         };
         let before = std::fs::read(store.path.with_file_name(FILE)).unwrap();
-        assert!(apply_locked(&store, edit).is_err());
+        assert!(call(&store, edit).is_err());
         assert_eq!(
             std::fs::read(store.path.with_file_name(FILE)).unwrap(),
             before
@@ -1696,7 +1906,7 @@ mod route_tests {
         let (_bd, _bc, mut b, _) = fixture();
         link(&mut a, &mut b);
         let bn = b.data.node_id.clone();
-        apply_locked(&a, add(&machine)).unwrap();
+        call(&a, add(&machine)).unwrap();
         let source = inventory_locked(&a).unwrap();
         let known = inventory_locked(&b).unwrap().known;
         let request = ExchangeRequest {
@@ -1824,5 +2034,352 @@ mod projection_tests {
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[&folder].as_array().unwrap().len(), MAX_VIEW);
         assert!(observed["versions"].as_object().unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod correction_tests {
+    use super::*;
+
+    fn main() -> MainContext {
+        MainContext {
+            node_id: catalog::new_id(),
+            swarm_id: catalog::new_id(),
+            folder_ids: BTreeSet::new(),
+            projects: BTreeSet::from(["alpha".into(), "beta".into()]),
+            machines: BTreeSet::new(),
+            peers: BTreeSet::new(),
+        }
+    }
+
+    fn value(project: &str, path: &str) -> DriveRecord {
+        DriveRecord {
+            project: project.into(),
+            machine: catalog::new_id(),
+            path: path.into(),
+            name: String::new(),
+        }
+    }
+
+    fn operation(
+        main: &MainContext,
+        clock: u64,
+        folder: &str,
+        parents: Vec<String>,
+        value: Option<DriveRecord>,
+    ) -> DriveOperation {
+        DriveOperation {
+            id: catalog::new_id(),
+            actor: main.node_id.clone(),
+            clock,
+            folder_id: folder.into(),
+            parents,
+            value,
+        }
+    }
+
+    fn permutations<T: Clone>(values: &[T]) -> Vec<Vec<T>> {
+        (0..values.len())
+            .flat_map(|a| {
+                (0..values.len()).flat_map(move |b| (0..values.len()).map(move |c| vec![a, b, c]))
+            })
+            .filter(|indices| indices.iter().collect::<BTreeSet<_>>().len() == 3)
+            .map(|indices| {
+                indices
+                    .into_iter()
+                    .map(|index| values[index].clone())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tombstone_descendants_and_project_reassignment_fail_in_every_order() {
+        let main = main();
+        let folder = catalog::new_id();
+        let root = operation(&main, 1, &folder, vec![], Some(value("alpha", "C:/Root")));
+        let tomb = operation(&main, 2, &folder, vec![root.id.clone()], None);
+        let live = operation(
+            &main,
+            3,
+            &folder,
+            vec![tomb.id.clone()],
+            Some(value("alpha", "D:/Revived")),
+        );
+        for batch in permutations(&[root.clone(), tomb, live]) {
+            let mut graph = DriveGraph::empty(&main.swarm_id, &catalog::new_id());
+            assert!(graph.merge(&main.swarm_id, batch).is_err());
+            assert!(graph.operations.is_empty());
+        }
+        let edit = operation(
+            &main,
+            2,
+            &folder,
+            vec![root.id.clone()],
+            Some(value("beta", "D:/OtherProject")),
+        );
+        let unrelated = operation(
+            &main,
+            2,
+            &catalog::new_id(),
+            vec![],
+            Some(value("alpha", "E:/Unrelated")),
+        );
+        for batch in permutations(&[root.clone(), edit, unrelated]) {
+            let mut graph = DriveGraph::empty(&main.swarm_id, &catalog::new_id());
+            assert!(graph.merge(&main.swarm_id, batch).is_err());
+            assert!(graph.operations.is_empty());
+        }
+        for clocks in [(2, 10), (10, 2)] {
+            for order in [false, true] {
+                let first = operation(
+                    &main,
+                    clocks.0,
+                    &folder,
+                    vec![],
+                    Some(value("alpha", "C:/First")),
+                );
+                let second = operation(
+                    &main,
+                    clocks.1,
+                    &folder,
+                    vec![],
+                    Some(value("alpha", "D:/Detached")),
+                );
+                let batch = if order {
+                    vec![first, second]
+                } else {
+                    vec![second, first]
+                };
+                let mut graph = DriveGraph::empty(&main.swarm_id, &catalog::new_id());
+                assert!(graph.merge(&main.swarm_id, batch).is_err());
+                assert!(graph.operations.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn map_identity_and_immutable_collisions_never_mutate_the_original() {
+        let main = main();
+        let folder = catalog::new_id();
+        let root = operation(&main, 1, &folder, vec![], Some(value("alpha", "C:/Root")));
+        let mut graph = DriveGraph::empty(&main.swarm_id, &catalog::new_id());
+        graph.operations.insert(catalog::new_id(), root.clone());
+        assert!(graph.validate().is_err());
+        let mut graph = DriveGraph::empty(&main.swarm_id, &catalog::new_id());
+        graph.merge(&main.swarm_id, vec![root.clone()]).unwrap();
+        let before = graph.clone();
+        let mut changed = root;
+        changed.value = Some(value("alpha", "D:/Changed"));
+        assert!(graph.merge(&main.swarm_id, vec![changed]).is_err());
+        assert_eq!(graph, before);
+    }
+
+    #[test]
+    fn independent_conflicts_consume_only_actual_emitted_variants() {
+        let mut main = main();
+        let first = catalog::new_id();
+        let second = catalog::new_id();
+        main.folder_ids = BTreeSet::from([first.clone(), second.clone()]);
+        let mut graph = DriveGraph::empty(&main.swarm_id, &catalog::new_id());
+        graph
+            .merge(
+                &main.swarm_id,
+                vec![
+                    operation(&main, 1, &first, vec![], Some(value("alpha", "C:/First"))),
+                    operation(&main, 2, &second, vec![], Some(value("alpha", "D:/Second"))),
+                ],
+            )
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = DriveStore::create(&main, dir.path(), graph).unwrap();
+        let observed = observation(&store, &main, None);
+        assert_eq!(observed["complete"], true);
+        assert_eq!(observed["conflicts"].as_object().unwrap().len(), 2);
+    }
+
+    fn fixture() -> (tempfile::TempDir, super::super::store::LockedStore, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            home: dir.path().to_str().unwrap().into(),
+            dir: dir.path().join("config"),
+            state: dir.path().join("state"),
+            selves: vec!["example-local".into()],
+            peers: vec![],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: BTreeMap::new(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        let organization = json!({"version":2,"default_project":"alpha","projects":[
+            {"id":"alpha","name":"Alpha","color":"#123456","folders":[],"sessions":[]}
+        ]});
+        let mut store = super::super::store::LockedStore::load(&config).unwrap();
+        store.data.initialize(&organization).unwrap();
+        let machine = store.data.machine_id("windows-peer").unwrap();
+        store.save().unwrap();
+        (dir, store, machine)
+    }
+
+    fn request(
+        store: &super::super::store::LockedStore,
+        machine: &str,
+        path: &str,
+    ) -> ApplyRequest {
+        let main = MainContext::from_store(&store.data);
+        ApplyRequest {
+            schema: 1,
+            original: None,
+            desired: ApplyRecord {
+                id: Some(catalog::new_id()),
+                project: "alpha".into(),
+                machine: machine.into(),
+                path: path.into(),
+                name: String::new(),
+            },
+            versions: BTreeMap::new(),
+            parent_order: zerus_client_core::swarm::drive_folders::DriveParentOrder::Lexicographic,
+            request_id: catalog::new_id(),
+            store_nonce: None,
+            store_context: DriveStoreContext::TrustedFirstAdd,
+            expected_node_id: main.node_id,
+            expected_swarm_id: main.swarm_id,
+            source: None,
+            destination: MachineProof {
+                node: machine.into(),
+                platform: "windows".into(),
+                verified: true,
+            },
+            canonical_request_sha256: String::new(),
+        }
+        .sealed()
+        .unwrap()
+    }
+
+    fn existing(
+        store: &super::super::store::LockedStore,
+        machine: &str,
+        path: &str,
+    ) -> ApplyRequest {
+        let mut request = request(store, machine, path);
+        request.store_nonce = Some(
+            DriveStore::load(
+                store.path.parent().unwrap(),
+                &MainContext::from_store(&store.data),
+            )
+            .into_nonce(),
+        );
+        request.store_context = DriveStoreContext::ExistingStore;
+        request.sealed().unwrap()
+    }
+
+    trait Nonce {
+        fn into_nonce(self) -> String;
+    }
+    impl Nonce for DriveState {
+        fn into_nonce(self) -> String {
+            match self {
+                DriveState::Ready(store) => store.graph.store_nonce,
+                _ => panic!("expected an initialized store"),
+            }
+        }
+    }
+
+    #[test]
+    fn first_add_origin_status_and_wrong_writer_are_exact_and_no_write() {
+        let (_ad, a, machine) = fixture();
+        let first = request(&a, &machine, "C:/Origin");
+        let reply = apply_locked(&a, first.clone()).unwrap();
+        assert_eq!(
+            reply["canonical_request_sha256"],
+            first.canonical_request_sha256
+        );
+        assert_eq!(
+            reply["initialization"]["cause"],
+            serde_json::to_value(DriveInitCause::TrustedFirstAdd {
+                original_request_uuid: first.request_id.clone(),
+                folder_uuid: first.desired.id.clone().unwrap(),
+                canonical_request_sha256: first.canonical_request_sha256.clone(),
+            })
+            .unwrap()
+        );
+        let status = get_locked(&a, Some(&first.request_id)).unwrap();
+        assert_eq!(status["operation"], reply["operation"]);
+        assert_eq!(status["initialization"], reply["initialization"]);
+        let before = std::fs::read(a.path.with_file_name(FILE)).unwrap();
+        assert!(apply_locked(&a, first.clone()).is_err());
+        assert_eq!(std::fs::read(a.path.with_file_name(FILE)).unwrap(), before);
+
+        let (_bd, b, _) = fixture();
+        let graph_before = std::fs::read(b.path.with_file_name(FILE)).ok();
+        let witness_before = std::fs::read(b.path.with_file_name(INIT_FILE)).ok();
+        assert!(apply_locked(&b, first).is_err());
+        assert_eq!(
+            std::fs::read(b.path.with_file_name(FILE)).ok(),
+            graph_before
+        );
+        assert_eq!(
+            std::fs::read(b.path.with_file_name(INIT_FILE)).ok(),
+            witness_before
+        );
+    }
+
+    #[test]
+    fn local_duplicate_locations_and_legacy_existing_store_rules_are_explicit() {
+        let (_dir, store, machine) = fixture();
+        apply_locked(&store, request(&store, &machine, "C:/Work")).unwrap();
+        let before = std::fs::read(store.path.with_file_name(FILE)).unwrap();
+        assert!(apply_locked(&store, existing(&store, &machine, "c:/work")).is_err());
+        assert_eq!(
+            std::fs::read(store.path.with_file_name(FILE)).unwrap(),
+            before
+        );
+        let witness_path = store.path.with_file_name(INIT_FILE);
+        let mut legacy: InitWitness =
+            serde_json::from_slice(&std::fs::read(&witness_path).unwrap()).unwrap();
+        legacy.schema = 1;
+        legacy.cause = None;
+        std::fs::write(&witness_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        apply_locked(&store, existing(&store, &machine, "D:/LegacyExisting")).unwrap();
+        let reloaded: InitWitness =
+            serde_json::from_slice(&std::fs::read(&witness_path).unwrap()).unwrap();
+        assert_eq!(reloaded, legacy);
+    }
+
+    #[test]
+    fn oversized_committed_proof_is_retained_and_original_status_only() {
+        let main = main();
+        let folder = catalog::new_id();
+        let path = format!("C:/{}", "a".repeat(8189));
+        let root = operation(&main, 1, &folder, vec![], Some(value("alpha", &path)));
+        let mut operations = vec![root.clone()];
+        for index in 0..1023 {
+            let parent = operations.last().unwrap().id.clone();
+            operations.push(operation(
+                &main,
+                index + 2,
+                &folder,
+                vec![parent],
+                Some(value("alpha", &path)),
+            ));
+        }
+        let parents: Vec<String> = operations
+            .iter()
+            .map(|operation| operation.id.clone())
+            .collect();
+        let child = operation(&main, 2000, &folder, parents, Some(value("alpha", &path)));
+        operations.push(child.clone());
+        let mut graph = DriveGraph::empty(&main.swarm_id, &catalog::new_id());
+        graph.merge(&main.swarm_id, operations).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = DriveStore::create(&main, dir.path(), graph).unwrap();
+        let observed = observation(&store, &main, Some(&child.id));
+        assert_eq!(observed["complete"], true);
+        assert!(ensure_response_bound(&observed).is_err());
+        let status = bounded_read(observed, &main, Some(&store.graph.store_nonce)).unwrap();
+        assert_eq!(status["status"], "unavailable");
+        assert_eq!(status["operation_found"], false);
+        assert!(std::fs::metadata(dir.path().join(FILE)).unwrap().len() > MAX_EXCHANGE_BYTES);
     }
 }

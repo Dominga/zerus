@@ -218,6 +218,50 @@ pub(crate) enum DriveError {
     Unknown(String),
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct DriveCardBinding {
+    computer: String,
+    host: String,
+    machine_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct DriveCardBindings {
+    source: Option<DriveCardBinding>,
+    destination: DriveCardBinding,
+}
+
+impl DriveCardBinding {
+    fn proof(
+        &self,
+        pump: &Pump,
+    ) -> Result<zerus_client_core::swarm::drive_folders::MachineProof, DriveError> {
+        folders::drive_proof(pump, &self.computer, &self.host, &self.machine_id)
+            .map_err(DriveError::Refused)
+    }
+}
+
+impl DriveCardBindings {
+    fn proofs(
+        &self,
+        pump: &Pump,
+    ) -> Result<
+        (
+            Option<zerus_client_core::swarm::drive_folders::MachineProof>,
+            zerus_client_core::swarm::drive_folders::MachineProof,
+        ),
+        DriveError,
+    > {
+        Ok((
+            self.source
+                .as_ref()
+                .map(|source| source.proof(pump))
+                .transpose()?,
+            self.destination.proof(pump)?,
+        ))
+    }
+}
+
 impl Organization {
     /// Only the production switch supplies a source. Recovery is queued by
     /// the existing local organization topic and runs on this hub's worker.
@@ -1042,45 +1086,64 @@ impl Organization {
 
     fn submit_drive(
         &self,
+        cards: DriveCardBindings,
         build: impl FnOnce(&Pump, &DriveObservation) -> Result<DriveSetRequest, DriveError>,
     ) -> Result<Value, DriveError> {
         if !self.0.allowed {
             return Err(DriveError::Refused(REPLAY_NEEDS_HGS.into()));
         }
-        let (invocation, request_id) = {
-            let mut hub = self.lock();
+        let (generation, digest, node, swarm, refresh) = {
+            let hub = self.lock();
             if hub.stopped {
                 return Err(DriveError::Unknown(STOPPED.into()));
             }
-            if hub.drive.observation().is_none() {
-                let invocation = hub.drive.refresh();
-                drop(hub);
-                let value = self.drive_call(invocation)?;
-                let observation =
-                    DriveObservation::from_reply(&value).map_err(DriveError::Unknown)?;
-                hub = self.lock();
-                hub.drive
-                    .observe(observation)
-                    .map_err(DriveError::Unknown)?;
-            }
-            let observation = hub
-                .drive
-                .observation()
-                .cloned()
-                .expect("observation was just stored");
             let main = hub
                 .sync
                 .observed_value()
                 .ok_or_else(|| DriveError::Refused("Project sync is not ready.".into()))?;
-            if !observation.source_matches(
-                main["node_id"].as_str().unwrap_or_default(),
-                main["swarm_id"].as_str().unwrap_or_default(),
-            ) {
+            let node = main["node_id"].as_str().unwrap_or_default().to_owned();
+            let swarm = main["swarm_id"].as_str().unwrap_or_default().to_owned();
+            let digest = main["digest"].as_str().unwrap_or_default().to_owned();
+            if node.is_empty() || swarm.is_empty() || digest.is_empty() {
+                return Err(DriveError::Refused("Project sync is not current.".into()));
+            }
+            (
+                hub.source_generation,
+                digest,
+                node,
+                swarm,
+                hub.drive.refresh(),
+            )
+        };
+        cards.proofs(&self.0.pump)?;
+        let value = self.drive_call(refresh)?;
+        let observation = DriveObservation::from_reply(&value).map_err(DriveError::Unknown)?;
+        let (invocation, request_id) = {
+            let mut hub = self.lock();
+            let current = hub.sync.observed_value();
+            if hub.stopped
+                || generation != hub.source_generation
+                || current.as_ref().is_none_or(|main| {
+                    main["digest"].as_str().unwrap_or_default() != digest
+                        || main["node_id"].as_str().unwrap_or_default() != node
+                        || main["swarm_id"].as_str().unwrap_or_default() != swarm
+                })
+                || !observation.source_matches(&node, &swarm)
+            {
                 return Err(DriveError::Refused(
                     "The drive-folder source changed. Select it again.".into(),
                 ));
             }
+            hub.drive
+                .observe(observation.clone())
+                .map_err(DriveError::Unknown)?;
             let request = build(&self.0.pump, &observation)?;
+            let proofs = cards.proofs(&self.0.pump)?;
+            if request.source != proofs.0 || request.destination != proofs.1 {
+                return Err(DriveError::Refused(
+                    "The selected computer changed. Select it again.".into(),
+                ));
+            }
             let submission = hub.drive.begin(request).map_err(DriveError::Refused)?;
             (submission.invocation, submission.request.request_id)
         };
@@ -1092,7 +1155,7 @@ impl Organization {
             Err(error) => return Err(DriveError::Unknown(error)),
         };
         let observation = match reply {
-            DriveReply::Ready(observation) => observation,
+            DriveReply::Ready(observation) => *observation,
             DriveReply::Unknown(invocation) => {
                 let value = self.drive_call(invocation)?;
                 match self.lock().drive.acknowledge_status(value) {

@@ -189,7 +189,7 @@ fn drive_path(change: &Change) -> bool {
     paths::absolute(path, Style::Windows) && !path.starts_with('/')
 }
 
-fn drive_proof(
+pub(super) fn drive_proof(
     pump: &Pump,
     computer: &str,
     host: &str,
@@ -293,15 +293,28 @@ pub(super) fn drive_change(
             })
             .transpose()?;
         let destination = drive_proof(&org.0.pump, &place.computer, &place.host, machine_id)?;
+        let cards = super::DriveCardBindings {
+            source: original.as_ref().map(|record| super::DriveCardBinding {
+                computer: record.machine.clone(),
+                host: record.machine_name.clone(),
+                machine_id: record.machine_id.clone(),
+            }),
+            destination: super::DriveCardBinding {
+                computer: place.computer.clone(),
+                host: place.host.clone(),
+                machine_id: machine_id.to_owned(),
+            },
+        };
         Ok((
             original_record,
             desired,
             source,
             destination,
             uuid::Uuid::new_v4().to_string(),
+            cards,
         ))
     };
-    let (original_record, desired, source, destination, request_id) = match outcome() {
+    let (original_record, desired, source, destination, request_id, cards) = match outcome() {
         Ok(values) => values,
         Err(detail) => {
             return Changed {
@@ -310,7 +323,7 @@ pub(super) fn drive_change(
             }
         }
     };
-    let outcome = org.submit_drive(move |_pump, observation| {
+    let outcome = org.submit_drive(cards, move |_pump, observation| {
         let versions = match &original_record {
             Some(record) => {
                 let id = record.id.as_deref().unwrap_or_default();
@@ -324,15 +337,27 @@ pub(super) fn drive_change(
             }
             None => BTreeMap::new(),
         };
-        Ok(DriveSetRequest {
+        DriveSetRequest {
+            schema: 1,
             original: original_record,
             desired,
             versions,
+            parent_order: zerus_client_core::swarm::drive_folders::DriveParentOrder::Lexicographic,
             request_id,
             store_nonce: observation.store_nonce.clone(),
+            store_context: if observation.status == "uninitialized" {
+                zerus_client_core::swarm::drive_folders::DriveStoreContext::TrustedFirstAdd
+            } else {
+                zerus_client_core::swarm::drive_folders::DriveStoreContext::ExistingStore
+            },
+            expected_node_id: observation.node_id.clone(),
+            expected_swarm_id: observation.swarm_id.clone(),
             source,
             destination,
-        })
+            canonical_request_sha256: String::new(),
+        }
+        .sealed()
+        .map_err(super::DriveError::Refused)
     });
     Changed {
         outcome: match outcome {

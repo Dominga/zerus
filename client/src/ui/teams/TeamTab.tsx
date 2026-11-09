@@ -36,6 +36,7 @@ import { TeamActions as TeamActionModel } from "./actions";
 import { composer } from "../../store/composer";
 import type { ComputerId, TeamCall, TeamMemberView, TeamTaskView, TeamView } from "../../types";
 import type { Session } from "../sessions/types";
+import { TextArea } from "../lib/TextField";
 
 // The Team tab (Qt's TeamWorkspace, design D3, HANDOFF §14): the team bar and
 // its strips, the canvas, and a side column split between the members and the
@@ -555,7 +556,7 @@ export function LeadConversation(props: { computer: ComputerId; lead?: Pick<Team
       {props.children}
       <Show when={own()} fallback={
         <div class="cmp-col team-coordinator-draft">
-          <textarea class="field" rows={2} data-coordinator-draft aria-label={props.label} placeholder={props.placeholder} value={text()}
+          <TextArea class="field" rows={2} data-coordinator-draft aria-label={props.label} placeholder={props.placeholder} value={text()}
             onInput={(event) => setText(event.currentTarget.value)}
             onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); carry(); } }} />
           <button class="btn small primary" data-coordinator-send onClick={carry}>{props.send}</button>

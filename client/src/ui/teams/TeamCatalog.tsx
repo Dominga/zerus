@@ -12,6 +12,7 @@ import {
 } from "./catalog";
 import type { TeamOutcome } from "./types";
 import "../styles/catalog.css";
+import { TextInput } from "../lib/TextField";
 
 export interface CatalogPort {
   decide(proposal: string, decision: "keep" | "reject" | "undo"): Promise<TeamOutcome>;
@@ -143,7 +144,7 @@ export function TeamCatalog(props: TeamCatalogProps): JSX.Element {
       <div class="cat-body">
         <aside class="cat-list">
           <div class="cat-search">
-            <input
+            <TextInput
               value={query()}
               placeholder={tr("Search templates or roles…")}
               onInput={(event) => setQuery(event.currentTarget.value)}

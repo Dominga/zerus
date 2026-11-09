@@ -2,6 +2,7 @@ import { For, Show, createEffect, createSignal, onCleanup, onMount, type JSX } f
 import { tr } from "../../../i18n";
 import { useModel, windowPort } from "../../teams/ProposalCards";
 import { DiskModel, decisionsLine, driveLine, folderKind, folderState, lastUse, size, type DiskPolicy } from "./disk-model";
+import { TextInput } from "../../lib/TextField";
 
 /** Task 109: the open section reads again this often, measuring a few folders each time. */
 export const DISK_LIVE_MS = 10_000;
@@ -30,7 +31,7 @@ export function DiskSection(): JSX.Element {
   const number = (key: "unused_days" | "free_gb" | "free_percent" | "team_limit_gb", label: string, max: number) => (
     <label class="set-field">
       <span>{label}</span>
-      <input class="field" type="number" min={0} max={max} value={policy()?.[key] ?? 0} disabled={read().busy}
+      <TextInput class="field" type="number" min={0} max={max} value={policy()?.[key] ?? 0} disabled={read().busy}
         onInput={(event) => field(key, Math.max(0, Math.min(max, Number(event.currentTarget.value) || 0)))} />
     </label>
   );

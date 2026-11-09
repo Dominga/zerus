@@ -7,6 +7,7 @@ import { selected, subagentOpen } from "../../store/ui";
 import { ProposalCards, proposalKindLabel, type CardState, type DecisionPort } from "./decisions";
 import { ledTeamOf, leadsTeam } from "./leadTeam";
 import type { ComputerId, TeamView } from "../../types";
+import { TextInput } from "../lib/TextField";
 
 // The lead's proposals as cards (Qt TeamProposalCards, task 11): the kind in
 // words, what changes, who asks and why; Deny with a reason the lead gets,
@@ -79,7 +80,7 @@ function Card(props: { cards: ProposalCards; state: CardState; onAnswered?: () =
       }>
         <Show when={card().kind === "question"} fallback={
           <div class="team-proposal-answers">
-            <input class="field team-proposal-reason-edit" maxlength={2000} placeholder={tr("Why deny? The lead receives this")} disabled={off()}
+            <TextInput class="field team-proposal-reason-edit" maxlength={2000} placeholder={tr("Why deny? The lead receives this")} disabled={off()}
               value={props.state.reason} onInput={(event) => props.cards.setReason(card().id, event.currentTarget.value)}
               onKeyDown={(event) => { if (event.key === "Enter" && event.currentTarget.value.trim()) void answer(false); }} />
             <button class="btn small danger" disabled={off()} onClick={() => void answer(false)}>{tr("Deny")}</button>
@@ -101,7 +102,7 @@ function Card(props: { cards: ProposalCards; state: CardState; onAnswered?: () =
           </div>
           <div class="team-proposal-answers">
             <Show when={props.state.own} fallback={<span class="grow" />}>
-              <input class="field team-proposal-reason-edit" maxlength={4000} placeholder={tr("Your answer, for the lead")} disabled={off()}
+              <TextInput class="field team-proposal-reason-edit" maxlength={4000} placeholder={tr("Your answer, for the lead")} disabled={off()}
                 value={props.state.reason} onInput={(event) => props.cards.setReason(card().id, event.currentTarget.value)}
                 onKeyDown={(event) => { if (event.key === "Enter") void answerQuestion(); }} />
             </Show>

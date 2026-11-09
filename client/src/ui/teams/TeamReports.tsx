@@ -5,6 +5,7 @@ import { useModel, windowPort } from "./ProposalCards";
 import { ReportDecision, TaskReportRead, reportLine, reportRows, type ReportRow } from "./decisions";
 import { teamTaskRead } from "../../bridge";
 import type { ComputerId, TeamView } from "../../types";
+import { TextInput } from "../lib/TextField";
 
 // The reports the lead or the owner decides in the Team tab (task 11, Qt
 // TeamPanel): an escalated report is accepted or rejected with the member's
@@ -33,7 +34,7 @@ function Report(props: { computer: ComputerId; team: TeamView; row: ReportRow })
       </div>
       <Show when={rejecting() && props.row.kind === "report"}>
         <div class="team-proposal-answers">
-          <input class="field" maxlength={4000} placeholder={tr("What should the member change?")} value={comment()} disabled={read().sending}
+          <TextInput class="field" maxlength={4000} placeholder={tr("What should the member change?")} value={comment()} disabled={read().sending}
             onInput={(event) => setComment(event.currentTarget.value)} />
           <button class="btn small danger" disabled={read().sending || !comment().trim()} onClick={() => void model.reject(props.row, comment())}>{tr("Reject")}</button>
         </div>

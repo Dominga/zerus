@@ -6,6 +6,7 @@ import { teamConfirm } from "../../store/teamConfirm";
 import { createProjectMemory, statusText } from "../../store/projectMemory";
 import { Icon } from "../lib/icons";
 import "../styles/projectmemory.css";
+import { TextInput } from "../lib/TextField";
 
 // Task 126: Qt's ProjectMemoryPanel on Projects. One switch turns RustCodeLore
 // on for the whole project (all its folders); the store folder shows with
@@ -67,7 +68,7 @@ export function ProjectMemoryPanel(props: { project: string; enabled?: boolean }
       {/* Task #397: search the project's store and its team sub-stores; each hit
           names the store that holds it, so a team's records are found here. */}
       <div class="row pm-search">
-        <input class="field" type="search" maxLength={500} placeholder={tr("Search this project's memory…")}
+        <TextInput class="field" type="search" maxLength={500} placeholder={tr("Search this project's memory…")}
           aria-label={tr("Search this project's memory")} value={query()} disabled={!editable() || memory.searching()}
           onInput={(event) => setQuery(event.currentTarget.value)}
           onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); search(); } }} />

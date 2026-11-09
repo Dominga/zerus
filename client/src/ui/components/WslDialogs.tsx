@@ -7,13 +7,14 @@ import {
 } from "../../bridge";
 import { createFileDialog, createMappingDialog, problem, type FileDialogState, type MappingDialogState } from "./wsl-mapping";
 import "../styles/wsl.css";
+import { TextInput } from "../lib/TextField";
 
 // Task 73: Qt's WslPathMappingDialog and WslFileOpenDialog. Cancel is the
 // default button and waits for a running request; Enter never submits.
 
 function Field(props: { id: string; label: string; value: string; placeholder?: string; disabled: boolean; onInput(value: string): void }) {
   return <div class="form-row"><label for={props.id}>{props.label}</label>
-    <input id={props.id} class="field mono" value={props.value} placeholder={props.placeholder} disabled={props.disabled}
+    <TextInput id={props.id} class="field mono" value={props.value} placeholder={props.placeholder} disabled={props.disabled}
       onInput={(event) => props.onInput(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter") event.preventDefault(); }} /></div>;
 }
 

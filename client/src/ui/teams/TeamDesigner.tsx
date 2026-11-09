@@ -18,6 +18,7 @@ import { parseCatalog, proposalCounts } from "./catalog";
 import { TeamCatalog } from "./TeamCatalog";
 import { TeamCatalogEditor } from "./TeamCatalogEditor";
 import { DESIGNER_AGENTS, designerEfforts, designerModelLabel, effortAllowed, effortLabel, modelSections } from "./designerModels";
+import { TextArea } from "../lib/TextField";
 
 // Task #44: Qt's TeamDesignerPage. The designer's conversation (the running
 // "…/team-designer" session) shows here and follows the selected local
@@ -217,7 +218,7 @@ export function TeamDesigner(props: { onClose?: () => void }): JSX.Element {
                   </Show>
                 </div>
               </div>
-              <textarea rows={5} value={goal()} placeholder={chosen()?.folder ? tr("Describe the project tasks…") : tr("Choose a project above…")} onInput={(event) => setGoal(event.currentTarget.value)} />
+              <TextArea rows={5} value={goal()} placeholder={chosen()?.folder ? tr("Describe the project tasks…") : tr("Choose a project above…")} onInput={(event) => setGoal(event.currentTarget.value)} />
               <div class="designer-start">
                 <Show when={startError()}><span class="cat-error" role="alert">{startError()}</span></Show>
                 <span class="grow" />

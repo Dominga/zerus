@@ -793,7 +793,8 @@ fn with_the_streams_team_heads_a_team_is_read_when_its_revision_moved() {
     let at = start + POLL * 6;
     model.heads(heads(&[(TEAM, 7), ("other", 2)]), at);
     let running = model.next(at).unwrap();
-    assert_eq!(running, TeamRead::List);
+    // Owner, 2026-11-10: the watched team's status is read first.
+    assert_eq!(running, TeamRead::Status { team: TEAM.into() });
     model.heads(heads(&[(TEAM, 8), ("other", 2)]), at);
     model.apply(&running, Ok(replies(&running)), at);
     assert_eq!(

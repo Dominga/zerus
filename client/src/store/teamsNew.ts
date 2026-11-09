@@ -272,7 +272,7 @@ export function createNewTeam(port: NewTeamPort) {
     }
   };
 
-  const createTeam = async (): Promise<NewTeamResult> => {
+  const createTeam = async (options: { confirmWidening?: boolean } = {}): Promise<NewTeamResult> => {
     const current = view();
     if (!current || !draftId()) return { ok: false, error: "no-draft" };
     setBusy(true);
@@ -293,7 +293,9 @@ export function createNewTeam(port: NewTeamPort) {
         team: draftId(),
         team_name: fields().name,
         confirmed: false,
-        action: { kind: "draft_create", approve: false, confirm_widening: false },
+        // Owner, 2026-11-09: a draft with wider member permissions needs the
+        // owner's explicit confirmation; the form asks for it (NewTeamFooter).
+        action: { kind: "draft_create", approve: false, confirm_widening: !!options.confirmWidening },
       });
       if (outcome.outcome !== "done") {
         setError(outcome.outcome === "confirm" ? outcome.confirmation.text : outcome.detail);

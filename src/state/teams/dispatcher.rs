@@ -1974,6 +1974,19 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     // member's ready task, and once it can start the later task's work holds
     // it back instead (plan::output_holders).
     let mut claimed: Vec<&Task> = Vec::new();
+    // Owner, 2026-11-09 ("приоритет выдачи поправь"): a member first takes the
+    // ready tasks the plan gave it; it takes another member's task only when
+    // none of its own is ready. Without this, an earlier task in the order
+    // pulled a free member away and its own task went to yet another member,
+    // across roles (records' #5 to export, export's #10 to core).
+    let own_ready: BTreeSet<String> = ready
+        .iter()
+        .filter_map(|id| team.task(*id))
+        .filter(|task| task.waits.is_none() && !task.assignee.is_empty())
+        .filter_map(|task| team.member(&task.assignee))
+        .filter(|member| member.session.is_some() && available(member, &busy, None))
+        .map(|member| member.id.clone())
+        .collect();
     for id in ready {
         let Some(task) = team.task(id) else { continue };
         // Spec 0: a refused or unconfirmed step waits for the lead or you.
@@ -2127,7 +2140,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                     task,
                     member,
                     member.session.is_some(),
-                    &|other| available(other, &busy, Some(id)),
+                    &|other| available(other, &busy, Some(id)) && !own_ready.contains(&other.id),
                     &outputs,
                 );
                 if let Some(peer) = peer {
@@ -2135,6 +2148,25 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                     claim_outputs(&mut claimed, task);
                     steps.push(Step::Rebalance { task: id, from: member.id.clone(), to: peer.id.clone() });
                     continue;
+                }
+                // Owner, 2026-11-09 (B1 waited 27 minutes for a busy assignee
+                // while a member of its role was never started): when the
+                // started assignee is busy and no started member can take the
+                // task, the first unstarted member of the same role (then of a
+                // related one) is started; a later tick hands the task over.
+                if member.session.is_some() {
+                    let role = team.role_of(&member.id);
+                    let unstarted = |other: &&Member| other.id != member.id && other.id != team.lead
+                        && other.session.is_none() && other.launch_id.is_empty() && other.error.is_empty()
+                        && !matches!(other.state, MemberState::Removed | MemberState::Paused)
+                        && !launching.contains(&other.id)
+                        && super::rights::missing(task, other).is_empty();
+                    let spare = team.members.iter().filter(unstarted).find(|other| team.role_of(&other.id) == role)
+                        .or_else(|| team.members.iter().filter(unstarted).find(|other| super::model::related_roles(&role, &team.role_of(&other.id))));
+                    if let Some(spare) = spare {
+                        launching.insert(spare.id.clone());
+                        steps.push(Step::Launch { member: spare.id.clone() });
+                    }
                 }
             }
         }
@@ -5544,6 +5576,21 @@ fn launch(team: &Team, member: &Member) -> anyhow::Result<()> {
                         eprintln!("hgs team worker: {}: trusting {folder} for {}: {error}", team.name, member.id);
                     }
                 }
+            }
+        }
+    }
+    // Owner, 2026-11-09 ("вот это должно быть в режиме auto apply"): a team
+    // member's own checkout (a worktree or clone Zerus made of the team's
+    // folder) is trusted for its agent before the launch, so Claude's folder
+    // trust question never stops a team. Only Zerus-made checkouts on this
+    // computer: the shared folder and other people's folders keep asking.
+    if member.computer.is_empty()
+        && matches!(member.folder, super::model::MemberFolder::Worktree | super::model::MemberFolder::Clone)
+        && folder.trim() != team.folder.trim()
+    {
+        if let Ok(config) = crate::config::Config::load() {
+            if let Err(error) = crate::accounts::trust_folder_for(&config, &member.agent, &member.account, &folder) {
+                eprintln!("hgs team worker: {}: trusting {folder} for {}: {error}", team.name, member.id);
             }
         }
     }
@@ -10576,105 +10623,9 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             Ok(())
         }
         Step::Launch { member } => {
-            let launch_id = uuid::Uuid::new_v4().to_string();
-            let mut planned = None;
-            change(store, &team.id, |team, _| {
-                let found = team.members.iter_mut().find(|m| m.id == *member).context("unknown member")?;
-                anyhow::ensure!(found.session.is_none() && found.launch_id.is_empty(), "already started");
-                found.launch_id = launch_id.clone();
-                let found = found.clone();
-                planned = Some((team.clone(), found));
-                Ok(())
-            })?;
-            let (team, found) = planned.unwrap();
-            let swapped = found.launch_after_swap;
-            let prepared = prepare_member_branch(&team, &found);
-            let launched = match prepared {
-                Ok(note) => {
-                    if let Some(note) = note {
-                        change(store, &team.id, |team, events| {
-                            events.push(Event::new(
-                                "folder_checked_out",
-                                json!({"member":team.role_of(&found.id),"note":note}),
-                            ));
-                            Ok(())
-                        })?;
-                    }
-                    // Feedback 14: a swap's old session is set aside first, so
-                    // the new one can take the member's name.
-                    match set_aside_replaced(&found) {
-                        Ok(note) => {
-                            if note.is_some() || found.replaced.is_some() {
-                                change(store, &team.id, |team, events| {
-                                    if let Some(note) = &note {
-                                        events.push(Event::new("member_retired", json!({"member":team.role_of(member),"note":note})));
-                                    }
-                                    if let Some(record) = team.members.iter_mut().find(|m| m.id == *member) {
-                                        record.replaced = None;
-                                    }
-                                    Ok(())
-                                })?;
-                            }
-                            launch(&team, &found)
-                        }
-                        Err(error) => Err(error),
-                    }
-                }
-                Err(error) => Err(error),
-            };
-            if let Err(error) = launched {
-                let error = error.to_string();
-                // Task 22: a host that is still starting is waited for: the
-                // member is started again on a later tick (a new launch id;
-                // nothing was saved for this one), with no error and no inbox
-                // item, until HOST_WAITS such starts have failed.
-                let waits = found.host_waits;
-                if host_still_starting(&error) && waits < HOST_WAITS {
-                    change(store, &team.id, |team, events| {
-                        let role = team.role_of(member);
-                        if let Some(record) = team.members.iter_mut().find(|m| m.id == *member && m.session.is_none()) {
-                            record.launch_id.clear();
-                            record.host_waits = waits + 1;
-                        }
-                        events.push(Event::new(
-                            "launch_waiting",
-                            json!({"member":role,"reason":error,"wait":waits + 1,"of":HOST_WAITS}),
-                        ));
-                        Ok(())
-                    })?;
-                    return Ok(());
-                }
-                let error = if host_still_starting(&error) {
-                    format!("{error} (started {} times while the DeepSeek host was starting; it did not answer)", waits + 1)
-                } else {
-                    error
-                };
-                // U54: a failed post-swap launch keeps `launch_after_swap`, so a
-                // relaunch starts it at once; the error names its fix.
-                let error = if swapped {
-                    format!("{error}; fix the folder or the old session, then hgs team relaunch starts it at once")
-                } else {
-                    error
-                };
-                change(store, &team.id, |team, events| {
-                    if let Some(found) = team.members.iter_mut().find(|m| m.id == *member && m.session.is_none()) {
-                        found.error = error.clone();
-                        found.launch_after_swap = swapped;
-                        found.host_waits = 0;
-                    }
-                    events.push(Event::new("launch_failed", json!({"member":team.role_of(member),"error":error})));
-                    Ok(())
-                })?;
-            } else {
-                change(store, &team.id, |team, _| {
-                    if let Some(found) = team.members.iter_mut().find(|m| m.id == *member && m.session.is_none()) {
-                        found.launch_after_swap = false;
-                        found.host_waits = 0;
-                    }
-                    Ok(())
-                })?;
-            }
-            Ok(())
+            let (team, found) = reserve_launch(store, team, member)?;
+            let outcome = start_member(&team, &found);
+            finish_launch(store, &team, member, &found, outcome)
         }
         Step::HandOut { task, member } => {
             if *member == team.lead {
@@ -11227,6 +11178,143 @@ pub(crate) fn pass_steps(steps: Vec<Step>, pass: Pass) -> Vec<Step> {
     steps.into_iter().filter(|step| urgent(step) == (pass == Pass::Urgent)).collect()
 }
 
+/// Owner, 2026-11-09 ("скоряй первый старт"): a member's start in three parts,
+/// so a tick starts all its members at once: the launch id is reserved in the
+/// store, the folder and the session are made without it (in parallel), and
+/// the outcome is recorded in the store again.
+fn reserve_launch(store: &mut Store, team: &Team, member: &str) -> anyhow::Result<(Team, Member)> {
+        let launch_id = uuid::Uuid::new_v4().to_string();
+        let mut planned = None;
+        change(store, &team.id, |team, _| {
+            let found = team.members.iter_mut().find(|m| m.id == member).context("unknown member")?;
+            anyhow::ensure!(found.session.is_none() && found.launch_id.is_empty(), "already started");
+            found.launch_id = launch_id.clone();
+            let found = found.clone();
+            planned = Some((team.clone(), found));
+            Ok(())
+        })?;
+        Ok(planned.unwrap())
+}
+
+struct LaunchOutcome {
+    checked_out: Option<String>,
+    retired: Option<Option<String>>,
+    result: anyhow::Result<()>,
+}
+
+fn start_member(team: &Team, found: &Member) -> LaunchOutcome {
+    let mut checked_out = None;
+    let mut retired = None;
+    let result = (|| -> anyhow::Result<()> {
+        checked_out = prepare_member_branch(team, found)?;
+        // Feedback 14: a swap's old session is set aside first, so the new
+        // one can take the member's name.
+        retired = Some(set_aside_replaced(found)?);
+        launch(team, found)
+    })();
+    LaunchOutcome { checked_out, retired, result }
+}
+
+fn finish_launch(store: &mut Store, team: &Team, member: &str, found: &Member, outcome: LaunchOutcome) -> anyhow::Result<()> {
+    let swapped = found.launch_after_swap;
+    if let Some(note) = outcome.checked_out {
+        change(store, &team.id, |team, events| {
+            events.push(Event::new("folder_checked_out", json!({"member":team.role_of(&found.id),"note":note})));
+            Ok(())
+        })?;
+    }
+    if let Some(note) = outcome.retired {
+        if note.is_some() || found.replaced.is_some() {
+            change(store, &team.id, |team, events| {
+                if let Some(note) = &note {
+                    events.push(Event::new("member_retired", json!({"member":team.role_of(member),"note":note})));
+                }
+                if let Some(record) = team.members.iter_mut().find(|m| m.id == member) {
+                    record.replaced = None;
+                }
+                Ok(())
+            })?;
+        }
+    }
+    let launched = outcome.result;
+        if let Err(error) = launched {
+            let error = error.to_string();
+            // Task 22: a host that is still starting is waited for: the
+            // member is started again on a later tick (a new launch id;
+            // nothing was saved for this one), with no error and no inbox
+            // item, until HOST_WAITS such starts have failed.
+            let waits = found.host_waits;
+            if host_still_starting(&error) && waits < HOST_WAITS {
+                change(store, &team.id, |team, events| {
+                    let role = team.role_of(member);
+                    if let Some(record) = team.members.iter_mut().find(|m| m.id == member && m.session.is_none()) {
+                        record.launch_id.clear();
+                        record.host_waits = waits + 1;
+                    }
+                    events.push(Event::new(
+                        "launch_waiting",
+                        json!({"member":role,"reason":error,"wait":waits + 1,"of":HOST_WAITS}),
+                    ));
+                    Ok(())
+                })?;
+                return Ok(());
+            }
+            let error = if host_still_starting(&error) {
+                format!("{error} (started {} times while the DeepSeek host was starting; it did not answer)", waits + 1)
+            } else {
+                error
+            };
+            // U54: a failed post-swap launch keeps `launch_after_swap`, so a
+            // relaunch starts it at once; the error names its fix.
+            let error = if swapped {
+                format!("{error}; fix the folder or the old session, then hgs team relaunch starts it at once")
+            } else {
+                error
+            };
+            change(store, &team.id, |team, events| {
+                if let Some(found) = team.members.iter_mut().find(|m| m.id == member && m.session.is_none()) {
+                    found.error = error.clone();
+                    found.launch_after_swap = swapped;
+                    found.host_waits = 0;
+                }
+                events.push(Event::new("launch_failed", json!({"member":team.role_of(member),"error":error})));
+                Ok(())
+            })?;
+        } else {
+            change(store, &team.id, |team, _| {
+                if let Some(found) = team.members.iter_mut().find(|m| m.id == member && m.session.is_none()) {
+                    found.launch_after_swap = false;
+                    found.host_waits = 0;
+                }
+                Ok(())
+            })?;
+        }
+        Ok(())
+}
+
+/// Owner, 2026-11-09: the tick's member starts run side by side (each clone
+/// and launch took 15-35 s, one after another).
+fn run_launches(store: &mut Store, team: &Team, members: &[String]) {
+    let mut reserved = Vec::new();
+    for member in members {
+        match reserve_launch(store, team, member) {
+            Ok(pair) => reserved.push((member.clone(), pair)),
+            Err(error) => eprintln!("hgs team worker: {}: Launch {{ member: {member:?} }}: {error}", team.name),
+        }
+    }
+    let outcomes: Vec<LaunchOutcome> = std::thread::scope(|scope| {
+        let handles: Vec<_> = reserved.iter().map(|(_, (team, found))| scope.spawn(move || start_member(team, found))).collect();
+        handles.into_iter().map(|handle| handle.join().unwrap_or_else(|_| LaunchOutcome {
+            checked_out: None, retired: None, result: Err(anyhow::anyhow!("the member's start panicked")),
+        })).collect()
+    });
+    for ((member, (fresh, found)), outcome) in reserved.iter().zip(outcomes) {
+        if let Err(error) = finish_launch(store, fresh, member, found, outcome) {
+            eprintln!("hgs team worker: {}: Launch {{ member: {member:?} }}: {error}", team.name);
+        }
+    }
+}
+
 /// The step's kind, for the tick's measurement.
 fn step_kind(step: &Step) -> String {
     let text = format!("{step:?}");
@@ -11252,6 +11340,16 @@ fn run_team_steps(store: &mut Store, team: &Team, sessions: &[Seen], listed: &BT
     let team = fresh.as_ref().unwrap_or(team);
     let started = Instant::now();
     let steps = pass_steps(steps_with(team, sessions, now(), Some(listed)), pass);
+    // Owner, 2026-11-09: two or more member starts of this tick run together.
+    let launches: Vec<String> = steps.iter().filter_map(|step| match step { Step::Launch { member } => Some(member.clone()), _ => None }).collect();
+    let steps = if launches.len() > 1 && super::super::iron_rules::project_identity(team).is_ok() {
+        let at = Instant::now();
+        run_launches(store, team, &launches);
+        super::tick_clock::note(&format!("{}: Launch x{}", team.name, launches.len()), at.elapsed());
+        steps.into_iter().filter(|step| !matches!(step, Step::Launch { .. })).collect()
+    } else {
+        steps
+    };
     let total = steps.len();
     for (index, step) in steps.into_iter().enumerate() {
         // Task #406: the rest of a team's steps wait for the next tick once

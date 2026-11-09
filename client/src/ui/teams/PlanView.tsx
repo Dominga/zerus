@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
-import { Icon } from "../lib/icons";
+import { Icon, ZerusMark } from "../lib/icons";
 import { Dropdown } from "../lib/Dropdown";
 import { tr } from "../../i18n";
 import type { PlanGraph, TeamView } from "./types";
@@ -489,7 +489,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           />
         </Show>
         <span class="pt-card-l1">
-          <span class="pt-state"><Icon name={statusIcon(task, !!problem)} size={12} /></span>
+          <span class="pt-state"><StateGlyph task={task} problem={!!problem} size={12} /></span>
           <span class="pt-id">#{task.id}</span>
           <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit" title={task.origin ? tr("Critical follow-up of #%1", task.origin) : tr("Critical follow-up")}>Crit{task.origin ? ` #${task.origin}` : ""}</span></Show>
           <Show when={task.severity === "minor"}><span class="pt-chip pt-chip-minor" data-severity="minor">Minor</span></Show>
@@ -593,7 +593,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         title={[`#${task.id} ${task.title}`, problem?.text ?? taskState(task).text, taskHeatNow?.tip ?? "", reply()].filter(Boolean).join("\n")}
         onClick={activate} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); activate(); } }}>
         <span class="pm-card-line">
-          <span class="pt-state"><Icon name={statusIcon(task, !!problem)} size={13} /></span>
+          <span class="pt-state"><StateGlyph task={task} problem={!!problem} size={13} /></span>
           <span class="pm-id">#{task.id}</span>
           <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit">Crit{task.origin ? ` #${task.origin}` : ""}</span></Show>
           <Show when={task.severity === "minor"}><span class="pt-chip pt-chip-minor" data-severity="minor">Minor</span></Show>
@@ -680,7 +680,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
                         style={taskHeatNow ? { "--heat": String(taskHeatNow.tint) } : undefined}
                         title={[problem?.text ?? taskState(task).text, taskHeatNow?.tip ?? ""].filter(Boolean).join("\n")} onClick={() => open(task.id)}>
                         <span class="pm-layer-label">{tr("L%1", (own.get(layer) ?? 0) + 1)}</span>
-                        <span class="pt-state"><Icon name={statusIcon(task, !!problem)} size={12} /></span>
+                        <span class="pt-state"><StateGlyph task={task} problem={!!problem} size={12} /></span>
                         <span class="pm-id">#{task.id}</span>
                         <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit">Crit{task.origin ? ` #${task.origin}` : ""}</span></Show>
                         <Show when={task.severity === "minor"}><span class="pt-chip pt-chip-minor" data-severity="minor">Minor</span></Show>
@@ -1002,3 +1002,11 @@ export function PlanView(props: PlanViewProps): JSX.Element {
   );
 }
 
+/** Owner, 2026-11-09: a task in progress shows the turning Zerus mark, as a working agent does, not a plain arrow. */
+function StateGlyph(props: { task: TeamTaskView; problem: boolean; size: number }) {
+  return (
+    <Show when={!props.problem && props.task.status === "in_progress"} fallback={<Icon name={statusIcon(props.task, props.problem)} size={props.size} />}>
+      <span class="pt-working-mark"><ZerusMark size={props.size + 2} /></span>
+    </Show>
+  );
+}

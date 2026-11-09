@@ -433,3 +433,7 @@
 /* Owner, 2026-11-09: the lead pill beside the session title (LeadTitleBadge). Unlayered: a button. */
 .lead-title-pill { flex: none; align-self: center; margin-left: 8px; height: 20px; padding: 0 8px; cursor: pointer; line-height: 18px; }
 .lead-title-pill:hover { filter: brightness(1.15); }
+/* Owner, 2026-11-09: Approve the plan above the first phase. Unlayered: packaged order. */
+.plan-approve-bar { display: flex; align-items: center; gap: 10px; margin: 8px 12px; padding: 10px 12px; border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--z-color-accent) 55%, transparent); background: color-mix(in srgb, var(--z-color-accent) 10%, transparent); }
+.plan-approve-bar .btn.primary { height: 32px; padding: 0 16px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }

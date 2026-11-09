@@ -164,3 +164,37 @@
 .nt-howto { display: flex; flex-direction: column; gap: 4px; flex: none; }
 .nt-howto-toggle { align-self: flex-start; display: inline-flex; align-items: center; gap: 4px; border: 0; background: none; padding: 0; color: var(--z-color-text-2); font-size: var(--fs-sm); font-weight: 600; cursor: pointer; }
 .nt-howto-steps { margin: 0; padding-left: 22px; color: var(--z-color-text-3); font-size: var(--fs-xs); line-height: 1.5; }
+
+/* Owner, 2026-11-09: the New team intro (before a draft) and the draft's Phases page. Unlayered: packaged layer order. */
+.nt-intro { display: grid; grid-template-columns: minmax(280px, 1fr) minmax(320px, 1fr); gap: 24px; padding: 16px; overflow: auto; }
+@media (max-width: 900px) { .nt-intro { grid-template-columns: 1fr; } }
+.nt-intro-guide h3 { margin: 0 0 10px; font-size: var(--fs-md); }
+.nt-intro-guide ol { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; line-height: 1.5; }
+.nt-intro-lead { display: flex; flex-direction: column; gap: 12px; }
+.nt-intro-start { align-self: flex-start; height: 40px; padding: 0 22px; font-size: var(--fs-md); font-weight: 600; display: inline-flex; align-items: center; gap: 8px; }
+.nt-phases { display: flex; flex-direction: column; gap: 8px; padding: 4px 0; overflow: auto; }
+.nt-phase-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; }
+.nt-phase { padding: 8px 10px; border: 1px solid var(--z-color-card-border); border-radius: 8px; background: var(--z-color-card); display: flex; flex-direction: column; gap: 4px; }
+.nt-phase-goal { margin: 0; font-size: var(--fs-xs); }
+.nt-phase-goal.empty { color: var(--z-color-muted); font-style: italic; }
+.nt-phase-tasks { margin: 0; padding-left: 16px; font-size: var(--fs-xs); }
+/* Owner, 2026-11-09: the create bar under the form, with what blocks it. */
+.nt-body > .nt-foot { position: sticky; bottom: 0; display: flex; flex-direction: column; gap: 6px; padding: 10px 0 4px; background: var(--z-color-pane); border-top: 1px solid var(--z-color-divider); }
+.nt-foot-row { display: flex; align-items: center; gap: 8px; }
+.nt-blocker { padding: 8px 10px; border-radius: 8px; border: 1px solid color-mix(in srgb, var(--z-color-danger, #e5484d) 55%, transparent); background: color-mix(in srgb, var(--z-color-danger, #e5484d) 10%, transparent); font-size: var(--fs-xs); display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.nt-blocker-list { flex-basis: 100%; margin: 2px 0 0; padding-left: 18px; }
+.nt-foot-bad { color: var(--z-color-danger, #e5484d); }
+.nt-create { height: 32px; padding: 0 18px; font-weight: 600; }
+
+/* Owner, 2026-11-09 ("кому говорилось в одну строчку выровнять?"): one line per
+   member in the split New team: role, agent, model, effort, permissions,
+   computer, account, own worktree, duplicate, remove. Unlayered: packaged order. */
+.nt-split .nt-member {
+  grid-template-columns: minmax(96px, 1.3fr) 76px minmax(96px, 1fr) 82px 92px 104px minmax(96px, 1fr) 22px 26px 26px;
+  gap: 4px; padding-bottom: 4px; border-bottom: 1px dashed var(--z-color-divider);
+}
+.nt-split .nt-member select, .nt-split .nt-member input:not([type="checkbox"]) { min-width: 0; height: 28px; padding: 0 6px; font-size: 12px; }
+.nt-split .nt-member .nt-check { font-size: 0; justify-self: center; }
+.nt-split .nt-member .nt-check input { margin: 0; }
+.nt-split .nt-member > .icon-btn { justify-self: center; }
+@media (max-width: 1100px) { .nt-split .nt-member { grid-template-columns: repeat(5, minmax(0, 1fr)); } .nt-split .nt-member .nt-check { font-size: inherit; } }

@@ -553,3 +553,12 @@
 .pm-tests-counts { display: flex; gap: 6px; padding: 2px 0 8px; }
 .pm-tests-counts .pm-pill { background: var(--z-color-field); color: var(--z-color-muted); }
 .pm-tests-counts .pm-count-on { background: var(--z-color-segment-on); color: var(--z-color-accent); }
+
+/* Owner, 2026-11-09 ("темнее весь бэк вкладок, всё белесым смотрится"): the
+   plan's phase and layer backgrounds sit close to the page, so the task cards
+   stand out. */
+.pt-phase, .pt-layer, .pm-column, .pm-layer { background: color-mix(in srgb, var(--z-color-card) 35%, var(--z-color-page)); }
+.pt-phase:hover { background: color-mix(in srgb, var(--z-color-card) 55%, var(--z-color-page)); }
+/* Owner, 2026-11-09: a task in progress turns the Zerus mark (the working agent's spin). */
+.pt-working-mark { display: inline-grid; place-items: center; color: var(--z-color-accent); }
+.pt-working-mark > svg { will-change: transform; animation: zl-spin 3s infinite; }

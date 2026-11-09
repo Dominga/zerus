@@ -29,6 +29,38 @@ it("archived phase totals survive a partially retained task window", () => {
   expect(phase.nodes.map((node) => node.node.id)).toEqual([1]);
 });
 
+it("an archived phase lays out in its layers with its links, like a live one", () => {
+  // Task #469: the owner's done phase 2 drew all 45 tasks in LAYER 1 because
+  // an archived stub kept no dependencies. With them the status carries the
+  // layers and the graph an edge per dependency, so a done phase lays out and
+  // links exactly as a live one does.
+  const deps: number[][] = [[], [1], [1], [2], [], [3], [6], [5]];
+  const layers = [0, 1, 1, 2, 0, 2, 3, 3];
+  const tasks = deps.map((dep, index) => ({ ...task(index + 1, 2, dep, "accepted"), archived: true }));
+  const team: TeamView = {
+    ...TEAM,
+    tasks,
+    phases: [{ ...TEAM.phases[0], n: 2, title: "Live check", done: 8, total: 8, archived: true }],
+  };
+  const graph: PlanGraph = {
+    team: team.id,
+    nodes: tasks.map((item, index) => ({ ...node(item), layer: layers[index] })),
+    edges: tasks.flatMap((item) => item.deps.map((dep) => ({ from: dep.task, to: item.id, hard: true }))),
+    layers: 4,
+  };
+  const [phase] = phasePlans(team, graph);
+  // Not one layer: the phase's own layers, in order, each with its tasks.
+  expect(phase.layers.map((layer) => layer.layer)).toEqual([0, 1, 2, 3]);
+  expect(phase.layers.map((layer) => layer.nodes.map((placed) => placed.node.id))).toEqual([[1, 5], [2, 3], [4, 6], [7, 8]]);
+  // Every dependency of the phase is a drawn link, in the row of its target.
+  const edges = phase.edges.map((edge) => `${edge.from}>${edge.to}`);
+  expect(edges).toEqual(["1>2", "1>3", "2>4", "3>6", "6>7", "5>8"]);
+  const drawn = buildRows([phase], new Set())
+    .filter((row) => row.kind === "layer")
+    .flatMap((row) => rowEdges(phase, row).map((entry) => `${entry.edge.from}>${entry.edge.to}`));
+  expect(drawn).toEqual(edges);
+});
+
 function task(id: number, phase: number, deps: number[] = [], status = "pending"): TaskView {
   return {
     id,

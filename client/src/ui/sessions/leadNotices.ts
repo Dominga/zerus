@@ -6,9 +6,9 @@ import type { ActivityItem, TranscriptItem } from "./types";
 // look, stalled and report notices, member messages, doorbells) and the
 // lead's answers to them show in the owner's view:
 //   full       as today (208's system-notice look);
-//   collapsed  each notice one folded line like a tool call, the lead's reply
-//              to it folded the same way (the default);
-//   silent     neither shows.
+//   collapsed  each notice one folded line like a tool call; the lead's reply
+//              shows in full (owner, 2026-11-09) (the default);
+//   silent     the notices do not show; the lead's reply still does (owner, 2026-11-09).
 // A turn belongs to the prompts that opened it: it is a notice turn only when
 // every prompt that opened it is a team notice; one owner message among them
 // makes it the owner's, shown in full. Display only: the lead receives
@@ -60,14 +60,6 @@ export function noticeLine(item: ActivityItem): string {
   return body ? `${head}: ${body}` : head;
 }
 
-/** The folded reply's line: the lead's first words, else what its tools did. */
-function replyLine(items: readonly TranscriptItem[]): string {
-  const said = items.find((item) => item.kind === "agent") as ActivityItem | undefined;
-  if (said) return firstLine(said.body);
-  const tools = items.filter((item) => item.kind === "tools" || item.kind === "tool") as ActivityItem[];
-  return tools.length ? tools.map((item) => item.title ?? "").filter(Boolean).join(", ") : "";
-}
-
 /** The items as the mode shows them. Full returns them unchanged. */
 export function foldNoticeTurns(items: readonly TranscriptItem[], mode: NoticeMode): TranscriptItem[] {
   if (mode === "full") return [...items];
@@ -81,15 +73,15 @@ export function foldNoticeTurns(items: readonly TranscriptItem[], mode: NoticeMo
     const body: TranscriptItem[] = [];
     while (i < items.length && !isPrompt(items[i])) body.push(items[i++]);
     if (prompts.some(isOwner)) { out.push(...prompts, ...body); continue; }
-    if (mode === "silent") continue;
+    if (mode === "silent") { out.push(...body); continue; }
     for (const prompt of prompts) {
       const notice = prompt as ActivityItem;
       out.push({ id: `fold-${notice.id}`, kind: "folded", at: notice.at, title: noticeLine(notice), sender: notice.sender, folded: [notice], foldKind: "notice" });
     }
-    if (body.length) {
-      const first = body[0] as ActivityItem, last = body[body.length - 1] as ActivityItem;
-      out.push({ id: `fold-reply-${first.id}`, kind: "folded", at: last.at ?? "", title: replyLine(body), sender: tr("Lead's reply"), folded: body, foldKind: "reply" });
-    }
+    // Owner, 2026-11-09: the lead's reply is never folded. The owner's messages
+    // reach the lead in the middle of a turn a notice opened, so a folded reply
+    // hid the lead's answers to the owner. Only the notice itself folds.
+    out.push(...body);
   }
   return out;
 }

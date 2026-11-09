@@ -3010,7 +3010,33 @@ mod tests {
             value
         };
         assert_eq!(super::super::lead_plan::list(&new, 300), super::super::lead_plan::list(&old, 300), "lead-changes answers the same");
-        assert_eq!(status(&new), status(&old), "status answers the same");
+        // The team is the same but for the snapshots, now ids; the status's
+        // lead changes are the same (the rest of a running team's status
+        // counts waits from the clock).
+        let mut light = old.clone();
+        for change in &mut light.lead_changes {
+            if !change.tasks_before.is_empty() || !change.phases_before.is_empty() {
+                change.changed = change.tasks_before.drain(..).map(|task| task.id).collect();
+                change.phases_changed = change.phases_before.drain(..).map(|phase| phase.n).collect();
+            }
+        }
+        assert_eq!(serde_json::to_value(&new).unwrap(), serde_json::to_value(&light).unwrap(), "the team reads the same");
+        let (before_status, after_status) = (status(&old), status(&new));
+        assert_eq!(after_status["lead_changes"], before_status["lead_changes"], "status shows the same lead changes");
+        assert_eq!(after_status["lead_changes_total"], before_status["lead_changes_total"]);
+        // `team status`'s own work on each copy, min of 5: a read-only open,
+        // the team's load and its bounded status view.
+        let timed = |path: &Path| {
+            (0..5)
+                .map(|_| {
+                    let started = Instant::now();
+                    let team = Store::open_at(path, false).unwrap().load(&target).unwrap().unwrap();
+                    let _ = status(&team);
+                    started.elapsed().as_secs_f64() * 1000.0
+                })
+                .fold(f64::MAX, f64::min)
+        };
+        let status_ms = json!({"before":timed(&before),"after":timed(&after)});
         // The newest revertible change, reverted on both: the same team (the
         // before copy writes the whole record, as before task 288).
         let change = new.lead_changes.iter().rev().find(|change| change.reverted_at.is_none() && change.op != "use-last-reply").map(|change| change.id.clone());
@@ -3050,7 +3076,7 @@ mod tests {
         let rows: i64 = Connection::open(&after).unwrap().query_row("SELECT COUNT(*) FROM team_lead_changes WHERE team=?1", params![target], |row| row.get(0)).unwrap();
         println!("{}", json!({"task":4,"team":target,"lead_changes":new.lead_changes.len(),"history_rows":rows,
             "head_bytes":{"before":old_bytes,"after":new_bytes},"layout":{"before":old_layout,"after":new_layout},
-            "open_ms":open_ms,"migration_held_ms":held.iter().max(),"reverted":change,"revert":reverted.first().map(|r| r.0.clone())}));
+            "open_ms":open_ms,"migration_held_ms":held.iter().max(),"status_min_of_5_ms":status_ms,"reverted":change,"revert":reverted.first().map(|r| r.0.clone())}));
     }
 
     #[test]

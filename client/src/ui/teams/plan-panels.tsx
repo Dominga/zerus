@@ -1,6 +1,8 @@
 import { For, Show, createSignal } from "solid-js";
 import type { JSX } from "solid-js";
 import { tr } from "../../i18n";
+import { Icon } from "../lib/icons";
+import { PROFILE_PREVIEW_ROWS, profileSectionFolded, setProfileSectionFolded, type ProfileSection } from "../../store/profileSections";
 import type { TeamBuildItem, TeamBuildsView, TeamProfileView, TeamTestsView, TeamView } from "../../types";
 import type { PlacedNode } from "./plan";
 import { KIND_STYLES, keyName, lossKey, styleOf, swatchBackground } from "./profile-palette";
@@ -324,7 +326,7 @@ export function ProfileSummary(props: { profile?: TeamProfileView | null; team?:
             <div class="pm-tile"><span>{tr("Elapsed")}</span><b>{formatSeconds(profile().elapsed_s ?? 0)}</b></div>
             <div class="pm-tile"><span>{tr("Worked")}</span><b>{formatSeconds(profile().worked_s ?? 0)}</b></div>
             <div class="pm-tile"><span>{tr("Accepted")}</span><b>{profile().accepted}/{profile().tasks}</b></div>
-            <div class="pm-tile"><span>{tr("Tokens")}</span><b>{formatTokens(profile().tokens)}</b><Show when={profile().tokens_partial}><i class="pm-note">{tr("partial")}</i></Show></div>
+            <div class="pm-tile"><span>{tr("Tokens")}</span><b>{tokenValue(profile().tokens, tr("The provider did not report this profile's tokens"))}</b><Show when={profile().tokens_partial}><i class="pm-note">{tr("partial")}</i></Show></div>
           </div>
         )}
       </Show>
@@ -333,11 +335,13 @@ export function ProfileSummary(props: { profile?: TeamProfileView | null; team?:
 }
 
 /**
- * Task #339: the Top losses and the roles follow the lanes and their legend,
- * as Qt's losses column follows the timeline card; the legend itself moved to
- * the Time section, directly under the lanes it explains.
+ * Task #339/#410: the Top losses and the Roles are two collapsible sections
+ * side by side under the lanes, each folded to its first rows with its count
+ * in the header and the owner's choice remembered per Profile view. The spans
+ * legend stays with the lanes (TimeView).
  */
 export function ProfileDetails(props: { profile?: TeamProfileView | null; team?: TeamView; onOpenReport?: (id: number) => void }): JSX.Element {
+  const view = () => props.team?.id || "profile";
   return (
     <div class="pm-profile pm-profile-details">
       <Show when={props.team?.tasks.some((task) => task.archived)}>
@@ -354,39 +358,75 @@ export function ProfileDetails(props: { profile?: TeamProfileView | null; team?:
       </Show>
       <Show when={props.profile}>
         {(profile) => (
-          <>
-            <h3>{tr("Top losses")}</h3>
-            <Show when={profile().losses.length > 0} fallback={<p class="pm-empty">{tr("No losses recorded")}</p>}>
-              <For each={profile().losses.slice(0, 20)}>
-                {(loss) => (
-                  <div class="pm-loss-row" data-kind={lossKey(loss.kind) ?? ""}>
-                    <Swatch kind={lossKey(loss.kind)} />
-                    <span class="pm-loss-kind">{lossLabel(loss.kind)}</span>
-                    <Show when={loss.task > 0}><span class="pm-id">#{loss.task}</span></Show>
-                    <span class="grow" />
-                    <span>{formatSeconds(loss.seconds)}</span>
-                    <span class="pm-note">{formatTokens(loss.tokens)}</span>
-                  </div>
-                )}
-              </For>
-            </Show>
-            <h3>{tr("Roles")}</h3>
-            <For each={profile().roles.slice(0, 50)}>
-              {(role) => (
+          <div class="pm-details-columns">
+            <ProfileSectionBox id="losses" view={view()} title={tr("Top losses")} count={profile().losses.length}
+              items={profile().losses.slice(0, 20)} empty={<p class="pm-empty">{tr("No losses recorded")}</p>}
+              row={(loss) => (
+                <div class="pm-loss-row" data-kind={lossKey(loss.kind) ?? ""}>
+                  <Swatch kind={lossKey(loss.kind)} />
+                  <span class="pm-loss-kind">{lossLabel(loss.kind)}</span>
+                  <Show when={loss.task > 0}><span class="pm-id">#{loss.task}</span></Show>
+                  <span class="grow" />
+                  <span>{formatSeconds(loss.seconds)}</span>
+                  <span class="pm-note">{tokenValue(loss.tokens, tr("This loss's tokens were not reported"))}</span>
+                </div>
+              )} />
+            <ProfileSectionBox id="roles" view={view()} title={tr("Roles")} count={profile().roles.length}
+              items={profile().roles.slice(0, 50)} empty={<p class="pm-empty">{tr("No roles recorded")}</p>}
+              row={(role) => (
                 <div class="pm-role-row">
                   <span>{role.key || role.kind}</span>
                   <span class="grow" />
                   <span>{role.accepted}/{role.attempts}</span>
                   <span class="pm-note">{role.returned} {tr("returned")}</span>
-                  <span class="pm-tokens">{formatTokens(role.tokens_per_accepted)}</span>
+                  <span class="pm-tokens">{tokenValue(role.tokens_per_accepted, tr("No accepted task of this role reported tokens"))}</span>
                 </div>
-              )}
-            </For>
-          </>
+              )} />
+          </div>
         )}
       </Show>
     </div>
   );
+}
+
+/**
+ * Task #410: one folded section: its title and count open or close it, and
+ * "Show all" / "Show fewer" sit at the header's end. Folded by default.
+ */
+function ProfileSectionBox<T>(props: {
+  id: ProfileSection; view: string; title: string; count: number;
+  items: readonly T[]; row: (item: T) => JSX.Element; empty?: JSX.Element;
+}): JSX.Element {
+  const open = () => !profileSectionFolded(props.view, props.id);
+  const toggle = () => setProfileSectionFolded(props.view, props.id, open());
+  const visible = () => (open() ? props.items : props.items.slice(0, PROFILE_PREVIEW_ROWS));
+  const more = () => props.items.length > PROFILE_PREVIEW_ROWS;
+  const countTip = () => (props.items.length < props.count ? tr("The first %1 of %2", props.items.length, props.count) : undefined);
+  return (
+    <section class="pm-section" data-section={props.id} aria-label={props.title}>
+      <header class="pm-section-head">
+        <button type="button" class="pm-section-toggle" aria-expanded={open()} onClick={toggle}>
+          <Icon name={open() ? "chevron-down" : "chevron-right"} size={13} />
+          <b>{props.title}</b>
+          <span class="pm-section-count" title={countTip()}>{props.count}</span>
+        </button>
+        <span class="grow" />
+        <Show when={more()}>
+          <button type="button" class="pm-section-more" onClick={toggle}>{open() ? tr("Show fewer") : tr("Show all")}</button>
+        </Show>
+      </header>
+      <Show when={props.items.length > 0} fallback={props.empty}>
+        <For each={visible()}>{(item) => props.row(item)}</For>
+      </Show>
+    </section>
+  );
+}
+
+/** Task #410: an unknown token value is a muted dash, its reason in the tooltip. */
+function tokenValue(tokens: number | null, reason: string): JSX.Element {
+  return tokens === null || !Number.isFinite(tokens)
+    ? <span class="pm-unknown" title={reason} aria-label={reason}>—</span>
+    : <>{formatTokens(tokens)}</>;
 }
 
 export function TestsPanel(props: {

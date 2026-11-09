@@ -251,6 +251,18 @@
 /* Task #339: the totals, the lanes and the Top losses in Qt's order. */
 .pm-profile-summary { flex: none; overflow: visible; }
 .pm-profile-details { flex: none; overflow: visible; }
+/* Task #410: the Profile page's two lower sections side by side; each folds to
+   its first rows by default and remembers the choice per view. */
+.pm-details-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start; }
+@media (max-width: 1100px) { .pm-details-columns { grid-template-columns: minmax(0, 1fr); } }
+.pm-section { min-width: 0; padding: 6px 9px 8px; border: 1px solid var(--z-color-card-border); border-radius: var(--z-radius-md); background: var(--z-color-card); }
+.pm-section-head { display: flex; align-items: center; gap: 8px; padding-bottom: 3px; }
+.pm-section-toggle { display: inline-flex; align-items: center; gap: 6px; color: var(--z-color-text-2); font-size: var(--fs-sm); }
+.pm-section-toggle b { color: var(--z-color-text); font-weight: 600; }
+.pm-section-count { padding: 0 6px; border-radius: 999px; background: var(--z-color-hover); color: var(--z-color-muted); font-size: var(--fs-2xs); font-variant-numeric: tabular-nums; }
+.pm-section-more { color: var(--z-color-accent); font-size: var(--fs-2xs); }
+.pm-section-more:hover { text-decoration: underline; }
+.pm-unknown { color: var(--z-color-muted); cursor: help; }
 .tl-section { padding: 12px 14px 0; }
 .tl-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .tl-head h3 { font-size: var(--fs-sm); color: var(--z-color-text-2); margin: 0; }

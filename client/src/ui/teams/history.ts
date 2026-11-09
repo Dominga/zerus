@@ -96,7 +96,13 @@ export function historyLine(event: HistoryEvent, tasks: readonly { id: number; t
     case "start_late": set(tr("Delivered and not started yet, %1%2", ref, at), "warn"); break;
     case "refused": set(tr("Not delivered %1%2 (%3); handed out again later", ref, at, str(d.error)), "warn"); break;
     case "unconfirmed": set(tr("Delivery unconfirmed, %1%2 (%3)", ref, at, str(d.error)), "danger"); break;
-    case "reported": set(tr("Report to %1, %2%3", str(d.to) || tr("Lead"), ref, at)); break;
+    case "reported": {
+      const quote = str(d.text);
+      const to = str(d.to) || tr("Lead");
+      // Task #362: the lead's use of a member's last reply quotes the reply.
+      set(quote ? tr("Report to %1, %2%3: “%4”", to, ref, at, quote) : tr("Report to %1, %2%3", to, ref, at));
+      break;
+    }
     case "interim_report": {
       const text = str(d.text);
       set(text ? tr("Interim report, %1%2: “%3”", ref, at, text) : tr("Interim report, %1%2", ref, at), "active");

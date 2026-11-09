@@ -17,7 +17,7 @@ export interface ActTeam {
   paused?: { at?: number; by?: string; reason?: string } | null;
   /** The owner's attention items as hgs words them (task 95 reads `lead_stalled`). */
   attention?: unknown[];
-  members: { id: string; role: string; agent: string; computer: string; lead: boolean; session: { name: string } | null }[];
+  members: { id: string; role: string; agent: string; computer: string; lead: boolean; session: { name: string; host?: string } | null }[];
   tasks: ActTask[];
   phases: { n: number; title: string; state: string; status: string; mode?: string }[];
   /** Task #58: the free phase, and whether hgs sends each phase's mode. */
@@ -41,6 +41,8 @@ export interface ActTask {
   waits?: string;
   /** Task 55: the newest attempt's open questions to the lead. */
   questions?: { id: string; text: string; at: number }[];
+  /** Task #415: an attempt that ended without a report: the card offers its last reply. */
+  no_report?: boolean; attempt_id?: string; archived?: boolean;
   pipeline_run?: { name: string; accept: string; stages: string[]; open: { stage: number; kind: string; member: string; state: string } | null } | null;
 }
 
@@ -713,6 +715,19 @@ export class TeamActions {
     if (attempt !== null) { this.notice = retryContinueText(attempt); this.changed(); }
     return outcome;
   }
+  /**
+   * Task #415: a No report attempt's last reply becomes its report (the owner,
+   * or the lead since task #362); hgs reads the reply the attempt kept.
+   */
+  useLastReply(task: ActTask) {
+    const attempt = task.attempt_id ?? "";
+    if (!attempt) {
+      this.notice = tr("This task has no attempt to report.");
+      this.changed();
+      return Promise.resolve("failed" as const);
+    }
+    return this.run(`use-last-reply:${task.id}`, { kind: "use_last_reply", task: task.id, attempt });
+  }
   /** Task 55: the owner's answer to a member's question (`hgs team reply`); nothing without text or for a closed question. */
   reply(task: ActTask, question: string, text: string) {
     const answer = text.trim();
@@ -775,10 +790,22 @@ export class TeamActions {
     return this.run(`discard-phase:${phase}`, { kind: "discard_phase", phase, tasks, accepted: state === "queued" || state === "running" });
   }
   returnToDraft(phase: number) { return this.run(`return-to-draft:${phase}`, { kind: "return_to_draft", phase }); }
-  /** Task #308: asks the owner to allow the project's working mode. */
-  proposeWorkingMode(preset: string, reason = "") {
-    return this.run(`working-mode:${preset}`, { kind: "propose_working_mode", preset, reason },
-      { name: "teamWorkingModeConfirm", title: tr("Switch the working mode?"), text: tr("Propose switching this team to %1? Its settings follow the project's proposal.", preset), action: tr("Propose the switch") });
+  /**
+   * Task #308/#451: the working-mode block's Propose the switch. "auto" asks
+   * hgs to re-read the project's profile, so a block left over from an older
+   * profile proposes the mode the project selects now, never a stale preset;
+   * the receipt says whether a card was made or the settings already follow it.
+   */
+  proposeWorkingMode() {
+    return this.run("working-mode:propose", { kind: "propose_working_mode", preset: "auto", reason: "" },
+      { name: "teamWorkingModeConfirm", title: tr("Switch the working mode?"), text: tr("Ask hgs to re-read the project's profile and propose the working mode it selects? You decide the switch on its card."), action: tr("Propose the switch") });
+  }
+  /**
+   * Task #337: the owner keeps the team's settings for the project's profile;
+   * nothing about the team changes, so no confirmation.
+   */
+  keepWorkingMode() {
+    return this.run("working-mode:keep", { kind: "keep_working_mode" });
   }
   /** Move earlier or later among the movable phases (drafts and accepted ones not started). */
   movePhase(phase: number, later: boolean) {

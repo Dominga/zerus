@@ -3,6 +3,8 @@ import copy
 import importlib.util
 import json
 from pathlib import Path
+import re
+import shlex
 import sys
 import tempfile
 import unittest
@@ -80,13 +82,14 @@ class NightlyTests(unittest.TestCase):
         recipe = directory / "aur" / nightly.PACKAGE
         recipe.mkdir(parents=True)
         digest = common.sha256(binary)
-        (recipe / "PKGBUILD").write_text(nightly.render_recipe(self.info, digest))
+        rendered = nightly.render_recipe(self.info, digest)
+        (recipe / "PKGBUILD").write_text(rendered)
+        dependencies = shlex.split(re.search(r"^depends=\((.*?)\)$", rendered, re.MULTILINE | re.DOTALL).group(1))
         (recipe / ".SRCINFO").write_text(
             f"pkgbase = {nightly.PACKAGE}\n\tpkgver = {version}\n\tpkgrel = 1\n\tarch = x86_64\n"
             f"\tsource = https://github.com/ufna/zerus/releases/download/nightly-123/{binary.name}\n"
             f"\tsha256sums = {digest}\n" +
-            "".join(f"\tdepends = {name}>=1.2.3\n" for name in self.info["binary_dependencies"]) +
-            "".join(f"\tdepends = {name}\n" for name in ("tmux>=3.7", "openssh", "python", "curl", "procps-ng", "hicolor-icon-theme", "bash", "tar")) +
+            "".join(f"\tdepends = {name}\n" for name in dependencies) +
             "".join(f"\tconflicts = {name}\n" for name in ("zerus", "zerus-git", "zerus-ade-bin")) +
             f"\tprovides = zerus={version}\n\tprovides = hgs\n\tprovides = hgs-tray\npkgname = {nightly.PACKAGE}\n")
         common.finish_candidate(directory, nightly.PACKAGES)
@@ -314,6 +317,40 @@ class NightlyTests(unittest.TestCase):
         self.assertIn(common.OPTIONAL_WEBENGINE, recipe)
         self.assertNotIn("gst-plugins-good", recipe)
         nightly.validate_nightly(self.candidate(name="previous-qt"), COMMIT, 123, 7)
+
+    def test_rendered_next_dependencies_validate_and_remain_exact(self):
+        directory = self.candidate()
+        path = directory / "aur" / nightly.PACKAGE / ".SRCINFO"
+        original = path.read_text()
+        codecs = {"gst-plugins-base", "gst-plugins-good", "gst-plugins-bad", "gst-plugins-ugly", "gst-libav"}
+        expected = {f"{name}>=1.2.3" for name in common.BINARY_LIBRARIES} | codecs | {
+            "tmux>=3.7", "openssh", "python", "curl", "procps-ng", "hicolor-icon-theme", "bash", "tar"}
+        self.assertEqual(set(common.metadata(original)["depends"]), expected)
+        nightly.validate_nightly(directory, COMMIT, 123, 7)
+        changes = [original.replace(f"\tdepends = {name}\n", "") for name in sorted(codecs)]
+        changes.append(original + "\tdepends = unreviewed-codec\n")
+        for changed in changes:
+            with self.subTest(srcinfo=changed):
+                path.write_text(changed)
+                common.finish_candidate(directory, nightly.PACKAGES)
+                with self.assertRaisesRegex(ValueError, "Nightly dependencies"):
+                    nightly.validate_nightly(directory)
+
+    def test_rendered_qt_fallback_dependencies_validate_without_next_codecs(self):
+        for index, libraries in enumerate((common.QT_BINARY_LIBRARIES, common.LEGACY_BINARY_LIBRARIES)):
+            with self.subTest(libraries=libraries):
+                self.info["binary_dependencies"] = {name: "1.2.3" for name in libraries}
+                directory = self.candidate(name=f"qt-fallback-{index}")
+                path = directory / "aur" / nightly.PACKAGE / ".SRCINFO"
+                original = path.read_text()
+                expected = {f"{name}>=1.2.3" for name in libraries} | {
+                    "tmux>=3.7", "openssh", "python", "curl", "procps-ng", "hicolor-icon-theme", "bash", "tar"}
+                self.assertEqual(set(common.metadata(original)["depends"]), expected)
+                nightly.validate_nightly(directory, COMMIT, 123, 7)
+                path.write_text(original + "\tdepends = gst-libav\n")
+                common.finish_candidate(directory, nightly.PACKAGES)
+                with self.assertRaisesRegex(ValueError, "Nightly dependencies"):
+                    nightly.validate_nightly(directory)
 
     def test_moving_url_missing_floors_and_extra_files_are_rejected(self):
         directory = self.candidate()

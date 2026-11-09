@@ -66,18 +66,32 @@ export class PrivateStoreNotices {
     const before = this.signature();
     const prefix = `${computer}\n`;
     const current = new Set<string>();
+    // Task #383: once per path - a store whose reason changes is not raised
+    // again - and the stores new in one look are one notice.
+    const raised: { key: string; store: PrivateStore }[] = [];
     for (const store of stores) {
       if (!store.path) continue;
       const key = `${prefix}${store.path}\n${store.reason}`;
       current.add(key);
-      if (this.known.has(key)) continue;
+      const path = `${prefix}${store.path}\n`;
+      const seen = [...this.known].some((known) => known.startsWith(path));
       this.known.add(key);
+      if (seen || raised.some((entry) => entry.store.path === store.path)) continue;
+      raised.push({ key, store });
+    }
+    if (raised.length > 0) {
       const where = name || (computer ? computer : tr("this computer"));
-      const notice = {
-        key,
-        title: tr("Zerus: a private store is refused"),
-        body: tr("%1: %2\n%3\nFix: %4", where, store.path, store.reason, store.fix),
-      };
+      const notice = raised.length === 1
+        ? {
+            key: raised[0].key,
+            title: tr("Zerus: a private store is refused"),
+            body: tr("%1: %2\n%3\nFix: %4", where, raised[0].store.path, raised[0].store.reason, raised[0].store.fix),
+          }
+        : {
+            key: raised[0].key,
+            title: tr("Zerus: %1 private stores are refused", raised.length),
+            body: groupedBody(where, raised.map((entry) => entry.store)),
+          };
       this.raised(notice);
       fresh.push(notice);
     }
@@ -108,6 +122,13 @@ export class PrivateStoreNotices {
   private keep(before: string) {
     if (this.port && this.signature() !== before) void this.port.save(this.knownKeys()).catch(() => {});
   }
+}
+
+/** Task #383: several refused stores on one line, the first one's fix after. */
+export function groupedBody(where: string, stores: readonly PrivateStore[]): string {
+  const shown = stores.slice(0, 3).map((store) => store.path).join(", ");
+  const list = stores.length > 3 ? tr("%1 and %2 more", shown, stores.length - 3) : shown;
+  return tr("%1: %2\nFix: %3\nEach store has a fix of its own; the session details list them.", where, list, stores[0]?.fix ?? "");
 }
 
 const devicePort: NoticesPort = {

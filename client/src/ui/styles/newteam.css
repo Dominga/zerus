@@ -125,17 +125,20 @@
 /* Task #308: the project's working-mode proposal. */
 .nt-working-mode { border: 1px solid var(--z-color-border); border-radius: var(--z-radius-lg); padding: 8px 10px; display: flex; flex-direction: column; gap: 5px; }
 .nt-working-reasons { margin: 0; padding-left: 18px; color: var(--z-color-text-3); font-size: var(--fs-sm); }
-.team-working-mode { border: 1px solid color-mix(in srgb, var(--z-color-warn) 55%, var(--z-color-border)); background: color-mix(in srgb, var(--z-color-warn) 6%, var(--z-color-raised)); border-radius: var(--z-radius-lg); padding: 7px 10px; display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
-.team-working-mode b { color: var(--z-color-warn); }
-.team-working-mode ul { margin: 0; padding-left: 18px; font-size: var(--fs-sm); color: var(--z-color-text-3); }
+/* Task #308, #337: the project's working-mode suggestion, as one compact row
+   (its title row, the differing settings and the three actions); the reasons
+   stay in the row's tooltip. */
+.team-working-mode { border: 1px solid color-mix(in srgb, var(--z-color-warn) 55%, var(--z-color-border)); background: color-mix(in srgb, var(--z-color-warn) 6%, var(--z-color-raised)); border-radius: var(--z-radius-lg); padding: 6px 10px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 6px 0; font-size: var(--fs-sm); }
+.team-working-mode > b { color: var(--z-color-warn); font-weight: 600; min-width: 0; }
+.team-working-mode .team-working-mode-wrong { color: var(--z-color-text-3); min-width: 0; }
+.team-working-mode .grow { flex: 1; }
+/* Task #451 (owner, 2026-11-09): the block's buttons answer: what hgs did, or
+   why it refused, stays under the row until the owner dismisses it. */
+.team-working-mode-note { display: flex; align-items: center; gap: 8px; margin: -2px 0 6px; padding: 4px 10px; border: 1px solid var(--z-color-border); border-radius: var(--z-radius-lg); background: var(--z-color-raised); color: var(--z-color-text-2); font-size: var(--fs-sm); }
+.team-working-mode-note > .ell { flex: 1; min-width: 0; }
+.team-working-mode-note.danger { border-color: color-mix(in srgb, var(--z-color-danger) 55%, var(--z-color-border)); color: var(--z-color-danger); }
 
-/* Task #314 (F1): an indented member card keeps the pane's right edge, and
-   its badges shrink before the provider chip or Resume is cut. */
-.scard.team-member { left: 24px; right: 2px; width: auto; max-width: calc(100% - 26px); }
-.scard.team-member .sc-l1, .scard.team-member .sc-l2, .scard.team-member .sc-l3, .scard.team-member .sc-foot { right: 6px; }
-.scard.team-member .sc-title { min-width: 0; }
-.scard.team-member .agent-badge { flex: 0 1 auto; min-width: 0; max-width: 104px; }
-.scard.team-member .sc-l3 > .ell { min-width: 0; }
+/* Task #314 (F1)'s member-card rules moved to sessions.css with the session list's own class names (task 425). */
 /* Task #314 (F10): New team fills the window; only the form body scrolls and
    the footer stays visible instead of a second page scrollbar. */
 .newteam-page, .newteam-page.embedded { width: 100%; max-width: none; box-sizing: border-box; overflow: hidden; }

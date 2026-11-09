@@ -1103,3 +1103,99 @@ fn the_lead_sets_a_tasks_estimate_in_the_plan_and_edits_it_in_the_draft() {
     let extended = team.task(2).unwrap();
     assert_eq!((extended.estimate_minutes, extended.estimate_source.as_str()), (Some(60.0), "lead"));
 }
+
+/// Task #362 (owner, 2026-11-08): the lead uses a member's last reply as the
+/// report; the feed names the lead and quotes the reply, and the lead-changes
+/// digest records the action.
+#[test]
+fn the_lead_uses_a_members_last_reply_as_the_report() {
+    let mut team = running_team();
+    let attempt = hand_out(&mut team, 1);
+    let reply = "Done: the parser and its tests";
+    team.task_mut(1).unwrap().attempts.last_mut().unwrap().last_reply = reply.into();
+    team.task_mut(1).unwrap().attempts.last_mut().unwrap().no_report = true;
+    let none = BTreeSet::new();
+    let mut events = Vec::new();
+    let value = apply(&mut team, "use-last-reply", &json!({"task":1,"attempt":attempt,"text":reply}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+    assert_eq!(value["status"], "submitted");
+    let report = team.task(1).unwrap().attempts.last().unwrap().report.clone().unwrap();
+    assert_eq!(report.text, reply);
+    assert!(!report.captured);
+    assert_eq!(team.task(1).unwrap().status, TaskStatus::Submitted);
+    // The feed names the lead's action, the member it is for, and the reply.
+    let reported = events.iter().find(|event| event.kind == "reported").expect("a report event");
+    assert_eq!(reported.payload["by"], "Lead");
+    assert_eq!(reported.payload["for"], "Backend");
+    assert_eq!(reported.payload["text"], reply);
+    // The owner sees it in the digest with the reply quoted, and no revert.
+    let change = team.lead_changes.last().expect("a lead change");
+    assert_eq!((change.op.as_str(), change.by.as_str()), ("use-last-reply", "Lead"));
+    assert!(change.summary.contains(reply), "{}", change.summary);
+    let (title, _, shown) = crate::state::teams::lead_plan::digest(&team).expect("a digest");
+    assert!(title.contains("last reply"), "{title}");
+    assert!(shown[0]["revert"].is_null(), "{shown}");
+    let change_id = change.id.clone();
+    let error = apply(&mut team, "revert-lead-change", &json!({"change":change_id}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+    assert!(error.contains("cannot be reverted"), "{error}");
+}
+
+/// Task #362: a member still cannot use its own last reply as the report.
+#[test]
+fn a_member_cannot_use_its_own_last_reply_as_the_report() {
+    let mut team = running_team();
+    let attempt = hand_out(&mut team, 1);
+    team.task_mut(1).unwrap().attempts.last_mut().unwrap().last_reply = "Done".into();
+    let none = BTreeSet::new();
+    let mut events = Vec::new();
+    let error = apply(&mut team, "use-last-reply", &json!({"task":1,"attempt":attempt,"text":"Done"}), &Actor::Member("dev".into()), &none, &mut events).unwrap_err().to_string();
+    assert!(error.contains("Only the lead or you use a last reply as the report"), "{error}");
+    assert!(team.task(1).unwrap().attempts.last().unwrap().report.is_none());
+    assert!(team.lead_changes.is_empty());
+}
+
+/// Task #362: a sub-lead uses the last reply of its own reports only.
+#[test]
+fn a_sub_lead_uses_the_last_reply_of_its_own_reports_only() {
+    let mut team = team_with_sub_lead();
+    let tests = hand_out(&mut team, 2);
+    team.task_mut(2).unwrap().attempts.last_mut().unwrap().last_reply = "Tests green".into();
+    let none = BTreeSet::new();
+    let mut events = Vec::new();
+    apply(&mut team, "use-last-reply", &json!({"task":2,"attempt":tests,"text":"Tests green"}), &Actor::Member("qalead".into()), &none, &mut events).unwrap();
+    assert_eq!(team.task(2).unwrap().status, TaskStatus::Submitted);
+    assert_eq!(team.lead_changes.last().unwrap().by, "QA lead");
+    // The lead's own work is not the sub-lead's to report.
+    let api = hand_out(&mut team, 1);
+    team.task_mut(1).unwrap().attempts.last_mut().unwrap().last_reply = "API done".into();
+    let error = apply(&mut team, "use-last-reply", &json!({"task":1,"attempt":api,"text":"API done"}), &Actor::Member("qalead".into()), &none, &mut events).unwrap_err().to_string();
+    assert!(error.contains("Only the lead or you"), "{error}");
+}
+
+/// Task #362: a member's missing report is its reviewer's item, so the
+/// sub-lead the member reports to may use the last reply.
+#[test]
+fn a_members_missing_report_reaches_its_sub_lead() {
+    let mut team = team_with_sub_lead();
+    team.status = TeamStatus::Running;
+    let now = crate::state::now();
+    let task = team.task_mut(2).unwrap();
+    task.status = TaskStatus::InProgress;
+    task.attempts.push(Attempt {
+        n: 1,
+        id: "A2".into(),
+        member: "qa".into(),
+        state: AttemptState::Delivered,
+        sent_at: now - 7200.0,
+        delivered_at: Some(now - 7200.0),
+        started_at: Some(now - 7100.0),
+        turn_ended_at: Some(now - 3600.0),
+        last_reply: "Tests green".into(),
+        no_report: true,
+        ..Default::default()
+    });
+    let items = crate::state::teams::inbox::items_for(&team, "qalead");
+    assert!(items.iter().any(|item| item.kind == "no_report" && item.task == Some(2)), "{items:?}");
+    assert!(!crate::state::teams::inbox::items(&team).iter().any(|item| item.kind == "no_report"));
+}
+
+

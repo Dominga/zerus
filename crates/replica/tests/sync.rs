@@ -554,3 +554,28 @@ fn the_view_trusts_the_remembered_stage_of_unchanged_files() {
         .tasks
         .contains_key(task.uuid()));
 }
+
+#[test]
+fn a_task_and_the_project_report_the_versions_their_inventory_holds() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(root.path());
+    assert!(store.project_version().unwrap().is_empty());
+    let first = add(&store, "Add rate limiting");
+    let mut second = add(&store, "Document the setup");
+    second.comment("More detail", &Actor::Person, 2).unwrap();
+    store.save(&mut second).unwrap();
+    let mut doc = store.project().unwrap();
+    doc.set_settings(&Settings {
+        agent_limit: 3,
+        ..doc.settings()
+    })
+    .unwrap();
+    store.save_project(&doc).unwrap();
+    let (inventory, _) = store.inventory().unwrap();
+    assert_eq!(store.project_version().unwrap(), inventory.project);
+    assert!(!inventory.project.is_empty());
+    for task in [&first, &second] {
+        let loaded = store.load(task.uuid()).unwrap();
+        assert_eq!(&loaded.inventory_version(), &inventory.tasks[task.uuid()]);
+    }
+}

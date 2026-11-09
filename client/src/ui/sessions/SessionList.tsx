@@ -1,6 +1,7 @@
-import { followVisibleGit } from "../../store/gitFeed";
-import { inspectSession, sessionFolderStatus } from "../../bridge";
-import { folderEntries, folderRequest, type FolderStatus } from "../../store/sessionFolders";
+import { TextInput } from "../lib/TextField";
+import { steadyTitle } from "../lib/steady-title";
+import { inspectSession, setKeepWarm, windowVisibility } from "../../bridge";
+import { sessionTerminalEntry } from "../../store/sessionTerminal";
 import { groupOf } from "../../store/organization";
 import { taskDragOver, taskDrop } from "../../store/taskAssignment";
 import { For, Show, Suspense, createMemo, createEffect, createSignal, lazy, on, onCleanup } from "solid-js";
@@ -9,60 +10,70 @@ import { Icon } from "../lib/icons";
 import { tr, trNoop } from "../../i18n";
 import { listRows, rowHeight, shownSummary, machineChoices, projectChoices, filterCounts as counts, pickerCounts, type Row } from "./model";
 import {
-  SessionCard, ChildCard, CompactCard, AgentBadge, StatusBadge, badgeKind, statusCaption, stripCaption,
-  emphasis, childStatus, gitTooltip, paletteIndex, folderOf, ProviderGlyph,
+  SessionCard, ChildCard, CompactCard, teamSummary, AgentBadge, StatusBadge, badgeKind, statusCaption, stripCaption,
+  emphasis, childStatus, captionText, gitTooltip, paletteIndex, folderOf, ProviderGlyph,
 } from "./SessionCard";
 import { agentKind, catalog, computerFresh, computerOffline } from "../../store/catalog";
 import { StateRefusalDetail, TakeoverRefusalDetail, servicePausedEmpty, stateRefusal, takeoverRefused } from "../components/DesktopServiceStatus";
+import { CleanupReviewButton } from "../screens/CleanupChip";
 import { visibleUnreadReply } from "../../store/attention";
 import { optionalQuestionCount } from "./optional-questions";
 import { currentChildren } from "./subagents";
-import { runningCommandsEntry } from "../../store/processes";
-import { flag, setSetting, settings, settingsReady } from "../../store/settings";
+import { setSetting, settings, settingsReady } from "../../store/settings";
 import { sessionsToggleTick, unifiedChrome } from "../../store/ui";
 import { compactSessionRows, expandSessionsOnHover } from "./session-prefs";
 import { archiveCount, archiveTip } from "../../store/archive";
 import { ArchiveBar, datePanelOpen } from "./ArchiveBar";
-import { detailsFor, followedFor, notify, updating } from "../../store/actions";
+import { detailsFor, errorText, followedFor, notify, updating } from "../../store/actions";
 import { STATE_CHANGED } from "./actions-ui";
 import { running } from "../../store/batch";
 import { grouping, headerOf, moveProject, setProjectCollapsed, setProjectToShow, sortProject } from "../../store/organization";
-import { TOOL_WIDTH, clearArchiveMenuEntry, machineMenu, moveState, runSelection, selectedRows, selectionContextMenu, selectionCount } from "./selection-live";
-import { barTools, splitTools, toolEntry } from "./selection-ui";
-import { actionEntries, copyEntries, freshActionEntry, forkEntry, muteEntry } from "./ActionDialogs";
+import { TOOL_WIDTH, clearArchiveMenuEntry, machineMenu, moveRefusal, runSelection, selectedRows, selectionContextMenu, selectionCount } from "./selection-live";
+import { anyUnmuted, barTools, splitTools, toolEntry } from "./selection-ui";
+import { actionEntries, copyEntries, freshActionEntry, muteEntry } from "./ActionDialogs";
 import { markAllEntry, markAllTip, markEntry, runMarkAll } from "./mark-entries";
-import { keepWarmAvailable, keepWarmHours, setKeepWarm } from "../../store/keepWarm";
-import { toggledHours, warmable } from "./keep-warm";
+import { keepWarmOf } from "./keep-warm";
+import { confirmKeepWarm, currentKeepWarm, keepWarmTarget } from "./keep-warm-state";
 import { moveEntry, openCreateProjectDialog, openDeleteProjectDialog, openRenameProjectDialog } from "./OrganizationDialogs";
 import { backgroundEntries } from "./background-menu";
 import { chipColor, headerEntries, projectColor, type FilterChip } from "./organization-ui";
+import { headerFrames } from "./folder-frames";
 import { newSessionForProject, newSessionFromCold, newSessionFromPanel } from "./newsession-view";
-import { openChip, openTerminal, terminalAvailable } from "./row-actions";
+import { openChip } from "./row-actions";
 import { CreationCard, CreationTile } from "./CreationCard";
+import { accessibleText as creationText } from "./creations-ui";
 import { creationCount, creationFooter, creationStatusMenu } from "../../store/creations";
 import {
-  selectedKey, setSelectedKey, setExpandedChildren, expandedChildren,
-  setCompactRows, compactRows, expandCompactRows, hasCompactRows, stateFilter, setStateFilter, search, setSearch, stripMode, setStripMode,
+  now, selectedKey, setSelectedKey, setExpandedChildren, expandedChildren,
+  setCompactRows, compactRows, expandCompactRows, stateFilter, setStateFilter, search, setSearch, stripMode, setStripMode,
   setMenu, visibleMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter, accountFilterSet, setAccountFilter, folderFilter, setPage,
-  multi, setMulti, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, commitSessionsWidth, menu, subagentOpen, teamsCollapsed, setTeamCollapsed,
-  revealing, setRevealing, setDetailTab,
+  multi, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, commitSessionsWidth, menu, subagentOpen, teamsCollapsed, setTeamCollapsed as setTeamsCollapsed,
+  revealing, setRevealing, setDetailTab, showLatestActivity,
   type StateFilter, type MenuEntry,
 } from "../../store/ui";
 import type { Session } from "./types";
 import { filterAccounts, selectedFilterAccounts, chooseFilterAccounts, toggleFilterAccount, openFilterAccounts, cancelFilterAccountReads } from "../../store/accountFilters";
+import { loadMarkCatalogs } from "../../store/accounts";
 import { clearFolderScope } from "../../store/folderFilter";
+import { compactNewChildren } from "../../store/childRowsWatch";
+import { setTeamCollapsed, teamCollapsed } from "../../store/teamCollapse";
 import { leaf, native } from "./paths";
 import { appendAccountChoices, bindingState, type AccountChoice } from "./scope-filters";
 import type { ClearControl, SessionRef } from "../../types";
 import { motionReduced } from "../motion";
 import { composer } from "../../store/composer";
 import { composerClearControl } from "../../bridge";
-import { bulkSelect, clearMulti, multiCount, setAnchor, dragItem, setDragItem, drop, setDrop, endDrag, placement, applyDrop, SESSION_MIME, type DragItem, type Drop } from "./organize";
+import { bulkSelect, clearMulti, multiCount, rangeStep, setAnchor, type RangeKey, dragItem, setDragItem, drop, setDrop, endDrag, placement, applyDrop, SESSION_MIME, type DragItem, type Drop } from "./organize";
 import { POINTER_DRAG, pointerDrag } from "../lib/pointerDrag";
 
-import { SearchResults } from "./SearchResults";
-import { nativeEntry } from "./native-entry";
+import { followGitRows } from "../../store/gitInterests";
+import { pageHidden } from "../../store/visibility";
+import { page } from "../../store/ui";
 import "../styles/content-search.css";
+import { lazyView } from "../lazy-view";
+import { LazyBoundary } from "../lazy-boundary";
+// The search results replace the list only while searching (zerus-ycycu).
+const SearchResults = lazyView(() => import("./SearchResults"), (m) => m.SearchResults);
 
 const SavedDraftsDialog = lazy(() => import("./SavedDrafts").then((m) => ({ default: m.SavedDraftsDialog })));
 
@@ -232,81 +243,65 @@ function clearEntry(s: Session, prepared?: ClearRead): MenuEntry {
 }
 
 /**
- * Keep cache warm (Qt's contextKeepCacheWarm): checked while the session's
- * cache is kept warm; on from here is one hour, the hours stay as set in
- * Details. No confirmation, as in Qt.
+ * Keep cache warm (Qt's contextKeepCacheWarm): checked while the host keeps the
+ * session's cache warm; on from here is one hour, the hours stay as set in
+ * Details. No confirmation, as in Qt. The change goes through the same host
+ * call, with the confirmed revision, as Details' row (KeepWarmRow).
  */
 function keepWarmEntry(s: Session): MenuEntry {
-  const hours = keepWarmHours(s), available = keepWarmAvailable();
+  const state = currentKeepWarm(s, undefined);
+  const on = !!state?.enabled;
+  const usable = !computerOffline(s.computer) && !!state && !!s.runId && !!s.conversationId;
   return {
-    label: tr("Keep cache warm"), icon: "zap", checked: hours > 0, disabled: !warmable(s) || !available,
-    hint: available ? tr("Send the idle agent a one-word service message before its prompt cache expires") : tr("Keep cache warm does not run while the background service manages sessions."),
-    action: () => { void setKeepWarm(s, toggledHours(hours)).catch(() => notify("error", tr("Keep cache warm could not be saved."), true)); },
+    label: tr("Keep cache warm"), icon: "zap", checked: on, disabled: !usable || (!on && state?.supported === false),
+    hint: state?.supported === false && !on ? tr(state.reason) : tr("Send the idle agent a one-word service message before its prompt cache expires"),
+    action: () => {
+      if (!state) return;
+      const target = { computer: s.computer, name: s.name, run_id: s.runId ?? "", conversation_id: s.conversationId ?? "" };
+      void setKeepWarm(target, on ? { kind: "off" } : { kind: "hours", hours: 1 }, state.revision)
+        .then((result) => { const next = keepWarmOf(result); if (next) confirmKeepWarm(keepWarmTarget(s), next); })
+        .catch((failure) => notify("error", tr(errorText(failure)), true));
+    },
   };
 }
 
-export function sessionMenu(s: Session, folderStatus?: { request: ReturnType<typeof folderRequest>; status: FolderStatus }, forkDetails?: import("../../types").Details, preparedClear?: ClearRead): MenuEntry[] {
-  // The selected row's menu reads the same details as the header (Qt's m_details).
-  const details = s.key === selectedKey() && !subagentOpen() ? detailsFor(s, !computerOffline(s.computer), followedFor(s.key)) : undefined;
+export function sessionMenu(s: Session, inspected?: import("../../types").Details, preparedClear?: ClearRead): MenuEntry[] {
+  const details = inspected ?? (s.key === selectedKey() && !subagentOpen() ? detailsFor(s, !computerOffline(s.computer), followedFor(s.key)) : undefined);
   const act = actionEntries(s, undefined, { context: true });
   const cp = copyEntries(s, details);
-  const request = folderRequest(s, details);
-  const folders = folderEntries(s, request, folderStatus && JSON.stringify(folderStatus.request) === JSON.stringify(request) ? folderStatus.status : undefined);
-  const mute = muteEntry(s);
-  const mark = markEntry(s);
-  const fresh = freshActionEntry(s);
+  const mute = muteEntry(s), mark = markEntry(s), fresh = freshActionEntry(s);
   const archived = s.state === "archived";
-  const commands = runningCommandsEntry(s, () => computerFresh(s.computer), () => flag("processes/enabled"), () => { setSelectedKey(s.key); setSubagentOpen(undefined); setDetailTab("processes"); });
   return [
     // Keep attention actions first, with Mark before Mute; Keep cache warm follows Mute (Qt).
     ...(archived ? [] : [...(mark ? [mark] : []), ...(mute ? [mute] : []), keepWarmEntry(s), { separator: true } as const]),
     { label: compactRows[s.key] ? tr("Expand session row") : tr("Compact session row"), icon: compactRows[s.key] ? "expand-row" : "compact-row", action: () => setRowCompact(s.key, !compactRows[s.key]) },
-    { label: tr("Expand all collapsed"), icon: "expand-row", disabled: !hasCompactRows(), action: expandCompactRows },
     { separator: true },
-    // An archived row has no terminal, and no Mute or Mark group (Qt's `if (!archived)`).
-    ...(archived ? [] : [nativeEntry(s) ?? { label: tr("Open terminal"), icon: "square-terminal", disabled: !terminalAvailable(s), action: () => openTerminal(s) }]),
-    ...(commands ? [commands] : []),
-    folders.folder,
-    { ...folders.shell, icon: "terminal" },
+    ...(archived ? [] : [sessionTerminalEntry(s, details)]),
     cp.command,
+    cp.id,
     { separator: true },
-    act.change,
     ...(fresh ? [fresh] : archived ? [] : [clearEntry(s, preparedClear)]),
     act.rename,
-    forkEntry(s, forkDetails ?? details),
-    ...(act.archive ? [act.archive] : []),
     moveEntry(s),
-    { separator: true },
-    cp.name,
-    cp.reference,
-    cp.folder,
     { separator: true },
     act.end,
   ];
 }
 
-/** Only an explicitly opened menu checks its folder; no per-row filesystem reads. */
+/** Read only the capabilities needed by this opening; folders and Fork live in the header menu. */
 function openSessionMenu(e: MouseEvent, s: Session) {
-  const details = s.key === selectedKey() && !subagentOpen() ? detailsFor(s, !computerOffline(s.computer), followedFor(s.key)) : undefined;
-  const request = folderRequest(s, details);
-  const items = sessionMenu(s), read = clearRead?.id === clearReadIdentity(s) ? clearRead : undefined;
-  let folderStatus: { request: ReturnType<typeof folderRequest>; status: FolderStatus } | undefined, forkDetails = details;
+  let details = s.key === selectedKey() && !subagentOpen() ? detailsFor(s, !computerOffline(s.computer), followedFor(s.key)) : undefined;
+  const items = sessionMenu(s, details), read = clearRead?.id === clearReadIdentity(s) ? clearRead : undefined;
   let update: ReturnType<typeof setMenu>;
-  const snapshot = () => sessionMenu(s, folderStatus, forkDetails, read);
+  const snapshot = () => sessionMenu(s, details, read);
   const refresh = () => update?.(snapshot());
-  // Local reads can finish before the bounded opening; slower replies update
-  // the same slots through this opening's revision guard, without refocusing.
-  const folders = sessionFolderStatus(request.target.computer, request.directory).catch(() => undefined).then((status) => {
-    folderStatus = status ? { request, status } : undefined; refresh();
-  });
-  const fork = !details && !computerOffline(s.computer)
-    ? inspectSession({ computer: s.computer, name: s.name, run_id: s.runId ?? "", conversation_id: s.conversationId ?? "" }, s.archiveId ?? null).catch(() => undefined)
-    : Promise.resolve(details);
-  const inspected = fork.then((value) => { forkDetails = value ?? undefined; refresh(); });
+  const inspected = !details && !computerOffline(s.computer)
+    ? inspectSession({ computer: s.computer, name: s.name, run_id: s.runId ?? "", conversation_id: s.conversationId ?? "" }, s.archiveId ?? null).catch(() => undefined).then((value) => { details = value ?? undefined; refresh(); })
+    : Promise.resolve();
   const cleared = read?.pending?.then(refresh);
   e.preventDefault();
   e.stopPropagation();
-  update = setMenu({ x: e.clientX, y: e.clientY, items, sessionKey: s.key }, Promise.all([folders, inspected, cleared]).then(snapshot));
+  update = setMenu({ x: e.clientX, y: e.clientY, items, sessionKey: s.key }, Promise.all([inspected, cleared]).then(snapshot));
 }
 
 /** A context target is independent of the open conversation and selection. */
@@ -462,17 +457,24 @@ function SelectionBar() {
     onCleanup(() => ro.disconnect());
   };
   const rows = createMemo(() => selectedRows(listRows()));
-  const tools = createMemo(() => barTools(selectionCount(rows()), rows().length, running(), moveState()));
+  const tools = createMemo(() => barTools(selectionCount(rows()), rows().length, running(), anyUnmuted(rows()), moveRefusal()));
   const split = createMemo(() => splitTools(tools(), Math.max(1, Math.floor(width() / TOOL_WIDTH))));
+  // Each tool keeps its button while the catalog refreshes (zerus-92hkz): the
+  // list is keyed by action and the button reads its current tool, so a
+  // refresh that changes nothing the bar shows replaces no button and
+  // WebKitGTK keeps the hovered button's tooltip.
+  const shownActions = createMemo(() => split().shown.map((t) => t.action), [], { equals: (a, b) => a.length === b.length && a.every((x, i) => x === b[i]) });
+  const toolOf = createMemo(() => new Map(split().shown.map((t) => [t.action, t])));
   return (
     <Show when={rows().length > 1}>
       <div class="selection-bar" role="toolbar" aria-label={tr("Selected sessions")}>
         <div class="row"><b>{tr("%1 selected", rows().length)}</b><span class="grow" /><button class="icon-btn small" title={tr("Deselect all")} aria-label={tr("Deselect all")} onClick={clearMulti}><Icon name="x" size={14} /></button></div>
         <div class="row sel-actions" ref={observe}>
-          <For each={split().shown}>
-            {(t) => (
-              <button class="icon-btn" classList={{ danger: t.danger }} title={t.hint} aria-label={t.hint} disabled={!t.enabled} data-text={t.text} onClick={() => runSelection(rows(), t.action)}><Icon name={t.icon} size={18} /></button>
-            )}
+          <For each={shownActions()}>
+            {(action) => {
+              const t = () => toolOf().get(action)!;
+              return <button class="icon-btn" classList={{ danger: t().danger }} title={t().hint} aria-label={t().hint} disabled={!t().enabled} data-text={t().text} onClick={() => runSelection(rows(), action)}><Icon name={t().icon} size={18} /></button>;
+            }}
           </For>
           <Show when={split().more.length}>
             <button class="icon-btn" title={tr("More actions for selected sessions")} aria-label={tr("More actions for selected sessions")} aria-haspopup="menu"
@@ -520,11 +522,17 @@ function useRows(strip: boolean) {
   // here tracks it, and an unchanged key list keeps every row's DOM node.
   const keys = createMemo<string[]>(() => items().map((i) => String(i.key)), [], { equals: (a, b) => a.length === b.length && a.every((k, i) => k === b[i]) });
   const startOf = createMemo(() => new Map(items().map((i) => [String(i.key), i.start])));
+  const gitKeys = createMemo(() => keys().flatMap((id) => {
+    const row = byId().get(id);
+    return row?.type === "card" ? [row.session.key] : row?.type === "child" ? [row.parent.key] : [];
+  }), [], { equals: (a, b) => a.length === b.length && a.every((key, i) => key === b[i]) });
   // The scroller can be replaced (placeholder, then the list); observe the new box once it is in the page.
   const ref = (el: HTMLElement) => { scrollEl = el; requestAnimationFrame(() => virtualizer._willUpdate()); };
   // Fixed heights per row type, so every row's offset is known without the DOM.
   const offsets = createMemo(() => { let y = 0; return heights().map((h) => { const t = y; y += h; return t; }); });
-  return { ref, rows, virtualizer, byId, keys, startOf, offsets, heights, heightOf: (id: string) => { const i = rows().findIndex((r) => r.id === id); return heights()[i] ?? 94; } };
+  // One frame per project, around its header row alone (owner, 2026-11-09).
+  const frames = createMemo(() => headerFrames(rows(), heights()));
+  return { ref, rows, virtualizer, byId, keys, gitKeys, startOf, offsets, heights, frames, heightOf: (id: string) => { const i = rows().findIndex((r) => r.id === id); return heights()[i] ?? 94; } };
 }
 
 /** The panel slide in flight, and the timer that ends it. */
@@ -572,12 +580,28 @@ function slideOpenLater(el: () => HTMLElement | undefined, width: () => number) 
 }
 
 export function SessionList() {
+  compactNewChildren();
   const refreshAccounts = () => { void openFilterAccounts().catch(() => {}); };
   onCleanup(cancelFilterAccountReads);
+  // Account marks need each live computer's account catalog (bindings only, no
+  // profile inspects): read only a newly live computer's, once (zerus-j648h).
+  const markCatalogs = new Set<string>();
+  createEffect(() => {
+    const fresh = Object.values(catalog.computers).filter((c) => c.status === "live" || c.status === "polled").map((c) => c.id).filter((id) => !markCatalogs.has(id));
+    if (!fresh.length) return;
+    fresh.forEach((id) => markCatalogs.add(id));
+    void loadMarkCatalogs(fresh).catch(() => {});
+  });
   const accountChoices = createMemo(() => filterAccounts().map((a) => ({ ...a, count: a.bindings.reduce((n, b) => n + (pickerCounts().account.get(b) ?? 0), 0) })));
   const list = useRows(false);
-  // Task 252: the visible cards' folders get their git status (Qt gitReads).
-  followVisibleGit(() => list.keys().flatMap((key) => { const row = list.byId().get(key); return row?.type === "card" ? [row.session] : []; }));
+  const [stripGitRows, setStripGitRows] = createSignal<string[]>([]);
+  const [gitWindowHidden, setGitWindowHidden] = createSignal(windowVisibility.hidden());
+  onCleanup(windowVisibility.onChange(() => setGitWindowHidden(windowVisibility.hidden())));
+  createEffect(on(() => page() !== "sessions" || pageHidden() || gitWindowHidden() ? [] : [...new Set([
+    ...(selectedKey() ? [selectedKey()!] : []),
+    ...(!stripMode() || peek() ? list.gitKeys() : stripGitRows()),
+  ])].slice(0, 48), followGitRows));
+  onCleanup(() => followGitRows([]));
   // A row the menu bar or a notification opened (Qt's revealRow): scrolled to
   // once the list has it; another selection drops the request.
   createEffect(on([revealing, list.rows, selectedKey], ([id, rows, selected]) => {
@@ -604,7 +628,7 @@ export function SessionList() {
   const unified = unifiedChrome;
   // Docked <-> strip: the conversation resizes once; the panel animates above it.
   const toggleDock = () => {
-    Object.keys(multi).forEach((k) => setMulti(k, false));
+    clearMulti();
     if (!stripMode()) {
       setStripMode(true);
       setPanelVisible(true);
@@ -639,14 +663,14 @@ export function SessionList() {
   const onStripEnter = () => {
     clearTimeout(leaveTimer);
     if (!stripMode() || peek() || !expandSessionsOnHover()) return;
-    enterTimer = setTimeout(() => { if (stripMode() && !peek()) { hoverOpened = true; setPeek(true); } }, 150);
+    enterTimer = window.setTimeout(() => { if (stripMode() && !peek()) { hoverOpened = true; setPeek(true); } }, 150);
   };
   const onSectionEnter = () => clearTimeout(leaveTimer);
   const onSectionLeave = () => {
     clearTimeout(enterTimer);
     if (!peek() || !hoverOpened) return;
-    const check = () => { if (keepOpen()) leaveTimer = setTimeout(check, 100); else { hoverOpened = false; setPeek(false); } };
-    leaveTimer = setTimeout(check, 350);
+    const check = () => { if (keepOpen()) leaveTimer = window.setTimeout(check, 100); else { hoverOpened = false; setPeek(false); } };
+    leaveTimer = window.setTimeout(check, 350);
   };
   const onKeyEsc = (e: KeyboardEvent) => {
     if (e.key !== "Escape") return;
@@ -662,23 +686,76 @@ export function SessionList() {
   createEffect(() => { if (!expandSessionsOnHover() && hoverOpened && peek()) { hoverOpened = false; setPeek(false); } });
   onCleanup(() => { removeEventListener("keydown", onKeyEsc); removeEventListener("pointerdown", outside); clearTimeout(enterTimer); clearTimeout(leaveTimer); });
 
+  // Qt's SessionList::keyPressEvent (SessionList.cpp:585-632) and its Enter (SessionsWindow.cpp:565,5499-5504).
   const onKey = (e: KeyboardEvent) => {
-    const nav = list.rows().filter((r) => r.type !== "header");
+    if ((e.target as Element).closest?.("input,textarea,[contenteditable]")) return;
+    const rows = list.rows();
+    const nav = rows.filter((r) => r.type !== "header");
     const i = nav.findIndex((r) => r.id === selectedKey());
-    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    const scrollTo = (row: Row) => list.virtualizer.scrollToIndex(rows.indexOf(row), { align: "auto" });
+    // The project header of a session whose collapsed project hides its row.
+    const hiddenBy = (key: string | undefined) => {
+      if (!key) return undefined;
+      const project = groupOf(key);
+      return rows.find((r): r is Extract<Row, { type: "header" }> => r.type === "header" && r.project === project && r.collapsed);
+    };
+    const move = (next: Row | undefined) => {
+      if (!next) return;
+      const key = next.type === "child" ? next.parent.key : next.id;
+      setSelectedKey(key);
+      // A plain move on a card starts the next Shift range there (SessionList.cpp:629-631).
+      if (next.type === "card") setAnchor(key);
+      scrollTo(next);
+    };
+    const vertical = e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Home" || e.key === "End";
+    if (vertical && e.shiftKey) {
       e.preventDefault();
-      const next = nav[Math.max(0, Math.min(nav.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)))];
-      if (next) {
-        setSelectedKey(next.type === "child" ? next.parent.key : next.id);
-        list.virtualizer.scrollToIndex(list.rows().indexOf(next), { align: "auto" });
+      const reached = rangeStep(e.key as RangeKey, e.ctrlKey || e.metaKey);
+      const row = reached === undefined ? undefined : rows.find((r) => r.id === reached);
+      if (row) scrollTo(row);
+    } else if (e.key === "Home" || e.key === "End") {
+      e.preventDefault();
+      move(e.key === "Home" ? nav[0] : nav[nav.length - 1]);
+    } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const down = e.key === "ArrowDown";
+      const header = i < 0 ? hiddenBy(selectedKey()) : undefined;
+      if (header) {
+        // From a row its collapsed project hides: the next row past the project, as Qt's hidden current item.
+        const at = rows.indexOf(header);
+        move(down ? rows.slice(at + 1).find((r) => r.type !== "header") : rows.slice(0, at).reverse().find((r) => r.type !== "header"));
+      } else move(nav[Math.max(0, Math.min(nav.length - 1, i + (down ? 1 : -1)))]);
+    } else if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+      const right = e.key === "ArrowRight";
+      // A plain row's project (SessionList.cpp:623-627): Left collapses it, Right expands it.
+      const project = (key: string) => {
+        const header = rows.find((r): r is Extract<Row, { type: "header" }> => r.type === "header" && r.project === groupOf(key));
+        if (header && header.collapsed === right) setProjectCollapsed(header.project, !right);
+      };
+      if (i < 0) {
+        // Right reopens the project that hides the open conversation's row.
+        const header = right ? hiddenBy(selectedKey()) : undefined;
+        if (header) { e.preventDefault(); setProjectCollapsed(header.project, false); }
+        return;
       }
-    } else if ((e.key === "ArrowRight" || e.key === "ArrowLeft") && i >= 0) {
       const r = nav[i];
-      if (r.type === "card" && r.compactRow && e.key === "ArrowRight") setRowCompact(r.session.key, false);
-      else if (r.type === "card" && r.expandable) setExpandedChildren(r.session.key, e.key === "ArrowRight");
-      else if (r.type === "child" && e.key === "ArrowLeft") setSelectedKey(r.parent.key);
+      if (r.type === "child") { if (!right) setSelectedKey(r.parent.key); }
+      else if (r.type === "card") {
+        if (r.compactRow && right) setRowCompact(r.session.key, false);
+        // A Teams lead: Right shows its members, Left folds them.
+        else if (r.teamSummary && r.expandable && teamsCollapsed(r.teamSummary.id) === right) setTeamsCollapsed(r.teamSummary.id, !right);
+        // Child sessions (zerus-sa9qn.2): Right expands, Left collapses, then moves to the parent.
+        else if (r.team && r.team.collapsed === right) setTeamCollapsed(r.session.key, !right);
+        else if (!right && r.parentKey) setSelectedKey(r.parentKey);
+        else if (!r.expandable && !r.team) project(r.session.key);
+      }
+    } else if (e.key === "Enter" && e.target === e.currentTarget && i >= 0 && nav[i].type !== "creation" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      // Qt's itemActivated: the Activity tab at its latest message. A focused
+      // button in the list (a project header) keeps its own Enter.
+      e.preventDefault();
+      showLatestActivity();
     } else if (e.key === "Escape") {
-      Object.keys(multi).forEach((k) => setMulti(k, false));
+      clearMulti();
     }
   };
 
@@ -690,19 +767,20 @@ export function SessionList() {
       style={{ "--pane-w": stripMode() ? (unified() ? "0px" : `${STRIP_WIDTH}px`) : `${sessionsWidth()}px`, "--panel-w": `${sessionsWidth()}px` }}
       data-hidden={stripMode() && unified() ? "" : undefined}
       onPointerEnter={onSectionEnter} onPointerLeave={onSectionLeave}>
-      <Show when={stripMode() && !unified()}><Strip onEnter={onStripEnter} onToggle={toggleDock} /></Show>
+      <Show when={stripMode() && !unified()}><Strip onEnter={onStripEnter} onToggle={toggleDock} onGitRows={setStripGitRows} /></Show>
       <div class="sp-panel" ref={panel} classList={{ overlay: stripMode() }} hidden={!panelVisible()}
         onContextMenu={(e) => { if ((e.target as Element).closest("input,textarea")) return; openMenu(e, backgroundEntries({ newSession: newSessionFromPanel, newProject: openCreateProjectDialog })); }}>
         <header class="sp-head">
           <h1>{stateFilter() === "archived" ? tr("Archive") : tr("Sessions")}</h1>
           <span class="grow" />
-          <button class="icon-btn hd" data-tip={tr("New team")} aria-label={tr("New team")} onClick={() => setPage("newteam")}><Icon name="users" size={18} /></button>
+          {/* Task #361: Qt's list header holds New session, the collapse toggle and
+              the batch menu only; a new team starts at "+ New team" on the tab row. */}
           <button class="icon-btn hd" data-tip={tr("New session")} aria-label={tr("New session")} onClick={newSessionFromPanel}><Icon name="add" size={18} /></button>
           <button class="icon-btn hd" data-tip={toggleCaption()} onClick={toggleDock}><Icon name={toggleGlyph()} size={18} /></button>
           <button class="icon-btn hd" data-tip={tr("Session and machine actions")} onClick={(e) => openMenu(e, batchMenu())}><Icon name="more" size={18} /></button>
         </header>
         <div class="sp-search">
-          <input class="field" type="search" maxLength={256} placeholder={stateFilter() === "archived" ? tr("Search archive names and IDs…") : tr("Search sessions, IDs and messages…")} value={search()}
+          <TextInput class="field" type="search" maxLength={256} placeholder={stateFilter() === "archived" ? tr("Search archive names and IDs…") : tr("Search sessions, IDs and messages…")} value={search()}
             onInput={(e) => setSearch(e.currentTarget.value)} onFocus={() => setSearchFocused(true)} onBlur={() => setSearchFocused(false)}
             onKeyDown={(e) => {
               if (e.key === "Escape") setSearch("");
@@ -729,14 +807,17 @@ export function SessionList() {
         <FilterChips />
         <Show when={folderFilter()}>{(folder) => <div class="filter-chips"><button class="fchip-sel" title={`${native(folder().path, folder().style)}${tr("\nClear folder filter")}`} onClick={clearFolderScope}>{tr("Folder: %1", leaf(folder().path, folder().style))}<Icon name="x" size={11} /></button></div>}</Show>
 
-        <Show when={stateFilter() === "archived"}><ArchiveBar contentSearch={!!search().trim()} /></Show>
+        <Show when={stateFilter() === "archived"}><ArchiveBar /></Show>
         <Show when={search().trim()} fallback={<>
           <Show when={catalog.order.length > 0 || creationCount() > 0 || stateFilter() === "archived"} fallback={<ListPlaceholder />}>
             <div class="sp-scroll" data-density={compactSessionRows() ? "compact" : "normal"} classList={{ organizing: !!dragItem() }} ref={list.ref} tabindex="0" onKeyDown={onKey} role="tree"
               onDragOver={(e) => organizeOver(e, list)} onDrop={(e) => organizeDrop(e)} onDragLeave={(e) => { if (!(e.currentTarget as Element).contains(e.relatedTarget as Node)) setDrop(undefined); }}
               aria-label={tr("Agent sessions; Ctrl-click to select several; drag to organize, left/right to collapse or expand a group")}>
               <Show when={list.rows().length} fallback={<NoMatches />}>
-                <div style={{ height: `${list.virtualizer.getTotalSize()}px`, position: "relative" }}>
+                <div role="presentation" style={{ height: `${list.virtualizer.getTotalSize()}px`, position: "relative" }}>
+                  <For each={list.frames()}>{(frame) => (
+                    <div class="group-frame" data-frame={frame.id} aria-hidden="true" style={{ transform: `translateY(${frame.top}px)`, height: `${frame.height}px`, "--frame": frame.frame }} />
+                  )}</For>
                   <DropIndicator />
                   <For each={list.keys()}>{(id) => <ListRow id={id} list={list} />}</For>
                 </div>
@@ -744,12 +825,14 @@ export function SessionList() {
             </div>
           </Show>
         </>}>
-          <SearchResults />
+          <LazyBoundary loading={<div class="lazy-waiting">{tr("Loading…")}</div>}><SearchResults /></LazyBoundary>
         </Show>
         <Show when={!search().trim()}><SelectionBar /></Show>
         <footer class="sp-foot">
-          <span class="tabular ell">{search().trim() ? "" : shownSummary().shown ? tr("%1 shown, %2 working, %3 attention", shownSummary().shown, shownSummary().working, shownSummary().attention) + creationFooter(true) : creationFooter(false) || (catalog.order.length ? tr("No matching sessions") : "")}</span>
+          {/* The filters above already say what is listed (owner, 2026-11-07): only creations or no matches. */}
+          <span class="tabular ell">{search().trim() ? "" : creationFooter(false) || (catalog.order.length && !shownSummary().shown ? tr("No matching sessions") : "")}</span>
           <span class="grow" />
+          <CleanupReviewButton />
           <button class="icon-btn small" data-tip={tr("Session creation status")} onClick={(e) => openMenu(e, creationStatusMenu())}><Icon name="clock" size={16} /></button>
           <button class="icon-btn small" title={markAllTip(markAllEntry())} disabled={markAllEntry().disabled} onClick={() => runMarkAll()}><Icon name="read-all" size={16} /></button>
           {/* The open composer is the dialog's target, none while a subagent shows (SessionsWindow.cpp:485-489). */}
@@ -852,13 +935,46 @@ function DropIndicator() {
 
 type RowSource = ReturnType<typeof useRows>;
 
+/** Child session indentation: 26 px per level, at most three levels (spec 3.3). */
+const indentOf = (depth = 0) => Math.min(Math.max(depth, 1), 3) * 26 - 26;
+const cardLevel = (row: Row | undefined) => row?.type === "card" && row.depth ? row.depth + 1 : undefined;
+
+/** Name the tree item itself; webviews do not reliably derive it from the card's groups.
+ * Keep the working clock out so every timer tick does not rename the focused item. */
+export function sessionRowName(row: Row | undefined): string | undefined {
+  if (!row) return undefined;
+  if (row.type === "header") return row.name;
+  if (row.type === "creation") return [creationText(row.creation), row.creation.target].filter(Boolean).join(", ");
+  if (row.type === "child") return [row.child.name,
+    childStatus(row.child, currentChildren(row.parent, !computerOffline(row.parent.computer))).caption,
+    folderOf(row.parent) || row.parent.project, row.parent.machine].filter(Boolean).join(", ");
+  const s = row.session;
+  const state = computerOffline(s.computer) ? tr("Offline") : s.status === "ready" && s.draft ? tr("Draft") : captionText(s.caption);
+  return [s.title, state, folderOf(s) || s.project, s.machine,
+    row.team ? tr(row.team.collapsed ? "%1 child sessions, collapsed" : "%1 child sessions, expanded", row.team.total) : "",
+    s.subagents?.length ? tr("Subagents: %1", s.subagents.length) : ""].filter(Boolean).join(", ");
+}
+
+function cardDescription(row: Row | undefined): string | undefined {
+  if (row?.type !== "card") return undefined;
+  const parts: string[] = [];
+  if (row.depth && row.parentKey) parts.push(tr("Child of %1, level %2", catalog.rows[row.parentKey]?.title ?? "", row.depth + 1));
+  if (row.team) {
+    parts.push(row.team.collapsed ? tr("%1 child sessions, collapsed", row.team.total) : tr("%1 child sessions, expanded", row.team.total));
+    parts.push(...teamSummary(row.team));
+  }
+  return parts.length ? parts.join("\n") : undefined;
+}
+
 /** One virtual row, bound to its id: content updates in place while the row exists. */
 function ListRow(props: { id: string; list: RowSource }) {
   const row = () => props.list.byId().get(props.id);
   const top = () => props.list.startOf().get(props.id) ?? 0;
   return (
     <div class="vrow" data-type={row()?.type} data-key={props.id} style={{ transform: `translateY(${top()}px)`, height: `${props.list.heightOf(props.id)}px` }}
-      role="treeitem" aria-selected={props.id === selectedKey()}>
+      role="treeitem" aria-label={sessionRowName(row())} aria-selected={props.id === selectedKey()} aria-level={cardLevel(row())}
+      aria-expanded={row()?.type === "card" && (row() as Extract<Row, { type: "card" }>).team ? !(row() as Extract<Row, { type: "card" }>).team!.collapsed : undefined}
+      aria-description={cardDescription(row())}>
       <Show when={row()?.type === "header" ? (row() as Extract<Row, { type: "header" }>) : undefined}>{(h) => <Header row={h()} list={props.list} />}</Show>
       <Show when={row()?.type === "child" ? (row() as Extract<Row, { type: "child" }>) : undefined}>
         {(c) => (
@@ -870,20 +986,30 @@ function ListRow(props: { id: string; list: RowSource }) {
       <Show when={row()?.type === "creation" ? (row() as Extract<Row, { type: "creation" }>) : undefined}>{(v) => <CreationCard card={v().creation} />}</Show>
       <Show when={row()?.type === "card" ? (row() as Extract<Row, { type: "card" }>) : undefined}>
         {(v) => (
-          <div onDragOver={(e) => taskDragOver(e, groupOf(v().session.key), v().session)} onDrop={(e) => taskDrop(e, groupOf(v().session.key), v().session)} class="rowhit" classList={{ "has-kids-open": v().expanded && !v().compactRow, stale: catalog.stale[v().session.computer] !== undefined, multi: !!multi[v().session.key], dragged: dragItem()?.id === v().session.key, "context-target": visibleMenu()?.sessionKey === v().session.key }}
+          <>
+          <Show when={!!v().parentKey}>
+            <i class="team-tree" classList={{ last: !!v().lastChild, compact: !!v().compactRow }} aria-hidden="true" style={{ "--indent": `${indentOf(v().depth)}px` }} />
+          </Show>
+          <div onDragOver={(e) => taskDragOver(e, groupOf(v().session.key), v().session)} onDrop={(e) => taskDrop(e, groupOf(v().session.key), v().session)} class="rowhit" classList={{ "has-kids-open": v().expanded && !v().compactRow, stale: catalog.stale[v().session.computer] !== undefined, multi: !!multi[v().session.key], dragged: dragItem()?.id === v().session.key, "context-target": visibleMenu()?.sessionKey === v().session.key, nested: !!v().parentKey }}
+            style={v().parentKey ? { left: `${indentOf(v().depth) + 26}px` } : undefined}
             draggable={POINTER_DRAG ? undefined : "true"} onDragStart={(e) => startDrag(e, { kind: "session", id: v().session.key })}
             onPointerDown={(e) => pointerOrganize(e, { kind: "session", id: v().session.key }, props.list)}
             onMouseDown={(e) => { if (e.shiftKey) e.preventDefault(); }} onClick={(e) => selectSession(v().session.key, e)}
             onContextMenu={(e) => sessionContextMenu(e, v().session)}
             onDblClick={(e) => { if (!e.ctrlKey && !e.metaKey && !e.shiftKey) setRowCompact(v().session.key, !compactRows[v().session.key]); }}>
-            <Show when={!v().compactRow} fallback={<CompactCard session={v().session} selected={selectedKey() === v().session.key || !!multi[v().session.key]} onExpand={() => setRowCompact(v().session.key, false)} />}>
+            <Show when={!v().compactRow} fallback={<CompactCard session={v().session} selected={selectedKey() === v().session.key || !!multi[v().session.key]} onExpand={() => setRowCompact(v().session.key, false)}
+              team={v().team} onToggleTeam={() => setTeamCollapsed(v().session.key, !teamCollapsed(v().session.key))} />}>
               <SessionCard session={v().session} selected={(selectedKey() === v().session.key && !subagentOpen()) || !!multi[v().session.key]} expandable={v().expandable}
-                expanded={v().team ? !teamsCollapsed(v().team!.id) : !!expandedChildren[v().session.key]}
-                onToggleChildren={() => v().team ? setTeamCollapsed(v().team!.id, !teamsCollapsed(v().team!.id)) : setExpandedChildren(v().session.key, !expandedChildren[v().session.key])}
+                expanded={v().teamSummary ? !teamsCollapsed(v().teamSummary!.id) : !!expandedChildren[v().session.key]}
+                onToggleChildren={() => setExpandedChildren(v().session.key, !expandedChildren[v().session.key])}
                 onCold={(action) => coldAction(v().session, action)} onChip={(kind) => openChip(v().session, kind)}
-                team={v().team} depth={v().depth} teamFirst={v().teamFirst} teamLast={v().teamLast} />
+                team={v().team} onToggleTeam={() => setTeamCollapsed(v().session.key, !teamCollapsed(v().session.key))}
+                teamSummary={v().teamSummary} onToggleMembers={() => v().teamSummary && setTeamsCollapsed(v().teamSummary!.id, !teamsCollapsed(v().teamSummary!.id))}
+                member={v().teamFirst !== undefined} depth={v().depth} teamFirst={v().teamFirst} teamLast={v().teamLast}
+                fromParent={v().fromParent} onOpenParent={(key) => { setSelectedKey(key); setRevealing(key); }} />
             </Show>
           </div>
+          </>
         )}
       </Show>
     </div>
@@ -953,8 +1079,10 @@ function ListPlaceholder() {
  * wide as a tile, the active and most urgent filters meeting in the middle,
  * then the same rows at their heights: bands, 84 px square tiles, child rows.
  */
-function Strip(props: { onEnter: () => void; onToggle: () => void }) {
+function Strip(props: { onEnter: () => void; onToggle: () => void; onGitRows: (rows: string[]) => void }) {
   const list = useRows(true);
+  createEffect(() => props.onGitRows(list.gitKeys()));
+  onCleanup(() => props.onGitRows([]));
   // The active filter plus the first of attention, active, all that is not checked and has sessions.
   const shown = createMemo(() => {
     const urgent = (["attention", "active", "all"] as StateFilter[]).find((id) => id !== stateFilter() && (id === "all" || Number(FILTERS.find((f) => f.id === id)!.count()) > 0));
@@ -1028,9 +1156,10 @@ function StripTile(props: { row: Extract<Row, { type: "card" }> }) {
   const optionalCount = () => optionalQuestionCount(s(), computerFresh(s().computer));
   const kind = () => badgeKind(s());
   const frame = () => (emphasis(s()) === "draft" ? "draft" : kind() === "muted-attention" || kind() === "muted-unread" ? "muted" : kind() === "unread" ? "attention" : kind());
-  const tip = () => [`${s().name}: ${statusCaption(s())}`, s().summary, `${folderOf(s())}${s().branch ? ` / ${s().branch}` : ""} on ${s().machine}`, s().git ? gitTooltip(s()) : "", optionalCount() ? `${optionalCount()} optional question(s) waiting` : ""].filter(Boolean).join("\n");
+  // A tooltip: no live seconds, and it holds still under the pointer (zerus-5ryrx).
+  const tip = steadyTitle(() => [`${s().name}: ${statusCaption(s(), false)}`, s().summary, `${folderOf(s())}${s().branch ? ` / ${s().branch}` : ""} on ${s().machine}`, s().git ? gitTooltip(s(), now() * 1000) : "", optionalCount() ? `${optionalCount()} optional question(s) waiting` : ""].filter(Boolean).join("\n"));
   return (
-    <button class="strip-tile" classList={{ selected: selectedKey() === s().key, "context-target": visibleMenu()?.sessionKey === s().key }} data-frame={frame()} title={tip()} onClick={() => selectSession(s().key)}
+    <button class="strip-tile" classList={{ selected: selectedKey() === s().key, "context-target": visibleMenu()?.sessionKey === s().key }} data-frame={frame()} title={tip.title()} onPointerEnter={tip.enter} onPointerLeave={tip.leave} onClick={() => selectSession(s().key)}
       onContextMenu={(e) => sessionContextMenu(e, s())}>
       <span class="st-block">
         <span class="st-top">

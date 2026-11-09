@@ -325,23 +325,31 @@ export function retainedSourceDetails(state: DesktopService | undefined): Migrat
   return Object.keys(details).length ? details : undefined;
 }
 
-/** Called by the existing opt-in confirmation only. An uncertain request is not replayed. */
+/** One switch or category change; `categories` (complete set) only for a category change. */
+type ApprovalRequest = { id: string; enabled: boolean; categories?: string[] };
+const sameIds = (a: unknown, b: readonly string[]) => Array.isArray(a) && a.length === b.length && a.every((id, n) => id === b[n]);
+
+/** The switch is changed by the existing opt-in confirmation only; a category
+ * change carries the committed switch value, so it can never turn approvals
+ * on. An uncertain request is not replayed. */
 export function createServiceApprovalIntent(
-  send: (id: string, enabled: boolean) => Promise<unknown>,
+  send: (id: string, enabled: boolean, categories?: string[]) => Promise<unknown>,
   id: () => string = () => crypto.randomUUID(),
   read?: () => Promise<unknown>,
 ) {
-  const [uncertain, setUncertain] = createSignal<{ id: string; enabled: boolean }>();
+  const [uncertain, setUncertain] = createSignal<ApprovalRequest>();
   const [checking, setChecking] = createSignal(false);
-  const settle = (result: Record<string, unknown>, request: { id: string; enabled: boolean }) => {
+  const settle = (result: Record<string, unknown>, request: ApprovalRequest) => {
     if (result?.request_id === request.id && result.op === "automatic_approvals"
       && result.accepted === false && result.durable === false && result.pending !== true) {
       setUncertain(undefined);
       if (result.code === "frontend_request_not_applied") throw Error(tr("The previous change was not applied."));
+      if (result.code === "approval_policy_changed") throw Error(tr("Automatic approvals were turned on or off elsewhere. Check the switch, then change the categories again."));
       throw Error("Automatic approval settings are unavailable with this background service connection.");
     }
     if (result?.request_id !== request.id || result.op !== "automatic_approvals" || result.accepted !== true
-      || result.durable !== true || result.enabled !== request.enabled || result.pending === true) {
+      || result.durable !== true || result.enabled !== request.enabled || result.pending === true
+      || (request.categories && !sameIds(result.categories, request.categories))) {
       throw Error("The background service has not confirmed this approval setting.");
     }
     setUncertain(undefined);
@@ -355,6 +363,14 @@ export function createServiceApprovalIntent(
       const result = await send(request.id, enabled) as Record<string, unknown>;
       settle(result, request);
     },
+    /** The complete category set, with the switch value the service has committed. */
+    async submitCategories(enabled: boolean, categories: string[]) {
+      if (uncertain()) throw Error("The previous approval setting is unconfirmed. Check the background service before making another change.");
+      const request = { id: id(), enabled, categories: [...categories] };
+      setUncertain(request);
+      const result = await send(request.id, enabled, request.categories) as Record<string, unknown>;
+      settle(result, request);
+    },
     async check() {
       if (!read || checking()) return;
       setChecking(true);
@@ -365,6 +381,7 @@ export function createServiceApprovalIntent(
           && (result.request_id == null || result.accepted === false)) return;
         if (!request && result?.op === "automatic_approvals" && typeof result.request_id === "string" && typeof result.enabled === "boolean") {
           request = { id: result.request_id, enabled: result.enabled };
+          if (Array.isArray(result.categories) && result.categories.every((c) => typeof c === "string")) request.categories = result.categories as string[];
           setUncertain(request);
         }
         if (!request) throw Error("The background service has not confirmed this approval setting.");
@@ -374,7 +391,7 @@ export function createServiceApprovalIntent(
   };
 }
 export const serviceApprovalIntent = createServiceApprovalIntent(
-  (request_id, enabled) => invoke("desktop_service_automatic_approvals", { request_id, enabled }),
+  (request_id, enabled, categories) => invoke("desktop_service_automatic_approvals", { request_id, enabled, categories: categories ?? null }),
   () => crypto.randomUUID(),
   () => invoke("desktop_service_frontend_result", { operation: "automatic_approvals" }),
 );
@@ -460,7 +477,12 @@ export function takeoverRefusal(view: NotificationOwnership | undefined): Takeov
       return { check: tr("Folder privacy"), reason: tr("Another account can change a folder that holds hgs's record of this app (.local/share/hgs/host or a folder above it)."),
         next: tr("Make that folder changeable only by you (other accounts may keep read access to the folders above it), then restart Zerus.") };
     case "agent_descended_frontend_refused":
-      return { check: tr("Process ancestry"), reason: tr("Zerus was started from an agent's session."), next: tr("Close it and start Zerus from the Start menu or its folder.") };
+      return { check: tr("Process ancestry"), reason: tr("Zerus was started from an agent's session."), next: tr("Close it and start Zerus from the Start menu or its folder.") };    // Task #421 (2026-11-09, package 167): the takeover's hgs child failed
+    // because the desktop service could not open its store; "Restart Zerus"
+    // never helped. Starting the service once shows why, or migrates it.
+    case "child_failed":
+      return { check: tr("Desktop service"), reason: tr("The desktop service did not start, so Zerus could not take over its sessions."),
+        next: tr("Run hgs desktop serve once in a terminal: it starts the service or says why it cannot. Then restart Zerus.") };
   }
   switch (refused.check) {
     case "ownership_journal":
@@ -487,6 +509,9 @@ export function ownershipNotice(view: NotificationOwnership | undefined): string
       return tr("Background activation is unavailable. Update Zerus and its desktop service, then Resume to check again.");
     return tr("Background work is paused. Resume to activate the service explicitly.");
   }
+  // Task #440: the window restarts itself to finish starting; said ahead.
+  if (view.native_recovery && view.native_recovery_restart_at)
+    return tr("Zerus restarts its window to finish starting. Your drafts are saved.");
   // Task 180: the refused takeover names its check and the next step.
   const refused = takeoverRefusal(view);
   if (refused) return `${tr("Zerus could not take over its sessions")} (${refused.check}): ${refused.reason} ${refused.next}`;

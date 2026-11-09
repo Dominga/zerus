@@ -2,21 +2,167 @@
 use super::*;
 use std::fs::{File, OpenOptions};
 
-pub(in crate::state) struct Directory {
+pub(crate) struct Directory {
     pub path: PathBuf,
     file: File,
     #[cfg(windows)]
     _ancestors: Vec<File>,
 }
 
+// Per-thread, exact-private-directory fault injection at the publication sync
+// boundary. It cannot affect a concurrent test or any production build.
+#[cfg(all(test, unix))]
+thread_local! { static SYNC_FAILURE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) }; }
+// Its callers are the fence probe (Linux) and the task refusal tests (Unix).
+#[cfg(all(test, unix))]
+pub(in crate::state) fn fail_publication_sync(path: Option<PathBuf>) {
+    SYNC_FAILURE.with(|slot| *slot.borrow_mut() = path);
+}
+
 impl Directory {
+    /// Namespace durability, rather than the platform's compatibility no-op.
+    /// A caller requiring this proof must retain Unknown when unavailable.
+    pub(in crate::state) fn sync(&self) -> Result<()> {
+        self.verify()?;
+        #[cfg(unix)]
+        {
+            self.file.sync_all().map_err(|e| e.to_string())?;
+            #[cfg(test)]
+            if SYNC_FAILURE.with(|slot| slot.borrow().as_ref() == Some(&self.path)) {
+                return Err("fixture directory sync failure".into());
+            }
+            self.verify()
+        }
+        #[cfg(windows)]
+        Err("Native namespace durability is unverified on this computer".into())
+    }
+
+    /// The native writer already exists. Task-control admission must not
+    /// create it or follow an alias while trying to acquire its exclusion.
+    pub(in crate::state) fn existing_private_lock(&self, name: &str) -> Result<File> {
+        if name.is_empty() || name.contains(['/', '\\', ':']) || name == "." || name == ".." {
+            return Err("Invalid existing exclusion filename".into());
+        }
+        self.verify()?;
+        #[cfg(unix)]
+        let file = {
+            use std::os::fd::{AsRawFd, FromRawFd};
+            let name = c_name(std::ffi::OsStr::new(name))?;
+            // SAFETY: one fixed component below the held original parent;
+            // no create, links, FIFO wait or inherited descriptor.
+            let fd = unsafe {
+                libc::openat(
+                    self.file.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDWR
+                        | libc::O_NOFOLLOW
+                        | libc::O_NONBLOCK
+                        | libc::O_NOCTTY
+                        | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+            unsafe { File::from_raw_fd(fd) }
+        };
+        #[cfg(windows)]
+        let file = crate::platform::no_follow(OpenOptions::new().read(true).write(true))
+            .open(self.path.join(name))
+            .map_err(|e| e.to_string())?;
+        if !crate::platform::verify_private_file(&file).map_err(|e| e.to_string())?
+            || file.metadata().map_err(|e| e.to_string())?.len() != 0
+        {
+            return Err("The original native exclusion file is unexpected".into());
+        }
+        self.verify()?;
+        Ok(file)
+    }
+
+    /// One existing or newly created child under this original directory.
+    /// A descendant alias is never resolved before the no-follow open, and
+    /// creation uses the held parent rather than a second pathname walk.
+    pub(in crate::state) fn ensure_child(&self, name: &str) -> Result<Self> {
+        if name.is_empty() || name.contains(['/', '\\', ':']) || name == "." || name == ".." {
+            return Err("Invalid directory entry name".into());
+        }
+        self.verify()?;
+        let child = match std::fs::symlink_metadata(self.path.join(name)) {
+            Ok(_) => self.child(name)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound =>
+                self.create(name,&format!(".hgs-dir-{}",uuid::Uuid::new_v4()))?,
+            Err(error) => return Err(error.to_string()),
+        };
+        self.verify()?; child.verify()?;
+        crate::platform::sync_dir(&self.path).map_err(|e| e.to_string())?;
+        Ok(child)
+    }
+
+    /// Native object identity, for metadata bindings. It is not a resource
+    /// retirement, ownership, consent or effect permit.
+    pub(crate) fn object(&self) -> Result<(u64, u64)> {
+        crate::platform::FileIdentity::of(&self.file)
+            .map(|id| (id.device, id.inode)).map_err(|e| e.to_string())
+    }
+
+    /// One auxiliary exclusion file in this original directory. Opening it
+    /// never follows a link or waits on a FIFO; the caller must try the lock.
+    pub(in crate::state) fn open_private_lock(&self, name: &str) -> Result<File> {
+        if name.is_empty() || name.contains(['/', '\\', ':']) || name == "." || name == ".." {
+            return Err("Invalid private lock filename".into());
+        }
+        self.verify()?;
+        #[cfg(unix)]
+        let file = {
+            use std::os::fd::{AsRawFd, FromRawFd};
+            let name = c_name(std::ffi::OsStr::new(name))?;
+            // SAFETY: a single NUL-free entry under this held parent. Opening
+            // RDWR is nonblocking even for a FIFO; its kind is then refused.
+            let fd = unsafe { libc::openat(self.file.as_raw_fd(), name.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC,
+                0o600 as libc::c_uint) };
+            if fd < 0 { return Err(std::io::Error::last_os_error().to_string()); }
+            // SAFETY: this call exclusively owns the descriptor just returned.
+            unsafe { File::from_raw_fd(fd) }
+        };
+        #[cfg(windows)]
+        let file = crate::platform::no_follow(OpenOptions::new().read(true).write(true).create(true).truncate(false))
+            .open(self.path.join(name)).map_err(|e|e.to_string())?;
+        if !crate::platform::verify_private_file(&file).map_err(|e|e.to_string())? {
+            return Err("The exclusion file must be private, regular and singly linked".into());
+        }
+        self.verify()?;
+        Ok(file)
+    }
+
     /// Existing-directory reads share acquisition's pinned, no-link walk.
     /// No directory, lock or file is created by these methods.
-    pub(in crate::state) fn private(&self) -> Result<bool> {
+    pub(crate) fn private(&self) -> Result<bool> {
         crate::platform::verify_private_directory(&self.file).map_err(|e| e.to_string())
     }
 
-    pub(in crate::state) fn read_private(&self, name: &str) -> Result<File> {
+    /// Advisory worker locks also exist in legacy 0755 state directories.
+    /// Require owner-only POSIX write access to their entries without changing
+    /// that mode. This is weaker than `private()` and never a native root proof.
+    #[cfg(unix)]
+    pub(in crate::state) fn owner_controls_entries(&self) -> Result<bool> {
+        use std::os::unix::fs::MetadataExt;
+        self.verify()?;
+        let metadata = self.file.metadata().map_err(|e| e.to_string())?;
+        // SAFETY: geteuid only returns this process's effective user ID.
+        Ok(metadata.is_dir()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.mode() & 0o022 == 0)
+    }
+
+    pub(crate) fn read_private(&self, name: &str) -> Result<File> {
+        self.read_private_optional(name)?
+            .ok_or_else(|| "Missing private file".into())
+    }
+
+    /// Absence is observed relative to this SAME pinned directory. The caller
+    /// decides whether absence has any meaning; it never establishes history.
+    pub(crate) fn read_private_optional(&self, name: &str) -> Result<Option<File>> {
         if name.is_empty() || name.contains(['/', '\\', ':']) || name == "." || name == ".." {
             return Err("Invalid existing file name".into());
         }
@@ -37,19 +183,27 @@ impl Directory {
                 )
             };
             if fd < 0 {
-                return Err(std::io::Error::last_os_error().to_string());
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    return Ok(None);
+                }
+                return Err(error.to_string());
             }
             // SAFETY: this call owns the new descriptor.
             unsafe { File::from_raw_fd(fd) }
         };
         #[cfg(windows)]
-        let file = crate::platform::no_follow(OpenOptions::new().read(true))
+        let file = match crate::platform::no_follow(OpenOptions::new().read(true))
             .open(self.path.join(name))
-            .map_err(|e| e.to_string())?;
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.to_string()),
+        };
         if !crate::platform::verify_private_file(&file).map_err(|e| e.to_string())? {
             return Err("The existing file must be private and regular".into());
         }
-        Ok(file)
+        Ok(Some(file))
     }
 
     pub fn verify(&self) -> Result<()> {
@@ -200,6 +354,25 @@ impl Directory {
     /// Publishes a new private file in this pinned directory: written under a
     /// private staging name, synced, then renamed without replacing anything.
     pub fn write_new(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        self.write_new_file(name,bytes).map(drop)
+    }
+
+    /// The same publication, retaining the exact file created by this call.
+    /// A later pathname open cannot stand in for that original object.
+    pub fn write_new_file(&self, name: &str, bytes: &[u8]) -> Result<File> {
+        self.publish_file(name, bytes, false)
+    }
+
+    /// Replace metadata under caller-held exclusion, through this original
+    /// directory. This does not establish any action or consent authority.
+    pub(in crate::state) fn replace_file(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        self.replace_file_retained(name, bytes).map(drop)
+    }
+    pub(in crate::state) fn replace_file_retained(&self, name: &str, bytes: &[u8]) -> Result<File> {
+        self.publish_file(name, bytes, true)
+    }
+
+    fn publish_file(&self, name: &str, bytes: &[u8], replace: bool) -> Result<File> {
         use std::io::Write;
         use std::os::fd::{AsRawFd, FromRawFd};
         if name.is_empty() || name.contains('/') || name == "." || name == ".." {
@@ -216,7 +389,7 @@ impl Directory {
             libc::openat(
                 dir,
                 staging.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
                 0o600 as libc::c_uint,
             )
         };
@@ -229,14 +402,13 @@ impl Directory {
             .write_all(bytes)
             .and_then(|()| file.sync_all())
             .map_err(|e| e.to_string());
-        drop(file);
         #[cfg(target_os = "linux")]
         let rc = written.as_ref().map_or(-1, |_| unsafe {
-            libc::renameat2(dir, staging.as_ptr(), dir, to.as_ptr(), libc::RENAME_NOREPLACE)
+            libc::renameat2(dir, staging.as_ptr(), dir, to.as_ptr(), if replace { 0 } else { libc::RENAME_NOREPLACE })
         });
         #[cfg(target_os = "macos")]
         let rc = written.as_ref().map_or(-1, |_| unsafe {
-            libc::renameatx_np(dir, staging.as_ptr(), dir, to.as_ptr(), libc::RENAME_EXCL)
+            libc::renameatx_np(dir, staging.as_ptr(), dir, to.as_ptr(), if replace { 0 } else { libc::RENAME_EXCL })
         });
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let rc = -1; // Refuse publication without an atomic no-replace primitive.
@@ -247,7 +419,14 @@ impl Directory {
             written?;
             return Err(format!("Cannot publish {}: {error}", to.to_string_lossy()));
         }
-        Ok(())
+        let synced = self.file.sync_all();
+        #[cfg(test)]
+        let synced = if SYNC_FAILURE.with(|slot| slot.borrow().as_ref() == Some(&self.path)) {
+            Err(std::io::Error::other("fixture directory sync failure"))
+        } else { synced };
+        synced.map_err(|e| e.to_string())?;
+        self.verify()?;
+        Ok(file)
     }
 
     /// This pinned directory's descriptor number in this process.
@@ -321,6 +500,56 @@ fn open_at(parent: &File, name: &std::ffi::OsStr) -> Result<File> {
 
 #[cfg(windows)]
 impl Directory {
+    pub fn child(&self, name: &str) -> Result<Self> {
+        if name.is_empty() || name.contains(['/', '\\', ':']) || name == "." || name == ".." {
+            return Err("Invalid directory entry name".into());
+        }
+        self.verify()?;
+        let child=Self::open(&self.path.join(name))?;
+        self.verify()?;
+        Ok(child)
+    }
+
+    /// The retained Windows directory and ancestors prohibit rename/reparse
+    /// replacement while this new entry is published without clobbering one.
+    pub fn write_new(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        self.write_new_file(name,bytes).map(drop)
+    }
+
+    /// The same publication, retaining the exact file created by this call.
+    /// A later pathname open cannot stand in for that original object.
+    pub fn write_new_file(&self, name: &str, bytes: &[u8]) -> Result<File> {
+        self.publish_file(name, bytes, false)
+    }
+
+    /// Replace metadata under caller-held exclusion, through this original
+    /// directory. This does not establish any action or consent authority.
+    pub(in crate::state) fn replace_file(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        self.replace_file_retained(name, bytes).map(drop)
+    }
+    pub(in crate::state) fn replace_file_retained(&self, name: &str, bytes: &[u8]) -> Result<File> {
+        self.publish_file(name, bytes, true)
+    }
+
+    fn publish_file(&self, name: &str, bytes: &[u8], replace: bool) -> Result<File> {
+        use std::io::Write;
+        if name.is_empty() || name.contains(['/', '\\', ':']) || name == "." || name == ".." {
+            return Err("Invalid file name".into());
+        }
+        self.verify()?;
+        let mut file = tempfile::Builder::new().prefix(".hgs-new-")
+            .tempfile_in(&self.path).map_err(|e| e.to_string())?;
+        file.write_all(bytes).map_err(|e| e.to_string())?;
+        file.as_file().sync_all().map_err(|e| e.to_string())?;
+        let file = if replace {
+            crate::platform::persist(file, self.path.join(name))
+        } else {
+            file.persist_noclobber(self.path.join(name))
+        }.map_err(|e| e.error.to_string())?;
+        self.verify()?;
+        Ok(file)
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
         use windows_sys::Win32::Storage::FileSystem::*;
@@ -331,7 +560,7 @@ impl Directory {
             let file = OpenOptions::new()
                 .read(true)
                 .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-                .share_mode(FILE_SHARE_READ)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
                 .open(ancestor)
                 .map_err(|e| format!("Cannot pin clone directory: {e}"))?;
             let meta = file.metadata().map_err(|e| e.to_string())?;
@@ -380,12 +609,14 @@ impl Directory {
         let code = unsafe {
             NtCreateFile(
                 &mut handle,
-                FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | 0x100000,
+                // private() checks owner/DACL through this original handle;
+                // GetSecurityInfo requires READ_CONTROL, not just attributes.
+                FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | READ_CONTROL | 0x100000,
                 &attrs,
                 &mut status,
                 std::ptr::null(),
                 FILE_ATTRIBUTE_NORMAL,
-                FILE_SHARE_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
                 FILE_CREATE,
                 FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
                 std::ptr::null(),
@@ -448,6 +679,47 @@ mod tests {
         // Causal control: the former pathname-based mkdir accepts this replacement.
         std::fs::create_dir(path.join("parent/checkout")).unwrap();
         assert!(path.join("parent/checkout").is_dir());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_created_directory_handle_can_read_its_original_security() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = crate::platform::canonical(temp.path()).unwrap();
+        let parent = Directory::open(&path).unwrap();
+        let created = parent.create("store", "unused").unwrap();
+        // Keep the creation handle: reopening first would hide missing rights
+        // because Directory::open requests GENERIC_READ (with READ_CONTROL).
+        let expected =
+            crate::platform::verify_private(&created.path, crate::platform::Private::Directory)
+                .unwrap();
+        assert_eq!(created.private().unwrap(), expected);
+        assert_eq!(
+            Directory::open(&created.path).unwrap().private().unwrap(),
+            expected
+        );
+        created.verify().unwrap();
+    }
+
+    /// Task #421 (os error 32 of 2026-11-09): a directory pinned by open or
+    /// by create accepts a file published into it.
+    #[cfg(windows)]
+    #[test]
+    fn a_pinned_directory_accepts_a_published_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = crate::platform::canonical(temp.path()).unwrap();
+        let parent = Directory::open(&path).unwrap();
+        parent.write_new("opened.json", b"one").unwrap();
+        let created = parent.create("backup", "unused").unwrap();
+        created.write_new("created.json", b"two").unwrap();
+        created.write_new_file("retained.json", b"three").unwrap();
+        assert_eq!(std::fs::read(path.join("opened.json")).unwrap(), b"one");
+        assert_eq!(std::fs::read(path.join("backup/created.json")).unwrap(), b"two");
+        assert_eq!(std::fs::read(path.join("backup/retained.json")).unwrap(), b"three");
+        // Publication never clobbers, and the pins still deny a rename.
+        assert!(created.write_new("created.json", b"other").is_err());
+        assert!(std::fs::rename(&created.path, path.join("moved")).is_err());
+        created.verify().unwrap();
     }
 
     #[cfg(windows)]

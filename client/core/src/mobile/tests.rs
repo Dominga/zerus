@@ -58,6 +58,50 @@ fn workspace_failures_distinguish_startup_protocol_and_refusal_without_child_tex
     assert!(error.contains("refused the workspace request"));
 }
 
+/// zerus-7rkq9: only the connector's closed result bound to this very call means
+/// that nothing changed. Its error text alone never does.
+#[test]
+fn only_the_closed_refusal_of_this_call_says_nothing_changed() {
+    // The connector's contract, in another package: its tests pin the same words.
+    assert_eq!(STOP_REFUSED_BEFORE_EFFECT, "stop-refused-before-effect");
+    let (revision, generation) = ("r".repeat(64), "g".repeat(32));
+    let refusal = json!({"ok":false,"refusal":STOP_REFUSED_BEFORE_EFFECT,"generation":generation,"expected_revision":revision,"error":"anything"});
+    let check = |value: &Value, status: i32| {
+        stop_refused(
+            &code(status, &value.to_string(), ""),
+            &revision,
+            &generation,
+        )
+    };
+    assert!(check(&refusal, 1));
+    for field in ["ok", "refusal", "generation", "expected_revision"] {
+        let mut changed = refusal.clone();
+        changed.as_object_mut().unwrap().remove(field);
+        assert!(!check(&changed, 1), "without {field}");
+        changed[field] = json!("other");
+        assert!(!check(&changed, 1), "with another {field}");
+    }
+    assert!(!check(&refusal, 0), "a clean exit is no refusal");
+    assert!(
+        !check(&json!({"ok":false,"error":STOP_REFUSED}), 1),
+        "text alone"
+    );
+    assert!(
+        !check(&json!({"ok":false,"error":STOP_REFUSED_BEFORE_EFFECT}), 1),
+        "text alone"
+    );
+    assert!(!stop_refused(&Some(Exit::TimedOut), &revision, &generation));
+    assert!(!stop_refused(&None, &revision, &generation));
+    assert!(!stop_refused(
+        &code(1, "not json", ""),
+        &revision,
+        &generation
+    ));
+    // workspace_reply itself never reads any of this as anything but a failure.
+    let error = workspace_reply(code(1, &refusal.to_string(), ""), false).unwrap_err();
+    assert_ne!(error, STOP_REFUSED);
+}
+
 #[test]
 fn a_missing_selected_connector_is_reported_before_the_status_probe() {
     let missing = std::env::temp_dir().join(format!("missing-connector-{}", uuid::Uuid::new_v4()));
@@ -436,6 +480,47 @@ fn a_staged_phone_cli_receives_the_exact_connector_without_global_environment_ch
     assert!(phone_connector(&hgs, &remote, Some(&bundle.0)).is_none());
 }
 
+/// zerus-ihrzs: on every platform a local nested phone call carries the
+/// connector the status probe selected. With no connector beside a separately
+/// staged hgs, the probe picks the one packaged beside the app; the nested CLI
+/// must not fall back to a different connector found on PATH.
+#[cfg(unix)]
+#[test]
+fn a_local_phone_call_carries_the_probe_selection_when_no_sibling_exists() {
+    let app = Scratch::new("phone-app");
+    let stage = Scratch::new("phone-lone-stage");
+    let on_path = Scratch::new("phone-path");
+    let (packaged, _) = app.program(
+        "zerus-mobile-connector",
+        &[("*", "echo '{\"packaged\":true}'")],
+    );
+    on_path.program("zerus-mobile-connector", &[("*", "echo stale; exit 9")]);
+    // Mirrors src/phones.rs: the exact selection, else the sibling, else PATH.
+    let fallback = format!(
+        "if [ -n \"${{ZERUS_CLIENT_MOBILE_CONNECTOR_PATH+x}}\" ]; then \"$ZERUS_CLIENT_MOBILE_CONNECTOR_PATH\" --workspace status; elif [ -x \"$here/zerus-mobile-connector\" ]; then \"$here/zerus-mobile-connector\" --workspace status; else PATH='{}':\"$PATH\" zerus-mobile-connector --workspace status; fi",
+        on_path.0.display()
+    );
+    let (hgs, _) = stage.program("hgs", &[("*", fallback.as_str())]);
+    assert_eq!(connector_program(&hgs, Some(&app.0)), packaged);
+    let call = invocation(&["mobile", "phones", "--json"], Duration::from_secs(5));
+    let result = run_phone_cli_from(&hgs, &call, 4096, Some(&app.0)).unwrap();
+    assert!(
+        matches!(result, Exit::Code { code: 0, ref stdout, .. } if stdout == b"{\"packaged\":true}\n"),
+        "{result:?}"
+    );
+    assert_eq!(
+        on_path.calls("zerus-mobile-connector"),
+        "",
+        "the stale PATH connector was reached"
+    );
+    // A remote call still carries no local selection.
+    let remote = invocation(
+        &["@lab", "mobile", "phones", "--json"],
+        Duration::from_secs(5),
+    );
+    assert!(phone_connector(&hgs, &remote, Some(&app.0)).is_none());
+}
+
 #[cfg(windows)]
 #[test]
 fn the_packaged_windows_connector_wins_over_a_legacy_cli_sibling() {
@@ -467,6 +552,128 @@ fn the_packaged_windows_connector_wins_over_a_legacy_cli_sibling() {
         Duration::from_secs(5),
     );
     assert!(phone_connector(&hgs, &remote, Some(&app)).is_none());
+}
+
+/// The real call path against a connector that advertises Stop and refuses it.
+#[cfg(unix)]
+fn running_reply() -> Map<String, Value> {
+    let mut value = active();
+    value["running"] = json!(true);
+    value["connector_state"] = json!("running");
+    value["generation"] = json!("e".repeat(32));
+    value.as_object().unwrap().clone()
+}
+
+#[cfg(unix)]
+fn running_status(reply: &Map<String, Value>) -> String {
+    Value::Object(reply.clone())
+        .to_string()
+        .replace('"', "\\\"")
+}
+
+#[cfg(unix)]
+#[test]
+fn a_stop_refused_by_the_connector_reaches_the_caller_as_the_closed_result() {
+    let scratch = Scratch::new("stop-refused");
+    let running = running_reply();
+    let reply = running_status(&running);
+    let revision = text(&running, "config_revision");
+    let generation = text(&running, "generation");
+    let refusal = json!({"ok":false,"refusal":STOP_REFUSED_BEFORE_EFFECT,"generation":generation,"expected_revision":revision}).to_string().replace('"', "\\\"");
+    let (connector, _) = scratch.program(
+        "zerus-mobile-connector",
+        &[
+            ("*--workspace\\ status*", &format!("echo \"{reply}\"")),
+            (
+                "*--workspace\\ stop*",
+                &format!("echo \"{refusal}\"; exit 1"),
+            ),
+            ("--help", &format!("echo '{STOP_MARKER}'")),
+        ],
+    );
+    let config = scratch.0.join("connector.json");
+    let current = read_status(&connector, &config).unwrap();
+    let target = connector_actions::admit(&current, connector_actions::Kind::Stop).unwrap();
+    let failure =
+        connector_actions::apply(&connector, &config, &target, connector_actions::Kind::Stop)
+            .err()
+            .unwrap();
+    assert_eq!(failure, Failure::StopRefused);
+    assert_eq!(failure.message(), STOP_REFUSED);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_workspace_change_whose_stop_is_refused_changes_nothing_and_says_so() {
+    let scratch = Scratch::new("change-refused");
+    let running = running_reply();
+    let reply = running_status(&running);
+    let revision = text(&running, "config_revision");
+    let generation = text(&running, "generation");
+    let refusal = json!({"ok":false,"refusal":STOP_REFUSED_BEFORE_EFFECT,"generation":generation,"expected_revision":revision}).to_string().replace('"', "\\\"");
+    let (connector, _) = scratch.program(
+        "zerus-mobile-connector",
+        &[
+            ("*--workspace\\ status*", &format!("echo \"{reply}\"")),
+            (
+                "*--workspace\\ stop*",
+                &format!("echo \"{refusal}\"; exit 1"),
+            ),
+            ("--help", &format!("echo '{STOP_MARKER}'")),
+        ],
+    );
+    let config = scratch.0.join("connector.json");
+    let current = read_status(&connector, &config).unwrap();
+    let target = enrollment::Target::capture(&current).unwrap();
+    let request = enrollment::Request {
+        mode: enrollment::Mode::Create,
+        relay: "https://relay.example.invalid".into(),
+        code: String::new(),
+    };
+    let failure = enrollment::enroll(&connector, &config, &target, &request, "Computer")
+        .err()
+        .unwrap();
+    assert_eq!(failure, Failure::StopRefused);
+    let calls = scratch.calls("zerus-mobile-connector");
+    assert!(calls.contains("--workspace stop"), "{calls}");
+    assert!(!calls.contains("--workspace switch"), "{calls}");
+}
+
+/// A connector that doesn't advertise Stop never receives one (zerus-7rkq9).
+#[cfg(unix)]
+#[test]
+fn a_connector_without_the_stop_marker_is_never_sent_a_stop_or_a_running_change() {
+    let scratch = Scratch::new("stop-unadvertised");
+    let running = running_reply();
+    let reply = running_status(&running);
+    let (connector, _) = scratch.program(
+        "zerus-mobile-connector",
+        &[
+            ("*--workspace\\ status*", &format!("echo \"{reply}\"")),
+            ("--help", "echo 'no marker here'"),
+        ],
+    );
+    let config = scratch.0.join("connector.json");
+    let current = read_status(&connector, &config).unwrap();
+    assert!(!current.stop_supported);
+    assert!(connector_actions::admit(&current, connector_actions::Kind::Stop).is_err());
+    let target = enrollment::Target::capture(&current).unwrap();
+    assert!(!target.can_enroll(), "a running change needs Stop");
+    let mut advertised = target.clone();
+    advertised.stop_supported = true;
+    assert!(connector_actions::apply(
+        &connector,
+        &config,
+        &advertised,
+        connector_actions::Kind::Stop
+    )
+    .is_err());
+    assert!(
+        !scratch
+            .calls("zerus-mobile-connector")
+            .contains("--workspace stop"),
+        "a Stop was sent"
+    );
 }
 
 #[cfg(unix)]

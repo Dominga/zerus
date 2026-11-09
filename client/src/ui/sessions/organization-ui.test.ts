@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  chipColor, createOrgDialogs, deleteTargets, deleteText, editEntry, headerEntries, headerMenuState, moveChoices, nameProblem, projectColor,
+  chipColor, createOrgDialogs, deleteTargets, deleteText, editEntry, folderFrameColor, headerEntries, headerMenuState, moveChoices, movedText, nameProblem, projectColor,
   type HeaderActions, type OrgStore,
 } from "./organization-ui";
+import { translateWithCatalog } from "../../i18n";
+import ru from "../../i18n.ru.json";
 import type { EditOutcome, GroupingOut } from "../../types";
 import type { MenuEntry } from "../../store/ui";
 import type { Session } from "./types";
@@ -49,6 +51,11 @@ describe("project menu rules", () => {
     expect(projectColor({ color: null, palette: 4 })).toBe("var(--z-entity-palette-4)");
     expect(nameProblem("  ")).toBe("Enter a project name.");
     expect(nameProblem(" Release ")).toBeUndefined();
+  });
+
+  it("frames a folder in its own colour, the neutral border when it has none (task #457)", () => {
+    expect(folderFrameColor({ color: "#3fb950" })).toBe("#3fb950");
+    expect(folderFrameColor({ color: null })).toBe("var(--z-color-border)");
   });
 
   it("colours a project chip as its header band, and a machine chip or an unlisted project by its name's slot", () => {
@@ -240,6 +247,80 @@ describe("the Move to project dialog (SessionsWindow.cpp:5363-5372)", () => {
     dialogs.openRename("alpha");
     dialogs.choose("beta");
     expect(calls()).toBe(0);
+  });
+});
+
+describe("Move to project for a selection (zerus-5wmh.18.1, SessionSelection.cpp:184-195)", () => {
+  const live = (key: string, row: Session) => ({ ...row, key, created: 1, runId: `run-${row.name}`, state: "running" }) as Session;
+  const a = live(one.key, one), b = live(two.key, two);
+  function selection(listed: Record<string, Session | undefined>, outcome: EditOutcome = { outcome: "done", conflicts: 0 }) {
+    const notify = vi.fn();
+    const store = { ...fakeStore().store, moveToProject: vi.fn(() => Promise.resolve(outcome)), createProject: vi.fn(() => Promise.resolve(outcome)) };
+    const dialogs = createOrgDialogs(store, { live: (key) => listed[key], notify });
+    return { store, dialogs, notify };
+  }
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+
+  it("moves every row still listed as the same instance with one call, and says how many moved", async () => {
+    const { store, dialogs, notify } = selection({ [a.key]: a, [b.key]: b });
+    dialogs.openMoveSelection([a, b]);
+    dialogs.choose("beta");
+    expect(store.moveToProject).toHaveBeenCalledExactlyOnceWith([a, b], "beta");
+    await flush();
+    expect(notify).toHaveBeenCalledExactlyOnceWith("info", "2 sessions moved to project.");
+  });
+
+  it("drops a row that left the list or became another instance, and names them", async () => {
+    // b was archived between open and choose: its live row is another instance, never moved under its old key.
+    const { store, dialogs, notify } = selection({ [a.key]: a, [b.key]: { ...b, state: "archived", archiveId: "a1" } as Session });
+    dialogs.openMoveSelection([a, b]);
+    dialogs.choose("beta");
+    expect(store.moveToProject).toHaveBeenCalledExactlyOnceWith([a], "beta");
+    await flush();
+    expect(notify).toHaveBeenCalledExactlyOnceWith("info", "1 session moved to project. 1 session is no longer listed.");
+    // A row gone from the list entirely is dropped too.
+    const gone = selection({ [a.key]: a });
+    gone.dialogs.openMoveSelection([a, b]);
+    gone.dialogs.choose("alpha");
+    expect(gone.store.moveToProject).toHaveBeenCalledExactlyOnceWith([a], "alpha");
+  });
+
+  it("refuses with the reason and sends nothing when no row is listed any more", () => {
+    const { store, dialogs, notify } = selection({});
+    dialogs.openMoveSelection([a, b]);
+    dialogs.choose("beta");
+    expect(store.moveToProject).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledExactlyOnceWith("info", "The selected sessions are no longer listed.");
+  });
+
+  it("leaves a kept or refused edit to the store's own notice", async () => {
+    for (const outcome of [{ outcome: "kept", detail: "Project sync unavailable: busy" }, { outcome: "refused", detail: "Project sync is starting." }] as EditOutcome[]) {
+      const { dialogs, notify } = selection({ [a.key]: a, [b.key]: b }, outcome);
+      dialogs.openMoveSelection([a, b]);
+      dialogs.choose("beta");
+      await flush();
+      expect(notify).not.toHaveBeenCalled();
+    }
+  });
+
+  it("New project from it takes the rows still listed, in the same apply", async () => {
+    const { store, dialogs, notify } = selection({ [a.key]: a });
+    dialogs.openMoveSelection([a, b]);
+    dialogs.newProject();
+    expect(dialogs.submitName("Release")).toBe(true);
+    expect(store.createProject).toHaveBeenCalledExactlyOnceWith("Release", [a]);
+    await flush();
+    expect(notify).toHaveBeenCalledExactlyOnceWith("info", "1 session moved to project. 1 session is no longer listed.");
+  });
+
+  it("counts in Russian with its plural forms, without dots between values", () => {
+    const russian = (source: string, ...args: (string | number)[]) => translateWithCatalog(ru, "ru", source, ...args);
+    expect(movedText(1, 0, russian)).toBe("1 сессия перемещена в проект.");
+    expect(movedText(3, 2, russian)).toBe("3 сессии перемещены в проект. 2 сессии больше не в списке.");
+    expect(movedText(5, 21, russian)).toBe("5 сессий перемещено в проект. 21 сессия больше не в списке.");
+    expect(movedText(1, 1)).toBe("1 session moved to project. 1 session is no longer listed.");
+    expect(movedText(2, 3)).toBe("2 sessions moved to project. 3 sessions are no longer listed.");
+    expect(movedText(2, 3)).not.toContain("\u00b7");
   });
 });
 

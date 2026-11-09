@@ -469,6 +469,7 @@ Team parse(const QJsonObject &v)
         member.id = str(m, "id"); member.role = str(m, "role"); member.agent = str(m, "agent"); member.model = str(m, "model");
         member.computer = str(m, "computer"); member.state = str(m, "state"); member.error = str(m, "error");
         member.account = str(m, "account"); member.effort = str(m, "effort"); member.permissions = str(m, "permissions");
+        member.permissionsProfile = str(m, "permissions_profile");
         member.sessionAccountKnown = m.contains("session_account"); member.sessionAccount = str(m, "session_account");
         member.folder = str(m, "folder"); member.directory = str(m, "directory"); member.prompt = str(m, "prompt");
         for (const auto &rule : m.value("iron_rules").toArray()) member.ironRules << rule.toString();
@@ -557,6 +558,9 @@ Team parse(const QJsonObject &v)
         member.sub = m.value("sub").toBool();
         member.models = parseModelChoices(m.value("models"));
         member.contextBeforeTask = str(m, "context_before_task");
+        member.afterTask = str(m, "after_task");
+        member.afterTaskOn = str(m, "after_task_on");
+        member.afterTaskAt = m.value("after_task_at").toInt();
         member.draining = m.value("draining").toBool();
         if (m.value("input_block").isObject()) {
             const auto block = m.value("input_block").toObject();
@@ -593,6 +597,7 @@ Team parse(const QJsonObject &v)
     for (const auto &value : v.value("tasks").toArray()) {
         const auto t = value.toObject();
         Task task;
+        task.archived = t.value("archived").isObject();
         task.id = t.value("id").toInt(); task.phase = qMax(1, t.value("phase").toInt(1)); task.pinned = t.value("pinned").toBool();
         task.title = str(t, "title"); task.description = str(t, "description");
         task.status = str(t, "status"); task.assignee = str(t, "assignee");
@@ -620,6 +625,7 @@ Team parse(const QJsonObject &v)
             const auto a = t.value("added_late").toObject();
             task.addedLate = {str(a, "by"), str(a, "request"), str(a, "confirm"), a.value("at").toDouble(), true};
         }
+        task.prerequisites = t.value("requires").toArray();
         // Owner 2026-10-31 (#746): the estimate, from #745's status fields.
         if (t.contains("estimate_source")) {
             task.estimateSource = str(t, "estimate_source");
@@ -627,9 +633,10 @@ Team parse(const QJsonObject &v)
             task.estimateMinutes = t.value("estimate_minutes").isDouble() ? t.value("estimate_minutes").toDouble() : -1;
             task.estimateSpent = t.value("estimate_spent_minutes").isDouble() ? t.value("estimate_spent_minutes").toDouble() : -1;
         }
-        if (t.value("timing").isObject()) {
+        const auto frozen = t.value("archived").toObject().value("timing");
+        if (t.value("timing").isObject() || frozen.isObject()) {
             // U37: the working time and the waits, computed by hgs.
-            const auto o = t.value("timing").toObject();
+            const auto o = (frozen.isObject() ? frozen : t.value("timing")).toObject();
             const auto w = o.value("waits").toObject();
             auto &timing = task.timing;
             timing.known = true;
@@ -827,6 +834,15 @@ Team parse(const QJsonObject &v)
     for (const auto &value : v.value("phases").toArray()) {
         const auto p = value.toObject();
         Phase phase;
+        phase.checks = p.value("checks").toObject();
+        phase.targetHours = p.value("target_hours").toDouble(-1);
+        const auto archived = p.value("archived").toObject();
+        phase.archived = p.value("archived").isObject();
+        phase.archivedTasks = archived.value("tasks").toInt();
+        phase.archivedAccepted = archived.value("accepted").toInt();
+        phase.archivedRejected = archived.value("rejected").toInt();
+        phase.archivedCancelled = archived.value("cancelled").toInt();
+        phase.closedAt = archived.value("closed_at").toDouble();
         phase.n = p.value("n").toInt(); phase.title = str(p, "title"); phase.barrier = p.value("barrier").toBool();
         phase.kind = str(p, "kind");
         for (const auto &id : p.value("crit").toArray()) phase.crit.append(id.toInt());
@@ -1117,6 +1133,7 @@ QJsonObject Member::json() const
 {
     QJsonObject o{{"id", id}, {"role", role}, {"agent", agent}, {"account", account}, {"model", model}, {"effort", effort},
                   {"permissions", permissions}, {"computer", computer}, {"directory", directory}, {"prompt", prompt}};
+    if (!permissionsProfile.isEmpty()) o.insert("permissions_profile", permissionsProfile);
     if (!ironRules.isEmpty()) o.insert("iron_rules", QJsonArray::fromStringList(ironRules));
     if (!folder.isEmpty()) o.insert("folder", folder);
     if (!parent.isEmpty()) o.insert("parent", parent);
@@ -1124,6 +1141,12 @@ QJsonObject Member::json() const
     // U45/U46: kept through a plan edit, and absent when never set.
     if (!models.isEmpty()) o.insert("models", modelChoicesJson(models));
     if (!contextBeforeTask.isEmpty()) o.insert("context_before_task", contextBeforeTask);
+    // Task #7: the After-a-task policy goes with the plan member when set.
+    if (!afterTask.isEmpty()) {
+        o.insert("after_task", afterTask);
+        if (!afterTaskOn.isEmpty()) o.insert("after_task_on", afterTaskOn);
+        if (afterTaskAt > 0) o.insert("after_task_at", afterTaskAt);
+    }
     if (!session.isEmpty()) {
         // F8: an adopted session keeps its identity, so hgs finds the same one.
         QJsonObject ref{{"host", host}, {"name", session}};
@@ -1140,6 +1163,7 @@ QJsonObject Task::json() const
     for (const auto &dep : deps) d.append(QJsonObject{{"task", dep.task}, {"kind", dep.soft ? "soft" : "hard"}});
     for (const auto &criterion : criteria) c.append(criterion);
     QJsonObject value{{"id", id}, {"title", title}, {"description", description}, {"criteria", c}, {"assignee", assignee}, {"deps", d}};
+    if (!prerequisites.isEmpty()) value.insert("requires", prerequisites);
     // C3 (#548): the phase it is planned in; hgs puts a task without one in phase 1.
     value.insert("phase", qMax(1, phase));
     if (lane.known()) value.insert("lane", QJsonObject{{"n", lane.n}, {"label", lane.label}});
@@ -1164,7 +1188,11 @@ QJsonObject planInput(const Team &team)
     QList<const Phase *> later;
     for (const auto &p : team.phases) if (p.n >= 2) later.append(&p);
     std::stable_sort(later.begin(), later.end(), [](const Phase *a, const Phase *b) { return a->n < b->n; });
-    for (const auto *p : later) phases.append(QJsonObject{{"n", p->n}, {"title", p->title}, {"barrier", p->barrier}});
+    for (const auto *p : later) {
+        QJsonObject phase{{"n", p->n}, {"title", p->title}, {"barrier", p->barrier}};
+        if (p->targetHours > 0) phase.insert("target_hours", p->targetHours);
+        phases.append(phase);
+    }
     return {{"members", members}, {"tasks", tasks}, {"phases", phases}};
 }
 
@@ -1673,6 +1701,12 @@ QList<PhaseGroup> phaseGroups(const Team &team)
         group.tasks.append(task.id);
         group.done += task.finished();
     }
+    for (const auto &phase : team.phases) if (phase.archived) {
+        auto &group = byPhase[phase.n];
+        group.n = phase.n;
+        group.archivedTotal = phase.archivedTasks;
+        group.done = phase.archivedTasks;
+    }
     for (auto it = byPhase.cbegin(); it != byPhase.cend(); ++it) {
         PhaseGroup group = it.value();
         if (const auto *record = team.phase(it.key())) {
@@ -1690,6 +1724,8 @@ QList<PhaseGroup> phaseGroups(const Team &team)
 
 bool phaseCancelled(const Team &team, int phase)
 {
+    if (const auto *record = team.phase(phase); record && record->archived)
+        return record->archivedTasks > 0 && record->archivedCancelled == record->archivedTasks;
     if (const auto *record = team.phase(phase); record && record->state == QLatin1String("discarded")) return false;
     bool any = false;
     for (const auto &task : team.tasks) {
@@ -1702,7 +1738,9 @@ bool phaseCancelled(const Team &team, int phase)
 
 int cancelledTasks(const Team &team)
 {
-    return int(std::count_if(team.tasks.cbegin(), team.tasks.cend(), [](const Task &task) { return task.status == QLatin1String("cancelled"); }));
+    int count = int(std::count_if(team.tasks.cbegin(), team.tasks.cend(), [](const Task &task) { return !task.archived && task.status == QLatin1String("cancelled"); }));
+    for (const auto &phase : team.phases) if (phase.archived) count += phase.archivedCancelled;
+    return count;
 }
 
 Team withoutCancelled(const Team &team)
@@ -1711,6 +1749,7 @@ Team withoutCancelled(const Team &team)
     Team shown = team;
     shown.cancelledHidden = true;
     QSet<int> gone, phases;
+    for (const auto &phase : team.phases) if (phase.archived && phaseCancelled(team, phase.n)) phases.insert(phase.n);
     for (const auto &task : team.tasks) if (task.status == QLatin1String("cancelled")) gone.insert(task.id);
     for (const auto &task : team.tasks) if (phaseCancelled(team, task.phase)) phases.insert(task.phase);
     shown.tasks.erase(std::remove_if(shown.tasks.begin(), shown.tasks.end(), [&gone](const Task &task) { return gone.contains(task.id); }), shown.tasks.end());
@@ -1724,6 +1763,7 @@ Team withoutCancelled(const Team &team)
 
 bool phaseFinished(const Team &team, int phase)
 {
+    if (const auto *record = team.phase(phase); record && record->archived) return !phaseCancelled(team, phase);
     if (const auto *record = team.phase(phase); record && record->state == QLatin1String("discarded")) return false;
     if (team.freeMode() && team.freePhase.known && team.freePhase.phase == phase) return false;
     bool any = false, cancelledOnly = true;
@@ -1739,6 +1779,7 @@ bool phaseFinished(const Team &team, int phase)
 int finishedPhases(const Team &team)
 {
     QSet<int> phases;
+    for (const auto &phase : team.phases) if (phase.archived && phaseFinished(team, phase.n)) phases.insert(phase.n);
     for (const auto &task : team.tasks) if (!phases.contains(task.phase) && phaseFinished(team, task.phase)) phases.insert(task.phase);
     return int(phases.size());
 }
@@ -1746,6 +1787,7 @@ int finishedPhases(const Team &team)
 Team withoutFinished(const Team &team)
 {
     QSet<int> phases;
+    for (const auto &phase : team.phases) if (phase.archived && phaseFinished(team, phase.n)) phases.insert(phase.n);
     for (const auto &task : team.tasks) if (phaseFinished(team, task.phase)) phases.insert(task.phase);
     if (phases.isEmpty()) return team;
     Team shown = team;
@@ -1904,7 +1946,7 @@ QString phaseHeading(const PhaseGroup &group)
 {
     const QString phase = group.title.isEmpty() ? tr("Phase %1").arg(group.n)
                                                 : tr("Phase %1 · %2").arg(group.n).arg(group.title);
-    return tr("%1 · %2/%3").arg(phase).arg(group.done).arg(group.tasks.size());
+    return tr("%1 · %2/%3").arg(phase).arg(group.done).arg(group.archivedTotal ? group.archivedTotal : group.tasks.size());
 }
 
 bool leftMember(const Team &team, const QString &member)
@@ -2072,6 +2114,24 @@ Approval phaseApproval(const Team &team, int phase)
         approval.title = tr("Approve phase?");
         approval.text = tr("Hand phase %1's %2 tasks to the members?").arg(phase).arg(count);
         approval.action = tr("Approve phase");
+    }
+    if (const auto *record = team.phase(phase)) {
+        const auto checks = record->checks;
+        if (checks.value("known_hours").isDouble()) {
+            const int missing = checks.value("missing_estimates").toInt();
+            QString path = tr("Critical path: %1%2 h").arg(missing ? QStringLiteral(">= ") : QString(), QString::number(checks.value("known_hours").toDouble(), 'g', 4));
+            if (missing) path += missing == 1 ? tr(", 1 task without an estimate") : tr(", %1 tasks without an estimate").arg(missing);
+            if (record->targetHours > 0) path += tr("; target %1 h").arg(record->targetHours);
+            if (checks.value("target_exceeded").toBool()) path += tr(" (exceeds target; warning only)");
+            approval.text += QLatin1Char('\n') + path;
+        }
+        const auto unresolved = checks.value("unresolved").toArray();
+        if (!unresolved.isEmpty()) {
+            approval.text += QLatin1Char('\n') + tr("Unresolved prerequisites:");
+            for (const auto &reason : unresolved) approval.text += QLatin1Char('\n') + reason.toString();
+            approval.action = tr("Approve anyway");
+            approval.input.insert("approve_anyway", true);
+        }
     }
     return approval;
 }
@@ -2266,7 +2326,10 @@ FeedLine feedLine(const Team &team, const QJsonObject &event)
     else if (k == "unconfirmed") { t = tr("Delivery unconfirmed · %1%2 (%3)").arg(ref, attempt, d.value("error").toString()); line.tone = Tone::Danger; }
     else if (k == "reported") {
         const QString to = d.value("to").toString();
-        t = tr("Report to %1 · %2%3").arg(to.isEmpty() ? tr("Lead") : to, ref, attempt);
+        const QString text = d.value("text").toString();
+        // Task #362: the lead's use of a member's last reply quotes the reply.
+        t = text.isEmpty() ? tr("Report to %1 · %2%3").arg(to.isEmpty() ? tr("Lead") : to, ref, attempt)
+                           : tr("Report to %1 · %2%3: “%4”").arg(to.isEmpty() ? tr("Lead") : to, ref, attempt, text);
     }
     else if (k == "interim_report") {
         const QString text = d.value("text").toString();

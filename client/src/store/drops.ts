@@ -15,6 +15,12 @@ import { trNoop, tr } from "../i18n";
 // MessageComposer.cpp:961-967). The target a drag entered with must still be
 // the target when it drops, every path must be a file, and the drop must land
 // on the panel; while it is over the panel the overlay says what a drop does.
+//
+// Image data dragged without a file (an image out of a browser) never reaches
+// the page: Tauri takes every native drop, macOS reports only file URLs and
+// Linux reports other URLs as paths (zerus-5wmh.13.7.5). Those URLs are left
+// out; a composer drop that names no file at all says to copy and paste
+// instead, since a pasted image attaches.
 
 export type DropRoute = { kind: "terminal"; key: string } | { kind: "composer"; key: string } | { kind: "none" };
 
@@ -33,6 +39,16 @@ export interface DropState {
 
 export const TERMINAL_HINT = trNoop("Drop files to insert their paths in Terminal");
 export const COMPOSER_HINT = trNoop("Drop files to attach to this message");
+export const NO_FILES_NOTICE = trNoop("Nothing was attached: this drop has no files. To attach an image from another app, copy it and paste it into the message.");
+
+/**
+ * A dropped web, data or other URI, which Linux reports among the paths: a
+ * scheme of two or more characters and a colon (`https://…`, `data:image/…`).
+ * A local, UNC or drive path (`C:\…`, a single letter) is not one (zerus-9vofc).
+ */
+export const nonFileUrl = (path: string) => /^[a-z][a-z0-9+.-]+:/i.test(path);
+/** The dropped paths that may name files. */
+const filePaths = (paths: string[]) => paths.filter((path) => !nonFileUrl(path));
 
 /**
  * Qt's targets: the Terminal while it is the current tab, its session online
@@ -82,7 +98,8 @@ export function createDrops(deps: DropDeps) {
 
   return {
     hint,
-    enter(paths: string[], x: number, y: number) {
+    enter(dropped: string[], x: number, y: number) {
+      const paths = filePaths(dropped);
       const files = paths.length ? deps.files(paths) : Promise.resolve(false);
       const d = { key: routeKey(routeDrop(deps.state())), files, at: { x, y } } as NonNullable<typeof drag>;
       drag = d;
@@ -95,13 +112,24 @@ export function createDrops(deps: DropDeps) {
       update();
     },
     leave() { drag = undefined; setHint(undefined); },
-    async drop(paths: string[], x: number, y: number) {
+    async drop(dropped: string[], x: number, y: number) {
       const d = drag;
       drag = undefined;
       setHint(undefined);
-      if (!d || !paths.length || !deps.overPanel(x, y)) return;
+      if (!d || !deps.overPanel(x, y)) return;
       const r = routeDrop(deps.state());
-      if (r.kind === "none" || r.key !== d.key || !(await d.files)) return;
+      if (r.kind === "none" || r.key !== d.key) return;
+      const paths = filePaths(dropped);
+      // Nothing to attach: say how an image gets in, never beside files that attach.
+      if (!paths.length) {
+        if (r.kind === "composer") deps.notify("info", tr(NO_FILES_NOTICE), false);
+        return;
+      }
+      if (!(await d.files)) return;
+      // The check may answer after the target changed: the drop goes only to
+      // the target it entered and was dropped on (zerus-tv0hj).
+      const now = routeDrop(deps.state());
+      if (now.kind !== r.kind || now.key !== r.key) return;
       if (r.kind === "composer") {
         deps.reveal();
         await deps.attach(paths);

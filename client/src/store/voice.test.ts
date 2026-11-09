@@ -16,6 +16,29 @@ function setup() {
 }
 
 describe("the main session's voice driver", () => {
+  it("the notice chip opens the microphone recovery or the notice as it read, and a session change drops it", async () => {
+    const a = setup(); a.store.follow(context); await tick();
+    a.store.openNotice();
+    expect(a.store.notice()).toBeUndefined();
+    a.out({ kind: "shown", shown: shown({ notice_visible: true, notice_permission: true, notice_label: "Microphone access", notice_detail: "Microphone access was denied." }) });
+    a.store.openNotice();
+    expect(a.store.permission()).toBe(true);
+    expect(a.store.notice()).toBeUndefined();
+    a.store.closePermission();
+    a.out({ kind: "shown", shown: shown({ notice_visible: true, notice_label: "Voice notice", notice_detail: "The voice recording is invalid." }) });
+    a.store.openNotice();
+    expect(a.store.permission()).toBe(false);
+    expect(a.store.notice()).toBe("The voice recording is invalid.");
+    a.out({ kind: "shown", shown: shown({ notice_visible: false, notice_detail: "" }) });
+    expect(a.store.notice(), "the open notice keeps its text, as Qt's modal does").toBe("The voice recording is invalid.");
+    a.store.closeNotice();
+    expect(a.store.notice()).toBeUndefined();
+    a.out({ kind: "shown", shown: shown({ notice_visible: true, notice_detail: "The voice recording is invalid." }) });
+    a.store.openNotice();
+    a.store.follow({ ...context, handle: 2, key: "peer\ncodex/sample-project/next" }); await tick();
+    expect(a.store.notice()).toBeUndefined();
+    await a.store.close();
+  });
   it("recording cancels a pending Activity player before its read can autoplay", async () => {
     const stop = vi.fn(), pending = mediaPlayback.take(stop);
     const a = setup(); a.store.follow(context); await tick();

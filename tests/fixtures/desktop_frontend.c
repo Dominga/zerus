@@ -48,10 +48,11 @@ static void write_all(int fd, const char *bytes, size_t length) {
     }
 }
 static char *line(void) {
-    char *bytes = calloc(8193, 1);
-    check(bytes != NULL && fgets(bytes, 8193, stdin) != NULL);
+    const size_t cap = 160 * 1024; /* bounded private program envelope */
+    char *bytes = calloc(cap + 1, 1);
+    check(bytes != NULL && fgets(bytes, (int)cap + 1, stdin) != NULL);
     size_t length = strlen(bytes);
-    check(length > 0 && length <= 8192 && bytes[length - 1] == '\n');
+    check(length > 0 && length <= cap && bytes[length - 1] == '\n');
     return bytes;
 }
 static void birth(pid_t pid, char *output, size_t length) {
@@ -78,6 +79,16 @@ static void birth(pid_t pid, char *output, size_t length) {
 /* Native adversarial relay: SAME binary/uid/direct parent/argv, a kernel-sealed
  * image instead of the installed inode. No product FD or image assertion. */
 static int sealed_image(const char *path, const char *mode) {
+    if (!strncmp(mode, "held:", 5)) {
+        char *end = NULL;
+        long held = strtol(mode + 5, &end, 10);
+        check(end && !*end && held >= 3 && held < 4096);
+        int required = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+        check((fcntl((int)held, F_GET_SEALS) & required) == required);
+        int retained = fcntl((int)held, F_DUPFD_CLOEXEC, 3);
+        check(retained >= 0);
+        return retained; /* SAME fixture-selected original object, no recopy */
+    }
     int input = open(path, O_RDONLY | O_CLOEXEC); check(input >= 0);
     struct stat info; check(fstat(input, &info) == 0 && S_ISREG(info.st_mode));
     check(info.st_size > 0 && info.st_size <= (256L << 20));
@@ -106,11 +117,13 @@ static int sealed_image(const char *path, const char *mode) {
 }
 #endif
 int main(int argc, char **argv) {
-    check(argc == 3 || argc == 4);
+    check(argc == 3 || argc == 4 || argc == 5);
+    const char *program_command = argc == 5 ? argv[4] : NULL;
+    check(program_command == NULL || !strcmp(program_command, "program-stop") || !strcmp(program_command, "program-cleanup"));
     int image = -1;
     int rendezvous = argc == 4 && !strcmp(argv[3], "rendezvous");
 #ifdef __linux__
-    if (argc == 4 && !rendezvous) image = sealed_image(argv[2], argv[3]);
+    if (argc >= 4 && !rendezvous) image = sealed_image(argv[2], argv[3]);
 #else
     check(argc == 3 || rendezvous);
 #endif
@@ -153,7 +166,9 @@ int main(int argc, char **argv) {
             snprintf(program, sizeof(program), "/proc/self/fd/%d", image);
             selected = program;
         }
-        if (rendezvous)
+        if (program_command)
+            execl(selected, argv[2], "worktrees", program_command, "--json", (char *)NULL);
+        else if (rendezvous)
             execl(selected, argv[2], "--desktop-helper-rendezvous-v1", "desktop", "frontend-request", "--json", (char *)NULL);
         else
             execl(selected, argv[2], "desktop", "frontend-request", "--json", (char *)NULL);

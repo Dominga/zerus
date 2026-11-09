@@ -1,17 +1,20 @@
-import { For, Show, createSignal, onCleanup } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
+import { steadyTitle } from "../lib/steady-title";
 import { tr, trNoop } from "../../i18n";
 import { AGENT_LABEL, AgentLogo, Icon } from "../lib/icons";
 import { computerFresh, computerOffline } from "../../store/catalog";
-import { visibleUnreadReply } from "../../store/attention";
+import { quietAttention, visibleUnreadReply } from "../../store/attention";
 import { optionalQuestionCount, optionalQuestionCountText } from "./optional-questions";
 import { now } from "../../store/ui";
 import { settings } from "../../store/settings";
 import { machineAppearance } from "../../store/machineAppearance";
+import { sessionMark, type AccountMark } from "../../store/accountMarks";
 import type { AgentKind, Session, Status, Subagent } from "./types";
 import type { TeamSummary } from "../../types";
+import type { Team } from "./group-rows";
+import type { LogoPath } from "../lib/agent-logos";
 import { currentChildren, workingChildren } from "./subagents";
 import { presentState, stateFacts, STATE_GLYPH, type Shown, type StateIcon } from "./session-states";
-import { keepWarmHours } from "../../store/keepWarm";
 
 // Card anatomy follows tray/src/SessionCardDelegate.h paintCard() at the
 // compact density (94 px rows, the only density in the web client):
@@ -39,12 +42,17 @@ const CAPTIONS = new Set<string>([
   trNoop("Interrupted"), trNoop("Model unavailable"), trNoop("Needs approval"), trNoop("Needs attention"), trNoop("Needs input"),
   trNoop("Not tracked"), trNoop("Paused"), trNoop("Provider error"), trNoop("Ready"), trNoop("Retrying"), trNoop("Scheduled"),
   trNoop("Sign in"), trNoop("Sign in required"), trNoop("Starting"), trNoop("Status unknown"), trNoop("Stopped"),
-  trNoop("Using a tool"), trNoop("Waiting for acceptance"), trNoop("Waiting for result"), trNoop("Waiting to retry"), trNoop("Working"),
+  trNoop("Using a tool"), trNoop("Waiting for acceptance"), trNoop("Waiting for result"), trNoop("Waiting to retry"), trNoop("Warming cache"), trNoop("Working"),
 ]);
 export const captionText = (caption: string) => (CAPTIONS.has(caption) ? tr(caption) : caption);
 
 /** The Qt caption (SessionPresentation::status) with the Working clock, as Qt shows it. */
-export function statusCaption(s: Session): string {
+/**
+ * The status a row shows, with its Working time. `seconds: false` is for a
+ * title or tooltip, which never carries a live seconds counter (zerus-5ryrx):
+ * minutes only, as past the first hour.
+ */
+export function statusCaption(s: Session, seconds = true): string {
   if (statusOf(s) === "offline") return tr("Offline");
   const state = cardState(s);
   if (state.kind && state.caption) return state.caption;
@@ -53,10 +61,10 @@ export function statusCaption(s: Session): string {
   // (SessionCardDelegate::statusOf), not the state under it ("Stopped").
   const kind = badgeKind(s);
   if (kind === "unread" || kind === "muted-unread") return tr("New reply");
-  const seconds = elapsed(s);
-  if (seconds === undefined) return captionText(s.caption);
-  const h = Math.floor(seconds / 3600), m = Math.floor((seconds % 3600) / 60), sec = seconds % 60;
-  return `${captionText(s.caption)} (${h ? `${h}h ${m}m` : `${m}m ${String(sec).padStart(2, "0")}s`})`;
+  const worked = elapsed(s);
+  if (worked === undefined) return captionText(s.caption);
+  const h = Math.floor(worked / 3600), m = Math.floor((worked % 3600) / 60), sec = worked % 60;
+  return `${captionText(s.caption)} (${h ? `${h}h ${m}m` : seconds ? `${m}m ${String(sec).padStart(2, "0")}s` : `${m}m`})`;
 }
 
 /** Short state for strip tiles: elapsed time while working, otherwise the caption. */
@@ -85,8 +93,8 @@ export const isStateKind = (kind: BadgeKind | undefined): kind is StateKind =>
 export interface CardState { shown: Shown; kind?: BadgeKind; caption?: string }
 export function cardState(s: Session): CardState {
   const online = !computerOffline(s.computer);
-  // Keep cache warm stretches Cooling to its hours (SessionsWindow.cpp:4936).
-  const shown = presentState(stateFacts(s, online, visibleUnreadReply(s, computerFresh(s.computer)), keepWarmHours(s) * 3600), now());
+  // The host reports the cache's lifetime, stretched by Keep cache warm (cache_ttl.kept_warm).
+  const shown = presentState(stateFacts(s, online, visibleUnreadReply(s, computerFresh(s.computer))), now());
   const blocked = s.status === "attention" || s.status === "error";
   const key = shown.key;
   if ((key === "deps" || key === "build" || key === "cooling" || key === "cold" || key === "stopped")
@@ -103,7 +111,7 @@ export function cardState(s: Session): CardState {
  */
 export function headerState(s: Session): { kind: BadgeKind; caption: string; title: string } | undefined {
   const online = !computerOffline(s.computer);
-  const shown = presentState(stateFacts(s, online, visibleUnreadReply(s, computerFresh(s.computer)), keepWarmHours(s) * 3600), now());
+  const shown = presentState(stateFacts(s, online, visibleUnreadReply(s, computerFresh(s.computer))), now());
   const key = shown.key;
   const needsYou = key === "user" && shown.badge === tr("Needs you") && !s.needsAction;
   if (needsYou) return { kind: "attention", caption: shown.badge, title: shown.reason };
@@ -114,12 +122,14 @@ export function headerState(s: Session): { kind: BadgeKind; caption: string; tit
 
 export function badgeKind(s: Session): BadgeKind {
   const status = statusOf(s);
-  if (status === "attention") return s.muted ? "muted-attention" : "attention";
+  if (status === "attention") return quietAttention(s) ? "muted-attention" : "attention";
+  // A supervised child's error is its parent's to handle: gray, like its other requests (zerus-rxz9k).
+  if (status === "error" && s.quiet && !s.muted) return "muted-attention";
   const state = cardState(s).kind;
   if (state) return state;
   if (status === "error" || status === "working" || status === "background") return status;
   if (s.draft && status !== "offline") return "draft";
-  if (visibleUnreadReply(s, computerFresh(s.computer))) return s.muted ? "muted-unread" : "unread";
+  if (visibleUnreadReply(s, computerFresh(s.computer))) return quietAttention(s) ? "muted-unread" : "unread";
   if (status === "scheduled" || status === "waiting" || status === "paused") return status;
   return "neutral";
 }
@@ -127,9 +137,9 @@ export function badgeKind(s: Session): BadgeKind {
 // Edge mark: attention/error > draft > unread; muted rows turn it grey.
 export function emphasis(s: Session): string | undefined {
   const status = statusOf(s);
-  if (s.muted && (status === "attention" || visibleUnreadReply(s, computerFresh(s.computer)))) return "muted";
+  if (quietAttention(s) && !(s.quiet && !s.muted && s.reviewLater) && (status === "attention" || visibleUnreadReply(s, computerFresh(s.computer)))) return "muted";
   if (status === "attention" || s.reviewLater) return "attention";
-  if (status === "error") return "error";
+  if (status === "error") return s.quiet && !s.muted ? "muted" : "error";
   if (s.draft) return "draft";
   if (visibleUnreadReply(s, computerFresh(s.computer))) return "unread";
   return undefined;
@@ -197,6 +207,83 @@ export function AgentBadge(props: { agent: AgentKind; narrow?: boolean; max?: nu
   );
 }
 
+/**
+ * A supervised child: its parent handles its requests (spec 3.4). A dim
+ * arrow turning down and right, before the title: handled by the parent
+ * above (owner, 2026-11-07, zerus-sa9qn.16; a bell read as notifications, a
+ * crossed bell as muted).
+ */
+export function SupervisedMark(props: { session: Session }) {
+  const name = () => props.session.parent?.name.split("/").pop() || props.session.parent?.name || "";
+  return (
+    <span class="sc-supervised" role="img" aria-label={tr("Supervised by %1", name())}
+      title={tr("Supervised by %1\nOnly requests that need you notify you.", props.session.parent?.name ?? "")}>
+      <Icon name="corner-down-right" size={13} />
+    </span>
+  );
+}
+
+// The prototype's agent artwork loads once, outside the entry chunk; until
+// then, and for agents without artwork, tiles show the provider glyph.
+const [agentLogos, setAgentLogos] = createSignal<Readonly<Record<string, readonly LogoPath[]>>>();
+let logosRequested = false;
+function logoOf(agent: AgentKind): readonly LogoPath[] | undefined {
+  if (!logosRequested) {
+    logosRequested = true;
+    void import("../lib/agent-logos").then((module) => setAgentLogos(module.AGENT_LOGOS)).catch(() => {});
+  }
+  return agentLogos()?.[agent];
+}
+
+/** The large agent mark at the card's left, on a bordered tile (spec 3.1, the owner's prototype). */
+export function AgentTile(props: { agent: AgentKind; size?: number }) {
+  const size = () => props.size ?? 34;
+  // 20 px artwork on the 34 px tile, 14 px on the compact row's 22 px tile.
+  const mark = () => (size() <= 24 ? 14 : Math.round(size() * 0.59));
+  return (
+    <span class="agent-tile" style={{ "--agent": `var(--z-agent-${props.agent})`, "--tile": `${size()}px` }} title={AGENT_LABEL[props.agent]}>
+      <Show when={logoOf(props.agent)} fallback={
+        <svg width={mark()} height={mark()} viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" innerHTML={PROVIDER_GLYPH[props.agent]} />
+      }>
+        {(paths) => (
+          <svg class="agent-logo" width={mark()} height={mark()} viewBox="0 0 24 24" aria-hidden="true">
+            <For each={paths()}>{(path) => <path d={path[0]} fill={path[1]} />}</For>
+          </svg>
+        )}
+      </Show>
+    </span>
+  );
+}
+
+/** A parent's child sessions: working of all, collapsing them (spec 3.3). */
+export function TeamToggle(props: { team: Team; onToggle?: () => void }) {
+  return (
+    <button class="sc-team" classList={{ open: !props.team.collapsed }} aria-expanded={!props.team.collapsed}
+      title={props.team.collapsed ? tr("Show subagents and child sessions") : tr("Hide subagents and child sessions")}
+      onClick={(e) => { e.stopPropagation(); props.onToggle?.(); }} onDblClick={(e) => e.stopPropagation()}>
+      <svg class="team-glyph" width="16" height="12" viewBox="0 0 16 12" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
+        <circle cx="8" cy="3" r="2" /><circle cx="3" cy="5" r="1.6" /><circle cx="13" cy="5" r="1.6" />
+        <path d="M4 11A4 3 0 0 1 12 11M0 10.5A3 2.4 0 0 1 4.5 9M16 10.5A3 2.4 0 0 0 11.5 9" />
+      </svg>
+      <span>{tr("%1 of %2", props.team.working, props.team.total)}</span>
+      <Show when={props.team.asking}><span class="team-asking" title={tr("Child sessions waiting for their parent's answer")}>{tr("Asking: %1", props.team.asking ?? 0)}</span></Show>
+      <Show when={props.team.needsYou}><span class="team-needs" title={tr("Child sessions with a request only you can answer")}>{tr("Needs you: %1", props.team.needsYou ?? 0)}</span></Show>
+      <svg class="chev" width="8" height="6" viewBox="0 0 8 6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 2L4 5L7 2" /></svg>
+    </button>
+  );
+}
+
+/** A child shown away from its parent: the parent's name, opening it when listed. */
+export function FromParent(props: { parent: { name: string; key?: string }; onOpen?: (key: string) => void }) {
+  const short = () => props.parent.name.split("/").pop() || props.parent.name;
+  return (
+    <Show when={props.parent.key} fallback={<span class="sc-from" title={tr("Started by %1\nThat session is not listed.", props.parent.name)}>{tr("from %1", short())}</span>}>
+      {(key) => <button class="sc-from link" title={tr("Started by %1\nClick to open it.", props.parent.name)}
+        onClick={(e) => { e.stopPropagation(); props.onOpen?.(key()); }} onDblClick={(e) => e.stopPropagation()}>{tr("from %1", short())}</button>}
+    </Show>
+  );
+}
+
 /** A stable palette slot (0-7) for a name, until machine and project colours come from the listing. */
 export function paletteIndex(name: string): number {
   let hash = 0;
@@ -214,35 +301,69 @@ export function MachineBadge(props: { alias: string; computer: string; vivid?: b
   );
 }
 
+/** The account's colored circle: its letter, or its emoji with emoji account marks (spec 3.2). */
+export function AccountMarkCircle(props: { mark: AccountMark; size?: number }) {
+  return (
+    <span class="acct-mark" classList={{ emoji: props.mark.isEmoji }} role="img" aria-label={tr("Account: %1", props.mark.label)}
+      style={{ "--mark": props.mark.color, "--mark-ink": props.mark.ink, "--mark-size": `${props.size ?? 16}px` }}>
+      <span aria-hidden="true">{props.mark.glyph}</span>
+    </span>
+  );
+}
+
+const markTooltip = (s: Session, mark: AccountMark) =>
+  [tr("Account: %1", mark.label), mark.machine ? tr("%1 on %2", AGENT_LABEL[s.agent], mark.machine) : AGENT_LABEL[s.agent]].join("\n");
+
+/** The expanded card's account: the circle and the label. */
+export function AccountChip(props: { session: Session }) {
+  const mark = () => sessionMark(props.session);
+  return (
+    <Show when={mark()}>{(m) => (
+      <span class="acct-chip" title={markTooltip(props.session, m())}>
+        <AccountMarkCircle mark={m()} />
+        <span class="acct-chip-label ell" aria-hidden="true">{m().label}</span>
+      </span>
+    )}</Show>
+  );
+}
+
 type Git = NonNullable<Session["git"]>;
 interface GitMark { icon: string; count?: string; tone: "muted" | "attention" | "incoming" | "synced" | "conflict" }
 
 // GitStatusBadge::marks: changed files, outgoing, incoming, then unverified or synced.
-export function gitMarks(g: Git): GitMark[] {
-  const verified = g.state !== "unknown";
+function gitFreshness(g: Git, at = Date.now()) {
+  const age = g.receivedAt === undefined ? 0 : at - g.receivedAt;
+  const fresh = (g.localFresh ?? g.state !== "unknown") && age >= 0 && (g.streamed === true || age < 30_000);
+  const verified = fresh && (g.remoteVerified ?? g.state !== "unknown")
+    && (g.remoteAge ?? 0) + age / 1000 < 60 && g.countsKnown !== false;
+  return { fresh, verified };
+}
+export function gitMarks(g: Git, at = Date.now()): GitMark[] {
+  const { fresh, verified } = gitFreshness(g, at);
   const count = (n: number) => (n > 99 ? "99+" : String(n));
   const marks: GitMark[] = [];
-  if (g.changed) marks.push({ icon: "git-diff", count: count(g.changed), tone: !verified ? "muted" : g.conflicts ? "conflict" : "attention" });
+  if (g.changed) marks.push({ icon: "git-diff", count: count(g.changed), tone: !fresh ? "muted" : g.conflicts ? "conflict" : "attention" });
   if (g.ahead) marks.push({ icon: "git-push", count: count(g.ahead), tone: verified ? "attention" : "muted" });
   if (g.behind) marks.push({ icon: "git-pull", count: count(g.behind), tone: verified ? "incoming" : "muted" });
   if (!verified) marks.push({ icon: "git-unknown", tone: "muted" });
-  else if (!g.changed && !g.ahead && !g.behind) marks.push({ icon: "git-synced", tone: "synced" });
+  else if (!g.changed && !g.ahead && !g.behind && !g.detached && !g.unborn) marks.push({ icon: "git-synced", tone: "synced" });
   return marks;
 }
 
-export function gitTooltip(s: Session): string {
+export function gitTooltip(s: Session, at = Date.now()): string {
   const g = s.git!;
-  const verified = g.state !== "unknown";
+  const { fresh, verified } = gitFreshness(g, at);
   const ref = verified ? tr("verified upstream") : tr("last known upstream; remote unverified");
   return [
     tr("Git status (current checkout)"),
-    s.cwd,
+    g.root || s.gitRoot || s.cwdPath || s.cwd,
     s.branch ? tr("Branch: %1", s.branch) : "",
-    s.branch ? tr("Upstream: %1", `origin/${s.branch}`) : "",
-    tr("%1 changed or new files (including staged and untracked files)", g.changed),
+    g.upstream ? tr("Upstream: %1", g.upstream) : "",
+    g.changedKnown !== false ? tr("%1 changed or new files (including staged and untracked files)", g.changed) : "",
     g.conflicts ? tr("%1 files with merge conflicts", g.conflicts) : "",
-    tr("%1 outgoing commits (%2)", g.ahead, ref),
-    tr("%1 incoming commits (%2)", g.behind, ref),
+    g.aheadKnown !== false ? tr("%1 outgoing commits (%2)", g.ahead, ref) : "",
+    g.behindKnown !== false ? tr("%1 incoming commits (%2)", g.behind, ref) : "",
+    !fresh ? tr("Git status is unavailable or out of date.") : "",
     !verified ? tr("Remote publication has not been verified recently.") : !g.changed && !g.ahead && !g.behind ? tr("Clean checkout. Branch matches the verified remote.") : "",
   ].filter(Boolean).join("\n");
 }
@@ -304,14 +425,14 @@ export function fitChips(chips: readonly RowChip[], room: number, more: Omit<Row
 }
 
 /** The chips of a row in Qt's order: services, background commands, then git. */
-export function rowChips(s: Session): RowChip[] {
+export function rowChips(s: Session, at = Date.now()): RowChip[] {
   const chips: RowChip[] = [];
   const services = s.services?.length ?? 0;
   if (services) chips.push({ kind: "services", icon: "settings", count: String(services), tone: "muted", tip: chipTooltip(s, "services") });
   const jobs = (s.backgroundJobs ?? 0) > 0 ? s.backgroundJobs! : 0;
   if (jobs) chips.push({ kind: "background", icon: "active", count: countText(jobs), tone: "bg", tip: chipTooltip(s, "background") });
   if (s.git && s.status !== "ended") {
-    for (const mark of gitMarks(s.git)) chips.push({ kind: "git", icon: mark.icon, count: mark.count, tone: mark.tone, tip: chipTooltip(s, GIT_CHIP[mark.icon] ?? "unchecked") });
+    for (const mark of gitMarks(s.git, at)) chips.push({ kind: "git", icon: mark.icon, count: mark.count, tone: mark.tone, tip: chipTooltip(s, GIT_CHIP[mark.icon] ?? "unchecked") });
   }
   return chips;
 }
@@ -326,7 +447,7 @@ export function rowChips(s: Session): RowChip[] {
 export function RowChips(props: { session: Session; room?: number; onChip?: (kind: "services" | "background" | "git") => void }) {
   const s = () => props.session;
   const click = (kind: RowChip["kind"]) => (e: MouseEvent) => { e.stopPropagation(); props.onChip?.(kind === "more" ? "git" : kind); };
-  const chips = () => fitChips(rowChips(s()), props.room ?? Infinity, { tip: s().git ? gitTooltip(s()) : "" });
+  const chips = () => fitChips(rowChips(s(), now() * 1000), props.room ?? Infinity, { tip: s().git ? gitTooltip(s(), now() * 1000) : "" });
   return (
     <Show when={chips().length}>
       <span class="gmarks">
@@ -342,9 +463,13 @@ export function RowChips(props: { session: Session; room?: number; onChip?: (kin
 }
 
 export function GitMarks(props: { session: Session }) {
+  const marks = createMemo(() => props.session.git ? gitMarks(props.session.git, now() * 1000) : [], [], {
+    equals: (a, b) => a.length === b.length && a.every((m, i) => m.icon === b[i].icon && m.count === b[i].count && m.tone === b[i].tone),
+  });
+  const tip = steadyTitle(() => (props.session.git ? gitTooltip(props.session, now() * 1000) : ""));
   return (
-    <span class="gmarks" title={gitTooltip(props.session)}>
-      <For each={gitMarks(props.session.git!)}>{(m) => (
+    <span class="gmarks" title={tip.title()} onPointerEnter={tip.enter} onPointerLeave={tip.leave}>
+      <For each={marks()}>{(m) => (
         <span class={`gmark t-${m.tone}`} classList={{ counted: !!m.count }}>
           <Icon name={m.icon} size={16} />
           <Show when={m.count}><span>{m.count}</span></Show>
@@ -417,7 +542,7 @@ export function folderOf(s: Session) {
 function OptionalQuestionsChip(props: { session: Session }) {
   const optionalCount = () => optionalQuestionCount(props.session, computerFresh(props.session.computer));
   return <Show when={optionalCount()}>
-    <span class="qchip" classList={{ muted: !!props.session.muted }} title={tr(optionalCount() === 1 ? "%1 optional question waiting\nThe agent can continue without an answer. Answer or skip it in Activity.\nClick to open." : "%1 optional questions waiting\nThe agent can continue without an answer. Answer or skip it in Activity.\nClick to open.", optionalCount())}>
+    <span class="qchip" classList={{ muted: quietAttention(props.session) }} title={tr(optionalCount() === 1 ? "%1 optional question waiting\nThe agent can continue without an answer. Answer or skip it in Activity.\nClick to open." : "%1 optional questions waiting\nThe agent can continue without an answer. Answer or skip it in Activity.\nClick to open.", optionalCount())}>
       <Icon name="question" size={16} />{optionalQuestionCountText(optionalCount())}
     </span>
   </Show>;
@@ -442,20 +567,25 @@ function TeamBar(props: { label: string; done: number; total: number; muted?: bo
 /** The lead's team strip (SessionCardDelegate.h:468-541): both bars, status, ?N, members. */
 export function TeamStrip(props: { team: TeamSummary; expanded: boolean; onToggle: () => void }) {
   const status = () => TEAM_STATUS[props.team.status] ?? props.team.status;
+  // Task 425: the session list's own class names (sc-team-*): the Team tab's
+  // .team-strip, .team-status and .team-members rules must not reach them.
   return (
-    <div class="team-strip" title={`${props.team.name}\n${tr("%1 of %2 phases finished; discarded drafts do not count", props.team.phases_done, props.team.phases_total)}`}>
-      <button class="team-toggle" aria-expanded={props.expanded} title={props.expanded ? tr("Hide team members") : tr("Show team members")}
-        onClick={(e) => { e.stopPropagation(); props.onToggle(); }}>
+    <div class="sc-team-strip" title={`${props.team.name}
+${tr("%1 of %2 phases finished; discarded drafts do not count", props.team.phases_done, props.team.phases_total)}`}>
+      <button type="button" class="sc-team-toggle" data-team-toggle aria-expanded={props.expanded}
+        aria-label={props.expanded ? tr("Hide team members") : tr("Show team members")} title={props.expanded ? tr("Hide team members") : tr("Show team members")}
+        onClick={(e) => { e.stopPropagation(); props.onToggle(); }} onDblClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") e.stopPropagation(); }}>
+        <Icon name="chevron-right" size={12} class="chev" />
         <Icon name="users" size={14} />
+        <span class="sc-team-count">{props.team.members.length}</span>
       </button>
       <TeamBar label={`${props.team.phase ? `P${props.team.phase} ` : ""}${props.team.phase_done}/${props.team.phase_total}`}
         done={props.team.phase_done} total={props.team.phase_total} />
       <TeamBar label={`${props.team.phases_done}/${props.team.phases_total}`} done={props.team.phases_done}
         total={props.team.phases_total} muted />
-      <span class="team-status" classList={{ stuck: props.team.status === "stuck" }}>{tr(status())}</span>
-      <Show when={props.team.attention > 0}><span class="team-answers">?{props.team.attention}</span></Show>
-      <span class="grow" />
-      <span class="team-members">{props.team.members.length}</span>
+      <span class={props.team.status === "stuck" ? "sc-team-status stuck" : "sc-team-status"}>{tr(status())}</span>
+      <Show when={props.team.attention > 0}><span class="sc-team-answers">?{props.team.attention}</span></Show>
     </div>
   );
 }
@@ -464,7 +594,7 @@ export function TeamStrip(props: { team: TeamSummary; expanded: boolean; onToggl
 export function fullTooltip(s: Session, team?: TeamSummary): string {
   const lines = [
     s.name,
-    `${s.machine} / ${s.agent} / ${statusCaption(s)}`,
+    `${s.machine} / ${s.agent} / ${statusCaption(s, false)}`,
     folderOf(s) + (s.branch ? ` / ${s.branch}` : ""),
     s.cwd,
     s.model + (s.effort ? `  ${s.effort}` : ""),
@@ -486,7 +616,15 @@ export function SessionCard(props: {
   onCold?: (action: "new" | "resume") => void;
   /** A chip's click: where its count lives. */
   onChip?: (kind: "services" | "background" | "git") => void;
-  team?: TeamSummary;
+  team?: Team;
+  onToggleTeam?: () => void;
+  fromParent?: { name: string; key?: string };
+  onOpenParent?: (key: string) => void;
+  /** A Teams lead's team: its strip, and the fold of its members under it. */
+  teamSummary?: TeamSummary;
+  onToggleMembers?: () => void;
+  /** A Teams member listed under its lead: indented, first and last of the group get the connector's ends. */
+  member?: boolean;
   depth?: number;
   teamFirst?: boolean;
   teamLast?: boolean;
@@ -508,23 +646,28 @@ export function SessionCard(props: {
     onCleanup(() => observer.disconnect());
   };
   return (
-    <div class="scard" classList={{ selected: props.selected, offline: statusOf(s()) === "offline", muted: !!s().muted,
-      "team-lead": !!props.team, "team-member": !!props.depth, "team-first": !!props.teamFirst, "team-last": !!props.teamLast }}
+    <div class="scard tiled" classList={{ selected: props.selected, offline: statusOf(s()) === "offline", muted: !!s().muted,
+      "sc-team-lead": !!props.teamSummary, "sc-member": !!props.member, "sc-member-first": !!props.teamFirst, "sc-member-last": !!props.teamLast }}
       // Task #330: a member's box spans the row (its content is indented by
       // the stylesheet), so the hover highlight and the card reach the pane
       // edge; the old inline left shrank both and left the indent unpainted.
-      style={{ left: `${props.depth ? 2 : 2 + (props.depth ?? 0) * 22}px` }} data-emphasis={emphasis(s())}
-      title={fullTooltip(s(), props.team)}>
+      // Task 425: a member's card is an ordinary card inside the tree's indent
+      // (the stylesheet places it); the connector runs in the indent beside it.
+      style={props.member ? undefined : { left: "2px" }} data-emphasis={emphasis(s())}
+      title={fullTooltip(s(), props.teamSummary)}>
+      <span class="sc-tile"><AgentTile agent={s().agent} /></span>
       <div class="sc-l1">
-        <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
+        {/* Supervision and Mute are independent: the arrow before the name,
+            the crossed bell right after it (owner, 2026-11-08). */}
+        <Show when={s().parent?.state === "live"}><SupervisedMark session={s()} /></Show>
         <span class="sc-title ell" style={titleReserve(s().title, 72)} title={s().name}>{s().title}</span>
+        <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
         <StatusBadge kind={kind()} caption={statusCaption(s())} heat={state().shown.heat} title={state().kind ? state().shown.tooltip : undefined} />
         <Show when={visibleUnreadReply(s(), computerFresh(s().computer)) && (s().status === "working" || s().status === "attention" || s().draft)}>
-          <span class="sc-extra"><StatusBadge kind={s().muted ? "muted-unread" : "unread"} caption="" iconOnly /></span>
+          <span class="sc-extra"><StatusBadge kind={quietAttention(s()) ? "muted-unread" : "unread"} caption="" iconOnly /></span>
         </Show>
         <OptionalQuestionsChip session={s()} />
         <span class="grow" />
-        <AgentBadge agent={s().agent} />
       </div>
       <div class="sc-l2" ref={measureLine}>
         <Icon name={s().branch ? "git-branch" : "folder"} size={14} class="sc-meta-ico" />
@@ -534,6 +677,7 @@ export function SessionCard(props: {
         <MachineBadge alias={s().machine} computer={s().computer} offline={statusOf(s()) === "offline"} />
       </div>
       <div class="sc-l3" classList={{ "s-deps": line().tone === "deps" }}>
+        <Show when={props.fromParent}>{(parent) => <FromParent parent={parent()} onOpen={props.onOpenParent} />}</Show>
         <Show when={s().reviewLater}><Icon name="attention" size={14} class="sc-review" /></Show>
         <Show when={line().icon}>
           {(icon) => <svg class={`sc-state-ico k-${line().tone ?? ""}`} width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" innerHTML={STATE_GLYPH[icon()]} />}
@@ -550,12 +694,14 @@ export function SessionCard(props: {
       <div class="sc-foot">
         <span class="sc-model ell">{s().model}</span>
         <Show when={s().effort}><span class="sc-effort">{s().effort}</span></Show>
+        <AccountChip session={s()} />
         <span class="grow" />
-        <Show when={(s().subagents ?? []).length}>
+        <Show when={!props.team && (s().subagents ?? []).length}>
           <AgentsCounter label={agentsLabel(s())} expandable={props.expandable} expanded={props.expanded} onToggle={props.onToggleChildren} />
         </Show>
+        <Show when={props.team}>{(team) => <TeamToggle team={team()} onToggle={props.onToggleTeam} />}</Show>
       </div>
-      <Show when={props.team}><TeamStrip team={props.team!} expanded={props.expanded} onToggle={props.onToggleChildren} /></Show>
+      <Show when={props.teamSummary}><TeamStrip team={props.teamSummary!} expanded={props.expanded} onToggle={() => props.onToggleMembers?.()} /></Show>
     </div>
   );
 }
@@ -573,42 +719,141 @@ export const childStatus = (c: Subagent, current = true): { kind: BadgeKind; cap
   ? { ...CHILD_STATUS[c.state], caption: tr(CHILD_STATUS[c.state].caption) }
   : { kind: "neutral", caption: tr("Recorded") };
 
-/** Native subagent row (64 px): card indented 24 px, one muted detail line. */
+/**
+ * Native subagent row (40 px), indented under its parent: a compact session
+ * row that never expands (owner, 2026-11-07, zerus-sa9qn.16): the agent's
+ * tile, the parent's account mark, the name and the status, then the expand
+ * button's empty slot; the summary is its tooltip.
+ */
 export function ChildCard(props: { parent: Session; child: Subagent; last: boolean; first: boolean; selected: boolean }) {
   const status = () => childStatus(props.child, currentChildren(props.parent, !computerOffline(props.parent.computer)));
   return (
     <div class="child-row" classList={{ last: props.last, first: props.first }}>
       <i class="tree" aria-hidden="true" />
-      <div class="scard child" classList={{ selected: props.selected }}>
-        <div class="sc-l1">
-          <span class="sc-title ell" style={titleReserve(props.child.name, 72)}>{props.child.name}</span>
-          <StatusBadge kind={status().kind} caption={status().caption} />
-          <span class="grow" />
-          <AgentBadge agent={props.parent.agent} max={85} />
-        </div>
-        <div class="sc-child-detail ell">{props.child.summary}</div>
+      <div class="scard compact child" classList={{ selected: props.selected }} title={props.child.summary || undefined}>
+        <span class="cc-tile"><AgentTile agent={props.parent.agent} size={22} /></span>
+        {/* A subagent runs on its parent's account (owner, 2026-11-08). */}
+        <Show when={sessionMark(props.parent)}>{(m) => <span class="cc-mark" title={markTooltip(props.parent, m())}><AccountMarkCircle mark={m()} size={14} /></span>}</Show>
+        <span class="sc-title ell" style={titleReserve(props.child.name, 60)}>{props.child.name}</span>
+        <StatusBadge kind={status().kind} caption={status().caption} />
+        {/* The expand button's slot, empty, so the status lines up with other rows. */}
+        <span class="cc-expand cc-slot" aria-hidden="true" />
       </div>
     </div>
   );
 }
 
+/** The text of a parent's child sessions summary, for its compact row and its accessible description. */
+export function teamSummary(team: Team): string[] {
+  return [
+    tr("%1 of %2 working", team.working, team.total),
+    team.needsYou ? tr("Needs you: %1", team.needsYou) : "",
+    team.asking ? tr("Asking: %1", team.asking) : "",
+    team.errors ? tr("Errors: %1", team.errors) : "",
+  ].filter(Boolean);
+}
+
+/**
+ * A compact parent's second line: its child sessions at a glance, collapsing
+ * them. The chevron keeps its place; on a narrow row the counters shorten to
+ * their numbers (zerus-sa9qn.11), and the button and row descriptions keep
+ * every count in words.
+ */
+/**
+ * Whether the summary shows short counters (zerus-sa9qn.12): it shortens once
+ * its long labels overflow, in any language, and lengthens again only when
+ * the width they needed is available. `needed` is that width (0 while long).
+ */
+export function fitCounters(state: { narrow: boolean; needed: number }, scrollWidth: number, clientWidth: number): { narrow: boolean; needed: number } {
+  if (!state.narrow) return scrollWidth > clientWidth + 1 ? { narrow: true, needed: scrollWidth } : state;
+  return clientWidth >= state.needed ? { narrow: false, needed: 0 } : state;
+}
+
+function CompactTeam(props: { team: Team; onToggle?: () => void }) {
+  const title = () => (props.team.collapsed ? tr("Show subagents and child sessions") : tr("Hide subagents and child sessions"));
+  // Short counters when the long ones do not fit; the container query below
+  // about 300 px is the first approximation before any measurement.
+  let body: HTMLSpanElement | undefined;
+  let fit = { narrow: false, needed: 0 };
+  const [narrow, setNarrow] = createSignal(false);
+  const measure = () => {
+    if (!body) return;
+    fit = fitCounters(fit, body.scrollWidth, body.clientWidth);
+    setNarrow(fit.narrow);
+  };
+  onMount(() => {
+    if (!body || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(body);
+    onCleanup(() => observer.disconnect());
+  });
+  // Other counts or language: measure the long labels again.
+  createEffect(on(() => [props.team.working, props.team.total, props.team.needsYou, props.team.asking, props.team.errors, tr("Asking: %1", 0)], () => {
+    fit = { narrow: false, needed: 0 };
+    setNarrow(false);
+    queueMicrotask(measure);
+  }, { defer: true }));
+  const counter = (kind: string, count: number | undefined, text: string) => (
+    <Show when={count}><span class={kind} title={text}><span class="long">{text}</span><span class="short" aria-hidden="true">{count}</span></span></Show>
+  );
+  return (
+    <button class="cc-team" classList={{ open: !props.team.collapsed, narrow: narrow() }} aria-expanded={!props.team.collapsed}
+      title={title()} aria-label={[title(), ...teamSummary(props.team)].join("\n")}
+      onClick={(e) => { e.stopPropagation(); props.onToggle?.(); }} onDblClick={(e) => e.stopPropagation()}>
+      <span class="cc-team-body" ref={body}>
+        <svg class="team-glyph" width="16" height="12" viewBox="0 0 16 12" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
+          <circle cx="8" cy="3" r="2" /><circle cx="3" cy="5" r="1.6" /><circle cx="13" cy="5" r="1.6" />
+          <path d="M4 11A4 3 0 0 1 12 11M0 10.5A3 2.4 0 0 1 4.5 9M16 10.5A3 2.4 0 0 0 11.5 9" />
+        </svg>
+        <span class="cc-team-count">
+          <span class="long">{tr("%1 of %2 working", props.team.working, props.team.total)}</span>
+          <span class="short" aria-hidden="true">{tr("%1 of %2", props.team.working, props.team.total)}</span>
+        </span>
+        {counter("team-needs", props.team.needsYou, tr("Needs you: %1", props.team.needsYou ?? 0))}
+        {counter("team-asking", props.team.asking, tr("Asking: %1", props.team.asking ?? 0))}
+        {counter("team-errors", props.team.errors, tr("Errors: %1", props.team.errors ?? 0))}
+      </span>
+      <svg class="chev" width="8" height="6" viewBox="0 0 8 6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 2L4 5L7 2" /></svg>
+    </button>
+  );
+}
+
 /**
  * Compact (collapsed) row, 40 px: title, then status, optional questions,
- * provider and mute at the right, then the expand button.
+ * provider and mute at the right, then the expand button. A parent of child
+ * sessions takes a second line with their summary (62 px).
  */
-export function CompactCard(props: { session: Session; selected: boolean; onExpand: () => void }) {
+/**
+ * What a compact row shows only in part (Qt's compactDescription,
+ * SessionCardDelegate.h:125-128): its title, status and provider, which the
+ * row draws as an icon only. The session's name follows a title that differs.
+ */
+export function compactDescription(s: Session): string {
+  return [s.title, s.name !== s.title ? s.name : "", statusCaption(s, false), AGENT_LABEL[s.agent]].filter(Boolean).join("\n");
+}
+
+export function CompactCard(props: { session: Session; selected: boolean; onExpand: () => void; team?: Team; onToggleTeam?: () => void }) {
   const s = () => props.session;
+  // Tooltips hold still under the pointer (zerus-5ryrx).
+  const described = steadyTitle(() => compactDescription(s()));
+  const expand = steadyTitle(() => `${tr("Expand session row")}\n${compactDescription(s())}`);
   return (
-    <div class="scard compact" classList={{ selected: props.selected }} data-emphasis={emphasis(s())}
+    <div class="scard compact" classList={{ selected: props.selected, two: !!props.team }} data-emphasis={emphasis(s())}
       aria-description={tr("Collapsed session row. Press Right to expand.")}>
-      <span class="sc-title ell" style={titleReserve(s().title, 60)} title={s().name}>{s().title}</span>
+      <div class="cc-line">
+      <span class="cc-tile"><AgentTile agent={s().agent} size={22} /></span>
+      <Show when={sessionMark(s())}>{(m) => <span class="cc-mark" title={markTooltip(s(), m())}><AccountMarkCircle mark={m()} size={14} /></span>}</Show>
+      <Show when={s().parent?.state === "live"}><SupervisedMark session={s()} /></Show>
+      <span class="sc-title ell" style={titleReserve(s().title, 60)} title={described.title()} onPointerEnter={described.enter} onPointerLeave={described.leave}>{s().title}</span>
+      <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
       <StatusBadge kind={badgeKind(s())} caption={statusCaption(s())} />
       <OptionalQuestionsChip session={s()} />
-      <AgentBadge agent={s().agent} />
-      <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
-      <button class="cc-expand" title={tr("Expand session row")} onClick={(e) => { e.stopPropagation(); props.onExpand(); }} onDblClick={(e) => e.stopPropagation()}>
+      <button class="cc-expand" title={expand.title()} onPointerEnter={expand.enter} onPointerLeave={expand.leave} aria-description={compactDescription(s())}
+        onClick={(e) => { e.stopPropagation(); props.onExpand(); }} onDblClick={(e) => e.stopPropagation()}>
         <Icon name="expand-row" size={16} />
       </button>
+      </div>
+      <Show when={props.team}>{(team) => <CompactTeam team={team()} onToggle={props.onToggleTeam} />}</Show>
     </div>
   );
 }

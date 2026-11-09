@@ -431,8 +431,8 @@ class EncryptedRelayTest {
             assertEquals(2,server.requestCount)
         }
     }
-    @Test fun websocketReadinessFetchesOneReceiptButStillRequiresFreshActiveMembership()=runBlocking {
-        for (revoked in listOf(false, true)) MockWebServer().use { server ->
+    @Test fun resultStreamsNeverDelayReceiptRecoveryAndStillRequireFreshActiveMembership()=runBlocking {
+        for (silent in listOf(false, true)) for (revoked in listOf(false, true)) MockWebServer().use { server ->
             val id=java.util.UUID.randomUUID().toString();val now=System.currentTimeMillis()/1000
             val header=WorkspaceHeader(roster.workspaceId,phone.device.deviceId,gateway.device.deviceId,
                 phone.device.keyGeneration,gateway.device.keyGeneration,gateway.device.deviceId,"route-fixture",
@@ -441,7 +441,8 @@ class EncryptedRelayTest {
             val reply=WorkspaceEnvelope.seal(gateway,phone.device,header.copy(senderDeviceId=gateway.device.deviceId,
                 recipientDeviceId=phone.device.deviceId,kind="result"),
                 JSONObject().put("request_id",id).put("state","completed").put("result",JSONObject().put("ok",true)).toString().toByteArray())
-            val readySent=java.util.concurrent.CountDownLatch(1);val receiptEntered=java.util.concurrent.CountDownLatch(1)
+            val watchRegistered=java.util.concurrent.CountDownLatch(1);val watchRemoved=java.util.concurrent.CountDownLatch(1)
+            val receiptEntered=java.util.concurrent.CountDownLatch(1)
             val release=java.util.concurrent.CountDownLatch(1);val posts=java.util.concurrent.atomic.AtomicInteger()
             server.dispatcher=object:Dispatcher() {
                 override fun dispatch(r:RecordedRequest):MockResponse {
@@ -449,9 +450,9 @@ class EncryptedRelayTest {
                     if(r.path=="/v2/capabilities") return MockResponse().setBody("""{"encrypted_transport":{"result_stream":{"version":1,"path":"/v2/stream","max_requests":16}}}""")
                     if(r.path=="/v2/stream") return MockResponse().withWebSocketUpgrade(object:okhttp3.WebSocketListener() {
                         override fun onMessage(socket:okhttp3.WebSocket,text:String) {
-                            if(JSONObject(text).getJSONArray("request_ids").length()==0) return
-                            socket.send(JSONObject().put("type","ready").put("request_id",id).put("state","completed").toString())
-                            readySent.countDown()
+                            if(JSONObject(text).getJSONArray("request_ids").length()==0) { watchRemoved.countDown();return }
+                            if (!silent) socket.send(JSONObject().put("type","ready").put("request_id",id).put("state","completed").toString())
+                            watchRegistered.countDown()
                         }
                     })
                     if(r.path=="/v2/requests/$id") {
@@ -469,7 +470,7 @@ class EncryptedRelayTest {
                     return MockResponse().setBody(page.toString())
                 }
             }
-            server.start();val connection=Connection("stream-$revoked","Fixture",server.url("/").toString().trimEnd('/'),"fixture-token",2)
+            server.start();val connection=Connection("stream-$silent-$revoked","Fixture",server.url("/").toString().trimEnd('/'),"fixture-token",2)
             val journal=MemoryWorkspaceJournal();journal.create(connection,state());journal.reserve(connection,id,"fixture-hash",request)
             val opened=java.util.concurrent.atomic.AtomicInteger()
             val guarded=object:WorkspaceJournal by journal {
@@ -479,14 +480,17 @@ class EncryptedRelayTest {
             }
             val client=okhttp3.OkHttpClient();val api=RelayApi(client,guarded)
             api.capabilities(connection)
-            val outcome=async { runCatching { api.await(connection,JSONObject().put("request_id",id).put("state","queued"),3,1000) } }
+            val outcome=async { runCatching { api.await(connection,JSONObject().put("request_id",id).put("state","queued"),3,1000,firstPollDelayMs=100) } }
             try {
-                assertTrue(withContext(Dispatchers.IO) { readySent.await(3,java.util.concurrent.TimeUnit.SECONDS) })
-                assertTrue("A WS hint must bypass the one-second poll sleep",withContext(Dispatchers.IO) { receiptEntered.await(700,java.util.concurrent.TimeUnit.MILLISECONDS) })
+                assertTrue(withContext(Dispatchers.IO) { watchRegistered.await(3,java.util.concurrent.TimeUnit.SECONDS) })
+                assertTrue("A connected ${if (silent) "silent" else "ready"} stream must not delay receipt recovery",
+                    withContext(Dispatchers.IO) { receiptEntered.await(700,java.util.concurrent.TimeUnit.MILLISECONDS) })
                 assertEquals(0,opened.get());release.countDown()
                 val result=outcome.await()
                 if(revoked) { assertTrue(result.isFailure);assertEquals(0,opened.get()) }
                 else { assertEquals("completed",result.getOrThrow().string("state"));assertEquals(1,opened.get()) }
+                assertTrue("Settled receipt must remove its readiness watch",
+                    withContext(Dispatchers.IO) { watchRemoved.await(700,java.util.concurrent.TimeUnit.MILLISECONDS) })
                 assertEquals(0,posts.get());assertEquals(4,server.requestCount)
             } finally { release.countDown();api.closeResultStreams();client.connectionPool.evictAll();client.dispatcher.executorService.shutdown() }
         }

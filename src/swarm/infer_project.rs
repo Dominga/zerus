@@ -274,6 +274,7 @@ mod tests {
             bindings: BTreeMap::new(),
             peers: BTreeMap::new(),
             twins: Default::default(),
+            id_memberships: None,
         }
     }
     fn folder(store: &mut Store, id: &str, project: &str, machine: &str, path: &Path) {

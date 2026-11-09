@@ -74,6 +74,14 @@ pub fn select_hgs(configured: Option<&Path>, installed: bool) -> PathBuf {
     if !installed || original.is_some() {
         return selected;
     }
+    // Shown while a slow check runs, as there is no tray icon yet (zerus-5wmh.13.14.4).
+    let note = crate::startup_note::StartupNote::start(
+        crate::startup_note::DELAY,
+        crate::startup_note::Window::new,
+    );
+    note.step(crate::native_text::render(&crate::startup_note::text(
+        "status",
+    )));
     let status = match session_host(&selected, "status") {
         Ok(value) => value,
         Err(error) => {
@@ -93,6 +101,9 @@ pub fn select_hgs(configured: Option<&Path>, installed: bool) -> PathBuf {
     let choice =
         crate::windows_shell::choose_hgs(&status, &selected, &digest, None, app.as_deref());
     if choice.refresh {
+        note.step(crate::native_text::render(&crate::startup_note::text(
+            "install",
+        )));
         if let Err(error) = session_host(&selected, "install") {
             eprintln!("zerus-client: session-host install: {error}");
             return choice.fallback;
@@ -124,11 +135,48 @@ pub fn prepare(args: &[String], id: &str) {
 /// The explicit install/remove commands are also used by the per-user installer.
 /// No launch invokes this automatically. Existing Startup shortcuts still work.
 pub fn login_item(enabled: bool, executable: &Path, args: &[String]) -> Result<(), String> {
-    let command = zerus_client_core::shell::windows_program_line(
+    let command = login_command(executable, args);
+    set_login_item(RUN_KEY, RUN_VALUE, enabled.then_some(command.as_str()))
+}
+fn login_command(executable: &Path, args: &[String]) -> String {
+    zerus_client_core::shell::windows_program_line(
         &format!("\"{}\"", executable.to_string_lossy()),
         &crate::windows_shell::restart_arguments(args),
-    );
-    set_login_item(RUN_KEY, RUN_VALUE, enabled.then_some(command.as_str()))
+    )
+}
+/// Reads this app's own Run value only; absent is `None`, and anything that
+/// cannot be read as text, or is implausibly long, is unreadable.
+pub fn read_login_item() -> Result<Option<String>, crate::login_item::Unreadable> {
+    read_value(RUN_KEY, RUN_VALUE)
+}
+fn read_value(key: &str, value: &str) -> Result<Option<String>, crate::login_item::Unreadable> {
+    let mut text = vec![0u16; 16 * 1024];
+    let mut size = (text.len() * 2) as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            wide(key).as_ptr(),
+            wide(value).as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            text.as_mut_ptr().cast(),
+            &mut size,
+        )
+    };
+    match status {
+        ERROR_SUCCESS => {
+            let units = (size as usize / 2).min(text.len());
+            let end = text[..units]
+                .iter()
+                .position(|&unit| unit == 0)
+                .unwrap_or(units);
+            String::from_utf16(&text[..end])
+                .map(Some)
+                .map_err(|_| crate::login_item::Unreadable)
+        }
+        ERROR_FILE_NOT_FOUND => Ok(None),
+        _ => Err(crate::login_item::Unreadable),
+    }
 }
 fn set_login_item(key: &str, value: &str, command: Option<&str>) -> Result<(), String> {
     let key = wide(key);
@@ -194,6 +242,61 @@ mod tests {
                 .trim_start()
                 .to_owned(),
             "--background --hgs \"C:/Program Files/Zerus/hgs.exe\""
+        );
+    }
+    #[test]
+    fn the_command_login_item_writes_is_a_confirmed_registration() {
+        let exe = Path::new(r"C:\Program Files\Zerus\hgs-tray.exe");
+        for options in [vec![], vec!["--hgs".to_owned(), r"C:\z\hgs.exe".to_owned()]] {
+            let command = login_command(exe, &options);
+            assert_eq!(
+                crate::login_item::registration(Ok(Some(&command)), exe),
+                crate::login_item::Registration::On,
+                "{command}"
+            );
+        }
+    }
+    #[test]
+    fn reading_the_login_value_tells_absent_from_text_from_unreadable() {
+        use crate::login_item::Unreadable;
+        let key = format!(r"Software\Zerus\Tests\{}", uuid::Uuid::new_v4());
+        assert_eq!(read_value(&key, "Zerus"), Ok(None), "absent key");
+        set_login_item(&key, "other", Some("keep")).unwrap();
+        assert_eq!(read_value(&key, "Zerus"), Ok(None), "absent value");
+        set_login_item(&key, "Zerus", Some(r#""C:\Z\hgs-tray.exe" --background"#)).unwrap();
+        assert_eq!(
+            read_value(&key, "Zerus"),
+            Ok(Some(r#""C:\Z\hgs-tray.exe" --background"#.to_owned()))
+        );
+        // A value of another type is unreadable, never off.
+        let mut handle = std::ptr::null_mut();
+        let opened = unsafe {
+            RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                wide(&key).as_ptr(),
+                0,
+                KEY_SET_VALUE,
+                &mut handle,
+            )
+        };
+        assert_eq!(opened, ERROR_SUCCESS);
+        let number = 1u32.to_ne_bytes();
+        let set = unsafe {
+            RegSetValueExW(
+                handle,
+                wide("Zerus").as_ptr(),
+                0,
+                REG_DWORD,
+                number.as_ptr(),
+                4,
+            )
+        };
+        unsafe { RegCloseKey(handle) };
+        assert_eq!(set, ERROR_SUCCESS);
+        assert_eq!(read_value(&key, "Zerus"), Err(Unreadable));
+        assert_eq!(
+            unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, wide(&key).as_ptr()) },
+            ERROR_SUCCESS
         );
     }
     #[test]

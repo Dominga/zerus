@@ -2,7 +2,9 @@ import { createSignal } from "solid-js";
 import type { EditOutcome, GroupingOut, HeaderOut } from "../../types";
 import type { MenuEntry } from "../../store/ui";
 import type { Session } from "./types";
-import { tr } from "../../i18n";
+import { tr, trNoop, type TranslationArgument } from "../../i18n";
+import { snapshotOf, type ActionRow } from "./actions-ui";
+import { sameInstance } from "./selection";
 
 // The rules of the project menus and dialogs (SessionsWindow.cpp:2558-2616,
 // 5363-5372; ProjectsDialog.cpp:367-381): pure rules, the header menu's
@@ -92,6 +94,13 @@ export function moveChoices(g: GroupingOut, current: readonly string[]): (Header
 
 export const projectColor = (h: Pick<HeaderOut, "color" | "palette">) => h.color ?? `var(--z-entity-palette-${h.palette})`;
 
+/**
+ * The frame around a project in the session list (owner, 2026-11-09): the
+ * colour the project is marked with, and the neutral border for a project
+ * without a colour of its own.
+ */
+export const folderFrameColor = (h: Pick<HeaderOut, "color">) => h.color ?? "var(--z-color-border)";
+
 /** A Sessions list filter chip: a machine, or a project by its id. */
 export interface FilterChip { id: string; label: string; kind: "m" | "p" | "a"; provider?: string }
 /**
@@ -126,10 +135,35 @@ export interface OrgStore {
 }
 
 export type OrgDialog =
-  | { kind: "move"; rows: Session[] }
-  | { kind: "new"; rows: Session[] }
+  // `originals`: a selection's rows as they were when it opened (zerus-5wmh.18.1).
+  | { kind: "move"; rows: Session[]; originals?: ActionRow[] }
+  | { kind: "new"; rows: Session[]; originals?: ActionRow[] }
   | { kind: "rename"; project: string; name: string }
   | { kind: "delete"; project: string; name: string; options: HeaderOut[]; selected: string };
+
+const MOVED = trNoop("%n session(s) moved to project.");
+const NOT_LISTED = trNoop("%n session(s) no longer listed.");
+/** A selection none of whose rows is listed any more as the same session. */
+export const NONE_LISTED = trNoop("The selected sessions are no longer listed.");
+
+type Translate = (source: string, ...args: TranslationArgument[]) => string;
+/** One count in the interface language with its plural form; English keeps "1 session" and "2 sessions". */
+function counted(translate: Translate, source: string, n: number, one: string, many: string): string {
+  const text = translate(source, n);
+  return text === source.replace("%n", String(n)) ? (n === 1 ? one : many).replace("%n", String(n)) : text;
+}
+
+/** What a selection's move did (Qt's "%1 sessions moved to project."), and how many rows were no longer listed. */
+export function movedText(moved: number, dropped: number, translate: Translate = tr): string {
+  const done = counted(translate, MOVED, moved, "%n session moved to project.", "%n sessions moved to project.");
+  return dropped ? `${done} ${counted(translate, NOT_LISTED, dropped, "%n session is no longer listed.", "%n sessions are no longer listed.")}` : done;
+}
+
+/** The live list a selection's move re-checks its rows against, and the notice it reports with. */
+export interface SelectionDeps {
+  live?: (key: string) => Session | undefined;
+  notify?: (tone: "info", text: string) => void;
+}
 
 /**
  * The organization dialogs, one open at a time: Move to project (for one row
@@ -137,12 +171,33 @@ export type OrgDialog =
  * confirmation closes its dialog and makes one edit call, whose outcome the
  * store reports.
  */
-export function createOrgDialogs(org: OrgStore) {
+export function createOrgDialogs(org: OrgStore, deps: SelectionDeps = {}) {
   const [dialog, setDialog] = createSignal<OrgDialog | undefined>(undefined, { equals: false });
   const close = () => setDialog(undefined);
 
   const openMove = (rows: readonly Session[]) => { setDialog({ kind: "move", rows: [...rows] }); };
-  const openNew = (rows: readonly Session[] = []) => { setDialog({ kind: "new", rows: [...rows] }); };
+  /**
+   * Move to project for a selection (zerus-5wmh.18.1): the dialog keeps each
+   * row as it was, and the choice moves only the rows still listed as the
+   * same session, all with one call (SessionSelection.cpp:184-195).
+   */
+  const openMoveSelection = (rows: readonly Session[]) => { setDialog({ kind: "move", rows: [...rows], originals: rows.map(snapshotOf) }); };
+  const openNew = (rows: readonly Session[] = [], originals?: ActionRow[]) => { setDialog({ kind: "new", rows: [...rows], originals }); };
+
+  /** A selection's rows still listed as the same instances; a single row's dialog moves its row as it is. */
+  function listed(d: { rows: Session[]; originals?: ActionRow[] }): { rows: Session[]; dropped: number } | undefined {
+    if (!d.originals) return { rows: d.rows, dropped: 0 };
+    const rows = d.originals.map((original) => {
+      const now = deps.live?.(original.key);
+      return now && sameInstance(now, original) ? now : undefined;
+    }).filter((s): s is Session => !!s);
+    if (!rows.length) { deps.notify?.("info", tr(NONE_LISTED)); return undefined; }
+    return { rows, dropped: d.originals.length - rows.length };
+  }
+  /** Says how many of a selection moved once the edit is done; a kept or refused edit is the store's notice. */
+  function reported(selection: boolean, moved: { rows: Session[]; dropped: number }, out: Promise<EditOutcome>) {
+    if (selection) void out.then((o) => { if (o.outcome === "done") deps.notify?.("info", movedText(moved.rows.length, moved.dropped)); });
+  }
   /** Qt asks only while the project is listed (SessionsWindow.cpp:2584). */
   function openRename(project: string) {
     const h = org.headerOf(project);
@@ -163,12 +218,14 @@ export function createOrgDialogs(org: OrgStore) {
     const d = dialog();
     if (d?.kind !== "move") return;
     close();
-    void org.moveToProject(d.rows, project);
+    const moved = listed(d);
+    if (moved) reported(!!d.originals, moved, org.moveToProject(moved.rows, project));
   }
   /** The Move dialog's New project…: its rows go into the new project in the same apply (5371, 2565). */
   function newProject() {
     const d = dialog();
-    openNew(d?.kind === "move" ? d.rows : []);
+    if (d?.kind === "move") openNew(d.rows, d.originals);
+    else openNew([]);
   }
 
   /** The name dialog's title and starting text. */
@@ -183,8 +240,10 @@ export function createOrgDialogs(org: OrgStore) {
     const d = dialog();
     if ((d?.kind !== "new" && d?.kind !== "rename") || nameProblem(name)) return false;
     close();
-    if (d.kind === "new") void org.createProject(name, d.rows);
-    else void org.renameProject(d.project, name);
+    if (d.kind === "new") {
+      const moved = listed(d);
+      if (moved) reported(!!d.originals, moved, org.createProject(name, moved.rows));
+    } else void org.renameProject(d.project, name);
     return true;
   }
 
@@ -202,6 +261,6 @@ export function createOrgDialogs(org: OrgStore) {
     return { label: tr("Move to project…"), icon: "folder", disabled: !e.enabled, hint: e.reason, action: () => openMove([s]) };
   }
 
-  return { dialog, close, openMove, openNew, openRename, openDelete, moveChoicesFor, choose, newProject, nameDialog, submitName,
+  return { dialog, close, openMove, openMoveSelection, openNew, openRename, openDelete, moveChoicesFor, choose, newProject, nameDialog, submitName,
            confirmDelete, moveEntry };
 }

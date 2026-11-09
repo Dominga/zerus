@@ -84,7 +84,7 @@ impl Saved {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::task_start::capture::tests::Fixture;
+    use crate::task_start::capture::tests::{retry_busy, Fixture};
     use std::fs;
 
     fn saved(f: &Fixture) -> Saved {
@@ -96,6 +96,9 @@ mod tests {
         .unwrap()
         .unwrap()
     }
+    // Every lock after a fixture's first may meet a parallel fork's inherited
+    // description (zerus-p1l5z): those steps wait for Busy, the no-write
+    // refusal, and keep every other result exactly.
     fn cancelled(f: &Fixture) -> Saved {
         drop(
             Journal::prepare(
@@ -104,7 +107,7 @@ mod tests {
             )
             .unwrap(),
         );
-        saved(f).discard_prepared(&f.intent.reconcile_id).unwrap();
+        retry_busy(|| saved(f).discard_prepared(&f.intent.reconcile_id)).unwrap();
         saved(f)
     }
     #[test]
@@ -114,13 +117,20 @@ mod tests {
         let stale = original.next_check_id().unwrap();
         let next = original.next_check_id().unwrap();
         drop(
-            Journal::prepare_after_discard(f.capture().unwrap(), &next, original.reconcile_id())
-                .unwrap(),
+            retry_busy(|| {
+                Journal::prepare_after_discard(f.capture().unwrap(), &next, original.reconcile_id())
+            })
+            .unwrap(),
         );
-        saved(&f).discard_prepared(next.as_str()).unwrap();
+        retry_busy(|| saved(&f).discard_prepared(next.as_str())).unwrap();
         let before = fs::read(f.file.with_extension("reconcile")).unwrap();
         assert_eq!(
-            Journal::prepare_after_discard(f.capture().unwrap(), &stale, next.as_str()).err(),
+            retry_busy(|| Journal::prepare_after_discard(
+                f.capture().unwrap(),
+                &stale,
+                next.as_str()
+            ))
+            .err(),
             Some(Error::Unavailable)
         );
         assert_eq!(
@@ -128,9 +138,56 @@ mod tests {
             before
         );
         let fresh = saved(&f).next_check_id().unwrap();
-        let current =
-            Journal::prepare_after_discard(f.capture().unwrap(), &fresh, next.as_str()).unwrap();
+        let current = retry_busy(|| {
+            Journal::prepare_after_discard(f.capture().unwrap(), &fresh, next.as_str())
+        })
+        .unwrap();
         assert_eq!(current.saved().reconcile_id(), fresh.as_str());
+    }
+    /// The reported step (zerus-p1l5z): while a parallel fork's child still
+    /// holds an inherited description of the metadata lock, a later discard
+    /// cycle's prepare refuses Busy before any write; the shared retry waits
+    /// for that description and then prepares the exact next ID.
+    #[test]
+    fn a_later_discard_cycle_waits_for_an_inherited_lock_description() {
+        let f = Fixture::new();
+        let original = cancelled(&f);
+        let next = original.next_check_id().unwrap();
+        // Like fork before exec, this clone shares the lock's open file description.
+        let lock = retry_busy(|| original.slot.lock(false)).unwrap();
+        let inherited = lock.try_clone().unwrap();
+        drop(lock);
+        let path = f.file.with_extension("reconcile");
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(
+            Journal::prepare_after_discard(f.capture().unwrap(), &next, original.reconcile_id())
+                .err(),
+            Some(Error::Busy)
+        );
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(saved(&f).phase(), Phase::CancelledBeforeOffer);
+        let (busy, observed) = std::sync::mpsc::sync_channel(1);
+        std::thread::scope(|threads| {
+            let waiter = threads.spawn(|| {
+                retry_busy(|| {
+                    let result = Journal::prepare_after_discard(
+                        f.capture().unwrap(),
+                        &next,
+                        original.reconcile_id(),
+                    );
+                    if matches!(result, Err(Error::Busy)) {
+                        let _ = busy.try_send(());
+                    }
+                    result.map(|journal| journal.saved().reconcile_id().to_owned())
+                })
+            });
+            observed
+                .recv_timeout(std::time::Duration::from_secs(8))
+                .unwrap();
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            drop(inherited);
+            assert_eq!(waiter.join().unwrap().unwrap(), next.as_str());
+        });
     }
     #[test]
     fn original_file_and_version_are_retained_across_identical_replacement_or_edit() {
@@ -153,11 +210,11 @@ mod tests {
                     .unwrap();
             }
             assert_eq!(
-                Journal::prepare_after_discard(
+                retry_busy(|| Journal::prepare_after_discard(
                     f.capture().unwrap(),
                     &proposal,
                     original.reconcile_id()
-                )
+                ))
                 .err(),
                 Some(Error::Unavailable)
             );

@@ -2,6 +2,46 @@ import { tr, trNoop } from "../../i18n";
 import { withdrawnRefusal } from "../../teamRefusals";
 import { retryContinues, retryContinueText } from "./actions";
 import type { ComputerId, TeamAction, TeamCall, TeamChoice, TeamConfirmation, TeamInboxItem, TeamMemberQuestion, TeamMemberView, TeamOutcome, TeamProposalView, TeamView, TeamWaitingItem } from "../../types";
+import type { TeamTaskDetailView } from "../../types";
+
+/** One selected report, with no per-task cache; stale completions are discarded. */
+export class TaskReportRead {
+  loading = false;
+  error = "";
+  detail: TeamTaskDetailView | null = null;
+  private generation = 0;
+
+  constructor(private read: (computer: ComputerId, team: string, task: number) => Promise<TeamTaskDetailView>, private changed: () => void) {}
+
+  async open(computer: ComputerId, team: string, task: number) {
+    const generation = ++this.generation;
+    this.loading = true;
+    this.error = "";
+    this.detail = null;
+    this.changed();
+    try {
+      const detail = await this.read(computer, team, task);
+      if (generation !== this.generation) return;
+      this.detail = detail;
+    } catch (error) {
+      if (generation !== this.generation) return;
+      this.error = hgsWords(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (generation === this.generation) {
+        this.loading = false;
+        this.changed();
+      }
+    }
+  }
+
+  close() {
+    ++this.generation;
+    this.loading = false;
+    this.detail = null;
+    this.error = "";
+    this.changed();
+  }
+}
 
 // The owner's decisions on a team (task 11), ported from Qt's
 // TeamProposalCard.cpp, TeamWaitingAnswer.cpp, TeamWaitingPage.cpp and

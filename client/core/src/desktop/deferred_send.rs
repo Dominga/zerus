@@ -31,6 +31,12 @@ pub const SUBMITTED: &str = "submitted";
 /// The closed code of an original child that never started: refused before
 /// any child existed. Nothing ran, so the message counts as never sent.
 pub const NOT_STARTED: &str = "deferred_send_not_started";
+/// The service refused the original before its ledger admission, with
+/// its ledger proving no row for the request, and sealed the request for
+/// its epoch, so no copy of it ever admits (zerus-tlb9q). The one refusal
+/// that settles as never started; every other refusal leaves only the
+/// read-only lookup.
+pub const NOT_ADMITTED: &str = "deferred_send_not_admitted";
 /// The largest CLI input receipt read.
 pub const RECEIPT_BYTES: usize = 256 << 10;
 /// The CLI receipt says `in_progress`: the input may have reached the
@@ -84,7 +90,7 @@ impl std::fmt::Debug for Intent {
 }
 
 /// `hgs send`'s stdin attachment, exactly as the CLI reads it.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Attachment {
     name: String,
@@ -94,7 +100,7 @@ struct Attachment {
     reference: String,
 }
 /// `hgs send`'s stdin, exactly as the CLI reads it.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Send {
     request_id: String,
@@ -104,7 +110,7 @@ struct Send {
     expected_conversation_id: String,
     #[serde(default)]
     attachments: Vec<Attachment>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     expected_compaction_id: String,
 }
 
@@ -341,6 +347,24 @@ pub(super) fn frozen(original: &str) -> Result<Frozen, Unsendable> {
     })
 }
 
+/// The send `template` names `original` as its run; the same send naming
+/// `run` instead, every other field exactly as decoded. `session_resume`
+/// binds its send to the resumed run this way, and only this way. A template
+/// the CLI would not take, or one naming another run, is refused.
+pub(super) fn rebound(template: &str, original: &str, run: &str) -> Result<String, Unsendable> {
+    let mut send: Send = serde_json::from_str(template).map_err(|_| Unsendable::Invalid)?;
+    cli_rules(&send).ok_or(Unsendable::Refused)?;
+    if send.expected_run_id != original
+        || run.is_empty()
+        || run.len() > 128
+        || run.chars().any(char::is_control)
+    {
+        return Err(Unsendable::Invalid);
+    }
+    send.expected_run_id = run.into();
+    serde_json::to_string(&send).map_err(|_| Unsendable::Invalid)
+}
+
 /// `[Image #n]` or `[File #n]`, n from 1 with at most nine digits.
 fn reference_label(value: &str) -> bool {
     let Some(inner) = value.strip_prefix('[').and_then(|v| v.strip_suffix(']')) else {
@@ -464,6 +488,18 @@ pub struct Admission {
     pub receipt: Option<Receipt>,
 }
 impl Admission {
+    /// Whether this is exactly the closed [`NOT_ADMITTED`] refusal of
+    /// `intent`: this kind's ABI, the same request and scope, refused, not
+    /// durable, with no receipt. Any other refusal or reply is not.
+    pub fn not_admitted(&self, intent: &Intent) -> bool {
+        self.abi == ABI
+            && self.request_id == intent.request_id
+            && self.scope == intent.scope
+            && !self.accepted
+            && !self.durable
+            && self.code == NOT_ADMITTED
+            && self.receipt.is_none()
+    }
     pub fn matches(&self, intent: &Intent) -> bool {
         self.abi == ABI
             && self.request_id == intent.request_id

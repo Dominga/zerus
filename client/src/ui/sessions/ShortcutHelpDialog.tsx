@@ -1,7 +1,9 @@
+import { TextInput } from "../lib/TextField";
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import { closeShortcutHelp, customizeShortcutHelp, shortcutHelpOrigin } from "../../store/goTo";
 import { filterShortcutRows, shortcutHelpRows } from "./shortcutHelp";
 import { Icon } from "../lib/icons";
+import { terminalRule } from "../../store/shortcuts";
 import { tr } from "../../i18n";
 
 export function ShortcutHelpDialog() {
@@ -21,7 +23,7 @@ export function ShortcutHelpDialog() {
       <dialog class="dlg shortcut-help" ref={dialog} aria-labelledby="shortcut-help-title" onCancel={(event) => { event.preventDefault(); closeShortcutHelp(); }} onClose={() => closeShortcutHelp()}>
         <div class="dlg-head"><Icon name="keyboard" size={18} class="accent" /><h2 id="shortcut-help-title">{tr("Keyboard shortcuts")}</h2><span class="grow" /><button class="icon-btn" aria-label={tr("Close")} onClick={() => closeShortcutHelp()}><Icon name="x" size={16} /></button></div>
         <div class="dlg-body">
-          <input ref={filter} class="field shortcut-help-filter" placeholder={tr("Filter shortcuts")} value={needle()} onInput={(event) => setNeedle(event.currentTarget.value)}
+          <TextInput ref={filter} class="field shortcut-help-filter" placeholder={tr("Filter shortcuts")} value={needle()} onInput={(event) => setNeedle(event.currentTarget.value)}
             onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); closeShortcutHelp(); } }} />
           <div class="shortcut-help-list">
             <For each={groups()}>{(group) => (
@@ -33,8 +35,9 @@ export function ShortcutHelpDialog() {
               </section>
             )}</For>
           </div>
+          <p class="hint shortcut-help-terminal">{terminalRule()} {tr("Chords marked ✓ also work while Terminal has focus.")}</p>
         </div>
-        <div class="dlg-foot"><span class="hint">{tr("Chords marked ✓ also work while Terminal has focus.")}</span><span class="spacer" /><button class="btn" data-initial onClick={customizeShortcutHelp}>{tr("Customize…")}</button></div>
+        <div class="dlg-foot"><span class="spacer" /><button class="btn" data-initial onClick={customizeShortcutHelp}>{tr("Customize…")}</button></div>
       </dialog>
     </Show>
   );

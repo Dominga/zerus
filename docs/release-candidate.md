@@ -11,7 +11,7 @@ Two legs now stand between a commit and `whitewh/main`:
 
 1. **Local release candidate** — `hgs team run` template `release-candidate`
    runs `scripts/release-candidate.py` on the Windows worker. It runs the steps
-   of `fork-windows.yml` after the Rust suite: offscreen Qt suites,
+   of `fork-windows.yml` after the Rust suite, without Qt (task #388):
    `fork_update`, `fork_handoff`, the Tauri build with the fork channel
    (`scripts/release-candidate-local.py`), `package-windows.py` and
    `check-windows-portable.py --run --selftest`. A green result is recorded in
@@ -20,6 +20,21 @@ Two legs now stand between a commit and `whitewh/main`:
    `whitewh-exp-<name>` for the exact commit, waits for the `Fork Windows build`
    workflow on that tag, and records its green conclusion. That tag publishes
    an experimental prerelease, never the latest release, no feed.
+
+### Manual builds only (task #446)
+
+Owner, 2026-11-09 ("сборка только по пинку"): nothing builds on a push, so a
+pushed `whitewh-exp-*` tag no longer starts `fork-windows.yml`, and the runner leg
+cannot be started that way any more. Until the gate in
+`scripts/publish_whitewh_main.py` is reworked, the runner evidence comes from a
+manual dispatch instead:
+
+- a **probe** dispatch from the candidate branch (`Actions -> Fork Windows
+  build -> Run workflow`) runs the same build, package and self-test and
+  publishes nothing; that zip has neither a fork build number nor a feed;
+- once the candidate is on `whitewh/main`, a dispatch from there with
+  `channel: numbered` publishes `whitewh-<run number>` with the stable feed
+  (docs/fork-updates.md).
 
 ## Pre-flight by hand
 
@@ -54,27 +69,10 @@ neither builds without a fork identity, and the self-test then compares "no
 build, no feed". The scripts refuse one without the other, a build that is not a
 positive number and a feed outside `https://github.com/WhiteWh/zerus/releases/`.
 
-On the Windows worker the local leg configures and builds the Qt tests with the
-Visual Studio generator and runs `ctest --parallel 2`: four suites
-(`sessionswindow_opencode`, `teamsui_workspace`, `sessionswindow_list3`,
-`machinespage`) failed under four workers and pass alone.
-
-### The Qt suites on Windows
-
-Git Bash cannot start under the release sandbox, so on Windows the script runs
-`scripts/ci/gui.sh`'s steps itself (task 192):
-- **Build:** Ninja with MSVC through `scripts/ci/msvc-env.py`, in
-  `.ci-build/gui`, the folder and generator Zerus's `qt-configure` uses. A
-  folder made by another generator is configured again with `--fresh`.
-- **Results:** per-function JUnit results go to
-  `artifacts/test-results/qt-functions`, and `QT_FORCE_STDERR_LOGGING=1`
-  keeps QtTest output in the CTest log.
-- **Limits:** a 240-second timeout per suite, and the retry policy
-  (`--repeat until-pass:2`, or `ZERUS_QT_RETRY`).
-- **Report:** `artifacts/test-results/qt.xml`.
-
-`--qt-only` runs just the machine-dependent scan and the Qt suites, records
-nothing, and is the way to look at a Qt failure.
+Task #388 (owner, 2026-11-08): the local leg runs no Qt step. It records each
+step's seconds (`timings_s`), the whole leg (`total_s`) and the zip's size
+(`zip_bytes`) with its result in `.zerus-release/<commit>.json`, and prints
+them at the end.
 
 ## Publishing
 

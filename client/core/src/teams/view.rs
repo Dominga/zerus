@@ -9,6 +9,8 @@ use serde_json::{json, Map, Value};
 pub const NAME_CHARS: usize = 200;
 /// The longest free text kept (a goal, a reason, a role prompt).
 pub const TEXT_CHARS: usize = 8000;
+/// One report opened explicitly; full history never enters the webview.
+pub const REPORT_CHARS: usize = 64 * 1024;
 /// The longest line kept (a finding, a summary).
 pub const LINE_CHARS: usize = 600;
 /// Teams one list keeps.
@@ -513,6 +515,7 @@ pub struct DepView {
 /// One task, as the plan, its cards and the graph show it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct TaskView {
+    pub archived: bool,
     pub id: u64,
     pub title: String,
     pub status: String,
@@ -690,6 +693,7 @@ fn pipeline_run(value: &Value) -> Option<PipelineRunView> {
 /// One phase of the plan (`phase_summary`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct PhaseView {
+    pub archived: bool,
     pub n: u64,
     pub title: String,
     pub state: String,
@@ -891,6 +895,7 @@ pub struct DraftView {
 /// `team status` for the Team tab.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct TeamView {
+    pub archived_phases_not_shown: u64,
     pub id: String,
     pub name: String,
     pub status: String,
@@ -1043,7 +1048,10 @@ fn member(value: &Value, lead: &str) -> MemberView {
 
 fn task(value: &Value) -> TaskView {
     let attempts = array(value, "attempts");
+    let archive = value.get("archived").filter(|archive| archive.is_object());
+    let timing = archive.and_then(|archive| archive.get("timing")).or_else(|| value.get("timing"));
     TaskView {
+        archived: archive.is_some(),
         id: count(value, "id"),
         title: name(value, "title"),
         status: name(value, "status"),
@@ -1096,7 +1104,7 @@ fn task(value: &Value) -> TaskView {
         estimate_source: name(value, "estimate_source"),
         estimate_spent: value.get("estimate_spent_minutes").and_then(Value::as_f64).filter(|minutes| minutes.is_finite() && *minutes >= 0.0),
         running_since: value.get("timing").map(|timing| number(timing, "running_since")).unwrap_or_default().max(0.0),
-        worked_s: value.get("timing").map(|timing| number(timing, "worked_s")).unwrap_or_default().max(0.0),
+        worked_s: timing.map(|timing| number(timing, "worked_s")).unwrap_or_default().max(0.0),
         wait_for: value.get("waits").map(|waits| name(waits, "for")).unwrap_or_default(),
         wait_on: value
             .get("waits")
@@ -1139,6 +1147,7 @@ fn phase_mode(team: &Value, n: u64) -> String {
 
 fn phase(value: &Value) -> PhaseView {
     PhaseView {
+        archived: value.get("archived").is_some_and(Value::is_object),
         n: count(value, "n"),
         title: name(value, "title"),
         state: name(value, "state"),
@@ -1183,6 +1192,25 @@ fn phase_record(view: &mut PhaseView, record: &Value) {
             view.pause_reason = text(pause, "reason", LINE_CHARS);
             view.pause_owner = flag(pause, "owner");
         }
+    }
+}
+
+/// One explicitly opened task; only the newest available report is retained.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct TaskDetailView {
+    pub task: TaskView,
+    pub report: String,
+    pub report_truncated: bool,
+}
+
+pub fn task_detail(value: &Value) -> TaskDetailView {
+    let report = array(value, "attempts").iter().rev()
+        .find_map(|attempt| attempt.get("report").and_then(|report| report.get("text")).and_then(Value::as_str))
+        .unwrap_or_default();
+    TaskDetailView {
+        task: task(value),
+        report: cut(report, REPORT_CHARS),
+        report_truncated: report.chars().nth(REPORT_CHARS).is_some(),
     }
 }
 
@@ -1256,6 +1284,8 @@ pub fn team(value: &Value) -> TeamView {
         .get("health")
         .or_else(|| validation.and_then(|found| found.get("health")));
     TeamView {
+        archived_phases_not_shown: value["archive_totals"]["phases"].as_u64().unwrap_or(0)
+            .saturating_sub(array(value, "phases").iter().filter(|phase| phase["archived"].is_object()).count() as u64),
         id: name(value, "id"),
         name: name(value, "name"),
         status: name(value, "status"),
@@ -1290,6 +1320,8 @@ pub fn team(value: &Value) -> TeamView {
             .map(|found| {
                 let mut view = phase(found);
                 view.mode = phase_mode(value, view.n);
+                view.archived = array(value, "phases").iter()
+                    .any(|record| record["n"] == found["n"] && record["archived"].is_object());
                 if let Some(record) = array(value, "phases").iter().find(|record| count(record, "n") == view.n) {
                     phase_record(&mut view, record);
                 }

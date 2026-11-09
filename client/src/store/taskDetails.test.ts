@@ -75,6 +75,14 @@ describe("bounded task inspector", () => {
     expect(entries.map((e) => [e.kind, e.stale])).toEqual([["report", "other_executor"], ["progress", undefined], ["report", undefined]]);
     expect(entries.every((e, i) => i === 0 || !("stale" in e))).toBe(true);
   });
+  it("keeps the attempt an entry's request names, and only when there is one", () => {
+    const log = [{ kind: "message", text: "Please change it", at: 2, request_id: "r", delivery: { mode: "note", state: "note" }, attempt: { origin: "reopen", phase: "submitted" } },
+      { kind: "message", text: "Unreadable", at: 3, attempt: null },
+      { kind: "comment", text: "Plain", at: 4 }];
+    const entries = taskDetail(raw("p", "one", { log, log_total: 3 }), "p", "one").log;
+    expect(entries.map((e) => e.attempt)).toEqual([{ origin: "reopen", phase: "submitted" }, { origin: "", phase: "" }, undefined]);
+    expect("attempt" in entries[2]).toBe(false);
+  });
   it("discards a read after close and refuses wrong identities and legacy journals", async () => {
     const first = deferred(), read = vi.fn().mockReturnValue(first.promise), s = createTaskDetails(read);
     s.select("p", "one"); s.select(); first.resolve(raw()); await tick(); expect(s.data()).toBeUndefined();

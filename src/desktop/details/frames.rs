@@ -21,6 +21,7 @@ impl Source {
                     hello.limits.processes_subscriptions.min(16),
                 ),
                 (topic::TASKS, hello.limits.tasks_subscriptions.min(16)),
+                (topic::GIT, hello.limits.git_subscriptions.min(64)),
                 (topic::ORGANIZATION, 1),
             ] {
                 if hello.topics.iter().any(|t| t == topic) {

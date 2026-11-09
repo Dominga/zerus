@@ -178,6 +178,15 @@
   .menu-item[aria-disabled="true"]:hover { background: none; color: var(--z-color-text-2); }
   .menu-sep { height: 1px; margin: 4px 6px; background: var(--z-color-divider); }
   .menu-label { padding: 6px 8px 2px; font-size: var(--fs-2xs); text-transform: uppercase; letter-spacing: .4px; color: var(--z-color-dim); font-weight: 600; }
+  .dropdown-trigger { display: flex; align-items: center; gap: 8px; text-align: left; cursor: pointer; }
+  .dropdown-label { display: flex; align-items: center; gap: 7px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dropdown-trigger > .dropdown-label { flex: 1; }
+  .dropdown-chevron { flex: none; color: var(--z-color-dim); margin-left: auto; }
+  .menu.dropdown-list { margin: 0; width: max-content; overflow-y: auto; overscroll-behavior: contain; color: var(--z-color-text); }
+  .dropdown-list .menu-item.active:not([aria-disabled="true"]) { background: var(--z-color-hover); color: var(--z-color-text); }
+  .dropdown-list .menu-item > svg { flex: none; }
+  dialog.dropdown-layer { position: fixed; inset: 0; margin: 0; padding: 0; border: 0; max-width: none; max-height: none; width: 100vw; height: 100vh; background: transparent; color: inherit; }
+  dialog.dropdown-layer::backdrop { background: transparent; }
   .kbd { font-family: var(--z-font-mono); font-size: var(--fs-2xs); color: var(--z-color-dim); padding: 1px 5px; border: 1px solid var(--z-color-border); border-radius: var(--z-radius-xs); white-space: nowrap; }
 
   /* Dialog */
@@ -234,6 +243,10 @@
 
   /* Toast */
   /* Notices never block a control: clicks pass through, except a sticky notice's Dismiss. */
+  /* A lazily loaded view still loading, or one that failed with Retry (lazy-boundary.tsx, zerus-ycycu). */
+  .lazy-waiting { padding: 8px 10px; font-size: var(--fs-sm); color: var(--z-color-muted); }
+  .lazy-failed { display: flex; gap: 10px; align-items: center; padding: 8px 10px; border-radius: var(--z-radius-md); font-size: var(--fs-sm); background: var(--z-color-info-bg); color: var(--z-color-text-2); }
+  .lazy-failed.floating { position: fixed; left: 50%; bottom: 40px; transform: translateX(-50%); z-index: 71; border: 1px solid var(--z-color-border); background: var(--z-color-raised); box-shadow: var(--z-shadow-popover); }
   .toasts { position: fixed; right: 16px; bottom: 40px; z-index: 70; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
   .toast { min-width: 260px; max-width: 380px; padding: 10px 12px; border-radius: var(--z-radius-lg); background: var(--z-color-raised); border: 1px solid var(--z-color-border); box-shadow: var(--z-shadow-popover); font-size: var(--fs-sm); animation: slideL var(--z-motion-base) var(--ease) both; }
   .toast b { display: block; margin-bottom: 2px; }
@@ -314,18 +327,18 @@
    border.) The rule names the scroll containers, so a popup restyles only them,
    not the whole document; popups.test.ts keeps both lists complete. */
 @layer variants {
-  :root[data-platform="linux"]:has(:is(.menu, .att-pop, .archive-pop, .acct-more, .acct-switch-pop, .ns-choice-list, .tk-tip, .goto-scrim, .cat-confirm, .nt-confirm, .pm-lane-menu, .designer-model-menu, .term-menu, dialog.ns-model-pop[open], dialog.diff-dlg[open], :popover-open))
+  :root[data-platform="linux"]:has(:is(.menu, .att-pop, .archive-pop, .acct-more, .acct-switch-pop, .ns-choice-list, .tk-tip, .goto-scrim, .goto, .cat-confirm, .nt-confirm, .pm-lane-menu, .designer-model-menu, .term-menu, dialog.ns-model-pop[open], dialog.diff-dlg[open], :popover-open))
     :is(.dlg-body, .set-scroll, .perf-host, .content-search-list, .act-scroll, .act-table-wrap, .act-code, .act-queue-text,
       .insp-scroll, .insp-tabs, .proc-list, .proc-output, .draft-list, .draft-preview, .qcard-scroll, .fb-list, .goto-list,
       .shortcut-help-list, .mach-page, .mach-log, .acct-scroll, .acct-main-scroll, .acct-more-list, .atm-list, .atm-results,
-      .ns-accounts, .wt-tree, .ocm-list, .wtp-tree, .su-page, .proj-list, .su-tablewrap, .ip-summary, .ip-body, .ip-diff,
+      .ns-accounts, .wt-tree, .ocm-list, .wtp-tree, .parent-choices, .su-page, .proj-list, .su-tablewrap, .ip-summary, .ip-body, .ip-diff,
       .bc-details, .sp-scroll, .strip-scroll, .set-nav, .set-table-wrap, .voice-list, .an-detail, .an-json, .sw-clist,
-      .sw-review, .tasks-list, .tasks-detail, .tk-scroll, .tv-scroll, .tk-assign-list, .wtl-panel, .wto-tree, .team-canvas, .team-members-list, .team-proposals, .lead-proposals, .team-waiting-list, .proj-session-list,
+      .sw-review, .tasks-list, .tasks-detail, .tk-scroll, .tk-damaged-review, .tv-scroll, .tk-assign-list, .wtl-panel, .wto-tree, .team-canvas, .team-members-list, .team-proposals, .lead-proposals, .team-waiting-list, .proj-session-list,
       .team-waiting-output, .team-questions, .ms-list, .ms-raw, .ms-logs, .cat-list, .cat-proposals, .nt-body, .pt-plan-scroll, .pt-phase-body, .pm-board-phase, .team-findings-list, .nt-lead-pane, .nt-template-list, .qcard-subagents, .team-drawer-rows, .pt-detail,
-      .cat-form, .cat-routing, .cat-rules, .designer-draft, .newteam-page, .catalog-page,
+      .cat-form, .cat-routing, .cat-rules, .designer-draft, .newteam-page, .catalog-page, .nsd-acc-list,
       .pm-board, .pm-column-body, .pm-layers, .pm-layer-body, .pm-lanes, .pm-profile, .pm-tests, .pm-profile-scroll, .tl-host, .cl-list, .diff-text,
       .xterm-viewport):not(
-      :is(.menu, .att-pop, .archive-pop, .acct-more, .acct-switch-pop, .ns-choice-list, .tk-tip, .goto-scrim, .cat-confirm, .nt-confirm, .pm-lane-menu, .designer-model-menu, .term-menu, dialog.ns-model-pop[open], dialog.diff-dlg[open], :popover-open) *) {
+      :is(.menu, .att-pop, .archive-pop, .acct-more, .acct-switch-pop, .ns-choice-list, .tk-tip, .goto-scrim, .goto, .cat-confirm, .nt-confirm, .pm-lane-menu, .designer-model-menu, .term-menu, dialog.ns-model-pop[open], dialog.diff-dlg[open], :popover-open) *) {
     scrollbar-width: none;
   }
 }

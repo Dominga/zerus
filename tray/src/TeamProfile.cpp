@@ -1,3 +1,4 @@
+#include "TeamArchive.h"
 #include <QWheelEvent>
 #include <QPointer>
 #include <cmath>
@@ -462,8 +463,11 @@ void Cache::moreTasks(const QString &team, const QString &scope)
         if (ok) {
             auto tasks = entry.profile.value("tasks").toObject();
             auto items = tasks.value("items").toArray();
-            for (const auto &item : result.value("tasks").toObject().value("items").toArray()) items.append(item);
-            tasks["items"] = items; tasks["next_cursor"] = result.value("tasks").toObject().value("next_cursor");
+            for (const auto &item : result.value("tasks").toObject().value("items").toArray()) {
+                if (items.size() == MaxSpanPages * SpanPage) break;
+                items.append(item);
+            }
+            tasks["items"] = items; tasks["next_cursor"] = items.size() < MaxSpanPages * SpanPage ? result.value("tasks").toObject().value("next_cursor") : QJsonValue();
             entry.profile["tasks"] = tasks;
         }
         emit changed(team, scope);
@@ -895,6 +899,12 @@ TeamProfileView::TeamProfileView(TeamController *teams, Cache *cache, QWidget *p
     auto *exportButton = button(tr("Export JSON"), "teamProfileExport");
     QObject::connect(exportButton, &QPushButton::clicked, this, [this] { exportJson(); });
     bar->addWidget(exportButton);
+    auto *archive = new QPushButton(tr("Archived phases..."));
+    archive->setObjectName("teamOpenArchive");
+    QObject::connect(archive, &QPushButton::clicked, this, [this] {
+        (new TeamArchive(m_teams, m_team, this, archivedScope() ? archivedScope()->n : 0))->show();
+    });
+    bar->addWidget(archive);
     outer->addLayout(bar);
     auto *split = new QHBoxLayout; split->setSpacing(12);
     auto *bodyBox = new QWidget; m_bodyHost = new QVBoxLayout(bodyBox); m_bodyHost->setContentsMargins(0, 0, 0, 0);
@@ -960,9 +970,11 @@ void TeamProfileView::setTeam(const Teams::Team &team)
     }
     const QSignalBlocker block(m_scope);
     m_scope->clear();
-    m_scope->addItem(tr("The plan, every phase"), 0);
+    const bool hasArchive = std::any_of(team.phases.cbegin(), team.phases.cend(), [](const Phase &phase) { return phase.archived; });
+    m_scope->addItem(hasArchive ? tr("Current plan window (archive is paged separately)") : tr("The plan, every phase"), 0);
     if (!team.phases.isEmpty() || !team.tasks.isEmpty()) {
-        QList<int> numbers{1};
+        QList<int> numbers;
+        if (team.phase(1) || std::any_of(team.tasks.cbegin(), team.tasks.cend(), [](const Task &task) { return task.phase == 1; })) numbers << 1;
         for (const auto &phase : team.phases) if (!numbers.contains(phase.n)) numbers << phase.n;
         for (int n : numbers) {
             const auto *phase = team.phase(n);
@@ -1007,6 +1019,11 @@ int TeamProfileView::selectedTask() const { return m_timeline ? m_timeline->sele
 void TeamProfileView::read()
 {
     if (m_team.id.isEmpty()) { render(); return; }
+    if (archivedScope()) {
+        m_state->setText(tr("Archived phase: recorded outcomes and timings. Open Archived phases for all tasks and reports."));
+        render();
+        return;
+    }
     const QString scopeKey = scope();
     const auto *entry = m_cache->entry(m_team.id, scopeKey, m_team.revision);
     m_state->setText(entry->loading ? tr("Reading the profile in the background…")
@@ -1034,13 +1051,50 @@ void TeamProfileView::pick(int task)
 void TeamProfileView::render()
 {
     const QString tab = m_tab;
-    QWidget *page = tab == "tokens" ? tokensPage() : tab == "members" ? membersPage() : tab == "compare" ? comparePage() : timePage();
+    const bool archived = archivedScope();
+    QWidget *page = archived ? archivedPage() : tab == "tokens" ? tokensPage() : tab == "members" ? membersPage() : tab == "compare" ? comparePage() : timePage();
     page->setObjectName(QStringLiteral("teamProfilePage"));
     page->setProperty("tab", tab);
     if (m_body) { m_bodyHost->removeWidget(m_body); retire(m_body); }
     m_bodyHost->addWidget(page); m_body = page;
-    m_side->setVisible(m_lossesOpen && tab != "compare" && tab != "members");
+    m_side->setVisible(!archived && m_lossesOpen && tab != "compare" && tab != "members");
     renderLosses();
+}
+
+const Teams::Phase *TeamProfileView::archivedScope() const
+{
+    const auto *phase = m_team.phase(m_phase);
+    if (phase && phase->archived) return phase;
+    if (m_tab == "compare") {
+        for (int n : {m_compareA, m_compareB})
+            if (const auto *compared = m_team.phase(n); compared && compared->archived) return compared;
+    }
+    return nullptr;
+}
+
+QWidget *TeamProfileView::archivedPage()
+{
+    const auto *phase = archivedScope();
+    auto *page = new QWidget; page->setObjectName("teamProfileArchived");
+    auto *layout = new QVBoxLayout(page);
+    layout->addWidget(new QLabel(tr("Phase %1 / %2\n%3 tasks: %4 accepted, %5 rejected, %6 cancelled")
+        .arg(phase->n).arg(phase->title).arg(phase->archivedTasks).arg(phase->archivedAccepted)
+        .arg(phase->archivedRejected).arg(phase->archivedCancelled)));
+    layout->addWidget(new QLabel(tr("Closed: %1").arg(QDateTime::fromSecsSinceEpoch(qint64(phase->closedAt)).toString(Qt::ISODate))));
+    int shown = 0;
+    for (const auto &task : m_team.tasks) {
+        if (task.phase != phase->n || shown == 50) continue;
+        ++shown;
+        auto *row = new QPushButton(tr("#%1 / %2 / %3 / worked %4").arg(task.id).arg(task.title, task.status, duration(task.timing.worked)));
+        row->setObjectName("teamProfileArchivedTask");
+        connect(row, &QPushButton::clicked, this, [this, id = task.id] { if (openTask) openTask(id); });
+        layout->addWidget(row);
+    }
+    layout->addWidget(new QLabel(tr("Showing %1 task summaries. Browse Archived phases for the complete paged list.").arg(shown)));
+    layout->addStretch();
+    auto *scroll = new QScrollArea;
+    scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame); scroll->setWidget(page);
+    return scroll;
 }
 
 QWidget *TeamProfileView::summaryTiles()

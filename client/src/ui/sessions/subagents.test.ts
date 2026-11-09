@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { toSession } from "../../store/catalog";
 import { groupRows, type ListInput } from "./group-rows";
-import { childInactive, childRows, finishedFoldId, foldedChildren, rosterFor } from "./subagents";
+import { childInactive, childRows, finishedFoldId, foldedChildren, rosterFor, splitSubagents } from "./subagents";
 import type { GroupingOut } from "../../types";
+import type { Subagent } from "./types";
 
 const grouping: GroupingOut = { loaded: true, default_project: "ungrouped", headers: [], ready: true, reason: null, busy: false, status: "", status_error: false, conflicts: 0 };
 const input = (extra: Partial<ListInput> = {}): ListInput => ({ grouping, members: new Map(), visible: () => true, online: () => true, projects: [], expanded: () => true, compact: () => false, ...extra });
@@ -10,6 +11,16 @@ const parent = () => toSession("", "run:1", { name: "dsh/example/review", conver
   working: { label: "Worker", state: "working", detail: "Checking now" },
   done: { name: "Finished", state: "ready", task: "Earlier result" },
 } });
+
+describe("a child's own conversation ID (zerus-5wmh.13.17)", () => {
+  it("is kept when the roster reports one, bounded and printable", () => {
+    const rows = childRows({ one: { state: "ready", conversation_id: "child-conversation-one" }, two: { state: "ready" },
+      three: { state: "ready", conversation_id: 7 }, four: { state: "ready", conversation_id: "x".repeat(300) }, five: { state: "ready", conversation_id: "bad\nid" },
+      // review-win-e on #1825 (zerus-5wmh.13.17.2.1): C1 controls such as U+0085 are refused too.
+      six: { state: "ready", conversation_id: `next${String.fromCharCode(0x85)}line` }, seven: { state: "ready", conversation_id: `c1${String.fromCharCode(0x9f)}` } });
+    expect(Object.fromEntries(rows.map((r) => [r.id, r.conversationId]))).toEqual({ one: "child-conversation-one", two: undefined, three: undefined, four: undefined, five: undefined, six: undefined, seven: undefined });
+  });
+});
 
 describe("native child presentation", () => {
   it("keeps unchanged current and non-current cards by identity, including absent child metadata", () => {
@@ -99,5 +110,20 @@ describe("finished subagents fold (task 262)", () => {
   });
   it("remembers the fold per session", () => {
     expect(finishedFoldId("arch\nrun:1")).not.toBe(finishedFoldId("\nrun:1"));
+  });
+});
+
+describe("Plan & agents keeps working subagents in view (zerus-5ffek)", () => {
+  const child = (id: string, state: Subagent["state"]): Subagent => ({ id, name: id, state, summary: "" });
+  const children = [child("a", "working"), child("b", "ready"), child("c", "attention"), child("d", "error"), child("e", "ended"), child("f", "unknown")];
+  it("shows the working and asking ones and folds the rest", () => {
+    expect(splitSubagents(children, true)).toEqual({ active: ["a", "c"], finished: ["b", "d", "e", "f"] });
+  });
+  it("keeps the one open in Activity in view", () => {
+    expect(splitSubagents(children, true, "e").active).toEqual(["a", "c", "e"]);
+  });
+  it("folds everything when the session's report is not current", () => {
+    expect(splitSubagents(children, false)).toEqual({ active: [], finished: ["a", "b", "c", "d", "e", "f"] });
+    expect(splitSubagents(children, false, "b").active).toEqual(["b"]);
   });
 });

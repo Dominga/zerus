@@ -7,6 +7,7 @@ import { native, of } from "./paths";
 import { ago, continueTip, stateText, statusText, titleOf, warning } from "./claude-app-ui";
 import { tr } from "../../i18n";
 import "../styles/claude-app.css";
+import { TextInput } from "../lib/TextField";
 
 // WhiteWh fork: Continue a Claude app session (tray/src/ClaudeAppSessionsDialog.h).
 // The list, its State column, "This folder only", the Session name and the one
@@ -116,7 +117,7 @@ export function ClaudeAppDialog(props: {
         <p class="cl-status" classList={{ error: !!store.error() }} title={status()}>{status()}</p>
         <div class="form-row">
           <label for="cl-name">{tr("Session name")}</label>
-          <input id="cl-name" class="field mono" value={store.name()} disabled={!row()}
+          <TextInput id="cl-name" class="field mono" value={store.name()} disabled={!row()}
             onInput={(e) => store.setName(e.currentTarget.value)} />
         </div>
         <Show when={store.problem()}><p class="hint dlg-error">{store.problem()}</p></Show>

@@ -402,6 +402,40 @@ describe("service approval intents", () => {
     expect(send.mock.calls).toEqual([["request-1", true], ["request-2", false]]);
     expect(read).toHaveBeenCalledOnce();
   });
+  it("sends a complete category set with the committed switch and settles only on its exact receipt", async () => {
+    const ids = ["read", "edit", "other"];
+    const send = vi.fn(async (request_id: string, enabled: boolean, categories?: string[]) =>
+      ({ request_id, enabled, categories, op: "automatic_approvals", accepted: true, durable: true }));
+    const intent = createServiceApprovalIntent(send, () => "request-1");
+    await intent.submitCategories(true, ids);
+    expect(send).toHaveBeenCalledExactlyOnceWith("request-1", true, ids);
+    expect(intent.pending()).toBeUndefined();
+    const other = createServiceApprovalIntent(async (request_id, enabled) =>
+      ({ request_id, enabled, categories: ["read"], op: "automatic_approvals", accepted: true, durable: true }), () => "request-2");
+    await expect(other.submitCategories(true, ids)).rejects.toThrow("not confirmed");
+    expect(other.pending()).toEqual({ id: "request-2", enabled: true, categories: ids });
+    await expect(other.submitCategories(true, ids)).rejects.toThrow("unconfirmed");
+  });
+  it("settles a category change refused for a switch changed elsewhere, so the next edit may go", async () => {
+    const send = vi.fn(async (request_id: string) => ({ request_id, op: "automatic_approvals", accepted: false, durable: false, pending: false, code: "approval_policy_changed" }));
+    const intent = createServiceApprovalIntent(send, () => "request-1");
+    await expect(intent.submitCategories(true, ["read"])).rejects.toThrow("turned on or off elsewhere");
+    expect(intent.pending()).toBeUndefined();
+  });
+  it("restores an uncertain category change after a reload and confirms it by its exact set", async () => {
+    const send = vi.fn();
+    const read = vi.fn(async () => ({ request_id: "native-original", op: "automatic_approvals", enabled: false,
+      categories: ["read", "paid"], accepted: true, durable: true, pending: false }));
+    const reloaded = createServiceApprovalIntent(send, () => "fresh-id", read);
+    await reloaded.check();
+    expect(reloaded.pending()).toBeUndefined();
+    const pending = vi.fn(async () => ({ request_id: "native-original", op: "automatic_approvals", enabled: false,
+      categories: ["read", "paid"], accepted: null, durable: false, pending: true }));
+    const waiting = createServiceApprovalIntent(send, () => "fresh-id", pending);
+    await expect(waiting.check()).rejects.toThrow("not confirmed");
+    expect(waiting.pending()).toEqual({ id: "native-original", enabled: false, categories: ["read", "paid"] });
+    expect(send).not.toHaveBeenCalled();
+  });
 
 });
 
@@ -434,6 +468,14 @@ describe("notification ownership presentation", () => {
     expect(takeoverRefusal(refused("agent_descended_frontend_refused", "ancestry"))!.check).toBe("Process ancestry");
     expect(takeoverRefusal(refused("ownership_not_settled", "ownership_journal"))!.check).toBe("Ownership journal");
     expect(takeoverRefusal(refused("timed_out", "other"))!.reason).toContain("timed_out");
+    // Task #421: a takeover whose hgs child failed names the desktop service and a working next step.
+    const child = takeoverRefusal(refused("child_failed", "other"))!;
+    expect(child.check).toBe("Desktop service");
+    expect(child.next).toContain("hgs desktop serve");
+    expect(ownershipNotice(refused("child_failed", "other"))).toContain("Zerus could not take over its sessions (Desktop service)");
+    // Task #440: a planned self-restart is said ahead of the refusal.
+    const restarting = view({ native_recovery: true, native_recovery_reason: { code: "child_failed", check: "other" }, native_recovery_restart_at: 1_800_000_000_000 });
+    expect(ownershipNotice(restarting)).toBe("Zerus restarts its window to finish starting. Your drafts are saved.");
     // The notice says it instead of a bare "not ready"; without a reason the old notice stays.
     const notice = ownershipNotice(refused("frontend_binding_unavailable", "binding"));
     expect(notice).toContain("Zerus could not take over its sessions (App binding)");

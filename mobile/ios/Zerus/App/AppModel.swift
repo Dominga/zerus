@@ -64,7 +64,11 @@ final class AppModel {
     var sessionQuery = "" { didSet { if oldValue != sessionQuery { sessionScopeChanged() } } }
     private(set) var selectedMachines: Set<MachineKey> = []
     private(set) var collapsedProjects: Set<String> = []
-    private(set) var expandedSubagents: Set<String> = []
+    /// Parents whose subagents and child sessions are hidden: one toggle, kept across relaunches
+    /// by machine UUID and session ID (TeamCollapse, zerus-sa9qn.5).
+    private(set) var teamCollapse = TeamCollapse()
+    @ObservationIgnored private var teamsStore: OrderedStatePersistence<[String]>?
+    @ObservationIgnored private var groupedCache: (source: [AccountCatalog], groups: [GroupedAccount])?
     private(set) var sessionProjectScope: ProjectSummary?
     @ObservationIgnored private var unscoped: (filter: SessionFilter, query: String)?
     private(set) var listPresentation = SessionListPresentation()
@@ -194,6 +198,9 @@ final class AppModel {
         }
         accountsStore = accounts
         accountCatalogs = accounts.state
+        let teams = await Task.detached { ChildSessions.parseTeams((try? sealed.read("collapsed_teams", as: [String].self)) ?? []) }.value
+        teamsStore = OrderedStatePersistence(initial: teams) { try sealed.write("collapsed_teams", $0) }
+        teamCollapse = teamCollapse.loaded(teams)
         // Offline navigation index: last known sessions and computers until the catalog refreshes.
         // A preview opened while storage loads keeps its own catalog.
         guard !demo else { return }
@@ -212,6 +219,7 @@ final class AppModel {
     func flushPrivateState() {
         messages?.flushAsync()
         accountsStore?.flushAsync()
+        teamsStore?.flushAsync()
         conversation.flushRead()
     }
 
@@ -625,8 +633,28 @@ final class AppModel {
         if collapsedProjects.contains(key.key) { collapsedProjects.remove(key.key) } else { collapsedProjects.insert(key.key) }
     }
 
-    func toggleSubagents(_ target: Target) {
-        if expandedSubagents.contains(target.key) { expandedSubagents.remove(target.key) } else { expandedSubagents.insert(target.key) }
+    /// The machine UUID of a target's computer, which parent links and collapsed parents name.
+    func machineUuid(_ target: Target) -> String? { machine(target.machineKey)?.machineId }
+
+    func teamCollapsed(_ session: Session) -> Bool { teamCollapse.collapsed(session, machine: machineUuid(session.target)) }
+
+    /// Shows or hides a parent's subagents and child sessions, and remembers it across relaunches.
+    func toggleTeam(_ session: Session) {
+        let collapsed = !teamCollapsed(session)
+        let saved = ChildSessions.teamId(machineUuid(session.target), session).flatMap { id in
+            teamsStore?.edit { ChildSessions.withTeam($0, id, collapsed: collapsed) }
+        }
+        teamCollapse = teamCollapse.choose(session.target.key, collapsed: collapsed, saved: saved)
+        scheduleList()
+    }
+
+    /// Grouped accounts, which label the cards' account marks; regrouped only when the catalogs change.
+    var groupedAccounts: [GroupedAccount] {
+        let source = displayedAccounts
+        if let cached = groupedCache, cached.source == source { return cached.groups }
+        let groups = AccountGrouping.group(source)
+        groupedCache = (source, groups)
+        return groups
     }
 
     func viewProjectSessions(_ project: ProjectSummary) {
@@ -654,7 +682,7 @@ final class AppModel {
         let generation = listGeneration
         let sessions = self.sessions, machines = self.machines, projects = self.projects
         let selected = selectedMachines, query = sessionQuery, project = sessionProjectScope?.key, filter = sessionFilter
-        let drafts = messageState.drafts, range = archive?.range ?? ArchiveRange()
+        let drafts = messageState.drafts, range = archive?.range ?? ArchiveRange(), teams = teamCollapse
         let later = Set((conversation?.readState.records ?? []).filter(\.reviewLater).map { ConversationReadPolicies.key($0.target) })
         Task { [weak self] in
             let prepared = await Task.detached(priority: .userInitiated) {
@@ -662,7 +690,7 @@ final class AppModel {
                                                 query: query, project: project, filter: filter, drafts: drafts, archiveRange: range,
                                                 readAllCandidate: { row, online in
                                                     ReadAllPolicies.listCandidate(row, online: online, reviewLater: later.contains(ConversationReadPolicies.key(row.target)))
-                                                })
+                                                }, teams: teams)
             }.value
             guard let self, self.listGeneration == generation else { return }
             self.listPresentation = prepared

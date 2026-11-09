@@ -38,11 +38,15 @@
   .sp-notice { font-size: var(--fs-xs); }
   .sp-notice a { color: var(--z-color-accent); }
 
-  /* The list reserves its scroll-bar gutter, so rows never change width. */
-  .sp-scroll { flex: 1; min-height: 0; margin-top: -7px; padding-top: 0; overflow-y: auto; overflow-x: hidden; outline: none; contain: strict;
+  /* Stable classic gutter plus clearance for overlay bars, which consume no gutter. */
+  .sp-scroll { flex: 1; min-height: 0; margin-top: -7px; padding-top: 0; padding-inline-end: 12px; overflow-y: auto; overflow-x: hidden; outline: none; contain: strict;
     scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: var(--z-color-scrollbar) transparent; }
   .sp-foot { display: flex; align-items: center; gap: 2px; height: 30px; margin: 0 -4px; padding: 0 6px 0 12px; border-top: 1px solid var(--z-color-divider); font-size: 11px; color: var(--z-color-muted); }
   .sp-foot .icon-btn.small { width: 26px; height: 26px; }
+  .sp-foot .icon-btn.cleanup-review { width: auto; min-width: 26px; gap: 3px; padding: 0 4px; color: var(--z-color-muted); }
+  .sp-foot .cleanup-review.attention { color: var(--z-color-accent); }
+  .sp-foot .cleanup-review.warn { color: var(--z-color-warn); }
+  .worktree-review-count { font-size: 10px; font-weight: 600; }
   .sp-empty { flex: 1; }
   .sp-paused { align-content: center; }
   /* Task 176: hgs's refusal of the state folder, selectable to copy. */
@@ -72,6 +76,11 @@
   .rowhit.dragged .scard { opacity: .45; }
   .sp-scroll.organizing .rowhit:hover .scard:not(.selected) { background: transparent; }
 
+  /* A project is a folder framed in its own colour around the header row alone
+     (owner, 2026-11-09 after the first build: the colour belongs to the folder's
+     header, not to its cards). */
+  .group-frame { position: absolute; left: 0; right: 0; top: 0; border: 1px solid var(--frame); border-radius: 8px; pointer-events: none; }
+
   /* Project header: 40 px row, band (2,5,-2,-3) radius 6, contents inset 9. */
   .group-band { position: absolute; left: 2px; right: 2px; top: 5px; height: 32px; display: flex; align-items: center; gap: 6px; padding: 0 9px; border-radius: 6px; text-align: left; }
   .group-band { padding-right: 36px; }
@@ -85,10 +94,16 @@
   .gb-count.hot { background: var(--z-list-count-hot-bg); color: var(--z-list-count-hot); }
   .gb-count.working { background: var(--z-list-count-working-bg); color: var(--z-list-count-working); animation: count-pulse 1.6s ease-in-out infinite; }
 
-  /* Card: row 94, card (2,4,-2,-6) = 84 px, radius 8. Instant hover like Qt. */
-  .scard { position: absolute; left: 2px; right: 2px; top: 4px; bottom: 6px; border-radius: 8px; border: 1px solid transparent; background: transparent; color: var(--z-list-text); }
-  .rowhit:hover .scard { background: var(--z-color-row-hover); }
-  .scard.selected, .rowhit:hover .scard.selected { background: var(--z-color-row-selected); border-color: var(--z-color-row-selected-border); }
+  /* Card: row 94, card (2,4,-2,-6) = 84 px, radius 8. Instant hover like Qt.
+     The surface and its frame are the skin's card tokens (owner, 2026-11-09): a
+     couple of tones above the list's pane, with a distinct hover and selection. */
+  .scard { position: absolute; left: 2px; right: 2px; top: 4px; bottom: 6px; border-radius: 8px; border: 1px solid var(--z-color-card-border); background: var(--z-color-card); color: var(--z-list-text); }
+  .rowhit:hover .scard { background: var(--z-color-card-hover); }
+  /* Selection as in the owner's prototype (2026-11-07): the skin's green-tinted card surface and an
+     accent-mixed border (at least 3:1 on the card in every skin); edge marks still draw on top. */
+  .scard.selected, .rowhit:hover .scard.selected { background: var(--z-color-card-selected); border-color: color-mix(in srgb, var(--z-color-accent) 55%, var(--z-color-card-selected-border)); }
+  /* Keyboard focus in the list adds an accent ring, distinct from selection alone. */
+  .sp-scroll:focus-visible .scard.selected { outline: 2px solid var(--z-color-accent); outline-offset: 1px; }
   /* Emphasis edge: 4 px, 6 px from the card's top and bottom (4 px in the compact row). */
   .scard[data-emphasis]::before { content: ""; position: absolute; left: 0; top: 6px; bottom: 6px; width: 4px; border-radius: 2px; background: var(--edge); }
   .scard.compact[data-emphasis]::before { top: 4px; bottom: 4px; }
@@ -114,7 +129,9 @@
   .sp-scroll[data-density="normal"] .sc-foot { top: 66px; }
   .sc-title { flex: 0 1 auto; font-size: 14px; font-weight: 600; line-height: 21px; }
   .sc-mute { flex: none; margin-right: 4px; color: var(--z-list-badge-muted); }
-  .sc-l1 > .sbadge { margin-left: 8px; flex-shrink: .001; }
+  /* The crossed bell sits right after the name (owner, 2026-11-08). */
+  .sc-title + .sc-mute { margin-left: 6px; margin-right: 0; }
+  .sc-l1 > .sbadge { margin-left: 8px; flex: 0 0 auto; max-width: 100%; }
   .sc-l1 > .sc-title { flex-shrink: 1; }
   .sc-extra { display: contents; }
   .sc-extra .sbadge { margin-left: 6px; width: 22px; }
@@ -125,6 +142,24 @@
   .sc-review { flex: none; margin-right: 4px; color: var(--z-list-tone-attention); }
   .muted .sc-review { color: var(--z-list-badge-muted); }
   .sc-model { flex: 0 1 auto; }
+  /* Account marks (zerus-sa9qn.1): a filled circle with the label's letter, or its emoji in a tinted ring. */
+  .acct-mark {
+    --mark-size: 16px;
+    flex: none; display: inline-grid; place-items: center; width: var(--mark-size); height: var(--mark-size); border-radius: 50%;
+    background: var(--mark); color: var(--mark-ink, #000); font-size: calc(var(--mark-size) * .62); font-weight: 650; line-height: 1;
+    font-variant-numeric: tabular-nums; overflow: hidden; user-select: none;
+  }
+  .acct-mark.emoji { background: color-mix(in srgb, var(--mark) 22%, transparent); box-shadow: inset 0 0 0 1px var(--mark); font-size: calc(var(--mark-size) * .7); font-weight: 400; }
+  .acct-chip { flex: 0 1 auto; min-width: 0; max-width: 140px; display: inline-flex; align-items: center; gap: 5px; margin-left: 8px; color: var(--z-list-muted); }
+  .acct-chip-label { min-width: 0; }
+  .cc-mark { flex: none; display: inline-flex; margin-right: 6px; }
+  .acct-title .acct-mark { margin-right: 8px; }
+  .am-preview { display: flex; align-items: center; gap: 10px; }
+  .am-label { font-weight: 600; }
+  .am-hint { margin: 2px 0 8px; font-size: var(--fs-xs, 11px); }
+  .am-emoji { font-size: 16px; }
+  .am-hide { margin: 2px 0 8px; }
+  .acct-title .am-hidden { flex: none; margin-left: 8px; font-size: var(--fs-xs, 11px); }
   .sc-effort { flex: none; margin-left: 7px; height: 16px; padding: 0 5px; border-radius: 3px; background: var(--z-list-chip); line-height: 16px; }
 
   /* Children counter: text + 46 wide, glyph at x+10, chevron at right-9. */
@@ -135,11 +170,14 @@
   .sc-kids.open .chev { rotate: 180deg; }
   .sc-kids.static { background: transparent; padding-right: 6px; }
 
-  /* Status badge: 20 px, radius 5, 11 px Medium; glyph centred at x+11, caption from 23 (7 neutral). */
-  .sbadge { position: relative; flex: 0 1 auto; min-width: 26px; display: inline-flex; align-items: center; height: 20px; padding: 0 8px 0 23px; border-radius: 5px; font-size: 11px; font-weight: 500; white-space: nowrap; overflow: hidden;
+  /* Status badge: 20 px, radius 5, 11 px Medium; glyph centred at x+11, caption from 23 (7 neutral).
+     A badge never leaves its card (owner, 2026-11-09): it keeps the width its
+     caption needs and the title gives way first; a caption too long for the card
+     is cut with an ellipsis inside the badge, never by the card. */
+  .sbadge { position: relative; flex: 0 0 auto; min-width: 26px; max-width: 100%; display: inline-flex; align-items: center; height: 20px; padding: 0 8px 0 23px; border-radius: 5px; font-size: 11px; font-weight: 500; white-space: nowrap; overflow: hidden;
     background: var(--z-list-badge-neutral-bg); color: var(--z-list-badge-neutral-fg); }
   .sbadge.k-neutral { padding-left: 7px; }
-  .sbadge .sb-label { overflow: hidden; text-overflow: ellipsis; }
+  .sbadge .sb-label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .sbadge .sb-glyph { position: absolute; left: 5px; top: 4px; }
   .sbadge .sb-mark { position: absolute; left: 11px; top: 10.5px; width: 0; height: 0; }
   .sbadge .sb-mark::before { content: ""; position: absolute; left: -2.5px; top: -2.5px; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
@@ -160,10 +198,10 @@
   .sbadge.k-deps, .sbadge.k-build, .sbadge.k-cooling, .sbadge.k-cold, .sbadge.k-stopped { background: transparent; color: var(--tone); border-radius: 10px; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tone) 50%, transparent); }
   .sbadge.k-deps { --tone: var(--z-list-state-deps); background: color-mix(in srgb, var(--tone) 11%, transparent); }
   .sbadge.k-build { --tone: var(--z-list-state-build); }
-  .sbadge.k-cooling { --tone: var(--z-list-state-cooling); padding-right: 29px; }
+  .sbadge.k-cooling { --tone: var(--z-list-state-cooling); padding-right: 31px; }
   .sbadge.k-cold { --tone: var(--z-list-state-cold); background: color-mix(in srgb, var(--tone) 11%, transparent); }
   .sbadge.k-stopped { --tone: var(--z-list-state-stopped); }
-  .sbadge .sb-heat { position: absolute; right: 7px; top: 50%; width: 16px; height: 3px; margin-top: -1.5px; border-radius: 1.5px; background: color-mix(in srgb, currentColor 25%, transparent); }
+  .sbadge .sb-heat { position: absolute; right: 8px; top: 50%; width: 16px; height: 3px; margin-top: -1.5px; border-radius: 1.5px; background: color-mix(in srgb, currentColor 25%, transparent); }
   .sbadge .sb-heat::after { content: ""; position: absolute; inset: 0 auto 0 0; width: calc(var(--heat) * 100%); border-radius: inherit; background: currentColor; }
   /* Line 3 of a state card: the state's glyph, its reason, and a cold card's + New and Resume. */
   .sc-state-ico { flex: none; margin-right: 6px; color: var(--tone, currentColor); }
@@ -206,26 +244,88 @@
   .qchip { flex: none; margin-left: 6px; height: 20px; display: inline-flex; align-items: center; gap: 3px; padding: 0 5px 0 4px; border-radius: 5px; background: color-mix(in srgb, var(--z-list-tone-attention) 16%, transparent); color: var(--z-list-tone-attention); font-size: 11px; font-weight: 600; }
   .qchip.muted { background: var(--z-list-chip); color: var(--z-list-badge-muted); }
 
+  /* Agent tile: the large colored provider mark at the card's left; the lines start after it. */
+  /* The prototype's darker tile and thin outline (owner 2026-11-07): skin tokens list.agent-tile(-border). */
+  .agent-tile { --tile: 34px; box-sizing: border-box; flex: none; display: inline-grid; place-items: center; width: var(--tile); height: var(--tile);
+    border-radius: calc(var(--tile) * .26); color: var(--agent); background: var(--z-list-agent-tile); border: 1px solid var(--z-list-agent-tile-border); }
+  .scard.tiled .sc-tile { position: absolute; left: 10px; top: 9px; display: inline-flex; }
+  .scard.tiled .sc-l1, .scard.tiled .sc-l2, .scard.tiled .sc-l3, .scard.tiled .sc-foot { left: 54px; }
+  .cc-tile { flex: none; display: inline-flex; margin-right: 7px; }
+  /* Team toggle: a parent's child sessions, working of all, with a chevron. */
+  .sc-team { position: relative; flex: none; margin-left: 8px; height: 20px; display: inline-flex; align-items: center; padding: 0 20px 0 26px; border-radius: 4px; background: var(--z-list-counter); color: var(--z-list-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .sc-team:hover { background: var(--z-list-counter-hover); color: var(--z-list-text); }
+  .sc-team:focus-visible { outline: 1px solid var(--z-color-accent); }
+  .sc-team .team-glyph { position: absolute; left: 6px; top: 4px; }
+  .sc-team .chev { position: absolute; right: 5px; top: 7px; transition: rotate var(--z-motion-base) var(--ease); }
+  .sc-team.open .chev { rotate: 180deg; }
+  .sc-team .team-asking, .sc-team .team-needs { margin-left: 6px; padding: 0 4px; border-radius: 3px; font-weight: 600; }
+  .sc-team .team-asking { color: var(--z-list-badge-muted); background: var(--z-list-chip); }
+  .sc-team .team-needs { color: var(--z-list-tone-attention); background: color-mix(in srgb, var(--z-list-tone-attention) 16%, transparent); }
+  /* A supervised child: its parent handles its requests (zerus-sa9qn.3). */
+  .sc-supervised { flex: none; display: inline-flex; margin-right: 4px; color: var(--z-color-dim); }
+  .scard.compact .sc-supervised { margin-right: 6px; }
+  /* A child shown away from its parent names it. */
+  .sc-from { flex: 0 0 auto; margin-right: 6px; height: 16px; max-width: 40%; padding: 0 5px; border-radius: 3px; background: var(--z-list-chip); color: var(--z-list-muted); font-size: 10.5px; line-height: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  button.sc-from:hover { color: var(--z-list-text); text-decoration: underline; }
+  button.sc-from:focus-visible { outline: 1px solid var(--z-color-accent); }
+  /* Nested child sessions: 26 px per level, a connector from the parent above. */
+  .team-tree { position: absolute; left: calc(var(--indent) + 14px); top: -6px; bottom: 0; width: 12px; pointer-events: none; }
+  .team-tree::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 1px; background: var(--z-list-tree-line); }
+  .team-tree.last::before { bottom: auto; height: 36px; }
+  .team-tree::after { content: ""; position: absolute; left: 0; top: 28px; width: 12px; height: 8px; border-left: 1px solid var(--z-list-tree-line); border-bottom: 1px solid var(--z-list-tree-line); border-bottom-left-radius: 6px; }
+  .team-tree.compact.last::before { height: 25px; }
+  .team-tree.compact::after { top: 17px; }
+  :root[data-tree-lines="indent"] .team-tree { display: none; }
+
   /* Compact (collapsed) row: 40 px row, 30 px card; status, provider, mute and expand at the right. */
   .scard.compact { display: flex; align-items: center; padding: 2px 3px 0 11px; bottom: 6px; }
   .scard.compact .sc-title { flex: 1 1 auto; line-height: 22px; }
-  .scard.compact .sbadge { flex-shrink: .001; }
+  .scard.compact .sbadge { flex: 0 0 auto; max-width: 100%; }
   .scard.compact .sbadge, .scard.compact .agent-badge, .scard.compact .sc-mute { margin-left: 6px; margin-right: 0; }
+  /* A muted row: the name keeps its width and the bell after it takes the rest. */
+  .scard.compact .sc-title:has(+ .sc-mute) { flex: 0 1 auto; }
+  .scard.compact .sc-title + .sc-mute { margin-right: auto; }
+  /* A compact parent (zerus-sa9qn): a second line sums up its child sessions. */
+  .scard.compact .cc-line { display: contents; }
+  .scard.compact.two { flex-direction: column; align-items: stretch; padding-top: 3px; padding-bottom: 3px; }
+  .scard.compact.two .cc-line { display: flex; align-items: center; min-width: 0; height: 24px; }
+  .cc-team { container: cc-team / inline-size; display: flex; align-items: center; gap: 6px; min-width: 0; height: 20px; margin: 2px 3px 0 29px; padding: 0 6px; border-radius: 4px;
+    font-size: 11px; color: var(--z-list-muted); text-align: left; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .cc-team:hover { background: var(--z-list-counter-hover); color: var(--z-list-text); }
+  .cc-team:focus-visible { outline: 1px solid var(--z-color-accent); }
+  /* The counters shrink and clip; the chevron always keeps its place (zerus-sa9qn.11). */
+  .cc-team-body { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 6px; overflow: hidden; }
+  .cc-team .team-glyph { flex: none; }
+  .cc-team .chev { flex: none; transition: rotate var(--z-motion-base) var(--ease); }
+  .cc-team.open .chev { rotate: 180deg; }
+  .cc-team .short { display: none; }
+  /* About 340 px rows and narrower: the counters show their numbers only. */
+  @container cc-team (max-width: 300px) {
+    .cc-team .long { display: none; }
+    .cc-team .short { display: inline; }
+  }
+  /* Longer translations: the row measured that its long labels overflow (zerus-sa9qn.12). */
+  .cc-team.narrow .long { display: none; }
+  .cc-team.narrow .short { display: inline; }
+  .cc-team .team-asking, .cc-team .team-needs, .cc-team .team-errors { flex: none; padding: 0 4px; border-radius: 3px; font-weight: 600; }
+  .cc-team .team-asking { color: var(--z-list-badge-muted); background: var(--z-list-chip); }
+  .cc-team .team-needs { color: var(--z-list-tone-attention); background: color-mix(in srgb, var(--z-list-tone-attention) 16%, transparent); }
+  .cc-team .team-errors { color: var(--z-list-tone-error); background: color-mix(in srgb, var(--z-list-edge-error) 14%, transparent); }
   .cc-expand { flex: none; margin-left: 6px; width: 24px; height: 24px; border-radius: 4px; display: grid; place-items: center; color: var(--z-list-muted); }
   .cc-expand:hover { background: var(--z-list-counter-hover); color: var(--z-list-text); }
   .cc-expand:focus-visible { outline: 1px solid var(--z-color-accent); }
+  .cc-slot { visibility: hidden; }
   .scard.compact.archived { position: relative; inset: auto; height: 36px; margin: 2px 2px; gap: 8px; }
   .scard.compact.archived .hint { font-size: var(--fs-xs); }
 
   /* Native child rows: 64 px, card indented 24 px, the prototype's tree lines. */
   .child-row { position: absolute; inset: 0; }
+  /* A native subagent is a compact row that never expands (zerus-sa9qn.16). */
   .child-row .scard.child { left: 26px; top: 4px; bottom: 6px; }
-  .child-row .scard.child .sc-l1 { top: 4px; }
-  .sc-child-detail { position: absolute; left: 11px; right: 10px; top: 29px; height: 18px; font-size: 11px; color: var(--z-list-muted); line-height: 18px; }
   .child-row .tree { position: absolute; left: 14px; top: 0; bottom: 0; width: 10px; pointer-events: none; }
   .child-row .tree::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 1px; background: var(--z-list-tree-line); }
-  .child-row.last .tree::before { bottom: auto; height: 25px; }
-  .child-row .tree::after { content: ""; position: absolute; left: 0; top: 23px; width: 9px; height: 8px; border-left: 1px solid var(--z-list-tree-line); border-bottom: 1px solid var(--z-list-tree-line); border-bottom-left-radius: 6px; }
+  .child-row.last .tree::before { bottom: auto; height: 13px; }
+  .child-row .tree::after { content: ""; position: absolute; left: 0; top: 11px; width: 9px; height: 8px; border-left: 1px solid var(--z-list-tree-line); border-bottom: 1px solid var(--z-list-tree-line); border-bottom-left-radius: 6px; }
   .rowhit.has-kids-open::after { content: ""; position: absolute; left: 14px; bottom: 0; height: 6px; width: 1px; background: var(--z-list-tree-line); }
   :root[data-tree-lines="indent"] .child-row .tree, :root[data-tree-lines="indent"] .rowhit.has-kids-open::after { display: none; }
 
@@ -302,10 +402,10 @@
   .strip-band > .ell { flex: 1; min-width: 0; font-size: 11px; font-weight: 600; }
   .strip-tile { position: absolute; left: 4px; top: 4px; width: 84px; height: 84px; border-radius: 8px; color: var(--z-list-text); background: var(--z-list-tile-surface); border: 1px solid var(--z-list-tile-border); }
   .strip-tile:hover { background: var(--z-color-row-hover); }
-  .strip-tile.selected { background: var(--z-color-row-selected); }
+  .strip-tile.selected { background: var(--z-color-card-selected); }
   .rowhit.context-target .scard:not(.selected), .strip-tile.context-target:not(.selected) { background: var(--z-color-row-hover); }
   .rowhit.context-target .scard, .strip-tile.context-target { outline: 1px solid var(--z-color-row-selected-border); outline-offset: -1px; }
-  .strip-tile.selected:not([data-frame]), .strip-tile.selected[data-frame="neutral"] { border-color: var(--z-color-row-selected-border); }
+  .strip-tile.selected:not([data-frame]), .strip-tile.selected[data-frame="neutral"] { border-color: color-mix(in srgb, var(--z-color-accent) 55%, var(--z-color-card-selected-border)); }
   .strip-tile[data-frame]:not([data-frame="neutral"]) { border: 1.5px solid var(--frame); box-shadow: inset 0 0 7px 0 color-mix(in srgb, var(--frame) 34%, transparent); }
   .strip-tile[data-frame="working"] { --frame: var(--z-list-frame-working); }
   .strip-tile[data-frame="background"] { --frame: var(--z-list-frame-background); }
@@ -350,6 +450,10 @@
   :root[data-attention-edge="tint"] .scard[data-emphasis="draft"] { background: color-mix(in srgb, var(--z-list-edge-draft) 12%, transparent); }
   :root[data-agent-mark="glyph"] .agent-badge:not(.narrow) { background: transparent; padding-left: 18px; }
   :root[data-agent-mark="glyph"] .agent-badge .ab-label { display: none; }
+  /* Set parent… (zerus-sa9qn.9): a bounded, scrolling list of the computer's sessions. */
+  .parent-choices { display: flex; flex-direction: column; gap: 2px; max-height: 260px; overflow-y: auto; }
+  .parent-choices .menu-item.on { background: var(--z-color-card-selected); }
+  .warn-text { color: var(--z-list-tone-attention); }
 }
 
 .acct-switch { position: relative; display: inline-flex; }
@@ -359,6 +463,17 @@
 .acct-switch-row:disabled { cursor: default; }
 .acct-switch-empty { display: block; padding: 8px; }
 .acct-switch-notice { margin: 4px; padding: 6px 8px; color: var(--z-color-text-2); font-size: var(--fs-xs); }
+.acct-switch-pop { max-height: min(60vh, 420px); overflow-y: auto; }
+.acct-switch-group + .acct-switch-group { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--z-color-card-border); }
+.acct-switch-head { display: flex; align-items: center; gap: 6px; padding: 4px 8px 2px; color: var(--z-color-text-2); font-size: var(--fs-xs); font-weight: 600; }
+.acct-switch-row .ell { flex: 1; min-width: 0; }
+/* Task 432: an account this computer cannot run now is listed, not hidden, and
+   its own line under the name says why. */
+.acct-switch-row.blocked { flex-wrap: wrap; }
+.acct-switch-row .acct-switch-why { flex: 0 0 100%; padding-left: 18px; color: var(--z-color-text-2); font-size: var(--fs-xs); }
+.acct-move-body p { margin: 0 0 8px; }
+.acct-move-list b { font-weight: 600; }
+.acct-move-refusal { color: var(--z-color-danger, var(--z-color-text)); }
 .tchip.locked { opacity: .6; cursor: not-allowed; }
 .acct-switch-row:disabled { cursor: default; }
 
@@ -366,36 +481,72 @@
    replaces them, and the status bar's note about them. */
 @layer components {
   .rowhit.stale { opacity: .62; }
-  .statusbar .stale-note { color: var(--z-color-warn); overflow: hidden; text-overflow: ellipsis; }
 }
 
-  /* The lead's team strip (Qt SessionCardDelegate::paintTeamStrip) */
-  .team-strip { position: absolute; left: 7px; right: 7px; top: 82px; height: 21px; display: flex; align-items: center;
-    gap: 7px; padding: 0 7px; border: 1px solid var(--z-color-card-border); border-radius: 7px; background: var(--z-color-card);
-    font-size: 10px; color: var(--z-list-muted); }
-  .team-strip .grow { flex: 1; }
-  .team-toggle { display: inline-flex; align-items: center; padding: 0; border: 0; background: transparent; color: var(--z-list-muted); cursor: pointer; }
-  .team-toggle[aria-expanded="true"] svg { transform: rotate(90deg); }
-  .tbar { display: inline-flex; align-items: center; gap: 4px; }
+  /* The lead's team strip (Qt SessionCardDelegate::paintTeamStrip). Task 425:
+     the session list's own names (sc-team-*, sc-member): the Team tab's
+     .team-strip, .team-status, .team-members and .team-member rules gave the
+     strip 34 px and a bottom rule and squeezed a member card into a 14 px bar. */
+  .sc-team-strip { position: absolute; left: 7px; right: 7px; top: 82px; height: 21px; box-sizing: border-box; display: flex; align-items: center;
+    gap: 7px; padding: 0 7px 0 3px; border: 1px solid var(--z-color-card-border); border-radius: 7px; background: var(--z-color-card);
+    font-size: 10px; color: var(--z-list-muted); overflow: hidden; white-space: nowrap; }
+  .sc-team-toggle { flex: none; display: inline-flex; align-items: center; gap: 3px; height: 17px; padding: 0 4px; border: 0; border-radius: 4px;
+    background: transparent; color: var(--z-list-muted); font: inherit; cursor: pointer; }
+  .sc-team-toggle:hover { background: var(--z-list-counter-hover, var(--z-color-hover)); color: var(--z-list-text); }
+  .sc-team-toggle:focus-visible { outline: 1px solid var(--z-color-accent); }
+  .sc-team-toggle .chev { transition: rotate var(--z-motion-base) var(--ease); }
+  .sc-team-toggle[aria-expanded="true"] .chev { rotate: 90deg; }
+  .sc-team-count { font-variant-numeric: tabular-nums; }
+  .tbar { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
   .tbar-label { font-variant-numeric: tabular-nums; }
   .tbar-track { width: 26px; height: 3px; border-radius: 2px; background: var(--z-color-border); overflow: hidden; }
   .tbar-fill { display: block; height: 100%; border-radius: 2px; background: var(--z-color-accent); }
   .tbar.muted .tbar-fill { background: var(--z-color-accent-muted); }
-  .team-status { padding: 1px 7px; border-radius: 9px; color: var(--z-color-text-3); white-space: nowrap; }
-  .team-status.stuck { color: var(--z-color-warn); background: color-mix(in srgb, var(--z-color-warn) 11%, transparent); }
-  .team-answers { font-weight: 600; color: var(--z-color-text-3); }
-  .team-members { color: var(--z-list-dim); }
-  /* Task #330: a member under its lead spans the row, its content indented
-     22 px, so the hover highlight covers the whole card at the pane edge. */
-  .scard.team-member { left: 2px; right: 2px; padding-left: 22px; }
-  .scard.team-member::before { content: ""; position: absolute; left: 12px; top: -8px; bottom: -6px; width: 1px;
-    background: var(--z-list-tree-line); }
-  .scard.team-member.team-last::before { bottom: 50%; }
-  .scard.team-member::after { content: ""; position: absolute; left: 12px; top: 50%; width: 10px; height: 1px;
-    background: var(--z-list-tree-line); }
+  .sc-team-status { min-width: 0; overflow: hidden; text-overflow: ellipsis; padding: 1px 7px; border-radius: 9px; color: var(--z-color-text-3); }
+  .sc-team-status.stuck { color: var(--z-color-warn); background: color-mix(in srgb, var(--z-color-warn) 11%, transparent); }
+  .sc-team-answers { flex: none; font-weight: 600; color: var(--z-color-text-3); }
+  /* Task 425: a member under its lead is an ordinary card inside a 26 px
+     indent; the tree runs in the indent as one line from the lead's card
+     down to the last member, with an elbow into each member card. A row is
+     104 px and its card spans 4..98, so the line reaches 10 px above the card
+     (the lead's card bottom and the row gap) and 6 px below it. */
+  .scard.sc-member { left: 26px; right: 2px; }
+  .scard.sc-member .sc-title { min-width: 0; }
+  .scard.sc-member .agent-badge { flex: 0 1 auto; min-width: 0; max-width: 104px; }
+  .scard.sc-member .sc-l3 > .ell { min-width: 0; }
+  .scard.sc-member::before { content: ""; position: absolute; left: -13px; top: -11px; bottom: -7px; width: 1px;
+    background: var(--z-list-tree-line); pointer-events: none; }
+  .scard.sc-member.sc-member-last::before { bottom: auto; height: 33px; }
+  .scard.sc-member::after { content: ""; position: absolute; left: -13px; top: 21px; width: 22px; height: 1px;
+    background: var(--z-list-tree-line); pointer-events: none; }
+  :root[data-tree-lines="indent"] .scard.sc-member::before, :root[data-tree-lines="indent"] .scard.sc-member::after { display: none; }
 
 /* Task #247: Qt's TerminalScreen context menu (Copy selection, Paste). */
 .term-menu { position: fixed; z-index: 60; min-width: 150px; display: flex; flex-direction: column; padding: 4px; border: 1px solid var(--z-color-card-border); border-radius: 8px; background: var(--z-color-surface); box-shadow: 0 8px 22px rgb(0 0 0 / 0.25); }
 .term-menu button { text-align: left; padding: 5px 10px; border: 0; border-radius: 6px; background: none; color: var(--z-color-text); font-size: var(--fs-sm); cursor: pointer; }
 .term-menu button:hover:not(:disabled) { background: var(--z-color-hover); }
 .term-menu button:disabled { opacity: 0.5; cursor: default; }
+
+/* Task #343: session cards at the owner's narrow side panel. The card answers
+   its own width like Qt's delegate: the provider label folds to its glyph, the
+   machine, title and status lines give way with an ellipsis, and the cold
+   actions keep their room, so nothing is cut at the right edge. */
+.scard { container-type: inline-size; }
+.sc-l1, .sc-l2, .sc-l3, .sc-foot { min-width: 0; }
+.sc-l1 > .sc-title { flex: 1 1 auto; min-width: 0; }
+.sc-l1 > .agent-badge { flex: 0 1 auto; min-width: 0; }
+.sc-l2 > .mbadge { flex: 0 1 auto; min-width: 0; }
+.sc-l3 > .ell { flex: 1 1 auto; min-width: 0; }
+.sc-cold { flex: none; display: inline-flex; gap: 6px; }
+@container (max-width: 430px) {
+  .agent-badge:not(.narrow) { width: 26px; min-width: 26px; flex: none; padding: 0; }
+  .agent-badge:not(.narrow) .ab-label { display: none; }
+  .agent-badge:not(.narrow) svg { left: 7px; }
+  .mbadge { max-width: 30%; }
+  .sc-l1 > .sbadge { max-width: 128px; }
+}
+@container (max-width: 360px) {
+  .sc-title { font-size: 13px; }
+  .sc-l1 > .sbadge { max-width: 104px; }
+  .sc-cold button { padding: 0 6px; }
+}

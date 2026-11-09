@@ -329,25 +329,174 @@ pub struct CliReport {
     pub removed: usize,
     /// Aside files left because a process still runs them.
     pub kept: Vec<PathBuf>,
+    /// Task #420: what staging lore did.
+    pub lore: LoreStage,
+}
+
+/// Task #420: what staging the lore sidecar did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LoreStage {
+    /// The package carries no lore; whatever sits beside the CLI stays.
+    Absent,
+    /// The same build is already there.
+    Same,
+    /// The package's lore took the place; the one it replaced, if any, is
+    /// kept beside it as `lore.exe.bak`.
+    Installed { backup: Option<PathBuf> },
+    /// The installed lore is newer or richer than the package's: untouched.
+    Kept { reason: String },
+}
+
+/// Task #420: what a lore binary says about itself: `lore --version`
+/// ("lore 0.4.1 (6728c2f)") and whether `lore atlas --help` answers.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LoreFacts {
+    pub version: Option<(u64, u64, u64)>,
+    pub commit: String,
+    pub atlas: bool,
+}
+
+/// `lore 0.4.1 (6728c2f)` or `lore 0.4.1`: the version and the commit.
+pub fn parse_lore_version(text: &str) -> Option<((u64, u64, u64), String)> {
+    let line = text.lines().find(|line| line.trim_start().starts_with("lore "))?.trim();
+    let mut words = line.split_whitespace().skip(1);
+    let version = words.next()?;
+    let mut numbers = version.trim_start_matches('v').split(['.', '-', '+']).map(|part| part.parse::<u64>());
+    let triple = (numbers.next()?.ok()?, numbers.next()?.ok()?, numbers.next().and_then(Result::ok).unwrap_or(0));
+    let commit = words
+        .next()
+        .map(|word| word.trim_matches(|c| c == '(' || c == ')').to_owned())
+        .filter(|commit| !commit.is_empty() && commit.chars().all(|c| c.is_ascii_hexdigit()))
+        .unwrap_or_default();
+    Some((triple, commit))
+}
+
+/// Task #420 (owner, 2026-11-09): an install never replaces a lore that is
+/// newer or richer than the package's: the reason it stays, or None when the
+/// package's lore may replace it (an older, not richer build, or one that does
+/// not answer at all).
+pub fn keep_installed_lore(installed: &LoreFacts, package: &LoreFacts) -> Option<String> {
+    let installed_version = installed.version?;
+    if installed.atlas && !package.atlas {
+        return Some("it has Atlas (lore atlas), which the package's lore lacks".into());
+    }
+    let shown = |facts: &LoreFacts| match facts.version {
+        Some((a, b, c)) if facts.commit.is_empty() => format!("{a}.{b}.{c}"),
+        Some((a, b, c)) => format!("{a}.{b}.{c} ({})", facts.commit),
+        None => "an unknown version".into(),
+    };
+    match package.version {
+        None => Some(format!("the package's lore reports no version; the installed {} stays", shown(installed))),
+        Some(package_version) if installed_version > package_version => {
+            Some(format!("the installed {} is newer than the package's {}", shown(installed), shown(package)))
+        }
+        // The same version from another commit: which one is newer is
+        // unknown here, so the installed build stays.
+        Some(package_version)
+            if installed_version == package_version
+                && !installed.commit.is_empty()
+                && !package.commit.is_empty()
+                && !installed.commit.starts_with(&package.commit)
+                && !package.commit.starts_with(&installed.commit) =>
+        {
+            Some(format!(
+                "the installed {} and the package's {} are different commits of the same version; their order is unknown",
+                shown(installed),
+                shown(package)
+            ))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests describe the lore binaries instead of running them.
+    static LORE_FACTS: std::cell::RefCell<Option<fn(&Path) -> LoreFacts>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_lore_facts(facts: Option<fn(&Path) -> LoreFacts>) {
+    LORE_FACTS.with(|cell| *cell.borrow_mut() = facts);
+}
+
+/// Runs `lore --version` and `lore atlas --help` (each bounded).
+pub fn lore_facts(path: &Path) -> LoreFacts {
+    #[cfg(test)]
+    if let Some(facts) = LORE_FACTS.with(|cell| *cell.borrow()) {
+        return facts(path);
+    }
+    let run = |args: &[&str]| -> Option<(bool, String)> {
+        let mut command = std::process::Command::new(path);
+        command
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        let mut child = command.spawn().ok()?;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let mut out = String::new();
+                    if let Some(mut stdout) = child.stdout.take() {
+                        let _ = io::Read::read_to_string(&mut stdout, &mut out);
+                    }
+                    return Some((status.success(), out));
+                }
+                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+            }
+        }
+    };
+    let mut facts = LoreFacts::default();
+    if let Some((true, out)) = run(&["--version"]) {
+        if let Some((version, commit)) = parse_lore_version(&out) {
+            facts.version = Some(version);
+            facts.commit = commit;
+        }
+    }
+    facts.atlas = run(&["atlas", "--help"]).is_some_and(|(ok, _)| ok);
+    facts
 }
 
 /// Stage `source`'s lore sidecar beside the stable CLI `cli`, when the package
 /// carries one. A missing sidecar leaves whatever already sits there; the same
 /// build is not rewritten. The copy is verified like the CLI's own.
-fn stage_lore(source: &Path, cli: &Path) -> Result<(), StageError> {
+/// Task #420: a newer or richer installed lore stays untouched; an older one
+/// is replaced and kept beside it as `lore.exe.bak`.
+fn stage_lore(source: &Path, cli: &Path) -> Result<LoreStage, StageError> {
     let source = source.parent().unwrap_or(Path::new("")).join(LORE);
     if !source.is_file() {
-        return Ok(());
+        return Ok(LoreStage::Absent);
     }
     let target = cli.with_file_name(LORE);
     let hash = sha256(&source).map_err(at(&source))?;
     if sha256(&target).ok().as_deref() == Some(hash.as_str()) {
-        return Ok(());
+        return Ok(LoreStage::Same);
+    }
+    if target.is_file() {
+        if let Some(reason) = keep_installed_lore(&lore_facts(&target), &lore_facts(&source)) {
+            eprintln!("hgs: kept {}: {reason}", target.display());
+            return Ok(LoreStage::Kept { reason });
+        }
     }
     let folder = cli
         .parent()
         .ok_or_else(|| StageError::Io(cli.to_owned(), io::ErrorKind::InvalidInput.into()))?;
     fs::create_dir_all(folder).map_err(at(folder))?;
+    // The build being replaced stays beside it, so it can be put back.
+    let backup = if target.is_file() {
+        let backup = target.with_file_name(format!("{LORE}.bak"));
+        fs::copy(&target, &backup).map_err(at(&backup))?;
+        Some(backup)
+    } else {
+        None
+    };
     let mut temporary = tempfile::Builder::new()
         .prefix(NEW_PREFIX)
         .tempfile_in(folder)
@@ -357,7 +506,8 @@ fn stage_lore(source: &Path, cli: &Path) -> Result<(), StageError> {
     // lore is a short-lived child of hgs, so a plain replace is enough; a busy
     // file is reported instead of guessed.
     platform::persist(temporary, &target).map_err(|error| StageError::Io(target, error.error))?;
-    platform::sync_dir(folder).map_err(at(folder))
+    platform::sync_dir(folder).map_err(at(folder))?;
+    Ok(LoreStage::Installed { backup })
 }
 
 /// Stage `source` as the stable CLI at `target`.
@@ -399,7 +549,7 @@ pub fn stage_cli(source: &Path, target: &Path) -> Result<CliReport, StageError> 
         let _ = platform::sync_dir(folder);
     }
     // Task 260: the stable CLI runs the team worker, which runs lore.
-    stage_lore(source, target)?;
+    let lore = stage_lore(source, target)?;
     let (removed, kept) = remove_aside(folder);
     Ok(CliReport {
         path: target.to_owned(),
@@ -407,6 +557,7 @@ pub fn stage_cli(source: &Path, target: &Path) -> Result<CliReport, StageError> 
         changed,
         removed,
         kept,
+        lore,
     })
 }
 
@@ -1272,6 +1423,84 @@ mod tests {
         let error = stage_cli(&dir.path().join("missing.exe"), &target).unwrap_err();
         assert!(matches!(error, StageError::Io(..)), "{error}");
         assert_eq!(fs::read(&target).unwrap(), b"build two");
+    }
+
+    /// Task #420: a test lore "binary" is its own description: its first line
+    /// is what `lore --version` prints, and "atlas" on a later line means
+    /// `lore atlas --help` answers.
+    fn described(path: &Path) -> LoreFacts {
+        let text = fs::read_to_string(path).unwrap_or_default();
+        let (version, commit) = parse_lore_version(&text).map_or((None, String::new()), |(v, c)| (Some(v), c));
+        LoreFacts { version, commit, atlas: text.lines().skip(1).any(|line| line.trim() == "atlas") }
+    }
+
+    #[test]
+    fn a_lore_version_names_its_version_and_commit() {
+        assert_eq!(parse_lore_version("lore 0.4.1 (6728c2f)
+"), Some(((0, 4, 1), "6728c2f".into())));
+        assert_eq!(parse_lore_version("lore 0.4.0"), Some(((0, 4, 0), String::new())));
+        assert_eq!(parse_lore_version("error: no such command"), None);
+    }
+
+    #[test]
+    fn an_installed_lore_that_is_newer_or_richer_stays() {
+        let facts = |version: (u64, u64, u64), commit: &str, atlas: bool| LoreFacts { version: Some(version), commit: commit.into(), atlas };
+        let package = facts((0, 4, 0), "8fdb66b", false);
+        // Newer.
+        assert!(keep_installed_lore(&facts((0, 4, 1), "6728c2f", false), &package).unwrap().contains("newer"));
+        // Richer: Atlas, even at an older version.
+        assert!(keep_installed_lore(&facts((0, 3, 9), "1234567", true), &package).unwrap().contains("Atlas"));
+        // The same version from another commit: its order is unknown, it stays.
+        assert!(keep_installed_lore(&facts((0, 4, 0), "abcdef1", false), &package).unwrap().contains("unknown"));
+        // Older and not richer, the same build, or one that does not answer: replaced.
+        assert_eq!(keep_installed_lore(&facts((0, 3, 9), "1234567", false), &package), None);
+        assert_eq!(keep_installed_lore(&facts((0, 4, 0), "8fdb66b", false), &package), None);
+        assert_eq!(keep_installed_lore(&LoreFacts::default(), &package), None);
+        // A package lore richer than the installed one replaces it.
+        assert_eq!(keep_installed_lore(&facts((0, 3, 9), "", false), &facts((0, 4, 0), "", true)), None);
+    }
+
+    /// Task #420 (owner, 2026-11-09): package 166 put a lore without Atlas over
+    /// the owner's newer build with Atlas. An install keeps a newer or richer
+    /// lore and replaces only an older one, kept as lore.exe.bak.
+    #[test]
+    fn an_install_keeps_a_newer_or_richer_lore_and_backs_up_an_older_one() {
+        set_lore_facts(Some(described));
+        let dir = private_tempdir();
+        let cli = dir.path().join("bin").join(EXECUTABLE);
+        let package = source(dir.path(), "pkg", b"build", &[]);
+        fs::write(package.with_file_name(LORE), "lore 0.4.0 (8fdb66b)
+").unwrap();
+        fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        let installed = cli.with_file_name(LORE);
+        let backup = cli.with_file_name(format!("{LORE}.bak"));
+        // A newer installed lore stays.
+        fs::write(&installed, "lore 0.4.1 (6728c2f)
+").unwrap();
+        let report = stage_cli(&package, &cli).unwrap();
+        assert!(matches!(&report.lore, LoreStage::Kept { reason } if reason.contains("newer")), "{:?}", report.lore);
+        assert_eq!(fs::read_to_string(&installed).unwrap(), "lore 0.4.1 (6728c2f)
+");
+        assert!(!backup.exists());
+        // A richer one (Atlas) stays, even at an older version.
+        fs::write(&installed, "lore 0.3.9 (1234567)
+atlas
+").unwrap();
+        let report = stage_cli(&package, &cli).unwrap();
+        assert!(matches!(&report.lore, LoreStage::Kept { reason } if reason.contains("Atlas")), "{:?}", report.lore);
+        assert!(fs::read_to_string(&installed).unwrap().contains("atlas"));
+        // An older, poorer one is replaced and kept beside it as a .bak.
+        fs::write(&installed, "lore 0.3.9 (1234567)
+").unwrap();
+        let report = stage_cli(&package, &cli).unwrap();
+        assert_eq!(report.lore, LoreStage::Installed { backup: Some(backup.clone()) });
+        assert_eq!(fs::read_to_string(&installed).unwrap(), "lore 0.4.0 (8fdb66b)
+");
+        assert_eq!(fs::read_to_string(&backup).unwrap(), "lore 0.3.9 (1234567)
+");
+        // The same build again changes nothing.
+        assert_eq!(stage_cli(&package, &cli).unwrap().lore, LoreStage::Same);
+        set_lore_facts(None);
     }
 
     #[test]

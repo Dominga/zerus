@@ -5,8 +5,11 @@ import { catalog } from "../../store/catalog";
 import { toast } from "../../store/ui";
 import { tr } from "../../i18n";
 import { Icon } from "../lib/icons";
-import { MigrationReportDialog } from "./MigrationReportDialog";
-import { TaskMessageInputsDialog } from "./TaskMessageInputsDialog";
+import { lazyView } from "../lazy-view";
+import { LazyBoundary } from "../lazy-boundary";
+// Opened on demand, outside the entry chunk (zerus-ycycu).
+const MigrationReportDialog = lazyView(() => import("./MigrationReportDialog"), (m) => m.MigrationReportDialog);
+const TaskMessageInputsDialog = lazyView(() => import("./TaskMessageInputsDialog"), (m) => m.TaskMessageInputsDialog);
 
 /** A connected passive service that lists no computers yet; the main area explains it. */
 export const servicePausedEmpty = () => (!!servicePaused(desktopService.state()) || firstChoicePending(desktopService.state()))
@@ -90,6 +93,7 @@ export function DesktopServiceStatus(props: { counts?: boolean }) {
   const counts = () => desktopService.state()?.attention_counts?.aggregate;
   const details = () => [status()?.details, props.counts ? `${tr("Shared host attention (excludes this device's review marks)")}: ${counts()?.attention ?? tr("Unknown")}${counts()?.complete ? "" : `; ${tr("Incomplete")}`}` : ""].filter(Boolean).join("\n");
   return <Show when={status()}>{(view) => <>
+    <Show when={props.counts || !view().healthy || view().review || view().inputsReview || view().ownership || view().manualRefresh || view().modeReview}>
     <div class="desktop-service-status" role="status" classList={{ healthy: view().healthy }}>
       <span ref={summary} class="service-summary" title={details()} aria-label={details()} tabIndex={0}
         aria-describedby={focused() ? "service-status-details" : undefined}
@@ -123,7 +127,8 @@ export function DesktopServiceStatus(props: { counts?: boolean }) {
       </Show>
     </div>
     <Show when={focused()}><Portal><div id="service-status-details" class="service-status-details" role="tooltip">{details()}</div></Portal></Show>
-    <Show when={reviewOrigin()}>{(origin) => <MigrationReportDialog origin={origin()} close={() => setReviewOrigin(undefined)} />}</Show>
-    <Show when={inputsOrigin()}>{(origin) => <TaskMessageInputsDialog origin={origin()} fallback={() => summary} close={() => setInputsOrigin(undefined)} />}</Show>
+    </Show>
+    <Show when={reviewOrigin()}>{(origin) => <LazyBoundary floating><MigrationReportDialog origin={origin()} close={() => setReviewOrigin(undefined)} /></LazyBoundary>}</Show>
+    <Show when={inputsOrigin()}>{(origin) => <LazyBoundary floating><TaskMessageInputsDialog origin={origin()} fallback={() => summary} close={() => setInputsOrigin(undefined)} /></LazyBoundary>}</Show>
   </>}</Show>;
 }

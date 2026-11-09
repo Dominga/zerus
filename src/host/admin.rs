@@ -205,6 +205,7 @@ pub fn install_json(report: &InstallReport, layout: &Layout, version: &str) -> V
         changed,
         removed,
         kept,
+        lore,
     } = &report.cli;
     let ImageReport {
         image,
@@ -235,6 +236,8 @@ pub fn install_json(report: &InstallReport, layout: &Layout, version: &str) -> V
             "removed_aside": removed,
             "kept_aside": kept.iter().map(|path| shown(path)).collect::<Vec<_>>(),
         },
+        // Task #420: what staging lore did; a newer or richer one stays.
+        "lore": lore_json(lore),
         "image": staged,
         "frontend": report.frontend.as_ref().map(|binding| json!({
             "path": shown(&binding.frontend.path),
@@ -242,6 +245,16 @@ pub fn install_json(report: &InstallReport, layout: &Layout, version: &str) -> V
             "frontend_current": true,
         })),
     })
+}
+
+/// Task #420: the lore outcome of an install.
+fn lore_json(lore: &staging::LoreStage) -> Value {
+    match lore {
+        staging::LoreStage::Absent => json!({"action":"absent"}),
+        staging::LoreStage::Same => json!({"action":"unchanged"}),
+        staging::LoreStage::Installed { backup } => json!({"action":"installed","backup":backup.as_deref().map(shown)}),
+        staging::LoreStage::Kept { reason } => json!({"action":"kept","reason":reason}),
+    }
 }
 
 /// `install` for a person.
@@ -265,6 +278,17 @@ pub fn install_text(report: &InstallReport, layout: &Layout, version: &str) -> S
             "Only one file of the bundled ConPTY pair (conpty.dll, OpenConsole.exe) sits next to \
              this hgs.exe; the session host uses inbox ConPTY.\n",
         );
+    }
+    // Task #420: a newer or richer lore stays; a replaced one keeps a .bak.
+    match &report.cli.lore {
+        staging::LoreStage::Kept { reason } => text.push_str(&format!(
+            "  lore        kept the installed lore: {reason}\n"
+        )),
+        staging::LoreStage::Installed { backup: Some(backup) } => text.push_str(&format!(
+            "  lore        updated; the previous one is kept as {}\n",
+            backup.display()
+        )),
+        _ => {}
     }
     if !report.cli.kept.is_empty() {
         text.push_str(&format!(

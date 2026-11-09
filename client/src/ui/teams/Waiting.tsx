@@ -14,6 +14,7 @@ import {
   waitingCount, waitingFields, waitingKindIcon, waitingKindLabel, bannerHeadItem, digestGroups, stillBlocks, type QuestionChoice,
 } from "./decisions";
 import type { TeamAction, TeamWaitingItem } from "../../types";
+import { TextInput } from "../lib/TextField";
 
 // Waiting for you (task 11, Qt TeamWaitingPage, TeamWaitingBanner and
 // TeamWaitingAnswer): what waits for the owner across this computer's teams,
@@ -85,7 +86,7 @@ function Answer(props: { item: TeamWaitingItem }) {
           <div class="team-waiting-card">
             <For each={addition().tasks ?? []}>{(task) => <div class="team-waiting-line">{task.title}</div>}</For>
             <div class="team-proposal-answers">
-              <input class="field" placeholder={tr("Type add to confirm")} value={typed()} disabled={off()} onInput={(event) => setTyped(event.currentTarget.value)} />
+              <TextInput class="field" placeholder={tr("Type add to confirm")} value={typed()} disabled={off()} onInput={(event) => setTyped(event.currentTarget.value)} />
               <button class="btn small" disabled={off()} onClick={() => void read().answerAddition(false)}>{tr("Cancel")}</button>
               <button class="btn small primary" disabled={off() || typed().trim() !== "add"} onClick={() => void read().answerAddition(true, typed())}>{tr("Add")}</button>
             </div>
@@ -97,7 +98,7 @@ function Answer(props: { item: TeamWaitingItem }) {
               <div class="team-waiting-line"><b>{question().tool}</b></div>
               <code class="team-waiting-command">{question().command || question().reason}</code>
               <div class="team-proposal-answers">
-                <input class="field" maxlength={2000} placeholder={tr("Why deny? The member receives this")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
+                <TextInput class="field" maxlength={2000} placeholder={tr("Why deny? The member receives this")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
                 <button class="btn small danger" disabled={off() || !!blocked()} title={blocked() || undefined} data-permission="deny" onClick={() => void read().answerPermission(false, reason())}>{tr("Deny")}</button>
                 <button class="btn small primary" disabled={off() || !!blocked()} title={blocked() || undefined} data-permission="allow" onClick={() => void read().answerPermission(true)}>{question().subagent_confirmation ? tr("Allow all") : tr("Allow")}</button>
               </div>
@@ -128,7 +129,7 @@ function Answer(props: { item: TeamWaitingItem }) {
                       {tr("Other")}
                     </label>
                     <Show when={choices().get(asked.id)?.other}>
-                      <input class="field" maxlength={4000} placeholder={tr("Your answer")} disabled={off()} value={choices().get(asked.id)?.text ?? ""}
+                      <TextInput class="field" maxlength={4000} placeholder={tr("Your answer")} disabled={off()} value={choices().get(asked.id)?.text ?? ""}
                         onInput={(event) => { const text = event.currentTarget.value; choose(asked.id, (choice) => ({ ...choice, text })); }} />
                     </Show>
                   </Show>
@@ -144,7 +145,7 @@ function Answer(props: { item: TeamWaitingItem }) {
           <div class="team-waiting-card">
             <Show when={acceptanceSummary(fields.summary)}><div class="team-waiting-line">{acceptanceSummary(fields.summary)}</div></Show>
             <div class="team-proposal-answers">
-              <input class="field" maxlength={4000} placeholder={tr("What should the lead change?")} value={comment()} disabled={off()} onInput={(event) => setComment(event.currentTarget.value)} />
+              <TextInput class="field" maxlength={4000} placeholder={tr("What should the lead change?")} value={comment()} disabled={off()} onInput={(event) => setComment(event.currentTarget.value)} />
               <button class="btn small" disabled={off() || !comment().trim()} onClick={() => void read().sendBack(comment())}>{tr("Send back")}</button>
               <button class="btn small primary" disabled={off()} onClick={() => void read().acceptPhase()}>{tr("Accept phase")}</button>
             </div>
@@ -171,13 +172,13 @@ function Answer(props: { item: TeamWaitingItem }) {
                     </div>
                   )}</For>
                   <div class="team-proposal-answers">
-                    <input class="field" maxlength={4000} placeholder={tr("Your answer")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
+                    <TextInput class="field" maxlength={4000} placeholder={tr("Your answer")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
                     <button class="btn small primary" disabled={off() || !reason().trim()} onClick={() => void read().answerDeferred("answer", reason())}>{tr("Answer")}</button>
                   </div>
                 </>
               }>
                 <div class="team-proposal-answers">
-                  <input class="field" maxlength={4000} placeholder={tr("A note for the session (optional)")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
+                  <TextInput class="field" maxlength={4000} placeholder={tr("A note for the session (optional)")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
                   <button class="btn small danger" disabled={off()} onClick={() => void read().answerDeferred("deny", reason())}>{tr("Deny")}</button>
                   <button class="btn small primary" disabled={off()} onClick={() => void read().answerDeferred("allow", reason())}>{tr("Allow")}</button>
                 </div>
@@ -193,7 +194,7 @@ function Answer(props: { item: TeamWaitingItem }) {
             <code class="team-waiting-command">{offer.command}</code>
             <Show when={offer.output}><pre class="team-waiting-output">{offer.output}</pre></Show>
             <div class="team-proposal-answers">
-              <input class="field" maxlength={500} placeholder={tr("Why deny? Zerus remembers it")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
+              <TextInput class="field" maxlength={500} placeholder={tr("Why deny? Zerus remembers it")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
               <button class="btn small danger" disabled={off()} onClick={() => void read().decideTool(false, reason())}>{tr("Deny")}</button>
               <button class="btn small primary" disabled={off() || !offer.canAllow} onClick={() => void read().decideTool(true)}>{offer.allow}</button>
             </div>
@@ -203,7 +204,7 @@ function Answer(props: { item: TeamWaitingItem }) {
           <div class="team-waiting-card">
             <div class="team-waiting-line"><b>{props.item.title}</b></div>
             <div class="team-proposal-answers">
-              <input class="field" maxlength={4000} placeholder={tr("Why reject? The member receives this")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
+              <TextInput class="field" maxlength={4000} placeholder={tr("Why reject? The member receives this")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
               <button class="btn small danger" disabled={off() || !reason().trim()} onClick={() => void read().rejectReport(reason())}>{tr("Reject")}</button>
               <button class="btn small primary" disabled={off()} onClick={() => void read().acceptReport()}>{tr("Accept")}</button>
             </div>
@@ -229,7 +230,7 @@ function Answer(props: { item: TeamWaitingItem }) {
           <div class="team-waiting-card">
             <div class="team-waiting-line"><b>{props.item.title}</b></div>
             <div class="team-proposal-answers">
-              <input class="field" maxlength={4000} placeholder={tr("A summary for the lead")} value={comment()} disabled={off()} onInput={(event) => setComment(event.currentTarget.value)} />
+              <TextInput class="field" maxlength={4000} placeholder={tr("A summary for the lead")} value={comment()} disabled={off()} onInput={(event) => setComment(event.currentTarget.value)} />
               <button class="btn small primary" disabled={off() || !comment().trim()} onClick={() => void read().finishTeam(comment())}>{tr("Finish")}</button>
             </div>
           </div>
@@ -270,7 +271,7 @@ async function dismiss(item: TeamWaitingItem) {
 }
 
 /** One row: kind, title, team and age; Open team; the answer in place. */
-function Row(props: { item: TeamWaitingItem; compact?: boolean }) {
+function Row(props: { item: TeamWaitingItem; compact?: boolean; newest?: boolean }) {
   const [open, setOpen] = createSignal(false);
   const item = () => props.item;
   const changes = () => {
@@ -282,7 +283,8 @@ function Row(props: { item: TeamWaitingItem; compact?: boolean }) {
     if (outcome.outcome === "done") answeredWaiting(item());
   };
   return (
-    <div class="team-waiting-row" classList={{ compact: props.compact, open: open() }} data-item={item().id} data-kind={item().kind}
+    <div class="team-waiting-row" classList={{ compact: props.compact, newest: props.newest, open: open() }} data-item={item().id} data-kind={item().kind}
+      data-banner-item={props.newest ? "" : undefined}
       onClick={() => { if (!open()) openTeam(item()); }}>
       <div class="team-waiting-head">
         <span class="team-waiting-icon"><Icon name={waitingKindIcon(item().kind)} size={14} /></span>
@@ -421,6 +423,34 @@ export function WaitingPage() {
   );
 }
 
+/**
+ * Task 384 (owner, 2026-11-08): the strip above Activity keeps its count on one
+ * line and shows the newest item as a two-line row with its kind and its own
+ * answer, so a card's Allow/Deny is reachable without Show all.
+ * Task 429 (owner, 2026-11-09): that row shows only while the list is folded;
+ * expanded, the head is the count and Hide and the list holds every row once, so
+ * no item is drawn twice and the count matches the rows.
+ */
+export function WaitingBannerView(props: { items: readonly TeamWaitingItem[]; total?: number; open: boolean; onToggle: () => void; onOpenList: () => void }) {
+  const rows = () => props.items.slice(0, BANNER_ROWS);
+  const newest = () => bannerHeadItem(props.items);
+  return <>
+    <div class="team-waiting-banner-head">
+      <Icon name="bell" size={14} />
+      <b data-banner-count>{tr("%1 wait for you", props.open ? rows().length : props.items.length)}</b>
+      <span class="grow" />
+      <Show when={props.items.length > 1}>
+        <button class="btn small ghost" data-banner-all onClick={props.onToggle}>{props.open ? tr("Hide") : tr("Show all")}</button>
+      </Show>
+    </div>
+    <Show when={!props.open}>{newest() ? <Row item={newest()!} compact newest /> : null}</Show>
+    <Show when={props.open}>
+      <For each={rows()}>{(item) => <Row item={item} compact />}</For>
+      <button class="btn small ghost" onClick={props.onOpenList}>{tr("Open the waiting list (%1)", props.total ?? props.items.length)}</button>
+    </Show>
+  </>;
+}
+
 /** The Team tab's banner: one item is one line; several fold into a count that opens to the newest rows. */
 export function WaitingBanner() {
   onCleanup(showWaiting());
@@ -430,20 +460,7 @@ export function WaitingBanner() {
   return (
     <Show when={items().length > 0}>
       <div class="team-waiting-banner" role="region" aria-label={tr("Waiting for you")}>
-        <Show when={items().length > 1} fallback={<Row item={items()[0]} compact />}>
-          <div class="team-waiting-banner-head">
-            <Icon name="bell" size={14} />
-            <b>{tr("%1 wait for you", items().length)}</b>
-            {/* Task 304 (hgs #286): the lead-changes digest has its own row; the header does not repeat it. */}
-            <span class="dim ell">{bannerHeadItem(items())?.title ?? ""}</span>
-            <span class="grow" />
-            <button class="btn small ghost" onClick={() => setOpen(!open())}>{open() ? tr("Hide") : tr("Show all")}</button>
-          </div>
-          <Show when={open()}>
-            <For each={items().slice(0, BANNER_ROWS)}>{(item) => <Row item={item} compact />}</For>
-            <button class="btn small ghost" onClick={() => setPage("waiting")}>{tr("Open the waiting list (%1)", waiting()?.total ?? items().length)}</button>
-          </Show>
-        </Show>
+        <WaitingBannerView items={items()} total={waiting()?.total} open={open()} onToggle={() => setOpen(!open())} onOpenList={() => setPage("waiting")} />
       </div>
     </Show>
   );

@@ -42,6 +42,12 @@ pub const SUBMITTED: &str = "submitted";
 /// The closed code of an original child that never started: refused before
 /// any child existed. Nothing ran, so the answer counts as never sent.
 pub const NOT_STARTED: &str = "deferred_answer_not_started";
+/// The service refused the answer before its ledger admission, with its
+/// ledger proving no row for the request, and sealed the request for its
+/// epoch, so no copy of it ever admits (zerus-tlb9q). The one refusal that
+/// settles as never started; every other refusal leaves only the read-only
+/// lookup.
+pub const NOT_ADMITTED: &str = "deferred_answer_not_admitted";
 /// The closed code of the CLI's own durable refusal: an exact `rejected`
 /// receipt, which this kind's allowed sources write only before any
 /// delivery. The answer counts as never sent.
@@ -531,6 +537,18 @@ pub struct Admission {
     pub receipt: Option<Receipt>,
 }
 impl Admission {
+    /// Whether this is exactly the closed [`NOT_ADMITTED`] refusal of
+    /// `intent`: this kind's ABI, the same request and scope, refused, not
+    /// durable, with no receipt. Any other refusal or reply is not.
+    pub fn not_admitted(&self, intent: &Intent) -> bool {
+        self.abi == ABI
+            && self.request_id == intent.request_id
+            && self.scope == intent.scope
+            && !self.accepted
+            && !self.durable
+            && self.code == NOT_ADMITTED
+            && self.receipt.is_none()
+    }
     pub fn matches(&self, intent: &Intent) -> bool {
         self.abi == ABI
             && self.request_id == intent.request_id

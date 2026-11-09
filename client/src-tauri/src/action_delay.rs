@@ -125,6 +125,25 @@ fn lock(inner: &Inner) -> MutexGuard<'_, Model> {
 
 impl Delays {
     fn begin(&self, actions: &Actions, id: String, captures: Vec<Captured>) -> Result<(), String> {
+        self.begin_with(actions, id, captures, None)
+    }
+    fn begin_with(
+        &self,
+        actions: &Actions,
+        id: String,
+        captures: Vec<Captured>,
+        original: Option<Arc<Claim>>,
+    ) -> Result<(), String> {
+        if original.is_some() && captures.len() != 1 {
+            return Err(STATE_CHANGED.into());
+        }
+        if let Some(claim) = &original {
+            if !actions.owns_end_claim(claim, &captures[0].target)
+                || captures[0].action != Action::Terminate
+            {
+                return Err(STATE_CHANGED.into());
+            }
+        }
         if captures.len() > TARGETS {
             return Err(format!(
                 "Too many sessions selected at once ({}). Select at most 50,000.",
@@ -153,7 +172,10 @@ impl Delays {
             let key = (c.target.computer.clone(), c.target.name.clone());
             if let std::collections::btree_map::Entry::Vacant(entry) = claims.entry(key) {
                 // A partial reservation drops all its claims before returning.
-                entry.insert(actions.reserve_end(&c.target).ok_or("busy")?);
+                entry.insert(match &original {
+                    Some(claim) => claim.clone(),
+                    None => actions.reserve_end(&c.target).ok_or("busy")?,
+                });
             }
         }
         // Retain bounded tombstones for this process: an old waiter/cancel
@@ -361,6 +383,8 @@ pub fn action_delay_begin(
     actions: State<'_, Actions>,
     id: String,
     captures: Vec<Captured>,
+    cleanup_id: Option<String>,
+    cleanup: State<'_, crate::termination_cleanup::TerminationCleanup>,
 ) -> Result<(), String> {
     main_only(&window)?;
     if !window.window().is_visible().unwrap_or(false)
@@ -368,6 +392,14 @@ pub fn action_delay_begin(
     {
         return Err(STATE_CHANGED.into());
     }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(offer) = cleanup_id {
+        if let Some(claim) = cleanup.program_claim(&offer, &captures)? {
+            return state.begin_with(&actions, id, captures, Some(claim));
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = (cleanup_id, cleanup);
     state.begin(&actions, id, captures)
 }
 

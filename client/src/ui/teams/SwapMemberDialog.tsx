@@ -8,6 +8,7 @@ import { windowPort } from "./ProposalCards";
 import { createModelCatalogs } from "./catalogControls";
 import { SWAP_AGENTS, firstModel, swapChoice, swapMemberCall, swapOptions, swapSessions, type SwapChoice } from "./swapMember";
 import type { ComputerId, TeamMemberView, TeamView } from "../../types";
+import { TextInput } from "../lib/TextField";
 
 // Task #218: Qt's swapDialog for the Team tab's member menu. A new session
 // takes the agent its account's models, the model's efforts and the agent's
@@ -93,7 +94,7 @@ export function SwapMemberDialog(props: { computer: ComputerId; team: TeamView; 
             </select>
           </label>
           <label class="team-swap-field">{tr("Model")}
-            <input class="field mono" list="team-swap-models" placeholder={tr("default model")} value={model()} disabled={!fresh()}
+            <TextInput class="field mono" list="team-swap-models" placeholder={tr("default model")} value={model()} disabled={!fresh()}
               onInput={(event) => changeModel(event.currentTarget.value)} />
             <datalist id="team-swap-models"><For each={models()}>{(option) => <option value={option.id}>{option.label}</option>}</For></datalist>
           </label>

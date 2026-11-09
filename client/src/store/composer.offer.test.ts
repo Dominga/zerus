@@ -35,7 +35,8 @@ function setup(lead: Partial<ComposerView> = {}) {
     send: async () => { calls.push("send"); return { kind: "sending" }; },
     push: async () => { calls.push("push"); return { kind: "sending" }; },
     sendNow: async () => false, answer: async () => ({ kind: "sending" }),
-    remove: nothing, undo: nothing, allowRetry: nothing, cancelSend: nothing, interrupted: nothing,
+    remove: nothing, undo: nothing, allowRetry: nothing, cancelSend: nothing, interrupted: nothing, interruptFailed: nothing,
+    inboxRemove: async () => ({ outcome: "removed" }),
     clear: async () => ({ kind: "sending" }), refresh: nothing, openAttachment: async () => null,
     localRetry: async () => ({ kind: "sending" }), localDelete: nothing, localInspect: async () => null,
   };

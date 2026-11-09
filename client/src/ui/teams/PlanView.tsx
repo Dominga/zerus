@@ -1,10 +1,11 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { Icon } from "../lib/icons";
+import { Dropdown } from "../lib/Dropdown";
 import { tr } from "../../i18n";
 import type { PlanGraph, TeamView } from "./types";
 import type { TeamBuildsView, TeamProfileView, TeamTaskView, TeamTestsView, TeamTimelineView } from "../../types";
-import { HeatLegend, HeatLine, PlanModeBar, TestsPanel, runStatusLabel, stageLabel } from "./plan-panels";
+import { BuildsPanel, HeatLegend, HeatLine, PlanModeBar, TestsPanel, runStatusLabel, stageLabel } from "./plan-panels";
 import { ProfilePage } from "./profile-page";
 import { LanesView, type LaneEdit } from "./LanesView";
 import { spawnedFrom, heatModeSeed, stageChips, type PlanMode } from "./planModes";
@@ -28,6 +29,7 @@ export interface PlanViewProps {
   graph: PlanGraph;
   /** Opens the task in the host's inspector; without it the plan shows its own card. */
   onOpenTask?: (id: number) => void;
+  onOpenReport?: (id: number) => void;
   onApprovePhase?: (n: number) => void;
   onDiscardPhase?: (n: number) => void;
   profile?: TeamProfileView | null;
@@ -41,6 +43,10 @@ export interface PlanViewProps {
   loadTimeline?: (phase: number | null) => Promise<TeamTimelineView>;
   /** Task 40: the task card's actions (ui/teams/TeamActions.tsx TaskActions), drawn under the task's detail. */
   taskActions?: (id: number) => JSX.Element;
+  /** Task #415: a No report task's kept last reply, shown on its board card. */
+  noReportReply?: (task: number) => string;
+  /** Task #415: the board card's "Use last reply as report". */
+  onUseLastReply?: (task: TeamTaskView) => void;
   /** Task #58: a phase header's mode chip and switch (ui/teams/TeamActions.tsx PhaseModeControl). */
   phaseActions?: (n: number) => JSX.Element;
   /** Task 197 (P2): the tasks with a problem and its reason (Qt problemTasks/problemTexts). */
@@ -147,6 +153,22 @@ function PhaseScroll(props: { key: string; class: string; children: JSX.Element;
   );
 }
 
+/**
+ * Task 428: a card's hover follows the pointer. It lights a card while the
+ * pointer is over it (or while the keyboard focuses it) and ends when the
+ * pointer leaves that card, the board or the window; a click's focus never
+ * keeps it. The selection is separate (pt-card-selected).
+ */
+export const planHover = {
+  enter: (id: number): number | null => id,
+  leave: (current: number | null, id: number): number | null => (current === id ? null : current),
+  focus: (current: number | null, id: number, keyboard: boolean): number | null => (keyboard ? id : current),
+};
+
+/** Task 428: a click on the board's empty space (not a card, a header or a control) clears the selection. */
+export const clearsSelection = (target: Element | null) =>
+  !!target && !target.closest(".pt-card, .pt-phase, .pt-free-accepted, .pt-detail, button, a, input, select, textarea, [role='button']");
+
 export function PlanView(props: PlanViewProps): JSX.Element {
   const now = () => props.now?.() ?? Date.now() / 1000;
   const [mode, setMode] = createSignal<PlanMode>(props.initialMode ?? "graph");
@@ -177,12 +199,21 @@ export function PlanView(props: PlanViewProps): JSX.Element {
   const heat = (id: number): TaskHeat | null => (heatView() ? heatOf(heatMode(), props.profile, id) : null);
   createEffect(() => {
     if (mode() === "tests") props.onLoadTests?.(null);
+    // Task #462: the Builds mode is its own tab and reads the broker when opened.
+    if (mode() === "builds") props.onLoadBuilds?.();
     if (mode() === "profile" || heatView()) props.onLoadProfile?.();
   });
   const [collapsed, setCollapsed] = createSignal<Set<number>>(
     new Set(props.team.phases.filter((phase) => phase.status === "done").map((phase) => phase.n)),
   );
   const [hover, setHover] = createSignal<number | null>(null);
+  // Task 428: leaving the window ends the hover too.
+  onMount(() => {
+    const clear = () => setHover(null);
+    window.addEventListener("blur", clear);
+    document.documentElement.addEventListener("pointerleave", clear);
+    onCleanup(() => { window.removeEventListener("blur", clear); document.documentElement.removeEventListener("pointerleave", clear); });
+  });
   // Task 342: the tests open a task on mount; otherwise a click selects it.
   const [selected, setSelected] = createSignal<number | null>(props.openTask?.task ?? null);
   createEffect(() => {
@@ -348,12 +379,15 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         <Show when={collapsible}><Icon name={closed ? "chevron-right" : "chevron-down"} size={14} /></Show>
         <span class="pt-pn">{phase.phase.n}</span>
         <b class="pt-phase-title">{phase.phase.title || tr("Phase %1", phase.phase.n)}</b>
+        <Show when={phase.phase.archived}><span class="pt-badge">{tr("Archived")}</span></Show>
         <span class={`pt-chip pt-chip-${status.kind}`}>{statusLabel(status.kind)}</span>
         <Show when={phase.phase.kind === "minor"}><span class="pt-chip pt-chip-minor" data-phase-kind="minor">{tr("Minor")}</span></Show>
         <Show when={phase.phase.crit_gate}>{(gate) => <span class="pt-crit-gate" data-crit-gate title={gate()}>{short(gate(), 80)}</span>}</Show>
         <Show when={phase.phase.auto}><span class="pt-chip pt-chip-auto">{tr("Auto")}</span></Show>
         <Show when={phase.phase.barrier}><span class="pt-chip pt-chip-barrier">{tr("Barrier")}</span></Show>
-        <Show when={!closed && phase.phase.acceptance}><span class="pt-acceptance">{short(phase.phase.acceptance, 80)}</span></Show>
+        {/* Task 356: no acceptance label. The core's acceptance names who accepts the
+            phase (lead or owner), which Qt shows only in the phase menu
+            (Requires owner acceptance, checked), as this header's menu does. */}
         <For each={head.notes.filter((shown) => shown.id !== "health")}>{(shown) => (
           <span class={`pt-phase-note pt-phase-note-${shown.tone}`} data-note={shown.id} title={shown.tip || shown.text}>{short(shown.text, 80)}</span>
         )}</For>
@@ -427,6 +461,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     if (!matchesTask(task)) classes.push("pt-card-off");
     if (problem) classes.push("pt-card-problem");
     if (task.status === "draft") classes.push("pt-card-draft");
+    if (selected() === task.id) classes.push("pt-card-selected");
     const stages = stageChips(task.pipeline_run);
     return (
       <button
@@ -437,9 +472,11 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         data-task={task.id}
         data-lit={litNow ? (litNow.has(task.id) ? "lit" : "dim") : "none"}
         aria-label={tr("Task %1: %2", task.id, task.title)}
-        onPointerEnter={() => setHover(task.id)}
-        onFocus={() => setHover(task.id)}
-        onBlur={() => setHover(null)}
+        aria-pressed={selected() === task.id}
+        onPointerEnter={() => setHover(planHover.enter(task.id))}
+        onPointerLeave={() => setHover(planHover.leave(hover(), task.id))}
+        onFocus={(event) => setHover(planHover.focus(hover(), task.id, event.currentTarget.matches(":focus-visible")))}
+        onBlur={() => setHover(planHover.leave(hover(), task.id))}
         onClick={() => (props.editing?.editTask ? props.editing.editTask(task.id) : open(task.id))}
       >
         <Show when={props.editing?.canLink(task.id) || (props.editing && task.status !== "cancelled" && props.editing.editTask)}>
@@ -547,11 +584,14 @@ export function PlanView(props: PlanViewProps): JSX.Element {
   const boardCard = (task: TeamTaskView) => {
     const problem = problems().get(task.id);
     const taskHeatNow = heat(task.id);
+    const reply = () => (task.no_report ? props.noReportReply?.(task.id) ?? "" : "");
+    const activate = () => open(task.id);
     return (
-      <button type="button" class={`pm-card pm-board-card pt-tone-${tone(task)}`} classList={{ problem: !!problem, draft: task.status === "draft", crit: task.severity === "crit", minor: task.severity === "minor" }}
+      <div role="button" tabindex="0" class={`pm-card pm-board-card pt-tone-${tone(task)}`} classList={{ problem: !!problem, draft: task.status === "draft", crit: task.severity === "crit", minor: task.severity === "minor" }}
         style={taskHeatNow ? { "--heat": String(taskHeatNow.tint) } : undefined}
-        data-task={task.id} data-severity={task.severity || undefined} title={[`#${task.id} ${task.title}`, problem?.text ?? taskState(task).text, taskHeatNow?.tip ?? ""].filter(Boolean).join("\n")}
-        onClick={() => open(task.id)}>
+        data-task={task.id} data-severity={task.severity || undefined} data-no-report={task.no_report ? "true" : undefined}
+        title={[`#${task.id} ${task.title}`, problem?.text ?? taskState(task).text, taskHeatNow?.tip ?? "", reply()].filter(Boolean).join("\n")}
+        onClick={activate} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); activate(); } }}>
         <span class="pm-card-line">
           <span class="pt-state"><Icon name={statusIcon(task, !!problem)} size={13} /></span>
           <span class="pm-id">#{task.id}</span>
@@ -571,7 +611,16 @@ export function PlanView(props: PlanViewProps): JSX.Element {
             <For each={stageChips(task.pipeline_run)}>{(stage) => <span class={`pm-stage pm-stage-${stage.state || "waiting"}`}>{stageLabel(stage.kind)}</span>}</For>
           </span>
         </Show>
-      </button>
+        <Show when={task.no_report}>
+          <span class="pm-card-noreport">
+            <Show when={reply()} fallback={<span class="dim">{tr("No report")}</span>}><span class="ell" title={reply()}>{reply()}</span></Show>
+            <Show when={props.onUseLastReply}>
+              <button type="button" class="btn small primary" data-action="use-last-reply"
+                onClick={(event) => { event.stopPropagation(); props.onUseLastReply!(task); }}>{tr("Use last reply as report")}</button>
+            </Show>
+          </span>
+        </Show>
+      </div>
     );
   };
 
@@ -676,6 +725,8 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         </div>
         <div class="pt-detail-meta">
           <span class="pt-chip">{taskState(task).text}</span>
+          <Show when={task.archived}><span class="pt-chip">{tr("Archived")}</span></Show>
+          <span class="pt-chip">{short(task.status || "pending", 24)}</span>
           <span class="pt-chip">{tr("Phase %1", phase?.phase.n ?? task.phase)}</span>
           <span class="pt-chip">{task.assignee || tr("Unassigned")}</span>
           <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit">{tr("Crit")}{task.origin ? ` ${tr("from #%1", task.origin)}` : ""}</span></Show>
@@ -689,6 +740,9 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           </Show>
         </div>
         <Show when={problems().get(task.id)}>{(problem) => <p class="pt-detail-note pt-problem">{problem().text}</p>}</Show>
+        <Show when={task.archived}>
+          <button class="btn small" onClick={() => props.onOpenReport?.(task.id)}>{tr("Open archived report")}</button>
+        </Show>
         <Show when={taskHeat(heatProfile(), task.id)}>
           {(found) => (
             <div class="pt-detail-section pt-detail-heat">
@@ -759,16 +813,18 @@ export function PlanView(props: PlanViewProps): JSX.Element {
   return (
     <section class={`pt-plan${props.class ? ` ${props.class}` : ""}`} aria-label={tr("Plan")}>
       <header class="pt-plan-bar">
-        <PlanModeBar mode={mode()} includeCancelled={includeCancelled()} onMode={setMode} onCancelled={setIncludeCancelled} />
-        <Show when={shownMode()}>
-          <Show when={mode() !== "board" && !planning()}>
-            <div class="pm-segment" role="radiogroup" aria-label={tr("Show")} data-filter={filter()}>
-              <For each={[["all", tr("All")], ["active", tr("Active")], ["problems", tr("Problems")]] as const}>
-                {([value, label]) => (
-                  <button type="button" role="radio" aria-checked={filter() === value} classList={{ on: filter() === value }}
-                    data-filter-value={value} onClick={() => setFilter(value)}>{label}</button>
-                )}
-              </For>
+        <div class="pm-tools" role="toolbar" aria-label={tr("Plan view")}>
+          <PlanModeBar mode={mode()} onMode={setMode} />
+          <Show when={shownMode() && mode() !== "board" && !planning()}>
+            <div class="pm-group" data-plan-group="filter">
+              <div class="pm-segment" role="radiogroup" aria-label={tr("Show")} data-filter={filter()}>
+                <For each={[["all", tr("All")], ["active", tr("Active")], ["problems", tr("Problems")]] as const}>
+                  {([value, label]) => (
+                    <button type="button" role="radio" aria-checked={filter() === value} classList={{ on: filter() === value }}
+                      data-filter-value={value} onClick={() => setFilter(value)}>{label}</button>
+                  )}
+                </For>
+              </div>
             </div>
           </Show>
           <Show when={member()}>
@@ -776,54 +832,75 @@ export function PlanView(props: PlanViewProps): JSX.Element {
               title={tr("A click on a member's card shows only its tasks. Click here or press Esc to show every member again.")}
               onClick={() => chooseMember("")}>{tr("Only %1's tasks", memberName())}<Icon name="x" size={11} /></button>
           </Show>
-          <label class="pm-check" title={tr("Tint each task by how late it is against the plan, or by the tokens it lost")}>
-            <span>{tr("Heat")}</span>
-            <select class="pm-heat-mode" value={heatMode()} onChange={(event) => switchHeat(event.currentTarget.value as HeatMode)}>
-              <option value="off">{tr("Off")}</option>
-              <option value="time">{tr("Lateness")}</option>
-              <option value="tokens">{tr("Tokens")}</option>
-            </select>
-          </label>
-          <Show when={finishedCount() > 0 || hideFinished()}>
-            <label class="pm-check" title={finishedCount() === 1 ? tr("1 phase has every task decided") : tr("%1 phases have every task decided", finishedCount())}>
-              <input type="checkbox" class="pm-hide-finished" checked={hideFinished()} onChange={(event) => switchHide(event.currentTarget.checked)} />
-              {tr("Hide finished")}
-            </label>
+          <Show when={mode() !== "profile" && mode() !== "tests" && mode() !== "builds"}>
+            <div class="pm-group pm-switches" data-plan-group="switches">
+              <button type="button" class="pm-toggle" classList={{ on: includeCancelled() }} aria-pressed={includeCancelled()}
+                data-toggle="cancelled" onClick={() => setIncludeCancelled(!includeCancelled())}>
+                <Icon name="eye" size={12} />{tr("Show cancelled")}
+              </button>
+              <Show when={shownMode()}>
+                <label class="pm-check pm-heat" title={tr("Tint each task by how late it is against the plan, or by the tokens it lost")}>
+                  <span>{tr("Heat")}</span>
+                  <Dropdown class="pm-heat-pick" aria-label={tr("Heat")} value={heatMode()} onChange={(next) => switchHeat(next as HeatMode)}
+                    options={[{ value: "off", label: tr("Off") }, { value: "time", label: tr("Lateness") }, { value: "tokens", label: tr("Tokens") }]} />
+                </label>
+                <Show when={finishedCount() > 0 || hideFinished()}>
+                  <button type="button" class="pm-toggle" classList={{ on: hideFinished() }} aria-pressed={hideFinished()} data-toggle="finished"
+                    title={finishedCount() === 1 ? tr("1 phase has every task decided") : tr("%1 phases have every task decided", finishedCount())}
+                    onClick={() => switchHide(!hideFinished())}>
+                    <Icon name="eye-off" size={12} />{tr("Hide finished")}
+                  </button>
+                </Show>
+                <Show when={props.onAutoAccept}>
+                  <button type="button" class="pm-toggle" classList={{ on: autoAccept() }} aria-pressed={autoAccept()} data-toggle="auto-accept"
+                    title={autoAccept() ? tr("Auto accepts a draft phase at its first hand-out") : tr("A draft phase waits for your approval")}
+                    onClick={() => props.onAutoAccept?.(!autoAccept())}>
+                    <Icon name="sparkles" size={12} />{tr("Auto-accept drafts")}
+                  </button>
+                </Show>
+              </Show>
+            </div>
           </Show>
-          <Show when={props.onAutoAccept}>
-            <label class="pm-check" title={autoAccept() ? tr("Auto accepts a draft phase at its first hand-out") : tr("A draft phase waits for your approval")}>
-              <input type="checkbox" class="pm-auto-accept" checked={autoAccept()} onChange={(event) => props.onAutoAccept?.(event.currentTarget.checked)} />
-              {tr("Auto-accept drafts")}
-            </label>
+          <span class="pt-grow" />
+          <div class="pm-group pm-legend-group" data-plan-group="legend">
+            {/* Task 342 (owner, 2026-11-08): the five task states, as the cards tint. */}
+            <span class="pt-legend pt-state-legend" aria-label={tr("Task states")} data-state-legend>
+              <span class="pt-legend-item"><i class="pt-swatch pt-swatch-done" />{tr("Done")}</span>
+              <span class="pt-legend-item"><i class="pt-swatch pt-swatch-work" />{tr("In progress")}</span>
+              <span class="pt-legend-item"><i class="pt-swatch pt-swatch-review" />{tr("In review")}</span>
+              <span class="pt-legend-item"><i class="pt-swatch pt-swatch-notstarted" />{tr("Not started")}</span>
+              <span class="pt-legend-item"><i class="pt-swatch pt-swatch-cancelled" />{tr("Cancelled")}</span>
+            </span>
+          </div>
+          <Show when={mode() === "graph"}>
+            <div class="pm-group" data-plan-group="links">
+              <span class="pt-legend" aria-label={tr("Link legend")}>
+                <span class="pt-legend-item"><i class="pt-legend-dep" />{tr("Depends on")}</span>
+                <span class="pt-legend-item"><i class="pt-legend-origin" />{tr("Spawned from")}</span>
+              </span>
+            </div>
+            <div class="pm-group pm-zoom" data-plan-group="zoom">
+              <button type="button" class="icon-btn small" aria-label={tr("Zoom out")} onClick={() => stepZoom(-0.1)}><Icon name="minus" size={12} /></button>
+              <span class="pm-zoom-value" data-zoom={zoom()}>{Math.round(zoom() * 100)}%</span>
+              <button type="button" class="icon-btn small" aria-label={tr("Zoom in")} onClick={() => stepZoom(0.1)}><Icon name="plus" size={12} /></button>
+              <button type="button" class="btn ghost small" onClick={fit}><Icon name="maximize-2" size={12} />{tr("Fit")}</button>
+            </div>
           </Show>
-        </Show>
-        <span class="pt-grow" />
-        {/* Task 342 (owner, 2026-11-08): the five task states, as the cards tint. */}
-        <span class="pt-legend pt-state-legend" aria-label={tr("Task states")} data-state-legend>
-          <span class="pt-legend-item"><i class="pt-swatch pt-swatch-done" />{tr("Done")}</span>
-          <span class="pt-legend-item"><i class="pt-swatch pt-swatch-work" />{tr("In progress")}</span>
-          <span class="pt-legend-item"><i class="pt-swatch pt-swatch-review" />{tr("In review")}</span>
-          <span class="pt-legend-item"><i class="pt-swatch pt-swatch-notstarted" />{tr("Not started")}</span>
-          <span class="pt-legend-item"><i class="pt-swatch pt-swatch-cancelled" />{tr("Cancelled")}</span>
-        </span>
-        <Show when={mode() === "graph"}>
-          <span class="pt-legend" aria-label={tr("Link legend")}>
-            <span class="pt-legend-item"><i class="pt-legend-dep" />{tr("Depends on")}</span>
-            <span class="pt-legend-item"><i class="pt-legend-origin" />{tr("Spawned from")}</span>
-          </span>
-          <span class="pm-zoom">
-            <button type="button" class="icon-btn small" aria-label={tr("Zoom out")} onClick={() => stepZoom(-0.1)}><Icon name="minus" size={12} /></button>
-            <span class="pm-zoom-value" data-zoom={zoom()}>{Math.round(zoom() * 100)}%</span>
-            <button type="button" class="icon-btn small" aria-label={tr("Zoom in")} onClick={() => stepZoom(0.1)}><Icon name="plus" size={12} /></button>
-            <button type="button" class="btn ghost small" onClick={fit}>{tr("Fit")}</button>
-          </span>
-        </Show>
-        <Show when={shownMode()}>
-          <button type="button" class="btn ghost small" data-expand-all onClick={() => (allOpen() ? collapseAll() : expandAll())}>
-            {allOpen() ? tr("Collapse all") : tr("Expand all")}
-          </button>
-        </Show>
+          <Show when={shownMode()}>
+            <div class="pm-group" data-plan-group="fold">
+              <button type="button" class="btn ghost small" data-expand-all onClick={() => (allOpen() ? collapseAll() : expandAll())}>
+                <Icon name={allOpen() ? "arrow-up-to-line" : "chevrons-down"} size={12} />{allOpen() ? tr("Collapse all") : tr("Expand all")}
+              </button>
+            </div>
+          </Show>
+        </div>
       </header>
+      <Show when={props.team.archived_phases_not_shown}>
+        <p class="pt-detail-note">{tr("%1 older archived phases are not shown here", props.team.archived_phases_not_shown ?? 0)}</p>
+      </Show>
+      <Show when={props.team.tasks.some((task) => task.archived)}>
+        <p class="pt-detail-note">{tr("Showing the status window of up to 1000 archived tasks and 200 archived phase headers")}</p>
+      </Show>
       <Show when={heatView()}>
         <HeatLegend profile={props.profile} />
       </Show>
@@ -833,7 +910,8 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           and Profile and Tests have no phase headers, as in Qt. */}
       <Show when={mode() === "graph"}>
         <div class="pt-plan-body">
-          <div class="pt-plan-scroll" ref={scroller} onPointerLeave={() => setHover(null)}>
+          <div class="pt-plan-scroll" ref={scroller} onPointerLeave={() => setHover(null)}
+            onClick={(event) => { if (clearsSelection(event.target as Element)) setSelected(null); }}>
             <div class="pt-plan-canvas" style={{ height: `${Math.max(virtualizer.getTotalSize(), ...windowed().map((item) => item.start + phaseHeight(phases()[item.index])))}px` }}>
               <For each={windowed()}>
                 {(item) => {
@@ -906,13 +984,16 @@ export function PlanView(props: PlanViewProps): JSX.Element {
       <Show when={mode() === "profile"}>
         <div class="pm-profile-scroll">
           <ProfilePage team={props.team} profile={props.profile} loadTimeline={props.loadTimeline}
-            statusName={runStatusLabel} onOpen={open} />
+            statusName={runStatusLabel} onOpen={open} onOpenReport={props.onOpenReport} />
           {detail()}
         </div>
       </Show>
       <Show when={mode() === "tests"}>
-        <TestsPanel tests={props.tests} onMore={() => props.onLoadTests?.(props.tests?.next ?? null)}
-          builds={props.builds} buildsError={props.buildsError} onLoadBuilds={props.onLoadBuilds} onForce={props.onForceTest} />
+        <TestsPanel tests={props.tests} onMore={() => props.onLoadTests?.(props.tests?.next ?? null)} onForce={props.onForceTest} />
+        {detail()}
+      </Show>
+      <Show when={mode() === "builds"}>
+        <BuildsPanel builds={props.builds} error={props.buildsError} />
         {detail()}
       </Show>
     </section>

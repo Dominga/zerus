@@ -45,7 +45,7 @@ fn digests(config: &Config) -> Result<Digests> {
     let root = root(config);
     let mut out = Digests::default();
     for id in ProjectStore::stored(&root)? {
-        match ProjectStore::open_within(&root, &id, PROJECT_WAIT) {
+        match ProjectStore::open_within(&crate::tasks::replica_root(config)?, &id, PROJECT_WAIT) {
             Ok(Some(store)) => match store.inventory() {
                 Ok((inventory, damaged)) => {
                     out.projects.insert(id.clone(), inventory.digest());
@@ -87,7 +87,7 @@ fn known(config: &Config) -> BTreeSet<String> {
 /// identity that cannot be read is null and named in the log; it never
 /// hides the rest.
 pub fn hello(config: &Config) -> Result<Value> {
-    let store = ProjectStore::store_id(&root(config))
+    let store = crate::tasks::replica_root(config).map_err(anyhow::Error::from).and_then(|root| ProjectStore::store_id(&root).map_err(anyhow::Error::from))
         .map_err(|error| eprintln!("hgs swarm: the replica store has no identity: {error}"))
         .ok();
     let digests = digests(config)?;
@@ -192,7 +192,7 @@ fn alive(config: &Config, store: &LockedStore) -> BTreeSet<String> {
 /// `swarm replica-inventory`: what this member holds of the project.
 pub fn inventory(config: &Config, request: Request) -> Result<Value> {
     let node = admit(config, &request)?;
-    let store = ProjectStore::open(&root(config), &request.project)?;
+    let store = ProjectStore::open(&crate::tasks::replica_root(config)?, &request.project)?;
     let (inventory, damaged) = store.inventory()?;
     Ok(json!({"node_id": node, "store": answering_store(config), "inventory": inventory,
               "damaged": damaged.len()}))
@@ -202,7 +202,7 @@ pub fn inventory(config: &Config, request: Request) -> Result<Value> {
 /// replaced since its hello answers with another one (zerus-cg5h.4.5). One
 /// that cannot be read is null and named in the log.
 fn answering_store(config: &Config) -> Option<String> {
-    ProjectStore::store_id(&root(config))
+    crate::tasks::replica_root(config).map_err(anyhow::Error::from).and_then(|root| ProjectStore::store_id(&root).map_err(anyhow::Error::from))
         .map_err(|error| eprintln!("hgs swarm: the replica store has no identity: {error}"))
         .ok()
 }
@@ -214,7 +214,7 @@ pub fn exchange(config: &Config, request: Request) -> Result<Value> {
     let theirs = request
         .inventory
         .ok_or_else(|| anyhow::anyhow!("a replica exchange needs the requester's inventory"))?;
-    let store = ProjectStore::open(&root(config), &request.project)?;
+    let store = ProjectStore::open(&crate::tasks::replica_root(config)?, &request.project)?;
     let imported = store.import_updates(decode(request.updates)?)?;
     let (ours, damaged) = store.inventory()?;
     let (updates, more) = store.updates_for(&ours, &theirs, PAGE)?;
@@ -435,7 +435,7 @@ pub fn replicate(config: &Config, alias: &str, project: &str) -> Result<()> {
         eprintln!("hgs swarm: {alias}: its replica could not be recorded: {error:#}");
     }
     // Copies that already agree need no exchange.
-    let (inventory, damaged) = ProjectStore::open(&root(config), project)?.inventory()?;
+    let (inventory, damaged) = ProjectStore::open(&crate::tasks::replica_root(config)?, project)?.inventory()?;
     let theirs = theirs(&identity["replica"]);
     if let Some(t) = theirs.as_ref().filter(|t| t.projects.get(project) == Some(&inventory.digest())) {
         let local = Digests {
@@ -483,7 +483,7 @@ fn exchange_pages(
     observed: Option<&str>,
     wait: Option<Duration>,
 ) -> std::result::Result<Outcome, Failed> {
-    let root = root(config);
+    let root = crate::tasks::replica_root(config).map_err(|error| (Incomplete::Busy, error.into()))?;
     let unreachable = |error: anyhow::Error| (Incomplete::Unreachable, error);
     let malformed = |error: anyhow::Error| (Incomplete::Malformed, error.context(format!("{alias} sent an invalid replica answer")));
     let changed_identity = || (Incomplete::ChangedIdentity, anyhow::anyhow!("the computer behind {alias} changed identity"));
@@ -651,7 +651,7 @@ mod tests {
     }
 
     fn add(config: &Config, project: &str) -> String {
-        let store = ProjectStore::open(&root(config), project).unwrap();
+        let store = ProjectStore::open(&crate::tasks::replica_root(config).unwrap(), project).unwrap();
         let mut task = TaskDoc::create(NewTask {
             project,
             id: &store.unused_short_id().unwrap(),

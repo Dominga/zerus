@@ -24,6 +24,7 @@ const catalog = "\0waiting-render-catalog";
 let server: ViteDevServer | undefined;
 let renderPage: (view: TeamWaitingView) => string;
 let renderBanner: (view: TeamWaitingView) => string;
+let renderBannerOpen: (view: TeamWaitingView) => string;
 
 const NOW = 1_800_000_000;
 
@@ -131,17 +132,19 @@ beforeAll(async () => {
           };`;
         if (id === entry) return `import {createComponent} from 'solid-js';
           import {renderToString} from 'solid-js/web';
-          import {WaitingPage, WaitingBanner} from '/src/ui/teams/Waiting.tsx';
+          import {WaitingPage, WaitingBanner, WaitingBannerView} from '/src/ui/teams/Waiting.tsx';
           import {state} from '${stores}';
           const show = (view, component) => { state.view = view; return renderToString(() => createComponent(component, {})); };
           export const renderPage = (view) => show(view, WaitingPage);
-          export const renderBanner = (view) => show(view, WaitingBanner);`;
+          export const renderBanner = (view) => show(view, WaitingBanner);
+          export const renderBannerOpen = (view) => { state.view = view; return renderToString(() => createComponent(WaitingBannerView, { items: view.items, total: view.total, open: true, onToggle: () => {}, onOpenList: () => {} })); };`;
       },
     }, solid({ ssr: true })],
   });
   const module = await server.ssrLoadModule(entry);
   renderPage = module.renderPage;
   renderBanner = module.renderBanner;
+  renderBannerOpen = module.renderBannerOpen;
 });
 
 afterAll(async () => { await server?.close(); });
@@ -172,6 +175,32 @@ describe("Waiting for you and the Activity strip (task 116)", () => {
       expect(one, found.kind).toContain(escaped(found.title));
       expect(one, `${found.kind} control`).toContain(control(found));
     }
+  });
+
+  // Task 429 (owner, 2026-11-09, "why this duplicate?"): the banner's head row
+  // repeated the first item while the expanded list showed it again.
+  it("names its first item only while folded and draws each row once when open", () => {
+    const items = fixture();
+    const folded = renderBanner({ items, total: items.length, more: false, next: null });
+    expect(folded).toContain(`${items.length} wait for you`);
+    // Folded: the head keeps the newest item as its one row, so Show all is not needed to answer it.
+    expect(folded).toContain(`title="${escaped(items[0].title)}"`);
+    expect(folded.match(/class="team-waiting-row/g) ?? []).toHaveLength(1);
+    expect(folded).toContain("Show all");
+
+    const open = renderBannerOpen({ items, total: items.length, more: false, next: null });
+    // Expanded: the head is the count of the rows below (BANNER_ROWS) and Hide; no item is named twice.
+    expect(open).toContain("5 wait for you");
+    expect(open).toContain("Hide");
+    expect(open).toContain(`Open the waiting list (${items.length})`);
+    expect(open.match(/class="team-waiting-row/g) ?? []).toHaveLength(5);
+    for (const shown of items.slice(0, 5)) {
+      // One row draws the title once (its title attribute); the head does not repeat it.
+      const drawn = open.split(`title="${escaped(shown.title)}"`).length - 1;
+      expect(drawn, shown.title).toBe(1);
+    }
+    // The rows the cap leaves out stay in the waiting list, not in the banner.
+    expect(open).not.toContain(escaped(items[5].title));
   });
 
   it("does not stack in-window notices, as Qt (task 323 N7)", () => {
@@ -223,19 +252,67 @@ describe("Waiting for you and the Activity strip (task 116)", () => {
   });
 
   // Task 304 (hgs #286): the escalation is one row naming the lead; the
-  // strip header names the newest item that is not the digest.
-  it("the escalated wait is one row, and the strip header does not repeat the digest", () => {
+  // strip's newest row names it too, never the digest (task 384).
+  it("the escalated wait is one row, and the strip does not repeat the digest", () => {
     const digest = { id: "t1/lead_changes/digest", kind: "lead_changes", team: "t1", team_name: "Checkout", action: "open_team", since: 1_800_000_100, proposal: null,
       title: "The lead changed the plan 3 times inside the approved goal, newest: added #9", detail: { changes: [{ id: "lc3", summary: "added #9" }] } };
     const escalated = { id: "t1/task_wait_escalated/escalated-4", kind: "task_wait_escalated", team: "t1", team_name: "Checkout", action: "open_team", since: 1_800_000_000, proposal: null,
       title: "#4 API still waits after 60 min: unknown model (Lead has not acted)", state: "wait:4" };
     const strip = renderBanner({ items: [digest, escalated], total: 2, more: false, next: null });
     expect(strip).toContain("2 wait for you");
-    const head = strip.slice(strip.indexOf("team-waiting-banner-head"), strip.indexOf("Show all"));
-    expect(head).toContain(escaped(escalated.title));
-    expect(head).not.toContain("The lead changed the plan");
+    const newest = strip.slice(strip.indexOf("data-banner-item"));
+    expect(newest).toContain(escaped(escalated.title));
+    expect(newest).not.toContain("The lead changed the plan");
     const page = renderPage({ items: [escalated], total: 1, more: false, next: null });
     expect(page).toContain("Lead has not acted");
     expect(page.match(/data-kind="task_wait_escalated"/g)?.length).toBe(1);
+  });
+
+  // Task 384 (owner, 2026-11-08): the strip above Activity broke "10 wait for
+  // you" into a column and cut the newest item to one line without its answer.
+  it("keeps the count on one line and the newest item's own answer in the strip at both widths", async () => {
+    const { readFileSync } = await import(/* @vite-ignore */ ["node", "fs"].join(":")) as { readFileSync(path: URL): string };
+    const css = String(readFileSync(new URL("../../ui/styles/teams.css", import.meta.url))).replace(/\r\n/g, "\n");
+    const block = (selector: string) => {
+      const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return [...css.matchAll(new RegExp(`(?:^|\\n)\\s*${escaped}\\s*\\{([^}]*)\\}`, "gm"))].at(-1)?.[1] ?? "";
+    };
+    // The owner's width: the count is one unbreakable line, and the newest item
+    // is a row of its own with its kind, a two-line summary and its buttons.
+    expect(block(".team-waiting-banner-head")).toContain("flex-wrap: wrap");
+    const fixed = css.slice(css.indexOf(".team-waiting-banner-head > b, .team-waiting-banner-head > .btn"));
+    expect(fixed).toContain("white-space: nowrap");
+    expect(block(".team-waiting-banner-head > b")).toContain("min-width: max-content");
+    expect(block(".team-waiting-row.newest .team-waiting-head")).toContain("flex-wrap: wrap");
+    // The base rule (before the narrow container query) is the owner's width.
+    const base = css.slice(0, css.indexOf("@container (max-width: 430px)"));
+    const title = [...base.matchAll(/\.team-waiting-row\.newest \.team-waiting-title \{([^}]*)\}/g)].at(-1)?.[1] ?? "";
+    expect(title).toContain("white-space: normal");
+    expect(title).toMatch(/-webkit-line-clamp:\s*2/);
+    expect(title).toMatch(/flex:\s*1 1 14ch/);
+    // The narrow strip (the owner's column at its smallest): the summary takes
+    // the whole row, so the buttons move under it instead of the title being cut.
+    const narrow = css.slice(css.indexOf("@container (max-width: 430px)"));
+    expect(narrow).toContain(".team-waiting-row.newest .team-waiting-title");
+    expect(narrow).toContain("flex-basis: 100%");
+
+    // Ten items wait and the newest is a proposal card: the count, the kind,
+    // the summary and the row's own Answer all come from the strip.
+    const proposal = item("owner_word_asked", "decide_proposal", "The lead proposes: settings - URGENT, the lead's page is cut", { proposal: "p9" });
+    const many = [proposal, ...fixture().slice(0, 9)];
+    const owner = renderBanner({ items: many, total: 10, more: false, next: null });
+    expect(owner).toContain("10 wait for you");
+    expect(owner).toContain("Show all");
+    const newest = owner.slice(owner.indexOf("data-banner-item"));
+    expect(newest).toContain(">Proposal<");
+    expect(newest).toContain(escaped(proposal.title));
+    expect(newest).toContain(">Answer<");
+    expect(newest).toContain(">Open team<");
+    // The same strip rendered for the narrow width keeps every control (the
+    // width itself is CSS; the markup carries no second copy of the item).
+    const small = renderBanner({ items: many, total: 10, more: false, next: null });
+    expect(small).toBe(owner);
+    expect(small.match(/data-banner-item/g)?.length).toBe(1);
+    expect(small).toContain(">Answer<");
   });
 });

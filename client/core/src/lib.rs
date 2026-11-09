@@ -35,6 +35,7 @@ pub mod file_download;
 pub mod fleet;
 pub mod fork_update;
 pub mod fsx;
+pub mod git;
 pub mod git_status;
 pub mod git_changes;
 pub mod held_input;
@@ -42,6 +43,7 @@ pub mod hgs_settings;
 pub mod image;
 pub mod input_queue;
 pub mod iron_rules;
+pub mod keep_warm;
 pub mod project_memory;
 pub mod launch;
 pub mod legacy;
@@ -62,6 +64,7 @@ pub mod notification_preferences;
 pub mod operation_recovery;
 pub mod optional_questions;
 pub mod organization;
+pub mod parent_change;
 pub mod paths;
 pub mod process_view;
 pub mod processes;
@@ -121,6 +124,7 @@ pub mod voice_driver;
 pub mod worktree_leftover;
 pub mod worktree_overview;
 pub mod worktree_policy;
+pub mod worktree_programs;
 pub mod worktree_review;
 pub mod worktrees;
 pub mod wsl_mapping;
@@ -136,6 +140,7 @@ pub use batch::ProcessesOut;
 pub use batch::TasksOut;
 pub use batch::{ActivityOut, Batch, Coalescer, ComputerOut, KeyOut, ReplaceOut, RowOut};
 pub use fleet::{Fleet, FollowError};
+pub use git::{GitState, GitStatus, GitUpdate};
 pub use machine::{LocalHost, MachineMeta};
 pub use organization::{OrganizationSnapshot, OrganizationState, OrganizationUpdate};
 pub use processes::{ProcessesState, ProcessesUpdate};
@@ -252,6 +257,11 @@ pub enum ActivityUpdate {
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Change {
+    Git {
+        computer: ComputerId,
+        key: String,
+        update: GitUpdate,
+    },
     Upsert {
         computer: ComputerId,
         key: String,
@@ -328,6 +338,7 @@ impl Change {
             | Self::Tasks { computer, .. }
             | Self::Machine { computer, .. }
             | Self::Organization { computer, .. }
+            | Self::Git { computer, .. }
             | Self::Teams { computer, .. }
             | Self::TeamHeads { computer, .. } => computer,
         }
@@ -389,8 +400,14 @@ mod hgs_tests {
     }
 
     fn folder(name: &str) -> Folder {
-        let dir =
-            std::env::temp_dir().join(format!("zerus-client-core-{name}-{}", std::process::id()));
+        // Task #418: the scratch root is the crate's own target tree, not the
+        // process-wide temporary folder. Concurrent suites share the isolated
+        // TEMP's parent and a neighbour's run folder can be pruned mid-run;
+        // these tests write a file and then look for it.
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("hgs-tests")
+            .join(format!("{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         Folder(dir)
@@ -430,5 +447,20 @@ mod hgs_tests {
         let path = std::env::join_paths([bin.to_path_buf()]).unwrap();
         let found = find_hgs(Some(path), None);
         assert!(found.is_none_or(|found| found.is_file()));
+    }
+
+    /// Task #418: on Windows the program is `hgs.exe`. A file named `hgs`
+    /// without the extension is not it, whatever PATHEXT says, and the
+    /// extension alone is what makes the file the program.
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_program_is_hgs_exe_and_a_bare_hgs_file_is_not() {
+        let bin = folder("bare-name");
+        std::fs::write(bin.join("hgs"), b"").unwrap();
+        let path = std::env::join_paths([bin.to_path_buf()]).unwrap();
+        assert_eq!(find_hgs(Some(path), None), None);
+        std::fs::write(bin.join(HGS), b"").unwrap();
+        let path = std::env::join_paths([bin.to_path_buf()]).unwrap();
+        assert_eq!(find_hgs(Some(path), None), Some(bin.join(HGS)));
     }
 }

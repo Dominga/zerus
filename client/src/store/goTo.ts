@@ -31,6 +31,10 @@ export function goToItems(): GoToItem[] {
       title: session.title,
       detail: [group, session.machine, statusCaption(session)].filter((part): part is string => !!part),
       recency: recent.indexOf(session.key),
+      // Task 423: the search finds a session by its name and IDs too, as the
+      // title bar's "Search sessions, IDs and messages" promises.
+      keys: [session.name, session.catalogKey, session.runId, session.conversationId,
+        ...(session.subagents ?? []).flatMap((child) => [child.id, child.conversationId])].filter((part): part is string => !!part),
     };
   });
   for (const header of groupHeaders()) {
@@ -64,8 +68,26 @@ function groupHeaders() {
 export const [goToOrigin, setGoToOrigin] = createSignal<HTMLElement | null>(null);
 export const [shortcutHelpOrigin, setShortcutHelpOrigin] = createSignal<HTMLElement | null>(null);
 
-export function openGoTo() {
+/**
+ * Task 423: the title-bar search field the palette opens over, as its rect at
+ * open time; null opens it centred (no title bar, e.g. the system chrome).
+ */
+export const [goToAnchor, setGoToAnchor] = createSignal<{ left: number; top: number; width: number; height: number } | null>(null);
+
+/** The visible title-bar search field, the anchor of the palette. */
+function searchField(from?: unknown): HTMLElement | null {
+  const clicked = from && typeof from === "object" && "currentTarget" in from ? (from as Event).currentTarget : null;
+  const field = clicked instanceof HTMLElement ? clicked : document.querySelector<HTMLElement>(".tb-search");
+  if (!field || !field.isConnected) return null;
+  const box = field.getBoundingClientRect();
+  return box.width > 0 && box.height > 0 ? field : null;
+}
+
+export function openGoTo(from?: unknown) {
   if (popupOpen()) return;
+  const field = searchField(from);
+  const box = field?.getBoundingClientRect();
+  setGoToAnchor(box ? { left: box.left, top: box.top, width: box.width, height: box.height } : null);
   const origin = document.activeElement as HTMLElement | null;
   const wait = nativeOverlayBarrier("goTo", true);
   if (wait) { void wait.then(() => setGoToOrigin(origin)).catch(() => {}); }

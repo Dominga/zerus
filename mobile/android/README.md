@@ -47,6 +47,9 @@ activity and history reads first poll their retained receipt after 100 ms,
 then at 200 ms through the first eight polls, returning to the ordinary 800 ms
 cadence. The maximum
 poll count remains bounded; a pending receipt never resubmits its request.
+An advertised WebSocket readiness stream runs alongside these receipt checks.
+A readiness hint can wake a check early; a connected silent stream never delays
+the ordinary polling cadence. The watcher ends with its retained request.
 Encrypted receipt HTTP overlaps a fresh signed membership check, but the app
 requires the original protected request and active enrollment before fetching,
 and verifies current membership before decrypting or settling any result.
@@ -221,13 +224,16 @@ background reads instead of returning to the initial placeholder. Opening cached
 messages immediately shows a pinned status beneath the session tools, distinguishing
 saved messages from checking activity and loading history. The status remains outside
 the scrolling transcript; its two lines and indicator slot retain their geometry as
-reads settle. The Refresh action remains in place. Opening starts exact-target
-inspection and canonical history independently instead of serializing their relay
-round trips. Either may finish first; a complete page already covered by the opening
-inspection is not immediately fetched again. Cached messages remain readable, and
-only the fresh inspection permits actions. The periodic loop does not start another
-inspection while that verified opening is still waiting for its first history page;
-explicit refresh remains available. Later background reads
+reads settle. The Refresh action remains in place. Opening recent Activity uses
+the exact-target inspection's bounded recent messages, independently of complete
+history indexing and exact unread totals. Earlier messages load when requested;
+an actual saved older reading position may also restore its canonical page.
+Returning to the latest messages reads a fresh inspection and leaves the older
+window. Saved positions distinguish following the latest messages from reading
+an older page; older saved data retains its original reading semantics.
+An incomplete earlier-history read keeps recent messages available and offers
+an explicit retry. Cached messages remain readable, and only the fresh inspection
+permits actions. Later background reads
 show progress only after five seconds; manual refresh shows it immediately and
 reuses any matching in-flight read. Catalogs retain their thin progress bar.
 Pulling a conversation up past its newest
@@ -331,14 +337,23 @@ questions.
 
 Session cards follow the desktop cards. A checkout line shows a small Git branch
 mark and `folder / branch` (or detached HEAD); a linked worktree names its main
-checkout folder, and ordinary folders show only their name with a folder mark. A subagent counter uses
-the desktop's compact active count, such as `3`, `2+` or `?`. Tapping it lists
-the children that are working, waiting for input, paused or unknown,
+checkout folder, and ordinary folders show only their name with a folder mark. A card lists
+the subagents that are working, waiting for input, paused or unknown beneath it,
 in stable ID order. Finished and failed turns stay hidden, as with the desktop default,
 unless the child has an unsent draft on this phone. Profile groups are counted
 but not listed. Tapping a child opens its session and then the child's activity
-once that conversation is verified; Back returns to the session. Open subagent
-lists persist with the other Sessions state. A running session with pending
+once that conversation is verified; Back returns to the session. Child sessions
+nest under their parent card (the listing's `parent` link: machine UUID and
+session ID, conversation for an older parent record). One counter covers both,
+as on the desktop (`2 of 5` working, gray **Asking**, amber **Needs you**), and
+tapping it hides or shows both; the phone keeps a collapsed parent across
+relaunches by machine UUID and session ID. Without shown rows the counter keeps
+the desktop's compact active subagent count, such as `3`, `2+` or `?`. A child
+supervised by a live parent shows an arrow before its title and stays quiet:
+no notification and gray badges unless only the person can answer it
+(`client/core/tests/fixtures/supervised-attention.json`). Cards show the
+recorded account's mark and label next to the machine, in the color the
+session's computer keeps for that account (`account_mark`). A running session with pending
 optional Codex questions, which the agent keeps working without, shows an
 amber question-mark chip with their count (`99+` above 99) right after its
 status badge, as on the desktop; its spoken description says how many are
@@ -792,6 +807,16 @@ request. The Other field's keyboard action follows the same steps. Earlier
 selections and custom text remain editable while navigating; an incomplete earlier
 answer is offered for review before submission. Existing exact-request, approval
 and cold-context consent checks still apply to the final send.
+
+`MobileDeliveryRecoverySmokeInstrumentation` checks an unconfirmed outgoing message
+without reposting it. Build with
+`-PzerusInstrumentationRunner=app.zerus.mobile.MobileDeliveryRecoverySmokeInstrumentation`
+using the same isolated emulator procedure. Run with `-e scenario recovery`, then
+force-stop the test app and run `-e scenario restart` without clearing its data.
+These phases check physical dismissal during a pending receipt lookup, persisted
+warning state and editor, a distinct next send, and exact original confirmation.
+On fresh test data, `-e scenario timeout` exercises the actual 45-second send and
+manual receipt deadlines. It does not shorten production timeouts.
 
 `QuestionDeliverySmokeInstrumentation` exercises physical Next/Enter/Send all controls,
 retained per-question answers, one complete synthetic answer, confirmed and missing

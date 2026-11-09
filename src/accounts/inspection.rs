@@ -6,7 +6,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_OUTPUT: u64 = 1024 * 1024;
-fn now() -> u64 {
+pub(super) fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -21,7 +21,7 @@ fn text(v: &Value, key: &str) -> String {
         .take(256)
         .collect()
 }
-fn read_json(path: &Path) -> Value {
+pub(super) fn read_json(path: &Path) -> Value {
     fs::File::open(path)
         .ok()
         .and_then(|f| serde_json::from_reader(std::io::BufReader::new(f.take(MAX_OUTPUT))).ok())
@@ -151,7 +151,94 @@ fn http_json(url: &str, token: &str, extra: &[&str]) -> std::result::Result<Valu
 }
 /// `http_json`'s error for a token the service refused.
 const UNAUTHORIZED: &str = "The native sign-in was refused.";
-fn window(
+thread_local! {
+    /// WhiteWh fork: set when the usage service refused the token of the last
+    /// `claude_http` call on this thread, so the account can say "expired".
+    static USAGE_REFUSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+fn claude_http(url: &str, token: &str) -> claude_usage::Reply {
+    use claude_usage::Reply;
+    if token.is_empty() || token.chars().any(char::is_control) {
+        return Reply::Unavailable;
+    }
+    let Ok(dir) = tempfile::tempdir() else {
+        return Reply::Unavailable;
+    };
+    let headers = dir.path().join("headers");
+    let Ok(file) = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&headers)
+    else {
+        return Reply::Unavailable;
+    };
+    if platform::make_private(&file).is_err() {
+        return Reply::Unavailable;
+    }
+    // Keep the grant in stdin, never argv. curl's stderr and response body are
+    // never logged or cached. There is no refresh-token or inference request.
+    let config = format!("url = {}\nheader = {}\nheader = \"Accept: application/json\"\nheader = \"anthropic-beta: oauth-2025-04-20\"\n",
+        json!(url), json!(format!("Authorization: Bearer {token}")));
+    let mut cmd = Command::new("curl");
+    cmd.args([
+        "--silent",
+        "--proto",
+        if cfg!(test) && url.starts_with("http://127.0.0.1:") {
+            "=http"
+        } else {
+            "=https"
+        },
+        "--connect-timeout",
+        "3",
+        "--max-time",
+        "6",
+        "--max-filesize",
+        "1048576",
+        "--dump-header",
+    ])
+    .arg(&headers)
+    .args(["--write-out", "\n%{http_code}", "--config", "-"]);
+    let response = capture(cmd, config.as_bytes(), 7);
+    let mut header_bytes = Vec::new();
+    if fs::File::open(headers)
+        .and_then(|f| f.take(32 * 1024 + 1).read_to_end(&mut header_bytes))
+        .is_err()
+        || header_bytes.len() > 32 * 1024
+    {
+        header_bytes.clear();
+    }
+    let headers = String::from_utf8_lossy(&header_bytes);
+    let limited = headers
+        .lines()
+        .rfind(|line| line.starts_with("HTTP/"))
+        .and_then(|line| line.split_whitespace().nth(1))
+        == Some("429");
+    if limited {
+        // A known 429 still carries its cooldown when curl refuses an oversized
+        // body or the connection closes before that body finishes.
+        return Reply::RateLimited(claude_usage::retry_after(&headers, now()));
+    }
+    let Ok(bytes) = response else {
+        return Reply::Unavailable;
+    };
+    let Some(split) = bytes.iter().rposition(|b| *b == b'\n') else {
+        return Reply::Unavailable;
+    };
+    match &bytes[split + 1..] {
+        b"200" => serde_json::from_slice(&bytes[..split])
+            .map(Reply::Usage)
+            .unwrap_or(Reply::Unavailable),
+        b"429" => Reply::RateLimited(claude_usage::retry_after(&headers, now())),
+        b"401" => {
+            // WhiteWh fork: a refused token is told apart from an unreachable service.
+            USAGE_REFUSED.with(|refused| refused.set(true));
+            Reply::Unavailable
+        }
+        _ => Reply::Unavailable,
+    }
+}
+
+pub(super) fn window(
     id: &str,
     label: &str,
     used: Option<f64>,
@@ -271,12 +358,12 @@ fn codex(home: &Path, native: bool) -> Value {
     let _ = reader.join();
     result
 }
-fn claude(home: &Path, native: bool) -> Value {
+fn claude(config: &Config, home: &Path, native: bool, seed: &Value) -> Result<Value> {
     // WhiteWh fork: a local model has no Anthropic sign-in or plan limits.
     if let Some(local) = super::local_model::read(home).filter(|_| !native) {
-        return json!({"identity":{"auth_method":"Ollama","plan":local.model},"windows":[],"source":"Ollama",
+        return Ok(json!({"identity":{"auth_method":"Ollama","plan":local.model},"windows":[],"source":"Ollama",
             "status":"configured","auth_status":"configured","endpoint":local.endpoint,
-            "reachable":super::local_model::reachable(&local.endpoint)});
+            "reachable":super::local_model::reachable(&local.endpoint)}));
     }
     let mut result =
         json!({"identity":{},"windows":[],"source":"Claude Code","status":"unavailable"});
@@ -285,7 +372,7 @@ fn claude(home: &Path, native: bool) -> Value {
     // Claude returns valid signed-out JSON with exit code 1.
     if let Ok(bytes) = capture_with_exit(cmd, &[], 5, Some(1)) {
         if let Ok(a) = serde_json::from_slice::<Value>(&bytes) {
-            result["identity"] = json!({"email":text(&a,"email"),"plan":text(&a,"subscriptionType"),"organization":text(&a,"orgName"),"auth_method":text(&a,"authMethod")});
+            result["identity"] = json!({"email":text(&a,"email"),"plan":text(&a,"subscriptionType"),"organization":text(&a,"orgName"),"organization_id":text(&a,"orgId"),"auth_method":text(&a,"authMethod")});
             if a["loggedIn"] == false {
                 result["status"] = json!(claude::missing_login_status(home, native));
                 result["auth_status"] = result["status"].clone();
@@ -293,7 +380,7 @@ fn claude(home: &Path, native: bool) -> Value {
                     result["identity"] = claude::saved_identity(home, native);
                     result["identity_cached"] = json!(true);
                 }
-                return result;
+                return Ok(result);
             }
             if a["loggedIn"] == true { result["auth_status"] = json!("signed_in"); }
         }
@@ -327,43 +414,33 @@ fn claude(home: &Path, native: bool) -> Value {
         // status or refresh credentials just to display a quota report.
         // WhiteWh fork: but say so, as for Kimi: opening Claude Code renews the
         // grant, or a revoked one needs a new sign-in. "limits n/a" said neither.
+        // Only the usage status says it; the account's auth status stays.
         result["status"] = json!("expired");
-        return result;
+        return Ok(result);
     }
     // Native OAuth usage endpoint used by /usage; never sends a message or refreshes a grant.
-    let usage = http_json(
-        "https://api.anthropic.com/api/oauth/usage",
-        auth["accessToken"].as_str().unwrap_or(""),
-        &["anthropic-beta: oauth-2025-04-20"],
-    );
-    if usage.as_ref().is_err_and(|e| e == UNAUTHORIZED) {
+    // Without a current native account identity, neither a prior identity nor
+    // its quota/cooldown can safely stand in for this account.
+    if result["auth_status"] != "signed_in" || text(&result["identity"], "email").is_empty() {
+        return Ok(result);
+    }
+    let key = claude_usage::key(home, &result["identity"], &credentials, true);
+    let same_sample = seed["_claude_usage_key"].as_str() == Some(&key)
+        || (seed["_claude_usage_key"].is_null()
+            && claude_usage::same_identity(&result["identity"], &seed["identity"]));
+    USAGE_REFUSED.with(|refused| refused.set(false));
+    let quota = claude_usage::get(&config.dir, &key, if same_sample { seed } else { &Value::Null }, now, || {
+        claude_http("https://api.anthropic.com/api/oauth/usage", auth["accessToken"].as_str().unwrap_or(""))
+    })?;
+    result["_claude_usage_key"] = json!(key);
+    for field in ["windows", "status", "checked_at", "attempted_at", "retry_at"] {
+        result[field] = quota[field].clone();
+    }
+    // WhiteWh fork: the service refused the token (not a cooldown or an outage).
+    if USAGE_REFUSED.with(std::cell::Cell::take) && result["status"] != "ok" {
         result["status"] = json!("expired");
     }
-    if let Ok(usage) = usage {
-        let mut windows = Vec::new();
-        for (key, label, minutes) in [
-            ("five_hour", "", 300),
-            ("seven_day", "", 10080),
-            ("seven_day_sonnet", "Sonnet", 10080),
-            ("seven_day_opus", "Opus", 10080),
-        ] {
-            let w = &usage[key];
-            if let Some(w) = window(
-                key,
-                label,
-                w["utilization"].as_f64(),
-                Some(minutes),
-                w["resets_at"].clone(),
-            ) {
-                windows.push(w);
-            }
-        }
-        if !windows.is_empty() {
-            result["windows"] = json!(windows);
-            result["status"] = json!("ok");
-        }
-    }
-    result
+    Ok(result)
 }
 struct KimiEnvironment {
     credentials: String,
@@ -665,7 +742,7 @@ fn cache_path(config: &Config, id: &str, home: &Path) -> PathBuf {
 // Catalog loading remains read-only and does not contact providers. A cached
 // identity is usable only for the same home and unchanged file credentials.
 pub(super) fn catalog_status(config: &Config, id: &str, provider: &str, home: &Path) -> Value {
-    let cache = read_json(&cache_path(config, id, home));
+    let cache = claude_usage::read_cache(&cache_path(config, id, home)).unwrap_or(Value::Null);
     if cache["signature"] != signature(home, provider) {
         return Value::Null;
     }
@@ -722,7 +799,7 @@ pub(super) fn catalog_status(config: &Config, id: &str, provider: &str, home: &P
     if let Some(unlimited) = data["credits"]["unlimited"].as_bool() {
         credits["unlimited"] = json!(unlimited);
     }
-    json!({"identity":identity,"status":text(data,"status"),"auth_status":text(data,"auth_status"),"checked_at":data["checked_at"],
+    json!({"identity":identity,"status":text(data,"status"),"auth_status":text(data,"auth_status"),"checked_at":data["checked_at"],"retry_at":data["retry_at"],
         "windows":rows("windows",&["id","label","used_percent","window_minutes","resets_at"]),
         "balances":rows("balances",&["kind","balance","currency"]),"credits":credits})
 }
@@ -783,24 +860,30 @@ pub(super) fn inspect(config: &Config, args: &[String]) -> Result<Value> {
     let signature = signature(&home, &profile.provider);
     let cache_dir = config.dir.join("account-status");
     let cache_path = cache_path(config, &id, &home);
-    let cached = read_json(&cache_path);
+    let cached = claude_usage::read_cache(&cache_path)?;
     let refresh = args.iter().any(|s| s == "--refresh");
-    let mut data = if !refresh
-        && cached["signature"] == signature
+    let same = cached["signature"] == signature;
+    // Claude must observe native identity before reusing any quota/cooldown:
+    // its durable auth revision deliberately excludes rotating bearer tokens.
+    let mut data = if profile.provider != "claude" && same && !refresh
         && now().saturating_sub(cached["data"]["checked_at"].as_u64().unwrap_or(0)) < 60
     {
         cached["data"].clone()
     } else {
         let mut data = match profile.provider.as_str() {
             "codex" => codex(&home, native),
-            "claude" => claude(&home, native),
+            "claude" => claude(config, &home, native, if same { &cached["data"] } else { &Value::Null })?,
             "kimi" => kimi(&home),
             "dsh" => dsh(&home),
             "opencode"=>json!({"status":"configured","source":"OpenCode","identity":{},"windows":[],"reason":"OpenCode uses its native inference-provider configuration; quota inspection is not available"}),
             _ => Value::Null,
         };
-        retain_cached_identity(&mut data, &cached, &signature);
-        data["checked_at"] = json!(now());
+        if profile.provider != "claude" {
+            retain_cached_identity(&mut data, &cached, &signature);
+        }
+        if data.get("checked_at").is_none() {
+            data["checked_at"] = json!(now());
+        }
         private_dir(&cache_dir)?;
         let mut f = tempfile::NamedTempFile::new_in(&cache_dir)?;
         platform::make_private(f.as_file())?;
@@ -813,6 +896,9 @@ pub(super) fn inspect(config: &Config, args: &[String]) -> Result<Value> {
             .map_err(|_| Error::new(1, "Could not cache account status."))?;
         data
     };
+    if let Some(data) = data.as_object_mut() {
+        data.remove("_claude_usage_key");
+    }
     data["id"] = json!(id);
     data["provider"] = json!(profile.provider);
     data["label"] = json!(profile.label);
@@ -828,6 +914,58 @@ pub(super) fn inspect(config: &Config, args: &[String]) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_429_headers_survive_curl_refusing_an_oversized_error_body() {
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/usage", server.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = server.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0]; stream.read_exact(&mut byte).unwrap(); request.push(byte[0]);
+            }
+            write!(stream, "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1000\r\nContent-Length: 1048577\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        let before = now();
+        let reply = claude_http(&url, "synthetic-token");
+        assert!(matches!(reply, claude_usage::Reply::RateLimited(t) if t >= before + 1000));
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn claude_http_fixture_preserves_429_cooldown_without_repeating_the_request() {
+        use std::net::TcpListener;
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/usage", server.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            for (status, headers, body) in [
+                ("200 OK", "", r#"{"five_hour":{"utilization":28,"resets_at":"2030-01-01T00:00:00Z"}}"#),
+                ("429 Too Many Requests", "Retry-After: 100\r\n", r#"{"error":{"type":"rate_limit_error"}}"#),
+            ] {
+                let (mut stream, _) = server.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0]; stream.read_exact(&mut byte).unwrap(); request.push(byte[0]);
+                }
+                assert!(String::from_utf8(request).unwrap().contains("Authorization: Bearer synthetic-token"));
+                write!(stream, "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let sampled = now().saturating_sub(360);
+        let first = claude_usage::get(dir.path(), "fixture", &Value::Null, || sampled, || claude_http(&url, "synthetic-token")).unwrap();
+        let limited = claude_usage::get(dir.path(), "fixture", &Value::Null, now, || claude_http(&url, "synthetic-token")).unwrap();
+        assert_eq!(limited["status"], "rate_limited");
+        assert_eq!(limited["checked_at"], sampled);
+        assert_eq!(limited["windows"], first["windows"]);
+        assert!(limited["retry_at"].as_u64().unwrap() >= now() + 99);
+        worker.join().unwrap(); // Only the original two HTTP requests exist.
+        let again = claude_usage::get(dir.path(), "fixture", &Value::Null, now, || panic!("manual refresh repeated HTTP")).unwrap();
+        assert_eq!(again, limited);
+    }
 
     #[test]
     fn partial_quota_refresh_keeps_identity_only_for_same_credentials() {

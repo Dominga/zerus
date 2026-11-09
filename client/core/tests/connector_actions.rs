@@ -56,6 +56,7 @@ impl Fixture {
     }
     fn apply(&self, t: &Target, k: Kind) -> Result<connector_actions::Answer, String> {
         connector_actions::apply(&self.program(), &self.config(), t, k)
+            .map_err(|failure| failure.message())
     }
     fn effects(&self) -> Vec<String> {
         fs::read_to_string(self.path("effects.ndjson"))

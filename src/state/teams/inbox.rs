@@ -18,11 +18,21 @@ const SUMMARY_CHARS: usize = 300;
 pub(crate) const URGENT_KINDS: [&str; 7] = ["question", "permission", "terminal_question", "crashed", "input_blocked", "member_stuck", "urgent_unread"];
 
 pub(crate) fn urgency<'a>(items: impl IntoIterator<Item = &'a Item>) -> super::working::Urgency {
-    if items.into_iter().any(|item| URGENT_KINDS.contains(&item.kind)) {
+    // Task #460 (owner, 2026-11-09): an item whose command asks nothing of the
+    // lead ("no action") is information, whatever its kind: it never makes the
+    // digest urgent.
+    if items.into_iter().any(|item| !informational(item) && URGENT_KINDS.contains(&item.kind)) {
         super::working::Urgency::Urgent
     } else {
         super::working::Urgency::Normal
     }
+}
+
+/// Task #460: an item the lead cannot act on is information for the digest:
+/// its command starts with "no action". It never makes the digest urgent, and
+/// its key is fixed while it is open, so it is told once.
+pub(crate) fn informational(item: &Item) -> bool {
+    item.command.starts_with("no action")
 }
 
 /// One thing on the lead's desk. `key` names it across ticks, so the coalesced
@@ -166,7 +176,9 @@ fn reviewer_of(team: &Team, item: &Item) -> String {
         // #538 N3: a report a sub-lead may not accept is the lead's.
         ("report", Some(task)) if super::pipeline::lead_accepts_only(task) => team.lead.clone(),
         // The lead's own task has no reviewer: it stays the lead's.
-        ("report" | "question" | "stalled" | "interim_report", Some(task)) if !task.assignee.is_empty() && task.assignee != team.lead => {
+        // Task #362: a member's missing report is its reviewer's, so the lead
+        // or the sub-lead it reports to can use the member's last reply.
+        ("report" | "question" | "stalled" | "interim_report" | "no_report", Some(task)) if !task.assignee.is_empty() && task.assignee != team.lead => {
             team.reviewer_of(&task.assignee)
         }
         _ => team.lead.clone(),
@@ -192,21 +204,34 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             subagents:Value::Null });
     }
 
+    // Task #406 (owner, 2026-11-09): one alarm when ready tasks wait while a
+    // phase of the worker's tick has held it for five minutes, naming it.
+    if team.status == TeamStatus::Running {
+        if let Some(item) = worker_stall(team, crate::state::now()) {
+            items.push(item);
+        }
+    }
+
     // A queued merge that failed and was rolled back waits for the lead to fix
     // the runner/tests map or to retry it.
     if active {
         for task in &team.tasks {
             let Some(entry) = task.merge.as_ref().filter(|entry| {
-                entry.state == "queued"
+                (entry.state == "queued" || entry.state == "blocked")
                     && !entry.note.is_empty()
                     && entry.wait_reason != super::model::MergeWaitReason::Busy
             }) else { continue };
-            let next = match entry.wait_reason {
+            // Task #370: a blocked landing offers the cherry-pick of the task's own commit.
+            let next = if entry.blocked {
+                "Land the task's own commit as a cherry-pick: the merge would carry a rejected attempt's commit.".to_owned()
+            } else {
+                match entry.wait_reason {
                 super::model::MergeWaitReason::Rollback => "The merge could not be rolled back; revert it, then retry or reject.",
                 super::model::MergeWaitReason::Runners => "Fix the runner or machine config, then accept or retry the merge.",
                 super::model::MergeWaitReason::Selection => "Fix the tests map, then accept or retry the merge.",
                 super::model::MergeWaitReason::Ancestry => "Check the lead branch and git access, then accept or retry the merge.",
                 _ => "Fix the cause, then accept or retry the merge.",
+                }.to_owned()
             };
             items.push(Item {
                 subagents: Value::Null,
@@ -217,8 +242,8 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
                 since: entry.at,
                 summary: summary(&format!("#{} merge waits: {}", task.id, entry.note)),
                 command: format!(
-                    "{} | hgs team retry --json",
-                    json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id})
+                    "{} | hgs team land --json",
+                    json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id,"cherry_pick":entry.blocked})
                 ),
                 detail: format!("{} {next}", entry.note),
             });
@@ -232,11 +257,17 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             let task = entry["task"].as_u64().unwrap_or_default() as u32;
             let why = entry["why"].as_str().unwrap_or_default();
             let resolve = entry["resolve"].as_u64();
-            let next = match resolve {
-                Some(resolve) => format!("The resolve task #{resolve} resolves the conflict; the landing retries once it is decided."),
-                None => "Retry the landing, or resolve it by hand and accept again.".to_owned(),
+            // Task #370: a blocked landing offers a cherry-pick of the task's
+            // own commit; the merge would carry a rejected attempt's commit.
+            let blocked = entry["blocked"].as_bool() == Some(true);
+            let next = if blocked {
+                "The accepted commit carries a commit of a rejected attempt, so the queue refuses to merge its branch. Land the task's own commit as a cherry-pick.".to_owned()
+            } else {
+                match resolve {
+                    Some(resolve) => format!("The resolve task #{resolve} resolves the conflict; the landing retries once it is decided."),
+                    None => "Land it again, or resolve it by hand and accept again.".to_owned(),
+                }
             };
-            let target = resolve.unwrap_or(u64::from(task));
             items.push(Item {
                 subagents: Value::Null,
                 kind: "unlanded",
@@ -245,7 +276,7 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
                 member: team.name_of(team.task(task).map(|task| task.assignee.as_str()).unwrap_or_default()),
                 since: team.task(task).and_then(|task| task.merge.as_ref()).map_or(team.updated, |entry| entry.at),
                 summary: summary(&format!("#{task} is accepted but not on the integration line: {why}")),
-                command: format!("{} | hgs team retry --json", json!({"request_id":PLACEHOLDER,"team":team.id,"task":target})),
+                command: format!("{} | hgs team land --json", json!({"request_id":PLACEHOLDER,"team":team.id,"task":task,"cherry_pick":blocked})),
                 detail: format!("Accepted work lands on {} ({}) at acceptance through the queue. {next}", landing["branch"].as_str().unwrap_or_default(), landing["head"].as_str().unwrap_or_default()),
             });
         }
@@ -312,6 +343,27 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
                     json!({"request_id":PLACEHOLDER,"team":team.id,"kind":"install-tool","offer":offer.id,
                         "reason":format!("{needs}: {}", offer.why)})
                 ),
+            });
+        }
+    }
+    // Task #364: one notice when the team's build folders pass the owner's
+    // limit; it stays while they do and is never repeated per folder.
+    if active {
+        if let Some((bytes, limit)) = crate::state::build_dirs::team_over(&team.id) {
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "build_folders",
+                key: format!("build_folders:{}", team.id),
+                task: None,
+                member: String::new(),
+                since: crate::state::now(),
+                summary: summary(&format!(
+                    "The team's build folders hold {} (over your {} limit); Clean removes the finished tasks' targets",
+                    crate::state::build_dirs::gigabytes(bytes),
+                    crate::state::build_dirs::gigabytes(limit)
+                )),
+                command: format!("{} | hgs team disk --json", json!({"action":"list","by":"human"})),
+                detail: "Settings > Build folders shows each team's folders; Clean… removes the targets of its finished tasks after your confirmation.".into(),
             });
         }
     }
@@ -634,7 +686,7 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             member: name.clone(),
             since: crate::state::now(),
             summary: summary(&format!("Draining {name}: {listed} still to decide; {why}")),
-            command: format!("{} | hgs team status --json", json!({"team":team.id})),
+            command: format!("{} | hgs team status --json", json!({"team":team.id,"task":waiting[0]})),
             detail: format!("{name} is draining. {listed} keep it open: {why}."),
         });
     }
@@ -725,12 +777,13 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
                 if flags.is_empty() { base } else { format!("{base}: {flags}") }
             }),
             command: format!(
-                "{} | hgs team test results --json",
-                json!({"request_id":PLACEHOLDER,"team":team.id,"record":notice.record})
+                "{} | hgs team test --json",
+                json!({"request_id":PLACEHOLDER,"team":team.id,"action":"results","record":notice.record})
             ),
             detail: format!(
-                "Asked by {}. The log and excerpt stay in record {}; read them with hgs team test results --json, not from this card.",
+                "Asked by {}. The log and excerpt stay in record {}; read them with hgs team test --json and action results, record {}, not from this card.",
                 if notice.asked_by.is_empty() { "an unknown caller" } else { notice.asked_by.as_str() },
+                notice.record,
                 notice.record
             ),
         });
@@ -901,7 +954,7 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             member: "owner".into(),
             since: decided_at(proposal),
             summary: summary(&text),
-            command: format!("{} | hgs team status --json", json!({"request_id":PLACEHOLDER,"team":team.id})),
+            command: format!("{} | hgs team inbox --json", json!({"request_id":PLACEHOLDER,"team":team.id})),
             detail: proposal["note"].as_str().unwrap_or_default().to_owned(),
         });
     }
@@ -1000,8 +1053,11 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
         });
     }
     for task in &team.tasks {
-        // A report to decide (C2).
-        if task.status == TaskStatus::Submitted {
+        // A report to decide (C2). Task #443: a report the lead accepted whose
+        // work waits for its landing (the queue's, or a hand landing) is
+        // decided: it is never a decision waiting and gets no reminder; the
+        // lead's status names it in one "accepted, waiting to land" line.
+        if task.status == TaskStatus::Submitted && !super::merge_queue::waits_for_landing(task) {
             if let Some(attempt) = task.attempts.iter().rev().find(|attempt| attempt.state == AttemptState::Reported) {
                 if let Some(report) = &attempt.report {
                     items.push(Item {
@@ -1110,7 +1166,7 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
                         member: team.name_of(&attempt.member),
                         since: interim.at,
                         summary: summary(&format!("Interim: {}", interim.text)),
-                        command: format!("{} | hgs team status --json", json!({"team":team.id})),
+                        command: format!("{} | hgs team status --json", json!({"team":team.id,"task":task.id})),
                         detail: interim.text.clone(),
                     });
                 }
@@ -1242,7 +1298,7 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             member: name.clone(),
             since: asked.at,
             summary: summary(&format!("{name} waits for an answer only its Terminal takes: {}", terminal_title(asked))),
-            command: format!("{} | hgs team status --json", json!({"team":team.id})),
+            command: format!("{} | hgs team inbox --json", json!({"team":team.id})),
             detail: format!(
                 "Zerus cannot answer it, so neither can you: {} Tell the owner to open {name}'s Terminal and answer it there; \
                  the member continues once it is answered.{}",
@@ -1290,7 +1346,8 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             since: ended,
             summary: summary(&format!("{role} ended its turn {minutes} min ago on #{} without a report: {}", task.id, task.title)),
             // One action: this reply as the report. The CLI reads the attempt's
-            // kept reply (or its session's last one); the lead decides.
+            // kept reply (or its session's last one); the lead, or the member's
+            // sub-lead, decides (task #362: the lead may run it too).
             command: format!(
                 "{} | hgs team use-last-reply --json",
                 json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id,"attempt":attempt.id})
@@ -1315,7 +1372,7 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             member: role.clone(),
             since: limit.at,
             summary: summary(&format!("{role} stopped by a usage limit{reset}")),
-            command: format!("{} | hgs team status --json", json!({"team":team.id})),
+            command: format!("{} | hgs team inbox --json", json!({"team":team.id})),
             detail: if limit.detail.is_empty() { String::new() } else { summary(&limit.detail) },
         });
     }
@@ -1433,34 +1490,31 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
     }
     // Task #275: a sandboxed member's queued call the worker refused or that
     // failed; the member is told as a team message and the lead reads why.
+    // Task #460 (owner, 2026-11-09: 'junk reminders'): each failure is one
+    // informational item, keyed by its own request id - never by the oldest
+    // failure's time. A failure ageing out of the 24 h window closes its item
+    // and makes no new notice; only a genuinely new failure is told, once. Its
+    // command asks nothing of the lead, so it never makes the digest urgent.
     if active || finished {
         let cutoff = crate::state::now() - 24.0 * 3600.0;
-        let failures: Vec<&Value> = team
-            .outbox_failures
-            .iter()
-            .filter(|failure| failure["at"].as_f64().unwrap_or(0.0) >= cutoff)
-            .collect();
-        if !failures.is_empty() {
-            let since = failures.iter().filter_map(|failure| failure["at"].as_f64()).fold(f64::INFINITY, f64::min);
-            let named: Vec<String> = failures
-                .iter()
-                .map(|failure| {
-                    let member = failure["member"].as_str().unwrap_or_default();
-                    let op = failure["op"].as_str().unwrap_or("call");
-                    let error = failure["error"].as_str().unwrap_or("no reason recorded");
-                    format!("{member}'s queued {op}: {error}")
-                })
-                .collect();
+        for failure in team.outbox_failures.iter().filter(|failure| failure["at"].as_f64().unwrap_or(0.0) >= cutoff) {
+            let at = failure["at"].as_f64().unwrap_or(0.0);
+            let member = failure["member"].as_str().unwrap_or_default();
+            let op = failure["op"].as_str().unwrap_or("call");
+            let error = failure["error"].as_str().unwrap_or("no reason recorded");
+            // A record from before task #275 carries no id; its time still
+            // names it, and every failure with an id keeps that id for good.
+            let id = failure["request_id"].as_str().filter(|id| !id.is_empty()).map(str::to_owned).unwrap_or_else(|| format!("{at:.0}"));
             items.push(Item {
                 subagents: Value::Null,
                 kind: "refused_queued_call",
-                key: format!("refused_queued_call:{since:.0}"),
+                key: format!("refused_queued_call:{id}"),
                 task: None,
                 member: "Zerus".into(),
-                since,
-                summary: summary(&format!("A queued call was refused: {}", named.join("; "))),
+                since: at,
+                summary: summary(&format!("A queued {op} from {member} was refused: {error}")),
                 command: "no action: the member was told at its next safe point; hgs team status --json shows the team".into(),
-                detail: named.join("; "),
+                detail: String::new(),
             });
         }
     }
@@ -1692,7 +1746,7 @@ pub(crate) fn text_with(team: &Team, items: &[Item], again: &[Item], now: f64) -
         // summary line.
         if item.kind == "report" {
             if let Some(task) = item.task {
-                text += &format!("   Full report: task #{task} in {} | hgs team status --json\n", json!({"team":team.id}));
+                text += &format!("   Full report: task #{task} in {} | hgs team status --json\n", json!({"team":team.id,"task":task}));
             }
         }
     }
@@ -2084,9 +2138,41 @@ pub(crate) fn full_run_text(proposal: &super::model::FullRunProposal) -> String 
 }
 
 /// #718: what a report's change does to the tests, on the lead's card.
+/// Task #406: the alarm for ready tasks behind a worker held by one phase.
+pub(crate) fn worker_stall(team: &Team, now: f64) -> Option<Item> {
+    let ready = super::plan::ready(team);
+    let first = *ready.first()?;
+    let (step, held) = super::tick_clock::stall(now)?;
+    let minutes = (held / 60.0).floor() as u64;
+    Some(Item {
+        kind: "stalled",
+        key: "worker_stall".into(),
+        task: Some(first),
+        member: team.lead.clone(),
+        since: now - held,
+        summary: format!(
+            "{} ready task(s) wait (#{first} first): the team worker has been held by '{step}' for {minutes} min and hands out nothing",
+            ready.len()
+        ),
+        command: "hgs team worker --stop (it ends within 5 s; the next team command starts it again)".into(),
+        detail: "hgs team status --json shows worker_tick: the phase running now, the last tick and the slowest recent one.".into(),
+        subagents: Value::Null,
+    })
+}
+
 pub(crate) fn tests_text(tests: &Value) -> String {
     if tests["files"].as_u64().unwrap_or(0) == 0 {
         return "Tests: no test file changed.".into();
+    }
+    // Task #401: a change too large to read file by file has its counts only.
+    if tests["bounded"] == true {
+        return format!(
+            "Tests: +{} -{} lines in {} test file(s) of {} changed; functions not listed for a change this large.",
+            tests["lines_added"].as_u64().unwrap_or(0),
+            tests["lines_removed"].as_u64().unwrap_or(0),
+            tests["files"].as_u64().unwrap_or(0),
+            tests["changed_files"].as_u64().unwrap_or(0)
+        );
     }
     let added = tests["functions_added"]["total"].as_u64().unwrap_or(0);
     let removed = tests["functions_removed"]["total"].as_u64().unwrap_or(0);
@@ -2530,7 +2616,7 @@ mod tests {
         assert!(text.contains("Done and checked") && text.contains("Which database?"), "{text}");
         assert!(text.contains("hgs team accept --json") && text.contains("hgs team reply --json"), "{text}");
         // N7: the message says how to read the whole report.
-        assert!(text.contains("Full report: task #1") && text.contains("hgs team status --json"), "{text}");
+        assert!(text.contains("Full report: task #1") && text.contains("hgs team status --json") && text.contains("\"task\":1"), "{text}");
         assert!(text.contains("hgs team inbox --json"), "{text}");
         // A long list is summarized, never sent whole.
         let mut many = team.clone();
@@ -2776,6 +2862,34 @@ mod told_tests {
         // Both leave the open list: the report is forgotten, the decision kept.
         mark_told(&mut told, &[], &Default::default());
         assert_eq!(told, vec!["proposal:p1".to_owned()]);
+    }
+
+    /// Task #364: the lead hears once when a team's build folders pass the
+    /// owner's limit.
+    #[test]
+    fn the_build_folders_notice_is_one_item_while_a_team_is_over_the_limit() {
+        let state = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(state.path(), || {
+            use crate::state::teams::ops;
+            let (mut team, _) = ops::create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+            ops::apply(&mut team, "plan", &json!({"members":[{"id":"dev","role":"Backend","agent":"codex"}],"tasks":[{"id":1,"title":"A","assignee":"dev"}]}), &ops::Actor::Human, &std::collections::BTreeSet::new(), &mut Vec::new()).unwrap();
+            ops::apply(&mut team, "approve", &json!({}), &ops::Actor::Human, &std::collections::BTreeSet::new(), &mut Vec::new()).unwrap();
+            team.status = crate::state::teams::model::TeamStatus::Running;
+            let target = work.path().join("target");
+            std::fs::create_dir_all(&target).unwrap();
+            crate::state::build_dirs::note(crate::state::build_dirs::Use {
+                path: target.clone(), kind: "cargo_target", origin: "team_run", team: team.id.clone(), ..Default::default()
+            })
+            .unwrap();
+            assert!(!items(&team).iter().any(|item| item.kind == "build_folders"));
+            crate::state::build_dirs::test_measure(&target, 200 * 1024 * 1024 * 1024, 100).unwrap();
+            let found: Vec<Item> = items(&team).into_iter().filter(|item| item.kind == "build_folders").collect();
+            assert_eq!(found.len(), 1, "{found:?}");
+            assert!(found[0].summary.contains("over your 100.0 GB limit"), "{}", found[0].summary);
+            // Still one on the next read: the notice fires once while it holds.
+            assert_eq!(items(&team).iter().filter(|item| item.kind == "build_folders").count(), 1);
+        });
     }
 }
 

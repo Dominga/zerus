@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Hook consent in an isolated native-like TUI; never touches real hook trust."""
+import json
 import os
 import signal
 import unittest
@@ -74,7 +75,7 @@ class HooksTrust(unittest.TestCase):
 
     def payload(self, choice='review', **updates):
         result = dict(request_id=str(uuid.uuid4()), expected_run_id=self.run_id,
-                      expected_conversation_id='', question_id=self.card['question_id'],
+                      expected_conversation_id=self.conversation_id, question_id=self.card['question_id'],
                       expected_question_hash=self.card['question_hash'],
                       answers=[dict(question_id='hooks_trust', selected_option_ids=[choice], text='')])
         result.update(updates)
@@ -136,6 +137,33 @@ class HooksTrust(unittest.TestCase):
                 self.write_record()
                 self.assertEqual(self.inspect()['pending_questions'], [])
                 self.record[field] = previous
+
+    def test_bound_restore_shows_review_despite_pending_input_and_never_replays_it(self):
+        self.conversation_id = str(uuid.uuid4())
+        self.record.update(startup_kind='resume', conversation_id=self.conversation_id,
+                           expected_id=self.conversation_id, restore_archive_id=str(uuid.uuid4()),
+                           input_pending_at=123.)
+        self.write_record()
+        # An earlier fresh-start card cannot answer this saved binding.
+        self.answer(self.payload('trust'), success=False)
+        self.assertEqual(self.received(), b'')
+        state = self.inspect()
+        self.card = state['pending_questions'][0]
+        self.assertEqual(state['phase'], 'approval')
+        self.assertEqual(self.card['conversation_id'], self.conversation_id)
+        self.assertEqual(state['attention_id'], self.card['question_id'])
+        refused = fixtures.InputTransport.send(
+            self, fixtures.InputTransport.payload(self, text='DO NOT REPLAY'), success=False)
+        self.assertIn('hook trust review', refused)
+        self.assertEqual(self.received(), b'')
+        request = self.payload('continue_without_trusting')
+        receipt = self.answer(request)
+        self.assertEqual(receipt['status'], 'answered')
+        before = self.received()
+        self.assertEqual(self.answer(request), receipt)
+        self.assertEqual(self.received(), before)
+        self.assertNotIn(b'DO NOT REPLAY', before)
+        self.assertEqual(json.loads(self.record_path.read_text())['input_pending_at'], 123.)
 
     def test_no_acknowledgement_is_uncertain_and_never_retried(self):
         (self.root / 'hold-dialog').touch()

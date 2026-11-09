@@ -96,7 +96,7 @@ fn exact_previous_store_upgrade_adds_only_the_independent_worktree_leaf() {
         // Its own two tables, then the later launch, termination outcome, task
         // message, task message input, deferred send, deferred answer and
         // compact-to-send leaves.
-        before + 2 + 2 + 1 + 2 + 2 + 2 + 2 + 2
+        before + 2 + 2 + 1 + 2 + 2 + 2 + 2 + 2 + 2
     );
     // The clone leaf's original table is byte-compatible and separate.
     assert_eq!(
@@ -248,6 +248,337 @@ fn admission_is_immutable_and_same_id_returns_only_its_original_receipt() {
             .binding,
         row.receipt.binding
     );
+}
+
+fn retry(original: &Verified) -> Verified {
+    let mut intent = original.intent.clone();
+    intent.worktree_request_id = uuid::Uuid::new_v4().to_string();
+    intent.revision += 1;
+    let mut value: serde_json::Value = serde_json::from_str(&intent.original).unwrap();
+    value["worktree_id"] = json!(intent.worktree_request_id);
+    value["revision"] = json!(intent.revision);
+    value["worktree_previous"] = json!([original.plan.worktree_request_id]);
+    intent.original = value.to_string();
+    intent.verify().unwrap()
+}
+fn failed_fixture(
+    db: &mut rusqlite::Connection,
+    original: &Verified,
+    effects: serde_json::Value,
+) -> wire::Receipt {
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    let mut row = ledger::admit(&tx, original, &uuid::Uuid::new_v4().to_string(), 1).unwrap();
+    // A storage fixture only: the actual-actor control below supplies the
+    // independent positive for real custody retirement.
+    row.receipt.phase = Phase::Failed;
+    row.receipt.drained = true;
+    let mut result = json!({"schema":1,"request_id":original.plan.worktree_request_id,
+        "fingerprint":original.plan.request_fingerprint().unwrap(),"status":"failed",
+        "detail":"fixture refused before checkout"});
+    if !effects.is_null() {
+        result["effects_started"] = effects;
+    }
+    row.receipt.worktree = Some(result);
+    tx.execute("UPDATE desktop_creation_worktrees SET receipt=?1,phase='failed',drained=1 WHERE worktree_id=?2",
+        rusqlite::params![serde_json::to_string(&row.receipt).unwrap(),original.plan.worktree_request_id]).unwrap();
+    tx.execute(
+        "UPDATE desktop_creation_worktree_budget SET active=active-1 WHERE id=1",
+        [],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    row.receipt
+}
+#[test]
+fn retry_retains_the_original_and_reopen_cannot_resurrect_its_slot() {
+    let (_temp, location, mut store, epoch) = fixture();
+    let original = original(&location.configuration, &epoch);
+    let receipt = failed_fixture(&mut store.db, &original, json!(false));
+    let next = retry(&original);
+    let tx = store
+        .db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    ledger::admit(&tx, &next, &uuid::Uuid::new_v4().to_string(), 2).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(
+        ledger::load(&store.db, &original.plan.worktree_request_id)
+            .unwrap()
+            .unwrap()
+            .receipt,
+        receipt
+    );
+    assert_eq!(
+        store
+            .db
+            .query_row::<String, _, _>(
+                "SELECT creation_slot FROM desktop_creation_worktrees WHERE worktree_id=?1",
+                [&original.plan.worktree_request_id],
+                |r| r.get(0)
+            )
+            .unwrap(),
+        format!("retired:{}", original.plan.worktree_request_id)
+    );
+    assert!(store
+        .db
+        .execute(
+            "UPDATE desktop_creation_worktrees SET creation_id='changed'",
+            []
+        )
+        .is_err());
+    assert!(store
+        .db
+        .execute("DELETE FROM desktop_creation_worktrees", [])
+        .is_err());
+    drop(store);
+    let mut store = Store::open(&location, &uuid::Uuid::new_v4().to_string()).unwrap();
+    assert_eq!(
+        ledger::load(&store.db, &original.plan.worktree_request_id)
+            .unwrap()
+            .unwrap()
+            .receipt,
+        receipt
+    );
+    let tx = store
+        .db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    assert!(ledger::admit(&tx, &retry(&original), &uuid::Uuid::new_v4().to_string(), 3).is_err());
+}
+#[test]
+fn retry_rolls_back_the_slot_and_all_budget_charges_after_a_late_insert_failure() {
+    let (_temp, location, mut store, epoch) = fixture();
+    let original = original(&location.configuration, &epoch);
+    let receipt = failed_fixture(&mut store.db, &original, json!(false));
+    let budget = |db: &rusqlite::Connection| {
+        db.query_row::<(u64, u64, u64), _, _>(
+            "SELECT rows,bytes,active FROM desktop_creation_worktree_budget",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+    };
+    let before = budget(&store.db);
+    store.db.execute_batch("CREATE TRIGGER fixture_insert_failure BEFORE INSERT ON desktop_creation_worktrees BEGIN SELECT RAISE(ABORT,'late fixture refusal'); END;").unwrap();
+    let tx = store
+        .db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    assert!(ledger::admit(&tx, &retry(&original), &uuid::Uuid::new_v4().to_string(), 2).is_err());
+    drop(tx);
+    assert_eq!(budget(&store.db), before);
+    assert_eq!(
+        ledger::load(&store.db, &original.plan.worktree_request_id)
+            .unwrap()
+            .unwrap()
+            .receipt,
+        receipt
+    );
+    assert_eq!(
+        store
+            .db
+            .query_row::<String, _, _>(
+                "SELECT creation_slot FROM desktop_creation_worktrees",
+                [],
+                |r| r.get(0)
+            )
+            .unwrap(),
+        original.binding.creation_id
+    );
+}
+#[test]
+fn retry_requires_literal_no_effects_and_the_same_original_geometry() {
+    for effects in [
+        serde_json::Value::Null,
+        json!("false"),
+        json!(0),
+        json!(true),
+    ] {
+        let (_temp, location, mut store, epoch) = fixture();
+        let original = original(&location.configuration, &epoch);
+        failed_fixture(&mut store.db, &original, effects);
+        let tx = store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        assert!(
+            ledger::admit(&tx, &retry(&original), &uuid::Uuid::new_v4().to_string(), 2).is_err()
+        );
+    }
+    for key in [
+        "expected_machine",
+        "target",
+        "worktree_common",
+        "destination",
+        "branch",
+    ] {
+        let (_temp, location, mut store, epoch) = fixture();
+        let original = original(&location.configuration, &epoch);
+        failed_fixture(&mut store.db, &original, json!(false));
+        let mut next = retry(&original).intent;
+        let mut value: serde_json::Value = serde_json::from_str(&next.original).unwrap();
+        value[key] = json!(match key {
+            "expected_machine" => "33333333-3333-4333-8333-333333333333",
+            "branch" => "another-branch",
+            _ => "/other/path",
+        });
+        next.original = value.to_string();
+        let tx = store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        assert!(ledger::admit(
+            &tx,
+            &next.verify().unwrap(),
+            &uuid::Uuid::new_v4().to_string(),
+            2
+        )
+        .is_err());
+    }
+    for phase in [Phase::Unknown, Phase::Created, Phase::Running] {
+        let (_temp, location, mut store, epoch) = fixture();
+        let original = original(&location.configuration, &epoch);
+        let mut receipt = failed_fixture(&mut store.db, &original, json!(false));
+        receipt.phase = phase;
+        if phase == Phase::Running {
+            receipt.drained = false;
+        }
+        // A deliberately inconsistent record must refuse too; no migration or
+        // load is allowed to turn it into a safe predecessor.
+        store
+            .db
+            .execute(
+                "UPDATE desktop_creation_worktrees SET receipt=?1 WHERE worktree_id=?2",
+                rusqlite::params![
+                    serde_json::to_string(&receipt).unwrap(),
+                    original.plan.worktree_request_id
+                ],
+            )
+            .unwrap();
+        let tx = store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        assert!(
+            ledger::admit(&tx, &retry(&original), &uuid::Uuid::new_v4().to_string(), 2).is_err()
+        );
+    }
+}
+#[test]
+fn malformed_failed_results_and_concurrent_attempts_never_share_a_slot() {
+    for (field, value) in [
+        ("schema", json!(2)),
+        ("detail", json!(null)),
+        ("resource_error", json!("unknown resource")),
+        ("fingerprint", json!("0".repeat(64))),
+    ] {
+        let (_temp, location, mut store, epoch) = fixture();
+        let original = original(&location.configuration, &epoch);
+        let mut receipt = failed_fixture(&mut store.db, &original, json!(false));
+        receipt.worktree.as_mut().unwrap()[field] = value;
+        store
+            .db
+            .execute(
+                "UPDATE desktop_creation_worktrees SET receipt=?1 WHERE worktree_id=?2",
+                rusqlite::params![
+                    serde_json::to_string(&receipt).unwrap(),
+                    original.plan.worktree_request_id
+                ],
+            )
+            .unwrap();
+        let tx = store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        assert!(
+            ledger::admit(&tx, &retry(&original), &uuid::Uuid::new_v4().to_string(), 2).is_err(),
+            "{field}"
+        );
+    }
+    let (_temp, location, mut store, epoch) = fixture();
+    let original = original(&location.configuration, &epoch);
+    let old = failed_fixture(&mut store.db, &original, json!(false));
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let mut threads = Vec::new();
+    for _ in 0..2 {
+        let path = location.root.join("state.sqlite3");
+        let intent = retry(&original).intent;
+        let barrier = barrier.clone();
+        threads.push(std::thread::spawn(move || {
+            let mut db = rusqlite::Connection::open_with_flags(
+                path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )
+            .unwrap();
+            db.busy_timeout(std::time::Duration::from_secs(2)).unwrap();
+            barrier.wait();
+            let tx = db
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            if ledger::admit(
+                &tx,
+                &intent.verify().unwrap(),
+                &uuid::Uuid::new_v4().to_string(),
+                2,
+            )
+            .is_ok()
+            {
+                tx.commit().unwrap();
+                true
+            } else {
+                false
+            }
+        }));
+    }
+    assert_eq!(
+        threads
+            .into_iter()
+            .map(|t| usize::from(t.join().unwrap()))
+            .sum::<usize>(),
+        1
+    );
+    assert_eq!(
+        ledger::load(&store.db, &original.plan.worktree_request_id)
+            .unwrap()
+            .unwrap()
+            .receipt,
+        old
+    );
+    assert_eq!(ledger::undrained(&store.db).unwrap(), 1);
+}
+
+#[test]
+fn slots_upgrade_preserves_the_exact_old_receipt_and_immutable_identity() {
+    let (_temp, location, mut store, epoch) = fixture();
+    let original = original(&location.configuration, &epoch);
+    let receipt = failed_fixture(&mut store.db, &original, json!(false));
+    rewind_slots(&store.db);
+    store
+        .db
+        .pragma_update(None, "user_version", SLOTS_SCHEMA - 1)
+        .unwrap();
+    drop(store);
+    let mut store = Store::open(&location, &uuid::Uuid::new_v4().to_string()).unwrap();
+    assert_eq!(
+        ledger::load(&store.db, &original.plan.worktree_request_id)
+            .unwrap()
+            .unwrap()
+            .receipt,
+        receipt
+    );
+    let tx = store
+        .db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    ledger::admit(&tx, &retry(&original), &uuid::Uuid::new_v4().to_string(), 2).unwrap();
+    tx.commit().unwrap();
+    assert!(store
+        .db
+        .execute("UPDATE desktop_creation_worktrees SET source='{}'", [])
+        .is_err());
 }
 
 #[test]
@@ -628,6 +959,350 @@ mod actor {
         }
     }
     #[test]
+    fn a_typed_slot_refusal_keeps_the_original_native_charge_and_reason() {
+        let mut f = Fixture::new(|plan, control| {
+            (control.before)(Step::Reserve)?;
+            Ok(json!({"schema":1,"request_id":plan.worktree_request_id,
+                "fingerprint":plan.request_fingerprint().unwrap(),"status":"failed",
+                "effects_started":false,"detail":"fixture pre-effect failure"}))
+        });
+        let first = f.original();
+        assert!(f.admit(&first).accepted);
+        let next = retry(&first);
+        let refused = f.admit(&next);
+        assert!(!refused.accepted);
+        assert_eq!(refused.code, "creation_worktree_predecessor_unsettled");
+        assert!(refused
+            .refusal(&next.intent)
+            .unwrap()
+            .contains("previous attempt"));
+        assert_eq!(ledger::undrained(&f.store.db).unwrap(), 1);
+        assert!(ledger::load(&f.store.db, &next.plan.worktree_request_id)
+            .unwrap()
+            .is_none());
+        f.until("original physical drain", |f| f.row(&first).receipt.drained);
+        assert!(f.admit(&next).accepted);
+        f.until("new original physical drain", |f| {
+            f.row(&next).receipt.drained
+        });
+    }
+
+    #[test]
+    fn a_legacy_unknown_card_stops_through_the_real_reducer_rpc_and_receipt_lane() {
+        use zerus_client_core::creation::{
+            self, Answer, Call, Creations, Effect, Journal, Placement,
+        };
+        struct Places;
+        impl Placement for Places {
+            fn resolve(
+                &mut self,
+                _: &mut serde_json::Value,
+                _: &serde_json::Value,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        // Use the maintained reducer and its actual ordered durable-write
+        // barriers, not an extracted transition or a synthesized stopped row.
+        fn flush(
+            queue: &mut Creations,
+            file: &std::path::Path,
+            effects: Vec<Effect>,
+        ) -> Vec<(u64, Call)> {
+            let mut pending: std::collections::VecDeque<_> = effects.into();
+            let mut calls = Vec::new();
+            while let Some(effect) = pending.pop_front() {
+                match effect {
+                    Effect::Write { write, bytes, .. } => {
+                        let ok =
+                            zerus_client_core::fsx::write_private_durable(file, &bytes).is_ok();
+                        assert!(ok);
+                        pending.extend(queue.written(write, ok));
+                    }
+                    Effect::Call { flight, call } => calls.push((flight, call)),
+                    Effect::Launch { .. } => panic!("Stop must not launch"),
+                    _ => (),
+                }
+            }
+            calls
+        }
+        let mut f = Fixture::new(|plan, control| {
+            (control.before)(Step::Reserve)?;
+            Ok(json!({"schema":1,"request_id":plan.worktree_request_id,
+                "fingerprint":plan.request_fingerprint().unwrap(),"status":"failed",
+                "effects_started":false,"detail":"fixture pre-effect failure"}))
+        });
+        let first = f.original();
+        assert!(f.admit(&first).accepted);
+        f.until("first original physical drain", |f| {
+            f.row(&first).receipt.drained
+        });
+        let old_receipt = f.row(&first).receipt;
+        let requests = f.config.state.join("worktree-requests");
+        crate::platform::private_dir(&requests).unwrap();
+        let old_path = requests.join(format!("{}.json", first.plan.worktree_request_id));
+        let old_bytes = serde_json::to_vec(old_receipt.worktree.as_ref().unwrap()).unwrap();
+        zerus_client_core::fsx::write_private_durable(&old_path, &old_bytes).unwrap();
+        let current = retry(&first);
+        assert!(ledger::load(&f.store.db, &current.plan.worktree_request_id)
+            .unwrap()
+            .is_none());
+        let id = current.binding.creation_id.clone();
+        let mut operation: serde_json::Value =
+            serde_json::from_str(&current.intent.original).unwrap();
+        operation["state"] = json!("unknown");
+        operation["stop_requested"] = json!(true);
+        let original = json!({"schema":1,"operations":{id.clone():operation}});
+        let journal = f.config.state.join("creation-fixture.json");
+        let mut queue = Creations::new(|| 1000, || uuid::Uuid::new_v4().to_string());
+        let effects = queue.load(Journal::Bytes(serde_json::to_vec(&original).unwrap()));
+        assert!(flush(&mut queue, &journal, effects).is_empty());
+        let effects = queue.stop(&id);
+        let calls = flush(&mut queue, &journal, effects);
+        assert_eq!(calls.len(), 1);
+        let (flight, call) = &calls[0];
+        let Call::WorktreeReceipt {
+            action,
+            request_id,
+            fingerprint,
+            ..
+        } = call
+        else {
+            panic!("expected exact original Stop")
+        };
+        assert_eq!(action, "cancel");
+        assert_eq!(request_id, &current.plan.worktree_request_id);
+        assert_eq!(
+            Some(fingerprint.clone()),
+            current.plan.request_fingerprint()
+        );
+        let before_reply = std::fs::read(&journal).unwrap();
+        let request = wire::ControlRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            scope: current.intent.scope.clone(),
+            creation_id: id.clone(),
+            plan: current.plan.clone(),
+            action: wire::ControlAction::Cancel,
+        };
+        let result = f.runtime.receipt_control(
+            &f.store,
+            &json!({"op":"creation_worktree_receipt","request":request}),
+            Some(f.exclusion.clone()),
+        );
+        let reply: wire::ControlReply = serde_json::from_value(result).unwrap();
+        assert!(reply.matches(&request));
+        let fence = reply.receipt.unwrap();
+        assert!(wire::fenced(&fence, &current.plan));
+        let effects = queue.answered(
+            *flight,
+            Answer {
+                ok: true,
+                data: fence.clone(),
+                error: String::new(),
+            },
+            &mut Places,
+        );
+        assert!(flush(&mut queue, &journal, effects).is_empty());
+        let stopped = queue.operation(&id).unwrap();
+        assert_eq!(stopped["state"], "stopped");
+        assert_eq!(stopped["worktree_id"], current.plan.worktree_request_id);
+        assert_eq!(
+            stopped["worktree_future_fence"],
+            current.plan.worktree_request_id
+        );
+        assert!(stopped["error"]
+            .as_str()
+            .unwrap()
+            .contains("outcome is unknown"));
+        assert!(!creation::can_resume(stopped));
+        assert!(queue.can_edit(&id));
+        assert!(queue.resume(&id).is_empty());
+        assert_eq!(f.row(&first).receipt, old_receipt);
+        assert_eq!(std::fs::read(&old_path).unwrap(), old_bytes);
+        assert_eq!(ledger::undrained(&f.store.db).unwrap(), 0);
+        // Losing the Stop reply cannot lose the fence or cause a second write:
+        // reloading the pre-reply journal recovers by STATUS only.
+        let saved = before_reply;
+        let fence_path = requests.join(format!("{}.json", current.plan.worktree_request_id));
+        let bytes = std::fs::read(&fence_path).unwrap();
+        let mut recovered = Creations::new(|| 1000, || uuid::Uuid::new_v4().to_string());
+        let effects = recovered.load(Journal::Bytes(saved));
+        assert!(flush(&mut recovered, &journal, effects).is_empty());
+        let effects = recovered.check(&id);
+        let calls = flush(&mut recovered, &journal, effects);
+        assert_eq!(calls.len(), 1);
+        let (recovery_flight, recovery_call) = &calls[0];
+        assert!(
+            matches!(recovery_call, Call::WorktreeReceipt { action, .. } if action == "status")
+        );
+        let mut read = request;
+        read.request_id = uuid::Uuid::new_v4().to_string();
+        read.action = wire::ControlAction::Status;
+        let result = f.runtime.receipt_control(
+            &f.store,
+            &json!({"op":"creation_worktree_receipt","request":read}),
+            Some(f.exclusion.clone()),
+        );
+        let reply: wire::ControlReply = serde_json::from_value(result).unwrap();
+        assert!(reply.matches(&read));
+        assert_eq!(reply.receipt, Some(fence.clone()));
+        let effects = recovered.answered(
+            *recovery_flight,
+            Answer {
+                ok: true,
+                data: fence,
+                error: String::new(),
+            },
+            &mut Places,
+        );
+        assert!(flush(&mut recovered, &journal, effects).is_empty());
+        assert_eq!(recovered.operation(&id).unwrap()["state"], "stopped");
+        assert_eq!(std::fs::read(&fence_path).unwrap(), bytes);
+        assert!(!creation::can_resume(recovered.operation(&id).unwrap()));
+        // A separate explicit creation is allowed; its admission still needs
+        // its own native proof. The old unknown row and original receipt stay.
+        let recipe = json!({"cmd":"codex","tag":"recreated-fixture","host":"","auto":true,
+            "target":current.plan.path,"destination":current.plan.destination,"branch":current.plan.branch});
+        let (new_id, effects) = recovered.submit(recipe);
+        let new_id = new_id.unwrap();
+        assert_ne!(new_id, id);
+        let calls = flush(&mut recovered, &journal, effects);
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(calls[0].1, Call::CreationDirectory { .. }));
+        let effects = recovered.answered(calls[0].0, Answer { ok:true, data:json!({"path":current.plan.path,"creation_identity_v1":true,"computer_id":current.plan.expected_machine}), error:String::new() }, &mut Places);
+        let calls = flush(&mut recovered, &journal, effects);
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(calls[0].1, Call::Catalog { .. }));
+        let effects = recovered.answered(calls[0].0, Answer { ok:true, data:json!({"state":"ok","common_dir":current.plan.common_dir,"selected_root":current.plan.path,"creation_receipts_v1":true}), error:String::new() }, &mut Places);
+        let calls = flush(&mut recovered, &journal, effects);
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(calls[0].1, Call::CreateWorktree { .. }));
+        let value = recovered.operation(&new_id).unwrap();
+        let fresh = wire::Intent {
+            scope: current.intent.scope.clone(),
+            creation_id: new_id.clone(),
+            worktree_request_id: value["worktree_id"].as_str().unwrap().into(),
+            revision: value["revision"].as_u64().unwrap(),
+            original: creation::effect_checkpoint(value).unwrap(),
+        }
+        .verify()
+        .unwrap();
+        assert_ne!(
+            fresh.plan.worktree_request_id,
+            current.plan.worktree_request_id
+        );
+        assert!(f.admit(&fresh).accepted);
+        f.until("new original physical drain", |f| {
+            f.row(&fresh).receipt.drained
+        });
+        assert_eq!(
+            recovered.operation(&id).unwrap()["worktree_id"],
+            current.plan.worktree_request_id
+        );
+        assert_eq!(f.row(&first).receipt, old_receipt);
+    }
+
+    #[test]
+    fn receipt_control_refuses_changed_scope_machine_and_the_original_native_root() {
+        let mut f = Fixture::new(|_, _| Err("not executed".into()));
+        let original = f.original();
+        crate::platform::private_dir(&f.config.state.join("worktree-requests")).unwrap();
+        let request = wire::ControlRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            scope: original.intent.scope.clone(),
+            creation_id: original.binding.creation_id,
+            plan: original.plan,
+            action: wire::ControlAction::Cancel,
+        };
+        for changed in ["scope", "machine", "root"] {
+            let mut value = json!({"op":"creation_worktree_receipt","request":request});
+            match changed {
+                "scope" => {
+                    value["request"]["scope"]["service_epoch"] =
+                        json!(uuid::Uuid::new_v4().to_string())
+                }
+                "machine" => {
+                    value["request"]["plan"]["expected_machine"] =
+                        json!(uuid::Uuid::new_v4().to_string())
+                }
+                _ => {
+                    std::fs::rename(
+                        &f.config.state,
+                        f._temp.path().join("original-state-retained"),
+                    )
+                    .unwrap();
+                    crate::platform::private_dir(&f.config.state).unwrap();
+                    crate::platform::private_dir(&f.config.state.join("worktree-requests"))
+                        .unwrap();
+                }
+            }
+            let result = f
+                .runtime
+                .receipt_control(&f.store, &value, Some(f.exclusion.clone()));
+            assert_eq!(result["accepted"], false, "{changed}");
+        }
+        assert!(!f
+            .config
+            .state
+            .join("worktree-requests.identity.json")
+            .exists());
+    }
+
+    #[test]
+    fn a_fresh_attempt_after_a_drained_effect_free_failure_keeps_the_original_receipt() {
+        let mut f = Fixture::new(|plan, control| {
+            (control.before)(Step::Reserve)?;
+            Ok(json!({"schema":1,"request_id":plan.worktree_request_id,
+                "fingerprint":plan.request_fingerprint().unwrap(),"status":"failed",
+                "effects_started":false,"detail":"synthetic refusal before checkout"}))
+        });
+        let first = f.original();
+        assert!(f.admit(&first).accepted);
+        f.until("first failure's actual resource drain", |f| {
+            f.row(&first).receipt.drained
+        });
+        let retained = f.row(&first).receipt;
+        assert_eq!(retained.phase, Phase::Failed);
+        assert_eq!(
+            retained.worktree.as_ref().unwrap()["effects_started"],
+            false
+        );
+        let mut intent = first.intent.clone();
+        let request = uuid::Uuid::new_v4().to_string();
+        let mut value: serde_json::Value = serde_json::from_str(&intent.original).unwrap();
+        value["worktree_previous"] = json!([first.plan.worktree_request_id]);
+        value["worktree_id"] = json!(request);
+        value["revision"] = json!(intent.revision + 1);
+        intent.worktree_request_id = request;
+        intent.revision += 1;
+        intent.original = value.to_string();
+        let next = intent.verify().unwrap();
+        let admission = f.admit(&next);
+        assert!(
+            admission.accepted,
+            "fresh attempt refused: {}",
+            admission.code
+        );
+        assert_eq!(f.row(&first).receipt, retained);
+        f.until("new attempt's actual resource drain", |f| {
+            f.row(&next).receipt.drained
+        });
+        assert_eq!(f.row(&first).receipt, retained);
+        let query = wire::Query::for_plan(
+            first.intent.scope.clone(),
+            first.binding.creation_id.clone(),
+            &first.plan,
+        )
+        .unwrap();
+        let reply: wire::Lookup = serde_json::from_value(super::query(
+            &f.store,
+            &json!({"op":"creation_worktree_result","query":query}),
+        ))
+        .unwrap();
+        assert!(reply.matches(&query));
+        assert_eq!(reply.receipt.unwrap(), retained);
+    }
+    #[test]
     fn fixed_admitted_plan_finishes_without_gui_and_waits_for_a_real_descendant_lock() {
         use std::process::{Command, Stdio};
         let effects = Arc::new(AtomicUsize::new(0));
@@ -720,7 +1395,10 @@ mod actor {
                     // Not this plan's checkout, and too large for any projection.
                     receipt["path"] = json!("\"".repeat(9000));
                 }
-                size.store(serde_json::to_vec(&receipt).unwrap().len(), Ordering::SeqCst);
+                size.store(
+                    serde_json::to_vec(&receipt).unwrap().len(),
+                    Ordering::SeqCst,
+                );
                 Ok(receipt)
             });
             let root = f._temp.path().canonicalize().unwrap();
@@ -778,8 +1456,19 @@ mod actor {
         let root = f._temp.path().canonicalize().unwrap();
         for args in [
             &["init", "-q", "-b", "main", "repo"][..],
-            &["-C", "repo", "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
-                "commit", "-q", "--allow-empty", "-m", "fixture"][..],
+            &[
+                "-C",
+                "repo",
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "fixture",
+            ][..],
         ] {
             let status = std::process::Command::new("git")
                 .current_dir(&root)

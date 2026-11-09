@@ -333,3 +333,340 @@ fn an_unknown_mode_is_refused_at_create() {
     );
     assert!(refused.is_err(), "{:?}", refused.map(|(team, _)| team.settings));
 }
+
+// --- task 336: a code repository with tests keeps the branch pipeline, and the
+// --- owner may keep the team's settings.
+
+/// A code repository with tests whose binaries are design previews: more source
+/// files than binary ones, and a binary share far above 20%.
+fn preview_binary_repository() -> tempfile::TempDir {
+    let mut files: Vec<(String, Vec<u8>)> = (0..12)
+        .map(|index| (format!("src/module{index}.rs"), format!("fn module{index}() {{}}\n").into_bytes()))
+        .collect();
+    for index in 0..8 {
+        files.push((format!("design/preview{index}.png"), vec![0u8; 1024 * 1024]));
+    }
+    files.push((".zerus/tests.toml".into(), tests_config(true, true)));
+    let refs: Vec<(&str, &[u8])> = files.iter().map(|(path, content)| (path.as_str(), content.as_slice())).collect();
+    repo(&refs)
+}
+
+/// A code repository with tests whose binaries are runtime assets (not design
+/// previews): more binaries than sources, and a binary share far above 20%.
+fn binary_majority_repository() -> tempfile::TempDir {
+    let mut files: Vec<(String, Vec<u8>)> = (0..3)
+        .map(|index| (format!("src/module{index}.rs"), format!("fn module{index}() {{}}\n").into_bytes()))
+        .collect();
+    for index in 0..9 {
+        files.push((format!("assets/texture{index}.png"), vec![0u8; 1024 * 1024]));
+    }
+    files.push((".zerus/tests.toml".into(), tests_config(true, true)));
+    let refs: Vec<(&str, &[u8])> = files.iter().map(|(path, content)| (path.as_str(), content.as_slice())).collect();
+    repo(&refs)
+}
+
+/// Task #451 (owner, 2026-11-09): design previews, docs images and test fixtures
+/// in a code repository: many of them, and three beyond 5 MiB, exactly as this
+/// team's project measured (157 binary files, 38% of the tracked bytes).
+fn design_and_fixture_repository() -> tempfile::TempDir {
+    let mut files: Vec<(String, Vec<u8>)> = (0..40)
+        .map(|index| (format!("src/module{index}.rs"), format!("fn module{index}() {{}}\n").into_bytes()))
+        .collect();
+    for index in 0..120 {
+        files.push((format!("design/preview{index}.png"), vec![0u8; 8 * 1024]));
+    }
+    for index in 0..25 {
+        files.push((format!("docs/shots/page{index}.jpg"), vec![0u8; 64 * 1024]));
+    }
+    for index in 0..9 {
+        files.push((format!("tests/fixtures/capture{index}.bin"), vec![0u8; 256 * 1024]));
+    }
+    for index in 0..3 {
+        files.push((format!("design/big{index}.psd"), vec![0u8; 6 * 1024 * 1024]));
+    }
+    files.push((".zerus/tests.toml".into(), tests_config(true, true)));
+    let refs: Vec<(&str, &[u8])> = files.iter().map(|(path, content)| (path.as_str(), content.as_slice())).collect();
+    repo(&refs)
+}
+
+#[test]
+fn a_code_repository_with_tests_and_preview_binaries_stays_branch_pipeline() {
+    let dir = preview_binary_repository();
+    let proposal = propose(dir.path()).expect("a profile");
+    assert_eq!(proposal.preset, BRANCH_PIPELINE, "{proposal:?}");
+    // Task #451: design previews are not runtime assets: they count in the
+    // totals, never as binaries or large assets.
+    assert_eq!(proposal.profile.binary_files, 0, "{:?}", proposal.profile);
+    assert_eq!(proposal.profile.preview_files, 8, "{:?}", proposal.profile);
+    assert_eq!(proposal.profile.source_files, 13, "{:?}", proposal.profile);
+    let reasons = proposal.reasons.join("\n");
+    assert!(reasons.contains("source files are the majority"), "{reasons}");
+    assert!(reasons.contains("are not runtime assets"), "{reasons}");
+    assert!(!reasons.contains("one shared folder keeps"), "{reasons}");
+}
+
+#[test]
+fn a_code_repository_with_design_docs_and_fixtures_never_proposes_one_shared_folder() {
+    // Task #451: 157 design/docs/fixture files (38% of the bytes) and three of
+    // 5 MiB or more in a code repository with its tests: the branch pipeline.
+    let dir = design_and_fixture_repository();
+    let proposal = propose(dir.path()).expect("a profile");
+    assert_eq!(proposal.preset, BRANCH_PIPELINE, "{proposal:?}");
+    assert_eq!(proposal.profile.binary_files, 0, "{:?}", proposal.profile);
+    assert_eq!(proposal.profile.large_assets, 0, "{:?}", proposal.profile);
+    assert_eq!(proposal.profile.preview_files, 157, "{:?}", proposal.profile);
+    assert!(proposal.profile.source_files > proposal.profile.binary_files, "{:?}", proposal.profile);
+    let reasons = proposal.reasons.join("\n");
+    assert!(!reasons.contains("one shared folder keeps"), "{reasons}");
+}
+
+#[test]
+fn this_projects_own_numbers_keep_the_branch_pipeline() {
+    // Task #451 (owner, 2026-11-09), the exact profile hgs measured for this
+    // team's project: 4026 tracked files, 148 MiB, 157 binary files (38% of the
+    // bytes), 3 files of 5 MiB or more, 25 suites. The branch pipeline.
+    let measured = ProjectProfile {
+        files: 4026,
+        bytes: 155_244_650,
+        source_files: 3869,
+        binary_files: 157,
+        binary_bytes: 58_446_963,
+        large_assets: 3,
+        suites: 25,
+        branch: "whitewh/main".into(),
+        ..Default::default()
+    };
+    assert!(measured.binary_share() > 0.3, "{measured:?}");
+    assert!(!measured.heavy(), "{measured:?}");
+    assert_eq!(select(&measured).0, BRANCH_PIPELINE);
+    // The same numbers with the design, docs and fixture files no longer
+    // counted as assets: still the branch pipeline, and further from a floor.
+    let counted = ProjectProfile { binary_files: 9, binary_bytes: 5 * 1024 * 1024, large_assets: 0, ..measured.clone() };
+    assert!(!counted.heavy(), "{counted:?}");
+    // Real signals do decide it: many large binaries, engine assets or LFS.
+    let many = ProjectProfile { large_assets: LARGE_ASSETS, ..counted.clone() };
+    assert!(many.heavy(), "{many:?}");
+    let mut engine = counted.clone();
+    engine.engine = vec!["a .uproject".into()];
+    assert!(engine.heavy());
+    let mut lfs = counted.clone();
+    lfs.lfs = true;
+    assert!(lfs.heavy());
+}
+
+#[test]
+fn more_binaries_than_sources_still_propose_one_shared_folder() {
+    let dir = binary_majority_repository();
+    let proposal = propose(dir.path()).expect("a profile");
+    assert_eq!(proposal.preset, SHARED_FOLDER, "{proposal:?}");
+    assert!(!proposal.profile.code_first(), "{:?}", proposal.profile);
+}
+
+#[test]
+fn only_huge_binaries_flip_a_code_repository_that_has_tests() {
+    let code = |bytes: u64, binary_bytes: u64, binary_files: u64| ProjectProfile {
+        files: 5000,
+        bytes,
+        source_files: 4000,
+        binary_files,
+        binary_bytes,
+        suites: 3,
+        ..Default::default()
+    };
+    // Design previews and fixtures: 90% of a small tree, still code first.
+    assert!(!code(100 * 1024 * 1024, 90 * 1024 * 1024, 100).heavy());
+    // Above the floor: one gibibyte of binaries, or two of tracked bytes.
+    assert!(code(1300 * 1024 * 1024, 1200 * 1024 * 1024, 200).heavy());
+    assert!(code(2500 * 1024 * 1024, 200 * 1024 * 1024, 200).heavy());
+    // Engine assets and LFS keep the shared folder whatever the tests say.
+    let mut engine = code(100 * 1024 * 1024, 90 * 1024 * 1024, 100);
+    engine.engine = vec!["a .uproject".into()];
+    assert!(engine.heavy());
+    let mut lfs = code(100 * 1024 * 1024, 90 * 1024 * 1024, 100);
+    lfs.lfs = true;
+    assert!(lfs.heavy());
+    // No tests: the old binary rules still apply.
+    let mut untested = code(100 * 1024 * 1024, 90 * 1024 * 1024, 100);
+    untested.suites = 0;
+    assert!(untested.heavy());
+}
+
+#[test]
+fn the_keep_choice_hides_the_block_until_the_profile_changes() {
+    let dir = binary_majority_repository();
+    let mut team = Team {
+        id: "t336".into(),
+        name: "Keep".into(),
+        lead: "lead".into(),
+        folder: dir.path().display().to_string(),
+        status: TeamStatus::Running,
+        settings: Settings {
+            branch_per_task: Some(BranchPerTask { template: "task/{id}".into() }),
+            base_branch: "main".into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    assert!(disagreement(&team).is_some(), "the shared folder differs from the branch settings");
+    // The owner keeps the team's settings: the block leaves.
+    let at = 1_800_000_000.0;
+    let record = keep(&mut team, at).expect("a keep");
+    assert_eq!(record["preset"], SHARED_FOLDER);
+    assert!(disagreement(&team).is_none(), "{:?}", disagreement(&team));
+    assert!(kept(&team).is_some());
+    // A material profile change brings it back.
+    team.mode_kept = Some(json!({"preset":SHARED_FOLDER,"fingerprint":"an older profile","at":at}));
+    assert!(disagreement(&team).is_some(), "the profile changed: the block returns");
+    // Another preset's keep does not hide it either.
+    team.mode_kept = Some(json!({"preset":BRANCH_PIPELINE,"fingerprint":"whatever","at":at}));
+    assert!(disagreement(&team).is_some());
+}
+
+#[test]
+fn the_cached_proposal_honors_the_keep() {
+    let dir = binary_majority_repository();
+    let proposal = propose(dir.path()).expect("a profile");
+    let fingerprint = fingerprint(&proposal.profile);
+    let mut team = Team {
+        id: "t336c".into(),
+        name: "Keep".into(),
+        lead: "lead".into(),
+        folder: dir.path().display().to_string(),
+        status: TeamStatus::Running,
+        settings: Settings {
+            branch_per_task: Some(BranchPerTask { template: "task/{id}".into() }),
+            base_branch: "main".into(),
+            ..Default::default()
+        },
+        mode_proposal: Some(proposal.value()),
+        ..Default::default()
+    };
+    assert!(cached_disagreement(&team).is_some());
+    team.mode_kept = Some(json!({"preset":SHARED_FOLDER,"fingerprint":fingerprint,"at":1.0}));
+    assert!(cached_disagreement(&team).is_none());
+    // The cached profile changed: the block returns.
+    team.mode_kept = Some(json!({"preset":SHARED_FOLDER,"fingerprint":"older","at":1.0}));
+    assert!(cached_disagreement(&team).is_some());
+}
+
+// --- task 451 (owner, 2026-11-09): the working-mode block's buttons answer, and
+// --- a code repository with design/asset binaries is never proposed one shared
+// --- folder.
+
+/// The owner's own press of Propose the switch makes the card, and Allow on that
+/// card switches the team: the round trip the block offers.
+#[test]
+fn the_working_mode_blocks_press_proposes_a_card_and_allow_switches_the_team() {
+    let dir = binary_majority_repository();
+    let (mut team, _) = ops::create(
+        "t451",
+        &json!({"name":"Mode","folder":dir.path().display().to_string(),"lead":{"id":"lead","agent":"claude"},"working_mode":"branch-per-task"}),
+    )
+    .unwrap();
+    team.status = TeamStatus::Running;
+    assert!(disagreement(&team).is_some(), "the project is one shared folder, the settings branch per task");
+    let mut events = Vec::new();
+    // The owner's press, not the lead's: "auto" is the project's profile now.
+    let card = ops::apply(
+        &mut team,
+        "propose",
+        &json!({"kind":"working-mode","preset":"auto","reason":""}),
+        &Actor::Human,
+        &BTreeSet::new(),
+        &mut events,
+    )
+    .unwrap();
+    assert_eq!(card["status"], "proposed", "{card}");
+    let id = card["proposal"].as_str().unwrap().to_owned();
+    let stored = team.proposals.iter().find(|proposal| proposal["id"] == id.as_str()).expect("the card");
+    assert_eq!((stored["state"].as_str(), stored["kind"].as_str()), (Some("open"), Some("working-mode")), "{stored}");
+    // The press carries its own reason when the block gave none.
+    assert_eq!(stored["reason"], "the working-mode block's Propose the switch");
+    // Allow: the settings follow the project, and the block has nothing left.
+    let hash = card["hash"].as_str().unwrap_or_default().to_owned();
+    ops::apply(
+        &mut team,
+        "decide-proposal",
+        &json!({"proposal":id,"accept":true,"expected_hash":hash,"reason":"yes"}),
+        &Actor::Human,
+        &BTreeSet::new(),
+        &mut events,
+    )
+    .unwrap();
+    assert_eq!(team.working_mode, SHARED_FOLDER);
+    assert!(disagreement(&team).is_none());
+    assert!(cached_disagreement(&team).is_none());
+}
+
+/// A block left over from an older profile: the press says the settings already
+/// follow the project, creates no card, and the block's next read is the current
+/// profile.
+#[test]
+fn the_blocks_press_answers_a_stale_profile_without_a_card() {
+    let dir = code_repository(true);
+    let (mut team, _) = ops::create(
+        "t451b",
+        &json!({"name":"Mode","folder":dir.path().display().to_string(),"lead":{"id":"lead","agent":"claude"},"working_mode":"branch-pipeline"}),
+    )
+    .unwrap();
+    team.status = TeamStatus::Running;
+    // The block still shows the proposal cached when the team was planned.
+    team.mode_proposal = Some(json!({"preset":SHARED_FOLDER,"title":"one shared folder","reasons":["binary files"]}));
+    assert!(cached_disagreement(&team).is_some(), "the stale block is showing");
+    let mut events = Vec::new();
+    let receipt = ops::apply(
+        &mut team,
+        "propose",
+        &json!({"kind":"working-mode","preset":"auto","reason":""}),
+        &Actor::Human,
+        &BTreeSet::new(),
+        &mut events,
+    )
+    .unwrap();
+    assert_eq!((receipt["status"].as_str(), receipt["working_mode"].as_str()), (Some("already"), Some(BRANCH_PIPELINE)), "{receipt}");
+    assert!(team.proposals.is_empty(), "nothing to allow: {:?}", team.proposals);
+    assert_eq!(team.mode_proposal.as_ref().unwrap()["preset"], BRANCH_PIPELINE, "the block reads the current profile");
+    assert!(cached_disagreement(&team).is_none(), "the block leaves");
+    assert!(events.iter().any(|event| event.kind == "working_mode_current"), "the press is in the feed");
+}
+
+/// Task #451: a cached profile older than MODE_CHECK_SECONDS is read again by
+/// the tick, so a block from an older profile (or an older hgs) is corrected;
+/// a fresh one costs no Git read.
+#[test]
+fn the_tick_reads_an_old_cached_profile_again() {
+    use crate::state::teams::dispatcher::{steps_with, Step};
+    let dir = binary_majority_repository();
+    let (mut team, _) = ops::create(
+        "t451c",
+        &json!({"name":"Mode","folder":dir.path().display().to_string(),"lead":{"id":"lead","agent":"claude"},"working_mode":"branch-per-task"}),
+    )
+    .unwrap();
+    team.status = TeamStatus::Running;
+    let now = crate::state::now();
+    // Just read: the tick compares settings and runs no Git.
+    let steps = steps_with(&team.clone(), &[], now, None);
+    assert!(!steps.iter().any(|step| matches!(step, Step::ModeCheck)), "{steps:?}");
+    // An old reading (here also the shape written before checked_at existed).
+    team.mode_proposal = Some(json!({"preset":SHARED_FOLDER,"title":"one shared folder"}));
+    let steps = steps_with(&team, &[], now, None);
+    assert!(steps.iter().any(|step| matches!(step, Step::ModeCheck)), "{steps:?}");
+    // An open attempt holds the folder the switch would move: no re-read yet.
+    team.tasks = vec![super::super::model::Task {
+        id: 1,
+        title: "A".into(),
+        assignee: "lead".into(),
+        status: super::super::model::TaskStatus::InProgress,
+        attempts: vec![super::super::model::Attempt {
+            n: 1,
+            id: "a1".into(),
+            member: "lead".into(),
+            state: super::super::model::AttemptState::Delivered,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }];
+    let steps = steps_with(&team, &[], now, None);
+    assert!(!steps.iter().any(|step| matches!(step, Step::ModeCheck)), "{steps:?}");
+}
+

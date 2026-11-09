@@ -113,20 +113,16 @@ def main():
                         help="folder with the pinned conpty.dll and OpenConsole.exe from scripts/fetch-conpty.py "
                              "[default: fetched from nuget.org]")
     # WhiteWh fork, task #65 (owner, 2026-11-06): the fork's zip names its fork
-    # build and feed (the values its hgs-tray.exe embeds) and keeps the Qt GUI
-    # for one release as qt/zerus-qt.exe, a fallback started by hand.
+    # build and feed (the values its hgs-tray.exe embeds). Task #388 (owner,
+    # 2026-11-08, "forget Qt"): it ships only the Tauri desktop; the one-release
+    # Qt fallback (qt/zerus-qt.exe) is gone.
     parser.add_argument("--fork", action="store_true",
                         help="a WhiteWh fork zip: fork identity in build-info.json and the fork README section")
     parser.add_argument("--fork-build", default=os.environ.get("ZERUS_FORK_BUILD", ""),
                         help="the fork build number [default: $ZERUS_FORK_BUILD; empty for an experimental build]")
     parser.add_argument("--fork-feed", default=os.environ.get("ZERUS_FORK_FEED_URL", ""),
                         help="the fork feed [default: $ZERUS_FORK_FEED_URL]")
-    parser.add_argument("--qt-fallback", type=Path, help="tested Qt hgs-tray.exe, shipped as qt/zerus-qt.exe")
-    parser.add_argument("--qt-root", type=Path, default=os.environ.get("QT_ROOT_DIR"),
-                        help="the Qt the fallback was built with [default: $QT_ROOT_DIR]")
-    parser.add_argument("--windeployqt", type=Path, help="[default: <qt-root>/bin/windeployqt.exe]")
     args = parser.parse_args()
-    require(not args.qt_fallback or args.fork, "The Qt fallback belongs to a fork zip (--fork).")
     require(args.output.suffix == ".zip", "The output must be a .zip file.")
     crt = args.crt_dir or crt_directory(visual_studio())
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
@@ -164,11 +160,6 @@ def main():
             copy(dll, stage / dll.name)
         missing = [name for name in CRT_REQUIRED if not (stage / name).is_file()]
         require(not missing, f"The MSVC runtime under {crt} lacks: {', '.join(missing)}")
-        if args.qt_fallback:
-            require(args.qt_root is not None and Path(args.qt_root).is_dir(), "Pass --qt-root or set QT_ROOT_DIR.")
-            import windows_qt_fallback
-            manifest["qt_fallback"] = windows_qt_fallback.deploy(stage, args.qt_fallback, Path(args.qt_root), crt,
-                                                                 args.windeployqt)
         for name, path in pair.items():
             copy(path, stage / name)
         for name in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
@@ -207,10 +198,6 @@ def main():
             build = manifest["fork"]["build"]
             fork = fork.replace("@FORK_BUILD@", str(build) if build else "none (experimental build)")
             fork = fork.replace("@FORK_FEED@", manifest["fork"]["feed"] or "none (experimental build)")
-            fallback = manifest.get("qt_fallback")
-            fork = fork.replace("@QT_FALLBACK@", (
-                f"qt\\zerus-qt.exe, the Qt GUI with Qt {fallback['qt_version']}, kept for this release as a fallback."
-                if fallback else "This zip has no Qt fallback."))
             readme = readme.rstrip("\n") + "\n\n" + fork
         require(not re.search(r"@[A-Z_]+@", readme), "Unreplaced placeholder in the Windows README.")
         # Notepad and other Windows tools expect CRLF in a plain-text README.
@@ -227,9 +214,8 @@ def main():
             raise
     os.replace(partial, output)
     fork = f", fork build {manifest['fork']['build']}" if args.fork else ""
-    fallback = ", Qt fallback qt/zerus-qt.exe" if "qt_fallback" in manifest else ""
     print(f"Wrote {output} ({output.stat().st_size} bytes) for Zerus {version}, hgs {cli_version}, "
-          f"Tauri/WebView2 Evergreen{fork}{fallback}, commit {manifest['source_commit']}.")
+          f"Tauri/WebView2 Evergreen{fork}, commit {manifest['source_commit']}.")
 
 
 if __name__ == "__main__":

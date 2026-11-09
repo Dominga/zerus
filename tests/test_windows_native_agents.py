@@ -70,6 +70,7 @@ import uuid
 
 import model_api_fixture as api
 import test_windows_host as host
+from codex_resume_diagnostics import ResumeDiagnostics
 
 TESTS = Path(__file__).resolve().parent
 EXE = ".exe" if os.name == "nt" else ""
@@ -79,6 +80,33 @@ CODEX = os.environ.get("HGS_CODEX_TEST_BIN")
 CONPTY = os.environ.get("HGS_TEST_CONPTY_DIR")
 KEY = "fixture-key"
 DEAD_PROXY = "http://127.0.0.1:9"
+
+# Claude 2.1.319's shared permission dialog rejects input for 150 ms after
+# first paint. A complete hook card is an observation, not an input-ready ACK.
+CLAUDE_PERMISSION_INPUT_GUARD = 0.150
+
+
+def wait_claude_permission_guard(card, read, observed, now=None, pause=None):
+    """Wait out the native window on this original card, before ONE key.
+
+    This does not claim to explain the historical Windows missed Enter. An
+    unchanged prompt after that key still fails; it never authorizes replay.
+    """
+    now = now or time.monotonic
+    pause = pause or time.sleep
+    fields = ('question_id', 'question_hash', 'run_id', 'conversation_id',
+              'tool_call_id', 'agent_id', 'source')
+    until = observed + CLAUDE_PERMISSION_INPUT_GUARD
+    while True:
+        current = read()
+        if (not current or not current.get('panel_verified') or not current.get('can_answer')
+                or any(current.get(field) != card.get(field) for field in fields)):
+            raise AssertionError('The original Claude permission panel changed before Terminal input')
+        remaining = until - now()
+        if remaining <= 0:
+            return
+        pause(min(remaining, 0.040))
+
 # Seconds an agent may take to start, finish a turn, pause or exit: Claude Code starts
 # in about 9 s under ConPTY on the development PC (spike S6), and a hosted runner scans
 # a freshly linked executable on its first start.
@@ -300,6 +328,9 @@ class NativeAgent:
         """The screens, the caret, the listing, the host's log and the fake model's requests, for
         failure messages."""
         parts = []
+        diagnostic = getattr(self, 'resume_diagnostic', None)
+        if diagnostic is not None:
+            parts.append('original Codex resume evidence:\n' + diagnostic.finish(self.agent_home))
         for name in self.names:
             try:
                 parts.append(f"screen of {name}:\n{self.capture(name)}")
@@ -429,10 +460,30 @@ class NativeAgent:
             return second if first == second and composer else None
         return self.until(f"{name}'s composer", same)
 
+    def sample_resume(self):
+        diagnostic = getattr(self, 'resume_diagnostic', None)
+        if diagnostic is None:
+            return
+        def query(request):
+            try:
+                result = subprocess.run([str(self.hgs_exe), '__host', 'call', json.dumps(request)],
+                    env=self.env, cwd=self.work, stdin=subprocess.DEVNULL, capture_output=True,
+                    timeout=2, creationflags=host.HIDDEN)
+                if result.returncode == 0 and len(result.stdout) <= 64 * 1024:
+                    return json.loads(result.stdout).get('ok')
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                pass
+            return None
+        try:
+            diagnostic.sample(self.record(diagnostic.name), query)
+        except (OSError, ValueError):
+            pass  # Diagnostics never replace the original test assertion.
+
     def ready(self, name):
         """The listing row once the session takes a message: what hgs itself reports for a
         conversation the agent has yet to confirm, else idle with a settled composer."""
         def check():
+            self.sample_resume()
             row, state = self.row(name), self.inspect(name)
             if row.get("runtime_state") != "live" or state.get("pending_questions"):
                 return None
@@ -610,7 +661,10 @@ class NativeAgent:
                          dict(runtime_state="stopped", process_state="exited", resumable=True,
                               conversation_id=row["conversation_id"]))
         self.until("the paused agent to exit", lambda: not self.alive(*process))
+        if self.AGENT == 'codex':
+            self.resume_diagnostic = ResumeDiagnostics(name, record)
         self.hgs("resume", name, "-d")
+        self.sample_resume()
         self.until("the resumed session", lambda: (lambda row: row.get("runtime_state") == "live"
                                                    and row.get("run_id") != record["run_id"])(self.row(name)))
         self.pin_session(name)
@@ -712,7 +766,7 @@ class NativeAgent:
 class NativeWindowsClaude(NativeAgent, host.HostCase):
     AGENT = "claude"
     BINARY = CLAUDE
-    ARGS = ("--model", "claude-sonnet-4-6")
+    ARGS = ("--model", "claude-sonnet-4-6", "--permission-mode", "manual")
     COMPOSER = "❯"
     CLEARS_WITH_KEYS = True
 
@@ -775,6 +829,22 @@ class NativeWindowsClaude(NativeAgent, host.HostCase):
         forms = (text, [{"type": "text", "text": text}])
         return sum(row.get("type") == "user" and row.get("message", {}).get("content") in forms
                    for row in self.transcript_rows(conversation_id))
+
+    def test_project_powershell_wrapper_keeps_existing_tracking_and_exact_messages(self):
+        # Initialize this private profile through the native CLI once. A project
+        # script is deliberately not run as a version probe for fresh hooks.
+        prime = self.launch("prime-hooks")
+        self.until("the native conversation", lambda: self.row(prime).get("conversation_id"))
+        self.hgs("terminate", prime)
+        self.until("the prime archive", lambda: self.row(prime).get("state") == "archived")
+        settings = (self.agent_home / "settings.json").read_bytes()
+        program = str(self.bin / "claude.exe").replace("'", "''")
+        (self.project / "run_claude.ps1").write_text(f"& '{program}' @args; exit $LASTEXITCODE\n", encoding="utf-8-sig")
+        name = self.launch("wrapper")
+        self.until("the wrapper's native conversation", lambda: self.row(name).get("conversation_id"))
+        self.assertTrue(self.inspect(name)["tracked"])
+        self.assertEqual((self.agent_home / "settings.json").read_bytes(), settings)
+        self.check_messages(name)
 
     def test_a_tracked_launch_reports_its_hooks_and_send_delivers_exact_messages(self):
         name = self.launch("messages")
@@ -943,12 +1013,19 @@ class NativeWindowsClaude(NativeAgent, host.HostCase):
         for key, check in (("Enter", approved.is_file),
                            ("Escape", lambda: "What should Claude do instead?" in self.capture(name))):
             card = self.hook_card(name, api.BASH)
-            worker = self.worker()
+            def current():
+                return next((item for item in self.inspect(name).get('pending_questions', [])
+                             if item.get('question_id') == card['question_id']), None)
+            card = self.until('the original complete Bash permission panel',
+                              lambda: (item := current()) and item.get('panel_verified') and item)
             carded = time.monotonic()
+            worker = self.worker()
+            wait_claude_permission_guard(card, current, carded)
             self.keys(name, {"named": key})
             # zerus-dy5u: an intermittent Enter without effect; the failure
             # must tell a key sent before the panel from one that was lost.
-            sent = f"panel_verified={card.get('panel_verified')}, sent {time.monotonic() - carded:.3f} s after the card"
+            sent = (f"panel_verified=True, native_guard={CLAUDE_PERMISSION_INPUT_GUARD:.3f} s, "
+                    f"sent {time.monotonic() - carded:.3f} s after the complete card")
             self.until(f"Terminal's {key} ({sent})", check)
             self.until(f"the hook to end after {key}", lambda: not self.alive(*worker))
             self.until("no pending card", lambda: not self.inspect(name).get("pending_questions"))
@@ -1234,6 +1311,14 @@ class NativeWindowsCodex(NativeAgent, host.HostCase):
             return None  # Not created yet or momentarily busy; the original end still applies.
         return super().turn_ended(name, since) if stopped else None
 
+    def test_project_powershell_wrapper_reports_native_hooks_and_exact_messages(self):
+        program = str(self.bin / "codex.exe").replace("'", "''")
+        (self.project / "run_codex.ps1").write_text(f"& '{program}' @args; exit $LASTEXITCODE\n", encoding="utf-8-sig")
+        name = self.launch("wrapper", self.NO_HOOK_REVIEW)
+        self.check_messages(name)
+        self.assertTrue(self.inspect(name)["tracked"])
+        self.check_hook_form()
+
     def test_a_tracked_launch_reports_its_hooks_and_send_delivers_exact_messages(self):
         name = self.launch("messages", self.NO_HOOK_REVIEW)
         # Codex 0.162 starts its conversation with the first message, whose hooks confirm it;
@@ -1465,8 +1550,14 @@ class NativeWindowsCodex(NativeAgent, host.HostCase):
         self.assertEqual(self.inspect(name)["session_clear"]["type"], "SessionCleared")
 
     def test_pause_resume_and_terminate(self):
+        self.env['RUST_LOG'] = 'warn,codex_core::rollout=debug,codex_state=debug,codex_tui::session_resume=debug'
         name = self.launch("lifecycle", self.NO_HOOK_REVIEW)
-        self.check_lifecycle(name)
+        try:
+            self.check_lifecycle(name)
+        finally:
+            diagnostic = getattr(self, 'resume_diagnostic', None)
+            if diagnostic is not None:
+                print('ZERUS_CODEX_RESUME_EVIDENCE=' + diagnostic.finish(self.agent_home), flush=True)
 
     def test_a_switch_to_another_account_keeps_the_conversation_folder_and_name(self):
         self.check_switch_account("switch")

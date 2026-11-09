@@ -59,6 +59,13 @@ impl Store {
     /// Mutation guard. Creating the private lock is intentional; status reads
     /// should inspect an existing atomic snapshot without invoking this method.
     pub fn lock(path: &Path, create: bool) -> Result<Self> {
+        Self::try_lock(path, create)?
+            .ok_or_else(|| refused("another private state operation is in progress"))
+    }
+
+    /// As `lock`, except that `None` says another holder has the lock right now.
+    /// Path, ownership and I/O failures are still errors.
+    pub fn try_lock(path: &Path, create: bool) -> Result<Option<Self>> {
         #[cfg(unix)]
         let directory = {
             use rustix::fs::{Mode, OFlags};
@@ -85,9 +92,10 @@ impl Store {
         #[cfg(windows)]
         let lock =
             zerus_windows_private::open_file(&path.join("workspace-state.lock"), true, true)?;
-        fsguard::lock_exclusive(&lock)
-            .map_err(|_| refused("another private state operation is in progress"))?;
-        Ok(Self {
+        if fsguard::lock_exclusive(&lock).is_err() {
+            return Ok(None);
+        }
+        Ok(Some(Self {
             #[cfg(windows)]
             path: path.to_owned(),
             #[cfg(unix)]
@@ -95,7 +103,7 @@ impl Store {
             #[cfg(windows)]
             _directory: directory,
             _lock: lock,
-        })
+        }))
     }
 
     pub fn read(&self, name: &str) -> Result<Option<Vec<u8>>> {

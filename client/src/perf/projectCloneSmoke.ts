@@ -1,3 +1,4 @@
+import { chooseDropdown } from "./dropdown";
 import { invoke } from "@tauri-apps/api/core";
 import { projectsPage } from "../store/projects";
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -26,7 +27,7 @@ export async function projectCloneSmoke(allowed: boolean, restored: boolean) {
     await until(() => button("Use checkout", dialog()!) && !button("Use checkout", dialog()!).disabled); await log("READY"); await sleep(500); button("Use checkout", dialog()!).click();
     await until(() => !dialog() && projectsPage().projects.some((p) => p.folders.some((f) => f.path === "/srv/example/checkouts/repo"))); await log("ADDED");
     await open(); input("#cl-url", "https://example.org/team/another.git"); input("#cl-parent", "/srv/example/checkouts"); await until(() => (dialog()!.querySelector<HTMLInputElement>("#cl-name"))?.value === "another");
-    const project = dialog()!.querySelector<HTMLSelectElement>("#cl-proj")!; project.value = "__new__"; project.dispatchEvent(new Event("change", {bubbles: true})); input("#cl-newp", "Fresh clone project");
+    const project = dialog()!.querySelector<HTMLButtonElement>("#cl-proj")!; chooseDropdown(project, "__new__"); input("#cl-newp", "Fresh clone project");
     button("Clone repository", dialog()!).click(); await until(() => button("Use checkout", dialog()!) && !button("Use checkout", dialog()!).disabled); button("Use checkout", dialog()!).click();
     await until(() => !dialog() && projectsPage().projects.some((p) => p.name === "Fresh clone project" && p.folders.some((f) => f.path === "/srv/example/checkouts/another"))); await log("NEW_PROJECT"); await sleep(500);
     await invoke("exit_app", {code: 0});

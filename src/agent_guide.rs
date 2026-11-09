@@ -244,10 +244,23 @@ mod tests {
     #[test]
     fn the_lead_page_is_one_readable_page_with_worked_examples() {
         let lead = TOPICS.iter().find(|(name, _)| *name == "team-lead").unwrap().1;
-        let crlf = lead.len() + lead.matches('\n').count();
+        // Only a bare LF grows in a CRLF checkout (as in the small-pages test below).
+        let crlf = lead.len() + lead.matches('\n').count() - lead.matches("\r\n").count();
         assert!((LEAD_MIN..=LEAD_LIMIT).contains(&lead.len()) && crlf <= LEAD_LIMIT, "{} bytes", lead.len());
         for example in ["Plan a goal.", "Run phases alongside.", "Decide reports.", "Park a blocked task.", "Record a decision.", "Publish through the release gate."] {
             assert!(lead.contains(example), "no example: {example}");
+        }        // Task #404 (owner, 2026-11-09): the lead answers the owner first, keeps
+        // one command per tool call, runs long work in the background, reads one
+        // task instead of the whole status and is never the bottleneck.
+        for rule in [
+            "answer the owner first",
+            "one team command per tool call",
+            "run in the background",
+            "hgs team status --task",
+            "never be the bottleneck",
+            "two reviewers, two mergers",
+        ] {
+            assert!(has(lead, rule), "no rule: {rule}");
         }
         // Each example shows its command.
         for command in ["hgs team plan --json", "hgs team extend --json", "hgs team accept --json", "hgs team reply --json", "hgs team decide --json", "release-candidate"] {

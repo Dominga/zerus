@@ -1,5 +1,5 @@
 """Claude's background jobs over a private tmux socket; never real user sessions."""
-import hashlib, json, os, subprocess, time, unittest, uuid
+import hashlib, json, os, subprocess, sys, time, unittest, uuid
 import test_input
 
 # Claude's background process runs the hook; it descends from no session's agent,
@@ -65,7 +65,7 @@ class BackgroundContinuation(unittest.TestCase):
         path.write_text("".join(json.dumps(line) + "\n" for line in lines))
         return str(path)
 
-    def hook(self, claude=None, **event):
+    def hook(self, claude=None, expected=0, **event):
         """`claude` is the Claude process that runs the hook; Claude names it
         and the hook's conversation in the hook's environment."""
         env = dict(self.env, HGS_SESSION=self.name, HGS_RUN_ID=self.run_id, HGS_AGENT="claude")
@@ -75,7 +75,7 @@ class BackgroundContinuation(unittest.TestCase):
             env.update(CLAUDE_PID=str(claude), CLAUDE_CODE_SESSION_ID=event["session_id"])
         result = subprocess.run([str(test_input.HGS), "__state", "hook"], env=env, input=json.dumps(dict(event, cwd="/fixture")),
                                 text=True, capture_output=True, timeout=12)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, expected, result.stderr)
 
     def saved(self, path):
         return json.loads(path.read_text())
@@ -119,6 +119,40 @@ class BackgroundContinuation(unittest.TestCase):
         self.tool(new, path)
         other = self.saved(self.other_path)
         self.assertEqual((other["conversation_id"], other["prompt"]), (new, "Previous request"))
+
+    @unittest.skipUnless(sys.platform in ("linux", "darwin"),
+                         "Unix Terminate fence")
+    def test_pending_terminate_keeps_background_continuations_on_the_original_binding(self):
+        # A background job inherits another session's token. Admission must
+        # inspect its actual owner, not just the record named by that token.
+        for owner_path, owner in ((self.other_path, self.other), (self.record_path, self.record)):
+            for marker in (None, False, "damaged", {"request_id": str(uuid.uuid4())}):
+                with self.subTest(owner=owner["name"], marker=marker):
+                    self.job = str(uuid.uuid4())
+                    new = str(uuid.uuid4())
+                    path = self.transcript(new)
+                    original = dict(owner, terminating=marker,
+                                    transcript=self.transcript(owner["conversation_id"], continued_in=new))
+                    owner_path.write_text(json.dumps(original))
+                    self.background(new, window=original)
+                    before = owner_path.read_bytes()
+                    for kind in ("SessionStart", "PreToolUse", "PostToolUse", "Stop", "SessionEnd"):
+                        self.hook(BACKGROUND, expected=2 if kind in ("SessionStart", "PreToolUse") else 0,
+                                  hook_event_name=kind, session_id=new, transcript_path=path, source="resume")
+                        self.assertEqual(owner_path.read_bytes(), before, kind)
+                    # Completion from the original held conversation still
+                    # commits without adopting a new transcript or identity.
+                    self.background(original["conversation_id"], window=original)
+                    self.hook(BACKGROUND, hook_event_name="SessionEnd", session_id=original["conversation_id"],
+                              transcript_path=path, reason="prompt_input_exit")
+                    current = self.saved(owner_path)
+                    self.assertEqual(current["session_end"]["reason"], "prompt_input_exit")
+                    self.assertEqual(current["session_end"]["conversation_id"], original["conversation_id"])
+                    for key in ("terminating", "name", "run_id", "conversation_id", "transcript",
+                                "pid", "process_start", "pane"):
+                        self.assertEqual(current.get(key), original.get(key), key)
+                    # Synthetic data only; reset before the next fixture case.
+                    owner_path.write_text(json.dumps(owner))
 
     def test_a_new_conversation_in_a_background_job_is_a_clear_of_the_session_that_moved_it(self):
         new = str(uuid.uuid4())

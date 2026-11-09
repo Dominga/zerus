@@ -571,7 +571,10 @@ attempt; a replacement pending ID cancels the old intent. This watcher does not
 promise execution after Android stops the application.
 
 Details presents the agent's task lists, goal and reported usage, subagent
-activity, and native process inventory. Completing a response is independent of
+activity, and native process inventory. When the computer reports it, Details
+also shows the session's Keep cache warm setting and status read only; the phone
+cannot change it yet. A running keep-warm ping reads **Warming cache**, not
+Working, and is not current work (docs/reference.md, Keep cache warm). Completing a response is independent of
 completing a goal. Historical or partial inventories are labeled accordingly.
 Opening a child preserves its parent's composition and viewport. Child input is
 available only when the native adapter explicitly supports continuing that child.
@@ -824,6 +827,20 @@ never authorize a message,
 answer or interruption: those actions require a fresh verified inspection.
 An inspection already in flight is shared across navigation and refreshes;
 leaving the screen does not create a second queued native read on return.
+Recent Activity and explicit navigation to the latest messages use the bounded
+inspection projection. They do not wait for complete canonical history,
+unrelated receipt backfill or exact unread totals. Canonical pages are read for
+requested earlier history and actual saved older reading positions. A saved
+viewport records whether it followed the latest messages; legacy positions
+remain older reading positions. An incomplete earlier read preserves the
+recent transcript and exposes an explicit retry. Displaying recent messages
+never establishes a complete historical incoming watermark.
+Latest navigation supersedes the previous reading intent before awaiting I/O.
+Shared native reads keep their original identities, while cache, history and
+inspection publications must still belong to the selected reading intent.
+An empty bounded recent projection preserves an already readable older page
+and offers a retry of the latest inspection. Fresh recent inspections retire
+exact head authority when no canonical window proves their coverage.
 
 The Android history cache is private and encrypted, with atomic files outside
 Android backup. It retains at most twenty conversations and twenty MiB for seven
@@ -909,6 +926,19 @@ requires a successful atomic draft-to-outbox write before any network mutation.
 Receipt updates and delayed writes must preserve
 newer composition. Only unsent drafts and unresolved deliveries appear in Drafts;
 successful delivery status belongs to the message in its conversation.
+
+An unconfirmed outgoing message initially blocks another send to the same
+conversation. Dismiss warning explicitly saves a device-local choice to allow a
+new message while preserving the original request, unknown outcome, attachments
+and receipt lookup. It neither cancels nor reposts the original message, and it
+does not replace the current composition. This choice survives restart; a later
+exact receipt can still confirm the original. An active send cannot be dismissed.
+Prepare again is available only for a confirmed failed message.
+
+Android bounds ordinary send preparation and receipt acquisition to 45 seconds.
+Saving an acquired result finishes outside that transport deadline, so a slow
+accepted write cannot turn a confirmed delivery back into an unknown outcome.
+A timed-out manual receipt check reports that the original remains recoverable.
 
 The multiline composer keeps one editor state for text, selection and IME
 composition across polling, expansion and sending. Sending brings the new local
@@ -1203,9 +1233,11 @@ after large result bodies expire.
 
 History selectors are mutually exclusive: newest, `before`, `after`, `around`,
 or `around_incoming_seq` together with an exact `history_epoch`. Pages contain at
-most 100 public rows. A bounded connector read can advance initial indexing
+most 100 public rows. A full-page newest connector read can advance initial indexing
 locally for up to two seconds and 32 native reads, avoiding a network roundtrip
-per index chunk. Cursored reads execute once. A partial resident adapter is
+per index chunk. Metadata-only head probes (`limit: 1`) and cursored reads execute
+one bounded native pass, so a background counter probe cannot occupy that full
+indexing budget ahead of a visible inspection. A partial resident adapter is
 reported as partial rather than a completed conversation.
 A fork's pages also carry its sources' history up to the fork point as
 additive `Inherited` rows (`inherited_type`, `inherited_from`), never counted as

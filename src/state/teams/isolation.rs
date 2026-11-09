@@ -24,6 +24,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub(crate) const CONFIG: &str = ".zerus/tests.toml";
 /// How many run folders a member's folder keeps, newest first.
 const KEEP_RUNS: usize = 5;
+/// Task #418: a run folder this young may belong to a suite still running, so
+/// the count above never prunes it. Concurrent suites (the merge queue runs
+/// several at once) share one `.zerus-team/runs`; deleting a live suite's
+/// folder wiped its isolated TEMP mid-test, which is how three client-core
+/// tests that write a file and then look for it failed together.
+const KEEP_FRESH_SECS: u64 = 600;
 /// The most entries a watched folder's listing reads.
 const LISTING: usize = 50_000;
 /// The most bytes of a watched log or registry a check reads.
@@ -290,8 +296,15 @@ fn build(config: Config, note: Option<String>, template: &str, program: &str, fo
     Run { folder: run_folder, env, remove: config.remove.clone(), note, watch }
 }
 
-/// Keeps the newest `KEEP_RUNS - 1` run folders, so the new one makes `KEEP_RUNS`.
+/// Keeps the newest `KEEP_RUNS - 1` run folders, so the new one makes
+/// `KEEP_RUNS` - and never one younger than `KEEP_FRESH_SECS`: a suite running
+/// beside this one owns its folder and its isolated TEMP.
 fn prune(runs: &Path) {
+    prune_at(runs, SystemTime::now());
+}
+
+/// `prune` at a stated time: the tests age the folders instead of waiting.
+fn prune_at(runs: &Path, now: SystemTime) {
     let Ok(entries) = fs::read_dir(runs) else { return };
     let mut folders: Vec<(SystemTime, PathBuf)> = entries
         .flatten()
@@ -300,9 +313,18 @@ fn prune(runs: &Path) {
         .map(|entry| (entry.metadata().and_then(|meta| meta.modified()).unwrap_or(UNIX_EPOCH), entry.path()))
         .collect();
     folders.sort_by_key(|folder| std::cmp::Reverse(folder.0));
-    for (_, path) in folders.into_iter().skip(KEEP_RUNS - 1) {
+    for (modified, path) in folders.into_iter().skip(KEEP_RUNS - 1) {
+        if !prunable(modified, now) {
+            continue;
+        }
         let _ = fs::remove_dir_all(path);
     }
+}
+
+/// Task #418: whether a run folder is old enough that no suite is still
+/// running in it.
+fn prunable(modified: SystemTime, now: SystemTime) -> bool {
+    now.duration_since(modified).is_ok_and(|age| age.as_secs() >= KEEP_FRESH_SECS)
 }
 
 /// What the fingerprint compares.

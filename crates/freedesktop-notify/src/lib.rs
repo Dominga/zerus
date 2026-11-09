@@ -20,18 +20,18 @@ type Parameters<'a> = (
     &'static str,
     &'a str,
     &'a str,
-    Vec<&'static str>,
+    Vec<&'a str>,
     BTreeMap<&'static str, Value<'static>>,
     i32,
 );
-fn parameters<'a>(title: &'a str, body_markup: &'a str) -> Parameters<'a> {
+fn parameters<'a>(title: &'a str, body_markup: &'a str, open_label: &'a str) -> Parameters<'a> {
     (
         "Zerus",
         0,
         "hgs-zerus-swarm-symbolic",
         title,
         body_markup,
-        vec!["default", "Open session", "open-session", "Open session"],
+        vec!["default", open_label, "open-session", open_label],
         BTreeMap::from([
             ("desktop-entry", Value::from("hgs-tray")),
             ("urgency", Value::from(1_u8)),
@@ -43,14 +43,17 @@ fn parameters<'a>(title: &'a str, body_markup: &'a str) -> Parameters<'a> {
 
 /// Issue one call to the selected daemon. A zero ID or an error is returned
 /// unchanged: only the caller's original reservation can settle its outcome.
+/// `open_label` names the open action in the interface language (Qt's
+/// `tr("Open session")`); the action keys stay fixed.
 pub fn notify(
     connection: &Connection,
     owner: UniqueName<'_>,
     title: &str,
     body_markup: &str,
+    open_label: &str,
 ) -> zbus::Result<u32> {
     let proxy = Proxy::new(connection, owner, PATH, SERVICE)?;
-    proxy.call("Notify", &parameters(title, body_markup))
+    proxy.call("Notify", &parameters(title, body_markup, open_label))
 }
 
 /// Close only on the supplied unique daemon. Namespace/currentness checks and
@@ -71,6 +74,7 @@ pub async fn notify_async(
     owner: UniqueName<'_>,
     title: &str,
     body_markup: &str,
+    open_label: &str,
 ) -> zbus::Result<zbus::Message> {
     connection
         .call_method(
@@ -78,7 +82,7 @@ pub async fn notify_async(
             PATH,
             Some(SERVICE),
             "Notify",
-            &parameters(title, body_markup),
+            &parameters(title, body_markup, open_label),
         )
         .await
 }

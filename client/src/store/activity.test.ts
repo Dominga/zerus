@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createRoot } from "solid-js";
-import { createActivity, type FollowRequest } from "./activity";
+import { FIRST_PAGE_MS, createActivity, type FollowRequest } from "./activity";
 import { buildTranscript, mergeProvider } from "../ui/sessions/transcript";
 import type { ActivityEvent, ActivityOut } from "../types";
 
@@ -437,5 +437,162 @@ describe("question replies in the transcript", () => {
     const prompt = items.find((i) => i.id === "prompt-snapshot") as { label?: string; replies?: unknown };
     expect(prompt.label).toBe("You (recorded answer)");
     expect(prompt.replies).toEqual([{ question: "Q", answer: "A" }]);
+  });
+});
+
+const turns = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+
+describe("a follow that never answers (zerus-bz54l)", () => {
+  it("says so after FIRST_PAGE_MS instead of reading forever, and Retry subscribes again", async () => {
+    vi.useFakeTimers();
+    try {
+      const { store, calls, unfollows } = setup();
+      store.follow(target);
+      vi.advanceTimersByTime(FIRST_PAGE_MS - 1);
+      expect(store.stalled()).toBe(false);
+      vi.advanceTimersByTime(1);
+      expect(store.stalled()).toBe(true);
+      expect(store.loaded()).toBe(false);
+      store.retry();
+      expect(store.stalled(), "Retry reads again").toBe(false);
+      expect(unfollows).toEqual(["run:a"]);
+      await turns();
+      expect(calls.map((call) => call.key)).toEqual(["run:a", "run:a"]);
+      store.applyActivity([out("events", { events: [ev(1)], cursor: 1 })]);
+      vi.advanceTimersByTime(FIRST_PAGE_MS);
+      expect(store.loaded()).toBe(true);
+      expect(store.stalled(), "an answer before the bound ends the wait").toBe(false);
+      store.follow(undefined);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("does not stall a session that answered, nor one the person left", () => {
+    vi.useFakeTimers();
+    try {
+      const { store } = setup();
+      store.follow(target);
+      store.applyActivity([out("replace", { events: [] })]);
+      vi.advanceTimersByTime(FIRST_PAGE_MS);
+      expect(store.stalled()).toBe(false);
+      store.follow({ ...target, id: "\nrun:b", key: "run:b" });
+      store.follow(undefined);
+      vi.advanceTimersByTime(FIRST_PAGE_MS);
+      expect(store.stalled()).toBe(false);
+    } finally { vi.useRealTimers(); }
+  });
+  // zerus-lxt6o: one Retry is one ordered, fenced read attempt.
+  it("subscribes again only once the stalled follow's unfollow settled", async () => {
+    vi.useFakeTimers();
+    try {
+      // The native side keeps one subscription per session and ignores an unchanged follow.
+      let active = false, starts = 0;
+      let settle!: () => void;
+      const port = {
+        follow: async () => { if (!active) { active = true; starts++; } },
+        unfollow: () => new Promise<void>((resolve) => { settle = () => { active = false; resolve(); }; }),
+      };
+      const store = createActivity(port);
+      store.follow(target);
+      vi.advanceTimersByTime(FIRST_PAGE_MS);
+      store.retry();
+      store.retry();
+      expect(starts, "no follow while the earlier one retires").toBe(1);
+      settle();
+      await turns();
+      expect(active, "the late unfollow did not erase the new subscription").toBe(true);
+      expect(starts).toBe(2);
+      store.follow(undefined);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("ignores the retired follow's late failure and timer", async () => {
+    vi.useFakeTimers();
+    try {
+      let attempts = 0;
+      let fail!: (reason: Error) => void;
+      const port = {
+        follow: () => ++attempts === 1 ? new Promise<void>((_resolve, reject) => { fail = reject; }) : Promise.resolve(),
+        unfollow: async () => {},
+      };
+      const store = createActivity(port);
+      store.follow(target);
+      vi.advanceTimersByTime(FIRST_PAGE_MS);
+      store.retry();
+      await turns();
+      store.applyActivity([out("events", { events: [ev(1, "AgentMessage", { detail: "Current answer" })], cursor: 1 })]);
+      fail(new Error("retired original follow"));
+      await turns();
+      vi.advanceTimersByTime(FIRST_PAGE_MS);
+      expect(store.error()).toBeUndefined();
+      expect(store.stalled()).toBe(false);
+      expect(store.events().map((e) => e.detail)).toEqual(["Current answer"]);
+      store.follow(undefined);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("drops the earlier run's stall, so Retry cannot pass the next run's composer barrier", async () => {
+    vi.useFakeTimers();
+    try {
+      const { store, calls } = setup();
+      store.follow({ ...target, conversationId: "conversation" });
+      vi.advanceTimersByTime(FIRST_PAGE_MS);
+      expect(store.stalled()).toBe(true);
+      let opened!: () => void;
+      const ready = new Promise<void>((resolve) => { opened = resolve; });
+      store.follow({ ...target, id: "\nrun:b", key: "run:b", conversationId: "conversation" }, ready);
+      expect(store.stalled(), "the next run has not been read yet").toBe(false);
+      store.retry();
+      await turns();
+      expect(calls.map((call) => call.key), "the next run waits for its native composer").toEqual(["run:a"]);
+      opened();
+      await turns();
+      expect(calls.map((call) => call.key)).toEqual(["run:a", "run:b"]);
+      vi.advanceTimersByTime(FIRST_PAGE_MS);
+      expect(store.stalled(), "the next run's own bound").toBe(true);
+      store.follow(undefined);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("keeps a continuing conversation's loaded transcript without stalling", () => {
+    vi.useFakeTimers();
+    try {
+      const { store } = setup();
+      store.follow({ ...target, conversationId: "conversation" });
+      store.applyActivity([out("events", { events: [ev(7, "AgentMessage", { detail: "Retained reply" })], cursor: 7 })]);
+      store.follow({ ...target, id: "\nrun:b", key: "run:b", conversationId: "conversation" });
+      vi.advanceTimersByTime(FIRST_PAGE_MS);
+      expect(store.loaded()).toBe(true);
+      expect(store.stalled()).toBe(false);
+      expect(store.events().map((e) => e.detail)).toEqual(["Retained reply"]);
+      store.follow(undefined);
+    } finally { vi.useRealTimers(); }
+  });
+
+  // Task #437 (owner, 2026-11-09): the keep-warm ping, its "ok" reply and its
+  // notification never render as Activity; a history written before the marks
+  // is read by the ping's envelope in the detail.
+  it("never shows a keep-warm ping, its reply or its notification", () => {
+    const { store } = setup();
+    store.follow({ ...target, conversationId: "conversation" });
+    store.applyActivity([out("events", { events: [
+      ev(10, "UserPromptSubmit", { detail: "Fix it" }),
+      ev(11, "Stop", { detail: "Fixed" }),
+      ev(12, "UserPromptSubmit", { origin: "cache_keepalive", turn_origin: "keep_warm", detail: "Cache warmed" }),
+      ev(13, "AgentMessage", { turn_origin: "keep_warm", detail: "ok" }),
+      ev(14, "Notification", { turn_origin: "keep_warm", detail: "Agent notification" }),
+      ev(15, "UserPromptSubmit", { detail: "<zerus-cache-keepalive>Reply with just: ok</zerus-cache-keepalive>" }),
+      ev(16, "AgentMessage", { detail: "an old keep-warm reply" }),
+    ], cursor: 16 })]);
+    expect(store.events().map((e) => e.seq)).toEqual([10, 11, 16]);
+    // A replaced window filters the same way, and a single event never inserts
+    // one.
+    store.applyActivity([out("replace", { events: [
+      ev(20, "Stop", { turn_origin: "keep_warm", detail: "ok" }),
+      ev(21, "AgentMessage", { detail: "Kept" }),
+    ], cursor: 21 })]);
+    expect(store.events().map((e) => e.seq)).toEqual([21]);
+    store.applyActivity([out("event", { id: "i22", rev: 1, event: ev(22, "AgentMessage", { turn_origin: "keep_warm", detail: "ok" }) })]);
+    expect(store.events().map((e) => e.seq)).toEqual([21]);
+    store.follow(undefined);
   });
 });

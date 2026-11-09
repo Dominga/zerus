@@ -22,7 +22,7 @@ fn session_rules_require_exact_identity_and_replay_one_write() {
         input["request_id"] = json!("22222222-2222-4222-8222-222222222222");
         assert!(iron_rules::run("set", &input).is_err());
         assert_eq!(
-            crate::state::with_session_project_binding(name, |record| Ok(
+            crate::state::with_session_project_binding(name, None, "r1", "c1", |record| Ok(
                 record["iron_rules"].clone()
             ))
             .unwrap(),

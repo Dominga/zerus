@@ -39,6 +39,9 @@ export const LAYOUT_VARIANTS = {
   "side-panel": ["tabs", "sections"],
   // Task 243: the system title bar and the rail, or (the Compact skins, as Qt) one title bar holding the controls.
   chrome: ["system", "unified"],
+  // Task #368: the fork's dense New session dialog ('B - Dense, labels left') is
+  // the default; a skin names classic for the upstream one (Qt's views.newSession).
+  "new-session": ["dense", "classic"],
 } as const;
 
 export type ComponentVariants = { -readonly [K in keyof typeof COMPONENT_VARIANTS]: (typeof COMPONENT_VARIANTS)[K][number] };

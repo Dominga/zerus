@@ -90,7 +90,7 @@ jobs:
       actions: read
     name: iOS TestFlight Dev build
     # Independent of the zerus.dev Dev catalog: TestFlight delivers it to internal testers;
-    # a maintainer promotes chosen builds to the public beta through Beta App Review.
+    # its independent promotion job adds the exact build to Public beta and Beta App Review.
     needs: gate
     if: >-
       !cancelled() && needs.gate.result == 'success' &&

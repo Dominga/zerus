@@ -1,12 +1,42 @@
 import { withdrawnRefusal } from "../../teamRefusals";
 import { describe, expect, it } from "vitest";
-import { decidedWaiting, leadToolMissing, toolMissingAction,
+import { decidedWaiting, leadToolMissing, toolMissingAction, TaskReportRead,
   ProposalCards, WaitingAnswer, WaitingNotices, acceptanceSummary, act, approvePhaseCall, noticeToken, proposalCards, proposalKindLabel, toolOffer,
   waitingActionLabel, waitingAge, waitingCount, waitingKindIcon, waitingKindLabel, deferredRequest, splitDeferred, approves, opensCard, type DecisionPort, type QuestionChoice,
   bannerHeadItem, digestGroups, stillBlocks,
 } from "./decisions";
 import { choiceButtons, confirmButtons, createConfirmer } from "../../store/teamConfirm";
 import type { TeamAction, TeamCall, TeamConfirmation, TeamMemberView, TeamOutcome, TeamProposalView, TeamTaskView, TeamView, TeamWaitingItem } from "../../types";
+
+it("an archived report loads on demand, exposes errors and drops late responses", async () => {
+  const pending: { resolve: (value: import("../../types").TeamTaskDetailView) => void; reject: (error: Error) => void }[] = [];
+  const ids: number[] = [];
+  const reader = new TaskReportRead((_computer, _team, task) => {
+    ids.push(task);
+    return new Promise((resolve, reject) => pending.push({ resolve, reject }));
+  }, () => {});
+  expect(ids).toEqual([]);
+  const first = reader.open("local", "team-1", 1);
+  expect(reader.loading).toBe(true);
+  const second = reader.open("local", "team-1", 2);
+  pending[0].resolve({ task: task({ id: 1 }), report: "Stale", report_truncated: false });
+  await first;
+  expect(reader.detail).toBeNull();
+  pending[1].reject(new Error("hgs: Archive unavailable"));
+  await second;
+  expect(reader.error).toBe("Archive unavailable");
+  expect(reader.loading).toBe(false);
+  const retry = reader.open("local", "team-1", 2);
+  pending[2].resolve({ task: task({ id: 2 }), report: "Final report", report_truncated: false });
+  await retry;
+  expect(reader.detail?.report).toBe("Final report");
+  const late = reader.open("local", "team-1", 3);
+  reader.close();
+  pending[3].resolve({ task: task({ id: 3 }), report: "After close", report_truncated: false });
+  await late;
+  expect(reader.detail).toBeNull();
+  expect(reader.loading).toBe(false);
+});
 
 // Every owner decision path of Qt's tray/tests/test_teamsui_waiting.cpp, on
 // the pure model the Team tab and Waiting for you draw (task 11). Each test

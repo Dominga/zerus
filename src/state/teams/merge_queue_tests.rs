@@ -61,6 +61,7 @@ fn repo_with(extra: &str) -> Repo {
 
 fn repo_providers(providers: &str) -> Repo {
     let dir = tempfile::tempdir().unwrap();
+    crate::platform::owner_only_dir(dir.path()).unwrap();
     let lead = dir.path().join("lead");
     let member = dir.path().join("member");
     std::fs::create_dir_all(lead.join(".zerus")).unwrap();
@@ -100,6 +101,7 @@ fn team(repo: &Repo) -> Team {
         name: "T".into(),
         lead: "lead".into(),
         folder: repo.lead.to_string_lossy().into_owned(),
+        line_branch: "master".into(),
         status: TeamStatus::Running,
         members: vec![
             Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), state: MemberState::Active, ..Default::default() },
@@ -141,7 +143,7 @@ fn settle(team: &mut Team, database: &TestStore, lead: &Path) -> Vec<Event> {
     let mut events = Vec::new();
     assert!(step_here(team, database, 100.0, &mut events).unwrap());
     let queued = database.queued(&team.id).unwrap();
-    run_due(database, lead, &queued, 101.0, &Default::default()).unwrap();
+    run_due(database, lead, &queued, 101.0, &Default::default(), team.settings.tests.as_ref()).unwrap();
     step_here(team, database, 102.0, &mut events).unwrap();
     events
 }
@@ -191,7 +193,7 @@ fn a_suite_of_another_platform_with_no_runner_is_recorded_not_run() {
     let suites: Vec<&str> = queued.iter().map(|request| request.suite.as_str()).collect();
     assert!(suites.contains(&"unit") && suites.contains(&"here") && !suites.contains(&"python"), "{suites:?}");
     assert!(!step(&mut team, &database, 100.5, &mut events, &host, &[]).unwrap(), "it waits for the suites that ran");
-    run_due(&database, &repo.lead, &queued, 101.0, &Default::default()).unwrap();
+    run_due(&database, &repo.lead, &queued, 101.0, &Default::default(), None).unwrap();
     step(&mut team, &database, 102.0, &mut events, &host, &[]).unwrap();
     let task = team.task(1).unwrap();
     assert_eq!(task.status, TaskStatus::Accepted);
@@ -223,7 +225,7 @@ fn a_not_run_suite_keeps_only_its_own_range_open() {
     let host = vec!["windows".to_owned()];
     assert!(step(&mut team, &database, 100.0, &mut events, &host, &[]).unwrap());
     let queued = database.queued("t1").unwrap();
-    run_due(&database, &repo.lead, &queued, 101.0, &Default::default()).unwrap();
+    run_due(&database, &repo.lead, &queued, 101.0, &Default::default(), None).unwrap();
     step(&mut team, &database, 102.0, &mut events, &host, &[]).unwrap();
     let first = team.merge_log[0].clone();
     let first_merged = team.merge_tested.clone();
@@ -255,7 +257,7 @@ fn a_not_run_suite_keeps_only_its_own_range_open() {
     ops::apply(&mut team, "accept", &json!({"task":2}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
     assert!(step(&mut team, &database, 200.0, &mut events, &host, &[]).unwrap());
     let queued = database.queued("t1").unwrap();
-    run_due(&database, &repo.lead, &queued, 201.0, &Default::default()).unwrap();
+    run_due(&database, &repo.lead, &queued, 201.0, &Default::default(), None).unwrap();
     step(&mut team, &database, 202.0, &mut events, &host, &[]).unwrap();
     let second_merged = team.merge_tested.clone();
     assert_ne!(second_merged, first_merged);
@@ -542,7 +544,7 @@ fn a_lead_accept_or_retry_resumes_a_queued_retry() {
     };
     let items = crate::state::teams::inbox::items_for(&team, "lead");
     let item = items.iter().find(|item| item.kind == "merge_waiting").expect("the lead sees the retry");
-    assert!(item.command.contains("hgs team retry --json"), "{}", item.command);
+    assert!(item.command.contains("hgs team land --json"), "{}", item.command);
     let mut events = Vec::new();
     let accepted = ops::apply(&mut team, "accept", &json!({"task":1}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
     assert_eq!(accepted["status"], "merge_retry");
@@ -696,7 +698,7 @@ fn a_suite_of_another_platform_with_a_runner_is_queued_and_waited_for() {
     assert!(python.platforms.contains(&"linux".to_owned()), "{:?}", python.platforms);
     // It waits for the runner's result like any queued suite.
     assert!(!step(&mut team, &database, 100.5, &mut events, &host, &runners).unwrap());
-    run_due(&database, &repo.lead, &queued, 101.0, &Default::default()).unwrap();
+    run_due(&database, &repo.lead, &queued, 101.0, &Default::default(), None).unwrap();
     step(&mut team, &database, 102.0, &mut events, &host, &runners).unwrap();
     assert_eq!(team.task(1).unwrap().status, TaskStatus::Accepted);
     assert!(team.merge_log[0].suites.iter().any(|suite| suite == "python"));
@@ -732,7 +734,7 @@ fn a_merged_report_whose_affected_tests_pass_is_kept_and_accepted() {
     assert_eq!((queued[0].suite.as_str(), queued[0].commit.as_str(), queued[0].task, queued[0].forced), ("unit", entry.merged.as_str(), Some(1), true));
     // Nothing decides before the result.
     assert!(!step_here(&mut team, &database, 100.5, &mut events).unwrap());
-    run_due(&database, &repo.lead, &queued, 101.0, &Default::default()).unwrap();
+    run_due(&database, &repo.lead, &queued, 101.0, &Default::default(), None).unwrap();
     assert!(step_here(&mut team, &database, 102.0, &mut events).unwrap());
     let task = team.task(1).unwrap();
     assert_eq!(task.status, TaskStatus::Accepted);
@@ -777,7 +779,7 @@ fn a_failed_merge_names_the_suites_not_run_here() {
     let host = vec!["windows".to_owned()];
     assert!(step(&mut team, &database, 100.0, &mut events, &host, &[]).unwrap());
     let queued = database.queued("t1").unwrap();
-    run_due(&database, &repo.lead, &queued, 101.0, &Default::default()).unwrap();
+    run_due(&database, &repo.lead, &queued, 101.0, &Default::default(), None).unwrap();
     step(&mut team, &database, 102.0, &mut events, &host, &[]).unwrap();
     let task = team.task(1).unwrap();
     assert_eq!(task.status, TaskStatus::Pending);
@@ -896,10 +898,13 @@ fn a_dirty_folder_is_committed_before_it_starts_from_the_integration_head() {
     let step = crate::state::teams::dispatcher::prepare_integration_base(&team, 1, "dev").expect("the base step");
     assert_eq!(step.result, "done", "{step:?}");
     assert!(step.reason.contains("starts from the integration head"), "{step:?}");
-    // The old work is committed on the old branch first, then the folder is at
-    // the integration head.
+    // Task #382: the unfinished work is committed on the branch the folder was
+    // on, which keeps that commit; the folder moves to the task's own branch at
+    // the integration head. The old branch is never reset.
     assert_eq!(run_git(&repo.member, &["rev-parse", "HEAD"]), head(&repo));
-    assert_eq!(run_git(&repo.member, &["log", "-1", "--format=%s", "task/1@{1}"]), "Zerus: dev's unfinished work before task #1");
+    assert_eq!(run_git(&repo.member, &["log", "-1", "--format=%s", "task/1"]), "Zerus: dev's unfinished work before task #1");
+    let task_branch = format!("team/{}/dev-1", &team.id[..8.min(team.id.len())]);
+    assert_eq!(run_git(&repo.member, &["rev-parse", "--abbrev-ref", "HEAD"]), task_branch);
     assert_eq!(run_git(&repo.member, &["show", "HEAD:a.txt"]), "one", "the head is the integration line's");
     // A folder already at the head is left alone.
     let step = crate::state::teams::dispatcher::prepare_integration_base(&team, 1, "dev").expect("the base step again");
@@ -949,12 +954,12 @@ fn status_and_the_lead_inbox_name_accepted_work_that_is_not_landed() {
     let inbox = crate::state::teams::inbox::items(&team);
     let item = inbox.iter().find(|item| item.kind == "unlanded").expect("the lead's item");
     assert!(item.summary.contains("#1 is accepted but not on the integration line"), "{}", item.summary);
-    assert!(item.command.contains("hgs team retry"));
+    assert!(item.command.contains("hgs team land"));
     // Once the queue lands its commit, it is on the line and the item leaves.
     let commit = run_git(&repo.member, &["rev-parse", "HEAD"]);
     run_git(&repo.lead, &["merge", "--no-edit", "-q", &commit]);
     let view = crate::state::teams::commands::view_with_cancelled(&team, &[], None, false);
-    assert_eq!(view["integration"]["landed"], json!([{"task":1,"commit":commit}]), "{}", view["integration"]);
+    assert_eq!(view["integration"]["landed"], json!([{"task":1,"commit":commit,"equivalent":false,"marked":null}]), "{}", view["integration"]);
     assert!(view["integration"]["unlanded"].as_array().unwrap().is_empty());
     assert!(crate::state::teams::inbox::items(&team).iter().all(|item| item.kind != "unlanded"));
 }
@@ -1121,7 +1126,7 @@ fn a_later_kept_merge_closes_an_open_range_only_after_all_its_suites_ran() {
     queue_next(&repo, &mut team, 2);
     let host = vec!["windows".to_owned()];
     step(&mut team, &database, 100.0, &mut events, &host, &[]).unwrap();
-    run_due(&database, &repo.lead, &database.queued("t1").unwrap(), 101.0, &Default::default()).unwrap();
+    run_due(&database, &repo.lead, &database.queued("t1").unwrap(), 101.0, &Default::default(), None).unwrap();
     step(&mut team, &database, 102.0, &mut events, &host, &[]).unwrap();
     assert_eq!(team.task(2).unwrap().status, TaskStatus::Accepted);
     assert_eq!(team.task(1).unwrap().untested_merge.as_ref(), Some(&range));
@@ -1132,7 +1137,7 @@ fn a_later_kept_merge_closes_an_open_range_only_after_all_its_suites_ran() {
     let queued = database.queued("t1").unwrap();
     assert!(queued.iter().any(|request| request.suite == "other"));
     assert!(queued.iter().all(|request| request.commit == head(&repo)));
-    run_due(&database, &repo.lead, &queued, 201.0, &Default::default()).unwrap();
+    run_due(&database, &repo.lead, &queued, 201.0, &Default::default(), None).unwrap();
     step(&mut team, &database, 202.0, &mut events, &host, &[]).unwrap();
     assert_eq!(team.task(3).unwrap().status, TaskStatus::Accepted);
     assert!(team.task(1).unwrap().untested_merge.is_none());
@@ -1331,6 +1336,7 @@ fn the_owners_integration_folder_takes_the_merge_and_its_tests() {
     run_git(&repo.member, &["commit", "-q", "-m", "work"]);
     let mut team = team(&repo);
     team.settings.integration_folder = integration.to_string_lossy().into_owned();
+    team.line_branch = "phase3".into();
     assert_eq!(team.integration_folder(), integration.to_string_lossy());
     assert_eq!(accept(&mut team)["status"], "merge_queued");
     let database = database(&repo);
@@ -1382,4 +1388,469 @@ fn an_unusable_integration_folder_holds_the_queue_with_its_note() {
 
 
 
+
+
+fn ctest_repo() -> Repo {
+    let repo = repo_providers(r#"[[provider]]
+name = "gui"
+kind = "ctest"
+build_dir = "build/gui"
+sources = ["a.txt", "tests/**", "tests.txt"]
+tests = ["tests/*.cpp"]
+configure = '"{python}" .zerus/fixture.py configure "{build_dir}"'
+build = '"{python}" .zerus/fixture.py build "{build_dir}" {targets}'
+probe = '"{python}" .zerus/fixture.py probe "{build_dir}"'
+command = '"{python}" .zerus/fixture.py test "{build_dir}" {targets}'
+"#);
+    write(&repo.lead, ".gitignore", "build/\nstages.log\n.zerus/tests.local.toml\n");
+    std::fs::create_dir(repo.lead.join("tests")).unwrap();
+    write(&repo.lead, "tests/test_old.cpp", "old test\n");
+    write(&repo.lead, "tests.txt", "test_old\n");
+    write(&repo.lead, ".zerus/fixture.py", r#"import os, pathlib, sys
+stage, folder = sys.argv[1:3]
+folder = pathlib.Path(folder)
+assert os.environ.get('FIXTURE_LOCAL') == 'yes'
+assert stage == 'test' or os.environ.get('EXPECT_OWNER_STAGE') != 'yes' or os.environ.get('OWNER_STAGE') == 'yes'
+with open('stages.log', 'a') as log:
+    log.write(stage + ' ' + ' '.join(sys.argv[3:]) + '\n')
+if stage == 'probe':
+    if os.environ.get('PROBE_READY') == 'no':
+        print('x' * 5000)
+        print('fixture compiler is unavailable')
+        sys.exit(9)
+elif stage == 'configure':
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / 'CMakeCache.txt').write_text('fixture cache')
+elif stage == 'build':
+    if pathlib.Path('fail-build.txt').exists():
+        print('fixture source build failed')
+        sys.exit(7)
+    assert (folder / 'CMakeCache.txt').exists()
+    (folder / 'built.txt').write_text(pathlib.Path('tests.txt').read_text())
+elif stage == 'test':
+    assert (folder / 'built.txt').read_text() == pathlib.Path('tests.txt').read_text(), 'stale test binary'
+    print('Ran ' + (folder / 'built.txt').read_text().strip())
+"#);
+    write(&repo.lead, ".zerus/test-map.json", r#"{"schema":1,"providers":{"gui":{"kind":"ctest","rule":"build","targets":{"test_old":{"run":["old"],"tests":1}},"files":{"a.txt":["test_old"],"tests/test_old.cpp":["test_old"]},"test_files":{"tests/test_old.cpp":["test_old"]}}}}"#);
+    run_git(&repo.lead, &["add", "."]);
+    run_git(&repo.lead, &["commit", "-q", "-m", "fixture recipes"]);
+    run_git(&repo.member, &["merge", "--ff-only", &head(&repo)]);
+    write_local(&repo, "yes");
+    crate::test_discipline::config::load(&repo.lead, None).unwrap();
+    repo
+}
+
+fn write_local(repo: &Repo, ready: &str) {
+    let python = if cfg!(windows) { "python" } else { "python3" };
+    write(&repo.lead, ".zerus/tests.local.toml", &format!(
+        "[provider.gui.vars]\npython = '{python}'\n[provider.gui.env]\nFIXTURE_LOCAL = 'yes'\nPROBE_READY = '{ready}'\n"));
+}
+
+fn ctest_change(repo: &Repo) {
+    write(&repo.member, "a.txt", "changed\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "change"]);
+}
+
+#[test]
+fn ctest_queue_configures_missing_folder_then_builds_selected_targets() {
+    let repo = ctest_repo();
+    ctest_change(&repo);
+    let mut team = team(&repo);
+    accept(&mut team);
+    let database = database(&repo);
+    settle(&mut team, &database, &repo.lead);
+    assert_eq!(team.task(1).unwrap().status, TaskStatus::Accepted);
+    let stages = std::fs::read_to_string(repo.lead.join("stages.log")).unwrap();
+    assert_eq!(stages.lines().map(|line| line.split_whitespace().next().unwrap()).collect::<Vec<_>>(), ["probe", "configure", "build", "test"]);
+    assert!(stages.contains("build --target test_old"), "{stages}");
+}
+
+#[test]
+fn ctest_queue_uses_owner_overrides_for_every_preparation_stage() {
+    let repo = ctest_repo();
+    write(&repo.member, ".zerus/owner.py", "import os, runpy, sys\nassert sys.argv.pop(1) == 'owner'\nos.environ['OWNER_STAGE'] = 'yes'\nrunpy.run_path('.zerus/fixture.py', run_name='__main__')\n");
+    let mut local = std::fs::read_to_string(repo.lead.join(".zerus/tests.local.toml")).unwrap();
+    local.push_str("EXPECT_OWNER_STAGE = 'yes'\n");
+    write(&repo.lead, ".zerus/tests.local.toml", &local);
+    ctest_change(&repo);
+    let mut team = team(&repo);
+    team.settings.tests = Some(json!({"provider":[{
+        "name":"gui", "build_dir":"build/owner",
+        "probe":"\"{python}\" .zerus/owner.py owner probe \"{build_dir}\"",
+        "configure":"\"{python}\" .zerus/owner.py owner configure \"{build_dir}\"",
+        "build":"\"{python}\" .zerus/owner.py owner build \"{build_dir}\" {targets}"
+    }]}));
+    accept(&mut team);
+    let database = database(&repo);
+    settle(&mut team, &database, &repo.lead);
+    assert_eq!(team.task(1).unwrap().status, TaskStatus::Accepted);
+    assert!(repo.lead.join("build/owner/CMakeCache.txt").is_file());
+    assert!(repo.lead.join("build/owner/built.txt").is_file());
+    assert!(!repo.lead.join("build/gui").exists());
+    let stages = std::fs::read_to_string(repo.lead.join("stages.log")).unwrap();
+    assert_eq!(stages.lines().map(|line| line.split_whitespace().next().unwrap()).collect::<Vec<_>>(), ["probe", "configure", "build", "test"]);
+}
+
+#[test]
+fn ctest_queue_rebuilds_stale_folder_and_runs_a_new_test_missing_from_the_map() {
+    let repo = ctest_repo();
+    std::fs::create_dir_all(repo.lead.join("build/gui")).unwrap();
+    write(&repo.lead, "build/gui/CMakeCache.txt", "old cache");
+    write(&repo.lead, "build/gui/built.txt", "test_old\n");
+    write(&repo.member, "tests/test_new.cpp", "new test\n");
+    write(&repo.member, "tests.txt", "test_old\ntest_new\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "new test"]);
+    let mut team = team(&repo);
+    accept(&mut team);
+    let database = database(&repo);
+    settle(&mut team, &database, &repo.lead);
+    assert_eq!(team.task(1).unwrap().status, TaskStatus::Accepted);
+    assert_eq!(std::fs::read_to_string(repo.lead.join("stages.log")).unwrap().lines().collect::<Vec<_>>(), ["probe ", "build ", "test "]);
+    assert_eq!(std::fs::read_to_string(repo.lead.join("build/gui/built.txt")).unwrap().lines().collect::<Vec<_>>(), ["test_old", "test_new"]);
+}
+
+#[test]
+fn ctest_queue_build_failure_fails_the_suite_and_rolls_back() {
+    let repo = ctest_repo();
+    write(&repo.member, "fail-build.txt", "bad source");
+    ctest_change(&repo);
+    let prev = head(&repo);
+    let mut team = team(&repo);
+    accept(&mut team);
+    let database = database(&repo);
+    let mut events = Vec::new();
+    step_here(&mut team, &database, 100.0, &mut events).unwrap();
+    let queued = database.queued(&team.id).unwrap();
+    let records = run_due(&database, &repo.lead, &queued, 101.0,
+        &super::super::test_results::Policy { retries: 1, ..Default::default() }, None).unwrap();
+    assert_eq!(records[0].status, "failed");
+    assert!(records[0].flags.iter().any(|flag| flag == "build"));
+    step_here(&mut team, &database, 102.0, &mut events).unwrap();
+    assert_eq!(team.task(1).unwrap().status, TaskStatus::Pending);
+    assert_eq!(head(&repo), prev);
+    assert!(team.task(1).unwrap().decision_reason.contains("fixture source build failed"));
+    let stages = std::fs::read_to_string(repo.lead.join("stages.log")).unwrap();
+    assert_eq!(stages.lines().filter(|line| line.starts_with("build ")).count(), 1);
+    assert!(!stages.lines().any(|line| line.starts_with("test ")));
+}
+
+#[test]
+fn ctest_queue_probe_failure_is_not_run_or_green_on_a_later_run() {
+    let repo = ctest_repo();
+    write_local(&repo, "no");
+    ctest_change(&repo);
+    let mut team = team(&repo);
+    let prev = head(&repo);
+    accept(&mut team);
+    let database = database(&repo);
+    let mut events = Vec::new();
+    step_here(&mut team, &database, 100.0, &mut events).unwrap();
+    let queued = database.queued(&team.id).unwrap();
+    let first = run_due(&database, &repo.lead, &queued, 101.0, &Default::default(), None).unwrap();
+    assert_eq!(first[0].status, "not_run");
+    assert!(first[0].excerpt.contains("fixture compiler is unavailable"));
+    step_here(&mut team, &database, 102.0, &mut events).unwrap();
+    assert_eq!(team.task(1).unwrap().status, TaskStatus::Accepted);
+    assert_ne!(head(&repo), prev);
+    assert!(team.merge_log[0].suites.is_empty());
+    assert!(team.merge_log[0].not_run[0].starts_with("not run here: gui runs on "));
+    assert!(team.merge_tested.is_empty() && !team.merge_tested_suites.contains_key("gui"));
+    assert!(team.merge_not_run.contains_key("gui"));
+    assert!(database.last_green(&team.id, "gui", "").unwrap().is_none());
+    let mut next = queued[0].clone();
+    next.id = uuid::Uuid::new_v4().to_string();
+    database.enqueue(&next).unwrap();
+    let second = run_due(&database, &repo.lead, &[next], 103.0, &Default::default(), None).unwrap();
+    assert_eq!(second[0].status, "not_run");
+    assert!(database.last_green(&team.id, "gui", "").unwrap().is_none());
+}
+
+#[test]
+fn ctest_queue_refuses_tracked_or_unknown_local_configuration() {
+    for case in ["tracked", "provider", "key"] {
+        let repo = ctest_repo();
+        ctest_change(&repo);
+        let mut team = team(&repo);
+        accept(&mut team);
+        match case {
+            "tracked" => { run_git(&repo.lead, &["add", "-f", ".zerus/tests.local.toml"]); run_git(&repo.lead, &["commit", "-q", "-m", "tracked local"]); }
+            "provider" => write(&repo.lead, ".zerus/tests.local.toml", "[provider.unknown.vars]\nx = 'y'\n"),
+            _ => write(&repo.lead, ".zerus/tests.local.toml", "[provider.gui]\ncommand = 'not allowed'\n"),
+        }
+        let database = database(&repo);
+        let mut events = Vec::new();
+        step_here(&mut team, &database, 100.0, &mut events).unwrap();
+        let note = &team.task(1).unwrap().merge.as_ref().unwrap().note;
+        assert!(note.contains("local") && (note.contains("tracked") || note.contains("unknown") || note.contains("command")), "{case}: {note}");
+        assert!(database.queued(&team.id).unwrap().is_empty());
+    }
+}
+
+
+#[test]
+fn ctest_queue_missing_probe_program_or_placeholder_is_not_run() {
+    for missing_program in [false, true] {
+        let repo = ctest_repo();
+        if missing_program {
+            write(&repo.lead, ".zerus/tests.local.toml", "[provider.gui.vars]\npython = 'zerus-fixture-missing-program'\n");
+        } else {
+            write(&repo.lead, ".zerus/tests.local.toml", "[provider.gui.env]\nFIXTURE_LOCAL = 'yes'\n");
+        }
+        ctest_change(&repo);
+        let mut team = team(&repo);
+        accept(&mut team);
+        let database = database(&repo);
+        let mut events = Vec::new();
+        step_here(&mut team, &database, 100.0, &mut events).unwrap();
+        let queued = database.queued(&team.id).unwrap();
+        let records = run_due(&database, &repo.lead, &queued, 101.0, &Default::default(), None).unwrap();
+        assert_eq!(records[0].status, "not_run");
+        assert!(records[0].excerpt.starts_with("not run here: gui runs on "));
+        assert!(!repo.lead.join("build/gui/CMakeCache.txt").exists());
+        assert!(database.last_green(&team.id, "gui", "").unwrap().is_none());
+    }
+}
+
+/// Task #393 (owner, 2026-11-08): a landing the queue recorded is on the line
+/// already; the finished task is named landed from its record, not read from
+/// Git again. The line here holds no such commit, so only the record can
+/// decide it.
+#[test]
+fn a_landing_the_queue_recorded_is_not_read_from_git_again() {
+    let repo = repo();
+    let mut team = team(&repo);
+    team.settings.integration_folder = repo.lead.to_string_lossy().into_owned();
+    let merged = "0123456789abcdef0123456789abcdef01234567".to_owned();
+    team.task_mut(1).unwrap().status = TaskStatus::Accepted;
+    team.task_mut(1).unwrap().merge = Some(MergeEntry {
+        state: "landed".into(),
+        author: "dev".into(),
+        commit: merged.clone(),
+        merged: merged.clone(),
+        ..Default::default()
+    });
+    let view = landing(&team);
+    // Each landed entry names its task and commit; task 370 adds how the landing was recognized.
+    let landed = view["landed"].as_array().unwrap();
+    assert_eq!(landed.len(), 1, "{}", view);
+    assert_eq!((landed[0]["task"].clone(), landed[0]["commit"].clone()), (json!(1), json!(merged)), "{}", view);
+    assert!(view["unlanded"].as_array().unwrap().is_empty(), "{}", view);
+}
+/// Task #370: a cherry-pick of the accepted change counts as landed, and the
+/// lead may mark a landing by a named line commit.
+#[test]
+fn cherry_picked_work_counts_as_landed_and_the_lead_can_mark_a_landing() {
+    let repo = repo();
+    write(&repo.member, "work.txt", "work\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "The accepted work"]);
+    let accepted = run_git(&repo.member, &["rev-parse", "HEAD"]);
+    // The merger cherry-picks the accepted change onto the line.
+    run_git(&repo.lead, &["cherry-pick", &accepted]);
+    // The line keeps the change with a commit of its own: the patch, not the sha, matches.
+    run_git(&repo.lead, &["commit", "--amend", "-q", "-m", "Land: the accepted work"]);
+    let line = head(&repo);
+    let mut team = team(&repo);
+    team.task_mut(1).unwrap().status = TaskStatus::Accepted;
+    team.task_mut(1).unwrap().merge = None;
+    let view = landing(&team);
+    assert!(view["unlanded"].as_array().unwrap().is_empty(), "{view}");
+    assert_eq!(view["landed"][0]["task"], 1);
+    assert_eq!(view["landed"][0]["equivalent"], true, "{view}");
+    // A commit the line does not carry is unlanded until the lead marks the
+    // landing by a commit that is on the line.
+    write(&repo.member, "more.txt", "more\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "More accepted work"]);
+    let more = run_git(&repo.member, &["rev-parse", "HEAD"]);
+    team.task_mut(1).unwrap().attempts[0].folder_head = more.clone();
+    let view = landing(&team);
+    assert_eq!(view["unlanded"][0]["task"], 1, "{view}");
+    let mut events = Vec::new();
+    let value = ops::apply(&mut team, "landed", &json!({"task":1,"commit":line}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+    assert_eq!(value["status"], "landed");
+    assert!(events.iter().any(|event| event.kind == "task_marked_landed"), "{events:?}");
+    let view = landing(&team);
+    assert!(view["unlanded"].as_array().unwrap().is_empty(), "{view}");
+    assert_eq!(view["landed"][0]["marked"], line);
+    // The line commit must be on the line.
+    let error = ops::apply(&mut team, "landed", &json!({"task":1,"commit":more}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap_err().to_string();
+    assert!(error.contains("not on the integration line"), "{error}");
+}
+
+/// Task #370: a landing refuses a range carrying a rejected attempt's commit
+/// and offers a cherry-pick of the task's own commit.
+#[test]
+fn a_landing_refuses_a_range_with_a_rejected_attempt_and_offers_a_cherry_pick() {
+    let repo = repo();
+    write(&repo.member, "rejected.txt", "rejected\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "A rejected try"]);
+    let rejected = run_git(&repo.member, &["rev-parse", "HEAD"]);
+    write(&repo.member, "accepted.txt", "accepted\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "The accepted work"]);
+    let accepted = run_git(&repo.member, &["rev-parse", "HEAD"]);
+    let mut team = team(&repo);
+    team.settings.integration_folder = repo.lead.to_string_lossy().into_owned();
+    team.task_mut(1).unwrap().attempts[0].folder_head = accepted.clone();
+    team.task_mut(1).unwrap().attempts.push(Attempt { n: 2, id: "A0".into(), member: "dev".into(), state: AttemptState::Rejected, folder_head: rejected.clone(), ..Default::default() });
+    accept(&mut team);
+    let database = database(&repo);
+    let mut events = Vec::new();
+    step_here(&mut team, &database, 100.0, &mut events).unwrap();
+    let entry = team.task(1).unwrap().merge.clone().unwrap();
+    assert!(entry.blocked, "{entry:?}");
+    assert!(entry.note.contains("rejected attempt") && entry.note.contains("cherry-pick"), "{}", entry.note);
+    assert!(!repo.lead.join("accepted.txt").exists() && !repo.lead.join("rejected.txt").exists());
+    // The queue's advice is the cherry-pick landing of the task's own commit.
+    let inbox = crate::state::teams::inbox::items(&team);
+    let item = inbox.iter().find(|item| item.kind == "merge_waiting").unwrap_or_else(|| panic!("no merge_waiting item: {inbox:?}"));
+    assert!(item.command.contains("hgs team land") && item.command.contains("cherry_pick"), "{}", item.command);
+    ops::apply(&mut team, "land", &json!({"task":1,"cherry_pick":true}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+    step_here(&mut team, &database, 101.0, &mut events).unwrap();
+    assert!(repo.lead.join("accepted.txt").exists());
+    assert!(!repo.lead.join("rejected.txt").exists());
+}
+
+/// Task #370: work that belongs to another repository is never unlanded here.
+#[test]
+fn an_out_of_repo_task_is_never_unlanded() {
+    let repo = repo();
+    let mut team = team(&repo);
+    team.task_mut(1).unwrap().status = TaskStatus::Accepted;
+    team.task_mut(1).unwrap().merge = None;
+    team.task_mut(1).unwrap().attempts[0].folder_head = "0123456789abcdef0123456789abcdef01234567".into();
+    let view = landing(&team);
+    assert!(view["unlanded"].as_array().unwrap().is_empty(), "{view}");
+    assert_eq!(view["landed"][0]["outside"], true, "{view}");
+    assert!(crate::state::teams::inbox::items(&team).iter().all(|item| item.kind != "unlanded"));
+}
+
+// Task 377 (owner, 2026-11-08): the line is a named branch. A folder left on
+// another checkout lands nothing: the task keeps its queue note, the lead gets
+// a merge_wrong_checkout event, and the task is not reopened.
+#[test]
+fn a_checkout_that_is_not_the_line_holds_the_landing_with_a_notice() {
+    let repo = repo();
+    let mut team = team(&repo);
+    team.settings.integration_folder = repo.lead.to_string_lossy().into_owned();
+    // The line's name, while the folder's checkout is master.
+    team.line_branch = "release".into();
+    assert_eq!(accept(&mut team)["status"], "merge_queued");
+    let database = database(&repo);
+    let mut events = Vec::new();
+    let landed = step_here(&mut team, &database, 100.0, &mut events).unwrap();
+    assert!(!landed, "nothing lands on a wrong checkout");
+    let entry = team.task(1).unwrap().merge.clone().expect("the queued landing");
+    assert!(entry.note.contains("release") && entry.note.contains("master"), "{}", entry.note);
+    assert!(entry.merged.is_empty(), "no merge was made");
+    let kinds: Vec<String> = events.iter().map(|event| event.kind.to_string()).collect();
+    assert!(kinds.iter().any(|kind| kind == "merge_wrong_checkout"), "{kinds:?}");
+}
+
+// Task 377 (owner, 2026-11-08): a merge runs the project's declared generators
+// and folds their output into the merge commit, so a generated catalog keeps
+// both sides' strings instead of whichever side the merge happened to keep.
+#[test]
+fn a_merge_regenerates_the_projects_generated_files_into_its_commit() {
+    let repo = repo();
+    // The project declares a generator; the line's copy of its output is stale.
+    let path = repo.lead.join(".zerus/tests.toml");
+    let config = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, format!("generate = [\"echo fresh > generated.txt\"]\n{config}")).unwrap();
+    write(&repo.lead, "generated.txt", "stale\n");
+    run_git(&repo.lead, &["add", "."]);
+    run_git(&repo.lead, &["commit", "-q", "-m", "the project declares its generator"]);
+    let mut team = team(&repo);
+    team.settings.integration_folder = repo.lead.to_string_lossy().into_owned();
+    assert_eq!(accept(&mut team)["status"], "merge_queued");
+    let database = database(&repo);
+    let events = settle(&mut team, &database, &repo.lead);
+    assert_eq!(team.task(1).unwrap().status, TaskStatus::Accepted, "{events:?}");
+    let generated = std::fs::read_to_string(repo.lead.join("generated.txt")).unwrap();
+    assert_eq!(generated.trim(), "fresh", "the generator ran over the stale copy");
+    // The regenerated file is part of the merge commit, not a dirty leftover.
+    let head = head(&repo);
+    let files = run_git(&repo.lead, &["show", "--name-only", "--pretty=format:", &head]);
+    assert!(files.lines().any(|file| file == "generated.txt"), "{files}");
+    assert!(run_git(&repo.lead, &["status", "--porcelain"]).is_empty(), "the merge commit carries it");
+}
+
+/// Task #443 (owner, 2026-11-09): with the queue off the lead's accept decides
+/// at once and a hand landing waits: the status names it in one "accepted,
+/// waiting to land" line with its age, and when the merger lands the commit
+/// Zerus marks it landed by itself (no second accept with "merged":true).
+#[test]
+fn an_accepted_commit_on_the_line_is_landed_by_itself() {
+    let repo = repo();
+    // The queue is off: the accept decides, and the merger lands by hand.
+    let path = repo.lead.join(".zerus/tests.toml");
+    std::fs::write(&path, format!("version = 1\n[merge_queue]\nenabled = false\n{}", unit_provider())).unwrap();
+    run_git(&repo.lead, &["add", "."]);
+    run_git(&repo.lead, &["commit", "-q", "-m", "the queue is off"]);
+    write(&repo.member, "b.txt", "work\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "work"]);
+    let commit = run_git(&repo.member, &["rev-parse", "HEAD"]);
+    let mut team = team(&repo);
+    let decided = accept(&mut team);
+    assert_eq!(decided["status"], "accepted");
+    assert_eq!(decided["landing"]["state"], "not_queued");
+    let task = team.task(1).unwrap();
+    assert_eq!((task.status, task.merge.is_none()), (TaskStatus::Accepted, true));
+    assert!(waits_for_landing(task));
+    // One status line with its age, not one reminder per task.
+    let at = task.attempts[0].decided_at.expect("the accept time");
+    let line = waiting_to_land(&team, at + 26.0 * 60.0).expect("the waiting line");
+    assert_eq!(line["line"], json!("accepted, waiting to land: #1 (26 min)"));
+    assert_eq!((line["tasks"][0]["task"].clone(), line["tasks"][0]["state"].clone()), (json!(1), json!("not_queued")));
+    let view = super::super::commands::view_with(&team, &[], None);
+    assert!(view["waiting_to_land"]["line"].as_str().unwrap_or_default().starts_with("accepted, waiting to land: #1 ("), "{}", view["waiting_to_land"]);
+    // Not on the line yet: nothing lands by itself.
+    assert!(landed_by_ancestry(&team, at + 60.0).is_empty());
+    // The merger lands the commit by hand.
+    run_git(&repo.lead, &["merge", "--no-ff", "-q", "-m", "Land #1", "task/1"]);
+    assert_eq!(landed_by_ancestry(&team, at + 120.0), vec![(1, commit.clone())]);
+    let mut events = Vec::new();
+    assert!(record_landed(&mut team, &[(1, commit.clone())], at + 120.0, &mut events).unwrap());
+    let task = team.task(1).unwrap();
+    assert_eq!(task.landed.as_ref().map(|landed| (landed.commit.as_str(), landed.by.as_str())), Some((commit.as_str(), "Zerus")));
+    assert!(!waits_for_landing(task));
+    assert!(waiting_to_land(&team, at + 120.0).is_none(), "nothing waits to land");
+    assert!(events.iter().any(|event| event.kind == "tasks_landed" && event.payload["by"] == "Zerus"), "{events:?}");
+    // A second look changes nothing.
+    assert!(!record_landed(&mut team, &[(1, commit)], at + 180.0, &mut Vec::new()).unwrap());
+}
+
+/// Task #443: a report accepted while the queue was on, whose landing is still
+/// queued when the queue is turned off, is landed by itself once a hand
+/// landing puts its commit on the line; the queue entry never decides it.
+#[test]
+fn a_queued_landing_on_the_line_is_accepted_and_landed_by_itself() {
+    let repo = repo();
+    write(&repo.member, "b.txt", "work\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "work"]);
+    let commit = run_git(&repo.member, &["rev-parse", "HEAD"]);
+    let mut team = team(&repo);
+    assert_eq!(accept(&mut team)["status"], "merge_queued");
+    assert_eq!(team.task(1).unwrap().status, TaskStatus::Submitted, "the queue entry leaves it undecided");
+    assert!(waits_for_landing(team.task(1).unwrap()), "a queued landing waits to land");
+    let line = waiting_to_land(&team, 26.0 * 60.0).expect("the waiting line");
+    assert_eq!(line["tasks"][0]["state"], "queued");
+    // The queue never lands it (the queue is off); the merger does.
+    assert!(landed_by_ancestry(&team, 100.0).is_empty());
+    run_git(&repo.lead, &["merge", "--no-ff", "-q", "-m", "Land #1", "task/1"]);
+    assert_eq!(landed_by_ancestry(&team, 200.0), vec![(1, commit.clone())]);
+    let mut events = Vec::new();
+    assert!(record_landed(&mut team, &[(1, commit.clone())], 200.0, &mut events).unwrap());
+    let task = team.task(1).unwrap();
+    assert_eq!(task.status, TaskStatus::Accepted, "the landing accepted the task");
+    assert!(task.merge.is_none(), "the queue entry goes");
+    assert_eq!(task.landed.as_ref().map(|landed| landed.commit.clone()), Some(commit));
+    assert!(!waits_for_landing(task));
+}
 

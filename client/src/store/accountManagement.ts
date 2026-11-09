@@ -1,6 +1,7 @@
 import { createSignal } from "solid-js";
 import { accountEditOpen, accountEditApply, accountEditClose, type AccountEditKind, type AccountEditView, type AccountEditResult, type AccountEditValues } from "../bridge";
 import { notify } from "./actions";
+import { trText } from "../text";
 
 export interface AccountPrompt extends AccountEditView { origin: HTMLElement }
 interface Port {
@@ -25,7 +26,7 @@ export function createAccountManagement(port: Port) {
     setPrompt(undefined); setBusy(true);
     try {
       const answer = await port.apply(view.handle, values);
-      answer.notices.forEach(text => { setNotice(text); port.notice(false, text); });
+      answer.notices.map(trText).forEach(text => { setNotice(text); port.notice(false, text); });
       answer.errors.forEach(text => port.notice(true, text));
     } catch (error) { port.notice(true, String(error)); }
     finally { setBusy(false); }
@@ -48,9 +49,12 @@ export function createAccountManagement(port: Port) {
       const view = prompt();
       if (!view || busy() || (expectedHandle && view.handle !== expectedHandle)) return;
       const values=typeof input==="string" ? {label:input} : input;
+      // Unchanged values need no save, unless the computers differ now: then
+      // saving the shown value is what makes them the same ("Use everywhere").
       if ((view.kind === "rename" && values.label?.trim() === view.label)
-        || (view.kind === "permissions" && values.mode === view.permission_mode)
-        || (view.kind === "model" && values.model === view.models?.defaults.model && values.effort === view.models?.defaults.effort)) { close(); return; }
+        || (view.kind === "permissions" && !view.differs && values.mode === view.permission_mode)
+        || (view.kind === "model" && !view.differs && values.model === view.models?.defaults.model && values.effort === view.models?.defaults.effort)
+        || (view.kind === "scope" && values.mode === (view.per_computer ? "computer" : "account"))) { close(); return; }
       await apply(view, values);
     },
   };

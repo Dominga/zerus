@@ -529,11 +529,12 @@ void runHgsDirect(const QString &hgs, const QStringList &args, int timeoutMs, QO
 // (ProcessRunner.h); done(value) or onFailed then runs on parent's thread.
 template <typename Parse, typename Done>
 void runHgsParsedDirect(const QString &hgs, const QStringList &args, int timeoutMs, QObject *parent, Parse parse, Done done,
-                        const std::function<void(const QString &, const QString &)> &onFailed, const QByteArray &input = {}, bool messageStartup = false)
+                        const std::function<void(const QString &, const QString &)> &onFailed, const QByteArray &input = {}, bool messageStartup = false, qsizetype maximumOutputBytes = 0)
 {
     using Value = std::decay_t<std::invoke_result_t<Parse &, const QByteArray &>>;
     struct Reply { QString detail; Value value{}; };
     auto request = processRequest(hgs, args); request.timeoutMs = timeoutMs;
+    request.maximumOutputBytes = maximumOutputBytes;
     if (!input.isEmpty()) request.input = input;
     ProcessRunner::run(std::move(request), parent,
         [hgs, parse = std::move(parse), messageStartup](ProcessRunner::Result result) mutable {
@@ -914,12 +915,14 @@ quint64 HgsClient::requestTeam(const QString &host, const QString &operation, co
     QStringList args{QStringLiteral("team")};
     args << operation.split(' ', Qt::SkipEmptyParts) << QStringLiteral("--json");
     if (!host.isEmpty()) args.prepend('@' + host);
-    runHgsParsed(m_hgs, args, timeoutMs > 0 ? timeoutMs : host.isEmpty() ? 15000 : 45000, this, parseObject,
+    runHgsParsedDirect(m_hgs, args, timeoutMs > 0 ? timeoutMs : host.isEmpty() ? 15000 : 45000, this, parseObject,
         [this, request, host, operation](const ObjectReply &data) {
             if (!data.ok()) emit teamFailed(request, host, operation, tr("Invalid team response"));
             else emit teamReady(request, host, operation, data.object);
         }, [this, request, host, operation](const QString &, const QString &error) { emit teamFailed(request, host, operation, error); },
-        QJsonDocument(input).toJson(QJsonDocument::Compact));
+        QJsonDocument(input).toJson(QJsonDocument::Compact), false,
+        operation == "status" && (input.contains("task") || input.contains("archived_phase") || input.contains("archived_phases"))
+            ? 8 * 1024 * 1024 : 0);
     return request;
 }
 

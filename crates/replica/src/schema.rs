@@ -117,6 +117,10 @@ pub struct LogEntry {
     /// The requirement revision a report says it considered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub considered: Option<u64>,
+    /// The immutable attempt named by a scoped report, including a stale
+    /// report. This never means the newest attempt at the time of reading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_attempt: Option<String>,
     /// The history entry a person's review of an unexplained execution entry
     /// names (`Execution::unexplained`).
     #[serde(default, skip_serializing_if = "Option::is_none")]

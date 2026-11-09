@@ -1166,6 +1166,14 @@ mod native {
                 service.snapshot().notification_ownership.unwrap()["native_recovery"],
                 true
             );
+            // Task #440 (A): the window's own re-check is a status read only:
+            // without a grant it never leaves recovery and never mutates.
+            assert!(!service.recheck_recovery().await, "no grant, no exit from recovery");
+            assert_eq!(
+                service.snapshot().notification_ownership.unwrap()["native_recovery"],
+                true
+            );
+            assert!(f.calls("frontend-request").is_empty(), "the re-check is read-only");
             let watches = f.calls("watch").len();
             service.retry();
             wait_for("settled retry and replacement watch", || {
@@ -1297,6 +1305,44 @@ mod native {
         assert!(legacy._receipt.is_none());
         assert!(no_marker.calls("ownership-status").is_empty());
         assert!(no_marker.calls("frontend-request").is_empty());
+    }
+
+    #[test]
+    fn program_source_keeps_the_actual_native_connection_and_refuses_legacy_origin() {
+        if crate::test_context::native() {
+            return;
+        }
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        let f = Fixture::new(Mode::Native, json!({}));
+        let ready =
+            native_takeover(f.root.join("hgs"), f.owner.responder.clone().unwrap()).unwrap();
+        let before = f.calls("frontend-request").len();
+        let source = ready.program_source().unwrap();
+        assert!(Arc::ptr_eq(&source.connection().unwrap(), &ready.helper));
+        assert_eq!(
+            source.configuration(),
+            ready._receipt.as_ref().unwrap().configuration
+        );
+        assert_eq!(
+            source.original_ownership(),
+            ready._receipt.as_ref().unwrap()
+        );
+        assert!(source.environment().current());
+        assert!(source.route_current());
+        assert_eq!(
+            f.calls("frontend-request").len(),
+            before,
+            "source capture does not submit another native action"
+        );
+        let old = Fixture::new(Mode::Native, json!({"ownership_abi":false}));
+        let legacy =
+            native_takeover(old.root.join("hgs"), old.owner.responder.clone().unwrap()).unwrap();
+        assert!(matches!(
+            legacy.program_source(),
+            Err("worktree_programs_native_origin_unavailable")
+        ));
+        assert!(old.calls("ownership-status").is_empty());
+        assert!(old.calls("frontend-request").is_empty());
     }
 
     #[test]

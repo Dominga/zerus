@@ -2,12 +2,10 @@ import { For, Match, Show, Suspense, Switch, createEffect, createMemo, createRoo
 import { tr } from "../../i18n";
 import * as bridge from "../../bridge";
 import { terminal } from "../../store/terminal";
-import { TerminalTab } from "./Terminal";
 import { NativeUiTab } from "./NativeUi";
 import { nativeBinding, nativeEntry, nativeRoute } from "./native-entry";
 import { nativeUi } from "../../store/native-ui";
 import { pageHidden } from "../../store/visibility";
-import { ProcessesTab } from "./Processes";
 import { LeadTeamHeader, TeamTab } from "../teams/TeamTab";
 import { NewTeamPage } from "../teams/NewTeamPage";
 import { WaitingBanner } from "../teams/Waiting";
@@ -20,12 +18,13 @@ import { flag } from "../../store/settings";
 import type { TerminalStatus } from "../../types";
 import { Icon } from "../lib/icons";
 import { ActivityView, columnStyle } from "./Activity";
+import { KeepWarmChip } from "./KeepWarmChip";
 import { AgentBadge, MachineBadge, StatusBadge, captionText, headerState, statusOf, folderOf } from "./SessionCard";
 import { detailTab, page, selected, setDetailTab, setMenu, subagentOpen, type MenuEntry } from "../../store/ui";
 import { activity, subagentActivity } from "../../store/session";
 import { activityReadOnly, type ActivitySource } from "../../store/activitySource";
 import { archiveActivity } from "../../store/archiveActivity";
-import { computerOffline } from "../../store/catalog";
+import { catalog, computerOffline } from "../../store/catalog";
 import { copyIdentity, detailsFor, followedFor } from "../../store/actions";
 import { headerClearSlot, sessionIdentity } from "./actions-ui";
 import { actionEntries, copyEntries, freshActionEntry } from "./ActionDialogs";
@@ -33,8 +32,6 @@ import { snapshotOf } from "./actions-ui";
 import { markEntry } from "./mark-entries";
 import { followViewedReplies } from "./viewed-reply";
 import { Composer } from "./Composer";
-import { ComposerDialogs } from "./ComposerDialogs";
-import { QuestionCard } from "./QuestionCard";
 import { QueuePanel } from "./QueuePanel";
 import { HeldInputBar, HeldMessage, TerminalDraftBar } from "./HeldMessage";
 import { onCommand } from "../../store/shortcuts";
@@ -42,15 +39,24 @@ import { stepArea, stepTab } from "../../store/navigation";
 import { composer } from "../../store/composer";
 import { createSubagentIdentity } from "../../store/subagentIdentity";
 import { selectedTask } from "../../store/taskNavigation";
-import { Inspector } from "./Inspector";
 import { followProjectTasks } from "../../store/taskContext";
-import { inspectorOpen, setInspectorOpen, openInspector, inspectorHint } from "../../store/inspector";
+import { inspectorOpen, inspectorTab, setInspectorOpen, openInspector, inspectorHint } from "../../store/inspector";
 import { sessionGoal } from "./inspector-data";
 import { PausedServiceDetail, servicePausedEmpty } from "../components/DesktopServiceStatus";
 
+import { expandedEntries } from "./session-extra-entries";
 import { folderEntries, folderRequest } from "../../store/sessionFolders";
+import { watchDetailRemoval } from "./detail-removal";
+import { lazyView } from "../lazy-view";
+import { LazyBoundary } from "../lazy-boundary";
+import { ComposerDialogsSlot, QuestionSlot } from "./lazy-slots";
+// Opened on demand, outside the entry chunk and preloaded on idle (zerus-ycycu).
+const ProcessesTab = lazyView(() => import("./Processes"), (m) => m.ProcessesTab);
+const TerminalTab = lazyView(() => import("./Terminal"), (m) => m.TerminalTab);
 
+const Inspector = lazy(() => import("./Inspector").then((m) => ({ default: m.Inspector })));
 const TaskView = lazy(() => import("../screens/TaskView"));
+let reportedRemovedDetail = false;
 
 // The session header and its Activity with the composer under it, after
 // design/webui SessionDetail. Session actions keep the mockup placement and
@@ -116,6 +122,10 @@ function Header() {
     act().fork,
     { separator: true },
     copies().command,
+    copies().name,
+    copies().reference,
+    copies().folder,
+    ...expandedEntries(s()),
     ...(nativeEntry(s()) ? [nativeEntry(s())!] : []),
     act().change,
     ...(mark() ? [mark()!] : []),
@@ -142,7 +152,7 @@ function Header() {
             aria-label={clear()?.running ? tr("Clearing…") : tr("Clear session")} disabled={!clear()?.enabled} onClick={() => composer.openClear()}><Icon name="clear" size={15} /></button>
         </Show>
         <Show when={!subagentOpen() && (s().status === "ended" || s().state === "archived")}><button class="btn small primary" title={act().change.hint} disabled={act().change.disabled} onClick={() => act().change.action()}><Icon name="play" size={12} />{tr("Restore")}</button></Show>
-        <button class="icon-btn" data-tip={tr("Session actions")} onClick={(e) => setMenu({ x: e.clientX - 200, y: e.clientY + 12, items: actions() })}><Icon name="ellipsis" size={16} /></button>
+        <button class="icon-btn" data-tip={tr("Session actions")} aria-label={tr("Session actions")} onClick={(e) => setMenu({ x: e.clientX - 200, y: e.clientY + 12, items: actions() })}><Icon name="ellipsis" size={16} /></button>
       </div>
       <div class="dh-row2">
         <AgentBadge agent={s().agent} />
@@ -156,6 +166,7 @@ function Header() {
         </Show>
         <Show when={s().worktree}><span class="dh-chip ell" title={tr("Linked worktree %1", s().worktree!)}><Icon name="folder-git-2" size={13} />{tr("worktree %1", s().worktree!)}</span></Show>
         <span class="grow" />
+        <KeepWarmChip session={s()} />
         <span class="dh-model ell">{s().model} {s().effort ?? ""}</span>
       </div>
     </header>
@@ -167,7 +178,7 @@ const TABS: readonly Tab[] = [{ id: "activity", label: "Activity" }, { id: "term
 /** Task #331: the strip renders these fixed ids, never a fresh tab object, so
  * a status poll, a team read or an unread change cannot remount a button and
  * restart the active tab's underline animation. */
-export const TAB_ORDER = ["activity", "terminal", "native", "processes", "taskview", "team"] as const;
+export const TAB_ORDER = ["activity", "terminal", "native", "processes", "taskview", "team", "newteam"] as const;
 
 /** The selected child's bounded page, an archive's recorded page, or the live parent follow. */
 export const activitySourceFor = (key: string): ActivitySource => (subagentOpen() ? subagentActivity : activityReadOnly(key) ? archiveActivity : activity);
@@ -220,7 +231,8 @@ createRoot(() => {
   createEffect(on(page, (p) => { if (p !== "sessions") void terminal.leavePage(); }, { defer: true }));
 });
 
-const tabs = () => {
+/** Task #361: the tab row's entries; the strip renders their ids in TAB_ORDER. */
+export const tabs = () => {
   const count = processes.view()?.count ?? 0;
   const all = [
     { id: "activity" as const, label: tr("Activity"), show: true },
@@ -312,6 +324,30 @@ export function SessionDetail() {
   // A reply shown in Activity or Terminal for a second is read (Qt's checkViewedReply).
   followViewedReplies();
   const [available, setAvailable] = createSignal(900);
+  // One lifetime for the whole frame. Archive browsing has its own bounded
+  // row store; every live detail must still belong to the current catalog.
+  const shown = createMemo(() => {
+    const row = selected();
+    return row && (activityReadOnly(row.key) || catalog.rows[row.key]) ? row : undefined;
+  });
+  let frame: HTMLDivElement | undefined;
+  const removal = watchDetailRemoval({
+    listed: (key) => !!catalog.rows[key],
+    schedule: (check) => { const id = requestAnimationFrame(check); return () => cancelAnimationFrame(id); },
+    report: (line) => {
+      if (reportedRemovedDetail) return;
+      reportedRemovedDetail = true;
+      void bridge.reportDetailInvariant(line);
+    },
+  });
+  createEffect(() => {
+    const row = shown();
+    removal.update(row && frame ? {
+      key: row.key, catalogBound: !activityReadOnly(row.key), sessionId: row.sessionId, element: frame,
+      route: { tab: detailTab(), inspector: inspectorOpen() ? inspectorTab() : "closed", child: !!subagentOpen() },
+    } : undefined);
+  });
+  onCleanup(() => removal.dispose());
   const measure = (el: HTMLDivElement) => {
     const observer = new ResizeObserver(() => setAvailable(el.clientWidth)); observer.observe(el);
     onCleanup(() => observer.disconnect());
@@ -343,63 +379,81 @@ export function SessionDetail() {
     <section class="detail" aria-label={tr("Session")}>
       {/* Qt's drop overlay (SessionFileDrop): what a drop on this panel does. */}
       <Show when={drops.hint()}>{(text) => <div class="drop-overlay" aria-hidden="true"><span>{text()}</span></div>}</Show>
-      <Show when={selected()}><Header /></Show>
-        <div class="work" ref={measure}>
-        <Show when={selected()} fallback={<div class="work-main"><EmptyDetail /></div>}>
-          <div class="work-main">
-            {/* Task 317 (F13): the lead's session carries its team bar and strip as Qt's
-                lead header does; the Team tab has its own bar. */}
-            <Show when={detailTab() !== "team"}><LeadTeamHeader /></Show>
-            <div class="detail-tabs tabs" role="tablist">
-              <For each={TAB_ORDER}>{(id) => {
-                const tab = () => tabs().find((found) => found.id === id);
-                return (
-                  <button class="tab" role="tab" data-tab-id={id} hidden={!tab()?.show} classList={{ on: detailTab() === id }}
-                    aria-selected={detailTab() === id} onClick={() => { if (id === "terminal") terminal.opened(); setDetailTab(id); }}>
-                    {tab()?.label}<Show when={id === "team" && teamAnswers(selectedTeam()) > 0}><span class="tab-count" data-tip={tr("Needs your answer")}>?{teamAnswers(selectedTeam())}</span></Show>
-                  </button>
-                );
-              }}</For>
-              <span class="grow" />
-              <Show when={!inspectorOpen()}><button class="icon-btn small" data-cmd="show-side-panel" aria-label={tr("Show side panel")} data-tip={inspectorHint(tr("Show tasks, plan, agents, details and worktrees"))} data-tip-pos="left" onClick={() => setInspectorOpen(true)}><Icon name="panel-right" size={15} /></button></Show>
+      <Show when={shown()} fallback={<div class="work"><div class="work-main"><EmptyDetail /></div></div>}>
+        <div class="detail-frame" ref={frame}>
+          <Header />
+          <div class="work" ref={measure}>
+            <div class="work-main">
+              {/* Task 317 (F13): the lead's session carries its team bar and strip as Qt's
+                  lead header does; the Team tab has its own bar. */}
+              <Show when={detailTab() !== "team"}><LeadTeamHeader /></Show>
+              <SessionTabRow />
+              <div class="tab-body">
+                <Switch>
+                  <Match when={detailTab() === "activity"}>
+                    <div class="activity-wrap" classList={{ "has-goal": !!goal().objective && !subagentOpen() }} style={columnStyle()}>
+                      {/* Task 116: what waits for the owner, in the lead's Activity
+                          strip too (Qt's waitingBannerHost): every kind the team
+                          feed has, each answered in its row as Waiting for you
+                          answers it, and one click to its team or the full list. */}
+                      <WaitingBanner />
+                      <Show when={goal().objective && !subagentOpen()}><button class="goal-pill" onClick={() => openInspector("plan")}><Icon name="circle-dot" size={13} /><b>{goal().caption}</b><span class="ell">{goal().objective}</span><span class="grow" /><span>{tr("Details")}</span><Icon name="chevron-right" size={12} /></button></Show>
+                      <ActivityView source={activitySourceFor(selected()!.key)} />
+                      {/* Child Activity stays read-only; its own composer opens only when the inspection supports send. */}
+                      <Show when={!subagentOpen()}>
+                        <Show when={signIn()}><div class="cmp-col"><div class="qcard">
+                          <p class="qcard-body">{tr("Sign in to DeepSeek to start using this session. Complete sign-in in the official DeepSeek UI, then return here.")}</p>
+                          <div class="qcard-actions"><button class="btn small" onClick={() => nativeRoute(selected())()}>{tr("Sign in to DeepSeek…")}</button></div>
+                        </div></div></Show>
+                        <HeldMessage /><QueuePanel /><LeadProposals /><QuestionSlot /><HeldInputBar /><TerminalDraftBar />
+                      </Show>
+                      <div class="cmp-col"><Composer /></div>
+                    </div>
+                  </Match>
+                  <Match when={detailTab() === "taskview"}><Suspense><TaskView /></Suspense></Match>
+                  <Match when={detailTab() === "terminal"}><LazyBoundary loading={<div class="lazy-waiting">{tr("Loading…")}</div>}><TerminalTab /></LazyBoundary></Match>
+                  <Match when={detailTab() === "native"}><NativeUiTab /></Match>
+                  <Match when={detailTab() === "processes"}><LazyBoundary loading={<div class="lazy-waiting">{tr("Loading…")}</div>}><ProcessesTab /></LazyBoundary></Match>
+                  <Match when={detailTab() === "team" && selectedTeam()?.status === "draft" && selected()!.computer === "" && selectedTeam()}>{(team) => <NewTeamPage embedded draft={team().id} />}</Match>
+                  <Match when={detailTab() === "team" && selectedTeam()}>{(team) => <TeamTab computer={selected()!.computer} team={team().id} />}</Match>
+                  <Match when={detailTab() === "newteam" && !selectedTeam() && selected()?.computer === ""}><NewTeamPage embedded /></Match>
+                </Switch>
+              </div>
             </div>
-            <div class="tab-body">
-              <Switch>
-                <Match when={detailTab() === "activity"}>
-                  <div class="activity-wrap" classList={{ "has-goal": !!goal().objective }} style={columnStyle()}>
-                    {/* Task 116: what waits for the owner, in the lead's Activity
-                        strip too (Qt's waitingBannerHost): every kind the team
-                        feed has, each answered in its row as Waiting for you
-                        answers it, and one click to its team or the full list. */}
-                    <WaitingBanner />
-                    <Show when={goal().objective}><button class="goal-pill" onClick={() => openInspector("plan")}><Icon name="circle-dot" size={13} /><b>{goal().caption}</b><span class="ell">{goal().objective}</span><span class="grow" /><span>{tr("Details")}</span><Icon name="chevron-right" size={12} /></button></Show>
-                    <ActivityView source={activitySourceFor(selected()!.key)} />
-                    {/* Child Activity stays read-only; its own composer opens only when the inspection supports send. */}
-                    <Show when={!subagentOpen()}>
-                      <Show when={signIn()}><div class="cmp-col"><div class="qcard">
-                        <p class="qcard-body">{tr("Sign in to DeepSeek to start using this session. Complete sign-in in the official DeepSeek UI, then return here.")}</p>
-                        <div class="qcard-actions"><button class="btn small" onClick={() => nativeRoute(selected())()}>{tr("Sign in to DeepSeek…")}</button></div>
-                      </div></div></Show>
-                      <HeldMessage /><QueuePanel /><LeadProposals /><QuestionCard /><HeldInputBar /><TerminalDraftBar />
-                    </Show>
-                    <div class="cmp-col"><Composer /></div>
-                  </div>
-                </Match>
-                <Match when={detailTab() === "taskview"}><Suspense><TaskView /></Suspense></Match>
-                <Match when={detailTab() === "terminal"}><TerminalTab /></Match>
-                <Match when={detailTab() === "native"}><NativeUiTab /></Match>
-                <Match when={detailTab() === "processes"}><ProcessesTab /></Match>
-                <Match when={detailTab() === "team" && selectedTeam()?.status === "draft" && selected()!.computer === "" && selectedTeam()}>{(team) => <NewTeamPage embedded draft={team().id} />}</Match>
-                <Match when={detailTab() === "team" && selectedTeam()}>{(team) => <TeamTab computer={selected()!.computer} team={team().id} />}</Match>
-                <Match when={detailTab() === "newteam" && !selectedTeam() && selected()?.computer === ""}><NewTeamPage embedded /></Match>
-              </Switch>
-            </div>
+          <Suspense><Inspector available={available()} /></Suspense>
           </div>
-        </Show>
-        <Show when={selected()}><Inspector available={available()} /></Show>
         </div>
+      </Show>
         {/* The composer's questions and Clear session, also from the header on another tab; the field takes the focus back. */}
-        <ComposerDialogs onClosed={() => { if (document.activeElement === document.body) document.querySelector<HTMLTextAreaElement>(".cmp-editor")?.focus(); }} />
+        <ComposerDialogsSlot onClosed={() => { if (document.activeElement === document.body) document.querySelector<HTMLTextAreaElement>(".cmp-editor")?.focus(); }} />
     </section>
+  );
+}
+
+/**
+ * Task #426 (owner, screenshot of package 167): the session view's tab row. The
+ * skin's tab spacing lives here as one component so a render test pins it: each
+ * tab carries the standard padding and the row a real gap between the tabs, the
+ * team's "?N" badge stands apart from its label (the tab's own gap plus a small
+ * margin), and the active underline stays under its own tab. The label is its
+ * own span so a narrow window shortens it with an ellipsis instead of letting
+ * the tabs run into each other; the row scrolls rather than squeezing them.
+ */
+export function SessionTabRow() {
+  return (
+    <div class="detail-tabs tabs" role="tablist">
+      <For each={TAB_ORDER}>{(id) => {
+        const tab = () => tabs().find((found) => found.id === id);
+        return (
+          <button class="tab" role="tab" data-tab={id} data-tab-id={id} hidden={!tab()?.show} classList={{ on: detailTab() === id }}
+            aria-selected={detailTab() === id} onClick={() => { if (id === "terminal") terminal.opened(); setDetailTab(id); }}>
+            <span class="tab-label">{tab()?.label}</span>
+            <Show when={id === "team" && teamAnswers(selectedTeam()) > 0}><span class="tab-count" data-tip={tr("Needs your answer")}>?{teamAnswers(selectedTeam())}</span></Show>
+          </button>
+        );
+      }}</For>
+      <span class="grow" />
+      <Show when={!inspectorOpen()}><button class="icon-btn small" data-cmd="show-side-panel" aria-label={tr("Show side panel")} data-tip={inspectorHint(tr("Show tasks, plan, agents, details and worktrees"))} data-tip-pos="left" onClick={() => setInspectorOpen(true)}><Icon name="panel-right" size={15} /></button></Show>
+    </div>
   );
 }

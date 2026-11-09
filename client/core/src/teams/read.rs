@@ -31,8 +31,10 @@ pub enum TeamRead {
     /// `team list` with `{include_cancelled: true, limit}`: every team the
     /// store keeps, newest first.
     List,
-    /// `team status` with `{team, include_cancelled: true}`: one team whole.
+    /// `team status`: live tasks and the bounded window of archived stubs.
     Status { team: String },
+    /// One live or archived task, selected by the store before decoding.
+    Task { team: String, task: u32 },
     /// `team events` with `{team, limit, before?}`: one page of the team's
     /// journal, newest first; `before` is the previous page's `next_cursor`.
     Events { team: String, before: Option<i64> },
@@ -83,7 +85,7 @@ impl TeamRead {
     pub fn op(&self) -> &'static str {
         match self {
             Self::List => "list",
-            Self::Status { .. } => "status",
+            Self::Status { .. } | Self::Task { .. } => "status",
             Self::Events { .. } => "events",
             Self::Inbox { .. } => "inbox",
             Self::Waiting { .. } => "waiting",
@@ -99,6 +101,7 @@ impl TeamRead {
     pub fn team(&self) -> Option<&str> {
         match self {
             Self::Status { team }
+            | Self::Task { team, .. }
             | Self::Events { team, .. }
             | Self::Inbox { team }
             | Self::Spans { team, .. }
@@ -116,6 +119,7 @@ impl TeamRead {
         match self {
             Self::List => json!({"include_cancelled": true, "limit": LIST_LIMIT}),
             Self::Status { team } => json!({"team": team, "include_cancelled": true}),
+            Self::Task { team, task } => json!({"team": team, "task": task}),
             Self::Events { team, before } => {
                 let mut request = json!({"team": team, "limit": FEED_PAGE});
                 if let Some(before) = before {
@@ -184,6 +188,7 @@ impl TeamRead {
                 &[("items", true)]
             }
             Self::Status { .. } => &[("id", false), ("members", true), ("tasks", true)],
+            Self::Task { .. } => &[],
             Self::Spans { .. } | Self::ScopedSpans { .. } => &[("tasks", true)],
             Self::Profile { .. } | Self::ScopedProfile { .. } => &[],
             Self::Catalog | Self::CatalogRoute { .. } => &[],
@@ -225,6 +230,9 @@ pub fn invocation(computer: &ComputerId, read: &TeamRead) -> Result<Invocation, 
     if read.team().is_some_and(|team| !valid_team(team)) {
         return Err(bad("not a team id"));
     }
+    if matches!(read, TeamRead::Task { task: 0, .. }) {
+        return Err(bad("not a positive task id"));
+    }
     let mut args: Vec<String> = computer
         .alias()
         .map(|alias| format!("@{alias}"))
@@ -263,6 +271,11 @@ pub fn decode(read: &TeamRead, exit: Exit) -> Result<Value, ReadError> {
     let Value::Object(object) = &value else {
         return Err(invalid("not a JSON object"));
     };
+    if let TeamRead::Task { task, .. } = read {
+        if object.get("id").and_then(Value::as_u64) != Some(u64::from(*task)) {
+            return Err(invalid("team status gives a different task"));
+        }
+    }
     for (key, array) in read.required() {
         let fits = match object.get(*key) {
             Some(found) if *array => found.is_array(),

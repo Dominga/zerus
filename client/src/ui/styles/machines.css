@@ -144,6 +144,8 @@
   .acct-oc-row:last-child { border-bottom: 0; }
   .acct-setting { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 8px; border-top: 1px solid var(--z-color-divider); font-size: var(--fs-sm); }
   .acct-perm-select { margin: 8px 0; }
+  .acct-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+  .acct-differs { color: var(--z-color-warn); white-space: nowrap; }
   dialog[aria-labelledby^="accounts-"] .form-row .field { width: 100%; }
   dialog[aria-labelledby^="accounts-"] p + p { margin-top: 8px; }
   .acct-usage { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; font-size: var(--fs-sm); }

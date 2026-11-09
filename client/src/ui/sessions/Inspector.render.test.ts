@@ -107,6 +107,18 @@ afterAll(async () => { await server?.close(); });
 const state = (value: Record<string, unknown>) => { (globalThis as Record<string, unknown>).__inspector = { session, details, team, ...value }; };
 /** The HTML without Solid's hydration markers, as the text reads. */
 const plain = (html: string) => html.replace(/<!--[^>]*-->/g, "");
+/** A stylesheet's rule body, read from disk (as task 317 does). */
+const read = async (path: string) => {
+  const fs = await import(/* @vite-ignore */ ["node", "fs"].join(":")) as { readFileSync(path: URL, encoding: "utf8"): string };
+  return fs.readFileSync(new URL(path, import.meta.url), "utf8").replace(/\r\n/g, "\n");
+};
+const rule = (css: string, selector: string) => {
+  const at = css.indexOf(`${selector} {`);
+  expect(at, selector).toBeGreaterThan(-1);
+  return css.slice(at, css.indexOf("}", at));
+};
+/** A drawn line, not the rounded corner's radius. */
+const borderLine = /\bborder(?:-(?:top|right|bottom|left|width|style|color))?\s*:/;
 const shown = (html: string) => [...html.matchAll(/data-section="([^"]+)"/g)].map((match) => match[1]);
 const folded = (html: string) => [...html.matchAll(/<section([^>]*)>/g)].map((match) => match[1])
   .filter((attributes) => /class="[^"]*\bclosed\b/.test(attributes)).map((attributes) => /data-section="([^"]+)"/.exec(attributes)?.[1]);
@@ -122,7 +134,7 @@ describe("the side panel (task 206)", () => {
     const text = plain(html);
     // Environment: the session ID with its copy button, machine, folder, branch, model and effort, last event.
     for (const row of ["Environment", "5f0c2a1e-7d3b-4c8e-9a61-2b7e4d9c0f13", "workstation", "/work/orbit", "feat/checkout-v2", "gpt-5.5 high", "27 Oct 01:40"]) expect(text).toContain(row);
-    expect(html).toContain('aria-label="Copy session ID"');
+    expect(html).toContain('aria-label="Copy Session ID: 5f0c2a1e-7d3b-4c8e-9a61-2b7e4d9c0f13"');
     // Context: Qt's used share of the window, the tokens and what is left.
     for (const row of ["36% used", "72k/200k", "128k left in the window", "Clear session…"]) expect(text).toContain(row);
     // Team: the card, its chips, Phase and Phases bars, accepted, Open Team, Members and the foot line.
@@ -158,6 +170,11 @@ describe("the side panel (task 206)", () => {
       const text = plain(render());
       expect(text).toContain("Writer");
       expect(text).not.toContain("Reader");
+      if (skin === tabs) {
+        // The tabs' Plan & agents list is upstream's bounded one: "Finished: N", unfolded by its own button.
+        expect(text).toContain("Finished: 2");
+        continue;
+      }
       expect(text).toContain("2 finished");
       expect(text).toContain("show");
       // Opened for this session: every child, running first, and the way back.
@@ -179,5 +196,76 @@ describe("the side panel (task 206)", () => {
     expect(html.match(/role="tab"/g)).toHaveLength(4);
     expect(shown(html).filter((id) => id.startsWith("sec-"))).toEqual([]);
     expect(plain(html)).toContain("Plan &amp; agents");
+  });
+});
+
+// Task 354 (owner, 2026-11-08): the panel's outer lines and the "Session"
+// caption go; the sections keep their own cards and only the collapse button
+// stays above them.
+describe("the side panel's frame and caption (task 354)", () => {
+  it("shows only the collapse button above the Compact panel's sections, with no 'Session' caption", () => {
+    state({ skin: sections });
+    const html = plain(render());
+    expect(html).not.toContain("insp-title");
+    const head = /<div[^>]*class="insp-head"[^>]*>([\s\S]*?)<\/div>/.exec(html)?.[1];
+    expect(head).toBeDefined();
+    expect((head!.match(/<button/g) ?? []).length).toBe(1);
+    expect(head).toContain('aria-label="Collapse side panel"');
+    // Nothing but the button and its spacer: the caption row is gone.
+    expect(head!.replace(/<[^>]+>/g, "").trim()).toBe("");
+    expect(shown(html)).toHaveLength(8);
+  });
+
+  it("draws no caption in the tabbed skins either, and keeps one collapse button", () => {
+    state({ skin: tabs });
+    const html = plain(render());
+    expect(html).not.toContain("insp-title");
+    expect(html).not.toContain('class="insp-head"');
+    expect(html).toContain('role="tablist"');
+    expect((html.match(/aria-label="Collapse side panel"/g) ?? []).length).toBe(1);
+  });
+
+  it("removes the panel's outer border and the line under its head, and keeps the sections' cards", async () => {
+    const css = await read("../styles/inspector.css");
+    expect(rule(css, ".inspector")).not.toMatch(borderLine);
+    expect(rule(css, ".insp-head")).not.toMatch(borderLine);
+    expect(css).not.toContain(".insp-title");
+    // The sections inside keep their own cards.
+    expect(rule(css, ".icard")).toContain("border: 1px solid var(--z-color-card-border)");
+    // detail.css still carries an older copy of the panel's rules; it drops the frame as well.
+    expect(rule(await read("../styles/detail.css"), ".inspector")).not.toMatch(borderLine);
+  });
+});
+
+// Task 435 (owner, 2026-11-09, "the paddings drifted again"): every inspector
+// section keeps one rhythm - the same row grid (icon column, value, right-aligned
+// label) in Environment and Tasks, and sub-blocks such as Subagents aligned with
+// that grid instead of the card's edge.
+describe("the inspector's row rhythm (task 435)", () => {
+  it("gives Environment and Tasks the same row class", () => {
+    state({ skin: sections });
+    const html = plain(render());
+    // Every labelled row of Environment and Tasks is the one row element:
+    // icon column, value, right-aligned label.
+    for (const label of ["machine", "directory", "branch", "model", "last event", "status", "action", "Done", "In progress"]) {
+      expect(html).toMatch(new RegExp(`class="irow[^"]*"[^>]*>[\\s\\S]*?<span[^>]*class="irow-label">${label}</span>`));
+    }
+    // And both sections use that grid throughout, not a mix of row shapes.
+    expect(html.match(/class="irow\b/g)?.length ?? 0).toBeGreaterThanOrEqual(10);
+  });
+
+  it("aligns a sub-block with the row grid, not with the card's edge", async () => {
+    state({ skin: sections });
+    const html = plain(render());
+    // Subagents is a row: an empty icon slot starts its text where every value starts.
+    expect(html).toMatch(/class="irow side-members-head"><span class="irow-ico"><\/span>/);
+    const { readFileSync } = await import(/* @vite-ignore */ ["node", "fs"].join(":")) as { readFileSync(path: URL): string };
+    const css = String(readFileSync(new URL("../styles/inspector.css", import.meta.url)));
+    // One icon column and gap, and the sub-blocks use them.
+    expect(css).toMatch(/\.inspector \{ --insp-row-ico: 16px; --insp-row-gap: 10px;/);
+    expect(css).toMatch(/\.irow-ico \{[^}]*width: var\(--insp-row-ico\);/);
+    for (const rule of ["\\.side-finished", "\\.side-actions", "\\.side-member", "\\.icard-text"]) {
+      expect(css).toMatch(new RegExp(`${rule} \\{[^}]*calc\\(var\\(--insp-row-ico\\) \\+ var\\(--insp-row-gap\\)\\)`));
+    }
   });
 });

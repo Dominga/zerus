@@ -15,6 +15,7 @@ mod metrics;
 #[cfg(unix)]
 mod mobile_peers;
 mod native_ui;
+mod path_info;
 mod phones;
 mod path_ref;
 mod extensions;
@@ -25,16 +26,21 @@ mod peer_channel;
 mod platform;
 mod presence;
 mod private_stores;
+mod remote_shell;
+mod project_launcher;
 mod screen;
 mod self_exec;
 mod session_reference;
 mod speech;
+mod ssh_bytes;
 mod sqlite_file;
 mod state;
 mod status;
 mod swarm;
 mod tasks;
 mod test_discipline;
+#[cfg(all(test, unix))]
+mod test_process;
 mod watch;
 
 /// H2: the position of `--json-file` before the first `--`; arguments after it
@@ -80,6 +86,20 @@ fn main() {
     if let Err(error) = desktop::compact_to_send::adopt_custody() {
         eprintln!("hgs: {error}");
         std::process::exit(2);
+    }
+    // The same for a session resume child, with its own descriptor.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Err(error) = desktop::session_resume::adopt_custody() {
+        eprintln!("hgs: {error}");
+        std::process::exit(2);
+    }
+    // Byte framing is local SSH plumbing, before configuration or managers.
+    if std::env::args().nth(1).as_deref() == Some("--ssh-bytes-client") {
+        let code = match ssh_bytes::run(std::env::args().skip(2).collect()) {
+            Ok(code) => code,
+            Err(error) => { eprintln!("hgs: Windows SSH pipe: {error}"); 255 }
+        };
+        std::process::exit(code);
     }
     // COM cold activation cannot load config, create jobs or acquire ownership.
     #[cfg(windows)]

@@ -107,6 +107,47 @@ pub const KEYS: &[Key] = &[
         kind: Kind::Text(""),
         seeded: false,
     },
+    // Its categories (zerus-sz42x): all except paid usage until changed.
+    Key {
+        name: "automaticApprovals/category/read",
+        kind: Kind::Flag(true),
+        seeded: false,
+    },
+    Key {
+        name: "automaticApprovals/category/edit",
+        kind: Kind::Flag(true),
+        seeded: false,
+    },
+    Key {
+        name: "automaticApprovals/category/shell",
+        kind: Kind::Flag(true),
+        seeded: false,
+    },
+    Key {
+        name: "automaticApprovals/category/web",
+        kind: Kind::Flag(true),
+        seeded: false,
+    },
+    Key {
+        name: "automaticApprovals/category/mcp",
+        kind: Kind::Flag(true),
+        seeded: false,
+    },
+    Key {
+        name: "automaticApprovals/category/agents",
+        kind: Kind::Flag(true),
+        seeded: false,
+    },
+    Key {
+        name: "automaticApprovals/category/other",
+        kind: Kind::Flag(true),
+        seeded: false,
+    },
+    Key {
+        name: "automaticApprovals/category/paid",
+        kind: Kind::Flag(false),
+        seeded: false,
+    },
     // Appearance (SettingsPage.h:46-95, UiLanguage.h, ContentScale.h,
     // ActivityWidth.h, WindowLayer.cpp).
     key(
@@ -143,6 +184,17 @@ pub const KEYS: &[Key] = &[
     key("workspace/collapsedTeams", Kind::Chords),
     key("workspace/expandSessionsOnHover", Kind::Flag(true)),
     key("workspace/hideEmptyProjects", Kind::Flag(true)),
+    // Session cards mark their account with its letter, or its emoji when set.
+    client("sessions/accountMarks", Kind::Choice(&["letter", "emoji"])),
+    // Session cards show account marks at all (zerus-sa9qn.13).
+    client("sessions/showAccountMarks", Kind::Flag(true)),
+    // A new child session's row starts compact (zerus-sa9qn.14); the second
+    // key is the device's record of the child links it already handled.
+    client("sessions/compactNewChildren", Kind::Flag(true)),
+    client("sessions/childRowsSeen", Kind::Text("")),
+    // Parents whose child sessions are hidden, by machine UUID and session
+    // ID, so the choice survives a relaunch (zerus-sa9qn.15).
+    client("sessions/collapsedTeams", Kind::Text("")),
     key("workspace/animateActivity", Kind::Flag(true)),
     key("workspace/showCompletedSubagents", Kind::Flag(false)),
     key("workspace/reduceMotion", Kind::Flag(false)),
@@ -302,6 +354,7 @@ pub const KEYS: &[Key] = &[
         },
     ),
     client("client/overviewFullWidth", Kind::Flag(false)),
+    client("client/overviewSubSessions", Kind::Flag(false)),
     Key { name: "workspace/inspectorOpen", kind: Kind::AutoFlag, seeded: true },
     Key {
         name: "workspace/inspectorTab",
@@ -419,6 +472,37 @@ pub fn find(name: &str) -> Option<Key> {
         .or_else(|| update_family(name))
         .or_else(|| machine_family(name))
         .or_else(|| project_family(name))
+        .or_else(|| account_family(name))
+}
+
+/// The desktop's own color and emoji mark for one account profile:
+/// `accounts/color/<token>` and `accounts/mark/<token>`, where the token is
+/// the URI-encoded profile key (computer and profile ID). Like machine colors
+/// these are this desktop's preferences, never the host's catalog.
+pub const ACCOUNT_COLORS: &str = "accounts/color/";
+pub const ACCOUNT_MARKS: &str = "accounts/mark/";
+/// The account's mark is not shown on session cards (zerus-sa9qn.13).
+pub const ACCOUNT_HIDDEN: &str = "accounts/hide/";
+fn account_family(name: &str) -> Option<Key> {
+    let (token, kind) = if let Some(token) = name.strip_prefix(ACCOUNT_HIDDEN) {
+        (token, Kind::Flag(false))
+    } else {
+        (
+            name.strip_prefix(ACCOUNT_COLORS)
+                .or_else(|| name.strip_prefix(ACCOUNT_MARKS))?,
+            Kind::Text(""),
+        )
+    };
+    (!token.is_empty()
+        && token.len() <= 512
+        && !token
+            .chars()
+            .any(|c| c.is_control() || c == '/' || c == '\\'))
+    .then_some(Key {
+        name: "accounts/",
+        kind,
+        seeded: false,
+    })
 }
 
 // Project IDs are flat JSON keys, never filesystem paths or machine aliases.
@@ -930,6 +1014,9 @@ struct State {
     writing: bool,
     closed: bool,
     seed: Option<QtStore>,
+    /// The Qt store's path, kept after the loader takes `seed`: the upgrade
+    /// notice's lstat fallback when no seed was recorded (zerus-dzmdx).
+    qt_path: Option<PathBuf>,
     error: Option<String>,
     revision: u64,
     capturing: bool,
@@ -959,6 +1046,7 @@ impl Settings {
     /// Opens `<data_dir>/settings.json`. With `seed`, a store never seeded
     /// before takes Qt's values first (the switch identity only).
     pub fn open(path: PathBuf, seed: Option<QtStore>) -> Settings {
+        let qt_path = seed.as_ref().map(|store| store.path().to_path_buf());
         let shared = Arc::new(Shared {
             path,
             state: Mutex::new(State {
@@ -969,6 +1057,7 @@ impl Settings {
                 writing: false,
                 closed: false,
                 seed,
+                qt_path,
                 error: None,
                 revision: 0,
                 capturing: false,
@@ -1048,6 +1137,7 @@ impl Settings {
                 name.starts_with(SHORTCUTS)
                     || name.starts_with("updates/")
                     || name.starts_with("machines/")
+                    || name.starts_with("accounts/")
             }) {
                 all.insert(name.clone(), effective(key.kind, Some(value)));
             }
@@ -1070,7 +1160,12 @@ impl Settings {
         }
         let stored = match (&key.kind, &value) {
             (Kind::Chords, Value::Null) => None,
-            (Kind::Text(""), Value::Null) if name.starts_with("machines/colors/") => None,
+            (Kind::Text(""), Value::Null)
+                if name.starts_with("machines/colors/") || name.starts_with("accounts/") =>
+            {
+                None
+            }
+            (Kind::Flag(_), Value::Null) if name.starts_with(ACCOUNT_HIDDEN) => None,
             (Kind::AutoFlag, Value::String(s)) if s == "auto" => Some(Value::from("auto")),
             (Kind::AutoFlag | Kind::Flag(_), Value::Bool(_))
             | (Kind::Choice(_) | Kind::Text(_) | Kind::Bytes, Value::String(_))

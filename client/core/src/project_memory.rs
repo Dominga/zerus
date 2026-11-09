@@ -42,6 +42,13 @@ pub enum MemoryOp {
         #[serde(default)]
         request_id: Option<String>,
     },
+    /// Task #397: searches the project's store and its team sub-stores
+    /// (`find --stores all`); a read, never a write.
+    Find {
+        query: String,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,6 +105,28 @@ pub enum MemoryOutcome {
     },
     /// The write may have been applied. Read again before anything else.
     Uncertain { detail: Text, request_id: String },
+    /// Task #397: a search's answer: lore's hits, each named with its store
+    /// (the project or the team that wrote it), and lore's notes (the model
+    /// download reports there).
+    Found {
+        store: String,
+        query: String,
+        hits: Vec<MemoryHit>,
+        notes: Vec<String>,
+    },
+}
+
+/// One hit of a project memory search.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct MemoryHit {
+    pub id: String,
+    /// The record's kind (decision, fault, reading, ...).
+    pub kind: String,
+    pub title: String,
+    /// project, or team NAME for a team workspace.
+    pub store: String,
+    pub via: String,
+    pub score: f64,
 }
 
 fn plain(text: &str, limit: usize) -> bool {
@@ -124,7 +153,7 @@ fn folder_problem(folder: &str, empty_ok: bool) -> Option<Text> {
 impl MemoryCall {
     fn request_id(&self) -> Option<String> {
         match &self.op {
-            MemoryOp::Read => None,
+            MemoryOp::Read | MemoryOp::Find { .. } => None,
             MemoryOp::Enable { request_id, .. }
             | MemoryOp::Store { request_id, .. }
             | MemoryOp::Move { request_id, .. } => Some(
@@ -149,6 +178,10 @@ impl MemoryCall {
             MemoryOp::Enable { enabled, expected_revision, .. } => write("enabled", json!(enabled), *expected_revision),
             MemoryOp::Store { store, expected_revision, .. } => write("store", json!(store.trim()), *expected_revision),
             MemoryOp::Move { to, expected_revision, .. } => write("to", json!(to.trim()), *expected_revision),
+            MemoryOp::Find { query, limit } => {
+                input["query"] = json!(query.trim());
+                input["limit"] = json!(limit.unwrap_or(5));
+            }
         }
         input
     }
@@ -191,10 +224,17 @@ impl MemoryCall {
         let op = match self.op {
             MemoryOp::Read => "get",
             MemoryOp::Move { .. } => "move",
+            // Task #397: the search reads the project and its team sub-stores.
+            MemoryOp::Find { .. } => "find",
             _ => "set",
         };
-        // A move copies the whole store and checks it: give it time.
-        let timeout = if op == "move" { Duration::from_secs(600) } else { Duration::from_secs(30) };
+        // A move copies the whole store and checks it: give it time. A search
+        // answers at once (lore leaves a too-large embedding to the background).
+        let timeout = match op {
+            "move" => Duration::from_secs(600),
+            "find" => Duration::from_secs(120),
+            _ => Duration::from_secs(30),
+        };
         Ok((
             Invocation {
                 args: vec!["project".into(), "config".into(), op.into(), "--json".into()],
@@ -258,9 +298,53 @@ fn unsupported() -> MemoryOutcome {
     }
 }
 
+/// Task #397: a search's answer, each hit named with the store that holds it,
+/// plus lore's notes (the model download reports there).
+fn parse_find(value: &Value) -> Option<(String, String, Vec<MemoryHit>, Vec<String>)> {
+    let text = |key: &str, limit: usize| value.get(key).and_then(Value::as_str).filter(|text| text.len() <= limit && !text.chars().any(char::is_control)).map(str::to_owned);
+    let store = text("store", 4096)?;
+    let query = text("query", 500)?;
+    if !value.get("results")?.is_array() {
+        return None;
+    }
+    let hits = value["results"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(50)
+        .filter_map(|hit| {
+            let record = &hit["record"];
+            let title = ["title", "summary", "name"]
+                .iter()
+                .find_map(|key| record[*key].as_str().filter(|text| !text.is_empty()))
+                .unwrap_or_default()
+                .chars()
+                .take(300)
+                .collect::<String>();
+            Some(MemoryHit {
+                id: record["id"].as_str()?.chars().take(200).collect(),
+                kind: record["kind"].as_str().unwrap_or_default().chars().take(40).collect(),
+                title,
+                store: hit["store"].as_str().unwrap_or("project").chars().take(120).collect(),
+                via: hit["via"].as_str().unwrap_or_default().chars().take(40).collect(),
+                score: hit["score"].as_f64().unwrap_or(0.0),
+            })
+        })
+        .collect();
+    let notes = value["notes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(20)
+        .filter_map(Value::as_str)
+        .map(|note| note.chars().take(500).collect::<String>())
+        .collect();
+    Some((store, query, hits, notes))
+}
+
 /// Sorts what the runner saw into an outcome. A write that may have run is
 /// uncertain; a read never is.
-pub fn classify(write: bool, request_id: Option<String>, exit: Exit) -> MemoryOutcome {
+pub fn classify(write: bool, find: bool, request_id: Option<String>, exit: Exit) -> MemoryOutcome {
     let uncertain = |detail: Text, request_id: Option<String>| match (write, request_id) {
         (true, Some(request_id)) => MemoryOutcome::Uncertain { detail, request_id },
         (_, request_id) => MemoryOutcome::Failed { detail, request_id },
@@ -268,6 +352,12 @@ pub fn classify(write: bool, request_id: Option<String>, exit: Exit) -> MemoryOu
     match exit {
         Exit::Code { code: 0, stdout, .. } => {
             let reply = serde_json::from_slice::<Value>(&stdout).ok();
+            if find {
+                return match reply.as_ref().and_then(parse_find) {
+                    Some((store, query, hits, notes)) => MemoryOutcome::Found { store, query, hits, notes },
+                    None => uncertain(crate::text!("Invalid project memory search response."), request_id),
+                };
+            }
             // A write answers {status, ..., view}; a read is the view itself.
             let view = reply.as_ref().map(|reply| reply.get("view").unwrap_or(reply)).and_then(parse);
             match view {
@@ -304,11 +394,13 @@ pub fn run(hgs: &Path, call: &MemoryCall) -> MemoryOutcome {
         }
         Err(_) => return unsupported(),
     }
-    let write = !matches!(call.op, MemoryOp::Read);
+    let write = !matches!(call.op, MemoryOp::Read | MemoryOp::Find { .. });
+    let find = matches!(call.op, MemoryOp::Find { .. });
     match crate::run::run_limited(hgs, &invocation, &[], READ_LIMIT) {
-        Ok(exit) => classify(write, request_id, exit),
+        Ok(exit) => classify(write, find, request_id, exit),
         Err(_) => classify(
             write,
+            find,
             request_id,
             Exit::Abnormal {
                 stderr: "Project memory reply is too large.".into(),
@@ -370,24 +462,54 @@ mod tests {
     #[test]
     fn replies_are_projected_and_a_lost_write_is_uncertain() {
         let ok = |value: Value| Exit::Code { code: 0, stdout: value.to_string().into_bytes(), stderr: String::new() };
-        match classify(false, None, ok(reply())) {
+        match classify(false, false, None, ok(reply())) {
             MemoryOutcome::Done { view, moved: None, .. } => {
                 assert_eq!((view.enabled, view.records, view.index.as_str(), view.revision), (true, 5, "stale", 2));
             }
             other => panic!("{other:?}"),
         }
         let moved = json!({"status":"moved","from":"/a","to":"/b","files":2,"bytes":900,"old_kept":true,"view":reply()});
-        match classify(true, Some("r".into()), ok(moved)) {
+        match classify(true, false, Some("r".into()), ok(moved)) {
             MemoryOutcome::Done { moved: Some(moved), .. } => assert_eq!((moved.from.as_str(), moved.files, moved.old_kept), ("/a", 2, true)),
             other => panic!("{other:?}"),
         }
-        assert!(matches!(classify(true, Some("r".into()), ok(json!({"status":"moved"}))), MemoryOutcome::Uncertain { .. }));
-        assert!(matches!(classify(true, Some("r".into()), Exit::TimedOut), MemoryOutcome::Uncertain { .. }));
-        assert!(matches!(classify(false, None, Exit::TimedOut), MemoryOutcome::Failed { .. }));
+        assert!(matches!(classify(true, false, Some("r".into()), ok(json!({"status":"moved"}))), MemoryOutcome::Uncertain { .. }));
+        assert!(matches!(classify(true, false, Some("r".into()), Exit::TimedOut), MemoryOutcome::Uncertain { .. }));
+        assert!(matches!(classify(false, false, None, Exit::TimedOut), MemoryOutcome::Failed { .. }));
         let refused = Exit::Code { code: 1, stdout: Vec::new(), stderr: "holds 3 records; move it instead".into() };
-        assert!(matches!(classify(true, Some("r".into()), refused), MemoryOutcome::Failed { .. }));
+        assert!(matches!(classify(true, false, Some("r".into()), refused), MemoryOutcome::Failed { .. }));
         let mut odd = reply();
         odd["status"]["index"] = json!("weird");
         assert!(parse(&odd).is_none());
+    }
+
+    /// Task #397: a search asks hgs for `find` and reads back the hits with the
+    /// store that holds each one, plus lore's notes.
+    #[test]
+    fn a_search_asks_for_every_store_and_names_it() {
+        let call = MemoryCall { project: "p-1".into(), op: MemoryOp::Find { query: " cache warm ".into(), limit: None } };
+        let (invocation, request_id) = call.prepare().unwrap();
+        assert_eq!(invocation.args, ["project", "config", "find", "--json"]);
+        assert_eq!((request_id, invocation.timeout >= Duration::from_secs(120)), (None, true));
+        let input = stdin(&invocation);
+        assert_eq!((input["query"].as_str(), input["limit"].as_u64()), (Some("cache warm"), Some(5)));
+        assert_eq!(input["expected_revision"], Value::Null, "a search writes nothing");
+        let reply = json!({"project":"p-1","query":"cache warm","store":"/data/lore/projects/p-1","notes":["fetching the model (12%)"],
+            "results":[{"score":0.8,"via":"text","store":"project","record":{"id":"p1","kind":"decision","title":"Warm the cache"}},
+                {"score":0.4,"via":"text","store":"team Core","record":{"id":"t1","kind":"fault","summary":"Cold starts"}}]});
+        let ok = Exit::Code { code: 0, stdout: reply.to_string().into_bytes(), stderr: String::new() };
+        match classify(false, true, None, ok) {
+            MemoryOutcome::Found { store, query, hits, notes } => {
+                assert_eq!((store.as_str(), query.as_str()), ("/data/lore/projects/p-1", "cache warm"));
+                assert_eq!(hits.iter().map(|hit| (hit.id.as_str(), hit.kind.as_str(), hit.store.as_str())).collect::<Vec<_>>(),
+                    [("p1", "decision", "project"), ("t1", "fault", "team Core")]);
+                assert_eq!(hits[1].title, "Cold starts");
+                assert_eq!(notes, ["fetching the model (12%)"]);
+            }
+            other => panic!("{other:?}"),
+        }
+        // A refused search is a failure, never an uncertain write.
+        let refused = Exit::Code { code: 1, stdout: Vec::new(), stderr: "the lore binary was not found".into() };
+        assert!(matches!(classify(false, true, None, refused), MemoryOutcome::Failed { .. }));
     }
 }

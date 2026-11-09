@@ -5,11 +5,24 @@ public struct SavedConversationViewport: Codable, Hashable, Sendable {
     public var offset: Int
     public var cursor: String
     public var epoch: String
-    public init(eventId: String, offset: Int, cursor: String = "", epoch: String = "") {
+    public var following: Bool
+    public init(eventId: String, offset: Int, cursor: String = "", epoch: String = "", following: Bool = false) {
         self.eventId = eventId
         self.offset = offset
         self.cursor = cursor
         self.epoch = epoch
+        self.following = following
+    }
+
+    private enum CodingKeys: String, CodingKey { case eventId, offset, cursor, epoch, following }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        eventId = try values.decode(String.self, forKey: .eventId)
+        offset = try values.decode(Int.self, forKey: .offset)
+        cursor = try values.decode(String.self, forKey: .cursor)
+        epoch = try values.decode(String.self, forKey: .epoch)
+        // Existing saved positions represented deliberate reading locations.
+        following = try values.decodeIfPresent(Bool.self, forKey: .following) ?? false
     }
 }
 
@@ -114,15 +127,15 @@ public struct ConversationReadState: Codable, Hashable, Sendable {
         guard let old = record(target) else { return self }
         var next = viewed(target, Set(aliases.filter { old.seen.contains($0.key) }.values))
         if let anchor = old.viewport, let alias = aliases[anchor.eventId] {
-            next = next.viewport(target, eventId: alias, offset: anchor.offset, cursor: anchor.cursor, epoch: anchor.epoch)
+            next = next.viewport(target, eventId: alias, offset: anchor.offset, cursor: anchor.cursor, epoch: anchor.epoch, following: anchor.following)
         }
         return next
     }
 
-    public func viewport(_ target: Target, eventId: String, offset: Int, cursor: String = "", epoch: String = "") -> ConversationReadState {
+    public func viewport(_ target: Target, eventId: String, offset: Int, cursor: String = "", epoch: String = "", following: Bool = false) -> ConversationReadState {
         if eventId.isEmpty || eventId.count > 2048 || offset < 0 || cursor.count > 8192 || epoch.count > 512 { return self }
         var previous = record(target) ?? ConversationReadRecord(target: target)
-        previous.viewport = SavedConversationViewport(eventId: eventId, offset: offset, cursor: cursor, epoch: epoch)
+        previous.viewport = SavedConversationViewport(eventId: eventId, offset: offset, cursor: cursor, epoch: epoch, following: following)
         previous.established = true
         return put(previous)
     }
@@ -545,7 +558,7 @@ public enum UnreadPresentation {
     /// The first reading position: remembered or saved place, else the unread divider, else the newest message.
     /// A missing saved position never silently drops the reader at the newest message.
     public static func opening(memory: ConversationAnchor?, saved: SavedConversationViewport?, boundary: String, keys: [String]) -> Opening {
-        let remembered = memory.flatMap { $0.following ? nil : $0 } ?? saved.map { ConversationAnchor(itemKey: "event:" + $0.eventId, offset: $0.offset, following: false) }
+        let remembered = memory.flatMap { $0.following ? nil : $0 } ?? saved.flatMap { $0.following ? nil : ConversationAnchor(itemKey: "event:" + $0.eventId, offset: $0.offset, following: false) }
         if let remembered, keys.contains(remembered.itemKey) { return Opening(anchor: remembered, unavailableSaved: false) }
         if !boundary.isEmpty && keys.contains("history:unread") {
             return Opening(anchor: ConversationAnchor(itemKey: "history:unread", offset: 0, following: false), unavailableSaved: remembered != nil)

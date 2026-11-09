@@ -238,29 +238,82 @@ pub(crate) fn settle(team: &mut Team, action: &str, input: &Value, now: f64) -> 
     }
 }
 
+/// Task #401: more changed files than this, and a report gets the counts only.
+pub(crate) const DELTA_FILES: usize = 200;
+/// Task #401: a delta that already took this long reads no old contents.
+const DELTA_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// #718: the test lines and test functions a report's change adds and
-/// removes, from its folder's diff against the lead's commit. Test files are
-/// the project's test globs and the Rust files that hold tests.
+/// removes, from its folder's diff against `base`. Test files are the
+/// project's test globs and the Rust files that hold tests.
+///
+/// Task #401 (2026-11-09): a report used to read every changed file and run
+/// one `git show` per file before it knew whether the file was a test, against
+/// a day-old lead commit: some 1300 files, 10-20 minutes of the worker. Now
+/// `base` is the task branch's own start (`report_git`), the paths are filtered
+/// first (test globs, then a Rust file's own markers), the old contents come
+/// from one `git cat-file --batch`, and a change of more than `DELTA_FILES`
+/// files, or one whose diff alone took `DELTA_BUDGET`, gets its counts only.
 pub(crate) fn report_delta(folder: &str, base: &str, config: &TestsConfig) -> Option<Value> {
+    let started = std::time::Instant::now();
     let root = Path::new(folder);
     let range = format!("{base}...HEAD");
     let numstat = super::dispatcher::git_at(folder, &["diff", "--numstat", "--no-renames", &range])?;
+    let changed: Vec<(u64, u64, &str)> = numstat
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(3, '\t');
+            let (plus, minus, file) = (parts.next()?, parts.next()?, parts.next()?);
+            Some((plus.parse().unwrap_or(0), minus.parse().unwrap_or(0), file))
+        })
+        .collect();
+    let bounded = changed.len() > DELTA_FILES || started.elapsed() > DELTA_BUDGET;
+    // Paths first: a test glob, or a Rust file whose new text holds a test. A
+    // Rust file without one may have lost its tests: its old text decides.
+    let mut tests: Vec<(usize, String)> = Vec::new();
+    let mut maybe: Vec<(usize, String)> = Vec::new();
+    for (index, (_, _, file)) in changed.iter().enumerate() {
+        if config.providers.iter().any(|provider| glob::any(&provider.tests, file)) {
+            tests.push((index, std::fs::read_to_string(root.join(file)).unwrap_or_default()));
+        } else if file.ends_with(".rs") {
+            let new = std::fs::read_to_string(root.join(file)).unwrap_or_default();
+            if has_tests(&new) {
+                tests.push((index, new));
+            } else if !bounded {
+                maybe.push((index, new));
+            }
+        }
+    }
     let (mut added, mut removed) = (0u64, 0u64);
     let mut functions_added = Vec::new();
     let mut functions_removed = Vec::new();
     let mut files = 0;
-    for line in numstat.lines() {
-        let mut parts = line.splitn(3, '\t');
-        let (Some(plus), Some(minus), Some(file)) = (parts.next(), parts.next(), parts.next()) else { continue };
-        let new = std::fs::read_to_string(root.join(file)).unwrap_or_default();
-        let old = super::dispatcher::git_at(folder, &["show", &format!("{base}:{file}")]).unwrap_or_default();
-        if !is_test_file(config, file, &old, &new) {
+    if bounded {
+        for (index, _) in &tests {
+            files += 1;
+            added += changed[*index].0;
+            removed += changed[*index].1;
+        }
+        if files == 0 {
+            return Some(json!({"files":0,"lines_added":0,"lines_removed":0,"functions_added":[],"functions_removed":[],
+                "bounded":true,"changed_files":changed.len()}));
+        }
+        return Some(json!({"files":files,"lines_added":added,"lines_removed":removed,
+            "functions_added":{"total":0,"names":[]},"functions_removed":{"total":0,"names":[]},
+            "bounded":true,"changed_files":changed.len()}));
+    }
+    let specs: Vec<String> = tests.iter().chain(maybe.iter()).map(|(index, _)| format!("{base}:{}", changed[*index].2)).collect();
+    let olds = super::dispatcher::git_cat_files(folder, &specs).unwrap_or_else(|| vec![None; specs.len()]);
+    for ((index, new), old) in tests.iter().chain(maybe.iter()).zip(olds) {
+        let old = old.unwrap_or_default();
+        let file = changed[*index].2;
+        if !is_test_file(config, file, &old, new) {
             continue;
         }
         files += 1;
-        added += plus.parse::<u64>().unwrap_or(0);
-        removed += minus.parse::<u64>().unwrap_or(0);
-        let (before, after) = (test_functions(file, &old), test_functions(file, &new));
+        added += changed[*index].0;
+        removed += changed[*index].1;
+        let (before, after) = (test_functions(file, &old), test_functions(file, new));
         functions_added.extend(after.difference(&before).map(|name| format!("{file}: {name}")));
         functions_removed.extend(before.difference(&after).map(|name| format!("{file}: {name}")));
     }
@@ -275,11 +328,15 @@ pub(crate) fn report_delta(folder: &str, base: &str, config: &TestsConfig) -> Op
         "functions_added":bounded(functions_added),"functions_removed":bounded(functions_removed)}))
 }
 
+fn has_tests(text: &str) -> bool {
+    text.contains("#[test]") || text.contains("#[tokio::test]")
+}
+
 fn is_test_file(config: &TestsConfig, file: &str, old: &str, new: &str) -> bool {
     if config.providers.iter().any(|provider| glob::any(&provider.tests, file)) {
         return true;
     }
-    file.ends_with(".rs") && (old.contains("#[test]") || new.contains("#[test]") || old.contains("#[tokio::test]") || new.contains("#[tokio::test]"))
+    file.ends_with(".rs") && (has_tests(old) || has_tests(new))
 }
 
 /// Test function names a file declares, by its language.

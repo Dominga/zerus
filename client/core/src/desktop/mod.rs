@@ -33,6 +33,8 @@ pub mod profile;
 pub mod relay;
 pub mod server_trust;
 pub mod service;
+/// The resume-then-send leaf's closed wire (zerus-5wmh.66.4.9, slice 3).
+pub mod session_resume;
 pub mod startup;
 pub mod task_message;
 pub mod task_start_reconcile;

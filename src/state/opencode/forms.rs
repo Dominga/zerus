@@ -186,6 +186,11 @@ pub(super) fn cards(record: &Value, forms: &Value, permissions: &Value) -> Vec<V
                 "answer_transport":"native_opencode","agent_id":"main","questions":items,"source":"opencode_native"});
             if kind == "permission" {
                 card["approval_choices"] = json!(true);
+                // The exact native action names the automatic-approval
+                // category; the prompt only starts with it (zerus-sz42x).
+                if let Some(action) = native["action"].as_str() {
+                    card["permission_action"] = json!(action);
+                }
             }
             if kind == "form" && !string(native, "title").is_empty() {
                 card["title"] = native["title"].clone();
@@ -489,6 +494,31 @@ mod tests {
             form_answer(&card, &form, &dup).unwrap_err(),
             "Choose each answer only once"
         );
+    }
+    #[test]
+    fn automatic_approval_categories_read_the_card_built_from_a_native_permission() {
+        use zerus_client_core::approvals::automatic::{categories, once, Category};
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/opencode2/permissions.json"
+        ))
+        .unwrap();
+        let native = fixture["data"][0].clone();
+        let record = json!({"run_id":"run","conversation_id":native["sessionID"]});
+        let card = cards(&record, &json!([]), &json!([native.clone()])).remove(0);
+        assert_eq!(card["permission_action"], "shell");
+        assert!(once("opencode", &card).is_some());
+        assert_eq!(categories::tool("opencode", &card).category, Category::Shell);
+        for (action, expected) in [
+            ("websearch", Category::Paid),
+            ("webfetch", Category::Web),
+            ("external_directory", Category::Other),
+            ("github_create_issue", Category::Other),
+        ] {
+            let mut changed = native.clone();
+            changed["action"] = json!(action);
+            let card = cards(&record, &json!([]), &json!([changed])).remove(0);
+            assert_eq!(categories::tool("opencode", &card).category, expected, "{action}");
+        }
     }
     #[test]
     fn permission_answers_are_exact() {

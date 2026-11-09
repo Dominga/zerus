@@ -20,6 +20,7 @@ import type { Catalog, CatalogTemplate } from "./catalog";
 import type { DraftMember } from "./types";
 import type { ComputerId } from "../../types";
 import "../styles/newteam.css";
+import { TextInput, TextArea } from "../lib/TextField";
 
 // New team (Qt TeamNewDialog/TeamNewTab, task 42). Opening it creates
 // nothing; Start planning creates only the draft and its lead; Create team
@@ -81,7 +82,7 @@ function TemplateList(props: { catalog?: Catalog; value: string; onPick: (id: st
   return (
     <div class="nt-templates">
       <div class="nt-inline">
-        <input class="grow nt-template-search" type="search" value={query()} placeholder={tr("Search templates or roles…")} aria-label={tr("Search templates or roles…")}
+        <TextInput class="grow nt-template-search" type="search" value={query()} placeholder={tr("Search templates or roles…")} aria-label={tr("Search templates or roles…")}
           onInput={(event) => setQuery(event.currentTarget.value)} />
         <button type="button" class="nt-star-filter" classList={{ on: onlyFavourites() }} aria-pressed={onlyFavourites()} title={tr("Show favourites only")}
           aria-label={tr("Show favourites only")} onClick={() => setOnlyFavourites(!onlyFavourites())}>★</button>
@@ -287,12 +288,12 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
         </div>
         <label class="nt-field">
           <span>{tr("Name")} {mark("name")}</span>
-          <input value={fields().name} maxlength={80} placeholder={tr("Checkout redesign")} onInput={(event) => store.edit("name", event.currentTarget.value)} />
+          <TextInput value={fields().name} maxlength={80} placeholder={tr("Checkout redesign")} onInput={(event) => store.edit("name", event.currentTarget.value)} />
         </label>
         <div class="nt-field">
           <span>{tr("Folder")}</span>
           <div class="nt-inline">
-            <input class="grow" value={fields().folder} disabled={!!draft()} onInput={(event) => store.setFolder(event.currentTarget.value)} />
+            <TextInput class="grow" value={fields().folder} disabled={!!draft()} onInput={(event) => store.setFolder(event.currentTarget.value)} />
             <button type="button" class="btn small" disabled={!!draft()} onClick={() => void browse()}>{tr("Browse…")}</button>
           </div>
         </div>
@@ -366,11 +367,11 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
           </Show>
           <For each={members()}>{(member, index) => (
             <div class="nt-row nt-member">
-              <input class="nt-role" placeholder={tr("Role")} value={member.role} onInput={(event) => setMember(index(), { role: event.currentTarget.value })} />
+              <TextInput class="nt-role" placeholder={tr("Role")} value={member.role} onInput={(event) => setMember(index(), { role: event.currentTarget.value })} />
               <select class="nt-agent" value={member.agent} onChange={(event) => setMember(index(), { agent: event.currentTarget.value, account: "" })}>
                 <For each={AGENTS}>{(agent) => <option value={agent}>{agent}</option>}</For>
               </select>
-              <input class="nt-model" placeholder={tr("default model")} value={member.model} list={`nt-models-${index()}`} onInput={(event) => setMember(index(), { model: event.currentTarget.value })} />
+              <TextInput class="nt-model" placeholder={tr("default model")} value={member.model} list={`nt-models-${index()}`} onInput={(event) => setMember(index(), { model: event.currentTarget.value })} />
               <datalist id={`nt-models-${index()}`}><For each={modelsFor(member)}>{(option) => <option value={option.id}>{option.label}</option>}</For></datalist>
               <select class="nt-effort" value={member.effort} aria-label={tr("Effort")} onChange={(event) => setMember(index(), { effort: event.currentTarget.value })}>
                 <For each={EFFORTS}>{(effort) => <option value={effort}>{effort || tr("Default effort")}</option>}</For>
@@ -434,12 +435,12 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
           </div>
           <label class="nt-field">
             <span>{tr("Max members")}</span>
-            <input type="number" min={1} max={32} class="nt-max" value={maxMembers(settings())}
+            <TextInput type="number" min={1} max={32} class="nt-max" value={maxMembers(settings())}
               onInput={(event) => { const n = Math.round(Number(event.currentTarget.value)); if (n >= 1 && n <= 32) setSettings({ max_members: n }); }} />
           </label>
           <button type="button" class="btn ghost small" aria-expanded={showProtocol()} onClick={() => setShowProtocol(!showProtocol())}>{showProtocol() ? tr("Hide protocol addendum") : tr("Protocol addendum")}</button> {mark("addendum")}
           <Show when={showProtocol()}>
-            <textarea rows={4} placeholder={tr("How the lead splits the work, checks reports and starts the next wave. A template fills this in.")}
+            <TextArea rows={4} placeholder={tr("How the lead splits the work, checks reports and starts the next wave. A template fills this in.")}
               value={fields().addendum} onInput={(event) => store.edit("addendum", event.currentTarget.value)} />
           </Show>
         </div>
@@ -478,7 +479,7 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
                 <select value={lead().agent} disabled={lead().mode !== "new"} aria-label={tr("Agent")} onChange={(event) => setLead({ ...lead(), agent: event.currentTarget.value, account: "" })}>
                   <For each={AGENTS}>{(agent) => <option value={agent}>{agent}</option>}</For>
                 </select>
-                <input placeholder={tr("default model")} value={lead().model} disabled={lead().mode !== "new"} list="nt-lead-models" onInput={(event) => setLead({ ...lead(), model: event.currentTarget.value })} />
+                <TextInput placeholder={tr("default model")} value={lead().model} disabled={lead().mode !== "new"} list="nt-lead-models" onInput={(event) => setLead({ ...lead(), model: event.currentTarget.value })} />
                 <datalist id="nt-lead-models"><For each={modelsFor({ computer: "", agent: lead().agent, account: lead().account, model: lead().model })}>{(option) => <option value={option.id}>{option.label}</option>}</For></datalist>
                 <select value={lead().effort} disabled={lead().mode !== "new"} aria-label={tr("Effort")} onChange={(event) => setLead({ ...lead(), effort: event.currentTarget.value })}>
                   <For each={EFFORTS}>{(effort) => <option value={effort}>{effort || tr("Default effort")}</option>}</For>
@@ -506,7 +507,7 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
         <Show when={leadPage() === "goal"}>
           <label class="nt-field nt-goal">
             <span>{tr("Goal")} {mark("goal")} <span class="nt-hint">{tr("what the team delivers: every member reads it with each task")}</span></span>
-            <textarea rows={10} placeholder={tr("Describe the result, constraints and what done means. The lead may write it with you.")}
+            <TextArea rows={10} placeholder={tr("Describe the result, constraints and what done means. The lead may write it with you.")}
               value={fields().goal} onInput={(event) => store.edit("goal", event.currentTarget.value)} />
           </label>
         </Show>

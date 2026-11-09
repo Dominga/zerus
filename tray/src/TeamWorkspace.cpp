@@ -1,3 +1,5 @@
+#include "TeamMemberDialog.h"
+#include "TeamArchive.h"
 #include "IronRulesEditor.h"
 #include "Settings.h"
 #include "SlowEventLog.h"
@@ -204,9 +206,10 @@ TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *p
     // U38 (#665): the Profile view's reads, kept across renders and teams.
     m_profileCache = new TeamProfile::Cache(teams, this);
     m_drawer = new TeamTaskCard(this);
+    m_drawer->setController(m_teams);
     m_drawer->setObjectName("teamWorkspaceDrawer");
     m_drawer->hide();
-    m_drawer->back = [this] { m_drawerTask = 0; m_drawer->hide(); };
+    m_drawer->back = [this] { m_drawerTask = 0; m_drawer->hide(); m_drawer->setTask({}, 0, {}, m_dark); };
     m_drawer->act = [this](const QString &operation, const QJsonObject &input) { m_panel->act(operation, input); };
     // Task 55: the card shows a member question's answer outcome on itself.
     m_drawer->actThen = [this](const QString &operation, const QJsonObject &input, const TeamTaskCard::Done &done) {
@@ -1275,6 +1278,11 @@ bool TeamWorkspace::approvePhase(const QString &id, int phase)
     // The team may have been refreshed while the dialog was open: read it again.
     team = currentTeam(id);
     if (!team || m_phaseAct || phaseDecided(*team, phase)) return false;
+    const auto freshApproval = phaseApproval(*team, phase);
+    if (freshApproval.text != approval.text || freshApproval.input != approval.input) {
+        m_error = tr("The phase changed while you answered; approve again.");
+        return false;
+    }
     const QString key = markPhaseDecided(*team, phase);
     QJsonObject request = approval.input;
     request.insert("team", id);
@@ -2017,9 +2025,9 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
     auto *h = new QHBoxLayout(bar); h->setContentsMargins(12, 8, 12, 6); h->setSpacing(8);
     // #755 (owner, 2026-10-31): the views as icons alone; each names itself
     // and what it shows in its tooltip and to a screen reader.
-    const QHash<QString, QString> purposes{{"graph", tr("Tasks and the dependencies between them")},
+    const QHash<QString, QString> purposes{{"graph", tr("Tasks and the dependencies between them") + QLatin1Char('\n') + tr("Dashed: spawned from")},
                                            {"board", tr("Tasks in columns by their state")},
-                                           {"layers", tr("Tasks in the waves they run in")},
+                                           {"layers", tr("Tasks in the waves they run in") + QLatin1Char('\n') + tr("Dashed: spawned from")},
                                            {"profile", tr("Where the phase's time and tokens went")},
                                            {"tests", tr("The tests the team ran and their results")},
                                            {"builds", tr("The builds the team ran and their queue")}};
@@ -2033,10 +2041,20 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
         b->setText(QString()); b->setFixedWidth(b->iconSize().width() + 16);
     }
     h->addWidget(views);
+    auto *archive = new QPushButton(tr("Archived phases..."));
+    archive->setObjectName("teamOpenArchive");
+    archive->setProperty("compactText", archive->text()); archive->setProperty("compactFirst", true);
+    archive->setAccessibleName(archive->text()); archive->setToolTip(archive->text());
+    archive->setIconSize(QSize(13, 13));
+    archive->setProperty("compactIcon", QVariant::fromValue(workspaceIcon("archive", c.text2)));
+    QObject::connect(archive, &QPushButton::clicked, this, [this] {
+        if (const auto *team = currentTeam(m_team)) (new TeamArchive(m_teams, *team, this))->show();
+    });
+    h->addWidget(archive);
     // Task 61: the origin link is not a dependency; name its dashed violet look.
     if (m_view == "graph" || m_view == "layers") {
         auto *legend = elided(tr("Dashed: spawned from"), c.violet, 11);
-        legend->setObjectName("teamOriginLegend"); h->addWidget(legend);
+        legend->setObjectName("teamOriginLegend"); legend->setProperty("compactHide", true); h->addWidget(legend);
     }
     const bool planning = team.status == "planning";
     if (planning) {
@@ -2667,6 +2685,14 @@ QWidget *TeamWorkspace::board(const Team &team)
             h->addWidget(approve); h->addWidget(discard);
         }
         v->addWidget(head);
+        if (const auto *record = team.phase(group.n); group.draft && record && !record->checks.isEmpty()) {
+            const auto approval = phaseApproval(team, group.n);
+            auto *checks = label(approval.text, record->checks.value("target_exceeded").toBool()
+                                || !record->checks.value("unresolved").toArray().isEmpty() ? c.warn : c.text2,
+                                11, false, "teamBoardPhaseChecks");
+            checks->setWordWrap(true);
+            v->addWidget(checks);
+        }
         if (!open) continue;
         v->addWidget(makeRow(group.tasks, group.n));
     }
@@ -2868,6 +2894,11 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         ++owed;
         if (task->status == "accepted") ++accepted;
     }
+    if (record && record->archived) {
+        accepted = record->archivedAccepted;
+        owed = record->archivedTasks - record->archivedCancelled;
+    }
+
     auto *bar = new PhaseBar(c, accepted, owed, state == "done" ? c.accentMuted : c.accent);
     bar->setObjectName("teamPhaseProgress");
     // The bar and the proposed-by or health line give way first on a narrow column.
@@ -3112,6 +3143,16 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         fv->addWidget(head);
     }
     if (!open) return frame;
+    if (record && record->archived) {
+        auto *summary = new QLabel(tr("Archived / %1 tasks / %2 accepted, %3 rejected, %4 cancelled")
+            .arg(record->archivedTasks).arg(record->archivedAccepted).arg(record->archivedRejected).arg(record->archivedCancelled));
+        summary->setObjectName("teamPhaseArchivedSummary");
+        fv->addWidget(summary);
+        auto *browse = new QPushButton(tr("Browse archived tasks and reports..."));
+        connect(browse, &QPushButton::clicked, this, [this, team, phase = group.n] { (new TeamArchive(m_teams, team, this, phase))->show(); });
+        fv->addWidget(browse);
+    }
+
     // The lead's note, then the send-back form, then the body.
     const QString note = record ? record->note : QString();
     if (!note.isEmpty()) {
@@ -4177,7 +4218,7 @@ void TeamWorkspace::memberMenu(const Team &team, const Member &member, const QPo
         auto *relaunch = menu.addAction(tr("Relaunch"), this, [this, id = member.id] { m_panel->act("relaunch", {{"member", id}}); });
         const bool failed = member.session.isEmpty() && !member.error.isEmpty();
         relaunch->setEnabled(failed);
-        if (!failed) relaunch->setToolTip(tr("Starts automatically with its first task"));
+        if (!failed) relaunch->setToolTip(tr("Starts automatically with its first task or its reports"));
         // U49: more members of this role at once, and a drain: the member
         // finishes its open work, takes nothing new and then leaves.
         if (team.status == "planning" || team.status == "running" || team.status == "paused") {
@@ -4247,6 +4288,16 @@ void TeamWorkspace::memberMenu(const Team &team, const Member &member, const QPo
         sub->setEnabled(!member.lead && !(member.sub && hasReports));
         if (member.lead) sub->setToolTip(tr("Already the coordinator"));
         else if (member.sub && hasReports) sub->setToolTip(tr("Move its reports to another lead first"));
+    }
+    if (team.status == "planning" || team.status == "running" || team.status == "paused") {
+        auto *edit = menu.addAction(tr("Edit member..."), this, [this, teamId = team.id, id = member.id] {
+            const auto *current = currentTeam(teamId);
+            if (const auto *found = current && current->full ? current->member(id) : nullptr)
+                (new TeamMemberDialog(m_teams, *current, *found, m_dark, this))->show();
+        });
+        edit->setObjectName("teamWorkspaceMemberEdit");
+        edit->setEnabled(team.full);
+        if (!team.full) edit->setToolTip(tr("Reading the current member settings..."));
     }
     // H6: swap the session, agent, model or account of any member, the lead too.
     if (team.status == "planning" || team.status == "running" || team.status == "paused") {
@@ -5050,6 +5101,3 @@ void TeamWorkspace::addMember(const Team &team)
     pop->show();
     placePopover();
 }
-
-
-

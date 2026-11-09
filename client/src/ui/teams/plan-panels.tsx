@@ -1,7 +1,10 @@
-import { For, Show, createSignal } from "solid-js";
+import { For, Show, createEffect, createSignal, on, untrack } from "solid-js";
 import type { JSX } from "solid-js";
 import { tr } from "../../i18n";
-import type { TeamBuildItem, TeamBuildsView, TeamProfileView, TeamTestsView } from "../../types";
+import { Icon } from "../lib/icons";
+import { PROFILE_PREVIEW_ROWS, profileSectionFolded, setProfileSectionFolded, type ProfileSection } from "../../store/profileSections";
+import type { TeamBuildItem, TeamBuildsView, TeamProfileRole, TeamProfileView, TeamTestsView, TeamTimelineView, TeamView, TimelineLane } from "../../types";
+import { createTimelineReads, defaultPhase, scopeChoices } from "./timeline";
 import type { PlacedNode } from "./plan";
 import { KIND_STYLES, keyName, lossKey, styleOf, swatchBackground } from "./profile-palette";
 import { taskHeat, type TaskHeat } from "./heat";
@@ -28,57 +31,43 @@ import {
   type PlanMode,
 } from "./planModes";
 
-const MODES: { mode: PlanMode; label: string }[] = [
-  { mode: "graph", label: "Graph" },
-  { mode: "board", label: "Board" },
-  { mode: "layers", label: "Layers" },
-  { mode: "lanes", label: "Lanes" },
-  { mode: "profile", label: "Profile" },
-  { mode: "tests", label: "Tests" },
+const MODES: { mode: PlanMode; label: string; icon: string }[] = [
+  { mode: "graph", label: "Graph", icon: "network" },
+  { mode: "board", label: "Board", icon: "rows-3" },
+  { mode: "layers", label: "Layers", icon: "layers" },
+  { mode: "lanes", label: "Lanes", icon: "layout-dashboard" },
+  { mode: "profile", label: "Profile", icon: "activity" },
+  { mode: "tests", label: "Tests", icon: "list-todo" },
+  { mode: "builds", label: "Builds", icon: "hard-drive" },
 ];
 
+/**
+ * Task #436 (owner, screenshot of package 167): the plan's view group, one icon
+ * per view, inside the toolbar's own segmented group. The toolbar's other
+ * groups and toggles live in PlanView, which owns their state.
+ */
 export function PlanModeBar(props: {
   mode: PlanMode;
-  includeCancelled: boolean;
   onMode: (mode: PlanMode) => void;
-  onCancelled: (shown: boolean) => void;
-  /** Task 82: the lateness heat on Graph, Board and Layers. */
-  heat?: boolean;
-  onHeat?: (on: boolean) => void;
 }): JSX.Element {
   return (
-    <div class="pm-modes" role="tablist" aria-label={tr("Plan view")}>
+    <div class="pm-modes pm-group" role="tablist" aria-label={tr("Plan view")} data-plan-group="view">
       <For each={MODES}>
         {(item) => (
           <button
             type="button"
             role="tab"
             class="pm-mode"
+            data-mode={item.mode}
             aria-selected={props.mode === item.mode}
             classList={{ on: props.mode === item.mode }}
             onClick={() => props.onMode(item.mode)}
           >
-            {modeLabel(item.mode)}
+            <Icon name={item.icon} size={13} />
+            <span class="pm-mode-label">{modeLabel(item.mode)}</span>
           </button>
         )}
       </For>
-      <span class="grow" />
-      <Show when={props.mode !== "profile" && props.mode !== "tests"}>
-        <label class="pm-check">
-          <input
-            type="checkbox"
-            checked={props.includeCancelled}
-            onChange={(event) => props.onCancelled(event.currentTarget.checked)}
-          />
-          {tr("Show cancelled")}
-        </label>
-        <Show when={props.onHeat && (props.mode === "graph" || props.mode === "board" || props.mode === "layers")}>
-          <label class="pm-check" title={tr("Tint each task by how late it is against the plan; its overrun shows beside it")}>
-            <input type="checkbox" class="pm-heat-toggle" checked={!!props.heat} onChange={(event) => props.onHeat?.(event.currentTarget.checked)} />
-            {tr("Lateness")}
-          </label>
-        </Show>
-      </Show>
     </div>
   );
 }
@@ -89,6 +78,7 @@ function modeLabel(mode: PlanMode): string {
   if (mode === "layers") return tr("Layers");
   if (mode === "lanes") return tr("Lanes");
   if (mode === "profile") return tr("Profile");
+  if (mode === "builds") return tr("Builds");
   return tr("Tests");
 }
 
@@ -324,7 +314,7 @@ export function ProfileSummary(props: { profile?: TeamProfileView | null; team?:
             <div class="pm-tile"><span>{tr("Elapsed")}</span><b>{formatSeconds(profile().elapsed_s ?? 0)}</b></div>
             <div class="pm-tile"><span>{tr("Worked")}</span><b>{formatSeconds(profile().worked_s ?? 0)}</b></div>
             <div class="pm-tile"><span>{tr("Accepted")}</span><b>{profile().accepted}/{profile().tasks}</b></div>
-            <div class="pm-tile"><span>{tr("Tokens")}</span><b>{formatTokens(profile().tokens)}</b><Show when={profile().tokens_partial}><i class="pm-note">{tr("partial")}</i></Show></div>
+            <div class="pm-tile"><span>{tr("Tokens")}</span><b>{tokenValue(profile().tokens, tr("The provider did not report this profile's tokens"))}</b><Show when={profile().tokens_partial}><i class="pm-note">{tr("partial")}</i></Show></div>
           </div>
         )}
       </Show>
@@ -333,45 +323,326 @@ export function ProfileSummary(props: { profile?: TeamProfileView | null; team?:
 }
 
 /**
- * Task #339: the Top losses and the roles follow the lanes and their legend,
- * as Qt's losses column follows the timeline card; the legend itself moved to
- * the Time section, directly under the lanes it explains.
+ * Task #339/#410: the Top losses and the Roles are two collapsible sections
+ * side by side under the lanes, each folded to its first rows with its count
+ * in the header and the owner's choice remembered per Profile view. The spans
+ * legend stays with the lanes (TimeView).
  */
-export function ProfileDetails(props: { profile?: TeamProfileView | null }): JSX.Element {
+export function ProfileDetails(props: { profile?: TeamProfileView | null; team?: TeamView; onOpenReport?: (id: number) => void }): JSX.Element {
+  const view = () => props.team?.id || "profile";
+  // Task #462 (Qt TeamProfile.cpp:917): the losses order, By time or By tokens.
+  const [order, setOrder] = createSignal<"time" | "tokens">("time");
+  const losses = () => order() === "tokens"
+    ? [...(props.profile?.losses ?? [])].sort((a, b) => (b.tokens ?? -1) - (a.tokens ?? -1) || b.seconds - a.seconds)
+    : (props.profile?.losses ?? []);
   return (
     <div class="pm-profile pm-profile-details">
+      <Show when={props.team?.tasks.some((task) => task.archived)}>
+        <h3>{tr("Archived tasks in this window")}</h3>
+        <For each={props.team?.tasks.filter((task) => task.archived)}>{(task) => (
+          <div class="pm-role-row">
+            <button class="btn small" onClick={() => props.onOpenReport?.(task.id)}>{`#${task.id} ${task.title}`}</button>
+            <span>{tr("Phase %1", task.phase)}</span>
+            <span>{task.status}</span>
+            <span class="grow" />
+            <span>{task.worked_s == null ? tr("Time unknown") : formatSeconds(task.worked_s)}</span>
+          </div>
+        )}</For>
+      </Show>
       <Show when={props.profile}>
         {(profile) => (
           <>
-            <h3>{tr("Top losses")}</h3>
-            <Show when={profile().losses.length > 0} fallback={<p class="pm-empty">{tr("No losses recorded")}</p>}>
-              <For each={profile().losses.slice(0, 20)}>
-                {(loss) => (
-                  <div class="pm-loss-row" data-kind={lossKey(loss.kind) ?? ""}>
-                    <Swatch kind={lossKey(loss.kind)} />
-                    <span class="pm-loss-kind">{lossLabel(loss.kind)}</span>
-                    <Show when={loss.task > 0}><span class="pm-id">#{loss.task}</span></Show>
-                    <span class="grow" />
-                    <span>{formatSeconds(loss.seconds)}</span>
-                    <span class="pm-note">{formatTokens(loss.tokens)}</span>
-                  </div>
-                )}
-              </For>
-            </Show>
-            <h3>{tr("Roles")}</h3>
-            <For each={profile().roles.slice(0, 50)}>
-              {(role) => (
+          <div class="pm-loss-order">
+            <div class="pm-segment" role="radiogroup" aria-label={tr("Top losses")} data-loss-order>
+              <button type="button" role="radio" aria-checked={order() === "time"} classList={{ on: order() === "time" }} onClick={() => setOrder("time")}>{tr("By time")}</button>
+              <button type="button" role="radio" aria-checked={order() === "tokens"} classList={{ on: order() === "tokens" }} onClick={() => setOrder("tokens")}>{tr("By tokens")}</button>
+            </div>
+          </div>
+          <div class="pm-details-columns">
+            <ProfileSectionBox id="losses" view={view()} title={tr("Top losses")} count={profile().losses.length}
+              items={losses().slice(0, 20)} empty={<p class="pm-empty">{tr("No losses recorded")}</p>}
+              row={(loss) => (
+                <div class="pm-loss-row" data-kind={lossKey(loss.kind) ?? ""}>
+                  <Swatch kind={lossKey(loss.kind)} />
+                  <span class="pm-loss-kind">{lossLabel(loss.kind)}</span>
+                  <Show when={loss.task > 0}><span class="pm-id">#{loss.task}</span></Show>
+                  <span class="grow" />
+                  <span>{formatSeconds(loss.seconds)}</span>
+                  <span class="pm-note">{tokenValue(loss.tokens, tr("This loss's tokens were not reported"))}</span>
+                </div>
+              )} />
+            <ProfileSectionBox id="roles" view={view()} title={tr("Roles")} count={profile().roles.length}
+              items={profile().roles.slice(0, 50)} empty={<p class="pm-empty">{tr("No roles recorded")}</p>}
+              row={(role) => (
                 <div class="pm-role-row">
                   <span>{role.key || role.kind}</span>
                   <span class="grow" />
                   <span>{role.accepted}/{role.attempts}</span>
                   <span class="pm-note">{role.returned} {tr("returned")}</span>
-                  <span class="pm-tokens">{formatTokens(role.tokens_per_accepted)}</span>
+                  <span class="pm-tokens">{tokenValue(role.tokens_per_accepted, tr("No accepted task of this role reported tokens"))}</span>
                 </div>
-              )}
-            </For>
+              )} />
+          </div>
           </>
         )}
+      </Show>
+    </div>
+  );
+}
+
+/**
+ * Task #410: one folded section: its title and count open or close it, and
+ * "Show all" / "Show fewer" sit at the header's end. Folded by default.
+ */
+function ProfileSectionBox<T>(props: {
+  id: ProfileSection; view: string; title: string; count: number;
+  items: readonly T[]; row: (item: T) => JSX.Element; empty?: JSX.Element;
+}): JSX.Element {
+  const open = () => !profileSectionFolded(props.view, props.id);
+  const toggle = () => setProfileSectionFolded(props.view, props.id, open());
+  const visible = () => (open() ? props.items : props.items.slice(0, PROFILE_PREVIEW_ROWS));
+  const more = () => props.items.length > PROFILE_PREVIEW_ROWS;
+  const countTip = () => (props.items.length < props.count ? tr("The first %1 of %2", props.items.length, props.count) : undefined);
+  return (
+    <section class="pm-section" data-section={props.id} aria-label={props.title}>
+      <header class="pm-section-head">
+        <button type="button" class="pm-section-toggle" aria-expanded={open()} onClick={toggle}>
+          <Icon name={open() ? "chevron-down" : "chevron-right"} size={13} />
+          <b>{props.title}</b>
+          <span class="pm-section-count" title={countTip()}>{props.count}</span>
+        </button>
+        <span class="grow" />
+        <Show when={more()}>
+          <button type="button" class="pm-section-more" onClick={toggle}>{open() ? tr("Show fewer") : tr("Show all")}</button>
+        </Show>
+      </header>
+      <Show when={props.items.length > 0} fallback={props.empty}>
+        <For each={visible()}>{(item) => props.row(item)}</For>
+      </Show>
+    </section>
+  );
+}
+
+/** Task #410: an unknown token value is a muted dash, its reason in the tooltip. */
+function tokenValue(tokens: number | null, reason: string): JSX.Element {
+  return tokens === null || !Number.isFinite(tokens)
+    ? <span class="pm-unknown" title={reason} aria-label={reason}>—</span>
+    : <>{formatTokens(tokens)}</>;
+}
+
+/** Task #462 (owner, package 168): the profile's four modes, as Qt's TeamProfile tabs. */
+export type ProfileMode = "time" | "tokens" | "members" | "compare";
+const PROFILE_MODES: { mode: ProfileMode; icon: string }[] = [
+  { mode: "time", icon: "clock" },
+  { mode: "tokens", icon: "gauge" },
+  { mode: "members", icon: "users" },
+  { mode: "compare", icon: "git-compare-arrows" },
+];
+function profileModeLabel(mode: ProfileMode): string {
+  if (mode === "time") return tr("Time");
+  if (mode === "tokens") return tr("Tokens");
+  if (mode === "members") return tr("Members");
+  return tr("Compare");
+}
+
+/** The profile's mode switch: one icon per mode, in the plan toolbar's own segmented style. */
+export function ProfileModeTabs(props: { mode: ProfileMode; onMode: (mode: ProfileMode) => void }): JSX.Element {
+  return (
+    <div class="pm-modes pm-profile-modes" role="tablist" aria-label={tr("Profile")} data-profile-modes>
+      <For each={PROFILE_MODES}>{(item) => (
+        <button type="button" role="tab" class="pm-mode" data-profile-mode={item.mode}
+          aria-selected={props.mode === item.mode} classList={{ on: props.mode === item.mode }} onClick={() => props.onMode(item.mode)}>
+          <Icon name={item.icon} size={13} /><span class="pm-mode-label">{profileModeLabel(item.mode)}</span>
+        </button>
+      )}</For>
+    </div>
+  );
+}
+
+/**
+ * Qt's tokensPage (TeamProfile.cpp:1274): the token totals, the roles that spend
+ * them and the losses that carry a token count. The profile read gives the
+ * team's totals, each role's tokens per accepted task and each loss's tokens;
+ * a per-task tray of tokens is not in that read, so the losses stand in for it.
+ */
+export function TokensPage(props: { profile?: TeamProfileView | null; phase?: number | null }): JSX.Element {
+  const byTokens = () => [...(props.profile?.losses ?? [])].filter((loss) => loss.tokens !== null).sort((a, b) => (b.tokens ?? 0) - (a.tokens ?? 0));
+  const roles = () => [...(props.profile?.roles ?? [])].sort((a, b) => (b.tokens_per_accepted ?? -1) - (a.tokens_per_accepted ?? -1));
+  const spent = (role: TeamProfileRole) => (role.tokens_per_accepted === null ? null : role.tokens_per_accepted * role.accepted);
+  return (
+    <div class="pm-profile pm-profile-tokens" data-profile-page="tokens">
+      <div class="pm-profile-head">
+        <h3>{props.phase ? tr("TOKENS PER TASK, PHASE %1", props.phase) : tr("TOKENS PER TASK, THE PLAN")}</h3>
+        <span class="grow" />
+        <Show when={props.profile?.tokens_partial}>
+          <span class="pm-note">{tr("partial: some sessions are on another computer or not recorded")}</span>
+        </Show>
+      </div>
+      <Show when={props.profile} fallback={<p class="pm-empty">{tr("Reading the profile…")}</p>}>{(profile) => (
+        <>
+          <p class="pm-note" data-profile-tokens-total>
+            <b>{tokenValue(profile().tokens, tr("The provider did not report this profile's tokens"))}</b> {tr("Tokens")}
+          </p>
+          <h3>{tr("Roles")}</h3>
+          <Show when={roles().length > 0} fallback={<p class="pm-empty">{tr("No roles recorded")}</p>}>
+            <table class="pm-table" data-profile-roles>
+              <thead><tr><th>{tr("Role %1")}</th><th>{tr("Accepted")}</th><th>{tr("Tokens per accepted")}</th><th>{tr("Tokens")}</th></tr></thead>
+              <tbody><For each={roles()}>{(role) => (
+                <tr data-role={role.key}>
+                  <td>{role.key || role.kind}</td>
+                  <td class="num">{role.accepted}/{role.attempts}</td>
+                  <td class="num"><Show when={role.tokens_per_accepted !== null} fallback={<span class="pm-unknown">—</span>}>{formatTokens(role.tokens_per_accepted!)}</Show></td>
+                  <td class="num"><Show when={spent(role) !== null} fallback={<span class="pm-unknown">—</span>}>{formatTokens(spent(role)!)}</Show></td>
+                </tr>
+              )}</For></tbody>
+            </table>
+          </Show>
+          <h3>{tr("Top losses")}</h3>
+          <Show when={byTokens().length > 0} fallback={<p class="pm-empty">{tr("No losses recorded")}</p>}>
+            <table class="pm-table" data-profile-token-losses>
+              <thead><tr><th>{tr("Task")}</th><th>{tr("Tokens")}</th><th>{tr("Worked")}</th></tr></thead>
+              <tbody><For each={byTokens()}>{(loss) => (
+                <tr data-kind={lossKey(loss.kind) ?? ""}>
+                  <td><Show when={loss.task > 0} fallback={<span class="pm-unknown">—</span>}>{`#${loss.task}`}</Show> {lossLabel(loss.kind)}</td>
+                  <td class="num">{formatTokens(loss.tokens ?? 0)}</td>
+                  <td class="num">{formatSeconds(loss.seconds)}</td>
+                </tr>
+              )}</For></tbody>
+            </table>
+          </Show>
+        </>
+      )}</Show>
+    </div>
+  );
+}
+
+/** A lane's own spans of one kind, in seconds; its waits are separate spans. */
+const laneSeconds = (lane: TimelineLane, kinds: readonly string[]) =>
+  lane.spans.filter((span) => kinds.includes(span.kind)).reduce((total, span) => total + Math.max(0, span.to - span.from), 0);
+const waitedSeconds = (lane: TimelineLane) => lane.waits.reduce((total, span) => total + Math.max(0, span.to - span.from), 0);
+
+/**
+ * Qt's membersPage (TeamProfile.cpp:1308): one row per member with the work the
+ * timeline read counts (attempts, returned work, worked, utilization, waited,
+ * work redone) and the profile's per-role numbers where the lane names a role.
+ */
+export function MembersPage(props: { profile?: TeamProfileView | null; team: TeamView; load: (phase: number | null) => Promise<TeamTimelineView> }): JSX.Element {
+  const [phase, setPhase] = createSignal<number | null>(defaultPhase(props.team.phases));
+  const reads = createTimelineReads((scope) => props.load(scope));
+  createEffect(on(phase, (scope) => reads.show(scope, untrack(() => props.team.revision))));
+  createEffect(on(() => props.team.revision, (revision) => reads.changed(revision), { defer: true }));
+  const roleOf = (name: string) => props.profile?.roles.find((role) => role.key === name);
+  const rows = () => reads.view()?.lanes ?? [];
+  return (
+    <div class="pm-profile pm-profile-members" data-profile-page="members">
+      <div class="pm-profile-head">
+        <h3>{tr("Members")}</h3>
+        <select class="tl-scope" aria-label={tr("Scope")} value={phase() == null ? "" : String(phase())}
+          onChange={(event) => setPhase(event.currentTarget.value ? Number(event.currentTarget.value) : null)}>
+          <For each={scopeChoices(props.team.phases)}>{(choice) => <option value={choice.value}>{choice.label}</option>}</For>
+        </select>
+        <Show when={reads.loading()}><span class="pm-note">{tr("Reading the timeline…")}</span></Show>
+      </div>
+      <Show when={reads.error()}><p class="pm-empty warn">{reads.error()}</p></Show>
+      <Show when={reads.view()} fallback={<Show when={!reads.error()}><p class="pm-empty">{tr("Reading the timeline…")}</p></Show>}>{(view) => (
+        <>
+          <table class="pm-table" data-profile-members>
+            <thead><tr>
+              <th>{tr("Member")}</th><th>{tr("Agent and model")}</th><th class="num">{tr("Accepted")}</th><th class="num">{tr("Attempts")}</th>
+              <th class="num">{tr("Returned")}</th><th class="num">{tr("Worked")}</th><th class="num">{tr("Utilization")}</th>
+              <th class="num">{tr("Its tasks waited")}</th><th class="num">{tr("Work redone")}</th><th class="num">{tr("Tokens per accepted")}</th>
+            </tr></thead>
+            <tbody><For each={rows()}>{(lane) => {
+              const role = () => roleOf(lane.role);
+              const work = () => laneSeconds(lane, ["work"]);
+              const rework = () => laneSeconds(lane, ["rework"]);
+              const redone = () => (work() + rework() > 0 ? Math.round((100 * rework()) / (work() + rework())) : 0);
+              return (
+                <tr data-member={lane.member}>
+                  <td><b>{lane.member}</b></td>
+                  <td>{lane.model || "—"}</td>
+                  <td class="num"><Show when={role()?.accepted !== undefined} fallback={<span class="pm-unknown">—</span>}>{role()!.accepted}</Show></td>
+                  <td class="num">{lane.spans.filter((span) => span.kind === "work" || span.kind === "rework").length > 0 ? new Set(lane.spans.filter((span) => span.kind === "work" || span.kind === "rework").map((span) => `${span.task}:${span.attempt}`)).size : 0}</td>
+                  <td classList={{ num: true, warn: rework() > 0 }}>{rework() > 0 ? new Set(lane.spans.filter((span) => span.kind === "rework").map((span) => `${span.task}:${span.attempt}`)).size : 0}</td>
+                  <td class="num">{formatSeconds(lane.busy_s)}</td>
+                  <td class="num">{`${Math.round((lane.utilization ?? 0) * 100)}%`}</td>
+                  <td class="num">{formatSeconds(waitedSeconds(lane))}</td>
+                  <td classList={{ num: true, warn: redone() > 0 }}>{`${redone()}%`}</td>
+                  <td class="num"><Show when={role()?.tokens_per_accepted !== undefined && role()!.tokens_per_accepted !== null} fallback={<span class="pm-unknown">—</span>}>{formatTokens(role()!.tokens_per_accepted!)}</Show></td>
+                </tr>
+              );
+            }}</For></tbody>
+          </table>
+          <p class="pm-note">{tr("Utilization counts worked spans only; waits for a dependency, a free member or the lead are not work. A row opens the timeline.")}</p>
+        </>
+      )}</Show>
+    </div>
+  );
+}
+
+/**
+ * Qt's comparePage (TeamProfile.cpp:1383) compares two phases. The plan's
+ * profile read is one scope, so each side is the phase's timeline read: the
+ * same lanes, elapsed and worked seconds the Time mode draws.
+ */
+export function ComparePage(props: { team: TeamView; load: (phase: number | null) => Promise<TeamTimelineView> }): JSX.Element {
+  const phases = () => props.team.phases.map((phase) => phase.n);
+  const [a, setA] = createSignal<number | null>(phases().length > 1 ? phases()[phases().length - 2] : (phases()[0] ?? null));
+  const [b, setB] = createSignal<number | null>(phases()[phases().length - 1] ?? null);
+  const left = createTimelineReads((scope) => props.load(scope));
+  const right = createTimelineReads((scope) => props.load(scope));
+  createEffect(on([a, () => props.team.revision], ([phase, revision]) => left.show(phase, revision)));
+  createEffect(on([b, () => props.team.revision], ([phase, revision]) => right.show(phase, revision)));
+  const rework = (view: TeamTimelineView | null) => (view?.lanes ?? []).reduce((total, lane) => total + laneSeconds(lane, ["rework"]), 0);
+  const waits = (view: TeamTimelineView | null) => (view?.lanes ?? []).reduce((total, lane) => total + waitedSeconds(lane), 0);
+  const tests = (view: TeamTimelineView | null) => (view?.tests ?? []).reduce((total, span) => total + Math.max(0, span.to - span.from), 0);
+  const rows = () => [
+    { key: "took", label: tr("Took"), unit: "s" as const, lower: true, value: (view: TeamTimelineView | null) => view?.elapsed_s ?? null },
+    { key: "tasks", label: tr("Tasks"), unit: "n" as const, lower: false, value: (view: TeamTimelineView | null) => view?.tasks ?? null },
+    { key: "worked", label: tr("Worked"), unit: "s" as const, lower: false, value: (view: TeamTimelineView | null) => view?.worked_s ?? null },
+    { key: "rework", label: tr("Work redone"), unit: "s" as const, lower: true, value: (view: TeamTimelineView | null) => (view ? rework(view) : null) },
+    { key: "waited", label: tr("Waited for a free member"), unit: "s" as const, lower: true, value: (view: TeamTimelineView | null) => (view ? waits(view) : null) },
+    { key: "tests", label: tr("Tests"), unit: "s" as const, lower: true, value: (view: TeamTimelineView | null) => (view ? tests(view) : null) },
+  ];
+  const show = (value: number | null, unit: "s" | "n") => (value === null ? "—" : unit === "s" ? formatSeconds(value) : String(value));
+  const phaseLabel = (n: number | null) => (n === null ? tr("The plan, every phase") : tr("Phase %1", n));
+  return (
+    <div class="pm-profile pm-profile-compare" data-profile-page="compare">
+      <Show when={phases().length > 0} fallback={<p class="pm-empty">{tr("No phases to compare")}</p>}>
+        <div class="pm-profile-head">
+          <h3>{tr("Compare")}</h3>
+          <select class="tl-scope" aria-label={tr("Phase %1", left.scope() ?? 0)} value={a() == null ? "" : String(a())} data-compare-a
+            onChange={(event) => setA(Number(event.currentTarget.value))}>
+            <For each={phases()}>{(n) => <option value={String(n)}>{phaseLabel(n)}</option>}</For>
+          </select>
+          <span class="pm-note">{tr("against")}</span>
+          <select class="tl-scope" aria-label={tr("Phase %1", right.scope() ?? 0)} value={b() == null ? "" : String(b())} data-compare-b
+            onChange={(event) => setB(Number(event.currentTarget.value))}>
+            <For each={phases()}>{(n) => <option value={String(n)}>{phaseLabel(n)}</option>}</For>
+          </select>
+          <Show when={left.loading() || right.loading()}><span class="pm-note">{tr("Reading the timeline…")}</span></Show>
+        </div>
+        <Show when={left.error() || right.error()}><p class="pm-empty warn">{left.error() || right.error()}</p></Show>
+        <Show when={left.view() || right.view()} fallback={<p class="pm-empty">{tr("Reading the timeline…")}</p>}>
+          <table class="pm-table pm-compare" data-profile-compare>
+            <thead><tr><th>{tr("Measure")}</th><th class="num">{phaseLabel(a())}</th><th class="num">{phaseLabel(b())}</th><th class="num">{tr("Delta")}</th></tr></thead>
+            <tbody><For each={rows()}>{(row) => {
+              const one = () => row.value(left.view() ?? null), two = () => row.value(right.view() ?? null);
+              const delta = () => (one() === null || two() === null ? null : two()! - one()!);
+              const worse = () => (delta() === null || delta() === 0 ? false : delta()! > 0 === row.lower);
+              return (
+                <tr data-measure={row.key}>
+                  <td>{row.label}</td>
+                  <td class="num">{show(one(), row.unit)}</td>
+                  <td class="num">{show(two(), row.unit)}</td>
+                  <td classList={{ num: true, warn: worse(), accent: delta() !== null && delta() !== 0 && !worse() }}>
+                    {delta() === null || delta() === 0 ? "—" : `${delta()! > 0 ? "+" : "-"}${show(Math.abs(delta()!), row.unit)}`}
+                  </td>
+                </tr>
+              );
+            }}</For></tbody>
+          </table>
+        </Show>
       </Show>
     </div>
   );
@@ -380,10 +651,7 @@ export function ProfileDetails(props: { profile?: TeamProfileView | null }): JSX
 export function TestsPanel(props: {
   tests?: TeamTestsView | null;
   onMore?: () => void;
-  /** Task 199 (Qt TeamTests): the Builds tab, its read and Force run of a suite (its refusal, if any). */
-  builds?: TeamBuildsView | null;
-  buildsError?: string;
-  onLoadBuilds?: () => void;
+  /** Task 199/#462: Force run of a suite (its refusal, if any); the builds have their own mode. */
   onForce?: (suite: string) => Promise<string>;
 }): JSX.Element {
   const rows = () => testsRows(props.tests);
@@ -401,7 +669,6 @@ export function TestsPanel(props: {
     return failed;
   };
   const [open, setOpen] = createSignal("");
-  const [tab, setTab] = createSignal<"tests" | "builds">("tests");
   const [forcing, setForcing] = createSignal<Record<string, boolean>>({});
   const [refused, setRefused] = createSignal<Record<string, string>>({});
   const force = async (suite: string) => {
@@ -413,15 +680,7 @@ export function TestsPanel(props: {
   };
   return (
     <div class="pm-tests">
-      <div class="pm-tabs" role="tablist">
-        <button type="button" role="tab" class="btn ghost small" aria-selected={tab() === "tests"} data-tab="tests" onClick={() => setTab("tests")}>{tr("Tests")}</button>
-        <button type="button" role="tab" class="btn ghost small" aria-selected={tab() === "builds"} data-tab="builds"
-          onClick={() => { setTab("builds"); props.onLoadBuilds?.(); }}>{tr("Builds")}</button>
-      </div>
-      <Show when={tab() === "builds"}>
-        <BuildsPanel builds={props.builds} error={props.buildsError} />
-      </Show>
-      <Show when={tab() === "tests" && props.tests} fallback={<Show when={tab() === "tests"}><p class="pm-empty">{tr("Reading the tests…")}</p></Show>}>
+      <Show when={props.tests} fallback={<p class="pm-empty">{tr("Reading the tests…")}</p>}>
         {/* Task 324 (Qt TeamTests): the hint, the counters and the Queue section in Qt's order. */}
         <p class="pm-note" data-tests-hint>{tr("Test requests wait in a queue; Zerus runs them when the machine has room and keeps each result with its excerpt.")}</p>
         <div class="pm-tests-counts" data-tests-counts>
@@ -520,8 +779,14 @@ function seconds(value: number): string {
   return runTime(Math.max(0, value) * 1000);
 }
 
-/** Task 199 (Qt TeamTests builds): the build broker's shared folders, their build folders, what builds, waits and finished. */
-function BuildsPanel(props: { builds?: TeamBuildsView | null; error?: string }): JSX.Element {
+/**
+ * Task 199 (Qt TeamTests builds): the build broker's shared folders, their build
+ * folders, what builds, waits and finished. Task #462 (owner, package 168): its
+ * own plan mode, with Qt's building and waiting counts (TeamTests.cpp:674-690).
+ */
+export function BuildsPanel(props: { builds?: TeamBuildsView | null; error?: string }): JSX.Element {
+  const building = () => (props.builds?.folders ?? []).reduce((total, folder) => total + folder.build_folders.reduce((sum, group) => sum + group.running.length, 0), 0);
+  const waiting = () => (props.builds?.folders ?? []).reduce((total, folder) => total + folder.build_folders.reduce((sum, group) => sum + group.queue.length, 0), 0);
   const line = (item: TeamBuildItem, kind: "running" | "queue" | "recent") => (
     <div class={`pm-queue pm-build pm-build-${kind}`} data-member={item.member}>
       <b>{item.member}</b>
@@ -544,7 +809,11 @@ function BuildsPanel(props: { builds?: TeamBuildsView | null; error?: string }):
     </div>
   );
   return (
-    <div class="pm-builds">
+    <div class="pm-builds" data-builds>
+      <div class="pm-tests-counts" data-builds-counts>
+        <span classList={{ "pm-pill": true, "pm-count-on": building() > 0 }} data-count="building">{tr("%n building", building())}</span>
+        <span classList={{ "pm-pill": true, "pm-count-on": waiting() > 0 }} data-count="waiting">{tr("%n waiting", waiting())}</span>
+      </div>
       <Show when={props.error}><p class="danger">{tr("Could not read the builds: %1", props.error!)}</p></Show>
       <Show when={props.builds} fallback={<Show when={!props.error}><p class="pm-empty">{tr("Reading the builds\u2026")}</p></Show>}>{(builds) => (
         <>

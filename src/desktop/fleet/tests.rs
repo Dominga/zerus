@@ -47,7 +47,12 @@ impl Fake {
     }
     fn store(&self, epoch: &str) -> Store {
         let location = Location {
-            root: self.temp.path().canonicalize().unwrap().join("state/desktop"),
+            root: self
+                .temp
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("state/desktop"),
             configuration: "a".repeat(64),
         };
         location.prepare().unwrap();
@@ -738,4 +743,89 @@ fn shared_detail_fence_uses_one_original_handle_and_exact_projection_generation(
     details.stop();
     stop(&mut runtime);
     assert_eq!(runtime.status()["control_batches"], 0);
+}
+
+#[test]
+fn an_ungreeted_bad_peer_does_not_degrade_a_live_computer_or_become_a_source() {
+    let fake = Fake::new(json!({
+        "":{"runs":[[{"lines":[hello(),snapshot(0,true,vec![row(1)]),meta(json!(["broken.example"]))]},{"serve":true}]]},
+        "broken.example":{"runs":[[{"exit":1}]]}
+    }));
+    let mut runtime = fake.start("epoch");
+    let until = Instant::now() + Duration::from_secs(15);
+    loop {
+        drop(runtime.poll());
+        let status = runtime.status();
+        let failed = status["connections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["id"] == "broken.example" && c["status"] == "reconnecting");
+        if failed
+            && runtime.computers[&ComputerId::local()].accepting
+            && runtime.computers[&ComputerId::local()].status == ComputerStatus::Live
+        {
+            break;
+        }
+        assert!(Instant::now() < until, "fake fleet did not settle");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let status = runtime.status();
+    let generation = runtime.computers[&ComputerId("broken.example".into())].generation;
+    let admitted_controls = runtime.controls("broken.example", 0, &[]);
+    stop(&mut runtime);
+    assert_eq!(
+        status["transport_ready"], true,
+        "healthy computer remains available"
+    );
+    assert_eq!(
+        status["all_sources_ready"], false,
+        "coverage is still incomplete"
+    );
+    assert_eq!(status["connections"].as_array().unwrap().len(), 2);
+    assert_eq!(generation, 0);
+    assert!(!admitted_controls, "a display alias has no source permit");
+    assert_eq!(runtime.status()["transport_ready"], false);
+}
+
+#[test]
+fn a_live_peer_stays_available_when_the_local_watch_reconnects() {
+    let fake = Fake::new(json!({
+        "":{"runs":[
+            [{"lines":[hello(),snapshot(0,true,vec![]),meta(json!(["healthy.example"]))]},
+             {"serve":true,"until_file":"local-disconnect"}],
+            [{"exit":1}]]},
+        "healthy.example":{"runs":[[{"lines":[hello(),snapshot(0,true,vec![row(1)])]},{"serve":true}]]}
+    }));
+    let mut runtime = fake.start("epoch");
+    let peer = ComputerId("healthy.example".into());
+    let until = Instant::now() + Duration::from_secs(15);
+    loop {
+        drop(runtime.poll());
+        if runtime
+            .computers
+            .get(&peer)
+            .is_some_and(|c| c.accepting && c.status == ComputerStatus::Live)
+        {
+            break;
+        }
+        assert!(Instant::now() < until, "peer did not become live");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    fs::write(fake.temp.path().join("local-disconnect"), "").unwrap();
+    let until = Instant::now() + Duration::from_secs(15);
+    loop {
+        drop(runtime.poll());
+        if !runtime.computers[&ComputerId::local()].accepting {
+            break;
+        }
+        assert!(Instant::now() < until, "local did not disconnect");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let status = runtime.status();
+    let peer_accepting = runtime.computers[&peer].accepting;
+    stop(&mut runtime);
+    assert_eq!(status["transport_ready"], true);
+    assert_eq!(status["all_sources_ready"], false);
+    assert!(peer_accepting);
 }

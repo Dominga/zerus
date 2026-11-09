@@ -394,3 +394,17 @@ fn changed_selection_members_never_revalidate_from_synthetic_metadata() {
         assert!(same_generation(&before, &after).is_err());
     }
 }
+
+#[test]
+fn capability_identity_compares_actual_running_code_without_app_admission() {
+    let own = std::env::current_exe().unwrap();
+    assert!(same_running_code_for_capability(&own));
+    let tree = Tree::new();
+    let copy = tree.1.join("same-code");
+    std::fs::copy(&own, &copy).unwrap();
+    assert!(same_running_code_for_capability(&copy));
+    assert!(!same_running_code_for_capability(std::path::Path::new(
+        "/bin/cat"
+    )));
+    assert!(!same_running_code_for_capability(&tree.1.join("missing")));
+}

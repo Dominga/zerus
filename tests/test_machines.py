@@ -17,6 +17,7 @@ REPO = Path(__file__).resolve().parents[1]
 HGS = Path(os.environ.get("HGS_TEST_BIN", REPO / "target/debug/hgs")).resolve()
 FAKE_SSH = r'''#!/usr/bin/env python3
 import json, os, pathlib, subprocess, sys
+if sys.argv[-1].startswith('echo "hgs-remote-v2|'): print('hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot'); sys.exit(0)
 root = pathlib.Path(os.environ['MACHINE_FIXTURE'])
 (root / 'ssh-args.json').write_text(json.dumps(sys.argv[1:]))
 mode = os.environ.get('MACHINE_SSH_MODE', 'probe')

@@ -1,7 +1,7 @@
 @layer components {
-  .inspector { --insp-motion: calc((var(--z-motion-base) + var(--z-motion-slow)) / 2);
+  .inspector { --insp-row-ico: 16px; --insp-row-gap: 10px; --insp-motion: calc((var(--z-motion-base) + var(--z-motion-slow)) / 2);
     position: relative; width: 400px; min-width: 240px; flex: 0 1 auto; display: flex; flex-direction: column; margin: 0 8px 8px 0;
-    border: 1px solid var(--z-color-divider); border-radius: var(--z-radius-dialog); background: var(--z-color-pane); overflow: hidden;
+    border-radius: var(--z-radius-dialog); background: var(--z-color-pane); overflow: hidden;
     animation: insp-in var(--insp-motion) var(--ease) both; }
   .inspector.leaving { position: absolute; z-index: 2; top: 0; right: 0; bottom: 8px; pointer-events: none; animation: insp-out var(--insp-motion) var(--ease) both; }
   :root[data-skin] .app:has(.layout-right) .inspector { margin-left: 0; }
@@ -29,19 +29,30 @@
   .icard.closed .icard-chev { rotate: -90deg; }
   .icard-aside { flex: none; max-width: 60%; overflow: hidden; display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--fs-xs); white-space: nowrap; }
   .icard-body { display: flex; flex-direction: column; padding: 0 12px 10px; animation: fadeIn var(--z-motion-base) both; }
-  .icard-body > .hint { margin-top: 4px; }
-  .icard-text { margin: 2px 0 4px; line-height: 1.45; color: var(--z-color-text); }
+  .icard-body > .hint { margin-top: 4px; padding-left: calc(var(--insp-row-ico) + var(--insp-row-gap)); }
+  .icard-text { padding-left: calc(var(--insp-row-ico) + var(--insp-row-gap)); margin: 2px 0 4px; line-height: 1.45; color: var(--z-color-text); }
 
   .irow { display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 30px; color: var(--z-color-text-2); text-align: left; }
-  .irow-ico { flex: none; width: 16px; height: 16px; display: grid; place-items: center; color: var(--z-color-muted); }
+  .irow-ico { flex: none; width: var(--insp-row-ico); height: 16px; display: grid; place-items: center; color: var(--z-color-muted); }
   .irow-ico .state-dot { margin: 0; }
   .irow-val { flex: 1; min-width: 0; }
+  /* Subagents (zerus-5ffek): each row is laid out on its own; the finished fold. */
+  .isub > .irow { contain: content; }
+  .isub-more { display: flex; align-items: center; gap: 6px; min-height: 28px; color: var(--z-color-muted); text-align: left; }
+  .isub-more:hover { color: var(--z-color-text); }
   .irow-val.mono { font-size: .94em; }
   .irow-label { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--z-color-dim); }
   .irow .icon-btn.small { flex: none; margin-right: -4px; }
   .irow.done .irow-ico { color: var(--z-color-accent); }
   .irow.doing .irow-ico { color: var(--z-color-warn); }
   .irow.agent.working .irow-label { color: var(--z-color-status-working); }
+  /* Keep cache warm (Details > Session): switch, duration slider and its lines. */
+  .kw-row .switch:disabled { opacity: .45; cursor: default; }
+  .kw-range { flex: none; width: 70px; accent-color: var(--z-color-accent); }
+  /* A fixed width: the slider stays put whether it shows "7 h" or the infinity sign (zerus-ua4bi). */
+  .kw-value { flex: none; width: 4ch; white-space: nowrap; text-align: right; color: var(--z-color-dim); font-variant-numeric: tabular-nums; }
+  .icard-body > .kw-hint { margin-top: 0; padding-left: 26px; }
+  .icard-body > .kw-error { color: var(--z-color-danger); }
   .irow.agent.attention .irow-label { color: var(--z-color-status-attention); }
   /* Keep cache warm: the hours slider and its label beside the switch (Qt's 70 px slider). */
   .irow.keep-warm .kw-hours { flex: none; width: 70px; margin: 0; accent-color: var(--z-color-accent); }
@@ -82,8 +93,9 @@
   .inspector .usage { user-select: text; }
   .work-main { min-width: min(360px, 100%); }
   /* Task 206: the Compact skins' side panel, one scroll of Qt's collapsible sections. */
-  .insp-head { display: flex; }
-  .insp-title { font-size: var(--fs-xs); font-weight: 600; color: var(--z-color-text-3); padding-left: 4px; }
+  /* Task 354: the Compact panel's top is its collapse button alone, with no
+     caption row and no line under it; the sections keep their own cards. */
+  .insp-head { display: flex; align-items: center; flex: none; height: 30px; padding: 0 6px 0 8px; }
   .insp-sections .icard-body { display: flex; flex-direction: column; gap: 2px; }
   /* Qt's section header: a small title after its chevron. */
   .insp-sections > .icard > .icard-head > .icard-toggle { flex-direction: row-reverse; justify-content: flex-end; }
@@ -100,11 +112,11 @@
   .side-progress { display: grid; grid-template-columns: minmax(64px, auto) 1fr auto; align-items: center; gap: 8px; font-size: var(--fs-xs); }
   .side-bar { height: 4px; border-radius: 2px; background: var(--z-color-divider); overflow: hidden; }
   .side-bar > i { display: block; height: 100%; border-radius: 2px; background: var(--z-color-accent); }
-  .side-members-head { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: var(--fs-xs); }
-  .side-member { display: flex; align-items: center; gap: 6px; min-width: 0; min-height: 24px; font-size: var(--fs-xs); }
+  .side-members-head { margin-top: 6px; font-size: var(--fs-xs); }
+  .side-member { display: flex; align-items: center; gap: 6px; min-width: 0; min-height: 24px; padding-left: calc(var(--insp-row-ico) + var(--insp-row-gap)); font-size: var(--fs-xs); }
   .side-member .role-badge { max-width: 45%; }
-  .side-actions { display: flex; align-items: center; gap: 8px; margin: 2px 0 4px; }
-  .side-finished { display: flex; align-items: center; gap: 6px; padding: 2px 0 2px 30px; font-size: var(--fs-xs); }
+  .side-actions { display: flex; align-items: center; gap: 8px; margin: 2px 0 4px; padding-left: calc(var(--insp-row-ico) + var(--insp-row-gap)); }
+  .side-finished { display: flex; align-items: center; gap: 6px; padding: 2px 0 2px calc(var(--insp-row-ico) + var(--insp-row-gap)); font-size: var(--fs-xs); }
   .side-tasks { height: 440px; display: flex; flex-direction: column; min-height: 0; }
   /* Qt parity (I3): the Changes card's files, each path elided in its middle (head shrinks, file name stays). */
   .chg-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 4px; }

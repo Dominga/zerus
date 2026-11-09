@@ -18,6 +18,17 @@ import {
   rowOrigins,
 } from "./plan";
 
+it("archived phase totals survive a partially retained task window", () => {
+  const archived = task(1, 1, [], "accepted");
+  archived.archived = true;
+  const team = { ...TEAM, tasks: [archived], phases: [{ ...TEAM.phases[0], n: 1, done: 80, total: 80, archived: true }] };
+  const graph: PlanGraph = { team: team.id, nodes: [], edges: [], layers: 0 };
+  const [phase] = phasePlans(team, graph);
+  expect(phase.phase.total).toBe(80);
+  expect(phase.phase.done).toBe(80);
+  expect(phase.nodes.map((node) => node.node.id)).toEqual([1]);
+});
+
 function task(id: number, phase: number, deps: number[] = [], status = "pending"): TaskView {
   return {
     id,

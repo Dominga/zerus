@@ -5,6 +5,7 @@ pkgbase = zerus-git
 	url = https://github.com/ufna/zerus
 	arch = x86_64
 	license = MIT
+	checkdepends = xorg-server-xvfb
 	makedepends = git
 	makedepends = rust
 	makedepends = nodejs

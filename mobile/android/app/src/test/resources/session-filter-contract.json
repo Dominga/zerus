@@ -42,6 +42,9 @@
     {"name":"subagent-original-process-ended","raw":{"activity":"idle","phase":"idle","subagent_active_count":0,"subagent_count":0,"subagent_unknown_count":1,"subagents":{"child":{"state":"ended","completion_source":"original_process_exit"}}},"online":true,"draft":false,"matches":["all"]},
     {"name":"subagent-process-unknown","raw":{"activity":"idle","phase":"idle","subagent_active_count":0,"subagent_unknown_count":1,"subagents":{"child":{"state":"working","display_state":"unknown"}}},"online":true,"draft":false,"matches":["all"]},
     {"name":"subagent-ended-independent-live-job","raw":{"activity":"idle","phase":"idle","subagent_active_count":0,"subagent_count":0,"process_work":{"count":1,"started_at":1700000000,"command":"fixture"},"subagents":{"child":{"state":"ended"}}},"online":true,"draft":false,"matches":["all","active"]},
-    {"name":"subagent-offline-history","raw":{"activity":"idle","phase":"idle","subagent_active_count":1,"subagents":{"child":{"state":"working"}}},"online":false,"draft":false,"matches":["all"]}
+    {"name":"subagent-offline-history","raw":{"activity":"idle","phase":"idle","subagent_active_count":1,"subagents":{"child":{"state":"working"}}},"online":false,"draft":false,"matches":["all"]},
+    {"name":"keep-warm-ping","raw":{"activity":"busy","phase":"working","keep_warm":{"enabled":true,"until":null,"revision":1,"state":"warming","next_at":null,"reason":"","turn_active":true}},"online":true,"draft":false,"matches":["all"]},
+    {"name":"keep-warm-person-turn","raw":{"activity":"busy","phase":"working","keep_warm":{"enabled":true,"until":null,"revision":1,"state":"waiting","next_at":null,"reason":"","turn_active":false}},"online":true,"draft":false,"matches":["all","active"]},
+    {"name":"keep-warm-ping-approval","raw":{"activity":"busy","phase":"approval","keep_warm":{"enabled":true,"until":null,"revision":1,"state":"warming","next_at":null,"reason":"","turn_active":true}},"online":true,"draft":false,"matches":["all","attention","active"]}
   ]
 }

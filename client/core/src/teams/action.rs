@@ -332,6 +332,9 @@ pub enum TeamAction {
         #[serde(default)]
         reason: String,
     },
+    /// Task #337: the owner keeps the team's settings for the project's current
+    /// profile, so the working-mode block stays away until the profile changes.
+    KeepWorkingMode,
     /// Task #230: the owner marks the lead's plan changes seen, or reverts one.
     SeenLeadChanges,
     RevertLeadChange {
@@ -707,6 +710,7 @@ impl TeamAction {
             Self::NextGoal { .. } => "next-goal",
             Self::Create { .. } => "create",
             Self::ProposeWorkingMode { .. } => "propose",
+            Self::KeepWorkingMode => "keep-working-mode",
             Self::SeenLeadChanges => "seen-lead-changes",
             Self::RevertLeadChange { .. } => "revert-lead-change",
             Self::WaitingDismiss { .. } | Self::WaitingRestore { .. } => "waiting",
@@ -1108,8 +1112,9 @@ impl TeamAction {
                 if !matches!(action.as_str(), "list" | "clean" | "policy" | "forget") {
                     return Err("List, clean, set the policy or forget.".into());
                 }
-                if !matches!(scope.as_str(), "" | "policy" | "all") {
-                    return Err("Clean what the policy removes, or every folder of Zerus's.".into());
+                // Task #364: one team's finished-task targets, `team:<id>`.
+                if !matches!(scope.as_str(), "" | "policy" | "all") && !(scope.starts_with("team:") && scope.len() > "team:".len()) {
+                    return Err("Clean what the policy removes, every folder of Zerus's, or one team's finished tasks.".into());
                 }
                 if action == "policy" && !policy.is_object() {
                     return Err("The policy is missing.".into());
@@ -1166,6 +1171,7 @@ impl TeamAction {
                 task(parent.task)
             }
             Self::SeenLeadChanges => Ok(()),
+            Self::KeepWorkingMode => Ok(()),
             Self::RevertLeadChange { change } => word(change, "lead change id"),
             Self::WaitingDismiss { id, state, team } => {
                 word(id, "Waiting item id")?;
@@ -1177,8 +1183,10 @@ impl TeamAction {
             }
             Self::WaitingRestore { id } => word(id, "Waiting item id"),
             Self::ProposeWorkingMode { preset, reason } => {
-                if !matches!(preset.as_str(), "branch-pipeline" | "branch-per-task" | "shared-folder") {
-                    return Err("The working mode is branch-pipeline, branch-per-task or shared-folder.".into());
+                // Task #451: "auto" is the project's profile as it is now, which
+                // the block's Propose the switch asks for.
+                if !matches!(preset.as_str(), "auto" | "branch-pipeline" | "branch-per-task" | "shared-folder") {
+                    return Err("The working mode is auto, branch-pipeline, branch-per-task or shared-folder.".into());
                 }
                 plain(reason, "A reason", 2000)
             }
@@ -1605,6 +1613,7 @@ impl TeamAction {
                 put("parent", json!({"team": parent.team, "task": parent.task}));
             }
             Self::SeenLeadChanges => put("by", json!("human")),
+            Self::KeepWorkingMode => put("by", json!("human")),
             Self::RevertLeadChange { change } => {
                 put("change", json!(change));
                 put("by", json!("human"));
@@ -2033,7 +2042,7 @@ pub fn classify(action: &TeamAction, request_id: &str, exit: Exit) -> TeamOutcom
                 // The new draft's id is the receipt.
                 TeamAction::DraftStart { .. } => receipt["team"]
                     .as_str()
-                    .is_some_and(|id| super::read::valid_team(id)),
+                    .is_some_and(super::read::valid_team),
                 // The receipt names the proposal it decided (or its earlier
                 // decision, on a replay).
                 TeamAction::DecideProposal { proposal, .. } => receipt
@@ -2198,4 +2207,11 @@ mod tests {
         .is_err());
     }
 
+    #[test]
+    fn a_kept_working_mode_call_keeps_the_team_settings_for_the_owner() {
+        let action = TeamAction::KeepWorkingMode;
+        assert_eq!(action.op(), "keep-working-mode");
+        assert!(action.check().is_ok());
+        assert_eq!(Value::Object(action.input()), json!({"by": "human"}));
+    }
 }

@@ -63,7 +63,7 @@ fn the_stall_clears_when_the_lead_moves_or_nothing_waits() {
         Seen { building: true, ..lead_idle() },
         Seen { background: true, ..lead_idle() },
     ] {
-        assert_eq!(stall_of(&steps(&t, &[moved.clone()], now)), Some(None), "{moved:?}");
+        assert_eq!(stall_of(&steps(&t, std::slice::from_ref(&moved), now)), Some(None), "{moved:?}");
     }
     // The report was decided: nothing waits.
     let mut decided = t.clone();
@@ -96,7 +96,7 @@ fn the_stall_names_what_the_lead_waits_on() {
     let mut asking = t.clone();
     let card = json!({"questions":[{"id":"q","header":"Install","question":"Install the shared build cache?","options":[]}]});
     asking.members.iter_mut().find(|member| member.id == "lead").unwrap().pending =
-        Some(PendingQuestion { question_id: "q1".into(), question_hash: "h1".into(), approval: false, at: at, card });
+        Some(PendingQuestion { question_id: "q1".into(), question_hash: "h1".into(), approval: false, at, card });
     let lead = Seen { asking: true, phase: "question".into(), free: false, ..lead_idle() };
     let (kind, detail) = reason(&asking, &[lead]).unwrap();
     assert_eq!(kind, "question");

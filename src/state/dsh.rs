@@ -17,6 +17,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(unix)]
+mod host_identity;
+
 // Resident bridge identity is independent of the installed harness release.
 const ADAPTER_VERSION: &str = "0.2.1-rc.2";
 const REVIEWED_VERSIONS: &[&str] = &["0.2.1-rc.2", "0.2.1-rc.5"];
@@ -71,40 +74,19 @@ const BRIDGE: &str = include_str!("../dsh/bridge.mjs");
 const COMMAND_GUARD: &str = include_str!("../dsh/command-guard.mjs");
 const CONFIG_PRESETS: &str = include_str!("../dsh/config-presets.mjs");
 const CONFIG_MODELS: &str = include_str!("../dsh/config-models.mjs");
-fn bindings() -> PathBuf {
-    root().join("dsh/bindings")
-}
 fn binding_path(name: &str) -> PathBuf {
-    bindings().join(format!("{:x}.json", Sha256::digest(name.as_bytes())))
-}
-pub(crate) fn exists(name: &str) -> bool {
-    binding_path(name).is_file()
-}
-pub(super) fn binding(name: &str) -> Result<Value> {
-    let value: Value =
-        serde_json::from_slice(&fs::read(binding_path(name)).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-    if value["name"] != name
-        || value["backend"] != "dsh"
-        || !string(&value, "conversation_id").starts_with("session-")
-    {
-        return Err("Invalid DeepSeek binding".into());
-    }
-    session_id::verify(&value)?;
-    Ok(value)
-}
-/// Saves the binding, keeping its durable session ID on the caller's record.
-pub(super) fn save(value: &mut Value) -> Result<()> {
-    ensure_session_id(value);
-    atomic(&binding_path(string(value, "name")), &value.to_string())?;
-    session_index::note(value, session_index::Kind::DeepSeek);
-    Ok(())
+    PROVIDER.label_path(name)
 }
 /// `save` for a test record the test keeps using as it is (a copy is stamped and written).
 #[cfg(test)]
 fn save_ref(value: &Value) -> Result<()> {
     save(&mut value.clone())
 }
+const PROVIDER: provider_binding::Provider = provider_binding::Provider::DeepSeek;
+pub(crate) fn exists(name: &str) -> bool { PROVIDER.exists(name) }
+pub(super) fn binding(name: &str) -> Result<Value> { PROVIDER.read(name) }
+pub(super) fn read_id(id: &str) -> Result<Value> { PROVIDER.read_id(id) }
+pub(super) fn save(record: &mut Value) -> Result<()> { PROVIDER.save(record) }
 fn native_home() -> PathBuf {
     nonempty_env("DSH_HOME")
         .map(PathBuf::from)
@@ -945,7 +927,7 @@ fn rpc_at(path: &Path, method: &str, params: Value, read_timeout: Duration) -> R
     parse_response(&response)
 }
 fn parse_response(response: &str) -> Result<Value> {
-    let response: Value = serde_json::from_str(&response)
+    let response: Value = serde_json::from_str(response)
         .map_err(|e| format!("Invalid native response; delivery uncertain: {e}"))?;
     if response["ok"] != true {
         return Err(string(&response, "error").into());
@@ -1062,6 +1044,8 @@ fn ensure_host(record: &Value) -> Result<bool> {
         wait_for_host(record, deadline, &mut || Ok(crate::platform::process_alive(pid)))?;
         return Ok(running_host_block_stale(&dir));
     }
+    #[cfg(unix)]
+    host_identity::before_start(&dir)?;
     let version = dsh_command().and_then(|mut command| command.arg("--version").output()).map_err(|_| {
         format!("Install the official harness: npm install -g @deepseek-ai/dsh@{VERSION}")
     })?;
@@ -1140,8 +1124,14 @@ fn ensure_host(record: &Value) -> Result<bool> {
         .stderr(log);
     // Detach only the dedicated native host. Closing its launching terminal or
     // HGS process must not stop conversations.
-    let mut child = crate::platform::spawn_detached(&mut command).map_err(|e| e.to_string())?;
-    atomic(&dir.join("host.pid"), &child.id().to_string())?;
+    #[cfg(unix)]
+    let mut child = host_identity::spawn(&dir, &mut command)?;
+    #[cfg(not(unix))]
+    let mut child = {
+        let child = crate::platform::spawn_detached(&mut command).map_err(|e| e.to_string())?;
+        atomic(&dir.join("host.pid"), &child.id().to_string())?;
+        child
+    };
     let deadline = Instant::now() + Duration::from_secs(HOST_START_SECONDS);
     wait_for_host(record, deadline, &mut || Ok(child.try_wait().map_err(|e| e.to_string())?.is_none()))?;
     Ok(false)
@@ -1586,11 +1576,10 @@ pub(crate) fn launch_with_permissions(
         }
     }
     let _guard = lock(Some(&root().join("dsh/bindings.lock")))?;
-    if exists(name) {
+    if let Some(mut record) = PROVIDER.existing_for_launch(name)? {
         if new_only {
             return Err("This DeepSeek session name already exists".into());
         }
-        let mut record = binding(name)?;
         if let Some(value) = &override_value {
             record["permission_override"] = json!(value);
         }
@@ -1751,25 +1740,7 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
     let mut phases = super::slow_calls::Phases::start();
     let mut out = Vec::new();
     let preferences = notifications::load();
-    let Ok(files) = fs::read_dir(bindings()) else {
-        return Ok(out);
-    };
-    let mut records = Vec::new();
-    for file in files.flatten().take(5000) {
-        if file.path().extension().is_none_or(|s| s != "json") {
-            continue;
-        }
-        let Ok(bytes) = fs::read(file.path()) else {
-            continue;
-        };
-        let Ok(record) = serde_json::from_slice::<Value>(&bytes) else {
-            continue;
-        };
-        if record["backend"] != "dsh" {
-            continue;
-        }
-        records.push(record);
-    }
+    let mut records = binding_records();
     phases.mark("bindings");
     // U22: a session whose own records still accept the upload is marked, so
     // the session card and Accounts can say so. Bounded and throttled per
@@ -2195,14 +2166,7 @@ fn supports(ping: &Value, operation: &str) -> bool {
 const OLDER_ADAPTER: &str = "The running DeepSeek host uses an older adapter; use Native UI until its next ordinary start";
 
 /// Valid DeepSeek bindings, read without contacting any host.
-pub(super) fn binding_records() -> Vec<Value> {
-    let Ok(files) = fs::read_dir(bindings()) else { return Vec::new(); };
-    files.flatten().take(5000).filter_map(|file| {
-        let record: Value = serde_json::from_slice(&fs::read(file.path()).ok()?).ok()?;
-        (record["backend"] == "dsh" && string(&record, "conversation_id").starts_with("session-")
-            && binding_path(string(&record, "name")) == file.path()).then_some(record)
-    }).collect()
-}
+pub(super) fn binding_records() -> Vec<Value> { PROVIDER.records() }
 
 fn fork_reason(record: &Value, ping: &Value, inspected: &Value) -> &'static str {
     if ping["generation"] != inspected["generation"] {
@@ -2218,6 +2182,49 @@ fn fork_reason(record: &Value, ping: &Value, inspected: &Value) -> &'static str 
     }
 }
 
+fn fork_pending_path(record: &Value, tag: Option<&str>) -> PathBuf {
+    root().join("dsh/forks").join(format!("{:x}.json", Sha256::digest(format!("{}\n{}", string(record,"session_id"), json!(tag)).as_bytes())))
+}
+
+/// Old releases did not retain the requested tag or a stable source key.
+/// An exact old record can be migrated by its original retry, below. If that
+/// path no longer matches (rename or a newly occupied suffix), refuse rather
+/// than mint a different request. This is a bounded pending-intent read only.
+fn legacy_fork_unconfirmed(record: &Value) -> Result<bool> {
+    let entries = match fs::read_dir(root().join("dsh/forks")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.to_string()),
+    };
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut bytes_read = 0;
+    for (count, entry) in entries.enumerate() {
+        if count == 5000 || std::time::Instant::now() >= until { return Err("Original fork intents cannot be checked; nothing was changed".into()); }
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.extension().is_none_or(|s| s != "json") { continue; }
+        let bytes = labels::read_file(&path, 16 << 10).map_err(|e| e.to_string())?.ok_or("A fork intent changed while it was read")?;
+        bytes_read += bytes.len();
+        if bytes_read > 4 << 20 { return Err("Original fork intents exceed the review bound; nothing was changed".into()); }
+        let intent: Value = serde_json::from_slice(&bytes).map_err(|_| "An original fork intent is unreadable; check Native UI")?;
+        if !intent.is_object() || !session_id::canonical(string(&intent,"request_id"))
+            || string(&intent,"source_conversation_id").is_empty() || string(&intent,"generation").is_empty()
+            || string(&intent,"source").is_empty() || string(&intent,"target").is_empty()
+        { return Err("An original fork intent is unreadable; check Native UI".into()); }
+        if intent["version"] == 2 {
+            let tag = if intent["intent_tag"].is_null() { None } else { Some(intent["intent_tag"].as_str().ok_or("An original fork tag is unreadable")?) };
+            if !session_id::canonical(string(&intent,"source_session_id"))
+                || fork_pending_path(&json!({"session_id":intent["source_session_id"]}),tag) != path
+                || !session_id::canonical(string(&intent,"request_id"))
+                || string(&intent,"source_conversation_id").is_empty() || string(&intent,"generation").is_empty()
+            { return Err("An original fork intent is unreadable; check Native UI".into()); }
+        } else if string(&intent,"source_conversation_id") == string(record,"conversation_id") {
+            return Ok(true);
+        }
+    }
+    if std::time::Instant::now() >= until { return Err("Original fork intents cannot be checked in time".into()); }
+    Ok(false)
+}
+
 /// Native fork through the resident adapter's official Session Controller.
 /// The new binding keeps the source's native profile and folder and records
 /// the exact identity the engine returned; the source binding never changes.
@@ -2231,7 +2238,7 @@ pub(super) fn fork(
     scope: Option<&session_action::Scope>,
 ) -> Result<String> {
     let _guard = lock(Some(&root().join("dsh/bindings.lock")))?;
-    let record = binding(name)?;
+    let mut record = binding(name)?;
     if let Some(scope) = scope { scope.check(&record)?; }
     if expected_run.is_some_and(|id| id != string(&record, "run_id"))
         || expected_conversation.is_some_and(|id| id != string(&record, "conversation_id"))
@@ -2243,7 +2250,8 @@ pub(super) fn fork(
         .chain(records()?.iter())
         .map(|record| string(record, "name").to_owned()).collect();
     occupied.insert(name.to_owned());
-    let target = fork::choose_name(name, tag, &occupied)?;
+    let requested = fork::choose_name(name, tag, &Default::default())?;
+    let mut target = fork::choose_name(name, tag, &occupied)?;
     if dry {
         println!("Fork official dsh session {name} as {target}");
         return Ok(target);
@@ -2253,21 +2261,56 @@ pub(super) fn fork(
     let inspected = rpc(&record, "inspect", json!({"sessionId":record["conversation_id"],"includeProcesses":false}))?;
     let reason = fork_reason(&record, &ping, &inspected);
     if !reason.is_empty() { return Err(reason.into()); }
+    if string(&record, "session_id").is_empty() { save(&mut record)?; }
+    if !session_id::canonical(string(&record,"session_id")) { return Err("The source session identity is unavailable; nothing was forked".into()); }
     // A fork whose reply was lost is retried under the same request ID, which
     // the same host answers with the fork it already made.
-    let pending = root().join("dsh/forks").join(format!("{:x}.json", Sha256::digest(format!("{name}\n{target}").as_bytes())));
-    let mut request_id = uuid::Uuid::new_v4().to_string();
-    if let Ok(bytes) = fs::read(&pending) {
-        let previous: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        if previous["source_conversation_id"] != record["conversation_id"] || previous["generation"] != ping["generation"] {
-            fs::remove_file(&pending).map_err(|e| e.to_string())?;
-            return Err(format!("An earlier fork of {name} as {target} was not confirmed before its DeepSeek host changed; check Native UI before forking again"));
-        }
-        request_id = string(&previous, "request_id").to_owned();
+    let pending = fork_pending_path(&record, tag);
+    let legacy = root().join("dsh/forks").join(format!("{:x}.json", Sha256::digest(format!("{name}\n{target}").as_bytes())));
+    let previous = labels::read_file(&pending, 16 << 10).map_err(|e| format!("Cannot read the original fork intent: {e}"))?;
+    let old = if previous.is_none() { labels::read_file(&legacy, 16 << 10).map_err(|e| e.to_string())? } else { None };
+    if previous.is_none() && old.is_none() && legacy_fork_unconfirmed(&record)? {
+        return Err("An earlier legacy fork of this conversation is unconfirmed; check Native UI before forking again".into());
     }
-    private_dir(pending.parent().unwrap())?;
-    atomic(&pending, &json!({"request_id":request_id,"source":name,"source_conversation_id":record["conversation_id"],
-        "target":target,"generation":ping["generation"],"at":now()}).to_string())?;
+    let mut request_id = uuid::Uuid::new_v4().to_string();
+    if let Some(bytes) = previous.as_ref().or(old.as_ref()) {
+        let intent: Value = serde_json::from_slice(bytes).map_err(|_| "The original fork intent is unreadable; check Native UI")?;
+        let is_legacy = previous.is_none();
+        let valid_id = uuid::Uuid::parse_str(string(&intent, "request_id"))
+            .is_ok_and(|id| !id.is_nil() && id.to_string() == string(&intent, "request_id"));
+        if !valid_id || intent["source_conversation_id"] != record["conversation_id"]
+            || intent["generation"] != ping["generation"]
+            || (!is_legacy && (intent["version"] != 2 || intent["source_session_id"] != record["session_id"]
+                || intent["intent_tag"] != json!(tag) || intent["cwd"] != record["cwd"] || intent["agent_home"] != record["agent_home"]))
+        {
+            return Err(format!("An earlier fork of {name} was not confirmed before its source or DeepSeek host changed; check Native UI before forking again"));
+        }
+        let original_target = string(&intent, "target");
+        // The allocated target is part of the original intent. A later occupied
+        // name never selects a suffix and remints the unknown native request.
+        if fork::choose_name(name, original_target.rsplit('/').next(), &Default::default())? != original_target
+            || occupied.contains(original_target)
+        {
+            return Err("The original fork destination is no longer available; check Native UI".into());
+        }
+        target = original_target.to_owned();
+        request_id = string(&intent, "request_id").to_owned();
+    }
+    if !PROVIDER.vacant(&target)? || storage::label_taken(&target) {
+        return Err("The original fork destination is not vacant; check Native UI".into());
+    }
+    if previous.is_none() {
+        private_dir(pending.parent().unwrap())?;
+        atomic(&pending, &json!({"version":2,"request_id":request_id,"source":name,"source_session_id":record["session_id"],
+            "source_conversation_id":record["conversation_id"],"intent_tag":tag,"requested":requested,"target":target,"generation":ping["generation"],
+            "cwd":record["cwd"],"agent_home":record["agent_home"],"at":now()}).to_string())?;
+        if let Some(bytes) = old {
+            if labels::read_file(&legacy, 16 << 10).map_err(|e| e.to_string())?.as_ref() != Some(&bytes) {
+                return Err("The original fork intent changed; check Native UI".into());
+            }
+            archive::remove_synced(&legacy)?;
+        }
+    }
     if let Some(scope) = scope { scope.changing(); }
     let answer = match rpc(&record, "fork", json!({"sessionId":record["conversation_id"],"cwd":record["cwd"],
         "generation":ping["generation"],"requestId":request_id,"title":target.rsplit('/').next()})) {
@@ -2275,10 +2318,7 @@ pub(super) fn fork(
         Err(error) if error.contains("delivery uncertain") => {
             return Err(format!("{error}. Fork {name} as {target} again to adopt the native result"));
         }
-        Err(error) => {
-            let _ = fs::remove_file(&pending);
-            return Err(error);
-        }
+        Err(error) => return Err(error),
     };
     let child = string(&answer, "sessionId");
     if answer["requestId"] != request_id.as_str() || answer["sourceSessionId"] != record["conversation_id"]
@@ -2333,7 +2373,7 @@ pub(super) fn history_search(records: &[&Value], query: &str, per_session: usize
             // The host's time budget skips later sessions: limited, not unavailable.
             let session = answer.as_ref().and_then(|answer| answer["sessions"].as_array()?.iter()
                 .find(|session| session["sessionId"] == record["conversation_id"] && ["ok", "skipped"].contains(&string(session, "status"))));
-            found.insert(string(record, "name").to_owned(), session.map(|session| {
+            found.insert(storage::owner_key(record), session.map(|session| {
                 let rows: Vec<Value> = session["events"].as_array().into_iter().flatten().map(|event| json!({"event":event})).collect();
                 (native_events(&json!(rows)), session["truncated"] == true || session["status"] == "skipped")
             }));
@@ -2755,6 +2795,10 @@ pub(super) fn session_action(name: &str, action: &str, new_name: Option<&str>, s
         }
         if new!=name && exists(new) {return Err("The destination session already exists".into());}
     }
+    if action=="rename" {
+        if legacy_fork_unconfirmed(&record)? { return Err("Resolve the original legacy fork before renaming this session".into()); }
+        PROVIDER.prepare_label(&record,new_name.unwrap())?;
+    }
     let ping=rpc(&record,"ping",json!({}))?;
     if ping["sessionActions"]!=true {return Err("The resident DeepSeek adapter lacks scoped lifecycle; it was left running".into());}
     let inspected=rpc(&record,"inspect",json!({"sessionId":record["conversation_id"],"includeProcesses":false}))?;
@@ -2823,12 +2867,12 @@ pub(super) fn session_action(name: &str, action: &str, new_name: Option<&str>, s
                 }
             }
         },
-        "rename"=>{notifications::anchor(&mut record);record["name"]=json!(new_name.unwrap());recovery::rename_job(name,new_name.unwrap(),string(&record,"run_id"))?;},
-        "forget"=>{archive::remove_synced(&binding_path(name))?;return Ok(());},
+        "rename"=>{notifications::anchor(&mut record);if storage::in_id_layout(&record) { recovery::rename_job_in_place(&record,new_name.unwrap())?; } else { recovery::rename_job(name,new_name.unwrap(),string(&record,"run_id"))?; } record["name"]=json!(new_name.unwrap());},
+        "forget"=>{PROVIDER.remove(&record)?;return Ok(());},
         _=>unreachable!(),
     }
     save(&mut record)?;
-    if action=="rename" && new_name!=Some(name) {
+    if action=="rename" && new_name!=Some(name) && !storage::in_id_layout(&record) {
         archive::remove_synced(&binding_path(name))?;
         // The rename is done; losing read marks only shows a reply as unread again.
         let _=read_marks::rename_owner(name,new_name.unwrap());
@@ -3117,6 +3161,8 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             if args.iter().any(|v| v == "--dry-run") {
                 return Ok(0);
             }
+            if legacy_fork_unconfirmed(&record)? { return Err("Resolve the original legacy fork before renaming this session".into()); }
+            PROVIDER.prepare_label(&record, new)?;
             rpc(
                 &record,
                 "rename",
@@ -3124,13 +3170,13 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             )?;
             notifications::anchor(&mut record);
             record["name"] = json!(new);
-            recovery::rename_job(name,new,string(&record,"run_id"))?;
+            if storage::in_id_layout(&record) { recovery::rename_job_in_place(&record,new)?; } else { recovery::rename_job(name,new,string(&record,"run_id"))?; }
             save(&mut record)?;
-            fs::remove_file(binding_path(name)).map_err(|e| e.to_string())?;
+            if !storage::in_id_layout(&record) { archive::remove_synced(&binding_path(name))?; }
             // The token samples follow the name; losing them only turns old windows unknown.
             let _ = usage_samples::rename(name, new);
             // The rename is done; losing read marks only shows a reply as unread again.
-            let _ = read_marks::rename_owner(name, new);
+            if !storage::in_id_layout(&record) { let _ = read_marks::rename_owner(name, new); }
             println!(
                 "{}",
                 json!({"old_name":name,"name":new,"new_name":new,"run_id":record["run_id"],"conversation_id":record["conversation_id"]})
@@ -3145,7 +3191,7 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                 "pause",
                 json!({"sessionId":record["conversation_id"]}),
             )?;
-            fs::remove_file(binding_path(name)).map_err(|e| e.to_string())?;
+            PROVIDER.remove(&record)?;
             usage_samples::forget(name);
         }
         "exists" => return Ok(0),
@@ -3268,6 +3314,24 @@ mod native_operation_tests {
 #[cfg(all(test, unix))]
 mod question_identity_tests {
     use super::*;
+    /// The approval card built from `src/dsh/bridge.mjs`'s published
+    /// approval names its tool for automatic-approval categories.
+    #[test]
+    fn automatic_approval_categories_read_the_bridge_approval_card() {
+        use zerus_client_core::approvals::automatic::{categories, once, Category};
+        let record = json!({"name":"dsh/test/session","conversation_id":"session-one","run_id":"run"});
+        let card = |tool: &str| {
+            let inspected = json!({"generation":"g1","pendingQuestions":[{"id":"q1","approval":true,"questions":[
+                {"id":"decision","header":"Approval required","question":format!("Allow {tool}?"),"detail":"",
+                 "options":[{"label":"Allow once"},{"label":"Reject"}]}]}]});
+            question_cards(&record, &inspected).remove(0)
+        };
+        assert!(once("dsh", &card("bash")).is_some());
+        for (tool, expected) in [("bash", Category::Shell), ("web_search", Category::Paid),
+            ("mcp__docs__lookup", Category::Mcp), ("create_worktree", Category::Other)] {
+            assert_eq!(categories::tool("dsh", &card(tool)).category, expected, "{tool}");
+        }
+    }
     #[test]
     fn pending_native_questions_have_an_exact_attention_identity() {
         let record = json!({"name":"dsh/test/session","conversation_id":"session-one","run_id":"run"});
@@ -3753,9 +3817,7 @@ mod permissions_compat_tests {
         if !node_available() {
             return;
         }
-        let mut initial = CompatState::default();
-        initial.current = "danger-full-access".into();
-        initial.running = true;
+        let initial = CompatState { current: "danger-full-access".into(), running: true, ..Default::default() };
         let (url, shared, stop, server) = compat_server(initial);
         let applied = permissions_compat_json(&url, Some(TEST_SESSION), "apply", None, false, false).unwrap();
         assert_eq!(applied["ok"], json!(true));
@@ -3771,10 +3833,10 @@ mod permissions_compat_tests {
         if !node_available() {
             return;
         }
-        let mut initial = CompatState::default();
-        initial.catalog = (0..65)
-            .map(|index| (format!("preset-{index}"), format!("Preset {index}")))
-            .collect();
+        let initial = CompatState {
+            catalog: (0..65).map(|index| (format!("preset-{index}"), format!("Preset {index}"))).collect(),
+            ..Default::default()
+        };
         let (url, _, stop, server) = compat_server(initial);
         assert_eq!(
             permissions_compat_json(&url, Some(TEST_SESSION), "catalog", None, false, false).unwrap_err(),
@@ -4528,5 +4590,18 @@ mod listing_rows_tests {
         // A row with a pending question is never cached.
         let asking = json!({"sessionId":"a","agentAvailable":false,"running":false,"pendingQuestions":[{"id":"q"}]});
         assert!(update_rows(&Value::Null, &[&a], &generation, &[asking], 100.0)["rows"]["a"].is_null());
+    }
+}
+
+#[cfg(test)]
+mod pending_identity_tests {
+    use super::*;
+
+    #[test]
+    fn fork_intents_of_label_twins_are_distinct() {
+        let source = |id, conversation| json!({"name":"dsh/example/shared","session_id":id,"conversation_id":conversation});
+        let one = source("11111111-1111-4111-8111-111111111111", "session-one");
+        let two = source("22222222-2222-4222-8222-222222222222", "session-two");
+        assert_ne!(fork_pending_path(&one,Some("child")), fork_pending_path(&two,Some("child")));
     }
 }

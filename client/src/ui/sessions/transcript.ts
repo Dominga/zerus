@@ -1,12 +1,11 @@
 import type { ActivityEvent, LocalMessage, Reply } from "../../types";
 import { eventKey } from "../../store/activity";
-import type { ActivityItem, LocalItem, MediaMessage, TranscriptItem, VoiceState } from "./types";
+import type { ActivityItem, InboxItem, LocalItem, MediaMessage, ToolEvent, TranscriptItem, VoiceState } from "./types";
 import { imageSize } from "./attachment-image";
 import { messageTimeOf } from "../lib/dates";
 import { tr, trNoop } from "../../i18n";
 import { systemNotice } from "./notices";
 import { toolMedia } from "./media";
-import { isKeepalive } from "./keep-warm";
 
 // A Symbol cannot arrive from a provider's JSON. Only our own local send
 // supplies these immutable-cache preview paths and oriented dimensions.
@@ -198,10 +197,49 @@ function media(e: ActivityEvent, id: string): MediaMessage {
 
 const GROUP_LIMIT = 24;
 const PREVIEW = 110;
-const preview = (text: string | undefined) => {
-  const flat = (text ?? "").replace(/\s+/g, " ").trim();
-  return flat.length > PREVIEW ? `${flat.slice(0, PREVIEW - 1)}…` : flat;
-};
+/** At most this much of an output is read for its preview, whatever its whitespace (zerus-1nsc6). */
+export const TOOL_PREVIEW_SCAN = 8_192;
+const SPACE = /\s/;
+/**
+ * The text's whitespace runs as single spaces, trimmed and cut to 110
+ * characters: read only as far as the preview shows and never past its first
+ * TOOL_PREVIEW_SCAN characters, so a multi-megabyte output costs no more than
+ * a short one (zerus-5wmh.13.8.1). A preview that stopped at that bound with
+ * more text left ends with "…".
+ */
+export function toolPreview(text: string | undefined): string {
+  const source = text ?? "";
+  const end = Math.min(source.length, TOOL_PREVIEW_SCAN);
+  let flat = "", space = false, i = 0;
+  for (; i < end && flat.length <= PREVIEW; i++) {
+    const c = source[i];
+    if (SPACE.test(c)) { space = flat.length > 0; continue; }
+    if (space) { flat += " "; space = false; }
+    flat += c;
+  }
+  if (flat.length > PREVIEW || (i === TOOL_PREVIEW_SCAN && source.length > TOOL_PREVIEW_SCAN)) {
+    return `${flat.slice(0, PREVIEW - 1)}…`;
+  }
+  return flat;
+}
+const preview = toolPreview;
+
+/** One reader per event: rebuilding the transcript leaves an unchanged event's row unchanged. */
+const outputs = new WeakMap<ActivityEvent, () => string>();
+function outputOf(e: ActivityEvent): () => string {
+  let read = outputs.get(e);
+  if (!read) { read = () => e.detail ?? ""; outputs.set(e, read); }
+  return read;
+}
+
+/** An operational event as an expanded tool row shows it; its output stays in the event. */
+function toolEvent(e: ActivityEvent): ToolEvent {
+  const process = typeof e.process_id === "string" && e.process_id ? e.process_id : undefined;
+  return {
+    label: `${eventTitle(e.type)}${e.tool ? ` / ${e.tool}` : ""}${childEvent(e) ? tr(" (subagent %1)", e.agent_id) : ""}`,
+    at: timeText(e.at), size: (e.detail ?? "").length, process, detail: outputOf(e),
+  };
+}
 
 /**
  * The request and reply the summary recorded, when the timeline has no events
@@ -461,6 +499,16 @@ export function buildTranscript(given: readonly ActivityEvent[], summary?: Recor
   return transcriptItems(events, summary, !provider.length);
 }
 
+/** The index of the Stop that ends the keep-warm ping at `from`, or -1 while it runs or a person's prompt comes first. */
+function pingStop(events: readonly ActivityEvent[], from: number): number {
+  for (let k = from + 1; k < events.length; k++) {
+    const event = events[k];
+    if (event.turn_origin === "keep_warm") { if (event.type === "Stop") return k; continue; }
+    if (messageRole(event) === "user") return -1;
+  }
+  return -1;
+}
+
 /** Journal identity stays intact in the store; only rendered rows adopt a send's key. */
 function transcriptItems(events: readonly ActivityEvent[], summary?: Record<string, unknown>, context = false): TranscriptItem[] {
   const items: TranscriptItem[] = context ? recordedContext(summary) : [];
@@ -483,6 +531,24 @@ function transcriptItems(events: readonly ActivityEvent[], summary?: Record<stri
     }
     const role = messageRole(e);
     const at = timeText(e.at);
+    if (e.turn_origin === "keep_warm" || e.origin === "keep_warm") {
+      // A keep-warm ping is not the person's message: its prompt, the reply
+      // and its Stop are one dim row. An untagged provider copy of the reply
+      // before the ping's Stop folds in too; a row without its prompt hides.
+      const stop = pingStop(events, i);
+      const lines: string[] = [];
+      let j = i;
+      for (; j < events.length; j++) {
+        const n = events[j];
+        const tagged = n.turn_origin === "keep_warm" || n.origin === "keep_warm";
+        if (!tagged && !(stop >= 0 && j < stop && messageRole(n) === "assistant")) break;
+        const body = (n.detail ?? "").trim();
+        if (body && (n.origin === "keep_warm" || messageRole(n) === "assistant") && lines[lines.length - 1] !== body) lines.push(body);
+        if (j === stop) { j++; break; }
+      }
+      if (e.origin === "keep_warm") items.push({ id, kind: "warm", at, title: tr("Cache kept warm"), lines });
+      i = j; continue;
+    }
     if (e.type === "SessionCleared") {
       items.push({ id, kind: "cleared", at, sender: tr("Session cleared"), body: tr("The agent no longer sees the activity above. New messages start with a fresh conversation context.") });
       i++; continue;
@@ -490,18 +556,6 @@ function transcriptItems(events: readonly ActivityEvent[], summary?: Record<stri
     if (e.type === "AgentThinking") {
       if ((e.detail ?? "").trim()) items.push({ id, kind: "thinking", at, body: e.detail });
       i++; continue;
-    }
-    // Keep cache warm (ActivityView.cpp:1239-1251, 1367-1370): one quiet line
-    // without the one-word replies; keepalives in a row share it, at the last one's time.
-    if (isKeepalive(e, role)) {
-      let count = 0, last = e;
-      while (i < events.length && isKeepalive(events[i], messageRole(events[i]))) {
-        last = events[i++];
-        count++;
-        while (i < events.length && messageRole(events[i]) === "assistant") i++;
-      }
-      items.push({ id, kind: "context", at: timeText(last.at), body: count > 1 ? tr("Cache warmed %1 times while idle", count) : tr("Cache warmed while idle") });
-      continue;
     }
     if (role === "notice") {
       const report = typeof e.report === "string" ? e.report : "";
@@ -535,7 +589,18 @@ function transcriptItems(events: readonly ActivityEvent[], summary?: Record<stri
     }
     if (role) {
       let receipt: string | undefined;
-      if (role === "user") {
+      let inbox: InboxItem | undefined;
+      // OpenCode reports its inbox: a waiting message is queued, and after
+      // Stop it stays there, not delivered, until it is sent or removed
+      // (ActivityView.cpp:1036-1038, 1072-1087).
+      const delivery = role === "user" ? e.delivery_state : undefined;
+      if (delivery === "queued" || delivery === "not_delivered") {
+        receipt = delivery === "queued" ? tr("Queued") : tr("Not delivered");
+        const messageId = typeof e.message_id === "string" ? e.message_id : "";
+        const allowed = Array.isArray(summary?.allowed_actions) && summary.allowed_actions.includes("remove_queued");
+        inbox = { state: delivery, messageId, run: String(summary?.run_id ?? ""), conversation: String(summary?.conversation_id ?? ""),
+          removable: delivery === "not_delivered" && !!messageId && allowed };
+      } else if (role === "user") {
         let accepted = e.type !== "UserPromptQueued";
         for (let j = i + 1; !accepted && j < events.length; j++) {
           const next = events[j];
@@ -550,7 +615,7 @@ function transcriptItems(events: readonly ActivityEvent[], summary?: Record<stri
         : e.type === "QuestionAnswered" || replies ? tr("You (answer)") : undefined;
       items.push({ id, kind: role === "user" ? "user" : "agent", at, body: e.detail ?? "",
         echoBody: typeof e.attachment_echo === "string" ? e.attachment_echo : undefined,
-        attachments: attachments(e), receipt, label, replies });
+        attachments: attachments(e), receipt, label, replies, ...(inbox ? { inbox } : {}) });
       i++; continue;
     }
     // Adjacent operational events form one group; messages and attention stay boundaries.
@@ -566,23 +631,23 @@ function transcriptItems(events: readonly ActivityEvent[], summary?: Record<stri
       if (g.type === "PreToolUse") calls++;
     }
     const last = group[group.length - 1];
-    const lines = group.map((g) => `${eventTitle(g.type)}${g.tool ? ` / ${g.tool}` : ""}${childEvent(g) ? tr(" (subagent %1)", g.agent_id) : ""}  ${preview(g.detail)}`);
+    const toolEvents = group.map(toolEvent);
     const shownTools = tools.slice(0, 3).join(", ") + (tools.length > 3 ? " …" : "");
     // Task 248: the pictures the group's finished tools worked with (Qt toolMedia).
     const pictures = toolMedia(group.filter((g) => g.type === "PostToolUse").map((g) => g.detail ?? ""));
     const shown = pictures.length ? pictures : undefined;
     if (group.length === 1) {
-      items.push({ id, kind: "tool", at: timeText(last.at), title: `${eventTitle(e.type)}${e.tool ? ` / ${e.tool}` : ""}`, body: preview(e.detail), lines, warn: attention(e), media: shown });
+      items.push({ id, kind: "tool", at: timeText(last.at), title: `${eventTitle(e.type)}${e.tool ? ` / ${e.tool}` : ""}`, body: preview(e.detail), events: toolEvents, warn: attention(e), media: shown });
     } else {
       const title = calls > 0 ? tr("%1, %2 events", calls === 1 ? tr("1 tool call") : tr("%1 tool calls", calls), group.length) : tr("%1 activity events", group.length);
-      items.push({ id, kind: "tools", at: timeText(last.at), title, body: shownTools || preview(last.detail), lines, warn: group.some(attention), media: shown });
+      items.push({ id, kind: "tools", at: timeText(last.at), title, body: shownTools || preview(last.detail), events: toolEvents, warn: group.some(attention), media: shown });
     }
   }
   inherit();
   return items;
 }
 
-/** One open Activity only. Remember at most 50 local receipts and 1000 small
+/** One display target only. Remember at most 50 local receipts and 1000 small
  * journal/display-key bindings; never retain another session's transcript.
  * Rust may drop its local row before the corresponding activity batch arrives. */
 export function createTranscriptProjection() {
@@ -615,5 +680,21 @@ export function createTranscriptProjection() {
       trim(bindings, 1000);
       return transcriptItems(mergeAttachmentMessages(events, summary), summary, !provider.length);
     },
+  };
+}
+
+/**
+ * The projections of one open Activity: the session's and its open child's.
+ * Each starts over when its own display target changes, so a child shows no
+ * other row's receipts and a brief visit to a child leaves its parent's handoff
+ * in place. Showing another session drops both; the bound is each projection's.
+ */
+export function createActivityProjections() {
+  const session = createTranscriptProjection(), child = createTranscriptProjection();
+  let sessionTarget: string | undefined, childTarget: string | undefined;
+  return (isChild: boolean, target: string | undefined, ...view: Parameters<typeof session.build>) => {
+    if (isChild && target !== childTarget) { child.reset(); childTarget = target; }
+    if (!isChild && target !== sessionTarget) { session.reset(); child.reset(); sessionTarget = target; }
+    return (isChild ? child : session).build(...view);
   };
 }

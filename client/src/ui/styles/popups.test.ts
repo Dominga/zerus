@@ -84,7 +84,8 @@ describe("popup scrollbar rule", () => {
       for (const match of text.matchAll(/<(?!dialog\b)[a-z]+\b(?:[^>"{]|"[^"]*"|\{(?:[^{}]|\{[^{}]*\})*\})*?\b(?:role="(?:menu|dialog)"|popover=)/g)) {
         seen++;
         const tag = match[0];
-        const own = [...tag.matchAll(/class=(?:"([^"]*)"|\{`([^`]*)`\})/g)].flatMap((m) => (m[1] ?? m[2]).split(/\s+/));
+        const own = [...tag.matchAll(/class=(?:"([^"]*)"|\{`([^`]*)`\}|\{([^{}]*)\})/g)].flatMap((m) => m[3] !== undefined
+          ? [...m[3].matchAll(/"([^"]*)"/g)].flatMap((q) => q[1].split(/\s+/)) : (m[1] ?? m[2]).split(/\s+/));
         // A dialog directly inside a listed popup (Go to's panel in its scrim) is covered by that popup.
         const before = text.slice(Math.max(0, match.index - 200), match.index);
         const inside = [...before.matchAll(/class="([^"]*)"/g)].some((m) => m[1].split(/\s+/).some((c) => popupClasses.has(c)));

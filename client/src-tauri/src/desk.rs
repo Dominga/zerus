@@ -16,11 +16,9 @@
 //! ([`Gate`]), the Dock badge, the menus that are tracking, and the action
 //! each item of the menu names.
 // Linux shares this desk with its native SNI/DBusMenu adapter.
-#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -35,7 +33,6 @@ use zerus_client_core::menubar::{
     tray_conf_value, Apply, Desk, DeviceMarks, Entry, Face, Gate, OpenMode,
 };
 use zerus_client_core::readmarks::Queued;
-use zerus_client_core::shell;
 use zerus_client_core::text::Text;
 use zerus_client_core::{text, Change, ComputerId};
 
@@ -68,7 +65,8 @@ pub enum DeskInput {
         version: Option<String>,
         restart: bool,
     },
-    /// A notification's default action (`MacAttentionNotifier.mm:20-28`).
+    /// A notification's default action on macOS and Windows.
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
     Clicked(String),
     #[cfg(target_os = "linux")]
     LinuxClicked {
@@ -237,6 +235,7 @@ pub struct DeskState {
     _attention_owner: attention_barrier::Owner,
     inbox: Mutex<Inbox>,
     /// Zerus is the active app: the tracker's foreground test.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     focused: Arc<AtomicBool>,
 }
 
@@ -392,6 +391,7 @@ pub fn start(app: &AppHandle, pump: &crate::pump::Pump, attention: Option<LoadAt
         sender: Mutex::new(sender),
         _attention_owner: owner,
         inbox: Mutex::new(Inbox::default()),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         focused: Arc::clone(&focused),
     });
     let handle = app.clone();
@@ -409,6 +409,7 @@ pub fn sender(app: &AppHandle) -> Option<InputSender> {
 
 /// Whether Zerus is the active app (`Qt::ApplicationActive`): an active
 /// Zerus consumes attention edges without banners.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn set_focused(app: &AppHandle, focused: bool) {
     if let Some(state) = app.try_state::<DeskState>() {
         state.focused.store(focused, Ordering::Relaxed);
@@ -442,7 +443,12 @@ impl Attention {
         };
         let checkpoint = zerus_client_core::attention_store::Observation::loaded(&bytes, &saved);
         Self {
-            tracker: Tracker::new(saved),
+            tracker: {
+                let mut tracker = Tracker::new(saved);
+                // Notice text in the interface language (zerus-5wmh.13.16.2).
+                tracker.set_render(crate::native_text::render);
+                tracker
+            },
             path,
             checkpoint,
             lifetime: None,
@@ -569,7 +575,13 @@ fn resolve_service(
         state.rows.iter().find(|(_, row)| {
             row.state != "archived"
                 && row.run_id.as_deref() == Some(&target.run)
-                && row.conversation_id.as_deref() == Some(&target.conversation)
+                && row.conversation_id.as_deref().unwrap_or("") == target.conversation
+                && target.startup_question.as_deref().is_none_or(|question| {
+                    row.state == "running"
+                        && row.process_state != "exited"
+                        && row.notify.needs_action
+                        && row.notify.attention_id == question
+                })
         })
     }) {
         return Resolution::Open {
@@ -1267,9 +1279,77 @@ fn window_notice_if(
     });
 }
 
-/// Qt's `TrayAgent::notify` on macOS: `osascript display notification`,
-/// shown at once without the app's own permission (`TrayAgent.cpp:796-830`).
-pub fn tray_notify(title: &str, body: &str) {
+/// Qt's `TrayAgent::notify` (`TrayAgent.cpp:655-830`): a short message from
+/// the tray, such as a new session's terminal advisory or "the terminal did
+/// not open" (zerus-5wmh.13.13). macOS shows it with `osascript display
+/// notification`, at once and without the app's own permission. Linux posts
+/// a desktop notification, and Windows the tray balloon, as Qt's tray did;
+/// where this app does not own them (the desktop service's mode, no tray
+/// yet) the window shows the notice instead. A click on it opens nothing.
+pub fn tray_notify(app: &AppHandle, title: &str, body: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app;
+        macos_tray_notify(title, body);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if app
+            .try_state::<crate::platform::linux_notify::Poster>()
+            .is_some()
+        {
+            let (cleared, raised) = tray_delivery(title, body);
+            crate::platform::linux_notify::deliver(app, cleared, raised);
+        } else {
+            window_notice(app, title, body);
+        }
+    }
+    #[cfg(windows)]
+    {
+        if app
+            .try_state::<crate::platform::windows::tray::WindowsShell>()
+            .is_some()
+        {
+            let (cleared, raised) = tray_delivery(title, body);
+            crate::platform::windows::tray::deliver(app, cleared, raised);
+        } else {
+            window_notice(app, title, body);
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    window_notice(app, title, body);
+}
+
+/// The one token of every tray message: no click target, update or
+/// attention edge knows it (`attention::target` refuses it). macOS posts
+/// tray messages through `osascript`, without a token.
+#[cfg(any(target_os = "linux", windows, test))]
+pub(crate) const TRAY_TOKEN: &str = "zerus-tray-message";
+
+/// A tray message replaces the previous one, as Qt's tray balloon did: the
+/// earlier message under [`TRAY_TOKEN`] is withdrawn and the new one posted
+/// under it. The tray then holds at most one of the notification store's
+/// slots across expiry, daemon changes and restarts, and never takes
+/// capacity from attention notices (zerus-5wmh.13.13.1).
+#[cfg(any(target_os = "linux", windows, test))]
+pub(crate) fn tray_delivery(
+    title: &str,
+    body: &str,
+) -> (Vec<String>, Vec<zerus_client_core::attention::Notice>) {
+    (
+        vec![TRAY_TOKEN.to_owned()],
+        vec![zerus_client_core::attention::Notice {
+            token: TRAY_TOKEN.to_owned(),
+            title: title.to_owned(),
+            body: body.to_owned(),
+        }],
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn macos_tray_notify(title: &str, body: &str) {
+    use std::process::Stdio;
+    use zerus_client_core::shell;
     let spawned = crate::child_environment::command("osascript")
         .arg("-e")
         .arg(shell::notification_script(title, body))
@@ -1391,6 +1471,8 @@ impl Bar {
     }
 
     /// No menu tracks and nothing waits for one to close: the status item may change.
+    /// Only AppKit needs this separate readiness check.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn quiet(&self) -> bool {
         self.tracking == 0 && !self.gate.is_open()
     }
@@ -1447,6 +1529,26 @@ impl Bar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// zerus-5wmh.13.13, .13.1: a tray message replaces the last one under one
+    /// token, which no click opens.
+    #[test]
+    fn a_tray_message_replaces_the_last_under_one_token_that_nothing_routes() {
+        let (cleared, raised) = tray_delivery("Zerus: the terminal did not open", "detail");
+        assert_eq!(cleared, [TRAY_TOKEN]);
+        assert_eq!(raised.len(), 1);
+        let notice = &raised[0];
+        assert_eq!(
+            (
+                notice.token.as_str(),
+                notice.title.as_str(),
+                notice.body.as_str()
+            ),
+            (TRAY_TOKEN, "Zerus: the terminal did not open", "detail")
+        );
+        assert!(attention::target(TRAY_TOKEN).is_none());
+        assert!(!zerus_client_core::updates::is_update_token(TRAY_TOKEN));
+    }
     use std::collections::BTreeSet;
     use zerus_client_core::attention::Tracker;
     use zerus_client_core::{ComputerStatus, ViewRow};
@@ -2150,6 +2252,7 @@ mod tests {
             computer: "peer".into(),
             run: "original-run".into(),
             conversation: "original-conversation".into(),
+            startup_question: None,
         };
         let initial = thread.round(
             0.0,
@@ -2191,6 +2294,7 @@ mod tests {
             computer: "peer".into(),
             run: "original-run".into(),
             conversation: "original-conversation".into(),
+            startup_question: None,
         };
         assert_eq!(resolve_service(&target, &desk, false), Resolution::Waiting);
         let mut original = asking("codex/renamed/current");
@@ -2226,6 +2330,45 @@ mod tests {
             resolve_service(&target, &desk, false),
             Resolution::Gone(_)
         ));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn startup_click_requires_the_same_live_run_and_question_before_session_start() {
+        let mut desk = Desk::default();
+        let target = zerus_client_core::desktop::activation::Target {
+            computer: "peer".into(),
+            run: "original-run".into(),
+            conversation: String::new(),
+            startup_question: Some("codex-trust:one".into()),
+        };
+        let mut row = asking("codex/renamed/startup");
+        row.run_id = Some(target.run.clone());
+        row.conversation_id = None;
+        row.notify.needs_action = true;
+        row.notify.attention_id = target.startup_question.clone().unwrap();
+        listed(&mut desk, "peer", vec![row.clone()]);
+        assert!(matches!(
+            resolve_service(&target, &desk, false),
+            Resolution::Open { .. }
+        ));
+        for (run, conversation, question, needs) in [
+            ("replacement", None, "codex-trust:one", true),
+            ("original-run", Some("bound"), "codex-trust:one", true),
+            ("original-run", None, "codex-trust:two", true),
+            ("original-run", None, "codex-trust:one", false),
+        ] {
+            let mut changed = row.clone();
+            changed.run_id = Some(run.into());
+            changed.conversation_id = conversation.map(String::from);
+            changed.notify.attention_id = question.into();
+            changed.notify.needs_action = needs;
+            listed(&mut desk, "peer", vec![changed]);
+            assert!(matches!(
+                resolve_service(&target, &desk, false),
+                Resolution::Gone(_)
+            ));
+        }
     }
 
     #[test]
@@ -2768,6 +2911,38 @@ mod tests {
             Item::Action { id, .. } | Item::Label { id, .. } => id,
             Item::Separator => "",
         }
+    }
+
+    /// zerus-5wmh.13.15: the menu every platform's tray composes (Linux's
+    /// StatusNotifier menu, macOS's menu bar and Windows' notification-area
+    /// menu all lay out the core's entries with this Bar) ends with Qt's
+    /// Refresh before Quit, once, and choosing it is MenuAction::Refresh
+    /// (`TrayMenu.cpp:241-242`).
+    #[test]
+    fn every_platforms_tray_offers_refresh_before_quit_once() {
+        let mut bar = Bar::default();
+        let items = bar.layout(&zerus_client_core::menubar::Desk::default().menu());
+        let texts: Vec<&str> = items
+            .iter()
+            .map(|item| match item {
+                Item::Action { text, .. } | Item::Label { text, .. } => text.as_str(),
+                Item::Separator => "-",
+            })
+            .collect();
+        assert_eq!(
+            // The fork's "Open log" sits right above Refresh and Quit.
+            texts[texts.len() - 3..],
+            ["Open log", "Refresh", "Quit"],
+            "{texts:?}"
+        );
+        assert_eq!(texts.iter().filter(|text| **text == "Refresh").count(), 1);
+        let refresh = &items[items.len() - 2];
+        assert!(matches!(refresh, Item::Action { .. }));
+        assert_eq!(bar.action(id(refresh)), Some(MenuAction::Refresh));
+        assert_eq!(
+            bar.action(id(&items[items.len() - 1])),
+            Some(MenuAction::Quit)
+        );
     }
 
     /// The owner's 0.48.0 menu: Open Zerus, one line per computer, Quit; no

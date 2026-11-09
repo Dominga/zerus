@@ -120,6 +120,7 @@ final class ConversationModel {
 
     var olderLoading = false
     var olderError = ""
+    var lastHistoryWasLatest = false
     var hasOlder = false
     var hasNewer = false
     var historyIndexing = false
@@ -213,6 +214,8 @@ final class ConversationModel {
     @ObservationIgnored var presentationRevision = 0
     @ObservationIgnored var unreadBoundaryCaptured = false
     @ObservationIgnored var restoreHistoryAttempt = ""
+    @ObservationIgnored var historyIntent: Int64 = 0
+    @ObservationIgnored var latestHistoryIntent: Int64?
     @ObservationIgnored var pendingHistoryPosition = ""
     @ObservationIgnored var pendingHistoryPublication = ""
     @ObservationIgnored var lastHistoryObservation: Int64 = 0
@@ -258,6 +261,7 @@ final class ConversationModel {
         historyIndexing = false
         historyComplete = false
         olderError = ""
+        lastHistoryWasLatest = false
         actionResultNotice = ""
         if session.target.agentId.isEmpty { parentSelection = nil }
         cancelCompactContinuation()
@@ -276,10 +280,16 @@ final class ConversationModel {
         historyTruncated = false
         revision += 1
         let key = session.target.key
+        let following = readState.record(session.target)?.viewport?.following == true
+        if following { historyWindows[key] = nil }
+        if historyWindows[key] == nil { currentHistoryHeads.remove(ConversationReadPolicies.key(session.target)) }
         let warm: ConversationFrame? = frames.touch(key).flatMap { frame in
             if frame.observedAt == 0 { return cache?.memory(frame.target) != nil ? frame : nil }
             let age = Clock.milliseconds() - frame.observedAt
             return (0...(7 * 24 * 60 * 60 * 1000)).contains(age) ? frame : nil
+        }.map { frame in
+            following ? frame.with(events: frame.inspectedEvents.isEmpty ? frame.events : frame.inspectedEvents,
+                                   truncated: frame.truncated, window: nil, indexComplete: false, indexing: false) : frame
         }
         if warm == nil { frames[key] = nil }
         if let warm {
@@ -290,8 +300,11 @@ final class ConversationModel {
                 guard let decoded = await cache.read(session.target) else { return }
                 let raw = decoded.raw, rows = decoded.events
                 let frame = await Task.detached(priority: .userInitiated) {
-                    ConversationFrame(target: session.target, raw: raw, events: rows, questions: NativeEvents.questions(raw), observedAt: 0,
-                                      bytes: JSON.object(raw).compact.utf8.count + rows.reduce(0) { $0 + $1.approximateBytes }, truncated: decoded.truncated)
+                    let inspected = NativeEvents.events(raw)
+                    let displayed = following && !inspected.isEmpty ? inspected : rows
+                    return ConversationFrame(target: session.target, raw: raw, events: displayed, questions: NativeEvents.questions(raw), observedAt: 0,
+                                             bytes: JSON.object(raw).compact.utf8.count + displayed.reduce(0) { $0 + $1.approximateBytes },
+                                             truncated: decoded.truncated, inspectedEvents: inspected)
                 }.value
                 guard navigationId == navigation, selected?.target == session.target, !activityVerified, activeFrame == nil else { return }
                 rememberFrame(frame)
@@ -299,8 +312,10 @@ final class ConversationModel {
             }
         }
         if !demo && readTrackingReady {
-            if historyReason(session.target).isEmpty && readState.record(session.target)?.viewport == nil { readPositionReady = false }
             restoreSavedWindow(session.target, navigation: navigationId)
+            // A normal opening reads the bounded inspection tail. Only an actual
+            // saved older reading position requests its canonical page.
+            restoreHistory(session.target)
         }
         if demo {
             events = DemoCatalog.events
@@ -363,6 +378,7 @@ final class ConversationModel {
         presentationRevision += 1
         presentationTask?.cancel()
         olderTask?.cancel()
+        latestHistoryIntent = nil
         olderLoading = false
         readPositionReady = readTrackingReady
         processOutputTask?.cancel()
@@ -379,13 +395,14 @@ final class ConversationModel {
     // MARK: Inspection
 
     func refreshActivity(explicit: Bool = false) {
-        guard !demo, !terminalVisible, let original = selected else { return }
+        guard !demo, !terminalVisible, latestHistoryIntent == nil, let original = selected else { return }
         if let action = pendingActionResult(original.target) {
             openSessionActionResult(action)
             return
         }
         guard let connection = app.connections.first(where: { $0.id == original.target.connectionId }) else { return }
         let navigation = navigationId
+        let intent = historyIntent
         let start = detailGate.begin("\(navigation):\(original.target.key)", explicit: explicit)
         detailProgress = detailGate.visible()
         guard start.newRequest else { return }
@@ -409,7 +426,8 @@ final class ConversationModel {
             }
             do {
                 let frame = try await self.inspectOnce(connection, original.target).value
-                guard self.detailGate.owns(operation.id), self.navigationId == navigation, self.selected?.target == original.target else { return }
+                guard self.detailGate.owns(operation.id), self.navigationId == navigation, self.historyIntent == intent,
+                      self.selected?.target == original.target else { return }
                 if let owner = self.detailReadErrorOwner, owner.target == original.target, owner.navigation == navigation { self.app.error = "" }
                 let clear = self.clearExpectation.flatMap { $0.navigation == navigation && ContextPolicies.sameSessionRun($0.target, frame.target) ? $0 : nil }
                 if let clear, frame.target.conversation != clear.target.conversation, !clear.confirmed {
@@ -443,7 +461,7 @@ final class ConversationModel {
                 self.installFrame(frame, verified: true)
             } catch is CancellationError {
             } catch {
-                guard self.detailGate.owns(operation.id), self.navigationId == navigation else { return }
+                guard self.detailGate.owns(operation.id), self.navigationId == navigation, self.historyIntent == intent else { return }
                 self.activeFrameVerified = false
                 self.activityVerified = false
                 self.historyCached = self.activity != nil
@@ -458,12 +476,18 @@ final class ConversationModel {
     }
 
     /// One shared inspection per exact target; at most four at a time.
-    func inspectOnce(_ connection: Connection, _ target: Target) async throws -> Task<ConversationFrame, Error> {
+    func inspectOnce(_ connection: Connection, _ target: Target, fresh: Bool = false, current: @MainActor () -> Bool = { true }) async throws -> Task<ConversationFrame, Error> {
+        if fresh, let existing = inspections[target.key] {
+            _ = try? await existing.task.value
+            try Task.checkCancellation()
+        }
+        if fresh && !current() { throw CancellationError() }
         while inspections.count >= 4 && inspections[target.key] == nil {
             if let first = inspections.values.first { _ = try? await first.task.value }
             try Task.checkCancellation()
         }
-        if let existing = inspections[target.key] { return existing.task }
+        if fresh && !current() { throw CancellationError() }
+        if !fresh, let existing = inspections[target.key] { return existing.task }
         let observedAt = Clock.milliseconds()
         let client = app.client
         let task = Task<ConversationFrame, Error> { [weak self] in
@@ -484,7 +508,8 @@ final class ConversationModel {
                 let unknown = currentWindow.map { HistoryInspection.changed($0, incoming, previousInspected) } ?? false
                 let bytes = JSON.object(raw).compact.utf8.count + rows.reduce(0) { $0 + $1.approximateBytes }
                 let frame = ConversationFrame(target: resolved, raw: raw, events: rows, questions: NativeEvents.questions(raw), observedAt: observedAt,
-                                              bytes: bytes, truncated: retained.truncated || previousTruncated || raw.bool("mobile_history_truncated"),
+                                              bytes: bytes, truncated: retained.truncated || previousTruncated || raw.bool("mobile_history_truncated") ||
+                                                  raw.bool("history_truncated") || raw.bool("message_events_truncated") || raw.bool("provider_messages_truncated"),
                                               window: window, indexComplete: complete && !unknown, indexing: indexing, inspectedEvents: incoming)
                 return (frame, retained.supersededIds)
             }.value
@@ -499,6 +524,7 @@ final class ConversationModel {
                                    indexComplete: self.historyComplete && !changed, indexing: self.historyIndexing)
             }
             guard self.app.connections.contains(where: { $0.id == connection.id }) else { throw CancellationError() }
+            if frame.window == nil { self.currentHistoryHeads.remove(ConversationReadPolicies.key(resolved)) }
             if let window = frame.window {
                 self.historyWindows[resolved.key] = window
                 if let base = latest, HistoryInspection.changed(base, frame.inspectedEvents, previousInspected) {
@@ -581,6 +607,14 @@ final class ConversationModel {
             historyEpoch = window.epoch
             historyComplete = frame.indexComplete
             historyIndexing = frame.indexing
+        } else {
+            // The bounded inspection does not prove that no older rows exist.
+            // Older installed CLIs may omit their provider-tail truncation flag.
+            hasOlder = historyNetworkReason(frame.target).isEmpty
+            hasNewer = false
+            historyEpoch = ""
+            historyComplete = false
+            historyIndexing = false
         }
         if pendingHistoryPublication == frame.target.key {
             // A page may retarget an existing opening divider through an alias; never restore a retired one.

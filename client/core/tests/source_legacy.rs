@@ -232,10 +232,22 @@ fn a_late_spool_corruption_never_emits_completion() {
 }
 
 #[test]
-fn explicit_legacy_resnapshot_is_single_flight_with_a_generation_gap() {
+fn explicit_legacy_resnapshot_is_single_flight_despite_a_delayed_first_start() {
     let fake = FakeHgs::new("source-legacy-resnapshot", json!({"":{"marker":false}}));
     write_listing(&fake, "local", 1);
-    let (tx, rx) = source::channel_with_legacy(spawn, factory(&fake, false));
+    let (tx, rx) = source::channel_with_legacy(
+        |command| {
+            static LISTINGS: AtomicUsize = AtomicUsize::new(0);
+            if command.get_args().next() == Some(std::ffi::OsStr::new("ls"))
+                && LISTINGS.fetch_add(1, Ordering::Relaxed) == 0
+            {
+                // Model a slow Windows process start after scheduler admission.
+                std::thread::sleep(Duration::from_millis(1100));
+            }
+            spawn(command)
+        },
+        factory(&fake, false),
+    );
     let handle = tx
         .spawn(&fake.path(), &ComputerId::local(), timing())
         .unwrap();
@@ -257,9 +269,8 @@ fn explicit_legacy_resnapshot_is_single_flight_with_a_generation_gap() {
     drain(&tx);
     let starts = fake.runs("", &["ls", "--json", "--local", "--no-archives"]);
     assert_eq!(starts.len(), 3);
-    for pair in starts.windows(2) {
-        assert!(pair[1] - pair[0] >= 0.9);
-    }
+    // The minimum gap is between scheduler admissions, before process startup.
+    // Pin that clock in legacy::tests; child timestamps only count actual starts.
 }
 
 #[test]

@@ -140,6 +140,9 @@ image descriptor and bounded captured configuration bytes. Whether that evidence
 can authorize anything remains a separate G1/G3/native decision. Later charged
 execution must bind those exact inputs, never re-resolve them; no configuration
 derivation is presumed available without its own shared bounded native contract.
+The [bounded pre-anchor evidence matrix](desktop-quit-preanchor-readset.md)
+proposes that next refusal-only boundary. It supplies no production read-root,
+positive availability or initial-anchor constructor.
 
 The maintained Arch service currently launches `hgs-tray` without `--hgs`, and
 the desktop entry adds `--sessions`. Current core discovery uses the explicit

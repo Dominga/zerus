@@ -185,8 +185,19 @@ pub(super) fn mark_system_prompt(record: &Value, event: &mut Value, prompt: &str
 }
 
 /// The person's latest request. Older records may hold background work.
+/// The last reply the session shows, which a keep-warm ping does not replace.
+pub(super) fn last_message(record: &Value) -> &str {
+    if record["keep_warm_quiet"].is_object() {
+        return string(&record["keep_warm_quiet"], "last_message");
+    }
+    string(record, "last_message")
+}
+
 pub(super) fn user_prompt(record: &Value) -> &Value {
     static NONE: Value = Value::Null;
+    if record["keep_warm_quiet"].is_object() {
+        return &record["keep_warm_quiet"]["prompt"];
+    }
     if system_prompt(string(record, "prompt")).is_some() { &NONE } else { &record["prompt"] }
 }
 
@@ -336,6 +347,13 @@ pub(super) fn log_event(record: &Value, event: &Value) -> Result<()> {
     if let Some(origin) = turn_origin(record, event) {
         data["turn_origin"] = json!(origin);
     }
+    // A keep-warm ping is not the person's message, and its turn is no reply.
+    if let Some(mark) = event["keep_warm"].as_str() {
+        data["turn_origin"] = json!("keep_warm");
+        if mark == "prompt" {
+            data["origin"] = json!("keep_warm");
+        }
+    }
     if let Some(id) = kimi_turn_id(record, event) {
         data["kimi_turn_id"] = json!(id);
         data["kimi_conversation_id"] = record["conversation_id"].clone();
@@ -446,9 +464,11 @@ pub(super) fn team_notice_prompt(event: &Value) -> bool {
     rest.starts_with(']') || (rest.starts_with(' ') && rest.split('\n').next().is_some_and(|line| line.contains(']')))
 }
 
-/// WhiteWh fork, task 244: whether only team pastes opened the turn of the
-/// main Stop `stop`. A turn with any prompt of the owner's is the owner's;
-/// a turn whose opening is not in the journal is not a notice turn.
+/// WhiteWh fork, tasks 244/#366: whether only team pastes made up the turn of
+/// the main Stop `stop`. A turn with any prompt of the owner's is the owner's:
+/// the opening prompt, a prompt the agent reports mid-turn, or the owner's
+/// message sent into the running turn (see `owner_prompt_in_turn`). A turn
+/// whose opening is not in the journal is not a notice turn.
 fn team_notice_turn(db: &Connection, record: &Value, stop: i64) -> Result<bool> {
     let mut statement = db
         .prepare(
@@ -466,10 +486,15 @@ fn team_notice_turn(db: &Connection, record: &Value, stop: i64) -> Result<bool> 
         })
         .map_err(|e| e.to_string())?;
     let mut prompts = 0;
+    let mut opened: Option<f64> = None;
+    let mut stopped: Option<f64> = None;
     for row in rows {
         let (kind, payload) = row.map_err(|e| e.to_string())?;
         match kind.as_deref() {
-            Some("Stop") => break,
+            Some("Stop") => {
+                stopped = serde_json::from_str::<Value>(&payload).ok().and_then(|event| event["at"].as_f64());
+                break;
+            }
             Some("UserPromptSubmit" | "UserPromptQueued" | "UserMessage" | "QuestionAnswered") => {
                 let event: Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
                 // Kimi's empty submit carries no prompt; its TurnStarted does.
@@ -479,12 +504,50 @@ fn team_notice_turn(db: &Connection, record: &Value, stop: i64) -> Result<bool> 
                 if kind.as_deref() == Some("QuestionAnswered") || !team_notice_prompt(&event) {
                     return Ok(false);
                 }
+                // Scanning backwards, the last prompt seen opens the turn.
+                if let Some(at) = event["at"].as_f64() {
+                    opened = Some(at);
+                }
                 prompts += 1;
             }
             _ => {}
         }
     }
-    Ok(prompts > 0)
+    if prompts == 0 {
+        return Ok(false);
+    }
+    // #366: the agent reports a message that came into its running turn only
+    // when the turn ends, so the journal alone cannot see it; hgs's receipt can.
+    let opened = opened.unwrap_or(0.0);
+    let end = stopped.filter(|end| *end >= opened).unwrap_or(f64::MAX);
+    if owner_prompt_in_turn(record, opened, end) {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// #366: whether hgs delivered a prompt of the owner's into the running turn
+/// between its opening (`from`) and the Stop (`to`). Claude and Codex queue a
+/// message sent while they work and report its `UserPromptSubmit` only at the
+/// turn's end, so the turn would otherwise fold as a team-notice reply. The
+/// last receipt names what was sent; a team paste queued the same way stays a
+/// notice.
+fn owner_prompt_in_turn(record: &Value, from: f64, to: f64) -> bool {
+    let sent = record["input_pending_at"].as_f64().unwrap_or(0.0);
+    if from <= 0.0 || sent <= from || sent > to {
+        return false;
+    }
+    let request = string(record, "input_pending_request");
+    if uuid::Uuid::parse_str(&request).is_err() {
+        return false;
+    }
+    let Ok(root) = super::storage::absolute_root() else { return false };
+    let Ok(contents) = std::fs::read_to_string(root.join("input_receipts").join(format!("{request}.json"))) else {
+        return false;
+    };
+    let receipt: Value = serde_json::from_str(&contents).unwrap_or_default();
+    let text = string(&receipt, "submitted_text");
+    !text.trim().is_empty() && !team_notice_prompt(&json!({"type":"UserPromptSubmit","detail":text}))
 }
 
 fn latest_reply_of(record: &Value, recurring_schedules: Option<u64>) -> Result<Value> {
@@ -506,6 +569,7 @@ fn latest_reply_of(record: &Value, recurring_schedules: Option<u64>) -> Result<V
         .query_row(
             "SELECT seq, payload FROM events WHERE name = ? AND conversation = ?
          AND json_extract(payload, '$.type') = 'Stop' AND json_extract(payload, '$.agent_id') = ''
+         AND COALESCE(json_extract(payload, '$.turn_origin'), '') != 'keep_warm'
          ORDER BY seq DESC LIMIT 1",
             params![journal_name(record), conversation],
             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -529,6 +593,13 @@ fn latest_reply_of(record: &Value, recurring_schedules: Option<u64>) -> Result<V
 // cache keepalive. Only the latest turn is read; a conversation that has had
 // no keepalive costs one indexed row.
 fn keepalive_turn(db: &Connection, record: &Value, stop: i64) -> Result<bool> {
+    keepalive_turn_in(db, journal_name(record), string(record, "conversation_id"), stop)
+}
+
+/// Task #437: the keep-warm turn of one journal and conversation, whatever
+/// view asks - the owner decided its ping, its reply and its notification are
+/// never Activity, history, a notification, an unread reply or a preview.
+fn keepalive_turn_in(db: &Connection, name: &str, conversation: &str, stop: i64) -> Result<bool> {
     let opening: Option<String> = db
         .query_row(
             "SELECT payload FROM events WHERE name = ? AND conversation = ?
@@ -536,7 +607,7 @@ fn keepalive_turn(db: &Connection, record: &Value, stop: i64) -> Result<bool> {
            AND json_extract(payload, '$.type') IN ('UserPromptSubmit','UserPromptQueued','UserMessage','TurnStarted','QuestionAnswered','AgentMessage','Stop')
            AND seq < ? AND json_extract(payload, '$.type') IN ('UserPromptSubmit','UserMessage','Stop')
          ORDER BY seq DESC LIMIT 1",
-            params![journal_name(record), string(record, "conversation_id"), stop],
+            params![name, conversation, stop],
             |row| row.get(0),
         )
         .optional()
@@ -549,6 +620,20 @@ fn keepalive_opening(payload: &str) -> bool {
         event["type"] != "Stop"
             && (event["origin"] == "cache_keepalive" || string(&event, "detail").starts_with(CACHE_KEEPALIVE))
     })
+}
+
+/// Task #437: a reply of a keep-warm turn in a history written before the
+/// marks existed - the Stop or AgentMessage after the ping's opening. The
+/// marked rows are already dropped by the query.
+fn legacy_keepalive_reply(db: &Connection, name: &str, conversation: &str, seq: i64, own: bool, payload: &str) -> bool {
+    if !own {
+        return false;
+    }
+    let Ok(event) = serde_json::from_str::<Value>(payload) else { return false };
+    if !matches!(string(&event, "type"), "Stop" | "AgentMessage") {
+        return false;
+    }
+    keepalive_turn_in(db, name, conversation, seq).unwrap_or(false)
 }
 
 // The latest main Stop whose turn the person or the agent opened. Keepalive
@@ -618,6 +703,10 @@ fn kimi_reply(db: &Connection, record: &Value, skip_scheduled: bool) -> Result<O
     let mut stop: Option<(i64, Value)> = None;
     for row in rows {
         let (seq, kind, origin, payload) = row.map_err(|e| e.to_string())?;
+        // Keep-warm ping turns are never replies, nor the person's prompts.
+        if origin.as_deref() == Some("keep_warm") {
+            continue;
+        }
         match (kind.as_deref(), stop.take()) {
             (Some("AgentMessage"), pending) => stop = pending,
             (Some("Stop"), None) => {
@@ -661,6 +750,9 @@ fn observed_summary(record: &Value, live_pane: bool) -> Value {
     }
     if !string(record, "session_id").is_empty() {
         output["session_id"] = record["session_id"].clone();
+    }
+    if let Some(parent) = parent_link::listed(record) {
+        output["parent"] = parent;
     }
     let last_tool = record["active_tools"]
         .as_object()
@@ -750,6 +842,7 @@ fn observed_summary(record: &Value, live_pane: bool) -> Value {
         }
     }
     recovery::enrich(record, &mut output);
+    keep_warm::visible(&mut output, record);
     output
 }
 
@@ -832,8 +925,14 @@ fn source_range(index: usize) -> String {
 /// by `seq` (descending when `newest`), at most `limit` of them.
 fn activity_query(extra: &str, newest: bool, limit: &str) -> String {
     let order = if newest { "DESC" } else { "ASC" };
+    // Task #437: the keep-warm turn never reaches Activity, history or a
+    // preview. New rows carry its marks; a history written before them keeps
+    // the ping's envelope in the detail.
+    let quiet = " AND COALESCE(json_extract(payload, '$.turn_origin'), '') != 'keep_warm' \
+        AND COALESCE(json_extract(payload, '$.origin'), '') != 'cache_keepalive' \
+        AND COALESCE(json_extract(payload, '$.detail'), '') NOT LIKE '<zerus-cache-keepalive>%'";
     let branch = |own: u8, range: &str| {
-        format!("SELECT * FROM (SELECT seq, payload, {own} AS own, name FROM events WHERE {range}{extra} ORDER BY seq {order} LIMIT {limit})")
+        format!("SELECT * FROM (SELECT seq, payload, {own} AS own, name FROM events WHERE {range}{quiet}{extra} ORDER BY seq {order} LIMIT {limit})")
     };
     let mut branches = vec![branch(1, OWN_RANGE)];
     branches.extend((0..LINEAGE).map(|index| branch(0, &source_range(index))));
@@ -1087,6 +1186,9 @@ fn message_events(db: &Connection, name: &str, conversation: Option<&str>, scope
     for row in rows {
         let (seq, payload, own, source) = row.map_err(|e| e.to_string())?;
         if events.len() == MESSAGE_EVENTS_LIMIT { truncated = true; break; }
+        // Task #437: the ping and the reply of a keep-warm turn are not
+        // messages; a history written before the marks keeps the reply.
+        if legacy_keepalive_reply(db, name, conversation.unwrap_or_default(), seq, own, &payload) { continue; }
         let mut event: Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
         event["seq"] = json!(seq);
         mark_inherited(&mut event, own, lineage_label(record, &source));
@@ -1221,6 +1323,7 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     if !user_prompt(&record).is_null() {
         output["prompt"] = record["prompt"].clone();
     }
+    keep_warm::visible(&mut output, &record);
     output["tracked"] = json!(true);
     if archive_id.is_some() {
         output["state"] = json!("archived");
@@ -1378,6 +1481,12 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     phases.mark("waits");
     notifications::enrich(&mut output, notifications::load().as_ref(), journal_name);
     phases.mark("notifications");
+    if archive_id.is_none() {
+        keep_warm::enrich(&mut output, keep_warm::load().as_ref(), &record);
+        let usage = output["session_usage"].clone();
+        keep_warm::describe(&mut output, &record, &usage);
+    }
+    phases.mark("keep_warm");
     // U30: after the notification preferences, which say whether it is muted.
     session_state::decorate(std::slice::from_mut(&mut output));
     phases.mark("session_state");
@@ -1435,6 +1544,10 @@ pub(super) fn timeline_rows(
         .map_err(|e| e.to_string())?
         .collect::<std::result::Result<_, _>>()
         .map_err(|e| e.to_string())?;
+    // Task #437: an old keep-warm reply carries no mark of its own; the ping
+    // before it says the turn is invisible.
+    let conversation = conversation.unwrap_or_default();
+    rows.retain(|row| !legacy_keepalive_reply(db, journal_name, conversation, row.seq, row.inherited_from.is_none(), &row.payload));
     if newest {
         rows.reverse();
     }
@@ -1795,9 +1908,18 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
                 );
                 // Keep native type/code evidence when the rolling-window text
                 // would otherwise erase a permanent refusal during projection.
-                if provider_errors::rolling_rate_limit(&detail(event)) {
-                    failure["native_error_type"] = json!(clipped(&event["error_type"], 1200));
-                    failure["native_error_code"] = json!(clipped(&event["error"], 1200));
+                if provider_errors::rolling_rate_limit(&detail(event))
+                    || (string(record, "agent") == "kimi"
+                        && string(event, "error_type") == provider_errors::KIMI_RATE_LIMIT_TYPE) {
+                    for (source, target) in [("error_type", "native_error_type"), ("error", "native_error_code")] {
+                        failure[target] = match event.get(source) {
+                            None => json!(""),
+                            Some(value @ Value::String(_)) => json!(clipped(value, 1200)),
+                            // Closed, bounded invalid-evidence marker. Do not
+                            // erase objects/numbers/arrays into an absent code.
+                            Some(_) => Value::Null,
+                        };
+                    }
                 }
                 let category = provider_errors::native_kind(&failure).unwrap_or_else(|| provider_errors::category(&format!(
                     "{} {} {}",
@@ -1807,6 +1929,10 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
                 )));
                 if category != "provider" || provider_errors::native_kind(&failure).is_some() {
                     failure["error_kind"] = json!(category);
+                }
+                if provider_errors::rolling_rate_error(&failure)
+                    && ["", "provider", "quota", "rate_limit"].contains(&string(&failure, "error_kind")) {
+                    failure["error_kind"] = json!("rate_limit");
                 }
                 // Keep a provider deadline separate from the chosen backoff.
                 for (key,scale) in [("retry_after",1.0),("retry_after_seconds",1.0),("retry_after_ms",0.001)] {
@@ -2550,6 +2676,31 @@ mod attention_regressions {
         let stop = insert_message(&db, "only", Some("conversation"), json!({"type":"Stop","agent_id":"","at":1.0}));
         assert!(keepalive_turn(&db, &only, stop).unwrap());
         assert_eq!(real_reply(&db, &only, stop).unwrap(), None);
+
+        // Task #437 (owner, 2026-11-09): the ping, its reply and its
+        // notification never reach Activity or history; a reply from a
+        // history written before the marks is found through the ping before it.
+        let details = |shown: &[TimelineRow]| -> Vec<String> {
+            shown.iter().map(|row| {
+                let event: Value = serde_json::from_str(&row.payload).unwrap();
+                string(&event, "detail").to_owned()
+            }).collect()
+        };
+        main(json!({"type":"UserPromptSubmit","agent_id":"","origin":"cache_keepalive","turn_origin":"keep_warm","detail":"Cache warmed"}));
+        main(json!({"type":"AgentMessage","agent_id":"","turn_origin":"keep_warm","detail":"ok"}));
+        main(json!({"type":"Stop","agent_id":"","at":6.0,"turn_origin":"keep_warm"}));
+        let scope = activity_scope(&db, &claude);
+        let shown = timeline_rows(&db, "example", Some("conversation"), &scope, 0, 100, false).unwrap();
+        let presented = details(&shown);
+        assert!(presented.contains(&"Fix the build".to_owned()), "{presented:?}");
+        assert!(!presented.contains(&"ok".to_owned()), "the keep-warm reply is not Activity");
+        assert!(!presented.contains(&"Cache warmed".to_owned()), "the ping is not Activity");
+        // The same history before the marks existed: the reply carries none.
+        main(json!({"type":"UserPromptSubmit","agent_id":"","detail":text}));
+        main(json!({"type":"AgentMessage","agent_id":"","detail":"old ok"}));
+        main(json!({"type":"Stop","agent_id":"","at":7.0}));
+        let shown = timeline_rows(&db, "example", Some("conversation"), &scope, 0, 100, false).unwrap();
+        assert!(!details(&shown).contains(&"old ok".to_owned()), "an old keep-warm reply stays out too");
     }
     #[test]
     fn a_reply_to_a_turn_only_team_pastes_opened_is_a_team_notice_reply() {
@@ -2591,6 +2742,42 @@ mod attention_regressions {
         main(prompt("[Zerus team \u{00b7} from: Tester \u{00b7} task: #4]\nDone"));
         let member = main(json!({"type":"Stop","agent_id":"","at":6.0}));
         assert!(team_notice_turn(&db, &lead, member).unwrap());
+    }
+    #[test]
+    fn a_team_notice_turn_that_took_the_owners_message_mid_turn_is_the_owners() {
+        // #366: a notice opened the turn, the owner's message came into the
+        // running turn (hgs's receipt), and the agent reports that prompt only
+        // when the turn ends; the reply must still show in full.
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let db = message_db();
+            let lead = json!({"agent":"claude","name":"lead","conversation_id":"conversation"});
+            let main = |event: Value| insert_message(&db, "lead", Some("conversation"), event);
+            main(json!({"type":"UserPromptSubmit","agent_id":"","at":10.0,
+                "detail":"[Zerus team \u{00b7} from: Zerus \u{00b7} inbox]\nReport for task #185"}));
+            let request = "00000000-0000-4000-8000-000000000001";
+            let folder = dir.path().join("input_receipts");
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join(format!("{request}.json")), json!({"status":"submitted",
+                "submitted_text":"Where do hundreds of GB come from?","submitted_at":20.0}).to_string()).unwrap();
+            let mut record = lead.clone();
+            record["input_pending_at"] = json!(20.0);
+            record["input_pending_request"] = json!(request);
+            let mixed = main(json!({"type":"Stop","agent_id":"","at":30.0}));
+            assert!(!team_notice_turn(&db, &record, mixed).unwrap());
+            // The team's own paste queued the same way leaves a notice turn.
+            std::fs::write(folder.join(format!("{request}.json")), json!({"status":"submitted",
+                "submitted_text":"[Zerus team] 1 new message for you: hgs team inbox","submitted_at":40.0}).to_string()).unwrap();
+            record["input_pending_at"] = json!(40.0);
+            main(json!({"type":"UserPromptSubmit","agent_id":"","at":40.0,"detail":"[Zerus team] 1 new message"}));
+            let only = main(json!({"type":"Stop","agent_id":"","at":50.0}));
+            assert!(team_notice_turn(&db, &record, only).unwrap());
+            // A send before the turn opened belongs to the previous turn.
+            record["input_pending_at"] = json!(5.0);
+            main(json!({"type":"UserPromptSubmit","agent_id":"","at":60.0,"detail":"[Zerus team] 1 new message"}));
+            let earlier = main(json!({"type":"Stop","agent_id":"","at":70.0}));
+            assert!(team_notice_turn(&db, &record, earlier).unwrap());
+        });
     }
     #[test]
     fn kimi_scheduled_ticks_are_not_replies_while_a_recurring_job_remains() {
@@ -2724,6 +2911,24 @@ mod attention_regressions {
         record["turn_started"] = json!(123.0);
         update_activity(&mut record, &json!({"hook_event_name":"UserPromptQueued"}));
         assert!(record["turn_started"].as_f64().unwrap() > 123.0);
+    }
+    #[test]
+    fn kimi_stop_failure_preserves_typed_window_evidence_without_fabricating_a_status() {
+        let message = "You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends.";
+        let event = json!({"hook_event_name":"StopFailure","error_type":"APIProviderRateLimitError","error_message":message});
+        for (agent, expected) in [("kimi", "rate_limit"), ("claude", "quota")] {
+            let mut record = json!({"agent":agent,"run_id":"original","active_tools":{},"subagents":{}});
+            update_activity(&mut record, &event);
+            let failure = &record["provider_error"];
+            assert_eq!(failure["error_kind"], expected);
+            assert_eq!(failure["detail"], message);
+            if agent == "kimi" {
+                assert_eq!(failure["native_error_type"], "APIProviderRateLimitError");
+                let mut output = json!({});
+                provider_errors::apply(&mut output, failure);
+                assert_eq!(output["provider_error"], *failure);
+            } else { assert!(failure.get("native_error_type").is_none()); }
+        }
     }
     #[test]
     fn provider_failure_survives_heartbeat_and_children_but_clears_on_new_work() {

@@ -1,9 +1,13 @@
+import { Dropdown } from "../lib/Dropdown";
+import { TextInput } from "../lib/TextField";
 import { For, Index, Show, Switch, Match, createEffect, createMemo, createSignal, lazy, Suspense, onCleanup } from "solid-js";
 import { Icon } from "../lib/icons";
 import { MachineTile } from "../components/MachineTile";
 import { MachineLabel } from "../components/MachineLabel";
 import { Actions, Spinner, Status } from "../components/Status";
-import { AgentBadge, ProviderGlyph } from "../sessions/SessionCard";
+import { AccountMarkCircle, AgentBadge, ProviderGlyph } from "../sessions/SessionCard";
+import { accountAppearance, accountMark } from "../../store/accountMarks";
+import { settings } from "../../store/settings";
 import { ResizeHandle } from "../sessions/SessionList";
 import type { Account } from "../../types";
 import { agentKind, catalog } from "../../store/catalog";
@@ -12,7 +16,7 @@ import { accountMachine, accountsPage, loadAccounts, requestedProfile, setAccoun
 import { connectionOf, osOf } from "../../store/overview";
 import { useNow } from "../../store/latest";
 import { sessionsWidth, setPage } from "../../store/ui";
-import { clock, providerName, stateText, windowsAt } from "../lib/usage";
+import { clock, providerName, rateLimitNotice, stateText, windowsAt } from "../lib/usage";
 import { UsageMeters } from "../components/UsageMeter";
 import { accountManagement } from "../../store/accountManagement";
 import { accountSetup } from "../../store/accountSetup";
@@ -27,6 +31,7 @@ import { trText } from "../../text";
 // setup and distribution share that writer and the existing terminal backend.
 
 const AccountDistributionDialog=lazy(()=>import("./AccountDistributionDialog"));
+const AccountMarkDialog=lazy(()=>import("./AccountMarkDialog"));
 const AccountSetupDialog = lazy(() => import("./AccountSetupDialog"));
 const OpenCodeBindDialog = lazy(() => import("./OpenCodeBindDialog"));
 const [bindPrompt, setBindPrompt] = createSignal<{ host: string; machine: string; home: string } | null>(null);
@@ -90,6 +95,7 @@ function AccountRow(props: { a: Account; now: number }) {
       <Show when={props.a.usage.windows.length}>
         <span class="acct-row-usage"><UsageMeters windows={windowsAt(props.a.usage.windows, props.now)} compact resetFrom={90} /></span>
       </Show>
+      <Show when={rateLimitNotice(props.a.usage, props.now)}><span class="dim">{rateLimitNotice(props.a.usage, props.now)}</span></Show>
     </button>
   );
 }
@@ -109,6 +115,7 @@ function UsagePanel(props: { a: Account }) {
       <Show when={u().offline}><Status>{tr("Machine is offline. Showing the last available account data.")}</Status></Show>
       <Show when={u().refreshing}><Status kind="busy">{tr("Updating… Previous values remain visible.")}</Status></Show>
       <Show when={!u().refreshing && u().refresh_error}><Status kind="warn">{tr("Update failed. Showing the last available values.")}</Status></Show>
+      <Show when={rateLimitNotice(u(), now())}><Status kind="warn">{rateLimitNotice(u(), now())}</Status></Show>
       <Show when={!u().windows.length && !u().balances.length && !u().offline}><p>{stateText(u())}</p></Show>
       <For each={u().windows}>{(p) => {
         const w = () => panelWindow(p, now());
@@ -152,9 +159,12 @@ function Detail(props: { a: Account }) {
   };
   const shown = () => visibleMembers(props.a, m().key);
   const nativeConfig = () => props.a.provider === "opencode";
+  // zerus-f0uz8: one permission mode for the account unless it keeps one per computer.
+  const perComputer = () => !!props.a.permissions_per_computer;
   const defaultable = () => props.a.provider !== "dsh" && !nativeConfig();
   const matches = () => props.a.members.filter((x) => x.machine.toLowerCase().includes(moreQuery().trim().toLowerCase()));
   const tags = createMemo(() => profileTags(props.a));
+  const [markEditor, setMarkEditor] = createSignal<{ origin: HTMLElement }>();
   // The selected machine, with its profile tag when another profile shares it.
   const where = () => (tags().has(m().key) ? `${m().machine} (${tags().get(m().key)})` : m().machine);
   const choose = (key: string) => { setSelectedProfile(key); closeManagement(); clearManagementNotice(); };
@@ -175,10 +185,14 @@ function Detail(props: { a: Account }) {
   return (
     <div class="acct-detail">
       <div class="acct-title">
+        <AccountMarkCircle mark={accountMark(props.a, settings)} size={22} />
         <h2 class="ell">{props.a.label}</h2>
+        <Show when={accountAppearance(settings, props.a.members).hidden}><span class="dim am-hidden">{tr("Hidden on session cards")}</span></Show>
         <span class="grow" />
+        <button class="btn" onClick={event=>setMarkEditor({ origin: event.currentTarget })}><Icon name="palette" size={13} />{tr("Color and mark…")}</button>
         <button class="btn" disabled={managementBusy()} onClick={event=>void openCatalog("rename",props.a.key,m().key,event.currentTarget)}><Icon name="pencil" size={13} />{tr("Rename…")}</button>
       </div>
+      <Show when={markEditor()}>{(editor) => <Suspense><AccountMarkDialog account={props.a} origin={editor().origin} close={() => setMarkEditor(undefined)} /></Suspense>}</Show>
       <div class="row acct-identity">
         <AgentBadge agent={agentKind(props.a.provider)} />
         <SignPill state={signState(m())} />
@@ -222,7 +236,7 @@ function Detail(props: { a: Account }) {
               <Show when={moreOpen()}>
                 <div class="acct-more" role="dialog" aria-label={tr("Machines with %1", props.a.label)}
                   onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeMore(); } }}>
-                  <input class="field" ref={moreInput} type="search" placeholder={tr("Search %1 machines", props.a.members.length)} value={moreQuery()}
+                  <TextInput class="field" ref={moreInput} type="search" placeholder={tr("Search %1 machines", props.a.members.length)} value={moreQuery()}
                     onInput={(e) => setMoreQuery(e.currentTarget.value)} aria-label={tr("Search machines")} />
                   <div class="acct-more-list">
                     <For each={matches()} fallback={<div class="dim acct-more-empty">{tr("No machine matches.")}</div>}>
@@ -274,15 +288,33 @@ function Detail(props: { a: Account }) {
         )}</Show>
         <div class="acct-setting">
           <span title={trText(m().permission_hint)}>
-            {tr("Permissions on %1:", m().machine)} <b classList={{ danger: m().permission === "bypass" }}>{trText(m().permission_label)}</b>
-            <span class="dim acct-src">{(m().permission_source ? m().permission_source === "zerus" : m().permission_mode === "bypass") ? tr("set in Zerus") : tr("from provider settings")}</span>
+            {perComputer() ? tr("Permissions on %1:", m().machine) : tr("Permissions:")} <b classList={{ danger: m().permission === "bypass" }}>{trText(m().permission_label)}</b>
+            <span class="dim acct-src">{m().permission_default ? tr("Zerus default") : (m().permission_source ? m().permission_source === "zerus" : m().permission_mode === "bypass") ? tr("set in Zerus") : tr("from provider settings")}</span>
           </span>
-          <button class="btn small" disabled={!m().online || nativeConfig() || managementBusy()} title={tr("Change permission defaults on %1", m().machine)} onClick={event=>void openCatalog("permissions",props.a.key,m().key,event.currentTarget)}>{tr("Change…")}</button>
+          <span class="acct-actions">
+            <Show when={!perComputer() && props.a.permission_differs && !nativeConfig()}>
+              <span class="acct-differs">{tr("Differs between computers")}</span>
+              <button class="btn small" disabled={!m().online || managementBusy()} title={tr("Save the permission mode of %1 on every computer with this account", m().machine)} onClick={event=>void openCatalog("permissions",props.a.key,m().key,event.currentTarget)}>{tr("Use everywhere")}</button>
+            </Show>
+            <button class="btn small" disabled={!m().online || nativeConfig() || managementBusy()} title={perComputer() ? tr("Change permission defaults on %1", m().machine) : tr("Change permission defaults on every computer with this account")} onClick={event=>void openCatalog("permissions",props.a.key,m().key,event.currentTarget)}>{tr("Change…")}</button>
+          </span>
         </div>
+        <Show when={!nativeConfig()}>
+          <div class="acct-setting">
+            <span class="dim">{perComputer() ? tr("Permissions are kept per computer.") : tr("Permissions are shared by every computer with this account.")}</span>
+            <button class="btn small" disabled={!m().online || managementBusy()} onClick={event=>void openCatalog("scope",props.a.key,m().key,event.currentTarget)}>{perComputer() ? tr("Share across computers…") : tr("Keep per computer…")}</button>
+          </div>
+        </Show>
         <Show when={m().model_supported}>
           <div class="acct-setting">
             <span>{trText(m().model_text)}</span>
-            <button class="btn small" disabled={!m().online || managementBusy()} onClick={event=>void openCatalog("model",props.a.key,m().key,event.currentTarget)}>{tr("Model and effort…")}</button>
+            <span class="acct-actions">
+              <Show when={props.a.model_differs}>
+                <span class="acct-differs">{tr("Differs between computers")}</span>
+                <button class="btn small" disabled={!m().online || managementBusy()} title={tr("Save the model and effort of %1 on every computer with this account", m().machine)} onClick={event=>void openCatalog("model",props.a.key,m().key,event.currentTarget)}>{tr("Use everywhere")}</button>
+              </Show>
+              <button class="btn small" disabled={!m().online || managementBusy()} onClick={event=>void openCatalog("model",props.a.key,m().key,event.currentTarget)}>{tr("Model and effort…")}</button>
+            </span>
           </div>
         </Show>
         <Actions>
@@ -354,10 +386,7 @@ export function AccountsScreen() {
           <p class="muted acct-summary">{tr("Your accounts across all machines. Choose an account to manage where it is available.")}</p>
           <For each={view().notices}>{(notice) => <Status kind="warn">{notice}</Status>}</For>
           <Show when={!view().no_hosts}>
-            <select class="field acct-filter" aria-label={tr("Machine")} value={accountMachine()} onChange={(e) => {closeManagement();clearManagementNotice();setAccountMachine(e.currentTarget.value);}}>
-              <option value="*">{tr("All machines")}</option>
-              <For each={view().hosts}>{(h) => <option value={h.computer}>{h.label}</option>}</For>
-            </select>
+            <Dropdown class="field acct-filter" aria-label={tr("Machine")} value={accountMachine()} onChange={(value) => {closeManagement();clearManagementNotice();setAccountMachine(value);}} options={[{ value: "*", label: tr("All machines") }, ...((view().hosts) ?? []).map((h) => ({ value: h.computer, label: h.label }))]} />
             <div class="acct-signs" role="group" aria-label={tr("Sign-in state")}>
               <button type="button" class="btn small" classList={{ on: signFilter() === "all" }} aria-pressed={signFilter() === "all"}
                 onClick={() => setSignFilter("all")}>{tr("All")}</button>
@@ -404,7 +433,7 @@ export function AccountsScreen() {
       <Show when={accountDistribution.prompt()}>{prompt=><Suspense><AccountDistributionDialog prompt={prompt()}/></Suspense>}</Show>
       <Show when={accountSetup.prompt()}>{prompt=><Suspense><AccountSetupDialog prompt={prompt()} busy={accountSetup.busy()} close={accountSetup.close} confirm={(values,handle)=>void accountSetup.confirm(values,handle)}/></Suspense>}</Show><Show when={bindNotice()}>{text=><Status kind="ok">{text()}</Status>}</Show>
       <Show when={bindPrompt()}>{p=><Suspense><OpenCodeBindDialog host={p().host} machine={p().machine} agentHome={p().home} close={()=>setBindPrompt(null)} bound={(name)=>{setBindPrompt(null);setBindNotice(tr("Existing OpenCode conversation is bound as %1. Native history was preserved.",name));void loadAccounts();}}/></Suspense>}</Show>
-      <Show when={accountManagement.prompt()}>{prompt=><Suspense><Switch><Match when={prompt().kind==="permissions" && prompt().permissions}>{editor=><AccountPermissionsDialog prompt={prompt()} editor={editor()} close={accountManagement.close} confirm={(values,handle)=>void accountManagement.confirm(values,handle)}/>}</Match><Match when={prompt().kind==="permissions" || prompt().kind==="model"}><AccountDefaultsDialog prompt={prompt()} close={accountManagement.close} confirm={(values,handle)=>void accountManagement.confirm(values,handle)}/></Match><Match when={true}><AccountCatalogDialog prompt={prompt()} close={accountManagement.close} confirm={(label,handle)=>void accountManagement.confirm(label,handle)}/></Match></Switch></Suspense>}</Show>
+      <Show when={accountManagement.prompt()}>{prompt=><Suspense><Switch><Match when={prompt().kind==="permissions" && prompt().permissions}>{editor=><AccountPermissionsDialog prompt={prompt()} editor={editor()} close={accountManagement.close} confirm={(values,handle)=>void accountManagement.confirm(values,handle)}/>}</Match><Match when={prompt().kind==="permissions" || prompt().kind==="model" || prompt().kind==="scope"}><AccountDefaultsDialog prompt={prompt()} close={accountManagement.close} confirm={(values,handle)=>void accountManagement.confirm(values,handle)}/></Match><Match when={true}><AccountCatalogDialog prompt={prompt()} close={accountManagement.close} confirm={(label,handle)=>void accountManagement.confirm(label,handle)}/></Match></Switch></Suspense>}</Show>
     </div>
   );
 }

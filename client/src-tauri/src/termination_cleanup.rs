@@ -17,6 +17,13 @@ use zerus_client_core::{
     },
     worktree_review as review, worktrees,
 };
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod program_pipeline;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use crate::desktop_service::termination_outcome::programs::pipeline as programs;
+
+pub mod manual;
+mod presentation;
 
 const LIMIT: usize = review::CLEANUP_TARGETS;
 const PREF: &str = "workspace/removeWorktreeAfterTermination";
@@ -26,14 +33,15 @@ pub struct TerminationCleanup(Arc<Inner>);
 #[derive(Default)]
 struct Inner {
     model: Mutex<Model>,
+    reads: Arc<Mutex<BTreeSet<String>>>,
     pending: Arc<crate::desktop_service::termination_outcome::Pending>,
 }
 #[derive(Default)]
 struct Model {
     offers: VecDeque<Offer>,
+    manual: Option<manual::Offer>,
     jobs: VecDeque<Job>,
     reserved: usize,
-    reads: BTreeSet<String>,
     revision: u64,
     overflow_kept: usize,
     overflow_unknown: usize,
@@ -59,6 +67,8 @@ struct Offer {
     capture: Capture,
     selected: Option<crate::desktop_service::termination_outcome::Selected>,
     at: Instant,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    programs: Option<programs::Offer>,
 }
 struct Job {
     id: String,
@@ -66,9 +76,60 @@ struct Job {
     busy: bool,
     phase: &'static str,
     manual_review: bool,
+    dismissed: bool,
+    // Presentation retention, not consent/custody: expiry may release the
+    // program pipeline while its incomplete/unknown result still needs review.
+    program_review_pending: bool,
+    program_retirement: Option<ProgramRetirement>,
     source: Option<Target>,
     archive: Option<ArchiveIdentity>,
     restore_supported: bool,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    programs: Option<program_pipeline::ProgramJob>,
+}
+impl Job {
+    fn has_launch_owner(&self) -> bool {
+        self.cleanup
+            .entries
+            .iter()
+            .all(|entry| entry.exit_cleanup && !entry.expected_owner_id.is_empty())
+    }
+    fn clearable(&self) -> bool {
+        !self.busy
+            && !self.unfinished_programs()
+            && !self.program_review_pending
+            && self
+                .cleanup
+                .entries
+                .iter()
+                .all(|entry| entry.status != Some(Status::Unconfirmed))
+    }
+    fn dismissible(&self) -> bool {
+        !self.busy && !self.unfinished_programs() && !self.program_review_pending
+    }
+
+    fn unfinished_programs(&self) -> bool {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            self.programs
+                .as_ref()
+                .is_some_and(|program| !program.normal_refusal())
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            false
+        }
+    }
+    fn has_programs(&self) -> bool {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            self.programs.is_some()
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            false
+        }
+    }
 }
 
 /// The same exact identifiers the Archive view restores. No local path or
@@ -130,7 +191,9 @@ pub(crate) fn inspection(
     }
 }
 
-pub(crate) struct ReadGuard(Arc<Inner>, String);
+// Read resources must not own/re-enter the cleanup model: a retained native
+// context may be dropped while that model lock is held on cancel/Keep/expiry.
+pub(crate) struct ReadGuard(Arc<Mutex<BTreeSet<String>>>, String);
 impl TerminationCleanup {
     pub(crate) fn read_terminal_identity(&self) -> Result<ReadGuard, String> {
         self.0.read()
@@ -138,20 +201,20 @@ impl TerminationCleanup {
 }
 impl Drop for ReadGuard {
     fn drop(&mut self) {
-        lock(&self.0.model).reads.remove(&self.1);
+        lock(&self.0).remove(&self.1);
     }
 }
 impl Inner {
     fn read(self: &Arc<Self>) -> Result<ReadGuard, String> {
-        let mut m = lock(&self.model);
-        if m.reads.len() >= 4 {
+        let mut reads = lock(&self.reads);
+        if reads.len() >= 4 {
             return Err(
                 "A folder inspection is already running. Try again after it finishes.".into(),
             );
         }
         let id = uuid::Uuid::new_v4().to_string();
-        m.reads.insert(id.clone());
-        Ok(ReadGuard(Arc::clone(self), id))
+        reads.insert(id.clone());
+        Ok(ReadGuard(self.reads.clone(), id))
     }
 }
 
@@ -159,10 +222,108 @@ impl Inner {
 pub struct OfferView {
     id: String,
     checked: bool,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    programs: Option<Vec<programs::ProgramView>>,
+}
+#[derive(Clone, Serialize)]
+pub(crate) struct ProgramView {
+    pub pid: u32,
+    pub label: String,
+}
+#[derive(Serialize)]
+pub struct ForceView {
+    confirmation: String,
+    programs: Vec<ProgramView>,
+    remaining_millis: u64,
+    revision: u64,
+}
+/// Closed presentation evidence; never a permit, effect result or drain proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+pub(crate) enum ProgramRetirement {
+    Expired,
+    SourceUnavailable,
+    HolderUnavailable,
+    OfferUnavailable,
+    StopUnconfirmed,
+    CleanupSettled,
+    CleanupUnconfirmed,
+}
+fn force_window(window: &tauri::Webview) -> Result<(), String> {
+    if window.label() != crate::MAIN_WINDOW
+        || (!window.window().is_visible().unwrap_or(false)
+            && !window.window().is_minimized().unwrap_or(false))
+    {
+        return Err(STATE_CHANGED.into());
+    }
+    Ok(())
+}
+#[tauri::command]
+pub async fn termination_program_force_offer(
+    window: tauri::Webview,
+    app: AppHandle,
+    state: State<'_, TerminationCleanup>,
+    id: String,
+) -> Result<ForceView, String> {
+    force_window(&window)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        program_pipeline::force_offer(state.0.clone(), app, id).await
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (app, state, id);
+        Err(STATE_CHANGED.into())
+    }
+}
+#[tauri::command]
+pub async fn termination_program_force_confirm(
+    window: tauri::Webview,
+    app: AppHandle,
+    state: State<'_, TerminationCleanup>,
+    id: String,
+    confirmation: String,
+) -> Result<View, String> {
+    force_window(&window)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        program_pipeline::force_confirm(state.0.clone(), app, id, confirmation).await
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (app, state, id, confirmation);
+        Err(STATE_CHANGED.into())
+    }
+}
+#[tauri::command]
+pub fn termination_program_force_cancel(
+    window: tauri::Webview,
+    app: AppHandle,
+    state: State<'_, TerminationCleanup>,
+    id: String,
+    confirmation: String,
+) -> Result<View, String> {
+    force_window(&window)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        program_pipeline::force_cancel(&state.0, &app, &id, &confirmation)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (app, state, id, confirmation);
+        Err(STATE_CHANGED.into())
+    }
 }
 #[derive(Serialize)]
 pub struct Row {
     id: String,
+    folder_key: String,
+    can_dismiss: bool,
+    can_remove_anyway: bool,
+    sessions: Vec<String>,
+    processes: Vec<ProgramView>,
     label: String,
     path: String,
     machine: String,
@@ -173,8 +334,13 @@ pub struct Row {
     reason: String,
     details: String,
     can_check: bool,
+    can_force: bool,
+    force_revision: Option<u64>,
+    program_retirement: Option<ProgramRetirement>,
     ready: bool,
     busy: bool,
+    /// What the job is doing right now, separate from the entry's outcome.
+    activity: Option<&'static str>,
     source: Option<Target>,
     notice: Option<String>,
     restore: Option<RestoreSource>,
@@ -185,6 +351,7 @@ pub struct View {
     rows: Vec<Row>,
     busy: bool,
     cleaning: bool,
+    can_clear: bool,
     removed: usize,
     kept: usize,
     unknown: usize,
@@ -211,6 +378,7 @@ impl Model {
         report: &zerus_client_core::WorktreeCleanup,
         restore_supported: bool,
     ) -> Option<RetainedCapture> {
+        self.prune_dismissed();
         self.offers.retain(|offer| offer.at.elapsed() < OFFER_AGE);
         if !matches!(report.status.as_str(), "kept" | "unconfirmed")
             || report.path.len() > 32 * 1024
@@ -322,9 +490,14 @@ impl Model {
             busy: false,
             phase: "checking",
             manual_review: false,
+            dismissed: false,
+            program_review_pending: false,
+            program_retirement: None,
             source: Some(target.clone()),
             archive,
             restore_supported,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            programs: None,
         });
         Some(RetainedCapture {
             id: Some(id),
@@ -334,9 +507,8 @@ impl Model {
     }
     fn view(&self) -> View {
         let mut rows = Vec::new();
-        let (mut removed, mut kept, mut unknown) = (0, self.overflow_kept, self.overflow_unknown);
         let mut required = Consents::default();
-        for job in &self.jobs {
+        for job in self.jobs.iter().filter(|job| !job.dismissed) {
             let restoring =
                 job.source
                     .as_ref()
@@ -347,24 +519,19 @@ impl Model {
                     });
             for entry in &job.cleanup.entries {
                 let path = entry.row["path"].as_str().unwrap_or("");
-                let status = match entry.status {
-                    Some(Status::Removed) => {
-                        removed += 1;
-                        "removed"
-                    }
-                    Some(Status::Unconfirmed) => {
-                        unknown += 1;
-                        "unknown"
-                    }
-                    Some(Status::Kept) => {
-                        kept += 1;
-                        "kept"
-                    }
-                    None => {
-                        if job.busy && !restoring {
-                            job.phase
-                        } else {
-                            "ready"
+                let status = if job.busy && !restoring && job.phase == "stopping" {
+                    "stopping"
+                } else {
+                    match entry.status {
+                        Some(Status::Removed) => "removed",
+                        Some(Status::Unconfirmed) => "unknown",
+                        Some(Status::Kept) => "kept",
+                        None => {
+                            if job.busy && !restoring {
+                                job.phase
+                            } else {
+                                "ready"
+                            }
                         }
                     }
                 };
@@ -380,7 +547,7 @@ impl Model {
                 } else {
                     review::summary_line(&entry.row)
                 };
-                let r = if job.manual_review {
+                let r = if job.manual_review && job.has_launch_owner() {
                     job.cleanup.required()
                 } else {
                     Consents::default()
@@ -397,6 +564,35 @@ impl Model {
                 let details=format!("Folder: {path}\nComputer: {}\n{}\n{}\nAfter removal: conversations and branches remain. Restoring an archived session may require recreating its working folder.", computer,reason,review::decision(&presentation).join("\n"));
                 rows.push(Row {
                     id: job.id.clone(),
+                    folder_key: presentation::folder_key(entry),
+                    can_dismiss: self.can_dismiss(job),
+                    can_remove_anyway: self.manual_entry(&job.id).is_ok(),
+                    sessions: entry.row["sessions"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .take(1024)
+                        .map(str::to_owned)
+                        .collect(),
+                    processes: entry.row["processes"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .take(64)
+                        .filter_map(|p| {
+                            Some(ProgramView {
+                                pid: u32::try_from(p["pid"].as_u64()?).ok()?,
+                                label: p["command"]
+                                    .as_str()
+                                    .or_else(|| p["label"].as_str())
+                                    .unwrap_or("Program")
+                                    .chars()
+                                    .take(2000)
+                                    .collect(),
+                            })
+                        })
+                        .collect(),
                     label: leaf(path),
                     path: path.into(),
                     machine: if entry.host.is_empty() {
@@ -414,14 +610,59 @@ impl Model {
                     },
                     reason: reason.chars().take(4000).collect(),
                     details: details.chars().take(128 * 1024).collect(),
-                    can_check: !job.busy
+                    can_force: {
+                        #[cfg(any(target_os = "linux", target_os = "macos"))]
+                        {
+                            !job.busy
+                                && job.program_retirement.is_none()
+                                && job
+                                    .programs
+                                    .as_ref()
+                                    .is_some_and(program_pipeline::ProgramJob::can_force)
+                        }
+                        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                        {
+                            false
+                        }
+                    },
+                    force_revision: {
+                        #[cfg(any(target_os = "linux", target_os = "macos"))]
+                        {
+                            match &job.programs {
+                                Some(program_pipeline::ProgramJob::Force { revision, .. })
+                                    if !job.busy && job.program_retirement.is_none() =>
+                                {
+                                    Some(*revision)
+                                }
+                                _ => None,
+                            }
+                        }
+                        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                        {
+                            None
+                        }
+                    },
+                    program_retirement: job.program_retirement,
+                    can_check: self.can_dismiss(job)
+                        && !self.unknown_folder(job)
+                        && !job.busy
+                        && !job.has_programs()
                         && job.cleanup.can_refresh()
                         && zerus_client_core::creation::canonical_uuid(&entry.machine),
-                    ready: !job.busy
+                    ready: self.can_dismiss(job)
+                        && !self.unknown_folder(job)
+                        && !job.busy
+                        && !job.has_programs()
                         && job.manual_review
+                        && job.has_launch_owner()
                         && ready(entry)
                         && zerus_client_core::creation::canonical_uuid(&entry.machine),
                     busy: job.busy,
+                    activity: if restoring {
+                        Some("restoring")
+                    } else {
+                        job.busy.then_some(job.phase)
+                    },
                     source: job.source.clone(),
                     notice: matches!(entry.status, Some(Status::Kept | Status::Unconfirmed)).then(
                         || {
@@ -469,13 +710,20 @@ impl Model {
                     },
                 )
         });
-        let text = if cleaning {
+        let counts = presentation::folder_counts(&rows);
+        let removed = counts.0;
+        let kept = self.overflow_kept.saturating_add(counts.1);
+        let unknown = self.overflow_unknown.saturating_add(counts.2);
+        // Running work has its own status bar item, so a held result always
+        // names itself here, even while another folder is still running.
+        let held = removed > 0 || kept > 0 || unknown > 0;
+        let only_kept = (kept == 1 && unknown == 0 && removed == 0)
+            .then(|| rows.iter().find(|r| matches!(r.status, "kept" | "review")))
+            .flatten();
+        let text = if cleaning && !held {
             "Cleaning working folders…".into()
-        } else if kept == 1 && unknown == 0 && removed == 0 {
-            format!(
-                "Folder kept: {}.",
-                rows.first().map(|r| r.label.as_str()).unwrap_or("")
-            )
+        } else if let Some(row) = only_kept {
+            format!("Folder kept: {}.", row.label)
         } else {
             // Only what the chip still holds: a finished removal has its own
             // notice, so a "0 removed" beside it would read as a contradiction.
@@ -491,7 +739,12 @@ impl Model {
             }
         };
         let mut title = text.clone();
-        if let Some(reason) = self.jobs.iter().find_map(|j| j.cleanup.retained_reason()) {
+        if let Some(reason) = self
+            .jobs
+            .iter()
+            .filter(|j| !j.dismissed)
+            .find_map(|j| j.cleanup.retained_reason())
+        {
             title.push(' ');
             title.push_str(&reason);
         }
@@ -509,6 +762,8 @@ impl Model {
             rows,
             busy,
             cleaning,
+            can_clear: self.restoring.is_empty()
+                && (self.overflow_kept > 0 || self.jobs.iter().any(|job| self.clearable(job))),
             removed,
             kept,
             unknown,
@@ -762,10 +1017,27 @@ impl Inner {
 pub fn termination_cleanup_view(state: State<'_, TerminationCleanup>) -> View {
     lock(&state.0.model).view()
 }
+
+fn offer_candidate(row: &zerus_client_core::ViewRow, target: &Target) -> Result<bool, String> {
+    if row.name != target.name
+        || row.state != "running"
+        || target.run_id.is_empty()
+        || row.run_id.as_deref() != Some(&target.run_id)
+        || row.conversation_id.as_deref().unwrap_or("") != target.conversation_id
+        || row.machine.is_empty()
+    {
+        return Err(STATE_CHANGED.into());
+    }
+    // The optional cleanup protocol requires a confirmed native conversation.
+    // Its absence never blocks the ordinary run-bound Terminate action.
+    Ok(!target.conversation_id.is_empty() && row.git_worktree != Some(false))
+}
 #[tauri::command]
 pub async fn termination_cleanup_offer(
+    handle: AppHandle,
     app: State<'_, crate::commands::AppState>,
     state: State<'_, TerminationCleanup>,
+    actions: State<'_, crate::actions::Actions>,
     settings: State<'_, crate::settings::Store>,
     target: Target,
 ) -> Result<Option<OfferView>, String> {
@@ -776,21 +1048,102 @@ pub async fn termination_cleanup_offer(
         .pump()
         .row_named(&target.computer, &target.name)
         .ok_or(STATE_CHANGED)?;
-    if row.state != "running"
-        || row.run_id.as_deref() != Some(&target.run_id)
-        || row.conversation_id.as_deref() != Some(&target.conversation_id)
-        || row.machine.is_empty()
-    {
-        return Err(STATE_CHANGED.into());
+    if !offer_candidate(&row, &target)? {
+        return Ok(None);
     }
-    let _read = state.0.read()?;
-    let call_target = target.clone();
+    let read = Arc::new(state.0.read()?);
     let machine = app
         .pump()
         .machine(&ComputerId(target.computer.clone()))
         .and_then(|m| m.machine_id)
         .filter(|id| zerus_client_core::creation::canonical_uuid(id))
         .ok_or(STATE_CHANGED)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if target.computer.is_empty() {
+        let running = Arc::new(
+            actions
+                .begin(
+                    crate::actions::Lane::key(&target, &zerus_client_core::Action::Terminate),
+                    &zerus_client_core::Action::Terminate,
+                )
+                .ok_or("busy")?,
+        );
+        let pending = state.0.pending.clone();
+        let native = if crate::desktop_service::mode() {
+            None
+        } else {
+            use tauri::Manager;
+            Some(
+                handle
+                    .try_state::<crate::desktop_ownership::NativeReady>()
+                    .ok_or("worktree_programs_native_origin_unavailable")?
+                    .program_source()?,
+            )
+        };
+        let service =
+            if crate::desktop_service::mode() {
+                Some(app.desktop_service().ok_or_else(
+                    crate::desktop_service::termination_outcome::missing_offer_service,
+                )?)
+            } else {
+                None
+            };
+        let offer = tauri::async_runtime::spawn_blocking(move || {
+            if let Some(service) = service {
+                let (capture, selected) =
+                    crate::desktop_service::termination_outcome::Selected::inspect(
+                        service,
+                        &target,
+                        &machine,
+                        Arc::new((read, running.clone())),
+                    )?;
+                capture
+                    .map(|capture| programs::Offer::service(selected, capture, running, pending))
+                    .transpose()
+            } else {
+                programs::Offer::native(
+                    native.ok_or(STATE_CHANGED)?,
+                    &target,
+                    &machine,
+                    running,
+                    pending,
+                    read,
+                )
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        let Some(offer) = offer else {
+            return Ok(None);
+        };
+        let program_list = offer.programs();
+        let capture = offer.capture().clone();
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut m = lock(&state.0.model);
+        m.offers.retain(|o| o.at.elapsed() < OFFER_AGE);
+        m.prune_dismissed();
+        if m.offers.len() + m.jobs.len() + m.reserved >= LIMIT {
+            return Err(
+                "Review the retained working folders before starting another cleanup.".into(),
+            );
+        }
+        m.offers.push_back(Offer {
+            id: id.clone(),
+            capture,
+            selected: None,
+            at: Instant::now(),
+            programs: Some(offer),
+        });
+        drop(m);
+        program_pipeline::expire_offer(&state.0, &id);
+        return Ok(Some(OfferView {
+            id,
+            checked: settings.0.get(PREF).as_bool().unwrap_or(false),
+            programs: Some(program_list),
+        }));
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = (handle, actions);
     let service = if crate::desktop_service::mode() {
         Some(
             app.desktop_service()
@@ -803,18 +1156,15 @@ pub async fn termination_cleanup_offer(
         if let Some(service) = service {
             let (capture, selected) =
                 crate::desktop_service::termination_outcome::Selected::inspect(
-                    service,
-                    &call_target,
-                    &machine,
-                    Arc::new(_read),
+                    service, &target, &machine, read,
                 )?;
             return Ok((capture, Some(selected)));
         }
-        let _read = _read;
+        let _read = read;
         let hgs = default_hgs();
-        probe(&hgs, &call_target, &bounded_run)?;
-        let value = inspection(&hgs, &call_target, &machine, &bounded_run)?;
-        Capture::from_inspection(&call_target, &machine, &value).map(|capture| (capture, None))
+        probe(&hgs, &target, &bounded_run)?;
+        let value = inspection(&hgs, &target, &machine, &bounded_run)?;
+        Capture::from_inspection(&target, &machine, &value).map(|capture| (capture, None))
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -823,6 +1173,7 @@ pub async fn termination_cleanup_offer(
     };
     let mut m = lock(&state.0.model);
     m.offers.retain(|o| o.at.elapsed() < OFFER_AGE);
+    m.prune_dismissed();
     if m.offers.len() + m.jobs.len() + m.reserved >= LIMIT {
         return Err("Review the retained working folders before starting another cleanup.".into());
     }
@@ -832,15 +1183,37 @@ pub async fn termination_cleanup_offer(
         capture,
         selected,
         at: Instant::now(),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        programs: None,
     });
     Ok(Some(OfferView {
         id,
         checked: settings.0.get(PREF).as_bool().unwrap_or(false),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        programs: None,
     }))
 }
 #[tauri::command]
-pub fn termination_cleanup_cancel(state: State<'_, TerminationCleanup>, id: String) {
-    lock(&state.0.model).offers.retain(|o| o.id != id);
+pub async fn termination_cleanup_cancel(
+    state: State<'_, TerminationCleanup>,
+    id: String,
+) -> Result<(), String> {
+    let offer = {
+        let mut m = lock(&state.0.model);
+        m.offers
+            .iter()
+            .position(|o| o.id == id)
+            .and_then(|index| m.offers.remove(index))
+    };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(programs) = offer.and_then(|offer| offer.programs) {
+        return tauri::async_runtime::spawn_blocking(move || programs.close())
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    drop(offer);
+    Ok(())
 }
 #[tauri::command]
 pub async fn termination_cleanup_confirm(
@@ -877,9 +1250,16 @@ pub async fn termination_cleanup_confirm(
             })
             .transpose()?;
         m.reserved += 1;
-        (o.capture, delayed, o.selected)
+        (o, delayed)
     };
-    let (capture, delayed, selected) = capture;
+    let (offer, delayed) = capture;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(programs) = offer.programs {
+        let _ = settings.0.set(PREF, Value::Bool(true));
+        return program_pipeline::confirm(state.0.clone(), app, &actions, id, programs, delayed)
+            .await;
+    }
+    let (capture, selected) = (offer.capture, offer.selected);
     // A remembered checkbox default never changes the action's admission.
     let _ = settings.0.set(PREF, Value::Bool(true));
     let outcome = match (crate::desktop_service::mode(), selected) {
@@ -914,8 +1294,13 @@ pub async fn termination_cleanup_confirm(
                 busy: true,
                 phase: "checking",
                 manual_review: false,
+                dismissed: false,
+                program_review_pending: false,
+                program_retirement: None,
                 source: Some(capture.target.clone()),
                 restore_supported: true,
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                programs: None,
                 archive: Some(ArchiveIdentity {
                     version: 1,
                     archive_id: receipt["result_target"]["archive_id"]
@@ -943,12 +1328,19 @@ pub fn termination_cleanup_check(
     id: String,
 ) -> Result<View, String> {
     let mut m = lock(&state.0.model);
+    if m.jobs
+        .iter()
+        .find(|j| j.id == id)
+        .is_some_and(|j| j.dismissed || m.unknown_folder(j))
+    {
+        return Err("An unknown result will not be retried.".into());
+    }
     let j = m
         .jobs
         .iter_mut()
         .find(|j| j.id == id)
         .ok_or(STATE_CHANGED)?;
-    if j.busy || !j.cleanup.can_refresh() {
+    if j.busy || j.has_programs() || !j.cleanup.can_refresh() {
         return Err("An unknown result will not be retried.".into());
     }
     j.manual_review = true;
@@ -975,12 +1367,23 @@ pub fn termination_cleanup_remove(
     }
     consents.merged_branches = false;
     let mut calls = Vec::new();
+    let unknown_folders = m.unknown_folders();
+    let mut removing_folders = BTreeSet::new();
     for j in &mut m.jobs {
-        if !j.manual_review {
+        if j.dismissed
+            || unknown_folders.contains(&presentation::job_key(j))
+            || !j.manual_review
+            || !j.has_launch_owner()
+            || j.has_programs()
+        {
+            continue;
+        }
+        if removing_folders.contains(&presentation::job_key(j)) {
             continue;
         }
         let step = j.cleanup.remove(consents);
         if matches!(step, Step::Remove { .. }) {
+            removing_folders.insert(presentation::job_key(j));
             j.busy = true;
             j.phase = "removing";
             j.manual_review = false;
@@ -1002,14 +1405,29 @@ pub fn termination_cleanup_keep(
     revision: u64,
 ) -> Result<View, String> {
     let mut m = lock(&state.0.model);
-    if m.revision != revision || m.jobs.iter().any(|j| j.busy) || !m.restoring.is_empty() {
+    if m.revision != revision || !m.restoring.is_empty() {
         return Err("Cleanup changed or is still running. Review the recorded outcomes.".into());
     }
-    m.jobs.clear();
-    m.overflow_kept = 0;
-    m.overflow_unknown = 0;
+    m.clear_settled_results();
     changed(&app, &mut m);
     Ok(m.view())
+}
+
+/// Dismiss one folder result. Unknown evidence stays in the native model.
+#[tauri::command]
+pub fn termination_cleanup_dismiss(
+    app: AppHandle,
+    state: State<'_, TerminationCleanup>,
+    id: String,
+    revision: u64,
+) -> Result<View, String> {
+    let mut model = lock(&state.0.model);
+    if model.revision != revision {
+        return Err(STATE_CHANGED.into());
+    }
+    model.dismiss(&id)?;
+    changed(&app, &mut model);
+    Ok(model.view())
 }
 
 /// Read-only inspection of an opaque recorded row; never accepts a local root
@@ -1052,7 +1470,92 @@ pub async fn termination_cleanup_inspect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn raw_unavailable_git_metadata_cannot_hide_the_confirmed_cleanup_offer() {
+        let target = source();
+        // workspace::empty emits false for both not_repo and unavailable.
+        // Only the former proves this is an ordinary folder.
+        for (metadata, inspect) in [("unavailable", true), ("not_repo", false), ("ok", false)] {
+            let raw = serde_json::json!({
+                "name": target.name, "tracked": true, "run_id": target.run_id,
+                "conversation_id": target.conversation_id,
+                "git_root": "", "git_branch": "", "git_worktree": false,
+                "git_worktree_name": "", "git_detached": false, "git_common_dir": "",
+                "git_metadata_state": metadata
+            });
+            let mut row = zerus_client_core::view::row(&raw);
+            row.machine = "fixture-machine".into();
+            assert_eq!(offer_candidate(&row, &target), Ok(inspect), "{metadata}");
+            let wire = serde_json::to_value(row).unwrap();
+            assert_eq!(
+                wire.get("git_worktree")
+                    .and_then(serde_json::Value::as_bool),
+                (!inspect).then_some(false),
+                "{metadata}"
+            );
+        }
+    }
+    #[test]
+    fn known_ordinary_folder_never_needs_the_offer_pipeline_before_a_first_turn() {
+        let mut target = source();
+        target.conversation_id.clear();
+        let mut row = zerus_client_core::ViewRow {
+            name: target.name.clone(),
+            state: "running".into(),
+            run_id: Some(target.run_id.clone()),
+            conversation_id: None,
+            machine: "fixture-machine".into(),
+            git_worktree: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(offer_candidate(&row, &target), Ok(false));
+        row.git_worktree = None;
+        assert_eq!(offer_candidate(&row, &target), Ok(false));
+        target.conversation_id = "first-conversation".into();
+        row.conversation_id = Some(target.conversation_id.clone());
+        assert_eq!(
+            offer_candidate(&row, &target),
+            Ok(true),
+            "unreported metadata still gets inspected"
+        );
+        row.git_worktree = Some(true);
+        assert_eq!(offer_candidate(&row, &target), Ok(true));
+        row.git_worktree = Some(false);
+        row.conversation_id = Some("replacement-conversation".into());
+        assert!(offer_candidate(&row, &target).is_err());
+        row.conversation_id = Some(target.conversation_id.clone());
+        row.run_id = Some("replacement".into());
+        assert!(offer_candidate(&row, &target).is_err());
+    }
     use zerus_client_core::termination_cleanup::Entry;
+    #[test]
+    fn a_native_read_resource_can_settle_while_the_cleanup_model_is_locked() {
+        let inner = Arc::new(Inner::default());
+        let read = inner.read().unwrap();
+        let (start, started) = std::sync::mpsc::sync_channel(0);
+        let (done, settled) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            started.recv().unwrap();
+            drop(read);
+            done.send(()).unwrap();
+        });
+        let model = lock(&inner.model);
+        start.send(()).unwrap();
+        let independent = settled.recv_timeout(Duration::from_secs(5)).is_ok();
+        // Always release/join, including the old-order RED control.
+        drop(model);
+        worker.join().unwrap();
+        assert!(
+            independent,
+            "cancel/Keep/expiry must not re-enter the held model lock"
+        );
+        assert!(lock(&inner.reads).is_empty());
+        assert_eq!(
+            Arc::strong_count(&inner),
+            1,
+            "read slots never retain the model"
+        );
+    }
     const MACHINE: &str = "11111111-1111-4111-8111-111111111111";
     const ARCHIVE: &str = "22222222-2222-4222-8222-222222222222";
     fn source() -> Target {
@@ -1206,7 +1709,10 @@ mod tests {
         assert!(capture.notice.ends_with("an unknown result."));
         let view = model.view();
         assert_eq!(view.rows.len(), LIMIT);
-        assert_eq!(view.kept, LIMIT);
+        assert_eq!(
+            view.kept, 1,
+            "the native capacity counts jobs; the view counts folders"
+        );
         assert_eq!(view.unknown, 1);
         assert!(view
             .title
@@ -1221,6 +1727,7 @@ mod tests {
         model.retain(&source(), MACHINE, &report, true);
         let view = model.view();
         assert_eq!(view.rows[0].status, "review");
+        assert_eq!(view.text, "Folder kept: work.");
         assert_eq!(
             view.rows[0].reason,
             "Not created by Zerus; review the folder manually"
@@ -1300,9 +1807,14 @@ mod tests {
             busy: false,
             phase: "checking",
             manual_review: false,
+            dismissed: false,
+            program_review_pending: false,
+            program_retirement: None,
             source: None,
             archive: None,
             restore_supported: false,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            programs: None,
         }
     }
     #[test]
@@ -1337,11 +1849,293 @@ mod tests {
         );
         m.jobs.push_back(job(Some(Status::Kept)));
         let view = m.view();
-        assert_eq!(view.kept, 1);
-        assert!(view.rows[1].can_check);
-        assert_eq!(view.text, "Working folders: 1 kept  1 unknown");
+        assert_eq!(view.kept, 0);
+        assert!(
+            !view.rows[1].can_check,
+            "an unknown sibling fences the whole folder"
+        );
+        assert_eq!(view.text, "Working folders: 1 unknown");
         m.jobs[1].busy = true;
+        assert_eq!(m.view().text, "Working folders: 1 unknown");
+    }
+    #[test]
+    fn clearing_settled_results_preserves_program_review_busy_and_unknown_rows() {
+        let mut m = Model::default();
+        let mut settled = job(Some(Status::Kept));
+        settled.id = "settled".into();
+        settled.cleanup.entries[0].row["path"] = json!("/srv/example/settled");
+        m.jobs.push_back(settled);
+        let mut programs = job(Some(Status::Kept));
+        programs.id = "programs".into();
+        // The live pipeline sets this before its stop starts. It survives the
+        // holder's expiry: loss of Force consent is not a completed stop.
+        programs.program_review_pending = true;
+        assert!(!programs.has_programs());
+        m.jobs.push_back(programs);
+        let mut busy = job(None);
+        busy.id = "busy".into();
+        busy.busy = true;
+        m.jobs.push_back(busy);
+        let mut unknown = job(Some(Status::Unconfirmed));
+        unknown.id = "unknown".into();
+        m.jobs.push_back(unknown);
+        m.overflow_kept = 2;
+        m.overflow_unknown = 1;
+        let originals: Vec<_> = m.jobs.iter().skip(1).map(|j| j.cleanup.clone()).collect();
+        assert!(m.view().can_clear);
+        m.clear_settled_results();
+        assert_eq!(
+            m.jobs.iter().map(|j| j.id.as_str()).collect::<Vec<_>>(),
+            ["programs", "busy", "unknown"]
+        );
+        assert_eq!(
+            m.jobs.iter().map(|j| j.cleanup.clone()).collect::<Vec<_>>(),
+            originals
+        );
+        assert_eq!(m.overflow_kept, 0);
+        assert_eq!(m.overflow_unknown, 1);
+        assert!(!m.view().can_clear);
+        m.clear_settled_results();
+        assert_eq!(m.jobs.len(), 3);
+    }
+    #[test]
+    fn program_retirement_is_closed_presentation_and_never_changes_the_cleanup_outcome() {
+        let mut m = Model::default();
+        let mut j = job(Some(Status::Kept));
+        j.program_review_pending = true;
+        let original = j.cleanup.clone();
+        m.jobs.push_back(j);
+        for (reason, code) in [
+            (ProgramRetirement::Expired, "expired"),
+            (ProgramRetirement::SourceUnavailable, "source_unavailable"),
+            (ProgramRetirement::HolderUnavailable, "holder_unavailable"),
+            (ProgramRetirement::OfferUnavailable, "offer_unavailable"),
+            (ProgramRetirement::StopUnconfirmed, "stop_unconfirmed"),
+            (ProgramRetirement::CleanupSettled, "cleanup_settled"),
+            (ProgramRetirement::CleanupUnconfirmed, "cleanup_unconfirmed"),
+        ] {
+            m.jobs[0].program_retirement = Some(reason);
+            let view = m.view();
+            assert!(!view.rows[0].can_force);
+            assert_eq!(view.rows[0].force_revision, None);
+            assert_eq!(view.rows[0].status, "kept");
+            assert_eq!(
+                serde_json::to_value(view.rows[0].program_retirement).unwrap(),
+                code
+            );
+            m.clear_settled_results();
+            assert_eq!(m.jobs[0].cleanup, original);
+        }
+    }
+    #[test]
+    fn ordinary_known_use_is_a_settled_kept_result() {
+        for row in [
+            json!({"process_count":1}),
+            json!({"processes":[{"pid":42}]}),
+            json!({"reasons":[{"code":"processes"}]}),
+        ] {
+            let mut j = job(Some(Status::Kept));
+            j.cleanup.entries[0].row = row;
+            let mut m = Model::default();
+            m.jobs.push_back(j);
+            assert!(m.view().can_clear);
+            m.clear_settled_results();
+            assert!(m.jobs.is_empty());
+        }
+    }
+    #[test]
+    fn a_shared_folder_is_counted_once_and_dismisses_settled_origins_together() {
+        let mut m = Model::default();
+        for id in ["first", "second", "third"] {
+            let mut j = job(Some(Status::Kept));
+            j.id = id.into();
+            j.cleanup.entries[0].row["sessions"] = json!(["claude/example/live"]);
+            j.cleanup.entries[0].row["processes"] = json!([{"pid":42,"command":"report-server"}]);
+            m.jobs.push_back(j);
+        }
+        let view = m.view();
+        assert_eq!(view.kept, 1);
+        assert_eq!(view.rows.len(), 3);
+        assert!(view.rows.iter().all(|r| r.can_dismiss));
+        assert_eq!(view.rows[0].sessions, ["claude/example/live"]);
+        assert_eq!(view.rows[0].processes[0].pid, 42);
+        m.dismiss("second").unwrap();
+        assert!(m.jobs.is_empty());
+    }
+    #[test]
+    fn a_pending_stop_keeps_every_origin_of_its_folder_in_review() {
+        for busy in [false, true] {
+            let mut m = Model::default();
+            let mut pending = job(Some(Status::Kept));
+            pending.id = "pending".into();
+            pending.busy = busy;
+            pending.program_review_pending = !busy;
+            m.jobs.push_back(pending);
+            let mut settled = job(Some(Status::Kept));
+            settled.id = "settled".into();
+            m.jobs.push_back(settled);
+            let before: Vec<_> = m.jobs.iter().map(|j| j.cleanup.clone()).collect();
+            assert!(!m.view().can_clear);
+            assert!(m.dismiss("settled").is_err());
+            m.clear_settled_results();
+            assert_eq!(m.jobs.len(), 2);
+            assert_eq!(
+                m.jobs.iter().map(|j| j.cleanup.clone()).collect::<Vec<_>>(),
+                before
+            );
+        }
+    }
+    #[test]
+    fn unknown_dismissal_hides_only_one_result_and_preserves_its_native_fence() {
+        let state = TerminationCleanup::default();
+        {
+            let mut m = lock(&state.0.model);
+            for id in ["first", "second"] {
+                let mut j = job(Some(Status::Unconfirmed));
+                j.id = id.into();
+                m.jobs.push_back(j);
+            }
+            m.clear_settled_results();
+            assert_eq!(m.view().rows.len(), 2);
+            let before = m.jobs[0].cleanup.clone();
+            m.dismiss("first").unwrap();
+            assert_eq!(m.view().rows.len(), 1);
+            assert_eq!(m.jobs[0].cleanup, before);
+            m.dismiss("second").unwrap();
+            m.prune_dismissed();
+            assert!(m.view().rows.is_empty());
+            assert_eq!(m.jobs.len(), 2);
+            assert_eq!(m.unknown_folders().len(), 1);
+            let mut later = job(Some(Status::Kept));
+            later.id = "later".into();
+            later.manual_review = true;
+            m.jobs.push_back(later);
+            let row = m.view().rows.pop().unwrap();
+            assert!(!row.can_check && !row.ready);
+        }
+        assert!(state.unknown(MACHINE, "/srv/example/.git", "/srv/example/work"));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn physically_settled_program_cleanup_kept_or_unknown_can_be_dismissed() {
+        use zerus_client_core::worktree_programs::cleanup::{Reason, Report, State};
+        for status in [State::Kept, State::Unknown] {
+            let state = TerminationCleanup::default();
+            {
+                let mut m = lock(&state.0.model);
+                let mut j = job(Some(Status::Kept));
+                j.program_review_pending = true;
+                j.busy = true;
+                j.cleanup.entries[0].row["process_count"] = json!(1);
+                let report = Report {
+                    request_id: "original-removal".into(),
+                    binding: "original-binding".into(),
+                    state: status,
+                    reason: Some(if status == State::Kept {
+                        Reason::Changed
+                    } else {
+                        Reason::Unconfirmed
+                    }),
+                };
+                assert!(!program_pipeline::record_cleanup_result(
+                    &mut j,
+                    &Ok(report),
+                    true
+                ));
+                assert_eq!(
+                    j.program_retirement,
+                    Some(if status == State::Kept {
+                        ProgramRetirement::CleanupSettled
+                    } else {
+                        ProgramRetirement::CleanupUnconfirmed
+                    })
+                );
+                m.jobs.push_back(j);
+                assert!(m.view().rows[0].can_dismiss);
+                assert_eq!(m.view().can_clear, status == State::Kept);
+                m.dismiss("job-1").unwrap();
+                assert!(m.view().rows.is_empty());
+            }
+            assert_eq!(
+                state.unknown(MACHINE, "/srv/example/.git", "/srv/example/work"),
+                status == State::Unknown
+            );
+        }
+        let mut j = job(Some(Status::Kept));
+        j.program_review_pending = true;
+        j.busy = true;
+        assert!(!program_pipeline::record_cleanup_result(
+            &mut j,
+            &Err("physical close unconfirmed".into()),
+            false
+        ));
+        assert_eq!(
+            j.program_retirement,
+            Some(ProgramRetirement::CleanupUnconfirmed)
+        );
+        let mut m = Model::default();
+        m.jobs.push_back(j);
+        assert!(!m.view().can_clear && !m.view().rows[0].can_dismiss);
+        assert!(m.dismiss("job-1").is_err());
+    }
+
+    #[test]
+    fn a_running_folder_never_replaces_a_held_result_in_the_chip_text() {
+        let mut m = Model::default();
+        let mut running = job(None);
+        running.id = "running".into();
+        running.cleanup.entries[0].row = json!({"path":"/srv/example/running"});
+        running.busy = true;
+        m.jobs.push_back(running);
         assert_eq!(m.view().text, "Cleaning working folders…");
+
+        m.jobs.push_back(job(Some(Status::Kept)));
+        let view = m.view();
+        assert!(view.cleaning);
+        assert_eq!(
+            view.text, "Folder kept: work.",
+            "not the running folder's name"
+        );
+
+        m.jobs.back_mut().unwrap().cleanup.entries[0].status = Some(Status::Unconfirmed);
+        assert_eq!(m.view().text, "Working folders: 1 unknown");
+    }
+    #[test]
+    fn a_kept_result_past_the_row_cap_is_counted_rather_than_named() {
+        let m = Model {
+            overflow_kept: 1,
+            ..Model::default()
+        };
+        assert_eq!(m.view().text, "Working folders: 1 kept");
+    }
+    #[test]
+    fn activity_follows_the_running_job_and_stays_apart_from_its_outcome() {
+        let mut m = Model::default();
+        m.jobs.push_back(job(None));
+        assert_eq!(m.view().rows[0].activity, None, "not running");
+        m.jobs[0].busy = true;
+        for phase in ["checking", "removing", "stopping"] {
+            m.jobs[0].phase = phase;
+            assert_eq!(m.view().rows[0].activity, Some(phase));
+        }
+        m.jobs[0].cleanup.entries[0].status = Some(Status::Kept);
+        m.jobs[0].phase = "checking";
+        let view = m.view();
+        assert_eq!(view.rows[0].status, "kept");
+        assert_eq!(view.rows[0].activity, Some("checking"));
+        m.jobs[0].busy = false;
+        assert_eq!(m.view().rows[0].activity, None);
+    }
+    #[test]
+    fn a_restoring_row_reports_the_restore_and_not_a_cleanup_phase() {
+        let mut model = Model::default();
+        model.retain(&source(), MACHINE, &report("kept"), true);
+        model.jobs[0].busy = true;
+        model
+            .restoring
+            .insert(format!("{}\n{}", source().computer, ARCHIVE));
+        assert_eq!(model.view().rows[0].activity, Some("restoring"));
     }
     #[test]
     fn a_background_kept_folder_is_not_a_manual_removal_without_check_again() {
@@ -1419,7 +2213,7 @@ mod tests {
         held.pop();
         assert!(inner.read().is_ok());
         drop(held);
-        assert!(lock(&inner.model).reads.is_empty());
+        assert!(lock(&inner.reads).is_empty());
     }
     #[test]
     fn old_or_oversized_help_never_admits_the_optional_scoped_action() {

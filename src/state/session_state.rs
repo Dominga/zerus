@@ -50,6 +50,8 @@ pub(super) fn decorate(sessions: &mut [Value]) {
     let leads: Vec<(String, String, String)> =
         waiting.iter().filter(|w| w.lead).map(|w| (w.team.clone(), String::new(), w.name.clone())).collect();
     let deferred = teams::owner_queue::mobile_items(&leads);
+    // Task 352: a session moved to another agent names the other session.
+    super::switch_provider::decorate(sessions);
     for session in sessions.iter_mut() {
         let team = waiting.iter().find(|w| {
             w.name == text(session, "name")

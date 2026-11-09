@@ -33,6 +33,13 @@ export interface ActivityPort {
   unfollow(computer: ComputerId, key: string): Promise<void>;
 }
 
+/**
+ * How long a follow may go without its first answer before the Activity says
+ * so and offers Retry, instead of reading forever (zerus-bz54l): a remote
+ * computer that stopped answering, for example.
+ */
+export const FIRST_PAGE_MS = 20_000;
+
 /** The newest events a subscription starts with (the server allows 100). */
 export const TAIL = 100;
 /** The first older read reaches this many journal rows back; empty reads double it. */
@@ -67,6 +74,18 @@ function ordered(map: Map<string, ActivityEvent>): ActivityEvent[] {
   return list;
 }
 
+/**
+ * Task #437 (owner, 2026-11-09): a keep-warm turn never shows in Activity,
+ * history, a notification, an unread reply or a last-message preview. The host
+ * marks it (`turn_origin`/`origin`); a history written before the marks keeps
+ * the ping's envelope in the detail.
+ */
+export function keepWarmEvent(event: ActivityEvent): boolean {
+  const e = event as { turn_origin?: unknown; origin?: unknown; detail?: unknown };
+  if (e.turn_origin === "keep_warm" || e.origin === "cache_keepalive" || e.origin === "keep_warm") return true;
+  return typeof e.detail === "string" && e.detail.startsWith("<zerus-cache-keepalive>");
+}
+
 export function createActivity(port: ActivityPort) {
   const [target, setTarget] = createSignal<FollowTarget | undefined>();
   const [events, setEvents] = createSignal<readonly ActivityEvent[]>([]);
@@ -79,6 +98,9 @@ export function createActivity(port: ActivityPort) {
   const [olderDone, setOlderDone] = createSignal(false);
   /** Why the last follow failed (unknown computer, too many followed sessions, ...). */
   const [error, setError] = createSignal<string | undefined>();
+  /** The first answer did not come within FIRST_PAGE_MS; Retry subscribes again. */
+  const [stalled, setStalled] = createSignal(false);
+  let firstPage: ReturnType<typeof setTimeout> | undefined;
 
   let byKey = new Map<string, ActivityEvent>();
   let stateRev = -1;
@@ -87,6 +109,8 @@ export function createActivity(port: ActivityPort) {
   let olderFrom: number | undefined;
   let olderTimer: ReturnType<typeof setTimeout> | undefined;
   let subscribed: FollowTarget | undefined;
+  /** Each follow and Retry is one read attempt: a retired one's late timers, failures and steps are ignored. */
+  let attempt = 0;
   // One display-only bridge across a run change; routing always uses target().
   let resuming: { conversation: string; previous: Map<string, ActivityEvent>; incoming: Map<string, ActivityEvent>; page: boolean; confirmed: boolean } | undefined;
 
@@ -123,7 +147,9 @@ export function createActivity(port: ActivityPort) {
     span = OLDER_SPAN;
     olderFrom = undefined;
     clearTimeout(olderTimer);
+    clearTimeout(firstPage);
     batch(() => {
+      setStalled(false);
       setEvents([]);
       setSummary(undefined);
       setTranscriptSummary(undefined);
@@ -154,6 +180,7 @@ export function createActivity(port: ActivityPort) {
     // incoming page into the retained conversation or its resume cursor.
     const retained = resuming && !resuming.confirmed ? resuming.previous : byKey;
     const after = continuing ? newestSeq(retained) : undefined;
+    const mine = ++attempt;
     subscribed = undefined;
     if (prev) void port.unfollow(prev.computer, prev.key).catch(() => {});
     batch(() => {
@@ -168,6 +195,9 @@ export function createActivity(port: ActivityPort) {
         setEnded(false);
         setLoadingOlder(false);
         setError(undefined);
+        // The earlier run's stall is not this run's: its read has not started yet.
+        clearTimeout(firstPage);
+        setStalled(false);
       } else {
         reset();
         setDisplayKey(next?.id);
@@ -175,16 +205,49 @@ export function createActivity(port: ActivityPort) {
       setTarget(next);
     });
     const subscribe = () => {
-      if (!next || target() !== next) return;
+      if (!next || target() !== next || attempt !== mine) return;
       subscribed = next;
+      watchFirstPage(next, mine);
       void port.follow(request(next, after)).catch((reason) => {
-        if (target() === next) batch(() => { setError(String(reason)); setLoaded(true); });
+        if (target() === next && attempt === mine) batch(() => { setError(String(reason)); setLoaded(true); });
       });
     };
     // A failed composer does not prevent read-only Activity. The await orders
     // subscription delivery only; it supplies no native readiness or authority.
     if (opened) void opened.then(subscribe, subscribe);
     else subscribe();
+  }
+
+  /** A follow whose first answer does not come in time ends in a visible state, not in reading forever. */
+  function watchFirstPage(next: FollowTarget, mine: number) {
+    clearTimeout(firstPage);
+    setStalled(false);
+    firstPage = setTimeout(() => { if (target() === next && attempt === mine && !loaded()) setStalled(true); }, FIRST_PAGE_MS);
+  }
+
+  /**
+   * Retry after a stalled first page (zerus-lxt6o): one new attempt for the
+   * same session. Only a stalled subscription that passed its composer
+   * barrier retries; the native side may deduplicate an unchanged follow, so
+   * it subscribes again only once the earlier one's unfollow settled.
+   */
+  function retry() {
+    const t = target();
+    if (!t || loaded() || !stalled() || subscribed !== t) return;
+    const mine = ++attempt;
+    const current = () => target() === t && attempt === mine;
+    subscribed = undefined;
+    clearTimeout(firstPage);
+    setStalled(false);
+    const again = () => {
+      if (!current()) return;
+      subscribed = t;
+      watchFirstPage(t, mine);
+      void port.follow(request(t)).catch((reason) => {
+        if (current()) batch(() => { setError(String(reason)); setLoaded(true); });
+      });
+    };
+    void port.unfollow(t.computer, t.key).then(again, again);
   }
 
   /** The finish of an older read: it either moved the oldest event back or doubles the reach. */
@@ -225,7 +288,11 @@ export function createActivity(port: ActivityPort) {
         switch (out.kind) {
           case "events": {
             const { events: list } = payloadEvents(out.payload);
-            for (const e of list) { byKey.set(eventKey(e), e); resuming?.incoming.set(eventKey(e), e); }
+            for (const e of list) {
+              if (keepWarmEvent(e)) continue;
+              byKey.set(eventKey(e), e);
+              resuming?.incoming.set(eventKey(e), e);
+            }
             if (resuming) { resuming.page = true; settleResume(); }
             changed = true;
             older = true;
@@ -233,7 +300,8 @@ export function createActivity(port: ActivityPort) {
             break;
           }
           case "replace": {
-            const { events: list } = payloadEvents(out.payload);
+            const { events: all } = payloadEvents(out.payload);
+            const list = all.filter((e) => !keepWarmEvent(e));
             const incoming = new Map(list.map((e) => [eventKey(e), e]));
             if (resuming) {
               resuming.incoming = incoming;
@@ -250,6 +318,7 @@ export function createActivity(port: ActivityPort) {
           case "event": {
             const p = (out.payload ?? {}) as { id?: string; rev?: number; event?: ActivityEvent };
             if (!p.event || !p.id) break;
+            if (keepWarmEvent(p.event)) break;
             const rev = typeof p.rev === "number" ? p.rev : 0;
             if ((revs.get(p.id) ?? -1) >= rev) break;
             revs.set(p.id, rev);
@@ -312,7 +381,7 @@ export function createActivity(port: ActivityPort) {
     return { computer: t.computer, name: t.name, conversation_id: conversation, archive_id: null };
   };
 
-  return { target, displayKey, events, summary, transcriptSummary, ended, loaded, loadingOlder, olderDone, error, follow, loadOlder, applyActivity, attachmentScope };
+  return { target, displayKey, events, summary, transcriptSummary, ended, loaded, loadingOlder, olderDone, error, stalled, retry, follow, loadOlder, applyActivity, attachmentScope };
 }
 
 export type ActivityStore = ReturnType<typeof createActivity>;

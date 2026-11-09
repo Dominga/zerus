@@ -675,3 +675,65 @@ fn a_notice_queued_before_seed_loading_is_rechecked_before_the_native_call() {
         assert!(calls.try_recv().is_err(), "a retained edge must never post");
     }
 }
+
+/// zerus-5wmh.13.13.1 (review-win-e's control for #1788): tray messages hold at
+/// most one slot of the store across expiry and restarts, each replacing the
+/// last, so they never refuse a real attention notice.
+#[test]
+fn tray_messages_hold_one_slot_across_expiry_and_restarts() {
+    let mut f = Fixture::new();
+    let tray = crate::desk::TRAY_TOKEN;
+    let post_tray = |f: &Fixture, n: usize| {
+        let (cleared, raised) =
+            crate::desk::tray_delivery("Zerus: the terminal did not open", &format!("attempt {n}"));
+        f.poster.deliver(cleared, raised);
+        let call = f.calls.recv_timeout(Duration::from_secs(5)).unwrap();
+        wait(|| {
+            lock(&f.poster.shared.state)
+                .saved
+                .tokens
+                .get(&call.id)
+                .is_some_and(|shown| shown == tray)
+        });
+        call
+    };
+    let held = |f: &Fixture| {
+        let state = lock(&f.poster.shared.state);
+        state
+            .saved
+            .tokens
+            .values()
+            .filter(|shown| *shown == tray)
+            .count()
+            + usize::from(state.pending.contains_key(tray))
+            + usize::from(state.saved.uncertain.contains(tray))
+    };
+    // Expired, then restarted: the next message withdraws it.
+    let first = post_tray(&f, 0);
+    f.server.emit("NotificationClosed", &(first.id, 1_u32));
+    f.restart(Box::new(|| panic!("saved state exists")));
+    assert_eq!(held(&f), 1);
+    let second = post_tray(&f, 1);
+    assert_eq!(
+        f.closed.recv_timeout(Duration::from_secs(5)).unwrap(),
+        first.id
+    );
+    assert_eq!(held(&f), 1);
+    // Many messages, with restarts between them, still hold one slot.
+    let mut last = second;
+    for n in 2..40 {
+        if n % 10 == 0 {
+            f.restart(Box::new(|| panic!("saved state exists")));
+        }
+        let next = post_tray(&f, n);
+        assert_eq!(
+            f.closed.recv_timeout(Duration::from_secs(5)).unwrap(),
+            last.id
+        );
+        last = next;
+        assert_eq!(held(&f), 1);
+    }
+    // A real attention notice is still posted.
+    let call = f.post("a-real-attention-edge");
+    assert!(call.id > last.id);
+}

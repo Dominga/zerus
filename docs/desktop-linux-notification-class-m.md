@@ -6,6 +6,13 @@ allocator measurements for this audit are zero. No numeric SDK heap bound or
 whole-profile qualification is established.
 The production allocator/metadata/whole-profile gate remains open.
 
+The proposed [private probe code plan](desktop-linux-notification-class-m-probe-plan.md)
+separately pins the target, callback ordering, provenance-preserving controls,
+fixed phase schedule and finite-prefix reporting. Thread enforcement remains
+an unadmitted execution prerequisite; real close-failure coverage is unverified.
+It requires fresh G1/G3 agreement before code and later implementation,
+execution and raw-proof reviews; this link grants none of those approvals.
+
 The baseline is the dormant startup from PR #822: one original worker, one
 concrete async-io Unix connection, one socket-reader task, two logical receivers
 over one raw16 queue, sequential Hello/AddMatch/RemoveMatch calls, and no body

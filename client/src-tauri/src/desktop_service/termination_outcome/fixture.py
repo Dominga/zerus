@@ -93,6 +93,15 @@ elif args[:1] in [['inspect'], ['session-action']] or args[:2] in [['desktop', '
             sys.stdout.write('x' * 65537)
             sys.stdout.flush()
             sys.exit(0)
+        if config.get('termination_effect_completed_pipe') and os.fork() == 0:
+            until = time.monotonic() + 20
+            while not (root / 'termination-release').exists() and time.monotonic() < until:
+                time.sleep(.005)
+            os._exit(0)
+        if config.get('termination_effect_cleanup'):
+            status = config['termination_effect_cleanup']
+            print('ZERUS_WORKTREE_CLEANUP ' + json.dumps(dict(status=status,
+                path=capture['root'], common_dir=capture['common_dir'])), file=sys.stderr, flush=True)
         print(json.dumps(dict(request_id=value['request_id'], name=capture['target']['name'],
             run_id=capture['target']['run_id'], conversation_id=capture['target']['conversation_id'], status='completed',
             result_target=dict(name=capture['target']['name'], run_id=capture['target']['run_id'],

@@ -19,7 +19,7 @@ class Upgrade(unittest.TestCase):
     def setUp(self):
         # Darwin's default temp root can exceed the native Unix socket bound.
         self.temporary = tempfile.TemporaryDirectory(
-            prefix='desktop-upgrade-', dir='/tmp' if sys.platform == 'darwin' else None)
+            prefix='desktop-upgrade-', dir=os.environ.get('ZERUS_TEST_SHORT_TMPDIR', '/tmp') if sys.platform == 'darwin' else None)
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
         for name in ('config', 'state', 'tmp', 'tmux', 'bin'):

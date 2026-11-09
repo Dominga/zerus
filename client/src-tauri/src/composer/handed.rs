@@ -19,15 +19,26 @@
 //! written, the draft is a delivery of that message held by the service,
 //! shown with [`STILL_SENDING`] and a locked Cancel send, and its result ends
 //! it as a handed send's would.
+//!
+//! A "Resume and send" of a stopped Claude, Kimi or Codex session the
+//! service takes (zerus-5wmh.66.4.9 and .10, the session_resume kind) is
+//! handed over the same way from its start's call
+//! ([`Composers::hand_start`]). A fresh start and a resume with compaction
+//! stay direct, and so does a Codex session for a service that does not
+//! observe its resumed agent.
 use super::send::{Call, Delivery};
 use super::*;
 use crate::desktop_service::compact_to_send::{self, CompactAnswer};
 use crate::desktop_service::deferred_send::{self, Checked, SendAnswer, STILL_SENDING};
+use crate::desktop_service::session_resume::{self, ResumeAnswer};
 use zerus_client_core::actions::Outcome;
 use zerus_client_core::attachments::StoredFile;
 use zerus_client_core::desktop::compact_to_send::Plan as CompactPlan;
 use zerus_client_core::desktop::deferred_send::Plan;
-use zerus_client_core::operation_recovery::deferred_input::{Checkpoint, Kind};
+use zerus_client_core::desktop::session_resume::Plan as ResumePlan;
+use zerus_client_core::operation_recovery::deferred_input::{
+    Checkpoint, Kind, Start, SESSION_RESUME_VERSION,
+};
 
 /// The first check after a hand-over, and the longest wait between two.
 const FIRST: f64 = 2.0;
@@ -39,6 +50,11 @@ type HandingFn<'a> = dyn Fn(&CompactPlan) -> bool + 'a;
 type CompactFn =
     dyn Fn(&str, &Checkpoint, &[u8], &[u8], &HandingFn<'_>) -> CompactAnswer + Send + Sync;
 type CompactCheckFn = dyn Fn(&CompactPlan) -> Checked + Send + Sync;
+type ResumeHandingFn<'a> = dyn Fn(&ResumePlan) -> bool + 'a;
+type ResumeFn =
+    dyn Fn(&str, &Checkpoint, &[u8], &[u8], &ResumeHandingFn<'_>) -> ResumeAnswer + Send + Sync;
+/// A check of a handed resume, with the run its resume's receipt returned.
+type ResumeCheckFn = dyn Fn(&ResumePlan) -> (Checked, Option<String>) + Send + Sync;
 
 /// The selected desktop service's deferred send route.
 pub struct DeferredRoute {
@@ -58,11 +74,24 @@ pub struct CompactRoute {
     pub check: Arc<CompactCheckFn>,
 }
 
-/// The original a handed draft holds: a send, or a compact-to-send.
+/// The selected desktop service's session resume route.
+pub struct ResumeRoute {
+    /// Offers the original once, calling its hand-over hook with the plan
+    /// right before the offer is written, and waits, bounded, for its
+    /// result.
+    pub offer: Arc<ResumeFn>,
+    /// One read-only lookup by the exact plan, with the run its resume's
+    /// receipt returned once recorded. It never resumes or sends.
+    pub check: Arc<ResumeCheckFn>,
+}
+
+/// The original a handed draft holds: a send, a compact-to-send or a
+/// resume-then-send.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum HandedPlan {
     Send(Plan),
     Compact(CompactPlan),
+    Resume(ResumePlan),
 }
 impl HandedPlan {
     /// The identity the draft's checkpoint holds.
@@ -70,6 +99,7 @@ impl HandedPlan {
         match self {
             Self::Send(plan) => &plan.request_id,
             Self::Compact(plan) => &plan.compaction_request_id,
+            Self::Resume(plan) => &plan.resume_request_id,
         }
     }
     /// The request of its message's local row: the send.
@@ -77,15 +107,61 @@ impl HandedPlan {
         match self {
             Self::Send(plan) => &plan.request_id,
             Self::Compact(plan) => &plan.send_request_id,
+            Self::Resume(plan) => &plan.send_request_id,
         }
     }
     fn message_sha256(&self) -> &str {
         match self {
             Self::Send(plan) => &plan.message_sha256,
             Self::Compact(plan) => &plan.message_sha256,
+            Self::Resume(plan) => &plan.message_sha256,
         }
     }
 }
+
+/// The continuation a hand-over ends: the compaction of a "Compact and
+/// continue" or the start of a "Resume and send".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Continuation {
+    Compaction,
+    Start,
+}
+impl Continuation {
+    fn start(self) -> bool {
+        self == Self::Start
+    }
+}
+
+/// What the service says about a continuation it was offered, either kind;
+/// a settled resume names the run its message's row belongs to.
+enum Continued {
+    Settled(SendAnswer, Option<String>),
+    Pending(HandedPlan),
+    Direct,
+}
+impl From<CompactAnswer> for Continued {
+    fn from(answer: CompactAnswer) -> Self {
+        match answer {
+            CompactAnswer::Settled(answer) => Self::Settled(answer, None),
+            CompactAnswer::Pending(plan) => Self::Pending(HandedPlan::Compact(plan)),
+            CompactAnswer::Direct => Self::Direct,
+        }
+    }
+}
+impl From<ResumeAnswer> for Continued {
+    fn from(answer: ResumeAnswer) -> Self {
+        match answer {
+            ResumeAnswer::Settled(answer, run) => Self::Settled(answer, run),
+            ResumeAnswer::Pending(plan) => Self::Pending(HandedPlan::Resume(plan)),
+            ResumeAnswer::Direct => Self::Direct,
+        }
+    }
+}
+/// A continuation's two exact stdins, as its direct calls would get them.
+type StdinsFn<'a> = dyn Fn(&Delivery, &Checkpoint) -> Option<(Vec<u8>, Vec<u8>)> + 'a;
+/// Offers a continuation once with its stdins and hand-over hook.
+type OfferFn<'a> =
+    dyn Fn(&Delivery, &Checkpoint, &[u8], &[u8], &dyn Fn(HandedPlan) -> bool) -> Continued + 'a;
 
 /// An original the service holds: what its checks need.
 #[derive(Clone, Debug)]
@@ -107,9 +183,10 @@ impl Handed {
             checking: false,
         }
     }
-    /// A handed "Compact and continue": Cancel send stays shown, locked.
-    pub(crate) fn compacts(&self) -> bool {
-        matches!(self.plan, HandedPlan::Compact(_))
+    /// A handed "Compact and continue" or "Resume and send": Cancel send
+    /// stays shown, locked.
+    pub(crate) fn locked(&self) -> bool {
+        matches!(self.plan, HandedPlan::Compact(_) | HandedPlan::Resume(_))
     }
 }
 
@@ -169,6 +246,24 @@ impl Composers {
 
     fn compact(&self) -> Option<Arc<CompactRoute>> {
         lock(&self.0.compact).clone()
+    }
+
+    /// Sets the session resume route (the app, at start): Linux and macOS in
+    /// desktop-service mode. Without one every "Resume and send" goes
+    /// direct.
+    #[cfg(any(target_os = "linux", target_os = "macos", test))]
+    pub fn set_resume(&self, route: ResumeRoute) {
+        *lock(&self.0.resume) = Some(Arc::new(route));
+    }
+
+    /// Whether a session resume route is set: a "Resume and send" may be
+    /// offered to the service.
+    pub(crate) fn resume_routed(&self) -> bool {
+        lock(&self.0.resume).is_some()
+    }
+
+    fn resume(&self) -> Option<Arc<ResumeRoute>> {
+        lock(&self.0.resume).clone()
     }
 
     /// The window is hidden or shown again (the webview's visibility). A
@@ -287,8 +382,8 @@ impl Composers {
     /// Each tick: the open composer's due check, and a reloaded draft's one
     /// lookup. Nothing while the window is hidden.
     pub(crate) fn tick_handed(&self, now: f64) {
-        let (deferred, compact) = (self.deferred(), self.compact());
-        if deferred.is_none() && compact.is_none() {
+        let (deferred, compact, resume) = (self.deferred(), self.compact(), self.resume());
+        if deferred.is_none() && compact.is_none() && resume.is_none() {
             return;
         }
         let job = {
@@ -337,6 +432,14 @@ impl Composers {
                             compact_to_send::plan(&open.name, checkpoint, &compaction, &input)
                                 .map(HandedPlan::Compact)
                         }
+                        Kind::ResumeToSend
+                            if resume.is_some() && checkpoint.version == SESSION_RESUME_VERSION =>
+                        {
+                            let (start, input) =
+                                session_resume::stdins(&open.name, checkpoint, text, attachments)?;
+                            session_resume::plan(&open.name, checkpoint, &start, &input)
+                                .map(HandedPlan::Resume)
+                        }
                         _ => None,
                     })
                     .map(|plan| (key, composer.handle, plan, Basis::Reload))
@@ -351,19 +454,31 @@ impl Composers {
         (self.0.deps.spawn)(Box::new(move || {
             // A check that panicked, or of a kind without its route, knows
             // nothing: never a held state 6.
-            let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &plan {
-                HandedPlan::Send(plan) => deferred.map(|route| (route.check)(plan)),
-                HandedPlan::Compact(plan) => compact.map(|route| (route.check)(plan)),
-            }))
-            .ok()
-            .flatten()
-            .unwrap_or(Checked::Unavailable);
-            me.checked(&key, handle, &plan, basis, checked);
+            let (checked, run) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &plan {
+                    HandedPlan::Send(plan) => deferred.map(|route| ((route.check)(plan), None)),
+                    HandedPlan::Compact(plan) => compact.map(|route| ((route.check)(plan), None)),
+                    HandedPlan::Resume(plan) => resume.map(|route| (route.check)(plan)),
+                }))
+                .ok()
+                .flatten()
+                .unwrap_or((Checked::Unavailable, None));
+            me.checked(&key, handle, &plan, basis, checked, run.as_deref());
         }));
     }
 
-    /// Applies one check's answer while the draft still holds that identity.
-    fn checked(&self, key: &str, handle: u64, plan: &HandedPlan, basis: Basis, checked: Checked) {
+    /// Applies one check's answer while the draft still holds that identity;
+    /// `run`: the run a handed resume's receipt returned, which its
+    /// message's row then belongs to.
+    fn checked(
+        &self,
+        key: &str,
+        handle: u64,
+        plan: &HandedPlan,
+        basis: Basis,
+        checked: Checked,
+        run: Option<&str>,
+    ) {
         let now = self.now();
         let mut hub = self.lock();
         let held = hub.composers.get(key).is_some_and(|c| {
@@ -413,6 +528,9 @@ impl Composers {
                 detail: deferred_send::UNCONFIRMED.into(),
             },
         };
+        if let Some(run) = run {
+            hub.local.rebind_run(key, plan.row(), run);
+        }
         // The service could not tell what happened: a Terminal draft may hold
         // it (hgs refuses a send while one is there), so it is read once.
         let unknown = matches!(outcome, Outcome::Uncertain { .. });
@@ -470,15 +588,80 @@ impl Composers {
         let Some(route) = self.compact() else {
             return false;
         };
-        let Some((delivery, checkpoint)) = self.compaction_delivery(key, revision) else {
+        self.hand_continuation(
+            key,
+            revision,
+            Continuation::Compaction,
+            &|delivery, checkpoint| {
+                compact_to_send::stdins(
+                    &delivery.session.name,
+                    checkpoint,
+                    &delivery.text,
+                    &delivery.attachments,
+                )
+            },
+            &|delivery, checkpoint, compaction, input, hand| {
+                (route.offer)(
+                    &delivery.session.name,
+                    checkpoint,
+                    compaction,
+                    input,
+                    &|plan| hand(HandedPlan::Compact(plan.clone())),
+                )
+                .into()
+            },
+        )
+    }
+
+    /// The start call of a "Resume and send" (`request`), offered to the
+    /// desktop service when it takes the whole resume-then-send, with the
+    /// exact resume stdin and send template, from the action that reserved
+    /// and saved its version 3 checkpoint. False: the direct path starts and
+    /// sends it, decided before any offer (a fresh start, a resume with
+    /// compaction or a version 1 checkpoint always; a Codex session for a
+    /// service without the Codex readiness marker). True:
+    /// the hand-over ended this continuation, whatever the service answered.
+    pub(crate) fn hand_start(&self, key: &str, revision: u64) -> bool {
+        let Some(route) = self.resume() else {
             return false;
         };
-        let Some((compaction, input)) = compact_to_send::stdins(
-            &delivery.session.name,
-            &checkpoint,
-            &delivery.text,
-            &delivery.attachments,
-        ) else {
+        self.hand_continuation(
+            key,
+            revision,
+            Continuation::Start,
+            &|delivery, checkpoint| {
+                session_resume::stdins(
+                    &delivery.session.name,
+                    checkpoint,
+                    &delivery.text,
+                    &delivery.attachments,
+                )
+            },
+            &|delivery, checkpoint, resume, input, hand| {
+                (route.offer)(&delivery.session.name, checkpoint, resume, input, &|plan| {
+                    hand(HandedPlan::Resume(plan.clone()))
+                })
+                .into()
+            },
+        )
+    }
+
+    /// One continuation's hand-over, either kind: its delivery and
+    /// checkpoint, its two exact stdins, the files a Retry of its row needs,
+    /// then the one offer. False: the direct path runs it, decided before
+    /// any offer. True: the hand-over ended this continuation.
+    fn hand_continuation(
+        &self,
+        key: &str,
+        revision: u64,
+        kind: Continuation,
+        stdins: &StdinsFn<'_>,
+        offer: &OfferFn<'_>,
+    ) -> bool {
+        let Some((delivery, checkpoint)) = self.continuation_delivery(key, revision, kind) else {
+            return false;
+        };
+        let Some((first, input)) = stdins(&delivery, &checkpoint) else {
             return false;
         };
         // The files a Retry of its row needs; without them the direct path
@@ -488,31 +671,26 @@ impl Composers {
         };
         let handed = std::cell::Cell::new(false);
         let offered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            (route.offer)(
-                &delivery.session.name,
-                &checkpoint,
-                &compaction,
-                &input,
-                &|plan| {
-                    let taken = self.handing(&delivery, &files, plan);
-                    handed.set(taken);
-                    taken
-                },
-            )
+            offer(&delivery, &checkpoint, &first, &input, &|plan| {
+                let taken = self.handing(&delivery, &files, plan, kind, &checkpoint.request_id);
+                handed.set(taken);
+                taken
+            })
         }));
         let answer = match offered {
             Ok(answer) => answer,
             // The offer's thread died: once handed it may have reached the
             // service; before, nothing did.
-            Err(_) if handed.get() => {
-                CompactAnswer::Settled(SendAnswer::Unconfirmed(deferred_send::UNCONFIRMED.into()))
-            }
-            Err(_) => CompactAnswer::Settled(SendAnswer::Unsent(deferred_send::NOT_SENT.into())),
+            Err(_) if handed.get() => Continued::Settled(
+                SendAnswer::Unconfirmed(deferred_send::UNCONFIRMED.into()),
+                None,
+            ),
+            Err(_) => Continued::Settled(SendAnswer::Unsent(deferred_send::NOT_SENT.into()), None),
         };
         if !handed.get() {
             let text = match answer {
-                CompactAnswer::Direct => return false,
-                CompactAnswer::Settled(SendAnswer::Unsent(text)) => text,
+                Continued::Direct => return false,
+                Continued::Settled(SendAnswer::Unsent(text), _) => text,
                 // Nothing is offered before the hand-over.
                 _ => deferred_send::NOT_SENT.into(),
             };
@@ -520,37 +698,42 @@ impl Composers {
             // ends with its draft, or, if it already ended meanwhile, its
             // held identity is resolved.
             let mut hub = self.lock();
-            let live = hub
-                .compacts
-                .get_mut(key)
-                .filter(|(pending, _)| pending.revision == revision);
-            match live {
-                Some((pending, _)) => {
+            match send::pending_mut(&mut hub, key, kind.start(), revision) {
+                Some(pending) => {
                     pending.call = Call::Settled;
                     drop(hub);
-                    self.cancel(key, false, revision, &text);
+                    self.cancel(key, kind.start(), revision, &text);
                 }
                 None => self.settle_orphan(&mut hub, &checkpoint.request_id, true),
             }
             return true;
         }
-        let outcome = match answer {
-            CompactAnswer::Pending(plan) => {
-                self.handed_over(&delivery, HandedPlan::Compact(plan));
+        let (answer, run) = match answer {
+            Continued::Pending(plan) => {
+                self.handed_over(&delivery, plan);
                 self.push_finished(&delivery.request_id, false, true);
                 return true;
             }
-            CompactAnswer::Settled(SendAnswer::Recorded(outcome)) => Outcome::Done {
+            Continued::Settled(answer, run) => (Some(answer), run),
+            Continued::Direct => (None, None),
+        };
+        let outcome = match answer {
+            Some(SendAnswer::Recorded(outcome)) => Outcome::Done {
                 receipt: serde_json::json!({"request_id": outcome.request_id}),
                 cleanup: None,
             },
-            CompactAnswer::Settled(SendAnswer::Unsent(detail)) => Outcome::Failed { detail },
-            CompactAnswer::Settled(_) | CompactAnswer::Direct => Outcome::Uncertain {
+            Some(SendAnswer::Unsent(detail)) => Outcome::Failed { detail },
+            _ => Outcome::Uncertain {
                 detail: deferred_send::UNCONFIRMED.into(),
             },
         };
+        // The message's row belongs to the run its resume returned, never
+        // the stopped one it was recorded under (zerus-5wmh.66.4.9.3).
+        if let Some(run) = &run {
+            self.lock().local.rebind_run(key, &delivery.request_id, run);
+        }
         if let Some(composer) = self.lock().composers.get_mut(key) {
-            if composer.handed.as_ref().is_some_and(Handed::compacts) {
+            if composer.handed.as_ref().is_some_and(Handed::locked) {
                 composer.handed = None;
             }
         }
@@ -558,17 +741,27 @@ impl Composers {
         true
     }
 
-    /// The message a compaction waits to send, as the delivery a hand-over
-    /// becomes, and the version 2 checkpoint its waiting save holds. None
-    /// when the service cannot take it: another computer, a subagent, a
-    /// checkpoint without its reserved send, or a message that is no longer
-    /// the one it reserved.
-    fn compaction_delivery(&self, key: &str, revision: u64) -> Option<(Delivery, Checkpoint)> {
+    /// The message a continuation waits to send, as the delivery a hand-over
+    /// becomes, and the checkpoint its waiting save holds: version 2 for a
+    /// compaction, version 3 of a resume for a start. None when the service
+    /// cannot take it: another computer, a subagent, a checkpoint without its
+    /// reserved send, or a message that is no longer the one it reserved.
+    fn continuation_delivery(
+        &self,
+        key: &str,
+        revision: u64,
+        kind: Continuation,
+    ) -> Option<(Delivery, Checkpoint)> {
         let hub = self.lock();
-        let (pending, _) = hub
-            .compacts
-            .get(key)
-            .filter(|(pending, _)| pending.revision == revision)?;
+        let pending = match kind {
+            Continuation::Compaction => hub.compacts.get(key).map(|(pending, _)| pending),
+            Continuation::Start => hub
+                .start
+                .as_ref()
+                .map(|(pending, _)| pending)
+                .filter(|pending| pending.key == key),
+        }
+        .filter(|pending| pending.revision == revision)?;
         if !pending.session.computer.is_empty() || pending.session.subagent.is_some() {
             return None;
         }
@@ -577,8 +770,15 @@ impl Composers {
             .get(key)
             .filter(|c| c.delivering == Some(revision))?;
         let checkpoint = composer.checkpoint.clone().filter(|checkpoint| {
-            checkpoint.kind == Kind::CompactToSend
-                && checkpoint.request_id == pending.request_id
+            let own = match kind {
+                Continuation::Compaction => checkpoint.kind == Kind::CompactToSend,
+                Continuation::Start => {
+                    checkpoint.kind == Kind::ResumeToSend
+                        && checkpoint.version == SESSION_RESUME_VERSION
+                        && checkpoint.start == Some(Start::Resume)
+                }
+            };
+            own && checkpoint.request_id == pending.request_id
                 && checkpoint.send_request_id.is_some()
         })?;
         let (text, attachments) = match &pending.retry {
@@ -608,7 +808,7 @@ impl Composers {
             text,
             attachments,
             retry_id: pending.retry.as_ref().map(|retry| retry.id.clone()),
-            compaction: Some(checkpoint.request_id.clone()),
+            compaction: (kind == Continuation::Compaction).then(|| checkpoint.request_id.clone()),
             consent: true,
             preserve,
             revision,
@@ -618,25 +818,37 @@ impl Composers {
     }
 
     /// Right before the offer is written: while the continuation still
-    /// waits on this compaction, it ends and the draft becomes the delivery
-    /// the service holds. Its row shows the message sending, its status the
-    /// service's line from the start, and Cancel send stays shown, locked.
-    /// False: the continuation ended meanwhile, and nothing is offered.
-    fn handing(&self, delivery: &Delivery, files: &[StoredFile], plan: &CompactPlan) -> bool {
+    /// waits on this call (`held`, its checkpoint's request), it ends and the
+    /// draft becomes the delivery the service holds. Its row shows the
+    /// message sending, its status the service's line from the start, and
+    /// Cancel send stays shown, locked. False: the continuation ended
+    /// meanwhile, and nothing is offered.
+    fn handing(
+        &self,
+        delivery: &Delivery,
+        files: &[StoredFile],
+        plan: HandedPlan,
+        kind: Continuation,
+        held: &str,
+    ) -> bool {
         let now = self.now();
         let mut hub = self.lock();
         let key = &delivery.key;
-        let live = hub.compacts.get(key).is_some_and(|(pending, _)| {
-            pending.revision == delivery.revision
-                && Some(pending.request_id.as_str()) == delivery.compaction.as_deref()
-        }) && hub
-            .composers
-            .get(key)
-            .is_some_and(|c| c.delivering == Some(delivery.revision));
+        let live = send::pending_mut(&mut hub, key, kind.start(), delivery.revision)
+            .is_some_and(|pending| pending.request_id == held)
+            && hub
+                .composers
+                .get(key)
+                .is_some_and(|c| c.delivering == Some(delivery.revision));
         if hub.closed || !live {
             return false;
         }
-        hub.compacts.remove(key);
+        match kind {
+            Continuation::Compaction => {
+                hub.compacts.remove(key);
+            }
+            Continuation::Start => hub.start = None,
+        }
         hub.local.sending(
             key,
             &delivery.request_id,
@@ -665,7 +877,7 @@ impl Composers {
             // Its own call checks it until the bound; the ticks after.
             composer.handed = Some(Handed {
                 checking: true,
-                ..Handed::new(HandedPlan::Compact(plan.clone()), now)
+                ..Handed::new(plan, now)
             });
             composer.text_epoch += 1;
             self.save(composer);

@@ -63,42 +63,15 @@ pub(super) fn records() -> Result<Vec<Value>> {
     Ok(result)
 }
 
-/// Worktree guards need metadata only. Stream a bounded inventory rather than
-/// sorting/materializing all archives or opening any conversation journal.
-/// Incomplete coverage is an error, never proof that no archive refers to a tree.
-pub(super) fn visit_bounded(deadline: std::time::Instant, mut visit: impl FnMut(Value) -> Result<()>) -> Result<()> {
-    use std::io::Read;
-    let entries=match fs::read_dir(root().join("archives")) {
-        Ok(entries)=>entries,
-        Err(e) if e.kind()==std::io::ErrorKind::NotFound=>return Ok(()),
-        Err(e)=>return Err(e.to_string()),
-    };
-    let mut bytes=0;
-    for (count,entry) in entries.enumerate() {
-        if count>=5000 || std::time::Instant::now()>=deadline {return Err("Archive metadata inventory exceeded its check budget; review manually".into());}
-        let path=entry.map_err(|e|e.to_string())?.path();
-        if path.extension().is_none_or(|e|e!="json"){continue;}
-        let file=crate::platform::refuse_link(fs::OpenOptions::new().read(true)).open(&path).map_err(|e|e.to_string())?;
-        if !file.metadata().is_ok_and(|m|m.is_file()) {return Err("Archive metadata is not a regular file".into());}
-        let mut data=Vec::new();file.take(1024*1024+1).read_to_end(&mut data).map_err(|e|e.to_string())?;
-        bytes+=data.len();
-        if data.len()>1024*1024 || bytes>32*1024*1024 {return Err("Archive metadata inventory exceeded its byte budget; review manually".into());}
-        let mut value:Value=serde_json::from_slice(&data).map_err(|e|e.to_string())?;
-        rename::normalize_archive(&mut value)?;
-        let id=path.file_stem().and_then(|s|s.to_str()).unwrap_or_default();
-        if value["version"]!=1 || string(&value,"archive_id")!=id
-            || uuid::Uuid::parse_str(id).is_err() || string(&value,"name").is_empty()
-            || !AGENTS.contains(&string(&value,"agent")) {return Err("Invalid archive metadata; review manually".into());}
-        visit(value)?;
-    }
-    Ok(())
-}
-
 pub(super) fn remove_synced(path: &Path) -> Result<()> {
     storage::cut_write()?;
     match fs::remove_file(path) {
-        Ok(()) => crate::platform::sync_dir(path.parent().ok_or("invalid record path")?)
-            .map_err(|error| error.to_string()),
+        Ok(()) => {
+            crate::platform::sync_dir(path.parent().ok_or("invalid record path")?)
+                .map_err(|error| error.to_string())?;
+            super::archive_references::forget(path);
+            Ok(())
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.to_string()),
     }
@@ -107,6 +80,19 @@ pub(super) fn remove_synced(path: &Path) -> Result<()> {
 /// The caller holds the state writer lock. Write the durable copy before
 /// releasing its old name; a crash between the two operations cannot lose it.
 pub(super) fn save(record: &Value) -> Result<String> {
+    if terminating::pending(record) {
+        return Err("Termination is unfinished; retain the session and archive for review".into());
+    }
+    // A caller's older copy must not retire the same binding after Terminate
+    // fenced it. The caller holds the writer lock across both reads and save.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if storage::current_of(record)?.is_some_and(|current| {
+        current["run_id"] == record["run_id"]
+            && current["conversation_id"] == record["conversation_id"]
+            && terminating::pending(&current)
+    }) {
+        return Err("Termination is unfinished; retain the session and archive for review".into());
+    }
     if clear_context::cleanup_pending(record) {
         return Err("Restored Clear archive cleanup is unfinished; retain the binding for review".into());
     }
@@ -174,7 +160,8 @@ pub(super) fn contains_selected(record: &Value) -> Result<bool> {
 
 fn reconcile_candidate(record: &Value, snapshot: &Snapshot) -> bool {
     // An environment that cannot be read counts as live: never archived.
-    !terminal_live(snapshot, record).unwrap_or(true)
+    !terminating::pending(record)
+        && !terminal_live(snapshot, record).unwrap_or(true)
         && !process_alive(record)
         && record.get("pausing").is_none()
         && !record["paused"].as_bool().unwrap_or(false)
@@ -219,7 +206,8 @@ pub(super) fn reconcile_locked(snapshot: &Snapshot) -> Result<(Vec<Value>, Vec<V
     let bindings = super::storage::records()?;
     let mut saved = false;
     for record in &bindings {
-        if terminal_live(snapshot, record).unwrap_or(true)
+        if terminating::pending(record)
+            || terminal_live(snapshot, record).unwrap_or(true)
             || process_alive(record)
             || record.get("pausing").is_some()
             || record["paused"].as_bool().unwrap_or(false)
@@ -268,6 +256,7 @@ pub(super) fn read_active(snapshot: &Snapshot) -> Result<Vec<Value>> {
     // One read-only catalog connection for the listing, never one per record.
     let catalog = archive_catalog::existing().unwrap_or(None);
     for record in bindings {
+        if terminating::pending(&record) { result.push(record); continue; }
         // A live exact binding cannot be the crash-left copy of a completed run.
         if matches(&record, panes_of(snapshot, &record)) || process_alive(&record) {
             result.push(record);
@@ -407,6 +396,9 @@ pub(super) fn reserve_clear_source(record: &Value) -> Result<()> {
 /// Commit the restore after its exact ID, or its explicitly cleared successor.
 /// The active binding has already been synced by the caller before this runs.
 pub(super) fn confirm_restore(record: &mut Value) -> Result<()> {
+    if terminating::pending(record) {
+        return Ok(());
+    }
     let pending = clear_context::cleanup_pending(record);
     if pending && !clear_context::restore_committed(record) {
         return Err("restored Clear cleanup identity is incomplete; retain both records for review".into());
@@ -448,6 +440,9 @@ pub(super) fn confirm_restore(record: &mut Value) -> Result<()> {
 }
 
 pub(super) fn failed_restore(record: &mut Value) -> Result<bool> {
+    if terminating::pending(record) {
+        return Ok(false);
+    }
     // An accepted SessionStart already synced the active conversation. Retry
     // finalization only; never discard it after an archive cleanup failure.
     // On failure, propagate uncertainty with both records left recoverable.
@@ -472,6 +467,9 @@ pub(super) fn failed_restore(record: &mut Value) -> Result<bool> {
 }
 
 pub(super) fn known_exit(record: &Value) -> bool {
+    if terminating::pending(record) {
+        return false;
+    }
     let end = &record["session_end"];
     if end["run_id"] != record["run_id"]
         || end["conversation_id"] != record["conversation_id"]
@@ -489,6 +487,21 @@ pub(super) fn known_exit(record: &Value) -> bool {
 mod tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn selected_reconciliation_retains_a_termination_fence() {
+        let mut record = json!({"name":"codex/termination-fence","agent":"codex",
+            "run_id":"original-run","conversation_id":"original-conversation",
+            "conversation_state":"ended","completion_source":"supervisor",
+            "completion_reason":"clean_exit","exit_code":0,
+            "session_end":{"run_id":"original-run","conversation_id":"original-conversation","reason":"other"}});
+        assert!(reconcile_candidate(&record, &Snapshot::new()));
+        assert!(clean_completion(&record));
+        record["terminating"] = Value::Null;
+        assert!(!reconcile_candidate(&record, &Snapshot::new()));
+        assert!(!clean_completion(&record));
+    }
 
     // Each filesystem cut runs in its own literal environment: other parallel
     // state tests must never see this test's HGS_STATE_DIR.

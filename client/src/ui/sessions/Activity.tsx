@@ -7,7 +7,6 @@ import { ActivityHeights, activityMeasureWindow, activityOverscan, createActivit
 import { searchPreview, clearSearchPreview } from "../../store/searchSelection";
 import { SearchHighlight } from "./SearchHighlight";
 import { For, Show, batch, createContext, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack, useContext, type JSX } from "solid-js";
-import { Dynamic } from "solid-js/web";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { createImageHandoff, fittedImage } from "./attachment-image";
 import { attachmentFetch, attachmentMedia, attachmentOpen, attachmentPin, attachmentUnpin, copyVerbatim, inTauri } from "../../bridge";
@@ -21,8 +20,10 @@ import { recordingBlob } from "./voice-playback";
 import { cardTarget, createOpen, readCards, rowScope } from "./attachment-card";
 import { createStore, reconcile } from "solid-js/store";
 import { Icon } from "../lib/icons";
-import { selected, toast, contentScale, subagentOpen, setSubagentOpen, setMenu, setDetailTab, type MenuEntry } from "../../store/ui";
-import { activity } from "../../store/session";
+import { ToolRow, TOOL_OUTPUT, outputKey, type ProcessLinks } from "./ToolEvents";
+import { processes, processViewKey, recordedProcess } from "../../store/processes";
+import { selected, toast, contentScale, subagentOpen, setSubagentOpen, setMenu, setDetailTab, takeLatestRequest, type MenuEntry } from "../../store/ui";
+import { activity, processesTarget } from "../../store/session";
 import { computerOffline, orderedRows } from "../../store/catalog";
 import { flag, num, setSetting } from "../../store/settings";
 import type { ActivitySource, AttachmentScope } from "../../store/activitySource";
@@ -31,12 +32,18 @@ import { terminal } from "../../store/terminal";
 import type { LocalMessage } from "../../types";
 import { animationFrames, createActivityEnd, newLocalSends } from "./activity-end";
 import { replyVisible } from "../../store/viewedReply";
-import { buildTranscript, createTranscriptProjection, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
+import { buildTranscript, createActivityProjections, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
 import { DELETE_TEXT, DELETE_TITLE, retryReason, routeInspect } from "./local-actions";
-import { markdownReady, markdownTree, type Inline, type MarkdownBlock } from "./markdown";
+import { NOT_DELIVERED_HINT } from "./inbox-actions";
+import { createInboxRemoveScope, InboxRemove, RemoveQueuedDialog, type InboxRemovePorts, type InboxRemoveScope } from "./InboxRemove";
+import { emptyActivity } from "./activity-empty";
+import { markdownReady, markdownTree } from "./markdown";
+import { ActivitySession, Body, HighlightQuery } from "./MarkdownBody";
+import { searchHitItems } from "./search-hit";
+import { ActivityPending } from "./ActivityPending";
+
+export { Body } from "./MarkdownBody";
 import { activityAll, activityFlow, activityRange, measureActivityRows, activitySelectionIndexes, activitySelectionText, activityText, activityTexts, activityVirtualOffset, selectActivityAll, selectionCoversActivity } from "./activity-virtual";
-import { openExternal, openSessionFile } from "./sessionFiles";
-import { SessionFileDialog } from "./SessionFileDialog";
 import { captionText, statusOf } from "./SessionCard";
 import { formatElapsed, workingLine } from "./inspector-data";
 import { foldedBody, noticeBar, type SystemNotice } from "./notices";
@@ -47,6 +54,10 @@ import { MediaStrip, MediaViewerDialog, VideoMessageDialog } from "./MediaViewer
 import { mediaReferences } from "./media";
 import { onMediaNotice, type MediaScope } from "../../store/media";
 import type { ActivityItem, ItemAttachment, LocalItem, MediaMessage, Session, TranscriptItem } from "./types";
+import { lazyView } from "../lazy-view";
+import { LazyBoundary } from "../lazy-boundary";
+// The File reference dialog opens on demand, outside the entry chunk (zerus-ycycu).
+const SessionFileDialog = lazyView(() => import("./SessionFileDialog"), (m) => m.SessionFileDialog);
 
 // ---------------------------------------------------------------------------
 // Reading column (ActivityWidth.h): 900 px at 100% content scale, 480–2400,
@@ -171,10 +182,6 @@ const copyText = (text: string, what: string) => {
   void copyVerbatim(text).then(() => toast(tr("Copied"), what), () => toast(tr("Not copied"), tr("The clipboard is unavailable"), "error"));
 };
 
-// Inline Markdown stays text except its links: HTTP(S) uses the system
-// opener, and local/file references open the session's File reference dialog.
-
-const ActivitySession = createContext<() => Session | undefined>();
 const ActivityLayoutHeld = createContext<() => boolean>(() => false);
 
 /** Keep disclosure geometry while a gesture or persistent selection owns
@@ -190,62 +197,6 @@ function layoutDisclosure(expanded: () => boolean | undefined = () => undefined,
     onExpanded?.(next);
   };
   return [open, toggle] as const;
-}
-
-function inlines(parts: Inline[], session?: () => Session | undefined): JSX.Element[] {
-  return parts.map((part): JSX.Element => {
-    switch (part.kind) {
-      case "text": return part.text;
-      case "code": return <code>{part.text}</code>;
-      case "br": return <br />;
-      case "bold": return <b>{inlines(part.children, session)}</b>;
-      case "em": return <em>{inlines(part.children, session)}</em>;
-      case "del": return <del>{inlines(part.children, session)}</del>;
-      default: {
-        const link = part;
-        return <a href={link.href} title={link.href} draggable={false} onAuxClick={(event) => event.preventDefault()} onDragStart={(event) => event.preventDefault()} onClick={(event) => {
-          event.preventDefault();
-          if (link.kind === "external") openExternal(link.href);
-          else {
-            const current = session?.();
-            if (current) openSessionFile(current, link.href);
-          }
-        }}>{inlines(link.children, session)}</a>;
-      }
-    }
-  });
-}
-
-const HEADINGS = ["h1", "h2", "h3", "h4", "h5", "h6"] as const;
-
-function blocks(list: MarkdownBlock[], session?: () => Session | undefined): JSX.Element[] {
-  return list.map((b): JSX.Element => {
-    switch (b.kind) {
-      case "code": return <pre class="act-code mono">{b.text}</pre>;
-      case "text": return <>{inlines(b.inline, session)}</>;
-      case "heading": return <Dynamic component={HEADINGS[b.level - 1]} class="md-heading">{inlines(b.inline, session)}</Dynamic>;
-      case "hr": return <hr class="md-rule" />;
-      case "quote": return <blockquote class="md-quote">{blocks(b.blocks, session)}</blockquote>;
-      case "list": {
-        const items = b.items.map((item) => (
-          <li classList={{ "md-task": item.task }}>
-            <Show when={item.task}><input type="checkbox" class="md-check" checked={item.checked} disabled aria-label={item.checked ? tr("Done") : tr("Not done")} /></Show>
-            {blocks(item.blocks, session)}
-          </li>
-        ));
-        return b.ordered ? <ol class="md-list" start={b.start}>{items}</ol> : <ul class="md-list">{items}</ul>;
-      }
-      case "table": return (
-        <div class="act-table-wrap" role="region" aria-label={tr("Message table")} tabindex="0">
-          <table class="act-table" style={{ "--table-columns": b.header.length }}>
-            <thead><tr>{b.header.map((cell, column) => <th scope="col" style={{ "text-align": b.align[column] }}>{inlines(cell, session)}</th>)}</tr></thead>
-            <Show when={b.rows.length}><tbody>{b.rows.map((row) => <tr>{row.map((cell, column) => <td style={{ "text-align": b.align[column] }}>{inlines(cell, session)}</td>)}</tr>)}</tbody></Show>
-          </table>
-        </div>
-      );
-      default: return <p>{inlines(b.inline, session)}</p>;
-    }
-  });
 }
 
 // Task 248: what Qt says in its notice line when a media file cannot be opened or loads from a peer.
@@ -271,14 +222,6 @@ function ReplyMedia(props: { text: string }) {
 function ToolMedia(props: { refs: readonly string[] }) {
   const scope = useMediaScope();
   return <MediaStrip scope={scope()} refs={props.refs} />;
-}
-
-export function Body(props: { text: string }) {
-  const session = useContext(ActivitySession);
-  // Rerenders once when the lazily loaded parser arrives; Activity places its
-  // rows only after that, so placed rows keep their height.
-  const tree = createMemo(() => { markdownReady(); return markdownTree(props.text); });
-  return <>{blocks(tree(), session)}</>;
 }
 
 // ---------------------------------------------------------------------------
@@ -613,6 +556,17 @@ function LocalDeleteDialog() {
   );
 }
 
+/** The open Activity's Remove (zerus-5i2e5): its review lives and ends with that Activity. */
+const InboxScope = createContext<InboxRemoveScope>();
+
+/** Remove for a not-delivered OpenCode message: the composer's view and its Rust command (zerus-5wmh.13.6). */
+const inboxPorts: InboxRemovePorts = {
+  view: () => composer.view(),
+  remove: (handle, run, conversation, messageId) => composer.inboxRemove(handle, run, conversation, messageId),
+  notify: (tone, text, sticky) => { notify(tone, text, sticky); },
+  done: () => { focusTranscript(); },
+};
+
 /** The native queue shares the outgoing Markdown/attachment renderer and its
  * guarded file-reference context, without adding sent/delivery actions. */
 export function OutgoingMessage(props: { item: ActivityItem; scope?: AttachmentScope; session?: Session }) {
@@ -621,6 +575,7 @@ export function OutgoingMessage(props: { item: ActivityItem; scope?: AttachmentS
 
 function ItemBody(props: { item: ActivityItem; scope?: AttachmentScope }) {
   const it = () => props.item;
+  const inboxScope = useContext(InboxScope);
   return (
     <div class="act-body">
       <Show when={it().kind === "user"} fallback={<Body text={it().body ?? ""} />}>
@@ -647,6 +602,9 @@ function ItemBody(props: { item: ActivityItem; scope?: AttachmentScope }) {
         </div>
       </Show>
       <Show when={it().local?.actions.length}><LocalActions local={it().local!} /></Show>
+      {/* Not delivered is not a refusal: OpenCode keeps the message and runs it first; Zerus never resends it. */}
+      <Show when={it().inbox?.state === "not_delivered"}><p class="act-inbox-hint">{tr(NOT_DELIVERED_HINT)}</p></Show>
+      <Show when={inboxScope && it().inbox?.removable ? it().inbox : undefined}>{(item) => <InboxRemove item={item()} scope={inboxScope!} />}</Show>
     </div>
   );
 }
@@ -739,38 +697,35 @@ export function setLeadNoticeMode(row: Session, mode: NoticeMode) {
 }
 const NOTICE_LABEL: Record<NoticeMode, string> = { full: trNoop("Full"), collapsed: trNoop("Collapsed"), silent: trNoop("Hidden") };
 
-function Item(props: { item: TranscriptItem; scope?: AttachmentScope; sourceId?: string; postersEnabled?: boolean; expanded?: boolean; onExpanded?: (open: boolean) => void }) {
+function Item(props: {
+  item: TranscriptItem; scope?: AttachmentScope; sourceId?: string; postersEnabled?: boolean; expanded?: boolean; onExpanded?: (open: boolean) => void;
+  /** A tool row's Show more state per event, and View process links. */
+  shown?: (index: number) => number | undefined; onMore?: (index: number) => void; process?: ProcessLinks;
+}) {
   const [open, toggleOpen] = layoutDisclosure(() => props.expanded, props.onExpanded);
   const it = props.item;
   if (it.kind === "folded") return <FoldedItem item={it} open={open()} toggle={toggleOpen} scope={props.scope} sourceId={props.sourceId} />;
   if (it.kind === "system" && it.notice) return <NoticeCard item={it} notice={it.notice} open={open()} toggle={toggleOpen} />;
   if (it.kind === "media") return <MediaCard item={it} scope={rowScope(it, props.scope)} sourceId={props.sourceId} postersEnabled={props.postersEnabled} expanded={props.expanded} onExpanded={props.onExpanded} />;
-  // A context line with a time (a kept-warm cache) shows it apart, never after a dot.
+  // A context line with a time shows it apart, never after a dot.
   if (it.kind === "context") return <div class="act-label eyebrow" id={`item-${it.id}`}>{it.body}<Show when={it.at}><span class="act-time"> {it.at}</span></Show></div>;
-  if (it.kind === "thinking") return <div class="act-thinking" id={`item-${it.id}`} classList={{ inherited: !!it.inherited }}><span class="eyebrow">{tr("Thinking")}</span><p>{it.body}</p></div>;
+  // Thinking and subagent reports are Markdown, as in Qt (ActivityView.cpp:942-975).
+  if (it.kind === "thinking") return <div class="act-thinking" id={`item-${it.id}`} classList={{ inherited: !!it.inherited }}><span class="eyebrow">{tr("Thinking")}</span><div class="act-thinking-body act-body"><Body text={it.body ?? ""} /></div></div>;
   if (it.kind === "report")
     return (
       <div class="act-notice" id={`item-${it.id}`} classList={{ open: open(), inherited: !!it.inherited }}>
         <div class="row"><Icon name="bot" size={13} /><b>{it.title}</b><Show when={it.sender}><span class="muted">{tr("from %1", it.sender!)}</span></Show><span class="grow" /><span class="act-time">{it.at}</span></div>
         <button class="link" onClick={toggleOpen}>{open() ? tr("▾ Hide report") : tr("▸ Show report")}</button>
-        <Show when={open()}><p class="act-notice-body">{it.body}</p></Show>
+        <Show when={open()}><div class="act-notice-body act-body"><Body text={it.body ?? ""} /></div></Show>
       </div>
     );
   return (
-    <Show when={it.kind !== "tools" && it.kind !== "tool"} fallback={
-      <div class="act-tools" id={`item-${it.id}`} classList={{ open: open(), warn: !!it.warn, inherited: !!it.inherited }}>
-        <button class="act-tools-head" onClick={toggleOpen} aria-expanded={open()}>
-          <Icon name="chevron-right" size={12} class="chev" />
-          <b>{it.title}</b>
-          <Show when={it.kind === "tools"}><span class="muted">/ {it.body}</span></Show>
-          <span class="act-time">{it.at}</span>
-        </button>
-        <Show when={it.kind === "tool"}><div class="act-tool-cmd mono">{it.body}</div></Show>
+    <Show when={it.kind !== "tools" && it.kind !== "tool" && it.kind !== "warm"} fallback={
+      <>
+        <ToolRow item={it} open={open()} onToggle={toggleOpen} shown={(index) => props.shown?.(index)}
+          onMore={(index) => props.onMore?.(index)} process={props.process} />
         <Show when={it.media?.length}><ToolMedia refs={it.media!} /></Show>
-        <Show when={open() && it.lines}>
-          <div class="act-tool-lines mono"><For each={it.lines}>{(l) => <div>{l}</div>}</For></div>
-        </Show>
-      </div>
+      </>
     }>
       <article class={`act-msg k-${it.kind}`} id={`item-${it.id}`} classList={{ inherited: !!it.inherited }}
         style={it.kind === "system" ? { "--bar-dark": noticeBar(it.sender ?? "").dark, "--bar-light": noticeBar(it.sender ?? "").light } : undefined}>
@@ -782,7 +737,7 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope; sourceId?:
           </Show>
           <Show when={it.kind === "user" && it.receipt}><span class="act-receipt"><Icon name="check" size={11} />{it.receipt}</span></Show>
           <span class="grow" />
-          <Show when={it.kind === "agent"}><button class="icon-btn small act-copy" title={tr("Copy as Markdown")} onClick={() => copyText(it.body ?? "", tr("The reply is on the clipboard"))}><Icon name="copy" size={12} /></button></Show>
+          <Show when={it.kind === "agent" && !it.excerpt}><button class="icon-btn small act-copy" title={tr("Copy as Markdown")} onClick={() => copyText(it.body ?? "", tr("The reply is on the clipboard"))}><Icon name="copy" size={12} /></button></Show>
         </header>
         {/* A fork's inherited row belongs to its source: never this session's attachments. */}
         <EchoBody item={it} scope={rowScope(it, props.scope)} />
@@ -827,7 +782,16 @@ export function focusTranscript(): boolean {
   return true;
 }
 
-/** Scrolls to the newest item and follows it again. */
+/**
+ * The search hit Activity shows instead of the session's history: the one
+ * chosen for the selected row, its run and conversation, outside a subagent.
+ */
+export function shownSearchPreview(row: Session | undefined = selected()) {
+  const p = searchPreview();
+  return p && row && p.key === row.key && p.run === (row.runId ?? "") && p.conversation === (row.conversationId ?? "") && !subagentOpen() ? p : undefined;
+}
+
+/** Scrolls to the newest item and follows it again; a shown search hit gives way to the latest activity. */
 export function jumpToLatest() {
   if (searchPreview()) { clearSearchPreview(); return; }
   setFollowing(true);
@@ -887,10 +851,7 @@ export function paneStates(source: ActivitySource, s: Session | undefined) {
  */
 export function ActivityView(props: { source?: ActivitySource; session?: () => Session | undefined }) {
   const s = () => (props.session ? props.session() : selected());
-  const preview = () => {
-    const p = searchPreview(), row = s();
-    return p && row && p.key === row.key && p.run === (row.runId ?? "") && p.conversation === (row.conversationId ?? "") && !subagentOpen() ? p : undefined;
-  };
+  const preview = () => shownSearchPreview(s());
   /** The live follow unless the detail passes another source (an archived row's). */
   const source = (): ActivitySource => props.source ?? activity;
   let scroller!: HTMLDivElement;
@@ -908,13 +869,10 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
   // Items keep their identity while events append, including across the virtual window.
   const [view, setView] = createStore<{ items: TranscriptItem[]; expired: boolean; loaded: boolean; pane: ReturnType<typeof paneStates>; tool: string }>({ items: [], expired: false, loaded: false, pane: paneStates(source(), s()), tool: "" });
   const local = createMemo(() => localRows(source(), s()), undefined, { equals: (a, b) => a === b || (a.length === 0 && b.length === 0) });
-  const projection = createTranscriptProjection();
-  let projectedTarget: string | undefined;
+  const project = createActivityProjections();
   const displayTarget = () => source().displayKey?.() ?? source().target()?.id;
   const built = createMemo(() => {
-    const target = displayTarget();
-    if (target !== projectedTarget) { projection.reset(); projectedTarget = target; }
-    const items = projection.build(source().events(), source().transcriptSummary?.() ?? source().summary(), local());
+    const items = project(!!subagentOpen(), displayTarget(), source().events(), source().transcriptSummary?.() ?? source().summary(), local());
     // Task 244: a lead session shows team notices and its replies to them as its mode says.
     const row = s();
     return row && !subagentOpen() && isLeadSession(row) ? foldNoticeTurns(items, leadNoticeMode(row)) : items;
@@ -936,12 +894,31 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
       for (const key of virtualizer.itemSizeCache.keys()) if (!content.has(String(key))) virtualizer.itemSizeCache.delete(key);
       const disclosures = Object.fromEntries(Object.entries(expanded).filter(([key]) => content.has(key)));
       setExpanded(reconcile(disclosures));
+      setMore(reconcile(Object.fromEntries(Object.entries(more).filter(([key]) => content.has(key.slice(0, key.lastIndexOf("#")))))));
       setView("items", reconcile(items, { key: "id" }));
       setView({ expired, loaded, pane, tool });
       reading.changed(); end.changed();
     }));
   });
   const [expanded, setExpanded] = createStore<Record<string, boolean>>({});
+  /** Show more per tool event (`outputKey`), kept while its row is loaded so a row scrolled back keeps its height. */
+  const [more, setMore] = createStore<Record<string, number>>({});
+  /** Show more per event of the shown search hit (zerus-tso9j): the same steps, kept only for that hit. */
+  const [hitMore, setHitMore] = createSignal<Record<string, number>>({});
+  createEffect(on(() => preview()?.hit, () => setHitMore({}), { defer: true }));
+  const moreHit = (id: string, index: number) => setHitMore((m) => { const key = outputKey(id, index); return { ...m, [key]: (m[key] ?? TOOL_OUTPUT.first) + TOOL_OUTPUT.step }; });
+  /**
+   * View process from the live main Activity while Processes is on
+   * (ActivityView.cpp:1129-1134): only in the Processes view of the session
+   * the tab follows now, checked when offered and again when used (zerus-u81tf).
+   */
+  const processView = () => { const target = processesTarget(); return target ? processViewKey(target) : undefined; };
+  const processLinks = (): ProcessLinks | undefined => source() === activity && !subagentOpen() && flag("processes/enabled") ? {
+    linkable: (process) => recordedProcess(processes.view(), process, processView()),
+    open: (process) => { if (processes.reveal(process, processView())) setDetailTab("processes"); },
+  } : undefined;
+  /** The guidance an empty Activity shows (ActivityView.cpp:1145-1150). */
+  const empty = createMemo(() => emptyActivity(source().summary(), !!s()?.tracked));
   let olderQueued = false;
   // Keep a named row and its offset while the end pin is released.
   const selectionInside = () => {
@@ -1097,6 +1074,8 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
       offset: (id) => rows.offset(id),
     }, reply, shown.events(), shown.summary());
   };
+  // Enter on a session row: this view jumps, once per request, even if it mounted after it.
+  createEffect(() => { if (takeLatestRequest()) queueMicrotask(jumpToLatest); });
   onMount(() => {
     liveScroller = scroller;
     liveLatest = latest;
@@ -1104,7 +1083,7 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
     const pointerEnded = () => motion.release();
     window.addEventListener("pointerup", pointerEnded); window.addEventListener("pointercancel", pointerEnded); window.addEventListener("blur", pointerEnded);
     onCleanup(() => { window.removeEventListener("pointerup", pointerEnded); window.removeEventListener("pointercancel", pointerEnded); window.removeEventListener("blur", pointerEnded); });
-    activityTexts.set(scroller, () => activityText(view.items, expanded));
+    activityTexts.set(scroller, () => activityText(view.items, expanded, more));
     const selectionChanged = () => {
       if (!selectionCoversActivity(scroller)) activityAll.delete(scroller);
       const inside = selectionInside();
@@ -1202,6 +1181,7 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
     motion.reset(); setLayoutHeld(false); latestAfterScroll = false;
     activityAll.delete(scroller);
     setExpanded(reconcile({}));
+    setMore(reconcile({}));
     measuredContent.clear(); setMeasuring([]); setSelectionIndexes([]);
     heights.clear();
     virtualizer.measure();
@@ -1257,18 +1237,27 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
     const id = source().target()?.id;
     return orderedRows().find((row) => row.key === id);
   };
+  // This Activity's Remove review: retired with it (zerus-5i2e5).
+  const inboxScope = createInboxRemoveScope(inboxPorts);
   return (
+    <InboxScope.Provider value={inboxScope}>
     <ActivitySession.Provider value={fileSession}>
     <ActivityLayoutHeld.Provider value={layoutHeld}>
     <div class="activity" style={{ position: "relative" }}>
       <Show when={!placed()}>
-        <div class="act-col" style={{ position: "absolute", inset: "0", "min-height": "0", "pointer-events": "none" }} role="status">
+        <div class="act-col" style={{ position: "absolute", inset: "0", "min-height": "0", "pointer-events": "none", "z-index": "1" }} role="status">
           <div class="act-label eyebrow">{tr("Recorded activity — messages and tool excerpts")}</div>
-          <div class="act-older hint">{tr("Reading activity…")}</div>
+          {/* Placement waits for a first page, which a shell session and a
+              stalled read never have: their states show here, above the
+              hidden column and its scroller, and take clicks (zerus-soudn). */}
+          <Show when={!states().archived && !view.loaded && !view.items.length} fallback={<div class="act-older hint">{tr("Reading activity…")}</div>}>
+            <div style={{ "pointer-events": "auto" }}><ActivityPending source={source()} session={s()} /></div>
+          </Show>
         </div>
       </Show>
       <LocalDeleteDialog />
-      <SessionFileDialog />
+      <RemoveQueuedDialog scope={inboxScope} />
+      <LazyBoundary floating><SessionFileDialog /></LazyBoundary>
       <MediaViewerDialog />
       <div class="act-scroll" ref={scroller} tabindex="-1" onContextMenu={activityMenu} onScroll={onScroll} style={{ "overflow-anchor": "none" }}
         onWheel={scrollIntent}
@@ -1305,7 +1294,13 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
           <Show when={preview()}>{(p) => <section class="search-preview" aria-label={tr("Search result")}>
             <div class="act-label eyebrow">{tr("SEARCH RESULT — Saved message")}</div>
             <Show when={p().hit.content_truncated}><div class="hint">{tr("Excerpt around the match. This message is too long to display in full.")}</div></Show>
-            <div class="search-preview-body"><SearchHighlight text={String(p().hit.event.detail ?? "")} query={p().query} /></div>
+            {/* The message as Activity shows it, Markdown and links with the query marked (ActivityView.cpp:664, 1592-1605). */}
+            <div class="search-preview-body">
+              <HighlightQuery.Provider value={() => p().query}>
+                <For each={searchHitItems(p().hit)}>{(item) => <Item item={item} scope={scope()} sourceId={source().target()?.id} postersEnabled={false} expanded={item.kind === "tool" || item.kind === "tools"}
+                  shown={(index) => hitMore()[outputKey(item.id, index)]} onMore={(index) => moreHit(item.id, index)} />}</For>
+              </HighlightQuery.Provider>
+            </div>
           </section>}</Show>
           <Show when={!preview()}>
           <div class="act-history-header">
@@ -1333,8 +1328,8 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
             <div class="act-older hint">{tr("Older events have expired from the journal.")}</div>
           </Show>
           <Show when={!states().archived} fallback={<div class="notice"><Icon name="archive" size={14} /><div>{tr("This conversation is archived.")}</div></div>}>
-            <Show when={view.loaded || view.items.length} fallback={<div class="act-older hint">{tr("Reading activity…")}</div>}>
-              <Show when={view.items.length} fallback={<div class="act-older hint">{tr("No recorded activity yet.")}</div>}>
+            <Show when={view.loaded || view.items.length} fallback={<ActivityPending source={source()} session={s()} />}>
+              <Show when={view.items.length} fallback={<div class="act-empty"><b>{empty().title}</b><p class="muted">{empty().text}</p></div>}>
                 {/* Reserve the current virtual extent through range swaps. Without
                     it, a synchronous layout between removing rows and updating
                     spacers makes WebKit clamp scrollTop even during a gesture.
@@ -1355,7 +1350,10 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
                           virtualizer.measureElement(node);
                         }}
                         style={{ "margin-top": `${flow().margins.get(id) ?? 0}px` }}>
-                        <Show when={item()}>{(it) => <Item item={it()} scope={scope()} sourceId={source().target()?.id} postersEnabled={placed() && !pageHidden()} expanded={!!expanded[id]} onExpanded={(open) => { heights.invalidate(id); setExpanded(id, open); }} />}</Show>
+                        <Show when={item()}>{(it) => <Item item={it()} scope={scope()} sourceId={source().target()?.id} postersEnabled={placed() && !pageHidden()} expanded={!!expanded[id]} onExpanded={(open) => { heights.invalidate(id); setExpanded(id, open); }}
+                          shown={(index) => more[outputKey(id, index)]}
+                          onMore={(index) => { heights.invalidate(id); setMore(outputKey(id, index), (more[outputKey(id, index)] ?? TOOL_OUTPUT.first) + TOOL_OUTPUT.step); }}
+                          process={processLinks()} />}</Show>
                       </div>
                     );
                   }}</For>
@@ -1392,5 +1390,6 @@ export function ActivityView(props: { source?: ActivitySource; session?: () => S
     </div>
     </ActivityLayoutHeld.Provider>
     </ActivitySession.Provider>
+    </InboxScope.Provider>
   );
 }

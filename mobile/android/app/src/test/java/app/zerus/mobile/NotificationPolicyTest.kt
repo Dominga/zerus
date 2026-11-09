@@ -32,6 +32,30 @@ class NotificationPolicyTest {
             conversation = "conversation", optional = ids.toList())
     private fun posted(plan: NotificationPlan) = roundtrip(NotificationPolicy.reserve(plan.state, plan.desired.single(), true, 10_000))
 
+    @Test fun aSupervisedChildsRequestWaitsForItsParentAndIsAnnouncedOnceWhenOrphaned() {
+        // zerus-sa9qn.4, as the desktop tracker (client/core/src/attention.rs): a quiet request
+        // posts nothing and is not remembered, so it notifies once the parent is gone (spec 2.4).
+        val quiet = plan(ready(emptyList()), current().copy(quiet = true))
+        assertTrue(quiet.desired.isEmpty()); assertTrue(quiet.retained.isEmpty())
+        val orphaned = plan(roundtrip(quiet.state), current(), event(2), at = now + 1)
+        assertTrue(orphaned.desired.single().fresh)
+        assertFalse(plan(posted(orphaned), current(), event(3), at = now + 2).desired.single().fresh)
+        // Supervision withdraws a posted card.
+        val withdrawn = plan(posted(orphaned), current().copy(quiet = true), event(3), at = now + 2)
+        assertTrue(withdrawn.desired.isEmpty()); assertTrue(withdrawn.retained.isEmpty())
+    }
+
+    @Test fun aCompletionSeenWhileSupervisedIsNotReplayedOnceOrphaned() {
+        val finished = preferences.copy(finished = true)
+        val idle = current(kind = null, idle = true)
+        val completed = event(2, kind = "completed", at = now + 1)
+        val quiet = plan(ready(listOf(idle)), idle.copy(quiet = true), completed, finished, now + 1)
+        assertTrue(quiet.desired.isEmpty())
+        assertTrue(plan(roundtrip(quiet.state), idle, completed, finished, now + 2).desired.isEmpty())
+        // Without supervision the same completion announces.
+        assertEquals(SessionAlertKind.Finished, plan(ready(listOf(idle)), idle, completed, finished, now + 2).desired.single().kind)
+    }
+
     @Test fun optionalQuestionsStayQuietByDefaultAndAnnounceOncePerQuestionWhenEnabled() {
         assertFalse(preferences.allows(SessionAlertKind.Optional))
         assertTrue(plan(ready(), optional("a")).desired.isEmpty())

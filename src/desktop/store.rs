@@ -11,8 +11,10 @@ use zerus_desktop_migration::{canonical, configuration, HANDOFF_LOCK};
 
 #[path = "maintenance.rs"]
 pub(crate) mod maintenance;
+#[path = "rollback_backup.rs"]
+pub(super) mod rollback_backup;
 
-pub const SCHEMA: i64 = super::compact_to_send::SCHEMA;
+pub const SCHEMA: i64 = super::creation_worktree::SLOTS_SCHEMA;
 pub struct HandoffLock {
     _lock: platform::FileLock,
     root: PathBuf,
@@ -313,6 +315,11 @@ pub(super) fn operation_undrained(db: &Connection) -> Result<u64> {
     } else {
         0
     };
+    let resumes = if version >= super::session_resume::SCHEMA {
+        super::session_resume::undrained(db)?
+    } else {
+        0
+    };
     task.checked_add(clones)
         .and_then(|count| count.checked_add(cache))
         .and_then(|count| count.checked_add(worktrees))
@@ -321,6 +328,7 @@ pub(super) fn operation_undrained(db: &Connection) -> Result<u64> {
         .and_then(|count| count.checked_add(sends))
         .and_then(|count| count.checked_add(answers))
         .and_then(|count| count.checked_add(compactions))
+        .and_then(|count| count.checked_add(resumes))
         .context("operation resource total overflow")
 }
 
@@ -348,21 +356,45 @@ pub struct Store {
     answer_custody: super::deferred_answer::Recovery,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     compact_custody: super::compact_to_send::Recovery,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    resume_custody: super::session_resume::Recovery,
 }
 impl Store {
+    /// The only production opener. Keep these SAME original exclusions from
+    /// the read-only version probe through rollback backup and migration.
+    pub fn open_owned(
+        location: &Location,
+        epoch: &str,
+        owner: &platform::FileLock,
+    ) -> Result<Self> {
+        let handoff = location.handoff_lock()?;
+        let original = rollback_backup::Original::new(location, owner, &handoff)?;
+        let store = Self::open_inner(location, epoch, Some(&original))?;
+        original.verify()?;
+        Ok(store)
+    }
+    // Unit fixtures without a service still exercise the migration itself;
+    // rollback controls use open_owned with both real original locks.
+    #[cfg(test)]
     pub fn open(location: &Location, epoch: &str) -> Result<Self> {
+        Self::open_inner(location, epoch, None)
+    }
+    fn open_inner(
+        location: &Location,
+        epoch: &str,
+        original: Option<&rollback_backup::Original<'_>>,
+    ) -> Result<Self> {
         let path = location.root.join("state.sqlite3");
         database_files(location)?;
         let flags = OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_NOFOLLOW;
         // A newer schema is probed read-only before any PRAGMA or migration write.
-        if path.try_exists()? {
-            let probe =
-                Connection::open_with_flags(&path, flags | OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-            let version: i64 = probe.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-            ensure!(
-                (0..=SCHEMA).contains(&version),
-                "desktop state requires a newer hgs version"
-            );
+        let previous = schema_before_write(&path, SCHEMA)?;
+        // The read-only connection and every statement above have dropped.
+        // Backup's raw DB/WAL handles also all close before the RW open below.
+        if let Some(original) = original {
+            original
+                .prepare(previous)
+                .context("preserve desktop rollback backup before schema 35")?;
         }
         // On Unix, closing any descriptor of this file drops this process's
         // POSIX locks on it, including those of every live SQLite connection
@@ -371,8 +403,9 @@ impl Store {
         #[cfg(unix)]
         let identity = {
             crate::sqlite_file::create(&path)?;
-            crate::sqlite_file::private(&path)
-                .map_err(|_| anyhow::anyhow!("desktop state must be private single-link regular files"))?
+            crate::sqlite_file::private(&path).map_err(|_| {
+                anyhow::anyhow!("desktop state must be private single-link regular files")
+            })?
         };
         // Windows locks belong to the handle that took them.
         #[cfg(not(unix))]
@@ -593,6 +626,42 @@ impl Store {
             tx.pragma_update(None, "user_version", super::compact_to_send::SCHEMA)?;
             tx.commit()?;
         }
+        if version < 31 {
+            let tx = db.transaction()?;
+            zerus_desktop_ledger::diagnostics::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", 31)?;
+            tx.commit()?;
+        }
+        if version < super::attention::STARTUP_SCHEMA {
+            let tx = db.transaction()?;
+            super::attention::migrate_startup(&tx)?;
+            tx.pragma_update(None, "user_version", super::attention::STARTUP_SCHEMA)?;
+            tx.commit()?;
+        }
+        if version < super::delivery::CATEGORIES_SCHEMA {
+            let tx = db.transaction()?;
+            super::delivery::migrate_categories(&tx)?;
+            tx.pragma_update(None, "user_version", super::delivery::CATEGORIES_SCHEMA)?;
+            tx.commit()?;
+        }
+        if version < super::session_resume::SCHEMA {
+            let tx = db.transaction()?;
+            super::session_resume::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", super::session_resume::SCHEMA)?;
+            tx.commit()?;
+        }
+        if version < super::creation_worktree::SLOTS_SCHEMA {
+            if let Some(original) = original {
+                original.verify()?;
+            }
+            let tx = db.transaction()?;
+            super::creation_worktree::migrate_slots(&tx)?;
+            tx.pragma_update(None, "user_version", super::creation_worktree::SLOTS_SCHEMA)?;
+            if let Some(original) = original {
+                original.verify()?;
+            }
+            tx.commit()?;
+        }
         // Opening Store follows acquisition of the real exclusive serve owner.
         // Cache workers are in-process and retain it through all actual I/O.
         let tx = db.transaction()?;
@@ -617,7 +686,8 @@ impl Store {
             | super::task_message::startup(&mut db).is_err()
             | super::deferred_send::startup(&mut db).is_err()
             | super::deferred_answer::startup(&mut db).is_err()
-            | super::compact_to_send::startup(&mut db).is_err();
+            | super::compact_to_send::startup(&mut db).is_err()
+            | super::session_resume::startup(&mut db).is_err();
         let tx = db.transaction()?;
         tx.execute(
             "UPDATE service SET generation=generation+1, epoch=?1 WHERE id=1",
@@ -652,6 +722,8 @@ impl Store {
             answer_custody: super::deferred_answer::Recovery::default(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             compact_custody: super::compact_to_send::Recovery::default(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            resume_custody: super::session_resume::Recovery::default(),
         })
     }
     pub fn checkpoint(&self) -> Result<()> {
@@ -690,6 +762,7 @@ impl Store {
         let send = super::deferred_send::summary(&self.db);
         let answer = super::deferred_answer::summary(&self.db);
         let compact = super::compact_to_send::summary(&self.db);
+        let resume = super::session_resume::summary(&self.db);
         let mut status = match zerus_desktop_ledger::operations::totals(&self.db).and_then(
             |totals| {
                 let summary = |value: &Result<serde_json::Value>| match value {
@@ -706,13 +779,25 @@ impl Store {
                     summary(&send)?,
                     summary(&answer)?,
                     summary(&compact)?,
+                    summary(&resume)?,
                 ))
             },
         ) {
-            Ok((totals, undrained, clone, worktree, launch, message, send, answer, compact)) => {
+            Ok((
+                totals,
+                undrained,
+                clone,
+                worktree,
+                launch,
+                message,
+                send,
+                answer,
+                compact,
+                resume,
+            )) => {
                 let unsettled = |v: &serde_json::Value| v["unsettled"].as_u64().unwrap_or(0);
-                serde_json::json!({"unsettled":totals.unsettled+unsettled(&clone)+unsettled(&worktree)+unsettled(&launch)+unsettled(&message)+unsettled(&send)+unsettled(&answer)+unsettled(&compact),"undrained":undrained,
-                "kinds":{"task_start_reconcile":{"unsettled":totals.unsettled,"undrained":totals.undrained},"creation_clone":clone,"creation_worktree":worktree,"creation_launch":launch,"task_message":message,"deferred_send":send,"deferred_answer":answer,"compact_to_send":compact},
+                serde_json::json!({"unsettled":totals.unsettled+unsettled(&clone)+unsettled(&worktree)+unsettled(&launch)+unsettled(&message)+unsettled(&send)+unsettled(&answer)+unsettled(&compact)+unsettled(&resume),"undrained":undrained,
+                "kinds":{"task_start_reconcile":{"unsettled":totals.unsettled,"undrained":totals.undrained},"creation_clone":clone,"creation_worktree":worktree,"creation_launch":launch,"task_message":message,"deferred_send":send,"deferred_answer":answer,"compact_to_send":compact,"session_resume":resume},
                 "admissions_paused":true,"recovery_error":self.operation_recovery_error || self.creation_recovery_error})
             }
             Err(_) => {
@@ -766,10 +851,11 @@ impl Store {
             || retained(&send)
             || retained(&answer)
             || retained(&compact)
+            || retained(&resume)
         {
             let task = status["resource_custody"].take();
             status["resource_custody"] = serde_json::json!({"state":"retained","creation_clone":clone.ok(),
-                "creation_worktree":worktree.ok(),"creation_launch":launch.ok(),"task_message":message.ok(),"deferred_send":send.ok(),"deferred_answer":answer.ok(),"compact_to_send":compact.ok(),
+                "creation_worktree":worktree.ok(),"creation_launch":launch.ok(),"task_message":message.ok(),"deferred_send":send.ok(),"deferred_answer":answer.ok(),"compact_to_send":compact.ok(),"session_resume":resume.ok(),
                 "task_start_reconcile":task,"remediation":super::revoke::OPERATION_REMEDIATION});
         }
         status
@@ -818,6 +904,10 @@ impl Store {
         if self.compact_custody.tick(location, &mut self.db).is_err() {
             self.creation_recovery_error = true;
         }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if self.resume_custody.tick(location, &mut self.db).is_err() {
+            self.creation_recovery_error = true;
+        }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let _ = location;
     }
@@ -838,6 +928,12 @@ impl Store {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(super) fn compact_owned(&self) -> super::compact_to_send::Owned {
         self.compact_custody.owned()
+    }
+    /// The resume-then-sends a live runtime drains itself; Store recovery
+    /// skips them while their token lives.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) fn resume_owned(&self) -> super::session_resume::Owned {
+        self.resume_custody.owned()
     }
     #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
     pub(super) fn retry_operation_custody(&mut self) {
@@ -884,6 +980,58 @@ impl Store {
     }
 }
 
+// Kept separate so the schema-34 ceiling can be exercised against a real
+// migrated store. This is the same read-only refusal older binaries use.
+/// Task #440: whether a start would get past the store and its rollback
+/// backup, read-only: the schema probe and the backup folder's state, nothing
+/// written, no lock taken. The window re-checks this after its takeover's
+/// desktop service child failed, before it starts itself again.
+pub(super) fn store_check(location: &Location) -> serde_json::Value {
+    let path = location.root.join("state.sqlite3");
+    let schema = match schema_before_write(&path, SCHEMA) {
+        Ok(schema) => schema,
+        Err(_) => return serde_json::json!({"opens":false,"code":"schema_refused"}),
+    };
+    let backup = location.root.join("schema-34-rollback");
+    let code = match schema {
+        Some(1..=34) => match std::fs::read_dir(&backup) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => "backup_needed",
+            Err(_) => "backup_unreadable",
+            Ok(mut entries) => {
+                if entries.next().is_none() {
+                    "empty_leftover"
+                } else if backup.join("manifest.json").is_file() {
+                    "backup_present"
+                } else {
+                    "backup_incomplete"
+                }
+            }
+        },
+        Some(_) => "current",
+        None => "absent",
+    };
+    let opens = !matches!(code, "backup_incomplete" | "backup_unreadable");
+    serde_json::json!({"opens":opens,"code":code,"schema":schema})
+}
+
+fn schema_before_write(path: &Path, maximum: i64) -> Result<Option<i64>> {
+    if !path.try_exists()? {
+        return Ok(None);
+    }
+    let probe = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW
+            | OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let version: i64 = probe.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    ensure!(
+        (0..=maximum).contains(&version),
+        "desktop state requires a newer hgs version"
+    );
+    Ok(Some(version))
+}
+
 /// The swap test's hook: runs after the private check (`false`) and after
 /// SQLite's open (`true`).
 #[cfg(all(test, unix))]
@@ -926,7 +1074,15 @@ mod tests {
         let aside = |name: &str| temp.path().join(name);
         AROUND_OPEN.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move |path: &Path, opened: bool| {
-                let aside = |name: &str| path.parent().unwrap().parent().unwrap().parent().unwrap().join(name);
+                let aside = |name: &str| {
+                    path.parent()
+                        .unwrap()
+                        .parent()
+                        .unwrap()
+                        .parent()
+                        .unwrap()
+                        .join(name)
+                };
                 if opened {
                     std::fs::rename(path, aside("b.sqlite3")).unwrap();
                     std::fs::rename(aside("a.sqlite3"), path).unwrap();
@@ -938,7 +1094,10 @@ mod tests {
         });
         let swapped = Store::open(&location, &epoch);
         AROUND_OPEN.with(|hook| hook.borrow_mut().take());
-        let error = format!("{:#}", swapped.err().expect("the swapped-in database is refused"));
+        let error = format!(
+            "{:#}",
+            swapped.err().expect("the swapped-in database is refused")
+        );
         assert!(error.contains("desktop state changed"), "{error}");
         // A is back at its path, unchanged, and opens again.
         assert!(aside("b.sqlite3").exists());
@@ -968,12 +1127,21 @@ mod tests {
                 .db
                 .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))
                 .unwrap();
-            assert!(foreign_lock_refused(&path), "round {round}: the store holds its lock");
+            assert!(
+                foreign_lock_refused(&path),
+                "round {round}: the store holds its lock"
+            );
             drop(Store::open(&location, &epoch));
-            assert!(foreign_lock_refused(&path), "round {round}: another open kept the lock");
+            assert!(
+                foreign_lock_refused(&path),
+                "round {round}: another open kept the lock"
+            );
             live.db.execute_batch("COMMIT").unwrap();
             drop(live);
-            assert!(!foreign_lock_refused(&path), "round {round}: the lock went with the store");
+            assert!(
+                !foreign_lock_refused(&path),
+                "round {round}: the lock went with the store"
+            );
         }
     }
 

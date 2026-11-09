@@ -377,7 +377,7 @@ export function contextOf(target: EventTarget | null, popup: boolean = popupOpen
   if (marked === "terminal" || marked === "composer") return marked;
   // xterm's hidden text area is Terminal, marked or not.
   if (el?.closest(".xterm")) return "terminal";
-  if (el && (el.matches("input, textarea, select") || el.isContentEditable)) return "text-field";
+  if (el && (el.matches('input, textarea, select, [role="combobox"]') || el.isContentEditable)) return "text-field";
   return "window";
 }
 
@@ -399,12 +399,23 @@ export function allowed(context: Context, first: Combo, bound: Sequence, selecti
 
 /** A drop-down list opens with Alt+Up, Alt+Down and F4 (Shortcuts.cpp comboPopupKey). */
 const listPopupKey = (target: EventTarget | null, c: Combo) =>
-  focused(target)?.tagName === "SELECT"
+  (focused(target)?.tagName === "SELECT" || focused(target)?.matches('[role="combobox"]'))
   && ((only(c, { alt: true }) && (c.key === "Up" || c.key === "Down")) || (only(c, {}) && c.key === "F4"));
+
+/**
+ * Chords an element keeps for itself (Qt's ClaimedKeys, a widget's own
+ * shortcut override): data-shortcut-claims lists them in portable text,
+ * separated by spaces, such as the Projects list's "Alt+Up Alt+Down".
+ */
+function claimed(target: EventTarget | null, combo: Combo): boolean {
+  const claims = focused(target)?.closest("[data-shortcut-claims]")?.getAttribute("data-shortcut-claims");
+  return !!claims && claims.split(" ").some((text) => { const own = parseChord(text); return !!own && sameCombo(own, combo); });
+}
 
 /** What a handler is limited to: the focus must be inside it (a message field). */
 export interface Root { contains(target: Node | null): boolean }
-interface Handler { run: () => void; root?: Root }
+type HandlerRoot = Root | (() => Root | undefined);
+interface Handler { run: () => void; root?: HandlerRoot }
 
 // The handlers per command: the newest one whose root holds the focus runs,
 // and removing it restores the one before.
@@ -416,12 +427,13 @@ const handlers = new Map<string, Handler[]>();
  */
 export function handlerFor(id: string, target: EventTarget | null): (() => void) | undefined {
   const stack = handlers.get(id) ?? [];
-  let best: Handler | undefined;
+  let best: Handler | undefined, bestRoot: Root | undefined;
   for (let i = stack.length - 1; i >= 0; i--) {
     const entry = stack[i];
-    if (entry.root && !entry.root.contains(target as Node | null)) continue;
-    const inner = !best || (entry.root && (!best.root || (best.root !== entry.root && best.root.contains(entry.root as unknown as Node))));
-    if (inner) best = entry;
+    const root = typeof entry.root === "function" ? entry.root() : entry.root;
+    if ((typeof entry.root === "function" && !root) || (root && !root.contains(target as Node | null))) continue;
+    const inner = !best || (root && (!bestRoot || (bestRoot !== root && bestRoot.contains(root as unknown as Node))));
+    if (inner) { best = entry; bestRoot = root; }
   }
   return best?.run;
 }
@@ -431,7 +443,7 @@ export function handlerFor(id: string, target: EventTarget | null): (() => void)
  * composer command while the focus is inside `root`, its message field.
  * Returns the unregister function.
  */
-export function onCommand(id: string, handler: () => void, root?: Root): () => void {
+export function onCommand(id: string, handler: () => void, root?: HandlerRoot): () => void {
   const entry: Handler = { run: handler, root };
   const stack = handlers.get(id) ?? [];
   stack.push(entry);
@@ -466,7 +478,7 @@ export function route(event: RouterEvent, state: SequenceState = windowState, on
   const context = contextOf(event.target);
   const typing = context === "text-field" || context === "composer";
   // AltGr types characters; on Windows it arrives as Ctrl+Alt.
-  if (context === "none" || (typing && event.getModifierState?.("AltGraph")) || listPopupKey(event.target, combo)) {
+  if (context === "none" || (typing && event.getModifierState?.("AltGraph")) || listPopupKey(event.target, combo) || (!pending && claimed(event.target, combo))) {
     state.typed = [];
     return { consume: false };
   }

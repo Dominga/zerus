@@ -2,6 +2,7 @@ import { Show, createSignal, onCleanup, onMount } from "solid-js";
 import { accountBindExisting } from "../../bridge";
 import { Icon } from "../lib/icons";
 import { tr } from "../../i18n";
+import { TextInput } from "../lib/TextField";
 
 /** Qt's OpenCodeExistingDialog: preview the exact native conversation, then bind it. */
 export default function OpenCodeBindDialog(props: {
@@ -71,9 +72,9 @@ export default function OpenCodeBindDialog(props: {
       <div class="dlg-body">
         <p>{tr("Choose one native conversation. Preview verifies its exact ID, directory and profile. Binding adds it to Zerus without creating a native conversation, changing its history or sending a message.")}</p>
         <p class="muted">{tr("Machine: %1\nNative profile: %2", props.machine || tr("This computer"), props.agentHome)}</p>
-        <div class="form-row"><label for="oc-native-id">{tr("Native conversation ID")}</label><input id="oc-native-id" class="field" placeholder="ses_..." value={nativeId()} onInput={(e) => { setNativeId(e.currentTarget.value); setIdentity(""); }} /></div>
-        <div class="form-row"><label for="oc-directory">{tr("Native directory")}</label><input id="oc-directory" class="field" value={directory()} onInput={(e) => { setDirectory(e.currentTarget.value); setIdentity(""); }} placeholder={tr("Exact absolute directory inside the selected environment")} /></div>
-        <div class="form-row"><label for="oc-name">{tr("Zerus session name")}</label><input id="oc-name" class="field" value={name()} onInput={(e) => { setName(e.currentTarget.value); setIdentity(""); }} placeholder="opencode/project/session" /></div>
+        <div class="form-row"><label for="oc-native-id">{tr("Native conversation ID")}</label><TextInput id="oc-native-id" class="field" placeholder="ses_..." value={nativeId()} onInput={(e) => { setNativeId(e.currentTarget.value); setIdentity(""); }} /></div>
+        <div class="form-row"><label for="oc-directory">{tr("Native directory")}</label><TextInput id="oc-directory" class="field" value={directory()} onInput={(e) => { setDirectory(e.currentTarget.value); setIdentity(""); }} placeholder={tr("Exact absolute directory inside the selected environment")} /></div>
+        <div class="form-row"><label for="oc-name">{tr("Zerus session name")}</label><TextInput id="oc-name" class="field" value={name()} onInput={(e) => { setName(e.currentTarget.value); setIdentity(""); }} placeholder="opencode/project/session" /></div>
         <Show when={notice()}><p class="muted" style={{ "white-space": "pre-wrap" }}>{notice()}</p></Show>
       </div>
       <div class="dlg-foot"><span class="hint" /><span class="spacer" />

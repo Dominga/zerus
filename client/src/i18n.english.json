@@ -1,1 +1,13 @@
-[]
+[
+  "Memory search model",
+  "Memory search results",
+  "No projects yet: make one on Projects to give it memory.",
+  "Nothing found in this project's memory.",
+  "Project memory (RustCodeLore): the store, its search and the model it downloads. A search finds the project's own records and its teams' workspaces, each hit naming its store.",
+  "Search",
+  "Search this project's memory",
+  "Search this project's memory…",
+  "Searching…",
+  "The project whose memory this shows.",
+  "The store that holds this record"
+]

@@ -1102,3 +1102,49 @@ fn a_draft_member_takes_the_catalogs_read_only_folder_and_a_refusal_names_the_fi
     let error = apply(&mut team, "draft", &task, &lead, &none, &mut events).unwrap_err().to_string();
     assert!(error.contains("A task \"1\" is invalid: field \"deps\""), "{error}");
 }
+
+/// Task #6: a swap to another session drops the changes pending for the
+/// session it replaced.
+#[test]
+fn a_swap_to_a_new_session_drops_the_pending_changes() {
+    let mut team = running_team();
+    let mut events = Vec::new();
+    team.members.iter_mut().find(|member| member.id == "dev").unwrap().session =
+        Some(SessionRef { name: "codex/x/dev".into(), run_id: "r1".into(), ..Default::default() });
+    apply(
+        &mut team,
+        "settings",
+        &json!({"members_update":[{"id":"dev","model":"gpt-6"},{"id":"dev","prompt":"Ship it"}]}),
+        &Actor::Human,
+        &BTreeSet::new(),
+        &mut events,
+    )
+    .unwrap();
+    assert!(team.member("dev").unwrap().model_switch.is_some() && team.member("dev").unwrap().prompt_change.is_some());
+    apply(&mut team, "swap-member", &json!({"member":"dev","fresh":true}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    let dev = team.member("dev").unwrap();
+    assert!(dev.model_switch.is_none() && dev.prompt_change.is_none(), "the replaced session's changes do not follow the swap: {dev:?}");
+}
+
+/// Task #6: a swap to an agent that lacks the member's permissions mode is
+/// refused (Claude's auto is no mode for Codex).
+#[test]
+fn a_swap_to_an_agent_without_the_permissions_mode_is_refused() {
+    let mut team = running_team();
+    let mut events = Vec::new();
+    apply(
+        &mut team,
+        "add-member",
+        &json!({"member":{"id":"rev","role":"Reviewer","agent":"claude","permissions":"auto"}}),
+        &Actor::Human,
+        &BTreeSet::new(),
+        &mut events,
+    )
+    .unwrap();
+    assert_eq!(team.member("rev").unwrap().permissions, "auto");
+    let error = apply(&mut team.clone(), "swap-member", &json!({"member":"rev","agent":"codex"}), &Actor::Human, &BTreeSet::new(), &mut events)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "Member \"rev\": field \"permissions\": Codex has no \"auto\" permissions mode; it takes bypass");
+    assert_eq!(team.member("rev").unwrap().agent, "claude", "the refused swap changed nothing");
+}

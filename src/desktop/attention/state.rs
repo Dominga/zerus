@@ -1,4 +1,4 @@
-//! Durable logical-edge tombstones and bounded per-conversation policy state.
+//! Durable logical-edge tombstones and bounded per-session policy state.
 //! Mapping is committed BEFORE ledger creation. A crash cannot lose the first
 //! original run/token and recreate the same logical edge under a resumed run.
 use super::projection::{self, Candidate, Projection, STATE_BYTES};
@@ -111,12 +111,66 @@ pub(super) fn label(db: &Connection, computer: &str) -> Result<String> {
 
 pub(super) fn session(computer: &str, raw: &Value) -> Result<String> {
     let row = zerus_client_core::view::row(raw);
-    projection::digest(&(
-        computer,
-        row.notify.cmd,
-        row.conversation_id
-            .context("missing attention conversation")?,
-    ))
+    projection::session(computer, &row)
+}
+
+/// SessionStart ends the run-scoped notice. If the SAME question remains
+/// visible, seed only its consumed request into the conversation's Tracker:
+/// the original banner is withdrawn, never posted again under another scope.
+/// Only a freshly matched catalog row calls this; a historical delta cannot.
+pub(super) fn handover_startup(
+    db: &mut Connection,
+    computer: &str,
+    row: &zerus_client_core::ViewRow,
+    current: &mut Map<String, Value>,
+) -> Result<()> {
+    let session = projection::startup_session(computer, row)?;
+    let key = format!(
+        "run:{}",
+        row.run_id.as_deref().context("attention run missing")?
+    );
+    if super::identity::question(&row.notify.attention_id) {
+        let logical = projection::startup_logical(
+            computer,
+            &row.notify.cmd,
+            row.run_id.as_deref().context("attention run missing")?,
+            &row.notify.attention_id,
+        )?;
+        let seen: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM desktop_attention_edges WHERE logical=?1)",
+            [&logical],
+            |r| r.get(0),
+        )?;
+        if seen || super::retention::suppressed(db, &logical)? {
+            // Keep the permanent logical suppression even after Tracker drops
+            // an answered request. A later scope must not make it fresh again.
+            if let Some(token) = current
+                .get(&key)
+                .and_then(|old| old.get("token"))
+                .and_then(Value::as_str)
+            {
+                retire_token(db, token)?;
+            }
+            current.insert(
+                key,
+                serde_json::json!({"phase":row.phase, "request":row.notify.attention_id}),
+            );
+        }
+    }
+    let mut query = db.prepare("SELECT payload FROM desktop_attention_edges WHERE session=?1 AND live=1 ORDER BY id LIMIT 129")?;
+    let payloads = query
+        .query_map([&session], |r| text(r, 0, ledger::PAYLOAD_BYTES))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    ensure!(
+        payloads.len() <= 128,
+        "startup handover exceeds live edge limit"
+    );
+    drop(query);
+    for payload in payloads {
+        let action: Action = serde_json::from_str(&payload)?;
+        retire_token(db, action.token())?;
+    }
+    Ok(())
 }
 
 pub(super) struct Position<'a> {
@@ -141,11 +195,10 @@ pub(super) fn save(
     // comparisons and later cleared callbacks must retain that exact token.
     db.execute(
         "UPDATE desktop_attention_edges SET ready=0 WHERE session=?1 AND live=1",
-        [&projected.conversation],
+        [&projected.session],
     )?;
     for candidate in &projected.candidates {
-        let Some((intent, payload)) = remember(db, &projected.conversation, candidate, baseline)?
-        else {
+        let Some((intent, payload)) = remember(db, &projected.session, candidate, baseline)? else {
             // A compact tombstone is permanently blocked. Preserve Tracker's
             // request/seen state without resurrecting its retired token/payload.
             for entry in projected.state.values_mut() {
@@ -182,14 +235,14 @@ pub(super) fn save(
     let charge = state.len()
         + computer.len()
         + key.len()
-        + projected.conversation.len()
+        + projected.session.len()
         + scope.len()
         + row_hash.len();
     let tx = db.transaction()?;
     let old: Option<i64> = tx
         .query_row(
             "SELECT bytes FROM desktop_attention_sessions WHERE id=?1",
-            [&projected.conversation],
+            [&projected.session],
             |r| r.get(0),
         )
         .optional()?;
@@ -203,7 +256,7 @@ pub(super) fn save(
             && bytes - old.unwrap_or(0) + charge as i64 <= MAX_STATE_BYTES,
         "attention state quota"
     );
-    tx.execute("INSERT INTO desktop_attention_sessions VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO UPDATE SET computer=excluded.computer,catalog_key=excluded.catalog_key,scope=excluded.scope,row_hash=excluded.row_hash,policy_revision=excluded.policy_revision,state=excluded.state,bytes=excluded.bytes",params![projected.conversation,computer,key,scope,row_hash,policy_revision,state,charge as i64])?;
+    tx.execute("INSERT INTO desktop_attention_sessions VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO UPDATE SET computer=excluded.computer,catalog_key=excluded.catalog_key,scope=excluded.scope,row_hash=excluded.row_hash,policy_revision=excluded.policy_revision,state=excluded.state,bytes=excluded.bytes",params![projected.session,computer,key,scope,row_hash,policy_revision,state,charge as i64])?;
     tx.commit()?;
     Ok(())
 }
@@ -252,7 +305,7 @@ pub(super) fn consume_history(db: &mut Connection, p: Projection) -> Result<()> 
             |r| r.get(0),
         )?;
         if !exists {
-            if let Some((intent, payload)) = remember(db, &p.conversation, c, true)? {
+            if let Some((intent, payload)) = remember(db, &p.session, c, true)? {
                 install(db, c, &intent, &payload)?;
             }
         }
@@ -261,19 +314,37 @@ pub(super) fn consume_history(db: &mut Connection, p: Projection) -> Result<()> 
 }
 /// At most two indexed live candidates. Ambiguity is not currentness. Raw
 /// catalog data never supplies a writer grant; the owned source is checked too.
+pub(super) const STARTUP_CURRENT: &str = "SELECT r.key FROM desktop_catalog_rows r JOIN desktop_catalog_sources s ON s.visible=r.generation WHERE s.computer=?1
+      AND CASE WHEN json_valid(r.json) THEN json_extract(r.json,'$.cmd') END=?2
+      AND CASE WHEN json_valid(r.json) THEN json_extract(r.json,'$.run_id') END=?3
+      AND COALESCE(json_extract(r.json,'$.conversation_id'),'')=''
+      AND COALESCE(json_extract(r.json,'$.state'),'running')='running'
+      AND COALESCE(json_extract(r.json,'$.process_state'),'')<>'exited' ORDER BY r.id LIMIT 2";
 pub(super) fn current_key(
     db: &Connection,
     computer: &str,
     cmd: &str,
     conversation: &str,
+    run: &str,
 ) -> Result<Option<String>> {
-    let mut q=db.prepare("SELECT r.key FROM desktop_catalog_rows r JOIN desktop_catalog_sources s ON s.visible=r.generation WHERE s.computer=?1
+    let mut q=db.prepare(if conversation.is_empty() { STARTUP_CURRENT } else {"SELECT r.key FROM desktop_catalog_rows r JOIN desktop_catalog_sources s ON s.visible=r.generation WHERE s.computer=?1
       AND CASE WHEN json_valid(r.json) THEN json_extract(r.json,'$.cmd') END=?2
       AND CASE WHEN json_valid(r.json) THEN json_extract(r.json,'$.conversation_id') END=?3
       AND COALESCE(json_extract(r.json,'$.state'),'running')='running'
-      AND COALESCE(json_extract(r.json,'$.process_state'),'')<>'exited' ORDER BY r.id LIMIT 2")?;
+      AND COALESCE(json_extract(r.json,'$.process_state'),'')<>'exited' ORDER BY r.id LIMIT 2"})?;
     let rows = q
-        .query_map(params![computer, cmd, conversation], |r| text(r, 0, 2048))?
+        .query_map(
+            params![
+                computer,
+                cmd,
+                if conversation.is_empty() {
+                    run
+                } else {
+                    conversation
+                }
+            ],
+            |r| text(r, 0, 2048),
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok((rows.len() == 1).then(|| rows[0].clone()))
 }
@@ -486,7 +557,12 @@ pub(super) fn remove(db: &mut Connection, computer: &str, key: &str) -> Result<(
         if let ledger::Target::Session { conversation, .. } = &identity.target {
             // All canonical tokens carry agent, including main/child notices.
             let cmd = target.get("agent").and_then(Value::as_str).unwrap_or("");
-            if current_key(db, computer, cmd, conversation)?.is_some() {
+            if current_key(db, computer, cmd, conversation, "")?.is_some() {
+                continue;
+            }
+        } else if let ledger::Target::StartupQuestion { run, .. } = &identity.target {
+            let cmd = target.get("agent").and_then(Value::as_str).unwrap_or("");
+            if current_key(db, computer, cmd, "", run)?.is_some() {
                 continue;
             }
         }

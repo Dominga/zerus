@@ -108,6 +108,71 @@ fn a_member_repeating_a_check_is_parked_and_the_lead_told_once() {
     assert!(!steps(&saved, &busy(), 2000.0).iter().any(|step| matches!(step, Step::DetectWait { .. })));
 }
 
+/// Task #413: a repeated check is a wait loop only while the state it reads
+/// stands. A first observation never parks; a fast-forward that moves HEAD
+/// between checks is work; an unchanged HEAD is the loop.
+#[test]
+fn a_fast_forward_that_moves_head_is_never_parked() {
+    let repo = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git").args(["-c", "user.name=t", "-c", "user.email=t@example.test"]).args(args).current_dir(repo.path()).output().unwrap();
+        assert!(output.status.success(), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(repo.path().join("a.txt"), "one").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "one"]);
+    let mut team = running();
+    {
+        let dev = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        dev.directory = repo.path().display().to_string();
+    }
+    let events = json!([
+        {"type":"PreToolUse","tool":"Bash","detail":"git log -1 --format=%H","at":"100"},
+        {"type":"PreToolUse","tool":"Bash","detail":"git log -1 --format=%H","at":"220"},
+        {"type":"PreToolUse","tool":"Bash","detail":"git log -1 --format=%H","at":"345"},
+    ]);
+    let (_dir, mut store) = stored(&team);
+    // The first look records the state and never parks.
+    run_with(&mut store, &team, &Step::DetectWait { task: 1 }, events.clone());
+    let saved = store.load(&team.id).unwrap().unwrap();
+    assert!(saved.task(1).unwrap().park.is_none(), "a first observation is not a loop");
+    let first = saved.task(1).unwrap().attempts[0].wait_head.clone();
+    assert!(!first.is_empty(), "the folder's HEAD is recorded");
+    // The next gate fast-forwards the line: the same command, a moved HEAD.
+    std::fs::write(repo.path().join("b.txt"), "two").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "two"]);
+    let moved = saved.clone();
+    run_with(&mut store, &moved, &Step::DetectWait { task: 1 }, events.clone());
+    let saved = store.load(&team.id).unwrap().unwrap();
+    assert!(saved.task(1).unwrap().park.is_none(), "a moved HEAD is work, not a wait");
+    let second = saved.task(1).unwrap().attempts[0].wait_head.clone();
+    assert_ne!(first, second, "the new state is recorded instead");
+    // Once the state stands, the same repeats are the loop.
+    run_with(&mut store, &saved, &Step::DetectWait { task: 1 }, events);
+    let saved = store.load(&team.id).unwrap().unwrap();
+    let park = saved.task(1).unwrap().park.clone().expect("an unchanged HEAD parks");
+    assert!(park.note.contains("with HEAD") && park.note.contains("unchanged"), "{}", park.note);
+}
+
+#[test]
+fn a_member_with_a_background_job_is_never_parked_on_a_repeated_command() {
+    let mut team = running();
+    team.members.iter_mut().find(|member| member.id == "dev").unwrap().jobs =
+        vec![crate::state::teams::model::MemberJob { what: "the gate monitor".into(), since: 1.0, ..Default::default() }];
+    let (_dir, mut store) = stored(&team);
+    let events = json!([
+        {"type":"PreToolUse","tool":"Bash","detail":"hgs --version","at":"100"},
+        {"type":"PreToolUse","tool":"Bash","detail":"hgs --version","at":"220"},
+        {"type":"PreToolUse","tool":"Bash","detail":"hgs --version","at":"345"},
+    ]);
+    run_with(&mut store, &team, &Step::DetectWait { task: 1 }, events);
+    let saved = store.load(&team.id).unwrap().unwrap();
+    assert!(saved.task(1).unwrap().park.is_none(), "its own background job is the wait");
+}
+
 #[test]
 fn an_attempt_doing_real_work_is_left_alone_and_looked_at_again_later() {
     let team = running();

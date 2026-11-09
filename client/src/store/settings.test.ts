@@ -26,6 +26,21 @@ describe("imported machine appearance settings", () => {
   });
 });
 
+describe("account appearance settings in browser storage", () => {
+  it("round-trips account colors and marks and refuses malformed keys (zerus-yvzta)", async () => {
+    const storage = memoryStorage();
+    const backend = storageBackend(storage);
+    await backend.save("accounts/color/studio%1Fclaude-a1", "#2b97ff");
+    await backend.save("accounts/mark/studio%1Fclaude-a1", "x");
+    expect((await backend.load()).values).toEqual({ "accounts/color/studio%1Fclaude-a1": "#2b97ff", "accounts/mark/studio%1Fclaude-a1": "x" });
+    const loaded = storageBackend(memoryStorage({ [STORAGE_KEY]: JSON.stringify({
+      "accounts/color/ok": "#123456", "accounts/color/": "#123456", "accounts/color/a/b": "#123456", "accounts/mark/n": 7,
+      "accounts/hide/ok": true, "accounts/hide/text": "true",
+    }) }));
+    expect((await loaded.load()).values).toEqual({ "accounts/color/ok": "#123456", "accounts/hide/ok": true });
+  });
+});
+
 function memoryStorage(initial: Record<string, string> = {}): SettingsStorage & { data: Record<string, string> } {
   const data = { ...initial };
   return {

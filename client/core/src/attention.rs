@@ -10,6 +10,7 @@
 //! this device's marks to (`menubar::overlay`), as Qt's tracker reads
 //! `FleetState`'s rows.
 use crate::menubar::{Computer, Desk};
+use crate::text::Text;
 use crate::{ComputerId, ViewRow};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -17,9 +18,11 @@ use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-pub const NEEDS_ATTENTION: &str = "Zerus \u{2014} Needs attention";
-pub const NEW_REPLY: &str = "Zerus \u{2014} New reply";
-pub const OPTIONAL_QUESTION: &str = "Zerus \u{2014} Optional question";
+// Catalog sources: the app renders notices in the interface language
+// (`Tracker::set_render`), Qt's QObject::tr (AttentionTracker.cpp:125-235).
+pub const NEEDS_ATTENTION: &str = crate::source!("Zerus — Needs attention");
+pub const NEW_REPLY: &str = crate::source!("Zerus — New reply");
+pub const OPTIONAL_QUESTION: &str = crate::source!("Zerus — Optional question");
 /// Question IDs remembered per conversation (`AttentionTracker.cpp:28`).
 pub const SEEN_QUESTIONS: usize = 64;
 /// A failed delivery is retried this many seconds later (`AttentionTracker.cpp:262`).
@@ -236,6 +239,11 @@ fn muted(row: &ViewRow) -> bool {
             .is_some_and(|preferences| preferences.muted)
 }
 
+/// A supervised child's requests are its parent's (zerus-sa9qn.3).
+fn quiet(row: &ViewRow) -> bool {
+    row.quiet
+}
+
 fn baseline(row: &ViewRow) -> Option<&Map<String, Value>> {
     row.notify
         .preferences
@@ -338,9 +346,19 @@ struct Pass<'a, 'n> {
     notice_id: &'n mut dyn FnMut() -> String,
     /// Task 244: this row is a lead whose replies to team notices do not notify.
     quiet_team_replies: bool,
+    /// Notice text in the interface language; English by default.
+    render: fn(&Text) -> String,
+}
+
+fn english(text: &Text) -> String {
+    text.english()
 }
 
 impl Pass<'_, '_> {
+    fn text(&self, text: Text) -> String {
+        (self.render)(&text)
+    }
+
     fn body(&self, row: &ViewRow, reason: &str) -> String {
         format!(
             "{} / {}\n{reason}",
@@ -386,7 +404,12 @@ impl Pass<'_, '_> {
                 || !old.contains_key("started")
                 || old.get("started").and_then(Value::as_f64).unwrap_or(0.0)
                     == edge.started.unwrap_or(0.0));
-        if edge.silent || muted(row) {
+        if quiet(row) && !edge.reply {
+            // A supervised child's request is not remembered: if the child
+            // stops being supervised it is announced once (spec 2.4).
+            return;
+        }
+        if edge.silent || muted(row) || quiet(row) {
             // Withdraw the banner but remember the request without a token.
             self.current.insert(edge.key, Value::Object(entry));
             return;
@@ -425,7 +448,7 @@ impl Pass<'_, '_> {
             let body = self.body(row, &edge.reason);
             self.raised.push(Notice {
                 token,
-                title: title.to_owned(),
+                title: self.text(Text::new(title)),
                 body,
             });
         }
@@ -437,11 +460,12 @@ impl Pass<'_, '_> {
         let baseline = baseline(row);
         if facts.needs_action {
             let reason = match row.phase.as_deref() {
-                Some("approval") => "Approval needed".to_owned(),
-                Some("input") => "Input needed".to_owned(),
+                Some("approval") => self.text(crate::text!("Approval needed")),
+                Some("input") => self.text(crate::text!("Input needed")),
+                // The agent's own words stay as written.
                 _ if !facts.recovery_reason.is_empty() => concise(&facts.recovery_reason, 240),
                 _ if !facts.activity_detail.is_empty() => concise(&facts.activity_detail, 240),
-                _ => "Agent needs attention".to_owned(),
+                _ => self.text(crate::text!("Agent needs attention")),
             };
             let request = match baseline {
                 Some(_) => request_json(&facts.attention_id, Some(facts.attention_started)),
@@ -495,13 +519,15 @@ impl Pass<'_, '_> {
             // Routine ticks of a recurring scheduled job are consumed, and
             // (task 244) a lead's replies to the team's notices unless its mode is Full.
             if muted(row)
+                || quiet(row)
                 || suppressed
                 || (idle && facts.reply_scheduled && facts.recurring_schedules > 0)
                 || (idle && facts.reply_team_notice && self.quiet_team_replies)
             {
                 self.notice(row, edge("", true));
             } else if idle && (!facts.reply_scheduled || facts.recurring_schedules == 0) {
-                self.notice(row, edge("Agent has a new reply", false));
+                let reason = self.text(crate::text!("Agent has a new reply"));
+                self.notice(row, edge(&reason, false));
             } else if let Some(kept) = previous
                 .get(&key)
                 .filter(|old| old.get("request").and_then(Value::as_str) == Some(reply))
@@ -523,17 +549,23 @@ impl Pass<'_, '_> {
                 None => child.request.clone(),
             };
             let kind = if child.phase == "approval" {
-                "Approval needed"
+                crate::text!("Approval needed")
             } else {
-                "Input needed"
+                crate::text!("Input needed")
             };
+            // The subagent's label stays as written.
+            let reason = self.text(crate::text!(
+                "Subagent %1: %2",
+                concise(&child.label, 100),
+                kind
+            ));
             self.notice(
                 row,
                 Edge {
                     key: format!("child:{}:{}", identity(row), child.id),
                     phase: child.phase.clone(),
                     request,
-                    reason: format!("Subagent {}: {kind}", concise(&child.label, 100)),
+                    reason,
                     reply: false,
                     silent: facts.acknowledged
                         || baseline.is_some_and(|b| suppressed_child(b, child)),
@@ -611,7 +643,7 @@ impl Pass<'_, '_> {
             if item.unknown {
                 // An unreadable index is not an answer: keep the banner and IDs.
                 if !old.is_empty() {
-                    if muted(row) {
+                    if muted(row) || quiet(row) {
                         old.remove("token");
                         old.remove("retry_at");
                     }
@@ -649,7 +681,12 @@ impl Pass<'_, '_> {
             entry.insert("seen".into(), json!(seen));
             // Marking the session read acknowledges its questions; turning
             // banners off or muting withdraws them.
-            if !item.ids.is_empty() && enabled && !row.notify.acknowledged && !muted(row) {
+            if !item.ids.is_empty()
+                && enabled
+                && !row.notify.acknowledged
+                && !muted(row)
+                && !quiet(row)
+            {
                 let token = text(&old, "token").to_owned();
                 let retry = integer(&old, "retry_at");
                 // A request that needs action announces itself; with focus,
@@ -674,13 +711,13 @@ impl Pass<'_, '_> {
                     entry.insert("token".into(), Value::from(token.as_str()));
                     let count = row.notify.optional_count.max(item.ids.len() as i64);
                     let reason = if count == 1 {
-                        "Optional question waiting".to_owned()
+                        self.text(crate::text!("Optional question waiting"))
                     } else {
-                        format!("{count} optional questions waiting")
+                        self.text(crate::text!("%1 optional questions waiting", count))
                     };
                     questions.push(Notice {
                         token,
-                        title: OPTIONAL_QUESTION.to_owned(),
+                        title: self.text(Text::new(OPTIONAL_QUESTION)),
                         body: self.body(row, &reason),
                     });
                 } else if !token.is_empty() {
@@ -706,6 +743,8 @@ pub struct Tracker {
     team_notices: (String, BTreeMap<String, String>),
     /// The state changed since [`Tracker::take_changed`] last asked.
     changed: bool,
+    /// Renders notice text in the interface language; English when unset.
+    render: Option<fn(&Text) -> String>,
 }
 
 impl Tracker {
@@ -715,7 +754,15 @@ impl Tracker {
             optional_questions: false,
             team_notices: ("collapsed".to_owned(), BTreeMap::new()),
             changed: false,
+            render: None,
         }
+    }
+
+    /// Notice titles and fixed reasons in the interface language (Qt's
+    /// QObject::tr in AttentionTracker.cpp); an agent's own words and names
+    /// stay as written. The tracker's state never holds rendered text.
+    pub fn set_render(&mut self, render: fn(&Text) -> String) {
+        self.render = Some(render);
     }
 
     /// Banners for new optional questions (off by default). Without them
@@ -776,6 +823,7 @@ impl Tracker {
             focused,
             notice_id,
             quiet_team_replies: false,
+            render: self.render.unwrap_or(english),
         };
         for (key, row) in host.rows.iter() {
             pass.quiet_team_replies = row.team_lead && !self.team_notices_notify(host.alias, key);
@@ -822,7 +870,7 @@ impl Tracker {
         for row in host
             .rows
             .values()
-            .filter(|row| muted(row) && row.state != "archived")
+            .filter(|row| (muted(row) || quiet(row)) && row.state != "archived")
         {
             muted_runs.insert(identity(row));
             if let Some(conversation) = nonempty(&row.conversation_id) {
@@ -1075,6 +1123,58 @@ mod tests {
         }
     }
 
+    /// A stand-in catalog: marked sources in brackets, arguments as given.
+    fn bracketed(text: &Text) -> String {
+        let args: Vec<String> = text
+            .args
+            .iter()
+            .map(|arg| match arg {
+                crate::text::Arg::Text(nested) => bracketed(nested),
+                crate::text::Arg::Verbatim(value) => value.clone(),
+                crate::text::Arg::Number(value) => value.to_string(),
+            })
+            .collect();
+        let mut out = format!("[{}]", text.source);
+        for (n, arg) in args.iter().enumerate().rev() {
+            out = out.replace(&format!("%{}", n + 1), arg);
+        }
+        out
+    }
+
+    #[test]
+    fn notice_text_is_rendered_but_agent_words_and_names_stay_as_written() {
+        // Qt's QObject::tr in AttentionTracker.cpp:125-235 (zerus-5wmh.13.16.2).
+        let mut fixture = Fixture::new();
+        fixture.tracker.set_render(bracketed);
+        let approval = fixture.observe(vec![asking("claude/p/a", "approval", "req-1")]);
+        assert_eq!(approval.raised[0].title, "[Zerus — Needs attention]");
+        assert_eq!(
+            approval.raised[0].body,
+            "claude/p/a / arch\n[Approval needed]"
+        );
+        let mut recovery = asking("claude/p/b", "working", "req-2");
+        recovery.notify.recovery_reason = "Provider failed".into();
+        let words = fixture.observe(vec![recovery]);
+        assert_eq!(
+            words.raised[0].body, "claude/p/b / arch\nProvider failed",
+            "the agent's own words"
+        );
+        let child = fixture.observe(vec![asking_child("claude/p/c", "input", "child-1")]);
+        assert_eq!(
+            child.raised[0].body, "claude/p/c / arch\n[Subagent Reviewer: [Input needed]]",
+            "the label stays as written"
+        );
+        let reply = fixture.observe(vec![replied("claude/p/d", "reply-1")]);
+        assert_eq!(titles(&reply), vec!["[Zerus — New reply]"]);
+        assert!(reply.raised[0].body.ends_with("\n[Agent has a new reply]"));
+        // The tracker's state never holds rendered text.
+        let state = serde_json::to_string(&fixture.tracker.hosts).unwrap();
+        assert!(
+            !state.contains("[Zerus") && !state.contains("[Approval") && !state.contains("[Agent"),
+            "{state}"
+        );
+    }
+
     #[test]
     fn an_approval_notifies_once_and_is_withdrawn_when_answered() {
         // edgesOfflineRestartAndIdentity
@@ -1278,6 +1378,106 @@ mod tests {
             )])
             .raised
             .is_empty());
+    }
+
+    fn supervised(mut row: ViewRow, quiet: bool) -> ViewRow {
+        row.quiet = quiet;
+        row
+    }
+
+    #[test]
+    fn a_supervised_childs_request_waits_for_its_parent_and_is_announced_once_when_orphaned() {
+        // zerus-sa9qn.3: a quiet request is not remembered, so it notifies
+        // once the child stops being supervised, and never twice.
+        let mut fixture = Fixture::new();
+        let quiet = fixture.observe(vec![supervised(asking("claude/p/kid", "input", "q"), true)]);
+        assert_eq!(quiet, Changes::default());
+        let orphaned = fixture.observe(vec![supervised(
+            asking("claude/p/kid", "input", "q"),
+            false,
+        )]);
+        assert_eq!(orphaned.raised.len(), 1);
+        assert!(fixture
+            .observe(vec![supervised(
+                asking("claude/p/kid", "input", "q"),
+                false
+            )])
+            .raised
+            .is_empty());
+        // A banner raised before supervision began is withdrawn.
+        let mut fixture = Fixture::new();
+        let token = fixture
+            .observe(vec![asking("claude/p/kid", "input", "r")])
+            .raised[0]
+            .token
+            .clone();
+        let withdrawn =
+            fixture.observe(vec![supervised(asking("claude/p/kid", "input", "r"), true)]);
+        assert_eq!(
+            withdrawn,
+            Changes {
+                raised: vec![],
+                cleared: vec![token]
+            }
+        );
+    }
+
+    /// A listing row of a supervised child, through the public projection.
+    fn listed_child(extra: Value) -> ViewRow {
+        let mut raw = json!({"name":"claude/p/kid","agent":"claude","cmd":"claude","state":"running",
+            "process_state":"running","tracked":true,"run_id":"run-kid","conversation_id":"conv-kid","created":100,
+            "parent":{"schema":1,"machine":"11111111-1111-4111-8111-111111111111","host":"arch",
+                "session_id":"22222222-2222-4222-8222-222222222222","name":"claude/p/lead",
+                "conversation_id":"c","run_id":"r","source":"launch","at":1,"state":"live"}});
+        raw.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        crate::view::row(&raw)
+    }
+
+    #[test]
+    fn a_supervised_childs_approvals_alert_whatever_the_host_reports() {
+        // zerus-b5oin: an unclassified (older host) approval keeps attention.
+        let approval = json!({"activity":"waiting","phase":"approval","attention_id":"tool-1","attention_started":5});
+        let row = listed_child(approval.clone());
+        assert!(!row.quiet);
+        assert_eq!(Fixture::new().observe(vec![row]).raised.len(), 1);
+        let mut misread = approval;
+        misread["human_request"] = json!(false);
+        assert_eq!(
+            Fixture::new()
+                .observe(vec![listed_child(misread)])
+                .raised
+                .len(),
+            1
+        );
+        // zerus-dn4ia: a native subagent's tool approval is the person's.
+        let child = json!({"activity":"busy","phase":"tool","human_request":false,"subagents":{"w1":{
+            "name":"Reviewer","state":"working","display_state":"approval","attention_id":"a1","attention_started":5}}});
+        let row = listed_child(child.clone());
+        assert!(!row.quiet);
+        assert_eq!(Fixture::new().observe(vec![row]).raised.len(), 1);
+        // The same child asking a question is the parent's.
+        let mut question = child;
+        question["subagents"]["w1"]["display_state"] = json!("input");
+        let row = listed_child(question);
+        assert!(row.quiet);
+        assert!(Fixture::new().observe(vec![row]).raised.is_empty());
+    }
+
+    #[test]
+    fn a_supervised_childs_replies_are_remembered_silently_and_never_replayed() {
+        let mut fixture = Fixture::new();
+        fixture.observe(vec![replied("claude/p/kid", "one")]);
+        let quiet = fixture.observe(vec![supervised(replied("claude/p/kid", "two"), true)]);
+        assert!(quiet.raised.is_empty());
+        assert!(
+            fixture
+                .observe(vec![replied("claude/p/kid", "two")])
+                .raised
+                .is_empty(),
+            "orphaning never announces a reply seen while supervised"
+        );
     }
 
     #[test]

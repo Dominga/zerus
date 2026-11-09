@@ -32,6 +32,7 @@ pub fn valid_alias(alias: &str) -> bool {
 }
 
 struct Shared {
+    git_rows: Mutex<Vec<crate::git::RowInterest>>,
     hgs: PathBuf,
     timing: Timing,
     /// Whether the peers the local listing names get streams.
@@ -83,6 +84,12 @@ impl Shared {
             .expect("start an accounted stream supervisor"),
             None => stream::spawn(&self.hgs, &computer, self.timing.clone(), events),
         };
+        let keys = guard(&self.git_rows)
+            .iter()
+            .filter(|row| row.computer == computer.0)
+            .map(|row| row.key.clone())
+            .collect();
+        handle.git_rows(keys);
         streams.insert(computer, resources::Stream { handle, resources });
         true
     }
@@ -196,6 +203,7 @@ impl Fleet {
     ) -> Self {
         let (tx, rx) = mpsc::channel();
         let shared = Arc::new(Shared {
+            git_rows: Mutex::new(Vec::new()),
             hgs,
             timing,
             peers,
@@ -246,6 +254,26 @@ impl Fleet {
         guard(&self.shared.streams)
             .get(computer)
             .is_some_and(|handle| handle.unfollow(key))
+    }
+
+    /// Bounded visible identities, resolved by each original native supervisor.
+    pub fn git_rows(&self, rows: &[crate::git::RowInterest]) -> Result<(), FollowError> {
+        if rows.len() > crate::git::VISIBLE_FOLDERS || rows.iter().any(|r| !r.valid()) {
+            return Err(FollowError::TooMany);
+        }
+        let streams = guard(&self.shared.streams);
+        *guard(&self.shared.git_rows) = rows.to_vec();
+        for (computer, handle) in streams.iter() {
+            let keys = rows
+                .iter()
+                .filter(|r| r.computer == computer.0)
+                .map(|r| r.key.clone())
+                .collect();
+            if !handle.git_rows(keys) {
+                return Err(FollowError::Stopped);
+            }
+        }
+        Ok(())
     }
 
     /// Follows a session's processes on one computer (see

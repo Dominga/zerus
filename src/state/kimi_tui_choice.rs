@@ -76,6 +76,7 @@ pub(super) fn capture(record: &Value) -> Result<String> {
 pub(super) fn identity(original: &Value) -> Result<Value> {
     let record = read_run(string(original, "name"), string(original, "run_id"))?
         .ok_or("Session run disappeared")?;
+    terminating::check_mutation(&record)?;
     if [
         "pane",
         "pid",
@@ -96,6 +97,13 @@ pub(super) fn identity(original: &Value) -> Result<Value> {
     input::checked_terminal(&record, false)?;
     Ok(record)
 }
+// Claude Code 2.1.319's shared permission dialog and auto-default nudge
+// reject confirmation for 150 ms after first paint. Observe the SAME panel
+// throughout this native guard before our ONE Enter. This does not promise
+// that a future release accepts it: an unconfirmed selection stays uncertain
+// and requires Terminal recovery, without replay.
+pub(super) const CLAUDE_CONFIRMATION_GUARD: Duration = Duration::from_millis(150);
+
 // The parser returns the exact question hash and highlighted option. A trust
 // decline can legitimately exit the pinned process after Enter; other choices
 // must observe the dialog disappear while the same process owns the terminal.
@@ -108,8 +116,54 @@ pub(super) fn answer(
     acknowledged: fn(&str) -> bool,
     expect_exit: bool,
 ) -> Result<()> {
-    navigate(record, question, chosen, option_count, parse, acknowledged, expect_exit, false, Duration::ZERO, None)
+    navigate(record, question, chosen, option_count, parse, acknowledged, expect_exit, false, Duration::ZERO, None, Duration::ZERO)
         .map(drop)
+}
+
+/// A native chooser can render before its confirmation guard accepts Enter.
+/// Start that guard at our first exact-panel observation, keep observing it,
+/// then use the usual single Enter and unchanged acknowledgement rules.
+pub(super) fn answer_after_observation(
+    record: &Value,
+    question: &Value,
+    chosen: usize,
+    option_count: usize,
+    parse: fn(&Value, &str) -> Option<(Value, usize)>,
+    acknowledged: fn(&str) -> bool,
+    guard: Duration,
+) -> Result<()> {
+    navigate(
+        record,
+        question,
+        chosen,
+        option_count,
+        parse,
+        acknowledged,
+        false,
+        false,
+        Duration::ZERO,
+        None,
+        guard,
+    )
+    .map(drop)
+}
+
+fn observed_guard(
+    observed: Instant,
+    guard: Duration,
+    mut current: impl FnMut() -> Result<()>,
+    mut now: impl FnMut() -> Instant,
+    mut wait: impl FnMut(Duration),
+) -> Result<()> {
+    let until = observed + guard;
+    loop {
+        current()?;
+        let remaining = until.saturating_duration_since(now());
+        if remaining.is_zero() {
+            return Ok(());
+        }
+        wait(remaining.min(Duration::from_millis(40)));
+    }
 }
 
 /// Recognizes the agent's announcement that a handed-off command started.
@@ -141,12 +195,14 @@ pub(super) fn answer_handoff(
     bound: Duration,
 ) -> Result<Handoff> {
     let handoff = Some((started, bound));
-    navigate(record, question, chosen, option_count, parse, |_| false, false, false, Duration::ZERO, handoff)?
+    navigate(record, question, chosen, option_count, parse, |_| false, false, false, Duration::ZERO, handoff, Duration::ZERO)?
         .ok_or_else(|| "delivery uncertain: The agent's selection did not finish".into())
 }
 
 // Claude shows queued tool approvals one after another, so the next complete
 // approval may replace the answered one before any other screen is drawn.
+// These approvals share the auto-default nudge's native confirmation guard,
+// including when Yes is already highlighted and no arrow was needed.
 pub(super) fn answer_queued(
     record: &Value,
     question: &Value,
@@ -156,7 +212,7 @@ pub(super) fn answer_queued(
     acknowledged: fn(&str) -> bool,
     navigation_settle: Duration,
 ) -> Result<()> {
-    navigate(record, question, chosen, option_count, parse, acknowledged, false, true, navigation_settle, None)
+    navigate(record, question, chosen, option_count, parse, acknowledged, false, true, navigation_settle, None, CLAUDE_CONFIRMATION_GUARD)
         .map(drop)
 }
 
@@ -221,8 +277,10 @@ fn navigate(
     queued: bool,
     navigation_settle: Duration,
     handoff: Option<(Started<'_>, Duration)>,
+    confirmation_guard: Duration,
 ) -> Result<Option<Handoff>> {
     let mut touched = false;
+    let mut first_observed = None;
     let result = (|| {
         // One verified arrow at a time: never apply a saved index to a different
         // dialog, or send Enter while an arrow is still being processed.
@@ -233,11 +291,27 @@ fn navigate(
             if panel.0 != question["question_hash"] {
                 return Err("The agent's dialog changed".into());
             }
+            let observed = *first_observed.get_or_insert_with(Instant::now);
             let key = match panel.1.cmp(&chosen) {
                 std::cmp::Ordering::Equal => "Enter",
                 std::cmp::Ordering::Less => "Down",
                 std::cmp::Ordering::Greater => "Up",
             };
+            if key == "Enter" && !confirmation_guard.is_zero() {
+                observed_guard(
+                    observed,
+                    confirmation_guard,
+                    || {
+                        let active = identity(record)?;
+                        if parse(&active, &capture(&active)?) != Some(panel.clone()) {
+                            return Err("Terminal changed during the native confirmation guard; nothing was submitted".into());
+                        }
+                        Ok(())
+                    },
+                    Instant::now,
+                    std::thread::sleep,
+                )?;
+            }
             let active = identity(record)?;
             // Compare the complete parsed request and highlighted option.
             // Unrelated terminal repainting (for example a spinner above the
@@ -346,7 +420,70 @@ fn navigate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+
+    #[test]
+    fn the_native_guard_uses_the_first_observation_not_navigation_completion() {
+        let observed = Instant::now();
+        let guard = Duration::from_millis(150);
+        let elapsed = Cell::new(Duration::from_millis(60));
+        let checked = Cell::new(0);
+        let waits = Cell::new(0);
+        observed_guard(
+            observed,
+            guard,
+            || {
+                checked.set(checked.get() + 1);
+                Ok(())
+            },
+            || observed + elapsed.get(),
+            |delay| {
+                waits.set(waits.get() + 1);
+                elapsed.set(elapsed.get() + delay);
+            },
+        )
+        .unwrap();
+        assert_eq!(elapsed.get(), guard);
+        assert_eq!(waits.get(), 3);
+        assert_eq!(checked.get(), 4);
+        // An already old observation still needs a fresh check, but no wait.
+        elapsed.set(Duration::from_millis(200));
+        checked.set(0);
+        observed_guard(
+            observed,
+            guard,
+            || {
+                checked.set(checked.get() + 1);
+                Ok(())
+            },
+            || observed + elapsed.get(),
+            |_| panic!("the native guard already elapsed"),
+        )
+        .unwrap();
+        assert_eq!(checked.get(), 1);
+    }
+
+    #[test]
+    fn a_changed_panel_or_identity_at_the_guard_boundary_refuses_confirmation() {
+        let observed = Instant::now();
+        let guard = Duration::from_millis(150);
+        let elapsed = Cell::new(Duration::ZERO);
+        let result = observed_guard(
+            observed,
+            guard,
+            || {
+                if elapsed.get() == guard {
+                    return Err("the original panel or process changed".into());
+                }
+                Ok(())
+            },
+            || observed + elapsed.get(),
+            |delay| elapsed.set(elapsed.get() + delay),
+        );
+        assert_eq!(elapsed.get(), guard);
+        assert_eq!(result.unwrap_err(), "the original panel or process changed");
+    }
 
     static CAPTURES: AtomicUsize = AtomicUsize::new(0);
     struct Counting;

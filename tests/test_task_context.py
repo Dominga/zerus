@@ -32,6 +32,8 @@ class TaskContext(test_fork.Base):
                 self.assertIn("hgs task add", output["additionalContext"])
                 self.assertIn("поставь таск", output["additionalContext"])
                 self.assertIn("hgs guide tasks", output["additionalContext"])
+                self.assertIn("hgs task report-attempt <ref> --attempt UUID", output["additionalContext"])
+                self.assertIn("never substitute the latest attempt ID", output["additionalContext"])
                 # Tracking goes on: the session is still idle in its conversation.
                 self.assertEqual(self.binding(name)["activity"], "idle")
 

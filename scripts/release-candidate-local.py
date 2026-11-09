@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Task 157: the Windows half of the release candidate.
 
-Runs the fork-windows steps after the Qt and fork tests: the Tauri build with
-the fork channel, the package and the portable self-test. The paths are the
-workflow's; --dry-run prints them.
+Runs the fork-windows steps after the fork tests: the Tauri build with the
+fork channel, the package and the portable self-test. Task #388: no Qt step and
+no Qt in the zip. The paths are the workflow's; --dry-run prints them; each
+step prints how long it took.
 """
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ import argparse
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,18 +27,11 @@ def run(command: list[str], cwd: Path = ROOT, env: dict[str, str] | None = None,
     # On Windows npm is npm.cmd: CreateProcess finds only .exe by a bare
     # name, so the program is resolved on PATH first (task 169).
     program = shutil.which(command[0], path=merged.get("PATH")) or command[0]
-    if subprocess.run([program, *command[1:]], cwd=cwd, env=merged).returncode != 0:
+    started = time.monotonic()
+    code = subprocess.run([program, *command[1:]], cwd=cwd, env=merged).returncode
+    print(f"  took {time.monotonic() - started:.0f} s", flush=True)
+    if code != 0:
         raise SystemExit(f"release candidate step failed: {' '.join(command)}")
-
-
-def qt_fallback() -> str:
-    """The Qt desktop the package carries as its fallback: gui.sh's Ninja
-    build writes .ci-build/gui/hgs-tray.exe; the Visual Studio generator the
-    Windows-native leg uses writes it under its configuration folder."""
-    for candidate in (".ci-build/gui/hgs-tray.exe", ".ci-build/gui/Release/hgs-tray.exe"):
-        if (ROOT / candidate).exists():
-            return candidate
-    return ".ci-build/gui/hgs-tray.exe"
 
 
 def fork_identity(build: str, feed: str) -> tuple[str, str]:
@@ -64,7 +59,6 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--commit", default="HEAD")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--qt-root", default=os.environ.get("QT_ROOT_DIR", r"D:/Tools/zerus-deps/Qt/6.10.3/msvc2022_64"))
     # Task 213: the local leg takes the fork identity the workflow gets from its
     # tag and run number. The environment names fork-windows.yml sets are read
     # too, so the same values serve both legs.
@@ -105,7 +99,6 @@ def main() -> int:
          "--gui", "target/windows-next/release/hgs-tray.exe",
          "--connector", "services/mobile/connector/target/release/zerus-mobile-connector.exe",
          "--mobile-relay", "services/mobile/relay/target/release/zerus-relay.exe",
-         "--qt-fallback", qt_fallback(), "--qt-root", args.qt_root,
          "--frontend-licenses", "artifacts/windows-frontend-licenses",
          "--conpty", str(Path(os.environ.get("RUNNER_TEMP", ROOT / ".zerus-team/tmp")) / "conpty"),
          "--output", "artifacts/zerus-windows-x86_64.zip"], dry=args.dry_run)

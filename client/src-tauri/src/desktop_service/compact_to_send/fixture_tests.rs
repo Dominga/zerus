@@ -181,6 +181,68 @@ fn a_lost_reply_is_looked_up_on_its_own_lane_and_never_becomes_unsent() {
     });
 }
 
+/// zerus-tlb9q: the service's exact refusal before admission never started:
+/// Unsent with the draft kept, with no lookup and no second offer. The same
+/// code for another request or scope, durable or with a receipt is no reply
+/// of this original, so only the lookup decides.
+#[test]
+fn an_exact_not_admitted_refusal_is_unsent_without_a_lookup() {
+    if !private_case("desktop_service::compact_to_send::fixture_tests::an_exact_not_admitted_refusal_is_unsent_without_a_lookup") {
+        return;
+    }
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        let refusal = |verified: &wire::Verified| {
+            let mut reply = admit(verified, None, false);
+            reply["code"] = json!(wire::NOT_ADMITTED);
+            reply
+        };
+        let first = original("not admitted");
+        let v = verified(&service, &first).await;
+        answers(&f.0, Some(refusal(&v)), &[]);
+        assert_eq!(
+            offer(service.clone(), SESSION, first).await,
+            settled_as(SendAnswer::Unsent(NOT_STARTED.into()))
+        );
+        assert_eq!(
+            (
+                count(&f.0, "compact_to_send"),
+                count(&f.0, "compact_to_send_result")
+            ),
+            (1, 0)
+        );
+        type Change = fn(&mut Value, &wire::Verified);
+        let changes: [(&str, Change); 5] = [
+            ("request", |r, _| {
+                r["request_id"] = json!("00000000-0000-4000-8000-0000000000ff")
+            }),
+            ("scope", |r, _| {
+                r["scope"]["service_epoch"] = json!("00000000-0000-4000-8000-0000000000fe")
+            }),
+            ("durable", |r, _| r["durable"] = json!(true)),
+            ("abi", |r, _| r["abi"] = json!("other")),
+            ("receipt", |r, v| {
+                r["receipt"] = json!(receipt(v, NotStarted, NotStarted, true))
+            }),
+        ];
+        for (n, (name, change)) in changes.into_iter().enumerate() {
+            let next = original(&format!("changed {name}"));
+            let v = verified(&service, &next).await;
+            let mut reply = refusal(&v);
+            change(&mut reply, &v);
+            answers(&f.0, Some(reply), &[]);
+            assert_eq!(
+                offer(service.clone(), SESSION, next).await,
+                settled_as(SendAnswer::Unconfirmed(UNCONFIRMED.into())),
+                "{name}"
+            );
+            assert_eq!(count(&f.0, "compact_to_send_result"), n + 1, "{name}");
+        }
+        service.join().await.unwrap();
+    });
+}
+
 #[test]
 fn the_admission_or_the_lookup_settles_and_an_unsettled_one_is_pending() {
     if !private_case("desktop_service::compact_to_send::fixture_tests::the_admission_or_the_lookup_settles_and_an_unsettled_one_is_pending") {

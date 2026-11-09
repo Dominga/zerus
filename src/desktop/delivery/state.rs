@@ -4,6 +4,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use zerus_client_core::approvals::automatic::Set;
 use zerus_desktop_ledger::reads::{self, ReadMark};
 
 const REQUESTS: i64 = 100_000;
@@ -11,6 +12,36 @@ const REQUESTS: i64 = 100_000;
 pub(super) struct Policy {
     pub enabled: bool,
     pub revision: i64,
+    /// The approval categories kept on (zerus-sz42x).
+    pub categories: Set,
+}
+
+/// Schema leaf 33: the approval categories, all except paid usage for an
+/// existing policy, as the window worker's defaults are. The column is added
+/// only where it is missing.
+pub(super) fn migrate_categories(db: &Connection) -> Result<()> {
+    let present: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('desktop_delivery_policy') WHERE name='categories')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !present {
+        db.execute_batch(&format!(
+            "ALTER TABLE desktop_delivery_policy ADD COLUMN categories TEXT NOT NULL DEFAULT '{}';",
+            encode(Set::defaults())
+        ))?;
+    }
+    Ok(())
+}
+fn encode(set: Set) -> String {
+    serde_json::to_string(&set.ids()).expect("closed category IDs")
+}
+/// Only this actor writes the column; anything but known, distinct IDs
+/// fails closed as an unavailable policy.
+fn decode(text: &str) -> Result<Set> {
+    ensure!(text.len() <= 256, "invalid approval categories");
+    let ids: Vec<String> = serde_json::from_str(text)?;
+    Set::from_ids(&ids).ok_or_else(|| anyhow::anyhow!("invalid approval categories"))
 }
 
 pub(super) fn migrate(db: &Connection) -> Result<()> {
@@ -26,16 +57,16 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
 }
 
 pub(super) fn policy(db: &Connection) -> Result<Policy> {
-    Ok(db.query_row(
-        "SELECT enabled,revision FROM desktop_delivery_policy WHERE id=1",
+    let (enabled, revision, categories): (bool, i64, String) = db.query_row(
+        "SELECT enabled,revision,substr(categories,1,257) FROM desktop_delivery_policy WHERE id=1",
         [],
-        |r| {
-            Ok(Policy {
-                enabled: r.get(0)?,
-                revision: r.get(1)?,
-            })
-        },
-    )?)
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    Ok(Policy {
+        enabled,
+        revision,
+        categories: decode(&categories)?,
+    })
 }
 
 pub(super) fn canonical(id: &str) -> bool {
@@ -104,17 +135,25 @@ pub(super) fn enqueue(db: &mut Connection, id: &str, mark: &ReadMark, now: i64) 
     )
 }
 
-fn policy_fingerprint(enabled: bool) -> String {
+/// A switch change keeps its original fingerprint; a category change also
+/// binds the complete set it names.
+fn policy_fingerprint(enabled: bool, categories: Option<Set>) -> String {
+    let intent = match categories {
+        None => json!(["automatic_approvals", enabled]),
+        Some(set) => json!(["automatic_approvals", enabled, set.ids()]),
+    };
     format!(
         "{:x}",
-        Sha256::digest(
-            serde_json::to_vec(&json!(["automatic_approvals", enabled]))
-                .expect("closed policy fingerprint")
-        )
+        Sha256::digest(serde_json::to_vec(&intent).expect("closed policy fingerprint"))
     )
 }
 /// Returning an original committed receipt grants no new policy mutation.
-pub(super) fn policy_receipt(db: &Connection, id: &str, enabled: bool) -> Result<Option<Value>> {
+pub(super) fn policy_receipt(
+    db: &Connection,
+    id: &str,
+    enabled: bool,
+    categories: Option<Set>,
+) -> Result<Option<Value>> {
     ensure!(canonical(id), "invalid delivery request ID");
     let old: Option<(String, String)> = db
         .query_row(
@@ -125,7 +164,7 @@ pub(super) fn policy_receipt(db: &Connection, id: &str, enabled: bool) -> Result
         .optional()?;
     if let Some((hash, receipt)) = old {
         ensure!(
-            hash == policy_fingerprint(enabled),
+            hash == policy_fingerprint(enabled, categories),
             "request ID changed its intent"
         );
         ensure!(receipt.len() <= 4096, "invalid delivery receipt");
@@ -133,12 +172,22 @@ pub(super) fn policy_receipt(db: &Connection, id: &str, enabled: bool) -> Result
     }
     Ok(None)
 }
-pub(super) fn set_policy(db: &mut Connection, id: &str, enabled: bool) -> Result<Value> {
+/// `categories` None changes the switch; Some changes only the categories,
+/// with `enabled` required to equal the committed switch.
+pub(super) fn set_policy(
+    db: &mut Connection,
+    id: &str,
+    enabled: bool,
+    categories: Option<Set>,
+) -> Result<Value> {
     ensure!(canonical(id), "invalid delivery request ID");
-    let fingerprint = policy_fingerprint(enabled);
+    let fingerprint = policy_fingerprint(enabled, categories);
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if let Some(receipt) = policy_receipt(&tx, id, enabled)? {
+    if let Some(receipt) = policy_receipt(&tx, id, enabled, categories)? {
         return Ok(receipt);
+    }
+    if categories.is_some() {
+        ensure!(policy(&tx)?.enabled == enabled, "approval policy changed");
     }
     let used: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM desktop_read_requests WHERE request_id=?1)",
@@ -155,12 +204,20 @@ pub(super) fn set_policy(db: &mut Connection, id: &str, enabled: bool) -> Result
     let revision = revision
         .checked_add(1)
         .ok_or_else(|| anyhow::anyhow!("policy revision exhausted"))?;
-    let receipt = json!({"request_id":id,"accepted":true,"durable":true,
+    let mut receipt = json!({"request_id":id,"accepted":true,"durable":true,
         "op":"automatic_approvals","enabled":enabled,"revision":revision});
-    tx.execute(
-        "UPDATE desktop_delivery_policy SET enabled=?1,revision=?2,requests=requests+1 WHERE id=1",
-        params![enabled, revision],
-    )?;
+    if let Some(set) = categories {
+        receipt["categories"] = json!(set.ids());
+        tx.execute(
+            "UPDATE desktop_delivery_policy SET categories=?1,revision=?2,requests=requests+1 WHERE id=1",
+            params![encode(set), revision],
+        )?;
+    } else {
+        tx.execute(
+            "UPDATE desktop_delivery_policy SET enabled=?1,revision=?2,requests=requests+1 WHERE id=1",
+            params![enabled, revision],
+        )?;
+    }
     tx.execute(
         "INSERT INTO desktop_delivery_requests VALUES(?1,?2,?3)",
         params![id, fingerprint, receipt.to_string()],

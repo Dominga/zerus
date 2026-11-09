@@ -122,7 +122,7 @@ class FakeTests(unittest.TestCase):
         inspected = self.call("inspect", "claude/sample-project/review", "--after", "0", "--skip-processes")
         self.assertEqual(inspected["runtime_state"], "live")
         self.assertTrue(inspected["run_id"].endswith("-resumed"))
-        child = self.call("inspect", "claude/sample-project/api-refactor", "--after", "0", "--skip-processes", "--subagent", "agent-writable")
+        child = self.call("inspect", "claude/sample-project/api-refactor", "--after", "0", "--skip-processes", "--agent", "agent-writable")
         self.assertTrue(child["send_supported"])
         receipt = self.call("send", "claude/sample-project/api-refactor", "--json", stdin=json.dumps(dict(request, agent_id="agent-writable")))
         self.assertEqual(receipt["agent_id"], "agent-writable")

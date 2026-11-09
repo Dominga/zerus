@@ -545,7 +545,6 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::{
-        io::{Read, Write},
         os::unix::fs::{symlink, PermissionsExt},
         process::{Child, Command, Stdio},
         time::Duration,
@@ -555,18 +554,16 @@ mod tests {
     /// kernel publishes the new image's environment, so /proc/PID/environ
     /// reads empty for a moment (1972 of 2000 reads right after spawn), and
     /// a loaded runner keeps it so past the fixture's setup (zerus-spum). Its
-    /// echo proves it runs; it lives until killed or its stdin closes.
+    /// echo proves it runs; the private test image also avoids Darwin's hidden
+    /// platform-binary environment. It lives until killed or its stdin closes.
     fn executor(run: &str) -> Child {
-        let mut child = Command::new("/bin/cat")
+        let mut child = crate::test_process::echo_command()
             .env("HGS_RUN_ID", run)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
-        child.stdin.as_mut().unwrap().write_all(b"ready\n").unwrap();
-        let mut echo = [0; 6];
-        child.stdout.as_mut().unwrap().read_exact(&mut echo).unwrap();
-        assert_eq!(&echo, b"ready\n");
+        crate::test_process::echo_ready(&mut child);
         child
     }
 

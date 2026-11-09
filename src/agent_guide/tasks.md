@@ -1,13 +1,16 @@
 Project tasks (hgs guide tasks)
 
-Own session/project; PROJECT/T-xxxxxx selects another. Text: stdin; --json: task.
+Own session/project. REF: T-xxxxxx or PROJECT/T-xxxxxx; text: stdin; --json: task.
 
   hgs task list [--stage review|active|todo|backlog|done]
   hgs task get REF
-  hgs task add [--backlog] [--position N] [--title TEXT] [--request-id UUID]
+  hgs task add [--backlog] [--position N] [--title TEXT [--request-id UUID]]
   hgs task add --start
   hgs task start REF
+  hgs task begin-attempt REF --attempt UUID
+  hgs task control plan|execute|status --json
   hgs task report [--progress]|comment REF
+  hgs task report-attempt REF --attempt UUID [--progress|--ready] [--considered REV]
   hgs task rename|edit REF
   hgs task move REF --position N
   hgs task stage REF todo|backlog|done
@@ -18,27 +21,26 @@ Own session/project; PROJECT/T-xxxxxx selects another. Text: stdin; --json: task
   hgs task handoff REF --session SESSION [--host ALIAS]
   hgs task cancel REF [--reason TEXT]
 
-Add queues later work; add --start or start REF records current work without
-resending. Report changes, checks, remaining work/blockers: it moves to Review.
-Only the person accepts Done. You cannot cancel your dispatched task; report
-instead. Handoff moves active ownership after native submission; messages do not.
+Add queues; --start/start records work, no resend. Only the person accepts Done.
+Use the prompt's one acknowledgement. After queue activation, begin-attempt
+replaces start for managed work. Controls are inactive; current prompts use start.
+Report with the original command; --progress updates.
+Keep its pinned report-attempt UUID; never substitute get/start's latest ID.
+Legacy start prints a plain report command.
+History-only means saved, not moved; do not retry. Without a pinned command,
+ask the person to accept or resend. You cannot cancel your dispatched task;
+report or hand it off. Messages do not transfer ownership; submitted handoff does.
 
-Plans create no executor. Explicit Start opens the launch dialog or asks the
-parent to create a subagent. Register its observed live ID
-against the sent receipt. The parent reports; children never use its identity.
-Unknown launch state needs review, not retry; no distributed lease or task Pause.
+Plans create none. Use Start dialog or ask the parent for a child.
+Bind its live ID to the receipt. Parent reports; children never use its identity.
+Unknown launch: review, not retry. No task Pause yet.
 
-Rename changes neither description nor owner. Edit is for To do/Backlog.
-Creation UUIDs bind title, content, target, stage and start intent. Exact replay
-recovers the card without reverting edits; changed input with that UUID fails.
-Add/edit/comment accept --content-json with text and attachments. Comments retain
-media without native input; read get REF before continuing.
+Edit: To do/Backlog. UUID replay keeps edits; changed input refuses.
+Files: --content-json. Read get first.
 
 Discussion: hgs task message REF --request-id UUID --mode queue|send|reopen|note
   --expect-dispatch ID --content-json
-Read get REF for dispatch_id and immutable executor. Queue waits for explicit
-Start; note only saves. Send targets the current execution. Reopen leaves
-Review/Done only after submission. A coordinator receipt does not prove child
-delivery or change ownership. Retry only the SAME UUID, mode, anchor and content:
-it reads the receipt without repeating reserved native input. Submitted means
-transport accepted, not model-read. Unknown stays unknown.
+Get supplies dispatch_id/executor. Queue waits for Start; note saves. Reopen
+leaves Review/Done after submission. Same UUID/mode/anchor/content looks up its
+receipt, never repeats input. Coordinator receipts prove no child ownership.
+Submitted is transport, not model-read; unknown stays unknown.

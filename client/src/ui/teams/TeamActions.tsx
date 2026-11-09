@@ -10,8 +10,10 @@ import {
   leadMemberOf,
   type ActTask, type ActTeam, type BarAction, type BarChip, type TaskForm,
 } from "./actions";
-import type { ComputerId, TeamFindingItem, TeamPhaseView } from "../../types";
+import type { ComputerId, TeamFindingItem, TeamPhaseView, TeamTaskView, TeamView } from "../../types";
+import { noReportReply, remindMember } from "./noReport";
 import { acceptedUnstarted, buttonText, menuText, phaseHeader, type HeaderPhase, type PhaseButton, type PhaseMenuId } from "./phaseHeader";
+import { TextArea, TextInput } from "../lib/TextField";
 
 // Task 40: the team bar's actions and chips, and the task card's actions
 // (ui/teams/actions.ts holds what they are and what they send).
@@ -34,7 +36,7 @@ export function TextDialog(props: {
       <div class="dlg-head"><h2 id="team-text-title">{props.title}</h2></div>
       <div class="dlg-body">
         <p class="team-confirm-text">{props.hint}</p>
-        <textarea ref={field} class="field team-text-field" rows={5} placeholder={props.placeholder} value={text()} onInput={(event) => setText(event.currentTarget.value)} />
+        <TextArea ref={field} class="field team-text-field" rows={5} placeholder={props.placeholder} value={text()} onInput={(event) => setText(event.currentTarget.value)} />
         <Show when={state().count}><div class="dim team-text-count">{state().count}</div></Show>
       </div>
       <div class="dlg-foot"><span class="spacer" />
@@ -125,8 +127,8 @@ export function NextGoalDialog(props: { computer: ComputerId; team: ActTeam; clo
       <div class="dlg-head"><h2 id="team-next-goal-title">{tr("Next goal: %1", props.team.name)}</h2></div>
       <div class="dlg-body">
         <p class="team-confirm-text">{tr("A new team takes the next goal with this folder, its settings, the lead and the members. %1 of %2 sessions are still running and keep their context; the others start with their first task. This team stays Done.", running(), props.team.members.length)}</p>
-        <label class="nt-field">{tr("Goal")}<textarea class="field" rows={5} placeholder={tr("What the team delivers next, and what done means")} value={goal()} onInput={(event) => setGoal(event.currentTarget.value)} /></label>
-        <label class="nt-field">{tr("Name")}<input class="field" maxlength={80} value={name()} onInput={(event) => setName(event.currentTarget.value)} /></label>
+        <label class="nt-field">{tr("Goal")}<TextArea class="field" rows={5} placeholder={tr("What the team delivers next, and what done means")} value={goal()} onInput={(event) => setGoal(event.currentTarget.value)} /></label>
+        <label class="nt-field">{tr("Name")}<TextInput class="field" maxlength={80} value={name()} onInput={(event) => setName(event.currentTarget.value)} /></label>
         <Show when={read().notice}><p class="danger" role="status">{read().notice}</p></Show>
       </div>
       <div class="dlg-foot"><span class="spacer" />
@@ -299,11 +301,11 @@ function EditPhaseDialog(props: {
       <div class="dlg-body">
         <p class="team-confirm-text">{tr("Phase %1 stays accepted and keeps its place. Only tasks whose work has not started change here.", props.phase)}</p>
         <label class="dim">{tr("Phase title")}</label>
-        <input class="field" maxLength={120} value={title()} onInput={(event) => setTitle(event.currentTarget.value)} data-field="phase-title" />
+        <TextInput class="field" maxLength={120} value={title()} onInput={(event) => setTitle(event.currentTarget.value)} data-field="phase-title" />
         <label class="dim">{tr("Tasks")}</label>
         <For each={tasks}>{(task) => (
           <div class="team-edit-phase-task"><span class="dim">#{task.id}</span>
-            <input class="field" maxLength={200} value={titles()[task.id] ?? ""} disabled={!editable(task)} data-task={task.id}
+            <TextInput class="field" maxLength={200} value={titles()[task.id] ?? ""} disabled={!editable(task)} data-task={task.id}
               title={editable(task) ? undefined : tr("Only a pending task changes here")}
               onInput={(event) => setTitles({ ...titles(), [task.id]: event.currentTarget.value })} />
           </div>
@@ -337,13 +339,13 @@ function AddTaskDialog(props: { team: ActTeam; phase: number; close: () => void;
       <div class="dlg-body">
         <p class="team-confirm-text">{tr("Add a task to this running phase: Zerus warns first, then you confirm")}</p>
         <label class="dim">{tr("Title")}</label>
-        <input class="field" maxLength={200} value={title()} onInput={(event) => setTitle(event.currentTarget.value)} data-field="task-title" />
+        <TextInput class="field" maxLength={200} value={title()} onInput={(event) => setTitle(event.currentTarget.value)} data-field="task-title" />
         <label class="dim">{tr("Member")}</label>
         <select class="field" value={assignee()} onChange={(event) => setAssignee(event.currentTarget.value)} data-field="task-assignee">
           <For each={members}>{(member) => <option value={member.id}>{member.role || member.id}</option>}</For>
         </select>
         <label class="dim">{tr("Description")}</label>
-        <textarea class="field" rows={4} value={description()} onInput={(event) => setDescription(event.currentTarget.value)} />
+        <TextArea class="field" rows={4} value={description()} onInput={(event) => setDescription(event.currentTarget.value)} />
       </div>
       <div class="dlg-foot"><span class="spacer" />
         <button type="button" class="btn" onClick={props.close}>{tr("Cancel")}</button>
@@ -443,17 +445,17 @@ function PlanTaskDialog(props: {
       <div class="dlg-head"><h2 id="team-plan-task-title">{props.task ? tr("Task %1", props.task.id) : tr("New task")}</h2></div>
       <div class="dlg-body">
         <label class="dim">{tr("Title")}</label>
-        <input class="field" maxLength={200} value={title()} onInput={(event) => setTitle(event.currentTarget.value)} data-field="task-title" />
+        <TextInput class="field" maxLength={200} value={title()} onInput={(event) => setTitle(event.currentTarget.value)} data-field="task-title" />
         <label class="dim">{tr("Member")}</label>
         <select class="field" value={assignee()} onChange={(event) => setAssignee(event.currentTarget.value)} data-field="task-assignee">
           <For each={members}>{(member) => <option value={member.id}>{member.role || member.id}</option>}</For>
         </select>
         <label class="dim">{tr("Phase")}</label>
-        <input class="field" type="number" min={1} value={phase()} onInput={(event) => setPhase(event.currentTarget.value)} data-field="task-phase" />
+        <TextInput class="field" type="number" min={1} value={phase()} onInput={(event) => setPhase(event.currentTarget.value)} data-field="task-phase" />
         <label class="dim">{tr("Description")}</label>
-        <textarea class="field" rows={4} value={description()} onInput={(event) => setDescription(event.currentTarget.value)} data-field="task-description" />
+        <TextArea class="field" rows={4} value={description()} onInput={(event) => setDescription(event.currentTarget.value)} data-field="task-description" />
         <label class="dim">{tr("Acceptance criteria, one per line")}</label>
-        <textarea class="field" rows={3} value={criteria()} onInput={(event) => setCriteria(event.currentTarget.value)} data-field="task-criteria" />
+        <TextArea class="field" rows={3} value={criteria()} onInput={(event) => setCriteria(event.currentTarget.value)} data-field="task-criteria" />
       </div>
       <div class="dlg-foot">
         <Show when={props.remove}><button type="button" class="btn danger" onClick={() => { props.remove!(); props.close(); }}>{tr("Remove task")}</button></Show>
@@ -478,7 +480,7 @@ export function TeamModeControl(props: { computer: ComputerId; team: ActTeam }) 
         <Show when={lock()?.mode === "standard" ? lock() : undefined}>{(switching) => (
           <button type="button" class="btn ghost small" data-action="phase-mode" data-mode="standard" disabled={!switching().enabled || read().busy}
             title={tr("Switch phase %1 to standard planning: its tasks stay, new work is planned in a new phase", switching().phase)}
-            onClick={() => void model.phaseMode(switching().phase, "standard")}>{switching().text}</button>
+            onClick={() => void model.phaseMode(switching().phase, "standard")}><span class="ell">{switching().text}</span></button>
         )}</Show>
         <Show when={read().notice}><span class="danger team-phase-mode-notice" role="status">{read().notice}</span></Show>
       </span>
@@ -508,7 +510,7 @@ const ICON: Partial<Record<BarAction["id"], string>> = { approve: "play", resume
  * The bar's actions. `planMode` is the owner's free/standard choice for the
  * approval; `sendToCoordinator` puts Send back's message to the coordinator.
  */
-export function TeamBarActions(props: { computer: ComputerId; team: ActTeam; planMode: string; sendToCoordinator: (text: string) => void; finishOpen?: () => boolean; setFinishOpen?: (open: boolean) => void }) {
+export function TeamBarActions(props: { computer: ComputerId; team: ActTeam; planMode: string; sendToCoordinator: (text: string) => void; finishOpen?: () => boolean; setFinishOpen?: (open: boolean) => void; compact?: "none" | "low" | "high"; onSettings?: () => void; onCatalog?: () => void }) {
   const { model, tick } = useModel((changed) => new TeamActions(windowPort, () => ({ computer: props.computer, team: props.team }), changed));
   const read = () => (tick(), model);
   const [localFinish, setLocalFinish] = createSignal(false);
@@ -518,6 +520,19 @@ export function TeamBarActions(props: { computer: ComputerId; team: ActTeam; pla
   const [findingsOpen, setFindingsOpen] = createSignal(false);
   const [nextGoalOpen, setNextGoalOpen] = createSignal(false);
   const actions = createMemo(() => barActions(props.team, props.planMode));
+  // Task #427: below 1100 px the lower-priority actions (Resume after limits,
+  // Team settings, Catalog) fold into More; below 900 px Pause and Stop fold
+  // too, so the strip stays one row.
+  const overflow = createMemo<ReadonlySet<string>>(() => {
+    if (props.compact === "low") return new Set(["resumeLimits"]);
+    if (props.compact === "high") return new Set(actions().map((action) => action.id));
+    return new Set();
+  });
+  const moved = () => props.compact === "low" || props.compact === "high";
+  const [moreOpen, setMoreOpen] = createSignal(false);
+  const inline = createMemo(() => actions().filter((action) => !overflow().has(action.id)));
+  const folded = () => actions().filter((action) => overflow().has(action.id));
+  const moreIds = () => ["settings", "catalog", ...folded().map((action) => action.id)].join(" ");
   const impact = () => subtreeImpact(props.team, teams.list(props.computer)?.teams ?? []);
   const run = (action: BarAction) => {
     switch (action.id) {
@@ -536,7 +551,7 @@ export function TeamBarActions(props: { computer: ComputerId; team: ActTeam; pla
   };
   return (
     <div class="team-bar-actions" role="toolbar" aria-label={tr("Team actions")}>
-      <For each={actions()}>{(action) => (
+      <For each={inline()}>{(action) => (
         <button type="button" class="btn small" data-action={action.id} title={action.tip}
           classList={{ primary: action.primary, danger: action.danger, ghost: action.id === "discard", on: !!action.checked }}
           aria-pressed={action.checked === undefined ? undefined : action.checked} disabled={!action.enabled || read().busy}
@@ -544,6 +559,28 @@ export function TeamBarActions(props: { computer: ComputerId; team: ActTeam; pla
           <Show when={ICON[action.id]}><Icon name={ICON[action.id]!} size={12} /></Show>{action.text}
         </button>
       )}</For>
+      <Show when={moved()}>
+        <button type="button" class="btn small ghost team-more-btn" data-more="" data-overflow={moreIds()}
+          aria-haspopup="menu" aria-expanded={moreOpen()} onClick={() => setMoreOpen(!moreOpen())}>
+          {tr("More")}<Icon name="chevron-down" size={12} />
+        </button>
+        <div class="menu team-more-menu" role="menu" aria-label={tr("More team actions")} hidden={!moreOpen()}>
+          <Show when={props.onSettings}>
+            <button type="button" role="menuitem" class="menu-item" data-more-item="settings"
+              onClick={() => { setMoreOpen(false); props.onSettings?.(); }}>{tr("Team settings")}</button>
+          </Show>
+          <Show when={props.onCatalog}>
+            <button type="button" role="menuitem" class="menu-item" data-more-item="catalog"
+              onClick={() => { setMoreOpen(false); props.onCatalog?.(); }}>{tr("Catalog")}</button>
+          </Show>
+          <For each={folded()}>{(action) => (
+            <button type="button" role="menuitem" class="menu-item" data-more-item={action.id} disabled={!action.enabled || read().busy}
+              title={action.tip} onClick={() => { setMoreOpen(false); run(action); }}>
+              <Show when={ICON[action.id]}><Icon name={ICON[action.id]!} size={12} /></Show>{action.text}
+            </button>
+          )}</For>
+        </div>
+      </Show>
       <Show when={read().notice}><span class="team-proposal-notice" role="status">{read().notice}</span></Show>
       <Show when={finishOpen()}>
         <TextDialog title={tr("Finish %1?", props.team.name)} hint={tr("Every task is decided. The summary goes to the lead and the team becomes Done.")}
@@ -569,6 +606,16 @@ export function TaskActions(props: { computer: ComputerId; team: ActTeam; task: 
   const [returnLater, setReturnLater] = createSignal(false);
   const [menu, setMenu] = createSignal<"more" | "reassign" | undefined>();
   const [delegate, setDelegate] = createSignal(false);
+  // Task #415: the kept last reply of a No report attempt, and whether its
+  // whole text is shown.
+  const [replyOpen, setReplyOpen] = createSignal(false);
+  const [remindNotice, setRemindNotice] = createSignal("");
+  const reply = () => noReportReply(teams.inbox(props.computer, props.team.id)?.items ?? [], props.task.id);
+  const remind = async () => {
+    const outcome = await remindMember(props.computer, props.team as unknown as TeamView, props.task as unknown as TeamTaskView);
+    setRemindNotice(outcome === "missing" ? tr("The member's session is not open; open it to send the reminder.")
+      : outcome === "draft" ? tr("The session already has a draft; the reminder was not added.") : "");
+  };
   const open = (next: TaskForm) => { setForm(next); setReason(""); setReturnLater(false); setMenu(undefined); };
   const words = () => (form() ? formText(props.team, props.task, form()!) : undefined);
   const peers = () => props.team.members.filter((member) => member.id !== props.task.assignee && !member.lead);
@@ -601,6 +648,31 @@ export function TaskActions(props: { computer: ComputerId; team: ActTeam; task: 
   };
   return (
     <div class="team-task-actions" data-task={props.task.id}>
+      <Show when={props.task.no_report}>
+        <div class="team-no-report" data-no-report={props.task.id}>
+          <div class="team-no-report-head">
+            <Icon name="message-square" size={13} />
+            <b>{tr("No report")}</b>
+            <span class="dim">{tr("The member's last reply")}</span>
+            <span class="grow" />
+            <Show when={reply()}>
+              <button type="button" class="btn small ghost" data-action="reply-more" aria-expanded={replyOpen()} onClick={() => setReplyOpen(!replyOpen())}>
+                {replyOpen() ? tr("Show less") : tr("Show more")}
+              </button>
+            </Show>
+          </div>
+          <Show when={reply()} fallback={<p class="pm-empty">{tr("No reply was kept for this attempt")}</p>}>
+            <p class={replyOpen() ? "team-no-report-text open" : "team-no-report-text"}>{reply()}</p>
+          </Show>
+          <div class="team-no-report-actions">
+            <button type="button" class="btn small primary" data-action="use-last-reply" disabled={read().busy || !props.task.attempt_id}
+              onClick={() => void model.useLastReply(props.task)}>{tr("Use last reply as report")}</button>
+            <button type="button" class="btn small" data-action="remind-member" disabled={read().busy} onClick={() => void remind()}>{tr("Remind")}</button>
+            <button type="button" class="btn small" data-action="retry-no-report" disabled={read().busy} onClick={() => void model.retry(props.task)}>{tr("Retry")}</button>
+          </div>
+          <Show when={remindNotice()}><div class="team-proposal-notice" role="status">{remindNotice()}</div></Show>
+        </div>
+      </Show>
       <Show when={(props.task.questions ?? []).length > 0}>
         <div class="team-task-questions">
           <b>{tr("Questions")}</b>
@@ -628,7 +700,7 @@ export function TaskActions(props: { computer: ComputerId; team: ActTeam; task: 
         <div class="team-task-form" data-form={form()}>
           <b>{text().heading}</b>
           <p class="dim">{text().what}</p>
-          <textarea class="field" rows={3} placeholder={text().placeholder} value={reason()} onInput={(event) => setReason(event.currentTarget.value)} ref={(el) => queueMicrotask(() => el.focus())} />
+          <TextArea class="field" rows={3} placeholder={text().placeholder} value={reason()} onInput={(event) => setReason(event.currentTarget.value)} ref={(el) => queueMicrotask(() => el.focus())} />
           <Show when={form() === "reject"}>
             <label class="team-proposal-option"><input type="checkbox" checked={returnLater()} onChange={(event) => setReturnLater(event.currentTarget.checked)} />
               {tr("Return later (hold): keep it with the member until released")}</label>
@@ -694,7 +766,7 @@ export function QuestionAnswer(props: { computer: ComputerId; team: ActTeam; tas
       <Show when={!closed()} fallback={<p class="dim team-question-closed">{closed()}</p>}>
         <Show when={!sent()} fallback={<p class="dim team-question-sent">{tr("Answer sent; it reaches %1 once.", assignee())}</p>}>
           <div class="team-proposal-answers">
-            <input class="field" maxlength={4000} placeholder={tr("Answer %1…", assignee())} value={draft()} disabled={read().busy}
+            <TextInput class="field" maxlength={4000} placeholder={tr("Answer %1…", assignee())} value={draft()} disabled={read().busy}
               onInput={(event) => setDraft(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Enter") void send(); }} />
             <button type="button" class="btn small primary" disabled={read().busy || !draft().trim()}
               title={tr("Send this answer to %1; it reaches the member as a message", assignee())} onClick={() => void send()}>

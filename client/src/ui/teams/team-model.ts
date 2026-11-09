@@ -10,6 +10,19 @@ import type { TeamMemberView, TeamTaskView, TeamView } from "../../types";
 // colour, so a tone names the state the plan CSS tints.
 export type Tone = "neutral" | "active" | "assigned" | "done" | "review" | "cancelled" | "muted" | "dim" | "warn" | "danger" | "planning";
 
+/** Task #347: the member card's state colour family, as the owner's legend:
+ * working and building are blue, waiting is amber, needs answer/blocked/failed
+ * red, idle/done grey, paused/offline muted (the card adds the hatch). */
+export type MemberStateColor = "info" | "warn" | "danger" | "muted" | "dim";
+
+export function memberStateColor(kind: string): MemberStateColor {
+  if (["working", "sent", "submitted", "in_review", "in_test", "planning"].includes(kind)) return "info";
+  if (["stuck", "no_report", "input_blocked", "asking"].includes(kind)) return "warn";
+  if (["answer", "failed", "unconfirmed"].includes(kind)) return "danger";
+  if (["paused", "offline", "removed"].includes(kind)) return "muted";
+  return "dim";
+}
+
 /** What the session list says about a member's session (Qt's Teams::Live). */
 export interface MemberLive {
   /** Its computer does not answer, or the team saw it stopped. */
@@ -95,7 +108,8 @@ export function memberStatus(team: TeamView, member: TeamMemberView, live: Membe
     return make("stuck", minutes > 0 ? tr("No progress for %1 min", minutes) : tr("Stuck"), tr("Stuck"), "warn", task, true, "hourglass");
   }
   if (current?.attempt_state === "delivering") return make("sent", tr("Sending #%1 %2", current.id, current.title), tr("Sending"), "assigned", task);
-  if (current) return make("working", tr("Working on #%1 %2", current.id, current.title), `#${current.id}`, "active", task);
+  // Task 355: the row's word, with the task number beside it in the card.
+  if (current) return make("working", tr("Working on #%1 %2", current.id, current.title), tr("Working"), "active", task);
   const last = team.tasks.find((t) => t.assignee === member.id && (t.status === "submitted" || t.status === "in_review" || t.status === "in_test"));
   if (last?.status === "submitted") return make("submitted", tr("Submitted"), tr("Submitted"), "done", last.id);
   if (last) {

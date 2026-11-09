@@ -19,8 +19,12 @@ const catalog = "\0plan-render-catalog";
 const timeView = "\0plan-render-time";
 const actions = "\0plan-render-actions";
 const skin = "\0plan-render-skin";
+const dropdown = "\0plan-render-dropdown";
 let server: ViteDevServer | undefined;
 let render: (props: Record<string, unknown>) => string;
+type Hover = { enter(id: number): number | null; leave(current: number | null, id: number): number | null; focus(current: number | null, id: number, keyboard: boolean): number | null };
+let planHover: Hover;
+let clearsSelection: (target: { closest(selector: string): unknown } | null) => boolean;
 
 const NOW = 1_800_000_000;
 
@@ -80,7 +84,7 @@ beforeAll(async () => {
     plugins: [{
       name: "plan-render-mocks", enforce: "pre",
       resolveId(id) {
-        if ([entry, translations, settingsStore, sessionCard, catalog, timeView, actions, skin].includes(id)) return id;
+        if ([entry, translations, settingsStore, sessionCard, catalog, timeView, actions, skin, dropdown].includes(id)) return id;
         if (id === "../../i18n") return translations;
         if (id === "../../store/settings") return settingsStore;
         if (id === "../sessions/SessionCard") return sessionCard;
@@ -88,6 +92,7 @@ beforeAll(async () => {
         if (id === "./TimeView") return timeView;
         if (id === "./actions") return actions;
         if (id === "../../skin/runtime") return skin;
+        if (id === "../lib/Dropdown") return dropdown;
         return undefined;
       },
       load(id) {
@@ -99,9 +104,15 @@ beforeAll(async () => {
         if (id === timeView) return `export const ProfileTime = () => null;`;
         if (id === actions) return `export const stageName = (kind) => kind;`;
         if (id === skin) return `export const skin = () => ({ appearance: 'light' });`;
+        // Task 407/436: the skin's Dropdown calls createUniqueId(), which the
+        // plain renderToString harness cannot use; the stand-in shows the chosen
+        // option so the toolbar's heat control still reads.
+        if (id === dropdown) return `export const Dropdown = (props) => "[" + (props["aria-label"] ?? "") + ":" +
+          ((props.options ?? []).find((option) => String(option.value) === String(props.value))?.label ?? "") + "]";`;
         if (id === entry) return `import {createComponent} from 'solid-js';
           import {renderToString} from 'solid-js/web';
           import {PlanView} from '/src/ui/teams/PlanView.tsx';
+          export {planHover, clearsSelection} from '/src/ui/teams/PlanView.tsx';
           export const render = (props) => renderToString(() => createComponent(PlanView, props));`;
         return undefined;
       },
@@ -109,6 +120,8 @@ beforeAll(async () => {
   });
   const module = await server.ssrLoadModule(entry);
   render = module.render;
+  planHover = module.planHover;
+  clearsSelection = module.clearsSelection;
 });
 
 afterAll(async () => { await server?.close(); });
@@ -160,16 +173,45 @@ describe("the plan's Graph, Board and Layers (task 197)", () => {
     const { team, graph } = fixture();
     const html = render({ team, graph, problems, now, onAutoAccept: () => {} });
     for (const text of ['data-filter-value="all"', 'data-filter-value="active"', 'data-filter-value="problems"']) expect(html).toContain(text);
-    expect(html).toContain('<option value="tokens">Tokens</option>');
-    expect(html).toContain('<option value="time">Lateness</option>');
+    // Heat is the skin's Dropdown, not a native select (task #436).
+    expect(html).toMatch(/\[Heat:(Off|Lateness|Tokens)\]/);
+    expect(html).not.toContain('class="pm-heat-mode"');
     expect(html).toContain("Auto-accept drafts");
-    expect(html).toMatch(/class="pm-auto-accept"[^>]*checked/);
+    expect(html).toContain('data-toggle="auto-accept"');
+    expect(html).toContain('aria-pressed="false"');
     expect(html).toContain('data-zoom="1"');
     expect(html).toContain("Fit");
     // A member filter names the member and dims the others' cards.
     const focused = render({ team, graph, problems, now, member: "qa" });
     expect(focused).toContain("Only Tester's tasks");
     expect(focused.match(/pt-card-off/g)?.length).toBe(5);
+  });
+
+  it("restores the toolbar's icons and grouped segments (task #436)", async () => {
+    const { team, graph } = fixture();
+    const html = render({ team, graph, problems, now, onAutoAccept: () => {} });
+    // Every view button carries its icon in the toolbar's view group.
+    const view = html.slice(html.indexOf('data-plan-group="view"'));
+    for (const mode of ["graph", "board", "layers", "lanes", "profile", "tests"]) {
+      const start = view.indexOf(`data-mode="${mode}"`);
+      expect(start, mode).toBeGreaterThan(-1);
+      expect(view.slice(start, view.indexOf("</button>", start)), mode).toContain("<svg");
+    }
+    // Each control group is its own segment; the legend sits with the other groups.
+    for (const group of ["view", "filter", "switches", "legend", "links", "zoom", "fold"]) {
+      expect(html, group).toContain(`data-plan-group="${group}"`);
+    }
+    // Fit and Expand or Collapse all carry their icons too.
+    const fitAt = html.indexOf("Fit");
+    expect(fitAt).toBeGreaterThan(-1);
+    expect(html.slice(Math.max(0, fitAt - 300), fitAt)).toContain("<svg");
+    expect(html).toMatch(/data-expand-all[\s\S]{0,80}<svg/);
+    // The stylesheet keeps the groups apart with a divider and the toggles as chips.
+    const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as { readFileSync(path: URL, encoding: "utf8"): string };
+    const css = fs.readFileSync(new URL("client/src/ui/styles/plan.css", new URL("../../../../", import.meta.url)), "utf8");
+    expect(css).toMatch(/\.pm-tools > \.pm-group \{[^}]*display: inline-flex/);
+    expect(css).toMatch(/\.pm-tools > \.pm-group \+ \.pm-group \{[^}]*border-left: 1px solid/);
+    expect(css).toMatch(/\.pm-toggle \{[^}]*border-radius: 12px/);
   });
 
   it("collapses a phase to one line with its tasks' titles", () => {
@@ -182,6 +224,20 @@ describe("the plan's Graph, Board and Layers (task 197)", () => {
     // One summary per phase, not the same list twice.
     expect(html).not.toContain('data-inline=');
     expect(html).not.toContain('data-scroll="graph/t1/2"');
+  });
+
+  it("shows one health figure and no 'lead' label in the phase header, in every mode (task 356)", () => {
+    const { team, graph } = fixture();
+    // The core names who accepts a phase in acceptance: lead or owner.
+    team.phases[0].acceptance = "lead";
+    team.phases[1].acceptance = "owner";
+    for (const initialMode of ["graph", "board", "layers"]) {
+      const html = plain(render({ team, graph, problems, now, initialMode }));
+      const head = html.slice(html.indexOf('data-phase-head="1"'), html.indexOf('data-phase-head="2"'));
+      expect(head.match(/Healthy \d+\/\d+/g), initialMode).toEqual(["Healthy 4/5"]);
+      expect(html, initialMode).not.toContain("pt-acceptance");
+      expect(html, initialMode).not.toMatch(/>\s*(lead|owner)\s*</);
+    }
   });
 
   it("gives a folded phase card its closing border and four round corners, with one frame when open (task 332)", async () => {
@@ -230,6 +286,23 @@ describe("the plan's Graph, Board and Layers (task 197)", () => {
     expect(plain(html)).toContain("←#2 #3 #1");
     expect(html).toContain("Backend");
     expect(html).toContain('data-scroll="board/t1/1"');
+  });
+
+  it("shows a No report card's kept last reply and 'Use last reply as report' (task #415)", () => {
+    const { team, graph } = fixture();
+    const target = team.tasks.find((task) => task.id === 2)!;
+    target.no_report = true;
+    target.attempt_id = "a7";
+    const html = plain(render({ team, graph, problems, now, initialMode: "board",
+      noReportReply: (id: number) => (id === 2 ? "Done: the parser and its tests" : ""),
+      onUseLastReply: () => {} }));
+    expect(html).toContain("Done: the parser and its tests");
+    expect(html).toContain("Use last reply as report");
+    expect(html).toContain('data-action="use-last-reply"');
+    expect(html).toContain('data-no-report="true"');
+    // The card is still the card: its task, title and column stay.
+    expect(html).toContain('data-task="2"');
+    expect(html).toContain("Store");
   });
 
   it("marks a Crit node and its links violet and a Minor phase and task quietly", () => {
@@ -374,3 +447,57 @@ describe("the plan's Graph, Board and Layers (task 197)", () => {
   });
 });
 
+
+// Task 428 (owner, 2026-11-09): "the cursor is here, and the last chosen one stayed".
+describe("the plan board's hover and selection (task 428)", () => {
+  it("lights a card only while the pointer is over it or the keyboard focuses it", () => {
+    let hover = planHover.enter(4);
+    expect(hover).toBe(4);
+    // The pointer moves to empty space: the card's own leave ends it.
+    hover = planHover.leave(hover, 4);
+    expect(hover).toBeNull();
+    // Entering another card before the first one's leave arrives never loses the new one.
+    hover = planHover.enter(2);
+    hover = planHover.leave(planHover.enter(5), 2);
+    expect(hover).toBe(5);
+    // A click's focus does not light a card; keyboard focus does, and blur ends it.
+    expect(planHover.focus(null, 3, false)).toBeNull();
+    expect(planHover.focus(null, 3, true)).toBe(3);
+    expect(planHover.leave(3, 3)).toBeNull();
+  });
+
+  it("marks only the selected card and nothing as hovered on a fresh board", () => {
+    const { team, graph } = fixture();
+    const html = render({ team, graph, problems, now, openTask: { task: 2 } });
+    const card = (id: number) => html.match(new RegExp(`<button[^>]*data-task="${id}"[^>]*>`))?.[0] ?? "";
+    expect(card(2)).toContain("pt-card-selected");
+    expect(card(2)).toContain('aria-pressed="true"');
+    for (const id of [1, 3, 4, 5]) {
+      expect(card(id), `#${id}`).not.toContain("pt-card-selected");
+      expect(card(id)).toContain('aria-pressed="false"');
+    }
+    expect(html).not.toContain("pt-card-on");
+    expect(html).not.toMatch(/data-lit="(lit|dim)"/);
+    // Nothing chosen: no card is marked.
+    expect(render({ team, graph, problems, now })).not.toContain("pt-card-selected");
+  });
+
+  it("clears the selection on a click on empty board space, never on a card, header or control", () => {
+    const at = (inside: string[]) => ({ closest: (selector: string) => (inside.some((part) => selector.split(", ").includes(part)) ? {} : null) });
+    expect(clearsSelection(at([]))).toBe(true);
+    for (const inside of [".pt-card", ".pt-phase", "button", ".pt-detail", "input"]) expect(clearsSelection(at([inside])), inside).toBe(false);
+    expect(clearsSelection(null)).toBe(false);
+  });
+
+  it("styles the selection apart from the hover, and shows a focus ring only for the keyboard", async () => {
+    const fs = await import(/* @vite-ignore */ ["node", "fs"].join(":")) as { readFileSync(path: URL, encoding: "utf8"): string };
+    const css = fs.readFileSync(new URL("../styles/plan.css", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+    expect(css).toMatch(/\.pt-card\.pt-card-selected \{[^}]*border-color: var\(--z-color-accent\)/);
+    expect(css).toMatch(/\.pt-card:focus \{ outline: none; \}/);
+    expect(css).toMatch(/\.pt-card:focus-visible \{ outline: 2px solid/);
+    const source = fs.readFileSync(new URL("./PlanView.tsx", import.meta.url), "utf8");
+    // The card ends its own hover when the pointer leaves it, and the window's blur ends any.
+    expect(source).toContain("onPointerLeave={() => setHover(planHover.leave(hover(), task.id))}");
+    expect(source).toContain('window.addEventListener("blur", clear)');
+  });
+});

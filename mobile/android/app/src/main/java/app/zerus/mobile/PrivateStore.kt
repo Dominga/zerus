@@ -72,6 +72,9 @@ class PrivateStore(context: Context) {
     internal fun speechConfigOperations() = SpeechConfigProtocol.decode(read("speech_configuration_ops_v1"))
     internal fun saveSpeechConfigOperations(pending: List<SpeechConfigOperation>) = write("speech_configuration_ops_v1", SpeechConfigProtocol.encode(pending))
     fun accounts()=AccountSnapshots.decode(read("account_catalog_v1"))
+    /** Collapsed parents by machine UUID and session ID (TeamCollapse). */
+    fun collapsedTeams()=ChildSessions.parseTeams(read("collapsed_teams_v1"))
+    fun saveCollapsedTeams(ids:List<String>)=write("collapsed_teams_v1",JSONArray(ids))
     fun saveAccounts(state:List<AccountCatalog>)=write("account_catalog_v1",AccountSnapshots.encode(state))
     fun readState()=ConversationReadPolicies.decode(read("conversation_read_v1"))
     fun saveReadState(state:ConversationReadState)=write("conversation_read_v1",ConversationReadPolicies.encode(state))

@@ -26,7 +26,7 @@ spec.loader.exec_module(updater)
 @unittest.skipUnless(sys.platform == 'darwin', 'codesign and bundles are macOS-only')
 class MacSwitch(unittest.TestCase):
     def setUp(self):
-        self.root = Path(tempfile.mkdtemp(prefix='zms-', dir='/tmp')).resolve()
+        self.root = Path(tempfile.mkdtemp(prefix='zms-', dir=os.environ.get('ZERUS_TEST_SHORT_TMPDIR', '/tmp'))).resolve()
         self.addCleanup(shutil.rmtree, self.root, True)
         self.home = self.root / 'home'
         self.home.mkdir()

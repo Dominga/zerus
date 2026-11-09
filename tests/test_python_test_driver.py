@@ -93,6 +93,14 @@ class HostedMacAdmission(unittest.TestCase):
 
 
 class IntegrationScheduling(unittest.TestCase):
+    def test_the_closed_linux_program_helper_controls_use_the_complete_process_namespace(self):
+        completed = subprocess.CompletedProcess([], 0, '', '')
+        with patch.object(driver.sys, 'platform', 'linux'), patch.object(driver.subprocess, 'run', return_value=completed) as run:
+            driver.run(('test_worktree_program_execution.ProgramExecution', ['test_worktree_program_execution.ProgramExecution']))
+        command = run.call_args.args[0]
+        self.assertEqual(Path(command[1]).name, 'worktree-tests.py')
+        self.assertEqual(command[2:], ['test_worktree_program_execution.ProgramExecution'])
+
     def test_mac_process_scope_keeps_all_three_whole_modules(self):
         with patch.object(driver.sys, 'platform', 'darwin'), patch.object(driver.subprocess, 'run') as run:
             actual = [item for module in sorted(driver.WORKTREE_MODULES) for item in driver.jobs_for(module)]

@@ -3,21 +3,34 @@ import UIKit
 import ZerusKit
 
 /// A desktop-style session card. Tapping opens the exact session; long-press offers copy actions.
+/// A child session's card sits under its parent (zerus-sa9qn.5).
 struct SessionCard: View {
     @Environment(AppModel.self) private var model
-    let session: Session
+    let entry: SessionCardEntry
+    var session: Session { entry.session }
+
+    init(entry: SessionCardEntry) { self.entry = entry }
+    init(session: Session) { self.entry = SessionCardEntry(session: session) }
 
     var body: some View {
         let online = model.online(session)
         let drafted = SessionCardPresentation.draftedChildren(session.target, model.messageState.drafts)
         let children = SessionCardPresentation.children(session, online, drafted: drafted)
         let counter = SessionCardPresentation.counter(session, online, children)
-        let expanded = counter?.expandable == true && model.expandedSubagents.contains(session.target.key)
+        // One toggle and counter for shown subagents and child sessions (zerus-sa9qn.16).
+        let team = children.isEmpty ? entry.team : (entry.team ?? SessionTeam()).withSubagents(children)
+        let collapsed = model.teamCollapsed(session)
+        let expanded = !children.isEmpty && !collapsed
         VStack(alignment: .leading, spacing: 9) {
             NavigationLink(value: SessionRoute(target: session.target)) {
                 VStack(alignment: .leading, spacing: 9) {
                     HStack(spacing: 10) {
                         ProviderBadge(agent: session.agent, size: 22)
+                        if let parent = ChildSessions.parent(session.raw), parent.live {
+                            // Its parent above handles its requests (spec 3.4).
+                            Image(systemName: "arrow.turn.down.right").font(.footnote).foregroundStyle(Theme.muted)
+                                .accessibilityLabel("Supervised by \(parent.shortName). Only requests that need you notify you.")
+                        }
                         Text(SessionFilters.label(session))
                             .font(.system(size: 17, weight: .semibold))
                             .lineLimit(1)
@@ -32,6 +45,7 @@ struct SessionCard: View {
                             .layoutPriority(1)
                         MachineLabel(name: model.machineName(session.target.machineKey, fallback: session.target.computerId),
                                      colorHex: model.machineColor(session.target.machineKey))
+                        if let mark = ChildSessions.accountMark(session, accounts: model.groupedAccounts) { AccountMarkChip(mark: mark) }
                         Spacer(minLength: 0)
                     }
                     CheckoutLine(raw: session.raw)
@@ -52,13 +66,16 @@ struct SessionCard: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            if let counter {
-                SubagentCounterButton(counter: counter, expanded: expanded) { model.toggleSubagents(session.target) }
+            if let parent = entry.fromParent { FromParentLine(parent: parent, key: entry.fromParentKey) }
+            if let team {
+                TeamToggleButton(team: team, collapsed: collapsed) { model.toggleTeam(session) }
+            } else if let counter {
+                SubagentCounterButton(counter: counter, expanded: false) {}
             }
             if expanded {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(children.enumerated()), id: \.element.id) { index, child in
-                        SubagentRow(child: child, last: index == children.count - 1,notificationsMuted:SessionNotificationPreferences.muted(session))
+                        SubagentRow(child: child, last: index == children.count - 1, notificationsMuted: ChildSessions.silenced(session))
                     }
                 }
             }
@@ -110,6 +127,102 @@ private struct SubagentCounterButton: View {
         } else {
             content.accessibilityElement(children: .ignore).accessibilityLabel(counter.description)
         }
+    }
+}
+
+/// One toggle for a parent's subagents and child sessions: working of all, gray Asking and amber
+/// Needs you (spec 2.3).
+private struct TeamToggleButton: View {
+    let team: SessionTeam
+    let collapsed: Bool
+    let toggle: () -> Void
+
+    var body: some View {
+        let action = collapsed ? "Show subagents and child sessions" : "Hide subagents and child sessions"
+        Button(action: toggle) {
+            HStack(spacing: 5) {
+                GlyphView(glyph: .subagents).frame(width: 16, height: 16)
+                Text("\(team.working) of \(team.total)").font(.caption.weight(.medium)).foregroundStyle(Theme.muted)
+                if team.asking > 0 { chip("Asking: \(team.asking)", .neutral) }
+                if team.needsYou > 0 { chip("Needs you: \(team.needsYou)", .attention) }
+                Image(systemName: collapsed ? "chevron.down" : "chevron.up").font(.caption2).foregroundStyle(Theme.muted)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(Color(hex: 0x28323C), in: RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(([action] + team.summary).joined(separator: ", "))
+        .accessibilityValue(collapsed ? "Collapsed" : "Expanded")
+    }
+
+    private func chip(_ text: String, _ kind: DesktopBadgeKind) -> some View {
+        let colors = DesktopSessionPalette.colors(kind, dark: true)
+        return Text(text).font(.caption2.weight(.semibold)).lineLimit(1)
+            .foregroundStyle(Color(rgb: colors.foreground))
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(Color(rgb: colors.background), in: RoundedRectangle(cornerRadius: 5))
+    }
+}
+
+/// The account mark: a circle in the account color with its letter, then the label (spec 3.2).
+struct AccountMarkChip: View {
+    let mark: AccountMark
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(mark.letter)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Color(rgb: mark.ink))
+                .frame(width: 16, height: 16)
+                .background(Color(rgb: mark.color), in: Circle())
+            Text(mark.label).font(.caption2).foregroundStyle(Theme.muted).lineLimit(1).frame(maxWidth: 96, alignment: .leading)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Account: \(mark.label)")
+    }
+}
+
+/// A child shown at top level names the parent that started it; a listed parent opens on tap.
+private struct FromParentLine: View {
+    @Environment(AppModel.self) private var model
+    let parent: ParentLink
+    let key: String?
+
+    var body: some View {
+        if let key, let listed = model.sessions.first(where: { $0.target.key == key }) {
+            NavigationLink(value: SessionRoute(target: listed.target)) {
+                Text("from \(parent.shortName)").font(.caption2).foregroundStyle(Theme.mint).lineLimit(1)
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Opens \(parent.shortName)")
+        } else {
+            Text("from \(parent.shortName)").font(.caption2).foregroundStyle(Theme.muted).lineLimit(1)
+                .accessibilityLabel("Started by \(parent.name). That session is not listed.")
+        }
+    }
+}
+
+/// Child cards are indented per level, three levels at most, with a tree connector (spec 3.3).
+struct ChildTree: View {
+    let depth: Int
+    let last: Bool
+
+    static func indent(_ depth: Int) -> CGFloat { CGFloat(16 * min(depth, 3)) }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let x = Self.indent(depth) - 9, elbow: CGFloat = 28
+            Path { path in
+                path.move(to: CGPoint(x: x, y: -5))
+                path.addLine(to: CGPoint(x: x, y: last ? elbow : proxy.size.height))
+                path.move(to: CGPoint(x: x, y: elbow))
+                path.addLine(to: CGPoint(x: x + 7, y: elbow))
+            }
+            .stroke(Theme.outline, lineWidth: 1)
+        }
+        .accessibilityHidden(true)
     }
 }
 

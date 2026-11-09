@@ -1391,7 +1391,7 @@ pub(super) fn reconcile(record:Value)->Value {
     /// Task #396 (owner, 2026-11-09): Claude's chooser for one call of a batch
     /// of three Explore subagents, as its terminal draws it, and the same
     /// chooser clipped by a short terminal (no top rule or title).
-    const ARENA_PANEL:&str="────────────────────────────────────────
+    const ARENA_PANEL:&str=r"────────────────────────────────────────
  Agent
   Explore(Arena participants and spawn events)
  Do you want to proceed?
@@ -1401,7 +1401,7 @@ pub(super) fn reconcile(record:Value)->Value {
 
  Esc to cancel · Tab to amend
 ";
-    const ARENA_CLIPPED:&str="  Explore(Arena participants and spawn events)
+    const ARENA_CLIPPED:&str=r"  Explore(Arena participants and spawn events)
  Do you want to proceed?
  ❯ 1. Yes
    2. Yes, and don't ask again for Agent commands in D:\Work\Arena
@@ -1434,7 +1434,7 @@ pub(super) fn reconcile(record:Value)->Value {
             assert_eq!(screen["subagent_calls"],json!(["toolu_one","toolu_two","toolu_three"]));
             assert_eq!((screen["can_answer"].clone(),screen["approval_choices"].clone()),(json!(true),json!(true)));
             let labels:Vec<_>=options(&screen).into_iter().map(|(label,scope)|format!("{label}|{scope}")).collect();
-            assert_eq!(labels,vec!["Yes|once".to_owned(),"Yes, and don't ask again for Agent commands in D:\Work\Arena|broader".to_owned(),"No|once".to_owned()]);
+            assert_eq!(labels,vec!["Yes|once".to_owned(),"Yes, and don't ask again for Agent commands in D:\\Work\\Arena|broader".to_owned(),"No|once".to_owned()]);
             assert!(screen["questions"][0]["question"].as_str().unwrap().starts_with("Start 3 subagents"));
             // A short terminal clips the panel: nothing to choose, Terminal answers it.
             let clipped=card(&r,ARENA_CLIPPED);

@@ -1290,7 +1290,7 @@ fn native_subagent_card() -> Value {
 
 Explore(Arena participants and spawn events)",
             "options": [{"id": "1", "label": "Yes", "scope": "once"},
-                        {"id": "2", "label": "Yes, and don't ask again for Agent commands in D:\Work\Arena", "scope": "broader"},
+                        {"id": "2", "label": "Yes, and don't ask again for Agent commands in D:\\Work\\Arena", "scope": "broader"},
                         {"id": "3", "label": "No", "scope": "once"}]}]})
 }
 

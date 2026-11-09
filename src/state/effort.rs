@@ -1058,14 +1058,237 @@ fn reacted() {
 
 /// After a failed attempt nothing is unconfirmed when it sent no keys, or when
 /// the agent reacted to the last of them and is back at its empty prompt.
-/// Otherwise input stays blocked until a native event, as for sent text.
-fn mark_unconfirmed(record: &mut Value) {
+/// Otherwise input stays blocked until a native event, or until the agent's own
+/// evidence shows the requested `model` and `effort` at its empty prompt
+/// ([`settings_evidence`]); the request is kept beside the mark for that.
+fn mark_unconfirmed(record: &mut Value, model: &str, effort: &str) {
     let (sent, unread) = ATTEMPT_KEYS.with(|keys| keys.replace((false, false)));
     if !sent || (!unread && input::checked_terminal(record, true).is_ok()) {
         return;
     }
     record["settings_unconfirmed_at"] = json!(now());
+    record["settings_unconfirmed_model"] = json!(model);
+    record["settings_unconfirmed_effort"] = json!(effort);
     let _ = write(record);
+}
+
+/// What the agent itself shows about an unconfirmed model or effort change
+/// (task #7): whether its terminal is back at an empty prompt with no dialog,
+/// and the model and effort its status line, receipts or history name.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct Evidence {
+    /// The agent shows the requested model and effort at its empty prompt.
+    pub confirmed: bool,
+    /// Its terminal shows an empty prompt and no dialog: text typed now would
+    /// reach its composer.
+    pub at_prompt: bool,
+    pub requested_model: String,
+    pub requested_effort: String,
+    pub shown_model: String,
+    pub shown_effort: String,
+    /// Why it is not confirmed, in the owner's words; empty when confirmed.
+    pub reason: String,
+}
+
+/// Whether what the agent shows is the requested change. An empty requested
+/// effort (a model without effort levels) accepts any effort.
+pub(super) fn evidence_matches(
+    requested_model: &str,
+    requested_effort: &str,
+    shown_model: &str,
+    shown_effort: &str,
+) -> bool {
+    !requested_model.is_empty()
+        && shown_model == requested_model
+        && (requested_effort.is_empty() || shown_effort == requested_effort)
+}
+
+/// The agent's evidence for the session's unconfirmed change: its terminal is
+/// read once (never typed into), and the change counts as confirmed only when
+/// that terminal is at an empty prompt with no dialog and the model and effort
+/// it reports are the requested ones. Without a recorded request (a mark from
+/// an older hgs) nothing can match.
+pub(super) fn settings_evidence(record: &Value) -> Evidence {
+    let mut evidence = Evidence {
+        requested_model: string(record, "settings_unconfirmed_model").into(),
+        requested_effort: string(record, "settings_unconfirmed_effort").into(),
+        ..Evidence::default()
+    };
+    if !process_alive(record) {
+        evidence.reason = "The agent is not running.".into();
+        return evidence;
+    }
+    if let Err(error) = input::checked_terminal(record, true) {
+        evidence.reason = format!("The agent's Terminal is not at an empty prompt: {error}");
+        return evidence;
+    }
+    evidence.at_prompt = true;
+    let shown = settings(record, true);
+    evidence.shown_model = shown.model;
+    evidence.shown_effort = shown.effort;
+    evidence.confirmed = evidence_matches(
+        &evidence.requested_model,
+        &evidence.requested_effort,
+        &evidence.shown_model,
+        &evidence.shown_effort,
+    );
+    if !evidence.confirmed {
+        evidence.reason = if evidence.requested_model.is_empty() {
+            "The requested model was not recorded, so the agent's settings cannot confirm it."
+                .into()
+        } else {
+            let effort = |value: &str| {
+                if value.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({value} effort)")
+                }
+            };
+            format!(
+                "The agent shows {}{}, not the requested {}{}.",
+                if evidence.shown_model.is_empty() {
+                    "no model"
+                } else {
+                    evidence.shown_model.as_str()
+                },
+                effort(&evidence.shown_effort),
+                evidence.requested_model,
+                effort(&evidence.requested_effort)
+            )
+        };
+    }
+    evidence
+}
+
+/// The inspection's `settings_confirmation` (task #7): null without an
+/// unconfirmed change, otherwise its request and what the agent shows, with
+/// `state` `confirmed` (a send goes through) or `unknown` (the composer offers
+/// Check again, or Continue anyway once Terminal shows the empty prompt).
+pub(super) fn confirmation_summary(record: &Value, live_pane: bool) -> Value {
+    if !input::settings_unconfirmed(record) {
+        return Value::Null;
+    }
+    let evidence = if live_pane {
+        settings_evidence(record)
+    } else {
+        Evidence {
+            reason: "The agent is not running.".into(),
+            ..Evidence::default()
+        }
+    };
+    confirmation_json(record, &evidence)
+}
+
+fn confirmation_json(record: &Value, evidence: &Evidence) -> Value {
+    json!({"state": if evidence.confirmed { "confirmed" } else { "unknown" },
+        "since": record["settings_unconfirmed_at"],
+        "requested_model": string(record, "settings_unconfirmed_model"),
+        "requested_effort": string(record, "settings_unconfirmed_effort"),
+        "shown_model": evidence.shown_model, "shown_effort": evidence.shown_effort,
+        "at_prompt": evidence.at_prompt, "reason": evidence.reason})
+}
+
+/// Whether a pending change is stale once the unconfirmed one settles: it is
+/// the change that was attempted (the same model and effort), or its receipt
+/// no longer waits to be applied (an attempt left it `in_progress`, which a
+/// send would refuse as unsafe to retry, a dead end without Terminal).
+pub(super) fn pending_is_stale(
+    pending: &Value,
+    requested_model: &str,
+    requested_effort: &str,
+    receipt_status: &str,
+) -> bool {
+    pending.is_object()
+        && ((!requested_model.is_empty()
+            && string(pending, "model") == requested_model
+            && string(pending, "effort") == requested_effort)
+            || receipt_status != "scheduled")
+}
+
+fn pending_receipt_status(pending: &Value) -> String {
+    let Ok(id) = uuid::Uuid::parse_str(string(pending, "request_id")) else {
+        return String::new();
+    };
+    absolute_root()
+        .ok()
+        .and_then(|root| {
+            fs::read_to_string(root.join("settings_receipts").join(format!("{id}.json"))).ok()
+        })
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .map(|receipt| string(&receipt, "status").to_owned())
+        .unwrap_or_default()
+}
+
+/// Settles an unconfirmed change in the record: the mark goes, the model and
+/// effort the agent showed become the session's (and its resume's), and a
+/// stale pending change is dropped, so the next send types no settings keys.
+fn settle_unconfirmed(record: &mut Value, evidence: &Evidence) {
+    record["model"] = json!(evidence.shown_model);
+    if !evidence.shown_effort.is_empty() {
+        record["effort"] = json!(evidence.shown_effort);
+    }
+    if !evidence.shown_model.is_empty() {
+        record["resume_settings"] =
+            json!({"model":evidence.shown_model,"effort":evidence.shown_effort});
+    }
+    let latest = history(record);
+    record["effort_source_path"] = json!(latest.path);
+    record["effort_source_offset"] = json!(latest.offset);
+    let status = pending_receipt_status(&record["pending_settings"]);
+    let stale = pending_is_stale(
+        &record["pending_settings"],
+        &evidence.requested_model,
+        &evidence.requested_effort,
+        &status,
+    );
+    let fields = record.as_object_mut().unwrap();
+    for key in [
+        "settings_unconfirmed_at",
+        "settings_unconfirmed_model",
+        "settings_unconfirmed_effort",
+    ] {
+        fields.remove(key);
+    }
+    if stale {
+        fields.remove("pending_settings");
+    }
+}
+
+/// `hgs settings <session> --check [--accept] --json` (task #7): checks the
+/// agent's evidence for an unconfirmed model or effort change again, without
+/// typing anything, and settles it when the agent shows the requested settings
+/// at its empty prompt. `--accept` is the person's explicit confirmation to
+/// continue with whatever the agent shows: it settles the change only while
+/// the terminal shows an empty prompt and no dialog, so nothing that follows
+/// can type into one. Prints the `settings_confirmation` state (`none` when
+/// nothing is unconfirmed, `accepted` after an accepted change).
+fn check_settings(name: &str, accept: bool) -> Result<i32> {
+    let _guard = lock(None)?;
+    let mut record = read(name)?;
+    terminating::check_mutation(&record)?;
+    if !input::settings_unconfirmed(&record) {
+        println!("{}", json!({"state":"none"}));
+        return Ok(0);
+    }
+    let evidence = settings_evidence(&record);
+    let mut shown = confirmation_json(&record, &evidence);
+    if evidence.confirmed {
+        settle_unconfirmed(&mut record, &evidence);
+        write(&mut record)?;
+    } else if accept {
+        if !evidence.at_prompt {
+            return Err(format!(
+                "{} Nothing was changed; answer or close it in Terminal, then try again.",
+                evidence.reason
+            ));
+        }
+        settle_unconfirmed(&mut record, &evidence);
+        record["settings_accepted_at"] = json!(now());
+        write(&mut record)?;
+        shown["state"] = json!("accepted");
+    }
+    println!("{shown}");
+    Ok(0)
 }
 
 fn checked(name: &str, request: &Request, empty: bool) -> Result<Value> {
@@ -2013,7 +2236,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         }
     };
     if let Err(error) = result {
-        mark_unconfirmed(&mut record);
+        mark_unconfirmed(&mut record, &current.model, &request.effort);
         return Err(format!("effort change not confirmed: {error}"));
     }
     let latest = history(&record);
@@ -2154,7 +2377,7 @@ fn apply_settings(
         }
     };
     if let Err(error) = result {
-        mark_unconfirmed(&mut record);
+        mark_unconfirmed(&mut record, &model.id, &request.effort);
         return Err(format!("settings change not confirmed: {error}"));
     }
     let latest = history(&record);
@@ -2171,8 +2394,19 @@ fn apply_settings(
 }
 
 pub(super) fn dispatch_settings(args: &[String]) -> Result<i32> {
+    match args {
+        [name, check, json] if check == "--check" && json == "--json" => {
+            return check_settings(name, false)
+        }
+        [name, check, accept, json]
+            if check == "--check" && accept == "--accept" && json == "--json" =>
+        {
+            return check_settings(name, true)
+        }
+        _ => {}
+    }
     if args.len() != 2 || args[1] != "--json" {
-        return Err("usage: hgs settings <session> --json (JSON from stdin)".into());
+        return Err("usage: hgs settings <session> --json (JSON from stdin), or hgs settings <session> --check [--accept] --json".into());
     }
     let mut bytes = Vec::new();
     io::stdin()
@@ -2541,6 +2775,139 @@ mod tests {
         assert_eq!(string(&scheduled, "session_id"), first);
     }
     #[test]
+    fn evidence_confirms_only_the_requested_model_and_effort() {
+        // Task #7: the agent's shown settings confirm an unconfirmed change.
+        assert!(evidence_matches(
+            "claude-sonnet-5-5",
+            "high",
+            "claude-sonnet-5-5",
+            "high"
+        ));
+        // A model without effort levels accepts whatever effort is shown.
+        assert!(evidence_matches(
+            "claude-opus-4-8",
+            "",
+            "claude-opus-4-8",
+            "medium"
+        ));
+        for (model, effort) in [
+            ("claude-opus-5-5", "high"),
+            ("claude-sonnet-5-5", "medium"),
+            ("claude-sonnet-5-5", ""),
+            ("", ""),
+        ] {
+            assert!(
+                !evidence_matches("claude-sonnet-5-5", "high", model, effort),
+                "{model} {effort}"
+            );
+        }
+        // A mark without its request (an older hgs) is never confirmed.
+        assert!(!evidence_matches("", "", "claude-sonnet-5-5", "high"));
+        assert!(!evidence_matches("", "", "", ""));
+    }
+
+    #[test]
+    fn an_unconfirmed_change_is_summarized_and_settled_from_the_evidence() {
+        let mut record = json!({"agent":"claude","model":"claude-opus-5-5","effort":"medium","last_event_at":5.0,
+            "settings_unconfirmed_at":10.0,"settings_unconfirmed_model":"claude-sonnet-5-5","settings_unconfirmed_effort":"high"});
+        // Without its pane nothing is shown: the state is unknown, never at a prompt.
+        let shown = confirmation_summary(&record, false);
+        assert_eq!(
+            (shown["state"].as_str(), shown["at_prompt"].as_bool()),
+            (Some("unknown"), Some(false))
+        );
+        assert_eq!(
+            (
+                shown["requested_model"].as_str(),
+                shown["requested_effort"].as_str()
+            ),
+            (Some("claude-sonnet-5-5"), Some("high"))
+        );
+        assert!(!shown["reason"].as_str().unwrap().is_empty());
+        // A native event after the mark settles it as before: nothing to show.
+        let mut later = record.clone();
+        later["last_event_at"] = json!(11.0);
+        assert!(confirmation_summary(&later, false).is_null());
+        // The agent's evidence settles it: the mark goes, its settings stay.
+        let evidence = Evidence {
+            confirmed: true,
+            at_prompt: true,
+            requested_model: "claude-sonnet-5-5".into(),
+            requested_effort: "high".into(),
+            shown_model: "claude-sonnet-5-5".into(),
+            shown_effort: "high".into(),
+            reason: String::new(),
+        };
+        settle_unconfirmed(&mut record, &evidence);
+        assert!(!input::settings_unconfirmed(&record));
+        for key in [
+            "settings_unconfirmed_at",
+            "settings_unconfirmed_model",
+            "settings_unconfirmed_effort",
+        ] {
+            assert!(record.get(key).is_none(), "{key}");
+        }
+        assert_eq!(
+            (string(&record, "model"), string(&record, "effort")),
+            ("claude-sonnet-5-5", "high")
+        );
+        assert_eq!(
+            record["resume_settings"],
+            json!({"model":"claude-sonnet-5-5","effort":"high"})
+        );
+        assert!(confirmation_summary(&record, false).is_null());
+    }
+
+    #[test]
+    fn a_settled_change_drops_its_stale_pending_settings() {
+        // Task #7: the attempted change, or one whose receipt was left in
+        // progress, would be typed (or refused as unsafe) before the next
+        // message; a change still scheduled for Ready stays.
+        let attempted = json!({"request_id":"r","model":"claude-sonnet-5-5","effort":"high"});
+        assert!(pending_is_stale(
+            &attempted,
+            "claude-sonnet-5-5",
+            "high",
+            "scheduled"
+        ));
+        let other = json!({"request_id":"r","model":"claude-haiku-5-5","effort":"low"});
+        assert!(pending_is_stale(
+            &other,
+            "claude-sonnet-5-5",
+            "high",
+            "in_progress"
+        ));
+        assert!(pending_is_stale(&other, "claude-sonnet-5-5", "high", ""));
+        assert!(!pending_is_stale(
+            &other,
+            "claude-sonnet-5-5",
+            "high",
+            "scheduled"
+        ));
+        assert!(!pending_is_stale(
+            &Value::Null,
+            "claude-sonnet-5-5",
+            "high",
+            ""
+        ));
+        // Settling removes an unreadable (stale) pending change from the record.
+        let mut record = json!({"agent":"claude","settings_unconfirmed_at":10.0,"settings_unconfirmed_model":"claude-sonnet-5-5",
+            "settings_unconfirmed_effort":"high","pending_settings":{"request_id":"not-a-uuid","model":"claude-haiku-5-5","effort":"low"}});
+        let evidence = Evidence {
+            confirmed: false,
+            at_prompt: true,
+            requested_model: "claude-sonnet-5-5".into(),
+            requested_effort: "high".into(),
+            shown_model: "claude-opus-5-5".into(),
+            shown_effort: "medium".into(),
+            reason: "x".into(),
+        };
+        settle_unconfirmed(&mut record, &evidence);
+        assert!(record.get("pending_settings").is_none());
+        assert!(!pending_applies(&record));
+    }
+
+    #[test]
     fn a_failed_attempt_without_keys_preserves_the_first_message() {
         let mut record = json!({
             "agent": "codex", "run_id": "fresh", "run_identity_version": 1,
@@ -2549,7 +2916,7 @@ mod tests {
         let before = record.clone();
         assert!(input::first_message_candidate(&record));
         start_attempt();
-        mark_unconfirmed(&mut record);
+        mark_unconfirmed(&mut record, "gpt-6-sol", "low");
         assert_eq!(record, before);
         assert!(input::first_message_candidate(&record));
     }

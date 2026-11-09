@@ -3134,7 +3134,7 @@ fn git_continuation(folder: &str, since: f64) -> String {
     };
     // A filter, include, hook path or fsmonitor of the repository's own config
     // could still run code: such a folder is not read (as `commit_in`).
-    if let Some(listing) = run(&["config", "--list", "--show-scope", "--name-only"]) {
+    if let Some(listing) = run(&["config", "--list", "--show-scope"]) {
         if let Some(reason) = refused_repository_config(&listing) {
             return format!("\nCommits and working tree: not read here, this repository {reason}.\n");
         }
@@ -9740,12 +9740,20 @@ pub(crate) fn refused_repository_config(listing: &str) -> Option<String> {
         if !matches!(scope, "local" | "worktree") {
             continue;
         }
+        // Task 377 (owner, 2026-11-08): Zerus writes its own union driver for
+        // the i18n catalogs; a repository carrying exactly that command as
+        // merge.i18n.driver is not a foreign merge driver (every merge Zerus
+        // runs overrides it with the same -c value).
+        let (key, value) = key.split_once('=').unwrap_or((key, ""));
         let key = key.trim().to_lowercase();
         let reason = if key.starts_with("include.") || key.starts_with("includeif.") {
             "includes another Git config".to_owned()
         } else if key.starts_with("filter.") {
             "configures a Git filter".to_owned()
         } else if key.starts_with("merge.") && key.ends_with(".driver") {
+            if key == "merge.i18n.driver" && value.trim() == super::merge_queue::I18N_MERGE_DRIVER {
+                continue;
+            }
             "configures a Git merge driver".to_owned()
         } else if matches!(key.as_str(), "core.hookspath" | "core.fsmonitor" | "gpg.program") || key.starts_with("gpg.") {
             format!("configures {key}")
@@ -9819,7 +9827,7 @@ pub(crate) fn commit_in(folder: &str, branch: &str, message: &str, paths: &[Stri
     // a hook, fsmonitor, signing program, filter or included file is refused
     // rather than silently ignored. Git lowercases section and key names, so
     // the keys are compared in lowercase.
-    let listed = git(&["config", "--list", "--show-scope", "--name-only"])?;
+    let listed = git(&["config", "--list", "--show-scope"])?;
     anyhow::ensure!(listed.status.success(), "{}", String::from_utf8_lossy(&listed.stderr).trim());
     if let Some(reason) = refused_repository_config(&String::from_utf8_lossy(&listed.stdout)) {
         anyhow::bail!("This repository {reason}; Zerus commits without it");
@@ -9863,7 +9871,7 @@ pub(crate) fn merge_lead(folder: &str, source: &str, branch: &str, timeout: Dura
     let deadline = started + timeout;
     let elapsed = || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     // A read, not a run: `worktrees::git` bounds it in time and output.
-    let listing = match super::super::worktrees::git(Path::new(folder), &["config", "--list", "--show-scope", "--name-only"], deadline) {
+    let listing = match super::super::worktrees::git(Path::new(folder), &["config", "--list", "--show-scope"], deadline) {
         Ok(out) => String::from_utf8_lossy(&out).into_owned(),
         Err(error) => {
             return super::templates::Outcome {
@@ -9920,6 +9928,13 @@ pub(crate) fn merge_lead(folder: &str, source: &str, branch: &str, timeout: Dura
         .args(["merge", "--no-edit", merge]);
     let remaining = deadline.saturating_duration_since(Instant::now()).max(Duration::from_secs(1));
     let mut outcome = super::templates::run_tree(&mut command, remaining, None);
+    // Task 377 (owner, 2026-11-08): the project's generated files (its catalogs)
+    // refresh in the merge commit, so both sides' strings stay.
+    if outcome.exit == Some(0) {
+        if let Some(head) = super::merge_queue::regenerate_and_amend(Path::new(folder)) {
+            outcome.tail = format!("{} {head}", outcome.tail.trim()).trim().to_owned();
+        }
+    }
     outcome.ms = elapsed();
     outcome
 }
@@ -11047,6 +11062,12 @@ fn sandbox_request(member: &Member, folder: &Path, request: &Value) -> Value {
 /// from the team's folder, never built into Zerus, so another project gets its
 /// own branch.
 fn lead_branch(team: &Team) -> anyhow::Result<String> {
+    // Task 377 (owner, 2026-11-08): with an integration folder the line is a
+    // named branch, never whatever the folder has checked out.
+    if !team.settings.integration_folder.trim().is_empty() {
+        return super::merge_queue::integration_branch(team)
+            .context("The team's line branch is not named: set base_branch (hgs team settings) or record the line");
+    }
     // Task 174: the lead branch is the integration folder's branch.
     let folder = team.integration_folder();
     anyhow::ensure!(!folder.is_empty(), "The team has no folder to merge from");

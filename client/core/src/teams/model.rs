@@ -161,12 +161,51 @@ pub struct TeamsModel {
     again: std::collections::BTreeSet<Slot>,
 }
 
-fn digest(update: &TeamsUpdate) -> u64 {
+/// An update as the model sends it (task #9): its payload is computed once
+/// per reply and serves both the digest and the client's batch.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sent {
+    pub key: String,
+    pub update: TeamsUpdate,
+    pub payload: Arc<Value>,
+}
+
+impl From<(String, TeamsUpdate)> for Sent {
+    fn from((key, update): (String, TeamsUpdate)) -> Self {
+        Self::new(key, update)
+    }
+}
+
+impl Sent {
+    /// An update whose payload is computed here (ends and follow changes).
+    pub fn new(key: String, update: TeamsUpdate) -> Self {
+        let payload = Arc::new(update.payload());
+        Self {
+            key,
+            update,
+            payload,
+        }
+    }
+}
+
+/// Feeds the serialized payload straight into the hasher, without a string.
+struct HashWriter<'a>(&'a mut DefaultHasher);
+
+impl std::io::Write for HashWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.write(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn digest(kind: &str, payload: &Value) -> u64 {
     let mut hasher = DefaultHasher::new();
-    update.kind().hash(&mut hasher);
-    serde_json::to_string(&update.payload())
-        .unwrap_or_default()
-        .hash(&mut hasher);
+    kind.hash(&mut hasher);
+    let _ = serde_json::to_writer(HashWriter(&mut hasher), payload);
     hasher.finish()
 }
 
@@ -227,9 +266,9 @@ impl TeamsModel {
         out
     }
 
-    fn end(&mut self, key: &str, out: &mut Vec<(String, TeamsUpdate)>) {
+    fn end<T: From<(String, TeamsUpdate)>>(&mut self, key: &str, out: &mut Vec<T>) {
         if self.shown.remove(key).is_some() {
-            out.push((key.to_owned(), TeamsUpdate::Ended));
+            out.push((key.to_owned(), TeamsUpdate::Ended).into());
         }
     }
 
@@ -421,11 +460,16 @@ impl TeamsModel {
         }
     }
 
-    fn send(&mut self, key: String, update: TeamsUpdate, out: &mut Vec<(String, TeamsUpdate)>) {
-        let digest = digest(&update);
+    fn send(&mut self, key: String, update: TeamsUpdate, out: &mut Vec<Sent>) {
+        let payload = update.payload();
+        let digest = digest(update.kind(), &payload);
         if self.shown.get(&key) != Some(&digest) {
             self.shown.insert(key.clone(), digest);
-            out.push((key, update));
+            out.push(Sent {
+                key,
+                update,
+                payload: Arc::new(payload),
+            });
         }
     }
 
@@ -438,6 +482,19 @@ impl TeamsModel {
         reply: Result<Value, ReadError>,
         now: Instant,
     ) -> Vec<(String, TeamsUpdate)> {
+        self.apply_sent(read, reply, now)
+            .into_iter()
+            .map(|sent| (sent.key, sent.update))
+            .collect()
+    }
+
+    /// [`Self::apply`] with each update's payload, computed once (task #9).
+    pub fn apply_sent(
+        &mut self,
+        read: &TeamRead,
+        reply: Result<Value, ReadError>,
+        now: Instant,
+    ) -> Vec<Sent> {
         let mut out = Vec::new();
         if let Some(slot) = Self::slot(read) {
             // With the stream's heads a slot waits for its revision to move.

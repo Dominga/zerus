@@ -1088,15 +1088,54 @@ fn the_poller_feeds_one_batch_entry_per_view() {
 
 /// A failure never replaces a view the batch has not sent yet.
 #[test]
+fn each_update_carries_its_payload_once_into_the_batch() {
+    // Task #9: the payload the digest hashed is the batch's payload, and the
+    // same reply again sends nothing.
+    let start = Instant::now();
+    let mut model = TeamsModel::default();
+    model.follow(follow_team(), start);
+    let mut coalescer = Coalescer::new();
+    let mut sent_keys = Vec::new();
+    while let Some(read) = model.next(start) {
+        for sent in model.apply_sent(&read, Ok(replies(&read)), start) {
+            assert_eq!(*sent.payload, sent.update.payload(), "{}", sent.key);
+            sent_keys.push(sent.key.clone());
+            coalescer.push(Change::Teams {
+                computer: ComputerId::local(),
+                key: sent.key,
+                update: sent.update,
+                payload: sent.payload,
+            });
+        }
+    }
+    assert!(sent_keys.contains(&team_key("team", TEAM)), "{sent_keys:?}");
+    let batch = coalescer.take();
+    let team = batch
+        .teams
+        .iter()
+        .find(|out| out.key == team_key("team", TEAM))
+        .unwrap();
+    assert_eq!(team.kind, "team");
+    assert_eq!(
+        team.payload,
+        TeamsUpdate::Team(std::sync::Arc::new(view::team(&fixture("status")))).payload()
+    );
+    while let Some(read) = model.next(start + POLL) {
+        assert!(
+            model
+                .apply_sent(&read, Ok(replies(&read)), start + POLL)
+                .is_empty(),
+            "{read:?}"
+        );
+    }
+}
+
+#[test]
 fn a_failure_keeps_a_pending_view_in_the_batch() {
     let mut coalescer = Coalescer::new();
     let team = view::team(&fixture("status"));
     let key = team_key("team", TEAM);
-    let change = |update| Change::Teams {
-        computer: ComputerId::local(),
-        key: key.clone(),
-        update,
-    };
+    let change = |update| Change::teams(ComputerId::local(), key.clone(), update);
     coalescer.push(change(TeamsUpdate::Team(std::sync::Arc::new(team))));
     coalescer.push(change(TeamsUpdate::Failed {
         code: "timed_out".into(),

@@ -1531,10 +1531,12 @@ mod tests {
             }],
             truncated: false,
         };
-        let teams = |status: &str| Change::Teams {
-            computer: ComputerId(String::new()),
-            key: "list".into(),
-            update: TeamsUpdate::List(Arc::new(list(status))),
+        let teams = |status: &str| {
+            Change::teams(
+                ComputerId(String::new()),
+                "list".into(),
+                TeamsUpdate::List(Arc::new(list(status))),
+            )
         };
         let pump = Pump::default();
         let (sender, receiver) = std::sync::mpsc::channel();

@@ -237,7 +237,7 @@ pub struct Coalescer {
     processes: BTreeMap<SessionKey, ProcessesUpdate>,
     tasks: BTreeMap<SessionKey, TasksUpdate>,
     organizations: BTreeMap<ComputerId, OrganizationUpdate>,
-    teams: BTreeMap<SessionKey, TeamsUpdate>,
+    teams: BTreeMap<SessionKey, (TeamsUpdate, std::sync::Arc<Value>)>,
 }
 
 impl Coalescer {
@@ -378,14 +378,18 @@ impl Coalescer {
                 computer,
                 key,
                 update,
+                payload,
             } => {
                 // The latest view of a key wins; a failure never replaces a
                 // pending view.
                 let id = (computer, key);
                 let keep = matches!(update, TeamsUpdate::Failed { .. })
-                    && self.teams.get(&id).is_some_and(TeamsUpdate::is_view);
+                    && self
+                        .teams
+                        .get(&id)
+                        .is_some_and(|(shown, _)| shown.is_view());
                 if !keep {
-                    self.teams.insert(id, update);
+                    self.teams.insert(id, (update, payload));
                 }
             }
         }
@@ -528,12 +532,16 @@ impl Coalescer {
                 payload,
             });
         }
-        for ((computer, key), update) in std::mem::take(&mut self.teams) {
+        for ((computer, key), (update, payload)) in std::mem::take(&mut self.teams) {
+            // The model's payload, computed once for its digest (task #9);
+            // shared only when the change was cloned.
+            let payload =
+                std::sync::Arc::try_unwrap(payload).unwrap_or_else(|shared| (*shared).clone());
             batch.teams.push(TeamsOut {
                 computer,
                 key,
                 kind: update.kind().to_owned(),
-                payload: update.payload(),
+                payload,
             });
         }
         batch

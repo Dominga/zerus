@@ -4335,13 +4335,38 @@ fn report_git(team: &Team, id: u32, by_member: &str) -> (String, String, Option<
     let test_delta = if head.is_empty() || team.folder.is_empty() {
         None
     } else {
-        let base = super::dispatcher::git_at(&team.folder, &["rev-parse", "HEAD"]).unwrap_or_default();
+        let base = delta_base(team, &folder);
         match crate::test_discipline::load(std::path::Path::new(&team.folder), None) {
             Ok(loaded) if !base.is_empty() && loaded.active() => super::test_results::report_delta(&folder, &base, &loaded.config),
             _ => None,
         }
     };
     (head, branch, test_delta)
+}
+
+/// Task #401: where a report's change starts: the nearest merge-base of the
+/// member's HEAD with the team's line (`base_branch`) or the lead's checkout.
+/// The lead's checkout alone was a day behind the line, so every report
+/// covered some 1300 files of other people's work.
+pub(crate) fn delta_base(team: &Team, folder: &str) -> String {
+    let mut candidates = Vec::new();
+    if !team.settings.base_branch.is_empty() {
+        candidates.push(team.settings.base_branch.clone());
+    }
+    if let Some(lead) = super::dispatcher::git_at(&team.folder, &["rev-parse", "HEAD"]).filter(|lead| !lead.is_empty()) {
+        candidates.push(lead);
+    }
+    let mut best: Option<(u64, String)> = None;
+    for candidate in candidates {
+        let Some(base) = super::dispatcher::git_at(folder, &["merge-base", "HEAD", &candidate]).filter(|base| !base.is_empty()) else { continue };
+        let ahead = super::dispatcher::git_at(folder, &["rev-list", "--count", &format!("{base}..HEAD")])
+            .and_then(|count| count.parse::<u64>().ok())
+            .unwrap_or(u64::MAX);
+        if best.as_ref().is_none_or(|(fewest, _)| ahead < *fewest) {
+            best = Some((ahead, base));
+        }
+    }
+    best.map(|(_, base)| base).unwrap_or_default()
 }
 
 /// Task 287: the git reads an operation will make, made now, before the store's

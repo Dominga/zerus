@@ -4564,11 +4564,98 @@ pub(crate) fn with_git_answers<T>(prefetch: impl FnOnce(), then: impl FnOnce() -
     then()
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Task #401: the git processes this thread started (their first argument).
+    static GIT_CALLS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Task #401: the git processes this thread started since the last call.
+#[cfg(test)]
+pub(crate) fn take_git_calls() -> Vec<String> {
+    GIT_CALLS.with(|calls| std::mem::take(&mut *calls.borrow_mut()))
+}
+
+fn note_git(_first: &str) {
+    #[cfg(test)]
+    GIT_CALLS.with(|calls| calls.borrow_mut().push(_first.to_owned()));
+}
+
+/// Task #401: the contents of `specs` (`<rev>:<path>`), read by one `git
+/// cat-file --batch` instead of a `git show` per file; None for a spec git has
+/// no blob for (a file added since `rev`). Memoized like `git_at`, so a
+/// report's prefetch answers the read inside the store's transaction.
+pub(crate) fn git_cat_files(folder: &str, specs: &[String]) -> Option<Vec<Option<String>>> {
+    if specs.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut key_args = vec!["cat-file".to_owned(), "--batch".to_owned()];
+    key_args.extend(specs.iter().cloned());
+    let key = (folder.to_owned(), key_args);
+    if let Some(answer) = GIT_MEMO.with(|memo| memo.borrow().as_ref().and_then(|memo| memo.get(&key).cloned())) {
+        return answer.and_then(|text| serde_json::from_str(&text).ok());
+    }
+    note_git("cat-file");
+    let answer = (|| {
+        use std::io::{Read, Write};
+        let mut child = git_command(folder)
+            .args(["cat-file", "--batch"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let mut stdin = child.stdin.take()?;
+        let input: String = specs.iter().map(|spec| format!("{spec}\n")).collect();
+        // Written beside the read, so a large answer never fills the pipe first.
+        let writer = std::thread::spawn(move || {
+            let _ = stdin.write_all(input.as_bytes());
+        });
+        let mut out = Vec::new();
+        child.stdout.take()?.read_to_end(&mut out).ok()?;
+        let _ = writer.join();
+        if !child.wait().ok()?.success() {
+            return None;
+        }
+        parse_cat_batch(&out, specs.len())
+    })();
+    GIT_MEMO.with(|memo| {
+        if let Some(memo) = memo.borrow_mut().as_mut() {
+            memo.insert(key, answer.as_ref().and_then(|answer| serde_json::to_string(answer).ok()));
+        }
+    });
+    answer
+}
+
+/// `git cat-file --batch` output: per object `<oid> <type> <size>\n<bytes>\n`,
+/// or `<spec> missing\n`.
+fn parse_cat_batch(out: &[u8], count: usize) -> Option<Vec<Option<String>>> {
+    let mut answers = Vec::with_capacity(count);
+    let mut at = 0;
+    while answers.len() < count {
+        let end = at + out.get(at..)?.iter().position(|byte| *byte == b'\n')?;
+        let header = String::from_utf8_lossy(&out[at..end]).into_owned();
+        at = end + 1;
+        let parts: Vec<&str> = header.split(' ').collect();
+        match parts.as_slice() {
+            [_, kind, size] if size.parse::<usize>().is_ok() => {
+                let size: usize = size.parse().ok()?;
+                let body = out.get(at..at + size)?;
+                answers.push((*kind == "blob").then(|| String::from_utf8_lossy(body).into_owned()));
+                at += size + 1;
+            }
+            _ => answers.push(None),
+        }
+    }
+    Some(answers)
+}
+
 pub(crate) fn git_at(folder: &str, args: &[&str]) -> Option<String> {
     let key = (folder.to_owned(), args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<String>>());
     if let Some(answer) = GIT_MEMO.with(|memo| memo.borrow().as_ref().and_then(|memo| memo.get(&key).cloned())) {
         return answer;
     }
+    note_git(args.first().copied().unwrap_or_default());
     let answer = (|| {
         let output = git_command(folder).args(args).output().ok()?;
         if !output.status.success() {

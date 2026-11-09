@@ -235,9 +235,9 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
       });
     } finally { setStarting(false); }
   };
-  const create = async () => {
+  const create = async (confirmWidening = false) => {
     const id = draft();
-    const result = await store.createTeam();
+    const result = await store.createTeam({ confirmWidening });
     if (result.ok) props.onCreated?.(id);
   };
   const discard = async (stopLead: boolean) => {
@@ -531,7 +531,9 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
         {/* Owner, 2026-11-09: Create team and what blocks it sit under the form. */}
         <NewTeamFooter draft={!!draft()} dirty={store.dirty().size > 0} revision={store.revision()} busy={store.busy()}
           preflightErrors={store.view()?.validation.errors.length} errors={store.view()?.validation.errors} createWhy={createWhy()}
-          fix={counted() > maxMembers(settings()) ? { label: tr("Raise the limit to %1", counted()), run: () => setSettings({ max_members: Math.min(32, counted()) }) } : undefined}
+          error={store.error()}
+          fix={counted() > maxMembers(settings()) ? { label: tr("Raise the limit to %1", counted()), run: () => setSettings({ max_members: Math.min(32, counted()) }) }
+            : /confirm_widening|wider permissions/i.test(store.error()) ? { label: tr("Confirm the wider permissions and create"), run: () => void create(true) } : undefined}
           onUseLead={store.useLeadVersion} onDiscard={() => setDiscarding(true)} onCreate={() => void create()} />
       </div>
 

@@ -12,6 +12,8 @@ export interface NewTeamFooterProps {
   /** Owner, 2026-11-09: the preflight errors themselves, shown, never only counted. */
   errors?: FindingView[];
   createWhy: string;
+  /** Owner, 2026-11-09: the last refusal of a save or a create, always shown. */
+  error?: string;
   /** Owner, 2026-11-09: a fix the owner can apply in one click (e.g. raise the member limit). */
   fix?: { label: string; run: () => void };
   onUseLead?: () => void;
@@ -31,6 +33,12 @@ export function NewTeamFooter(props: NewTeamFooterProps) {
     : tr("Nothing is created until you press Start planning.");
   return (
     <footer class="nt-foot" data-new-team-footer>
+      <Show when={props.draft && !props.createWhy && props.error}>
+        <div class="nt-blocker" role="alert" data-create-error>
+          <b>{tr("Create team did not go through:")}</b> <span>{props.error}</span>
+          <Show when={props.fix}>{(fix) => <button type="button" class="btn small primary" onClick={() => fix().run()}>{fix().label}</button>}</Show>
+        </div>
+      </Show>
       <Show when={props.draft && props.createWhy}>
         <div class="nt-blocker" role="alert" data-create-blocker>
           <b>{tr("Create team is blocked:")}</b> <span>{props.createWhy}</span>

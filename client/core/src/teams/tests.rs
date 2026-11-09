@@ -735,6 +735,245 @@ fn due_reads(model: &mut TeamsModel, now: Instant) -> Vec<String> {
 }
 
 #[test]
+fn a_hidden_window_reads_only_waiting_at_the_watchers_pace() {
+    // Task #10: hidden or minimized, nothing but Waiting is read, and that at
+    // the always-on watcher's pace; shown again, every followed view at once.
+    let start = Instant::now();
+    let mut model = TeamsModel::default();
+    model.follow(follow_team(), start);
+    assert_eq!(due_reads(&mut model, start).len(), 5);
+    model.set_hidden(true, start);
+    assert!(model.hidden());
+    let mut read = Vec::new();
+    let mut at = start;
+    while at <= start + super::model::HIDDEN_WAITING * 3 {
+        read.extend(due_reads(&mut model, at));
+        // Nothing else is due, so the thread waits instead of spinning.
+        assert!(model.wait(at) > Duration::ZERO, "{at:?}");
+        at += POLL;
+    }
+    assert_eq!(
+        read,
+        ["waiting", "waiting", "waiting"],
+        "one Waiting read per {:?}",
+        super::model::HIDDEN_WAITING
+    );
+    // An action's refresh does not read the hidden views either.
+    model.refresh(at);
+    assert!(due_reads(&mut model, at)
+        .iter()
+        .all(|key| *key == "waiting"));
+    // Shown again: every followed view is read now.
+    model.set_hidden(false, at);
+    assert_eq!(
+        due_reads(&mut model, at),
+        ["feed", "inbox", "list", "status", "waiting"]
+    );
+    assert!(
+        due_reads(&mut model, at + POLL).len() == 5,
+        "polling as before"
+    );
+}
+
+#[test]
+fn hiding_never_starts_a_second_waiting_read() {
+    let start = Instant::now();
+    let mut model = TeamsModel::default();
+    model.follow(
+        TeamsFollow {
+            waiting: true,
+            ..TeamsFollow::default()
+        },
+        start,
+    );
+    let running = model.next(start).unwrap();
+    assert_eq!(running, TeamRead::Waiting { before: None });
+    model.set_hidden(true, start);
+    assert_eq!(
+        model.next(start + super::model::HIDDEN_WAITING),
+        None,
+        "the read in flight keeps its slot"
+    );
+    model.apply(&running, Ok(replies(&running)), start + POLL);
+    assert_eq!(model.next(start + POLL * 2), None);
+    assert_eq!(
+        model.next(start + POLL + super::model::HIDDEN_WAITING),
+        Some(TeamRead::Waiting { before: None })
+    );
+}
+
+#[test]
+fn with_heads_the_inbox_and_feed_wait_for_the_watched_teams_revision() {
+    // Task #10: the watched team's inbox and feed are read only when its
+    // revision moved; the status keeps its minute-long safety read.
+    use std::sync::Arc;
+    let heads = |rev: i64| {
+        Some(Arc::new(
+            [(TEAM.to_owned(), rev), ("other".to_owned(), 1)]
+                .into_iter()
+                .collect::<super::Heads>(),
+        ))
+    };
+    let start = Instant::now();
+    let mut model = TeamsModel::default();
+    model.follow(follow_team(), start);
+    model.heads(heads(1), start);
+    assert_eq!(due_reads(&mut model, start).len(), 5);
+    for minutes in 1..=5 {
+        let at = start + (super::STREAM_POLL + POLL) * minutes;
+        assert_eq!(
+            due_reads(&mut model, at),
+            ["list", "status", "waiting"],
+            "minute {minutes}"
+        );
+    }
+    let at = start + super::STREAM_POLL * 6;
+    model.heads(heads(2), at);
+    assert_eq!(
+        due_reads(&mut model, at),
+        ["feed", "inbox", "list", "status", "waiting"]
+    );
+    // An action's refresh reads them too (the others keep their pace, as before).
+    model.refresh(at + POLL);
+    assert_eq!(due_reads(&mut model, at + POLL), ["feed", "inbox"]);
+    // Another team moved: not them.
+    let other = Some(Arc::new(
+        [(TEAM.to_owned(), 2), ("other".to_owned(), 2)]
+            .into_iter()
+            .collect::<super::Heads>(),
+    ));
+    model.heads(other, at + POLL * 2);
+    assert_eq!(due_reads(&mut model, at + POLL * 2), ["list", "waiting"]);
+    // Watching another team forgets what was parked for the first one.
+    model.follow(
+        TeamsFollow {
+            team: Some("other".into()),
+            ..follow_team()
+        },
+        at + POLL * 3,
+    );
+    assert_eq!(
+        due_reads(&mut model, at + POLL * 3),
+        ["feed", "inbox", "status"]
+    );
+}
+
+#[test]
+fn a_hidden_poller_reads_only_waiting_and_shares_it_with_the_watcher() {
+    // Task #10, with the poller's runner fixture: hidden, the poller runs no
+    // list, status, inbox or feed read, still reads Waiting, sends its view
+    // and keeps the reply for the always-on watcher, which then reads none.
+    use std::sync::{Arc, Mutex};
+    let reads: Arc<Mutex<Vec<String>>> = Arc::default();
+    let log = Arc::clone(&reads);
+    let (tx, rx) = mpsc::channel();
+    let poller = super::TeamsPoller::spawn_with(
+        ComputerId::local(),
+        Box::new(move |read: &TeamRead| {
+            log.lock().unwrap().push(format!("{read:?}"));
+            Ok(replies(read))
+        }),
+        Box::new(move |change| {
+            let _ = tx.send(change);
+        }),
+    )
+    .unwrap();
+    let share = super::WaitingShare::default();
+    poller.share_waiting(Some(share.clone()));
+    poller.hidden(true);
+    poller.follow(follow_team());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut waiting = false;
+    while !waiting && Instant::now() < deadline {
+        if let Ok(Change::Teams { key, .. }) = rx.recv_timeout(Duration::from_millis(200)) {
+            waiting |= key == "waiting";
+        }
+    }
+    assert!(waiting, "the Waiting view arrives while hidden");
+    // Give a busy poller the time to read anything else it would.
+    while rx.recv_timeout(Duration::from_millis(500)).is_ok() {}
+    let seen = reads.lock().unwrap().clone();
+    assert!(
+        seen.iter().all(|read| read.starts_with("Waiting")),
+        "{seen:?}"
+    );
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    // The watcher reuses that reply instead of starting a read of its own.
+    let reply = share
+        .reply_or(super::model::HIDDEN_WAITING, || {
+            panic!("the watcher read again")
+        })
+        .unwrap();
+    assert_eq!(reply, replies(&TeamRead::Waiting { before: None }));
+    // Shown again: the team's views are read.
+    poller.hidden(false);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let shown_all = |reads: &[String]| {
+        ["List", "Status", "Inbox", "Events"]
+            .iter()
+            .all(|kind| reads.iter().any(|read| read.starts_with(kind)))
+    };
+    while Instant::now() < deadline && !shown_all(&reads.lock().unwrap()) {
+        let _ = rx.recv_timeout(Duration::from_millis(100));
+    }
+    let seen = reads.lock().unwrap().clone();
+    for kind in ["List", "Status", "Inbox", "Events"] {
+        assert!(
+            seen.iter().any(|read| read.starts_with(kind)),
+            "{kind} after showing: {seen:?}"
+        );
+    }
+}
+
+#[test]
+fn the_watcher_reads_waiting_once_per_interval_while_a_window_follows_it() {
+    // Task #10: a fresh reply from the poller serves the watcher; a stale or
+    // missing one is read once and kept.
+    let share = super::WaitingShare::default();
+    let mut read = 0;
+    let reply = json!({"items": [], "total": 0});
+    assert_eq!(
+        share
+            .reply_or(Duration::from_secs(30), || {
+                read += 1;
+                Ok(reply.clone())
+            })
+            .unwrap(),
+        reply
+    );
+    assert_eq!(read, 1, "nothing kept yet: one read");
+    for _ in 0..3 {
+        share
+            .reply_or(Duration::from_secs(30), || {
+                read += 1;
+                Ok(reply.clone())
+            })
+            .unwrap();
+    }
+    assert_eq!(read, 1, "within the interval the kept reply serves");
+    let old = Instant::now() - Duration::from_secs(31);
+    share.put(&reply, old);
+    assert!(share
+        .fresh(Duration::from_secs(30), Instant::now())
+        .is_none());
+    share
+        .reply_or(Duration::from_secs(30), || {
+            read += 1;
+            Ok(reply.clone())
+        })
+        .unwrap();
+    assert_eq!(read, 2, "a stale reply is read again");
+    // A failed read keeps nothing new and is retried next time.
+    let empty = super::WaitingShare::default();
+    assert!(empty
+        .reply_or(Duration::from_secs(30), || Err(ReadError::TimedOut))
+        .is_err());
+    assert!(empty
+        .fresh(Duration::from_secs(30), Instant::now())
+        .is_none());
+}
+
+#[test]
 fn with_the_streams_team_heads_a_team_is_read_when_its_revision_moved() {
     use std::sync::Arc;
     let heads = |pairs: &[(&str, i64)]| {
@@ -783,10 +1022,12 @@ fn with_the_streams_team_heads_a_team_is_read_when_its_revision_moved() {
         "the list again, at once"
     );
     assert_eq!(model.next(at + POLL), None);
-    // The safety read after a minute.
+    // The safety read after a minute: the list, Waiting and the team's
+    // status (its live sessions are not in a revision); its inbox and feed
+    // wait for its revision to move (task #10).
     assert_eq!(
-        due_reads(&mut model, at + super::STREAM_POLL + POLL).len(),
-        5
+        due_reads(&mut model, at + super::STREAM_POLL + POLL),
+        ["list", "status", "waiting"]
     );
     // The stream lost its heads (a gap, an older peer): polling again.
     model.heads(None, at + super::STREAM_POLL * 2);

@@ -225,7 +225,7 @@ fn a_refusal_whose_path_vanished_drops_out() {
 #[test]
 fn a_test_never_writes_the_persons_private_store_list() {
     let person = crate::state::watch_source::state_root();
-    let home = platform::home().unwrap_or_default();
+    let home = std::path::PathBuf::from(platform::home().unwrap_or_default());
     let real = home.join(".local/state/hgs/sessions");
     assert_ne!(person, real, "a test's state folder is never the person's");
     assert!(!person.starts_with(&real));

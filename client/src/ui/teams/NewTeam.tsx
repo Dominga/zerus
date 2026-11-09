@@ -16,6 +16,7 @@ import { shownTemplates, templateSeats, templateTaskCount, toggledFavourite, coo
 import { createModelCatalogs, modelOptions } from "./catalogControls";
 import { LeadConversation } from "./TeamTab";
 import { NewTeamFooter } from "./NewTeamFooter";
+import { NewTeamHowTo, PlanModeField } from "./NewTeamGuide";
 import { teamRoleModels } from "../../bridge";
 import type { Catalog, CatalogTemplate } from "./catalog";
 import type { DraftMember } from "./types";
@@ -60,6 +61,8 @@ const EFFORTS = ["", "low", "medium", "high", "xhigh"];
 const PERMISSIONS: [string, () => string][] = [["", () => tr("Account")], ["auto", () => tr("Auto")], ["bypass", () => tr("Bypass")]];
 
 const FAVOURITES = "teams/templateFavourites";
+// Task #8 (team ede724c4): the how-to's collapse, remembered; open until the owner folds it.
+const HOWTO_CLOSED = "client/newTeamHowToClosed";
 const favourites = () => { const stored = settingsStore[FAVOURITES]; return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : []; };
 
 /**
@@ -283,6 +286,7 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
 
       <div class="nt-split">
       <div class="nt-body">
+        <NewTeamHowTo open={settingsStore[HOWTO_CLOSED] !== true} onToggle={(open) => void setSetting(HOWTO_CLOSED, !open)} />
         <div class="nt-field">
           <span>{tr("Template")}</span>
           <TemplateList catalog={props.catalog} value={template()} onPick={chooseTemplate} />
@@ -341,6 +345,10 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
             </Show>
           </section>
         </Show>
+
+        <PlanModeField mode={fields().plan_mode} offer={store.view()?.plan_mode_offer} reason={store.view()?.plan_mode_reason}
+          unseen={unseen("plan_mode") || unseen("plan_mode_reason")} onChoose={(mode) => store.edit("plan_mode", mode)}
+          onSeen={() => void store.markSeen(["plan_mode", "plan_mode_reason"])} />
 
         <div class="nt-members">
           <div class="nt-members-head">

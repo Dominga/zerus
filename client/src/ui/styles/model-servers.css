@@ -84,3 +84,8 @@
   .ms-seg > button { padding: 3px 10px; border-radius: 6px; }
   .ms-seg > button.on { background: color-mix(in srgb, var(--z-color-accent) 18%, transparent); }
 }
+
+/* Owner, 2026-11-09: a folded server shows its header only; wide windows lay the servers out side by side. Unlayered on purpose (packaged layer order). */
+.ms-card.folded .ms-head { border-bottom: 0; }
+.ms-fold { flex: none; margin-right: 2px; }
+@media (min-width: 1500px) { .ms-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(640px, 1fr)); align-content: start; } }

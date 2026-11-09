@@ -287,7 +287,8 @@ export function ProjectsScreen() {
                       title={`${p().is_default ? tr("%1, default project for sessions started outside Zerus", p().name) : p().name}\n${tr("Drag to reorder, or use Alt+Up / Alt+Down.")}`}
                       onClick={() => choose(p())} onContextMenu={(e) => listMenu(e, p().id)}>
                       <ProjectLabel project={p()} />
-                      <Show when={countsFor(p().id).sessions}><span class="proj-count" title={countsText(countsFor(p().id))}>{countsFor(p().id).sessions}</span></Show>
+                      {/* Owner, 2026-11-09: every row keeps the count's column, so a project without sessions lines up with the rest. */}
+                      <span class="proj-count" classList={{ empty: !countsFor(p().id).sessions }} title={countsFor(p().id).sessions ? countsText(countsFor(p().id)) : undefined}>{countsFor(p().id).sessions || ""}</span>
                     </button>
                   </Show>
                 </li>

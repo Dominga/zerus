@@ -6,7 +6,7 @@ import { NativeUiTab } from "./NativeUi";
 import { nativeBinding, nativeEntry, nativeRoute } from "./native-entry";
 import { nativeUi } from "../../store/native-ui";
 import { pageHidden } from "../../store/visibility";
-import { LeadTeamHeader, TeamTab } from "../teams/TeamTab";
+import { LeadTeamHeader, LeadTitleBadge, TeamTab } from "../teams/TeamTab";
 import { NewTeamPage } from "../teams/NewTeamPage";
 import { WaitingBanner } from "../teams/Waiting";
 import { LeadProposals } from "../teams/ProposalCards";
@@ -138,6 +138,7 @@ function Header() {
     <header class="detail-head">
       <div class="dh-row1">
         <h1 class="ell" title={s().name}>{s().project} / {s().title}<Show when={subagentOpen()}> / {s().subagents?.find((k) => k.id === subagentOpen())?.name}</Show></h1>
+        <LeadTitleBadge />
         <Show when={s().computer !== "" && statusOf(s()) === "working" && !activity.loaded()}><span class="busy-arc" title={tr("Waiting for the remote read")} /></Show>
         <span class="grow" />
         {/* Task 315 (F3): the host's state, as the card shows it (Qt's header pill). */}
@@ -167,7 +168,6 @@ function Header() {
         <Show when={s().worktree}><span class="dh-chip ell" title={tr("Linked worktree %1", s().worktree!)}><Icon name="folder-git-2" size={13} />{tr("worktree %1", s().worktree!)}</span></Show>
         <span class="grow" />
         <KeepWarmChip session={s()} />
-        <span class="dh-model ell">{s().model} {s().effort ?? ""}</span>
       </div>
     </header>
   );

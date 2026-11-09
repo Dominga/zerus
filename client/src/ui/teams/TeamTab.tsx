@@ -365,6 +365,29 @@ export function LeadTeamHeader() {
   return <Show when={team()}>{(view) => <LeadTeamBar computer={row()!.computer} team={view()} />}</Show>;
 }
 
+/**
+ * Owner, 2026-11-09 (package 169): the strip "Team NAME Lead ... Open team
+ * panel" took a whole row; the lead's role now sits beside the session title as
+ * one pill, which opens the Team tab.
+ */
+export function LeadTitleBadge() {
+  const team = createMemo(() => {
+    const now = selected();
+    if (!now || now.state === "archived" || subagentOpen()) return undefined;
+    const summary = ledTeamOf(teams.list(now.computer), now);
+    return summary && summary.status !== "draft" ? summary : undefined;
+  });
+  return (
+    <Show when={team()}>
+      {(summary) => (
+        <button type="button" class="team-pill lead-title-pill" data-lead-title title={tr("Open team panel")} onClick={() => setDetailTab("team")}>
+          {tr("Lead")} · {summary().name}
+        </button>
+      )}
+    </Show>
+  );
+}
+
 function LeadTeamBar(props: { computer: ComputerId; team: TeamView }) {
   const live = (member: TeamMemberView) => liveOf(props.computer, member);
   const state = createMemo(() => teamState(props.team, live));
@@ -385,12 +408,7 @@ function LeadTeamBar(props: { computer: ComputerId; team: TeamView }) {
   return (
     <div class="lead-team" data-lead-team={props.team.id}>
       <TeamBar computer={props.computer} team={props.team} state={state()} problemTasks={problemTasks()}
-        onPhase={() => setDetailTab("team")} onSettings={() => setSettingsOpen(true)} onCatalog={() => setCatalogOpen(true)} />
-      <div class="lead-team-strip" data-lead-team-strip>
-        <span>{tr("Team")}</span><b class="ell">{props.team.name}</b><span class="team-pill">{tr("Lead")}</span>
-        <span class="grow" />
-        <button type="button" class="btn ghost small" data-open-team-panel onClick={() => setDetailTab("team")}>{tr("Open team panel")}</button>
-      </div>
+        onPhase={() => setDetailTab("team")} onSettings={() => setSettingsOpen(true)} />
       <Show when={settingsOpen()}>
         <TeamSettingsDialog team={props.team} onClose={() => setSettingsOpen(false)} />
       </Show>

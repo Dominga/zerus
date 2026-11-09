@@ -25,7 +25,6 @@ import { duration, memberStatus, stateLabel, stateTone } from "../teams/team-mod
 import { roleStyle } from "../teams/roles";
 import { machineCards } from "../../store/machines";
 import { flag } from "../../store/settings";
-import { SocratiCodePanel } from "./SocratiCodePanel";
 import { SessionLeadPanel } from "./SessionLeadPanel";
 import { privateStoreNotices } from "../../store/privateStoreNotices";
 import { toast } from "../../store/notices";
@@ -297,7 +296,6 @@ function Details() {
     <Card id="details-usage" title={tr("Session usage")}><Show when={rows().length} fallback={<div class="hint">{tr("No native usage reported for this conversation yet.")}</div>}><table class="usage"><tbody><For each={rows()}>{([label, val]) => <Show when={val !== tr("Not reported")} fallback={<tr><td>{label}</td><td class="tabular">{val}</td></tr>}>
       <tr class="copyable" tabindex="0" role="button" title={tr("Click to copy")} aria-label={tr("Copy %1: %2", label, val)} onClick={() => void copyValue(val)}
         onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); void copyValue(val); } }}><td>{label}</td><td class="tabular"><span class="u-val">{val}<CopyMark /></span></td></tr></Show>}</For></tbody></table><Show when={usage().costNote}><div class="hint">{usage().costNote}</div></Show><div class="hint">{usage().footer}</div></Show></Card>
-    <Show when={flag("extensions/socraticode") === true && !!s().cwdPath}><Card id="details-socraticode" title={tr("SocratiCode")}><SocratiCodePanel /></Card></Show>
     <Show when={!subagentOpen()}><div class="insp-foot"><span class="muted" title={context()?.tooltip}>{tr("Context: %1", context()?.text || tr("Not reported"))}</span><span class="grow" /><button class="btn small" title={clear()?.reason || undefined} disabled={!clear()?.enabled} onClick={() => composer.openClear()}>{clear()?.running ? tr("Clearing…") : tr("Clear session…")}</button></div></Show>
   </div>;
 }
@@ -428,7 +426,6 @@ function Sections() {
     <Card id="sec-worktrees" title={tr("Worktrees")} folded><Worktrees /></Card>
     <ChangesCard session={s()} id="sec-changes" />
     <Card id="sec-projecttasks" title={tr("Project tasks")} folded aside={<TaskTabBadge />}><div class="side-tasks"><Suspense><TasksPanel /></Suspense></div></Card>
-    <Show when={flag("extensions/socraticode") === true && !!s().cwdPath}><Card id="sec-socraticode" title={tr("SocratiCode")}><SocratiCodePanel /></Card></Show>
   </div>;
 }
 

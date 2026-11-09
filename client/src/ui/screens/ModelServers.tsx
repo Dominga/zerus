@@ -177,8 +177,15 @@ function ServerCard(props: { server: ModelServer; entry: StatusEntry; ask(dialog
   const p = () => pill(s(), props.entry);
   const [copied, setCopied] = createSignal(false);
   const copy = () => { void bridge.copyVerbatim(s().agent_url).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); }); };
-  return <section class="ms-card" classList={{ unreachable: failed() }} data-server={s().name}>
+  // Owner, 2026-11-09: a server card folds to its header; the choice is kept per server.
+  const foldKey = () => `zerus.modelServers.folded.${s().name}`;
+  const readFolded = () => { try { return localStorage.getItem(foldKey()) === "1"; } catch { return false; } };
+  const [folded, setFolded] = createSignal(readFolded());
+  const toggleFold = () => { const next = !folded(); setFolded(next); try { localStorage.setItem(foldKey(), next ? "1" : "0"); } catch { /* per-viewer convenience only */ } };
+  return <section class="ms-card" classList={{ unreachable: failed(), folded: folded() }} data-server={s().name}>
     <header class="ms-head">
+      <button type="button" class="icon-btn small ms-fold" aria-expanded={!folded()} title={folded() ? tr("Unfold %1", s().name) : tr("Fold %1", s().name)} onClick={toggleFold}>
+        <Icon name={folded() ? "chevron-right" : "chevron-down"} size={14} /></button>
       <span class="ms-tile"><Icon name="hard-drive" size={14} /></span>
       <b class="ms-name">{s().name}</b>
       <span class={`ms-pill tone-${p().tone}`}>{p().text}</span>
@@ -202,6 +209,7 @@ function ServerCard(props: { server: ModelServer; entry: StatusEntry; ask(dialog
         <button type="button" class="btn small ghost" onClick={() => editServers(s().name)}><Icon name="settings" size={13} />{tr("Edit…")}</button>
       </Show>
     </header>
+    <Show when={!folded()}>
     <Show when={!failed()} fallback={<p class="ms-problem selectable"><Icon name="triangle-alert" size={14} />{st() ? trText(st()!.problem) : ""}</p>}>
       <For each={st()?.models ?? []}>{(m) => (
         <div class="ms-model" data-model={m.name} data-state={m.state}>
@@ -223,6 +231,7 @@ function ServerCard(props: { server: ModelServer; entry: StatusEntry; ask(dialog
         <Show when={props.entry.known}><span class="muted">{props.entry.reading ? tr("reading") : ago(props.entry.readAt, Date.now())}</span></Show>
         <Show when={!s().read_only}><button type="button" class="btn small ghost" disabled={props.entry.reading} onClick={() => store.refreshStatus(s().name)}><Icon name="refresh-cw" size={13} />{tr("Refresh")}</button></Show>
       </footer>
+    </Show>
     </Show>
   </section>;
 }

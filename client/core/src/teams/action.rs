@@ -1989,6 +1989,10 @@ pub fn prepare(call: &TeamCall) -> Result<(Invocation, String), TeamOutcome> {
         // designer starts an agent session, which hgs gives 120 s.
         timeout: Duration::from_secs(match (&call.action, call.computer.is_empty()) {
             (TeamAction::CatalogDesigner { .. }, _) => 150,
+            // Owner, 2026-11-09 (package 169): Start planning starts or binds
+            // the lead's agent session too, which hgs gives up to 120 s; 15 s
+            // gave "hgs did not answer in time" and no team.
+            (TeamAction::DraftStart { .. }, _) => 150,
             (_, true) => 15,
             (_, false) => 45,
         }),

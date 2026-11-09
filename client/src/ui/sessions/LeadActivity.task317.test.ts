@@ -48,10 +48,13 @@ describe("the lead's Activity (task 317)", () => {
     // Only the session that leads the team, from the live read (a member shows none).
     expect(body).toContain("leadsTeam(view, now)");
     expect(body).toContain('summary.status === "draft"');
-    // The same bar as the Team tab, and Qt's "Team <name> Lead / Open team panel" strip.
+    // The same bar as the Team tab. Owner, 2026-11-09: the "Team <name> Lead /
+    // Open team panel" strip is gone; the lead's role is one pill beside the
+    // session title (LeadTitleBadge) that opens the Team tab.
     expect(body).toContain("<TeamBar computer={props.computer} team={props.team}");
-    expect(body).toContain("data-open-team-panel");
-    expect(body).toContain('tr("Open team panel")');
+    expect(body).not.toContain("data-lead-team-strip");
+    expect(detail).toContain("<LeadTitleBadge />");
+    expect(tab).toContain("data-lead-title");
     expect(body).toContain("<TeamSettingsDialog");
   });
 });

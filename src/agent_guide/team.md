@@ -12,9 +12,8 @@ Report once, when the task is done:
 Say what changed and how you checked it. A progress line is interim; only hgs team
 report reports, and a report on a task you did not take is refused.
 
-Remove a build output, extra CARGO_TARGET_DIR, worktree or package folder you made for a
-task when you report; keep your target and what the next task needs; never delete another
-member's or the owner's; a node_modules junction goes with rmdir, not a recursive delete.
+Remove the builds, extra CARGO_TARGET_DIRs, worktrees and package folders you made for
+a task when you report (keep your target); never another's; rmdir a node_modules junction.
 
 Blocked: ask the lead. The attempt stays open:
   {"request_id":"UUID","team":"ID","attempt":"ATTEMPT","text":"..."} | hgs team ask --json

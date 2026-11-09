@@ -2,8 +2,7 @@ Send team requests that are accepted the first time (hgs guide team-input)
 
 Every hgs team OPERATION --json reads one JSON object on stdin. PowerShell has
 no <<<: save it and use --json-file PATH.
-In a sandbox call hgs team directly, one command per call with --json-file PATH: your
-own calls and your scratch team's queue in your folder; a script still asks.
+In a sandbox call hgs team directly, one command per call, with --json-file PATH.
 
 A member has one shape in plan, add-member and a draft:
   {"id":"dev","role":"Backend","agent":"claude","account":"work",
@@ -36,9 +35,8 @@ Your pulse for the lead (else Zerus sums up your turn's tools):
   hgs team note --json   (each at most 500 characters)
 While running, settings accepts members_update:
   {"team":"ID","members_update":[{"id":"dev","prompt":"...","model":"opus"}]}
-Model/effort switch before the next task; a new prompt is sent once as "replaces
-previous instructions" (clear_context_first:true clears first). after_task:
-compact|clear (after_task_on:percent|tokens, after_task_at) runs before the next
-task once the context passes it. The owner edits all of it; the lead edits
-model/effort, else proposes {"kind":"settings","members_update":[...]}. Agent,
-account and computer stay with Swap member.
+Model/effort switch before the next task; a new prompt is sent once
+(clear_context_first:true clears first). after_task:compact|clear
+(after_task_on:percent|tokens, after_task_at) runs before the next task. The
+owner edits all of it; the lead edits model/effort, else proposes
+{"kind":"settings","members_update":[...]}. Agent, account, computer: Swap member.

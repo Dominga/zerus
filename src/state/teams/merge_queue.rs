@@ -582,6 +582,32 @@ where
         if failed.is_empty() {
             keep(team, id, &entry, results.iter().filter(|record| record.status != "not_run").map(|record| record.suite.clone()).collect(), now, events)?;
         } else {
+            // Task 374 (owner, 2026-11-08): a run that could not start - a
+            // missing module, a missing toolchain, nothing in a report - is an
+            // environment failure, not the work's. The merge is rolled back,
+            // the landing stays queued waiting for the lead's retry after the
+            // fix, and the task is never reopened.
+            let environment: Vec<&super::test_queue::Record> = results
+                .iter()
+                .filter(|record| {
+                    !matches!(record.status.as_str(), "passed" | "flaky" | "reused")
+                        && record.report.is_none()
+                        && environment_excerpt(&record.excerpt)
+                })
+                .collect();
+            if !environment.is_empty() && environment.len() == failed.len() {
+                let rolled = roll_back(team.integration_folder(), &entry).note();
+                let reason = format!(
+                    "The merge queue's tests could not start: an environment failure, not this work's. {rolled} The landing stays queued; the task is not reopened. Fix the dependency or toolchain and retry (hgs team merge --json with retry).\n{}",
+                    environment
+                        .iter()
+                        .map(|record| format!("{}: {}", record.suite, record.excerpt.lines().last().unwrap_or_default()))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+                events.push(Event::new("merge_environment_failed", json!({"task":id,"reason":reason})));
+                return Ok(set_queue_note(team, id, &reason, MergeWaitReason::Other, "merge_environment_failed", events));
+            }
             let excerpt = results
                 .iter()
                 .find(|record| !matches!(record.status.as_str(), "passed" | "flaky" | "reused" | "not_run"))
@@ -752,6 +778,23 @@ where
             Ok(true)
         }
     }
+}
+
+/// Task 374 (owner, 2026-11-08): the output of a suite that never started -
+/// its module, its toolchain or its test tool was missing - so the result says
+/// nothing about the merged work and must not reopen the task.
+fn environment_excerpt(excerpt: &str) -> bool {
+    let text = excerpt.to_lowercase();
+    [
+        "err_module_not_found",
+        "cannot find module",
+        "module_not_found",
+        "is not recognized as an internal or external command",
+        "command not found",
+        "toolchain",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
 }
 
 /// Whether `commit` is reachable from the lead branch's HEAD; only exit 1 is a

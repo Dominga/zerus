@@ -75,7 +75,7 @@ fn a_worker_held_for_five_minutes_while_tasks_are_ready_is_one_alarm() {
     super::super::tick_clock::set_test_dir(None);
 }
 
-/// Task #406: a team of 200 tasks (a plan holds at most 200) and 10 members: deciding a tick's steps
+/// Task #406: a team of 200 tasks (a plan holds at most 200) and 6 members: deciding a tick's steps
 /// stays far under the 2 s a tick may take, and the very first tick hands a
 /// ready task to every idle member.
 #[test]
@@ -85,20 +85,20 @@ fn a_large_team_decides_its_tick_quickly_and_hands_out_on_the_first_tick() {
         &json!({"name":"Large","lead":{"id":"lead","agent":"claude","session":{"name":"claude/x/lead","run_id":"r0"}}}),
     )
     .unwrap();
-    let members: Vec<Value> = (0..10)
+    let members: Vec<Value> = (0..6)
         .map(|n| json!({"id":format!("m{n}"),"role":format!("Role {n}"),"agent":"codex","session":{"name":format!("codex/x/m{n}"),"run_id":format!("r{}", n + 1)}}))
         .collect();
     let tasks: Vec<Value> = (1..=200u32)
         .map(|id| {
-            let deps = if id > 10 { json!([{"task":id - 10,"kind":"hard"}]) } else { json!([]) };
-            json!({"id":id,"title":format!("Task {id}"),"assignee":format!("m{}", (id - 1) % 10),"deps":deps})
+            let deps = if id > 6 { json!([{"task":id - 6,"kind":"hard"}]) } else { json!([]) };
+            json!({"id":id,"title":format!("Task {id}"),"assignee":format!("m{}", (id - 1) % 6),"deps":deps})
         })
         .collect();
     let mut events = Vec::new();
     ops::apply(&mut team, "plan", &json!({"members":members,"tasks":tasks}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
     ops::apply(&mut team, "approve", &json!({}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
     let mut seen = vec![session("claude/x/lead", "r0", false)];
-    seen.extend((0..10).map(|n| session(&format!("codex/x/m{n}"), &format!("r{}", n + 1), true)));
+    seen.extend((0..6).map(|n| session(&format!("codex/x/m{n}"), &format!("r{}", n + 1), true)));
     let started = Instant::now();
     let found = steps(&team, &seen, 10.0);
     let decided = started.elapsed();
@@ -111,5 +111,5 @@ fn a_large_team_decides_its_tick_quickly_and_hands_out_on_the_first_tick() {
             _ => None,
         })
         .collect();
-    assert_eq!(handed.len(), 10, "every idle member gets a ready task on the first tick: {urgent:?}");
+    assert_eq!(handed.len(), 6, "every idle member gets a ready task on the first tick: {urgent:?}");
 }

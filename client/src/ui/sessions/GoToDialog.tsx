@@ -1,3 +1,4 @@
+import { TextInput } from "../lib/TextField";
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import { keys } from "../../store/shortcuts";
 import { activateGoTo, closeGoTo, goToItems, goToOrigin } from "../../store/goTo";
@@ -55,7 +56,7 @@ export function GoToDialog() {
         <div class="goto" ref={frame} role="dialog" aria-label={tr("Go to")}>
           <div class="goto-field">
             <Icon name="search" size={15} />
-            <input ref={field} value={query()} placeholder={tr("Go to… (type > for commands)")} onInput={(event) => { setQuery(event.currentTarget.value); setCurrent(0); }} onKeyDown={onKey} />
+            <TextInput ref={field} value={query()} placeholder={tr("Go to… (type > for commands)")} onInput={(event) => { setQuery(event.currentTarget.value); setCurrent(0); }} onKeyDown={onKey} />
             <span class="kbd">Esc</span>
           </div>
           <ul class="goto-list" role="listbox" aria-label={tr("Results")}>

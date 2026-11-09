@@ -183,6 +183,7 @@ pub const FLOOR_KINDS: [&str; 6] = ["project", "folder", "session", "machine", "
 pub fn advertised() -> BTreeSet<String> {
     let mut kinds = kinds();
     kinds.insert(SESSION_ID_KIND.to_owned());
+    kinds.insert(super::session_memberships::CAPABILITY.to_owned());
     kinds
 }
 pub const SESSION_ID_KIND: &str = "session_id";

@@ -8,6 +8,21 @@ use zerus_client_core::desktop::creation_worktree::{
 };
 use zerus_desktop_ledger::operations::{custody::Record, Ticket};
 
+#[derive(Debug)]
+pub(super) enum Refused {
+    Predecessor,
+    Capacity,
+}
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Predecessor => "creation_worktree_predecessor_unsettled",
+            Self::Capacity => "creation_worktree_capacity",
+        })
+    }
+}
+impl std::error::Error for Refused {}
+
 const ROWS: i64 = 4096;
 const BYTES: i64 = 16 << 20;
 const ACTIVE: i64 = 32;
@@ -42,6 +57,39 @@ pub(super) fn migrate(tx: &Transaction<'_>) -> Result<()> {
         CREATE TRIGGER desktop_creation_worktree_preserve BEFORE DELETE ON desktop_creation_worktrees BEGIN
         SELECT RAISE(ABORT,'creation worktree receipts are retained'); END;")?;
     Ok(())
+}
+
+/// Separate the mutable scheduling claim from the immutable creation identity.
+/// In particular, RENAME COLUMN rewrites triggers: rebuild the original guard
+/// explicitly rather than accidentally leaving the scheduling slot immutable.
+pub(super) fn migrate_slots(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "DROP TRIGGER desktop_creation_worktree_original;
+        ALTER TABLE desktop_creation_worktrees RENAME COLUMN creation_id TO creation_slot;",
+    )?;
+    #[cfg(test)]
+    crate::desktop::store::rollback_backup::after_slot_rename();
+    tx.execute_batch("
+        ALTER TABLE desktop_creation_worktrees ADD COLUMN creation_id TEXT NOT NULL DEFAULT '';
+        UPDATE desktop_creation_worktrees SET creation_id=creation_slot;
+        CREATE TRIGGER desktop_creation_worktree_original BEFORE UPDATE OF worktree_id,creation_id,fingerprint,source,plan,writer_epoch,created ON desktop_creation_worktrees BEGIN
+        SELECT RAISE(ABORT,'immutable creation worktree original'); END;
+        CREATE TRIGGER desktop_creation_worktree_slot BEFORE UPDATE OF creation_slot ON desktop_creation_worktrees
+        WHEN NOT coalesce((OLD.creation_slot=OLD.creation_id AND NEW.creation_slot='retired:'||OLD.worktree_id
+          AND OLD.phase='failed' AND OLD.drained=1
+          AND json_extract(OLD.receipt,'$.worktree.status')='failed'
+          AND json_type(OLD.receipt,'$.worktree.effects_started')='false'),0) BEGIN
+        SELECT RAISE(ABORT,'creation worktree slot is not safely retired'); END;")?;
+    Ok(())
+}
+#[cfg(test)]
+pub(super) fn rewind_slots(db: &Connection) {
+    db.execute_batch("DROP TRIGGER desktop_creation_worktree_slot;
+        DROP TRIGGER desktop_creation_worktree_original;
+        ALTER TABLE desktop_creation_worktrees DROP COLUMN creation_id;
+        ALTER TABLE desktop_creation_worktrees RENAME COLUMN creation_slot TO creation_id;
+        CREATE TRIGGER desktop_creation_worktree_original BEFORE UPDATE OF worktree_id,creation_id,fingerprint,source,plan,writer_epoch,created ON desktop_creation_worktrees BEGIN
+        SELECT RAISE(ABORT,'immutable creation worktree original'); END;").unwrap();
 }
 
 pub(super) struct Row {
@@ -105,6 +153,16 @@ pub(super) fn load(db: &Connection, id: &str) -> Result<Option<Row>> {
             && word(receipt.phase) == phase
             && receipt.drained == drained,
         "creation receipt changed"
+    );
+    let (creation_id, slot): (String, String) = db.query_row(
+        "SELECT creation_id,creation_slot FROM desktop_creation_worktrees WHERE worktree_id=?1",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    ensure!(
+        creation_id == receipt.binding.creation_id
+            && (slot == creation_id || slot == format!("retired:{id}")),
+        "creation slot changed"
     );
     let intent = Intent {
         scope: wire::Scope {
@@ -177,6 +235,51 @@ pub(super) fn admit(
         );
         return Ok(old);
     }
+    // This unique indexed lookup is bounded independently of retained history.
+    // Only a fresh admitted native intent reaches here; status/recovery cannot
+    // retire a slot or mint a new attempt.
+    let predecessor: Option<String> = tx
+        .query_row(
+            "SELECT worktree_id FROM desktop_creation_worktrees WHERE creation_slot=?1",
+            [&verified.binding.creation_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(previous) = predecessor {
+        let old = load(tx, &previous)?.context("creation predecessor missing")?;
+        let a = &old.verified.plan;
+        let b = &verified.plan;
+        ensure!(
+            old.receipt.phase == Phase::Failed
+                && old
+                    .receipt
+                    .worktree
+                    .as_ref()
+                    .is_some_and(|v| v["schema"] == 1
+                        && v["detail"].as_str().is_some_and(|s| !s.is_empty())
+                        && v.get("resource_error")
+                            .is_none_or(|e| e.as_str() == Some("")))
+                && old.receipt.drained
+                && old.receipt.result(a).is_some_and(|result| result.is_err())
+                && old
+                    .receipt
+                    .worktree
+                    .as_ref()
+                    .and_then(|v| v.get("effects_started"))
+                    == Some(&serde_json::Value::Bool(false))
+                && old.verified.binding.configuration == verified.binding.configuration
+                && old.verified.binding.creation_id == verified.binding.creation_id
+                && a.expected_machine == b.expected_machine
+                && a.path == b.path
+                && a.common_dir == b.common_dir
+                && a.branch == b.branch
+                && a.destination == b.destination,
+            Refused::Predecessor
+        );
+        ensure!(tx.execute("UPDATE desktop_creation_worktrees SET creation_slot=?1 WHERE worktree_id=?2 AND creation_slot=?3 AND receipt=?4",
+            params![format!("retired:{previous}"),previous,verified.binding.creation_id,
+                encoded(&old.receipt, wire::REPLY_BYTES)?])? == 1, "creation predecessor changed");
+    }
     let plan = encoded(&verified.plan, PLAN_BYTES)?;
     let receipt = Receipt {
         binding: verified.binding.clone(),
@@ -199,8 +302,8 @@ pub(super) fn admit(
             + 4096
             + 1024,
     )?;
-    ensure!(tx.execute("UPDATE desktop_creation_worktree_budget SET rows=rows+1,bytes=bytes+?1,active=active+1 WHERE id=1 AND rows<?2 AND bytes<=?3-?1 AND active<?4",params![charge,ROWS,BYTES,ACTIVE])? == 1,"creation capacity unavailable");
-    tx.execute("INSERT INTO desktop_creation_worktrees(worktree_id,creation_id,fingerprint,source,plan,receipt,writer_epoch,phase,drained,created) VALUES(?1,?2,?3,?4,?5,?6,?7,'queued',0,?8)",params![id,verified.binding.creation_id,verified.binding.fingerprint().context("invalid worktree binding")?,verified.intent.original,plan,encoded_receipt,writer_epoch,at])?;
+    ensure!(tx.execute("UPDATE desktop_creation_worktree_budget SET rows=rows+1,bytes=bytes+?1,active=active+1 WHERE id=1 AND rows<?2 AND bytes<=?3-?1 AND active<?4",params![charge,ROWS,BYTES,ACTIVE])? == 1,Refused::Capacity);
+    tx.execute("INSERT INTO desktop_creation_worktrees(worktree_id,creation_id,creation_slot,fingerprint,source,plan,receipt,writer_epoch,phase,drained,created) VALUES(?1,?2,?2,?3,?4,?5,?6,?7,'queued',0,?8)",params![id,verified.binding.creation_id,verified.binding.fingerprint().context("invalid worktree binding")?,verified.intent.original,plan,encoded_receipt,writer_epoch,at])?;
     load(tx, id)?.context("creation admission missing")
 }
 

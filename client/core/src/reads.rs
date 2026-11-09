@@ -86,6 +86,9 @@ pub enum Read {
         until: f64,
         cursor: String,
         query: String,
+        /// `--bounded` (zerus-080n8): capped counts and partial scans, only
+        /// for a CLI that lists [`BOUNDED_PAGES`].
+        bounded: bool,
     },
     /// `hgs [@host] inspect NAME --after AFTER --skip-processes --archive ID`
     /// (5 s, 15 s on a peer): the recorded Activity of one archived session
@@ -369,6 +372,7 @@ pub fn invocation(computer: &ComputerId, read: &Read) -> Result<Invocation, Read
             until,
             cursor,
             query,
+            bounded,
         } => {
             if !from.is_finite() || !until.is_finite() {
                 return Err(bad("an archive window is two finite times"));
@@ -377,8 +381,13 @@ pub fn invocation(computer: &ComputerId, read: &Read) -> Result<Invocation, Read
                 "from": seconds(*from), "until": seconds(*until),
                 "limit": ARCHIVE_PAGE_ROWS, "cursor": cursor, "query": query,
             });
+            let words: &[&str] = if *bounded {
+                &["archives", "--json", "--bounded"]
+            } else {
+                &["archives", "--json"]
+            };
             (
-                arguments(computer, &["archives", "--json"]),
+                arguments(computer, words),
                 Some(request.to_string().into_bytes()),
                 timeout(30, 30, computer),
             )
@@ -524,6 +533,7 @@ pub fn decode(read: &Read, exit: Exit) -> Result<Value, ReadError> {
         until,
         cursor,
         query,
+        ..
     } = read
     {
         check_archive_page(*from, *until, cursor, query, &value).map_err(archive_invalid)?;
@@ -595,6 +605,10 @@ pub fn check_archive_page(
         .map_or(&[], Vec::as_slice);
     let next = data.get("next_cursor").and_then(Value::as_str);
     let total = data.get("total").and_then(Value::as_f64);
+    // A bounded page that ran out of its scan budget may be short, or empty,
+    // and still continue (zerus-080n8).
+    let partial = data.get("partial").and_then(Value::as_bool) == Some(true);
+    let total_capped = data.get("total_capped").and_then(Value::as_bool) == Some(true);
     let mut error = None;
     let page_ok = data.is_object()
         && data.get("version").and_then(Value::as_f64) == Some(1.0)
@@ -602,10 +616,11 @@ pub fn check_archive_page(
         && rows.len() <= ARCHIVE_PAGE_ROWS
         && next.is_some_and(|next| {
             next.chars().count() <= ARCHIVE_CURSOR_CHARS
-                && !(rows.is_empty() && !next.is_empty())
+                && !(rows.is_empty() && !next.is_empty() && !partial)
                 && (cursor.is_empty() || next != cursor)
         })
-        && total.is_some_and(|total| total >= rows.len() as f64)
+        // A capped total (zerus-080n8) is only a lower bound (zerus-0g4rm).
+        && total.is_some_and(|total| total >= 0.0 && (total_capped || total >= rows.len() as f64))
         && data.get("from").and_then(Value::as_f64) == Some(from)
         && data.get("until").and_then(Value::as_f64) == Some(until)
         && data.get("query").and_then(Value::as_str) == Some(query);
@@ -615,12 +630,16 @@ pub fn check_archive_page(
     if data.get("previous_cursor").is_some() || data.get("position").is_some() {
         let previous = data.get("previous_cursor").and_then(Value::as_str);
         let position = data.get("position").and_then(Value::as_f64);
+        // A capped total (zerus-080n8) counts only up to its cap, so a later
+        // window may start past it.
+        let capped = data.get("total_capped").and_then(Value::as_bool) == Some(true)
+            || data.get("position_capped").and_then(Value::as_bool) == Some(true);
         let window = previous
             .is_some_and(|previous| previous.chars().count() <= ARCHIVE_CURSOR_CHARS)
             && position.is_some_and(|position| {
                 position >= 0.0
                     && position == position.floor()
-                    && position + rows.len() as f64 <= total.unwrap_or(0.0)
+                    && (capped || position + rows.len() as f64 <= total.unwrap_or(0.0))
             });
         if !window {
             error = Some(ARCHIVE_WINDOW_INVALID);
@@ -654,7 +673,27 @@ pub struct ArchivePage {
     pub next_cursor: String,
     pub previous_cursor: Option<String>,
     pub total: u64,
+    /// The host counted only up to a cap: show the total as "N+" (zerus-5wmh.13.17 (4)).
+    pub total_capped: bool,
     pub position: Option<u64>,
+    /// The position is a lower bound (zerus-080n8).
+    pub position_capped: bool,
+    /// The scan stopped at its budget before a full page (zerus-080n8).
+    pub partial: bool,
+    /// Rows the host looked at for this page (zerus-080n8); 0 from an exact page.
+    pub searched: u64,
+    /// The host answered a bounded page: every bounded reply says whether it
+    /// is `partial` (zerus-5czy6); an exact one, from an older host too, does not.
+    pub bounded: bool,
+}
+
+/// The help line of a CLI that serves bounded archive pages (zerus-080n8).
+pub const BOUNDED_PAGES: &str = "archive-bounded-pages-v1";
+
+/// Whether `hgs --help` output lists [`BOUNDED_PAGES`] as a whole line.
+pub fn bounded_pages(help: &[u8]) -> bool {
+    help.split(|&b| b == b'\n')
+        .any(|line| line.trim_ascii() == BOUNDED_PAGES.as_bytes())
 }
 
 /// Reads and checks one archive page of `computer` (30 s, at most
@@ -695,6 +734,7 @@ pub fn archive_page_cancellable(
         until,
         cursor: cursor.to_owned(),
         query: query.to_owned(),
+        bounded: local_bounded_pages(hgs),
     };
     let invocation = invocation(computer, &request)?;
     let exit =
@@ -712,6 +752,27 @@ pub fn archive_page_cancellable(
         row.compact_keys = crate::row_preferences::keys(&computer.0, row);
     }
     Ok(page)
+}
+
+/// Whether the local CLI lists [`BOUNDED_PAGES`]: probed once per executable
+/// path for this process. A CLI updated meanwhile is used exactly until the
+/// next start; a peer it forwards to falls back by itself.
+fn local_bounded_pages(hgs: &Path) -> bool {
+    static PROBED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, bool>>,
+    > = std::sync::OnceLock::new();
+    let probed = PROBED.get_or_init(Default::default);
+    if let Some(known) = probed.lock().ok().and_then(|map| map.get(hgs).copied()) {
+        return known;
+    }
+    let listed = crate::run::run_limited(hgs, &crate::actions::help_invocation(), &[], 256 * 1024)
+        .is_ok_and(
+            |exit| matches!(exit, Exit::Code { code: 0, stdout, .. } if bounded_pages(&stdout)),
+        );
+    if let Ok(mut map) = probed.lock() {
+        map.insert(hgs.to_path_buf(), listed);
+    }
+    listed
 }
 
 /// Standard error an archive page failure shows, at most (Qt's `left(4000)`).
@@ -760,6 +821,11 @@ fn page(data: &Value) -> ArchivePage {
         next_cursor: text("next_cursor").unwrap_or_default(),
         previous_cursor: text("previous_cursor"),
         total: data["total"].as_f64().unwrap_or(0.0) as u64,
+        total_capped: data.get("total_capped").and_then(Value::as_bool) == Some(true),
+        position_capped: data.get("position_capped").and_then(Value::as_bool) == Some(true),
+        partial: data.get("partial").and_then(Value::as_bool) == Some(true),
+        searched: data.get("searched").and_then(Value::as_u64).unwrap_or(0),
+        bounded: data.get("partial").and_then(Value::as_bool).is_some(),
         position: data
             .get("position")
             .and_then(Value::as_f64)
@@ -1019,8 +1085,167 @@ pub fn attachment_message(error: &ReadError) -> String {
     }
 }
 
+/// `hgs [@host] path-info --path P`: the marker a computer's help names it by.
+/// An older hgs would read the unknown command as a session launch.
+pub const PATH_INFO_MARKER: &str = "hgs [@host] path-info --path";
+/// The longest path a check sends, as the reference dialog's.
+const PATH_INFO_PATH: usize = 32 << 10;
+
+/// What `hgs path-info` says of a path on a computer (schema 1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PathInfo {
+    File {
+        size: u64,
+    },
+    Directory,
+    Other,
+    Missing,
+    /// The computer's account cannot inspect the path.
+    Unknown,
+}
+
+fn cancellable(
+    hgs: &Path,
+    invocation: &Invocation,
+    limit: usize,
+    cancel: &AtomicBool,
+) -> Result<Exit, ReadError> {
+    run_cancellable(hgs, invocation, &[], limit, cancel).map_err(|stopped| match stopped {
+        Stopped::TooLarge(TooLarge { cap, .. }) => ReadError::TooLarge { limit: cap },
+        Stopped::Cancelled => ReadError::Superseded,
+    })
+}
+
+/// The `path-info` call for `path` on `computer`.
+pub fn path_info_invocation(computer: &ComputerId, path: &str) -> Result<Invocation, ReadError> {
+    if computer.alias().is_some_and(|alias| !valid_alias(alias)) {
+        return Err(bad("not a computer alias"));
+    }
+    if path.is_empty() || path.len() > PATH_INFO_PATH || path.chars().any(char::is_control) {
+        return Err(bad("not a path to check"));
+    }
+    Ok(Invocation {
+        args: arguments(computer, &["path-info", "--path", path]),
+        stdin: None,
+        timeout: timeout(5, 15, computer),
+        request_id: None,
+    })
+}
+
+/// The reply of schema 1, and nothing else.
+pub fn decode_path_info(stdout: &[u8]) -> Result<PathInfo, ReadError> {
+    let value: Value =
+        serde_json::from_slice(stdout).map_err(|_| invalid("path-info reply is not JSON"))?;
+    if value.get("schema").and_then(Value::as_u64) != Some(1) {
+        return Err(invalid("unknown path-info schema"));
+    }
+    let kind = value.get("kind").and_then(Value::as_str);
+    match (value.get("exists"), kind) {
+        (Some(Value::Bool(true)), Some("file")) => value
+            .get("size")
+            .and_then(Value::as_u64)
+            .map(|size| PathInfo::File { size })
+            .ok_or_else(|| invalid("a file without its size")),
+        (Some(Value::Bool(true)), Some("directory")) => Ok(PathInfo::Directory),
+        (Some(Value::Bool(true)), Some("other")) => Ok(PathInfo::Other),
+        (Some(Value::Bool(false)), None) => Ok(PathInfo::Missing),
+        (Some(Value::Null), None) => Ok(PathInfo::Unknown),
+        _ => Err(invalid("unexpected path-info reply")),
+    }
+}
+
+/// Whether `computer`'s hgs names `path-info` in its help; ends at `cancel`.
+pub fn path_info_supported(
+    hgs: &Path,
+    computer: &ComputerId,
+    cancel: &AtomicBool,
+) -> Result<bool, ReadError> {
+    if computer.alias().is_some_and(|alias| !valid_alias(alias)) {
+        return Err(bad("not a computer alias"));
+    }
+    let probe = Invocation {
+        args: arguments(computer, &["--help"]),
+        stdin: None,
+        timeout: timeout(10, 20, computer),
+        request_id: None,
+    };
+    let help = output(cancellable(hgs, &probe, HELP_LIMIT, cancel)?)?;
+    Ok(String::from_utf8_lossy(&help).contains(PATH_INFO_MARKER))
+}
+
+/// One `path-info` read within [`READ_LIMIT`]; ends at `cancel`. The caller
+/// checks [`path_info_supported`] first.
+pub fn path_info(
+    hgs: &Path,
+    computer: &ComputerId,
+    path: &str,
+    cancel: &AtomicBool,
+) -> Result<PathInfo, ReadError> {
+    let invocation = path_info_invocation(computer, path)?;
+    decode_path_info(&output(cancellable(hgs, &invocation, READ_LIMIT, cancel)?)?)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn path_info_reads_only_schema_one_replies() {
+        let decode = |text: &str| decode_path_info(text.as_bytes());
+        assert_eq!(
+            decode(r#"{"schema":1,"exists":true,"kind":"file","size":12}"#),
+            Ok(PathInfo::File { size: 12 })
+        );
+        assert_eq!(
+            decode(r#"{"schema":1,"exists":true,"kind":"directory","size":null}"#),
+            Ok(PathInfo::Directory)
+        );
+        assert_eq!(
+            decode(r#"{"schema":1,"exists":true,"kind":"other","size":null}"#),
+            Ok(PathInfo::Other)
+        );
+        assert_eq!(
+            decode(r#"{"schema":1,"exists":false,"kind":null,"size":null}"#),
+            Ok(PathInfo::Missing)
+        );
+        assert_eq!(
+            decode(r#"{"schema":1,"exists":null,"kind":null,"size":null}"#),
+            Ok(PathInfo::Unknown)
+        );
+        for bad in [
+            r#"{"schema":2,"exists":true,"kind":"file","size":1}"#,
+            r#"{"exists":true,"kind":"file","size":1}"#,
+            r#"{"schema":1,"exists":true,"kind":"file"}"#,
+            r#"{"schema":1,"exists":true,"kind":"socket"}"#,
+            r#"{"schema":1,"exists":false,"kind":"file"}"#,
+            "not json",
+        ] {
+            assert!(
+                matches!(decode(bad), Err(ReadError::Invalid { .. })),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn path_info_asks_the_named_computer_with_the_path_as_one_argument() {
+        let peer = ComputerId::from("studio");
+        let call = path_info_invocation(&peer, "~/plan's notes.md").unwrap();
+        assert_eq!(
+            call.args,
+            ["@studio", "path-info", "--path", "~/plan's notes.md"]
+        );
+        assert_eq!(call.timeout, Duration::from_secs(15));
+        assert_eq!(
+            path_info_invocation(&ComputerId::local(), "/srv/a")
+                .unwrap()
+                .args,
+            ["path-info", "--path", "/srv/a"]
+        );
+        assert!(path_info_invocation(&peer, "").is_err());
+        assert!(path_info_invocation(&peer, "/srv/a\nb").is_err());
+        assert!(path_info_invocation(&ComputerId::from("bad alias"), "/srv/a").is_err());
+    }
+
     use super::*;
 
     fn peer() -> ComputerId {
@@ -1461,6 +1686,7 @@ mod tests {
             until: 2000.0,
             cursor: cursor.into(),
             query: "q".into(),
+            bounded: false,
         }
     }
 
@@ -1490,6 +1716,7 @@ mod tests {
             until: 2000.5,
             cursor: "c".into(),
             query: "q".into(),
+            bounded: false,
         };
         let invocation = invocation(&peer(), &read).unwrap();
         assert_eq!(invocation.args, ["@studio", "archives", "--json"]);
@@ -1596,6 +1823,109 @@ mod tests {
             decode(&read, code(&inventory.to_string())).unwrap(),
             inventory
         );
+    }
+
+    #[test]
+    fn a_bounded_page_asks_with_its_flag_and_an_exact_one_without() {
+        // zerus-080n8: only a CLI that lists the marker receives --bounded.
+        let bounded = Read::ArchivePage {
+            from: 1000.0,
+            until: 2000.0,
+            cursor: String::new(),
+            query: "q".into(),
+            bounded: true,
+        };
+        assert_eq!(
+            invocation(&peer(), &bounded).unwrap().args,
+            ["@studio", "archives", "--json", "--bounded"]
+        );
+        assert_eq!(
+            invocation(&peer(), &archive_read("")).unwrap().args,
+            ["@studio", "archives", "--json"]
+        );
+        assert!(bounded_pages(
+            b"usage\n       archive-bounded-pages-v1\r\nmore"
+        ));
+        assert!(!bounded_pages(b"usage archive-bounded-pages-v1 inline"));
+        assert!(!bounded_pages(b"archive-bounded-pages-v2"));
+    }
+
+    #[test]
+    fn a_partial_page_may_be_short_or_empty_and_still_continue() {
+        let partial = page_with(|p| {
+            p["sessions"] = json!([]);
+            p["next_cursor"] = json!("n");
+            p["total"] = json!(0);
+            p["total_capped"] = json!(true);
+            p["partial"] = json!(true);
+            p["searched"] = json!(25000);
+        });
+        assert_eq!(verdict("", partial.clone()), None);
+        let typed = page(&partial);
+        assert!(typed.partial && typed.total_capped && !typed.position_capped);
+        assert_eq!(typed.searched, 25000);
+        // Without `partial` an empty page with a cursor is still refused.
+        let refused = page_with(|p| {
+            p["sessions"] = json!([]);
+            p["next_cursor"] = json!("n");
+            p["total"] = json!(0);
+        });
+        assert_eq!(verdict("", refused).as_deref(), Some(ARCHIVE_PAGE_INVALID));
+        // A capped position may lie past the counted total.
+        let later = page_with(|p| {
+            p["previous_cursor"] = json!("p");
+            p["position"] = json!(10000);
+            p["position_capped"] = json!(true);
+        });
+        assert_eq!(verdict("c", later.clone()), None);
+        assert!(page(&later).position_capped);
+        // zerus-0g4rm: a capped total may be a lower bound below the rows a later page finds.
+        let deep = page_with(|p| {
+            p["total"] = json!(0);
+            p["total_capped"] = json!(true);
+            p["partial"] = json!(false);
+        });
+        assert_eq!(verdict("c", deep), None);
+        // Without the capped flag the total still has to cover the rows.
+        let short = page_with(|p| p["total"] = json!(0));
+        assert_eq!(verdict("c", short).as_deref(), Some(ARCHIVE_PAGE_INVALID));
+        // An older hgs answers a bounded request without the new fields: an exact page.
+        let old = page(&page_with(|_| {}));
+        assert!(!old.partial && !old.total_capped && !old.position_capped);
+        assert_eq!(old.searched, 0);
+        // zerus-5czy6: the webview tells an exact reply from a bounded one by this flag,
+        // since an exact reply's projected `searched` is 0 too.
+        assert!(!old.bounded);
+        assert!(page(&partial).bounded);
+        assert!(page(&page_with(|p| p["partial"] = json!(false))).bounded);
+    }
+
+    #[test]
+    fn a_capped_total_is_kept_and_a_window_past_it_passes() {
+        // zerus-5wmh.13.17 (4): an hgs that counts only up to a cap (zerus-080n8)
+        // says so with `total_capped`; its later windows may start past that count.
+        let capped = page_with(|p| {
+            p["total"] = json!(3);
+            p["total_capped"] = json!(true);
+            p["previous_cursor"] = json!("p");
+            p["position"] = json!(10);
+        });
+        assert_eq!(verdict("", capped.clone()), None);
+        let typed = page(&capped);
+        assert!(typed.total_capped);
+        assert_eq!((typed.total, typed.position), (3, Some(10)));
+        // Without the flag the window still has to fit inside the total.
+        let uncapped = page_with(|p| {
+            p["previous_cursor"] = json!("p");
+            p["position"] = json!(10);
+        });
+        assert_eq!(
+            verdict("", uncapped).as_deref(),
+            Some(ARCHIVE_WINDOW_INVALID)
+        );
+        assert!(!page(&page_with(|_| {})).total_capped);
+        // The flag is a boolean; anything else is not a capped total.
+        assert!(!page(&page_with(|p| p["total_capped"] = json!("yes"))).total_capped);
     }
 
     #[test]

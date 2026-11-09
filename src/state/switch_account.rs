@@ -34,15 +34,58 @@ enum Confirmation {
 }
 
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
-    let (name, account, request) = parse(args)?;
+    // Task 352: `--to` names the account as `--account` does; `--preview`
+    // answers what the choice would do and changes nothing.
+    let preview = args.iter().any(|arg| arg == "--preview");
+    let args: Vec<String> = args
+        .iter()
+        .filter(|arg| *arg != "--preview")
+        .map(|arg| if arg == "--to" { "--account".to_owned() } else { arg.clone() })
+        .collect();
+    if preview {
+        let (name, account) = parse_preview(&args)?;
+        let config = crate::config::Config::load().map_err(|error| error.message)?;
+        println!("{}", switch_provider::preview(&config, &name, &account));
+        return Ok(0);
+    }
+    let (name, account, request) = parse(&args)?;
     // The owner's choice, from outside every agent session (U53).
     if nonempty_env("HGS_SESSION").is_some() || nonempty_env("HGS_RUN_ID").is_some() {
         return Err("Changing a session's account is your choice: run hgs switch-account outside a Zerus session".into());
     }
     let config = crate::config::Config::load().map_err(|error| error.message)?;
+    // Task 352: an account of another agent moves the session to that agent.
+    if switch_provider::crosses(&config, &name, &account) {
+        let receipt = switch_provider::run(&config, &name, &account, &request)?;
+        println!("{receipt}");
+        return Ok(if string(&receipt, "status") == "moved" { 0 } else { 1 });
+    }
     let receipt = switch(&config, &name, &account, &request, false)?;
     println!("{receipt}");
     Ok(if string(&receipt, "status") == "switched" { 0 } else { 1 })
+}
+
+/// A preview names the session and the account; it needs no request id.
+fn parse_preview(args: &[String]) -> Result<(String, String)> {
+    let usage = || "usage: hgs switch-account <session> --account ID --preview".to_owned();
+    let mut name = None;
+    let mut account = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--account" => {
+                account = Some(args.get(index + 1).filter(|value| !value.is_empty()).ok_or_else(usage)?.clone());
+                index += 2;
+            }
+            "--request-id" => index += 2,
+            value if value.starts_with('-') || name.is_some() => return Err(usage()),
+            value => {
+                name = Some(value.to_owned());
+                index += 1;
+            }
+        }
+    }
+    Ok((name.ok_or_else(usage)?, account.ok_or_else(usage)?))
 }
 
 fn parse(args: &[String]) -> Result<(String, String, String)> {
@@ -380,7 +423,7 @@ fn confirm(name: &str, run_id: &str, conversation: &str, deadline: Instant, sett
 }
 
 /// The active teams' sessions; a member's account is the team's to change.
-fn member_of(name: &str) -> Option<(String, String)> {
+pub(super) fn member_of(name: &str) -> Option<(String, String)> {
     let store = teams::store::Store::open(false).ok()?;
     for team in store.active_teams(200).ok()? {
         for member in &team.members {

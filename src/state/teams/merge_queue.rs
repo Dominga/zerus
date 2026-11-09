@@ -189,7 +189,7 @@ pub(crate) fn enabled(team: &Team) -> bool {
     if team.integration_folder().is_empty() {
         return false;
     }
-    crate::test_discipline::config::load(Path::new(team.integration_folder()), team.settings.tests.as_ref())
+    crate::test_discipline::config::load_project(Path::new(team.integration_folder()), team.settings.tests.as_ref())
         .is_ok_and(|loaded| loaded.active() && loaded.config.merge_queue.enabled)
 }
 
@@ -555,7 +555,7 @@ where
         migrated = true;
     }
     if let Some(id) = team.tasks.iter().find(|task| task.merge.as_ref().is_some_and(|entry| entry.state == "testing")).map(|task| task.id) {
-        let entry = team.task(id).and_then(|task| task.merge.clone()).unwrap_or_default();
+        let mut entry = team.task(id).and_then(|task| task.merge.clone()).unwrap_or_default();
         let mut results = Vec::new();
         for request in &entry.requests {
             match database.result_of(request)? {
@@ -563,17 +563,54 @@ where
                 None => return Ok(migrated),
             }
         }
+        for record in results.iter().filter(|record| record.status == "not_run") {
+            push_not_run(&mut entry.not_run, &record.excerpt);
+            entry.not_run_since.entry(record.suite.clone()).or_insert_with(|| entry.prev.clone());
+        }
+        let not_run: Vec<&str> = results.iter().filter(|record| record.status == "not_run").map(|record| record.excerpt.as_str()).collect();
+        if !not_run.is_empty() {
+            // The persisted entry has no suite selection per range. Keep all
+            // ranges open rather than closing one whose missing suite is unknown.
+            entry.tested_ranges.clear();
+            events.push(Event::new("merge_not_run", json!({"task":id,"suites":not_run})));
+        }
         let failed: Vec<String> = results
             .iter()
-            .filter(|record| !matches!(record.status.as_str(), "passed" | "flaky" | "reused"))
+            .filter(|record| !matches!(record.status.as_str(), "passed" | "flaky" | "reused" | "not_run"))
             .map(|record| format!("{} {} (record {})", record.suite, record.status, record.id))
             .collect();
         if failed.is_empty() {
-            keep(team, id, &entry, results.iter().map(|record| record.suite.clone()).collect(), now, events)?;
+            keep(team, id, &entry, results.iter().filter(|record| record.status != "not_run").map(|record| record.suite.clone()).collect(), now, events)?;
         } else {
+            // Task 374 (owner, 2026-11-08): a run that could not start - a
+            // missing module, a missing toolchain, nothing in a report - is an
+            // environment failure, not the work's. The merge is rolled back,
+            // the landing stays queued waiting for the lead's retry after the
+            // fix, and the task is never reopened.
+            let environment: Vec<&super::test_queue::Record> = results
+                .iter()
+                .filter(|record| {
+                    !matches!(record.status.as_str(), "passed" | "flaky" | "reused")
+                        && record.report.is_none()
+                        && environment_excerpt(&record.excerpt)
+                })
+                .collect();
+            if !environment.is_empty() && environment.len() == failed.len() {
+                let rolled = roll_back(team.integration_folder(), &entry).note();
+                let reason = format!(
+                    "The merge queue's tests could not start: an environment failure, not this work's. {rolled} The landing stays queued; the task is not reopened. Fix the dependency or toolchain and retry (hgs team merge --json with retry).\n{}",
+                    environment
+                        .iter()
+                        .map(|record| format!("{}: {}", record.suite, record.excerpt.lines().last().unwrap_or_default()))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+                events.push(Event::new("merge_environment_failed", json!({"task":id,"reason":reason})));
+                return Ok(set_queue_note(team, id, &reason, MergeWaitReason::Other, "merge_environment_failed", events));
+            }
             let excerpt = results
                 .iter()
-                .find(|record| !matches!(record.status.as_str(), "passed" | "flaky" | "reused"))
+                .find(|record| !matches!(record.status.as_str(), "passed" | "flaky" | "reused" | "not_run"))
                 .map(|record| record.excerpt.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"))
                 .unwrap_or_default();
             let rolled = roll_back(team.integration_folder(), &entry).note();
@@ -741,6 +778,23 @@ where
             Ok(true)
         }
     }
+}
+
+/// Task 374 (owner, 2026-11-08): the output of a suite that never started -
+/// its module, its toolchain or its test tool was missing - so the result says
+/// nothing about the merged work and must not reopen the task.
+fn environment_excerpt(excerpt: &str) -> bool {
+    let text = excerpt.to_lowercase();
+    [
+        "err_module_not_found",
+        "cannot find module",
+        "module_not_found",
+        "is not recognized as an internal or external command",
+        "command not found",
+        "toolchain",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
 }
 
 /// Whether `commit` is reachable from the lead branch's HEAD; only exit 1 is a

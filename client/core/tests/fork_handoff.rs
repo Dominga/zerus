@@ -290,14 +290,15 @@ fn qt_installed_layout_hands_over_to_tauri_and_back() {
 
     // 3. Rollback to the Qt build by hand: current back to app-100 starts it.
     junction(&root.join("current"), &root.join("app-100"));
-    {
+    let mut rollback_child = {
         use std::os::windows::process::CommandExt;
         // CREATE_NO_WINDOW: the stand-in build never shows a console.
         Command::new(root.join("current").join("hgs-tray.exe")).creation_flags(0x0800_0000)
-            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
-    }
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap()
+    };
     assert!(running(&root.join("app-100")).is_some(), "the Qt build runs after the rollback");
     stop(&root.join("app-100"));
+    rollback_child.wait().expect("the stopped rollback stand-in can be reaped");
     junction(&root.join("current"), &root.join("app-101"));
 
     // 4. The Tauri build updates itself to the following fork build.

@@ -50,6 +50,16 @@ it("sends one explicit Start with exact task, assignment and executor identities
   expect(taskStart).toHaveBeenCalledExactlyOnceWith({ project: "example", task: task.uuid, stage_at: 123, assignment: { kind: "any", machine: "", session_id: "", name: "" }, target: { computer: "", name: "codex/example/worker", run_id: "worker", conversation_id: "conversation" }, catalog_key: "run:worker", session_id: "run_id:worker" });
   expect(notify).toHaveBeenCalledWith("info", "Task started.");
 });
+it("names a cutover or an unconfirmed Start and never claims it started", async () => {
+  vi.mocked(taskStart).mockResolvedValueOnce(view({ pending: false, phase: "released", outcome: "cutting_over", error: "Cutting over (busy). Nothing was sent." }));
+  await startTask("example", task);
+  expect(notify).toHaveBeenCalledExactlyOnceWith("error", "Cutting over (busy). Nothing was sent.", true, undefined, "Not started: this task is moving to execution records. Nothing was sent; try again later.");
+  vi.mocked(notify).mockClear();
+  vi.mocked(taskStart).mockResolvedValueOnce(view({ outcome: "uncertain", error: "No confirmed receipt." }));
+  await startTask("example", task);
+  expect(notify).toHaveBeenCalledExactlyOnceWith("error", "No confirmed receipt.", true, undefined, "Start unconfirmed: check the executor’s session. The task will not be sent again automatically.");
+  expect(taskStart).toHaveBeenCalledTimes(2);
+});
 it("refuses stale stage or assignment and never retries a lost Start response", async () => {
   fixture.rows[0] = { ...task, targetKind: "session" }; await startTask("example", task); expect(taskStart).not.toHaveBeenCalled();
   fixture.rows[0] = { ...task }; vi.mocked(taskStart).mockRejectedValueOnce(new Error("response lost"));
@@ -64,6 +74,25 @@ it("settles a receipt or releases the exact reviewed snapshot, with the specifie
   expect(await releaseTaskStart(review)).toBe(true); expect(toast).toHaveBeenCalledWith("Start record released", "Another start is allowed. Nothing was stopped or sent again.");
   vi.mocked(taskStartRelease).mockRejectedValueOnce(new Error("changed")); expect(await releaseTaskStart(review)).toBe(false);
   expect(notify).toHaveBeenCalledWith("error", "Could not release the start record.", true);
+});
+
+it("shows a terminal native refusal and leaves the next Start as a separate explicit action", async () => {
+  const review = { task, view: view() };
+  const reason = "Refused: acknowledgement mode changed. Start again to prepare a new request.";
+  vi.mocked(taskStartRelease).mockResolvedValueOnce(view({ pending: false, phase: "released", outcome: "refused", error: reason }));
+  expect(await releaseTaskStart(review)).toBe(true);
+  expect(taskStartRelease).toHaveBeenCalledExactlyOnceWith(review.view);
+  expect(notify).toHaveBeenCalledExactlyOnceWith("error", reason, true);
+  expect(taskStart).not.toHaveBeenCalled();
+  expect(toast).not.toHaveBeenCalled();
+});
+
+it("does not treat a still-pending refusal as a successful release", async () => {
+  const review = { task, view: view() };
+  vi.mocked(taskStartRelease).mockResolvedValueOnce(view({ pending: true, phase: "review", outcome: "refused" }));
+  expect(await releaseTaskStart(review)).toBe(false);
+  expect(notify).toHaveBeenCalledWith("error", "Could not release the start record.", true);
+  expect(taskStart).not.toHaveBeenCalled();
 });
 
 it("checks only an explicit original receipt and never releases or sends after a lost check", async () => {

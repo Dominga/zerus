@@ -15,6 +15,32 @@ pub enum OriginalHelperFailure {
     #[cfg(feature = "macos-native-peer")]
     Native(crate::macos_notify::peer::installation::Refusal),
 }
+
+/// DATA from this connection's genuine own-original-child observation. It is
+/// not a lease, a stop permit or a substitute for fresh kernel peer evidence.
+/// There is no public constructor or deserializer.
+#[cfg(target_os = "macos")]
+pub struct OriginalHelperIdentity {
+    pid: u32,
+    parent: u32,
+    birth: String,
+    audit: [u32; 8],
+}
+#[cfg(target_os = "macos")]
+impl OriginalHelperIdentity {
+    pub fn parent(&self) -> u32 {
+        self.parent
+    }
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+    pub fn birth(&self) -> &str {
+        &self.birth
+    }
+    pub fn audit_token(&self) -> &[u32; 8] {
+        &self.audit
+    }
+}
 #[cfg(all(target_os = "macos", feature = "macos-native-peer"))]
 impl From<crate::macos_notify::peer::installation::Refusal> for OriginalHelperFailure {
     fn from(error: crate::macos_notify::peer::installation::Refusal) -> Self {
@@ -124,6 +150,38 @@ impl Connection {
                 native
                     .observe_original_helper(child)
                     .map_err(OriginalHelperFailure::from)
+            });
+        #[cfg(not(feature = "macos-native-peer"))]
+        let result = Err(OriginalHelperFailure::Unavailable);
+        if result.is_err() {
+            drop(child.stdin.take());
+        }
+        result
+    }
+    /// Preserve the exact kernel identity observed alongside live code, for
+    /// binding the original helper to a later host-local custody socket. The
+    /// consumer must freshly verify that socket's token and current exec
+    /// generation. This DATA cannot reconstruct consent or child custody.
+    #[cfg(target_os = "macos")]
+    pub fn observe_original_helper_identity(
+        &self,
+        child: &mut std::process::Child,
+    ) -> Result<OriginalHelperIdentity, OriginalHelperFailure> {
+        #[cfg(feature = "macos-native-peer")]
+        let result = self
+            .native
+            .as_ref()
+            .ok_or(OriginalHelperFailure::Unavailable)
+            .and_then(|native| {
+                native
+                    .observe_original_helper_identity(child)
+                    .map_err(OriginalHelperFailure::from)
+            })
+            .map(|identity| OriginalHelperIdentity {
+                pid: identity.pid(),
+                parent: identity.parent(),
+                birth: identity.birth().into(),
+                audit: *identity.audit_token(),
             });
         #[cfg(not(feature = "macos-native-peer"))]
         let result = Err(OriginalHelperFailure::Unavailable);

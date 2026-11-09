@@ -559,6 +559,7 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
     prefillRequest = 0;
     if (repositorySource && !enabled) repositoryNewProject = isNewProject();
     repositorySource = enabled;
+    if (enabled) focusUrl++;
     const newIndex = projectList.findIndex((p) => p.newProject);
     if (enabled && newIndex < 0) projectList = projectRows(headers, true);
     else if (!enabled && newIndex >= 0) {
@@ -570,7 +571,6 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
     if (enabled && repositoryNewProject) setProjectIndex(projectList.findIndex((p) => p.newProject));
     syncRepositoryComputer();
     updateForm();
-    if (enabled) focusUrl++;
   }
 
   function askFields(destination: string, custom: boolean, fresh: string | null) {

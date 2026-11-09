@@ -203,7 +203,24 @@ impl Store {
             self.catalog.write(&self.node_id, key, value, parents)?;
         }
         // This computer's sessions also move by ID (zerus-ucck P2c-1).
-        super::session_ids::write(&self.catalog, &mut self.twins, &self.node_id, &labels)
+        super::session_ids::write(&self.catalog, &mut self.twins, &self.node_id, &labels)?;
+        if let Some(primary) = &mut self.id_memberships {
+            // New clients carry the ID graph's observed raw heads unchanged in
+            // versions. Old name-only clients cannot supersede ID data. Never
+            // use the current selected value as a causal write frontier.
+            for twin in super::session_ids::current_twins(&self.catalog,&self.twins) {
+                let machine=self.catalog.machine(&twin.machine);
+                if !labels.contains(&(machine.clone(),twin.label.clone())) { continue; }
+                let token=super::session_memberships::Memberships::token(&machine,&twin.session_id);
+                if let Some(parents)=patch.versions.get(&token) {
+                    let key=Key::Session {machine:machine.clone(),session:twin.label.clone()};
+                    let value=after.get(&key).cloned().unwrap_or(Value::Null);
+                    primary.write(&self.catalog,&self.node_id,&machine,&twin.session_id,value,parents.clone())?;
+                }
+            }
+            primary.migrate(&self.catalog,&self.twins)?;
+        }
+        Ok(())
     }
 
     pub fn initialize(&mut self, organization: &Value) -> Result<()> {
@@ -307,22 +324,56 @@ impl Store {
                 p["accessible"] = json!(true);
             }
         }
-        // The same sessions by durable ID, where a desktop may read them
-        // (zerus-ucck P2c-1): only twins of the name operation now selected.
-        for (machine, session_id, project) in super::session_ids::readable(&self.catalog, &self.twins) {
+        // Primary ID data wins even when it is null or conflicted. Derived
+        // name twins are a fallback ONLY when this exact ID has no record.
+        // Unavailable primary data never becomes an absent record.
+        let primary = self
+            .id_memberships
+            .as_ref()
+            .and_then(|p| p.resolved(&self.catalog).ok());
+        let mut memberships = BTreeMap::new();
+        if let Some(primary) = &primary {
+            for (machine, id, project) in super::session_ids::readable(&self.catalog, &self.twins) {
+                if !primary.contains_key(&(machine.clone(), id.clone())) {
+                    memberships.insert((machine, id), project);
+                }
+            }
+            for ((machine, id), record) in primary {
+                if let Some(project) = record.value.as_str() {
+                    memberships.insert((machine.clone(), id.clone()), project.to_owned());
+                }
+            }
+        }
+        for ((machine, session_id), project) in memberships {
             if let Some(p) = projects.get_mut(&project) {
                 let machine = aliases.get(&machine).cloned().unwrap_or(machine);
-                let members = p
+                p
                     .as_object_mut()
                     .unwrap()
                     .entry("session_ids")
-                    .or_insert_with(|| json!([]));
-                members
+                    .or_insert_with(|| json!([]))
                     .as_array_mut()
                     .unwrap()
                     .push(json!(format!("{machine}\n{session_id}")));
             }
         }
+        let mut versions=self.catalog.versions();
+        for ((machine,id),record) in primary.as_ref().into_iter().flat_map(|p|p.iter()) {
+            versions.insert(super::session_memberships::Memberships::token(machine,id),record.heads.clone());
+        }
+        let records: Vec<_> = primary.as_ref().into_iter().flat_map(|map| map.iter()).map(|((machine,id), record)|
+            json!({"machine":machine,"session_id":id,"project":record.value,"heads":record.heads,"variants":record.variants,"conflict":record.conflict})).collect();
+        let id_state = json!({"available":primary.is_some(),"records":records});
+        let digest = self.id_memberships.as_ref().map_or_else(
+            || self.catalog.digest(),
+            |p| {
+                use sha2::{Digest, Sha256};
+                format!(
+                    "{:x}",
+                    Sha256::digest(format!("{}:{}", self.catalog.digest(), p.digest()))
+                )
+            },
+        );
         let conflicts: Vec<_> = self
             .catalog
             .effective_heads()
@@ -359,9 +410,9 @@ impl Store {
         if order.is_some() {
             organization["project_order"] = Value::Array(ids);
         }
-        json!({"schema":1,"node_id":self.node_id,"swarm_id":self.catalog.swarm_id,"digest":self.catalog.digest(),"initialized":self.imported,
+        json!({"schema":1,"node_id":self.node_id,"swarm_id":self.catalog.swarm_id,"digest":digest,"initialized":self.imported,"session_id_memberships":id_state,
             "organization":organization,
-            "versions":self.catalog.versions(),"conflicts":conflicts,"preferences":self.catalog.preferences(),"machines":machines,"peers":self.peers})
+            "versions":versions,"conflicts":conflicts,"preferences":self.catalog.preferences(),"machines":machines,"peers":self.peers})
     }
 }
 
@@ -371,9 +422,11 @@ mod tests {
     use crate::swarm::{catalog::new_id, store::Binding};
     fn store() -> Store {
         let node_id = new_id();
+        let catalog = Catalog::default();
+        let primary=super::super::session_memberships::Memberships::empty(&catalog);
         Store {
             node_id: node_id.clone(),
-            catalog: Catalog::default(),
+            catalog,
             imported: false,
             bindings: BTreeMap::from([(
                 "local".into(),
@@ -384,10 +437,51 @@ mod tests {
             )]),
             peers: BTreeMap::new(),
             twins: Default::default(),
+            id_memberships: Some(primary),
         }
     }
     fn org(name: &str) -> Value {
         json!({"projects":[{"id":"project","name":name,"color":"#123456","vivid":false,"folders":[],"sessions":[]}]})
+    }
+    #[test]
+    fn an_observed_id_move_consumes_raw_heads_but_an_old_name_only_move_does_not() {
+        let mut store=store();
+        store.initialize(&org("One")).unwrap();
+        store.twins=super::super::session_ids::Twins::new(&store.catalog.swarm_id);
+        for (field,value) in [("alive",json!(true)),("name",json!("Two")),("color",json!("#123456"))] {
+            store.catalog.set(&store.node_id,Key::project("two",field),value).unwrap();
+        }
+        let label="claude/example/one";let id=new_id();
+        super::super::session_ids::SESSIONS.with(|s|s.borrow_mut().insert(label.into(),id.clone()));
+        let before=store.snapshot(&config());
+        let mut desired=before["organization"].clone();
+        desired["projects"][0]["sessions"]=json!([format!("local\n{label}")]);
+        store.apply(Patch{base:before["organization"].clone(),desired,versions:serde_json::from_value(before["versions"].clone()).unwrap()}).unwrap();
+        let before=store.snapshot(&config());
+        let mut desired=before["organization"].clone();
+        desired["projects"][0]["sessions"]=json!([]);
+        desired["projects"][1]["sessions"]=json!([format!("local\n{label}")]);
+        store.apply(Patch{base:before["organization"].clone(),desired,versions:serde_json::from_value(before["versions"].clone()).unwrap()}).unwrap();
+        let primary=store.id_memberships.as_ref().unwrap();
+        assert_eq!(primary.resolve(&store.catalog,&store.node_id,&id).unwrap().unwrap().value,"two");
+        store.catalog.set(&store.node_id,Key::Session {machine:store.node_id.clone(),session:label.into()},json!("project")).unwrap();
+        let shown=store.snapshot(&config());
+        let two=shown["organization"]["projects"].as_array().unwrap().iter().find(|p|p["id"]=="two").unwrap();
+        assert_eq!(two["session_ids"],json!([format!("local\n{id}")]));
+        store.id_memberships.as_mut().unwrap().set(&store.catalog,&store.node_id,&store.node_id,&id,Value::Null).unwrap();
+        let shown=store.snapshot(&config());
+        assert!(shown["organization"]["projects"].as_array().unwrap().iter().all(|p|p["session_ids"].as_array().is_none_or(|ids|ids.is_empty())));
+        assert_eq!(shown["session_id_memberships"]["records"][0]["project"],Value::Null);
+        let mut other=store.id_memberships.clone().unwrap();
+        other.set(&store.catalog,&new_id(),&store.node_id,&id,json!("two")).unwrap();
+        let primary=store.id_memberships.as_mut().unwrap();
+        primary.set(&store.catalog,&store.node_id,&store.node_id,&id,json!("project")).unwrap();
+        primary.merge(&store.catalog,&store.catalog.swarm_id,other.missing(&BTreeSet::new())).unwrap();
+        let shown=store.snapshot(&config());
+        let record=&shown["session_id_memberships"]["records"][0];
+        assert_eq!(record["conflict"],true);
+        assert_eq!(record["project"],Value::Null);
+        assert_eq!(record["variants"].as_array().unwrap().iter().map(|op|op["value"].as_str().unwrap()).collect::<BTreeSet<_>>(),BTreeSet::from(["project","two"]));
     }
     #[test]
     fn patches_use_observed_versions_and_do_not_overwrite_unseen_edits() {
@@ -438,10 +532,15 @@ mod tests {
         a.initialize(&org("Initial")).unwrap();
         let mut b = a.clone();
         b.node_id = new_id();
-        a.catalog.set(&a.node_id, Key::project("project", "name"), json!("Local choice")).unwrap();
-        b.catalog.set(&b.node_id, Key::project("project", "name"), json!("Peer choice")).unwrap();
-        a.catalog.merge(&b.catalog.swarm_id, b.catalog.operations.into_values().collect()).unwrap();
-        a.catalog.set(&a.node_id, Key::Folder { id: "retained-deletion".into() }, Value::Null).unwrap();
+        a.catalog.set(&a.node_id, Key::project("project", "name"), json!("Local choice"),
+            ).unwrap();
+        b.catalog.set(&b.node_id, Key::project("project", "name"), json!("Peer choice"),
+            ).unwrap();
+        a.catalog.merge(&b.catalog.swarm_id, b.catalog.operations.into_values().collect(),
+            ).unwrap();
+        a.catalog.set(&a.node_id, Key::Folder { id: "retained-deletion".into(),
+                }, Value::Null,
+            ).unwrap();
         let heads: BTreeMap<_, Vec<String>> = a.catalog.heads().into_iter().map(|(key, ops)| (key, ops.into_iter().map(|op| op.id.clone()).collect())).collect();
         assert_eq!(heads[&Key::project("project", "name")].len(), 2);
         let values = a.catalog.values();
@@ -471,7 +570,8 @@ mod tests {
         a.initialize(&document).unwrap();
         assert!(!a.catalog.values().keys().any(|key| matches!(key, Key::Session { .. })));
         let before = a.snapshot(&config());
-        a.apply(Patch { base: before["organization"].clone(), desired: document, versions: a.catalog.versions() }).unwrap();
+        a.apply(Patch { base: before["organization"].clone(), desired: document, versions: a.catalog.versions(),
+        }).unwrap();
         assert!(!a.catalog.values().keys().any(|key| matches!(key, Key::Session { .. })));
     }
     #[test]

@@ -86,12 +86,25 @@ pub(super) fn materialize(task: &TaskDoc) -> Result<Read> {
     header["start_confirmed"] = json!(started);
     header.as_object_mut().expect("task").remove("log");
     let summary = summarized(&header)?;
+    let phases = task.attempt_phases().map_err(fail)?;
     let entries = ids
         .into_iter()
         .zip(log)
         .map(|(id, entry)| {
-            let payload = serde_json::to_value(&entry).map_err(fail)?;
-            Ok(Entry { id, at: entry.at, summary: summarized(&payload)?, payload })
+            let mut payload = serde_json::to_value(&entry).map_err(fail)?;
+            // An entry whose request names an attempt carries that attempt's
+            // own origin and phase (A4): a reopen's note is a change request
+            // whose delivery its attempt alone shows. Additive; an entry
+            // without an attempt is unchanged.
+            if let Some((origin, phase)) = entry.request_id.as_deref().and_then(|r| phases.get(r)) {
+                payload["attempt"] = json!({"origin": origin, "phase": phase});
+            }
+            Ok(Entry {
+                id,
+                at: entry.at,
+                summary: summarized(&payload)?,
+                payload,
+            })
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(Read { header, summary, entries })
@@ -248,7 +261,9 @@ mod tests {
     #[test]
     fn pages_preserve_canonical_order() {
         let temp = tempfile::tempdir().unwrap();
-        let store = ProjectStore::open(temp.path(), "example").unwrap();
+        let root = temp.path().join("replica");
+        crate::platform::owner_only_dir(&root).unwrap();
+        let store = ProjectStore::open(&root, "example").unwrap();
         let mut task = task();
         // Equal times retain the canonical Loro order; merged earlier times
         // need chronological order rather than raw append positions.
@@ -263,7 +278,9 @@ mod tests {
     #[test]
     fn cursor_survives_append_compaction_and_eviction() {
         let temp = tempfile::tempdir().unwrap();
-        let store = ProjectStore::open(temp.path(), "example").unwrap();
+        let root = temp.path().join("replica");
+        crate::platform::owner_only_dir(&root).unwrap();
+        let store = ProjectStore::open(&root, "example").unwrap();
         let mut a = task();
         for n in 1..=6 {
             a.comment(&format!("note {n}"), &Actor::Person, 100 + n).unwrap();
@@ -319,6 +336,37 @@ mod tests {
         page(&store, a.uuid(), 80, None, false).unwrap();
         page(&store, b.uuid(), 1, None, false).unwrap();
         assert_eq!(index::MATERIALIZED.with(Cell::get), 3);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_new_store_and_history_index_inherit_only_the_owner() {
+        use crate::platform;
+        use std::fs;
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        fs::create_dir(&state).unwrap();
+        assert!(std::process::Command::new("icacls").arg(&state)
+            .args(["/grant", "*S-1-5-11:(OI)(CI)M", "/Q"])
+            .stdout(std::process::Stdio::null()).status().unwrap().success());
+        let config = Config {
+            home: temp.path().to_string_lossy().into_owned(),
+            dir: temp.path().join("config"), state,
+            selves: vec![], peers: vec![], base_peers: vec![],
+            peers_from_environment: false, machines: Default::default(),
+            tab: false, tab_colors: String::new(),
+        };
+        let store = super::super::store(&config, "example").unwrap();
+        let mut task = task();
+        store.save(&mut task).unwrap();
+        let dir = store_dir(&config, "example");
+        for _ in 0..2 {
+            page(&store, task.uuid(), 2, None, false).unwrap();
+        }
+        assert!(platform::verify_private(&dir, platform::Private::Directory).unwrap());
+        assert!(platform::verify_private(&dir.join("task-index-v2.sqlite3"), platform::Private::File).unwrap());
+        assert!(!platform::verify_private(&config.state, platform::Private::Directory).unwrap(),
+            "the existing parent keeps its foreign grant");
     }
 
     #[test]
@@ -379,6 +427,119 @@ mod tests {
         assert_eq!(page(&store, a.uuid(), 3, None, true).unwrap(), latest);
     }
 
+    /// An entry whose request names an attempt carries that attempt's own
+    /// origin and phase (A4), from the index and from the document alike: a
+    /// reopen's note is a change request whose delivery only its attempt
+    /// shows. A settled receipt changes the task, so the cached page follows.
+    #[cfg(unix)]
+    #[test]
+    fn an_entry_naming_an_attempt_carries_its_own_phase() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use zerus_replica::execution::{NativeRequest, Origin, Receipt};
+        use zerus_replica::{Settlement, TaskDelivery};
+        const SEND: &str = "11111111-1111-4111-8111-111111111111";
+        const REOPEN: &str = "22222222-2222-4222-8222-222222222222";
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(temp.path(), "example").unwrap();
+        let to = SessionKey {
+            machine: "m1".into(),
+            session: "codex/api".into(),
+            session_id: "launch_id:api".into(),
+        };
+        let native = || NativeRequest {
+            machine: "m1".into(),
+            name: "codex/api".into(),
+            run_id: "run-api".into(),
+            conversation_id: "conversation-api".into(),
+            digest: "ab".repeat(32),
+        };
+        let receipt = |id: &str| Receipt {
+            request_id: id.into(),
+            name: "codex/api".into(),
+            run_id: "run-api".into(),
+            conversation_id: "conversation-api".into(),
+            first_message: false,
+            digest: "ab".repeat(32),
+            submitted: true,
+        };
+        let mut a = task();
+        a.comment("plain note", &Actor::Person, 101).unwrap();
+        a.reserve_attempt(SEND, Origin::Send, &to, native(), &Actor::Person, 102)
+            .unwrap();
+        a.settle_attempt(
+            SEND,
+            Settlement::Receipt(&receipt(SEND)),
+            &Actor::Person,
+            103,
+        )
+        .unwrap();
+        a.report_attempt(SEND, "Done", zerus_replica::execution::ReportKind::Ready, None, &Actor::Agent(to.clone()), 104)
+            .unwrap();
+        let view = a.view().unwrap();
+        assert_eq!(view.stage, Stage::Review);
+        let note = TaskDelivery {
+            mode: "note".into(),
+            state: "note".into(),
+            stage: "review".into(),
+            stage_at: view.stage_at,
+            dispatch_id: SEND.into(),
+            submitted_id: String::new(),
+            run_id: String::new(),
+            conversation_id: String::new(),
+            prompt: String::new(),
+            error: String::new(),
+        };
+        a.reserve_message(
+            REOPEN,
+            "Please change it",
+            &[],
+            &note,
+            None,
+            (&Actor::Person, 105),
+        )
+        .unwrap();
+        a.reserve_attempt(REOPEN, Origin::Reopen, &to, native(), &Actor::Person, 105)
+            .unwrap();
+        store.save(&mut a).unwrap();
+        let shown = |pages: &[Value], request: &str| {
+            let named: Vec<_> = pages
+                .iter()
+                .filter(|e| e["request_id"] == request)
+                .collect();
+            assert!(!named.is_empty(), "{request}: {pages:#?}");
+            named
+                .iter()
+                .map(|e| e.get("attempt").cloned())
+                .collect::<Vec<_>>()
+        };
+        let reopen = |phase: &str| vec![Some(json!({"origin": "reopen", "phase": phase}))];
+        for summary in [false, true] {
+            let pages = all(&store, a.uuid(), 3, summary);
+            assert_eq!(shown(&pages, REOPEN), reopen("unknown"));
+            assert!(shown(&pages, SEND)
+                .iter()
+                .all(|a| *a == Some(json!({"origin": "send", "phase": "ready"}))));
+            let plain: Vec<_> = pages.iter().filter(|e| e["text"] == "plain note").collect();
+            assert!(plain.len() == 1 && plain[0].get("attempt").is_none());
+        }
+        // Its own receipt settles it; the cached history is read again.
+        a.settle_attempt(
+            REOPEN,
+            Settlement::Receipt(&receipt(REOPEN)),
+            &Actor::Person,
+            106,
+        )
+        .unwrap();
+        store.save(&mut a).unwrap();
+        let indexed = all(&store, a.uuid(), 3, false);
+        assert_eq!(shown(&indexed, REOPEN)[0], reopen("submitted")[0]);
+        // The document gives the same pages.
+        fs::set_permissions(store.dir(), fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(all(&store, a.uuid(), 3, false), indexed);
+        fs::set_permissions(store.dir(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
     /// A cached history of another shape is never served: the page comes
     /// from the document instead.
     #[test]
@@ -389,7 +550,7 @@ mod tests {
         a.comment("note", &Actor::Person, 101).unwrap();
         store.save(&mut a).unwrap();
         let good = page(&store, a.uuid(), 80, None, false).unwrap();
-        let path = store.dir().join("task-index-v1.sqlite3");
+        let path = store.dir().join("task-index-v2.sqlite3");
         let header = |field: &str, value: Value| {
             let mut h = good.clone();
             for key in ["log", "log_total", "history_next", "history_schema", "ref"] {

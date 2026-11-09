@@ -336,6 +336,41 @@ fn a_status_projects_the_team_tab_and_its_plan_graph() {
 }
 
 #[test]
+fn archived_stubs_keep_their_phase_totals_and_frozen_timing_without_attempts() {
+    let value = json!({"id":TEAM,"members":[],"archive_totals":{"phases":205,"tasks":1200},
+        "tasks":[{"id":7,"phase":2,"title":"Archived work","assignee":"core","status":"accepted",
+            "archived":{"started_at":10,"accepted_at":40,"timing":{"worked_s":23}}}],
+        "phases":[{"n":2,"archived":{"tasks":8,"accepted":8}}],
+        "phase_summary":[{"n":2,"title":"Closed","state":"done","status":"done","done":8,"total":8}]});
+    let team = view::team(&value);
+    let task = &team.tasks[0];
+    assert!(task.archived);
+    assert_eq!(task.worked_s, 23.0);
+    assert!(task.questions.is_empty() && task.attempt_id.is_empty() && !task.no_report);
+    assert!(team.phases[0].archived);
+    assert_eq!((team.phases[0].done, team.phases[0].total), (8, 8));
+    assert_eq!(team.archived_phases_not_shown, 204);
+    assert_eq!(view::graph(&value, &team).nodes[0].id, 7);
+}
+
+#[test]
+fn one_task_read_validates_its_identity_and_bounds_the_projected_report() {
+    let read = TeamRead::Task { team: TEAM.into(), task: 7 };
+    let request = invocation(&ComputerId::local(), &read).unwrap();
+    assert_eq!(request.args, ["team", "status", "--json"]);
+    assert_eq!(read.request(), json!({"team":TEAM,"task":7}));
+    let value = json!({"id":7,"title":"Archived work","status":"accepted","attempts":[
+        {"report":{"text":"Old report"}}, {"report":{"text":"R".repeat(view::REPORT_CHARS + 10)}}]});
+    let decoded = decode(&read, exit(&value)).unwrap();
+    let detail = view::task_detail(&decoded);
+    assert_eq!(detail.task.id, 7);
+    assert_eq!(detail.report.chars().count(), view::REPORT_CHARS);
+    assert!(detail.report_truncated);
+    assert!(decode(&read, exit(&json!({"id":8}))).is_err());
+    assert!(invocation(&ComputerId::local(), &TeamRead::Task { team: TEAM.into(), task: 0 }).is_err());
+}
+
+#[test]
 fn task_40_status_carries_held_tasks_pipelines_widenings_and_sub_teams() {
     let status = json!({"id":"t1","name":"Checkout","status":"planning","lead":"lead",
         "members":[{"id":"lead","role":"Lead"},{"id":"api","role":"Backend","profile_widening":{"from":"auto","to":"bypass"}}],
@@ -591,6 +626,7 @@ fn replies(read: &TeamRead) -> Value {
     match read {
         TeamRead::List => fixture("list"),
         TeamRead::Status { .. } => fixture("status"),
+        TeamRead::Task { task, .. } => json!({"id":task}),
         TeamRead::Events { before: None, .. } => fixture("events"),
         TeamRead::Events {
             before: Some(_), ..

@@ -28,9 +28,12 @@ permissions:
   contents: read
 cache-mode: none
 
+# Pull requests: one run per PR, and a new head cancels the older run;
+# closing the PR cancels the rest (pr-closed.yml, zerus-b8zze).
+# Manual runs keep their per-ref group without cancellation.
 concurrency:
-  group: kimi-native-${{ github.ref }}
-  cancel-in-progress: false
+  group: ${{ github.event_name == 'pull_request' && format('kimi-native-pr-{0}', github.event.pull_request.number) || format('kimi-native-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   contracts:
@@ -50,7 +53,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.14.8'
       - name: Keep Cargo and Rustup in this ephemeral runner's private temporary directory

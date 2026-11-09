@@ -222,6 +222,7 @@ if command -v tmux >/dev/null 2>&1 || [ -x /opt/homebrew/bin/tmux ]; then
   # then the link died: exit 255 with no teardown.
   cat > "$tmp/fakebin/ssh" <<'EOF'
 #!/bin/sh
+case "$*" in *hgs-remote-v2*) echo "hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot"; exit 0 ;; esac
 for a; do case "$a" in LocalCommand=*) "${SHELL:-/bin/sh}" -c "${a#LocalCommand=}" ;; esac; done
 printf '\033[?1049h\033[?1h\033[?1003h\033[?1006h\033[?2004h'
 exit 255
@@ -540,7 +541,13 @@ PATH="$tmp/fakebin:$PATH" json_ok "json: SSH failure preserves the connection re
 assert d['ok'] is False and d['error'] == 'offline', d
 assert 'Connection refused' in d['error_detail'], d
 " @nowhere ls --json
-printf '#!/bin/sh\necho "  claude/legacy-session   0 client(s)"\nexit 0\n' > "$tmp/fakebin/ssh"; chmod +x "$tmp/fakebin/ssh"
+cat > "$tmp/fakebin/ssh" <<'EOF'
+#!/bin/sh
+case "$*" in *hgs-remote-v2*) echo "hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot"; exit 0 ;; esac
+echo "  claude/legacy-session   0 client(s)"
+exit 0
+EOF
+chmod +x "$tmp/fakebin/ssh"
 PATH="$tmp/fakebin:$PATH" json_ok "json: пир отвечает не-JSON -> ok:false, error:bad_response" "
 assert d['host'] == 'nowhere', d
 assert d['ok'] is False and d['error'] == 'bad_response', d
@@ -763,6 +770,7 @@ exit 0
 EOF
 cat > "$tmp/fakebin/ssh" <<EOF
 #!/bin/sh
+case "\$*" in *hgs-remote-v2*) echo "hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot"; exit 0 ;; esac
 echo "ssh \$*" >> "$tmp/paste.log"
 case "\$FAKE_CLIP" in
   png)    printf 'PNGDATA'; exit 0 ;;
@@ -960,7 +968,7 @@ while True:
         break
     time.sleep(0.1)
 assert ended.get(sys.argv[2]) == {'launch_id': sys.argv[2], 'name': 'sh/sample-project/gone', 'code': None,
-                                  'output': ''}, box
+                                  'output': '', 'diagnostic_code': 'launch_supervisor_report_missing'}, box
 assert sys.argv[3] not in ended, box
 assert all(session['name'] != 'sh/sample-project/gone' for session in box['sessions']), box
 PY

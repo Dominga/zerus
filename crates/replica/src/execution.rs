@@ -545,6 +545,39 @@ fn phase_of(attempt: &Attempt, events: &[&AttemptEvent]) -> Projected {
     (phase, began_at, progress_at)
 }
 
+/// Each attempt with its own projected phase, and the IDs of those rebound.
+/// Facts count only for the exact record they name. A fact about another
+/// record written under the same ID (two replicas reserved one UUID with
+/// different contents) leaves this one rebound: a conflict for review, held
+/// as Unknown until the person cancels it, never settled by the other
+/// original's receipt.
+pub(crate) fn phases<'a>(
+    attempts: &'a [Attempt],
+    events: &[AttemptEvent],
+) -> (
+    Vec<(&'a Attempt, Projected)>,
+    std::collections::BTreeSet<&'a str>,
+) {
+    let mut rebound = std::collections::BTreeSet::new();
+    let phases = attempts
+        .iter()
+        .map(|attempt| {
+            let fingerprint = attempt.fingerprint();
+            let (own, foreign): (Vec<&AttemptEvent>, Vec<&AttemptEvent>) = events
+                .iter()
+                .filter(|e| e.attempt == attempt.id)
+                .partition(|e| e.of.is_empty() || e.of == fingerprint);
+            let mut projected = phase_of(attempt, &own);
+            if !foreign.is_empty() && projected.0 != Phase::Cancelled {
+                rebound.insert(attempt.id.as_str());
+                projected.0 = Phase::Unknown;
+            }
+            (attempt, projected)
+        })
+        .collect();
+    (phases, rebound)
+}
+
 /// Projects a task's execution from its attempts, or for a task In progress
 /// without any, from its history's last send or start. `log` is the history
 /// in reading order. `binding` is how `session` was bound from a name-only
@@ -577,28 +610,7 @@ pub(crate) fn project(
             }
         });
     };
-    // Facts count only for the exact record they name. A fact about another
-    // record written under the same ID (two replicas reserved one UUID with
-    // different contents) leaves this one rebound: a conflict for review,
-    // held as Unknown until the person cancels it, never settled by the
-    // other original's receipt.
-    let mut rebound = std::collections::BTreeSet::new();
-    let phases: Vec<(&Attempt, Projected)> = attempts
-        .iter()
-        .map(|attempt| {
-            let fingerprint = attempt.fingerprint();
-            let (own, foreign): (Vec<&AttemptEvent>, Vec<&AttemptEvent>) = events
-                .iter()
-                .filter(|e| e.attempt == attempt.id)
-                .partition(|e| e.of.is_empty() || e.of == fingerprint);
-            let mut projected = phase_of(attempt, &own);
-            if !foreign.is_empty() && projected.0 != Phase::Cancelled {
-                rebound.insert(attempt.id.as_str());
-                projected.0 = Phase::Unknown;
-            }
-            (attempt, projected)
-        })
-        .collect();
+    let (phases, rebound) = phases(attempts, events);
     // An attempt whose input was never admitted is not an execution: the one
     // before it stays current, as a refused handoff leaves the previous
     // executor working. Only when every attempt never started is the latest
@@ -965,6 +977,7 @@ mod tests {
             delivery: None,
             stale: None,
             considered: None,
+            reported_attempt: None,
             reviews: None,
             of: None,
         }

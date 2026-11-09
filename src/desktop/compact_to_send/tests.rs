@@ -130,7 +130,8 @@ fn exact_previous_store_upgrade_adds_only_the_independent_compact_to_send_leaf()
             .unwrap(),
         crate::desktop::store::SCHEMA
     );
-    assert_eq!(tables(&store.db), before + 2);
+    // Its own two tables, then the session resume leaf's two.
+    assert_eq!(tables(&store.db), before + 2 + 2);
     assert_eq!(ledger::undrained(&store.db).unwrap(), 0);
     assert_eq!(
         store.operation_status()["kinds"]["compact_to_send"]["undrained"],
@@ -1125,6 +1126,8 @@ mod actor {
         epoch: String,
         config: Config,
         owner: Arc<crate::platform::FileLock>,
+        /// The epoch's sealed negatives: every runtime of this epoch shares them.
+        fences: Arc<crate::desktop::not_admitted::Fences>,
     }
     impl Fixture {
         fn new(
@@ -1146,6 +1149,7 @@ mod actor {
             Self::build(Some(execute))
         }
         /// No executor: the original path runs through the pinned image.
+        #[cfg(target_os = "linux")]
         fn unexecuted() -> Self {
             Self::build(None)
         }
@@ -1179,20 +1183,10 @@ mod actor {
             .unwrap();
             let owner = Arc::new(location.lock().unwrap());
             let exclusion = Arc::new(location.handoff_lock().unwrap());
-            let mut runtime = runtime::Runtime::new(&config, &epoch, owner.clone()).unwrap();
-            match execute {
-                Some(execute) => {
-                    let state = config.state.clone();
-                    runtime.fixture_executor(
-                        MACHINE,
-                        Arc::new(move |plan, args, input, lock, resources| {
-                            execute(&state, plan, args, input, lock, resources)
-                        }),
-                    )
-                }
-                None => runtime.fixture_machine(MACHINE),
-            }
-            runtime.fixture_mac_fence(false);
+            let fences = Arc::new(crate::desktop::not_admitted::Fences::default());
+            let mut runtime =
+                runtime::Runtime::new(&config, &epoch, owner.clone(), fences.clone()).unwrap();
+            Self::install(&mut runtime, &config.state, execute);
             runtime.poll(&mut store, Some(exclusion.clone()));
             Self {
                 _temp: temp,
@@ -1203,7 +1197,37 @@ mod actor {
                 epoch,
                 config,
                 owner,
+                fences,
             }
+        }
+        /// The fixture's executor and macOS fence on `runtime`.
+        fn install(runtime: &mut runtime::Runtime, state: &Path, execute: Option<Arc<Execute>>) {
+            match execute {
+                Some(execute) => {
+                    let state = state.to_path_buf();
+                    runtime.fixture_executor(
+                        MACHINE,
+                        Arc::new(move |plan, args, input, lock, resources| {
+                            execute(&state, plan, args, input, lock, resources)
+                        }),
+                    )
+                }
+                None => runtime.fixture_machine(MACHINE),
+            }
+            runtime.fixture_mac_fence(false);
+        }
+        /// Destroys the runtime and builds it again under the same epoch,
+        /// as the service does when it restarts its background runtime.
+        fn rebuild(&mut self, execute: Arc<Execute>) {
+            let torn = std::mem::replace(
+                &mut self.runtime,
+                runtime::Runtime::new(&self.config, &self.epoch, self.owner.clone(), self.fences.clone())
+                    .unwrap(),
+            );
+            drop(torn);
+            Self::install(&mut self.runtime, &self.config.state, Some(execute));
+            self.runtime
+                .poll(&mut self.store, Some(self.exclusion.clone()));
         }
         fn original(&self) -> Verified {
             super::original(&self.location.configuration, &self.epoch)
@@ -1373,6 +1397,41 @@ mod actor {
 
     /// The wait ends without a send when the slot ends, the session changes,
     /// the budget expires or the operation's deadline passes.
+    /// A slot read that ends after the wait's own budget, however it
+    /// began, starts nothing: the send never starts past the budget, even
+    /// when the slot completed meanwhile (the zerus-5wmh.66.4.9.1 class).
+    #[test]
+    fn a_completed_slot_read_that_ends_after_the_budget_never_sends() {
+        let ran = Arc::new(Ran::default());
+        let mut f = Fixture::with(executor(ran.clone(), true, "submitted", true));
+        f.runtime.fixture_wait(
+            Duration::from_millis(500),
+            Duration::from_millis(5),
+            runtime::CHAIN,
+        );
+        let original = f.original();
+        let plan = original.plan.clone();
+        let state = f.config.state.clone();
+        let first = Arc::new(AtomicUsize::new(0));
+        f.runtime.fixture_slot_hook(Arc::new(move || {
+            // The first read outlives the budget, and only then finds the
+            // compaction completed on an idle session.
+            if first.fetch_add(1, Ordering::SeqCst) == 0 {
+                std::thread::sleep(Duration::from_millis(700));
+                slot_record(&state, &plan, slot_of(&plan, "completed"), true);
+            }
+        }));
+        f.admit(&original);
+        f.until("settled", |f| f.row(&original).receipt.drained);
+        let receipt = f.row(&original).receipt;
+        assert_eq!(receipt.compaction.step, Step::Recorded);
+        assert_eq!(
+            (receipt.send.step, receipt.code.as_str()),
+            (Step::NotStarted, ledger::WAIT_EXPIRED)
+        );
+        assert_eq!(ran.counts(), (1, 0));
+    }
+
     #[test]
     fn the_wait_ends_without_a_send_for_its_closed_reason() {
         use super::super::slot::{SESSION_CHANGED, SLOT_ENDED};
@@ -1560,7 +1619,7 @@ mod actor {
             let receipt = f.row(&original).receipt;
             receipt.compaction.step == Step::Recorded && !receipt.drained
         });
-        f.runtime = runtime::Runtime::new(&f.config, &f.epoch, f.owner.clone()).unwrap();
+        f.runtime = runtime::Runtime::new(&f.config, &f.epoch, f.owner.clone(), f.fences.clone()).unwrap();
         f.runtime.fixture_executor(
             MACHINE,
             Arc::new(|_, _, _, _, _| panic!("restart must not run a child")),
@@ -1644,6 +1703,95 @@ mod actor {
             (Step::NotStarted, wire::NOT_STARTED)
         );
         assert_eq!(ran.counts(), (1, 0), "no send child");
+    }
+
+    /// zerus-qw7wp: one work slot, so an operation queued behind another's
+    /// wait keeps its clock unstarted until its own turn. Observe that
+    /// ownership directly: scaling the whole chain to milliseconds would
+    /// instead benchmark unrelated disk and thread scheduling on the host.
+    #[test]
+    fn a_second_operation_queued_behind_a_long_wait_still_runs() {
+        let first_id = Arc::new(std::sync::Mutex::new(String::new()));
+        let (ran_first, ran_second) = (Arc::new(Ran::default()), Arc::new(Ran::default()));
+        // The first's compaction never completes; the second's does.
+        let pending = executor(ran_first.clone(), true, "submitted", true);
+        let completes = executor(ran_second.clone(), true, "completed", true);
+        let which = first_id.clone();
+        let mut f = Fixture::new(move |state, plan, args, input, lock, resources| {
+            if plan.compaction_request_id == *which.lock().unwrap() {
+                return pending(state, plan, args, input, lock, resources);
+            }
+            completes(state, plan, args, input, lock, resources)
+        });
+        // Keep the real operation bound. Only the first's deliberately
+        // unfinished slot wait is short; the child/receipt path is real I/O.
+        f.runtime.fixture_wait(
+            Duration::from_millis(300),
+            Duration::from_millis(5),
+            runtime::CHAIN,
+        );
+        // The queue runs by admission millisecond, then request ID: with the
+        // first's ID lower, a tie between the two admissions still runs the
+        // first first (zerus-mupq4).
+        let (first, second) = match (f.original(), f.original()) {
+            (a, b) if a.plan.compaction_request_id < b.plan.compaction_request_id => (a, b),
+            (a, b) => (b, a),
+        };
+        *first_id.lock().unwrap() = first.plan.compaction_request_id.clone();
+        assert!(f.admit(&first).accepted);
+        assert!(f.admit(&second).accepted);
+        assert_eq!(
+            f.runtime
+                .fixture_chain_started(&first.plan.compaction_request_id),
+            Some(None),
+            "admission must not start the first operation's clock"
+        );
+        assert_eq!(
+            f.runtime
+                .fixture_chain_started(&second.plan.compaction_request_id),
+            Some(None),
+            "admission must not start the queued operation's clock"
+        );
+        f.until("first holds the waiting work slot", |f| {
+            f.row(&first).receipt.compaction.step == Step::Recorded
+                && !f.row(&first).receipt.drained
+        });
+        assert!(
+            f.runtime
+                .fixture_chain_started(&first.plan.compaction_request_id)
+                .flatten()
+                .is_some(),
+            "the first turn must start the first operation's clock"
+        );
+        assert_eq!(
+            f.runtime
+                .fixture_chain_started(&second.plan.compaction_request_id),
+            Some(None),
+            "another operation's wait must not start the queued clock"
+        );
+        assert_eq!(f.row(&second).receipt.compaction.step, Step::Queued);
+        assert_eq!(ran_second.counts(), (0, 0));
+        f.until("both settled", |f| {
+            f.row(&first).receipt.drained && f.row(&second).receipt.drained
+        });
+        // The first's wait expired: compacted, never sent.
+        let row = f.row(&first);
+        assert_eq!(
+            row.receipt.result(&first.plan),
+            Some(Settled::NotSent { compacted: true })
+        );
+        assert!(row.send.is_none());
+        assert_eq!(ran_first.counts(), (1, 0));
+        // After the other operation's wait, this same queued original gets
+        // its own turn and runs both children exactly once.
+        let row = f.row(&second);
+        assert_eq!(row.receipt.compaction.step, Step::Recorded);
+        assert_eq!(row.receipt.send.step, Step::Recorded);
+        assert_eq!(
+            row.receipt.result(&second.plan),
+            Some(Settled::Sent(row.receipt.send.outcome.clone().unwrap()))
+        );
+        assert_eq!(ran_second.counts(), (1, 1), "each child once");
     }
 
     /// An operation past its compaction that no live work holds lost its
@@ -1783,7 +1931,7 @@ mod actor {
         let original = f.original();
         assert!(f.admit(&original).accepted);
         // A restart before any child: a new runtime and Store, no consent.
-        f.runtime = runtime::Runtime::new(&f.config, &f.epoch, f.owner.clone()).unwrap();
+        f.runtime = runtime::Runtime::new(&f.config, &f.epoch, f.owner.clone(), f.fences.clone()).unwrap();
         f.runtime.fixture_executor(
             MACHINE,
             Arc::new(|_, _, _, _, _| panic!("restart must not run a child")),
@@ -2171,5 +2319,225 @@ else:
             );
             assert!(!ran.exists(), "{action}: no child ever existed");
         }
+    }
+
+    /// `original`'s request with content that no longer verifies: refused
+    /// in the writer transaction after its empty read.
+    fn broken(original: &Verified) -> Intent {
+        let mut bad = original.intent.clone();
+        bad.original = "{}".into();
+        bad
+    }
+    fn offer(f: &mut Fixture, intent: Intent) -> wire::Admission {
+        let request = json!(
+            zerus_client_core::desktop::ui_requests::Request::CompactToSend {
+                intent: Box::new(intent),
+            }
+        );
+        serde_json::from_value(f.runtime.frontend(
+            &mut f.store,
+            ui_authority::Validated::fixture(&request),
+            Some(f.exclusion.clone()),
+        ))
+        .unwrap()
+    }
+    fn no_row(f: &Fixture, request_id: &str) -> bool {
+        ledger::load(&f.store.db, request_id).unwrap().is_none()
+    }
+    /// Polls a while: nothing sealed may start in that time.
+    fn idle(f: &mut Fixture) {
+        for _ in 0..20 {
+            f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+    /// A fixture whose compaction and send complete and count themselves.
+    fn counting() -> (Arc<Ran>, Fixture) {
+        let ran = Arc::new(Ran::default());
+        let f = Fixture::with(executor(ran.clone(), true, "completed", true));
+        (ran, f)
+    }
+
+    /// zerus-tlb9q, desktop-u's pin: a request refused before its admission
+    /// with no row is answered not admitted and sealed for the epoch; an
+    /// otherwise admissible copy of the same request that arrives after it
+    /// gets the same answer and never runs. The lookup never answers it.
+    #[test]
+    fn a_request_refused_before_admission_is_sealed_and_its_copy_never_runs() {
+        let (ran, mut f) = counting();
+        let original = f.original();
+        let id = original.plan.compaction_request_id.clone();
+        let refused = offer(&mut f, broken(&original));
+        assert_eq!(
+            (refused.accepted, refused.durable, refused.code.as_str()),
+            (false, false, wire::NOT_ADMITTED)
+        );
+        assert!(refused.not_admitted(&original.intent), "{}", refused.code);
+        assert!(no_row(&f, &id) && f.fences.compact_to_send.sealed(&id));
+        let copy = f.admit(&original);
+        assert!(copy.not_admitted(&original.intent), "{}", copy.code);
+        idle(&mut f);
+        assert_eq!(ran.counts(), (0, 0), "the copy never ran");
+        assert!(no_row(&f, &id));
+        let query = wire::Query::for_plan(original.intent.scope.clone(), &original.plan).unwrap();
+        let lookup = super::super::query(&f.store, &json!({"op": "compact_to_send_result", "query": query}));
+        assert_eq!(
+            (lookup["found"].as_bool(), lookup.get("code")),
+            (Some(false), None)
+        );
+    }
+
+    /// zerus-5llxc: another connection's request is never answered not
+    /// admitted nor sealed, even when its permit expires after the empty
+    /// read or when this epoch sealed its ID.
+    #[test]
+    fn another_connections_request_is_never_not_admitted() {
+        let (_, mut f) = counting();
+        let foreign = super::original(&f.location.configuration, &uuid::Uuid::new_v4().to_string());
+        let request = json!(
+            zerus_client_core::desktop::ui_requests::Request::CompactToSend {
+                intent: Box::new(foreign.intent.clone()),
+            }
+        );
+        let expired = ui_authority::Validated::fixture_expiring(
+            &request,
+            Instant::now() - Duration::from_secs(1),
+        );
+        let reply = f
+            .runtime
+            .frontend(&mut f.store, expired, Some(f.exclusion.clone()));
+        assert_eq!(reply["code"], "compact_to_send_unavailable", "{reply}");
+        assert!(!f.fences.compact_to_send.sealed(&foreign.plan.compaction_request_id));
+        // This epoch's seal is no answer for another connection's copy.
+        let original = f.original();
+        assert!(offer(&mut f, broken(&original)).not_admitted(&original.intent));
+        let mut intent = original.intent.clone();
+        intent.scope.service_epoch = uuid::Uuid::new_v4().to_string();
+        let copy = intent.verify().unwrap();
+        let reply = f.admit(&copy);
+        assert_eq!(reply.code, "compact_to_send_unavailable");
+        assert!(!reply.not_admitted(&copy.intent));
+        assert!(no_row(&f, &original.plan.compaction_request_id));
+    }
+
+    /// The seal belongs to the epoch: the background runtime destroyed and
+    /// built again under the same epoch still refuses the sealed request,
+    /// and a request of another epoch's connection is never sealed.
+    #[test]
+    fn a_runtime_rebuilt_in_the_same_epoch_keeps_the_seal() {
+        let (ran, mut f) = counting();
+        let original = f.original();
+        let id = original.plan.compaction_request_id.clone();
+        assert!(offer(&mut f, broken(&original)).not_admitted(&original.intent));
+        f.rebuild(executor(ran.clone(), true, "completed", true));
+        let copy = f.admit(&original);
+        assert!(copy.not_admitted(&original.intent), "{}", copy.code);
+        idle(&mut f);
+        assert_eq!(ran.counts(), (0, 0));
+        assert!(no_row(&f, &id));
+        // The rebuilt runtime still admits a new request.
+        let other = f.original();
+        assert!(f.admit(&other).accepted);
+        f.until("settled", |f| f.row(&other).receipt.drained);
+        assert_eq!(ran.counts(), (1, 1));
+        // A request of another epoch's connection: unavailable, not sealed.
+        let stale = super::original(&f.location.configuration, &uuid::Uuid::new_v4().to_string());
+        let reply = f.admit(&stale);
+        assert_eq!(
+            (reply.accepted, reply.code.as_str()),
+            (false, "compact_to_send_unavailable")
+        );
+        assert!(!reply.not_admitted(&stale.intent));
+        assert!(!f.fences.compact_to_send.sealed(&stale.plan.compaction_request_id));
+        assert!(no_row(&f, &stale.plan.compaction_request_id));
+    }
+
+    /// Before the writer transaction the refusal is proven by a fresh empty
+    /// read; a request whose row exists, a failure from the admission on and
+    /// a full fence all stay unavailable and unsealed.
+    #[test]
+    fn only_a_proven_absence_is_not_admitted() {
+        // Refused before the transaction (the owner stops): proven absent.
+        let (_, mut f) = counting();
+        let original = f.original();
+        f.runtime.request_stop();
+        let stopped = f.admit(&original);
+        assert!(stopped.not_admitted(&original.intent), "{}", stopped.code);
+        assert!(no_row(&f, &original.plan.compaction_request_id));
+        // Another connection's request refused there is never sealed.
+        let stale = super::original(&f.location.configuration, &uuid::Uuid::new_v4().to_string());
+        let reply = f.admit(&stale);
+        assert_eq!(reply.code, "compact_to_send_unavailable");
+        assert!(!f.fences.compact_to_send.sealed(&stale.plan.compaction_request_id));
+
+        // Refused before the transaction while another writer holds the
+        // store: nothing is proven.
+        let (_, mut f) = counting();
+        let original = f.original();
+        f.runtime.request_stop();
+        let mut other = rusqlite::Connection::open(f.location.root.join("state.sqlite3")).unwrap();
+        let held = other
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        f.store.db.busy_timeout(Duration::from_millis(1)).unwrap();
+        let busy = f.admit(&original);
+        drop(held);
+        assert_eq!(
+            (busy.accepted, busy.code.as_str()),
+            (false, "compact_to_send_unavailable")
+        );
+        assert!(!f.fences.compact_to_send.sealed(&original.plan.compaction_request_id));
+
+        // A row exists: the same refusal stays unavailable.
+        let (_, mut f) = counting();
+        let original = f.original();
+        assert!(f.admit(&original).accepted);
+        f.until("settled", |f| f.row(&original).receipt.drained);
+        let existing = offer(&mut f, broken(&original));
+        assert_eq!(
+            (existing.accepted, existing.code.as_str()),
+            (false, "compact_to_send_unavailable")
+        );
+        f.runtime.request_stop();
+        let stopped = f.admit(&original);
+        assert_eq!(stopped.code, "compact_to_send_unavailable");
+        assert!(!f.fences.compact_to_send.sealed(&original.plan.compaction_request_id));
+
+        // The admission itself fails: unavailable although no row is left,
+        // and nothing is sealed.
+        let (ran, mut f) = counting();
+        let original = f.original();
+        f.store
+            .db
+            .execute_batch(
+                "CREATE TEMP TRIGGER refuse BEFORE INSERT ON desktop_compact_to_sends \
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+        let failed = f.admit(&original);
+        assert_eq!(
+            (failed.accepted, failed.code.as_str()),
+            (false, "compact_to_send_unavailable")
+        );
+        assert!(no_row(&f, &original.plan.compaction_request_id));
+        assert!(!f.fences.compact_to_send.sealed(&original.plan.compaction_request_id));
+        f.store.db.execute_batch("DROP TRIGGER refuse;").unwrap();
+        assert!(f.admit(&original).accepted, "an unavailable refusal seals nothing");
+        f.until("settled", |f| f.row(&original).receipt.drained);
+        assert_eq!(ran.counts(), (1, 1));
+
+        // A full fence mints no new negative; its sealed IDs stay sealed.
+        let (_, mut f) = counting();
+        for n in 0..crate::desktop::not_admitted::BOUND {
+            assert!(f.fences.compact_to_send.seal(&format!("sealed-{n}")));
+        }
+        let original = f.original();
+        let full = offer(&mut f, broken(&original));
+        assert_eq!(
+            (full.accepted, full.code.as_str()),
+            (false, "compact_to_send_unavailable")
+        );
+        assert!(!f.fences.compact_to_send.sealed(&original.plan.compaction_request_id));
+        assert!(f.fences.compact_to_send.sealed("sealed-0"));
     }
 }

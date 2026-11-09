@@ -1,4 +1,6 @@
-import { For, Show, type JSX } from "solid-js";
+import { Dropdown } from "../../lib/Dropdown";
+import { TextInput } from "../../lib/TextField";
+import { For, Show, batch, createEffect, createSignal, type JSX } from "solid-js";
 import { Icon } from "../../lib/icons";
 import { fieldValue } from "./number-field";
 import { tr } from "../../../i18n";
@@ -119,10 +121,8 @@ export interface Option { value: string; label: string }
 
 export function Select(props: { value: string; options: Option[]; onChange: (value: string) => void; label?: string; id?: string; disabled?: boolean }) {
   return (
-    <select id={props.id} class="field set-select" value={props.value} aria-label={typeof props.label === "string" ? tr(props.label) : props.label} disabled={props.disabled}
-      onChange={(e) => props.onChange(e.currentTarget.value)}>
-      <For each={props.options}>{(o) => <option value={o.value} selected={o.value === props.value}>{tr(o.label)}</option>}</For>
-    </select>
+    <Dropdown id={props.id} class="field set-select" value={props.value} aria-label={typeof props.label === "string" ? tr(props.label) : props.label} disabled={props.disabled}
+      onChange={(value) => props.onChange(value)} options={[...((props.options) ?? []).map((o) => ({ value: o.value, label: tr(o.label) }))]} />
   );
 }
 
@@ -178,15 +178,18 @@ export function NumberField(props: {
   onChange: (v: number) => void; disabled?: boolean; id?: string; label?: string;
 }) {
   const clamp = (v: number) => fieldValue(v, props.min, props.max, props.decimals);
+  const [shown, setShown] = createSignal(props.value.toFixed(props.decimals ?? 0));
+  const [format, setFormat] = createSignal(0);
+  createEffect(() => setShown(props.value.toFixed(props.decimals ?? 0)));
   return (
     <span class="set-number" classList={{ disabled: props.disabled }}>
-      <input id={props.id} class="field tabular" type="number" min={props.min} max={props.max} step={props.step ?? 1}
-        value={props.value.toFixed(props.decimals ?? 0)} disabled={props.disabled} aria-label={typeof props.label === "string" ? tr(props.label) : props.label}
+      <TextInput id={props.id} class="field tabular" type="number" min={props.min} max={props.max} step={props.step ?? 1}
+        value={shown()} valueRevision={format()} disabled={props.disabled} aria-label={typeof props.label === "string" ? tr(props.label) : props.label}
         onChange={(e) => {
           const kept = clamp(Number(e.currentTarget.value) || props.min);
-          // Shown as kept even when the kept value did not change.
-          e.currentTarget.value = kept.toFixed(props.decimals ?? 0);
-          props.onChange(kept);
+          // Canonical formatting is an explicit model update, even when the
+          // numeric setting itself is unchanged. Never overwrite the DOM here.
+          batch(() => { setShown(kept.toFixed(props.decimals ?? 0)); setFormat((n) => n + 1); props.onChange(kept); });
         }} />
       <Show when={props.suffix}><span class="set-suffix">{props.suffix}</span></Show>
     </span>

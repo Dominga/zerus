@@ -1,3 +1,5 @@
+import type { AutostartLine } from "./connector-autostart";
+
 // Settings > Mobile connection as its Qt panels drive it. The reads, their
 // answers and the one call of each kind that may run live in the app
 // (mobile.rs); the page asks for them and shows the newest view.
@@ -13,6 +15,8 @@ export interface PhoneList { host: string; workspace_id: string; workspace_name:
 export interface Phones { lists: PhoneList[]; lines: string[] }
 export interface View {
   workspace: Workspace | null; workspace_error: string | null; workspace_busy: boolean;
+  /** Automatic connector start, where this computer has it. */
+  autostart?: AutostartLine | null; autostart_save_failed?: boolean;
   phones: Phones | null; phones_busy: boolean;
   delivery: string | null; delivery_busy: boolean; delivery_status: string;
   delivery_outdated: string | null; delivery_worker: string | null;

@@ -8,11 +8,11 @@ use crate::{ids, Error, Result};
 use loro::VersionVector;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// A document's version: each Loro peer that changed it (its ID as decimal
 /// text) and how many changes it made. Sorted, so equal versions compare and
@@ -64,6 +64,16 @@ pub struct DoneRow {
     pub accepted_at: i64,
 }
 
+/// A Done task as a page of the Done list is chosen from (`done_page_of`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DoneEntry {
+    /// When it entered Done (Unix milliseconds).
+    pub at: i64,
+    pub uuid: String,
+    /// The session it was sent to.
+    pub sent: Option<SessionKey>,
+}
+
 /// A page of the Done list; `next` is the cursor of the page after it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DonePage {
@@ -80,6 +90,9 @@ pub struct DonePage {
 pub struct Imported {
     pub changed: usize,
     pub refused: Vec<Damaged>,
+    /// Healthy shallow copies that could not apply an update. Internal
+    /// phone recovery bookkeeping, never a field in the exchange envelope.
+    pub(crate) refresh: BTreeSet<String>,
 }
 
 const CACHE: &str = "inventory.json";
@@ -176,6 +189,24 @@ fn settled(files: &[Option<Stamp>]) -> bool {
         .all(|Stamp(_, secs, nanos, _)| Duration::new(*secs, *nanos) + SETTLE <= now)
 }
 
+impl TaskDoc {
+    /// This task's version as an inventory holds it.
+    pub fn inventory_version(&self) -> Version {
+        version(&self.current_vv())
+    }
+}
+
+impl ProjectStore {
+    /// The project document's version as an inventory holds it; empty while
+    /// it was never saved.
+    pub fn project_version(&self) -> Result<Version> {
+        if !self.dir().join("project.loro").exists() {
+            return Ok(Version::new());
+        }
+        Ok(version(&VersionVector::decode(&self.project()?.version())?))
+    }
+}
+
 pub(crate) fn version(vv: &VersionVector) -> Version {
     vv.iter()
         .map(|(peer, count)| (peer.to_string(), *count))
@@ -222,7 +253,12 @@ fn includes(theirs: &Version, ours: &Version) -> bool {
 }
 
 impl ProjectStore {
-    /// The project IDs stored below `root`.
+    /// The project IDs stored below `root`. A project is named by its
+    /// folder's `project-id`, read without waiting or following a link and
+    /// within its bound (zerus-iih7g), and only when that ID is valid and is
+    /// the one the folder is named after. Any other folder's identity is
+    /// unknown: it is not listed (never taken for another project) and
+    /// nothing in it is changed.
     pub fn stored(root: &Path) -> Result<Vec<String>> {
         let entries = match fs::read_dir(root) {
             Ok(entries) => entries,
@@ -231,7 +267,18 @@ impl ProjectStore {
         };
         let mut out = Vec::new();
         for entry in entries {
-            if let Ok(id) = fs::read_to_string(entry?.path().join("project-id")) {
+            let folder = entry?.path();
+            let read = crate::store::read_identity(
+                &folder.join("project-id"),
+                crate::store::PROJECT_ID_BYTES,
+            );
+            let Ok(Some(bytes)) = read else { continue };
+            let Ok(id) = String::from_utf8(bytes) else {
+                continue;
+            };
+            let named = folder.file_name().and_then(|name| name.to_str())
+                == Some(format!("{:x}", Sha256::digest(id.as_bytes())).as_str());
+            if named && !id.is_empty() && !id.chars().any(char::is_control) {
                 out.push(id);
             }
         }
@@ -279,21 +326,40 @@ impl ProjectStore {
         session: Option<&SessionKey>,
     ) -> Result<DonePage> {
         let (_, stages, _) = self.inventory_with_stages()?;
-        let mut done: Vec<(i64, String)> = stages
+        let done = stages
             .into_iter()
-            .filter(|(_, (stage, _, sent))| {
-                *stage == Stage::Done
-                    && session.is_none_or(|session| {
-                        sent.as_ref().is_some_and(|sent| {
-                            if session.session_id.is_empty() {
-                                sent.machine == session.machine && sent.session == session.session
-                            } else {
-                                sent == session
-                            }
-                        })
+            .filter(|(_, (stage, _, _))| *stage == Stage::Done)
+            .map(|(uuid, (_, at, sent))| DoneEntry { at, uuid, sent })
+            .collect();
+        self.done_page_of(done, before, limit, since, session)
+    }
+
+    /// `done_page` over the Done tasks a caller already holds (hgs's task
+    /// index, zerus-cg5h.23): each one's UUID, when it entered Done and the
+    /// session it was sent to, which must be what the documents say. Only
+    /// the page's documents are read.
+    pub fn done_page_of(
+        &self,
+        done: Vec<DoneEntry>,
+        before: Option<(i64, String)>,
+        limit: usize,
+        since: i64,
+        session: Option<&SessionKey>,
+    ) -> Result<DonePage> {
+        let mut done: Vec<(i64, String)> = done
+            .into_iter()
+            .filter(|entry| {
+                session.is_none_or(|session| {
+                    entry.sent.as_ref().is_some_and(|sent| {
+                        if session.session_id.is_empty() {
+                            sent.machine == session.machine && sent.session == session.session
+                        } else {
+                            sent == session
+                        }
                     })
+                })
             })
-            .map(|(uuid, (_, at, _))| (at, uuid))
+            .map(|entry| (entry.at, entry.uuid))
             .collect();
         done.sort_unstable_by(|a, b| b.cmp(a));
         let total = done.len();
@@ -335,9 +401,14 @@ impl ProjectStore {
     )> {
         let path = self.dir().join(CACHE);
         let mark = self.dir().join(CACHE_MARK);
-        let old: Cache = fs::read(&path)
+        let old: Cache = crate::store::read_regular(&path)
             .ok()
-            .filter(|bytes| fs::read_to_string(&mark).ok() == Some(cache_mark(bytes)))
+            .filter(|bytes| {
+                crate::store::read_regular(&mark)
+                    .ok()
+                    .and_then(|mark| String::from_utf8(mark).ok())
+                    == Some(cache_mark(bytes))
+            })
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
         let mut cache = Cache::default();
@@ -437,6 +508,25 @@ impl ProjectStore {
         theirs: &Inventory,
         limit: usize,
     ) -> Result<(Vec<Update>, bool)> {
+        self.updates_for_mode(ours, theirs, limit, false)
+    }
+
+    pub(crate) fn updates_for_phone(
+        &self,
+        ours: &Inventory,
+        theirs: &Inventory,
+        limit: usize,
+    ) -> Result<(Vec<Update>, bool)> {
+        self.updates_for_mode(ours, theirs, limit, true)
+    }
+
+    fn updates_for_mode(
+        &self,
+        ours: &Inventory,
+        theirs: &Inventory,
+        limit: usize,
+        phone: bool,
+    ) -> Result<(Vec<Update>, bool)> {
         let mut page = Vec::new();
         let mut size = 0;
         let mut add = |update: Update| {
@@ -465,6 +555,9 @@ impl ProjectStore {
             }
             let task = self.load(uuid)?;
             let bytes = match known {
+                Some(known) if phone && known.is_empty() && task.stage()? == Stage::Done => {
+                    task.shallow_snapshot()?
+                }
                 Some(known) => task.export_since_vv(&vector(known)?)?,
                 None => task.snapshot()?,
             };
@@ -491,6 +584,16 @@ impl ProjectStore {
     /// Imports another replica's updates. A document that cannot take them is
     /// refused and named; it never stops the others.
     pub fn import_updates(&self, updates: Vec<Update>) -> Result<Imported> {
+        self.import_phone_updates(updates, &BTreeSet::new())
+    }
+
+    /// A fresh phone fetch may replace a healthy shallow copy only when
+    /// the incoming whole state covers every locally saved operation.
+    pub(crate) fn import_phone_updates(
+        &self,
+        updates: Vec<Update>,
+        refresh: &BTreeSet<String>,
+    ) -> Result<Imported> {
         let mut imported = Imported::default();
         for update in updates {
             let (name, result) = match &update.document {
@@ -498,11 +601,22 @@ impl ProjectStore {
                     "project".to_owned(),
                     self.import_project(&update.bytes).map_err(Refusal::from),
                 ),
-                Document::Task(uuid) => (uuid.clone(), self.import_task(uuid, &update.bytes)),
+                Document::Task(uuid) => (
+                    uuid.clone(),
+                    if refresh.contains(uuid) {
+                        self.refresh_phone_task(uuid, &update.bytes)
+                            .map_err(Refusal::from)
+                    } else {
+                        self.import_task(uuid, &update.bytes)
+                    },
+                ),
             };
             match result {
                 Ok(changed) => imported.changed += usize::from(changed),
                 Err(refusal) => {
+                    if refusal.refresh {
+                        imported.refresh.insert(name.clone());
+                    }
                     let refused = Damaged::new(name, refusal.error.to_string());
                     imported.refused.push(match refusal.kept {
                         Some(reason) => refused.kept_for(reason),
@@ -535,7 +649,18 @@ impl ProjectStore {
                 Ok(mut task) => {
                     let before = task.current_vv();
                     if !task.import_block(bytes) {
-                        return Err(Error::new("the updates could not be applied").into());
+                        let shallow = task.is_shallow();
+                        return Err(Refusal {
+                            error: Error::new(if shallow {
+                                "the updates could not be applied to the shallow history; \
+                                 the local copy is kept and needs a fresh copy covering \
+                                 all its changes"
+                            } else {
+                                "the updates could not be applied"
+                            }),
+                            kept: None,
+                            refresh: shallow,
+                        });
                     }
                     // Every live import restores the execution schema a merged
                     // lower value replaced, before anything reads or exports it.
@@ -561,6 +686,7 @@ impl ProjectStore {
                                  person's review and nothing is sent for it"
                             )),
                             kept: Some(reason),
+                            refresh: false,
                         });
                     }
                 },
@@ -575,6 +701,7 @@ impl ProjectStore {
                      a person's review and nothing is sent for it",
                 ),
                 kept: Some(Keep::Marked),
+                refresh: false,
             });
         } else {
             (TaskDoc::from_bytes(bytes)?, false)
@@ -591,6 +718,36 @@ impl ProjectStore {
             self.set_aside(uuid)?;
         }
         self.save(&mut task)?;
+        Ok(true)
+    }
+
+    fn refresh_phone_task(&self, uuid: &str, bytes: &[u8]) -> Result<bool> {
+        // One admission covers the latest local version, the inclusion
+        // proof and the save. A writer through the same store cannot add
+        // an unsent edit between the check and the replacement.
+        let mut admitted = self
+            .admit_until(Instant::now() + Duration::from_secs(2))
+            .ok_or_else(|| Error::failed("the task store is busy; the local copy is kept"))?;
+        let current = admitted.load_complete(uuid)?;
+        if !current.is_shallow() {
+            return Err(Error::new(
+                "the local task copy changed before its refresh; it is kept for a person's review",
+            ));
+        }
+        let mut incoming = TaskDoc::from_bytes(bytes)?;
+        incoming.repair_schema()?;
+        if incoming.uuid() != uuid || incoming.view()?.project != self.project_id() {
+            return Err(Error::new("the fresh copy is for another task or project"));
+        }
+        if incoming.applied_version().is_none()
+            || !incoming.current_vv().includes_vv(&current.current_vv())
+        {
+            return Err(Error::new(
+                "the fresh copy does not cover all local changes; the shallow \
+                 copy and any unsent edits are kept for a person's review",
+            ));
+        }
+        admitted.save(&mut incoming)?;
         Ok(true)
     }
 
@@ -615,7 +772,7 @@ impl ProjectStore {
             return Recovery::Unreadable;
         };
         let marked = self.was_managed(uuid);
-        let local = match fs::read(self.updates_path(uuid)) {
+        let local = match crate::store::read_regular(&self.updates_path(uuid)) {
             Ok(local) => local,
             Err(error) if error.kind() == ErrorKind::NotFound => Vec::new(),
             Err(_) if marked => return Recovery::Kept(Keep::Marked),
@@ -652,7 +809,7 @@ impl ProjectStore {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_millis());
         for path in [self.snapshot_path(uuid), self.updates_path(uuid)] {
-            match fs::read(&path) {
+            match crate::store::read_regular(&path) {
                 Ok(bytes) => {
                     let name = path.file_name().unwrap_or_default().to_string_lossy();
                     write_atomic(
@@ -685,11 +842,16 @@ enum Recovery {
 struct Refusal {
     error: Error,
     kept: Option<Keep>,
+    refresh: bool,
 }
 
 impl From<Error> for Refusal {
     fn from(error: Error) -> Self {
-        Self { error, kept: None }
+        Self {
+            error,
+            kept: None,
+            refresh: false,
+        }
     }
 }
 
@@ -909,12 +1071,12 @@ mod tests {
         store.save(&mut task).unwrap();
         let uuid = task.uuid().to_owned();
         let old_time = SystemTime::now() - Duration::from_secs(60);
-        let age = |path: &Path| {
+        let age = |path: &Path, modified| {
             fs::File::options()
                 .write(true)
                 .open(path)
                 .unwrap()
-                .set_times(fs::FileTimes::new().set_modified(old_time))
+                .set_times(fs::FileTimes::new().set_modified(modified))
                 .unwrap();
         };
         for path in [
@@ -922,17 +1084,27 @@ mod tests {
             store.updates_path(&uuid),
             store.managed_path(&uuid),
         ] {
-            age(&path);
+            age(&path, old_time);
         }
         let (warm, damaged) = store.inventory().unwrap();
         assert!(damaged.is_empty() && warm.tasks.contains_key(&uuid));
+        let before = store.stamps(&uuid);
         // The mark moves ahead and the save fails before its append.
         task.comment("Never appended", &Actor::Person, 5).unwrap();
         let first = fs::read(store.updates_path(&uuid)).unwrap();
         store
             .write_mark(&uuid, &Mark::new(&task.current_vv(), &first))
             .unwrap();
-        age(&store.managed_path(&uuid));
+        #[cfg(unix)]
+        age(&store.managed_path(&uuid), old_time);
+        #[cfg(windows)]
+        // Windows stamps have no file identity: restoring the same mtime
+        // and length is a known product limitation. Use a different settled
+        // time to test mark-only invalidation without relying on Unix inodes.
+        age(&store.managed_path(&uuid), old_time + Duration::from_secs(1));
+        let after = store.stamps(&uuid);
+        assert_eq!(&after[..2], &before[..2]);
+        assert_ne!(after[2], before[2]);
         assert!(store.load(&uuid).is_err());
         let (inventory, damaged) = store.inventory().unwrap();
         assert!(!inventory.tasks.contains_key(&uuid));
@@ -1112,6 +1284,150 @@ mod tests {
         assert!(store.updates_path(task.uuid()).exists());
         let uuid = task.uuid().to_owned();
         (dir, store, uuid, peer.snapshot().unwrap())
+    }
+
+    /// zerus-r75ru: an import or an inventory beside an irregular file (a
+    /// FIFO) in a task's or the cache's place never waits on it. The copy is
+    /// kept for review, or its import refused; a marked copy's freshness is
+    /// unknown. Each runs under a watchdog, so a regression fails, not hangs.
+    #[cfg(unix)]
+    #[test]
+    fn an_import_or_inventory_beside_an_irregular_file_never_waits() {
+        fn fifo(path: &std::path::Path) {
+            let _ = fs::remove_file(path);
+            let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        }
+        fn soon<T: Send + 'static>(
+            root: &std::path::Path,
+            read: impl FnOnce(ProjectStore) -> T + Send + 'static,
+        ) -> T {
+            let root = root.to_owned();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(read(ProjectStore::open(&root, "project-1").unwrap()));
+            });
+            rx.recv_timeout(Duration::from_secs(20))
+                .expect("waited on an irregular file")
+        }
+        // A marked copy's updates log that is a FIFO: its freshness is
+        // unknown and the copy is kept, never read through.
+        let (dir, store, uuid, peer) = beside_a_peer(true);
+        fifo(&store.updates_path(&uuid));
+        drop(store);
+        let (fresh, kept) = soon(dir.path(), move |store| {
+            let fresh = store.fresh_version(&uuid).is_some();
+            (fresh, store.import_task(&uuid, &peer).unwrap_err().kept)
+        });
+        assert!(!fresh);
+        assert_eq!(kept, Some(Keep::Marked));
+        // An unmarked copy: a FIFO as its updates log is local data that
+        // cannot be read (kept); as its snapshot, beside updates that would
+        // give way, the replacement refuses when it sets the files aside.
+        for snapshot in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = ProjectStore::open(dir.path(), "project-1").unwrap();
+            let mut task = created();
+            store.save(&mut task).unwrap();
+            task.comment("Local", &Actor::Person, 2).unwrap();
+            store.save(&mut task).unwrap();
+            assert!(!store.was_managed(task.uuid()));
+            let (uuid, peer) = (task.uuid().to_owned(), task.snapshot().unwrap());
+            fifo(&if snapshot {
+                store.snapshot_path(&uuid)
+            } else {
+                store.updates_path(&uuid)
+            });
+            drop(store);
+            let refused = soon(dir.path(), move |store| {
+                store.import_task(&uuid, &peer).err()
+            });
+            let refused = refused.expect("refused");
+            if !snapshot {
+                assert_eq!(refused.kept, Some(Keep::UnreadableLocalData));
+            }
+        }
+        // The inventory cache and its mark, each written by an inventory of
+        // a task and then replaced by a FIFO.
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(dir.path(), "project-1").unwrap();
+        let mut task = created();
+        store.save(&mut task).unwrap();
+        // Only settled files are cached.
+        let old_time = SystemTime::now() - Duration::from_secs(60);
+        for path in [
+            store.snapshot_path(task.uuid()),
+            store.updates_path(task.uuid()),
+        ] {
+            if let Ok(file) = fs::File::options().write(true).open(&path) {
+                file.set_times(fs::FileTimes::new().set_modified(old_time))
+                    .unwrap();
+            }
+        }
+        drop(store);
+        for name in [CACHE, CACHE_MARK] {
+            let store = ProjectStore::open(dir.path(), "project-1").unwrap();
+            for stale in [CACHE, CACHE_MARK] {
+                let _ = fs::remove_file(store.dir().join(stale));
+            }
+            store.inventory().unwrap();
+            for written in [CACHE, CACHE_MARK] {
+                let meta = fs::symlink_metadata(store.dir().join(written)).unwrap();
+                assert!(meta.is_file(), "{written}");
+            }
+            fifo(&store.dir().join(name));
+            drop(store);
+            assert!(
+                soon(dir.path(), |store| store.inventory().is_ok()),
+                "{name}"
+            );
+        }
+    }
+
+    /// zerus-iih7g: a project is listed only by a `project-id` that is a
+    /// regular file within its bound, readable without waiting, holding a
+    /// valid ID its folder is named after. Any other folder stays unknown:
+    /// it is not listed and nothing in it changes.
+    #[cfg(unix)]
+    #[test]
+    fn only_a_folder_s_own_project_id_lists_it() {
+        let root = tempfile::tempdir().unwrap();
+        for id in ["kept", "fifo", "linked", "other", "large"] {
+            drop(ProjectStore::open(root.path(), id).unwrap());
+        }
+        let folder = |id: &str| {
+            root.path()
+                .join(format!("{:x}", Sha256::digest(id.as_bytes())))
+        };
+        let place = |id: &str| folder(id).join("project-id");
+        fs::remove_file(place("fifo")).unwrap();
+        let name = std::ffi::CString::new(place("fifo").as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        fs::remove_file(place("linked")).unwrap();
+        std::os::unix::fs::symlink(place("kept"), place("linked")).unwrap();
+        fs::write(place("other"), b"kept").unwrap();
+        let bound = crate::store::PROJECT_ID_BYTES as usize;
+        fs::write(place("large"), "x".repeat(bound + 1)).unwrap();
+        // Folders named after what they hold, which is still not a project:
+        // past the bound, empty, or with a control character.
+        for id in ["y".repeat(bound + 1), String::new(), "a\nb".to_owned()] {
+            fs::create_dir(folder(&id)).unwrap();
+            fs::write(place(&id), &id).unwrap();
+        }
+        let listed = {
+            let root = root.path().to_owned();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(ProjectStore::stored(&root).unwrap());
+            });
+            rx.recv_timeout(Duration::from_secs(20))
+                .expect("waited on an irregular project-id")
+        };
+        assert_eq!(listed, ["kept"]);
+        // Nothing was rewritten.
+        assert_eq!(fs::read(place("other")).unwrap(), b"kept");
+        assert!(fs::symlink_metadata(place("linked")).unwrap().is_symlink());
+        assert!(!fs::symlink_metadata(place("fifo")).unwrap().is_file());
     }
 
     fn damaged_beside_a_pre_attempt_peer() -> (tempfile::TempDir, ProjectStore, String, Vec<u8>) {

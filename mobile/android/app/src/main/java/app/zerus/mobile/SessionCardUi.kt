@@ -9,6 +9,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.SubdirectoryArrowRight
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.sp
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -124,7 +128,7 @@ private fun subagentChildren(model: ZerusViewModel, session: Session, online: Bo
  */
 @Composable internal fun SessionOptionalQuestionChip(session: Session, online: Boolean) {
     val chip = SessionCardPresentation.optionalQuestionChip(session, online) ?: return
-    val colors = DesktopSessionPalette.colors(if(SessionNotificationPreferences.muted(session)) DesktopBadgeKind.Neutral else DesktopBadgeKind.Attention, MaterialTheme.colorScheme.background.luminance() < .5f)
+    val colors = DesktopSessionPalette.colors(if(ChildSessions.silenced(session)) DesktopBadgeKind.Neutral else DesktopBadgeKind.Attention, MaterialTheme.colorScheme.background.luminance() < .5f)
     val foreground = Color(colors.foreground)
     Row(Modifier.clip(RoundedCornerShape(5.dp)).background(Color(colors.background))
         .clearAndSetSemantics { contentDescription = chip.description }
@@ -135,25 +139,33 @@ private fun subagentChildren(model: ZerusViewModel, session: Session, online: Bo
     }
 }
 
-/** The subagent counter, at the end of the card's status row like the desktop card. */
-@Composable internal fun SessionSubagentCounter(model: ZerusViewModel, session: Session, online: Boolean) {
-    val counter = SessionCardPresentation.counter(session, online, subagentChildren(model, session, online)) ?: return
-    SubagentCounter(counter, counter.expandable && session.target.key in model.expandedSubagents) { model.toggleSubagents(session.target) }
+/**
+ * The card's counter at the end of its status row. A parent with shown
+ * subagents or child sessions gets one toggle for both (zerus-sa9qn.16):
+ * working of all, gray Asking and amber Needs you (spec 2.3). Without shown
+ * rows the subagent count is information only, as on the desktop card.
+ */
+@Composable internal fun SessionTeamCounter(model: ZerusViewModel, entry: SessionCardEntry, online: Boolean) {
+    val session = entry.session
+    val children = subagentChildren(model, session, online)
+    val team = if (children.isEmpty()) entry.team else (entry.team ?: SessionTeam()).withSubagents(children)
+    if (team != null) return TeamToggle(team, model.teamCollapsed(session)) { model.toggleTeam(session) }
+    val counter = SessionCardPresentation.counter(session, online, children) ?: return
+    SubagentCounter(counter, false) { }
 }
 
-/** Once the counter is expanded, the visible child rows beneath the card. */
+/** Unless the parent is collapsed, its shown subagent rows beneath the card. */
 @Composable internal fun SessionSubagentRows(model: ZerusViewModel, session: Session, online: Boolean) {
     val children = subagentChildren(model, session, online)
-    val counter = SessionCardPresentation.counter(session, online, children) ?: return
     // Nothing is composed while collapsed, so the card keeps no empty spaced slot.
-    if (!counter.expandable || session.target.key !in model.expandedSubagents) return
+    if (children.isEmpty() || model.teamCollapsed(session)) return
     Column(Modifier.fillMaxWidth()) {
         run {
             val reasons = children.associate { child ->
                 child.id to if (child.group) "" else model.agentListReason(session.target, child.id, online)
             }
             children.forEachIndexed { index, child ->
-                SubagentRow(child, reasons.getValue(child.id), last = index == children.lastIndex, notificationsMuted=SessionNotificationPreferences.muted(session)) {
+                SubagentRow(child, reasons.getValue(child.id), last = index == children.lastIndex, notificationsMuted=ChildSessions.silenced(session)) {
                     model.openAgent(session, child.id, online)
                 }
             }
@@ -187,6 +199,70 @@ private fun subagentChildren(model: ZerusViewModel, session: Session, online: Bo
                 stateDescription = if (expanded) "Expanded" else "Collapsed"
             }) { content() }
     }
+}
+
+@Composable private fun TeamToggle(team: SessionTeam, collapsed: Boolean, onToggle: () -> Unit) {
+    val dark = MaterialTheme.colorScheme.surface.luminance() < .5f
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val action = if (collapsed) "Show subagents and child sessions" else "Hide subagents and child sessions"
+    val shape = RoundedCornerShape(8.dp)
+    Box(Modifier.minimumInteractiveComponentSize().clip(shape).background(Color(if (dark) 0xFF28323C else 0xFFE7EDF2))
+        .clickable(onClickLabel = action, role = Role.Button, onClick = onToggle)
+        .clearAndSetSemantics {
+            contentDescription = (listOf(action) + team.summary()).joinToString(", ")
+            stateDescription = if (collapsed) "Collapsed" else "Expanded"
+        }) {
+        Row(Modifier.padding(start = 8.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            Icon(DesktopIcons.Subagents, null, Modifier.size(16.dp), tint = muted)
+            Text("${team.working} of ${team.total}", color = muted, style = MaterialTheme.typography.labelMedium, maxLines = 1)
+            listOf(DesktopBadgeKind.Neutral to "Asking: ${team.asking}".takeIf { team.asking > 0 },
+                DesktopBadgeKind.Attention to "Needs you: ${team.needsYou}".takeIf { team.needsYou > 0 }).forEach { (kind, text) ->
+                if (text != null) DesktopSessionPalette.colors(kind, dark).let { colors ->
+                    Text(text, Modifier.clip(RoundedCornerShape(5.dp)).background(Color(colors.background)).padding(horizontal = 5.dp, vertical = 1.dp),
+                        color = Color(colors.foreground), style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                }
+            }
+            Icon(if (collapsed) Icons.Default.ExpandMore else Icons.Default.ExpandLess, null, Modifier.size(18.dp), tint = muted)
+        }
+    }
+}
+
+/** A supervised child's mark before its title: its parent above handles its requests (spec 3.4). */
+@Composable internal fun SupervisedMark(session: Session) {
+    val parent = ChildSessions.parent(session.raw)?.takeIf { it.live } ?: return
+    Icon(Icons.Filled.SubdirectoryArrowRight, "Supervised by ${parent.shortName}. Only requests that need you notify you.",
+        Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+}
+
+/** The account mark: a circle in the account color with its letter, then the label (spec 3.2). */
+@Composable internal fun AccountMarkChip(mark: AccountMark, modifier: Modifier = Modifier) {
+    Row(modifier.clearAndSetSemantics { contentDescription = "Account: ${mark.label}" },
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        Box(Modifier.size(16.dp).clip(CircleShape).background(Color(mark.color)), contentAlignment = Alignment.Center) {
+            Text(mark.letter, color = Color(mark.ink), fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+        }
+        Text(mark.label, Modifier.widthIn(max = 96.dp), color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/** A child shown at top level names the parent that started it; a listed parent opens on tap. */
+@Composable internal fun FromParentLine(parent: ParentLink, onOpen: (() -> Unit)?) {
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val text = "from ${parent.shortName}"
+    if (onOpen == null) Text(text, color = muted, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.semantics { contentDescription = "Started by ${parent.name}. That session is not listed." })
+    else Text(text, Modifier.minimumInteractiveComponentSize().clickable(onClickLabel = "Open ${parent.shortName}", role = Role.Button, onClick = onOpen),
+        color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+}
+
+/** Child cards are indented per level, three levels at most, with a tree connector in the gutter (spec 3.3). */
+internal fun childIndent(depth: Int) = (16 * depth.coerceAtMost(3)).dp
+internal fun Modifier.childTree(entry: SessionCardEntry, color: Color): Modifier = if (entry.depth == 0) this else drawBehind {
+    val x = childIndent(entry.depth).toPx() - 9.dp.toPx(); val width = 1.dp.toPx(); val elbow = 28.dp.toPx()
+    drawLine(color, Offset(x, -10.dp.toPx()), Offset(x, if (entry.lastChild) elbow else size.height), width)
+    drawLine(color, Offset(x, elbow), Offset(x + 7.dp.toPx(), elbow), width)
 }
 
 @Composable private fun SubagentRow(child: SessionCardChild, reason: String, last: Boolean, notificationsMuted: Boolean, onOpen: () -> Unit) {

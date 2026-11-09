@@ -17,8 +17,8 @@ pub(crate) struct Reference {
     pub archive: String,
     pub agent: String,
     /// The durable session ID (zerus-ucck P1c). Parsed and verified when a
-    /// reference carries it; references do not emit it yet, because older
-    /// parsers refuse an unknown field (rollout gated as P3).
+    /// reference carries it; emission needs the P3 fleet transition gate,
+    /// because older parsers refuse an unknown field.
     pub session: String,
 }
 fn encode(value: &str) -> String {
@@ -205,9 +205,23 @@ pub(crate) fn create(config: &Config, args: &[String]) -> cli::Result<i32> {
         run: text("run_id"),
         archive,
         agent,
-        session: String::new(),
+        session: emitted_session(config, &details),
     };
     print(&reference, as_json, json!({}))
+}
+
+/// The optional reference field stays absent until every answering route is
+/// compatible. This is metadata only; the receiver verifies all selectors.
+fn emitted_session(config: &Config, record: &Value) -> String {
+    record["session_id"]
+        .as_str()
+        .filter(|id| {
+            state::session_id::canonical(id)
+                && uuid::Uuid::parse_str(id).is_ok_and(|id| !id.is_nil())
+        })
+        .filter(|_| swarm::session_labels::cached(config))
+        .unwrap_or_default()
+        .to_owned()
 }
 
 fn print(reference: &Reference, as_json: bool, extra: Value) -> cli::Result<i32> {
@@ -216,6 +230,9 @@ fn print(reference: &Reference, as_json: bool, extra: Value) -> cli::Result<i32>
     if as_json {
         let mut output = json!({"schema":1,"uri":uri,"name":reference.name,"machine_id":reference.machine,
         "host":reference.host,"run_id":reference.run,"conversation_id":reference.conversation,"archive_id":reference.archive,"agent_id":reference.agent});
+        if !reference.session.is_empty() {
+            output["session_id"] = json!(reference.session);
+        }
         for (key, value) in extra.as_object().into_iter().flatten() {
             output[key] = value.clone();
         }
@@ -255,7 +272,7 @@ fn caller(config: &Config) -> cli::Result<Option<(Reference, String)>> {
         run: text("run_id"),
         archive: String::new(),
         agent: String::new(),
-        session: String::new(),
+        session: emitted_session(config, &record),
     };
     Ok(Some((reference, text("agent"))))
 }
@@ -390,6 +407,62 @@ mod tests {
         });
     }
 
+    #[test]
+    fn session_emission_needs_a_fresh_open_gate_and_a_canonical_stored_id() {
+        use std::{
+            collections::BTreeMap,
+            time::{Duration, Instant},
+        };
+        let root = tempfile::tempdir().unwrap();
+        let config = Config {
+            home: root.path().to_string_lossy().into(),
+            dir: root.path().join("config"),
+            state: root.path().join("state"),
+            selves: vec!["fixture".into()],
+            peers: vec![],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: BTreeMap::new(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        for path in [&config.dir, &config.state, &config.dir.join("swarm")] {
+            crate::platform::private_dir(path).unwrap();
+        }
+        let machine = "11111111-1111-4111-8111-111111111111";
+        let sid = "22222222-2222-4222-8222-222222222222";
+        let raw = json!({"node_id":machine,"catalog":{"schema":1,"swarm_id":"33333333-3333-4333-8333-333333333333","operations":{}},"imported":true,"bindings":{},"peers":{}});
+        std::fs::write(config.dir.join("swarm/catalog.json"), raw.to_string()).unwrap();
+        let record = json!({"session_id":sid});
+        assert_eq!(emitted_session(&config, &record), "");
+        swarm::session_labels::refresh_local(&config, Instant::now() + Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(emitted_session(&config, &record), sid);
+        for id in ["", "not-a-uuid", "00000000-0000-0000-0000-000000000000"] {
+            assert_eq!(emitted_session(&config, &json!({"session_id":id})), "");
+        }
+        let reference = Reference {
+            machine: machine.into(),
+            host: "fixture".into(),
+            name: "claude/example/shared".into(),
+            conversation: "conversation".into(),
+            run: "run".into(),
+            archive: String::new(),
+            agent: String::new(),
+            session: emitted_session(&config, &record),
+        };
+        let uri = reference.uri();
+        assert_eq!(Reference::parse(&uri).unwrap().session, sid);
+        let message = envelope(&reference.name, &reference.host, &uri, "hello");
+        let (_, copied, _) = sender_message(&message).unwrap();
+        assert_eq!(Reference::parse(&copied).unwrap().session, sid);
+        std::fs::write(
+            config.dir.join("swarm/session-id-memberships.json"),
+            b"damaged primary",
+        )
+        .unwrap();
+        assert_eq!(emitted_session(&config, &record), "");
+    }
     #[test]
     fn strict_uri_round_trip_and_ambiguous_fields() {
         let reference = Reference {

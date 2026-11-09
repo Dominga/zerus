@@ -1,6 +1,7 @@
 package app.zerus.mobile
 
 import android.app.Application
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -212,9 +213,20 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     fun toggleMachine(key: MachineKey) { selectedMachines = if (key in selectedMachines) selectedMachines - key else selectedMachines + key; resetSessionScroll() }
     fun allMachines() { selectedMachines = emptySet(); resetSessionScroll() }
     fun toggleProject(key: ProjectKey) { collapsedProjects = if (key.key in collapsedProjects) collapsedProjects - key.key else collapsedProjects + key.key }
-    /** Session cards whose subagent rows are open, by exact parent target, as the desktop session tree keeps them. */
-    var expandedSubagents by mutableStateOf<Set<String>>(emptySet()); private set
-    fun toggleSubagents(target: Target) { expandedSubagents = if (target.key in expandedSubagents) expandedSubagents - target.key else expandedSubagents + target.key }
+    /** Parents whose subagents and child sessions are hidden: one toggle, kept across relaunches (TeamCollapse). */
+    var teamCollapse by mutableStateOf(TeamCollapse()); private set
+    private var teamWriter: OrderedStatePersistence<List<String>>? = null
+    /** The machine UUID of a target's computer, which parent links and collapsed parents name. */
+    fun machineUuid(target: Target) = machines.find { it.connectionId == target.connectionId && it.id == target.computerId }?.machineId
+    fun teamCollapsed(session: Session) = teamCollapse.collapsed(session, machineUuid(session.target))
+    fun toggleTeam(session: Session) {
+        val collapsed = !teamCollapsed(session)
+        val saved = ChildSessions.teamId(machineUuid(session.target), session)?.let { id ->
+            teamWriter?.edit { ChildSessions.withTeam(it, id, collapsed) } }
+        teamCollapse = teamCollapse.choose(session.target.key, collapsed, saved)
+    }
+    /** Grouped accounts, which label the cards' account marks. */
+    val groupedAccounts by derivedStateOf { AccountGrouping.group(displayedAccounts) }
     fun saveSessionScroll(index: Int, offset: Int, scope: String, reset: Long) {
         if (scope != sessionProjectScope?.key?.key.orEmpty() || reset != sessionScrollReset) return
         sessionListIndex = index; sessionListOffset = offset
@@ -295,10 +307,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private var sharedReadRetryTimer:Job?=null
     private var readAllShares:Job?=null
     fun conversationViewport(target:Target)=readState.record(target)?.viewport
-    fun saveConversationViewport(target:Target,eventId:String,offset:Int) {
+    fun saveConversationViewport(target:Target,eventId:String,offset:Int,following:Boolean=false) {
         if(selected?.target != target || activeFrame?.target != target || conversationEvents.none { it.id == eventId }) return
         val event=conversationEvents.find { it.id==eventId } ?: return
-        readWriter?.let { readState=it.edit { state -> state.viewport(target,eventId,offset,event.historyCursor,event.historyEpoch) } }
+        readWriter?.let { readState=it.edit { state -> state.viewport(target,eventId,offset,event.historyCursor,event.historyEpoch,following) } }
         if(event.historyCursor.isNotBlank()) historyWindows[target.key]?.let { window ->
             viewportPageJob?.cancel();viewportPageJob=viewModelScope.launch {
                 delay(250)
@@ -370,7 +382,13 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     var historyEpoch by mutableStateOf("");private set
     var historyComplete by mutableStateOf(false);private set
     private var lastHistoryRequest:Triple<Target,String,String>?=null
-    fun retryHistory(target:Target) { lastHistoryRequest?.takeIf { it.first==target }?.let { loadHistory(target,it.second,it.third) } ?: loadHistory(target,"") }
+    private var lastHistoryWasLatest=false
+    fun historyRetryIsLatest(target:Target)=lastHistoryWasLatest && selected?.target==target
+    fun historyRetryLabel(target:Target)=if(historyRetryIsLatest(target)) "Retry latest messages" else "Retry history"
+    fun retryHistory(target:Target) {
+        if(historyRetryIsLatest(target)) { jumpToLatest(target);return }
+        lastHistoryRequest?.takeIf { it.first==target }?.let { loadHistory(target,it.second,it.third) } ?: loadHistory(target,"")
+    }
     private val historyWindows=LinkedHashMap<String,HistoryWindow>(20,0.75f,true)
     private var currentHistoryHeads by mutableStateOf<Set<String>>(emptySet())
     private val historyFlights=mutableMapOf<String,Pair<Target,Deferred<HistoryPage>>>()
@@ -384,6 +402,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private var restoreHistoryAttempt=""
     private var pendingHistoryPosition=""
     private var pendingHistoryPublication=""
+    private var historyViewIntent=0L
+    private var latestNavigationIntent:Long?=null
     private var lastHistoryObservation=0L
     private var lastHistoryReadCompletedAt=0L
     private fun historyNetworkReason(target:Target):String = when {
@@ -504,6 +524,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         if(selected?.target != target || olderLoading) return null
         if(target.run.isBlank() || target.conversation.isBlank() || connections.none { it.id==target.connectionId }) { olderError=historyReason(target);return null }
         val navigation=navigationId
+        val intent=historyViewIntent
+        lastHistoryWasLatest=false
         lastHistoryRequest=Triple(target,direction,cursor)
         olderLoading=true;olderError=""
         if(direction in setOf("","around","unread") && !unreadBoundaryCaptured) readPositionReady=false
@@ -519,13 +541,14 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 val aliases=withContext(Dispatchers.Default) { RollingConversationHistory.merge(target,target,activeFrame?.takeIf { it.target==target }?.events.orEmpty(),page.events).supersededIds+HistoryAliases.exact(page.events,knownIds) }
                 if(aliases.isNotEmpty()) readWriter?.let { readState=it.edit { state -> state.supersede(target,aliases) } }
                 observeHistoryHead(page,verifiedPage)
-                if(selected?.target != target || navigationId != navigation) return@launch
+                if(selected?.target != target || navigationId != navigation || historyViewIntent!=intent) return@launch
                 if(verifiedPage && page.complete) lastHistoryReadCompletedAt=System.currentTimeMillis()
                 if(mode=="" && verifiedPage && !page.complete) {
                     androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
                         historyIndexing=page.indexing;historyComplete=false;olderLoading=false;readPositionReady=true
-                        if(latest) olderError=if(page.indexing) "Message history is still indexing. Try again shortly."
-                            else "This computer could not provide the latest message history. Refresh to try again."
+                        hasOlder=true
+                        olderError=if(page.indexing) "Earlier history is still indexing. Recent messages remain available. Retry to continue."
+                            else "This computer could not provide earlier history. Recent messages remain available. Retry to continue."
                         captureUnreadBoundary(target,conversationEvents)
                     }
                     return@launch
@@ -539,7 +562,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                     readPositionReady=false
                     val unread=historyOnce(target,"unread",JSONArray(listOf(page.epoch,marker!!.readThrough)).toString())
                     observeHistoryHead(unread)
-                    if(selected?.target!=target || navigationId!=navigation) return@launch
+                    if(selected?.target!=target || navigationId!=navigation || historyViewIntent!=intent) return@launch
                     publishWindow(target,HistoryWindow.from(unread),unread.complete,unread.indexing);published=true
                     lastHistoryObservation=activeFrame?.observedAt ?: 0L
                     return@launch
@@ -548,8 +571,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 val window=withContext(Dispatchers.Default) { if(mode in setOf("before","after") && old?.epoch==page.epoch) old.merge(page,mode) else HistoryWindow.from(page) }
                 publishWindow(target,window,page.complete && verifiedPage,page.indexing,aliases[firstUnreadEventId]);lastHistoryObservation=activeFrame?.observedAt ?: 0L;published=true
             } catch(e:CancellationException) { throw e }
-            catch(e:Exception) { if(selected?.target==target && navigationId==navigation) { olderError=ReadFailure.message(e,"conversation");currentHistoryHeads-=ConversationReadPolicies.key(target) } }
-            finally { if(!published && selected?.target==target && navigationId==navigation) { olderLoading=false;if(pendingHistoryPosition!=target.key) readPositionReady=true } }
+            catch(e:Exception) { if(selected?.target==target && navigationId==navigation && historyViewIntent==intent) { olderError=ReadFailure.message(e,"conversation");currentHistoryHeads-=ConversationReadPolicies.key(target) } }
+            finally { if(!published && selected?.target==target && navigationId==navigation && historyViewIntent==intent) { olderLoading=false;if(pendingHistoryPosition!=target.key) readPositionReady=true } }
         }
         return olderJob
     }
@@ -558,20 +581,80 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         if(window==null) loadHistory(target,"") else if(window.hasBefore && window.before!=null) loadHistory(target,"before",window.before)
     }
     fun loadNewer(target:Target) { historyWindows[target.key]?.takeIf { it.hasAfter && it.after!=null }?.let { loadHistory(target,"after",it.after!!) } }
-    fun jumpToLatest(target:Target):Job? = loadHistory(target,"",latest=true)
+    /** The recent native inspection is independent of historical indexing and exact unread totals. */
+    fun jumpToLatest(target:Target):Job? {
+        if(selected?.target!=target) return null
+        val connection=connections.find { it.id==target.connectionId } ?: run { olderError="Workspace disconnected. Showing saved conversation.";return null }
+        val navigation=navigationId
+        val intent=++historyViewIntent
+        val previous=olderJob
+        latestNavigationIntent=intent
+        lastHistoryWasLatest=true
+        // Retire the old view's observers, retaining every shared native read's
+        // original identity. They may finish but cannot publish an older window.
+        detailGate.cancel();detailJob?.cancel();detailTimer?.cancel()
+        detailBusy=false;detailProgress=false
+        presentationRevision++;presentationJob?.cancel()
+        previous?.cancel()
+        olderLoading=true;olderError=""
+        olderJob=viewModelScope.launch {
+            fun current()=selected?.target==target && navigationId==navigation && historyViewIntent==intent && connections.any { it==connection }
+            try {
+                previous?.join()
+                if(!current()) return@launch
+                val inspected=inspectOnce(connection,target,fresh=true,current=::current).await()
+                check(inspected.target==target) { "The conversation changed. Refresh before loading its latest messages." }
+                if(!current()) return@launch
+                val recent=withContext(Dispatchers.Default) {
+                    val bounded=RollingConversationHistory.merge(target,target,emptyList(),inspected.inspectedEvents)
+                    inspected.copy(events=bounded.events,window=null,indexComplete=false,indexing=false,presentation=null,
+                        truncated=inspected.truncated || bounded.truncated)
+                }
+                if(!current()) return@launch
+                check(recent.events.isNotEmpty() || conversationEvents.isEmpty()) {
+                    "The computer returned no recent messages. The loaded conversation was kept."
+                }
+                // Explicit latest navigation leaves the older canonical window. Its
+                // cursors remain in the page cache, never on these provisional rows.
+                historyWindows.remove(target.key)
+                currentHistoryHeads-=ConversationReadPolicies.key(target)
+                historyEpoch="";historyComplete=false;historyIndexing=false;hasNewer=false
+                recent.events.lastOrNull()?.let { last ->
+                    readWriter?.let { readState=it.edit { state -> state.viewport(target,last.id,0,following=true) } }
+                }
+                restoreHistoryAttempt=target.key+readState.record(target)?.viewport?.cursor.orEmpty()
+                pendingHistoryPublication=target.key
+                rememberFrame(recent)
+                installFrame(recent,true)
+                // The navigation caller must receive the installed rows and paging
+                // flags before choosing the scroll target, including identical reads.
+                presentationJob?.join()
+            } catch(error:CancellationException) { throw error }
+            catch(error:Exception) { if(current()) olderError=ReadFailure.message(error,"conversation") }
+            finally {
+                if(latestNavigationIntent==intent) latestNavigationIntent=null
+                if(current()) { olderLoading=false;readPositionReady=true }
+            }
+        }
+        return olderJob
+    }
     private fun restoreSavedWindow(target:Target,navigation:Long) {
         val saved=readState.record(target)?.viewport ?: return
+        if(saved.following) return
         if(saved.cursor.isBlank()) return
         val originalWindow=historyWindows[target.key]
+        val intent=historyViewIntent
         readPositionReady=false
         viewModelScope.launch {
             var published=false
             try {
                 val page=HistoryReadPaths.saved(target) { pageCache.read(target,"around",saved.cursor) } ?: return@launch
-                if(selected?.target==target && navigationId==navigation && historyWindows[target.key]===originalWindow && conversationEvents.none { it.id==saved.eventId }) {
+                if(selected?.target==target && navigationId==navigation && historyViewIntent==intent && readState.record(target)?.viewport==saved &&
+                    historyWindows[target.key]===originalWindow && conversationEvents.none { it.id==saved.eventId }) {
                     publishWindow(target,HistoryWindow.from(page));restoreHistoryAttempt=target.key+saved.cursor;published=true
                 }
-            } finally { if(!published && selected?.target==target && navigationId==navigation && !olderLoading && pendingHistoryPublication!=target.key) readPositionReady=true }
+            } finally { if(!published && selected?.target==target && navigationId==navigation && historyViewIntent==intent &&
+                readState.record(target)?.viewport==saved && !olderLoading && pendingHistoryPublication!=target.key) readPositionReady=true }
         }
     }
     private fun watchHistoryHeads(priority:Target?=null) {
@@ -609,11 +692,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                     val page=historyOnce(target,"","",1)
                     if(sessions.none { it.target==target } || historyNetworkReason(target).isNotBlank() ||
                         machines.none { it.connectionId==target.connectionId && it.id==target.computerId && it.online }) return@runCatching
-                    observeHistoryHead(page)
-                    if(selected?.target==target && historyWindows[target.key]==null) {
-                        if(page.complete && !olderLoading) { restoreHistoryAttempt="";loadHistory(target,"") }
-                        else if(page.indexing) historyIndexing=true
-                    }
+                    observeHistoryHead(page,verified=priority!=null || selected?.target!=target || historyWindows[target.key]!=null)
+                    // A retained metadata probe may finish after navigation. It
+                    // never enters canonical history on behalf of a recent view.
+                    if(selected?.target==target && historyWindows[target.key]==null && page.indexing) historyIndexing=true
                     historySnapshotHints[ConversationReadPolicies.key(target)]=candidates.first { it.first==target }.second
                     adoptSharedReads();if(selected?.target==target) shareRead(target)
                 }
@@ -627,9 +709,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val key=target.key+saved?.cursor.orEmpty()
         if(restoreHistoryAttempt==key) return
         restoreHistoryAttempt=key
-        if(saved?.cursor?.isNotBlank()==true && conversationEvents.none { it.id==saved.eventId }) {
+        if(saved?.following==false && saved.cursor.isNotBlank() && conversationEvents.none { it.id==saved.eventId }) {
             readPositionReady=false;loadHistory(target,"around",saved.cursor)
-        } else if(historyWindows[target.key]==null) loadHistory(target,"")
+        }
     }
     fun reviewLater(target:Target)=indexedReadRecord(target)?.reviewLater==true
     fun captureReadAttention(target:Target):ReadAttentionEvidence {
@@ -863,6 +945,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 accountsWriter!!.edit { rows -> rows.filter { row -> connections.any { it.id==row.key.connectionId } } }
                 accountCatalogs=accountsWriter!!.state.value
                 launch { accountsWriter!!.state.collectLatest { accountCatalogs=it } }
+                try {
+                    teamWriter=OrderedStatePersistence(withContext(Dispatchers.IO) { store.collapsedTeams() },viewModelScope,{ store.saveCollapsedTeams(it) })
+                    teamCollapse=teamCollapse.copy(stored=teamWriter!!.state.value)
+                } catch(_:Exception) { }
                 launch { AccountsPersistence.get(application).error.collectLatest { failure -> accountsError=if(failure!=null) "Account snapshots could not be saved. Existing private data is preserved." else "" } }
                 try {
                     readWriter=ConversationReadPersistence.get(application).open();readState=readWriter!!.state.value;readTrackingReady=true
@@ -947,7 +1033,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             finally { machineColorSaving=machineColorSaving-key }
         }
     }
-    fun flushDrafts() { persistence?.flushAsync();readWriter?.flushAsync();accountsWriter?.flushAsync() }
+    fun flushDrafts() { persistence?.flushAsync();readWriter?.flushAsync();accountsWriter?.flushAsync();teamWriter?.flushAsync() }
     var updateInstallPreparing by mutableStateOf(false); private set
     fun updateInstallReason(): String = if (speech.busy || speechConfiguration.busy) "Finish the voice operation before installing." else UpdateInstallGuard.reason(messageState,storageReady,
         attachmentImporting || attachmentPreparing,preparingTargets.isNotEmpty(),
@@ -998,7 +1084,15 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         preparePresentation()
     }
     private fun publishPagingMetadata(frame:Frame) {
-        frame.window?.let { window -> hasOlder=window.hasBefore;hasNewer=window.hasAfter;historyEpoch=window.epoch;historyComplete=frame.indexComplete;historyIndexing=frame.indexing }
+        val window=frame.window
+        if(window!=null) { hasOlder=window.hasBefore;hasNewer=window.hasAfter;historyEpoch=window.epoch;historyComplete=frame.indexComplete;historyIndexing=frame.indexing }
+        else {
+            // Native inspection is a bounded recent projection, including on
+            // older CLIs without an explicit truncation flag. History remains
+            // an available explicit choice even when this projection is empty.
+            hasOlder=historyNetworkReason(frame.target).isBlank()
+            hasNewer=false;historyEpoch="";historyComplete=false;historyIndexing=frame.indexing
+        }
         if(pendingHistoryPublication==frame.target.key) {
             // A page may retarget an existing opening divider through an alias.
             // Repreparing a retained frame must never restore a retired divider.
@@ -1076,7 +1170,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 val nativeUnknown=currentWindow?.let { HistoryInspection.changed(it,incoming,previous?.inspectedEvents.orEmpty()) }==true
                 Triple(Frame(resolved,raw,events,NativeParser.questions(raw),observedAt,
                     raw.toString().toByteArray(Charsets.UTF_8).size+EventHistoryCodec.encode(events).toString().toByteArray(Charsets.UTF_8).size,
-                    retained.truncated || previous?.truncated==true || raw.optBoolean("mobile_history_truncated"),window=window,indexComplete=historyComplete && !nativeUnknown,indexing=historyIndexing,inspectedEvents=incoming,settingsInspectionStartNanos=settingsInspectionStartNanos),retained.supersededIds,window)
+                    retained.truncated || previous?.truncated==true || raw.optBoolean("mobile_history_truncated") || raw.optBoolean("history_truncated") ||
+                        raw.optBoolean("message_events_truncated") || raw.optBoolean("provider_messages_truncated"),window=window,indexComplete=historyComplete && !nativeUnknown,indexing=historyIndexing,inspectedEvents=incoming,settingsInspectionStartNanos=settingsInspectionStartNanos),retained.supersededIds,window)
             }
             // A page can publish during Default parsing. Rebase before mutating the
             // window map, so the older inspection snapshot cannot erase that page.
@@ -1091,6 +1186,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             val expectedWindow=rebased.base
             val (finalFrame,finalWindow)=rebased.value
             if (connections.none { it.id == connection.id }) throw CancellationException("Workspace disconnected.")
+            if(finalWindow==null) currentHistoryHeads-=ConversationReadPolicies.key(resolved)
             if(finalWindow!=null) {
                 historyWindows[resolved.key]=finalWindow
                 if(expectedWindow?.let { HistoryInspection.changed(it,frame.inspectedEvents,previous?.inspectedEvents.orEmpty()) }==true) currentHistoryHeads-=ConversationReadPolicies.key(resolved)
@@ -2795,15 +2891,19 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     fun open(session: Session, preserveProject: Boolean = false) {
         RelayReadTiming.point(RelayReadTiming.Stage.OpenConversation)
         contextNotice="";actionResultNotice="";firstUnreadEventId="";unreadBoundaryCaptured=false;restoreHistoryAttempt="";pendingHistoryPosition="";pendingHistoryPublication="";lastHistoryObservation=0L;lastHistoryReadCompletedAt=0L
-        hasOlder=false;hasNewer=false;historyEpoch="";historyIndexing=false;historyComplete=false;olderError=""
+        hasOlder=false;hasNewer=false;historyEpoch="";historyIndexing=false;historyComplete=false;olderError="";lastHistoryWasLatest=false
         if(session.target.agentId.isBlank()) parentSelection=null
         cancelCompactContinuation(); clearExpectation = null
         flushDrafts()
         if (!preserveProject) selectedProject = null
         navigationId++; cancelDetail()
+        currentHistoryHeads-=ConversationReadPolicies.key(session.target)
         selected = session; activityVerified = false /* BEGIN QUESTION_AVAILABILITY_PROBE writer-open-session */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.OPEN_SESSION) /* END QUESTION_AVAILABILITY_PROBE writer-open-session */; historyCached = false
         activeFrame = null; activity = null; conversationEvents = emptyList(); conversationQuestions = emptyList(); conversationOutgoing = emptyList(); conversationHistoryTruncated = false
+        val following=readState.record(session.target)?.viewport?.following==true
+        if(following) historyWindows.remove(session.target.key)
         val warm = frames[session.target.key]?.takeIf { if (it.observedAt == 0L) historyCache.getMemory(it.target) != null else System.currentTimeMillis() - it.observedAt in 0..7L * 24 * 60 * 60 * 1000 }
+            ?.let { if(following) it.copy(events=it.inspectedEvents.ifEmpty { it.events },window=null,indexComplete=false,indexing=false,presentation=null) else it }
         if (warm == null) frames.remove(session.target.key)
         if (warm != null) installFrame(warm, false)
         else if (!demo) {
@@ -2812,8 +2912,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 val raw = runCatching { historyCache.read(session.target) }.getOrNull() ?: return@launch
                 val frame = withContext(Dispatchers.Default) {
                     val decoded = ConversationDisplayCache.decode(raw)
-                    Frame(session.target, decoded.raw, decoded.events, NativeParser.questions(decoded.raw), 0,
-                        raw.toString().toByteArray(Charsets.UTF_8).size, decoded.truncated)
+                    val inspected=NativeParser.events(decoded.raw)
+                    Frame(session.target, decoded.raw, if(following) inspected.ifEmpty { decoded.events } else decoded.events, NativeParser.questions(decoded.raw), 0,
+                        raw.toString().toByteArray(Charsets.UTF_8).size, decoded.truncated,inspectedEvents=inspected)
                 }
                 if (navigationId == navigation && selected?.target == session.target && !activityVerified && activeFrame == null) {
                     rememberFrame(frame); installFrame(frame, false)
@@ -2821,13 +2922,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         if(!demo && readTrackingReady) {
-            if(historyReason(session.target).isBlank() && readState.record(session.target)?.viewport==null) readPositionReady=false
             restoreSavedWindow(session.target,navigationId)
-            // Both RPCs bind the exact run/conversation and validate their own
-            // response. History need not wait for the inspection round trip.
+            // Only a saved older reading position requests canonical history.
+            // A normal opening uses the bounded inspection tail immediately.
             restoreHistory(session.target)
-            historyWindows[session.target.key]?.takeIf { it.atHead && !olderLoading && historyNetworkReason(session.target).isBlank() }
-                ?.let { HistoryRequests.refreshAtHead(it) }?.let { (direction,cursor) -> loadHistory(session.target,direction,cursor) }
         }
         if (demo) { conversationEvents = Demo.events; conversationQuestions = emptyList() }
         else refreshActivity()
@@ -2890,7 +2988,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         cancelTerminalAvailability()
         if(detailReadErrorOwner!=null) error=""
         detailGate.cancel(); detailJob?.cancel(); detailTimer?.cancel()
-        detailBusy = false; detailProgress = false
+        detailBusy = false; detailProgress = false;latestNavigationIntent=null
         presentationRevision++; presentationJob?.cancel()
         olderJob?.cancel();olderLoading=false;readPositionReady=readTrackingReady
         processOutputJob?.cancel();processOutputLoading=false;processOutputResult=null;processOutputError=""
@@ -2911,7 +3009,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     internal suspend fun awaitActivityRead() { detailJob?.join() }
 
     private fun refreshActivity(explicit: Boolean, freshInspection: Boolean, ownerCurrent: () -> Boolean = { true }) {
-        if (demo || terminalVisible) return
+        if (demo || terminalVisible || latestNavigationIntent!=null) return
         val original = selected ?: return
         // Background refresh must not start another inspection
         // while the opening inspection is already verified and its first
@@ -2920,6 +3018,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         pendingActionResult(original.target)?.let { action -> openSessionActionResult(action);return }
         val connection = connections.find { it.id == original.target.connectionId } ?: return
         val navigation = navigationId
+        val historyIntent=historyViewIntent
         val start = detailGate.begin("$navigation:${original.target.key}", explicit)
         detailProgress = detailGate.visible()
         if (!start.newRequest) return
@@ -2935,12 +3034,12 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         var preparationOwner: Frame? = null
         var publicationFrame: Frame? = null
         fun ownsDetail() = detailGate.owns(operation.id) && navigationId == navigation &&
-            selected?.target == original.target && (!freshInspection || ownerCurrent()) && connections.any { it == connection }
+            historyViewIntent==historyIntent && selected?.target == original.target && (!freshInspection || ownerCurrent()) && connections.any { it == connection }
         try {
             val frame = inspectOnce(connection, original.target,fresh=freshInspection,current={
                 !freshInspection || ownerCurrent() && detailGate.owns(operation.id) && navigationId==navigation && selected?.target==original.target
             }).await()
-            if (detailGate.owns(operation.id) && navigationId == navigation && selected?.target == original.target && (!freshInspection || ownerCurrent())) {
+            if (detailGate.owns(operation.id) && navigationId == navigation && historyViewIntent==historyIntent && selected?.target == original.target && (!freshInspection || ownerCurrent())) {
                 if(detailReadErrorOwner==(original.target to navigation)) error=""
                 val clear = clearExpectation?.takeIf { it.navigation == navigation && ContextPolicies.sameSessionRun(it.target, frame.target) }
                 if (clear != null && frame.target.conversation != clear.target.conversation && !clear.confirmed) {

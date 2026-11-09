@@ -1,6 +1,7 @@
 import { showQtUpgradeNotice } from "./store/qtUpgrade";
 import { DesktopServiceStatus } from "./ui/components/DesktopServiceStatus";
-import { desktopService, serviceStatus, servicePaused, firstChoicePending } from "./store/desktopService";
+import { MachinesStatus } from "./ui/components/MachinesStatus";
+import { BackgroundTasksChip } from "./ui/screens/BackgroundTasks";
 import { CleanupChip } from "./ui/screens/CleanupChip";
 import { worktreeReviewDialog } from "./store/worktreeCleanup";
 import { cleanupDialog } from "./store/terminationCleanup";
@@ -9,7 +10,7 @@ import { taskExecutorReview } from "./store/taskExecutors";
 import { taskStartReview } from "./store/taskStart";
 import { taskSettings } from "./store/taskSettings";
 import { taskCancellation } from "./store/taskCancel";
-import { For, Match, Show, Suspense, Switch, createEffect, createMemo, createSignal, lazy, onCleanup, onMount } from "solid-js";
+import { Match, Show, Suspense, Switch, createEffect, createMemo, createSignal, lazy, onCleanup, onMount } from "solid-js";
 import { Rail } from "./ui/components/Rail";
 import { TitleBar } from "./ui/components/TitleBar";
 import { openAbout } from "./store/desk";
@@ -24,30 +25,30 @@ import { SessionList } from "./ui/sessions/SessionList";
 import { SessionDetail } from "./ui/sessions/SessionDetail";
 import { CreationPanel } from "./ui/sessions/CreationPanel";
 import { selectedCreation } from "./store/creations";
-import { OverviewScreen } from "./ui/screens/Overview";
-import { ProjectsScreen } from "./ui/screens/Projects";
 import { applySkin, skin } from "./skin/runtime";
 import { catalog } from "./store/catalog";
 import { contentScale, page, selectedKey, setContentScale, setPage, setUnifiedChrome, toast } from "./store/ui";
 import { num, setSetting } from "./store/settings";
 import { installShortcutRouter, onCommand } from "./store/shortcuts";
-import { installWindowCommands } from "./ui/sessions/windowCommands";
 import { openGoTo, openShortcutHelp, goToOrigin, shortcutHelpOrigin } from "./store/goTo";
 import { rememberRecentSession } from "./ui/sessions/goTo";
+import { installWindowCommands } from "./ui/sessions/window-commands";
 import { updateCommands, updates } from "./store/updates";
 import { openUpdates } from "./store/desk";
-import { SessionUsageStrip } from "./ui/components/SessionUsageStrip";
-import { fleetRefresh, windowChrome, type BridgeMode } from "./bridge";
+import { windowChrome, type BridgeMode } from "./bridge";
 import { installUiLanguage, tr, uiLanguage } from "./i18n";
 import { WaitingPage } from "./ui/teams/Waiting";
 import { NewTeamPage } from "./ui/teams/NewTeamPage";
 import { CatalogPage } from "./ui/teams/CatalogPage";
 import { TeamDesigner } from "./ui/teams/TeamDesigner";
-import { connected, connectionError as hasConnectionError, staleNote, statusSummary } from "./ui/status-summary";
+import { staleNote } from "./ui/status-summary";
 import { ModelServersScreen } from "./ui/screens/ModelServers";
 import { TeamConfirmDialog } from "./ui/teams/TeamConfirmDialog";
 import { SandboxWarning } from "./ui/SandboxWarning";
 import { BootSplash } from "./ui/BootSplash";
+import { lazyView } from "./ui/lazy-view";
+import { LazyBoundary } from "./ui/lazy-boundary";
+const ParentDialogs = lazyView(() => import("./ui/sessions/ParentDialogs"), (m) => m.ParentDialogs);
 
 // The client shell: the rail, the pages and the status bar.
 const WorktreeCleanup = lazy(() => import("./ui/screens/WorktreeCleanup"));
@@ -55,8 +56,10 @@ const WorktreeReviewDialog = lazy(() => import("./ui/screens/WorktreeReviewDialo
 
 // Accounts keeps its data and refresh cadence in store/accounts; only its
 // screen loads on first navigation.
+const OverviewScreen = lazy(() => import("./ui/screens/Overview").then((m) => ({ default: m.OverviewScreen })));
 const MachinesScreen = lazy(() => import("./ui/screens/Machines").then((m) => ({ default: m.MachinesScreen })));
 const AccountsScreen = lazy(() => import("./ui/screens/Accounts").then((m) => ({ default: m.AccountsScreen })));
+const ProjectsScreen = lazy(() => import("./ui/screens/Projects").then((m) => ({ default: m.ProjectsScreen })));
 // Settings and its sections load the first time Settings opens; their
 // state lives in their modules, so it stays once loaded.
 const SettingsScreen = lazy(() => import("./ui/screens/Settings").then((m) => ({ default: m.SettingsScreen })));
@@ -72,14 +75,6 @@ const GoToDialog = lazy(() => import("./ui/sessions/GoToDialog").then((m) => ({ 
 const ShortcutHelpDialog = lazy(() => import("./ui/sessions/ShortcutHelpDialog").then((m) => ({ default: m.ShortcutHelpDialog })));
 const PerfHost = lazy(() => import("./ui/PerfHost").then((m) => ({ default: m.PerfHost })));
 
-const STATE_TEXT: Record<string, string> = {
-  probing: "checking",
-  unsupported: "no event stream (update hgs)",
-  polled: "polled every 60 s (update hgs for live updates)",
-  reconnecting: "reconnecting",
-  ended: "stream ended",
-};
-
 function LoginItemButton() {
   return (
     <Show when={updates().login_item_deprioritized}>
@@ -89,29 +84,12 @@ function LoginItemButton() {
 }
 
 function StatusBar(props: { mode: () => BridgeMode | "starting" }) {
-  const computers = createMemo(() => Object.values(catalog.computers));
-  const problems = createMemo(() => computers().filter((c) => !connected(c.status)));
-  const label = (id: string) => id || tr("this computer");
-  // Task 72 (F1): a computer still connecting is said to be connecting, never offline.
-  const connectionError = createMemo(() => hasConnectionError(computers()));
-  const summary = createMemo(() => statusSummary(computers(), label));
   // Task 235: the rows on screen are the last list on disk until the live listing replaces them.
   const staleSince = createMemo(() => staleNote(catalog.stale));
   return (
     <footer class="statusbar">
       <Show when={staleSince()}>{(note) => <span class="stale-note" data-stale title={tr("These rows are the last session list Zerus saw; the live list replaces them as each computer answers.")}>{note()}</span>}</Show>
-      <Show when={computers().length} fallback={<Show when={!servicePaused(desktopService.state()) && !firstChoicePending(desktopService.state())}><span>{props.mode() === "starting" ? tr("Starting…") : tr("Connecting…")}</span></Show>}>
-        {connectionError() ? (
-          <>
-            <span class="danger">
-              <For each={problems()}>{(c, i) => <>{i() ? "; " : ""}{label(c.id)}: {tr(STATE_TEXT[c.status] ?? c.status)}{c.status === "reconnecting" && c.attempt ? ` (attempt ${c.attempt})` : ""}</>}</For>
-            </span>
-            <Show when={!serviceStatus(desktopService.state())?.retry}><button type="button" class="btn small ghost" onClick={() => { void fleetRefresh().catch((error) => toast("Connection", String(error), "error", true)); }}>{tr("Retry now")}</button></Show>
-          </>
-        ) : (
-          <span class="conn-ok"><span class="state-dot ready" hidden={problems().length > 0} />{summary()}</span>
-        )}
-      </Show>
+      <MachinesStatus mode={props.mode} />
       <DesktopServiceStatus />
       <Show when={props.mode() === "replay"}>
         <span class="chip-accent" title={tr("Synthetic data from the replay fixture; no hgs is running")}>{tr("Replay")}</span>
@@ -126,9 +104,10 @@ function StatusBar(props: { mode: () => BridgeMode | "starting" }) {
           onClick={() => { void updateCommands.restart().catch((error) => toast("Updates", String(error), "error", true)); }}>{tr("Restart to finish update")}</button>
       </Show>
       <LoginItemButton />
+      <BackgroundTasksChip />
       <CleanupChip />
       <span class="grow" />
-      <SessionUsageStrip />
+      {/* Task #351: the agent and usage block moved to the composer's usage chip; the status bar keeps no copy. */}
       {/* Task 243: with the controls in the title bar the version moves here, as Qt's placeRailControls. */}
       <Show when={skin().layout.chrome === "unified"}>
         <button type="button" class="status-version" data-tip={tr("%1\nOpen About", installedAppName(appBuildInfo()))} onClick={openAbout}>{railVersion(appBuildInfo()) || tr("About")}</button>
@@ -190,10 +169,10 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
               <Show when={selectedCreation() !== undefined} fallback={<SessionDetail />}><CreationPanel /></Show>
             </div>
           </Match>
-          <Match when={page() === "dashboard"}><OverviewScreen /></Match>
+          <Match when={page() === "dashboard"}><Suspense><OverviewScreen /></Suspense></Match>
           <Match when={page() === "machines"}><MachinesScreen /></Match>
           <Match when={page() === "accounts"}><Suspense><AccountsScreen /></Suspense></Match>
-          <Match when={page() === "projects"}><ProjectsScreen /></Match>
+          <Match when={page() === "projects"}><Suspense><ProjectsScreen /></Suspense></Match>
           <Match when={page() === "settings"}><Suspense><SettingsScreen /></Suspense></Match>
           <Match when={page() === "waiting"}><WaitingPage /></Match>
           <Match when={page() === "newteam"}><NewTeamPage /></Match>
@@ -221,6 +200,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
       <Show when={shortcutHelpOrigin()}><Suspense><ShortcutHelpDialog /></Suspense></Show>
       <Show when={newSessionOpened()}><Suspense><NewSessionDialog /></Suspense></Show>
       <OrganizationDialogs />
+      <LazyBoundary floating><ParentDialogs /></LazyBoundary>
       <Suspense><PerfHost /></Suspense>
     </div>
   );

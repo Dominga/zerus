@@ -397,6 +397,7 @@ mod tests {
             bindings: BTreeMap::new(),
             peers: BTreeMap::new(),
             twins: Default::default(),
+            id_memberships: None,
         };
         store
             .catalog

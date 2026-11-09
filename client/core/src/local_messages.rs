@@ -55,6 +55,12 @@ pub struct LocalMessage {
     pub source: Option<String>,
     #[serde(default)]
     pub voice: Option<Value>,
+    /// The stopped run a desktop-service resume-then-send was recorded under,
+    /// once its send is bound to the run the receipted resume returned
+    /// (`run_id`). Until the agent's history shows it, the row belongs to
+    /// either run, so an inspection of either keeps it (zerus-5wmh.66.4.9.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_from: Option<String>,
 }
 
 /// The detail of a send that may have delivered, as Qt shows it.
@@ -216,9 +222,31 @@ impl LocalMessages {
             submitted_text: None,
             source: None,
             voice: None,
+            resumed_from: None,
         });
         self.touch(key);
         self.trim(key);
+    }
+
+    /// The row of `request_id` was sent to `run_id`: a send the desktop
+    /// service bound to the run its own receipted resume returned
+    /// (zerus-5wmh.66.4.9.3). The row was recorded under the stopped run it
+    /// resumed; it keeps that one as [`LocalMessage::resumed_from`], so an
+    /// inspection of either run keeps it until the agent's history shows it.
+    /// Without this its next reconcile would drop it as another run's once
+    /// it stops sending. Nothing else of the row changes.
+    pub fn rebind_run(&mut self, key: &str, request_id: &str, run_id: &str) {
+        let Some(row) = self
+            .rows
+            .get_mut(key)
+            .and_then(|rows| rows.iter_mut().find(|row| row.id == request_id))
+        else {
+            return;
+        };
+        if row.run_id != run_id {
+            row.resumed_from = Some(std::mem::replace(&mut row.run_id, run_id.into()));
+            self.touch(key);
+        }
     }
 
     /// A send ended. Returns the detail the composer shows, empty on
@@ -301,9 +329,10 @@ impl LocalMessages {
             if row.status == Status::Sending {
                 return true;
             }
-            if (!run.is_empty() && row.run_id != run)
-                || (!conversation.is_empty() && row.conversation_id != conversation)
-            {
+            // A resumed send's row belongs to both its runs until shown.
+            let other_run =
+                !run.is_empty() && row.run_id != run && row.resumed_from.as_deref() != Some(run);
+            if other_run || (!conversation.is_empty() && row.conversation_id != conversation) {
                 result.removed += 1;
                 return false;
             }
@@ -437,6 +466,7 @@ impl LocalMessages {
             submitted_text: None,
             source: Some("hgs_voice".into()),
             voice: Some(message.clone()),
+            resumed_from: None,
         });
         self.touch(key);
         self.trim(key);
@@ -480,6 +510,74 @@ mod tests {
 
     fn send(messages: &mut LocalMessages, id: &str, text: &str, files: &[StoredFile]) {
         messages.sending(KEY, id, None, text, files, "run-1", "conv-1", 100.0);
+    }
+
+    /// zerus-5wmh.66.4.9.3: a row sent to the run a receipted resume returned
+    /// survives the reconcile of that run's inspection once it is sent, until
+    /// the agent's history shows it; an unbound one is dropped as another
+    /// run's.
+    #[test]
+    fn a_row_rebound_to_its_resumed_run_survives_that_runs_reconcile() {
+        let ok = Outcome::Done {
+            receipt: json!({"request_id": "r1"}),
+            cleanup: None,
+        };
+        let resumed = json!({"run_id": "run-2", "conversation_id": "conv-1"});
+        for rebound in [true, false] {
+            let mut messages = LocalMessages::default();
+            send(&mut messages, "r1", "after resume", &[]);
+            if rebound {
+                messages.rebind_run(KEY, "r1", "run-2");
+            }
+            messages.finished(KEY, "r1", &ok);
+            messages.reconcile(KEY, &resumed, &[]);
+            assert_eq!(messages.rows(KEY).len(), usize::from(rebound), "{rebound}");
+        }
+        // An inspection that still shows the stopped run keeps it too: the
+        // row belongs to either run until the history shows it.
+        let mut messages = LocalMessages::default();
+        send(&mut messages, "r1", "after resume", &[]);
+        messages.rebind_run(KEY, "r1", "run-2");
+        messages.finished(KEY, "r1", &ok);
+        let stale = json!({"run_id": "run-1", "conversation_id": "conv-1"});
+        messages.reconcile(KEY, &stale, &[]);
+        messages.reconcile(KEY, &resumed, &[]);
+        assert_eq!(messages.rows(KEY).len(), 1);
+        assert_eq!(messages.rows(KEY)[0].resumed_from.as_deref(), Some("run-1"));
+        // A third run, or another conversation, is not this message's.
+        let mut third = messages.clone();
+        third.reconcile(
+            KEY,
+            &json!({"run_id": "run-3", "conversation_id": "conv-1"}),
+            &[],
+        );
+        assert!(third.rows(KEY).is_empty());
+        let mut other = messages.clone();
+        other.reconcile(
+            KEY,
+            &json!({"run_id": "run-2", "conversation_id": "conv-2"}),
+            &[],
+        );
+        assert!(other.rows(KEY).is_empty());
+        // A row that was never rebound serializes exactly as before.
+        let mut plain = LocalMessages::default();
+        send(&mut plain, "r2", "plain", &[]);
+        assert!(!serde_json::to_string(&plain.rows(KEY)[0])
+            .unwrap()
+            .contains("resumed_from"));
+        // Rebound, it goes once the resumed run's history shows it.
+        let mut messages = LocalMessages::default();
+        send(&mut messages, "r1", "after resume", &[]);
+        messages.rebind_run(KEY, "r1", "run-2");
+        messages.finished(KEY, "r1", &ok);
+        let shown = [json!({"type": "UserPromptSubmit", "detail": "after resume", "at": 101.0})];
+        messages.reconcile(KEY, &resumed, &shown);
+        assert!(messages.rows(KEY).is_empty());
+        // Another request's row is never rebound.
+        let mut messages = LocalMessages::default();
+        send(&mut messages, "r1", "after resume", &[]);
+        messages.rebind_run(KEY, "other", "run-2");
+        assert_eq!(messages.rows(KEY)[0].run_id, "run-1");
     }
 
     #[test]

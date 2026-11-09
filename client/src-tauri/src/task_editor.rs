@@ -36,6 +36,18 @@ const HANDED_OFF_OPEN: &str = zerus_client_core::source!(
 const NOT_STARTED_KEPT: &str = zerus_client_core::source!(
     "The desktop service did not start this message, so it was not sent. Your draft has changed since, so the original was kept for review: release the record to send your current draft as a new message."
 );
+/// A reopen refused before any input: nothing reached the executor.
+const REOPEN_NOT_SENT: &str = zerus_client_core::source!(
+    "The change request was not sent: it was refused before it reached the executor, and the task was not reopened. It stays in the task history as a note. Your draft was kept, so you can send it again."
+);
+/// The same, while the draft no longer holds that original.
+const REOPEN_NOT_SENT_KEPT: &str = zerus_client_core::source!(
+    "The change request was not sent: it was refused before it reached the executor. Your draft has changed since, so the original was kept for review: release the record to send your current draft as a new message."
+);
+/// A reopen whose delivery its attempt cannot confirm.
+const REOPEN_UNCERTAIN: &str = zerus_client_core::source!(
+    "The change request may have reached the executor, but its delivery could not be confirmed. Its original was kept for review and will not be sent again. Check the executor’s session before you send anything else."
+);
 const TOO_LONG: &str = "Message exceeds 64 KiB.";
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -783,6 +795,27 @@ fn submitted_with_delivery(
             {
                 return Err("The task reply did not match the selected task.".into());
             }
+            // A reopen with execution attempts answers with its own attempt
+            // (A4): only its submitted state is a sent change request.
+            match tasks_write::reopen_attempt(&reply, record["id"].as_str().unwrap_or(""))? {
+                None | Some(tasks_write::Reopen::Submitted) => {}
+                // Refused before any input: nothing was sent, and the text
+                // stays in the task as a note. Only a draft that still holds
+                // this original replaces it; an edited draft keeps the
+                // original for the explicit reviewed release.
+                Some(tasks_write::Reopen::Refused) => {
+                    if current_draft.text == expected.text
+                        && current_draft.attachments == expected.attachments
+                    {
+                        not_started = Some(record);
+                        return Err(REOPEN_NOT_SENT.into());
+                    }
+                    return Err(REOPEN_NOT_SENT_KEPT.into());
+                }
+                // It may have reached the executor: kept for review, never
+                // sent again.
+                Some(tasks_write::Reopen::Uncertain) => return Err(REOPEN_UNCERTAIN.into()),
+            }
             delivered = Some(record["id"].as_str().unwrap_or("").to_owned());
         }
         Ok(())
@@ -1517,6 +1550,95 @@ mod tests {
                 }
             )
             .unwrap());
+        }
+    }
+    /// A reopen with execution attempts settles by its own attempt (A4):
+    /// only "submitted" clears the draft as sent. A refusal keeps the draft
+    /// and releases the original only while the draft still holds it; an
+    /// uncertain or foreign attempt keeps the original for review.
+    #[test]
+    fn a_reopen_settles_by_its_own_attempt() {
+        use zerus_client_core::task_feedback::Delivery;
+        let reopen = |state: &str| {
+            let root = crate::composer::tests::dir(&format!("task-note-reopen-{state}"));
+            let store = crate::composer::tests::drafts(&root);
+            let (hub, _) = crate::composer::tests::hub_on(&store);
+            let detail = json!({"uuid":ID,"project":"example","stage":"review","stage_at":123,"dispatch_id":"","writable":true});
+            let delivery = Delivery {
+                mode: "reopen".into(),
+                stage_at: 123,
+                dispatch_id: String::new(),
+            };
+            let mut slot = slot(Mode::Note);
+            let state = state.to_owned();
+            let result = submitted_with_delivery(
+                &mut slot,
+                &hub,
+                detail.clone(),
+                false,
+                Some(&delivery),
+                None,
+                &|call| {
+                    let at = call.args.iter().position(|a| a == "--request-id").unwrap();
+                    let request = call.args[at + 1].clone();
+                    let mut reply = receipt(&request);
+                    let id = if state == "foreign" {
+                        ID.into()
+                    } else {
+                        request
+                    };
+                    reply.insert(
+                        "attempt".into(),
+                        json!({"id": id, "state": state, "error": ""}),
+                    );
+                    Ok(reply)
+                },
+            );
+            let pending = outbox::pending(store.root(), "example", ID).unwrap();
+            let durable = load(&store, &slot.key()).unwrap().draft;
+            (result, pending, durable, slot, store, hub, detail, root)
+        };
+        let (result, pending, durable, ..) = reopen("submitted");
+        assert_eq!(result, Ok(true));
+        assert!(pending.is_none() && durable.draft.text.is_empty());
+        let (result, pending, durable, slot, ..) = reopen("refused");
+        assert_eq!(result, Err(REOPEN_NOT_SENT.into()));
+        assert!(
+            pending.is_none(),
+            "nothing was sent: the original is released"
+        );
+        assert_eq!(durable.draft.text, "Original");
+        assert!(!durable.uncertain && !durable.sending && !slot.recovery);
+        for state in ["uncertain", "cutting_over", "foreign"] {
+            let (result, pending, durable, mut slot, store, hub, detail, _root) = reopen(state);
+            assert_eq!(
+                result.unwrap_err(),
+                if state == "foreign" {
+                    "The message reply did not match its original identity. Recovery data was kept."
+                } else {
+                    REOPEN_UNCERTAIN
+                }
+            );
+            let record = pending.expect("kept for review, never sent again");
+            assert!(durable.uncertain && slot.recovery);
+            // A refused recovery while the draft changed keeps the original.
+            slot.stored.draft.text = "A different follow-up".into();
+            checkpoint(&mut slot, &store).unwrap();
+            let id = record["id"].as_str().unwrap().to_owned();
+            let refused = |call: &TaskCall| {
+                assert!(call.args.iter().any(|a| a == "--recover-only"));
+                let mut reply = receipt(&id);
+                reply.insert("attempt".into(), json!({"id": id, "state": "refused"}));
+                Ok(reply)
+            };
+            assert_eq!(
+                submitted_with_delivery(&mut slot, &hub, detail, true, None, None, &refused),
+                Err(REOPEN_NOT_SENT_KEPT.into())
+            );
+            assert_eq!(
+                outbox::pending(store.root(), "example", ID).unwrap(),
+                Some(record)
+            );
         }
     }
     /// A route whose send hands off and leaves the original unconfirmed.

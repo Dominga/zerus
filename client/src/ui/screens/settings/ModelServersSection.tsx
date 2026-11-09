@@ -17,9 +17,12 @@ import "../../styles/model-servers.css";
 type Result = { tone: string; text: string } | undefined;
 
 export function ModelServersSection(): JSX.Element {
-  const [form, setForm] = createSignal<ModelServerForm>(formOf(undefined));
-  const [ssh, setSsh] = createSignal<SshMode>("none");
-  const [hasKey, setHasKey] = createSignal(false);
+  // Task #350: a section opened again shows the first server at once, never an
+  // empty form; the read in onMount replaces it with the requested one.
+  const initial = store.servers()[0];
+  const [form, setForm] = createSignal<ModelServerForm>(formOf(initial));
+  const [ssh, setSsh] = createSignal<SshMode>(sshMode(initial?.ssh ?? "", machineNames()));
+  const [hasKey, setHasKey] = createSignal(!!initial?.has_key);
   const [busy, setBusy] = createSignal(false);
   const [saveError, setSaveError] = createSignal("");
   const [api, setApi] = createSignal<Result>();
@@ -84,7 +87,6 @@ export function ModelServersSection(): JSX.Element {
     finally { setBusy(false); }
   };
   const key = () => keyMode(hasKey(), form().key_change);
-  const ResultLine = (props: { result: Result }) => <Show when={props.result}>{(r) => <p class={`ms-result ${r().tone}`} role="status">{r().text}</p>}</Show>;
 
   return (
     <div class="set-section ms-settings">
@@ -99,63 +101,75 @@ export function ModelServersSection(): JSX.Element {
           )}</For>
         </ul>
         <form class="ms-form" onSubmit={(e) => { e.preventDefault(); void save(); }}>
-          <label for="msf-name">{tr("Name")}</label>
-          <input id="msf-name" ref={nameField} class="field" placeholder={tr("lab")} value={form().name} onInput={(e) => set({ name: e.currentTarget.value })} />
-          <label for="msf-url">{tr("Server root")}</label>
-          <div class="row">
-            <input id="msf-url" class="field mono grow" placeholder="http://host.example:8000" value={form().base_url} onInput={(e) => set({ base_url: e.currentTarget.value })} />
-            <div class="ms-seg" role="radiogroup" aria-label={tr("API kind")}>
-              <button type="button" role="radio" aria-checked={form().kind !== "anthropic"} classList={{ on: form().kind !== "anthropic" }} onClick={() => set({ kind: "openai" })}>{tr("OpenAI")}</button>
-              <button type="button" role="radio" aria-checked={form().kind === "anthropic"} classList={{ on: form().kind === "anthropic" }} onClick={() => set({ kind: "anthropic" })}>{tr("Anthropic")}</button>
+          <div class="ms-field"><label for="msf-name">{tr("Name")}</label>
+            <div class="ms-control"><input id="msf-name" ref={nameField} class="field" placeholder={tr("lab")} value={form().name} onInput={(e) => set({ name: e.currentTarget.value })} /></div>
+          </div>
+          <div class="ms-field"><label for="msf-url">{tr("Server root")}</label>
+            <div class="ms-control">
+              <input id="msf-url" class="field mono" placeholder="http://host.example:8000" value={form().base_url} onInput={(e) => set({ base_url: e.currentTarget.value })} />
+              <div class="ms-seg" role="radiogroup" aria-label={tr("API kind")}>
+                <button type="button" role="radio" aria-checked={form().kind !== "anthropic"} classList={{ on: form().kind !== "anthropic" }} onClick={() => set({ kind: "openai" })}>{tr("OpenAI")}</button>
+                <button type="button" role="radio" aria-checked={form().kind === "anthropic"} classList={{ on: form().kind === "anthropic" }} onClick={() => set({ kind: "anthropic" })}>{tr("Anthropic")}</button>
+              </div>
+              <button type="button" class="btn small" onClick={() => void test("api")}>{tr("Test API")}</button>
             </div>
-            <button type="button" class="btn small" onClick={() => void test("api")}>{tr("Test API")}</button>
           </div>
-          <span /><p class="ms-note">{urlHint(form().base_url)}</p>
-          <span /><ResultLine result={api()} />
-          <label for="msf-key">{tr("API key")}</label>
-          <div class="row">
-            <Show when={key().stored}><span class="muted grow"><Icon name="key-round" size={12} /> {key().text}</span></Show>
-            <Show when={key().field}><input id="msf-key" type="password" class="field grow" placeholder={tr("none")} value={form().key} onInput={(e) => set({ key: e.currentTarget.value })} /></Show>
-            <Show when={key().actions}>
-              <button type="button" class="btn small" onClick={() => set({ key_change: "replace" })}>{tr("Replace")}</button>
-              <button type="button" class="btn small danger" onClick={() => set({ key_change: "remove" })}>{tr("Remove")}</button>
-            </Show>
-          </div>
-          <span>{tr("SSH host")}</span>
-          <div class="row">
-            <div class="ms-seg" role="radiogroup" aria-label={tr("SSH host")}>
-              <button type="button" role="radio" aria-checked={ssh() === "none"} classList={{ on: ssh() === "none" }} onClick={() => setSsh("none")}>{tr("None")}</button>
-              <button type="button" role="radio" aria-checked={ssh() === "machine"} classList={{ on: ssh() === "machine" }} onClick={() => { setSsh("machine"); set({ ssh: machineNames().includes(form().ssh) ? form().ssh : machineNames()[0] ?? "" }); }}>{tr("Machine")}</button>
-              <button type="button" role="radio" aria-checked={ssh() === "alias"} classList={{ on: ssh() === "alias" }} onClick={() => { setSsh("alias"); set({ ssh: machineNames().includes(form().ssh) ? "" : form().ssh }); }}>{tr("SSH alias")}</button>
+          <p class="ms-note">{urlHint(form().base_url)}</p>
+          <Show when={api()}>{(r) => <p class={`ms-result ${r().tone}`} role="status">{r().text}</p>}</Show>
+          <div class="ms-field"><label for="msf-key">{tr("API key")}</label>
+            <div class="ms-control">
+              <Show when={key().stored}><span class="muted"><Icon name="key-round" size={12} /> {key().text}</span></Show>
+              <Show when={key().field}><input id="msf-key" type="password" class="field" placeholder={tr("none")} value={form().key} onInput={(e) => set({ key: e.currentTarget.value })} /></Show>
+              <Show when={key().actions}>
+                <button type="button" class="btn small" onClick={() => set({ key_change: "replace" })}>{tr("Replace")}</button>
+                <button type="button" class="btn small danger" onClick={() => set({ key_change: "remove" })}>{tr("Remove")}</button>
+              </Show>
             </div>
-            <Show when={ssh() === "machine"}>
-              <select class="field grow" aria-label={tr("Machine")} value={form().ssh} onChange={(e) => set({ ssh: e.currentTarget.value })}>
-                <For each={machineNames()}>{(alias) => <option value={alias}>{alias}</option>}</For>
-              </select>
-            </Show>
-            <Show when={ssh() === "alias"}>
-              <input class="field grow" aria-label={tr("SSH alias")} placeholder={tr("an alias from your SSH configuration")} value={form().ssh} onInput={(e) => set({ ssh: e.currentTarget.value })} />
-            </Show>
           </div>
-          <span /><p class="ms-note">{tr("Reached through hgs's own SSH transport (BatchMode); hgs is not needed on the server.")}</p>
+          <div class="ms-field"><span>{tr("SSH host")}</span>
+            <div class="ms-control">
+              <div class="ms-seg" role="radiogroup" aria-label={tr("SSH host")}>
+                <button type="button" role="radio" aria-checked={ssh() === "none"} classList={{ on: ssh() === "none" }} onClick={() => setSsh("none")}>{tr("None")}</button>
+                <button type="button" role="radio" aria-checked={ssh() === "machine"} classList={{ on: ssh() === "machine" }} onClick={() => { setSsh("machine"); set({ ssh: machineNames().includes(form().ssh) ? form().ssh : machineNames()[0] ?? "" }); }}>{tr("Machine")}</button>
+                <button type="button" role="radio" aria-checked={ssh() === "alias"} classList={{ on: ssh() === "alias" }} onClick={() => { setSsh("alias"); set({ ssh: machineNames().includes(form().ssh) ? "" : form().ssh }); }}>{tr("SSH alias")}</button>
+              </div>
+              <Show when={ssh() === "machine"}>
+                <select class="field" aria-label={tr("Machine")} value={form().ssh} onChange={(e) => set({ ssh: e.currentTarget.value })}>
+                  <For each={machineNames()}>{(alias) => <option value={alias}>{alias}</option>}</For>
+                </select>
+              </Show>
+              <Show when={ssh() === "alias"}>
+                <input class="field" aria-label={tr("SSH alias")} placeholder={tr("an alias from your SSH configuration")} value={form().ssh} onInput={(e) => set({ ssh: e.currentTarget.value })} />
+              </Show>
+            </div>
+          </div>
+          <p class="ms-note">{tr("Reached through hgs's own SSH transport (BatchMode); hgs is not needed on the server.")}</p>
           <p class="ms-control-title"><b>{tr("CONTROL COMMANDS")}</b> {tr("optional, argv templates; {model} is the model, {server} the server")}</p>
-          <label for="msf-status">{tr("Status")}</label>
-          <div class="row"><input id="msf-status" class="field mono grow" placeholder={tr("not set")} value={form().status} onInput={(e) => set({ status: e.currentTarget.value })} />
-            <button type="button" class="btn small" onClick={() => void test("status")}><Icon name="play" size={12} />{tr("Test")}</button></div>
-          <span /><ResultLine result={status()} />
-          <Show when={raw().length}><span /><pre class="ms-raw mono">{raw().join("\n")}</pre></Show>
-          <label for="msf-up">{tr("Up NAME")}</label>
-          <input id="msf-up" class="field mono" placeholder={tr("not set")} value={form().up} onInput={(e) => set({ up: e.currentTarget.value })} />
-          <label for="msf-down">{tr("Down NAME")}</label>
-          <input id="msf-down" class="field mono" placeholder={tr("not set")} value={form().down} onInput={(e) => set({ down: e.currentTarget.value })} />
-          <span /><p class="ms-note">{tr("Up and Down run from the Model servers tab, after its confirmations: the server may be shared.")}</p>
-          <label for="msf-logs">{tr("Logs NAME")}</label>
-          <div class="row"><input id="msf-logs" class="field mono grow" placeholder={tr("not set")} value={form().logs} onInput={(e) => set({ logs: e.currentTarget.value })} />
-            <button type="button" class="btn small" onClick={() => void test("logs")}><Icon name="play" size={12} />{tr("Test")}</button></div>
-          <span /><ResultLine result={logs()} />
+          <div class="ms-field"><label for="msf-status">{tr("Status")}</label>
+            <div class="ms-control">
+              <input id="msf-status" class="field mono" placeholder={tr("not set")} value={form().status} onInput={(e) => set({ status: e.currentTarget.value })} />
+              <button type="button" class="btn small" onClick={() => void test("status")}><Icon name="play" size={12} />{tr("Test")}</button>
+            </div>
+          </div>
+          <Show when={status()}>{(r) => <p class={`ms-result ${r().tone}`} role="status">{r().text}</p>}</Show>
+          <Show when={raw().length}><pre class="ms-raw mono">{raw().join("\n")}</pre></Show>
+          <div class="ms-field"><label for="msf-up">{tr("Up NAME")}</label>
+            <div class="ms-control"><input id="msf-up" class="field mono" placeholder={tr("not set")} value={form().up} onInput={(e) => set({ up: e.currentTarget.value })} /></div>
+          </div>
+          <div class="ms-field"><label for="msf-down">{tr("Down NAME")}</label>
+            <div class="ms-control"><input id="msf-down" class="field mono" placeholder={tr("not set")} value={form().down} onInput={(e) => set({ down: e.currentTarget.value })} /></div>
+          </div>
+          <p class="ms-note">{tr("Up and Down run from the Model servers tab, after its confirmations: the server may be shared.")}</p>
+          <div class="ms-field"><label for="msf-logs">{tr("Logs NAME")}</label>
+            <div class="ms-control">
+              <input id="msf-logs" class="field mono" placeholder={tr("not set")} value={form().logs} onInput={(e) => set({ logs: e.currentTarget.value })} />
+              <button type="button" class="btn small" onClick={() => void test("logs")}><Icon name="play" size={12} />{tr("Test")}</button>
+            </div>
+          </div>
+          <Show when={logs()}>{(r) => <p class={`ms-result ${r().tone}`} role="status">{r().text}</p>}</Show>
           <pre class="ms-formats mono">{`{"models":[{"name":"small","state":"running"}],"memory":{"free":12.5,"total":64}}\n${tr("or plain lines:  small: running   large: stopped   memory: 12.5/64 GB")}`}</pre>
           <Show when={saveError()}><p class="ms-result error" role="alert">{saveError()}</p></Show>
-          <div class="row ms-buttons">
+          <div class="ms-buttons">
             <Show when={form().was}><button type="button" class="btn danger small" disabled={busy()} onClick={() => void remove()}><Icon name="trash" size={13} />{tr("Delete server…")}</button></Show>
             <span class="grow" />
             <button type="button" class="btn small" disabled={busy()} onClick={() => show(form().was)}>{tr("Cancel")}</button>

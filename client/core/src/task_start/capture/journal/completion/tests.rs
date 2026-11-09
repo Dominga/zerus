@@ -1,5 +1,5 @@
 use super::*;
-use crate::task_start::capture::tests::Fixture;
+use crate::task_start::capture::tests::{retry_busy, Fixture};
 use serde_json::{json, Value};
 use std::fs;
 const READ: &str = "0000000a-1111-4111-8111-111111111111";
@@ -13,6 +13,17 @@ fn offered(f: &Fixture) -> Saved {
     journal.offer().unwrap();
     drop(journal);
     saved(f)
+}
+// Every settlement follows `offered`'s lock, which a parallel fork may still
+// hold through an inherited description (zerus-p1l5z): wait for Busy, the
+// no-write refusal, and keep every other result exactly.
+fn settle(
+    saved: &mut Saved,
+    query: &wire::Query,
+    lookup: &wire::Lookup,
+    mut current: impl FnMut() -> bool,
+) -> Result<Settlement, Error> {
+    retry_busy(|| saved.settle_submitted(query, lookup, &mut current))
 }
 fn saved(f: &Fixture) -> Saved {
     Saved::read(
@@ -73,7 +84,7 @@ fn exact_submitted_and_drained_metadata_sets_only_phase_and_error_without_a_fake
     expected["error"] = json!("");
     let marker = fs::read(&f.marker).unwrap();
     assert_eq!(
-        saved.settle_submitted(&q, &r, || true).unwrap(),
+        settle(&mut saved, &q, &r, || true).unwrap(),
         Settlement::Applied
     );
     assert_eq!(
@@ -84,7 +95,7 @@ fn exact_submitted_and_drained_metadata_sets_only_phase_and_error_without_a_fake
     assert_eq!(saved.phase(), Phase::Completed);
     let bytes = fs::read(&f.file).unwrap();
     assert_eq!(
-        saved.settle_submitted(&q, &r, || true).unwrap(),
+        settle(&mut saved, &q, &r, || true).unwrap(),
         Settlement::AlreadyApplied
     );
     assert_eq!(fs::read(&f.file).unwrap(), bytes);
@@ -111,9 +122,7 @@ fn unknown_undrained_or_mismatched_result_never_changes_the_original_or_journal(
         }
         let before = (fs::read(&f.file).unwrap(), saved.disk.bytes.clone());
         assert!(
-            saved
-                .settle_submitted(&q, &r, || mode != "current")
-                .is_err(),
+            settle(&mut saved, &q, &r, || mode != "current").is_err(),
             "{mode}"
         );
         assert_eq!(fs::read(&f.file).unwrap(), before.0);
@@ -134,7 +143,7 @@ fn identical_replacement_or_changed_opaque_source_is_not_cas_eligible() {
             crate::fsx::write_private_atomic(&f.file, &bytes, true).unwrap();
         }
         let before = fs::read(&f.file).unwrap();
-        assert!(saved.settle_submitted(&q, &r, || true).is_err());
+        assert!(settle(&mut saved, &q, &r, || true).is_err());
         assert_eq!(fs::read(&f.file).unwrap(), before);
         assert_eq!(saved.phase(), Phase::OfferedUnknown);
     }
@@ -144,12 +153,11 @@ fn restart_after_the_outbox_cas_finishes_metadata_without_writing_it_twice() {
     let f = Fixture::new();
     let mut saved = offered(&f);
     let (q, r) = submitted(&f, &saved);
-    assert!(saved
-        .settle_submitted(&q, &r, || {
-            let value: Value = serde_json::from_slice(&fs::read(&f.file).unwrap()).unwrap();
-            value["phase"] != "started"
-        })
-        .is_err());
+    assert!(settle(&mut saved, &q, &r, || {
+        let value: Value = serde_json::from_slice(&fs::read(&f.file).unwrap()).unwrap();
+        value["phase"] != "started"
+    })
+    .is_err());
     assert_eq!(saved.phase(), Phase::SettlementPrepared);
     let bytes = fs::read(&f.file).unwrap();
     let file = File::open(&f.file).unwrap();
@@ -157,7 +165,7 @@ fn restart_after_the_outbox_cas_finishes_metadata_without_writing_it_twice() {
     drop(saved);
     let mut saved = super::tests::saved(&f);
     assert_eq!(
-        saved.settle_submitted(&q, &r, || true).unwrap(),
+        settle(&mut saved, &q, &r, || true).unwrap(),
         Settlement::AlreadyApplied
     );
     assert_eq!(saved.phase(), Phase::Completed);
@@ -172,7 +180,7 @@ fn a_genuinely_new_delivery_is_preserved_and_only_then_can_have_an_explicit_new_
     let mut f = Fixture::new();
     let mut saved = offered(&f);
     let (q, r) = submitted(&f, &saved);
-    saved.settle_submitted(&q, &r, || true).unwrap();
+    settle(&mut saved, &q, &r, || true).unwrap();
     f.intent.binding.key.request_id = NEXT.into();
     f.intent.binding.marker_id = NEXT.into();
     f.change(|v| {
@@ -191,7 +199,7 @@ fn a_genuinely_new_delivery_is_preserved_and_only_then_can_have_an_explicit_new_
     );
     let before = fs::read(&f.file).unwrap();
     assert_eq!(
-        saved.settle_submitted(&q, &r, || true).unwrap(),
+        settle(&mut saved, &q, &r, || true).unwrap(),
         Settlement::ChangedOriginal
     );
     assert_eq!(fs::read(&f.file).unwrap(), before);
@@ -233,7 +241,7 @@ fn source_change_or_native_connection_loss_at_the_cas_boundary_keeps_the_origina
         let changed = [before.as_slice(), b" "].concat();
         let prefix = format!("{}.", f.file.file_name().unwrap().to_str().unwrap());
         let mut boundary = false;
-        let result = saved.settle_submitted(&q, &r, || {
+        let result = settle(&mut saved, &q, &r, || {
             let staged = fs::read_dir(f.file.parent().unwrap()).unwrap().any(|e| {
                 let name = e.unwrap().file_name();
                 let name = name.to_str().unwrap();
@@ -270,12 +278,11 @@ fn changed_or_replaced_marker_refuses_original_and_post_cas_settlement() {
             let mut saved = offered(&f);
             let (q, r) = submitted(&f, &saved);
             if after_cas {
-                assert!(saved
-                    .settle_submitted(&q, &r, || {
-                        let v: Value = serde_json::from_slice(&fs::read(&f.file).unwrap()).unwrap();
-                        v["phase"] != "started"
-                    })
-                    .is_err());
+                assert!(settle(&mut saved, &q, &r, || {
+                    let v: Value = serde_json::from_slice(&fs::read(&f.file).unwrap()).unwrap();
+                    v["phase"] != "started"
+                })
+                .is_err());
                 assert_eq!(saved.phase(), Phase::SettlementPrepared);
             }
             let marker = if wrong_bytes {
@@ -285,7 +292,7 @@ fn changed_or_replaced_marker_refuses_original_and_post_cas_settlement() {
             };
             crate::fsx::write_private_atomic(&f.marker, &marker, true).unwrap();
             let before = (fs::read(&f.file).unwrap(), saved.disk.bytes.clone());
-            assert!(saved.settle_submitted(&q, &r, || true).is_err());
+            assert!(settle(&mut saved, &q, &r, || true).is_err());
             assert_eq!(fs::read(&f.file).unwrap(), before.0);
             assert_eq!(saved.disk.bytes, before.1);
         }
@@ -298,7 +305,7 @@ fn serialized_marker_version_never_substitutes_for_exact_marker_bytes() {
     let (q, r) = submitted(&f, &saved);
     crate::fsx::write_private_atomic(&f.marker, NEXT.as_bytes(), true).unwrap();
     // A frozen Version is serialized metadata, never authority for another marker.
-    let lock = saved.slot.lock(false).unwrap();
+    let lock = retry_busy(|| saved.slot.lock(false)).unwrap();
     let mut record = saved.disk.record.clone();
     record.version.marker = file_version(&File::open(&f.marker).unwrap(), 128).unwrap();
     saved.disk = publish(
@@ -312,7 +319,7 @@ fn serialized_marker_version_never_substitutes_for_exact_marker_bytes() {
     .unwrap();
     drop(lock);
     let before = fs::read(&f.file).unwrap();
-    assert!(saved.settle_submitted(&q, &r, || true).is_err());
+    assert!(settle(&mut saved, &q, &r, || true).is_err());
     assert_eq!(fs::read(&f.file).unwrap(), before);
 }
 #[test]
@@ -320,7 +327,7 @@ fn completed_original_cannot_prepare_another_check_for_the_same_delivery_id() {
     let mut f = Fixture::new();
     let mut saved = offered(&f);
     let (q, r) = submitted(&f, &saved);
-    saved.settle_submitted(&q, &r, || true).unwrap();
+    settle(&mut saved, &q, &r, || true).unwrap();
     f.change(|v| {
         v["phase"] = json!("review");
         v["error"] = json!("fixture: same ID review");

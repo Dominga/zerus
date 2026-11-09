@@ -7,14 +7,5 @@ WhiteWh fork
 - hgs-tray.exe is the Tauri desktop. A versioned installation keeps it in
   <root>\app-<build> with <root>\current pointing at the running build; start
   Zerus from current\hgs-tray.exe.
-
-Qt fallback
-- @QT_FALLBACK@
-- It is not the default and it does not update itself. Start it by hand only
-  if the Tauri desktop does not work for you: quit Zerus (the tray menu's
-  Quit), then run qt\zerus-qt.exe from this folder. It uses the hgs.exe of
-  this folder and the same accounts, sessions and agents.
-- The Tauri desktop imported the Qt settings and composer drafts once, on its
-  first start; changes you make in the fallback do not reach it.
-- Updates still come only through the Tauri desktop. The next fork releases
-  drop the fallback.
+- The fork ships only the Tauri desktop; the earlier Qt fallback
+  (qt\zerus-qt.exe) is gone. Quit an old fallback before starting this build.

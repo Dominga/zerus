@@ -165,6 +165,27 @@ else if (process.argv[2] === 'login') {
             (source / name).write_bytes(text.encode())
         return source
 
+    def test_windows_pipe_helper_preserves_native_bytes_exit_and_slow_consumers(self):
+        data = bytes(range(256))*32
+        stdout, stderr = self.root/'bytes.out', self.root/'bytes.err'
+        stdout.write_bytes(data); stderr.write_bytes(data[::-1])
+        for code, pause in ((0, 0), (7, 3)):
+            with self.subTest(code=code, pause=pause):
+                environment = dict(self.env, FAKE_SSH_MODE='canned', FAKE_SSH_EXIT=str(code),
+                                   FAKE_SSH_STDOUT=str(stdout), FAKE_SSH_STDERR=str(stderr))
+                child = subprocess.Popen([str(HGS), '--ssh-bytes-client', 'peer', '__hgs_ssh_bytes_v1__ fixed'],
+                                         env=environment, stdin=subprocess.DEVNULL,
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                try:
+                    if pause: time.sleep(pause)
+                    out, err = child.communicate(timeout=10)
+                    self.assertEqual(child.returncode, code)
+                    self.assertEqual(out, data)
+                    self.assertEqual(err, data[::-1])
+                finally:
+                    if child.poll() is None: child.terminate(); child.wait(timeout=5)
+                    child.stdout.close(); child.stderr.close()
+
     def test_the_fake_client_refuses_streams_that_break_windows_openssh(self):
         # Every other test therefore proves that hgs gives ssh.exe only consoles
         # and overlapped pipes, whatever its own streams are: a CI runner's are
@@ -733,6 +754,11 @@ else if (process.argv[2] === 'login') {
             process.kill()  # TerminateProcess, as the desktop app stops a stuck poll
             process.wait(timeout=10)
         self.assertTrue(exited(child, 5), 'the job object should end the SSH client with hgs')
+
+
+# The same Windows job builds fake_agent. Keep the fixed remote decoder's
+# native PowerShell/cmd controls in its ordinary client cohort.
+from test_remote_windows import WindowsNativeTransport  # noqa: E402,F401
 
 
 if __name__ == '__main__':

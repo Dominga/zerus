@@ -4,8 +4,15 @@ import { tr } from "../i18n";
 
 // Task 69: the account of a running session (`AccountSwitch.*`): options are
 // this computer's signed-in profiles of the same agent, the current one first.
+// Task 352: every installed agent's usable accounts, grouped by agent; an
+// account of another agent moves the session there with a handoff.
 
+/** Agents whose accounts a session changes in place (`hgs switch-account`). */
 export const switchable = (provider: string) => provider === "claude" || provider === "codex";
+
+/** Agents a session moves between, in the menu's group order. */
+export const MOVE_AGENTS = ["claude", "codex", "kimi", "dsh", "opencode"] as const;
+export const movable = (provider: string) => (MOVE_AGENTS as readonly string[]).includes(provider);
 
 /** The session's account id as the switch reads it: none is the native one. */
 export const accountOf = (provider: string, accountId: string) =>
@@ -26,6 +33,58 @@ export function accountOptions(view: AccountsView, host: string, provider: strin
     }
   }
   return rows.sort((a, b) => Number(b.id === current) - Number(a.id === current));
+}
+
+/** One agent's accounts in the chip's menu. */
+export interface AccountGroup { provider: string; rows: Profile[] }
+
+/** Whether a profile can take a session: installed and online here, and for
+ * Claude, Codex and Kimi signed in. DeepSeek and OpenCode run on their
+ * native configuration. */
+function usable(profile: Profile): boolean {
+  if (!profile.installed || profile.online === false || profile.state === "not-installed" || profile.state === "offline") return false;
+  if (profile.provider === "dsh" || profile.provider === "opencode") return true;
+  return profile.signed_in === true && !signedOut.has(profile.state);
+}
+
+/** Task 352: every usable account of every agent on the session's computer,
+ * grouped by agent: the session's own agent first (its current account first
+ * and marked), then the others in MOVE_AGENTS order. The own agent's other
+ * accounts are offered only where it switches in place. */
+export function accountGroups(view: AccountsView, host: string, provider: string, current: string): AccountGroup[] {
+  const groups = new Map<string, Profile[]>();
+  const seen = new Set<string>();
+  for (const account of view.accounts) {
+    for (const profile of account.members) {
+      if (profile.host !== host || !movable(profile.provider) || seen.has(`${profile.provider}/${profile.id}`)) continue;
+      const own = profile.provider === provider;
+      const currentRow = own && profile.id === current;
+      if (!currentRow && (!usable(profile) || (own && !switchable(provider)))) continue;
+      seen.add(`${profile.provider}/${profile.id}`);
+      groups.set(profile.provider, [...(groups.get(profile.provider) ?? []), profile]);
+    }
+  }
+  const order = [provider, ...MOVE_AGENTS.filter((agent) => agent !== provider)];
+  return order.filter((agent) => groups.has(agent)).map((agent) => ({
+    provider: agent,
+    rows: (groups.get(agent) ?? []).sort((a, b) => Number(b.id === current) - Number(a.id === current)),
+  }));
+}
+
+/** The line the chip shows after a move to another agent. */
+export function moveOutcome(receipt: Record<string, unknown>, error: string, target: string): string {
+  const status = String(receipt.status ?? "");
+  const created = String(receipt.new_session ?? "");
+  if (status === "moved") return tr("Moved to %1 in %2; the old session is stopped and stays readable.", target, created);
+  if (status === "uncertain") return tr("%1 started for %2, but it did not confirm the handoff. Check it; Zerus does not retry.", created || target, target);
+  if (status === "failed") {
+    const reason = String(receipt.reason ?? "");
+    return receipt.relaunched === false
+      ? tr("The move to %1 failed (%2). Resume the old session from Activity.", target, reason)
+      : tr("The move to %1 failed (%2); the old session resumed.", target, reason);
+  }
+  const clean = error.replace(/^hgs:\s*/, "").trim();
+  return tr("Not moved: %1", clean || tr("the move gave no receipt"));
 }
 
 /** The line the chip shows after a switch, as Qt words its receipt. */

@@ -55,7 +55,7 @@ fn a_failure_that_passes_on_its_retry_is_flaky_with_its_history_and_quarantine()
     let mut all = Vec::new();
     for episode in 0..4 {
         let marker = format!("m{episode}");
-        let ran = run_due(&database, dir.path(), &[request(&format!("r{episode}"), "gui", &flaky_command(&marker))], 100.0 + f64::from(episode), &policy()).unwrap();
+        let ran = run_due(&database, dir.path(), &[request(&format!("r{episode}"), "gui", &flaky_command(&marker))], 100.0 + f64::from(episode), &policy(), None).unwrap();
         assert_eq!(ran[0].status, "flaky", "{:?}", ran[0]);
         assert_eq!(ran[0].flags, vec!["retried"]);
         // The episode keeps the failure the retry hid.
@@ -91,7 +91,7 @@ fn a_failure_that_passes_on_its_retry_is_flaky_with_its_history_and_quarantine()
     assert!(super::super::inbox::items(&team).iter().all(|item| item.kind != "test_alert"));
     assert!(settle(&mut team, "dismiss", &json!({"kind":"flaky","suite":"gui"}), 301.0).is_err());
     for episode in 4..7 {
-        let ran = run_due(&database, dir.path(), &[request(&format!("r{episode}"), "gui", &flaky_command(&format!("m{episode}")))], 400.0 + f64::from(episode), &policy()).unwrap();
+        let ran = run_due(&database, dir.path(), &[request(&format!("r{episode}"), "gui", &flaky_command(&format!("m{episode}")))], 400.0 + f64::from(episode), &policy(), None).unwrap();
         apply(&mut team, &ran, &database, &policy(), 400.0 + f64::from(episode), (0.0, 0)).unwrap();
         let open = team.test_alerts.iter().filter(|alert| alert.kind == "flaky" && !alert.dismissed).count();
         assert_eq!(open, usize::from(episode == 6), "episode {episode}");
@@ -120,7 +120,7 @@ fn a_crash_is_never_retried_to_green() {
         cases.push(("av", counted("av.txt", "exit /b -1073741819")));
     }
     for (name, command) in cases {
-        let ran = run_due(&database, dir.path(), &[request(name, "gui", &command)], 100.0, &policy()).unwrap();
+        let ran = run_due(&database, dir.path(), &[request(name, "gui", &command)], 100.0, &policy(), None).unwrap();
         assert_eq!(ran[0].status, "crashed", "{name}: {:?}", ran[0]);
         assert_eq!(ran[0].flags, vec!["crash"]);
         let runs = std::fs::read_to_string(dir.path().join(format!("{name}.txt"))).unwrap();
@@ -138,7 +138,7 @@ fn a_suite_grown_past_its_recorded_time_or_its_budget_is_flagged_for_the_lead() 
     let mut grown = request("grown", "unit", slow);
     grown.seconds = 0.2;
     // Recorded 0.2 s, ran about a second: more than half over it.
-    let ran = run_due(&database, dir.path(), &[grown.clone()], 100.0, &policy()).unwrap();
+    let ran = run_due(&database, dir.path(), &[grown.clone()], 100.0, &policy(), None).unwrap();
     assert_eq!(ran[0].status, "passed");
     assert_eq!(ran[0].flags, vec!["slower"]);
     assert_eq!(ran[0].recorded_ms, 200);
@@ -148,14 +148,14 @@ fn a_suite_grown_past_its_recorded_time_or_its_budget_is_flagged_for_the_lead() 
     assert!(card.summary.contains("slower than recorded") && card.summary.contains("recorded 0 s"), "{}", card.summary);
     // Within the share: no flag; growth off: no flag.
     grown.seconds = 60.0;
-    assert!(run_due(&database, dir.path(), &[Request { id: "fine".into(), ..grown.clone() }], 101.0, &policy()).unwrap()[0].flags.is_empty());
+    assert!(run_due(&database, dir.path(), &[Request { id: "fine".into(), ..grown.clone() }], 101.0, &policy(), None).unwrap()[0].flags.is_empty());
     let off = Policy { grow_percent: 0, ..policy() };
     grown.seconds = 0.2;
-    assert!(run_due(&database, dir.path(), &[Request { id: "off".into(), ..grown.clone() }], 102.0, &off).unwrap()[0].flags.is_empty());
+    assert!(run_due(&database, dir.path(), &[Request { id: "off".into(), ..grown.clone() }], 102.0, &off, None).unwrap()[0].flags.is_empty());
     // Over its time budget: flagged and one lead item.
     let mut over = request("over", "unit", slow);
     over.budget_minutes = 0.005;
-    let ran = run_due(&database, dir.path(), &[over], 103.0, &policy()).unwrap();
+    let ran = run_due(&database, dir.path(), &[over], 103.0, &policy(), None).unwrap();
     assert!(ran[0].flags.contains(&"over_time_budget".to_owned()), "{:?}", ran[0].flags);
     apply(&mut team, &ran, &database, &policy(), 103.0, (0.0, 0)).unwrap();
     let alert = team.test_alerts.iter().find(|alert| alert.kind == "time_budget").unwrap();
@@ -239,10 +239,10 @@ fn unchanged_inputs_reuse_the_last_green_result_and_rust_never_does() {
     let database = store(dir.path());
     let mut green = request("g", "py", if cfg!(windows) { "exit /b 0" } else { "true" });
     green.input_hash = first.clone();
-    run_due(&database, dir.path(), &[green.clone()], 100.0, &policy()).unwrap();
+    run_due(&database, dir.path(), &[green.clone()], 100.0, &policy(), None).unwrap();
     let mut red = request("red", "py", if cfg!(windows) { "exit /b 3" } else { "exit 3" });
     red.input_hash = changed.clone();
-    let failed = run_due(&database, dir.path(), &[red], 101.0, &Policy { retries: 0, ..policy() }).unwrap();
+    let failed = run_due(&database, dir.path(), &[red], 101.0, &Policy { retries: 0, ..policy() }, None).unwrap();
     assert_eq!(failed[0].status, "failed");
     assert!(database.last_green("t", "py", &changed).unwrap().is_none(), "a red run is never reused");
     let source = database.last_green("t", "py", &first).unwrap().unwrap();
@@ -266,7 +266,7 @@ fn enough_reused_results_propose_a_full_run_with_its_estimate() {
     let database = store(dir.path());
     let mut green = request("g", "py", if cfg!(windows) { "exit /b 0" } else { "true" });
     green.input_hash = "same".into();
-    let source = run_due(&database, dir.path(), &[green.clone()], 100.0, &policy()).unwrap().remove(0);
+    let source = run_due(&database, dir.path(), &[green.clone()], 100.0, &policy(), None).unwrap().remove(0);
     let by_count = Policy { full_after: 3, ..policy() };
     let mut team = team();
     for n in 0..3 {

@@ -372,6 +372,8 @@ pub struct Flags {
     /// `mobile-peer-session-id-v1`: its mobile peer entry points accept that
     /// flag after the session. Not an operation.
     pub peer_session_id: bool,
+    /// Complete current-session reads and ID project membership, not just mutation selection.
+    pub session_labels: bool,
 }
 
 impl Flags {
@@ -427,6 +429,9 @@ impl Flags {
             peer_session_id: help
                 .lines()
                 .any(|line| line.trim() == crate::session_selector::PEER_MARKER),
+            session_labels: help
+                .lines()
+                .any(|line| line.trim() == crate::session_selector::LABELS_MARKER),
         };
         if flags.windows_gateway {
             return flags.windows_local();

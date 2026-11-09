@@ -47,12 +47,40 @@ elif args[3] == "rm":
     catalog["profiles"].remove(profile)
 elif args[3] == "permissions":
     mode = args[args.index("--mode") + 1]
-    assert mode in ("provider", "bypass")
+    assert mode in ("provider", "bypass", "default")
+    if "--expect-scope" in args and profile.get("permission_scope", "account") != args[args.index("--expect-scope") + 1]:
+        print("Permissions on this account changed between shared and per computer. Refresh before saving.", file=sys.stderr)
+        sys.exit(1)
     profile["permission_mode"] = mode
+elif args[3] == "permission-scope":
+    scope = args[args.index("--scope") + 1]
+    assert scope in ("account", "computer")
+    profile["permission_scope"] = scope
+    # As the real CLI: the scope lives beside accounts.json, so the catalog
+    # revision does not change.
+    (root / "catalog.json").write_text(json.dumps(catalog))
+    print(json.dumps(catalog))
+    sys.exit()
+elif args[3] == "mark":
+    # As the real CLI: marks live beside accounts.json; --if-unset fills
+    # only what the computer has no value for.
+    mark = profile.setdefault("mark", {"color": None, "emoji": None})
+    for field in ("color", "emoji"):
+        value = args[args.index("--" + field) + 1]
+        if "--if-unset" in args and mark[field]:
+            continue
+        mark[field] = None if value == "none" else value
+    (root / "catalog.json").write_text(json.dumps(catalog))
+    print(json.dumps(catalog))
+    sys.exit()
 elif args[3] == "model-defaults":
     model, effort = args[args.index("--model") + 1], args[args.index("--effort") + 1]
     assert (not model and not effort) or (model == "model-a" and effort in ("", "low", "high"))
     profile["model_defaults"] = {"model": model, "effort": effort}
+    # A test hook: another desktop keeps this profile's permissions per
+    # computer right after the model is saved.
+    if (root / "scope-after-model").exists():
+        profile["permission_scope"] = "computer"
 else:
     raise AssertionError(args)
 catalog["revision"] = "r" + str(int(catalog["revision"][1:]) + 1)

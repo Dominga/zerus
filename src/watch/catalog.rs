@@ -33,6 +33,24 @@ pub(super) fn digest(value: &Value) -> Digest32 {
     Sha256::digest(value.to_string().as_bytes()).into()
 }
 
+/// The parent states of every row again, after some rows were derived on
+/// their own: a derived subset reads each parent outside it as missing, so a
+/// supervised child would flap between live and missing until the next whole
+/// listing (zerus-sa9qn.16). Digests change only where a row was `updated`
+/// or its parent state changed.
+pub(super) fn redecorate(rows: &mut [(String, Value)], digests: &mut [Digest32], updated: &BTreeSet<usize>) {
+    let state = |row: &Value| row.get("parent").and_then(|link| link.get("state")).cloned();
+    let before: Vec<Option<Value>> = rows.iter().map(|(_, row)| state(row)).collect();
+    let mut values: Vec<Value> = rows.iter_mut().map(|(_, row)| std::mem::take(row)).collect();
+    crate::state::parent_link::decorate(&mut values);
+    for (index, ((_, slot), row)) in rows.iter_mut().zip(values).enumerate() {
+        *slot = row;
+        if updated.contains(&index) || state(slot) != before[index] {
+            digests[index] = row_digest(slot);
+        }
+    }
+}
+
 /// A row's digest with its volatile fields masked.
 pub(super) fn row_digest(row: &Value) -> Digest32 {
     digest(&masked(row, &VOLATILE_ROW))
@@ -165,6 +183,37 @@ pub(super) fn pages<T>(items: Vec<T>, size: impl Fn(&T) -> usize, limit: usize) 
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_derived_child_reads_its_listed_parent_live_again() {
+        // zerus-sa9qn.16: a child derived on its own read its parent as
+        // missing, so its supervised mark and quiet attention flapped.
+        let lead = "22222222-2222-4222-8222-222222222222";
+        let link = |state: &str| json!({"machine":"11111111-1111-4111-8111-111111111111","session_id":lead,
+            "name":"claude/p/lead","conversation_id":"c","run_id":"r","source":"adopt","at":1,"state":state});
+        let mut rows = vec![
+            ("run:lead".to_owned(), json!({"name":"claude/p/lead","run_id":"lead","session_id":lead,"state":"running"})),
+            ("run:kid".to_owned(), json!({"name":"claude/p/kid","run_id":"kid","parent":link("live")})),
+            ("run:other".to_owned(), json!({"name":"codex/p/other","run_id":"other"})),
+            ("run:codex-kid".to_owned(), json!({"name":"codex/p/kid","run_id":"codex-kid","parent":link("live")})),
+        ];
+        let mut digests: Vec<Digest32> = rows.iter().map(|(_, row)| row_digest(row)).collect();
+        let listed = digests.clone();
+        // The derived subset (each child alone, a Claude and a Codex one)
+        // read its parent as missing.
+        rows[1].1["parent"] = link("missing");
+        rows[3].1["parent"] = link("missing");
+        redecorate(&mut rows, &mut digests, &BTreeSet::from([1, 3]));
+        assert_eq!((&rows[1].1["parent"]["state"], &rows[3].1["parent"]["state"]), (&json!("live"), &json!("live")));
+        assert_eq!(digests, listed, "the same row as listed: nothing to send");
+        // The parent exits: its children follow at once.
+        rows[0].1["process_state"] = json!("exited");
+        redecorate(&mut rows, &mut digests, &BTreeSet::from([0]));
+        assert_eq!(rows[1].1["parent"]["state"], "saved");
+        assert_eq!(rows[3].1["parent"]["state"], "saved");
+        assert_ne!(digests[1], listed[1]);
+        assert_eq!(digests[2], listed[2]);
+    }
 
     fn row(name: &str, run: &str, phase: &str, observed: f64) -> Value {
         json!({"name":name,"run_id":run,"phase":phase,"goal_observed_at":observed,

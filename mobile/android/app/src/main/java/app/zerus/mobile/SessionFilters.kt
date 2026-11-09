@@ -14,7 +14,9 @@ enum class SessionFilter(val id: String, val caption: String) {
     All("all", "All sessions"), Attention("attention", "Needs attention"), Active("active", "Active"),
     Saved("paused", "Saved sessions"), Archive("archived", "Archive")
 }
-data class SessionGroup(val key: ProjectKey, val name: String, val color: String, val sessions: List<Session>)
+/** `cards` nests child sessions under their parents (ChildSessions.nest); a group built without nesting lists each session. */
+data class SessionGroup(val key: ProjectKey, val name: String, val color: String, val sessions: List<Session>,
+    val cards: List<SessionCardEntry> = sessions.map { SessionCardEntry(it) })
 
 object SessionFilters {
     fun machineKey(target: Target) = MachineKey(target.connectionId, target.computerId)
@@ -35,8 +37,10 @@ object SessionFilters {
                 (recovery !in listOf("waiting", "dispatching", "retrying") || providerError in listOf("quota", "provider_policy")) ||
                 recovery in listOf("uncertain", "blocked", "exhausted"))
     }
+    /** A keep-warm ping is running: the agent works, but not on the person's turn (desktop core `keep_warm_turn`). */
+    fun keepWarmTurn(session: Session) = KeepWarmPresentation.turnActive(session.raw)
     fun working(session: Session, online: Boolean) = !archived(session) && currentActivity(session, online) &&
-        (session.raw.string("activity") == "busy" || backgroundIdle(session)) && !needsAction(session)
+        (session.raw.string("activity") == "busy" || backgroundIdle(session)) && !needsAction(session) && !keepWarmTurn(session)
     private fun positiveCount(value: Any?) = (value as? Number)?.toDouble()?.let { it.isFinite() && it > 0 && it % 1.0 == 0.0 } == true
     fun hasCoordinationWait(session: Session): Boolean {
         val wait = session.raw.optJSONObject("coordination_wait") ?: return false
@@ -61,7 +65,7 @@ object SessionFilters {
         return label + (if(includeProducer && name.isNotBlank()) " from $name" else "") + (if(includeProducer && host.isNotBlank()) " on $host" else "") +
             (if(wait.optInt("count") > 1) " (+${wait.optInt("count")-1})" else "") + (if(elapsed.isNotBlank()) " ($elapsed)" else "")
     }
-    fun replyInProgress(session: Session, online: Boolean) = currentActivity(session, online) &&
+    fun replyInProgress(session: Session, online: Boolean) = currentActivity(session, online) && !keepWarmTurn(session) &&
         (session.raw.string("activity") == "busy" || positiveCount(session.raw.optJSONObject("process_work")?.opt("count")) ||
             positiveCount(session.raw.opt("subagent_active_count") as? Number ?: session.raw.opt("subagent_count")) ||
             session.raw.string("activity") == "idle" && session.raw.string("phase") == "idle" && hasCoordinationWait(session))
@@ -158,6 +162,7 @@ object SessionFilters {
                 !RecoveryPresentation.resumed(raw.optJSONObject("recovery")) -> "Retrying"
             raw.string("phase") == "error" -> "Error"
             raw.string("phase") == "interrupted" -> "Interrupted"
+            keepWarmTurn(session) -> "Warming cache"
             raw.string("phase") == "compacting" -> "Compacting"
             raw.string("phase") == "starting" -> "Starting"
             raw.string("phase") == "tool" -> "Using a tool"

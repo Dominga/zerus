@@ -8,6 +8,8 @@ import tempfile
 import time
 import unittest
 
+import graph_timeout
+
 HGS = Path(os.environ.get('HGS_TEST_BIN', Path(__file__).resolve().parents[1] / 'target/debug/hgs')).resolve()
 
 
@@ -32,8 +34,8 @@ class SessionGraph(unittest.TestCase):
         return path, value
 
     def graph(self, *args, success=True, timeout=5):
-        result = subprocess.run([str(HGS), 'graph', *args, '--json'], env=self.env,
-                                text=True, capture_output=True, timeout=timeout)
+        result = graph_timeout.run([str(HGS), 'graph', *args, '--json'], env=self.env,
+                                   timeout=timeout)
         self.assertEqual(self.marker.read_bytes(), b'{"fixture":"untouched"}\n')
         if success:
             self.assertEqual(result.returncode, 0, result.stderr)

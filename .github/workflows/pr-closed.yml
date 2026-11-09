@@ -1,0 +1,131 @@
+name: Cancel a closed pull request's runs
+
+# Merged or closed pull requests no longer need their checks. Their queued and
+# running runs would otherwise hold the hosted runners (zerus-b8zze). A run
+# still active a minute after an ordinary cancel is force-cancelled, since
+# queued runs can ignore that cancel (zerus-b8zze.2). Main, Dev, nightly,
+# schedule and publication runs are never pull_request events and are never
+# touched.
+#
+# This is a pull_request workflow, as docs/ci-and-aur.md requires: a fork PR
+# gets a read-only token and maintainer approval, so this only acts on
+# same-repository PRs. A PR with a merge conflict starts no pull_request
+# workflow; its earlier heads' runs were already cancelled per PR.
+on:
+  pull_request:
+    branches: [main]
+    types: [closed]
+
+permissions: {}
+cache-mode: none
+
+# Per PR, like every pull_request workflow; a later close redoes the same work.
+concurrency:
+  group: pr-closed-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  cancel:
+    name: Cancel queued and running checks
+    if: github.repository == 'ufna/zerus'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    cache-mode: none
+    # Only this inline script runs, with no checkout, action or secret.
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel this pull request's runs that started before it closed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          CLOSED_AT: ${{ github.event.pull_request.closed_at }}
+        run: |
+          python3 - <<'PY'
+          import datetime, json, os, subprocess, time
+
+          # Statuses of a run that holds or waits for a runner.
+          ACTIVE = ('queued', 'in_progress', 'waiting', 'pending', 'requested')
+          # Seconds an ordinary cancel gets before force-cancel (zerus-b8zze.2).
+          SETTLE = 60
+
+          def when(value):
+              return datetime.datetime.fromisoformat(value.replace('Z', '+00:00'))
+
+          def doomed(runs, number, branch, repository, own_run, closed_at):
+              """This PR's active pull_request runs that started before it closed.
+
+              A run that names another PR and not this one is left alone, and so
+              are this workflow's own run and runs of a reopened PR."""
+              chosen = set()
+              for run in runs:
+                  linked = [entry.get('number') for entry in run.get('pull_requests') or []]
+                  if (run.get('id') != own_run and run.get('event') == 'pull_request'
+                          and run.get('status') in ACTIVE
+                          and run.get('head_branch') == branch
+                          and (run.get('head_repository') or {}).get('full_name') == repository
+                          and (not linked or number in linked)
+                          and when(run['created_at']) <= closed_at):
+                      chosen.add(run['id'])
+              return sorted(chosen)
+
+          def api(*args):
+              result = subprocess.run(['gh', 'api', *args], capture_output=True, text=True)
+              return result.returncode, result.stdout, (result.stderr.strip().splitlines() or [''])[-1][:200]
+
+          def listing(call, branch):
+              """The branch's active pull_request runs, in bounded pages per status."""
+              runs = {}
+              for status in ACTIVE:
+                  for page in range(1, 6):
+                      code, output, error = call('-X', 'GET', 'repos/ufna/zerus/actions/runs',
+                                                 '-f', 'event=pull_request', '-f', f'branch={branch}',
+                                                 '-f', f'status={status}', '-F', 'per_page=100', '-F', f'page={page}')
+                      if code:
+                          raise SystemExit(f'Run listing failed: {error}')
+                      batch = json.loads(output)['workflow_runs']
+                      runs.update((run['id'], run) for run in batch)
+                      if len(batch) < 100:
+                          break
+              return list(runs.values())
+
+          def stop(call, run_ids, endpoint):
+              """Send cancel or force-cancel; the count of failures other than HTTP 409."""
+              failed = 0
+              for run_id in run_ids:
+                  code, _, error = call('-X', 'POST', f'repos/ufna/zerus/actions/runs/{run_id}/{endpoint}')
+                  # HTTP 409: the run finished meanwhile.
+                  if code and 'HTTP 409' not in error:
+                      failed += 1
+                      print(f'Run {run_id}: {endpoint} failed: {error}')
+                  else:
+                      print(f'Run {run_id}: {endpoint} sent, or it had finished')
+              return failed
+
+          def sweep(call, sleep, number, branch, repository, own_run, closed_at):
+              """Cancel, wait, then force-cancel only the runs that ignored it.
+
+              A run is its ID and attempt: a re-run keeps the ID and starts a new
+              attempt (zerus-b8zze.2.1). An attempt first seen on the second
+              listing, a re-run included, gets an ordinary cancel."""
+              def select():
+                  runs = listing(call, branch)
+                  attempts = {run['id']: run.get('run_attempt', 1) for run in runs}
+                  return [(run_id, attempts[run_id])
+                          for run_id in doomed(runs, number, branch, repository, own_run, closed_at)]
+              first = select()
+              failed = stop(call, [run_id for run_id, _ in first], 'cancel')
+              if first:
+                  sleep(SETTLE)
+                  second = select()
+                  failed += stop(call, [run_id for run_id, attempt in second if (run_id, attempt) in first], 'force-cancel')
+                  failed += stop(call, [run_id for run_id, attempt in second if (run_id, attempt) not in first], 'cancel')
+              if failed:
+                  raise SystemExit(f'{failed} runs were not cancelled')
+
+          if __name__ == '__main__':
+              sweep(api, time.sleep, int(os.environ['PR_NUMBER']), os.environ['HEAD_REF'], os.environ['HEAD_REPO'],
+                    int(os.environ['GITHUB_RUN_ID']), when(os.environ['CLOSED_AT']))
+          PY

@@ -1359,6 +1359,7 @@ fn open_session_after_frontend_quit_survives_native_close_and_launches_original_
     let mut runtime = h.start(&bus.address);
     Harness::activate(&runtime);
     let target = navigation::Target {
+        startup_question: None,
         computer: "peer.example".into(),
         run: "run-1".into(),
         conversation: "conversation-1".into(),

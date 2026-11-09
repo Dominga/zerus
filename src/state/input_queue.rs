@@ -138,6 +138,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     expect(&args[0], &request.expected_run_id, &request.expected_conversation_id)?;
     let _guard=lock(None)?;
     let record=read(&args[0])?;
+    terminating::check_mutation(&record)?;
     if record["run_id"]!=request.expected_run_id || record["conversation_id"]!=request.expected_conversation_id || !eligible(&record) {
         return Err("Session changed or is no longer working; nothing was sent".into());
     }

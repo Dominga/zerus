@@ -321,7 +321,7 @@ fn search(directory: &Path, mut bindings: Vec<Value>, query: &str, limit: usize)
     let native = if native.is_empty() { BTreeMap::new() } else { dsh::history_search(&native, query, limit.min(20)) };
     for record in &bindings {
         if record["backend"] == "dsh" {
-            match native.get(string(record, "name")) {
+            match native.get(&storage::owner_key(record)) {
                 Some(Some((events, truncated))) => {
                     search.truncated |= *truncated;
                     for event in events {
@@ -366,7 +366,7 @@ fn search(directory: &Path, mut bindings: Vec<Value>, query: &str, limit: usize)
             let text = if field == "prompt" {
                 journal::user_prompt(record).as_str().unwrap_or("")
             } else {
-                string(record, field)
+                journal::last_message(record)
             };
             if text.is_empty() {
                 continue;

@@ -27,6 +27,12 @@ class DesktopSessionPaletteTest {
         Target("computer", "codex/project/task", "run", "conversation", "workspace", archive),
         "Task", "codex", "Untrusted display string", "Project", "Preview", pending, JSONObject(raw))
 
+    @Test fun aKeepWarmPingReadsReadyNotWorking() {
+        val badge = DesktopSessionPalette.badge(session("""{"tracked":true,"activity":"busy","phase":"working","keep_warm":{"enabled":true,"turn_active":true}}"""), true)
+        assertEquals("Warming cache", badge.caption)
+        assertEquals(DesktopBadgeKind.Neutral, badge.kind)
+    }
+
     @Test fun localReadReminderUsesDesktopPrecedence() {
         assertEquals(DesktopBadgeKind.Attention,DesktopSessionPalette.badge(session("""{"mobile_review_later":true}"""),false).kind)
         assertEquals(DesktopBadgeKind.Attention,DesktopSessionPalette.badge(

@@ -1,18 +1,34 @@
 import type { MenuEntry } from "../../store/ui";
 import type { Row } from "./model";
 import type { Session } from "./types";
-import { SELECTION_ACTIONS, selectionText, type SelectionAction, type SelectionRow } from "./selection";
-import { tr } from "../../i18n";
+import { MOVE_WAIT, SELECTION_ACTIONS, selectionText, type SelectionAction, type SelectionRow } from "./selection";
+import { translate, tr, trNoop, type TranslationArgument } from "../../i18n";
 
 // The selection bar and the selection context menu, after Qt's
 // SessionsWindow::setupSelectionActions, updateSelectionActions and
 // populateSelectionMenu (SessionSelection.cpp 110-218). Pure models: the
 // components in SessionList.tsx render them, store/batch.ts runs the actions.
 
+// "%2 — %3 of %n": the action, its count and the selection, which sets the plural form (zerus-wi352).
+const TOOL_HINT = trNoop("%2 — %3 of %n selected session(s)");
+const HEADING = trNoop("%n selected session(s)");
+
+/**
+ * A text about `selected` sessions in the interface language: Russian takes
+ * its plural form from `selected`; English says "1 selected session" and
+ * "2 selected sessions". `rest` fills %2 onwards.
+ */
+function selectedText(source: string, one: string, many: string, selected: number, ...rest: TranslationArgument[]): string {
+  const text = tr(source, selected, ...rest);
+  return text === translate("en", source, selected, ...rest) ? translate("en", selected === 1 ? one : many, selected, ...rest) : text;
+}
+
 /** Qt's selectionActionIcon, as client icon names (all are in the Qt glyph set). */
 export const SELECTION_ICONS: Record<SelectionAction, string> = {
   mark_read: "read-all",
   review_later: "attention",
+  mute: "bell-off",
+  unmute: "bell",
   compact: "compact-row",
   expand: "expand-row",
   pause: "pause",
@@ -35,6 +51,16 @@ export function countable(s: Pick<SelectionRow, "state">, a: SelectionAction, ap
   return archiveBound || s.state !== "archived" || (a !== "resume" && a !== "forget");
 }
 
+/**
+ * One bell tool: Mute while any selected session is unmuted, else Unmute
+ * (zerus-qhtxf). The direction comes from every selected row's muted flag,
+ * whether or not its setting can change now (zerus-qhtxf.1).
+ */
+const hiddenBell = (a: SelectionAction, anyUnmuted: boolean) => (a === "unmute" && anyUnmuted) || (a === "mute" && !anyUnmuted);
+
+/** Whether any selected session is unmuted: the bell tool's direction. */
+export const anyUnmuted = (rows: readonly Pick<SelectionRow, "muted">[]) => rows.some((s) => !s.muted);
+
 /** Compact and Expand only change the presentation, so a running batch does not block them. */
 export const presentation = (a: SelectionAction) => a === "compact" || a === "expand";
 
@@ -50,23 +76,25 @@ export interface SelectionTool {
   danger: boolean;
 }
 
-/** The bar's visible tools in Qt's order: a tool shows when its count is above 0. */
-export interface MoveState { enabled: boolean; reason?: string }
-
-export function barTools(count: (a: SelectionAction) => number, selected: number, batchRunning: boolean, moveState: MoveState = { enabled: true }): SelectionTool[] {
+/**
+ * The bar's visible tools in Qt's order: a tool shows when its count is above
+ * 0. `unmuted` says whether any selected session is unmuted (`anyUnmuted`);
+ * `moveRefusal` why the organization takes no edit now (zerus-5wmh.18.1).
+ */
+export function barTools(count: (a: SelectionAction) => number, selected: number, batchRunning: boolean, unmuted = true, moveRefusal?: string): SelectionTool[] {
   const tools: SelectionTool[] = [];
   for (const action of SELECTION_ACTIONS) {
     const n = count(action);
-    if (n <= 0) continue;
-    const move = action === "move";
+    if (n <= 0 || hiddenBell(action, unmuted)) continue;
+    // Move waits for a lifecycle batch on the selection, then for project sync.
+    const blocked = action === "move" ? (batchRunning ? tr(MOVE_WAIT) : moveRefusal) : undefined;
     tools.push({
       action,
       icon: SELECTION_ICONS[action],
       text: `${selectionText(action)} (${n})`,
-      hint: move && moveState.reason ? moveState.reason : `${selectionText(action)} — ${n} of ${selected} selected sessions`,
+      hint: blocked ?? selectedText(TOOL_HINT, "%2 — %3 of %n selected session", "%2 — %3 of %n selected sessions", selected, selectionText(action), n),
       count: n,
-      // Move to project opens its dialog, so a running batch does not hold it; the organization must be editable.
-      enabled: move ? moveState.enabled : presentation(action) || !batchRunning,
+      enabled: action === "move" ? !blocked : presentation(action) || !batchRunning,
       danger: action === "forget" || action === "terminate",
     });
   }
@@ -82,14 +110,14 @@ export function splitTools<T>(tools: readonly T[], capacity: number): { shown: T
 
 /** An overflow entry for a tool. */
 export function toolEntry(t: SelectionTool, run: (a: SelectionAction) => void): MenuEntry {
-  return { label: t.text, icon: t.icon, danger: t.danger, disabled: !t.enabled, hint: !t.enabled && t.action === "move" ? t.hint : undefined, action: () => run(t.action) };
+  return { label: t.text, icon: t.icon, danger: t.danger, disabled: !t.enabled, hint: t.action === "move" && !t.enabled ? t.hint : undefined, action: () => run(t.action) };
 }
 
 /** The selection menu: a section, the applicable actions, a separator and Deselect all. */
-export function selectionMenu(count: (a: SelectionAction) => number, selected: number, batchRunning: boolean, run: (a: SelectionAction) => void, deselect: () => void, moveState?: MoveState): MenuEntry[] {
+export function selectionMenu(count: (a: SelectionAction) => number, selected: number, batchRunning: boolean, run: (a: SelectionAction) => void, deselect: () => void, unmuted = true, moveRefusal?: string): MenuEntry[] {
   return [
-    { heading: `${selected} selected sessions` },
-    ...barTools(count, selected, batchRunning, moveState).map((t) => toolEntry(t, run)),
+    { heading: selectedText(HEADING, "%n selected session", "%n selected sessions", selected) },
+    ...barTools(count, selected, batchRunning, unmuted, moveRefusal).map((t) => toolEntry(t, run)),
     { separator: true },
     { label: tr("Deselect all"), action: deselect },
   ];

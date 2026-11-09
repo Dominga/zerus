@@ -50,6 +50,7 @@ fn live_smoke() {
                 Change::Activity { .. } => "activity",
                 Change::Processes { .. } => "processes",
                 Change::Tasks { .. } => "tasks",
+                Change::Git { .. } => "git",
                 Change::Machine { .. } => "machine",
                 Change::Organization { .. } => "organization",
                 Change::Teams { .. } => "teams",

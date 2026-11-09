@@ -7,7 +7,7 @@ import type { DecisionPort } from "../../teams/decisions";
 // now. Clean now goes through the core's confirmation (Cancel is focused);
 // only Zerus's own build output is ever removed, and a folder in use is kept.
 
-export interface DiskPolicy { enabled: boolean; unused_days: number; free_gb: number; free_percent: number }
+export interface DiskPolicy { enabled: boolean; unused_days: number; free_gb: number; free_percent: number; team_limit_gb?: number }
 export interface DiskDrive { drive: string; free: number; total: number; threshold: number; low: boolean; held?: number }
 export interface DiskFolder {
   path: string; kind: string; origin: string; owned: boolean; owned_reason: string; state: string; note?: string;
@@ -135,8 +135,9 @@ export class DiskModel {
     this.changed();
   }
 
-  /** A dry run, or Clean now (the core asks the owner first). */
-  async clean(dry: boolean, scope: "policy" | "all" = "policy") {
+  /** A dry run, or Clean now (the core asks the owner first); `team:<id>` cleans
+   * one team's finished-task targets (task #364). */
+  async clean(dry: boolean, scope: string = "policy") {
     const receipt = await this.send({ kind: "disk", action: "clean", scope, dry_run: dry });
     if (!receipt) return;
     this.dry = dry;

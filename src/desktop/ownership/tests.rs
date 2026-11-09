@@ -8,6 +8,8 @@ use std::{
 use zerus_desktop_ledger::operations::cache as cache_ledger;
 
 mod observation;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod programs;
 
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[test]

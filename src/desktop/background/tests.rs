@@ -96,14 +96,37 @@ impl Fixture {
             message: crate::desktop::task_message::Runtime::new(&config, &epoch, owner.clone())
                 .unwrap(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            send: crate::desktop::deferred_send::Runtime::new(&config, &epoch, owner.clone())
-                .unwrap(),
+            send: crate::desktop::deferred_send::Runtime::new(
+                &config,
+                &epoch,
+                owner.clone(),
+                Default::default(),
+            )
+            .unwrap(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            answer: crate::desktop::deferred_answer::Runtime::new(&config, &epoch, owner.clone())
-                .unwrap(),
+            answer: crate::desktop::deferred_answer::Runtime::new(
+                &config,
+                &epoch,
+                owner.clone(),
+                Default::default(),
+            )
+            .unwrap(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            compact: crate::desktop::compact_to_send::Runtime::new(&config, &epoch, owner.clone())
-                .unwrap(),
+            compact: crate::desktop::compact_to_send::Runtime::new(
+                &config,
+                &epoch,
+                owner.clone(),
+                Default::default(),
+            )
+            .unwrap(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            resume: crate::desktop::session_resume::Runtime::new(
+                &config,
+                &epoch,
+                owner.clone(),
+                Default::default(),
+            )
+            .unwrap(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             task_start: crate::desktop::task_start_reconcile::Runtime::new(
                 &config,
@@ -418,6 +441,88 @@ fn a_compact_to_send_reaches_its_actor_which_refuses_without_a_lease() {
         .store
         .db
         .query_row("SELECT count(*) FROM desktop_compact_to_sends", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(rows, 0);
+}
+
+/// A valid session resume, built as the client builds it.
+fn session_resume_intent(
+    configuration: String,
+    epoch: String,
+) -> zerus_client_core::desktop::session_resume::Intent {
+    use zerus_client_core::{
+        desktop::session_resume::{Intent, Scope},
+        operation_recovery::deferred_input as checkpoint,
+    };
+    let reserved = checkpoint::Checkpoint::reserve_session_resume(checkpoint::Intent {
+        kind: checkpoint::Kind::ResumeToSend,
+        draft_revision: 1,
+        message_sha256: checkpoint::message_sha256("after resume", std::iter::empty()),
+        run_id: "run-1".into(),
+        conversation_id: "conversation-1".into(),
+        question: None,
+        start: Some(checkpoint::Start::Resume),
+        retry_of: None,
+        consent: true,
+    })
+    .unwrap();
+    let resume = serde_json::json!({"request_id": reserved.request_id, "action": "resume",
+        "expected_run_id": "run-1", "expected_conversation_id": "conversation-1"});
+    let original = serde_json::json!({"request_id": reserved.send_request_id,
+        "text": "after resume", "attachments": [], "expected_run_id": "run-1",
+        "expected_conversation_id": "conversation-1"});
+    Intent {
+        scope: Scope {
+            configuration,
+            service_epoch: epoch,
+        },
+        session: "claude/private-resume".into(),
+        request_id: reserved.request_id.clone(),
+        send_request_id: reserved.send_request_id.clone().unwrap(),
+        checkpoint: serde_json::to_string(&reserved).unwrap(),
+        resume: resume.to_string(),
+        original: original.to_string(),
+    }
+}
+
+/// zerus-5wmh.66.4.9: a session resume reaches its actor, which refuses it
+/// without a lease before any row or child.
+#[test]
+fn a_session_resume_reaches_its_actor_which_refuses_without_a_lease() {
+    let mut f = Fixture::new();
+    let intent = session_resume_intent(
+        f.location.configuration.clone(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+    intent.clone().verify().unwrap();
+    let request = zerus_client_core::desktop::ui_requests::Request::SessionResume {
+        intent: Box::new(intent.clone()),
+    };
+    let authority = crate::desktop::ui_authority::Validated::fixture(&serde_json::json!(request));
+    let answer = f.runtime.frontend_request(&mut f.store, authority);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let admission: zerus_client_core::desktop::session_resume::Admission =
+            serde_json::from_value(answer).unwrap();
+        assert_eq!(admission.request_id, intent.request_id);
+        assert!(!admission.accepted && !admission.durable && admission.receipt.is_none());
+        #[cfg(target_os = "linux")]
+        assert_eq!(admission.code, "session_resume_unavailable");
+        #[cfg(target_os = "macos")]
+        assert_eq!(admission.code, "session_resume_native_image_unavailable");
+    }
+    #[cfg(windows)]
+    assert_eq!(
+        answer,
+        serde_json::json!({"request_id": intent.request_id, "accepted": false,
+            "durable": false, "code": "session_resume_unsupported"})
+    );
+    let rows: i64 = f
+        .store
+        .db
+        .query_row("SELECT count(*) FROM desktop_session_resumes", [], |r| {
             r.get(0)
         })
         .unwrap();

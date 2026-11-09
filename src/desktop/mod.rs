@@ -27,12 +27,18 @@ mod notification_controls;
 mod notifications;
 #[allow(dead_code)]
 mod operations;
+// The never-renewed overall deadline of a multi-child operation.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod operation_clock;
 // One bounded original-child runner for the launch and task message leaves.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod original_child;
 // The CLI state store one deferred original holds and reads.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod original_store;
+// The deferred-input kinds' sealed negatives, owned by the service epoch.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod not_admitted;
 mod owner;
 mod ownership;
 mod pending_reads;
@@ -47,6 +53,11 @@ mod producer_io;
 mod producer_prepared;
 #[allow(dead_code)]
 mod producer_session;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod program_stop;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)] // The private final-cleanup adapter is the next caller.
+pub(crate) mod program_cleanup;
 mod protocol;
 mod registration;
 mod revoke;
@@ -63,9 +74,12 @@ mod swarm_windows;
 pub(crate) mod compact_to_send;
 pub(crate) mod deferred_answer;
 pub(crate) mod deferred_send;
+/// The resume-then-send leaf (zerus-5wmh.66.4.9, slice 3).
+pub(crate) mod session_resume;
 pub(crate) mod task_message;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod task_start_reconcile;
+mod task_controls;
 mod termination_outcome;
 mod transport;
 mod ui_authority;
@@ -636,7 +650,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
             .context("prepare private desktop folders")?;
         let lock = Arc::new(location.lock().context("acquire desktop owner lock")?);
         let epoch = uuid::Uuid::new_v4().to_string();
-        let store = Store::open(&location, &epoch).context("open desktop store")?;
+        let store = Store::open_owned(&location, &epoch, &lock).context("open desktop store")?;
         // A status deadline must not start while startup still owns the actor
         // for migrations/recovery. Publish only once that work has completed.
         #[allow(unused_mut)]
@@ -649,6 +663,10 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
     .context(StartupRefused)?;
     let stopped = Arc::new(AtomicBool::new(false));
     let active = Arc::new(AtomicUsize::new(0));
+    // The sealed negatives of this epoch (zerus-tlb9q): every background
+    // runtime this epoch starts, the first and each later one, gets them.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let fences = Arc::new(not_admitted::Fences::default());
     let mut feed = feed::Broker::new(&epoch);
     let mut reads = catalog_read::Reader::default();
     let audit = Arc::new(approval_audit::worker::Worker::new(
@@ -730,8 +748,15 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
         }
         if background_mode && !background_blocked {
             background = Some(
-                background::Runtime::start(config, &epoch, &mut feed, owner.clone())
-                    .context(StartupRefused)?,
+                background::Runtime::start(
+                    config,
+                    &epoch,
+                    &mut feed,
+                    owner.clone(),
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    fences.clone(),
+                )
+                .context(StartupRefused)?,
             );
             // Store the runtime first: a writer startup error still drains the
             // fleet through the common shutdown path below.
@@ -811,6 +836,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         &epoch,
                         &mut feed,
                         owner.clone(),
+                        #[cfg(any(target_os = "linux", target_os = "macos"))]
+                        fences.clone(),
                     )?);
                     background.as_mut().unwrap().start_presence(&location)?;
                     background_blocked = false;
@@ -1204,6 +1231,20 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         } else if hello
                             .request
                             .as_ref()
+                            .is_some_and(|v| v["op"] == "creation_worktree_receipt")
+                        {
+                            match &mut background {
+                                Some(runtime) => runtime.creation_worktree_receipt(
+                                    &store,
+                                    hello.request.as_ref().unwrap(),
+                                ),
+                                None => {
+                                    json!({"accepted":false,"code":"creation_receipt_unavailable"})
+                                }
+                            }
+                        } else if hello
+                            .request
+                            .as_ref()
                             .is_some_and(|v| v["op"] == "creation_worktree_result")
                         {
                             creation_worktree::query(&store, hello.request.as_ref().unwrap())
@@ -1237,6 +1278,12 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                             .is_some_and(|v| v["op"] == "compact_to_send_result")
                         {
                             compact_to_send::query(&store, hello.request.as_ref().unwrap())
+                        } else if hello
+                            .request
+                            .as_ref()
+                            .is_some_and(|v| v["op"] == "session_resume_result")
+                        {
+                            session_resume::query(&store, hello.request.as_ref().unwrap())
                         } else if hello
                             .request
                             .as_ref()
@@ -1300,6 +1347,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                         | "deferred_send"
                                         | "deferred_answer"
                                         | "compact_to_send"
+                                        | "session_resume"
                                         | "task_start_reconcile"
                                 )
                             )
@@ -1488,18 +1536,11 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => (),
             }
-            if feed.retire(&mut store).unwrap_or(false) {
+            for mut change in feed.retire(&mut store).unwrap_or_default() {
                 seq += 1;
+                change["attention_counts"] = attention_counts(&store, &epoch, seq, &feed);
                 fanout.publish(
-                    protocol::encode(&frame(
-                        &epoch,
-                        seq,
-                        "catalog_changed",
-                        json!({"display_only":true,"retired":true,"reset_required":true,
-                        "changes_abi":catalog_read::CHANGES_ABI,
-                        "attention_counts":attention_counts(&store,&epoch,seq,&feed)}),
-                    ))?
-                    .into(),
+                    protocol::encode(&frame(&epoch, seq, "catalog_changed", change))?.into(),
                 );
             }
             if Instant::now() >= collect_at {

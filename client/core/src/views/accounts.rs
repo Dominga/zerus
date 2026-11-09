@@ -156,8 +156,13 @@ pub struct Profile {
     /// The status line under the machine tags.
     pub detail: Text,
     pub signed_in: bool,
-    /// The stored override (`provider`, `bypass`, legacy `auto` or `native:...`).
+    /// The effective mode: the stored override (`provider`, `bypass`, legacy
+    /// `auto` or `native:...`) or what the provider reports, including
+    /// OpenCode's allow/ask/deny/custom.
     pub permission: String,
+    /// The mode is the Zerus default, not a choice (owner, 2026-11-07,
+    /// T-6hcfnu: bypass for Claude, Codex and Kimi).
+    pub permission_default: bool,
     pub permission_label: Text,
     pub permission_hint: Text,
     /// `provider` or `zerus`; never a live-session claim.
@@ -168,6 +173,19 @@ pub struct Profile {
     pub permission_mode: String,
     pub model_supported: bool,
     pub model_text: Text,
+    /// This computer's model and effort defaults for the account, empty when
+    /// it follows the provider (zerus-f0uz8).
+    pub model: String,
+    pub effort: String,
+    /// `account` (shared by the account's computers), `computer`, or empty
+    /// when this computer's hgs does not keep a scope.
+    pub permission_scope: String,
+    /// The account's color and emoji as this computer keeps them, empty when
+    /// unset (zerus-sa9qn.6); `marks_supported` is false for an older hgs,
+    /// whose marks stay this desktop's preferences.
+    pub mark_color: String,
+    pub mark_emoji: String,
+    pub marks_supported: bool,
     pub usage: Usage,
     pub opencode: Option<OpenCode>,
 }
@@ -185,6 +203,13 @@ pub struct Account {
     pub usage: Usage,
     /// Bypass, Auto, Plan, Default, or Varies when the members differ.
     pub permission: Text,
+    /// The account keeps its permission mode per computer: any member says
+    /// so (zerus-f0uz8). Otherwise one mode is shared by every computer.
+    pub permissions_per_computer: bool,
+    /// The members' model and effort defaults differ.
+    pub model_differs: bool,
+    /// The members' Zerus permission modes differ.
+    pub permission_differs: bool,
     /// Identity values verbatim, then "Plan: %1" and "Sign-in: %1".
     pub identity_lines: Vec<Text>,
     /// Shown without identity lines: "Reading account details…" or
@@ -387,6 +412,11 @@ fn profile_usage(entry: &FleetEntry, raw: &Value, r: &UsageRef, state: &Accounts
             u.windows = cached.windows;
             u.balances = cached.balances;
             u.credits = cached.credits;
+            u.retry_at = cached.retry_at;
+            if cached.status == "rate_limited" {
+                u.status = cached.status;
+                u.auth_status = cached.auth_status;
+            }
             u.seeded = true;
         } else if matches!(u.status.as_str(), "unavailable" | "offline")
             && u.identity == Identity::default()
@@ -488,6 +518,12 @@ fn legacy_label(raw: &Value) -> Text {
         "auto" => crate::source!("Auto"),
         "plan" => crate::source!("Plan"),
         "bypass" => crate::source!("Bypass"),
+        "mixed" => crate::source!("Varies"),
+        "allow" => crate::source!("Allow tools"),
+        "ask" => crate::source!("Ask before tools"),
+        "deny" => crate::source!("Deny tools"),
+        "custom" => crate::source!("Custom rules"),
+        "unknown" => crate::source!("Unverified"),
         _ => crate::source!("Default"),
     })
 }
@@ -520,25 +556,50 @@ fn permission_source(raw: &Value) -> String {
 
 /// permissionHint (AccountsPage.cpp:89-92), with the native current value kept.
 fn permission_hint(raw: &Value) -> Text {
-    let source = if permission_source(raw) == "zerus" {
+    if text(raw, "provider") == "opencode" {
+        let detail = match text(raw, "effective_permission_mode").as_str() {
+            "allow" if text(raw, "permission_detail") == "OpenCode native default" => {
+                crate::text!("OpenCode allows tools by default; reads of .env files may still ask.")
+            }
+            "allow" => crate::text!("OpenCode account rules allow tools without asking."),
+            "ask" => crate::text!("OpenCode account rules ask before tools run."),
+            "deny" => crate::text!("OpenCode account rules deny tools."),
+            "custom" => crate::text!("OpenCode uses custom permission rules."),
+            _ => crate::text!("OpenCode permission configuration could not be verified."),
+        };
+        return crate::text!(
+            "%1\n%2\n%3",
+            crate::text!("From provider settings"),
+            detail,
+            crate::text!("Project, agent and session rules may use a different policy.")
+        );
+    }
+    let source = if zerus_default(raw) {
+        // Bypass for Claude, Codex and Kimi without a choice (T-6hcfnu).
+        crate::text!("Zerus default")
+    } else if permission_source(raw) == "zerus" {
         crate::text!("Set in Zerus")
     } else {
         crate::text!("From provider settings")
     };
-    // The provider's own detail is shown as it reports it.
-    let detail = raw
-        .get("permission_current")
-        .and_then(|current| current["detail"].as_str())
-        .filter(|detail| !detail.is_empty())
-        .map(str::to_owned)
-        .or_else(|| {
-            let detail = text(raw, "permission_detail");
-            (!detail.is_empty()).then_some(detail)
-        })
-        .map_or_else(
-            || crate::text!("Provider defaults have not been verified."),
-            Text::verbatim,
-        );
+    // The provider's own detail is shown as it reports it; the default says
+    // what it is.
+    let detail = if zerus_default(raw) {
+        crate::text!("Without a choice, Claude, Codex and Kimi accounts bypass permissions.")
+    } else {
+        raw.get("permission_current")
+            .and_then(|current| current["detail"].as_str())
+            .filter(|detail| !detail.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                let detail = text(raw, "permission_detail");
+                (!detail.is_empty()).then_some(detail)
+            })
+            .map_or_else(
+                || crate::text!("Provider defaults have not been verified."),
+                Text::verbatim,
+            )
+    };
     crate::text!(
         "%1\n%2\n%3",
         source,
@@ -547,6 +608,10 @@ fn permission_hint(raw: &Value) -> Text {
             "Applies to new and resumed sessions; a running session may use a different mode."
         )
     )
+}
+
+fn zerus_default(raw: &Value) -> bool {
+    text(raw, "permission_mode_source") == "default" && text(raw, "permission_mode") == "bypass"
 }
 
 /// The model line (AccountsPage.cpp:610-612), with the effort in parentheses (the dots rule).
@@ -693,8 +758,26 @@ fn profile(entry: &FleetEntry, raw: &Value, state: &AccountsState) -> Profile {
             "provider"
         }
         .into(),
+        permission_default: zerus_default(raw),
         model_supported: flag(raw, "model_defaults_supported"),
         model_text: model_text(raw),
+        model: text(raw.get("model_defaults").unwrap_or(&Value::Null), "model"),
+        effort: text(raw.get("model_defaults").unwrap_or(&Value::Null), "effort"),
+        permission_scope: match text(raw, "permission_scope").as_str() {
+            scope @ ("account" | "computer") => scope.to_owned(),
+            _ => String::new(),
+        },
+        mark_color: raw
+            .get("mark")
+            .map(|mark| text(mark, "color"))
+            .filter(|color| crate::account_actions::mark_color(color))
+            .unwrap_or_default(),
+        mark_emoji: raw
+            .get("mark")
+            .map(|mark| text(mark, "emoji"))
+            .filter(|emoji| crate::account_actions::mark_emoji(emoji))
+            .unwrap_or_default(),
+        marks_supported: raw.get("mark").is_some_and(Value::is_object),
         usage,
         opencode: opencode(raw),
         id: r.id,
@@ -824,6 +907,9 @@ fn identity_key(p: &Profile, with_account: bool) -> String {
 }
 
 fn quality(u: &Usage) -> u8 {
+    if u.status == "rate_limited" && !u.windows.is_empty() {
+        return if u.offline { 2 } else { 3 };
+    }
     match u.status.as_str() {
         "ok" | "configured" if u.offline => 2,
         "ok" | "configured" => 3,
@@ -835,7 +921,9 @@ fn quality(u: &Usage) -> u8 {
 fn better(usage: &Usage, previous: &Usage) -> bool {
     quality(usage) > quality(previous)
         || (quality(usage) == quality(previous)
-            && usage.checked_at.unwrap_or(0.0) > previous.checked_at.unwrap_or(0.0))
+            && (usage.checked_at.unwrap_or(0.0) > previous.checked_at.unwrap_or(0.0)
+                || (usage.checked_at == previous.checked_at
+                    && usage.retry_at.unwrap_or(0.0) > previous.retry_at.unwrap_or(0.0))))
 }
 
 /// accountPermission (AccountsPage.cpp:80-88).
@@ -917,6 +1005,9 @@ pub fn group(profiles: &[Profile]) -> Vec<Account> {
                 members: Vec::new(),
                 usage: p.usage.clone(),
                 permission: Text::default(),
+                permissions_per_computer: false,
+                model_differs: false,
+                permission_differs: false,
                 identity_lines: Vec::new(),
                 identity_note: None,
             });
@@ -940,9 +1031,34 @@ pub fn group(profiles: &[Profile]) -> Vec<Account> {
             group.label = group.usage.identity.email.clone();
         }
         group.permission = account_permission(&group.members);
+        (
+            group.permissions_per_computer,
+            group.model_differs,
+            group.permission_differs,
+        ) = shared_settings(&group.members);
         (group.identity_lines, group.identity_note) = identity_lines(&group.label, &group.usage);
     }
     groups
+}
+
+/// Whether the account keeps permissions per computer, and whether its
+/// members' model defaults or Zerus permission modes differ (zerus-f0uz8).
+fn shared_settings(members: &[Profile]) -> (bool, bool, bool) {
+    let models: BTreeSet<(&str, &str)> = members
+        .iter()
+        .filter(|m| m.model_supported)
+        .map(|m| (m.model.as_str(), m.effort.as_str()))
+        .collect();
+    let modes: BTreeSet<&str> = members
+        .iter()
+        .filter(|m| m.provider != "opencode")
+        .map(|m| m.permission_mode.as_str())
+        .collect();
+    (
+        members.iter().any(|m| m.permission_scope == "computer"),
+        models.len() > 1,
+        modes.len() > 1,
+    )
 }
 
 /// NewSessionDialog::refreshUsage (990-1000): the groups of an earlier
@@ -973,6 +1089,8 @@ pub fn refresh_groups(groups: &[Account], profiles: &[Profile]) -> Vec<Account> 
             }
         }
         let (identity_lines, identity_note) = identity_lines(&old.label, &usage);
+        let (permissions_per_computer, model_differs, permission_differs) =
+            shared_settings(&members);
         out.push(Account {
             key: old.key.clone(),
             label: old.label.clone(),
@@ -980,6 +1098,9 @@ pub fn refresh_groups(groups: &[Account], profiles: &[Profile]) -> Vec<Account> 
             installed: members.iter().any(|m| m.installed),
             machines,
             permission: account_permission(&members),
+            permissions_per_computer,
+            model_differs,
+            permission_differs,
             usage,
             identity_lines,
             identity_note,
@@ -1179,6 +1300,45 @@ mod tests {
             );
         }
         state
+    }
+
+    #[test]
+    fn the_zerus_default_permission_mode_says_so() {
+        // Owner, 2026-11-07 (T-6hcfnu): bypass without a choice.
+        let mut state = with_inspects();
+        let data = state
+            .catalogs
+            .get_mut(&ComputerId::from(""))
+            .unwrap()
+            .data
+            .as_mut()
+            .unwrap();
+        let rows = data["profiles"].as_array_mut().unwrap();
+        rows[0]["permission_mode"] = json!("bypass");
+        rows[0]["permission_mode_source"] = json!("default");
+        rows[1]["permission_mode"] = json!("provider");
+        rows[1]["permission_mode_source"] = json!("zerus");
+        let (first, second) = (rows[0]["id"].clone(), rows[1]["id"].clone());
+        let view = project(
+            &[entry("", "live", 0)],
+            &state,
+            &mut AccountsDisplay::default(),
+        );
+        let member = |id: &Value| {
+            view.accounts
+                .iter()
+                .flat_map(|a| &a.members)
+                .find(|m| json!(m.id) == *id)
+                .unwrap()
+                .clone()
+        };
+        let default = member(&first);
+        assert!(default.permission_default);
+        assert!(default
+            .permission_hint
+            .english()
+            .starts_with("Zerus default\nWithout a choice"));
+        assert!(!member(&second).permission_default);
     }
 
     #[test]
@@ -1753,6 +1913,36 @@ mod tests {
         json!({ "profiles": profiles })
     }
 
+    #[test]
+    fn cached_rate_limit_remains_visible_before_inspect_and_wins_a_same_sample_tie() {
+        let state = AccountsState::default();
+        let local = entry("", "live", 0);
+        let mut catalog = launch_catalog(&[("claude-work", "claude")]);
+        let quota = json!({"status":"rate_limited","auth_status":"signed_in","checked_at":100,"retry_at":300,
+            "identity":{"email":"work@example.test"},"windows":[{"id":"five_hour","used_percent":42,"window_minutes":300}]});
+        catalog["profiles"][0]["account_status"] = quota.clone();
+        let raw = &catalog["profiles"][0];
+        let reference = usage_ref(&local.computer, raw);
+        let seeded = profile_usage(&local, raw, &reference, &state);
+        assert!(seeded.seeded);
+        assert_eq!(seeded.status, "rate_limited");
+        assert_eq!(seeded.retry_at, Some(300.0));
+        assert_eq!(seeded.checked_at, Some(100.0));
+        assert_eq!(seeded.windows[0].used, 42.0);
+        let launching = host_profiles(&local, &catalog, &state, &["claude"]);
+        assert_eq!(launching[0].0.usage.retry_at, Some(300.0));
+        let mut previous = usage::usage(&quota);
+        previous.status = "ok".into();
+        previous.retry_at = None;
+        assert!(better(&seeded, &previous));
+        assert!(!better(&previous, &seeded));
+        previous.checked_at = Some(301.0);
+        assert!(
+            better(&previous, &seeded),
+            "a genuinely newer sample still wins"
+        );
+    }
+
     fn ids(profiles: &[(Profile, Value)]) -> Vec<String> {
         profiles.iter().map(|(p, _)| p.id.clone()).collect()
     }
@@ -2097,5 +2287,56 @@ mod permission_source_tests {
             profile(&entry, &explicit, &AccountsState::default()).permission_mode,
             "bypass"
         );
+    }
+
+    #[test]
+    fn opencode_native_policy_is_localized_and_never_labelled_as_a_zerus_default() {
+        let entry = FleetEntry {
+            computer: ComputerId::local(),
+            status: "live".into(),
+            attempt: 0,
+            local_sessions: true,
+            local_host: false,
+            host: Some("workstation".into()),
+            platform: Some("linux".into()),
+        };
+        for (mode, label) in [
+            ("allow", "Allow tools"),
+            ("ask", "Ask before tools"),
+            ("deny", "Deny tools"),
+            ("custom", "Custom rules"),
+            ("unknown", "Unverified"),
+        ] {
+            let raw = json!({"id":"native-opencode","provider":"opencode","home":"/accounts/example","native":true,"installed":true,
+                "permission_mode":"provider","permission_mode_source":"default","effective_permission_mode":mode,"permission_detail":"OpenCode native default"});
+            let p = profile(&entry, &raw, &AccountsState::default());
+            assert_eq!(p.permission, mode);
+            assert_eq!(p.permission_label.source, label);
+            assert!(!p.permission_default);
+            assert_eq!(p.permission_mode, "provider");
+            assert!(p
+                .permission_hint
+                .english()
+                .starts_with("From provider settings"));
+            assert!(!p.permission_hint.english().contains("Without a choice"));
+            assert!(p
+                .permission_hint
+                .english()
+                .contains("Project, agent and session rules"));
+            if mode == "allow" {
+                assert!(p.permission_hint.english().contains(".env"));
+            }
+            if mode == "unknown" {
+                assert!(p
+                    .permission_hint
+                    .english()
+                    .contains("could not be verified"));
+            }
+            assert!(p
+                .permission_hint
+                .args
+                .iter()
+                .all(|arg| !matches!(arg, crate::text::Arg::Verbatim(_))));
+        }
     }
 }

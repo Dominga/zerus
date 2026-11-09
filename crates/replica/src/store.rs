@@ -6,7 +6,7 @@
 //! Updates are folded into a fresh snapshot when they grow, and once when a
 //! task is accepted (its Done compaction). One process at a time holds a project.
 use crate::project::ProjectDoc;
-use crate::schema::{Actor, Stage};
+use crate::schema::Stage;
 use crate::task::TaskDoc;
 use crate::{ids, rank, Error, Result};
 use fs2::FileExt;
@@ -18,6 +18,9 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
+
+mod copy_review;
+pub use copy_review::{CopyReview, CopyReviewOutcome};
 
 /// A rank longer than this renumbers its stage (ranks stay valid up to 64).
 const RENUMBER_AT: usize = 32;
@@ -138,6 +141,35 @@ pub struct Changes {
     pub documents: Option<BTreeSet<String>>,
 }
 
+/// One of a task's files in the task folder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskFile {
+    /// `<uuid>.loro`
+    Snapshot,
+    /// `<uuid>.updates`, appended to the snapshot
+    Updates,
+    /// `<uuid>.managed`
+    Mark,
+}
+
+/// The task an entry of the task folder named `name` belongs to, and which
+/// of its files it is; None for any other entry. A mark alone is a task
+/// too: kept for review, never invisible.
+pub fn task_file(name: &std::ffi::OsStr) -> Option<(&str, TaskFile)> {
+    let path = Path::new(name);
+    let file = match path.extension().and_then(|e| e.to_str())? {
+        "loro" => TaskFile::Snapshot,
+        "updates" => TaskFile::Updates,
+        "managed" => TaskFile::Mark,
+        _ => return None,
+    };
+    let uuid = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| ids::is_uuid(s))?;
+    Some((uuid, file))
+}
+
 /// A task file that failed to load, or a document an import refused. It
 /// stays on disk and never blocks the others.
 ///
@@ -215,6 +247,39 @@ pub enum Position {
     /// Before or after the task with this short ID or UUID.
     Before(String),
     After(String),
+}
+
+/// One task of a stage as a placement source has it (zerus-cg5h.24).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Placed {
+    pub uuid: String,
+    /// Its short ID.
+    pub id: String,
+    pub rank: String,
+}
+
+/// A stage's order and the short IDs in use, from a source that answers
+/// without reading every task document (hgs's task index, zerus-cg5h.24).
+/// An answer must be what the documents say: the loadable tasks only, in
+/// (rank, UUID) order. `None` declines, and the whole write then reads the
+/// documents as before.
+pub trait Placement {
+    /// The loadable tasks of `stage` in their order.
+    fn order(&self, stage: Stage) -> Result<Option<Vec<Placed>>>;
+    /// Whether a loadable task uses short ID `id`.
+    fn short_id_used(&self, id: &str) -> Result<Option<bool>>;
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static LOADS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Task documents this thread loaded so far (tests of this and other crates).
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn load_count_for_test() -> usize {
+    LOADS.with(std::cell::Cell::get)
 }
 
 /// One load or save at a time through a store, in turn. An untimed entry
@@ -348,9 +413,50 @@ impl Admitted<'_> {
         self.store.load_admitted(uuid)
     }
 
+    /// Read every retained byte without folding or repairing a readable
+    /// prefix. Replacement proofs must refuse a cut, corrupt or unapplied
+    /// block, as the existing agent-start counter and copy review do.
+    pub fn load_complete(&mut self, uuid: &str) -> Result<TaskDoc> {
+        let task = self.store.counted(uuid)?;
+        if task.applied_version().is_none() {
+            return Err(Error::failed("the local task has unapplied changes"));
+        }
+        Ok(task)
+    }
+
     /// `ProjectStore::save`, inside this admission.
     pub fn save(&mut self, task: &mut TaskDoc) -> Result<()> {
         self.store.save_locked(task)
+    }
+
+    /// The project's directory, for a record kept beside its tasks under
+    /// this admission and the project lock.
+    pub fn dir(&self) -> &Path {
+        self.store.dir()
+    }
+
+    /// The project document (its settings and hold), read inside this
+    /// admission. Read only: it neither loads a task nor enters another
+    /// admission.
+    pub fn project(&self) -> Result<ProjectDoc> {
+        self.store.project()
+    }
+
+    /// `ProjectStore::agent_starts_since`, counted inside this admission
+    /// from the tasks as saved: every reservation and save serialized by it
+    /// is counted, never a number read before it (#1519 review). It fails
+    /// closed and never waits: any task that cannot be read whole as
+    /// regular files (`counted`), and the deadline, are errors, never a
+    /// count of zero.
+    pub fn agent_starts_since(&mut self, since: i64, deadline: Instant) -> Result<usize> {
+        let mut count = 0;
+        for uuid in self.store.uuids()? {
+            if Instant::now() >= deadline {
+                return Err(Error::failed("the deadline passed while counting"));
+            }
+            count += self.store.counted(&uuid)?.agent_starts_since(since)?;
+        }
+        Ok(count)
     }
 }
 
@@ -521,7 +627,7 @@ fn digest(bytes: &[u8]) -> String {
 /// The first block of an updates file, header and payload; none when the
 /// file is missing or its first block is cut short.
 fn first_block(path: &Path) -> Result<Option<Vec<u8>>> {
-    let mut file = match File::open(path) {
+    let mut file = match open_regular(path) {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
@@ -562,6 +668,80 @@ thread_local! {
     /// Runs inside an observation, between its read and its stamps.
     pub(crate) static OBSERVING: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
         const { std::cell::RefCell::new(None) };
+}
+
+/// A store file opened for reading without waiting (#1519 review,
+/// zerus-r75ru): only a regular file, refused before it is opened otherwise;
+/// opened without following a final link or waiting for a FIFO's writer; the
+/// handle a regular file. A missing file is `NotFound`.
+fn open_regular(path: &Path) -> std::io::Result<File> {
+    let irregular = || std::io::Error::other("not a regular file");
+    if !fs::symlink_metadata(path)?.is_file() {
+        return Err(irregular());
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT: a link is opened itself.
+        options.custom_flags(0x0020_0000);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(irregular());
+    }
+    Ok(file)
+}
+
+/// One task or project file, read whole without waiting (`open_regular`).
+/// Every read of a store's documents goes through it, so a FIFO, device or
+/// link in a task's place never holds a command that reads every task: that
+/// task does not load, and is listed as damaged.
+///
+/// No size is refused (zerus-ern6o): no writer bounds these files. A
+/// project's or a task's Loro history grows with every edit, and only a
+/// task's visible text is held to `MAX_DOCUMENT`, so any cap here would make
+/// a file this store wrote unreadable. A read takes the memory a load of
+/// that file always took; only regular files are read.
+pub(crate) fn read_regular(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut file = open_regular(path)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// The most a `store-id` may hold: its writers write a canonical UUID and a
+/// newline (37 bytes), and a read trims surrounding whitespace.
+const STORE_ID_BYTES: u64 = 1024;
+/// The most a `project-id` may hold: the project ID itself, which `opening`
+/// refuses past 128 bytes, written exactly.
+pub(crate) const PROJECT_ID_BYTES: u64 = 128;
+
+/// A small identity file read whole without waiting (`open_regular`), at
+/// most `limit` bytes (zerus-iih7g): `None` only when nothing is at its path.
+/// Anything else that is not a regular file within the limit (a FIFO, a
+/// device, a link, even a dangling one, or a larger file) is an error, so an
+/// identity that cannot be read is never taken for a missing one.
+pub(crate) fn read_identity(path: &Path, limit: u64) -> std::io::Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    let file = match open_regular(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(std::io::Error::other("larger than an identity"));
+    }
+    Ok(Some(bytes))
 }
 
 /// The intact blocks with their end offsets, and whether the whole input was
@@ -609,20 +789,40 @@ impl ProjectStore {
     fn store_id_with(root: &Path, deadline: Option<Instant>) -> Result<Option<String>> {
         private_dir(root)?;
         let path = root.join("store-id");
+        // The identity, or none when there is none yet: nothing at its path,
+        // or an empty file, which the first writer (create, then one write)
+        // left when it stopped between the two, before any identity was
+        // written. Anything else that is not a canonical UUID within the
+        // bound, readable without waiting, is an identity that cannot be
+        // known (zerus-iih7g): refused and kept, never replaced by another.
         let read = |path: &Path| -> Result<Option<String>> {
-            match fs::read_to_string(path) {
-                Ok(text) => Ok(Some(text.trim().to_owned()).filter(|id| ids::is_uuid(id))),
-                Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-                Err(error) => Err(error.into()),
+            let unknown = |why: &str| {
+                Error::failed(format!(
+                    "this computer's replica identity ({}) {why}; it is kept, and a new one is \
+                     made only after a person removes it",
+                    path.display()
+                ))
+            };
+            let bytes = match read_identity(path, STORE_ID_BYTES) {
+                Ok(None) => return Ok(None),
+                Ok(Some(bytes)) if bytes.is_empty() => return Ok(None),
+                Ok(Some(bytes)) => bytes,
+                Err(error) => return Err(unknown(&format!("cannot be read: {error}"))),
+            };
+            let text = String::from_utf8(bytes).map_err(|_| unknown("is not text"))?;
+            let id = text.trim();
+            if !ids::is_uuid(id) {
+                return Err(unknown("is not a canonical identity"));
             }
+            Ok(Some(id.to_owned()))
         };
         if let Some(id) = read(&path)? {
             return Ok(Some(id));
         }
-        // Creating it, or replacing a malformed one, is one step across
-        // processes: under this lock the file is read again, and only then
-        // written whole (an atomic replace), so a creator never replaces
-        // another's identity and nothing reads a partial one.
+        // Creating it is one step across processes: under this lock the file
+        // is read again, and only then written whole (an atomic replace), so
+        // a creator never replaces another's identity and nothing reads a
+        // partial one.
         let lock = private_options()
             .create(true)
             .truncate(false)
@@ -729,7 +929,7 @@ impl ProjectStore {
     }
 
     pub fn project(&self) -> Result<ProjectDoc> {
-        match fs::read(self.dir.join("project.loro")) {
+        match read_regular(&self.dir.join("project.loro")) {
             Ok(bytes) => ProjectDoc::from_bytes(&bytes),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(ProjectDoc::new()),
             Err(error) => Err(error.into()),
@@ -857,7 +1057,7 @@ impl ProjectStore {
 
     /// The task's mark; none when it is missing or cannot be read.
     pub(crate) fn mark(&self, uuid: &str) -> Option<Mark> {
-        Mark::unsealed(&fs::read(self.managed_path(uuid)).ok()?)
+        Mark::unsealed(&read_regular(&self.managed_path(uuid)).ok()?)
     }
 
     /// Whether the task is marked, and the version its mark says this store
@@ -865,7 +1065,7 @@ impl ProjectStore {
     /// when there is nothing to read.
     fn marked(&self, uuid: &str) -> Marked {
         let path = self.managed_path(uuid);
-        match fs::read(&path) {
+        match read_regular(&path) {
             Ok(bytes) => Mark::unsealed(&bytes)
                 .and_then(|mark| mark.version())
                 .map_or(Marked::Unreadable, Marked::Saved),
@@ -894,7 +1094,7 @@ impl ProjectStore {
         if self.was_managed(uuid) {
             return Some(Keep::Marked);
         }
-        match fs::read(self.updates_path(uuid)) {
+        match read_regular(&self.updates_path(uuid)) {
             Ok(bytes) => (!blocks(&bytes).1).then_some(Keep::UnreadableLocalData),
             Err(error) if error.kind() == ErrorKind::NotFound => None,
             Err(_) => Some(Keep::UnreadableLocalData),
@@ -962,17 +1162,9 @@ impl ProjectStore {
     pub fn uuids(&self) -> Result<Vec<String>> {
         let mut uuids = BTreeSet::new();
         for entry in fs::read_dir(self.dir.join("tasks"))? {
-            let path = entry?.path();
-            let extension = path.extension().and_then(|e| e.to_str());
-            // A mark alone is a task too: kept for review, never invisible.
-            if matches!(extension, Some("loro" | "updates" | "managed")) {
-                if let Some(stem) = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .filter(|s| ids::is_uuid(s))
-                {
-                    uuids.insert(stem.to_owned());
-                }
+            let name = entry?.file_name();
+            if let Some((uuid, _)) = task_file(&name) {
+                uuids.insert(uuid.to_owned());
             }
         }
         Ok(uuids.into_iter().collect())
@@ -996,13 +1188,66 @@ impl ProjectStore {
         })
     }
 
+    /// A task read only for the agent-start count, inside an admission:
+    /// every file of it read whole (`read_regular`), and a copy that holds
+    /// less than its mark is damaged. It writes nothing (no mark is raised).
+    fn counted(&self, uuid: &str) -> Result<TaskDoc> {
+        self.counted_with(uuid, read_regular)
+    }
+
+    fn counted_with(
+        &self,
+        uuid: &str,
+        read: impl Fn(&Path) -> std::io::Result<Vec<u8>>,
+    ) -> Result<TaskDoc> {
+        let mut task = TaskDoc::from_bytes(&read(&self.snapshot_path(uuid))?)?;
+        if task.uuid() != uuid {
+            return Err(Error::failed("the task file does not match its name"));
+        }
+        // Every update block must frame and import whole: a broken or cut
+        // record is unknown evidence, never fewer starts (#1519 R3).
+        match read(&self.updates_path(uuid)) {
+            Ok(bytes) => {
+                let (found, intact) = blocks(&bytes);
+                if !intact {
+                    return Err(Error::failed("the task's updates are not whole"));
+                }
+                for (payload, _) in found {
+                    if !task.import_block(payload) {
+                        return Err(Error::failed("an update of the task cannot be read"));
+                    }
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        match read(&self.managed_path(uuid)) {
+            Ok(bytes) => {
+                let saved = Mark::unsealed(&bytes)
+                    .and_then(|mark| mark.version())
+                    .ok_or_else(|| Error::failed("the copy's mark cannot be read"))?;
+                if !task.current_vv().includes_vv(&saved) {
+                    return Err(Error::failed(
+                        "the copy holds less than this computer saved",
+                    ));
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        task.view()?;
+        Ok(task)
+    }
+
     fn load_admitted(&self, uuid: &str) -> Result<TaskDoc> {
-        let mut task = TaskDoc::from_bytes(&fs::read(self.snapshot_path(uuid))?)?;
+        #[cfg(any(test, feature = "test-support"))]
+        LOADS.with(|n| n.set(n.get() + 1));
+        let mut task = TaskDoc::from_bytes(&read_regular(&self.snapshot_path(uuid))?)?;
         if task.uuid() != uuid {
             return Err(Error::failed("the task file does not match its name"));
         }
         let mut first = None;
-        match fs::read(self.updates_path(uuid)) {
+        match read_regular(&self.updates_path(uuid)) {
             Ok(bytes) => {
                 let (found, intact) = blocks(&bytes);
                 task.needs_fold = !intact;
@@ -1081,8 +1326,9 @@ impl ProjectStore {
     /// Reads a task, saves it when its execution schema needs the repair, and
     /// stamps its files with `stamp`, all in one admission: the version read
     /// and the stamps taken are one observation, which no save of this store
-    /// comes between.
-    pub(crate) fn observe<S>(&self, uuid: &str, stamp: impl FnOnce() -> S) -> (Result<TaskDoc>, S) {
+    /// comes between. The inventory reads every task so, and so does any
+    /// cache of its versions (hgs's task index).
+    pub fn observe<S>(&self, uuid: &str, stamp: impl FnOnce() -> S) -> (Result<TaskDoc>, S) {
         let _turn = self.admission.enter();
         let loaded = self.load_admitted(uuid).and_then(|mut task| {
             if task.repair_schema()? {
@@ -1292,6 +1538,101 @@ impl ProjectStore {
         Ok((tasks, damaged))
     }
 
+    /// The rank for `position` in `stage` (leaving out `moving`) and, with
+    /// `need_id`, an unused short ID: from `placement` when its answer holds,
+    /// else from the documents as `rank_for` and `unused_short_id` give them,
+    /// for the whole write (zerus-cg5h.24).
+    pub(crate) fn place(
+        &self,
+        placement: Option<&dyn Placement>,
+        stage: Stage,
+        position: &Position,
+        moving: Option<&str>,
+        need_id: bool,
+    ) -> Result<(String, Option<String>)> {
+        if let Some(placement) = placement {
+            if let Some(placed) = self.place_from(placement, stage, position, moving, need_id)? {
+                return Ok(placed);
+            }
+        }
+        let rank = self.rank_for(stage, position, moving)?;
+        let id = need_id.then(|| self.unused_short_id()).transpose()?;
+        Ok((rank, id))
+    }
+
+    /// `place` from `placement`, or None when it declines or its answer may
+    /// not hold: a reference it does not know, a rank that needs the stage
+    /// renumbered (read from the documents, with its schema rule), or a
+    /// chosen neighbour whose document is not in `stage` with the rank given.
+    /// Only those neighbours are read.
+    fn place_from(
+        &self,
+        placement: &dyn Placement,
+        stage: Stage,
+        position: &Position,
+        moving: Option<&str>,
+        need_id: bool,
+    ) -> Result<Option<(String, Option<String>)>> {
+        let Some(order) = placement.order(stage)? else {
+            return Ok(None);
+        };
+        let list: Vec<&Placed> = order
+            .iter()
+            .filter(|t| Some(t.uuid.as_str()) != moving)
+            .collect();
+        let at = |reference: &str| {
+            list.iter()
+                .position(|t| t.id == reference || t.uuid == reference)
+        };
+        let index = match position {
+            Position::Top => 0,
+            Position::End => list.len(),
+            Position::Index(index) => (*index).min(list.len()),
+            Position::Before(reference) => match at(reference) {
+                Some(index) => index,
+                None => return Ok(None),
+            },
+            Position::After(reference) => match at(reference) {
+                Some(index) => index + 1,
+                None => return Ok(None),
+            },
+        };
+        let low = index.checked_sub(1).map(|i| list[i]);
+        // As `rank_for`: aim below the first rank higher than the one before.
+        let high = list[index..]
+            .iter()
+            .copied()
+            .find(|t| low.is_none_or(|l| t.rank > l.rank));
+        let Ok(rank) = rank::between(low.map(|t| t.rank.as_str()), high.map(|t| t.rank.as_str()))
+        else {
+            return Ok(None);
+        };
+        if rank.len() > RENUMBER_AT {
+            return Ok(None);
+        }
+        for neighbour in [low, high].into_iter().flatten() {
+            let holds = self.load(&neighbour.uuid).is_ok_and(|task| {
+                task.stage().ok() == Some(stage) && task.rank() == neighbour.rank
+            });
+            if !holds {
+                return Ok(None);
+            }
+        }
+        let id = if need_id {
+            loop {
+                let id = ids::short_id();
+                match placement.short_id_used(&id)? {
+                    None => return Ok(None),
+                    Some(false) => break Some(id),
+                    Some(true) => {}
+                }
+            }
+        } else {
+            None
+        };
+        Ok(Some((rank, id)))
+    }
+
     /// The rank that puts a task at `position` in `stage`, leaving out the
     /// task being moved (its UUID).
     pub fn rank_for(
@@ -1347,12 +1688,7 @@ impl ProjectStore {
         let (tasks, _) = self.tasks()?;
         let mut count = 0;
         for task in tasks {
-            count += task
-                .view()?
-                .log
-                .iter()
-                .filter(|e| e.kind == "sent" && e.at >= since && matches!(e.actor, Actor::Agent(_)))
-                .count();
+            count += task.agent_starts_since(since)?;
         }
         Ok(count)
     }
@@ -1361,7 +1697,7 @@ impl ProjectStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{SessionKey, Target};
+    use crate::schema::{Actor, SessionKey, Target};
     use crate::task::NewTask;
     use crate::ErrorKind;
 
@@ -1404,6 +1740,247 @@ mod tests {
             .open(store.updates_path(task.uuid()))
             .unwrap();
         file.write_all(bytes).unwrap();
+    }
+
+    /// #1519 R2 (review-win-c): the agent-start count inside an admission
+    /// fails closed and never waits. It counts what it reads whole; a task
+    /// file it cannot read as a bounded regular file (a FIFO, a link, one
+    /// it may not read) or the deadline is an error, never a count of zero.
+    /// zerus-ern6o (review-win-c on #1521): a project whose settings history
+    /// outgrew the earlier 64 MiB read cap, written by `save_project` as any
+    /// long-lived project's would be, is read again. No writer bounds a
+    /// document's history, so the reader refuses no size.
+    #[test]
+    fn a_project_whose_history_outgrew_any_cap_is_read_again() {
+        use crate::project::Settings;
+        fn text(seed: &mut u64) -> String {
+            const LETTERS: &[u8] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+            let mut text = String::from("[Zerus task]\n");
+            while text.len() < 16 * 1024 {
+                *seed ^= *seed << 13;
+                *seed ^= *seed >> 7;
+                *seed ^= *seed << 17;
+                text.push(LETTERS[(*seed as usize) % LETTERS.len()] as char);
+            }
+            text
+        }
+        let earlier_cap = 16 * crate::schema::MAX_DOCUMENT;
+        let mut doc = ProjectDoc::new();
+        let mut seed = 0x67c2_1ab7_d393_u64;
+        for _ in 0..2250 {
+            let settings = Settings {
+                task_template: text(&mut seed),
+                cancel_template: text(&mut seed),
+                agents_other: true,
+                agent_limit: 0,
+            };
+            doc.set_settings(&settings).unwrap();
+        }
+        let root = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(root.path(), "growth").unwrap();
+        store.save_project(&doc).unwrap();
+        let size = fs::metadata(store.dir().join("project.loro"))
+            .unwrap()
+            .len();
+        assert!(size > earlier_cap as u64, "{size}");
+        let read = store.project().unwrap();
+        assert_eq!(read.settings(), doc.settings());
+        // A regular file of any size is read whole, by every reader.
+        let large = root.path().join("large.loro");
+        let file = File::create(&large).unwrap();
+        file.set_len(earlier_cap as u64 * 2 + 1).unwrap();
+        assert_eq!(
+            read_regular(&large).unwrap().len() as u64,
+            earlier_cap as u64 * 2 + 1
+        );
+    }
+
+    /// zerus-r75ru: a FIFO in place of any task file, or of the project
+    /// file, never holds a read: that task does not load and is listed as
+    /// damaged (kept for review), the others load, and a short ID is found.
+    /// Each read runs under a watchdog, so a regression fails, not hangs.
+    #[cfg(unix)]
+    #[test]
+    fn an_irregular_task_file_never_holds_a_read_of_every_task() {
+        fn fifo(path: &Path) {
+            let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        }
+        fn soon<T: Send + 'static>(read: impl FnOnce() -> T + Send + 'static) -> T {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(read());
+            });
+            rx.recv_timeout(Duration::from_secs(20))
+                .expect("a read waited on an irregular file")
+        }
+        let root = tempfile::tempdir().unwrap();
+        let open = {
+            let root = root.path().to_owned();
+            move || ProjectStore::open(&root, "example").unwrap()
+        };
+        let store = open();
+        let mut good = new_task(&store, "U");
+        store.save(&mut good).unwrap();
+        let mut updated = new_task(&store, "V");
+        store.save(&mut updated).unwrap();
+        updated.comment("an update", &Actor::Person, 2).unwrap();
+        store.save(&mut updated).unwrap();
+        let mut marked = new_task(&store, "W");
+        store.save(&mut marked).unwrap();
+        let lone = "11111111-1111-4111-8111-111111111111";
+        fifo(&store.snapshot_path(lone));
+        let updates = store.updates_path(updated.uuid());
+        fs::remove_file(&updates).unwrap();
+        fifo(&updates);
+        fifo(&store.managed_path(marked.uuid()));
+        let (short, uuids) = (
+            good.id().to_owned(),
+            [lone, updated.uuid(), marked.uuid()].map(str::to_owned),
+        );
+        let project = store.dir().join("project.loro");
+        // Each read opens its own store, as a command does.
+        drop(store);
+        let (loaded, damaged) = soon({
+            let open = open.clone();
+            move || {
+                let (tasks, damaged) = open().tasks().unwrap();
+                let ids: Vec<_> = tasks.iter().map(|t| t.uuid().to_owned()).collect();
+                let damaged: BTreeSet<_> = damaged.into_iter().map(|d| d.uuid).collect();
+                (ids, damaged)
+            }
+        });
+        assert_eq!(loaded, [good.uuid().to_owned()]);
+        assert_eq!(damaged, BTreeSet::from(uuids.clone()));
+        // Each is kept for review: an irregular updates log or mark is
+        // local data that cannot be read.
+        let kept = soon({
+            let (open, uuids) = (open.clone(), uuids.clone());
+            move || uuids.map(|uuid| open().locally_kept(&uuid))
+        });
+        assert_eq!(kept[1], Some(Keep::UnreadableLocalData));
+        assert_eq!(kept[2], Some(Keep::Marked));
+        // The mark itself is not read through either.
+        let mark = uuids[2].clone();
+        assert!(soon({
+            let open = open.clone();
+            move || open().mark(&mark).is_none()
+        }));
+        // A short ID is found by reading every task.
+        let found = soon({
+            let open = open.clone();
+            move || open().find(&short).map(|t| t.uuid().to_owned())
+        });
+        assert_eq!(found.unwrap(), good.uuid());
+        // A FIFO as the project file is refused, not waited on.
+        fs::remove_file(&project).ok();
+        fifo(&project);
+        assert!(soon(move || open().project().is_err()));
+    }
+
+    #[test]
+    fn the_admitted_agent_count_fails_closed_and_never_waits() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(root.path(), "p1").unwrap();
+        let agent = Actor::Agent(SessionKey {
+            machine: "m1".into(),
+            session: "codex/api".into(),
+            session_id: "launch_id:api".into(),
+        });
+        let mut task = new_task(&store, "V");
+        task.record_send(
+            &SessionKey {
+                machine: "m1".into(),
+                session: "codex/api".into(),
+                session_id: "launch_id:api".into(),
+            },
+            "legacy",
+            &agent,
+            5,
+        )
+        .unwrap();
+        store.save(&mut task).unwrap();
+        let soon = Instant::now() + Duration::from_secs(5);
+        let count = |store: &ProjectStore, deadline: Instant| {
+            store
+                .admit_until(Instant::now() + Duration::from_secs(5))
+                .unwrap()
+                .agent_starts_since(0, deadline)
+        };
+        assert_eq!(count(&store, soon).unwrap(), 1);
+        assert!(count(&store, Instant::now()).is_err(), "past the deadline");
+        // A FIFO named as another task's snapshot is refused, not waited on.
+        let fifo = store.snapshot_path("11111111-1111-4111-8111-111111111111");
+        let path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        #[cfg(unix)]
+        {
+            assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+            let began = Instant::now();
+            assert!(count(&store, soon).is_err());
+            assert!(began.elapsed() < Duration::from_secs(2));
+            fs::remove_file(&fifo).unwrap();
+            // A link in a task's place is not read through.
+            let snapshot = store.snapshot_path(task.uuid());
+            let elsewhere = root.path().join("elsewhere.loro");
+            fs::rename(&snapshot, &elsewhere).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, &snapshot).unwrap();
+            assert!(count(&store, soon).is_err());
+            fs::remove_file(&snapshot).unwrap();
+            fs::rename(&elsewhere, &snapshot).unwrap();
+        }
+        let _ = path;
+        assert_eq!(count(&store, soon).unwrap(), 1);
+        // Updates whose framing is broken, or cut short, are not counted as
+        // fewer starts: the count refuses (#1519 R3).
+        task.comment("an update", &Actor::Person, 6).unwrap();
+        store.save(&mut task).unwrap();
+        let updates = store.updates_path(task.uuid());
+        let whole = fs::read(&updates).unwrap();
+        assert_eq!(count(&store, soon).unwrap(), 1);
+        let mut broken = b"garbage".to_vec();
+        broken.extend_from_slice(&whole);
+        fs::write(&updates, &broken).unwrap();
+        assert!(count(&store, soon).is_err());
+        fs::write(&updates, &whole[..whole.len() - 1]).unwrap();
+        assert!(count(&store, soon).is_err());
+        fs::write(&updates, &whole).unwrap();
+        assert_eq!(count(&store, soon).unwrap(), 1);
+    }
+
+    /// desktop-u's fifth control on #1519 R3: an agent's start recorded
+    /// in a legacy task's updates, with one checksum bit flipped, is unknown
+    /// evidence: the count refuses, never reads it as no start.
+    #[test]
+    fn a_torn_legacy_charge_is_unknown_not_zero() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(root.path(), "p1").unwrap();
+        let to = SessionKey {
+            machine: "m1".into(),
+            session: "codex/api".into(),
+            session_id: "launch_id:api".into(),
+        };
+        let mut legacy = new_task(&store, "W");
+        store.save(&mut legacy).unwrap();
+        legacy
+            .record_send(&to, "legacy", &Actor::Agent(to.clone()), 5)
+            .unwrap();
+        store.save(&mut legacy).unwrap();
+        assert!(!store.managed_path(legacy.uuid()).exists());
+        let soon = Instant::now() + Duration::from_secs(5);
+        let count = |store: &ProjectStore| {
+            store
+                .admit_until(Instant::now() + Duration::from_secs(5))
+                .unwrap()
+                .agent_starts_since(0, soon)
+        };
+        assert_eq!(count(&store).unwrap(), 1);
+        let updates = store.updates_path(legacy.uuid());
+        let mut bytes = fs::read(&updates).unwrap();
+        assert!(bytes.len() > 8);
+        bytes[4] ^= 1;
+        fs::write(&updates, bytes).unwrap();
+        assert!(count(&store).is_err());
     }
 
     #[test]
@@ -2144,8 +2721,10 @@ mod tests {
     }
 
     /// review-n on #1432: two first hellos at once agree on one store
-    /// identity; a creator under the lock is never replaced by another, and
-    /// a malformed one is replaced once.
+    /// identity, and a creator under the lock is never replaced by another.
+    /// zerus-iih7g: an identity that cannot be known is refused and kept,
+    /// never replaced; only an empty file (the first writer's create before
+    /// its one write) is created as if missing.
     #[test]
     fn concurrent_first_hellos_agree_on_one_store_identity() {
         let dir = tempfile::tempdir().unwrap();
@@ -2177,11 +2756,68 @@ mod tests {
         assert_eq!(one, two);
         assert_eq!(ProjectStore::store_id(&root).unwrap(), one);
         assert!(ids::is_uuid(&one));
-        // A malformed identity is replaced once, and then kept.
-        fs::write(root.join("store-id"), b"not an identity").unwrap();
-        let replaced = ProjectStore::store_id(&root).unwrap();
-        assert!(ids::is_uuid(&replaced) && replaced != one);
-        assert_eq!(ProjectStore::store_id(&root).unwrap(), replaced);
+        // An empty identity file is created once, and then kept.
+        let path = root.join("store-id");
+        fs::write(&path, b"").unwrap();
+        let created = ProjectStore::store_id(&root).unwrap();
+        assert!(ids::is_uuid(&created) && created != one);
+        assert_eq!(ProjectStore::store_id(&root).unwrap(), created);
+        // Any other identity that is not canonical is refused, untouched,
+        // by the untimed and the timed read alike.
+        let soon = Instant::now() + Duration::from_secs(5);
+        let refused = |bytes: &[u8], what: &str| {
+            fs::write(&path, bytes).unwrap();
+            let error = ProjectStore::store_id(&root).unwrap_err().to_string();
+            assert!(error.contains("is kept"), "{what}: {error}");
+            assert!(ProjectStore::store_id_until(&root, soon).is_err(), "{what}");
+            assert_eq!(fs::read(&path).unwrap(), bytes, "{what}");
+        };
+        refused(b"not an identity", "malformed");
+        refused(&created.as_bytes()[..20], "cut short");
+        refused(&[0xff, 0xfe], "not text");
+        refused(
+            &format!("{created}{}", " ".repeat(2000)).into_bytes(),
+            "past the bound",
+        );
+        fs::write(&path, format!("  {created}\r\n")).unwrap();
+        assert_eq!(ProjectStore::store_id(&root).unwrap(), created);
+    }
+
+    /// zerus-iih7g: a FIFO or a link, even a dangling one, at the identity's
+    /// place is refused without waiting and is never replaced.
+    #[cfg(unix)]
+    #[test]
+    fn an_irregular_store_identity_is_refused_without_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("replica");
+        let path = root.join("store-id");
+        let id = ProjectStore::store_id(&root).unwrap();
+        let elsewhere = dir.path().join("elsewhere");
+        fs::write(&elsewhere, format!("{id}\n")).unwrap();
+        let check = |what: &str| {
+            let root = root.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(ProjectStore::store_id(&root).map_err(|e| e.to_string()));
+            });
+            let read = rx
+                .recv_timeout(Duration::from_secs(20))
+                .expect("waited on an irregular identity");
+            assert!(read.unwrap_err().contains("is kept"), "{what}");
+            assert!(
+                !fs::symlink_metadata(&path).unwrap().is_file(),
+                "{what} was replaced"
+            );
+        };
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &path).unwrap();
+        check("a link to a valid identity");
+        fs::remove_file(&elsewhere).unwrap();
+        check("a dangling link");
+        fs::remove_file(&path).unwrap();
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        check("a FIFO");
     }
 
     /// The cutover status counts marks within a strict budget, and past it

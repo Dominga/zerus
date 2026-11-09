@@ -2,11 +2,15 @@
 //! (zerus-ucck P1c-2b). The connector reads the ID from its own listing row
 //! for the request's exact run and adds `--session-id ID` after the name, once
 //! the CLIs on the call's path list the markers; phones never send it. The CLI
-//! then acts only while the name still belongs to that session. Reads, polls,
-//! history, Terminal, restore and archived conversations keep their form.
+//! then acts only while the name still belongs to that session. P3d also
+//! routes fresh auxiliary reads through one captured ID when every CLI on
+//! the path advertises complete label support. Original actor status/recovery
+//! calls and archived conversations keep their original form.
 use serde_json::{Map, Value};
 
 /// The help line of an `hgs` that selects a session by `--session-id`.
+pub const LABELS_MARKER: &str = "session-labels-v1";
+
 pub const SELECTOR_MARKER: &str = "session-id-selector-v1";
 
 /// The help line of an `hgs` whose mobile peer entry points accept
@@ -69,15 +73,42 @@ pub fn selects(operation: &str, payload: &Value) -> bool {
 pub fn index<'a>(
     rows: impl IntoIterator<Item = &'a Map<String, Value>>,
 ) -> std::collections::HashMap<String, String> {
-    rows.into_iter()
+    let mut runs = std::collections::HashSet::new();
+    let mut ambiguous = std::collections::HashSet::new();
+    let mut ids = std::collections::HashMap::<String, String>::new();
+    let mut result = std::collections::HashMap::new();
+    for row in rows
+        .into_iter()
         .filter(|row| row.get("state").and_then(Value::as_str) != Some("archived"))
         .filter(|row| row.get("archive_id").is_none())
-        .filter_map(|row| {
-            let run = row.get("run_id").and_then(Value::as_str)?;
-            let id = row.get("session_id").and_then(Value::as_str)?;
-            (!run.is_empty() && canonical(id)).then(|| (run.to_owned(), id.to_owned()))
-        })
-        .collect()
+    {
+        let Some(run) = row
+            .get("run_id")
+            .and_then(Value::as_str)
+            .filter(|run| !run.is_empty())
+        else {
+            continue;
+        };
+        // Even a row whose ID is unavailable makes a second candidate for this
+        // run. It must not disappear and let the other row win by iteration.
+        if !runs.insert(run.to_owned()) {
+            ambiguous.insert(run.to_owned());
+        }
+        let Some(id) = row
+            .get("session_id")
+            .and_then(Value::as_str)
+            .filter(|id| canonical(id))
+        else {
+            continue;
+        };
+        if let Some(previous) = ids.insert(id.to_owned(), run.to_owned()) {
+            ambiguous.insert(previous);
+            ambiguous.insert(run.to_owned());
+        }
+        result.insert(run.to_owned(), id.to_owned());
+    }
+    result.retain(|run, _| !ambiguous.contains(run));
+    result
 }
 
 /// `argv` with `--session-id ID` right after the session's name, which
@@ -93,6 +124,49 @@ pub fn selected_argv(argv: &[String], selection: &Selection) -> Option<Vec<Strin
         ]),
         _ => None,
     }
+}
+
+/// Auxiliary reads/metadata for one fresh phone request. This is routing,
+/// never an actor-plan rewrite: original status/recovery/effect command forms
+/// are deliberately absent. Archive argv and existing selectors stay intact.
+pub fn auxiliary_argv(argv: &[String], selection: &Selection) -> Option<Vec<String>> {
+    const AUXILIARY: &[&str] = &[
+        "inspect",
+        "processes",
+        "history",
+        "history-projection",
+        "terminal",
+        "hooks",
+        "read",
+        "notifications",
+        "file-read",
+        "attachment",
+        "voice",
+    ];
+    let [command, name, rest @ ..] = argv else {
+        return None;
+    };
+    if !AUXILIARY.contains(&command.as_str())
+        || name != &selection.name
+        || !canonical(&selection.id)
+        || rest
+            .iter()
+            .any(|word| matches!(word.as_str(), "--session-id" | "--archive"))
+    {
+        return None;
+    }
+    Some(
+        [
+            vec![
+                command.clone(),
+                name.clone(),
+                "--session-id".into(),
+                selection.id.clone(),
+            ],
+            rest.to_vec(),
+        ]
+        .concat(),
+    )
 }
 
 /// Whether a failed selected call is the CLI's refusal of that exact ID before
@@ -312,5 +386,28 @@ mod tests {
         let index = index(rows.iter().filter_map(Value::as_object));
         assert_eq!(index.len(), 1);
         assert_eq!(index.get("run-a").map(String::as_str), Some(ID));
+    }
+
+    #[test]
+    fn shared_labels_keep_distinct_ids_but_duplicate_run_or_id_evidence_never_wins() {
+        let rows = [
+            json!({"name":NAME,"run_id":"one","session_id":ID}),
+            json!({"name":NAME,"run_id":"two","session_id":OTHER}),
+        ];
+        assert_eq!(index(rows.iter().filter_map(Value::as_object)).len(), 2);
+        for second in [
+            json!({"name":NAME,"run_id":"one","session_id":OTHER}),
+            json!({"name":NAME,"run_id":"two","session_id":ID}),
+            json!({"name":NAME,"run_id":"one","session_id":null}),
+            rows[0].clone(),
+        ] {
+            for reverse in [false, true] {
+                let mut candidates = [rows[0].clone(), second.clone()];
+                if reverse {
+                    candidates.reverse();
+                }
+                assert!(index(candidates.iter().filter_map(Value::as_object)).is_empty());
+            }
+        }
     }
 }

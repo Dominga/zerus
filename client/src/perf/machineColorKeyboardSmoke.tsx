@@ -1,3 +1,4 @@
+import { chooseDropdown } from "./dropdown";
 // Real color dialog, synthetic settings replies; no device preference is written.
 // With Vite running: python3 scripts/menu-smoke.py
 //   --url http://127.0.0.1:1420/scripts/machine-color-keyboard-smoke.html
@@ -58,8 +59,8 @@ async function run() {
     hex().focus();
     const fieldKey = new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true });
     hex().dispatchEvent(fieldKey); check(!fieldKey.defaultPrevented, "hex field keeps its own keys"); state(5, false);
-    const style = document.querySelector<HTMLSelectElement>("#cd-style")!;
-    style.value = "bright"; style.dispatchEvent(new Event("change", { bubbles: true }));
+    const style = document.querySelector<HTMLButtonElement>("#cd-style")!;
+    chooseDropdown(style, "bright");
     check(writes.length === 0 && closed === 0, "keyboard, hex and style changes remain staged");
     apply().click(); await frame();
     check(JSON.stringify(writes.map(({ key, value }) => ({ key, value }))) === JSON.stringify([

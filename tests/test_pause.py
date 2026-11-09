@@ -809,8 +809,41 @@ class Harness(unittest.TestCase):
                     "name", "pid", "supervisor", "activity", "pausing", "session_end", "exited_at", "completion_reason")})[:600])
 
         def processes():
-            output = run(["ps", "-axo", "pid=,ppid=,lstart=,stat=,etime=,command="], 5, STOP_REPORT_TABLE_BYTES,
-                         env=dict(self.env, LC_ALL="C", TZ="UTC"))
+            columns = "pid=,ppid=,lstart=,stat=,etime=,command="
+            environment = dict(self.env, LC_ALL="C", TZ="UTC")
+            try:
+                output = run(["ps", "-axo", columns], 5, STOP_REPORT_TABLE_BYTES, env=environment)
+                incomplete = output.endswith("\n[output truncated]")
+            except (subprocess.TimeoutExpired, TimeoutError) as error:
+                lines.append(f"unavailable: process table: {type(error).__name__}: {str(error)[:200]}")
+                output, incomplete = "", True
+            if incomplete:
+                # A bounded all-host command listing may end before our late
+                # fixture PIDs. Recover only this private pane's bounded tree,
+                # using compact parent data and one targeted detail read.
+                lines.append("unavailable: process table truncated or unavailable; private-pane fallback")
+                roster = run(["ps", "-axo", "pid=,ppid="], 3, STOP_REPORT_TABLE_BYTES, env=environment)
+                if roster.endswith("\n[output truncated]"):
+                    lines.append("unavailable: process parent roster truncated")
+                parents = {}
+                for line in roster.splitlines():
+                    fields = line.split()
+                    if len(fields) == 2 and all(field.isdecimal() for field in fields):
+                        parents[fields[0]] = fields[1]
+                children = {}
+                for pid, parent in parents.items():
+                    children.setdefault(parent, []).append(pid)
+                pending, selected, seen = [pane[2] for pane in state["panes"]], [], set()
+                while pending and len(selected) < STOP_REPORT_PROCESSES:
+                    pid = pending.pop(0)
+                    if pid in seen or pid not in parents:
+                        continue
+                    seen.add(pid)
+                    selected.append(pid)
+                    pending += children.get(pid, [])
+                if selected:
+                    output += "\n" + run(["ps", "-p", ",".join(selected), "-o", columns], 3,
+                                         STOP_REPORT_TABLE_BYTES, env=environment)
             rows = {}
             for line in output.splitlines():
                 fields = line.split(None, 9)
@@ -3294,7 +3327,11 @@ class Recipes(Harness):
         self.assertEqual(path.read_bytes(), before, "dry-run changed the saved binding")
         tmux_command = shlex.split(output.strip())
         self.assertEqual(tmux_command[:3], ["tmux", "new-session", "-d"])
-        runner = shlex.split(tmux_command[-1])
+        command_start = tmux_command.index("--")
+        self.assertEqual(tmux_command[command_start:command_start + 3], ["--", "/usr/bin/env", "--"])
+        # The launcher executes this argv directly; its last item is a native
+        # argument, not another shell-encoded copy of the whole runner.
+        runner = tmux_command[command_start + 3:]
         expected = ('exec env HGS_AGENT_HINT=1 HGS_AGENT_HINT_OFF= "$0" --run "$@"'
                     if agent in ('claude', 'codex') else 'exec "$0" --run "$@"')
         self.assertEqual(runner[2], expected)
@@ -4784,6 +4821,7 @@ class StopReportControls(unittest.TestCase):
                       "999": ("1", f"{python} {self.bin / 'claude'}")}
         self.executables = {"501": sorted(self.interpreters)[0], "504": "/synthetic/notpython"}
         self.identity, self.flood, self.pane_gone, self.kills, self.commands, self.children = {}, False, False, [], [], []
+        self.table_flood, self.table_hang = False, False
         self.slow_sample = None
         real_kill = os.kill
         # Signals reach only the report's own command children; any other is recorded, not sent.
@@ -4802,7 +4840,15 @@ class StopReportControls(unittest.TestCase):
                 return "" if self.pane_gone else "500 0\n"
             return "claude/p/one %0 500 0\n"
         if argv[:2] == ["ps", "-axo"]:
-            return "".join(f"{pid:>6} {ppid:>6} {self.started} S 00:10 {command}\n" for pid, (ppid, command) in self.table.items())
+            if argv[2] == "pid=,ppid=":
+                return "".join(f"{pid} {ppid}\n" for pid, (ppid, _) in self.table.items())
+            rows = "".join(f"{pid:>6} {ppid:>6} {self.started} S 00:10 {command}\n" for pid, (ppid, command) in self.table.items())
+            if self.table_flood:
+                rows = (f"99000 1 {self.started} S 00:10 /fixture/unrelated " + "x" * 256 + "\n") * 4096 + rows
+            return rows
+        if argv[:2] == ["ps", "-p"] and argv[4] == "pid=,ppid=,lstart=,stat=,etime=,command=":
+            return "".join(f"{pid} {self.table[pid][0]} {self.started} S 00:10 {self.table[pid][1]}\n"
+                           for pid in argv[2].split(",") if pid in self.table)
         if argv[:2] == ["ps", "-p"] and argv[4] == "comm=":
             return self.executables.get(argv[2], "/fixture/other") + "\n"
         if argv[:2] == ["ps", "-p"]:
@@ -4820,14 +4866,21 @@ class StopReportControls(unittest.TestCase):
         if argv[0] == str(HGS):
             code = ["import sys; sys.stderr.write(sys.argv[1]); sys.exit(1)",
                     "hgs: claude/p/one: agent did not exit after SIGTERM (no forced kill was sent)\n"]
-        elif self.hang or argv[0] == "sample" and argv[1] == self.slow_sample:
+        elif self.hang or argv[0] == "sample" and argv[1] == self.slow_sample \
+                or self.table_hang and argv == ["ps", "-axo", "pid=,ppid=,lstart=,stat=,etime=,command="]:
             code = ["import time; time.sleep(60)"]
         elif argv[0] == "sample" and self.flood:
             block = "".join(f"    9 Thread_{index}   DispatchQueue_1: fixture\n" + "      9 frame  (in fixture) + 8\n" * 40
                             for index in range(50))
             code = ["import sys\nwhile True: sys.stdout.write(sys.argv[1])", "Call graph:\n" + block]
         else:
-            code = ["import sys; sys.stdout.write(sys.argv[1])", self.output(argv)]
+            output = self.output(argv)
+            if len(output.encode()) > 65536:
+                path = self.root / f"command-output-{len(self.children)}"
+                path.write_text(output)
+                code = ["from pathlib import Path; import sys; sys.stdout.write(Path(sys.argv[1]).read_text())", str(path)]
+            else:
+                code = ["import sys; sys.stdout.write(sys.argv[1])", output]
         child = self.real_popen([sys.executable, "-c", *code], **options)
         self.children.append(child)
         return child
@@ -4889,6 +4942,25 @@ class StopReportControls(unittest.TestCase):
         self.assertIn("python 501: not signalled, its process identity or pane changed", report)
         self.assertIn("native 501: omitted, its process identity or pane changed", report)
         self.assertTrue({"501", "999"}.isdisjoint(self.sampled()))
+
+    def test_truncated_host_commands_still_report_the_verified_private_pane(self):
+        self.table_flood = True
+        report = self.report()
+        self.assertRegex(report, r"(?m)^process: 501 500 ")
+        self.assertIn("unavailable: process table truncated", report)
+        self.assertEqual(self.kills, [(501, signal.SIGUSR1)])
+        self.assertEqual(self.sampled(), {"500", "501", "502", "503", "504"})
+        self.assertLessEqual(len(report), STOP_REPORT_CHARS + 60)
+
+    def test_unavailable_host_commands_keep_their_error_and_recover_private_rows(self):
+        self.table_hang = True
+        started = time.monotonic()
+        report = self.report()
+        self.assertGreaterEqual(time.monotonic() - started, 5)
+        self.assertLess(time.monotonic() - started, STOP_REPORT_SECONDS)
+        self.assertRegex(report, r"(?m)^process: 501 500 ")
+        self.assertIn("unavailable: process table: TimeoutExpired:", report)
+        self.assertEqual(self.kills, [(501, signal.SIGUSR1)])
 
     def test_proc_is_read_only_for_verified_pane_processes(self):
         self.identity["501"] = "Sun Oct 18 00:00:09 2026"

@@ -62,7 +62,7 @@ pub fn dispatch(config: &Config, host: &str, args: &[String], dry: bool) -> Resu
     let (Some(path), Some(output)) = (path, output) else {
         return Err(usage());
     };
-    if !(path.starts_with('/') || path.starts_with("~/"))
+    if !(path.starts_with('/') || path.starts_with("~/") || windows_absolute(path))
         || path.len() > 32768
         || path.chars().any(char::is_control)
     {
@@ -252,7 +252,17 @@ fn usage() -> Error {
     )
 }
 
+fn windows_absolute(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'/' | b'\\')
+}
+
 fn sftp_path(path: &str) -> String {
+    let windows;
+    let path = if windows_absolute(path) {
+        windows = format!("/{}", path.replace('\\', "/"));
+        windows.as_str()
+    } else { path };
     let mut literal = String::new();
     for ch in path.chars() {
         if matches!(ch, '\\' | '*' | '?' | '[' | ']') {
@@ -326,6 +336,11 @@ mod tests {
             "/files/report \\[1\\]\\*\\?.txt"
         );
         assert_eq!(sftp_path("~/file\\name"), "~/file\\\\name");
+        assert_eq!(sftp_path(r"C:\fixture folder\日本語\file [1].txt"), "/C:/fixture folder/日本語/file \\[1\\].txt");
+        assert!(windows_absolute(r"C:\fixture"));
+        assert!(windows_absolute("D:/fixture"));
+        assert!(!windows_absolute("C:relative"));
+        assert!(!windows_absolute("a/b"));
     }
     #[test]
     fn timeout_reaps_owned_transfer_and_reports_failure() {

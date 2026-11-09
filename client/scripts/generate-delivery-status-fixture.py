@@ -11,7 +11,7 @@ import re
 import sys
 import uuid
 
-FIELDS = ('abi', 'configuration', 'epoch', 'generation', 'lifecycle', 'automatic_approvals', 'catalog_reads')
+FIELDS = ('abi', 'configuration', 'epoch', 'generation', 'lifecycle', 'automatic_approvals', 'automatic_approval_categories', 'catalog_reads')
 LIFECYCLE_FIELDS = ('abi', 'configuration', 'epoch', 'generation', 'ipc_ready', 'phase', 'background')
 CASES = {'passive', 'awaiting_handoff', 'disabled_but_ready', 'enabled', 'approval_degraded',
          'disabled_while_degraded', 'read_degraded', 'drained'}

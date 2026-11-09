@@ -23,6 +23,40 @@ class BoundedProcess(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(Path('/proc', result.stdout.strip()).exists())
 
+    def test_adopted_exit_is_reaped_while_the_original_keeps_its_failure_status(self):
+        # The original test stays alive until its orphan has disappeared, as
+        # stream::helper's group checks do. Its nonzero result must survive:
+        # reaping all children would steal Popen's status and mask the failure.
+        orphan = """import os,sys,time
+from pathlib import Path
+gate=Path(sys.argv[1])
+while not gate.exists(): time.sleep(.005)
+"""
+        parent = """import subprocess,sys
+child=subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2]],
+                       stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+print(child.pid,flush=True)
+"""
+        code = f'''import subprocess,sys,tempfile,time
+from pathlib import Path
+with tempfile.TemporaryDirectory() as directory:
+ gate=Path(directory)/'release'
+ parent=subprocess.run([sys.executable,'-c',{parent!r},{orphan!r},str(gate)],
+                       capture_output=True,text=True,check=True)
+ pid=int(parent.stdout)
+ gate.touch()
+ deadline=time.monotonic()+2
+ while Path('/proc',str(pid)).exists():
+  assert time.monotonic()<deadline,'adopted zombie was not reaped during the test'
+  time.sleep(.005)
+ print('orphan reaped before original exit',flush=True)
+ sys.exit(17)
+'''
+        result = self.run_fixture(code, seconds=4)
+        self.assertEqual(result.returncode, 17, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'orphan reaped before original exit')
+
     def test_deadline_cleans_owned_tree_and_keeps_unrelated_child(self):
         other = subprocess.Popen([sys.executable, '-c', 'import time;time.sleep(30)'])
         try:

@@ -563,8 +563,10 @@ fn the_lead_cannot_take_the_owners_settings() {
     let qa = team.members.iter_mut().find(|member| member.id == "qa").unwrap();
     (qa.session, qa.permissions_profile) = (None, "read".into());
     // A refused change is not stored (the store drops the changed copy).
+    // Task #6: the lead names only a model or effort here, so it proposes the
+    // wider profile as a card instead.
     let error = apply(&mut team.clone(), "settings", &widen, &Actor::Member("lead".into()), &none, &mut events).unwrap_err().to_string();
-    assert!(error.contains("confirm_widening"), "{error}");
+    assert!(error.contains("The lead changes only a member's model and effort"), "{error}");
     let error = apply(&mut team.clone(), "settings", &widen, &Actor::Human, &none, &mut events).unwrap_err().to_string();
     assert!(error.contains("confirm_widening"), "{error}");
     let mut confirmed = widen.clone();
@@ -686,4 +688,274 @@ fn the_context_threshold_defaults_to_95_and_only_the_owner_sets_it() {
     assert!(error.contains("50 to 100"), "{error}");
     apply(&mut team, "settings", &json!({"settings":{"context_compact_percent":90}}), &Actor::Human, &none, &mut events).unwrap();
     assert_eq!(team.settings.context_compact_percent, 90);
+}
+
+/// Task #6: a running member that has a session takes its new start prompt,
+/// model, effort and settings; they apply from its next task.
+#[test]
+fn a_running_member_takes_its_prompt_model_effort_and_settings() {
+    let mut team = running_team();
+    team.members.iter_mut().find(|member| member.id == "dev").unwrap().session =
+        Some(SessionRef { name: "codex/x/dev".into(), run_id: "r1".into(), ..Default::default() });
+    let set = |team: &mut Team, update: Value| {
+        let mut events = Vec::new();
+        apply(team, "settings", &json!({"members_update":[update],"confirm_widening":true}), &Actor::Human, &BTreeSet::new(), &mut events)
+    };
+    let value = set(
+        &mut team,
+        json!({"id":"dev","prompt":"Ship the cards API","model":"gpt-5.5","effort":"high","permissions":"bypass",
+            "permissions_profile":"commit","context_before_task":"compact","iron_rules":["Read the docs"]}),
+    )
+    .unwrap();
+    assert_eq!(value["members"], json!(["dev"]));
+    let dev = team.member("dev").unwrap();
+    assert_eq!((dev.prompt.as_str(), dev.model.as_str(), dev.effort.as_str()), ("Ship the cards API", "gpt-5.5", "high"));
+    assert_eq!((dev.permissions.as_str(), dev.permissions_profile.as_str()), ("bypass", "commit"));
+    assert_eq!((dev.context_before_task.as_str(), dev.iron_rules.len()), ("compact", 1));
+    // The session follows the change from its next task; the clear is off
+    // unless the owner ticked it.
+    assert!(dev.model_switch.is_some(), "the session switches before its next task");
+    assert_eq!(dev.prompt_change.as_ref().map(|change| change.clear_context), Some(false));
+    // A member without a session takes the model at its next start: no switch.
+    let value = set(&mut team, json!({"id":"qa","model":"gpt-5.5"})).unwrap();
+    assert_eq!(value["members"], json!(["qa"]));
+    assert_eq!(team.member("qa").unwrap().model, "gpt-5.5");
+    assert!(team.member("qa").unwrap().model_switch.is_none());
+}
+
+/// Task #6: the lead changes only a member's model and effort while the team
+/// runs; the rest is the owner's, as a settings card.
+#[test]
+fn the_lead_changes_only_a_running_members_model_and_effort() {
+    let mut team = running_team();
+    team.members.iter_mut().find(|member| member.id == "dev").unwrap().session =
+        Some(SessionRef { name: "codex/x/dev".into(), run_id: "r1".into(), ..Default::default() });
+    let set = |team: &mut Team, actor: &Actor, update: Value| {
+        let mut events = Vec::new();
+        apply(team, "settings", &json!({"members_update":[update]}), actor, &BTreeSet::new(), &mut events)
+    };
+    set(&mut team, &Actor::Member("lead".into()), json!({"id":"dev","model":"gpt-5.5","effort":"high"})).unwrap();
+    assert_eq!((team.member("dev").unwrap().model.as_str(), team.member("dev").unwrap().effort.as_str()), ("gpt-5.5", "high"));
+    for update in [json!({"id":"dev","prompt":"Ship it"}), json!({"id":"dev","permissions":"bypass"}), json!({"id":"dev","iron_rules":["Read the docs"]})] {
+        let error = set(&mut team, &Actor::Member("lead".into()), update).unwrap_err().to_string();
+        assert!(error.contains("The lead changes only a member's model and effort") && error.contains("team-propose"), "{error}");
+    }
+    assert_eq!((team.member("dev").unwrap().prompt.as_str(), team.member("dev").unwrap().permissions.as_str()), ("", ""));
+    // The owner's own change applies; the lead's way to it is the card.
+    set(&mut team, &Actor::Human, json!({"id":"dev","prompt":"Ship it"})).unwrap();
+    assert_eq!(team.member("dev").unwrap().prompt, "Ship it");
+}
+
+/// Task #6: a permissions mode its agent does not have is refused in plan,
+/// add-member and members_update; members_update changes it too.
+#[test]
+fn a_permissions_mode_its_agent_has_is_the_only_one_accepted() {
+    let mut events = Vec::new();
+    let (mut planned, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+    let plan_members = json!({"members":[{"id":"dev","role":"Backend","agent":"codex","permissions":"auto"}],
+        "tasks":[{"id":1,"title":"A","assignee":"dev"}]});
+    let error = plan(&mut planned, &plan_members, &Actor::Human, &mut events).unwrap_err().to_string();
+    assert_eq!(error, "A member \"dev\": field \"permissions\": Codex has no \"auto\" permissions mode; it takes bypass");
+    // Codex takes bypass, and Claude has auto.
+    plan(
+        &mut planned,
+        &json!({"members":[{"id":"dev","role":"Backend","agent":"codex","permissions":"bypass"},
+            {"id":"rev","role":"Reviewer","agent":"claude","permissions":"auto"}],
+            "tasks":[{"id":1,"title":"A","assignee":"dev"}]}),
+        &Actor::Human,
+        &mut events,
+    )
+    .unwrap();
+    assert_eq!((planned.member("dev").unwrap().permissions.as_str(), planned.member("rev").unwrap().permissions.as_str()), ("bypass", "auto"));
+    let mut running = running_team();
+    let error = apply(
+        &mut running,
+        "add-member",
+        &json!({"member":{"id":"qa2","role":"Tester","agent":"codex","permissions":"auto"}}),
+        &Actor::Human,
+        &BTreeSet::new(),
+        &mut events,
+    )
+    .unwrap_err()
+    .to_string();
+    assert_eq!(error, "A member \"qa2\": field \"permissions\": Codex has no \"auto\" permissions mode; it takes bypass");
+    // members_update changes the permissions of a running member without a
+    // session, and refuses a mode the member's agent does not have.
+    apply(&mut running, "settings", &json!({"members_update":[{"id":"qa","permissions":"bypass"}]}), &Actor::Human, &BTreeSet::new(), &mut events)
+        .unwrap();
+    assert_eq!(running.member("qa").unwrap().permissions, "bypass");
+    let error = apply(&mut running, "settings", &json!({"members_update":[{"id":"qa","permissions":"auto"}]}), &Actor::Human, &BTreeSet::new(), &mut events)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "Member \"qa\": field \"permissions\": Kimi has no \"auto\" permissions mode; it takes bypass");
+}
+
+/// Task #6: a members_update field it does not take is refused by name, never
+/// dropped; the fields that stay with Swap member say so.
+#[test]
+fn a_member_update_refuses_what_it_cannot_change() {
+    let mut team = running_team();
+    let set = |team: &mut Team, update: Value| {
+        let mut events = Vec::new();
+        apply(team, "settings", &json!({"members_update":[update]}), &Actor::Human, &BTreeSet::new(), &mut events)
+    };
+    let error = set(&mut team, json!({"id":"qa","permisions":"read"})).unwrap_err().to_string();
+    assert!(error.contains("no field \"permisions\"") && error.contains("permissions"), "{error}");
+    assert!(error.contains("it takes:") && error.contains("Example:"), "{error}");
+    let error = set(&mut team, json!({"id":"qa","agent":"claude"})).unwrap_err().to_string();
+    assert!(error.contains("no field \"agent\"") && error.contains("Swap member"), "{error}");
+    // A running member that has a session keeps its folder and role too.
+    team.members.iter_mut().find(|member| member.id == "qa").unwrap().session =
+        Some(SessionRef { name: "kimi/x/qa".into(), run_id: "r3".into(), ..Default::default() });
+    for update in [json!({"id":"qa","folder":"clone"}), json!({"id":"qa","role":"QA lead"})] {
+        let error = set(&mut team, update).unwrap_err().to_string();
+        assert_eq!(error, "A running team changes only members without a session");
+    }
+    // "clear_context_first" only goes with a new prompt.
+    let error = set(&mut team, json!({"id":"qa","clear_context_first":true})).unwrap_err().to_string();
+    assert_eq!(error, "Member \"qa\": field \"clear_context_first\" goes with a new \"prompt\"");
+    // And it is a checkbox: a value that is not a boolean is refused.
+    let error = set(&mut team, json!({"id":"qa","prompt":"Ship it","clear_context_first":"yes"})).unwrap_err().to_string();
+    assert_eq!(error, "Member \"qa\": field \"clear_context_first\" is true or false");
+}
+
+/// Task #6: a removed member takes no change.
+#[test]
+fn a_removed_member_is_not_updated() {
+    let mut team = running_team();
+    team.members.iter_mut().find(|member| member.id == "qa").unwrap().state = MemberState::Removed;
+    let mut events = Vec::new();
+    let error = apply(&mut team, "settings", &json!({"members_update":[{"id":"qa","model":"gpt-6"}]}), &Actor::Human, &BTreeSet::new(), &mut events)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "Member \"qa\" was removed");
+}
+
+/// Task #6: the dispatcher's pending changes are its own record; a plan or
+/// add-member cannot set them, as it cannot set launch_id or error.
+#[test]
+fn a_plan_cannot_set_the_dispatchers_pending_changes() {
+    let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+    let mut events = Vec::new();
+    plan(
+        &mut team,
+        &json!({"members":[{"id":"dev","role":"Backend","agent":"claude",
+            "model_switch":{"model":"opus","effort":"high"},"prompt_change":{"clear_context":true}}],
+            "tasks":[{"id":1,"title":"A","assignee":"dev"}]}),
+        &Actor::Human,
+        &mut events,
+    )
+    .unwrap();
+    let dev = team.member("dev").unwrap();
+    assert!(dev.model_switch.is_none() && dev.prompt_change.is_none(), "{dev:?}");
+}
+
+/// Task #6: "Clear context first" needs an agent with a native clear; DeepSeek
+/// has none, and the skip must not count as a clear.
+#[test]
+fn clear_context_first_is_refused_where_the_agent_cannot_clear() {
+    let mut team = running_team();
+    let dev = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+    dev.agent = "dsh".into();
+    dev.session = Some(SessionRef { name: "dsh/x/dev".into(), run_id: "r1".into(), ..Default::default() });
+    let mut events = Vec::new();
+    let error = apply(
+        &mut team,
+        "settings",
+        &json!({"members_update":[{"id":"dev","prompt":"Ship it","clear_context_first":true}]}),
+        &Actor::Human,
+        &BTreeSet::new(),
+        &mut events,
+    )
+    .unwrap_err()
+    .to_string();
+    assert_eq!(error, "Member \"dev\": DeepSeek has no clear-context action; leave \"clear_context_first\" off");
+    // Without the checkbox the prompt change is taken.
+    apply(
+        &mut team,
+        "settings",
+        &json!({"members_update":[{"id":"dev","prompt":"Ship it"}]}),
+        &Actor::Human,
+        &BTreeSet::new(),
+        &mut events,
+    )
+    .unwrap();
+    assert_eq!(team.member("dev").unwrap().prompt, "Ship it");
+    // The checkbox needs a new message: the same prompt changes nothing to clear.
+    let error = apply(
+        &mut team,
+        "settings",
+        &json!({"members_update":[{"id":"dev","prompt":"Ship it","clear_context_first":true}]}),
+        &Actor::Human,
+        &BTreeSet::new(),
+        &mut events,
+    )
+    .unwrap_err()
+    .to_string();
+    assert_eq!(error, "Member \"dev\": field \"clear_context_first\" needs a new \"prompt\" for a member that runs");
+}
+
+
+/// Task #7: only the owner sets a member's After-a-task policy, and a mode, a
+/// criterion, a threshold or an agent that does not fit is refused by name.
+#[test]
+fn only_the_owner_sets_a_members_after_task_policy() {
+    fn set(team: &mut Team, actor: &Actor, update: Value) -> anyhow::Result<Value> {
+        let mut events = Vec::new();
+        apply(team, "settings", &json!({"members_update":[update]}), actor, &BTreeSet::new(), &mut events)
+    }
+    let mut team = running_team();
+    // The lead cannot set it directly on a running team.
+    let error = set(
+        &mut team.clone(),
+        &Actor::Member("lead".into()),
+        json!({"id":"dev","after_task":"compact","after_task_on":"percent","after_task_at":80}),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.starts_with("The lead changes only a member's model and effort"), "{error}");
+    // The owner sets it, and a running member takes it from the next task.
+    set(&mut team, &Actor::Human, json!({"id":"dev","after_task":"compact","after_task_on":"percent","after_task_at":80})).unwrap();
+    let dev = team.member("dev").unwrap();
+    assert_eq!((dev.after_task.as_str(), dev.after_task_on.as_str(), dev.after_task_at), ("compact", "percent", 80));
+    // A mode needs its criterion and a positive threshold; a bad value names
+    // its field.
+    let error = set(&mut team.clone(), &Actor::Human, json!({"id":"dev","after_task":"clear","after_task_on":"percent","after_task_at":0}))
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "Member \"dev\": field \"after_task_at\" is a positive threshold");
+    let error = set(&mut team.clone(), &Actor::Human, json!({"id":"dev","after_task_on":"megabytes"})).unwrap_err().to_string();
+    assert_eq!(error, "Member \"dev\": field \"after_task_on\" must be percent or tokens, not \"megabytes\"");
+    let error = set(&mut team.clone(), &Actor::Human, json!({"id":"dev","after_task":"hold"})).unwrap_err().to_string();
+    assert_eq!(error, "Member \"dev\": field \"after_task\" must be empty (keep), compact or clear, not \"hold\"");
+    let error = set(&mut team.clone(), &Actor::Human, json!({"id":"dev","after_task":"compact","after_task_on":"percent","after_task_at":101}))
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "Member \"dev\": field \"after_task_at\" is 1 to 100 percent, not 101");
+    // A mode without a criterion is refused, and keep takes neither.
+    let error = set(&mut team.clone(), &Actor::Human, json!({"id":"dev","after_task":"compact","after_task_on":"","after_task_at":80}))
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "Member \"dev\": field \"after_task_on\" names the criterion: percent or tokens");
+    let error = set(&mut team.clone(), &Actor::Human, json!({"id":"dev","after_task":"","after_task_on":"percent"})).unwrap_err().to_string();
+    assert_eq!(error, "Member \"dev\": field \"after_task\": \"after_task_on\" and \"after_task_at\" only go with compact or clear");
+    // An agent without the native action is refused when the policy is set.
+    team.members.iter_mut().find(|member| member.id == "dev").unwrap().agent = "dsh".into();
+    let error = set(&mut team.clone(), &Actor::Human, json!({"id":"dev","after_task":"clear","after_task_on":"tokens","after_task_at":1000}))
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "Member \"dev\": field \"after_task\": DeepSeek has no clear-context action");
+    // A plan member is checked the same way.
+    let (mut planned, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+    let mut events = Vec::new();
+    let error = plan(
+        &mut planned,
+        &json!({"members":[{"id":"dev","role":"Backend","agent":"claude","after_task":"compact","after_task_on":"percent","after_task_at":0}],
+            "tasks":[{"id":1,"title":"A","assignee":"dev"}]}),
+        &Actor::Human,
+        &mut events,
+    )
+    .unwrap_err()
+    .to_string();
+    assert_eq!(error, "A member \"dev\": field \"after_task_at\" is a positive threshold");
 }

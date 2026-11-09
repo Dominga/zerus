@@ -30,7 +30,7 @@ export async function terminationCleanupSmoke(allowed: boolean) {
     require(document.querySelector(".statusbar .chip-accent")?.isConnected, "statusbar did not render");
     await log("CLEANING"); await sleep(500);
     openCleanup(); await until(() => !!document.querySelector("dialog.worktree-cleanup[open]"), "review did not open while cleaning");
-    require(button(".worktree-cleanup", "Keep folders")!.disabled, "Keep folders must be disabled during work");
+    require(!button(".worktree-cleanup", "Close")!.disabled, "Close must dismiss review without stopping background work");
     await log("ESCAPE_CLEANING"); await until(() => !cleanupDialog(), "Escape did not close the review");
     await until(() => !cleanup().busy && !cleanup().rows.length, "clean generated folder did not settle");
     require(notices().some((n) => n.title === "Folder removed"), "removed result needs its toast");
@@ -55,11 +55,13 @@ export async function terminationCleanupSmoke(allowed: boolean) {
     const discard = [...document.querySelectorAll<HTMLInputElement>(".bc-consent input")][0]; require(discard, "discard confirmation absent"); discard.click();
     require(!remove.disabled, "fresh explicit consent was not applied"); remove.click();
     await until(() => cleanup().rows.length === 1 && cleanup().unknown === 1 && !cleanup().busy, "manual cleanup did not settle without repeating unknown");
-    button(".worktree-cleanup", "Keep folders")!.click(); await until(() => !cleanupDialog() && !cleanup().rows.length, "Keep folders did not dismiss recorded results");
-    await confirm("unknown-only"); await until(() => cleanup().unknown === 1 && !cleanup().busy, "standalone unknown absent");
+    button(".worktree-cleanup", "Close")!.click(); await until(() => !cleanupDialog(), "Close did not dismiss review");
+    require(cleanup().rows.length > 0, "Close discarded retained results");
+    const held = cleanup().rows.length, unknown = cleanup().unknown;
+    await confirm("unknown-only"); await until(() => cleanup().unknown === unknown + 1 && !cleanup().busy, "new unknown absent beside retained result");
     await log("UNKNOWN"); await sleep(600);
     await confirm("changed"); await until(() => notices().some((n) => (n.text.includes("session state changed") || n.text === "Terminate cancelled: the session changed.")), "changed source did not refuse termination");
-    require(cleanup().rows.length === 1 && cleanup().unknown === 1, "source change started cleanup");
+    require(cleanup().rows.length === held + 1 && cleanup().unknown === unknown + 1, "source change started cleanup");
     await log("PASS"); await sleep(200); await invoke("exit_app", { code: 0 });
   } catch (error) { await log("FAIL " + String(error) + (error instanceof Error ? "\n" + error.stack : "")); await log("STATE " + JSON.stringify({ cleanup: cleanup(), notices: notices() })); await invoke("exit_app", { code: 1 }); }
 }

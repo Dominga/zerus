@@ -206,7 +206,8 @@ class PublicCaskBoundaries(unittest.TestCase):
             q.prepare_gui_runtime()
             runtime = Path(q.env["TMPDIR"])
             try:
-                self.assertEqual(runtime.parent, Path("/tmp").resolve())
+                selected = Path(os.environ.get("ZERUS_TEST_SHORT_TMPDIR", "/tmp")).resolve()
+                self.assertEqual(runtime.parent, selected)
                 self.assertEqual(stat.S_IMODE(runtime.stat().st_mode), 0o700)
                 self.assertNotEqual(runtime, outside)
                 self.assertLessEqual(q.gui_runtime_info()["canonical_socket_bytes"], 90)
@@ -219,6 +220,12 @@ class PublicCaskBoundaries(unittest.TestCase):
             self.assertFalse(runtime.exists())
             self.assertIsNone(q.gui_runtime)
             self.assertEqual(retained.read_text(), "Unrelated private fixture data")
+
+    def test_short_gui_runtime_contract_accepts_an_explicit_private_root(self):
+        with tempfile.TemporaryDirectory(prefix="cask-root-",
+                dir=os.environ.get("ZERUS_TEST_SHORT_TMPDIR", "/tmp")) as root:
+            with patch.dict(os.environ, ZERUS_TEST_SHORT_TMPDIR=root):
+                self.test_short_gui_runtime_is_owned_and_cleanup_never_follows_external_links()
 
     def test_gui_runtime_cleanup_also_runs_after_native_cleanup_failure(self):
         for throws in (False, True):

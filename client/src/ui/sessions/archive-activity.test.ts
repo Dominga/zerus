@@ -55,8 +55,8 @@ vi.mock("../../bridge", async (importOriginal) => ({
   // The selected session's composer (store/composer), opened by store/session.
   composerOpen: vi.fn(async () => null), composerVisibility: vi.fn(async () => {}), composerEdit: vi.fn(async () => {}), composerPick: vi.fn(async () => {}), composerPasteImage: vi.fn(async () => {}),
   composerRemove: vi.fn(async () => {}), composerUndoRemove: vi.fn(async () => {}), composerAllowRetry: vi.fn(async () => {}), composerRefresh: vi.fn(async () => {}),
-  composerTab: vi.fn(async () => {}), sendMessage: vi.fn(), sendAnswer: vi.fn(), sendCancel: vi.fn(async () => {}), sendInterrupted: vi.fn(async () => {}), clearContext: vi.fn(),
-  localRetry: vi.fn(), localDelete: vi.fn(async () => {}), localInspect: vi.fn(async () => null),
+  composerTab: vi.fn(async () => {}), sendMessage: vi.fn(), sendAnswer: vi.fn(), sendCancel: vi.fn(async () => {}), sendInterrupted: vi.fn(async () => {}), sendInterruptFailed: vi.fn(async () => {}), clearContext: vi.fn(),
+  localRetry: vi.fn(), localDelete: vi.fn(async () => {}), localInspect: vi.fn(async () => null), inboxRemove: vi.fn(async () => ({ outcome: "removed" as const })),
   // The File reference dialog (SessionFileDialog) listens with Activity.
   onSessionFileChanged: vi.fn(async () => () => {}),
   onSessionFileNotice: vi.fn(async () => () => {}),
@@ -227,6 +227,22 @@ describe("the app's archived Activity", () => {
     expect(mocked.composerOpen).toHaveBeenLastCalledWith({ computer: "", key: "run:run-live", name: "codex/example/live", archive_id: null, session_id: null });
     vi.advanceTimersByTime(10_000);
     expect(reads.length).toBe(2);
+  });
+
+  it("never follows a shell session's Activity, which records none (zerus-bz54l)", async () => {
+    applyBatch({ ...emptyBatch(), computers: [{ computer: "", status: "live", attempt: 0 }], upserts: [
+      { computer: "", key: "shell:work-1", row: { name: "sh/kinder/work-1", agent: "sh", state: "running", status: "unavailable", tracked: false } },
+      { computer: "", key: "run:run-agent", row: { name: "codex/example/agent", agent: "codex", state: "running", status: "ready", tracked: true, run_id: "run-agent", conversation_id: "conv-agent" } },
+    ] });
+    setStateFilter("all");
+    vi.mocked(mocked.activityPort.follow).mockClear();
+    setSelectedKey("\nshell:work-1");
+    await flush();
+    expect(mocked.activityPort.follow).not.toHaveBeenCalled();
+    expect(activity.target()).toBeUndefined();
+    setSelectedKey("\nrun:run-agent");
+    await flush();
+    expect(mocked.activityPort.follow).toHaveBeenCalledWith(expect.objectContaining({ key: "run:run-agent" }));
   });
 
   it("keeps reading a restore's archived row while the archive reloads, as Qt's selected() keeps its source (3136-3139)", async () => {

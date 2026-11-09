@@ -1,3 +1,4 @@
+import { TextInput } from "../lib/TextField";
 import { For, Index, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import { Icon } from "../lib/icons";
 import { composing } from "../lib/keys";
@@ -46,7 +47,7 @@ function PromptDialog(props: { prompt: () => FolderPrompt; onName(name: string):
         <p class="fb-text">{props.prompt().text}</p>
         <div class="form-row">
           <label for="fb-prompt-name">{tr("Folder name")}</label>
-          <input id="fb-prompt-name" ref={name} class="field" aria-label={tr("New folder name")} value={props.prompt().name} onInput={(e) => props.onName(e.currentTarget.value)} />
+          <TextInput id="fb-prompt-name" ref={name} class="field" aria-label={tr("New folder name")} value={props.prompt().name} onInput={(e) => props.onName(e.currentTarget.value)} />
         </div>
       </div>
       <div class="dlg-foot">
@@ -192,11 +193,11 @@ export function FolderBrowserDialog(props: { computer: string; start: string; ca
           <div class="row fb-nav">
             <button type="button" class="btn" disabled={!v().controlsEnabled} onClick={() => model.up()}>{tr("Up")}</button>
             <button type="button" class="btn" disabled={!v().controlsEnabled} onClick={() => model.home()}>{tr("Home")}</button>
-            <input class="field mono grow" data-role="path" aria-label={tr("Directory path")} value={v().path} disabled={!v().controlsEnabled}
+            <TextInput class="field mono grow" data-role="path" aria-label={tr("Directory path")} value={v().path} disabled={!v().controlsEnabled}
               onInput={(e) => model.editPath(e.currentTarget.value)} />
             <button type="button" class="btn" disabled={!v().controlsEnabled} onClick={() => model.go()}>{tr("Go")}</button>
           </div>
-          <input class="field fb-filter" type="search" placeholder={tr("Filter folders in this directory…")} value={v().filter} disabled={!v().controlsEnabled}
+          <TextInput class="field fb-filter" type="search" placeholder={tr("Filter folders in this directory…")} value={v().filter} disabled={!v().controlsEnabled}
             onInput={(e) => model.setFilter(e.currentTarget.value)}
             onKeyDown={(e) => {
               // Escape is the dialog's, as in Qt: WebKit's search field would only clear itself.
@@ -208,7 +209,7 @@ export function FolderBrowserDialog(props: { computer: string; start: string; ca
             <Show when={v().inline}>{(row) => (
               <li class="fb-inline">
                 <Icon name="folder" size={14} class="fb-icon" />
-                <input ref={inline} class="field grow" placeholder={tr("Folder name")} aria-label={tr("New folder name")} value={row().name}
+                <TextInput ref={inline} class="field grow" placeholder={tr("Folder name")} aria-label={tr("New folder name")} value={row().name}
                   onInput={(e) => model.setInlineName(e.currentTarget.value)} />
                 <button type="button" class="btn small" disabled={!row().createEnabled} onClick={() => model.createInline()}>{tr("Create")}</button>
                 <button type="button" class="btn small" aria-label={tr("Cancel new folder")} data-tip={tr("Cancel new folder")} onClick={cancelInline}>{tr("Cancel")}</button>

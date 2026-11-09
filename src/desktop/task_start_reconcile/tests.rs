@@ -5,8 +5,11 @@ use std::{
     fs,
     os::unix::{fs::PermissionsExt, net::UnixListener},
     path::PathBuf,
-    process::{Child, Command, Stdio},
+    process::{Child, Stdio},
 };
+// Only the Linux image tests start a process of their own.
+#[cfg(target_os = "linux")]
+use std::process::Command;
 use zerus_client_core::{desktop::ui_requests::Request, operation_recovery::task_start as policy};
 
 const HELPER: &str = r#"#!/usr/bin/env python3
@@ -100,7 +103,7 @@ impl Fixture {
         let name = "codex/private-task-start";
         // The stand-in is owned until Fixture::drop, not until an unrelated
         // wall-clock timeout expires while other tests occupy the scheduler.
-        let mut agent = Command::new("/bin/cat");
+        let mut agent = crate::test_process::echo_command();
         agent
             .env("HGS_RUN_ID", &run)
             .stdin(Stdio::piped())
@@ -125,16 +128,9 @@ impl Fixture {
             }
         }
         let mut agent = agent.spawn().unwrap();
-        // spawn() returns before the kernel publishes the new image's
-        // environment, so a capture at once can read no HGS_RUN_ID and decline
-        // preparation (zerus-db04, zerus-spum). The echo proves it runs.
-        {
-            use std::io::{Read, Write};
-            agent.stdin.as_mut().unwrap().write_all(b"ready\n").unwrap();
-            let mut echo = [0; 6];
-            agent.stdout.as_mut().unwrap().read_exact(&mut echo).unwrap();
-            assert_eq!(&echo, b"ready\n");
-        }
+        // The private test image exposes its own environment on Darwin too;
+        // the echo still proves exec before native identity capture.
+        crate::test_process::echo_ready(&mut agent);
         let record = json!({"version":1,"run_identity_version":1,"name":name,"agent":"codex","run_id":run,
             "conversation_id":conversation,"pid":agent.id(),"process_start":platform::process_start_time(agent.id()).unwrap(),
             "supervisor":{"pid":std::process::id(),"start":platform::process_start_time(std::process::id()).unwrap()}});
@@ -988,8 +984,12 @@ fn real_fixture(submitted: bool) -> Fixture {
         let path = dir.join(format!("{}.json", f.intent.binding.key.request_id));
         // Existing native-receipt fixture: no terminal submission is performed
         // by setup. The real recover-only CLI must reconcile this exact record.
+        // Every field `submit_core` writes, `first_message` included: a receipt
+        // that does not decode whole is unknown evidence and settles nothing
+        // (#1519 R4, zerus-kpj4c).
         fs::write(&path,json!({"status":"submitted","name":"codex/private-task-start",
             "run_id":f.intent.binding.executor.run_id,"conversation_id":f.intent.binding.executor.conversation_id,
+            "first_message":f.intent.binding.executor.conversation_id.is_empty(),
             "request_id":f.intent.binding.key.request_id,"digest":operations::hash(plan["request"].to_string().as_bytes())}).to_string()).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
     }

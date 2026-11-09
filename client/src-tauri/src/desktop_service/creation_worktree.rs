@@ -111,7 +111,7 @@ pub(crate) fn call(
                 creation_id: id.into(),
                 worktree_request_id: plan.worktree_request_id.clone(),
                 revision: operation["revision"].as_u64().ok_or(())?,
-                original: serde_json::to_string(operation).map_err(drop)?,
+                original: creation::effect_checkpoint(operation).map_err(drop)?,
             };
             intent.clone().verify().map_err(drop)?;
             sent.set(true);
@@ -126,6 +126,9 @@ pub(crate) fn call(
                 )
                 .map_err(drop)?;
             let admission: wire::Admission = serde_json::from_slice(&bytes).map_err(drop)?;
+            if let Some(answer) = admission.refusal_answer(&intent) {
+                return Ok(Some(answer));
+            }
             if !admission.matches(&intent) {
                 return Err(());
             }
@@ -152,7 +155,11 @@ pub(crate) fn call(
             if !lookup.matches(&query) {
                 return Err(());
             }
-            let receipt = lookup.receipt.ok_or(())?; // Missing never authorizes Start.
+            let Some(receipt) = lookup.receipt else {
+                // A lost Stop reply can recover its durable FUTURE fence via a
+                // read. Absence itself remains Unknown and never creates one.
+                return read_fence(&read, id, &plan, wire::ControlAction::Status).map(Some);
+            };
             if let Some(answer) = settled(&receipt, &plan, wait) {
                 return Ok(Some(answer));
             }
@@ -182,6 +189,86 @@ pub(crate) fn call(
                 }),
         )
     })
+}
+
+fn read_fence(
+    read: &Arc<Read>,
+    id: &str,
+    plan: &wire::Plan,
+    action: wire::ControlAction,
+) -> Result<creation::Answer, ()> {
+    if !read.supports(wire::CONTROL_HELP_MARKER).map_err(drop)? {
+        return Err(());
+    }
+    let request = wire::ControlRequest {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        scope: read.scope.clone(),
+        creation_id: id.into(),
+        plan: plan.clone(),
+        action,
+    };
+    let bytes = read
+        .exchange(
+            None,
+            json!({"op":"creation_worktree_receipt", "request":request}),
+            false,
+            None,
+        )
+        .map_err(drop)?;
+    let reply: wire::ControlReply = serde_json::from_slice(&bytes).map_err(drop)?;
+    if !reply.matches(&request) {
+        return Err(());
+    }
+    let receipt = reply.receipt.ok_or(())?;
+    if wire::fenced(&receipt, plan) {
+        return Ok(creation::Answer {
+            ok: true,
+            data: receipt,
+            error: String::new(),
+        });
+    }
+    // Raw receipt bytes never stand in for the actor's physical retirement.
+    let query = wire::Query::for_plan(read.scope.clone(), id.into(), plan).ok_or(())?;
+    let bytes = read
+        .exchange(
+            None,
+            json!({"op":"creation_worktree_result","query":query}),
+            false,
+            None,
+        )
+        .map_err(drop)?;
+    let lookup: wire::Lookup = serde_json::from_slice(&bytes).map_err(drop)?;
+    if !lookup.matches(&query) {
+        return Err(());
+    }
+    lookup
+        .receipt
+        .as_ref()
+        .and_then(|receipt| settled(receipt, plan, false))
+        .ok_or(())
+}
+/// Explicit Stop, through the SAME selected source and native configured
+/// receipt store. It cannot fall back to default_hgs, settle physical charges
+/// or turn the historical unknown into a no-effects result.
+pub(crate) fn cancel(
+    service: Option<Arc<Service>>,
+    id: &str,
+    operation: &Value,
+    shutdown: &AtomicBool,
+) -> Option<creation::Answer> {
+    let result = (|| {
+        let read = Read::new(service).map_err(drop)?;
+        if shutdown.load(Ordering::Acquire) || !creation::valid_operation(id, operation) {
+            return Err(());
+        }
+        let plan = wire::Plan::from_operation(id, operation).ok_or(())?;
+        read_fence(&read, id, &plan, wire::ControlAction::Cancel)
+    })();
+    Some(result.unwrap_or_else(|()| creation::Answer {
+        ok: false,
+        data: Value::Null,
+        error: zerus_client_core::repository::UNCONFIRMED_OPERATION.into(),
+    }))
 }
 
 #[cfg(test)]

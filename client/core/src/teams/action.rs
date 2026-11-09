@@ -1108,8 +1108,9 @@ impl TeamAction {
                 if !matches!(action.as_str(), "list" | "clean" | "policy" | "forget") {
                     return Err("List, clean, set the policy or forget.".into());
                 }
-                if !matches!(scope.as_str(), "" | "policy" | "all") {
-                    return Err("Clean what the policy removes, or every folder of Zerus's.".into());
+                // Task #364: one team's finished-task targets, `team:<id>`.
+                if !matches!(scope.as_str(), "" | "policy" | "all") && !(scope.starts_with("team:") && scope.len() > "team:".len()) {
+                    return Err("Clean what the policy removes, every folder of Zerus's, or one team's finished tasks.".into());
                 }
                 if action == "policy" && !policy.is_object() {
                     return Err("The policy is missing.".into());
@@ -2033,7 +2034,7 @@ pub fn classify(action: &TeamAction, request_id: &str, exit: Exit) -> TeamOutcom
                 // The new draft's id is the receipt.
                 TeamAction::DraftStart { .. } => receipt["team"]
                     .as_str()
-                    .is_some_and(|id| super::read::valid_team(id)),
+                    .is_some_and(super::read::valid_team),
                 // The receipt names the proposal it decided (or its earlier
                 // decision, on a replay).
                 TeamAction::DecideProposal { proposal, .. } => receipt

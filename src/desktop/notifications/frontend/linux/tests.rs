@@ -84,6 +84,7 @@ fn open() -> Open {
         computer: "peer.example".into(),
         run: "original-run".into(),
         conversation: "original-conversation".into(),
+        startup_question: None,
     };
     let token = zerus_client_core::attention::encode_token(
         serde_json::json!({

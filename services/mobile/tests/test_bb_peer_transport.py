@@ -14,8 +14,10 @@ target/debug/hgs; without one the tests skip, except in CI, where they fail.
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
+import tempfile
 import unittest
 
 from connector_harness import ROOT
@@ -24,10 +26,16 @@ from gateway_harness import GatewayCase, error, route_id
 
 TIMED_OUT = {error("native command timed out"), error("native peer command timed out")}
 STAND_INS = ("tmux", "codex", "claude", "kimi", "opencode", "dsh")
+LOGIN_PROBE = 'echo "hgs-remote-v2|%OS%|%SystemRoot%|$env:OS|$env:SystemRoot"'
+LOGIN_REPLY = 'hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot'
 SSH = '''#!{python} -I
 """Synthetic SSH: run the alias's hgs here with its own configuration."""
 import json, os, shlex, sys, tempfile, time
 root, hgs = {root!r}, {hgs!r}
+# The fixed platform probe is a shell builtin, not an hgs invocation.
+if sys.argv[-1] == {probe!r}:
+    print({reply!r})
+    sys.exit(0)
 alias, args = sys.argv[-2], shlex.split(sys.argv[-1])[1:]
 env =dict(os.environ, HGS_CONFIG_DIR=os.path.join(root, alias), HGS_STATE_DIR=os.path.join(root, alias, "state"))
 if args == ["swarm", "__mobile-peer-local", "--json"]:
@@ -46,6 +54,65 @@ if args == ["swarm", "__mobile-peer-local", "--json"]:
     os.dup2(stdin.fileno(), 0)
 os.execve(hgs, [hgs, *args], env)
 '''
+
+
+def ssh_script(root: Path, hgs: Path) -> str:
+    return SSH.format(python=sys.executable, root=str(root), hgs=str(hgs),
+                      probe=LOGIN_PROBE, reply=LOGIN_REPLY)
+
+
+class PeerSshFixtureTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.record = self.root / "native.json"
+        self.native = self.root / "hgs"
+        self.native.write_text(
+            f"#!{sys.executable} -I\n"
+            "import json, os, sys\n"
+            "value = dict(args=sys.argv[1:], input=sys.stdin.buffer.read().hex(), "
+            "config=os.environ['HGS_CONFIG_DIR'], state=os.environ['HGS_STATE_DIR'])\n"
+            f"with open({str(self.record)!r}, 'w') as out: json.dump(value, out)\n"
+            "print(json.dumps(value))\n"
+            "raise SystemExit(7)\n")
+        self.native.chmod(0o700)
+        self.ssh = self.root / "ssh"
+        self.ssh.write_text(ssh_script(self.root, self.native))
+
+    def call(self, command: str, data: bytes = b""):
+        env = {key: value for key, value in os.environ.items()
+               if key in {"PATH", "LANG", "LC_ALL", "TZ"}}
+        env["HOME"] = str(self.root)
+        return subprocess.run([sys.executable, "-I", str(self.ssh), "b", command],
+                              input=data, capture_output=True, env=env, timeout=10)
+
+    def test_fixed_login_probe_reports_posix_without_invoking_hgs(self):
+        self.assertIn(f'r#"{LOGIN_PROBE}"#', (ROOT / "src/remote_shell.rs").read_text())
+        result = self.call(LOGIN_PROBE)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, (LOGIN_REPLY + "\n").encode())
+        self.assertFalse(self.record.exists())
+
+    def test_native_arguments_input_selected_profile_and_exit_are_unchanged(self):
+        args = ["swarm", "__mobile-peer-identity", "--json", "", "literal ; $value", "пример"]
+        data = b"\x00\xff\r\noriginal bytes"
+        result = self.call(shlex.join(["~/.local/bin/hgs", *args]), data)
+        self.assertEqual(result.returncode, 7, result.stderr)
+        value = json.loads(result.stdout)
+        self.assertEqual(value, json.loads(self.record.read_text()))
+        self.assertEqual(value, dict(args=args, input=data.hex(),
+                                    config=str(self.root / "b"), state=str(self.root / "b/state")))
+
+    def test_similar_or_mixed_commands_are_not_swallowed_as_the_probe(self):
+        for command in [LOGIN_PROBE + " extra", LOGIN_PROBE + "; printf other",
+                        "printf " + shlex.quote(LOGIN_REPLY)]:
+            with self.subTest(command=command):
+                self.record.unlink(missing_ok=True)
+                result = self.call(command)
+                self.assertEqual(result.returncode, 7, result.stderr)
+                self.assertEqual(json.loads(self.record.read_text())["args"],
+                                 shlex.split(command)[1:])
 
 
 def native_hgs() -> Path | None:
@@ -85,7 +152,7 @@ class PeerTransportTests(GatewayCase):
         self.root = self.scratch / "fleet"
         bin_dir = self.root / "bin"
         bin_dir.mkdir(parents=True)
-        (bin_dir / "ssh").write_text(SSH.format(python=sys.executable, root=str(self.root), hgs=str(self.native)))
+        (bin_dir / "ssh").write_text(ssh_script(self.root, self.native))
         for name in STAND_INS:
             (bin_dir / name).write_text("#!/bin/sh\nexit 1\n")
         for path in bin_dir.iterdir():

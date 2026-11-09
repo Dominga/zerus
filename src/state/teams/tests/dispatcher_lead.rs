@@ -344,3 +344,99 @@ fn a_deepseek_members_model_is_applied_bare_or_qualified() {
         assert_eq!(calls[0].1["expected_run_id"], "r1");
     }
 }
+
+/// Task #346 (owner, 2026-11-08): ONE `hgs team <op> --json-file PATH` call in
+/// the member's own scope - its scratch team under the owner's standing rule -
+/// is answered by Zerus itself, recorded in the feed; a compound script still
+/// reaches the lead.
+#[test]
+fn a_single_team_call_in_the_members_own_scope_is_answered_by_zerus() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        crate::state::teams::templates::settings_override(Some(dir.path().join("templates.json")));
+        safe_actions::set_test_path(Some(dir.path().join("safe-actions.json")));
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        t.folder = project.display().to_string();
+        let qa_folder = dir.path().join("qa");
+        std::fs::create_dir_all(&qa_folder).unwrap();
+        {
+            let qa = t.members.iter_mut().find(|member| member.id == "qa").unwrap();
+            qa.agent = "dsh".into();
+            qa.permissions_profile = "operate".into();
+            qa.session = Some(SessionRef { name: "dsh/x/qa".into(), run_id: "r1".into(), conversation_id: "qa-conversation".into(), ..Default::default() });
+            qa.directory = qa_folder.display().to_string();
+        }
+        crate::state::teams::owner_steps::add_standing(crate::state::teams::owner_steps::ScratchRule {
+            team: t.id.clone(),
+            folder: crate::state::teams::scratch::root(&t),
+            agents: vec!["dsh".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        let mut child = Team {
+            id: "child1".into(),
+            name: "Live check".into(),
+            folder: format!("{}/check", crate::state::teams::scratch::root(&t)),
+            lead: "qa".into(),
+            status: TeamStatus::Running,
+            ..Default::default()
+        };
+        child.scratch_parent = Some(crate::state::teams::model::ScratchParent { team: t.id.clone(), task: 0, member: "qa".into() });
+        child.members.push(t.member("qa").unwrap().clone());
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        store.create("11111111-1111-4111-8111-111111111112", &json!({}), child, vec![]).unwrap();
+        let plan = qa_folder.join("plan.json");
+        std::fs::write(&plan, serde_json::to_vec(&json!({"team":"child1","tasks":[{"id":1,"title":"Check","assignee":"qa"}]})).unwrap()).unwrap();
+        let command = format!("hgs team plan --json-file {}", plan.display());
+        let card = |id: &str, command: &str| json!({"question_id":id,"question_hash":format!("h-{id}"),"approval":true,"can_answer":true,
+            "tool":"Shell","command":command,
+            "questions":[{"id":"decision","header":"Shell","question":"Allow?","options":[
+                {"id":"allow","label":"Allow once"},{"id":"deny","label":"Reject"}]}]});
+        let answers = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Value>::new()));
+        let sent = answers.clone();
+        let single = command.clone();
+        let script = format!("pwsh -Command \"{command}\"");
+        let scripted = script.clone();
+        set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| {
+            if args.first() == Some(&"answer") {
+                sent.borrow_mut().push(input.cloned().unwrap_or_default());
+                return Ok(fake_output(0, r#"{"status":"answered"}"#, ""));
+            }
+            Ok(fake_output(0, &json!({"pending_questions":[card("q1", &single), card("q2", &scripted)]}).to_string(), ""))
+        })));
+        let saved = store.load(&t.id).unwrap().unwrap();
+        sync_permission(&mut store, &saved, "qa").unwrap();
+        set_fake_hgs(None);
+        assert_eq!(answers.borrow().len(), 1, "the single call is answered; the script is not");
+        assert_eq!(answers.borrow()[0]["answers"], json!([{"question_id":"decision","selected_option_ids":["allow"]}]));
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let qa = saved.member("qa").unwrap();
+        assert!(qa.pending.is_none(), "the answered request leaves no pending card");
+        let allowed = qa.permission_answers.last().unwrap();
+        assert!(allowed["by"].as_str().unwrap().contains("own-scope"), "{allowed}");
+        let events = store.events(&t.id, None, 30).unwrap().to_string();
+        assert!(events.contains("permission_answered") && events.contains("own-scope"), "{events}");
+        assert!(events.contains("safe_action_reserved") && events.contains("sandbox-scope"), "{events}");
+        // The compound script is the lead's: the next read records it unanswered.
+        sync_permission_forget(&t.id, "qa");
+        let scripted = card("q2", &script);
+        set_fake_hgs(Some(Box::new(move |_, args: &[&str], _: Option<&Value>| {
+            if args.first() == Some(&"answer") {
+                return Ok(fake_output(0, r#"{"status":"answered"}"#, ""));
+            }
+            Ok(fake_output(0, &json!({"pending_questions":[scripted]}).to_string(), ""))
+        })));
+        let saved = store.load(&t.id).unwrap().unwrap();
+        sync_permission(&mut store, &saved, "qa").unwrap();
+        set_fake_hgs(None);
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let qa = saved.member("qa").unwrap();
+        assert_eq!(qa.pending.as_ref().map(|pending| pending.question_id.as_str()), Some("q2"), "the script waits for the lead");
+        assert_eq!(answers.borrow().len(), 1, "Zerus never answered the script");
+        safe_actions::set_test_path(None);
+        crate::state::teams::templates::settings_override(None);
+    });
+}

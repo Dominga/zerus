@@ -695,6 +695,7 @@ fn matching_record(name: &str, request: &AnswerRequest) -> Result<Value> {
     // share the label.
     expect(name, &request.expected_run_id, &request.expected_conversation_id)?;
     let record = read(name)?;
+    terminating::check_mutation(&record)?;
     if string(&record, "run_id") != request.expected_run_id
         || string(&record, "conversation_id") != request.expected_conversation_id
     {

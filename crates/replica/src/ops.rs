@@ -3,7 +3,7 @@
 //! these, so the rules hold the same everywhere.
 use crate::render::{task_prompt, Tools};
 use crate::schema::{Actor, Stage, Target};
-use crate::store::{Position, ProjectStore};
+use crate::store::{Placement, Position, ProjectStore};
 use crate::task::{check_new_stage, NewTask, TaskDoc};
 use crate::Result;
 
@@ -33,10 +33,35 @@ impl ProjectStore {
         project_name: &str,
         now: i64,
     ) -> Result<TaskDoc> {
+        self.new_task_placed(
+            None,
+            text,
+            stage,
+            target,
+            author,
+            position,
+            project_name,
+            now,
+        )
+    }
+
+    /// `new_task`, placed from `placement` when its answer holds (zerus-cg5h.24).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_task_placed(
+        &self,
+        placement: Option<&dyn Placement>,
+        text: &str,
+        stage: Stage,
+        target: Target,
+        author: Actor,
+        position: &Position,
+        project_name: &str,
+        now: i64,
+    ) -> Result<TaskDoc> {
         // Before the rank: placing it in another stage could renumber that stage.
         check_new_stage(stage)?;
-        let rank = self.rank_for(stage, position, None)?;
-        let id = self.unused_short_id()?;
+        let (rank, id) = self.place(placement, stage, position, None, true)?;
+        let id = id.expect("a placement with a short ID");
         let task = TaskDoc::create(NewTask {
             project: self.project_id(),
             id: &id,
@@ -56,6 +81,39 @@ impl ProjectStore {
     #[allow(clippy::too_many_arguments)]
     pub fn new_named_task(
         &self,
+        title: &str,
+        text: &str,
+        files: &[crate::TaskAttachment],
+        stage: Stage,
+        target: Target,
+        author: Actor,
+        position: &Position,
+        project_name: &str,
+        now: i64,
+        request: Option<&str>,
+        start: bool,
+    ) -> Result<(TaskDoc, bool)> {
+        self.new_named_task_placed(
+            None,
+            title,
+            text,
+            files,
+            stage,
+            target,
+            author,
+            position,
+            project_name,
+            now,
+            request,
+            start,
+        )
+    }
+
+    /// `new_named_task`, placed from `placement` when its answer holds (zerus-cg5h.24).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_named_task_placed(
+        &self,
+        placement: Option<&dyn Placement>,
         title: &str,
         text: &str,
         files: &[crate::TaskAttachment],
@@ -105,8 +163,8 @@ impl ProjectStore {
                 return Ok((existing, false));
             }
         }
-        let rank = self.rank_for(stage, position, None)?;
-        let id = self.unused_short_id()?;
+        let (rank, id) = self.place(placement, stage, position, None, true)?;
+        let id = id.expect("a placement with a short ID");
         let mut task = TaskDoc::create_named(
             NewTask {
                 project: self.project_id(),
@@ -153,10 +211,22 @@ impl ProjectStore {
         actor: &Actor,
         now: i64,
     ) -> Result<()> {
+        self.change_stage_placed(None, task, to, actor, now)
+    }
+
+    /// `change_stage`, placed from `placement` when its answer holds (zerus-cg5h.24).
+    pub fn change_stage_placed(
+        &self,
+        placement: Option<&dyn Placement>,
+        task: &mut TaskDoc,
+        to: Stage,
+        actor: &Actor,
+        now: i64,
+    ) -> Result<()> {
         let from = task.stage()?;
         task.set_stage(to, actor, now)?;
         if from != to && matches!(to, Stage::Todo | Stage::Backlog) {
-            let rank = self.rank_for(to, &Position::Top, Some(task.uuid()))?;
+            let (rank, _) = self.place(placement, to, &Position::Top, Some(task.uuid()), false)?;
             task.set_rank(&rank)?;
         }
         Ok(())
@@ -164,8 +234,18 @@ impl ProjectStore {
 
     /// Puts a task at `position` within its current stage, without changing execution.
     pub fn reorder(&self, task: &mut TaskDoc, position: &Position) -> Result<()> {
+        self.reorder_placed(None, task, position)
+    }
+
+    /// `reorder`, placed from `placement` when its answer holds (zerus-cg5h.24).
+    pub fn reorder_placed(
+        &self,
+        placement: Option<&dyn Placement>,
+        task: &mut TaskDoc,
+        position: &Position,
+    ) -> Result<()> {
         task.writable()?;
-        let rank = self.rank_for(task.stage()?, position, Some(task.uuid()))?;
+        let (rank, _) = self.place(placement, task.stage()?, position, Some(task.uuid()), false)?;
         task.set_rank(&rank)
     }
 }

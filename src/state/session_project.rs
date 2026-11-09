@@ -5,6 +5,9 @@ use super::*;
 
 pub(crate) fn with_session_project_binding<T>(
     name: &str,
+    id: Option<&str>,
+    run: &str,
+    conversation: &str,
     check: impl FnOnce(&Value) -> std::result::Result<T, anyhow::Error>,
 ) -> anyhow::Result<T> {
     // Keep the launch metadata transaction's established lock order. The
@@ -12,7 +15,41 @@ pub(crate) fn with_session_project_binding<T>(
     let _writer = lock(None).map_err(anyhow::Error::msg)?;
     let _dsh = lock(Some(&root().join("dsh/bindings.lock"))).map_err(anyhow::Error::msg)?;
     let _opencode = opencode::lock_bindings().map_err(anyhow::Error::msg)?;
-    let (provider, path) = binding_location(name);
+    let selected_path = if let Some(id) = id {
+        anyhow::ensure!(session_id::canonical(id), "Invalid native session ID");
+        let (indexed_name, kind) = session_index::indexed(id)
+            .ok_or_else(|| anyhow::anyhow!("Session identity is unavailable; refresh and retry"))?;
+        anyhow::ensure!(
+            indexed_name == name,
+            "Session ID no longer names the requested session; refresh and retry"
+        );
+        let by_id = matches!(kind, session_index::Kind::IdRecord | session_index::Kind::DeepSeekId | session_index::Kind::OpenCodeId);
+        session_id::select_guarded_route(name, id, run, conversation, by_id);
+        Some(match kind {
+            session_index::Kind::IdRecord => storage::id_record_path(id).expect("canonical ID"),
+            session_index::Kind::DeepSeekId => provider_binding::Provider::DeepSeek.id_path(id).expect("canonical ID"),
+            session_index::Kind::OpenCodeId => provider_binding::Provider::OpenCode.id_path(id).expect("canonical ID"),
+            session_index::Kind::Record => storage::label_record_path(name),
+            session_index::Kind::DeepSeek => root()
+                .join("dsh/bindings")
+                .join(legacy_record_path(name).file_name().unwrap()),
+            session_index::Kind::OpenCode => root()
+                .join("opencode/bindings")
+                .join(legacy_record_path(name).file_name().unwrap()),
+        })
+    } else {
+        select_by(name, run, conversation).map_err(anyhow::Error::msg)?;
+        let selection = session_id::selected().filter(|selection| selection.name == name);
+        let (id, by_id) = selection
+            .map(|selection| (selection.session_id, selection.id_layout))
+            .unwrap_or_default();
+        session_id::select_guarded_route(name, &id, run, conversation, by_id);
+        None
+    };
+    let (provider, mut path) = binding_location(name);
+    if let Some(selected) = selected_path {
+        path = selected;
+    }
     let record = binding_metadata(&path, name, provider)?;
     check(&record)
 }
@@ -72,34 +109,29 @@ fn binding_location(name: &str) -> (Option<&'static str>, PathBuf) {
     } else {
         None
     };
-    let path = provider.map_or_else(
-        || record_path(name),
-        |provider| {
-            root()
-                .join(provider)
-                .join("bindings")
-                .join(legacy_record_path(name).file_name().unwrap())
-        },
-    );
+    let path = provider_binding::Provider::named(name).map_or_else(|| record_path(name), |provider| provider.path(name));
     (provider, path)
 }
 fn binding_metadata(path: &Path, name: &str, provider: Option<&str>) -> anyhow::Result<Value> {
-    use std::io::Read;
-    let metadata = std::fs::symlink_metadata(path)?;
-    anyhow::ensure!(
-        metadata.file_type().is_file(),
-        "Session binding is not a regular file"
-    );
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)?
-        .take(1_048_577)
-        .read_to_end(&mut bytes)?;
-    anyhow::ensure!(bytes.len() <= 1_048_576, "Session binding is too large");
+    let bytes = labels::read_file(path, 1_048_576)?
+        .ok_or_else(|| anyhow::anyhow!("Session binding is absent"))?;
     let record: Value = serde_json::from_slice(&bytes)?;
     anyhow::ensure!(
         record.is_object() && string(&record, "name") == name,
         "Stored session identity changed"
     );
+    let by_id = path.parent() == Some(root().join("sessions").as_path())
+        || provider_binding::Provider::named(name).is_some_and(|p| path.parent() == Some(p.directory().as_path()));
+    let id = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default();
+    anyhow::ensure!(
+        (by_id && storage::is_id_layout_record(&record, id))
+            || (!by_id && !storage::in_id_layout(&record)),
+        "Session binding layout and location disagree"
+    );
+    session_id::verify(&record).map_err(anyhow::Error::msg)?;
     let valid = match provider {
         Some("opencode") => {
             record["backend"] == "opencode"
@@ -114,7 +146,8 @@ fn binding_metadata(path: &Path, name: &str, provider: Option<&str>) -> anyhow::
         _ => false,
     };
     anyhow::ensure!(
-        valid && string(&record, "archive_id").is_empty() && record["state"] != "archived",
+        valid && string(&record, "archive_id").is_empty() && record["state"] != "archived"
+            && record["rename_shadow"] != true,
         "Choose the exact parent session; archived conversations are read-only"
     );
     Ok(record)
@@ -185,6 +218,82 @@ pub(crate) fn update_iron_rules(
 mod tests {
     use super::*;
     #[test]
+    fn an_index_routes_metadata_but_never_substitutes_for_all_identity_checks() {
+        let state = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "state::session_project::tests::metadata_id_fixture",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("HGS_STATE_DIR", state.path())
+            .env("HGS_TEST_PROJECT_METADATA_ID", "1")
+            .env_remove("HGS_SESSION")
+            .env_remove("HGS_SESSION_ID")
+            .env_remove("HGS_RUN_ID")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed"),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    #[test]
+    #[ignore = "private metadata fixture, launched by an_index_routes_metadata_but_never_substitutes_for_all_identity_checks"]
+    fn metadata_id_fixture() {
+        if std::env::var_os("HGS_TEST_PROJECT_METADATA_ID").is_none() {
+            return;
+        }
+        let name = "claude/example/shared";
+        let first = "11111111-1111-4111-8111-111111111111";
+        let second = "22222222-2222-4222-8222-222222222222";
+        let mut a = json!({"version":1,"agent":"claude","name":name,"session_id":first,"run_id":"run-first","conversation_id":"first"});
+        storage::write(&mut a).unwrap();
+        let b = json!({"version":1,"agent":"claude","name":name,"session_id":second,"run_id":"run-second","conversation_id":"second","layout":"id"});
+        let path = storage::id_record_path(second).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b.to_string()).unwrap();
+        session_index::note(&b, session_index::Kind::IdRecord);
+        let read = || {
+            with_session_project_binding(name, Some(second), "run-second", "second", |r| {
+                Ok(r["session_id"].clone())
+            })
+        };
+        assert_eq!(read().unwrap(), json!(second));
+        assert!(
+            with_session_project_binding(name, Some(second), "run-first", "first", |_| Ok(()))
+                .is_err()
+        );
+        for key in ["session_id", "run_id", "conversation_id", "name", "layout"] {
+            let mut changed = b.clone();
+            changed[key] = json!("changed");
+            std::fs::write(&path, changed.to_string()).unwrap();
+            assert!(read().is_err(), "changed {key}");
+            std::fs::write(&path, b.to_string()).unwrap();
+        }
+        // The retained route remains the ID path after the final read. A later
+        // missing record refuses instead of exposing the label's first holder.
+        with_session_project_binding(name, Some(second), "run-second", "second", |_| {
+            std::fs::remove_file(&path)?;
+            anyhow::ensure!(
+                super::super::read(name).is_err(),
+                "fell back to first holder"
+            );
+            Ok(())
+        })
+        .unwrap();
+        assert!(read().is_err());
+        #[cfg(unix)]
+        {
+            session_id::clear();
+            assert_eq!(storage::read_label(name).unwrap()["session_id"], first);
+        }
+    }
+    #[test]
     fn only_bounded_literal_binding_identity_is_needed_for_paused_metadata() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("binding.json");
@@ -253,7 +362,8 @@ mod tests {
         };
         let own = json!({"version":1,"agent":"claude","name":terminal,"run_id":"run-1","conversation_id":null});
         save(terminal, own.clone());
-        save(deepseek, json!({"backend":"dsh","name":deepseek,"run_id":"run-2","conversation_id":"session-2"}));
+        save(deepseek, json!({"backend":"dsh","name":deepseek,"run_id":"run-2","conversation_id":"session-2"}),
+        );
         let writer = root().join(".lock");
         let provider = root().join("dsh/bindings.lock");
         assert_eq!(pinned(terminal, "run-1", &Value::Null), Pinned::Written("written"));
@@ -275,7 +385,8 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(2));
         // Lock order: waiting for the writer, it holds no provider lock (X4).
         let waiting = std::thread::spawn(|| {
-            with_pinned_session_binding(deepseek, "run-2", &json!("session-2"), Instant::now() + Duration::from_secs(5), || "written")
+            with_pinned_session_binding(deepseek, "run-2", &json!("session-2"), Instant::now() + Duration::from_secs(5), || "written",
+            )
                 .unwrap()
         });
         std::thread::sleep(Duration::from_millis(150));
@@ -293,7 +404,8 @@ mod tests {
         // attempt waited for the writer writes nothing (PW, X6).
         let guard = super::super::storage::lock_until(&writer, soon()).unwrap().unwrap();
         let waiting = std::thread::spawn(|| {
-            with_pinned_session_binding(terminal, "run-1", &Value::Null, Instant::now() + Duration::from_secs(5), || "written")
+            with_pinned_session_binding(terminal, "run-1", &Value::Null, Instant::now() + Duration::from_secs(5), || "written",
+            )
                 .unwrap()
         });
         std::thread::sleep(Duration::from_millis(150));

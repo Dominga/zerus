@@ -13,6 +13,7 @@ process still runs) and the terminal client that attaches.
 Build the agent with `cargo build --locked --example fake_agent`; HGS_TEST_BIN and
 HGS_TEST_FAKE_AGENT name other builds.
 """
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -39,6 +40,11 @@ except ImportError:  # Windows: the host backend attaches on a pseudoconsole ins
 REPO = Path(__file__).resolve().parents[1]
 EXE = ".exe" if sys.platform == "win32" else ""
 HGS = Path(os.environ.get("HGS_TEST_BIN", REPO / f"target/debug/hgs{EXE}")).resolve()
+# The approved default (owner, 2026-11-07; PR #1695): a Claude start without an
+# account choice runs with its provider's bypass switch after the caller's own
+# arguments (accounts::apply_permissions). Spawned argv only; the saved resume
+# recipe stays as launched.
+BYPASS = ["--permission-mode", "bypassPermissions"]
 FAKE_AGENT = Path(os.environ.get("HGS_TEST_FAKE_AGENT", REPO / f"target/debug/examples/fake_agent{EXE}")).resolve()
 TMUX = shutil.which("tmux")
 # Windows: no console window for any hgs the tests start (docs/windows-host-testing.md).
@@ -634,9 +640,10 @@ class Sessions(Contract):
                               cwd=str(self.project)))
         self.assertTrue(row["run_id"])
         self.assertTrue(started - 2 <= row["created"] <= time.time() + 1, row["created"])
-        # The agent runs in the session folder on a terminal of its own, with nothing typed.
+        # The agent runs in the session folder on a terminal of its own, with nothing typed,
+        # and only the default bypass switch of its own.
         self.assertEqual((self.agent_arguments(agent), agent["cwd"], agent["tty"], agent["raw"]),
-                         ([], str(self.project), True, True))
+                         (BYPASS, str(self.project), True, True))
         self.assertEqual(self.received(agent["pid"]), b"")
         # An untracked command is listed and runs the same way, without a conversation.
         self.assertEqual({key: rows[plain].get(key) for key in ("cmd", "project", "tag", "attached", "clients")},
@@ -707,7 +714,7 @@ class Sessions(Contract):
         resumed = self.wait_for(lambda: next((event for event in self.events(kind="start")
                                               if event["pid"] not in (pid, kept_agent["pid"])), None), "the resume")
         self.assertEqual((self.agent_arguments(resumed), resumed["session_id"], resumed["resumed"], resumed["cwd"]),
-                         (["--resume", row["conversation_id"]], row["conversation_id"], True, str(self.project)))
+                         (["--resume", row["conversation_id"], *BYPASS], row["conversation_id"], True, str(self.project)))
         live = self.wait_for(lambda: (live := self.sessions()[name]).get("runtime_state") == "live"
                              and live.get("activity") == "idle" and live["run_id"] != row["run_id"] and live,
                              "the resumed session")
@@ -794,6 +801,59 @@ class Sessions(Contract):
         self.hgs("kill", name)
         self.assertNotIn(name, self.sessions())
         self.assertNotIn(row["launch_id"], self.ended_launches())
+
+    @unittest.skipIf(os.name == "nt", "POSIX native-process ancestry fixture")
+    def test_a_launch_run_by_a_live_agent_records_it_as_the_parent(self):
+        # This test process stands in for a live tracked agent: its record
+        # names this process, so the launching hgs proves it as the caller.
+        start = subprocess.check_output(["ps", "-p", str(os.getpid()), "-o", "lstart="],
+                                        env=dict(self.env, LC_ALL="C", TZ="UTC"), text=True).strip()
+        lead_id = str(uuid.uuid4())
+        lead = dict(version=1, name="claude/project/lead", agent="claude", run_id="run-lead",
+                    conversation_id="conversation-lead", session_id=lead_id, subagents={},
+                    pid=os.getpid(), process_start=start)
+        state = self.root / "state"
+        state.mkdir(exist_ok=True)
+        lead_path = state / (hashlib.sha256(lead["name"].encode()).hexdigest() + ".json")
+        lead_path.write_text(json.dumps(lead))
+        # Teardown stops every recorded process; this one is the test itself.
+        self.addCleanup(lead_path.unlink, missing_ok=True)
+        # The link reads this computer's identity from its existing shared catalog.
+        self.hgs("reference", lead["name"], "--json")
+        # A value inherited from a surrounding session never reaches the record.
+        self.env.update(HGS_SESSION=lead["name"], HGS_RUN_ID="run-lead", HGS_PARENT='{"forged": true}')
+        name, row, _ = self.launch("kid")
+        parent = row["parent"]
+        self.assertEqual((parent["session_id"], parent["name"], parent["run_id"], parent["source"]),
+                         (lead_id, lead["name"], "run-lead", "launch"))
+        # The lead is not running in this backend, so the child is not supervised.
+        self.assertEqual(parent["state"], "saved")
+        # A launch the person runs outside any agent records no parent.
+        for key in ("HGS_SESSION", "HGS_RUN_ID"):
+            self.env.pop(key)
+        _, plain, _ = self.launch("plain")
+        self.assertNotIn("parent", plain)
+        # Pause and resume keep the link.
+        self.hgs("pause", name)
+        self.assertEqual(self.sessions()[name]["parent"]["session_id"], lead_id)
+
+    def test_a_launch_records_a_parent_another_computer_forwarded(self):
+        # zerus-sa9qn.7: the peer side of a remote launch. The link names another
+        # computer, so this computer lists the parent as missing: never supervised.
+        link = {"schema": 1, "machine": "99999999-9999-4999-8999-999999999999", "host": "mac",
+                "session_id": "22222222-2222-4222-8222-222222222222", "name": "claude/elsewhere/lead",
+                "conversation_id": "c", "run_id": "r", "source": "launch", "at": 1}
+        self.launched = True
+        launch_id = str(uuid.uuid4())
+        result = self.hgs("claude", str(self.project), "--new", "-n", "forwarded", "-d", "--launch-id", launch_id,
+                          "--parent-link", json.dumps(link, separators=(",", ":")).encode().hex())
+        self.assertEqual(result.stdout, "hgs: started claude/project/forwarded\n")
+        row = self.wait_for(lambda: (row := self.sessions().get("claude/project/forwarded")) and row.get("parent") and row,
+                            "the forwarded parent")
+        self.assertEqual((row["parent"]["session_id"], row["parent"]["host"], row["parent"]["state"]),
+                         (link["session_id"], "mac", "missing"))
+        bad = self.hgs("claude", str(self.project), "--new", "-n", "refused", "-d", "--parent-link", "zz", rc=None)
+        self.assertNotEqual(bad.returncode, 0)
 
 
 class Input(Contract):

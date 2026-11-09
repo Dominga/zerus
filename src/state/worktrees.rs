@@ -55,6 +55,33 @@ pub(super) fn error(state: &'static str, detail: impl Into<String>) -> GitError 
     }
 }
 
+/// Whether `reference` (`refs/heads/<branch>`) is taken: the ref itself, a
+/// ref under it (`<branch>/x`) or a ref named by one of its leading parts
+/// (`a` for `a/b`). Each check reads at most one ref, so a repository that
+/// keeps thousands of branches never overflows the bounded Git output, as a
+/// full branch listing did. Ref patterns match whole path parts, and refs sort
+/// by name, so a part sorts before every ref under it.
+fn branch_taken(read: &dyn Fn(&[&str]) -> Result<String>, reference: &str) -> Result<bool> {
+    let first = |pattern: &str| -> Result<String> {
+        Ok(
+            read(&["for-each-ref", "--count=1", "--format=%(refname)", pattern])?
+                .trim_end()
+                .to_owned(),
+        )
+    };
+    if !first(reference)?.is_empty() {
+        return Ok(true);
+    }
+    let parts: Vec<&str> = reference.split('/').collect();
+    for end in 3..parts.len() {
+        let parent = parts[..end].join("/");
+        if first(&parent)? == parent {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub(super) fn git(cwd: &Path, args: &[&str], deadline: Instant) -> std::result::Result<Vec<u8>, GitError> {
     git_holding(cwd, args, deadline, None)
 }
@@ -70,9 +97,20 @@ pub(super) fn git_holding(
     deadline: Instant,
     lock: Option<&fs::File>,
 ) -> std::result::Result<Vec<u8>, GitError> {
-    if mobile_stopped() || Instant::now() >= deadline {
-        return Err(error("timeout", "Git operation cancelled or timed out"));
+    git_holding_cancellable(cwd, args, deadline, lock, &|| false)
+}
+/// The private native continuation can add cancellation, never waive an
+/// existing guard or replace the original Git/deletion deadline.
+pub(super) fn git_holding_cancellable(
+    cwd: &Path, args: &[&str], deadline: Instant, lock: Option<&fs::File>, cancelled: &impl Fn() -> bool,
+) -> std::result::Result<Vec<u8>, GitError> {
+    let mut command = args;
+    while command.len() >= 2 && matches!(command[0], "-c" | "-C") {
+        command = &command[2..];
     }
+    let subcommand = command.first().copied().unwrap_or("command");
+    let timeout = || error("timeout", format!("git {subcommand} timed out or was cancelled"));
+    if mobile_stopped() || cancelled() || Instant::now() >= deadline { return Err(timeout()); }
     let mut command = Command::new("git");
     #[cfg(unix)]
     if let Some(lock) = lock {
@@ -118,7 +156,7 @@ pub(super) fn git_holding(
     // checkout hook or filter can outlive Git: on timeout the whole operation
     // stops instead of writing on after an error was reported.
     let (status, out, err) =
-        crate::platform::run_bounded(&mut command, [MAX_OUTPUT, 8192], deadline, &mobile_stopped)
+        crate::platform::run_bounded(&mut command, [MAX_OUTPUT, 8192], deadline, &|| mobile_stopped() || cancelled())
             .map_err(|failure| match failure {
                 crate::platform::RunError::Spawn(e) => error(
                     if e.kind() == io::ErrorKind::NotFound {
@@ -132,7 +170,7 @@ pub(super) fn git_holding(
                     error("too_large", "Git operation exceeded the output limit")
                 }
                 crate::platform::RunError::Io(e) => error("metadata_error", e.to_string()),
-                _ => error("timeout", "Git operation cancelled or timed out"),
+                _ => timeout(),
             })?;
     if status.success() {
         Ok(out)
@@ -382,16 +420,61 @@ pub(super) fn catalog_until(path: &Path, refresh: bool, deadline: Instant) -> Va
 
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let action = args.first().map(String::as_str);
+    if action == Some("program-cleanup-status") {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let value = super::worktree_programs::cleanup_status(&args[1..])?;
+            println!("{}", serde_json::to_string(&value).map_err(|e| e.to_string())?);
+            return Ok(0);
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        return Err("Native program cleanup is unavailable on this computer".into());
+    }
+    if action == Some("program-cleanup") {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        return super::worktree_programs::cleanup(&args[1..]);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        return Err("Native program cleanup is unavailable on this computer".into());
+    }
+    if action == Some("program-stop-status") {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let value = super::worktree_programs::stop_status(&args[1..])?;
+            println!("{}", serde_json::to_string(&value).map_err(|e| e.to_string())?);
+            return Ok(0);
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        return Err("Native program stop is unavailable on this computer".into());
+    }
+    if action == Some("program-stop") {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        return super::worktree_programs::stop(&args[1..]);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        return Err("Native program stop is unavailable on this computer".into());
+    }
+    if action == Some("program-holder") {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        return super::worktree_programs::hold(&args[1..]);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        return Err("Native worktree custody is unavailable on this computer".into());
+    }
     if let Some(
         action @ ("create" | "status" | "cancel" | "review" | "inspect" | "remove" | "keep-folder"
-        | "leftovers" | "delete-leftover" | "policy" | "sweep"),
+        | "leftovers" | "delete-leftover" | "policy" | "sweep" | "programs"),
     ) = action
     {
         let value = match action {
             "create" if args.iter().any(|arg| arg == "--receipt") => super::worktree_requests::create(&args[1..])?,
+            "create" if super::worktree_requests::has_receipt_id(&args[1..]) => super::worktree_requests::create_direct(&args[1..])?,
             "create" => create(&args[1..])?,
             "status" | "cancel" => super::worktree_requests::control(action, &args[1..])?,
             "review" => super::worktree_cleanup::review_command(&args[1..])?,
+            "programs" => {
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                { super::worktree_programs::discover(&args[1..])? }
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                { return Err("Native worktree program discovery is unavailable on this computer".into()); }
+            }
             "keep-folder" => {
                 let (result, attempted) = super::worktree_cleanup::keep_folder_command(&args[1..]);
                 if let Err(detail) = &result {
@@ -549,6 +632,7 @@ const CHECKOUT_SECONDS: u64 = 10 * 60;
 #[cfg(test)]
 thread_local! {
     static AFTER_CLONE: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
+    static BEFORE_CREATE_READ: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
 }
 
 /// Why `destination` is not a clone of `source` that a create may finish:
@@ -785,6 +869,7 @@ pub(super) fn create(args: &[String]) -> Result<Value> {
 }
 
 pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Result<Value> {
+    if super::worktree_requests::has_receipt_id(args) { super::worktree_requests::original_current(args)?; }
     let mobile = args.iter().any(|value| value == "--mobile");
     if mobile && control.is_some() {
         return Err("An owned worktree creation has no mobile form".into());
@@ -861,8 +946,11 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
         }),
         None => None,
     };
-    let deadline = total_deadline.min(Instant::now() + Duration::from_secs(5));
     let read = |args: &[&str]| -> Result<String> {
+        // Each read keeps its own window within the operation deadline.
+        let deadline = total_deadline.min(Instant::now() + Duration::from_secs(5));
+        #[cfg(test)]
+        if let Some(delay) = BEFORE_CREATE_READ.with(std::cell::Cell::get) { delay(); }
         #[cfg(unix)]
         let bytes = match &owned {
             Some(owned) => owned.git(&owned.source, args, 5)?,
@@ -910,14 +998,7 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
     read(&["check-ref-format", &reference]).map_err(|_| "Invalid new branch name".to_string())?;
     read(&["check-ref-format", "--branch", branch])
         .map_err(|_| "Invalid new branch name".to_string())?;
-    if read(&["for-each-ref", "--format=%(refname)", "refs/heads"])?
-        .lines()
-        .any(|r| {
-            r == reference
-                || r.starts_with(&format!("{reference}/"))
-                || reference.starts_with(&format!("{r}/"))
-        })
-    {
+    if branch_taken(&read, &reference)? {
         return Err(format!(
             "Branch '{branch}' already exists or conflicts with an existing branch. Choose a new branch name."
         ));
@@ -949,6 +1030,7 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
     )
     .open(cache.with_extension("lock"))
     .map_err(|e| e.to_string())?;
+    let deadline = total_deadline.min(Instant::now() + Duration::from_secs(5));
     while guard.try_lock_exclusive().is_err() {
         if Instant::now() >= deadline {
             return Err(
@@ -1303,6 +1385,17 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
 mod tests {
     use super::*;
 
+    #[test]
+    fn timed_out_git_identifies_the_subcommand() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases: &[&[&str]] = &[&["rev-parse", "HEAD"], &["-c", "core.hooksPath=", "rev-parse", "HEAD"]];
+        for args in cases {
+            let failure = git(dir.path(), args, Instant::now()).unwrap_err();
+            assert_eq!(failure.state, "timeout");
+            assert!(failure.detail.contains("git rev-parse timed out"), "{}", failure.detail);
+        }
+    }
+
     /// N9: the sandbox grant is made only when the caller asks for it; every
     /// other worktree is created without touching its ACLs.
     #[test]
@@ -1363,11 +1456,33 @@ mod tests {
         create(&args)
     }
 
+    #[test]
+    fn pre_clone_reads_each_have_their_own_deadline() {
+        let _guard = crate::state::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let old = std::env::var("HGS_STATE_DIR").ok();
+        let dir = tempfile::tempdir().unwrap();
+        let (source, _, base) = repository(dir.path());
+        let destination = dir.path().join("member");
+        // At least five reads spend 5.5 seconds in delays, each within its window.
+        BEFORE_CREATE_READ.with(|delay| delay.set(Some(|| std::thread::sleep(Duration::from_millis(1100)))));
+        let started = Instant::now();
+        let created = clone_member(&source, &destination);
+        BEFORE_CREATE_READ.with(|delay| delay.set(None));
+        match old {
+            Some(old) => std::env::set_var("HGS_STATE_DIR", old),
+            None => std::env::remove_var("HGS_STATE_DIR"),
+        }
+        let created = created.unwrap();
+        assert!(started.elapsed() > Duration::from_secs(5), "the reads exceed one shared window");
+        assert_eq!(created["head"], base);
+        assert_eq!(run(&destination, &["symbolic-ref", "--short", "HEAD"]), "team/x/dev");
+    }
+
     /// Task 20: a clone that takes longer than the old 5 s window still gets
     /// its branch, from the base branch rather than the clone's default one.
     #[test]
     fn a_slow_clone_finishes_on_the_base_branch() {
-        let _guard = crate::state::ENV_LOCK.lock().unwrap();
+        let _guard = crate::state::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let old = std::env::var("HGS_STATE_DIR").ok();
         let dir = tempfile::tempdir().unwrap();
         let (source, main, base) = repository(dir.path());
@@ -1392,7 +1507,7 @@ mod tests {
     /// folder, is never touched.
     #[test]
     fn an_unfinished_clone_is_finished_on_relaunch() {
-        let _guard = crate::state::ENV_LOCK.lock().unwrap();
+        let _guard = crate::state::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let old = std::env::var("HGS_STATE_DIR").ok();
         let dir = tempfile::tempdir().unwrap();
         let (source, _, base) = repository(dir.path());
@@ -1430,5 +1545,102 @@ mod tests {
             Some(old) => std::env::set_var("HGS_STATE_DIR", old),
             None => std::env::remove_var("HGS_STATE_DIR"),
         }
+    }
+}
+
+#[cfg(test)]
+mod branch_taken_tests {
+    use super::branch_taken;
+    use std::cell::Cell;
+    use std::process::Command;
+
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("LC_ALL", "C")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    #[test]
+    fn a_repository_with_thousands_of_branches_keeps_every_check_to_one_ref() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        git(
+            repo,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.invalid",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+        );
+        let head = git(repo, &["rev-parse", "HEAD"]).trim().to_owned();
+        // 3000 long branch names: a full refs/heads listing is far beyond the 64 KiB Git output bound.
+        let mut batch = String::new();
+        for i in 0..3000 {
+            batch.push_str(&format!(
+                "create refs/heads/work-{i:04}-{} {head}\n",
+                "x".repeat(40)
+            ));
+        }
+        for name in ["feat", "a/b", "deep/one/two"] {
+            batch.push_str(&format!("create refs/heads/{name} {head}\n"));
+        }
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["update-ref", "--stdin"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(child.stdin.as_mut().unwrap(), batch.as_bytes()).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert!(git(repo, &["for-each-ref", "--format=%(refname)", "refs/heads"]).len() > 65_536);
+
+        let largest = Cell::new(0usize);
+        let read = |args: &[&str]| -> crate::state::Result<String> {
+            let out = git(repo, args);
+            largest.set(largest.get().max(out.len()));
+            Ok(out)
+        };
+        let taken = |branch: &str| branch_taken(&read, &format!("refs/heads/{branch}")).unwrap();
+        assert!(taken("main"), "the ref itself");
+        assert!(
+            taken("work-0042-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
+            "an existing branch among thousands"
+        );
+        assert!(taken("feat/x"), "a leading part is a branch");
+        assert!(
+            taken("deep/one/two/three"),
+            "a deeper leading part is a branch"
+        );
+        assert!(taken("a"), "a branch lives under it");
+        assert!(taken("deep"), "a branch lives further under it");
+        assert!(!taken("a/c"), "a sibling under the same parent is free");
+        assert!(
+            !taken("work-0042"),
+            "a name that only shares a prefix is free"
+        );
+        assert!(!taken("work-aaca42cc"), "a new name is free");
+        assert!(
+            largest.get() < 256,
+            "each check reads at most one ref, got {} bytes",
+            largest.get()
+        );
     }
 }

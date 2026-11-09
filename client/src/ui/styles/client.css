@@ -15,6 +15,9 @@
   .act-older { padding: 4px 2px; text-align: center; }
   /* Groups that hold an approval or a failure read in the warning colour, as in Qt. */
   .act-tools.warn .act-tools-head b { color: var(--z-color-warn); }
+  /* A keep-warm ping is not the person's message: one quiet, borderless line. */
+  .act-tools.warm { border-color: transparent; padding-top: 2px; padding-bottom: 2px; color: var(--z-color-dim); }
+  .act-tools.warm .act-tools-head b { font-weight: normal; color: var(--z-color-dim); }
   .act-live b { min-width: 0; }
   /* Settings so far (ui/components/SettingsScreen.tsx): the mockup's rows (design/webui styles/settings.css). */
   .set-scroll { flex: 1; min-width: 0; overflow-y: auto; overflow-x: hidden; }

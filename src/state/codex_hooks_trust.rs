@@ -1,4 +1,5 @@
-//! Codex's separate startup consent for new/changed hooks precedes SessionStart.
+//! Codex's separate startup consent for new/changed hooks precedes SessionStart,
+//! including a saved conversation's resume or archive restore.
 //! Keep native trust ownership: the TUI submits its captured hook keys/hashes to
 //! Codex, which verifies them. HGS never edits trust files or bypasses the prompt.
 //! The title, exact choices and hint frame the panel; its disclosure, including
@@ -58,16 +59,23 @@ fn parse(screen: &str) -> Option<Panel> {
 }
 
 fn eligible(record: &Value) -> bool {
+    // A resumed process reviews hooks before opening its saved conversation.
+    // A pending input receipt is not a native SessionStart and must not hide
+    // that manual decision. This observation never retries the pending input.
+    let resumed = record["startup_kind"] == "resume"
+        && !string(record, "conversation_id").is_empty()
+        && record["expected_id"] == record["conversation_id"]
+        && string(record, "requested_id").is_empty();
     string(record, "agent") == "codex"
         && record["run_identity_version"] == 1
         && record["supervisor"].is_object()
         && !string(record, "run_id").is_empty()
-        && string(record, "conversation_id").is_empty()
+        && (string(record, "conversation_id").is_empty() || resumed)
         && string(record, "error").is_empty()
         && !pause_active(record)
         && record.get("session_end").is_none()
         && record["last_event_at"].as_f64().unwrap_or(0.) == 0.
-        && record["input_pending_at"].as_f64().unwrap_or(0.) == 0.
+        && (record["input_pending_at"].as_f64().unwrap_or(0.) == 0. || resumed)
 }
 
 fn card(record: &Value, panel: &Panel) -> Option<Value> {
@@ -168,6 +176,34 @@ mod tests {
             ("agent", json!("claude")), ("supervisor", Value::Null)] {
             let mut changed = record(); changed[field] = value;
             assert!(card(&changed, &parse(SCREEN).unwrap()).is_none());
+        }
+    }
+    #[test]
+    fn a_saved_conversation_reviews_hooks_only_before_its_new_runs_native_events() {
+        let panel = parse(SCREEN).unwrap();
+        let mut resumed = record();
+        resumed["startup_kind"] = json!("resume");
+        resumed["conversation_id"] = json!("saved");
+        resumed["expected_id"] = json!("saved");
+        let original = card(&resumed, &panel).unwrap();
+        resumed["restore_archive_id"] = json!("original-archive");
+        assert_eq!(card(&resumed, &panel).unwrap(), original);
+        resumed["input_pending_at"] = json!(123.);
+        assert_eq!(card(&resumed, &panel).unwrap(), original);
+        let mut other = resumed.clone();
+        other["conversation_id"] = json!("another");
+        other["expected_id"] = json!("another");
+        assert_ne!(card(&other, &panel).unwrap()["question_hash"], original["question_hash"]);
+        for (field, value) in [
+            ("startup_kind", json!("new")), ("expected_id", json!("different")),
+            ("requested_id", json!("unconfirmed")), ("last_event_at", json!(1.)),
+            ("session_end", json!({"at": 1.})), ("error", json!("failed")),
+            ("pausing", json!({"pid": std::process::id(), "start": process_start(std::process::id())})),
+            ("run_identity_version", json!(0)),
+            ("supervisor", Value::Null), ("run_id", json!("")),
+        ] {
+            let mut invalid = resumed.clone(); invalid[field] = value;
+            assert!(card(&invalid, &panel).is_none(), "{field}: {invalid}");
         }
     }
 }

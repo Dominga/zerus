@@ -119,14 +119,30 @@ class Exchange(test_tasks.DeliveryFixture):
                               "updates": sent["updates"]})
 
     def accept(self, task):
-        self.hgs("send", task["ref"])
+        sent = self.hgs("send", task["ref"])
+        origin = sent["task"]["execution"]["current"]["id"]
+        self.assertEqual(origin, sent["receipt"]["request_id"])
         self.wait_received(task["text"])
         self.confirm()
-        self.as_agent("report", task["ref"], "--json", text="Done.")
+        result = json.loads(self.as_agent("report-attempt", task["ref"], "--attempt", origin, "--json", text="Done."))
+        self.assertTrue(result["moved_to_review"])
         self.hgs("stage", task["ref"], "done")
 
     def phone_tasks(self, *args):
         return self.run_hgs(["task", "list", "--project", "orchard", *args], self.phone)["tasks"]
+
+    def test_a_phone_can_accept_after_explicit_review_without_an_agent_report(self):
+        task = self.add("Phone review", "--target", self.name)
+        self.hgs("send", task["ref"])
+        self.confirm()
+        reviewed = self.run_hgs(["task", "mobile-cancel", "--json"], self.env,
+                                {"schema": 1, "project": "project-1", "task": task["uuid"]})
+        self.assertEqual(reviewed["stage"], "review")
+        self.pull()
+        accepted = self.run_hgs(["task", "stage", task["ref"], "done"], self.phone)
+        self.assertEqual(accepted["task"]["stage"], "done")
+        self.push()
+        self.assertEqual(self.hgs("get", task["ref"])["task"]["stage"], "done")
 
     def test_digests_name_every_project_and_change_with_a_task(self):
         before = self.digests()
@@ -138,6 +154,41 @@ class Exchange(test_tasks.DeliveryFixture):
         self.accept(task)
         # The Done task leaves the phone's view: the digest is that of an empty project again.
         self.assertEqual(self.digests()["project-1"], before["project-1"])
+
+    def test_digests_and_answers_come_from_the_task_index_or_else_the_documents(self):
+        """zerus-cg5h.21: the task index answers both without the store's
+        inventory cache; a damaged index is built again and one that cannot
+        be opened leaves the documents to answer, with the same digest."""
+        self.add("Add rate limiting")
+        done = self.add("Document the limits", "--target", self.name)
+        self.accept(done)
+        folder = self.state / "replica" / hashlib.sha256(b"project-1").hexdigest()
+        cache = folder / "inventory.json"
+        if cache.exists():
+            cache.unlink()
+        request = {"schema": 1, "project": "project-1", "inventory": EMPTY}
+        digests, answer = self.digests(), self.exchange(request)
+        self.assertEqual(answer["digest"], digests["project-1"])
+        self.assertFalse(cache.exists())
+        index = folder / "task-index-v2.sqlite3"
+        self.assertTrue(index.exists())
+
+        def remove():
+            for suffix in ("", "-wal", "-shm"):
+                path = folder / f"task-index-v2.sqlite3{suffix}"
+                if path.is_dir():
+                    path.rmdir()
+                elif path.exists():
+                    path.unlink()
+        remove()
+        index.write_bytes(b"not a database")
+        self.assertEqual(self.digests(), digests)
+        self.assertEqual(self.exchange(request), answer)
+        remove()
+        index.mkdir()
+        self.assertEqual(self.digests(), digests)
+        self.assertEqual(self.exchange(request), answer)
+        remove()
 
     def test_an_empty_phone_gets_the_project_and_its_live_tasks(self):
         self.add("Add rate limiting")

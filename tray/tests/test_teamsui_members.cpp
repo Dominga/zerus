@@ -3,6 +3,7 @@
 // The fixture (the fake hgs, its teams and the shot helpers) is shared:
 // support/TeamsUiFixture.h.
 #include "TeamsUiFixture.h"
+#include <QSpinBox>
 #include "Settings.h"
 #include "ActivityView.h"
 #include "CollapsibleBlock.h"
@@ -98,6 +99,13 @@ private slots:
     void pinMarkAndFinishedTeamShowWhoFinished();
     void deliveryShots();
     void swapMemberAsksFirstAndListsTheOldSession();
+    void editMemberPrefillsAndSendsPartialUpdates();
+    void editMemberPromptClearIsOptional_data();
+    void editMemberPromptClearIsOptional();
+    void editMemberAfterTaskPolicyIsPrefilledAndSent();
+    void editMemberRefusalLeavesTheMemberUnchanged_data();
+    void editMemberRefusalLeavesTheMemberUnchanged();
+    void editMemberWideningIsExplicit();
     void memberMenuWorksBeforeTheStatusReadLands();
     void limitedAndSharedHostMembersAreMarked();
     void reportPreviewsAndFindings();
@@ -107,8 +115,183 @@ private slots:
     void aPollUnderTheMemberMenuKeepsItsButtonAndTheSwapDialog();
     void memberBlocksShowTheirReasonAndReviewAction();
     void memberMenuScalesAndDrains();
+    void relaunchTooltipNamesItsReports();
     void sideListsAndMemberTasks();
 };
+
+namespace {
+QJsonObject editableMemberTeam()
+{
+    auto value = team(); auto members = value["members"].toArray(); auto member = members[1].toObject();
+    member["prompt"] = "Current start instructions"; member["effort"] = "ultra";
+    member["permissions"] = "bypass"; member["permissions_profile"] = "build";
+    member["context_before_task"] = "compact";
+    member["models"] = QJsonArray{QJsonObject{{"model", "alternate"}, {"effort", "high"}}};
+    member["iron_rules"] = QJsonArray{"Keep the public contract"};
+    members[1] = member; value["members"] = members; return value;
+}
+QToolButton *editMenuButton(TeamWorkspace &workspace)
+{
+    for (auto *card : workspace.findChildren<QFrame *>("teamWorkspaceMember"))
+        if (card->property("teamMember") == "backend" && card->isVisibleTo(&workspace))
+            return card->findChild<QToolButton *>("teamWorkspaceMemberMenu");
+    return nullptr;
+}
+}
+
+void TestTeamsUiMembers::editMemberPrefillsAndSendsPartialUpdates()
+{
+    setTeam(editableMemberTeam());
+    QVERIFY(FakeCli::replace(script()+".memberhold", "hold"));
+    auto unhold = qScopeGuard([this] { QFile::remove(script()+".memberhold"); });
+    HgsClient client(FakeCli::program(script())); TeamController controller(&client); TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel); workspace.resize(1300, 900); workspace.show();
+    controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+    QTRY_VERIFY(controller.watched() && editMenuButton(workspace));
+    chooseMenuAction("teamWorkspaceMemberEdit"); editMenuButton(workspace)->click();
+    QDialog *dialog = nullptr;
+    QTRY_VERIFY((dialog = workspace.findChild<QDialog *>("teamMemberEditDialog")) && dialog->isVisible());
+    shot(dialog, "task24-edit-member");
+    QCOMPARE(dialog->findChild<QPlainTextEdit *>("teamMemberEditPrompt")->toPlainText(), QString("Current start instructions"));
+    QCOMPARE(dialog->findChild<QComboBox *>("teamMemberEditModel")->currentText(), QString("gpt-5.5-codex"));
+    auto *effort = dialog->findChild<QComboBox *>("teamMemberEditEffort"); QCOMPARE(effort->currentText(), QString("ultra"));
+    QCOMPARE(dialog->findChild<QComboBox *>("teamMemberEditPermissions")->currentData().toString(), QString("bypass"));
+    QCOMPARE(dialog->findChild<QComboBox *>("teamMemberEditProfile")->currentData().toString(), QString("build"));
+    QCOMPARE(dialog->findChild<QComboBox *>("teamMemberEditContext")->currentData().toString(), QString("compact"));
+    QCOMPARE(dialog->findChild<QPlainTextEdit *>("teamMemberEditRules")->toPlainText(), QString("Keep the public contract"));
+    QCOMPARE(dialog->findChild<QTableWidget *>("teamMemberEditModels")->item(0, 0)->text(), QString("alternate"));
+    QVERIFY(!dialog->findChild<QWidget *>("teamSwapAgent"));
+    auto *save = dialog->findChild<QPushButton *>("teamMemberEditSave"); QVERIFY(!save->isEnabled());
+    effort->setCurrentText("high"); save->click();
+    QTRY_COMPARE(calls(script(), "settings").size(), 1);
+    QVERIFY(!save->isEnabled()); QVERIFY(!effort->isEnabled()); save->click();
+    QCOMPARE(calls(script(), "settings").size(), 1);
+    const auto input = calls(script(), "settings").first();
+    QCOMPARE(input.value("members_update").toArray(), (QJsonArray{QJsonObject{{"id", "backend"}, {"effort", "high"}}}));
+    QCOMPARE(input.value("by").toString(), QString("human"));
+    QFile::remove(script()+".memberhold");
+    QTRY_VERIFY(!workspace.findChild<QDialog *>("teamMemberEditDialog"));
+    QCOMPARE(calls(script(), "swap-member").size(), 0);
+}
+
+void TestTeamsUiMembers::editMemberPromptClearIsOptional_data()
+{
+    QTest::addColumn<bool>("clear"); QTest::addColumn<bool>("running");
+    QTest::newRow("keep-context") << false << true;
+    QTest::newRow("clear-first") << true << true;
+    QTest::newRow("not-started") << false << false;
+}
+void TestTeamsUiMembers::editMemberPromptClearIsOptional()
+{
+    QFETCH(bool, clear); QFETCH(bool, running);
+    auto value = editableMemberTeam();
+    if (!running) { auto members = value["members"].toArray(); auto member = members[1].toObject(); member.remove("session"); members[1] = member; value["members"] = members; }
+    setTeam(value);
+    HgsClient client(FakeCli::program(script())); TeamController controller(&client); TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel); workspace.resize(1300, 900); workspace.show();
+    controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+    QTRY_VERIFY(controller.watched() && editMenuButton(workspace));
+    chooseMenuAction("teamWorkspaceMemberEdit"); editMenuButton(workspace)->click();
+    QDialog *dialog = nullptr; QTRY_VERIFY((dialog = workspace.findChild<QDialog *>("teamMemberEditDialog")));
+    auto *prompt = dialog->findChild<QPlainTextEdit *>("teamMemberEditPrompt");
+    auto *option = dialog->findChild<QCheckBox *>("teamMemberEditClear"); QVERIFY(option->isHidden());
+    prompt->setPlainText("Replacement instructions"); QVERIFY(!option->isHidden()); QVERIFY(!option->isChecked());
+    QCOMPARE(option->isEnabled(), running);
+    if (running) { option->setChecked(true); prompt->setPlainText("Current start instructions"); QVERIFY(!option->isChecked()); prompt->setPlainText("Replacement instructions"); }
+    option->setChecked(clear);
+    dialog->findChild<QPushButton *>("teamMemberEditSave")->click();
+    QTRY_COMPARE(calls(script(), "settings").size(), 1);
+    const auto update = calls(script(), "settings").first().value("members_update").toArray().first().toObject();
+    QCOMPARE(update.value("prompt").toString(), QString("Replacement instructions"));
+    QCOMPARE(update.contains("clear_context_first"), clear);
+    if (clear) QVERIFY(update.value("clear_context_first").toBool());
+    QCOMPARE(update.size(), clear ? 3 : 2);
+    QTRY_VERIFY(!workspace.findChild<QDialog *>("teamMemberEditDialog"));
+}
+
+// Task #7: the member editor's After-a-task policy is prefilled and sent as
+// one partial update, so the setting reaches the server through the same path.
+void TestTeamsUiMembers::editMemberAfterTaskPolicyIsPrefilledAndSent()
+{
+    auto value = editableMemberTeam();
+    auto members = value["members"].toArray(); auto member = members[1].toObject();
+    member["after_task"] = "compact"; member["after_task_on"] = "percent"; member["after_task_at"] = 85;
+    members[1] = member; value["members"] = members;
+    setTeam(value);
+    HgsClient client(FakeCli::program(script())); TeamController controller(&client); TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel); workspace.resize(1300, 900); workspace.show();
+    controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+    QTRY_VERIFY(controller.watched() && editMenuButton(workspace));
+    chooseMenuAction("teamWorkspaceMemberEdit"); editMenuButton(workspace)->click();
+    QDialog *dialog = nullptr;
+    QTRY_VERIFY((dialog = workspace.findChild<QDialog *>("teamMemberEditDialog")) && dialog->isVisible());
+    auto *mode = dialog->findChild<QComboBox *>("teamMemberEditAfterTask");
+    auto *on = dialog->findChild<QComboBox *>("teamMemberEditAfterOn");
+    auto *at = dialog->findChild<QSpinBox *>("teamMemberEditAfterAt");
+    QVERIFY(mode && on && at);
+    QCOMPARE(mode->currentData().toString(), QString("compact"));
+    QCOMPARE(on->currentData().toString(), QString("percent"));
+    QCOMPARE(at->value(), 85);
+    // The criterion decides the threshold's range: tokens take a token count.
+    on->setCurrentIndex(on->findData("tokens"));
+    QCOMPARE(at->maximum(), 10000000);
+    at->setValue(250000);
+    dialog->findChild<QPushButton *>("teamMemberEditSave")->click();
+    QTRY_COMPARE(calls(script(), "settings").size(), 1);
+    const auto update = calls(script(), "settings").first().value("members_update").toArray().first().toObject();
+    QCOMPARE(update.value("id").toString(), QString("backend"));
+    QCOMPARE(update.value("after_task").toString(), QString("compact"));
+    QCOMPARE(update.value("after_task_on").toString(), QString("tokens"));
+    QCOMPARE(update.value("after_task_at").toInt(), 250000);
+    QTRY_VERIFY(!workspace.findChild<QDialog *>("teamMemberEditDialog"));
+}
+void TestTeamsUiMembers::editMemberRefusalLeavesTheMemberUnchanged_data()
+{
+    QTest::addColumn<QString>("reason");
+    QTest::newRow("refused-field") << QString("Member backend: field permissions: Codex has no auto mode");
+    QTest::newRow("lead-limit") << QString("The lead changes only a member's model and effort: propose a settings card");
+    QTest::newRow("clear-action") << QString("Member backend: DeepSeek has no clear-context action; leave clear_context_first off");
+}
+void TestTeamsUiMembers::editMemberRefusalLeavesTheMemberUnchanged()
+{
+    QFETCH(QString, reason); setTeam(editableMemberTeam());
+    QVERIFY(FakeCli::replace(script()+".memberrefuse", reason.toUtf8()));
+    HgsClient client(FakeCli::program(script())); TeamController controller(&client); TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel); workspace.resize(1300, 900); workspace.show();
+    controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+    QTRY_VERIFY(controller.watched() && editMenuButton(workspace));
+    const auto before = controller.watched()->member("backend")->json();
+    chooseMenuAction("teamWorkspaceMemberEdit"); editMenuButton(workspace)->click();
+    QDialog *dialog = nullptr; QTRY_VERIFY((dialog = workspace.findChild<QDialog *>("teamMemberEditDialog")));
+    auto *field = dialog->findChild<QComboBox *>("teamMemberEditPermissions"); field->setCurrentIndex(field->findData("auto"));
+    auto *save = dialog->findChild<QPushButton *>("teamMemberEditSave"); save->click();
+    auto *error = dialog->findChild<QLabel *>("teamMemberEditError");
+    QTRY_VERIFY(error->text().contains(reason)); QVERIFY(error->isVisible()); QVERIFY(dialog->isVisible()); QVERIFY(save->isEnabled());
+    QCOMPARE(field->currentData().toString(), QString("auto")); // keep the owner's draft
+    QCOMPARE(controller.watched()->member("backend")->json(), before);
+    QCOMPARE(calls(script(), "swap-member").size(), 0);
+    QFile::remove(script()+".memberrefuse"); save->click();
+    QTRY_COMPARE(calls(script(), "settings").size(), 2);
+    QTRY_VERIFY(!workspace.findChild<QDialog *>("teamMemberEditDialog"));
+}
+
+void TestTeamsUiMembers::editMemberWideningIsExplicit()
+{
+    setTeam(editableMemberTeam());
+    HgsClient client(FakeCli::program(script())); TeamController controller(&client); TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel); workspace.resize(1300, 900); workspace.show();
+    controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+    QTRY_VERIFY(controller.watched() && editMenuButton(workspace));
+    chooseMenuAction("teamWorkspaceMemberEdit"); editMenuButton(workspace)->click();
+    QDialog *dialog = nullptr; QTRY_VERIFY((dialog = workspace.findChild<QDialog *>("teamMemberEditDialog")));
+    auto *profile = dialog->findChild<QComboBox *>("teamMemberEditProfile"); profile->setCurrentIndex(profile->findData("network"));
+    auto *confirm = dialog->findChild<QCheckBox *>("teamMemberEditWiden"); QVERIFY(!confirm->isHidden()); QVERIFY(!confirm->isChecked());
+    confirm->setChecked(true); dialog->findChild<QPushButton *>("teamMemberEditSave")->click();
+    QTRY_COMPARE(calls(script(), "settings").size(), 1);
+    const auto input = calls(script(), "settings").first(); QVERIFY(input.value("confirm_widening").toBool());
+    QCOMPARE(input.value("members_update").toArray(), (QJsonArray{QJsonObject{{"id", "backend"}, {"permissions_profile", "network"}}}));
+    QTRY_VERIFY(!workspace.findChild<QDialog *>("teamMemberEditDialog"));
+}
 
 void TestTeamsUiMembers::taskCardOffersActionsByStatus()
 {
@@ -1886,6 +2069,31 @@ void TestTeamsUiMembers::sideListsAndMemberTasks()
     if (!qEnvironmentVariable("ZERUS_TEAM_SHOTS").isEmpty()) lightShot(&workspace, "ux-4-planning-light");
     darkPalette();
     Settings::remove("workspace/skin");
+}
+
+// Task #26: a member that is not failed starts on its own for its first task or
+// its reports; the Relaunch action says so.
+void TestTeamsUiMembers::relaunchTooltipNamesItsReports()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.refreshCatalog();
+    QTRY_VERIFY(controller.catalogReady());
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    panel.resize(420, 900); panel.show();
+    workspace.resize(1300, 820); workspace.show();
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QTRY_VERIFY(!workspace.findChildren<QFrame *>("teamWorkspaceMember").isEmpty());
+    inspectMemberMenu(&workspace, "backend", [](QMenu *menu) {
+        QAction *relaunch = nullptr;
+        for (auto *action : menu->actions()) if (action->text() == "Relaunch") relaunch = action;
+        QVERIFY(relaunch && !relaunch->isEnabled());
+        QVERIFY2(relaunch->toolTip().contains("its reports"), qPrintable(relaunch->toolTip()));
+    });
 }
 
 QTEST_MAIN(TestTeamsUiMembers)

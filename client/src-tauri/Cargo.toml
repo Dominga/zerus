@@ -36,6 +36,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The clipboard is written from Rust only (copy_text): the webview loses the user activation navigator.clipboard needs while hgs runs.
 tauri-plugin-clipboard-manager = "2"
+# The clipboard's copied files for the composer's paste (`clipboard_files`):
+# the version and features clipboard-manager already resolves, no new crates.
+arboard = { version = "3.7.0", default-features = false, features = ["wayland-data-control"] }
 # Called from Rust only, for the composer's Attach files picker
 # (`composer_pick`) and New session's local folder picker
 # (`pick_local_folder`): the webview gets none of the plugin's permissions.
@@ -64,6 +67,8 @@ zerus-client-media = { path = "../media", optional = true }
 # so drafts reach the disk.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# Close-only mutation custody remains held by helpers and their descendants.
+tempfile = "3"
 # Bound activation connect as well as write when an exiting GUI stops accepting.
 socket2 = "0.6"
 

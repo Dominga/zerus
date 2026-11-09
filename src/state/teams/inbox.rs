@@ -315,6 +315,27 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             });
         }
     }
+    // Task #364: one notice when the team's build folders pass the owner's
+    // limit; it stays while they do and is never repeated per folder.
+    if active {
+        if let Some((bytes, limit)) = crate::state::build_dirs::team_over(&team.id) {
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "build_folders",
+                key: format!("build_folders:{}", team.id),
+                task: None,
+                member: String::new(),
+                since: crate::state::now(),
+                summary: summary(&format!(
+                    "The team's build folders hold {} (over your {} limit); Clean removes the finished tasks' targets",
+                    crate::state::build_dirs::gigabytes(bytes),
+                    crate::state::build_dirs::gigabytes(limit)
+                )),
+                command: format!("{} | hgs team disk --json", json!({"action":"list","by":"human"})),
+                detail: "Settings > Build folders shows each team's folders; Clean… removes the targets of its finished tasks after your confirmation.".into(),
+            });
+        }
+    }
     // Task 259 (owner, 2026-11-08): no idle member while ready work waits.
     // Zerus moves a ready task with free outputs to an idle member itself; the
     // one case it leaves to the lead is a task an explicit assignment keeps
@@ -634,7 +655,7 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             member: name.clone(),
             since: crate::state::now(),
             summary: summary(&format!("Draining {name}: {listed} still to decide; {why}")),
-            command: format!("{} | hgs team status --json", json!({"team":team.id})),
+            command: format!("{} | hgs team status --json", json!({"team":team.id,"task":waiting[0]})),
             detail: format!("{name} is draining. {listed} keep it open: {why}."),
         });
     }
@@ -725,12 +746,13 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
                 if flags.is_empty() { base } else { format!("{base}: {flags}") }
             }),
             command: format!(
-                "{} | hgs team test results --json",
-                json!({"request_id":PLACEHOLDER,"team":team.id,"record":notice.record})
+                "{} | hgs team test --json",
+                json!({"request_id":PLACEHOLDER,"team":team.id,"action":"results","record":notice.record})
             ),
             detail: format!(
-                "Asked by {}. The log and excerpt stay in record {}; read them with hgs team test results --json, not from this card.",
+                "Asked by {}. The log and excerpt stay in record {}; read them with hgs team test --json and action results, record {}, not from this card.",
                 if notice.asked_by.is_empty() { "an unknown caller" } else { notice.asked_by.as_str() },
+                notice.record,
                 notice.record
             ),
         });
@@ -901,7 +923,7 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             member: "owner".into(),
             since: decided_at(proposal),
             summary: summary(&text),
-            command: format!("{} | hgs team status --json", json!({"request_id":PLACEHOLDER,"team":team.id})),
+            command: format!("{} | hgs team inbox --json", json!({"request_id":PLACEHOLDER,"team":team.id})),
             detail: proposal["note"].as_str().unwrap_or_default().to_owned(),
         });
     }
@@ -1110,7 +1132,7 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
                         member: team.name_of(&attempt.member),
                         since: interim.at,
                         summary: summary(&format!("Interim: {}", interim.text)),
-                        command: format!("{} | hgs team status --json", json!({"team":team.id})),
+                        command: format!("{} | hgs team status --json", json!({"team":team.id,"task":task.id})),
                         detail: interim.text.clone(),
                     });
                 }
@@ -1242,7 +1264,7 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             member: name.clone(),
             since: asked.at,
             summary: summary(&format!("{name} waits for an answer only its Terminal takes: {}", terminal_title(asked))),
-            command: format!("{} | hgs team status --json", json!({"team":team.id})),
+            command: format!("{} | hgs team inbox --json", json!({"team":team.id})),
             detail: format!(
                 "Zerus cannot answer it, so neither can you: {} Tell the owner to open {name}'s Terminal and answer it there; \
                  the member continues once it is answered.{}",
@@ -1315,7 +1337,7 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             member: role.clone(),
             since: limit.at,
             summary: summary(&format!("{role} stopped by a usage limit{reset}")),
-            command: format!("{} | hgs team status --json", json!({"team":team.id})),
+            command: format!("{} | hgs team inbox --json", json!({"team":team.id})),
             detail: if limit.detail.is_empty() { String::new() } else { summary(&limit.detail) },
         });
     }
@@ -1692,7 +1714,7 @@ pub(crate) fn text_with(team: &Team, items: &[Item], again: &[Item], now: f64) -
         // summary line.
         if item.kind == "report" {
             if let Some(task) = item.task {
-                text += &format!("   Full report: task #{task} in {} | hgs team status --json\n", json!({"team":team.id}));
+                text += &format!("   Full report: task #{task} in {} | hgs team status --json\n", json!({"team":team.id,"task":task}));
             }
         }
     }
@@ -2530,7 +2552,7 @@ mod tests {
         assert!(text.contains("Done and checked") && text.contains("Which database?"), "{text}");
         assert!(text.contains("hgs team accept --json") && text.contains("hgs team reply --json"), "{text}");
         // N7: the message says how to read the whole report.
-        assert!(text.contains("Full report: task #1") && text.contains("hgs team status --json"), "{text}");
+        assert!(text.contains("Full report: task #1") && text.contains("hgs team status --json") && text.contains("\"task\":1"), "{text}");
         assert!(text.contains("hgs team inbox --json"), "{text}");
         // A long list is summarized, never sent whole.
         let mut many = team.clone();
@@ -2776,6 +2798,34 @@ mod told_tests {
         // Both leave the open list: the report is forgotten, the decision kept.
         mark_told(&mut told, &[], &Default::default());
         assert_eq!(told, vec!["proposal:p1".to_owned()]);
+    }
+
+    /// Task #364: the lead hears once when a team's build folders pass the
+    /// owner's limit.
+    #[test]
+    fn the_build_folders_notice_is_one_item_while_a_team_is_over_the_limit() {
+        let state = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(state.path(), || {
+            use crate::state::teams::ops;
+            let (mut team, _) = ops::create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+            ops::apply(&mut team, "plan", &json!({"members":[{"id":"dev","role":"Backend","agent":"codex"}],"tasks":[{"id":1,"title":"A","assignee":"dev"}]}), &ops::Actor::Human, &std::collections::BTreeSet::new(), &mut Vec::new()).unwrap();
+            ops::apply(&mut team, "approve", &json!({}), &ops::Actor::Human, &std::collections::BTreeSet::new(), &mut Vec::new()).unwrap();
+            team.status = crate::state::teams::model::TeamStatus::Running;
+            let target = work.path().join("target");
+            std::fs::create_dir_all(&target).unwrap();
+            crate::state::build_dirs::note(crate::state::build_dirs::Use {
+                path: target.clone(), kind: "cargo_target", origin: "team_run", team: team.id.clone(), ..Default::default()
+            })
+            .unwrap();
+            assert!(!items(&team).iter().any(|item| item.kind == "build_folders"));
+            crate::state::build_dirs::test_measure(&target, 200 * 1024 * 1024 * 1024, 100).unwrap();
+            let found: Vec<Item> = items(&team).into_iter().filter(|item| item.kind == "build_folders").collect();
+            assert_eq!(found.len(), 1, "{found:?}");
+            assert!(found[0].summary.contains("over your 100.0 GB limit"), "{}", found[0].summary);
+            // Still one on the next read: the notice fires once while it holds.
+            assert_eq!(items(&team).iter().filter(|item| item.kind == "build_folders").count(), 1);
+        });
     }
 }
 

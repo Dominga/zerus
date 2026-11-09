@@ -36,3 +36,6 @@ __pycache__/
 # they made the Tauri build of the next candidate sourceDirty.
 /.zerus-release/
 /gui-profile/
+
+# Machine-only test toolchain values
+/.zerus/tests.local.toml

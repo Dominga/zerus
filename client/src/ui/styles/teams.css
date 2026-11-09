@@ -146,6 +146,12 @@
   .team-proposal-by { font-size: 10.5px; }
   .team-proposal-change { padding-left: 6px; color: var(--z-color-muted); overflow-wrap: anywhere; user-select: text; }
   .team-proposal-reason { color: var(--z-color-muted); overflow-wrap: anywhere; }
+  /* Task 367: an owner card grows with its text and keeps its buttons; only a
+     long reason is clamped, with More. The strip owns no inner scrollbar. */
+  .team-proposal-reason.clamped { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; }
+  .team-proposal-more { align-self: flex-start; font-size: var(--fs-xs); }
+  .team-proposal-answers { flex: none; }
+  .team-conversation > .team-proposals { max-height: none; overflow: visible; flex: none; }
   .team-proposal-notice, .team-waiting-notice { color: var(--z-color-warn); overflow-wrap: anywhere; }
   .team-waiting-notice.inline { font-size: 11px; max-width: 40ch; }
   .team-proposal-answers { display: flex; align-items: center; gap: 6px; }
@@ -190,12 +196,28 @@
   .team-waiting-question { display: flex; flex-direction: column; gap: 2px; }
   .team-waiting-command { display: block; padding: 4px 6px; border-radius: 5px; background: var(--z-color-field); overflow-wrap: anywhere; user-select: text; }
   .team-waiting-output { margin: 0; max-height: 8em; overflow: auto; padding: 4px 6px; border-radius: 5px; background: var(--z-color-field); white-space: pre-wrap; }
-  .team-waiting-banner { display: flex; flex-direction: column; gap: 2px; padding: 4px 14px; border-bottom: 1px solid var(--z-color-divider); background: var(--z-color-warn-bg); }
-  .team-waiting-banner-head { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--z-color-warn); }
-  /* Task 317 (F8): the count and the button keep their line; only the newest
-     title gives way, to an ellipsis (Qt keeps "7 wait for you" on one line). */
+  .team-waiting-banner { display: flex; flex-direction: column; gap: 2px; padding: 4px 14px; border-bottom: 1px solid var(--z-color-divider); background: var(--z-color-warn-bg); container-type: inline-size; }
+  .team-waiting-banner-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; color: var(--z-color-warn); }
+  /* Task 317 (F8), task 384: the count never wraps (min-width keeps it whole);
+     the button may drop to its own line in a narrow column. */
   .team-waiting-banner-head > b, .team-waiting-banner-head > .btn { flex: none; white-space: nowrap; }
+  .team-waiting-banner-head > b { min-width: max-content; }
   .team-waiting-banner-head > .ell { flex: 0 1 auto; min-width: 0; }
+  /* Task 384: the newest item is its own row with its kind, a summary clamped
+     to two lines and its answer buttons; a narrow strip wraps the parts
+     instead of cutting the title or hiding the buttons. */
+  .team-waiting-row.newest { padding: 2px 0 4px 22px; }
+  .team-waiting-row.newest .team-waiting-head { flex-wrap: wrap; row-gap: 4px; }
+  .team-waiting-row.newest .team-waiting-title { flex: 1 1 14ch; white-space: normal; overflow-wrap: anywhere;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+  .team-waiting-row.newest .team-waiting-team { max-width: none; }
+  /* Task 384: a narrow strip (the owner's column at its smallest) gives the
+     summary the whole width, so the title keeps two readable lines and the
+     answer buttons take the line below. */
+  @container (max-width: 430px) {
+    .team-waiting-row.newest .team-waiting-title { flex-basis: 100%; }
+    .team-waiting-row.newest .team-waiting-team { max-width: 100%; }
+  }
   .team-confirm-text { white-space: pre-line; }
 
   /* Task 55: members' questions the owner answers (task card and side). */

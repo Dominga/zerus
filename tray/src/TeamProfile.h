@@ -175,6 +175,8 @@ private:
     void read();
     void render();
     void renderLosses();
+    const Teams::Phase *archivedScope() const;
+    QWidget *archivedPage();
     QWidget *summaryTiles();
     QWidget *timePage();
     QWidget *estimatesCard();

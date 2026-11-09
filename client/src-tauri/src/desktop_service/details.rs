@@ -6,12 +6,15 @@ use zerus_client_core::{
     CatalogState, OrganizationSnapshot,
 };
 use zerus_watch_protocol::{topic, Body, Subscription};
+mod git;
 
 #[cfg(all(test, unix))]
 mod tests;
 
 #[derive(Default)]
 pub(super) struct Hub {
+    git_rows: Vec<zerus_client_core::git::RowInterest>,
+    git_bindings: BTreeMap<Key, Vec<git::Binding>>,
     lease: Option<Lease>,
     routes: BTreeMap<Key, Entry>,
     retiring: BTreeMap<String, Retirement>,
@@ -197,7 +200,14 @@ impl Hub {
         self.lease = None;
         self.retiring.clear();
         self.sources.clear();
-        let mut changes = Vec::new();
+        self.git_bindings.clear();
+        let mut changes = self
+            .routes
+            .iter()
+            .filter(|(key, _)| key.topic == topic::GIT)
+            .map(|(_, entry)| entry.route.connection(false, "service_unavailable"))
+            .collect::<Vec<_>>();
+        self.routes.retain(|key, _| key.topic != topic::GIT);
         for entry in self.routes.values_mut() {
             // Old queued deliveries cannot acquire the next lease's identity.
             entry.route = Route::new(
@@ -394,6 +404,7 @@ impl Delivery {
                 entry.route.id == *id
                     && entry.route.version() == *version
                     && entry.route.stamp() == *stamp
+                    && (key.topic != topic::GIT || hub.git_current(key, pump))
             }),
             Target::Source {
                 computer,
@@ -654,23 +665,45 @@ pub(super) async fn frame(
                 return Ok(());
             }
             let id = entry.route.id.clone();
-            match entry.route.apply(kind, value) {
-                Ok(changes) => {
-                    let generation = entry.route.version().map_or(0, |v| v.generation);
-                    let gate = Target::Route {
-                        key: key.clone(),
-                        id,
-                        version: entry.route.version(),
-                        stamp: entry.route.stamp(),
-                    };
-                    hub.source(&key.computer, generation)?;
-                    shared.details_changed.notify_one();
-                    Some((lease, gate, changes))
-                }
-                Err(code) => {
-                    let recovered = hub.recover(&key, &id, code, true)?;
-                    shared.details_changed.notify_one();
-                    recovered.map(|(gate, changes)| (lease, gate, changes))
+            let result = entry.route.apply(kind, value);
+            let terminal_git = (key.topic == topic::GIT && kind == "detail")
+                .then(|| {
+                    result
+                        .as_ref()
+                        .ok()?
+                        .iter()
+                        .find_map(|change| match change {
+                            Change::Git {
+                                update: zerus_client_core::GitUpdate::Unavailable { code },
+                                ..
+                            } => Some(code.clone()),
+                            _ => None,
+                        })
+                })
+                .flatten();
+            if let Some(code) = terminal_git {
+                let recovered = hub.recover(&key, &id, &code, false)?;
+                shared.details_changed.notify_one();
+                recovered.map(|(gate, changes)| (lease, gate, changes))
+            } else {
+                match result {
+                    Ok(changes) => {
+                        let generation = entry.route.version().map_or(0, |v| v.generation);
+                        let gate = Target::Route {
+                            key: key.clone(),
+                            id,
+                            version: entry.route.version(),
+                            stamp: entry.route.stamp(),
+                        };
+                        hub.source(&key.computer, generation)?;
+                        shared.details_changed.notify_one();
+                        Some((lease, gate, changes))
+                    }
+                    Err(code) => {
+                        let recovered = hub.recover(&key, &id, code, key.topic != topic::GIT)?;
+                        shared.details_changed.notify_one();
+                        recovered.map(|(gate, changes)| (lease, gate, changes))
+                    }
                 }
             }
         }
@@ -686,6 +719,7 @@ pub(super) async fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>) -> Result<()
         if stop.load(Ordering::Acquire) {
             return Ok(());
         }
+        git::reconcile(&shared);
         let (work, retry_at) = {
             let mut hub = shared
                 .details

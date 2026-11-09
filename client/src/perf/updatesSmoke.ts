@@ -40,12 +40,17 @@ async function statusbarSmoke() {
   setPage("settings");
   await until(() => !!document.querySelector(".updates-card"), "Updates did not render for the connection-state checks");
   require(Object.keys(catalog.computers).length === 5, "the status fixture has extra computers");
-  await until(() => document.querySelector<HTMLElement>(".statusbar .conn-ok")?.innerText.replace(/\s+/g, " ").trim() === "5 of 5 machines connected", "the all-connected summary did not render");
-  require(!document.querySelector<HTMLElement>(".statusbar .conn-ok")?.textContent?.includes("offline"), "all-connected has an offline tail");
+  const machines = () => document.querySelector<HTMLButtonElement>(".statusbar .machines-status");
+  await until(() => machines()?.textContent === "5/5", "the all-connected machine counter did not render");
+  require(!machines()?.classList.contains("warn"), "all-connected machine counter warns");
+  require(machines()?.getAttribute("aria-label")?.includes("5 of 5 machines connected") === true, "the compact counter lost its accessible summary");
+  machines()!.click(); await until(() => page() === "machines", "the machine counter did not open Machines");
+  setPage("settings"); await until(() => !!document.querySelector(".updates-card"), "Updates did not return");
 
   batch("reconnecting", 2);
-  await until(() => document.querySelector(".statusbar .danger")?.textContent?.includes("build-02: reconnecting (attempt 2)") ?? false, `inline connection details did not render: ${JSON.stringify(catalog.computers)} ${document.querySelector(".statusbar")?.textContent}`);
-  log("statusbar inline error shown");
+  await until(() => machines()?.classList.contains("warn") && machines()?.title.includes("build-02: reconnecting (attempt 2)") || false, "the offline warning lost its machine name or reason");
+  require(machines()?.textContent === "4/5", "offline machine details expanded the counter");
+  log("statusbar connection warning shown");
   const retry = [...document.querySelectorAll<HTMLButtonElement>(".statusbar button")].find((button) => button.textContent === "Retry now");
   require(!!retry, "Retry now is missing in the connection-error state");
   retry!.click();
@@ -53,8 +58,7 @@ async function statusbarSmoke() {
 
   batch("probing");
   log("statusbar probing applied");
-  log(`calm text: ${JSON.stringify(document.querySelector<HTMLElement>(".statusbar .conn-ok")?.innerText)}`);
-  await until(() => document.querySelector<HTMLElement>(".statusbar .conn-ok")?.innerText.replace(/\s+/g, " ").trim() === "4 of 5 machines connected, build-02 connecting", "the calm connecting-name summary did not render (task 72: probing is connecting, never offline)");
+  await until(() => machines()?.textContent === "4/5" && machines()?.title.includes("build-02: checking") || false, "the checking machine counter did not render");
   require(![...document.querySelectorAll<HTMLButtonElement>(".statusbar button")].some((button) => button.textContent === "Retry now"), "Retry now shows without a connection error");
   log("statusbar calm checks passed");
 
@@ -91,6 +95,8 @@ async function statusbarSmoke() {
   log("statusbar dialog closed");
   setPage("sessions");
   await until(() => !!document.querySelector(".vrow .rowhit"), "Sessions did not return after the login-item dialog");
+  require(!!document.querySelector(".sp-foot .cleanup-review"), "the permanent worktree review is missing from the session footer");
+  require(!document.querySelector(".statusbar .cleanup-review"), "the review icon stayed in the bottom status bar");
   log("statusbar Sessions returned");
   document.querySelector<HTMLElement>(".vrow .rowhit")!.click();
   await until(() => !!document.querySelector(".usage-refresh"), "the selected session's usage refresh did not render");

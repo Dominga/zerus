@@ -73,7 +73,7 @@ struct PermissionAnswer {
 
 struct Member {
     QString id, role, agent, model, computer, state, error;
-    QString account, effort, permissions, folder, directory, prompt;
+    QString account, effort, permissions, permissionsProfile, folder, directory, prompt;
     QStringList ironRules;
     // U54: the account its session really runs on (team status's
     // session_account), which may differ from the configured `account`.
@@ -132,6 +132,11 @@ struct Member {
     // compact or clear); sent back only when set.
     QList<ModelChoice> models;
     QString contextBeforeTask;
+    // Task #7: the After-a-task policy: keep (empty), compact or clear, with
+    // the criterion (percent of the context window or tokens used) and its
+    // threshold. The lead is a member too.
+    QString afterTask, afterTaskOn;
+    int afterTaskAt = 0;
     // U49: it finishes its open work, takes nothing new and then leaves.
     bool draining = false;
     // Task 98: hand-outs its Terminal refused in a row (a draft, a dialog or an
@@ -307,8 +312,11 @@ struct Timing {
 };
 
 struct Task {
+    QJsonArray prerequisites;
+
     int id = 0;
     int phase = 1;             // the approved initial plan is phase 1
+    bool archived = false;    // full history is read only when the card opens
     bool pinned = false;       // stays with its assignee
     QString title, description, status, assignee, decidedBy, reason;
     QString kind;              // C5: "check" for a check task
@@ -393,6 +401,12 @@ struct PhasePause {
 PhasePause readPhasePause(const QJsonValue &value);
 
 struct Phase {
+    QJsonObject checks;
+    double targetHours = -1;
+
+    bool archived = false;
+    int archivedTasks = 0, archivedAccepted = 0, archivedRejected = 0, archivedCancelled = 0;
+    double closedAt = 0;
     int n = 0;
     QString title, approval, state, addedBy, decidedBy;
     bool barrier = false;      // no task starts before every lower phase is finished
@@ -686,8 +700,8 @@ struct PhaseGroup {
     QList<int> crit;     // Task #229: open critical tasks holding it
     QString critGate;
     QList<int> tasks;
-    int done = 0;
-    bool finished() const { return !tasks.isEmpty() && done == tasks.size(); }
+    int done = 0, archivedTotal = 0;
+    bool finished() const { return archivedTotal > 0 || (!tasks.isEmpty() && done == tasks.size()); }
 };
 // The phases to show, in phase order; empty while the plan is phase 1 only.
 QList<PhaseGroup> phaseGroups(const Team &team);

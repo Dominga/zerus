@@ -1,5 +1,5 @@
 use super::*;
-use crate::task_start::capture::tests::Fixture;
+use crate::task_start::capture::tests::{retry_busy, Fixture};
 use serde_json::json;
 use std::{
     fs,
@@ -25,11 +25,15 @@ fn saved(f: &Fixture) -> Saved {
     .unwrap()
     .unwrap()
 }
+// Every caller expects a successful prepare: a later one may meet a parallel
+// fork's inherited lock description, so wait for Busy only (zerus-3bix9).
 fn prepared(f: &Fixture) -> Journal {
-    Journal::prepare(
-        f.capture().unwrap(),
-        &CheckId::fixture_initial(&f.intent.reconcile_id),
-    )
+    retry_busy(|| {
+        Journal::prepare(
+            f.capture().unwrap(),
+            &CheckId::fixture_initial(&f.intent.reconcile_id),
+        )
+    })
     .unwrap()
 }
 
@@ -102,7 +106,8 @@ fn ui_exit_and_absent_outbox_only_reopen_the_same_original_read_identity() {
     );
     f.write();
     assert_eq!(
-        Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(NEXT)).err(),
+        retry_busy(|| Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(NEXT)))
+            .err(),
         Some(Error::Unavailable)
     );
     assert_eq!(
@@ -119,7 +124,8 @@ fn prepared_reopen_reuses_the_original_id_with_only_a_fresh_service_scope() {
     let bytes = fs::read(&f.file).unwrap();
     f.intent.scope.service_epoch = NEXT.into();
     let mut journal =
-        Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(READ)).unwrap();
+        retry_busy(|| Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(READ)))
+            .unwrap();
     assert_eq!(journal.saved().phase(), Phase::Prepared);
     assert_eq!(journal.saved().reconcile_id(), f.intent.reconcile_id);
     let offered = journal.offer().unwrap();
@@ -128,7 +134,8 @@ fn prepared_reopen_reuses_the_original_id_with_only_a_fresh_service_scope() {
     assert_eq!(offered.original.as_bytes(), bytes);
     drop(journal);
     let mut reloaded =
-        Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(READ)).unwrap();
+        retry_busy(|| Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(READ)))
+            .unwrap();
     assert_eq!(reloaded.offer().err(), Some(Error::OfferedUnknown));
     assert_eq!(reloaded.saved().reconcile_id(), f.intent.reconcile_id);
 }
@@ -145,7 +152,8 @@ fn another_writer_or_changed_source_cannot_rotate_or_replace_a_saved_original() 
     drop(first);
     f.change(|v| v["opaque_future"] = json!("changed source"));
     assert_eq!(
-        Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(NEXT)).err(),
+        retry_busy(|| Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(NEXT)))
+            .err(),
         Some(Error::Unavailable)
     );
     assert_eq!(
@@ -327,26 +335,28 @@ fn explicit_discard_only_retires_the_exact_never_offered_metadata() {
     // The original outbox may have changed or gone away. This API discards
     // only confirmed never-offered journal metadata, not that outbox.
     fs::remove_file(&f.file).unwrap();
-    saved(&f).discard_prepared(&f.intent.reconcile_id).unwrap();
+    retry_busy(|| saved(&f).discard_prepared(&f.intent.reconcile_id)).unwrap();
     assert_eq!(saved(&f).phase(), Phase::CancelledBeforeOffer);
     assert_eq!(saved(&f).reconcile_id(), f.intent.reconcile_id);
-    saved(&f).discard_prepared(&f.intent.reconcile_id).unwrap();
+    retry_busy(|| saved(&f).discard_prepared(&f.intent.reconcile_id)).unwrap();
     assert!(!f.file.exists());
     f.write();
     assert_eq!(fs::read(&f.file).unwrap(), original);
     assert_eq!(
-        Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(NEXT)).err(),
+        retry_busy(|| Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(NEXT)))
+            .err(),
         Some(Error::Cancelled)
     );
     let proposal = saved(&f).next_check_id().unwrap();
     let next_id = proposal.as_str().to_owned();
     assert_eq!(
-        Journal::prepare_after_discard(f.capture().unwrap(), &proposal, READ).err(),
+        retry_busy(|| Journal::prepare_after_discard(f.capture().unwrap(), &proposal, READ)).err(),
         Some(Error::Unavailable)
     );
-    let mut next =
+    let mut next = retry_busy(|| {
         Journal::prepare_after_discard(f.capture().unwrap(), &proposal, &f.intent.reconcile_id)
-            .unwrap();
+    })
+    .unwrap();
     assert_eq!(next.saved().reconcile_id(), next_id);
     assert_eq!(
         next.saved.disk.record.previous_cancelled.as_deref(),
@@ -370,6 +380,12 @@ fn stale_prepared_snapshot_and_missing_lock_never_discard_an_offered_or_unknown_
     let before = saved(&f);
     journal.offer().unwrap();
     drop(journal);
+    // discard consumes this exact stale snapshot; do not reconstruct or replay
+    // it. Wait for the old writer, then unlock the fixture probe explicitly so
+    // a parallel fork cannot keep that probe's description locked until exec.
+    let idle = retry_busy(|| before.slot.lock(false)).unwrap();
+    idle.unlock().unwrap();
+    drop(idle);
     assert_eq!(
         before.discard_prepared(&f.intent.reconcile_id),
         Err(Error::Unavailable)
@@ -429,9 +445,9 @@ fn missing_journal_beside_its_original_lock_never_creates_another_reconciliation
 fn invalid_next_record_is_refused_before_publication_and_replaced_preparation_is_idempotent() {
     let f = Fixture::new();
     drop(prepared(&f));
-    saved(&f).discard_prepared(&f.intent.reconcile_id).unwrap();
+    retry_busy(|| saved(&f).discard_prepared(&f.intent.reconcile_id)).unwrap();
     let snapshot = saved(&f);
-    let lock = snapshot.slot.lock(false).unwrap();
+    let lock = retry_busy(|| snapshot.slot.lock(false)).unwrap();
     let before = snapshot.disk.bytes.clone();
     let mut invalid = snapshot.disk.record.clone();
     invalid.phase = Phase::Prepared;
@@ -453,13 +469,15 @@ fn invalid_next_record_is_refused_before_publication_and_replaced_preparation_is
     drop(snapshot);
     let proposal = saved(&f).next_check_id().unwrap();
     let next_id = proposal.as_str().to_owned();
-    let first =
+    let first = retry_busy(|| {
         Journal::prepare_after_discard(f.capture().unwrap(), &proposal, &f.intent.reconcile_id)
-            .unwrap();
+    })
+    .unwrap();
     drop(first);
-    let repeated =
+    let repeated = retry_busy(|| {
         Journal::prepare_after_discard(f.capture().unwrap(), &proposal, &f.intent.reconcile_id)
-            .unwrap();
+    })
+    .unwrap();
     assert_eq!(repeated.saved().phase(), Phase::Prepared);
     assert_eq!(repeated.saved().reconcile_id(), next_id);
 }
@@ -539,17 +557,23 @@ fn abort_after_candidate_sync_can_reoffer_the_same_prepared_original() {
     const LEAF: &str = "ZERUS_TEST_TASK_PUBLICATION_BEFORE_TRACKING";
     if let Some(root) = std::env::var_os(LEAF) {
         let intent = wire::test_intent();
-        let source = Captured::read(
-            Path::new(&root),
-            &intent.binding.key.project,
-            &intent.binding.key.task,
-            &intent.binding.key.request_id,
-            &intent.binding.ui_snapshot_sha256,
-            intent.scope,
-        )
+        // The parent prepared this same fixture before spawning this leaf; a
+        // parallel fork there may still hold that lock description, so only
+        // this prepare waits for Busy, re-reading the unchanged source each
+        // time (zerus-puowk). The offer and its candidate-sync cut stay exact.
+        let mut journal = retry_busy(|| {
+            let source = Captured::read(
+                Path::new(&root),
+                &intent.binding.key.project,
+                &intent.binding.key.task,
+                &intent.binding.key.request_id,
+                &intent.binding.ui_snapshot_sha256,
+                intent.scope.clone(),
+            )
+            .unwrap();
+            Journal::prepare(source, &CheckId::fixture_initial(&intent.reconcile_id))
+        })
         .unwrap();
-        let mut journal =
-            Journal::prepare(source, &CheckId::fixture_initial(&intent.reconcile_id)).unwrap();
         journal
             .offer_with_sync(|file, directory| {
                 if !directory {
@@ -615,17 +639,66 @@ fn older_cancelled_id_cannot_return_after_a_second_explicit_discard() {
     let f = Fixture::new();
     let first = CheckId::fixture_initial(&f.intent.reconcile_id);
     drop(Journal::prepare(f.capture().unwrap(), &first).unwrap());
-    saved(&f).discard_prepared(first.as_str()).unwrap();
+    retry_busy(|| saved(&f).discard_prepared(first.as_str())).unwrap();
     let next = saved(&f).next_check_id().unwrap();
-    drop(Journal::prepare_after_discard(f.capture().unwrap(), &next, first.as_str()).unwrap());
-    saved(&f).discard_prepared(next.as_str()).unwrap();
+    drop(
+        retry_busy(|| Journal::prepare_after_discard(f.capture().unwrap(), &next, first.as_str()))
+            .unwrap(),
+    );
+    retry_busy(|| saved(&f).discard_prepared(next.as_str())).unwrap();
     let before = fs::read(f.file.with_extension("reconcile")).unwrap();
     assert_eq!(
-        Journal::prepare_after_discard(f.capture().unwrap(), &first, next.as_str()).err(),
+        retry_busy(|| Journal::prepare_after_discard(f.capture().unwrap(), &first, next.as_str()))
+            .err(),
         Some(Error::Unavailable)
     );
     assert_eq!(
         fs::read(f.file.with_extension("reconcile")).unwrap(),
         before
     );
+}
+
+#[test]
+fn fixture_waits_for_the_inherited_description_and_never_retries_other_refusals() {
+    let f = Fixture::new();
+    let original = prepared(&f);
+    // Like fork before exec, this clone shares the original open file description.
+    let inherited = original.lock.try_clone().unwrap();
+    drop(original);
+    let bytes = fs::read(f.file.with_extension("reconcile")).unwrap();
+    let (busy, observed) = std::sync::mpsc::sync_channel(1);
+    std::thread::scope(|threads| {
+        let waiter = threads.spawn(|| {
+            retry_busy(|| {
+                let result = saved(&f).discard_prepared(&f.intent.reconcile_id);
+                if result == Err(Error::Busy) {
+                    let _ = busy.try_send(());
+                }
+                result
+            })
+        });
+        observed
+            .recv_timeout(std::time::Duration::from_secs(8))
+            .unwrap();
+        assert_eq!(saved(&f).phase(), Phase::Prepared);
+        assert_eq!(fs::read(f.file.with_extension("reconcile")).unwrap(), bytes);
+        drop(inherited);
+        waiter.join().unwrap().unwrap();
+    });
+    assert_eq!(saved(&f).phase(), Phase::CancelledBeforeOffer);
+    for error in [
+        Error::Unavailable,
+        Error::OfferedUnknown,
+        Error::PublicationUnknown,
+    ] {
+        let mut calls = 0;
+        assert_eq!(
+            retry_busy(|| {
+                calls += 1;
+                Err::<(), _>(error)
+            }),
+            Err(error)
+        );
+        assert_eq!(calls, 1);
+    }
 }

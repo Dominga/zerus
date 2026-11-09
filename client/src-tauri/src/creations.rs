@@ -44,6 +44,16 @@ type ServiceLaunch = Arc<
         + Send
         + Sync,
 >;
+/// Read-only result of one original; no consent or dispatch path.
+type ServiceLaunchLookup = Arc<
+    dyn Fn(
+            &str,
+            &Value,
+            &AtomicBool,
+        ) -> Option<crate::desktop_service::creation_launch::LaunchAnswer>
+        + Send
+        + Sync,
+>;
 type JournalWriter = Arc<dyn Fn(&Path, &[u8]) -> bool + Send + Sync>;
 type LaunchSession = Arc<dyn Fn(&Value) -> Result<(), String> + Send + Sync>;
 type ReadBinding = Arc<dyn Fn(&ComputerId) -> Result<BindingListing, String> + Send + Sync>;
@@ -116,6 +126,7 @@ pub struct CreationCard {
     caption: String,
     error: String,
     created: i64,
+    updated: i64,
     group: String,
     host: String,
     machine: String,
@@ -126,6 +137,8 @@ pub struct CreationCard {
     launch_dispatched: bool,
     stop_requested: bool,
     worktree_receipts: bool,
+    worktree_pending: bool,
+    worktree_fenced: bool,
     can_resume: bool,
     can_edit: bool,
     bound_session: String,
@@ -141,6 +154,10 @@ impl CreationCard {
             caption: creation::caption(text(operation, "state")).into(),
             error: text(operation, "error").into(),
             created: operation["created"].as_i64().unwrap_or_default(),
+            updated: operation["updated"]
+                .as_i64()
+                .filter(|time| *time > 0)
+                .unwrap_or_else(|| operation["created"].as_i64().unwrap_or_default()),
             group: text(operation, "group").into(),
             host: text(operation, "host").into(),
             machine: text(operation, "machine").into(),
@@ -151,6 +168,11 @@ impl CreationCard {
             launch_dispatched: flag(operation, "launch_dispatched"),
             stop_requested: flag(operation, "stop_requested"),
             worktree_receipts: flag(operation, "worktree_receipts"),
+            worktree_pending: !text(operation, "worktree_id").is_empty()
+                && !flag(operation, "worktree_done"),
+            worktree_fenced: operation["worktree_future_fence"].as_str()
+                == operation["worktree_id"].as_str()
+                && !text(operation, "worktree_id").is_empty(),
             can_resume: creation::can_resume(operation),
             can_edit,
             bound_session: text(operation, "bound_session").into(),
@@ -169,9 +191,11 @@ struct Services {
     service_clone: Option<ServiceClone>,
     /// The same native intent shape for the worktree leaf, never shared state.
     service_worktree: Option<ServiceClone>,
+    service_worktree_cancel: Option<ServiceClone>,
     /// Local detached launches of the closed agent set, in desktop-service
     /// mode only; every other launch keeps `launch`.
     service_launch: Option<ServiceLaunch>,
+    service_launch_lookup: Option<ServiceLaunchLookup>,
     launch: LaunchSession,
     binding: ReadBinding,
     watch: WatchBinding,
@@ -205,6 +229,11 @@ enum Done {
     Launched(String, String, bool, Result<(), String>),
     /// A fresh launch the selected service definitively does not offer.
     LaunchUnsent(String, String),
+    LaunchFailed(String, String),
+    LaunchLookup(
+        String,
+        Option<crate::desktop_service::creation_launch::LaunchAnswer>,
+    ),
     Binding(String, Result<BindingListing, String>),
 }
 
@@ -310,6 +339,7 @@ impl CreationHost {
                     fresh_creations: BTreeSet::new(),
                     fresh_worktrees: BTreeSet::new(),
                     fresh_launches: BTreeSet::new(),
+                    launch_lookup_running: false,
                     chains: BTreeMap::new(),
                     #[cfg(all(test, unix))]
                     barrier: None,
@@ -562,6 +592,8 @@ struct Worker {
     /// Submits (direct or task Start) whose first launch may be a fresh
     /// service intent, consumed once.
     fresh_launches: BTreeSet<String>,
+    /// At most one explicit original-result read, independent of dispatch.
+    launch_lookup_running: bool,
     /// One explicit Continue setup's chain per creation
     /// (zerus-5wmh.66.4.3.9); see [`Chain`].
     chains: BTreeMap<String, Chain>,
@@ -807,6 +839,9 @@ impl Worker {
                     CreationAction::Show => self.queue.show(&id),
                 };
                 self.effects(effects);
+                if matches!(action, CreationAction::Check) {
+                    self.check_launch(&id);
+                }
                 let _ = answer.send(Ok(()));
             }
             #[cfg(all(test, unix))]
@@ -839,6 +874,35 @@ impl Worker {
                 cache.cards.insert(id.clone(), card);
             }
         }
+    }
+
+    fn check_launch(&mut self, id: &str) {
+        if self.launch_lookup_running || self.shutdown.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(lookup) = self.services.service_launch_lookup.clone() else {
+            return;
+        };
+        let Some(operation) = self.queue.operation(id).cloned().filter(|o| {
+            flag(o, "launch_dispatched") && matches!(text(o, "state"), "unknown" | "recover")
+        }) else {
+            return;
+        };
+        self.launch_lookup_running = true;
+        let id = id.to_owned();
+        let shutdown = self.shutdown.clone();
+        let done = self.done.clone();
+        (self.services.spawn)(Box::new(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                lookup(&id, &operation, &shutdown)
+            }))
+            .ok()
+            .flatten();
+            let _ = done.send(Done::LaunchLookup(
+                text(&operation, "launch_id").into(),
+                result,
+            ));
+        }));
     }
 
     fn effects(&mut self, effects: Vec<Effect>) {
@@ -945,9 +1009,11 @@ impl Worker {
                         Some(Ok((sender.clone(), id, value, fresh, wait)))
                     });
                     // A local receipt-backed checkout and its status reads go
-                    // to the service; cancel and remote calls stay direct.
+                    // to the service, including explicit cancellation of its
+                    // exact original. Remote calls retain their native route.
                     let clone_call = clone_call.or_else(|| {
-                        let sender = self.services.service_worktree.as_ref()?;
+                        let cancel = matches!(&call, creation::Call::WorktreeReceipt { host, action, .. } if host.is_empty() && action == "cancel");
+                        let sender = if cancel { self.services.service_worktree_cancel.as_ref()? } else { self.services.service_worktree.as_ref()? };
                         let (request_id, wait) = match &call {
                             creation::Call::CreateWorktree {
                                 host,
@@ -960,7 +1026,7 @@ impl Worker {
                                 action,
                                 request_id,
                                 ..
-                            } if host.is_empty() && action == "status" => (request_id, false),
+                            } if host.is_empty() && matches!(action.as_str(), "status" | "cancel") => (request_id, false),
                             _ => return None,
                         };
                         let mut originals =
@@ -1073,6 +1139,7 @@ impl Worker {
                                     }),
                                 ),
                                 LaunchAnswer::Unsent(error) => Done::LaunchUnsent(launch, error),
+                                LaunchAnswer::Failed(error) => Done::LaunchFailed(launch, error),
                                 LaunchAnswer::Launched => Done::Launched(
                                     text(&operation, "host").into(),
                                     launch,
@@ -1123,6 +1190,16 @@ impl Worker {
                 }
             }
             Done::LaunchUnsent(launch, error) => self.queue.launch_unsent(&launch, &error),
+            Done::LaunchFailed(launch, error) => self.queue.launch_failed(&launch, &error),
+            Done::LaunchLookup(launch, result) => {
+                self.launch_lookup_running = false;
+                use crate::desktop_service::creation_launch::LaunchAnswer;
+                match result {
+                    Some(LaunchAnswer::Failed(error)) => self.queue.launch_failed(&launch, &error),
+                    Some(LaunchAnswer::Launched) => self.queue.launch_finished(&launch, Ok(())),
+                    _ => Vec::new(),
+                }
+            }
             Done::Binding(host, result) => {
                 if let Some(poll) = self.polls.get_mut(&host) {
                     poll.running = false;
@@ -1291,11 +1368,17 @@ impl Worker {
                 continue;
             }
             let tag = text(operation, "tag");
-            let reason = match ended.code {
+            let mut reason = match ended.code {
                 Some(code) => format!("Session {tag} ended before it appeared (exit code {code})."),
                 None => format!("Session {tag} ended before it appeared."),
-            } + "\n"
-                + &ended.output.chars().take(4000).collect::<String>();
+            };
+            if ended.code.is_none() && ended.diagnostic_code == creation::SUPERVISOR_REPORT_MISSING
+            {
+                reason.push('\n');
+                reason.push_str(creation::SUPERVISOR_REPORT_MISSING_DETAIL);
+            }
+            reason.push('\n');
+            reason.extend(ended.output.chars().take(4000));
             let effects = self.queue.ended(&id, &ended.launch_id, &reason);
             self.effects(effects);
         }
@@ -1578,6 +1661,22 @@ pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> Creati
                 },
             ) as ServiceClone
         });
+    let cancel_app = app.clone();
+    let service_worktree_cancel = (cfg!(target_os = "linux") && crate::desktop_service::mode())
+        .then(|| {
+            Arc::new(
+                move |id: &str, operation: &Value, _: bool, _: bool, shutdown: &AtomicBool| {
+                    crate::desktop_service::creation_worktree::cancel(
+                        cancel_app
+                            .state::<crate::commands::AppState>()
+                            .desktop_service(),
+                        id,
+                        operation,
+                        shutdown,
+                    )
+                },
+            ) as ServiceClone
+        });
     // Launches go to the service on Linux and macOS in desktop-service mode.
     let launch_app = app.clone();
     let service_launch = (cfg!(unix) && crate::desktop_service::mode()).then(|| {
@@ -1594,6 +1693,19 @@ pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> Creati
                 )
             },
         ) as ServiceLaunch
+    });
+    let lookup_app = app.clone();
+    let service_launch_lookup = (cfg!(unix) && crate::desktop_service::mode()).then(|| {
+        Arc::new(move |id: &str, operation: &Value, shutdown: &AtomicBool| {
+            crate::desktop_service::creation_launch::lookup(
+                lookup_app
+                    .state::<crate::commands::AppState>()
+                    .desktop_service(),
+                id,
+                operation,
+                shutdown,
+            )
+        }) as ServiceLaunchLookup
     });
     let service_clone = crate::desktop_service::mode().then(|| {
         Arc::new(
@@ -1626,6 +1738,7 @@ pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> Creati
     let online_pump = pump.clone();
     let watch_pump = pump.clone();
     let emit = app.clone();
+    let notify_app = app.clone();
     let terminal_dir = dir.to_path_buf();
     let launcher = Arc::new(Mutex::new(
         zerus_client_core::terminal_launch::Launcher::new(Default::default()),
@@ -1651,7 +1764,9 @@ pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> Creati
             call: Arc::new(move |call| creation::run_call(&call_hgs, call)),
             service_clone,
             service_worktree,
+            service_worktree_cancel,
             service_launch,
+            service_launch_lookup,
             binding: Arc::new(move |computer| {
                 creation::binding_listing(
                     zerus_client_core::run_limited(
@@ -1700,6 +1815,7 @@ pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> Creati
                         Ok(advisory) => {
                             if let Some(advisory) = advisory {
                                 crate::desk::tray_notify(
+                                    &notify_app,
                                     zerus_client_core::terminal_launch::ADVISORY_TITLE,
                                     &advisory,
                                 );
@@ -1708,6 +1824,7 @@ pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> Creati
                         }
                         Err(error) => {
                             crate::desk::tray_notify(
+                                &notify_app,
                                 "Zerus: the terminal did not open",
                                 &format!("{error}\n\n{command}"),
                             );
@@ -1839,6 +1956,42 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn cards_carry_the_stage_clock_without_retiming_visibility_or_legacy_records() {
+        let clock = Arc::new(std::sync::atomic::AtomicI64::new(1_000));
+        let source = Arc::clone(&clock);
+        let mut queue = Creations::new(
+            move || source.load(Ordering::SeqCst),
+            || "00000000-0000-4000-8000-000000000123".into(),
+        );
+        queue.load(Journal::Missing);
+        let (id, effects) = queue.submit(plan());
+        let id = id.unwrap();
+        let write = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Write { write, .. } => Some(*write),
+                _ => None,
+            })
+            .unwrap();
+        clock.store(2_000, Ordering::SeqCst);
+        queue.written(write, false);
+        let value =
+            serde_json::to_value(CreationCard::of(&id, queue.operation(&id).unwrap(), false))
+                .unwrap();
+        assert_eq!(value["created"], 1_000);
+        assert_eq!(value["updated"], 2_000);
+        assert_eq!(value["state"], "storage_error");
+        clock.store(3_000, Ordering::SeqCst);
+        queue.hide(&id);
+        queue.show(&id);
+        let operation = queue.operation(&id).unwrap();
+        assert_eq!(CreationCard::of(&id, operation, false).updated, 2_000);
+        let mut legacy = operation.clone();
+        legacy.as_object_mut().unwrap().remove("updated");
+        assert_eq!(CreationCard::of(&id, &legacy, false).updated, 1_000);
+    }
+
     impl Fake {
         fn new() -> Self {
             let tree = crate::PROCESS_TREE
@@ -1905,7 +2058,9 @@ mod tests {
                 call: Arc::new(move |step| creation::run_call(&call, step)),
                 service_clone: None,
                 service_worktree: None,
+                service_worktree_cancel: None,
                 service_launch: None,
+                service_launch_lookup: None,
                 launch: Arc::new(move |operation| detached(&launch, &launch_invocation(operation))),
                 binding: Arc::new(move |_| {
                     binding.reads.fetch_add(1, Ordering::SeqCst);
@@ -2610,6 +2765,116 @@ mod tests {
         fake.stop(host);
     }
     #[test]
+    fn a_known_service_launch_failure_can_edit_but_never_dispatches_its_original_again() {
+        use crate::desktop_service::creation_launch::LaunchAnswer;
+        let fake = Fake::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let mut services = fake.services();
+        services.service_launch = Some(Arc::new(move |_, _, _, _| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            LaunchAnswer::Failed("This session already has an account.".into())
+        }));
+        let host = CreationHost::new(fake.dir.join("creations.json"), services);
+        let id = admitted(&host, plan());
+        state(&host, &id, "failed");
+        let original = operation(&host, &id)["launch_id"].clone();
+        assert!(host.plan(&id).is_some());
+        assert!(host.view()[0].can_edit && !host.view()[0].can_resume);
+        host.action(id.clone(), CreationAction::Resume).unwrap();
+        assert!(host.arrange_for_test(|| {}));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(operation(&host, &id)["launch_id"], original);
+        assert!(flag(&operation(&host, &id), "launch_dispatched"));
+        assert!(!launched_directly(&fake));
+        fake.stop(host);
+    }
+
+    #[test]
+    fn explicit_check_reads_only_the_original_failure_and_missing_evidence_stays_unknown() {
+        use crate::desktop_service::creation_launch::LaunchAnswer;
+        for found in [false, true] {
+            let fake = Fake::new();
+            let sends = Arc::new(AtomicUsize::new(0));
+            let sent = sends.clone();
+            let reads = Arc::new(AtomicUsize::new(0));
+            let read = reads.clone();
+            let mut services = fake.services();
+            services.service_launch = Some(Arc::new(move |_, _, _, _| {
+                sent.fetch_add(1, Ordering::SeqCst);
+                LaunchAnswer::Unconfirmed("lost reply".into())
+            }));
+            services.service_launch_lookup = Some(Arc::new(move |_, _, _| {
+                read.fetch_add(1, Ordering::SeqCst);
+                found.then(|| LaunchAnswer::Failed("The existing name was refused.".into()))
+            }));
+            let host = CreationHost::new(fake.dir.join("creations.json"), services);
+            let id = admitted(&host, plan());
+            state(&host, &id, "unknown");
+            let original = operation(&host, &id)["launch_id"].clone();
+            host.action(id.clone(), CreationAction::Check).unwrap();
+            wait("original lookup", || reads.load(Ordering::SeqCst) == 1);
+            if found {
+                state(&host, &id, "failed");
+                assert!(host.plan(&id).is_some());
+            } else {
+                assert!(host.arrange_for_test(|| {}));
+                assert_eq!(text(&operation(&host, &id), "state"), "unknown");
+                assert!(host.plan(&id).is_none());
+            }
+            host.action(id.clone(), CreationAction::Resume).unwrap();
+            assert!(host.arrange_for_test(|| {}));
+            assert_eq!(sends.load(Ordering::SeqCst), 1);
+            assert_eq!(operation(&host, &id)["launch_id"], original);
+            assert!(flag(&operation(&host, &id), "launch_dispatched"));
+            assert!(!launched_directly(&fake));
+            fake.stop(host);
+        }
+    }
+
+    #[test]
+    fn continue_after_a_definitely_unsent_submit_has_fresh_consent_for_the_reserved_launch() {
+        use crate::desktop_service::creation_launch::{self, LaunchAnswer};
+        let fake = Fake::new();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = calls.clone();
+        let mut services = fake.services();
+        services.service_launch = Some(Arc::new(move |id, operation, fresh, shutdown| {
+            let mut calls = lock(&seen);
+            calls.push((text(operation, "launch_id").to_owned(), fresh));
+            if calls.len() == 1 {
+                return creation_launch::call(None, id, operation, fresh, shutdown);
+            }
+            if fresh {
+                LaunchAnswer::Launched
+            } else {
+                LaunchAnswer::Unsent(creation_launch::NOT_SENT.into())
+            }
+        }));
+        let host = CreationHost::new(fake.dir.join("creations.json"), services);
+        let id = admitted(&host, plan());
+        state(&host, &id, "failed");
+        let replacement = operation(&host, &id)["launch_id"].clone();
+        assert_eq!(lock(&calls).len(), 1);
+        assert!(lock(&calls)[0].1);
+        assert!(!flag(&operation(&host, &id), "launch_dispatched"));
+        assert_ne!(replacement, lock(&calls)[0].0);
+        host.action(id.clone(), CreationAction::Resume).unwrap();
+        state(&host, &id, "confirming");
+        assert_eq!(lock(&calls).len(), 2);
+        assert!(lock(&calls)[1].1);
+        assert_eq!(replacement, lock(&calls)[1].0);
+        host.action(id.clone(), CreationAction::Resume).unwrap();
+        assert!(host.arrange_for_test(|| {}));
+        assert_eq!(
+            lock(&calls).len(),
+            2,
+            "no regrant for an already dispatched launch"
+        );
+        assert!(!launched_directly(&fake));
+        fake.stop(host);
+    }
+    #[test]
     fn a_service_without_launch_support_launches_on_the_direct_path() {
         use crate::desktop_service::creation_launch::LaunchAnswer;
         let fake = Fake::new();
@@ -2906,6 +3171,56 @@ mod tests {
         assert_eq!(value["clone_previous"].as_array().unwrap().len(), 1);
         fake.stop(host);
     }
+    #[test]
+    fn explicit_stop_of_a_service_unknown_uses_its_native_lane_without_direct_fallback() {
+        let fake = Fake::new();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut services = service_worktree_probe(&fake, calls.clone());
+        let stops = Arc::new(Mutex::new(Vec::new()));
+        let observed = stops.clone();
+        services.service_worktree_cancel = Some(Arc::new(move |id, operation, fresh, wait, _| {
+            assert!(!fresh && !wait);
+            assert_eq!(operation["stop_requested"], true);
+            let plan =
+                zerus_client_core::desktop::creation_worktree::Plan::from_operation(id, operation)
+                    .unwrap();
+            lock(&observed).push(plan.worktree_request_id.clone());
+            Some(creation::Answer {
+                ok: true,
+                data: json!({"schema":1,"request_id":plan.worktree_request_id,
+                "fingerprint":plan.request_fingerprint().unwrap(),"status":"fenced","future_starts_fenced":true,"past_outcome":"unknown"}),
+                error: String::new(),
+            })
+        }));
+        let host = CreationHost::new(fake.dir.join("creations.json"), services);
+        let id = admitted(&host, worktree_plan());
+        state(&host, &id, "unknown");
+        let original = operation(&host, &id)["worktree_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        host.action(id.clone(), CreationAction::Stop).unwrap();
+        state(&host, &id, "stopped");
+        let card = host.view().into_iter().find(|c| c.id == id).unwrap();
+        assert!(card.worktree_fenced && card.worktree_pending && card.can_edit);
+        assert!(!card.can_resume);
+        assert!(card.error.contains("outcome is unknown"));
+        assert_eq!(operation(&host, &id)["worktree_id"], original);
+        assert_eq!(*lock(&stops), [original]);
+        assert!(
+            fake.log()
+                .iter()
+                .all(|args| !args.iter().any(|a| a == "cancel")),
+            "a sent service request never falls back to default_hgs cancel"
+        );
+        host.action(id.clone(), CreationAction::Resume).unwrap();
+        assert!(host.arrange_for_test(|| {}));
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        host.action(id.clone(), CreationAction::Hide).unwrap();
+        assert!(!operation(&host, &id)["show_pending"].as_bool().unwrap());
+        fake.stop(host);
+    }
+
     #[test]
     fn a_definitely_unsent_service_worktree_fails_and_frees_its_request() {
         let fake = Fake::new();
@@ -3507,6 +3822,44 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_supervisor_report_is_explained_without_inventing_code_or_output() {
+        let fake = Fake::new();
+        let host = fake.host();
+        let id = admitted(&host, plan());
+        state(&host, &id, "confirming");
+        let launch = text(&operation(&host, &id), "launch_id").to_owned();
+        check(
+            &host,
+            &fake,
+            &id,
+            BindingListing {
+                online: true,
+                sessions: Vec::new(),
+                ended_launches: vec![creation::EndedLaunch {
+                    launch_id: launch.clone(),
+                    diagnostic_code: creation::SUPERVISOR_REPORT_MISSING.into(),
+                    ..Default::default()
+                }],
+            },
+        );
+        state(&host, &id, "failed");
+        let value = operation(&host, &id);
+        let error = text(&value, "error");
+        assert!(error.contains(creation::SUPERVISOR_REPORT_MISSING_DETAIL));
+        assert!(!error.contains("exit code"));
+        assert_eq!(
+            value["previous_launches"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap(),
+            &json!(launch)
+        );
+        assert_eq!(value["launch_dispatched"], false);
+        fake.stop(host);
+    }
+
+    #[test]
     fn a_retired_launch_cannot_bind_the_retried_creation() {
         let fake = Fake::new();
         let host = fake.host();
@@ -3557,6 +3910,7 @@ mod tests {
                 name: "codex/repo/created".into(),
                 code,
                 output: "é".repeat(4001),
+                diagnostic_code: String::new(),
             };
             check(
                 &host,

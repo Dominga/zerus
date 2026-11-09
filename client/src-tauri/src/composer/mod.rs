@@ -28,13 +28,16 @@ pub mod fetch;
 pub mod files;
 pub mod handed;
 pub mod held;
+mod history_hint;
+pub mod inbox;
+mod interrupted;
 pub mod questions;
 pub mod queue;
 pub mod reference;
 pub mod saved;
 pub mod send;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub use handed::{CompactRoute, DeferredRoute};
+pub use handed::{CompactRoute, DeferredRoute, ResumeRoute};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use questions::AnswerRoute;
 #[cfg(feature = "media")]
@@ -66,8 +69,8 @@ pub type Notify = Arc<dyn Fn() + Send + Sync>;
 pub type Clock = Arc<dyn Fn() -> f64 + Send + Sync>;
 /// (computer, catalog key, name) -> (row, online); a new run is found by name.
 pub type Rows = Arc<dyn Fn(&str, &str, &str) -> Option<(ViewRow, bool)> + Send + Sync>;
-/// (computer, name) -> the session's write, for the send rules.
-pub type Facts = Arc<dyn Fn(&str, &str) -> Option<WriteKind> + Send + Sync>;
+/// (computer, name, native run) -> the session's write, for the send rules.
+pub type Facts = Arc<dyn Fn(&str, &str, &str) -> Option<WriteKind> + Send + Sync>;
 /// One `hgs inspect` of the parent or exact child (archive id, then agent id); blocking.
 /// The error is Qt's detail for "Could not refresh activity: %1" (`send::inspection`).
 pub type Inspect =
@@ -317,6 +320,16 @@ pub struct SubagentView {
     pub hint: String,
 }
 
+/// Text Rust offers the message field (Qt's `offerDraft`): the webview takes
+/// it once, only while its own field is still empty and nothing it typed is
+/// on its way, as an ordinary edit (zerus-5wmh.13.4, zerus-c0xz8). Typing the
+/// webview has not handed over yet therefore always wins.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct DraftOffer {
+    pub id: u64,
+    pub text: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct ComposerView {
     pub handle: u64,
@@ -337,6 +350,8 @@ pub struct ComposerView {
     pub recording: bool,
     pub waiting: Option<String>,
     pub uncertain: bool,
+    /// Advisory text match in the loaded history, never request-id evidence.
+    pub history_text_match: bool,
     /// The desktop service still sends this draft's message: no Allow
     /// retry, and the status is not an error.
     pub delivery_pending: bool,
@@ -394,9 +409,17 @@ pub struct ComposerView {
     /// The agent's question card shown in the composer (A2-1).
     pub question: Option<questions::QuestionView>,
     pub queue: Option<zerus_client_core::input_queue::QueueView>,
+    /// The not-delivered OpenCode message of this session whose removal
+    /// runs (Qt's `queued_removal`), and whether any removal runs across
+    /// sessions (`queued_removal_busy`): no other Remove can be clicked.
+    pub inbox_removing: Option<String>,
+    pub inbox_busy: bool,
     /// The editor and the action row show: false while a required card
     /// stands in for them (`MessageComposer::setInputVisible`).
     pub input_visible: bool,
+    /// The interrupted prompt offered to an empty field, while Rust's draft is
+    /// still empty, loaded and idle.
+    pub offer: Option<DraftOffer>,
 }
 
 /// One composer's draft and state (`MessageComposer::Draft` plus its sets).
@@ -459,6 +482,8 @@ pub(crate) struct Composer {
     pub(crate) handed: Option<handed::Handed>,
     /// A reload's one lookup of the held identity ran.
     pub(crate) probed: bool,
+    /// The interrupted prompt offered to the field ([`DraftOffer`]); any edit ends it.
+    pub(crate) offer: Option<DraftOffer>,
 }
 
 impl Composer {
@@ -496,6 +521,7 @@ impl Composer {
             checkpoint: None,
             handed: None,
             probed: false,
+            offer: None,
         }
     }
 
@@ -658,12 +684,21 @@ pub(crate) struct Hub {
     /// (`SessionsWindow.cpp:2013-2016`); None is Activity's 2.5 s.
     pub(crate) poll: Option<f64>,
     pub(crate) queue: queue::Queue,
+    /// The one OpenCode inbox removal that runs (zerus-5wmh.13.6).
+    pub(crate) inbox: inbox::Inbox,
     /// Events for the next batch (`composer_events`), at most 16.
     pub(crate) events: VecDeque<ComposerEvent>,
     /// The window is hidden: a handed-over send is not checked.
     pub(crate) hidden: bool,
     /// U35: the held messages and the open run's Terminal draft.
     pub(crate) holds: held::Holds,
+    /// The prompts a Stop gives back once their turns read interrupted
+    /// (Qt's `m_interruptPrompts`), by draft key, at most 16.
+    pub(crate) interrupted: interrupted::Prompts,
+    /// Numbers the draft offers, so the webview takes each one once.
+    next_offer: u64,
+    /// Numbers the Stops whose prompts wait (`interrupted::Prompt::stop`).
+    pub(crate) next_stop: u64,
 }
 
 impl Hub {
@@ -700,6 +735,9 @@ pub(crate) struct Shared {
     /// The selected service's compact-to-send route: Linux and macOS in
     /// desktop-service mode only.
     pub(crate) compact: Mutex<Option<Arc<handed::CompactRoute>>>,
+    /// The selected service's session resume route: Linux and macOS in
+    /// desktop-service mode only.
+    pub(crate) resume: Mutex<Option<Arc<handed::ResumeRoute>>>,
     /// Its deferred answer route, if any.
     pub(crate) answer_route: Mutex<Option<Arc<questions::AnswerRoute>>>,
     /// Runs `hgs send-cancel` and `hgs terminal` (`held`); none in tests
@@ -760,6 +798,7 @@ impl Composers {
             opened: Condvar::new(),
             deferred: Mutex::new(None),
             compact: Mutex::new(None),
+            resume: Mutex::new(None),
             answer_route: Mutex::new(None),
             hgs: Mutex::new(None),
             #[cfg(test)]
@@ -1272,6 +1311,8 @@ impl Composers {
         composer.draft.text = text;
         composer.position = position;
         composer.anchor = anchor;
+        // The webview took the offer, or typed its own text: either ends it.
+        composer.offer = None;
         if !composer.error && !composer.uncertain {
             composer.notice.clear();
         }
@@ -1623,12 +1664,18 @@ impl Composers {
             None => false,
         };
         let touched = hub.open.as_ref().is_some_and(|open| touches(batch, open));
+        let history_hint = new_events
+            && hub
+                .open_key
+                .as_ref()
+                .and_then(|key| hub.composers.get(key))
+                .is_some_and(|c| c.uncertain && c.checkpoint.is_some());
         drop(hub);
         if state_changed {
             self.after_observe(accepted_details);
         } else if new_events {
-            // New events alone change the view only when they reconcile a row.
-            if self.reconcile() || touched {
+            // An uncertain draft's advisory can change without a local row.
+            if self.reconcile() || touched || history_hint {
                 self.changed();
             }
         } else if touched {
@@ -1642,6 +1689,7 @@ impl Composers {
     /// `continueAfterCompact` and `continueAfterStart`, 3607), and the
     /// question cards follow (`renderQuestion`).
     fn after_observe(&self, accepted_details: bool) {
+        self.restore_interrupted();
         self.reconcile();
         self.continue_open();
         self.settle_gave_up();
@@ -1653,6 +1701,59 @@ impl Composers {
             self.held_observed();
         }
         self.changed();
+    }
+
+    /// Qt's `restoreInterruptedPrompt`: once the open session's stopped turn
+    /// reads interrupted, its prompt is offered to the message field, which
+    /// must be empty and idle: a draft the person started, or a message on
+    /// its way, always wins (`offerDraft`). The draft itself is not written
+    /// here: the webview may hold typing Rust has not received yet, so it
+    /// takes the offer only while its own field is empty ([`DraftOffer`]).
+    /// Runs before the local rows' reconcile, which may drop the row that
+    /// holds the exact sent text.
+    fn restore_interrupted(&self) {
+        let mut hub = self.lock();
+        let Some(key) = hub.open_key.clone() else {
+            return;
+        };
+        if hub.closed
+            || hub
+                .open
+                .as_ref()
+                .is_some_and(|open| open.subagent.is_some())
+        {
+            return;
+        }
+        let (Some(prompt), Some(details)) = (
+            hub.interrupted.get(&key).cloned(),
+            hub.followed.details.clone(),
+        ) else {
+            return;
+        };
+        match interrupted::verdict(&prompt, &details) {
+            interrupted::Verdict::Wait => return,
+            interrupted::Verdict::Drop => {
+                hub.interrupted.remove(&key);
+                return;
+            }
+            interrupted::Verdict::Restore => hub.interrupted.remove(&key),
+        }
+        hub.next_offer += 1;
+        let id = hub.next_offer;
+        let Some(composer) = hub.composers.get_mut(&key) else {
+            return;
+        };
+        if !composer.loaded
+            || composer.has_content()
+            || composer.busy()
+            || prompt.text.trim().is_empty()
+        {
+            return;
+        }
+        composer.offer = Some(DraftOffer {
+            id,
+            text: prompt.text,
+        });
     }
 
     /// A reloaded webview gets the view and the draft keys again. Its
@@ -1745,10 +1846,7 @@ impl Composers {
             || (status == session.session_status && session.session_status_error);
         // Qt's `locked` includes the session status's lock (1149).
         let locked = composer.busy() || !composer.loaded || session.session_blocks_input;
-        let compact_handed = composer
-            .handed
-            .as_ref()
-            .is_some_and(handed::Handed::compacts);
+        let continuation_handed = composer.handed.as_ref().is_some_and(handed::Handed::locked);
         Some(ComposerView {
             handle: composer.handle,
             key: composer.key.clone(),
@@ -1791,6 +1889,7 @@ impl Composers {
             recording: composer.recording_owner.is_some(),
             waiting: composer.waiting.clone(),
             uncertain: composer.uncertain,
+            history_text_match: history_hint::shown(hub, composer),
             delivery_pending: composer.handed.is_some(),
             status,
             status_error,
@@ -1824,15 +1923,15 @@ impl Composers {
             local: hub.local.rows(&composer.key).to_vec(),
             cancel_send: hub.compacts.contains_key(key)
                 || hub.start.as_ref().is_some_and(|(p, _)| p.key == key)
-                || compact_handed,
-            cancel_locked: compact_handed,
+                || continuation_handed,
+            cancel_locked: continuation_handed,
             compacting: hub.compacts.contains_key(key),
             // Only while the composer shows nothing of it: a held message
             // that comes back (unconfirmed, failed, reloaded) is the draft.
             held: composer
                 .handed
                 .as_ref()
-                .filter(|handed| composer.sending && handed.compacts())
+                .filter(|handed| composer.sending && handed.locked())
                 .map(|handed| HeldView {
                     request_id: handed.plan.row().to_owned(),
                     text: composer.draft.text.clone(),
@@ -1848,7 +1947,13 @@ impl Composers {
             clear: session.clear,
             question,
             queue: self.queue_part(hub),
+            inbox_removing: Self::inbox_part(hub, &composer.key).0,
+            inbox_busy: Self::inbox_part(hub, &composer.key).1,
             input_visible,
+            offer: composer
+                .offer
+                .clone()
+                .filter(|_| composer.loaded && !composer.has_content() && !composer.busy()),
         })
     }
 }
@@ -2122,7 +2227,7 @@ pub(crate) mod tests {
                 // No session: these views read "Select a session.".
                 clock: Arc::new(|| 1_793_000_100.0),
                 rows: Arc::new(|_, _, _| None),
-                facts: Arc::new(|_, _| None),
+                facts: Arc::new(|_, _, _| None),
                 reconnect: Arc::new(|_| {}),
                 inspect: Arc::new(|_, _, _| Err("timed out".into())),
                 dispatch: Arc::new(|_, _, _| Err("no call in these tests".into())),

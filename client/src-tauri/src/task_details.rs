@@ -10,6 +10,7 @@ use std::sync::{
     Arc,
 };
 use tauri::State;
+use zerus_client_core::tasks::{checked_scoped_page, scoped_page_call, PageScope};
 use zerus_client_core::{attachments, reads::CachedAttachment, task_details, tasks_write};
 
 #[derive(Clone, Default)]
@@ -180,22 +181,43 @@ pub async fn task_attachment_read(
     .map_err(|e| e.to_string())?
 }
 
+/// One session's view (`--session`, `--host`) when a session is given.
+fn page_scope<'a>(session: &'a Option<String>, host: &'a Option<String>) -> Option<PageScope<'a>> {
+    session.as_deref().map(|session_id| PageScope {
+        host: host.as_deref().unwrap_or(""),
+        session_id,
+    })
+}
+
 /// One further page of a stage on the board, after the cursor of its window
 /// or of the previous page: `task list --stage --limit --after`, checked.
+/// With `session` (an identity, `launch_id:...` or `run_id:...`) and its
+/// computer's `host`, a page of that session's view only (`--session`).
 #[tauri::command]
 pub async fn task_page(
     project: String,
     stage: String,
     limit: usize,
     after: Option<String>,
+    session: Option<String>,
+    host: Option<String>,
 ) -> Result<Value, String> {
     if crate::actions::blocked() {
         return Err(crate::screens::REPLAY_NEEDS_HGS.into());
     }
-    let call = zerus_client_core::tasks::page_call(&project, &stage, limit, after.as_deref())?;
+    if session.is_none() && host.is_some() {
+        return Err("Invalid task page request.".into());
+    }
+    let call = scoped_page_call(
+        &project,
+        &stage,
+        limit,
+        after.as_deref(),
+        page_scope(&session, &host),
+    )?;
     tauri::async_runtime::spawn_blocking(move || {
         let reply = tasks_write::run(&zerus_client_core::default_hgs(), &call)?;
-        zerus_client_core::tasks::checked_page(&reply, &project, &stage, limit)
+        checked_scoped_page(&reply, &project, &stage, limit, page_scope(&session, &host))
     })
     .await
     .map_err(|e| e.to_string())?

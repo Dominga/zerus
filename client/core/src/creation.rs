@@ -309,6 +309,20 @@ pub fn diagnostic(value: &str) -> String {
         .collect()
 }
 
+/// The native service effect checkpoint keeps all original fields except the
+/// cached worktree listing. The reducer already selected and verified its exact
+/// target before dispatch; unrelated checkout rows supply no effect authority.
+/// Keep the full catalog in the journal for recovery/queueing, and keep its
+/// common directory and other metadata in this checkpoint. The service's
+/// existing source/envelope caps and complete verifier still apply.
+pub fn effect_checkpoint(operation: &Value) -> Result<String, serde_json::Error> {
+    let mut checkpoint = operation.clone();
+    if let Some(catalog) = checkpoint.get_mut("catalog").and_then(Value::as_object_mut) {
+        catalog.remove("worktrees");
+    }
+    serde_json::to_string(&checkpoint)
+}
+
 /// Whether a journal entry is a well-formed operation with this ID.
 pub fn valid_operation(id: &str, value: &Value) -> bool {
     if !uuid(id)
@@ -637,6 +651,7 @@ pub enum Call {
         action: String,
         request_id: String,
         expected_machine: String,
+        fingerprint: String,
     },
 }
 
@@ -731,7 +746,12 @@ pub struct EndedLaunch {
     pub name: String,
     pub code: Option<i64>,
     pub output: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub diagnostic_code: String,
 }
+
+pub const SUPERVISOR_REPORT_MISSING: &str = "launch_supervisor_report_missing";
+pub const SUPERVISOR_REPORT_MISSING_DETAIL: &str = "No supervisor exit report was captured. The terminal may have failed during startup; the agent's exit status and output are unknown.";
 
 /// One bounded binding read; an absent row proves nothing about a launch.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -812,6 +832,10 @@ pub(crate) fn ended_launches(value: &Value) -> Vec<EndedLaunch> {
             name: text(row, "name").into(),
             code: row.get("code").and_then(Value::as_i64),
             output: text(row, "output").into(),
+            diagnostic_code: match text(row, "diagnostic_code") {
+                SUPERVISOR_REPORT_MISSING => SUPERVISOR_REPORT_MISSING.into(),
+                _ => String::new(),
+            },
         })
         .collect()
 }
@@ -944,10 +968,16 @@ pub fn run_call(hgs: &Path, call: &Call) -> Answer {
             action,
             request_id,
             expected_machine,
+            fingerprint,
         } => {
             let computer = ComputerId::from(host.as_str());
-            let invocation =
+            let mut invocation =
                 worktrees::receipt_invocation(&computer, action, request_id, expected_machine);
+            if action == "cancel" && !fingerprint.is_empty() {
+                invocation
+                    .args
+                    .extend(["--fingerprint".into(), fingerprint.clone()]);
+            }
             let result = worktrees::run_guarded(hgs, &invocation, crate::run::run)
                 .and_then(|exit| worktrees::receipt(exit, request_id));
             Answer::of(result)
@@ -1337,6 +1367,8 @@ impl Creations {
             action: action.into(),
             request_id: text(&value, "worktree_id").into(),
             expected_machine: text(&value, "expected_machine").into(),
+            fingerprint: crate::desktop::creation_worktree::Plan::receipt_fingerprint(id, &value)
+                .unwrap_or_default(),
         };
         self.flight(kind, id, call);
     }
@@ -1716,7 +1748,11 @@ impl Creations {
             }
             self.put(id, value);
         }
-        self.failed(id, error, text(result, "status") != "failed");
+        self.failed(
+            id,
+            error,
+            !matches!(text(result, "status"), "failed" | "refused"),
+        );
     }
 
     fn failed(&mut self, id: &str, error: &str, uncertain: bool) {
@@ -1927,6 +1963,20 @@ impl Creations {
             let resource = resource.to_owned();
             return self.failed(id, &resource, false);
         }
+        {
+            let operation = self.get(id);
+            if crate::desktop::creation_worktree::fenced_operation(id, &operation, &result) {
+                let mut value = self.get(id);
+                // Retain the original unknown UUID. Continue stays prohibited;
+                // Recreate edits a NEW creation, with fresh native admission.
+                value["worktree_future_fence"] = operation["worktree_id"].clone();
+                self.put(id, value);
+                self.stage(id, "stopped", "Setup stopped. Further starts of this request are fenced. The earlier attempt's outcome is unknown. Review the destination before using Recreate for a new session.");
+                self.release(id);
+                self.persist(id, After::Nothing);
+                return;
+            }
+        }
         match text(&result, "status") {
             "created" if verifying => self.launch(id),
             "created" => self.prepared(id, &result, true),
@@ -2062,7 +2112,10 @@ impl Creations {
     pub fn can_edit(&self, id: &str) -> bool {
         self.operations.get(id).is_some_and(|value| {
             !self.in_flight(id)
-                && !flag(value, "launch_dispatched")
+                && (!flag(value, "launch_dispatched")
+                    || (text(value, "state") == "failed"
+                        && !text(value, "launch_id").is_empty()
+                        && text(value, "failed_launch") == text(value, "launch_id")))
                 && (matches!(text(value, "state"), "failed" | "stopped") || can_resume(value))
         })
     }
@@ -2223,6 +2276,27 @@ impl Creations {
             }
             Err(error) => self.failed(&id, &error, true),
         }
+        self.finish()
+    }
+
+    /// A typed, exact-original service receipt confirms that the launch
+    /// command exited unsuccessfully and physically drained. This is not a
+    /// no-start proof: keep the dispatched identity and forbid Continue.
+    /// Editing supplies choices for a separately confirmed new creation.
+    pub fn launch_failed(&mut self, launch: &str, error: &str) -> Vec<Effect> {
+        let Some(id) = self.for_launch(launch) else {
+            return Vec::new();
+        };
+        let mut value = self.get(&id);
+        if text(&value, "launch_id") != launch
+            || text(&value, "state") == "bound"
+            || !flag(&value, "launch_dispatched")
+        {
+            return Vec::new();
+        }
+        value["failed_launch"] = Value::from(launch);
+        self.put(&id, value);
+        self.failed(&id, error, false);
         self.finish()
     }
 

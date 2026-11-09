@@ -1,4 +1,4 @@
-import type { Reply } from "../../types";
+import type { ParentLinkOut, Reply } from "../../types";
 // View models the session list and Activity render. A `Session` is the
 // catalog store's row: the Rust view row plus the presentation fields derived
 // from it once per upsert (store/catalog.ts `toSession`).
@@ -21,6 +21,8 @@ export type Status =
 
 export interface Subagent {
   id: string;
+  /** The child's own conversation ID, when its roster reports one (search matches it). */
+  conversationId?: string;
   name: string;
   state: "working" | "ready" | "attention" | "error" | "paused" | "unknown" | "ended";
   summary: string;
@@ -52,7 +54,13 @@ export interface Session {
   cwd: string;
   branch?: string;
   worktree?: string;
-  git?: { ahead: number; behind: number; changed: number; conflicts?: number; state: "synced" | "diff" | "push" | "pull" | "unknown" };
+  /** Native reported false: this folder has no worktree-removal offer. */
+  gitWorktree?: boolean;
+  git?: { ahead: number; behind: number; changed: number; conflicts?: number; state: "synced" | "diff" | "push" | "pull" | "unknown";
+    streamed?: boolean; localFresh?: boolean; remoteVerified?: boolean; receivedAt?: number; remoteAge?: number; countsKnown?: boolean; changedKnown?: boolean; aheadKnown?: boolean; behindKnown?: boolean;
+    root?: string; upstream?: string; detached?: boolean; unborn?: boolean };
+  gitMetadataState?: string;
+  gitDetached?: boolean;
   status: Status;
   /** The Qt caption for the status (SessionPresentation). */
   caption: string;
@@ -104,6 +112,10 @@ export interface Session {
   launchId?: string;
   /** The listing's durable session ID, when canonical: it keys the drafts. */
   sessionId?: string;
+  /** The session that launched or adopted this one; display and attention routing only. */
+  parent?: ParentLinkOut;
+  /** Supervised by a live parent and holding no request only the person can answer. */
+  quiet?: boolean;
   conversationId?: string;
   /** Exact/fallback device-local density identity, calculated in Rust. */
   compactKeys?: [string, string];
@@ -182,6 +194,8 @@ export interface Session {
   /** The notification preferences pass Qt's validation, and their revision. */
   sharedNotifications: boolean;
   notificationRevision?: number;
+  /** The host's Keep cache warm state, when it reports one. */
+  keepWarm?: import("../../types").KeepWarmState;
 }
 
 /** A file of a message, as Qt's attachment card shows it (ActivityView.cpp:759-782). */
@@ -219,9 +233,30 @@ export interface LocalItem {
   available: boolean[];
 }
 
+export interface InboxItem {
+  state: "queued" | "not_delivered";
+  messageId: string;
+  run: string;
+  conversation: string;
+  removable: boolean;
+}
+
+/** One event of a tool row, shown when the row is expanded (ActivityView.cpp:1122-1140). */
+export interface ToolEvent {
+  /** The event's title, tool and subagent, e.g. "Tool finished / Bash". */
+  label: string;
+  at: string;
+  /** The output's length: a changed output changes the row without serializing it. */
+  size: number;
+  /** The recorded process the event started, when it names one. */
+  process?: string;
+  /** The whole recorded output, read only to show or copy the part that shows. */
+  detail: () => string;
+}
+
 export interface ActivityItem {
   id: string;
-  kind: "user" | "agent" | "tool" | "tools" | "question" | "approval" | "system" | "receipt" | "thinking" | "report" | "voice" | "cleared" | "context" | "folded";
+  kind: "user" | "agent" | "tool" | "tools" | "question" | "approval" | "system" | "receipt" | "thinking" | "report" | "voice" | "cleared" | "context" | "folded" | "warm";
   at: string;
   title?: string;
   body?: string;
@@ -229,6 +264,8 @@ export interface ActivityItem {
   echoBody?: string;
   code?: string;
   lines?: string[];
+  /** A tool row's events with their output (zerus-5wmh.13.8.1). */
+  events?: ToolEvent[];
   attachments?: ItemAttachment[];
   sender?: string;
   /** Receipt line under a user message ("Sent", "Queued at this time"). */
@@ -239,6 +276,8 @@ export interface ActivityItem {
   label?: string;
   /** A local message row (this app's send) and its buttons. */
   local?: LocalItem;
+  /** An OpenCode inbox message (ActivityView.cpp:1036-1087): its native id, the run and conversation it was shown under, and whether the session offers Remove for it. */
+  inbox?: InboxItem;
   /** Codex question replies the message holds, shown as Question and Your answer blocks (ActivityView.cpp:347-363). */
   replies?: Reply[];
   /** History a fork began from, shown read-only and muted. */
@@ -252,6 +291,8 @@ export interface ActivityItem {
   foldKind?: "notice" | "reply";
   /** Task 208: a team message or Zerus notice pasted into the session (Qt's plaque), never the owner's. */
   notice?: import("./notices").SystemNotice;
+  /** A search hit's excerpt of a longer message: no Copy as Markdown of the whole reply. */
+  excerpt?: boolean;
 }
 
 export type VoiceState =

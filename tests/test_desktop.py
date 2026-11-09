@@ -472,6 +472,58 @@ finally:
         else:
             self.assertNotIn('desktop-deferred-compact-to-send', help_text)
 
+    def test_session_resume_is_a_closed_native_intent_with_scoped_read_only_lookup(self):
+        self.serve()
+        status = self.cli('desktop', 'status', '--json')
+        scope = dict(configuration=status['configuration'], service_epoch=status['epoch'])
+        request, send_request = str(uuid.uuid4()), str(uuid.uuid4())
+        session = 'claude/private-resume'
+        resume = dict(request_id=request, action='resume', expected_run_id='run-1',
+                      expected_conversation_id='conversation-1')
+        stdin = dict(request_id=send_request, text='hello', expected_run_id='run-1',
+                     expected_conversation_id='conversation-1')
+        intent = dict(scope=scope, session=session, request_id=request, send_request_id=send_request,
+                      checkpoint='{}', resume=json.dumps(resume, separators=(',', ':')),
+                      original=json.dumps(stdin, separators=(',', ':')))
+        # Only the native frontend lane carries it.
+        refused = self.cli('desktop', 'request', '--json', data=dict(op='session_resume', intent=intent))
+        self.assertFalse(refused['accepted'])
+        self.assertEqual(refused['code'], 'frontend_authentication_required')
+        query = dict(scope=scope, session=session, request_id=request, plan_sha256='a' * 64)
+        result = self.cli('desktop', 'request', '--json', data=dict(op='session_resume_result', query=query))
+        self.assertEqual(result['abi'], 'desktop-deferred-session-resume-v1')
+        self.assertEqual(result['scope'], scope)
+        self.assertTrue(result['read_only'])
+        self.assertFalse(result['found'])
+        self.assertIsNone(result['receipt'])
+        # A Codex session is this kind's too (zerus-5wmh.66.4.10).
+        codex = self.cli('desktop', 'request', '--json',
+                         data=dict(op='session_resume_result', query=dict(query, session='codex/private-resume')))
+        self.assertEqual((codex['read_only'], codex['found'], codex['receipt']), (True, False, None))
+        # Another epoch, a remote session, a DeepSeek session or a malformed
+        # request is never looked up.
+        for bad in (dict(query, scope=dict(scope, service_epoch=str(uuid.uuid4()))),
+                    dict(query, session='@peer/claude'), dict(query, session='dsh/private-resume'),
+                    dict(query, request_id='not-a-uuid')):
+            self.assertEqual(self.cli('desktop', 'request', '--json', data=dict(op='session_resume_result', query=bad)),
+                             dict(accepted=False, read_only=True, code='session_resume_result_unavailable'))
+        with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_session_resumes').fetchone()[0], 0)
+        status = self.cli('desktop', 'status', '--json')
+        self.assertEqual(status['operation_queue']['kinds']['session_resume']['undrained'], 0)
+        self.assertFalse(status['operation_queue']['kinds']['session_resume']['authority'])
+        help_text = subprocess.run([str(HGS), '--help'], env=self.env, capture_output=True, text=True).stdout
+        # macOS refuses every original until a qualified child seam exists.
+        if sys.platform.startswith('linux'):
+            self.assertIn('Desktop deferred session resume ABI: desktop-deferred-session-resume-v1',
+                          [line.strip() for line in help_text.splitlines()])
+            # A client offers a Codex session only to a service with this marker.
+            self.assertIn('Desktop deferred session resume Codex readiness: '
+                          'desktop-deferred-session-resume-codex-v1',
+                          [line.strip() for line in help_text.splitlines()])
+        else:
+            self.assertNotIn('desktop-deferred-session-resume', help_text)
+
     def test_creation_launch_is_a_closed_native_intent_with_scoped_read_only_lookup(self):
         self.serve()
         status = self.cli('desktop', 'status', '--json')
@@ -811,7 +863,7 @@ finally:
     def setUp(self):
         # macOS's per-user TMPDIR (/var/folders/...) leaves too little of the
         # 104-byte socket path for the desktop service under nested state dirs.
-        temp = tempfile.TemporaryDirectory(prefix='hgs-desk-', dir='/tmp' if sys.platform == 'darwin' else None)
+        temp = tempfile.TemporaryDirectory(prefix='hgs-desk-', dir=os.environ.get('ZERUS_TEST_SHORT_TMPDIR', '/tmp') if sys.platform == 'darwin' else None)
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name).resolve()
         self.state = self.root / 'state'
@@ -1432,7 +1484,14 @@ finally:
         script = Path(__file__).resolve().parents[1] / 'scripts/install-linux-desktop-service.py'
         consumer = runpy.run_path(str(script))['Installer']
         process, status = self.serve()
-        selected = consumer(str(HGS), self.env)
+        hgs = HGS
+        if hgs.stat().st_size > 512 * 1024 * 1024:
+            # Debug symbols can exceed the installer's unchanged binary bound.
+            hgs = self.root / 'installer-hgs'
+            subprocess.run(['objcopy', '--strip-debug', str(HGS), str(hgs)],
+                           check=True, capture_output=True, text=True, timeout=30)
+            hgs.chmod(0o700)
+        selected = consumer(str(hgs), self.env)
         live = selected.probe()
         self.assertTrue(live['ipc_ready'])
         self.assertEqual(live['pid'], process.pid)
@@ -1440,7 +1499,7 @@ finally:
         self.assertFalse(any(value['ready'] for value in live['background'].values()))
         other = dict(self.env, HGS_CONFIG_DIR=str(self.root / 'other-config'),
                      HGS_STATE_DIR=str(self.root / 'other-state'))
-        absent = consumer(str(HGS), other).probe()
+        absent = consumer(str(hgs), other).probe()
         self.assertFalse(absent['ipc_ready'])
         self.assertNotEqual(absent['configuration'], live['configuration'])
         self.assertFalse((self.root / 'unexpected-tool').exists())
@@ -1683,11 +1742,16 @@ finally:
     @staticmethod
     def remove_catalog_reason_schema(db):
         # Rewind the later leaves too, never leaving one labelled older: the
-        # schema-30 compact-to-send, schema-29 deferred answer, schema-28
+        # schema-34 session resume, schema-32 startup attention index,
+        # schema-30 compact-to-send, schema-29
+        # deferred answer, schema-28
         # deferred send, schema-27 task
         # message inputs, schema-26 task message, schema-25 termination
         # retention, creation launch/worktree, then the schema-22 catalog
         # approval.
+        db.execute('DROP TABLE desktop_session_resumes')
+        db.execute('DROP TABLE desktop_session_resume_budget')
+        db.execute('DROP INDEX desktop_attention_catalog_run')
         db.execute('DROP TABLE desktop_compact_to_sends')
         db.execute('DROP TABLE desktop_compact_to_send_budget')
         db.execute('DROP TABLE desktop_deferred_answers')
@@ -2177,6 +2241,41 @@ finally:
         self.assertEqual(status['effect_journal']['attempts']['reserved'], 0)
         self.assertFalse(status['writers_enabled'])
         self.assertFalse((self.root / 'unexpected-tool').exists())
+
+    def test_status_reports_only_bounded_closed_failure_details_from_the_original_ledger(self):
+        process, initial = self.serve()
+        empty = initial['effect_journal']['recent_failures']
+        self.assertEqual(empty, dict(available=True, refused=None, unknown=None))
+        database = self.desktop / 'state.sqlite3'
+        for number, (state, code, kind) in enumerate([
+                ('refused', 'permission_denied', 'post'),
+                ('refused', 'not_ready', 'withdrawal'),
+                ('refused', 'cancelled', 'post'),
+                ('refused', 'getter_failed', 'post'),
+                ('unknown', 'native_error', 'withdrawal')]):
+            identity = json.dumps(dict(kind=kind, target=dict(scope='session', computer='peer.example',
+                                                            run='private-run', conversation='private-conversation'),
+                                       edge=f'private-edge-{number}'), separators=(',', ':'))
+            intent = hashlib.sha256(identity.encode()).hexdigest()
+            receipt = json.dumps(dict(binding=dict(private='private-binding'), outcome=dict(state=state, code=code)))
+            recorded_at = 1700000000000 + number
+            with closing(sqlite3.connect(database)) as db, db:
+                db.execute('INSERT INTO desktop_intents VALUES(?,?,1,?,0,0)',
+                           (intent, identity, json.dumps(dict(title='private-title', body='private-body'))))
+                seq = db.execute('INSERT INTO desktop_attempts(request_id,fingerprint,intent_id,revision,epoch,service_epoch,adapter,lease,state,receipt,recorded_at) '
+                                 'VALUES(?,?,?,1,?,?,?,?,?,?,?)',
+                                 (str(uuid.uuid4()), 'b' * 64, intent, *[str(uuid.uuid4()) for _ in range(4)],
+                                  state, receipt, recorded_at)).lastrowid
+            status = self.cli('desktop', 'status', '--json')
+            journal = status['effect_journal']
+            self.assertEqual(journal['recent_failures'][state],
+                             dict(seq=seq, kind=kind, code=code, recorded_at=recorded_at, details_available=True))
+            self.assertNotIn('private-', json.dumps(journal))
+            self.assertEqual(journal['reason'], initial['effect_journal']['reason'])
+            self.assertEqual(journal['revoked'], initial['effect_journal']['revoked'])
+            self.assertFalse(status['writers_enabled'])
+            self.assertEqual(status['generation'], initial['generation'])
+        self.stop(process)
 
     @unittest.skipIf(os.name == 'nt', 'Unix socket and mode checks')
     def test_unsafe_files_and_socket_targets_are_preserved(self):

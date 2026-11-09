@@ -188,7 +188,7 @@ pub(crate) fn record_accepted(team: &Team, now: f64) -> Result<()> {
 fn record_into(history: &mut History, team: &Team, now: f64) -> bool {
     let mut changed = false;
     for task in &team.tasks {
-        if task.status != TaskStatus::Accepted {
+        if task.status != TaskStatus::Accepted || task.archived.is_some() {
             continue;
         }
         if history
@@ -425,6 +425,12 @@ mod tests {
         }
         trim(&mut history);
         assert_eq!(history.entries.len(), MAX_ENTRIES);
+        // A stub has no attempt history and must not become a fabricated sample.
+        one.tasks[0].archived = Some(Default::default());
+        let mut empty = History::default();
+        one.tasks.truncate(1);
+        record_into(&mut empty, &one, 3000.0);
+        assert!(empty.entries.is_empty());
     }
 
     #[test]

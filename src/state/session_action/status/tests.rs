@@ -25,7 +25,16 @@ impl Fixture {
         // macOS's ordinary temporary prefix can itself contain a symlink.
         // Select the real owned fixture root before asking the strict reader.
         let root = fs::canonicalize(temp.path()).unwrap().join("state");
-        crate::platform::private_dir(&root.join("action_receipts")).unwrap();
+        // Task #32: the root itself must be private, as the product's store
+        // roots are; a temporary directory's inherited ACL is not private on
+        // every computer (#526: a Codex sandbox adds its users to the profile),
+        // so create it the way Zerus makes a private store, which the strict
+        // reader below then verifies.
+        crate::platform::owner_only_dir(&root.join("action_receipts")).unwrap();
+        assert!(
+            crate::platform::verify_private(&root, crate::platform::Private::Directory).unwrap(),
+            "the fixture root must be private, as the strict reader requires"
+        );
         Self { _temp: temp, root }
     }
     fn path(&self) -> PathBuf {
@@ -482,4 +491,49 @@ fn a_terminal_refusal_never_acquires_a_controlling_terminal() {
         output.status.success(),
         "private terminal-refusal child failed"
     );
+}
+
+/// zerus-5wmh.66.4.9: a service that read the receipt bytes itself from its
+/// held store gets exactly what the path observation gives for the same
+/// bytes, by the same rule; an absence is `unavailable`, never a retry.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_held_read_projects_exactly_as_the_path_observation() {
+    let f = Fixture::new();
+    let mut r = request();
+    r.action = "resume".into();
+    let original = serde_json::to_vec(&r).unwrap();
+    let hash = request_hash(&r, NAME);
+    let mut resumed = receipt(&r, NAME, &hash, "completed");
+    resumed["result_target"] = json!({"name":NAME,"run_id":"run-2",
+        "conversation_id":r.expected_conversation_id});
+    for value in [
+        receipt(&r, NAME, &hash, "claimed"),
+        receipt(&r, NAME, &hash, "failed"),
+        receipt(&r, NAME, &hash, "uncertain"),
+        resumed,
+    ] {
+        f.write(&value);
+        let bytes = fs::read(f.path()).unwrap();
+        let held = observe_held(NAME, &original, Some(&bytes)).unwrap();
+        assert_eq!(held, observe_original(&f.root, NAME, &original).unwrap());
+    }
+    fs::remove_file(f.path()).unwrap();
+    assert_eq!(
+        observe_held(NAME, &original, None).unwrap(),
+        observe_original(&f.root, NAME, &original).unwrap()
+    );
+    assert_eq!(
+        observe_held(NAME, &original, None).unwrap()["status"],
+        "unavailable"
+    );
+    // Another request's receipt, an oversized one, or an original that is
+    // not a valid request never projects.
+    let mut other = request();
+    other.action = "resume".into();
+    other.expected_run_id = "run-9".into();
+    let foreign = receipt(&other, NAME, &request_hash(&other, NAME), "failed");
+    assert!(observe_held(NAME, &original, Some(foreign.to_string().as_bytes())).is_err());
+    assert!(observe_held(NAME, &original, Some(&vec![b' '; LIMIT as usize + 1])).is_err());
+    assert!(observe_held(NAME, b"{}", None).is_err());
 }

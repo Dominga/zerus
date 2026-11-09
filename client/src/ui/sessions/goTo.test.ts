@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseSequence } from "../../store/shortcuts";
-import { goToDetails, goToKey, goToKindLabel, goToScore, rankGoTo, recentSessionIds, rememberRecentSession, visibleGoToRows, GoToKind, type GoToItem, type GoToKeyState } from "./goTo";
+import { goToDetails, goToFrame, goToKey, goToKindLabel, goToMessageRows, goToScore, rankGoTo, recentSessionIds, rememberRecentSession, visibleGoToRows, GoToKind, type GoToItem, type GoToKeyState } from "./goTo";
 
 const item = (kind: GoToKind, id: string, title = id, recency = -1): GoToItem => ({ kind, id, host: "", title, detail: "", recency });
 const press = (key: string, code: string, extra: Partial<KeyboardEvent> = {}) => ({ key, code, altKey: false, ctrlKey: false, metaKey: false, shiftKey: false, ...extra });
@@ -68,5 +68,41 @@ describe("Go to keyboard flow", () => {
     expect(goToKey(press("j", "KeyJ", { ctrlKey: true, altKey: true }), state, [parseSequence("Ctrl+Alt+J")!])).toBe("close");
     expect(goToKey(press("x", "KeyX", { ctrlKey: true }), state, [parseSequence("Ctrl+X, Ctrl+S")!])).toBe("hold");
     expect(goToKey(press("s", "KeyS", { ctrlKey: true }), state, [parseSequence("Ctrl+X, Ctrl+S")!])).toBe("close");
+  });
+});
+
+// Task 423: the title-bar search opens in place and finds sessions by name and
+// ID and messages, as its placeholder says.
+describe("the title-bar search (task 423)", () => {
+  it("lies over the search field: its left edge and top, at least its width, inside the window", () => {
+    expect(goToFrame({ left: 300, top: 6, width: 340, height: 28 }, { width: 1400, height: 900 })).toEqual({ left: 300, top: 6, width: 560, height: 28 });
+    expect(goToFrame({ left: 300, top: 6, width: 700, height: 28 }, { width: 1400, height: 900 }).width).toBe(700);
+    // Near the right edge it moves left to stay inside the window.
+    expect(goToFrame({ left: 1000, top: 6, width: 340, height: 28 }, { width: 1400, height: 900 })).toMatchObject({ left: 1400 - 8 - 560, width: 560 });
+    // A window narrower than the minimum keeps a margin on both sides.
+    expect(goToFrame({ left: 100, top: 6, width: 200, height: 28 }, { width: 400, height: 900 })).toMatchObject({ left: 8, width: 384 });
+  });
+
+  it("finds a session by its ID or name, not only its title", () => {
+    const items: GoToItem[] = [
+      { kind: GoToKind.Session, id: "a", host: "", title: "Checkout", detail: "", recency: -1, keys: ["claude/shop/checkout", "conv-7f3a2c91-0b44"] },
+      { kind: GoToKind.Session, id: "b", host: "", title: "Docs", detail: "", recency: -1, keys: ["claude/shop/docs", "conv-1111"] },
+    ];
+    expect(rankGoTo(items, "7f3a2c91").map((item) => item.id)).toEqual(["a"]);
+    expect(rankGoTo(items, "CONV-1111").map((item) => item.id)).toEqual(["b"]);
+    expect(rankGoTo(items, "shop/docs").map((item) => item.id)).toEqual(["b"]);
+    // Commands only after ">": IDs never pull sessions in.
+    expect(rankGoTo(items, "> conv").filter((item) => item.kind === GoToKind.Session)).toEqual([]);
+  });
+
+  it("lists a message hit as a row of its live session, and skips archived and foreign hits", () => {
+    const session = { key: "\nrun:r1", catalogKey: "run:r1", computer: "", name: "claude/shop/checkout", title: "Checkout", runId: "r1", conversationId: "c1" } as never;
+    const hit = (extra: Record<string, unknown>) => ({ computer: "", machine: "This computer",
+      hit: { name: "claude/shop/checkout", run_id: "r1", conversation_id: "c1", archive_id: "", message_id: "m1", at: 1, role: "assistant",
+        snippet: "the refund webhook retries twice", event: {} as never, content_truncated: false, session: null, group: "", ...extra } });
+    const rows = goToMessageRows([hit({}), hit({ archive_id: "z9", message_id: "m2" }), hit({ name: "other", message_id: "m3" })],
+      (_computer, found) => (found.name === "claude/shop/checkout" ? session : undefined));
+    expect(rows.map((row) => [row.item.kind, row.item.title, row.item.detail])).toEqual([[GoToKind.Message, "Checkout", ["the refund webhook retries twice", "This computer"]]]);
+    expect(goToKindLabel(GoToKind.Message)).toBe("MESSAGE");
   });
 });

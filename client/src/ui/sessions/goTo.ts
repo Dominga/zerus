@@ -1,6 +1,8 @@
 import { comboFromEvent, matchSequence, type Sequence } from "../../store/shortcuts";
+import { identityMatches, type FoundHit } from "../../store/content-search-model";
+import type { Session } from "./types";
 
-export const GoToKind = { Session: 0, Project: 1, Account: 2, Machine: 3, Section: 4, Command: 5 } as const;
+export const GoToKind = { Session: 0, Project: 1, Account: 2, Machine: 3, Section: 4, Command: 5, Message: 6 } as const;
 export type GoToKind = (typeof GoToKind)[keyof typeof GoToKind];
 
 export interface GoToItem {
@@ -11,9 +13,11 @@ export interface GoToItem {
   detail: string | readonly string[];
   chord?: string;
   recency: number;
+  /** Task 423: text the search matches without showing it: a session's name and IDs. */
+  keys?: readonly string[];
 }
 
-export const goToKindLabel = (kind: GoToKind) => ["SESSION", "PROJECT", "ACCOUNT", "MACHINE", "SECTION", "COMMAND"][kind];
+export const goToKindLabel = (kind: GoToKind) => ["SESSION", "PROJECT", "ACCOUNT", "MACHINE", "SECTION", "COMMAND", "MESSAGE"][kind];
 export const goToDetails = (detail: GoToItem["detail"]) => (Array.isArray(detail) ? detail : [detail]).filter(Boolean);
 
 let recent: string[] = [];
@@ -62,7 +66,12 @@ export function rankGoTo(items: readonly GoToItem[], query: string): GoToItem[] 
   if (commandsOnly) q = q.slice(1).trim();
   const entries = items.flatMap((item, order) => {
     if (commandsOnly && item.kind !== GoToKind.Command && item.kind !== GoToKind.Section) return [];
-    const score = goToScore(q, `${item.title} ${goToDetails(item.detail).join(" ")}`);
+    // Task 423: names and IDs match as substrings (a pasted ID, part of one),
+    // never by the fuzzy score, which is slow on long IDs.
+    const shown = goToScore(q, `${item.title} ${goToDetails(item.detail).join(" ")}`);
+    const lower = q.toLowerCase();
+    const keyed = q && item.keys?.some((key) => key.toLowerCase().includes(lower)) ? 50 + 10 * q.length : -1;
+    const score = Math.max(shown, keyed);
     return score < 0 ? [] : [{ item, score, order }];
   });
   entries.sort((a, b) => {
@@ -110,4 +119,37 @@ export function goToKey(event: Parameters<typeof comboFromEvent>[0] & { isCompos
     case "Escape": return "close";
     default: return "none";
   }
+}
+
+/**
+ * Task 423: the title-bar search opens in place. The palette's box from the
+ * search field's rect: its left edge and top on the field's, at least the
+ * field's width (and a readable minimum), kept inside the window with a margin.
+ */
+export function goToFrame(field: { left: number; top: number; width: number; height: number }, viewport: { width: number; height: number }, minimum = 560, margin = 8) {
+  const room = Math.max(0, viewport.width - 2 * margin);
+  const width = Math.min(room, Math.max(field.width, minimum));
+  const left = Math.max(margin, Math.min(field.left, viewport.width - margin - width));
+  const top = Math.max(0, Math.min(field.top, viewport.height - margin));
+  return { left, top, width, height: field.height };
+}
+
+/** A message the palette lists: the live session it belongs to and the hit. */
+export interface GoToMessage { item: GoToItem; row: Session; found: FoundHit }
+
+/** Palette rows for the message hits whose session is on the list (archived hits stay in the panel's search). */
+export function goToMessageRows(hits: readonly FoundHit[], row: (computer: string, hit: FoundHit["hit"]) => Session | undefined, limit = 50): GoToMessage[] {
+  const rows: GoToMessage[] = [];
+  for (const found of hits) {
+    if (rows.length >= limit) break;
+    if (found.hit.archive_id) continue;
+    const session = row(found.computer, found.hit);
+    if (!identityMatches(session, found.hit)) continue;
+    rows.push({
+      row: session, found,
+      item: { kind: GoToKind.Message, id: `${session.key}\n${found.hit.message_id}`, host: session.computer, title: session.title,
+        detail: [found.hit.snippet, found.machine].filter(Boolean), recency: -1 },
+    });
+  }
+  return rows;
 }

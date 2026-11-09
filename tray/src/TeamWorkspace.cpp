@@ -282,12 +282,9 @@ void TeamWorkspace::setTheme(bool dark)
 {
     m_dark = dark;
     const Colors c = colorsFor(dark);
-    // Task #347: the Members column has its own darker surface, apart from the chat.
-    const QColor membersSurface = m_dark ? c.surface.darker(112) : c.surface.darker(104);
     setStyleSheet(teamSheet(c) + QStringLiteral(
         "QWidget#teamWorkspace{background:%1;}"
         "QScrollArea#teamWorkspaceMembers,QScrollArea#teamWorkspaceMembers>QWidget#qt_scrollarea_viewport,"
-        "QWidget#teamWorkspaceMemberList{background:%8;border-bottom:1px solid %2;}"
         "QWidget#teamWorkspaceSide,QWidget#teamSideLists{background:%1;border:0;}"
         "QSplitter#teamWorkspaceSplit::handle{background:%2;margin:0 3px;}"
         "QSplitter#teamWorkspaceSplit::handle:hover{background:%4;}"
@@ -299,7 +296,7 @@ void TeamWorkspace::setTheme(bool dark)
         "QPushButton[dangerFill=\"true\"]{background:%5;border-color:%5;color:#ffffff;font-weight:600;}"
         "QPushButton[dangerFill=\"true\"]:disabled{background:%6;border-color:transparent;color:%7;}")
         .arg(c.surface.name(), c.border.name(), c.muted.name(), c.accent.name(), c.danger.name(),
-             alpha(c.danger, .35).name(QColor::HexArgb), alpha(QColor(Qt::white), .7).name(QColor::HexArgb), membersSurface.name()));
+             alpha(c.danger, .35).name(QColor::HexArgb), alpha(QColor(Qt::white), .7).name(QColor::HexArgb)));
     // The prototype's .btn.sm buttons and its header pills (.pill.planp, .pill.acc).
     const auto a = [](const QColor &color, double value) { return alpha(color, value).name(QColor::HexArgb); };
     const QString selBorder = WorkspaceSkin::color(WorkspaceSkin::active(), dark, QStringLiteral("cardSelBorder")).name();
@@ -3838,9 +3835,7 @@ QWidget *TeamWorkspace::members(const Team &team)
         m_membersOpen = !m_membersOpen; Settings::set("teams/membersOpen", m_membersOpen); scheduleRender();
     });
     title->addWidget(membersToggle);
-    auto *membersTitle = label(tr("Members"), c.fg, 12, true);
-    membersTitle->setToolTip(tr("State colours: working, building and running tests are blue; waiting for its own job, for the lead or for a person is amber; needs your answer, blocked or failed is red; idle or done is grey; paused or offline is muted and hatched."));
-    title->addWidget(membersTitle); title->addWidget(label(QString::number(active), c.muted, 12)); title->addStretch();
+    title->addWidget(label(tr("Members"), c.fg, 12, true)); title->addWidget(label(QString::number(active), c.muted, 12)); title->addStretch();
     if (team.status == "planning" || team.status == "running" || team.status == "paused") {
         auto *add = button(tr("+ Member"), "teamWorkspaceAddMember");
         add->setToolTip(tr("Add a member; it starts with the first task it gets"));
@@ -3864,8 +3859,6 @@ QWidget *TeamWorkspace::members(const Team &team)
         if (finished && leftMember(team, m.id)) continue;
         const auto state = live(m);
         const auto status = memberStatus(team, m, state);
-        // Task #347: the state's colour, on the card's left edge and its state pill.
-        const auto mark = memberMark(team, m, status, c);
         auto *b = new MemberCard; b->setObjectName("teamWorkspaceMember"); b->setCursor(Qt::PointingHandCursor); b->setProperty("teamMember", m.id);
         // U25: the prototype's .mcard: the card colour, accent and the selected fill
         // when focused, a problem's tone mixed into the border; spec 5.6: a
@@ -3875,18 +3868,17 @@ QWidget *TeamWorkspace::members(const Team &team)
             : status.problem ? colorMix(toneColor(c, status.tone), c.cardBorder, 0.6)
             : m.sub ? subEdge : c.cardBorder;
         const QColor fill = m.id == m_focus ? WorkspaceSkin::color(WorkspaceSkin::active(), m_dark, QStringLiteral("cardSel")) : c.cardFill;
-        b->setStyleSheet(QStringLiteral("QFrame#teamWorkspaceMember{background:%1;border:1px solid %2;border-left:3px solid %4;border-radius:10px;}"
+        b->setStyleSheet(QStringLiteral("QFrame#teamWorkspaceMember{background:%1;border:1px solid %2;border-radius:10px;}"
                                         "QFrame#teamWorkspaceMember:hover{background:%3;}")
-                             .arg(fill.name(), edge.name(), m.id == m_focus ? fill.name() : WorkspaceSkin::color(WorkspaceSkin::active(), m_dark, QStringLiteral("cardHover")).name(),
-                                  mark.color.name()));
+                             .arg(fill.name(), edge.name(), m.id == m_focus ? fill.name() : WorkspaceSkin::color(WorkspaceSkin::active(), m_dark, QStringLiteral("cardHover")).name()));
         QString tip = m.id == m_focus ? tr("Show every member") : tr("Show only %1's tasks").arg(team.roleOf(m.id));
         if (const QString boss = team.reviewerOf(m.id); !boss.isEmpty() && boss != team.lead)
             tip += QStringLiteral("\n") + tr("Reports to %1").arg(team.roleOf(boss));
         b->setToolTip(tip);
         b->clicked = [this, id = m.id] { m_focus = m_focus == id ? QString() : id; scheduleRender(); };
-        auto *bh = new QHBoxLayout(b); bh->setContentsMargins(7, 4, 5, 4); bh->setSpacing(6);
+        auto *bh = new QHBoxLayout(b); bh->setContentsMargins(8, 6, 6, 6); bh->setSpacing(8);
         auto *tile = new QLabel; tile->setPixmap(agentLogo(m.agent, c.fg).pixmap(16, 16)); bh->addWidget(tile, 0, Qt::AlignTop);
-        auto *col = new QVBoxLayout; col->setSpacing(0);
+        auto *col = new QVBoxLayout; col->setSpacing(2);
         auto *top = row(4);
         const QString role = team.roleOf(m.id);
         top->addWidget(new Pill(role, roleColor(role, m_dark)));
@@ -3913,16 +3905,20 @@ QWidget *TeamWorkspace::members(const Team &team)
         }
         if (state.attention) { auto *q = label(QStringLiteral("?1"), c.warn, 10, true); q->setToolTip(tr("A question waits in its session")); top->addWidget(q); }
         top->addWidget(elided(m.model.isEmpty() ? agentNames.value(m.agent, m.agent) : m.model, c.text3, 11), 1);
-        // Task #347: the account lives in the card's tooltip, not on its compact header.
+        // U54: the account its session really runs on, not only the configured one.
         if (team.status != "draft") {
             const QString account = Teams::AccountMove::memberAccount(m);
-            QString accountTip = m.session.isEmpty() || !m.sessionAccountKnown ? tr("Account: %1").arg(accountLabel(m))
-                                                                                : tr("Its session runs on %1").arg(accountLabel(m));
+            // It keeps its width beside the model, up to 120 pixels.
+            auto *shown = label(accountLabel(m), c.muted, 11, false, "teamWorkspaceMemberAccount");
+            shown->setText(shown->fontMetrics().elidedText(accountLabel(m), Qt::ElideRight, 120));
+            shown->setProperty("account", account);
+            QString tip = m.session.isEmpty() || !m.sessionAccountKnown ? tr("Account: %1").arg(accountLabel(m))
+                                                                         : tr("Its session runs on %1").arg(accountLabel(m));
             if (m.sessionAccountKnown && !m.session.isEmpty() && Teams::AccountMove::accountOf(m.agent, m.account) != account)
-                accountTip += QLatin1Char('\n') + tr("The roster names %1; the session runs on another account.")
-                                                   .arg(Teams::AccountMove::labelOf(m_accountProfiles, m.agent, m.account));
-            tip += QLatin1Char('\n') + accountTip;
-            b->setToolTip(tip);
+                tip += QLatin1Char('\n') + tr("The roster names %1; the session runs on another account.")
+                                               .arg(Teams::AccountMove::labelOf(m_accountProfiles, m.agent, m.account));
+            shown->setToolTip(tip);
+            top->addWidget(shown);
         }
         col->addLayout(top);
         if (m.id == m_focus) {
@@ -3946,6 +3942,7 @@ QWidget *TeamWorkspace::members(const Team &team)
             col->addLayout(wait);
         } else {
             // A1: the attempt's phase icon and tooltip beside the member.
+            const auto mark = memberMark(team, m, status, c);
             auto *state = new StatusMark(mark.text, mark.color, mark.kind, 0, Qt::AlignLeft, nullptr, mark.tooltip);
             state->setObjectName("teamWorkspaceMemberState");
             state->setProperty("phase", mark.phase);

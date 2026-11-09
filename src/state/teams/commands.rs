@@ -1654,11 +1654,26 @@ fn draft_get_in(store: &mut Store, input: &Value) -> anyhow::Result<Value> {
         }
     }
     let draft = team.draft.clone().unwrap_or_default();
-    let validation = super::plan::validate(&team, &BTreeSet::new());
     // Task 270 (owner, 2026-11-08): New team shows the working mode Zeros
     // proposes for the project, with its reasons, and the preset the owner
     // accepted so far (empty: the proposal).
     let proposal = super::working_mode::propose(std::path::Path::new(team.folder.trim()));
+    // Owner, 2026-11-09: create applies the working mode before it validates
+    // the plan (ops.rs, draft create), so the preflight checks the plan the
+    // same way: a member folder the applied mode forbids showed only at create.
+    let validation = {
+        let mut checked = team.clone();
+        let preset = match (proposal.as_ref(), checked.working_mode.trim()) {
+            (Some(proposal), "" | "auto") => proposal.preset.clone(),
+            (_, "none") | (None, "" | "auto") => String::new(),
+            (_, mode) => mode.to_owned(),
+        };
+        if !preset.is_empty() {
+            let branch = proposal.as_ref().map(|proposal| proposal.profile.branch.clone()).unwrap_or_default();
+            let _ = super::working_mode::apply(&mut checked.settings, &preset, &branch);
+        }
+        super::plan::validate(&checked, &BTreeSet::new())
+    };
     let working = super::working_mode::requested_mode(&json!({"working_mode":team.working_mode}));
     let working = match (proposal.as_ref(), working) {
         (Some(proposal), Some(mode)) if mode == "auto" => json!({"accepted":"auto","preset":proposal.preset,"proposal":proposal.value()}),

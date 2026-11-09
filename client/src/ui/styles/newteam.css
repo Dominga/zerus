@@ -170,3 +170,16 @@
 .nt-blocker-list { flex-basis: 100%; margin: 2px 0 0; padding-left: 18px; }
 .nt-foot-bad { color: var(--z-color-danger, #e5484d); }
 .nt-create { height: 32px; padding: 0 18px; font-weight: 600; }
+
+/* Owner, 2026-11-09 ("кому говорилось в одну строчку выровнять?"): one line per
+   member in the split New team: role, agent, model, effort, permissions,
+   computer, account, own worktree, duplicate, remove. Unlayered: packaged order. */
+.nt-split .nt-member {
+  grid-template-columns: minmax(96px, 1.3fr) 76px minmax(96px, 1fr) 82px 92px 104px minmax(96px, 1fr) 22px 26px 26px;
+  gap: 4px; padding-bottom: 4px; border-bottom: 1px dashed var(--z-color-divider);
+}
+.nt-split .nt-member select, .nt-split .nt-member input:not([type="checkbox"]) { min-width: 0; height: 28px; padding: 0 6px; font-size: 12px; }
+.nt-split .nt-member .nt-check { font-size: 0; justify-self: center; }
+.nt-split .nt-member .nt-check input { margin: 0; }
+.nt-split .nt-member > .icon-btn { justify-self: center; }
+@media (max-width: 1100px) { .nt-split .nt-member { grid-template-columns: repeat(5, minmax(0, 1fr)); } .nt-split .nt-member .nt-check { font-size: inherit; } }

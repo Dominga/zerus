@@ -593,6 +593,13 @@ fn latest_reply_of(record: &Value, recurring_schedules: Option<u64>) -> Result<V
 // cache keepalive. Only the latest turn is read; a conversation that has had
 // no keepalive costs one indexed row.
 fn keepalive_turn(db: &Connection, record: &Value, stop: i64) -> Result<bool> {
+    keepalive_turn_in(db, journal_name(record), string(record, "conversation_id"), stop)
+}
+
+/// Task #437: the keep-warm turn of one journal and conversation, whatever
+/// view asks - the owner decided its ping, its reply and its notification are
+/// never Activity, history, a notification, an unread reply or a preview.
+fn keepalive_turn_in(db: &Connection, name: &str, conversation: &str, stop: i64) -> Result<bool> {
     let opening: Option<String> = db
         .query_row(
             "SELECT payload FROM events WHERE name = ? AND conversation = ?
@@ -600,7 +607,7 @@ fn keepalive_turn(db: &Connection, record: &Value, stop: i64) -> Result<bool> {
            AND json_extract(payload, '$.type') IN ('UserPromptSubmit','UserPromptQueued','UserMessage','TurnStarted','QuestionAnswered','AgentMessage','Stop')
            AND seq < ? AND json_extract(payload, '$.type') IN ('UserPromptSubmit','UserMessage','Stop')
          ORDER BY seq DESC LIMIT 1",
-            params![journal_name(record), string(record, "conversation_id"), stop],
+            params![name, conversation, stop],
             |row| row.get(0),
         )
         .optional()
@@ -613,6 +620,20 @@ fn keepalive_opening(payload: &str) -> bool {
         event["type"] != "Stop"
             && (event["origin"] == "cache_keepalive" || string(&event, "detail").starts_with(CACHE_KEEPALIVE))
     })
+}
+
+/// Task #437: a reply of a keep-warm turn in a history written before the
+/// marks existed - the Stop or AgentMessage after the ping's opening. The
+/// marked rows are already dropped by the query.
+fn legacy_keepalive_reply(db: &Connection, name: &str, conversation: &str, seq: i64, own: bool, payload: &str) -> bool {
+    if !own {
+        return false;
+    }
+    let Ok(event) = serde_json::from_str::<Value>(payload) else { return false };
+    if !matches!(string(&event, "type"), "Stop" | "AgentMessage") {
+        return false;
+    }
+    keepalive_turn_in(db, name, conversation, seq).unwrap_or(false)
 }
 
 // The latest main Stop whose turn the person or the agent opened. Keepalive
@@ -904,8 +925,14 @@ fn source_range(index: usize) -> String {
 /// by `seq` (descending when `newest`), at most `limit` of them.
 fn activity_query(extra: &str, newest: bool, limit: &str) -> String {
     let order = if newest { "DESC" } else { "ASC" };
+    // Task #437: the keep-warm turn never reaches Activity, history or a
+    // preview. New rows carry its marks; a history written before them keeps
+    // the ping's envelope in the detail.
+    let quiet = " AND COALESCE(json_extract(payload, '$.turn_origin'), '') != 'keep_warm' \
+        AND COALESCE(json_extract(payload, '$.origin'), '') != 'cache_keepalive' \
+        AND COALESCE(json_extract(payload, '$.detail'), '') NOT LIKE '<zerus-cache-keepalive>%'";
     let branch = |own: u8, range: &str| {
-        format!("SELECT * FROM (SELECT seq, payload, {own} AS own, name FROM events WHERE {range}{extra} ORDER BY seq {order} LIMIT {limit})")
+        format!("SELECT * FROM (SELECT seq, payload, {own} AS own, name FROM events WHERE {range}{quiet}{extra} ORDER BY seq {order} LIMIT {limit})")
     };
     let mut branches = vec![branch(1, OWN_RANGE)];
     branches.extend((0..LINEAGE).map(|index| branch(0, &source_range(index))));
@@ -1159,6 +1186,9 @@ fn message_events(db: &Connection, name: &str, conversation: Option<&str>, scope
     for row in rows {
         let (seq, payload, own, source) = row.map_err(|e| e.to_string())?;
         if events.len() == MESSAGE_EVENTS_LIMIT { truncated = true; break; }
+        // Task #437: the ping and the reply of a keep-warm turn are not
+        // messages; a history written before the marks keeps the reply.
+        if legacy_keepalive_reply(db, name, conversation.unwrap_or_default(), seq, own, &payload) { continue; }
         let mut event: Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
         event["seq"] = json!(seq);
         mark_inherited(&mut event, own, lineage_label(record, &source));
@@ -1514,6 +1544,10 @@ pub(super) fn timeline_rows(
         .map_err(|e| e.to_string())?
         .collect::<std::result::Result<_, _>>()
         .map_err(|e| e.to_string())?;
+    // Task #437: an old keep-warm reply carries no mark of its own; the ping
+    // before it says the turn is invisible.
+    let conversation = conversation.unwrap_or_default();
+    rows.retain(|row| !legacy_keepalive_reply(db, journal_name, conversation, row.seq, row.inherited_from.is_none(), &row.payload));
     if newest {
         rows.reverse();
     }
@@ -2642,6 +2676,31 @@ mod attention_regressions {
         let stop = insert_message(&db, "only", Some("conversation"), json!({"type":"Stop","agent_id":"","at":1.0}));
         assert!(keepalive_turn(&db, &only, stop).unwrap());
         assert_eq!(real_reply(&db, &only, stop).unwrap(), None);
+
+        // Task #437 (owner, 2026-11-09): the ping, its reply and its
+        // notification never reach Activity or history; a reply from a
+        // history written before the marks is found through the ping before it.
+        let details = |shown: &[TimelineRow]| -> Vec<String> {
+            shown.iter().map(|row| {
+                let event: Value = serde_json::from_str(&row.payload).unwrap();
+                string(&event, "detail").to_owned()
+            }).collect()
+        };
+        main(json!({"type":"UserPromptSubmit","agent_id":"","origin":"cache_keepalive","turn_origin":"keep_warm","detail":"Cache warmed"}));
+        main(json!({"type":"AgentMessage","agent_id":"","turn_origin":"keep_warm","detail":"ok"}));
+        main(json!({"type":"Stop","agent_id":"","at":6.0,"turn_origin":"keep_warm"}));
+        let scope = activity_scope(&db, &claude);
+        let shown = timeline_rows(&db, "example", Some("conversation"), &scope, 0, 100, false).unwrap();
+        let presented = details(&shown);
+        assert!(presented.contains(&"Fix the build".to_owned()), "{presented:?}");
+        assert!(!presented.contains(&"ok".to_owned()), "the keep-warm reply is not Activity");
+        assert!(!presented.contains(&"Cache warmed".to_owned()), "the ping is not Activity");
+        // The same history before the marks existed: the reply carries none.
+        main(json!({"type":"UserPromptSubmit","agent_id":"","detail":text}));
+        main(json!({"type":"AgentMessage","agent_id":"","detail":"old ok"}));
+        main(json!({"type":"Stop","agent_id":"","at":7.0}));
+        let shown = timeline_rows(&db, "example", Some("conversation"), &scope, 0, 100, false).unwrap();
+        assert!(!details(&shown).contains(&"old ok".to_owned()), "an old keep-warm reply stays out too");
     }
     #[test]
     fn a_reply_to_a_turn_only_team_pastes_opened_is_a_team_notice_reply() {

@@ -323,3 +323,135 @@ fn a_report_carries_the_test_lines_and_functions_it_adds_and_removes() {
     assert!(text.starts_with("Tests: +") && text.contains("functions +3") && text.contains("-1 (src/lib.rs: old_case)"), "{text}");
     assert_eq!(super::super::inbox::tests_text(&json!({"files":0})), "Tests: no test file changed.");
 }
+
+/// Task #401: a repository whose task branch changed `count` Rust files
+/// (one of them with tests) since `base`; returns the base commit.
+fn wide_change(root: &Path, count: usize) -> String {
+    git(root, &["init", "-q"]);
+    write(root, "src/kept.rs", "pub fn a() {}
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn old_case() {}
+}
+");
+    write(root, "src/dropped.rs", "pub fn z() {}
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn gone() {}
+}
+");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    let base = super::super::dispatcher::git_at(&root.to_string_lossy(), &["rev-parse", "HEAD"]).unwrap();
+    for n in 0..count {
+        write(root, &format!("src/gen/m{n}.rs"), &format!("pub fn f{n}() {{}}
+"));
+    }
+    write(root, "src/kept.rs", "pub fn a() {}
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn old_case() {}
+    #[test]
+    fn new_case() {}
+}
+");
+    write(root, "src/dropped.rs", "pub fn z() {}
+");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "wide"]);
+    base
+}
+
+/// Task #401: a report far ahead of its base costs one git diff and at most
+/// one cat-file batch - never a git show per file - and a change of more than
+/// DELTA_FILES files gets its counts only.
+#[test]
+fn a_wide_report_costs_one_diff_and_at_most_one_batch() {
+    let config: TestsConfig = serde_json::from_value(parse_toml("[[provider]]
+name = \"py\"
+kind = \"unittest\"
+tests = [\"tests/test_*.py\"]
+").unwrap()).unwrap();
+    // 1000 files ahead: the counts only, from the diff alone.
+    let dir = tempfile::tempdir().unwrap();
+    let base = wide_change(dir.path(), 1000);
+    super::super::dispatcher::take_git_calls();
+    let delta = report_delta(&dir.path().to_string_lossy(), &base, &config).unwrap();
+    assert_eq!(super::super::dispatcher::take_git_calls(), ["diff"], "one git diff, nothing per file");
+    assert_eq!((delta["bounded"].clone(), delta["changed_files"].clone(), delta["files"].clone()), (json!(true), json!(1002), json!(1)), "{delta}");
+    assert_eq!(delta["functions_added"]["total"], 0);
+    let text = super::super::inbox::tests_text(&delta);
+    assert!(text.contains("1 test file(s) of 1002 changed") && text.contains("not listed"), "{text}");
+    // 150 files ahead: one diff and one batch read the old tests, so a file
+    // that lost its tests still counts.
+    let dir = tempfile::tempdir().unwrap();
+    let base = wide_change(dir.path(), 150);
+    super::super::dispatcher::take_git_calls();
+    let delta = report_delta(&dir.path().to_string_lossy(), &base, &config).unwrap();
+    assert_eq!(super::super::dispatcher::take_git_calls(), ["diff", "cat-file"]);
+    assert!(delta.get("bounded").is_none(), "{delta}");
+    assert_eq!(delta["files"], 2, "{delta}");
+    assert_eq!(delta["functions_added"]["names"], json!(["src/kept.rs: new_case"]));
+    assert_eq!(delta["functions_removed"]["names"], json!(["src/dropped.rs: gone"]));
+}
+
+/// Task #401: the batch reader keeps each answer in order, a missing object
+/// as none.
+#[test]
+fn one_cat_file_batch_answers_every_spec_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q"]);
+    write(root, "a.txt", "alpha
+");
+    write(root, "b.txt", "beta
+with two lines
+");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "one"]);
+    let specs = ["HEAD:a.txt".to_owned(), "HEAD:missing.txt".to_owned(), "HEAD:b.txt".to_owned()];
+    let read = super::super::dispatcher::git_cat_files(&root.to_string_lossy(), &specs).unwrap();
+    assert_eq!(read, vec![Some("alpha
+".to_owned()), None, Some("beta
+with two lines
+".to_owned())]);
+}
+
+/// Task #401: a report's base is the nearest start of its branch: the
+/// merge-base with the team's line, not a lead checkout a day behind it.
+#[test]
+fn a_reports_base_is_the_nearest_start_of_its_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "old"]);
+    write(&repo, "one.txt", "1
+");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "old"]);
+    let old = super::super::dispatcher::git_at(&repo.to_string_lossy(), &["rev-parse", "HEAD"]).unwrap();
+    git(&repo, &["checkout", "-q", "-b", "line"]);
+    for n in 0..5 {
+        write(&repo, &format!("line{n}.txt"), "x
+");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "line"]);
+    }
+    let line = super::super::dispatcher::git_at(&repo.to_string_lossy(), &["rev-parse", "HEAD"]).unwrap();
+    git(&repo, &["checkout", "-q", "-b", "task"]);
+    write(&repo, "task.txt", "t
+");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "task"]);
+    // The lead's checkout stays on the old commit.
+    let lead = dir.path().join("lead");
+    git(&repo, &["worktree", "add", "-q", &lead.to_string_lossy(), "old"]);
+    let mut team = team();
+    team.folder = lead.to_string_lossy().into_owned();
+    assert_eq!(super::super::ops::delta_base(&team, &repo.to_string_lossy()), old, "without a line, the lead's commit");
+    team.settings.base_branch = "line".into();
+    assert_eq!(super::super::ops::delta_base(&team, &repo.to_string_lossy()), line);
+}

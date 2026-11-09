@@ -107,8 +107,8 @@ export function AccountSwitchChip(props: { session: Session; compact?: boolean; 
                         const own = () => group.provider === provider() && option.id === current();
                         const ready = () => takesSession(option);
                         return (
-                          <button type="button" role="menuitem" class="acct-switch-row" disabled={own() || !ready()}
-                            title={trText(option.detail)}
+                          <button type="button" role="menuitem" class="acct-switch-row" classList={{ blocked: !ready() }}
+                            disabled={own() || !ready()} title={trText(option.detail)}
                             onClick={() => ask({ id: option.id, label: option.label, provider: group.provider })}>
                             <AgentLogo agent={group.provider} size={12} fallback={<Icon name="accounts" size={12} />} />
                             <span class="ell">{option.label || option.id}</span>
@@ -116,6 +116,7 @@ export function AccountSwitchChip(props: { session: Session; compact?: boolean; 
                             <Show when={!own() && !ready()}><span class="dim">{tr("Unavailable account")}</span></Show>
                             <Show when={!own() && ready() && group.provider === provider()}><span class="dim">{option.usage.status}</span></Show>
                             <Show when={!own() && ready() && group.provider !== provider()}><span class="dim">{tr("Move")}</span></Show>
+                            <Show when={!ready()}><span class="acct-switch-why">{trText(option.detail)}</span></Show>
                           </button>
                         );
                       }}

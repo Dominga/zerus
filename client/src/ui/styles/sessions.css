@@ -457,6 +457,10 @@
 .acct-switch-group + .acct-switch-group { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--z-color-card-border); }
 .acct-switch-head { display: flex; align-items: center; gap: 6px; padding: 4px 8px 2px; color: var(--z-color-text-2); font-size: var(--fs-xs); font-weight: 600; }
 .acct-switch-row .ell { flex: 1; min-width: 0; }
+/* Task 432: an account this computer cannot run now is listed, not hidden, and
+   its own line under the name says why. */
+.acct-switch-row.blocked { flex-wrap: wrap; }
+.acct-switch-row .acct-switch-why { flex: 0 0 100%; padding-left: 18px; color: var(--z-color-text-2); font-size: var(--fs-xs); }
 .acct-move-body p { margin: 0 0 8px; }
 .acct-move-list b { font-weight: 600; }
 .acct-move-refusal { color: var(--z-color-danger, var(--z-color-text)); }

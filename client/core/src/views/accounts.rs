@@ -404,6 +404,7 @@ fn profile_usage(entry: &FleetEntry, raw: &Value, r: &UsageRef, state: &Accounts
         .filter(|cached| cached.is_object())
     {
         let cached = usage::usage(cached);
+        let (cached_status, cached_auth) = (cached.status.clone(), cached.auth_status.clone());
         if data.is_none() {
             // Until the first inspect answers, the cached inspection stands in
             // (owner ruling; Qt seeds identity and checked_at only).
@@ -413,9 +414,9 @@ fn profile_usage(entry: &FleetEntry, raw: &Value, r: &UsageRef, state: &Accounts
             u.balances = cached.balances;
             u.credits = cached.credits;
             u.retry_at = cached.retry_at;
-            if cached.status == "rate_limited" {
-                u.status = cached.status;
-                u.auth_status = cached.auth_status;
+            if cached_status == "rate_limited" {
+                u.status = cached_status.clone();
+                u.auth_status = cached_auth.clone();
             }
             u.seeded = true;
         } else if matches!(u.status.as_str(), "unavailable" | "offline")
@@ -429,8 +430,8 @@ fn profile_usage(entry: &FleetEntry, raw: &Value, r: &UsageRef, state: &Accounts
         // `account_status` is the only evidence of it: without this an account that
         // is signed in was reported as signed out, and the session chooser dropped
         // it ("No other signed-in account."). A signed-out cache never signs in.
-        if u.auth_status.is_empty() && cached.status != "signed_out" {
-            u.auth_status = cached.auth_status;
+        if u.auth_status.is_empty() && cached_status != "signed_out" {
+            u.auth_status = cached_auth;
         }
     }
     u
@@ -2268,89 +2269,6 @@ mod tests {
         assert_eq!(view.truncated, 6 * 256 - 1024);
         assert_eq!(view.notices.len(), 16);
     }
-}
-
-#[cfg(test)]
-mod permission_source_tests {
-    use super::*;
-    use serde_json::json;
-    #[test]
-    fn provider_bypass_is_distinct_from_a_zerus_override() {
-        let entry = FleetEntry {
-            computer: ComputerId::local(),
-            status: "live".into(),
-            attempt: 0,
-            local_sessions: true,
-            local_host: false,
-            host: Some("workstation".into()),
-            platform: Some("linux".into()),
-        };
-        let raw = json!({"id":"work","provider":"codex","home":"/accounts/example","installed":false,"permission_mode":"provider","effective_permission_mode":"bypass"});
-        let inherited = profile(&entry, &raw, &AccountsState::default());
-        assert_eq!(inherited.permission, "bypass");
-        assert_eq!(inherited.permission_mode, "provider");
-        assert!(inherited
-            .permission_hint
-            .english()
-            .starts_with("From provider settings"));
-        let mut explicit = raw;
-        explicit["permission_mode"] = json!("bypass");
-        assert_eq!(
-            profile(&entry, &explicit, &AccountsState::default()).permission_mode,
-            "bypass"
-        );
-    }
-
-    #[test]
-    fn opencode_native_policy_is_localized_and_never_labelled_as_a_zerus_default() {
-        let entry = FleetEntry {
-            computer: ComputerId::local(),
-            status: "live".into(),
-            attempt: 0,
-            local_sessions: true,
-            local_host: false,
-            host: Some("workstation".into()),
-            platform: Some("linux".into()),
-        };
-        for (mode, label) in [
-            ("allow", "Allow tools"),
-            ("ask", "Ask before tools"),
-            ("deny", "Deny tools"),
-            ("custom", "Custom rules"),
-            ("unknown", "Unverified"),
-        ] {
-            let raw = json!({"id":"native-opencode","provider":"opencode","home":"/accounts/example","native":true,"installed":true,
-                "permission_mode":"provider","permission_mode_source":"default","effective_permission_mode":mode,"permission_detail":"OpenCode native default"});
-            let p = profile(&entry, &raw, &AccountsState::default());
-            assert_eq!(p.permission, mode);
-            assert_eq!(p.permission_label.source, label);
-            assert!(!p.permission_default);
-            assert_eq!(p.permission_mode, "provider");
-            assert!(p
-                .permission_hint
-                .english()
-                .starts_with("From provider settings"));
-            assert!(!p.permission_hint.english().contains("Without a choice"));
-            assert!(p
-                .permission_hint
-                .english()
-                .contains("Project, agent and session rules"));
-            if mode == "allow" {
-                assert!(p.permission_hint.english().contains(".env"));
-            }
-            if mode == "unknown" {
-                assert!(p
-                    .permission_hint
-                    .english()
-                    .contains("could not be verified"));
-            }
-            assert!(p
-                .permission_hint
-                .args
-                .iter()
-                .all(|arg| !matches!(arg, crate::text::Arg::Verbatim(_))));
-        }
-    }
 
     /// Task 432: the exact rows this computer's `hgs account ls` lists for provider
     /// claude - the native "Default account", the named copy "Default" that groups
@@ -2439,5 +2357,88 @@ mod permission_source_tests {
         assert!(gb10.signed_in, "{gb10:?}");
         assert_eq!(gb10.state, MemberState::Unavailable);
         assert_eq!(gb10.detail.english(), "Account status is unavailable on workstation.");
+    }
+}
+
+#[cfg(test)]
+mod permission_source_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn provider_bypass_is_distinct_from_a_zerus_override() {
+        let entry = FleetEntry {
+            computer: ComputerId::local(),
+            status: "live".into(),
+            attempt: 0,
+            local_sessions: true,
+            local_host: false,
+            host: Some("workstation".into()),
+            platform: Some("linux".into()),
+        };
+        let raw = json!({"id":"work","provider":"codex","home":"/accounts/example","installed":false,"permission_mode":"provider","effective_permission_mode":"bypass"});
+        let inherited = profile(&entry, &raw, &AccountsState::default());
+        assert_eq!(inherited.permission, "bypass");
+        assert_eq!(inherited.permission_mode, "provider");
+        assert!(inherited
+            .permission_hint
+            .english()
+            .starts_with("From provider settings"));
+        let mut explicit = raw;
+        explicit["permission_mode"] = json!("bypass");
+        assert_eq!(
+            profile(&entry, &explicit, &AccountsState::default()).permission_mode,
+            "bypass"
+        );
+    }
+
+    #[test]
+    fn opencode_native_policy_is_localized_and_never_labelled_as_a_zerus_default() {
+        let entry = FleetEntry {
+            computer: ComputerId::local(),
+            status: "live".into(),
+            attempt: 0,
+            local_sessions: true,
+            local_host: false,
+            host: Some("workstation".into()),
+            platform: Some("linux".into()),
+        };
+        for (mode, label) in [
+            ("allow", "Allow tools"),
+            ("ask", "Ask before tools"),
+            ("deny", "Deny tools"),
+            ("custom", "Custom rules"),
+            ("unknown", "Unverified"),
+        ] {
+            let raw = json!({"id":"native-opencode","provider":"opencode","home":"/accounts/example","native":true,"installed":true,
+                "permission_mode":"provider","permission_mode_source":"default","effective_permission_mode":mode,"permission_detail":"OpenCode native default"});
+            let p = profile(&entry, &raw, &AccountsState::default());
+            assert_eq!(p.permission, mode);
+            assert_eq!(p.permission_label.source, label);
+            assert!(!p.permission_default);
+            assert_eq!(p.permission_mode, "provider");
+            assert!(p
+                .permission_hint
+                .english()
+                .starts_with("From provider settings"));
+            assert!(!p.permission_hint.english().contains("Without a choice"));
+            assert!(p
+                .permission_hint
+                .english()
+                .contains("Project, agent and session rules"));
+            if mode == "allow" {
+                assert!(p.permission_hint.english().contains(".env"));
+            }
+            if mode == "unknown" {
+                assert!(p
+                    .permission_hint
+                    .english()
+                    .contains("could not be verified"));
+            }
+            assert!(p
+                .permission_hint
+                .args
+                .iter()
+                .all(|arg| !matches!(arg, crate::text::Arg::Verbatim(_))));
+        }
     }
 }

@@ -12,6 +12,7 @@
   "automaticApprovals/qtEnabledAtSwitch": false,
   "client/darkSkin": "zerus-dark",
   "client/lightSkin": "zerus-light",
+  "client/newTeamHowToClosed": false,
   "client/overviewFullWidth": false,
   "client/overviewSubSessions": false,
   "client/overviewWidth": 1200,

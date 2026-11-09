@@ -1514,6 +1514,11 @@ pub struct NewTeamView {
     /// Task #308: the proposed working mode, its reasons and the accepted preset.
     #[serde(skip_serializing_if = "Value::is_null")]
     pub working_mode: Value,
+    /// Task #8 (team ede724c4): the plan mode the owner chose ("standard" or
+    /// "free"), the lead's offer ("" for none) and the lead's one-line reason.
+    pub plan_mode: String,
+    pub plan_mode_offer: String,
+    pub plan_mode_reason: String,
     pub members: Vec<DraftMember>,
     pub tasks: Vec<TaskView>,
     pub draft: DraftView,
@@ -1535,6 +1540,17 @@ pub fn new_team(value: &Value, view: &TeamView) -> Option<NewTeamView> {
         folder: view.folder.clone(),
         settings: view.settings.clone(),
         working_mode: bounded(value.get("working_mode")),
+        // hgs leaves out the standard mode; an unknown one reads as standard.
+        plan_mode: if view.plan_mode == "free" {
+            "free".into()
+        } else {
+            "standard".into()
+        },
+        plan_mode_offer: match name(value, "plan_mode_offer").as_str() {
+            offer @ ("standard" | "free") => offer.into(),
+            _ => String::new(),
+        },
+        plan_mode_reason: text(value, "plan_mode_reason", LINE_CHARS),
         members: array(value, "members")
             .iter()
             .take(MEMBERS_KEPT)

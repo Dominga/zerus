@@ -141,7 +141,13 @@ describe("a team member's row and the team tree (tasks 330, 425)", () => {
       const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       return stylesheet.match(new RegExp(`(?:^|\\n)\\s*${escaped} \\{([^}]*)\\}`))?.[1] ?? "";
     };
-    return { read, rule };
+    // The declaration that wins: an unlayered rule outranks every layered one in
+    // either layer order, and the member rules are restated unlayered at the end.
+    const effectiveRule = (selector: string) => {
+      const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return [...stylesheet.matchAll(new RegExp(`(?:^|\\n)\\s*${escaped} \\{([^}]*)\\}`, "g"))].at(-1)?.[1] ?? "";
+    };
+    return { read, rule, effectiveRule };
   };
   const px = (text: string, property: string) => Number(text.match(new RegExp(`(?:^|[;\\s])${property}:\\s*(-?\\d+)px`))?.[1] ?? NaN);
 
@@ -185,25 +191,74 @@ describe("a team member's row and the team tree (tasks 330, 425)", () => {
     expect(px(line, "top") + px(last, "height")).toBeLessThanOrEqual(px(elbow, "top") + 2);
   });
 
-  it("gives the lead a strip of its own height with a keyboard-reachable fold toggle", async () => {
+  it("puts the fold control at the strip's right end: a small icon button with the member count and Fold or Unfold team (task 452)", async () => {
     const { rule } = await styles();
-    const team = { name: "T", status: "running", phase: 9, phase_done: 207, phase_total: 230, phases_done: 8, phases_total: 9, attention: 3, members: ["a", "b"] };
+    const team = { name: "T", status: "running", phase: 9, phase_done: 257, phase_total: 258, phases_done: 8, phases_total: 9, attention: 3,
+      members: Array.from({ length: 14 }, (_, i) => `m${i}`) };
+    const strip = (html: string) => html.match(/<div[^>]*class="sc-team-strip"[\s\S]*?<\/button>\s*(?:<!--[^>]*-->\s*)*<\/div>/)?.[0] ?? "";
+    const toggle = (html: string) => html.match(/<button[^>]*class="icon-btn small sc-team-toggle"[^>]*>/)?.[0] ?? "";
     const open = render(false, row(), true, undefined, { teamSummary: team, expanded: true });
-    expect(open).toContain('class="sc-team-strip"');
     expect(open).not.toMatch(/class="team-strip"|class="team-members"|class="team-status/);
-    const toggle = (html: string) => html.match(/<button[^>]*class="sc-team-toggle"[^>]*>/)?.[0] ?? "";
+    // The button is the strip's last element, after the count: its right end.
+    const openStrip = strip(open);
+    expect(openStrip).not.toBe("");
+    expect(openStrip.indexOf("14 members")).toBeGreaterThan(openStrip.indexOf("Running"));
+    expect(openStrip.indexOf('class="icon-btn small sc-team-toggle"')).toBeGreaterThan(openStrip.indexOf("14 members"));
     expect(toggle(open)).toContain('type="button"');
     expect(toggle(open)).toContain('aria-expanded="true"');
-    expect(toggle(open)).toContain('aria-label="Hide team members"');
+    expect(toggle(open)).toContain('aria-label="Fold team"');
+    expect(toggle(open)).toContain('title="Fold team"');
     const folded = render(false, row(), true, undefined, { teamSummary: team, expanded: false });
+    expect(strip(folded)).toContain("14 hidden");
+    expect(strip(folded)).toContain('data-folded="1"');
     expect(toggle(folded)).toContain('aria-expanded="false"');
-    expect(toggle(folded)).toContain('aria-label="Show team members"');
-    // The Team tab's .team-strip gave it 34 px and a bottom rule past the card's edge.
-    const strip = rule(".sc-team-strip");
-    expect(px(strip, "height")).toBe(21);
-    expect(strip).toMatch(/box-sizing:\s*border-box/);
-    expect(strip).toMatch(/overflow:\s*hidden/);
-    expect(rule('.sc-team-toggle[aria-expanded="true"] .chev')).toMatch(/rotate:\s*90deg/);
+    expect(toggle(folded)).toContain('aria-label="Unfold team"');
+    // The normal small icon-button size, with hover and keyboard focus states; the chevron turns when folded.
+    const button = rule(".sc-team-toggle.icon-btn.small");
+    expect(px(button, "width")).toBe(22);
+    expect(px(button, "height")).toBe(22);
+    expect(rule(".sc-team-toggle.icon-btn.small:hover")).toMatch(/background:/);
+    expect(rule(".sc-team-toggle.icon-btn.small:focus-visible")).toMatch(/outline:\s*2px solid/);
+    expect(rule('.sc-team-toggle[aria-expanded="false"] .chev')).toMatch(/rotate:\s*-90deg/);
+    // The strip holds the button (26 px), stays inside the card and folds on a click anywhere on it.
+    const box = rule(".sc-team-strip");
+    expect(px(box, "height")).toBe(26);
+    expect(px(box, "top") + px(box, "height")).toBeLessThanOrEqual(104 + 26 - 4 - 6);
+    expect(box).toMatch(/box-sizing:\s*border-box/);
+    expect(box).toMatch(/overflow:\s*hidden/);
+    expect(box).toMatch(/cursor:\s*pointer/);
+    const { readFileSync } = await import(/* @vite-ignore */ ["node", "fs"].join(":")) as { readFileSync(path: URL): string };
+    const source = String(readFileSync(new URL("./SessionCard.tsx", import.meta.url)));
+    expect(source).toMatch(/class="sc-team-strip"[^>]*\n?[^>]*onClick=\{\(e\) => \{ e\.stopPropagation\(\); props\.onToggle\(\); \}\}/);
+  });
+
+  it("fits a member card inside the indent: the chip and the badge stay whole, the title and branch ellipsize (tasks 452, 455)", async () => {
+    const { read, rule, effectiveRule } = await styles();
+    // A member card is 26 px narrower for the tree's indent. The container queries cap every
+    // card's badge (128/104 px) and chip (30 %), so a member's chip and badge keep their whole
+    // box instead: the machine alias is never cut to 'ms' and the caption keeps its cooling bar.
+    const badge = effectiveRule(".scard.sc-member .sc-l1 > .sbadge");
+    expect(badge).toMatch(/flex:\s*0 0 auto/);
+    expect(badge).toMatch(/max-width:\s*100%/);
+    expect(badge).not.toMatch(/flex-shrink:\s*1/);
+    const chip = effectiveRule(".scard.sc-member .sc-l2 > .mbadge");
+    expect(chip).toMatch(/flex:\s*0 0 auto/);
+    expect(chip).toMatch(/max-width:\s*100%/);
+    // The title and the branch are the lines that give way, each with its own ellipsis.
+    expect(rule(".scard.sc-member .sc-title")).toMatch(/min-width:\s*0/);
+    const html = render(false, row(), true, undefined, { member: true, depth: 1, teamFirst: true });
+    const title = html.match(/<span class="sc-title ell"[^>]*>/)?.[0] ?? "";
+    // No 72 px floor inside the indent: the title shrinks before the chip or the badge lose a pixel.
+    expect(title).toMatch(/min-width:\s*0px/);
+    expect(html).toMatch(/class="sc-title ell"/);
+    expect(html).toMatch(/class="sc-meta ell"/);
+    expect(html).toMatch(/class="entity mbadge/);
+    expect(html).toMatch(/class="sbadge k-/);
+    // The unlayered restatements come after the container queries, so they win in either layer order.
+    const css = read("sessions");
+    for (const selector of [".scard.sc-member .sc-l1 > .sbadge { flex: 0 0 auto", ".scard.sc-member .sc-l2 > .mbadge { flex: 0 0 auto"]) {
+      expect(css.lastIndexOf(selector)).toBeGreaterThan(css.indexOf("@container (max-width: 360px)"));
+    }
   });
 });
 describe("session cards at the narrow side panel (task 343)", () => {

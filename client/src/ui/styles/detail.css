@@ -62,7 +62,21 @@
 
   .work { position: relative; flex: 1; min-height: 0; display: flex; gap: 8px; padding: 0 0 0 0; }
   .work-main { flex: 1; min-width: 280px; min-height: 0; display: flex; flex-direction: column; }
-  .detail-tabs { padding: 0 12px; border-bottom: 1px solid var(--z-color-divider); align-items: center; height: 34px; }
+  /* Task #426 (owner, screenshot of package 167): the session view's tabs get
+     the skin's real tab spacing: each tab keeps its own padding and the row a
+     clear gap between the tabs, the team's "?N" badge stands apart from its
+     label, and the active underline stays under its own tab only. A narrow
+     window shortens a label with an ellipsis (the inspector's own pattern)
+     instead of squeezing the tabs into each other. */
+  .detail-tabs {
+    padding: 0 12px; border-bottom: 1px solid var(--z-color-divider); align-items: center; height: 34px;
+    gap: 6px; min-width: 0;
+  }
+  .detail-tabs .tab { flex: 0 1 auto; min-width: 3.2em; padding: 0 10px; }
+  .detail-tabs .tab.on { flex-shrink: 0; }
+  .detail-tabs .tab-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .detail-tabs .tab-count { flex: none; margin-left: 2px; }
+  .detail-tabs .tab.on::after { left: 8px; right: 8px; }
   .tab-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 
   /* Activity: one centered reading column (--col, set by Activity's width

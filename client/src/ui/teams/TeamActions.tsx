@@ -480,7 +480,7 @@ export function TeamModeControl(props: { computer: ComputerId; team: ActTeam }) 
         <Show when={lock()?.mode === "standard" ? lock() : undefined}>{(switching) => (
           <button type="button" class="btn ghost small" data-action="phase-mode" data-mode="standard" disabled={!switching().enabled || read().busy}
             title={tr("Switch phase %1 to standard planning: its tasks stay, new work is planned in a new phase", switching().phase)}
-            onClick={() => void model.phaseMode(switching().phase, "standard")}>{switching().text}</button>
+            onClick={() => void model.phaseMode(switching().phase, "standard")}><span class="ell">{switching().text}</span></button>
         )}</Show>
         <Show when={read().notice}><span class="danger team-phase-mode-notice" role="status">{read().notice}</span></Show>
       </span>

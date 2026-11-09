@@ -775,3 +775,14 @@ dialog.session-file { width: min(520px, calc(100vw - 32px)); max-width: calc(100
 /* The mockup round player keeps its geometry while real frames decode. */
 .vm-poster .vm-frames.real { inset: 0; animation: none; will-change: auto; background: none; }
 .vm-frames > video, .vm-frames > img { display: block; width: 100%; height: 100%; object-fit: cover; }
+
+/* Task 454 (owner, package 168, D:/Tools/zerus-build/owner-tabs-168.png): the
+   session tabs keep their spacing whatever order the document's cascade layers
+   arrive in. The packaged build links the lazy chunks' stylesheets before the
+   entry one, so base.css's reset can be opened after the components layer, and
+   then its `button { padding: 0 }` outranks task 426's tab rules: the labels sat
+   6 px apart instead of 26. Unlayered, as the question card's own controls are
+   (task 449), so the row holds either way; pixels, never a token, so every skin
+   and both appearances get the same spacing. */
+.detail-tabs { gap: 6px; }
+.detail-tabs .tab { padding: 0 10px; }

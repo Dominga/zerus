@@ -2981,5 +2981,18 @@
   "~%1 GB estimated": "~%1 ГБ по оценке",
   "“%1” is no longer offered for %2.": "«%1» больше не предлагается для %2.",
   "● changed by the lead, not yet seen: click a mark when you have seen it": "● изменено лидом и ещё не просмотрено: нажмите на отметку, когда посмотрите",
-  "✓ %1": "✓ %1"
+  "✓ %1": "✓ %1",
+  "%1 with %2 effort": "%1 с усилием %2",
+  "Continue anyway…": "Всё равно продолжить…",
+  "Continue with what the agent shows now. Terminal is at an empty prompt, so your next message goes to the agent's composer, never into a dialog.": "Продолжить с тем, что агент показывает сейчас. Терминал на пустом приглашении, поэтому следующее сообщение попадёт в поле ввода агента, а не в диалог.",
+  "Continuing with the settings the agent shows. You can send messages again.": "Продолжаем с настройками, которые показывает агент. Можно снова отправлять сообщения.",
+  "It shows %1.": "Он показывает %1.",
+  "Model settings not confirmed": "Настройки модели не подтверждены",
+  "Read the agent's model and effort again; nothing is typed": "Снова прочитать модель и усилие агента; ничего не вводится",
+  "Terminal shows a dialog or unsent text: answer or close it there first. Nothing is typed into a dialog.": "В терминале диалог или неотправленный текст: сначала ответьте или закройте его там. В диалог ничего не вводится.",
+  "The agent has not shown the switch to %1 yet": "Агент ещё не показал переключение на %1",
+  "The agent shows the new model settings. You can send messages again.": "Агент показывает новые настройки модели. Можно снова отправлять сообщения.",
+  "The agent still does not show the requested model settings.": "Агент всё ещё не показывает запрошенные настройки модели.",
+  "The check did not finish; nothing was changed.": "Проверка не завершилась; ничего не изменено.",
+  "a new model": "новую модель"
 }

@@ -427,6 +427,8 @@ export interface Target { computer: ComputerId; name: string; run_id: string; co
 export type Action =
   | { kind: "fork"; tag: string; archive_id: string | null }
   | { kind: "settings"; model: string; effort: string; expected_pending_id?: string; without_terminal: boolean }
+  /** Task #7: Check again (`accept` false) or Continue anyway; nothing is typed into the agent. */
+  | { kind: "settings_check"; accept: boolean }
   | { kind: "interrupt"; turn_started: number }
   | { kind: "mark_read"; reply_id: string | null; attention_signature: string | null }
   | { kind: "pause" }
@@ -940,6 +942,8 @@ export interface HeldMessageView { request_id: string; text: string; attachments
 /** U35: a message hgs holds until the agent takes the previous one (src-tauri composer/held.rs). */
 export interface HeldInputView { request_id: string; text: string; cancelling: boolean }
 /** Text left in the agent's own Terminal input; `error` says why the last Send it did not go. */
+/** Task #7: what the agent shows about a model or effort change it has not visibly taken; `at_prompt`: Terminal shows an empty prompt and no dialog. */
+export interface SettingsCheckView { requested_model: string; requested_effort: string; shown_model: string; shown_effort: string; at_prompt: boolean; reason: string }
 export interface TerminalDraftView { draft: string; can_send: boolean; submitting: boolean; error: Text | null }
 export interface ComposerView {
   handle: number; key: string; subagent?: { agent_id: string; send_supported: boolean; hint: string } | null; loaded: boolean; rev: number; text_epoch: number; text: string; position: number; anchor: number;
@@ -960,6 +964,8 @@ export interface ComposerView {
   held_inputs?: HeldInputView[];
   /** Text left in the agent's own Terminal input, which holds every send. */
   terminal_draft?: TerminalDraftView | null;
+  /** Task #7: a model or effort change the agent has not visibly taken (src-tauri composer/send.rs SettingsCheckView). */
+  settings_check?: SettingsCheckView | null;
   /** The agent's question card shown in the composer (A2). */
   question: QuestionView | null;
   /** False while a required card stands in for the editor and the action row (Qt's setInputVisible). */

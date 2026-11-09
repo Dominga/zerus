@@ -404,6 +404,9 @@ pub struct ComposerView {
     pub held_inputs: Vec<held::HeldInputView>,
     /// Text left in the agent's own Terminal input: the Terminal draft bar.
     pub terminal_draft: Option<held::TerminalDraftView>,
+    /// Task #7: a model or effort change the agent has not visibly taken:
+    /// the settings bar with Check again and Continue anyway.
+    pub settings_check: Option<send::SettingsCheckView>,
     /// Clear session and the cache popover's Clear context (`clearContext`).
     pub clear: send::ClearControl,
     /// The agent's question card shown in the composer (A2-1).
@@ -1944,6 +1947,7 @@ impl Composers {
                 }),
             held_inputs: held::inputs_view(hub, key),
             terminal_draft: held::draft_view(hub, key),
+            settings_check: session.settings_check,
             clear: session.clear,
             question,
             queue: self.queue_part(hub),

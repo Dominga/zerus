@@ -411,7 +411,11 @@ fn checked_input(
     if !input_confirmed(&record) {
         return Err(UNCONFIRMED.into());
     }
-    if settings_unconfirmed(&record) {
+    // Task #7: checked again on every send. The agent's own evidence (its
+    // empty prompt showing the requested model and effort) confirms the
+    // change; `hgs settings --check --accept` settles it on the person's
+    // explicit confirmation, at an empty prompt only.
+    if settings_unconfirmed(&record) && !effort::settings_evidence(&record).confirmed {
         return Err(SETTINGS_UNCONFIRMED.into());
     }
     Ok(record)
@@ -455,13 +459,16 @@ fn queued_on_screen(agent: &str, screen: &str, text: &str) -> bool {
 /// Keys of a model or effort change the agent may not have read yet. Unlike
 /// sent text it is not a first message, so a new session keeps its first
 /// message state; a later native event settles it.
-fn settings_unconfirmed(record: &Value) -> bool {
+pub(super) fn settings_unconfirmed(record: &Value) -> bool {
     record["settings_unconfirmed_at"]
         .as_f64()
         .is_some_and(|at| record["last_event_at"].as_f64().unwrap_or(0.0) <= at)
 }
 
-const SETTINGS_UNCONFIRMED: &str = "the agent did not react to the last model settings change; finish or cancel it in Terminal, then send a message there to continue";
+/// Task #7: the refusal names what gets through: the agent showing the change
+/// (checked on every send, by Check again and by each inspection), or Continue
+/// anyway once Terminal shows its empty prompt.
+const SETTINGS_UNCONFIRMED: &str = "the agent has not shown the last model or effort change yet; use Check again once it shows the new model and effort, or Continue anyway when Terminal shows its empty prompt";
 
 /// Capture ANSI attributes so a faint Codex placeholder is distinguishable from
 /// a user's existing draft. Never clear/edit the terminal's current draft.

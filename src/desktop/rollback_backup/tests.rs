@@ -108,6 +108,53 @@ fn the_schema_34_preflight_refuses_35_without_rewriting_its_database_or_columns(
     assert_eq!(schema(&db), 35);
     assert_eq!(db.query_row::<i64,_,_>("SELECT count(*) FROM pragma_table_info('desktop_creation_worktrees') WHERE name IN ('creation_id','creation_slot')",[],|r|r.get(0)).unwrap(),2);
 }
+/// Task #421 (2026-11-09): an interrupted attempt left an EMPTY
+/// schema-34-rollback (on Windows its first file could not be published), and
+/// every later start refused it. Now the empty folder is retained under a new
+/// name, a complete backup is made again, and the store migrates.
+#[test]
+fn an_empty_leftover_backup_is_retained_and_the_backup_is_made_again() {
+    let temp = tempfile::tempdir().unwrap();
+    let location = make_old(&temp.path().canonicalize().unwrap().join("state/desktop"));
+    platform::private_dir(&location.root.join(BACKUP)).unwrap();
+    let owner = location.lock().unwrap();
+    let store = Store::open_owned(&location, &epoch(), &owner).unwrap();
+    assert_eq!(schema(&store.db), 35);
+    drop(store);
+    let manifest: Manifest =
+        serde_json::from_slice(&fs::read(location.root.join(BACKUP).join(MANIFEST)).unwrap()).unwrap();
+    assert_eq!(manifest.source_schema, 34);
+    assert!(location.root.join(BACKUP).join(DATABASE).is_file());
+    let retained: Vec<_> = fs::read_dir(&location.root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.file_name().unwrap().to_string_lossy().starts_with(&format!("{BACKUP}.empty-")))
+        .collect();
+    assert_eq!(retained.len(), 1, "the leftover is kept under a new name");
+    assert_eq!(fs::read_dir(&retained[0]).unwrap().count(), 0);
+}
+
+/// Task #421: the backup of an older store (schema 30, the owner's) completes:
+/// its manifest, the database and, when there is one, the WAL.
+#[test]
+fn a_schema_30_store_is_backed_up_completely() {
+    let temp = tempfile::tempdir().unwrap();
+    let location = make_old(&temp.path().canonicalize().unwrap().join("state/desktop"));
+    let owner = location.lock().unwrap();
+    let handoff = location.handoff_lock().unwrap();
+    let original = Original::new(&location, &owner, &handoff).unwrap();
+    original.prepare(Some(30)).unwrap();
+    let backup = location.root.join(BACKUP);
+    let manifest: Manifest = serde_json::from_slice(&fs::read(backup.join(MANIFEST)).unwrap()).unwrap();
+    assert_eq!(manifest.source_schema, 30);
+    assert_eq!(fs::read(backup.join(DATABASE)).unwrap().len() as u64, manifest.database.bytes);
+    assert_eq!(manifest.wal.is_some(), backup.join(WAL).is_file());
+    // A later start finds it complete and never rewrites it.
+    let before = backup_bytes(&location);
+    original.prepare(Some(30)).unwrap();
+    assert_eq!(backup_bytes(&location), before);
+}
+
 #[test]
 fn partial_or_corrupt_backup_is_never_repaired_or_used_for_a_migration() {
     for corrupt in [false, true] {

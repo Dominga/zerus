@@ -87,6 +87,20 @@ impl<'a> Original<'a> {
         };
         let path = self.location.root.join(BACKUP);
         match fs::symlink_metadata(&path) {
+            // Task #421: an EMPTY backup folder (no manifest, no file) is an
+            // interrupted attempt's own leftover - on Windows the 166 install
+            // left one when its first file could not be published. It is
+            // retained under a new name, and the backup is made again. Any
+            // other content keeps the refusal below.
+            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() && empty(&path)? => {
+                let retained = self
+                    .location
+                    .root
+                    .join(format!("{BACKUP}.empty-{}", uuid::Uuid::new_v4()));
+                fs::rename(&path, &retained)
+                    .context("retain an empty desktop rollback backup leftover")?;
+                self.verify()?;
+            }
             Ok(_) => {
                 return self.validate(
                     &self.root.child(BACKUP).map_err(anyhow::Error::msg)?,
@@ -225,6 +239,14 @@ impl<'a> Original<'a> {
         backup.verify().map_err(anyhow::Error::msg)
     }
 }
+/// Task #421: a folder with no entry at all.
+fn empty(path: &std::path::Path) -> Result<bool> {
+    Ok(fs::read_dir(path)
+        .with_context(|| format!("read {}", path.display()))?
+        .next()
+        .is_none())
+}
+
 struct Budget {
     until: Instant,
     remaining: u64,

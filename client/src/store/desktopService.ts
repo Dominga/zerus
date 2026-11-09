@@ -477,7 +477,12 @@ export function takeoverRefusal(view: NotificationOwnership | undefined): Takeov
       return { check: tr("Folder privacy"), reason: tr("Another account can change a folder that holds hgs's record of this app (.local/share/hgs/host or a folder above it)."),
         next: tr("Make that folder changeable only by you (other accounts may keep read access to the folders above it), then restart Zerus.") };
     case "agent_descended_frontend_refused":
-      return { check: tr("Process ancestry"), reason: tr("Zerus was started from an agent's session."), next: tr("Close it and start Zerus from the Start menu or its folder.") };
+      return { check: tr("Process ancestry"), reason: tr("Zerus was started from an agent's session."), next: tr("Close it and start Zerus from the Start menu or its folder.") };    // Task #421 (2026-11-09, package 167): the takeover's hgs child failed
+    // because the desktop service could not open its store; "Restart Zerus"
+    // never helped. Starting the service once shows why, or migrates it.
+    case "child_failed":
+      return { check: tr("Desktop service"), reason: tr("The desktop service did not start, so Zerus could not take over its sessions."),
+        next: tr("Run hgs desktop serve once in a terminal: it starts the service or says why it cannot. Then restart Zerus.") };
   }
   switch (refused.check) {
     case "ownership_journal":

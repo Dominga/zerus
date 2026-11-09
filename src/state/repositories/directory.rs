@@ -701,6 +701,27 @@ mod tests {
         created.verify().unwrap();
     }
 
+    /// Task #421 (os error 32 of 2026-11-09): a directory pinned by open or
+    /// by create accepts a file published into it.
+    #[cfg(windows)]
+    #[test]
+    fn a_pinned_directory_accepts_a_published_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = crate::platform::canonical(temp.path()).unwrap();
+        let parent = Directory::open(&path).unwrap();
+        parent.write_new("opened.json", b"one").unwrap();
+        let created = parent.create("backup", "unused").unwrap();
+        created.write_new("created.json", b"two").unwrap();
+        created.write_new_file("retained.json", b"three").unwrap();
+        assert_eq!(std::fs::read(path.join("opened.json")).unwrap(), b"one");
+        assert_eq!(std::fs::read(path.join("backup/created.json")).unwrap(), b"two");
+        assert_eq!(std::fs::read(path.join("backup/retained.json")).unwrap(), b"three");
+        // Publication never clobbers, and the pins still deny a rename.
+        assert!(created.write_new("created.json", b"other").is_err());
+        assert!(std::fs::rename(&created.path, path.join("moved")).is_err());
+        created.verify().unwrap();
+    }
+
     #[cfg(windows)]
     #[test]
     fn pinned_ancestors_and_destination_deny_replacement() {

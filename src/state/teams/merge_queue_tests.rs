@@ -1629,7 +1629,10 @@ fn a_landing_the_queue_recorded_is_not_read_from_git_again() {
         ..Default::default()
     });
     let view = landing(&team);
-    assert_eq!(view["landed"], json!([{"task":1,"commit":merged}]), "{}", view);
+    // Each landed entry names its task and commit; task 370 adds how the landing was recognized.
+    let landed = view["landed"].as_array().unwrap();
+    assert_eq!(landed.len(), 1, "{}", view);
+    assert_eq!((landed[0]["task"].clone(), landed[0]["commit"].clone()), (json!(1), json!(merged)), "{}", view);
     assert!(view["unlanded"].as_array().unwrap().is_empty(), "{}", view);
 }
 /// Task #370: a cherry-pick of the accepted change counts as landed, and the

@@ -196,9 +196,9 @@ function Detail(props: { a: Account }) {
       </div>
       <Show when={markEditor()}>{(editor) => <Suspense><AccountMarkDialog account={props.a} origin={editor().origin} close={() => setMarkEditor(undefined)} /></Suspense>}</Show>
       <div class="acct-identity selectable">
-        <For each={metadata()} fallback={<div class="acct-meta-note muted" data-meta="note" title={identityNote() || tr("Unavailable")} aria-label={`${tr("Identity")}: ${identityNote() || tr("Unavailable")}`}>{identityNote() || tr("Unavailable")}</div>}>
-          {(field) => <div class="acct-meta-field"><span class="acct-meta-label" title={field.label}>{field.label}</span><MetadataValue kind={field.kind} label={field.label} value={field.value} /></div>}
-        </For>
+        <Index each={metadata()} fallback={<div class="acct-meta-note muted" data-meta="note" title={identityNote() || tr("Unavailable")} aria-label={`${tr("Identity")}: ${identityNote() || tr("Unavailable")}`}>{identityNote() || tr("Unavailable")}</div>}>
+          {(field) => <div class="acct-meta-field"><span class="acct-meta-label" title={field().label}>{field().label}</span><MetadataValue kind={field().kind} label={field().label} value={field().value} /></div>}
+        </Index>
       </div>
 
       <section class="acct-card box">

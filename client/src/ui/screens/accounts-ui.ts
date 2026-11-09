@@ -37,19 +37,13 @@ export function memberOf(a: Account, key: string | undefined, machine: string): 
   return a.members.find((m) => m.key === key) ?? a.members.find((m) => m.host === machine) ?? a.members[0];
 }
 
+/** Keep reported identity fields visible independently of the editable account label. */
 export function identityFields(a: Account) {
   const identity = a.usage.identity;
-  const seen = new Set([a.label.trim().toLowerCase()]);
-  const distinct = (value: string) => {
-    const text = value.trim(), key = text.toLowerCase();
-    if (!text || seen.has(key)) return "";
-    seen.add(key);
-    return text;
-  };
   return {
-    name: distinct(identity.name),
-    email: distinct(identity.email),
-    organization: distinct(identity.organization),
+    name: identity.name.trim(),
+    email: identity.email.trim(),
+    organization: identity.organization.trim(),
     plan: identity.plan,
     signIn: identity.auth_method === "none" ? "" : identity.auth_method,
   };

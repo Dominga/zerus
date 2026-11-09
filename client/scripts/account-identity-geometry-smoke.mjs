@@ -16,7 +16,7 @@ const HARNESS = [
   "client/scripts/account-identity-geometry-smoke.html",
   "client/scripts/account-identity-geometry-smoke.mjs",
 ];
-const CASES = ["loading", "kimi", "codex", "claude", "unavailable", "claude-late"];
+const CASES = ["loading", "kimi", "codex", "codex-email", "claude", "unavailable", "claude-late"];
 const TITLE_CASES = ["short", "email-label", "switch-long", "long-label", "localized-label", "hidden-short", "hidden-long", "unhidden-short"];
 let titleLabels;
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -170,6 +170,10 @@ async function runCase(bidi, widthName, caseName, output) {
   if (caseName === "loading" || caseName === "short") details = await bidi.json("window.accountIdentityFixture.reset()");
   else if (caseName === "kimi") details = await bidi.json("window.accountIdentityFixture.update('kimi')");
   else if (caseName === "codex") details = await bidi.json("window.accountIdentityFixture.select('Codex Work')");
+  else if (caseName === "codex-email") {
+    details = await bidi.json("window.accountIdentityFixture.update('codex-email')");
+    if (details.metadata.find((field) => field.kind === 'email')?.text !== 'codex@example.test' || details.accountLabel.text !== 'codex@example.test') throw Error('reported identity equal to title was hidden');
+  }
   else if (caseName === "claude") details = await bidi.json("window.accountIdentityFixture.select('Claude Team')");
   else if (caseName === "unavailable") details = await bidi.json("window.accountIdentityFixture.update('unavailable')");
   else if (caseName === "claude-late") details = await bidi.json("window.accountIdentityFixture.update('claude-late')");
@@ -238,6 +242,8 @@ async function checkAccountFilters(bidi, output) {
   await bidi.json("window.accountIdentityFixture.requestProfile('claude')");
   await expectRows('explicit requested account clears hiding filters', ['Claude Team', 'Codex Work', 'Kimi Personal']);
   if ((await read()).selected !== 'Claude Team') throw Error('explicit requested account was not selected');
+  await bidi.json('window.accountIdentityFixture.echoMetadata()');
+  await expectRows('unchanged metadata refresh preserves displayed selection and nodes', ['Claude Team', 'Codex Work', 'Kimi Personal']);
   const screenshot = `${output}/accounts-list-filters.png`;
   return { states, screenshot, screenshot_sha256: await bidi.capture(screenshot) };
 }
@@ -327,7 +333,7 @@ try {
   await waitReady(bidi);
   let baseline;
   const captures = [];
-  for (const caseName of ["loading", "kimi", "codex"]) {
+  for (const caseName of ["loading", "kimi", "codex", "codex-email"]) {
     const { details, image } = await runCase(bidi, "narrow-ru", caseName, output);
     if (details.language !== "ru") throw new Error("Russian fixture did not load its catalog");
     checkGeometry(details, baseline, `narrow-ru/${caseName}`);

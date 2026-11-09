@@ -65,18 +65,20 @@ describe("accounts page", () => {
     expect(memberStateLabel("signed-out")).toBe("Sign-in needed");
   });
 
-  it("uses structured identity fields with the core's trimming and title deduplication", () => {
+  it("keeps reported identity visible even when it repeats the editable title", () => {
     const withIdentity = (label: string, identity: Account["usage"]["identity"]) => ({
       ...account([member()]), label, usage: usageOf({ identity }),
     });
     const empty = { email: "", name: "", plan: "", organization: "", account_id: "", auth_method: "" };
     expect(identityFields(withIdentity("Work", empty))).toEqual({ name: "", email: "", organization: "", plan: "", signIn: "" });
+    expect(identityFields(withIdentity("person@example.test", empty)).email).toBe("");
+    expect(identityFields(withIdentity("person@example.test", { ...empty, email: " person@example.test " })).email).toBe("person@example.test");
     expect(identityFields(withIdentity("Work", { ...empty, email: "work@example.test", auth_method: "none" })))
       .toEqual({ name: "", email: "work@example.test", organization: "", plan: "", signIn: "" });
     expect(identityFields(withIdentity("Work", { ...empty, name: " Ада 例 ", email: "ada@example.test", organization: "Организация 例", plan: "Team", auth_method: "passkey" })))
       .toEqual({ name: "Ада 例", email: "ada@example.test", organization: "Организация 例", plan: "Team", signIn: "passkey" });
     expect(identityFields(withIdentity("ada@example.test", { ...empty, name: " Work ", email: "ADA@example.test", organization: "work" })))
-      .toEqual({ name: "Work", email: "", organization: "", plan: "", signIn: "" });
+      .toEqual({ name: "Work", email: "ADA@example.test", organization: "work", plan: "", signIn: "" });
   });
 
   it("words the summary as Qt does", () => {

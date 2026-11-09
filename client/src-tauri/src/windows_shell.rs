@@ -130,6 +130,26 @@ pub fn balloon_click(token: Option<String>) -> BalloonClick {
     }
 }
 
+/// The `WM_SETTINGCHANGE` area Windows names when the light or dark theme
+/// changes (zerus-5wmh.13.14.2).
+#[cfg(any(feature = "live", test))]
+pub fn theme_setting(area: &str) -> bool {
+    area == "ImmersiveColorSet"
+}
+
+/// The tray icon's new foreground after a theme change, when it changes: a
+/// configured `icon-color` keeps it; otherwise white on a dark taskbar and
+/// black on a light one (`trayicon::foreground`).
+#[cfg(any(feature = "live", test))]
+pub fn retinted(
+    current: zerus_client_core::trayicon::Rgb,
+    light: bool,
+    configured: Option<zerus_client_core::trayicon::Rgb>,
+) -> Option<zerus_client_core::trayicon::Rgb> {
+    let next = zerus_client_core::trayicon::foreground(!light, configured);
+    (next != current).then_some(next)
+}
+
 /// Windows tray clicks do not identify a message; Qt also routes only the latest.
 #[cfg(any(feature = "live", test))]
 #[derive(Default)]
@@ -241,6 +261,23 @@ mod tests {
             BalloonClick::Desk("attention:computer:run:key".into())
         );
         assert_eq!(balloon_click(None), BalloonClick::Nothing);
+    }
+    #[test]
+    fn a_theme_change_retints_the_tray_unless_a_colour_is_configured() {
+        use zerus_client_core::trayicon::Rgb;
+        let (white, black) = (Rgb::new(255, 255, 255), Rgb::new(0, 0, 0));
+        assert!(theme_setting("ImmersiveColorSet"));
+        assert!(!theme_setting("WindowMetrics"));
+        assert!(!theme_setting(""));
+        // Dark taskbar to light: white becomes black, and back.
+        assert_eq!(retinted(white, true, None), Some(black));
+        assert_eq!(retinted(black, false, None), Some(white));
+        // No change, no redraw.
+        assert_eq!(retinted(white, false, None), None);
+        // A configured icon-color holds through any theme.
+        let teal = Rgb::new(0, 128, 128);
+        assert_eq!(retinted(teal, true, Some(teal)), None);
+        assert_eq!(retinted(teal, false, Some(teal)), None);
     }
     use serde_json::json;
     #[cfg(windows)]

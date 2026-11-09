@@ -21,6 +21,9 @@ use zerus_client_core::{
 };
 
 const CALLBACK: u32 = WM_APP + 41;
+/// Posted to itself on a theme change: the redraw runs from the message loop,
+/// never inside a shell call that may hold `Inner` (zerus-5wmh.13.14.2).
+const RETHEME: u32 = WM_APP + 42;
 const ICON: u32 = 1;
 const KEY_SELECT: u32 = NIN_SELECT | NINF_KEY;
 pub struct WindowsShell {
@@ -40,6 +43,10 @@ struct Inner {
     bindings: HashMap<u32, String>,
     icon: drawing::Icon,
     foreground: zerus_client_core::trayicon::Rgb,
+    /// `tray.conf`'s `icon-color`, which no theme overrides.
+    configured: Option<zerus_client_core::trayicon::Rgb>,
+    /// The face the icon shows, redrawn in a new foreground.
+    face: Face,
     tooltip: String,
     badge: Option<String>,
     current_notice: crate::windows_shell::NoticeClicks,
@@ -104,6 +111,17 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
         return unsafe { DefWindowProcW(hwnd, message, w, l) };
     }
     if let Some(state) = state(hwnd) {
+        if message == WM_SETTINGCHANGE && crate::windows_shell::theme_setting(&setting_area(l)) {
+            unsafe {
+                PostMessageW(hwnd, RETHEME, 0, 0);
+            }
+            return 0;
+        }
+        if message == RETHEME {
+            let mut inner = state.inner.lock().unwrap_or_else(PoisonError::into_inner);
+            retheme(hwnd, &mut inner, light_taskbar());
+            return 0;
+        }
         if state.taskbar_created != 0 && message == state.taskbar_created {
             let inner = state.inner.lock().unwrap_or_else(PoisonError::into_inner);
             icon(hwnd, &inner, true);
@@ -243,18 +261,8 @@ fn apply(hwnd: HWND, inner: &mut Inner, changes: Vec<Apply>) {
     for change in changes {
         match change {
             Apply::Face(face) => {
-                match drawing::tile(
-                    &face,
-                    unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16),
-                    inner.foreground,
-                ) {
-                    Ok(image) => {
-                        let old = std::mem::replace(&mut inner.icon, image);
-                        icon(hwnd, inner, false);
-                        drop(old);
-                    }
-                    Err(error) => eprintln!("zerus-client: Windows tray icon: {error}"),
-                }
+                inner.face = face;
+                redraw(hwnd, inner);
             }
             Apply::Tooltip(text) => {
                 inner.tooltip = text;
@@ -265,8 +273,53 @@ fn apply(hwnd: HWND, inner: &mut Inner, changes: Vec<Apply>) {
     }
 }
 
-pub fn install(app: &AppHandle, conf: Option<&str>) -> io::Result<()> {
-    // Explorer follows SystemUsesLightTheme, independently of the app theme.
+/// The icon in the current face and foreground.
+fn redraw(hwnd: HWND, inner: &mut Inner) {
+    match drawing::tile(
+        &inner.face,
+        unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16),
+        inner.foreground,
+    ) {
+        Ok(image) => {
+            let old = std::mem::replace(&mut inner.icon, image);
+            icon(hwnd, inner, false);
+            drop(old);
+        }
+        Err(error) => eprintln!("zerus-client: Windows tray icon: {error}"),
+    }
+}
+
+/// A theme change redraws the icon in the taskbar's new foreground, as the
+/// macOS menu bar follows its appearance (zerus-5wmh.13.14.2).
+fn retheme(hwnd: HWND, inner: &mut Inner, light: bool) {
+    if let Some(next) = crate::windows_shell::retinted(inner.foreground, light, inner.configured) {
+        inner.foreground = next;
+        redraw(hwnd, inner);
+    }
+}
+
+/// The area a `WM_SETTINGCHANGE` names (its `lParam` string), at most 64
+/// characters; empty when it names none.
+fn setting_area(l: LPARAM) -> String {
+    let text = l as *const u16;
+    if text.is_null() {
+        return String::new();
+    }
+    let mut units = Vec::new();
+    // SAFETY: Windows passes a NUL-terminated string valid for this call; at
+    // most 64 units are read.
+    while units.len() < 64 {
+        let unit = unsafe { *text.add(units.len()) };
+        if unit == 0 {
+            break;
+        }
+        units.push(unit);
+    }
+    String::from_utf16_lossy(&units)
+}
+
+/// Explorer's taskbar follows SystemUsesLightTheme, independently of the app theme.
+fn light_taskbar() -> bool {
     use windows_sys::Win32::System::Registry::*;
     let mut light = 0u32;
     let mut size = std::mem::size_of_val(&light) as u32;
@@ -281,10 +334,14 @@ pub fn install(app: &AppHandle, conf: Option<&str>) -> io::Result<()> {
             &mut size,
         );
     }
+    light == 1
+}
+
+pub fn install(app: &AppHandle, conf: Option<&str>) -> io::Result<()> {
     let configured = conf
         .and_then(|text| zerus_client_core::menubar::tray_conf_value(text, "icon-color"))
         .and_then(|text| zerus_client_core::trayicon::parse_color(&text));
-    let foreground = zerus_client_core::trayicon::foreground(light != 1, configured);
+    let foreground = zerus_client_core::trayicon::foreground(!light_taskbar(), configured);
     let image = drawing::tile(
         &Face::counts(0, 0, false),
         unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16),
@@ -309,6 +366,8 @@ pub fn install(app: &AppHandle, conf: Option<&str>) -> io::Result<()> {
         bindings: HashMap::new(),
         icon: image,
         foreground,
+        configured,
+        face: Face::counts(0, 0, false),
         tooltip: "Zerus".into(),
         badge: None,
         current_notice: Default::default(),

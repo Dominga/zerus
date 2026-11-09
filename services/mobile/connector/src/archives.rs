@@ -52,7 +52,7 @@ pub fn supported_page(page: &Value) -> bool {
 
 /// The preview keeps these listing fields of a row, and these texts cut to
 /// 240 code points.
-const PREVIEW_FIELDS: [&str; 26] = [
+const PREVIEW_FIELDS: [&str; 27] = [
     "name",
     "cmd",
     "agent",
@@ -79,6 +79,7 @@ const PREVIEW_FIELDS: [&str; 26] = [
     "allowed_actions",
     "action_reasons",
     "account_id",
+    "notification_preferences",
 ];
 const PREVIEW_TEXTS: [&str; 3] = ["prompt", "last_message", "title"];
 
@@ -474,6 +475,22 @@ mod tests {
             meta,
             json!({"schema": 1, "available": true, "total": 5, "loaded": 2, "partial": true})
         );
+    }
+
+    #[test]
+    fn preview_preserves_notification_preferences_and_unknown_within_the_budget() {
+        let preference = json!({"conversation_id":"conversation","muted":true,"revision":7,
+            "suppressed":{"reply_id":null,"attention_signature":null,"optional_question_ids":[],"main_attention":null,"child_attention":{}}});
+        let mut first = row(A, 20.0);
+        first["notification_preferences"] = preference.clone();
+        let mut second = row(B, 10.0);
+        second["notification_preferences"] = Value::Null;
+        let (rows, metadata) = preview(&listed(vec![first.clone(), second], 2)).unwrap();
+        assert_eq!(rows[0].get("notification_preferences"), Some(&preference));
+        assert_eq!(rows[1].get("notification_preferences"), Some(&Value::Null));
+        assert_eq!(metadata["loaded"], 2);
+        first["notification_preferences"] = json!({"padding":"x".repeat(128 * 1024)});
+        assert!(preview(&listed(vec![first], 1)).unwrap().0.is_empty());
     }
 
     #[test]

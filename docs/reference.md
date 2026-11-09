@@ -888,6 +888,15 @@ changes or five minutes expire. Native identity checks and the existing fresh
 snapshot gate remain in force for that window. Updated Android ignores this
 compatibility window when page operations are supported; an old relay can still
 show it while the system updates. Full Archive browsing needs the updated client.
+Archive rows carry the current host-owned `notification_preferences`, using the
+original journal and native conversation identity. Both connectors retain the
+complete preference or explicit unknown value in their bounded previews; a
+known relay conversation never silently loses its preference revision when it
+is archived. Corrupt host preferences remain unknown. Native pages keep their
+250,000-byte summary budget; one larger row is returned alone if it fits
+768 KiB, within the 1 MiB response bound, so a valid 384 KiB preference can still
+be read. The compatibility preview remains capped at 128 KiB and omits an
+oversized row.
 The legacy `ls --json` default remains compatible. The native, read-only ABI is:
 
 ```sh

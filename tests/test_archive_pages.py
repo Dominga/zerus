@@ -72,6 +72,35 @@ class ArchivePages(unittest.TestCase):
         result=subprocess.run([str(HGS),'ls','--json','--local','--no-archives'],env=self.env,capture_output=True,text=True,timeout=20)
         self.assertEqual(result.returncode,0,result.stderr);snapshot=json.loads(result.stdout)
         self.assertTrue(snapshot['archive_paging']);self.assertEqual(snapshot['sessions'],[])
+    def test_archived_preferences_follow_the_original_journal_and_current_store(self):
+        owner='session:00000000-0000-4000-8000-000000000050'
+        row=self.record(0,journal_name=owner)
+        preference=dict(conversation_id=row['conversation_id'],muted=True,revision=3,
+                        suppressed=dict(reply_id=None,attention_signature=None,optional_question_ids=[],main_attention=None,child_attention={}))
+        store=self.state/'notifications.json'
+        store.write_text(json.dumps(dict(version=1,sessions={owner:{row['conversation_id']:preference}})))
+        for bounded in (False,True):
+            result=self.run_query(bounded=bounded)['sessions'][0]
+            self.assertEqual(result.get('notification_preferences'),preference)
+            self.assertEqual(result['conversation_id'],row['conversation_id'])
+        # A warm metadata index must not retain an earlier preference revision.
+        preference.update(muted=False,revision=4)
+        store.write_text(json.dumps(dict(version=1,sessions={owner:{row['conversation_id']:preference}})))
+        self.assertEqual(self.run_query()['sessions'][0].get('notification_preferences'),preference)
+        store.write_text('{broken')
+        result=self.run_query()['sessions'][0]
+        self.assertIn('notification_preferences',result)
+        self.assertIsNone(result['notification_preferences'],'Unreadable preferences remain unknown')
+    def test_a_valid_large_preference_fits_an_archive_page_and_the_response_bound(self):
+        row=self.record(0)
+        children={f'child-{i}':dict(phase='input',request_id='q'*1200,started_at=None) for i in range(220)}
+        preference=dict(conversation_id=row['conversation_id'],muted=True,revision=1,
+                        suppressed=dict(reply_id=None,attention_signature=None,optional_question_ids=[],main_attention=None,child_attention=children))
+        self.assertGreater(len(json.dumps(preference)),250000)
+        (self.state/'notifications.json').write_text(json.dumps(dict(version=1,sessions={row['name']:{row['conversation_id']:preference}})))
+        page=self.run_query(bounded=True)
+        self.assertEqual(page['sessions'][0].get('notification_preferences'),preference)
+        self.assertLess(len(json.dumps(page)),1048576)
     def test_non_regular_archive_entries_never_block_catalog(self):
         self.record(0)
         if hasattr(os,'mkfifo'):os.mkfifo(self.archives/(str(uuid.UUID(int=2))+'.json'))

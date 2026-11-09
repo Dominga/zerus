@@ -5,7 +5,7 @@
 import { render } from "solid-js/web";
 import { For, Show } from "solid-js";
 import { MemberCard } from "../ui/teams/MemberCard";
-import { TestsPanel } from "../ui/teams/plan-panels";
+import { BuildsPanel, TestsPanel } from "../ui/teams/plan-panels";
 import { TeamSettingsDialog } from "../ui/teams/TeamSettingsDialog";
 import { memberTree } from "../ui/teams/members";
 import { sideLists } from "../ui/teams/sideLists";
@@ -95,7 +95,7 @@ render(() => (
       </div>
     </Show>
     <Show when={view === "tests"}>
-      <div style={{ width: "760px" }}><TestsPanel tests={tests} onMore={() => {}} builds={builds} onLoadBuilds={() => {}} onForce={async () => ""} /></div>
+      <div style={{ width: "760px" }}><TestsPanel tests={tests} onMore={() => {}} onForce={async () => ""} /><BuildsPanel builds={builds} /></div>
     </Show>
     <Show when={view === "settings"}>
       <div class="team-tab" style={{ width: "640px", height: "100%" }}><TeamSettingsDialog team={team} onClose={() => {}} /></div>

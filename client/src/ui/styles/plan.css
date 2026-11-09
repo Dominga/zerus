@@ -539,3 +539,17 @@
 .pt-card.pt-card-selected { border-color: var(--z-color-accent); box-shadow: 0 0 0 1px var(--z-color-accent) inset; background: color-mix(in srgb, var(--z-color-accent) 8%, var(--z-color-surface)); }
 .pt-card:focus { outline: none; }
 .pt-card:focus-visible { outline: 2px solid var(--z-color-focus); outline-offset: 1px; }
+
+/* Task #462 (owner, package 168): the profile's four modes, its tables and the
+   Builds mode's own counts. */
+.pm-profile-modes { margin: 0 0 8px; }
+.pm-loss-order { display: flex; justify-content: flex-end; padding: 0 2px 6px; }
+.pm-table { width: 100%; border-collapse: collapse; font-size: var(--fs-xs); }
+.pm-table th { padding: 4px 8px; border-bottom: 1px solid var(--z-color-divider); color: var(--z-color-muted); font-weight: 500; text-align: left; }
+.pm-table td { padding: 5px 8px; border-bottom: 1px solid var(--z-color-divider); vertical-align: top; }
+.pm-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.pm-table .warn { color: var(--z-color-warn); }
+.pm-table .accent { color: var(--z-color-accent); }
+.pm-tests-counts { display: flex; gap: 6px; padding: 2px 0 8px; }
+.pm-tests-counts .pm-pill { background: var(--z-color-field); color: var(--z-color-muted); }
+.pm-tests-counts .pm-count-on { background: var(--z-color-segment-on); color: var(--z-color-accent); }

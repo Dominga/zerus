@@ -5,7 +5,7 @@ import { Dropdown } from "../lib/Dropdown";
 import { tr } from "../../i18n";
 import type { PlanGraph, TeamView } from "./types";
 import type { TeamBuildsView, TeamProfileView, TeamTaskView, TeamTestsView, TeamTimelineView } from "../../types";
-import { HeatLegend, HeatLine, PlanModeBar, TestsPanel, runStatusLabel, stageLabel } from "./plan-panels";
+import { BuildsPanel, HeatLegend, HeatLine, PlanModeBar, TestsPanel, runStatusLabel, stageLabel } from "./plan-panels";
 import { ProfilePage } from "./profile-page";
 import { LanesView, type LaneEdit } from "./LanesView";
 import { spawnedFrom, heatModeSeed, stageChips, type PlanMode } from "./planModes";
@@ -199,6 +199,8 @@ export function PlanView(props: PlanViewProps): JSX.Element {
   const heat = (id: number): TaskHeat | null => (heatView() ? heatOf(heatMode(), props.profile, id) : null);
   createEffect(() => {
     if (mode() === "tests") props.onLoadTests?.(null);
+    // Task #462: the Builds mode is its own tab and reads the broker when opened.
+    if (mode() === "builds") props.onLoadBuilds?.();
     if (mode() === "profile" || heatView()) props.onLoadProfile?.();
   });
   const [collapsed, setCollapsed] = createSignal<Set<number>>(
@@ -830,7 +832,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
               title={tr("A click on a member's card shows only its tasks. Click here or press Esc to show every member again.")}
               onClick={() => chooseMember("")}>{tr("Only %1's tasks", memberName())}<Icon name="x" size={11} /></button>
           </Show>
-          <Show when={mode() !== "profile" && mode() !== "tests"}>
+          <Show when={mode() !== "profile" && mode() !== "tests" && mode() !== "builds"}>
             <div class="pm-group pm-switches" data-plan-group="switches">
               <button type="button" class="pm-toggle" classList={{ on: includeCancelled() }} aria-pressed={includeCancelled()}
                 data-toggle="cancelled" onClick={() => setIncludeCancelled(!includeCancelled())}>
@@ -987,8 +989,11 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         </div>
       </Show>
       <Show when={mode() === "tests"}>
-        <TestsPanel tests={props.tests} onMore={() => props.onLoadTests?.(props.tests?.next ?? null)}
-          builds={props.builds} buildsError={props.buildsError} onLoadBuilds={props.onLoadBuilds} onForce={props.onForceTest} />
+        <TestsPanel tests={props.tests} onMore={() => props.onLoadTests?.(props.tests?.next ?? null)} onForce={props.onForceTest} />
+        {detail()}
+      </Show>
+      <Show when={mode() === "builds"}>
+        <BuildsPanel builds={props.builds} error={props.buildsError} />
         {detail()}
       </Show>
     </section>

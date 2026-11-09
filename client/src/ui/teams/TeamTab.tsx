@@ -209,7 +209,7 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
       return;
     }
     setModeNoticeTone("info");
-    const receipt = outcome.receipt ?? {};
+    const receipt = ("receipt" in outcome ? outcome.receipt : undefined) ?? {};
     const status = typeof receipt.status === "string" ? receipt.status : "";
     const named = [receipt.title, receipt.working_mode].find((value): value is string => typeof value === "string" && value !== "") || "";
     const text = status === "already"

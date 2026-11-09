@@ -2512,5 +2512,7 @@
   "Task states": "Состояния задач",
   "New team…": "Новая команда…",
   "No sessions in this project yet.": "В этом проекте пока нет сеансов.",
-  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд"
+  "%1 sessions, %2 in teams, %3 teams": "%1 сеансов, %2 в командах, %3 команд",
+  "Member details": "Подробности об участнике",
+  "State colours: working, building and running tests are blue; waiting for its own job, for the lead or for a person is amber; needs your answer, blocked or failed is red; idle or done is grey; paused or offline is muted and hatched.": "Цвета состояний: работа, сборка и тесты синие; ожидание своей задачи, ведущего или человека янтарное; нужен ваш ответ, заблокировано или ошибка красные; простой или готово серые; пауза или офлайн приглушённые и штрихованные."
 }

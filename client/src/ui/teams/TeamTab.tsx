@@ -440,6 +440,8 @@ function SideColumn(props: {
 }) {
   const members = createMemo(() => shownMembers(props.team));
   const lead = createMemo(() => props.team.members.find((member) => member.lead));
+  // Task #347: the Members header explains the card colours on hover.
+  const memberLegend = () => tr("State colours: working, building and running tests are blue; waiting for its own job, for the lead or for a person is amber; needs your answer, blocked or failed is red; idle or done is grey; paused or offline is muted and hatched.");
   // Spec 5.6: the members as a tree; a folded sub-lead hides its reports.
   const [folded, setFolded] = createSignal<Set<string>>(new Set());
   const tree = createMemo(() => {
@@ -456,7 +458,7 @@ function SideColumn(props: {
       <SideLists team={props.team} onGo={props.onGo} />
       <TeamQuestions computer={props.computer} team={props.team} />
       <section class="team-members" style={{ height: `${teamLayout.membersShare()}%` }} aria-label={tr("Members")}>
-        <div class="team-section-head"><b>{tr("Members")}</b><span class="dim mono">{members().length}</span>
+        <div class="team-section-head" title={memberLegend()}><b>{tr("Members")}</b><span class="dim mono">{members().length}</span>
           <span class="grow" />
           <Show when={canAdd()}>
             <button type="button" class="btn ghost small" data-action="add-member" title={tr("Add a member; it starts with the first task it gets")} onClick={() => setAdding(true)}>{tr("+ Member")}</button>

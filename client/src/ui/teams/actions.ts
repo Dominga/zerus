@@ -17,7 +17,7 @@ export interface ActTeam {
   paused?: { at?: number; by?: string; reason?: string } | null;
   /** The owner's attention items as hgs words them (task 95 reads `lead_stalled`). */
   attention?: unknown[];
-  members: { id: string; role: string; agent: string; computer: string; lead: boolean; session: { name: string } | null }[];
+  members: { id: string; role: string; agent: string; computer: string; lead: boolean; session: { name: string; host?: string } | null }[];
   tasks: ActTask[];
   phases: { n: number; title: string; state: string; status: string; mode?: string }[];
   /** Task #58: the free phase, and whether hgs sends each phase's mode. */
@@ -41,6 +41,8 @@ export interface ActTask {
   waits?: string;
   /** Task 55: the newest attempt's open questions to the lead. */
   questions?: { id: string; text: string; at: number }[];
+  /** Task #415: an attempt that ended without a report: the card offers its last reply. */
+  no_report?: boolean; attempt_id?: string; archived?: boolean;
   pipeline_run?: { name: string; accept: string; stages: string[]; open: { stage: number; kind: string; member: string; state: string } | null } | null;
 }
 
@@ -712,6 +714,19 @@ export class TeamActions {
     const attempt = outcome && outcome !== "cancelled" && outcome.outcome === "done" ? retryContinues(outcome.receipt) : null;
     if (attempt !== null) { this.notice = retryContinueText(attempt); this.changed(); }
     return outcome;
+  }
+  /**
+   * Task #415: a No report attempt's last reply becomes its report (the owner,
+   * or the lead since task #362); hgs reads the reply the attempt kept.
+   */
+  useLastReply(task: ActTask) {
+    const attempt = task.attempt_id ?? "";
+    if (!attempt) {
+      this.notice = tr("This task has no attempt to report.");
+      this.changed();
+      return Promise.resolve("failed" as const);
+    }
+    return this.run(`use-last-reply:${task.id}`, { kind: "use_last_reply", task: task.id, attempt });
   }
   /** Task 55: the owner's answer to a member's question (`hgs team reply`); nothing without text or for a closed question. */
   reply(task: ActTask, question: string, text: string) {

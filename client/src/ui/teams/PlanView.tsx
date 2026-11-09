@@ -42,6 +42,10 @@ export interface PlanViewProps {
   loadTimeline?: (phase: number | null) => Promise<TeamTimelineView>;
   /** Task 40: the task card's actions (ui/teams/TeamActions.tsx TaskActions), drawn under the task's detail. */
   taskActions?: (id: number) => JSX.Element;
+  /** Task #415: a No report task's kept last reply, shown on its board card. */
+  noReportReply?: (task: number) => string;
+  /** Task #415: the board card's "Use last reply as report". */
+  onUseLastReply?: (task: TeamTaskView) => void;
   /** Task #58: a phase header's mode chip and switch (ui/teams/TeamActions.tsx PhaseModeControl). */
   phaseActions?: (n: number) => JSX.Element;
   /** Task 197 (P2): the tasks with a problem and its reason (Qt problemTasks/problemTexts). */
@@ -551,11 +555,14 @@ export function PlanView(props: PlanViewProps): JSX.Element {
   const boardCard = (task: TeamTaskView) => {
     const problem = problems().get(task.id);
     const taskHeatNow = heat(task.id);
+    const reply = () => (task.no_report ? props.noReportReply?.(task.id) ?? "" : "");
+    const activate = () => open(task.id);
     return (
-      <button type="button" class={`pm-card pm-board-card pt-tone-${tone(task)}`} classList={{ problem: !!problem, draft: task.status === "draft", crit: task.severity === "crit", minor: task.severity === "minor" }}
+      <div role="button" tabindex="0" class={`pm-card pm-board-card pt-tone-${tone(task)}`} classList={{ problem: !!problem, draft: task.status === "draft", crit: task.severity === "crit", minor: task.severity === "minor" }}
         style={taskHeatNow ? { "--heat": String(taskHeatNow.tint) } : undefined}
-        data-task={task.id} data-severity={task.severity || undefined} title={[`#${task.id} ${task.title}`, problem?.text ?? taskState(task).text, taskHeatNow?.tip ?? ""].filter(Boolean).join("\n")}
-        onClick={() => open(task.id)}>
+        data-task={task.id} data-severity={task.severity || undefined} data-no-report={task.no_report ? "true" : undefined}
+        title={[`#${task.id} ${task.title}`, problem?.text ?? taskState(task).text, taskHeatNow?.tip ?? "", reply()].filter(Boolean).join("\n")}
+        onClick={activate} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); activate(); } }}>
         <span class="pm-card-line">
           <span class="pt-state"><Icon name={statusIcon(task, !!problem)} size={13} /></span>
           <span class="pm-id">#{task.id}</span>
@@ -575,7 +582,16 @@ export function PlanView(props: PlanViewProps): JSX.Element {
             <For each={stageChips(task.pipeline_run)}>{(stage) => <span class={`pm-stage pm-stage-${stage.state || "waiting"}`}>{stageLabel(stage.kind)}</span>}</For>
           </span>
         </Show>
-      </button>
+        <Show when={task.no_report}>
+          <span class="pm-card-noreport">
+            <Show when={reply()} fallback={<span class="dim">{tr("No report")}</span>}><span class="ell" title={reply()}>{reply()}</span></Show>
+            <Show when={props.onUseLastReply}>
+              <button type="button" class="btn small primary" data-action="use-last-reply"
+                onClick={(event) => { event.stopPropagation(); props.onUseLastReply!(task); }}>{tr("Use last reply as report")}</button>
+            </Show>
+          </span>
+        </Show>
+      </div>
     );
   };
 

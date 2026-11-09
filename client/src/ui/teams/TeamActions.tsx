@@ -10,7 +10,8 @@ import {
   leadMemberOf,
   type ActTask, type ActTeam, type BarAction, type BarChip, type TaskForm,
 } from "./actions";
-import type { ComputerId, TeamFindingItem, TeamPhaseView } from "../../types";
+import type { ComputerId, TeamFindingItem, TeamPhaseView, TeamTaskView, TeamView } from "../../types";
+import { noReportReply, remindMember } from "./noReport";
 import { acceptedUnstarted, buttonText, menuText, phaseHeader, type HeaderPhase, type PhaseButton, type PhaseMenuId } from "./phaseHeader";
 
 // Task 40: the team bar's actions and chips, and the task card's actions
@@ -569,6 +570,16 @@ export function TaskActions(props: { computer: ComputerId; team: ActTeam; task: 
   const [returnLater, setReturnLater] = createSignal(false);
   const [menu, setMenu] = createSignal<"more" | "reassign" | undefined>();
   const [delegate, setDelegate] = createSignal(false);
+  // Task #415: the kept last reply of a No report attempt, and whether its
+  // whole text is shown.
+  const [replyOpen, setReplyOpen] = createSignal(false);
+  const [remindNotice, setRemindNotice] = createSignal("");
+  const reply = () => noReportReply(teams.inbox(props.computer, props.team.id)?.items ?? [], props.task.id);
+  const remind = async () => {
+    const outcome = await remindMember(props.computer, props.team as unknown as TeamView, props.task as unknown as TeamTaskView);
+    setRemindNotice(outcome === "missing" ? tr("The member's session is not open; open it to send the reminder.")
+      : outcome === "draft" ? tr("The session already has a draft; the reminder was not added.") : "");
+  };
   const open = (next: TaskForm) => { setForm(next); setReason(""); setReturnLater(false); setMenu(undefined); };
   const words = () => (form() ? formText(props.team, props.task, form()!) : undefined);
   const peers = () => props.team.members.filter((member) => member.id !== props.task.assignee && !member.lead);
@@ -601,6 +612,31 @@ export function TaskActions(props: { computer: ComputerId; team: ActTeam; task: 
   };
   return (
     <div class="team-task-actions" data-task={props.task.id}>
+      <Show when={props.task.no_report}>
+        <div class="team-no-report" data-no-report={props.task.id}>
+          <div class="team-no-report-head">
+            <Icon name="message-square" size={13} />
+            <b>{tr("No report")}</b>
+            <span class="dim">{tr("The member's last reply")}</span>
+            <span class="grow" />
+            <Show when={reply()}>
+              <button type="button" class="btn small ghost" data-action="reply-more" aria-expanded={replyOpen()} onClick={() => setReplyOpen(!replyOpen())}>
+                {replyOpen() ? tr("Show less") : tr("Show more")}
+              </button>
+            </Show>
+          </div>
+          <Show when={reply()} fallback={<p class="pm-empty">{tr("No reply was kept for this attempt")}</p>}>
+            <p class={replyOpen() ? "team-no-report-text open" : "team-no-report-text"}>{reply()}</p>
+          </Show>
+          <div class="team-no-report-actions">
+            <button type="button" class="btn small primary" data-action="use-last-reply" disabled={read().busy || !props.task.attempt_id}
+              onClick={() => void model.useLastReply(props.task)}>{tr("Use last reply as report")}</button>
+            <button type="button" class="btn small" data-action="remind-member" disabled={read().busy} onClick={() => void remind()}>{tr("Remind")}</button>
+            <button type="button" class="btn small" data-action="retry-no-report" disabled={read().busy} onClick={() => void model.retry(props.task)}>{tr("Retry")}</button>
+          </div>
+          <Show when={remindNotice()}><div class="team-proposal-notice" role="status">{remindNotice()}</div></Show>
+        </div>
+      </Show>
       <Show when={(props.task.questions ?? []).length > 0}>
         <div class="team-task-questions">
           <b>{tr("Questions")}</b>

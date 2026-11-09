@@ -32,6 +32,7 @@ import { WorkingModeRow } from "./WorkingModeRow";
 import { closeWorkingMode, markWorkingModeKept, workingModeShown } from "../../store/workingMode";
 import { WaitingBanner } from "./Waiting";
 import { Blockers, PhaseActions, TaskActions, TeamBarActions, TeamBarChips, TeamModeControl, TeamQuestions, createPlanEditing } from "./TeamActions";
+import { noReportReply } from "./noReport";
 import { TeamActions as TeamActionModel } from "./actions";
 import { composer } from "../../store/composer";
 import type { ComputerId, TeamCall, TeamMemberView, TeamTaskView, TeamView } from "../../types";
@@ -249,6 +250,8 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
                   const task = props.team.tasks.find((candidate) => candidate.id === id);
                   return task && !task.archived ? <TaskActions computer={props.computer} team={props.team} task={task} /> : <></>;
                 }}
+                noReportReply={(id) => noReportReply(teams.inbox(props.computer, props.team.id)?.items ?? [], id)}
+                onUseLastReply={(task) => void new TeamActionModel(windowPort, () => ({ computer: props.computer, team: props.team })).useLastReply(task)}
                 phaseActions={(n) => <PhaseActions computer={props.computer} team={props.team} phase={n} owner={props.owner} />}
                 editing={plan.editing()}
                 problems={planProblems()}

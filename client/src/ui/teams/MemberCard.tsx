@@ -16,6 +16,7 @@ import { answerRow, newestAnswers, permissionSummary } from "./permissionAnswers
 import { now } from "../../store/ui";
 import { accountLabel, limitText, memberMenu, memberAccount, moveAffected, reportsOf, scaleRoom, waitingForTask, type MemberMenuId } from "./members";
 import type { ComputerId, TeamMemberView, TeamPulseView, TeamView } from "../../types";
+import { TextInput } from "../lib/TextField";
 
 // Task 199 (owner, 2026-11-07: Tauri parity with Qt): a member's card in the
 // side column as Qt's TeamWorkspace::members draws it, and its menu
@@ -286,7 +287,7 @@ export function MemberCard(props: {
             <Show when={permission()!.command}><code class="team-permission-command">{permission()!.command}</code></Show>
             <Show when={permission()!.reason}><div class="dim">{tr("Agent: %1", permission()!.reason!)}</div></Show>
             <div class="team-member-line">
-              <input class="field grow" placeholder={tr("Why deny? The member receives this")} value={denyReason()} onInput={(event) => setDenyReason(event.currentTarget.value)}
+              <TextInput class="field grow" placeholder={tr("Why deny? The member receives this")} value={denyReason()} onInput={(event) => setDenyReason(event.currentTarget.value)}
                 disabled={!answerable()} data-field="deny-reason" />
               <button type="button" class="btn small danger" data-action="permission-deny" disabled={!answerable() || read().busy}
                 title={answerable() ? undefined : tr("This hgs sends no answer ids for the question; answer it in the session.")}
@@ -371,7 +372,7 @@ function ScaleDialog(props: { role: string; member: TeamMemberView; room: number
       <div class="dlg-head"><h2>{tr("Add more %1", props.role)}</h2></div>
       <div class="dlg-body">
         <p class="team-confirm-text">{tr("How many more %1 members, each on %2?", props.role, agent)}</p>
-        <input class="field" type="number" min={1} max={props.room} value={count()} data-field="scale-count"
+        <TextInput class="field" type="number" min={1} max={props.room} value={count()} data-field="scale-count"
           onInput={(event) => setCount(Math.max(1, Math.min(props.room, Number(event.currentTarget.value) || 1)))} />
       </div>
       <div class="dlg-foot"><span class="spacer" />
@@ -395,7 +396,7 @@ function MoveAccountDialog(props: { team: TeamView; member: TeamMemberView; clos
       <div class="dlg-body">
         <p class="team-confirm-text">{tr("Moves every %1 member on %2 to another account: %3.", props.member.agent, accountLabel(props.member), affected.join(", "))}</p>
         <label class="dim">{tr("To account")}</label>
-        <input class="field" value={to()} placeholder={tr("Account id")} onInput={(event) => setTo(event.currentTarget.value)} data-field="move-to" />
+        <TextInput class="field" value={to()} placeholder={tr("Account id")} onInput={(event) => setTo(event.currentTarget.value)} data-field="move-to" />
       </div>
       <div class="dlg-foot"><span class="spacer" />
         <button type="button" class="btn" onClick={props.close}>{tr("Cancel")}</button>
@@ -427,19 +428,19 @@ export function AddMemberDialog(props: { close: () => void; submit: (member: Rec
       <div class="dlg-body">
         <p class="team-confirm-text">{tr("Add a member; it starts with the first task it gets")}</p>
         <label class="dim">{tr("Role")}</label>
-        <input class="field" value={role()} onInput={(event) => setRole(event.currentTarget.value)} data-field="member-role" />
+        <TextInput class="field" value={role()} onInput={(event) => setRole(event.currentTarget.value)} data-field="member-role" />
         <label class="dim">{tr("Agent")}</label>
         <select class="field" value={agent()} onChange={(event) => setAgent(event.currentTarget.value)} data-field="member-agent">
           <For each={AGENTS}>{(name) => <option value={name}>{name}</option>}</For>
         </select>
         <label class="dim">{tr("Model")}</label>
-        <input class="field" value={model()} onInput={(event) => setModel(event.currentTarget.value)} />
+        <TextInput class="field" value={model()} onInput={(event) => setModel(event.currentTarget.value)} />
         <label class="dim">{tr("Effort")}</label>
         <select class="field" value={effort()} onChange={(event) => setEffort(event.currentTarget.value)}>
           <For each={EFFORTS}>{(level) => <option value={level}>{level || tr("its effort")}</option>}</For>
         </select>
         <label class="dim">{tr("Account")}</label>
-        <input class="field" value={account()} placeholder={tr("Default account")} onInput={(event) => setAccount(event.currentTarget.value)} />
+        <TextInput class="field" value={account()} placeholder={tr("Default account")} onInput={(event) => setAccount(event.currentTarget.value)} />
       </div>
       <div class="dlg-foot"><span class="spacer" />
         <button type="button" class="btn" onClick={props.close}>{tr("Cancel")}</button>

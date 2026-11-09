@@ -8,6 +8,7 @@ import { teamConfirm } from "../../../store/teamConfirm";
 import { formOf, keyMode, listNote, machineNames, sshMode, urlHint, type SshMode } from "../model-servers";
 import { NEW_SERVER, requestedServer } from "./model-server-section";
 import "../../styles/model-servers.css";
+import { TextInput } from "../../lib/TextField";
 
 // Task 67: Qt's ModelServerSettings. Adds, edits, tests and removes this
 // computer's model servers through hgs (save and test --json). A saved key is
@@ -102,11 +103,11 @@ export function ModelServersSection(): JSX.Element {
         </ul>
         <form class="ms-form" onSubmit={(e) => { e.preventDefault(); void save(); }}>
           <div class="ms-field"><label for="msf-name">{tr("Name")}</label>
-            <div class="ms-control"><input id="msf-name" ref={nameField} class="field" placeholder={tr("lab")} value={form().name} onInput={(e) => set({ name: e.currentTarget.value })} /></div>
+            <div class="ms-control"><TextInput id="msf-name" ref={nameField} class="field" placeholder={tr("lab")} value={form().name} onInput={(e) => set({ name: e.currentTarget.value })} /></div>
           </div>
           <div class="ms-field"><label for="msf-url">{tr("Server root")}</label>
             <div class="ms-control">
-              <input id="msf-url" class="field mono" placeholder="http://host.example:8000" value={form().base_url} onInput={(e) => set({ base_url: e.currentTarget.value })} />
+              <TextInput id="msf-url" class="field mono" placeholder="http://host.example:8000" value={form().base_url} onInput={(e) => set({ base_url: e.currentTarget.value })} />
               <div class="ms-seg" role="radiogroup" aria-label={tr("API kind")}>
                 <button type="button" role="radio" aria-checked={form().kind !== "anthropic"} classList={{ on: form().kind !== "anthropic" }} onClick={() => set({ kind: "openai" })}>{tr("OpenAI")}</button>
                 <button type="button" role="radio" aria-checked={form().kind === "anthropic"} classList={{ on: form().kind === "anthropic" }} onClick={() => set({ kind: "anthropic" })}>{tr("Anthropic")}</button>
@@ -119,7 +120,7 @@ export function ModelServersSection(): JSX.Element {
           <div class="ms-field"><label for="msf-key">{tr("API key")}</label>
             <div class="ms-control">
               <Show when={key().stored}><span class="muted"><Icon name="key-round" size={12} /> {key().text}</span></Show>
-              <Show when={key().field}><input id="msf-key" type="password" class="field" placeholder={tr("none")} value={form().key} onInput={(e) => set({ key: e.currentTarget.value })} /></Show>
+              <Show when={key().field}><TextInput id="msf-key" type="password" class="field" placeholder={tr("none")} value={form().key} onInput={(e) => set({ key: e.currentTarget.value })} /></Show>
               <Show when={key().actions}>
                 <button type="button" class="btn small" onClick={() => set({ key_change: "replace" })}>{tr("Replace")}</button>
                 <button type="button" class="btn small danger" onClick={() => set({ key_change: "remove" })}>{tr("Remove")}</button>
@@ -139,7 +140,7 @@ export function ModelServersSection(): JSX.Element {
                 </select>
               </Show>
               <Show when={ssh() === "alias"}>
-                <input class="field" aria-label={tr("SSH alias")} placeholder={tr("an alias from your SSH configuration")} value={form().ssh} onInput={(e) => set({ ssh: e.currentTarget.value })} />
+                <TextInput class="field" aria-label={tr("SSH alias")} placeholder={tr("an alias from your SSH configuration")} value={form().ssh} onInput={(e) => set({ ssh: e.currentTarget.value })} />
               </Show>
             </div>
           </div>
@@ -147,22 +148,22 @@ export function ModelServersSection(): JSX.Element {
           <p class="ms-control-title"><b>{tr("CONTROL COMMANDS")}</b> {tr("optional, argv templates; {model} is the model, {server} the server")}</p>
           <div class="ms-field"><label for="msf-status">{tr("Status")}</label>
             <div class="ms-control">
-              <input id="msf-status" class="field mono" placeholder={tr("not set")} value={form().status} onInput={(e) => set({ status: e.currentTarget.value })} />
+              <TextInput id="msf-status" class="field mono" placeholder={tr("not set")} value={form().status} onInput={(e) => set({ status: e.currentTarget.value })} />
               <button type="button" class="btn small" onClick={() => void test("status")}><Icon name="play" size={12} />{tr("Test")}</button>
             </div>
           </div>
           <Show when={status()}>{(r) => <p class={`ms-result ${r().tone}`} role="status">{r().text}</p>}</Show>
           <Show when={raw().length}><pre class="ms-raw mono">{raw().join("\n")}</pre></Show>
           <div class="ms-field"><label for="msf-up">{tr("Up NAME")}</label>
-            <div class="ms-control"><input id="msf-up" class="field mono" placeholder={tr("not set")} value={form().up} onInput={(e) => set({ up: e.currentTarget.value })} /></div>
+            <div class="ms-control"><TextInput id="msf-up" class="field mono" placeholder={tr("not set")} value={form().up} onInput={(e) => set({ up: e.currentTarget.value })} /></div>
           </div>
           <div class="ms-field"><label for="msf-down">{tr("Down NAME")}</label>
-            <div class="ms-control"><input id="msf-down" class="field mono" placeholder={tr("not set")} value={form().down} onInput={(e) => set({ down: e.currentTarget.value })} /></div>
+            <div class="ms-control"><TextInput id="msf-down" class="field mono" placeholder={tr("not set")} value={form().down} onInput={(e) => set({ down: e.currentTarget.value })} /></div>
           </div>
           <p class="ms-note">{tr("Up and Down run from the Model servers tab, after its confirmations: the server may be shared.")}</p>
           <div class="ms-field"><label for="msf-logs">{tr("Logs NAME")}</label>
             <div class="ms-control">
-              <input id="msf-logs" class="field mono" placeholder={tr("not set")} value={form().logs} onInput={(e) => set({ logs: e.currentTarget.value })} />
+              <TextInput id="msf-logs" class="field mono" placeholder={tr("not set")} value={form().logs} onInput={(e) => set({ logs: e.currentTarget.value })} />
               <button type="button" class="btn small" onClick={() => void test("logs")}><Icon name="play" size={12} />{tr("Test")}</button>
             </div>
           </div>

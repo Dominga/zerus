@@ -77,6 +77,10 @@ const rule = (selector: string) => css.split("\n").find((line) => {
   return text.startsWith(`${selector} {`) || text.startsWith(`${selector},`);
 }) ?? "";
 
+// Solid's SSR output marks reactive regions and hydration keys; the field
+// component wraps its input, so the markup is read without those markers.
+const plain = (html: string) => html.replace(/<!--[^>]*-->/g, "").replace(/ data-hk="[^"]*"/g, "");
+
 describe("Settings > Model servers' layout (task #350)", () => {
   it("keeps the long model list in a wrapping note of the editor, not a squeezed cell", () => {
     const html = render();
@@ -92,7 +96,7 @@ describe("Settings > Model servers' layout (task #350)", () => {
   });
 
   it("puts every labelled field in its own row with the control taking the editor's width", () => {
-    const html = render();
+    const html = plain(render());
     // Name, Server root, API key, SSH host, Status, Up, Down and Logs.
     expect(html.match(/class="ms-field"/g)).toHaveLength(8);
     expect(html).toContain('<div class="ms-field"><label for="msf-name">Name</label>');

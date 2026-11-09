@@ -14,6 +14,7 @@ import {
   waitingCount, waitingFields, waitingKindIcon, waitingKindLabel, bannerHeadItem, digestGroups, stillBlocks, type QuestionChoice,
 } from "./decisions";
 import type { TeamAction, TeamWaitingItem } from "../../types";
+import { TextInput } from "../lib/TextField";
 
 // Waiting for you (task 11, Qt TeamWaitingPage, TeamWaitingBanner and
 // TeamWaitingAnswer): what waits for the owner across this computer's teams,
@@ -85,7 +86,7 @@ function Answer(props: { item: TeamWaitingItem }) {
           <div class="team-waiting-card">
             <For each={addition().tasks ?? []}>{(task) => <div class="team-waiting-line">{task.title}</div>}</For>
             <div class="team-proposal-answers">
-              <input class="field" placeholder={tr("Type add to confirm")} value={typed()} disabled={off()} onInput={(event) => setTyped(event.currentTarget.value)} />
+              <TextInput class="field" placeholder={tr("Type add to confirm")} value={typed()} disabled={off()} onInput={(event) => setTyped(event.currentTarget.value)} />
               <button class="btn small" disabled={off()} onClick={() => void read().answerAddition(false)}>{tr("Cancel")}</button>
               <button class="btn small primary" disabled={off() || typed().trim() !== "add"} onClick={() => void read().answerAddition(true, typed())}>{tr("Add")}</button>
             </div>
@@ -97,7 +98,7 @@ function Answer(props: { item: TeamWaitingItem }) {
               <div class="team-waiting-line"><b>{question().tool}</b></div>
               <code class="team-waiting-command">{question().command || question().reason}</code>
               <div class="team-proposal-answers">
-                <input class="field" maxlength={2000} placeholder={tr("Why deny? The member receives this")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
+                <TextInput class="field" maxlength={2000} placeholder={tr("Why deny? The member receives this")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
                 <button class="btn small danger" disabled={off() || !!blocked()} title={blocked() || undefined} data-permission="deny" onClick={() => void read().answerPermission(false, reason())}>{tr("Deny")}</button>
                 <button class="btn small primary" disabled={off() || !!blocked()} title={blocked() || undefined} data-permission="allow" onClick={() => void read().answerPermission(true)}>{question().subagent_confirmation ? tr("Allow all") : tr("Allow")}</button>
               </div>
@@ -128,7 +129,7 @@ function Answer(props: { item: TeamWaitingItem }) {
                       {tr("Other")}
                     </label>
                     <Show when={choices().get(asked.id)?.other}>
-                      <input class="field" maxlength={4000} placeholder={tr("Your answer")} disabled={off()} value={choices().get(asked.id)?.text ?? ""}
+                      <TextInput class="field" maxlength={4000} placeholder={tr("Your answer")} disabled={off()} value={choices().get(asked.id)?.text ?? ""}
                         onInput={(event) => { const text = event.currentTarget.value; choose(asked.id, (choice) => ({ ...choice, text })); }} />
                     </Show>
                   </Show>
@@ -144,7 +145,7 @@ function Answer(props: { item: TeamWaitingItem }) {
           <div class="team-waiting-card">
             <Show when={acceptanceSummary(fields.summary)}><div class="team-waiting-line">{acceptanceSummary(fields.summary)}</div></Show>
             <div class="team-proposal-answers">
-              <input class="field" maxlength={4000} placeholder={tr("What should the lead change?")} value={comment()} disabled={off()} onInput={(event) => setComment(event.currentTarget.value)} />
+              <TextInput class="field" maxlength={4000} placeholder={tr("What should the lead change?")} value={comment()} disabled={off()} onInput={(event) => setComment(event.currentTarget.value)} />
               <button class="btn small" disabled={off() || !comment().trim()} onClick={() => void read().sendBack(comment())}>{tr("Send back")}</button>
               <button class="btn small primary" disabled={off()} onClick={() => void read().acceptPhase()}>{tr("Accept phase")}</button>
             </div>
@@ -171,13 +172,13 @@ function Answer(props: { item: TeamWaitingItem }) {
                     </div>
                   )}</For>
                   <div class="team-proposal-answers">
-                    <input class="field" maxlength={4000} placeholder={tr("Your answer")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
+                    <TextInput class="field" maxlength={4000} placeholder={tr("Your answer")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
                     <button class="btn small primary" disabled={off() || !reason().trim()} onClick={() => void read().answerDeferred("answer", reason())}>{tr("Answer")}</button>
                   </div>
                 </>
               }>
                 <div class="team-proposal-answers">
-                  <input class="field" maxlength={4000} placeholder={tr("A note for the session (optional)")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
+                  <TextInput class="field" maxlength={4000} placeholder={tr("A note for the session (optional)")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
                   <button class="btn small danger" disabled={off()} onClick={() => void read().answerDeferred("deny", reason())}>{tr("Deny")}</button>
                   <button class="btn small primary" disabled={off()} onClick={() => void read().answerDeferred("allow", reason())}>{tr("Allow")}</button>
                 </div>
@@ -193,7 +194,7 @@ function Answer(props: { item: TeamWaitingItem }) {
             <code class="team-waiting-command">{offer.command}</code>
             <Show when={offer.output}><pre class="team-waiting-output">{offer.output}</pre></Show>
             <div class="team-proposal-answers">
-              <input class="field" maxlength={500} placeholder={tr("Why deny? Zerus remembers it")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
+              <TextInput class="field" maxlength={500} placeholder={tr("Why deny? Zerus remembers it")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
               <button class="btn small danger" disabled={off()} onClick={() => void read().decideTool(false, reason())}>{tr("Deny")}</button>
               <button class="btn small primary" disabled={off() || !offer.canAllow} onClick={() => void read().decideTool(true)}>{offer.allow}</button>
             </div>
@@ -203,7 +204,7 @@ function Answer(props: { item: TeamWaitingItem }) {
           <div class="team-waiting-card">
             <div class="team-waiting-line"><b>{props.item.title}</b></div>
             <div class="team-proposal-answers">
-              <input class="field" maxlength={4000} placeholder={tr("Why reject? The member receives this")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
+              <TextInput class="field" maxlength={4000} placeholder={tr("Why reject? The member receives this")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
               <button class="btn small danger" disabled={off() || !reason().trim()} onClick={() => void read().rejectReport(reason())}>{tr("Reject")}</button>
               <button class="btn small primary" disabled={off()} onClick={() => void read().acceptReport()}>{tr("Accept")}</button>
             </div>
@@ -229,7 +230,7 @@ function Answer(props: { item: TeamWaitingItem }) {
           <div class="team-waiting-card">
             <div class="team-waiting-line"><b>{props.item.title}</b></div>
             <div class="team-proposal-answers">
-              <input class="field" maxlength={4000} placeholder={tr("A summary for the lead")} value={comment()} disabled={off()} onInput={(event) => setComment(event.currentTarget.value)} />
+              <TextInput class="field" maxlength={4000} placeholder={tr("A summary for the lead")} value={comment()} disabled={off()} onInput={(event) => setComment(event.currentTarget.value)} />
               <button class="btn small primary" disabled={off() || !comment().trim()} onClick={() => void read().finishTeam(comment())}>{tr("Finish")}</button>
             </div>
           </div>

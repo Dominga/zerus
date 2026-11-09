@@ -614,7 +614,7 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
       <h2 id="ns-title" class="nsd-title">{tr("New session")}</h2>
       <div class="nsd-header">
         <span class="nsd-cap">{tr("Name")}</span>
-        <input id="nsd-name" class="nsd-name" data-keys="text" data-initial maxLength={200} value={s().name} disabled={!fields()}
+        <TextInput id="nsd-name" class="nsd-name" data-keys="text" data-initial maxLength={200} value={s().name} disabled={!fields()}
           aria-label={tr("Name")} aria-invalid={!!form()?.name_problem}
           onInput={(e) => act.setName(e.currentTarget.value)} />
         <button type="button" class="nsd-close" aria-label={tr("Close")} title={tr("Close")} disabled={!(form()?.cancel_enabled ?? true)}
@@ -639,7 +639,7 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
         <Show when={s().newProjectRow}>
           <span class="nsd-cap" classList={{ "nsd-reserved": !s().newProjectVisible }}>{tr("New project")}</span>
           <Show when={s().newProjectVisible} fallback={<span class="nsd-reserved-field" />}>
-            <input id="nsd-new-project" class="field nsd-wide" data-keys="text" maxLength={80} placeholder={tr("Project name")} value={s().newProjectName}
+            <TextInput id="nsd-new-project" class="field nsd-wide" data-keys="text" maxLength={80} placeholder={tr("Project name")} value={s().newProjectName}
               disabled={!fields()} onInput={(e) => act.setNewProjectName(e.currentTarget.value)} />
           </Show>
         </Show>
@@ -681,13 +681,13 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
         </Show>
         <Show when={s().repository}>
           <span class="nsd-cap">{tr("Repository")}</span>
-          <input id="nsd-url" ref={url} class="field mono nsd-url" data-keys="text" maxLength={4096} placeholder="https://github.com/owner/repository.git"
+          <TextInput id="nsd-url" ref={url} class="field mono nsd-url" data-keys="text" maxLength={4096} placeholder="https://github.com/owner/repository.git"
             title={tr("An SSH or HTTPS repository URL, on GitHub or another Git server.")} value={s().url} disabled={!fields() || !online()}
             onInput={(e) => act.setUrl(e.currentTarget.value)} />
           <button type="button" id="nsd-browse-repository" class="nsd-icon" data-keys="button" data-tip={tr("Browse for folder")} aria-label={tr("Browse for folder")}
             disabled={!fields() || !online()} onClick={browseRepository}><Icon name="folder" size={16} /></button>
           <span class="nsd-cap">{tr("Clone to")}</span>
-          <input id="nsd-destination" class="field mono nsd-dest" data-keys="text" maxLength={8192} value={s().destination} disabled={!fields() || !online()}
+          <TextInput id="nsd-destination" class="field mono nsd-dest" data-keys="text" maxLength={8192} value={s().destination} disabled={!fields() || !online()}
             title={tr("The complete new checkout path. Edit its folder name or choose a parent folder with Browse.")}
             onInput={(e) => act.setDestination(e.currentTarget.value)} />
           <button type="button" class="nsd-icon" data-keys="button" data-tip={tr("Browse for folder")} aria-label={tr("Browse for folder")}

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import ts from "typescript";
 import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ui=dirname(dirname(fileURLToPath(import.meta.url)));
@@ -10,7 +10,7 @@ describe("editable controlled fields",()=>{
   it("uses native-history fields across screens, tasks and dialogs",()=>{
     const missed:string[]=[];
     for(const file of files(ui)){
-      if(file.endsWith("/TextField.tsx"))continue;
+      if(basename(file)==="TextField.tsx")continue;
       const tree=ts.createSourceFile(file,readFileSync(file,"utf8"),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
       const visit=(node:ts.Node)=>{
         if(ts.isJsxSelfClosingElement(node)||ts.isJsxOpeningElement(node)){

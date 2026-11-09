@@ -5,6 +5,7 @@ import { Icon } from "../lib/icons";
 import type { TeamLaneView, TeamProfileView, TeamTaskView, TeamView } from "../../types";
 import { defaultLaneName, laneEditable, laneGroups, laneMoveUpdate, laneName, laneRenameUpdates, laneTitle, nextLane } from "./lanes";
 import { taskHeat } from "./heat";
+import { TextInput } from "../lib/TextField";
 
 // Task #226: Qt's lane sections (TeamWorkspace::laneSections): a phase whose
 // tasks carry lanes shows one section per lane, the unassigned tasks last.
@@ -210,7 +211,7 @@ function TextDialog(props: { title: string; hint: string; value: string; busy: b
       <div class="dlg-head"><h2 id="team-lane-title">{props.title}</h2></div>
       <div class="dlg-body">
         <label class="field-label" for="team-lane-name">{props.hint}</label>
-        <input ref={field} id="team-lane-name" class="field" value={text()} maxlength={40}
+        <TextInput ref={field} id="team-lane-name" class="field" value={text()} maxlength={40}
           onInput={(event) => setText(event.currentTarget.value)}
           onKeyDown={(event) => { if (event.key === "Enter" && ok()) { event.preventDefault(); props.submit(text()); } }} />
       </div>

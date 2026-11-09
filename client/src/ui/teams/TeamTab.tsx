@@ -33,7 +33,7 @@ import { ArchivedTaskReport, TeamReports } from "./TeamReports";
 import { WorkingModeRow } from "./WorkingModeRow";
 import { closeWorkingMode, markWorkingModeKept, workingModeShown } from "../../store/workingMode";
 import { WaitingBanner } from "./Waiting";
-import { Blockers, PhaseActions, TaskActions, TeamQuestions, createPlanEditing } from "./TeamActions";
+import { Blockers, PhaseActions, TaskActions, createPlanEditing } from "./TeamActions";
 import { noReportReply } from "./noReport";
 import { TeamActions as TeamActionModel } from "./actions";
 import { composer } from "../../store/composer";
@@ -276,6 +276,9 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
               </button>
             </div>
           )}</Show>
+          {/* Owner, 2026-11-09: the plan's approval sits right above the first
+              phase, where the owner reads the draft phases. */}
+          <Show when={props.team.status === "planning"}><PlanApproveBar computer={props.computer} team={props.team} /></Show>
           <Show when={graph()} fallback={<TeamPhases computer={props.computer} team={props.team} owner={props.owner} />}>
             {(shown) => (
               <PlanView
@@ -459,7 +462,6 @@ function SideColumn(props: {
   return (
     <div class="team-side-inner" ref={column}>
       <SideLists team={props.team} onGo={props.onGo} />
-      <TeamQuestions computer={props.computer} team={props.team} />
       <section class="team-members" style={{ height: `${teamLayout.membersShare()}%` }} aria-label={tr("Members")}>
         <div class="team-section-head" title={memberLegend()}><b>{tr("Members")}</b><span class="dim mono">{members().length}</span>
           <span class="grow" />
@@ -633,5 +635,23 @@ function Divider(props: {
         props.onStep(step);
       }}
     />
+  );
+}
+
+/** Owner, 2026-11-09: approving the planned team, above its first phase. */
+function PlanApproveBar(props: { computer: ComputerId; team: TeamView }) {
+  const { model, tick } = useModel((changed) => new TeamActionsModel(windowPort, () => ({ computer: props.computer, team: props.team }), changed));
+  const read = () => (tick(), model);
+  const [free, setFree] = createSignal(false);
+  return (
+    <div class="plan-approve-bar" data-plan-approve>
+      <span class="grow"><b>{tr("The plan waits for your approval")}</b> <span class="nt-hint">{tr("%1 phases, %2 tasks", props.team.phases.length, props.team.tasks.length)}</span></span>
+      <label class="team-proposal-option" title={tr("One open phase that takes tasks as they come until you close it")}>
+        <input type="checkbox" checked={free()} onChange={(event) => setFree(event.currentTarget.checked)} />{tr("Free planning")}
+      </label>
+      <button type="button" class="btn primary" disabled={read().busy} onClick={() => void model.approve(free() ? "free" : "")}>
+        <Icon name="play" size={13} />{tr("Approve the plan")}
+      </button>
+    </div>
   );
 }

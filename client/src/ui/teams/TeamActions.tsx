@@ -525,7 +525,8 @@ export function TeamBarActions(props: { computer: ComputerId; team: ActTeam; pla
   // too, so the strip stays one row.
   const overflow = createMemo<ReadonlySet<string>>(() => {
     if (props.compact === "low") return new Set(["resumeLimits"]);
-    if (props.compact === "high") return new Set(actions().map((action) => action.id));
+    // Owner, 2026-11-09: the primary action (Approve the plan) never folds.
+    if (props.compact === "high") return new Set(actions().filter((action) => !action.primary).map((action) => action.id));
     return new Set();
   });
   const moved = () => props.compact === "low" || props.compact === "high";

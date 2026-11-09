@@ -499,8 +499,20 @@ pub(crate) fn enabled(team: &Team) -> bool {
     if team.integration_folder().is_empty() {
         return false;
     }
-    crate::test_discipline::config::load_project(Path::new(team.integration_folder()), team.settings.tests.as_ref())
-        .is_ok_and(|loaded| loaded.active() && loaded.config.merge_queue.enabled)
+    let root = Path::new(team.integration_folder());
+    let overrides = team.settings.tests.as_ref();
+    let Ok(loaded) = crate::test_discipline::config::load_project(root, overrides) else { return false };
+    if loaded.active() && loaded.config.merge_queue.enabled {
+        return true;
+    }
+    // Owner, 2026-11-09: when neither the project nor the team says, a team
+    // whose members work in their own clones or worktrees has the queue on:
+    // their accepted branches live there, so nothing else lands them.
+    let said = overrides.is_some_and(|fields| fields.get("merge_queue").is_some())
+        || std::fs::read_to_string(root.join(crate::test_discipline::config::FILE)).is_ok_and(|text| text.contains("merge_queue"));
+    !said && team.members.iter().any(|member| {
+        member.id != team.lead && matches!(member.folder, super::model::MemberFolder::Worktree | super::model::MemberFolder::Clone)
+    })
 }
 
 /// The queue entry an accept of task `id` makes, or None when the accept

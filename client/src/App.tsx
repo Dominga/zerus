@@ -1,7 +1,4 @@
-import { DesktopServiceStatus } from "./ui/components/DesktopServiceStatus";
-import { MachinesStatus } from "./ui/components/MachinesStatus";
-import { BackgroundTasksChip } from "./ui/screens/BackgroundTasks";
-import { CleanupChip } from "./ui/screens/CleanupChip";
+import { connectionLine } from "./ui/components/MachinesStatus";
 import { worktreeReviewDialog } from "./store/worktreeCleanup";
 import { cleanupDialog } from "./store/terminationCleanup";
 import { taskAssignmentPopover } from "./store/taskAssignment";
@@ -12,9 +9,6 @@ import { taskCancellation } from "./store/taskCancel";
 import { Match, Show, Suspense, Switch, createEffect, createMemo, createSignal, lazy, onCleanup, onMount } from "solid-js";
 import { Rail } from "./ui/components/Rail";
 import { TitleBar } from "./ui/components/TitleBar";
-import { openAbout } from "./store/desk";
-import { appBuildInfo } from "./store/buildInfo";
-import { installedAppName, railVersion } from "./ui/screens/settings/about-version";
 import { MenuLayer, Toasts } from "./ui/components/Overlays";
 import { ActionDialogs } from "./ui/sessions/ActionDialogs";
 import { ResumeBehindDialog } from "./ui/sessions/ResumeBehindDialog";
@@ -32,10 +26,10 @@ import { installShortcutRouter, onCommand } from "./store/shortcuts";
 import { openGoTo, openShortcutHelp, goToOrigin, shortcutHelpOrigin } from "./store/goTo";
 import { rememberRecentSession } from "./ui/sessions/goTo";
 import { installWindowCommands } from "./ui/sessions/window-commands";
-import { updateCommands, updates } from "./store/updates";
-import { openUpdates } from "./store/desk";
 import { windowChrome, type BridgeMode } from "./bridge";
 import { installUiLanguage, tr, uiLanguage } from "./i18n";
+import { appLog } from "./store/appLog";
+import { bus } from "./store/notices";
 import { WaitingPage } from "./ui/teams/Waiting";
 import { NewTeamPage } from "./ui/teams/NewTeamPage";
 import { CatalogPage } from "./ui/teams/CatalogPage";
@@ -74,47 +68,6 @@ const GoToDialog = lazy(() => import("./ui/sessions/GoToDialog").then((m) => ({ 
 const ShortcutHelpDialog = lazy(() => import("./ui/sessions/ShortcutHelpDialog").then((m) => ({ default: m.ShortcutHelpDialog })));
 const PerfHost = lazy(() => import("./ui/PerfHost").then((m) => ({ default: m.PerfHost })));
 
-function LoginItemButton() {
-  return (
-    <Show when={updates().login_item_deprioritized}>
-      <button type="button" class="chip-accent warn-chip" title={tr("macOS limits background priority for this login item")} onClick={openUpdates}>{tr("Fix login item")}</button>
-    </Show>
-  );
-}
-
-function StatusBar(props: { mode: () => BridgeMode | "starting" }) {
-  // Task 235: the rows on screen are the last list on disk until the live listing replaces them.
-  const staleSince = createMemo(() => staleNote(catalog.stale));
-  return (
-    <footer class="statusbar">
-      <Show when={staleSince()}>{(note) => <span class="stale-note" data-stale title={tr("These rows are the last session list Zerus saw; the live list replaces them as each computer answers.")}>{note()}</span>}</Show>
-      <MachinesStatus mode={props.mode} />
-      <DesktopServiceStatus />
-      <Show when={props.mode() === "replay"}>
-        <span class="chip-accent" title={tr("Synthetic data from the replay fixture; no hgs is running")}>{tr("Replay")}</span>
-      </Show>
-      <Show when={!updates().quiet && updates().available}>
-        <button type="button" class="chip-accent status-update" title={tr("Zerus %1 is available. Open Updates.", updates().version)}
-          aria-label={tr("Zerus %1 is available. Open Updates.", updates().version)} onClick={openUpdates}>{tr("New version")}</button>
-      </Show>
-      <Show when={!updates().quiet && updates().restart_required}>
-        <button type="button" class="chip-accent status-restart" title={tr("Zerus was updated on disk. Drafts are kept; sessions keep running.")}
-          aria-label={tr("Zerus was updated on disk. Drafts are kept; sessions keep running.")}
-          onClick={() => { void updateCommands.restart().catch((error) => toast("Updates", String(error), "error", true)); }}>{tr("Restart to finish update")}</button>
-      </Show>
-      <LoginItemButton />
-      <BackgroundTasksChip />
-      <CleanupChip />
-      <span class="grow" />
-      {/* Task #351: the agent and usage block moved to the composer's usage chip; the status bar keeps no copy. */}
-      {/* Task 243: with the controls in the title bar the version moves here, as Qt's placeRailControls. */}
-      <Show when={skin().layout.chrome === "unified"}>
-        <button type="button" class="status-version" data-tip={tr("%1\nOpen About", installedAppName(appBuildInfo()))} onClick={openAbout}>{railVersion(appBuildInfo()) || tr("About")}</button>
-      </Show>
-    </footer>
-  );
-}
-
 /** Keyboard zoom changes Settings > Appearance > Content scale (Qt's syncContentScale). */
 function zoom(scale: number) {
   setContentScale(scale);
@@ -122,11 +75,43 @@ function zoom(scale: number) {
 }
 
 export function App(props: { mode: () => BridgeMode | "starting" }) {
+  const staleSince = createMemo(() => staleNote(catalog.stale));
   installUiLanguage();
   createEffect(() => { document.documentElement.lang = uiLanguage(); });
   createEffect(() => applySkin(skin()));
   createEffect(() => setContentScale(num("workspace/contentScale")));
   createEffect(() => rememberRecentSession(selectedKey()));
+  // Task 409 (owner, 2026-11-08): the title bar's log line replaces the status
+  // bar. The client log's tail is read on a timer, and the connection line,
+  // stale rows and warnings are written as they change, so the line always
+  // names what just happened; the full log opens in the system viewer.
+  createEffect(() => { if (props.mode() === "tauri") appLog.start(); });
+  onCleanup(() => appLog.stop());
+  let loggedConnection = "";
+  createEffect(() => {
+    const line = props.mode() === "tauri" ? connectionLine() : "";
+    if (!line || line === loggedConnection) return;
+    loggedConnection = line;
+    appLog.record("connection", line);
+  });
+  let loggedStale = "";
+  createEffect(() => {
+    const note = staleSince();
+    if (props.mode() !== "tauri" || !note || note === loggedStale) return;
+    loggedStale = note;
+    appLog.record("warning", note);
+  });
+  let loggedNotice = 0;
+  createEffect(() => {
+    const fresh = bus.notices().filter((notice) => notice.id > loggedNotice);
+    if (!fresh.length) return;
+    loggedNotice = fresh[fresh.length - 1].id;
+    if (props.mode() !== "tauri") return;
+    for (const notice of fresh) {
+      if (notice.tone === "info") continue;
+      appLog.record(notice.tone === "error" ? "error" : "warning", notice.title ? `${notice.title}: ${notice.text}` : notice.text);
+    }
+  });
   // Window commands through the shortcut router (store/shortcuts.ts), with the
   // chords of Settings > Keyboard.
   const zoomBy = (step: number) => {
@@ -158,7 +143,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
   createEffect(() => { setUnifiedChrome(unified()); void windowChrome(unified()).catch(() => undefined); });
   return (
     <div class="app" classList={{ "rail-labeled": skin().layout.rail === "labeled" && !unified(), "chrome-unified": unified() }}>
-      <Show when={unified()} fallback={<Rail />}><TitleBar /></Show>
+      <Show when={unified()} fallback={<Rail />}><TitleBar mode={props.mode} logTitle={staleSince() ? tr("These rows are the last session list Zerus saw; the live list replaces them as each computer answers.") : undefined} /></Show>
       <main class="page">
         <Switch>
           <Match when={page() === "sessions"}>
@@ -179,7 +164,6 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
           <Match when={page() === "modelservers"}><ModelServersScreen /></Match>
         </Switch>
       </main>
-      <StatusBar mode={props.mode} />
       <MenuLayer />
       <Toasts />
       <ActionDialogs />

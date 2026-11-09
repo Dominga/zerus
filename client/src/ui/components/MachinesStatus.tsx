@@ -17,20 +17,38 @@ function stateText(status: string) {
   }
 }
 
-/** Connection presentation only; opening Machines never retries a connection. */
-export function MachinesStatus(props: { mode: () => BridgeMode | "starting" }) {
+/** The computers the connection line reads: the service's roster when it has one. */
+function connectionComputers() {
   // The catalog has no row for a peer that has never greeted. Use the native
   // checked display roster when available; older/native clients keep theirs.
-  const computers = createMemo(() => {
-    const service = desktopService.state();
-    return service?.connected && service.fleet_computers
-      ? service.fleet_computers : Object.values(catalog.computers);
-  });
-  const connected = (status: string) => status === "live" || status === "polled";
+  const service = desktopService.state();
+  return service?.connected && service.fleet_computers
+    ? service.fleet_computers : Object.values(catalog.computers);
+}
+const connectedStatus = (status: string) => status === "live" || status === "polled";
+const connectionLabel = (id: string) => id || tr("this computer");
+
+/**
+ * Task 409 (owner, 2026-11-08): the connection line the client log records and
+ * the title bar's log line shows, as Qt writes each change of its status line:
+ * the offline computers by name, else the calm count.
+ */
+export function connectionLine(): string {
+  const computers = connectionComputers();
+  if (!computers.length) return "";
+  const problems = computers.filter((c) => !connectedStatus(c.status));
+  if (!problems.length) return tr("%1 of %2 machines connected", computers.length, computers.length);
+  return problems.map((c) => `${connectionLabel(c.id)}: ${stateText(c.status)}${c.status === "reconnecting" && c.attempt ? ` (${tr("attempt %1", c.attempt)})` : ""}`).join("; ");
+}
+
+/** Connection presentation only; opening Machines never retries a connection. */
+export function MachinesStatus(props: { mode: () => BridgeMode | "starting" }) {
+  const computers = createMemo(connectionComputers);
+  const connected = connectedStatus;
   const live = createMemo(() => computers().filter((c) => connected(c.status)).length);
   const problems = createMemo(() => computers().filter((c) => !connected(c.status)));
   const offline = createMemo(() => problems().filter((c) => c.status !== "probing"));
-  const label = (id: string) => id || tr("this computer");
+  const label = connectionLabel;
   const connectionError = () => offline().length > 0;
   const details = createMemo(() => [
     tr("%1 of %2 machines connected", live(), computers().length)

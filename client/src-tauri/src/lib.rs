@@ -192,6 +192,7 @@ mod speech_settings;
 mod startup_error;
 #[cfg(feature = "live")]
 mod second_start;
+mod applog;
 mod startup_log;
 // Its text needs the interface catalog, so its portable tests need `live` too.
 #[cfg(all(feature = "live", any(windows, test)))]
@@ -1900,6 +1901,9 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         settings::skins::user_skins_load,
         settings::skins::user_skin_import,
         settings::skins::user_skins_open,
+        applog::log_write,
+        applog::log_latest,
+        applog::log_open,
         settings::settings_get,
         settings::settings_legacy_projects,
         settings::settings_set,

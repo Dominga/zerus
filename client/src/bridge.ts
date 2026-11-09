@@ -26,6 +26,11 @@ let source: Source | undefined;
 
 export const inTauri = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+/** Task 409: the client log's last line, its writer, and the whole log in the system viewer. */
+export const logLatest = () => inTauri() ? invoke<string | null>("log_latest") : Promise.resolve(null);
+export const logWrite = (level: string, text: string) => inTauri() ? invoke<void>("log_write", { level, text }) : Promise.resolve();
+export const openLog = () => inTauri() ? invoke<void>("log_open") : Promise.resolve();
+
 /** Content-free invariant evidence through the existing capped stderr logger. */
 export async function reportDetailInvariant(line: string): Promise<void> {
   if (inTauri()) {

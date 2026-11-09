@@ -211,7 +211,7 @@ describe("Windows first background choice in flight", () => {
   });
 });
 
-describe("service status in the footer", () => {
+describe("service status in the title bar (task 409)", () => {
   it("keeps healthy details available to About and offers no Retry", () => {
     expect(serviceStatus(undefined)).toBeUndefined();
     expect(serviceStatus(healthy())).toMatchObject({ healthy: true, retry: false, review: false, ownership: undefined, label: "Background service", details: "Background service connected" });
@@ -261,15 +261,20 @@ describe("service status in the footer", () => {
     // A durable handoff block keeps its own label and Retry.
     expect(serviceStatus(passive({ code: "explicit_handoff_required" }))).toMatchObject({ label: "Background handoff required", retry: true, ownership: "rearm" });
   });
-  it("inserts status only in the fixed-height footer, never above the page", async () => {
+  it("inserts status only in the title bar, never above the page", async () => {
     const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as { readFileSync(path: URL, encoding: "utf8"): string };
     const app = fs.readFileSync(new URL("../../App.tsx", import.meta.url), "utf8");
-    expect(app.match(/<DesktopServiceStatus\b/g)).toHaveLength(1);
-    expect(app.match(/<footer\b[\s\S]*?<\/footer>/)?.[0]).toContain("<DesktopServiceStatus");
+    // Task 409: the footer is gone; the service status sits in the title bar.
+    expect(app).not.toContain("DesktopServiceStatus");
+    expect(app).not.toContain("<footer");
+    const bar = fs.readFileSync(new URL("./TitleBar.tsx", import.meta.url), "utf8");
+    expect(bar.match(/<DesktopServiceStatus\b/g)).toHaveLength(1);
+    expect(bar.match(/<div class="tb-group tb-status">[\s\S]*?<\/div>/)?.[0]).toContain("<DesktopServiceStatus");
     expect(app.match(/<main\b[\s\S]*?<\/main>/)?.[0]).not.toContain("DesktopServiceStatus");
     expect(app).not.toContain("with-service-status");
     const css = fs.readFileSync(new URL("../styles/app.css", import.meta.url), "utf8");
-    expect(css.match(/\.statusbar\s*\{([^}]+)\}/)?.[1]).toContain("height: 28px");
+    expect(css).not.toContain(".statusbar");
+    expect(css).toContain(".tb-log {");
     expect(css).not.toContain(".page.with-service-status");
   });
 });

@@ -8,7 +8,7 @@ use std::{
 
 pub(crate) const LINE_BYTES: usize = 512;
 
-fn path() -> Option<PathBuf> {
+pub(crate) fn path() -> Option<PathBuf> {
     let home = crate::identity::home_dir();
     #[cfg(target_os = "macos")]
     {
@@ -72,7 +72,7 @@ fn line(outcome: &str, reason: &str, detail: Option<&str>) -> Vec<u8> {
     bytes
 }
 
-fn append(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn append(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if bytes.len() > LINE_BYTES || bytes.last() != Some(&b'\n') {
         return Err(io::Error::other("invalid startup log line"));
     }

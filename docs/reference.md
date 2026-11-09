@@ -3166,6 +3166,13 @@ waiting loop; waiting on an outside event is always a park.
   (`wait_parked`). The member is told to stop the wait and end its turn; the
   lead is told once with the guessed condition to correct. Zerus does not stop
   the job itself; it ends at its own bound.
+  Task #413: a command that changes the repository (a merge, a rebase, a
+  checkout, a reset, a cherry-pick, a pull, a push) is work, never a poll,
+  even when it also carries read-only words; a repeated check is a loop only
+  while the state it reads stands - the member's folder HEAD is recorded
+  (`wait_head`), a first observation never parks, and a HEAD that moved since
+  the last check is a fast-forward left alone; a member with a background
+  monitor or job running is never parked on a repeated command.
 - The lead gets every park's outcome without watching: a met park is told
   when the task goes back to its member; a failed or overdue one is a lead
   inbox item.

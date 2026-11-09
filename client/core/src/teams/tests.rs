@@ -458,6 +458,25 @@ fn a_draft_projects_the_new_team_form() {
     assert_eq!(form.tasks.len(), 27);
 }
 
+/// Task #8 (team ede724c4): New team shows the draft's plan mode, the
+/// lead's offer and its reason; hgs leaves out the standard mode.
+#[test]
+fn a_draft_carries_its_plan_mode_and_the_leads_offer() {
+    let standard = json!({"id":"t1","name":"Draft","status":"draft","lead":"lead","members":[{"id":"lead"}],
+        "plan_mode_offer":"free","plan_mode_reason":"a stream of small requests"});
+    let form = view::new_team(&standard, &view::team(&standard)).expect("a draft is a form");
+    assert_eq!(
+        (form.plan_mode.as_str(), form.plan_mode_offer.as_str(), form.plan_mode_reason.as_str()),
+        ("standard", "free", "a stream of small requests")
+    );
+    let free = json!({"id":"t1","name":"Draft","status":"draft","lead":"lead","members":[{"id":"lead"}],
+        "plan_mode":"free","plan_mode_offer":null,"plan_mode_reason":""});
+    let form = view::new_team(&free, &view::team(&free)).expect("a draft is a form");
+    assert_eq!((form.plan_mode.as_str(), form.plan_mode_offer.as_str()), ("free", ""));
+    let odd = json!({"id":"t1","name":"Draft","status":"draft","lead":"lead","plan_mode_offer":"other"});
+    assert_eq!(view::new_team(&odd, &view::team(&odd)).unwrap().plan_mode_offer, "");
+}
+
 #[test]
 fn inbox_waiting_spans_and_profile_project_their_replies() {
     let inbox = view::inbox(TEAM, &fixture("inbox"));

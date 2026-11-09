@@ -47,14 +47,14 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Composer and sending | 35 | | | 1 intentional difference |
 | Activity | 17 | 0 | 0 | |
 | Questions and approvals | 12 | | | |
-| Notifications | 9 | 3 | | |
-| Tray, menu bar and Dock | 7 | 1 | | 2 owner decisions, 1 intentional difference |
+| Notifications | 11 | 1 | | |
+| Tray, menu bar and Dock | 8 | | | 2 owner decisions, 1 intentional difference |
 | Shortcuts and navigation | 6 | | | |
-| Lifecycle and updates | 7 | 1 | 1 | |
+| Lifecycle and updates | 9 | | | |
 | Settings | 17 | | | 1 intentional difference |
 | Machines, accounts, projects, new session, tasks and worktrees | 18 | | | |
 | Terminal, processes and platform session support | 8 | | | |
-| Total (193 rows) | 179 | 5 | 1 | 8 |
+| Total (193 rows) | 184 | 1 | 0 | 8 |
 
 ## Owner decisions
 
@@ -70,7 +70,6 @@ Every partial, missing and unverified row names the bead that tracks it.
 
 | Bead | Priority | Gap |
 | --- | --- | --- |
-| `zerus-5wmh.13.14` | P2 | Windows: focus-aware banners, update alert, tray theme, watchdog, startup note |
 | `zerus-5wmh.66.10` | existing | Desktop presence for phone alerts |
 | `zerus-5wmh.13.11.4` | P4 | Deferred: batch Terminate folder removal, one confirmation holding every session's program manifest |
 
@@ -235,13 +234,13 @@ In the default native alert mode the Zerus Next app posts alerts itself while it
 | Capability | Platform | Status | Zerus Next evidence | Qt |
 | --- | --- | --- | --- | --- |
 | Needs attention alert with its reason; New reply alert once the session is idle; subagent requests; optional-question alerts off by default | all | done | `core/attention.rs:20-22,442-700`; `ui/screens/settings/Sessions.tsx:45-47` | `AttentionTracker.cpp:120-242` |
-| No banners while Zerus is the active app | Windows | partial (`zerus-5wmh.13.14`) | Linux and macOS report focus (`tauri/platform/linux_notify.rs:640-658`; `tauri/platform/macos_notify.rs:163-196`); `tauri/desk.rs:383` `set_focused` is Linux and macOS only, so Windows always alerts | `AttentionTracker.cpp:45-49,122-125` |
+| No banners while Zerus is the active app | Windows | done (`zerus-5wmh.13.14.1`) | Windows polls whether the foreground window belongs to this process, so its dialogs and file pickers count too (`tauri/active_app.rs:15-75`, started at `tauri/lib.rs:1256`), and reports it through `set_focused` (`tauri/desk.rs:383-387`), as Linux and macOS report focus (`tauri/platform/linux_notify.rs:640-658`; `tauri/platform/macos_notify.rs:163-196`) | `AttentionTracker.cpp:45-49,122-125` |
 | Alert withdrawn when attention clears or is read; Mute withdraws and never replays | all | done | `tauri/desk.rs:1025-1042`; `core/attention.rs:228-237,393`; `ui/sessions/actions-ui.ts:40-78` | `TrayAgent.cpp:558,706-714`; `AttentionTracker.cpp:99-105` |
 | Click opens the session's Activity, waiting for fresh data | all | done | `tauri/desk.rs:684-770,954-1022`; `store/desk.ts:105-125` | `TrayAgent.cpp:166-194,593-608` |
 | Delivery failure notice and retry; macOS permission hint | all | done | `tauri/desk.rs:753-766`; `core/attention.rs:863-871` | `TrayAgent.cpp:195-201`; `MacAttentionNotifier.mm:84-92` |
 | macOS sound and native notification center; Linux actions, hints, daemon restarts and Wayland activation; Windows balloon | per platform | done | `tauri/platform/macos_notify.rs:52-151`; `tauri/platform/linux_notify.rs:427-610`; `tauri/platform/windows/tray.rs:118-128,407-440` | `MacAttentionNotifier.mm`; `LinuxAttentionNotifier.cpp`; `WindowsAttentionNotifier.cpp` |
 | Alerts continue with the window closed | all | done | `tauri/lib.rs:1196,1221,1249` | `TrayAgent.cpp:137-160` |
-| Update available alert, once per release | Windows | partial (`zerus-5wmh.13.14`) | macOS and Linux post it (`tauri/updates.rs:739-761`); the Windows hook does nothing (`tauri/updates.rs:924-925`) | `TrayAgent.cpp:164-175` |
+| Update available alert, once per release | Windows | done (`zerus-5wmh.13.14.1`) | posted once per release (`tauri/updates.rs:739-761`); on Windows as the tray balloon (`tauri/updates.rs:924-926`), whose click opens Updates as on macOS and Linux (`tauri/windows_shell.rs:118-131`; `tauri/platform/windows/tray.rs:143-152`) | `TrayAgent.cpp:164-175` |
 | Short tray messages (a new session's terminal advisory, the terminal did not open) | Linux, Windows | done | `tauri/desk.rs:1183-1235`: a desktop notification on Linux and the tray balloon on Windows, the window's notice where the app does not own them; macOS keeps `osascript`; callers `tauri/creations.rs:1783,1792` | `TrayAgent.cpp:655-830` |
 | Phone alerts wait while the owner is at the desktop | Linux, macOS | partial (`zerus-5wmh.66.10`) | the app reports no presence; only the registered `hgs` service does (`src/desktop/presence_worker.rs`) | `TrayAgent.cpp:279-290`; `DesktopPresence.cpp` |
 | Alert text in the interface language | all | done (`zerus-5wmh.13.16`) | the tracker renders its titles and reasons through `Tracker::set_render` (`core/attention.rs:23-25,457-462,752`), which the desktop gives the interface-language renderer (`tauri/desk.rs:418`); the Linux open action is named in it too (`crates/freedesktop-notify/src/lib.rs:27-46`) | `AttentionTracker.cpp:125-134`; `LinuxAttentionNotifier.cpp:52` |
@@ -252,7 +251,7 @@ In the default native alert mode the Zerus Next app posts alerts itself while it
 | Capability | Platform | Status | Zerus Next evidence | Qt |
 | --- | --- | --- | --- | --- |
 | Tray icon: count tile, amber on attention, stale dot, error mark, 99+; tooltip; `icon-color` override | all | done | `core/menubar.rs:247-286,583-637`; `tauri/platform/macos_menubar.rs:155,322-374`; `tauri/platform/linux_tray.rs:1019`; `tauri/platform/windows/tray.rs:234-279` | `IconFactory.cpp`; `TrayAgent.cpp:161,537-549` |
-| Icon follows a light or dark theme change | Windows | partial (`zerus-5wmh.13.14`) | macOS redraws (`tauri/platform/macos_menubar.rs:235-300`); Windows reads the theme once (`tauri/platform/windows/tray.rs:260-279`) | `TrayAgent.cpp:537-549` |
+| Icon follows a light or dark theme change | Windows | done (`zerus-5wmh.13.14.2`) | Windows redraws when `WM_SETTINGCHANGE` names `ImmersiveColorSet`, unless `icon-color` is set (`tauri/platform/windows/tray.rs:114-123,294-338`; `tauri/windows_shell.rs:133-151`), as macOS redraws (`tauri/platform/macos_menubar.rs:235-300`) | `TrayAgent.cpp:537-549` |
 | Left click opens Zerus, right click the menu; Open Zerus; Update available; Restart to finish update (macOS); machine state lines; Quit saving drafts | all | done | `core/menubar.rs:644-676`; `tauri/updates.rs:905-916,1305-1311`; `tauri/platform/linux_tray.rs:256-264,968-973`; `tauri/platform/windows/tray.rs:114-117,183,189` | `TrayMenu.cpp:162-245`; `QtTrayIcon.cpp`; `SniTrayIcon.cpp` |
 | Per-session rows in the tray menu | all | removed by owner decision | one count line per machine (`core/menubar.rs:639-678`, owner, 0.48.0) | `TrayMenu.cpp:23-31,168-234` |
 | Open in terminal-mode submenu | all | removed by owner decision | only read from files (`tauri/desk.rs:224-288`); see Terminal preferences | `TrayMenu.cpp:62-148`; `TrayAgent.cpp:832-873` |
@@ -283,9 +282,9 @@ In the default native alert mode the Zerus Next app posts alerts itself while it
 | `--sessions` and `--background`; closing hides the window; show, raise and unminimise; window geometry remembered; keep above | all | done | `tauri/cli.rs:23-31`; `tauri/lifecycle.rs:13-168`; `tauri/window_geometry.rs`; `tauri/window_layer.rs` | `AppConfig.cpp:461-463`; `main.cpp:279`; `SessionsWindow.cpp:5831-5908` |
 | Start at login; macOS Fix login item | all | done | `packaging/linux/hgs-tray.service`; `tauri/login_item.rs:106-207`; `ui/screens/settings/Updates.tsx:18-70` | `tray/packaging`; `SessionsWindow.cpp:1775-1823` |
 | Quit saves drafts and clears badges | all | done | `tauri/exit_flush.rs`; `tauri/signals.rs`; `tauri/lifecycle.rs:253-283` | `main.cpp:380-382`; `TerminationSignals.cpp` |
-| Hang watchdog | Windows | partial (`zerus-5wmh.13.14`) | Linux and macOS only: `tauri/lib.rs:1307-1309`; `tauri/watchdog.rs` | `main.cpp:410-423`; `MainThreadWatchdog.cpp` |
+| Hang watchdog | Windows | done (`zerus-5wmh.13.14.3`) | on Linux, macOS and Windows (`tauri/lib.rs:1314-1317,1464-1490`; `tauri/watchdog.rs`). Windows beats from a main-thread timer that modal loops dispatch too (`tauri/platform/windows/mod.rs:29-53`), on a clock that excludes sleep (`tauri/watchdog.rs:210-228`); quitting stops it (`tauri/lifecycle.rs:258-262`). After the abort Windows may offer the registered restart (next row), with the person's consent | `main.cpp:410-423`; `MainThreadWatchdog.cpp` |
 | Restart after a crash | Windows | done | `tauri/platform/windows/startup.rs:104-122` | `main.cpp:392-409` |
-| Startup note while the hgs command line is updated | Windows | **missing** (`zerus-5wmh.13.14`) | `tauri/platform/windows/startup.rs:18-32,76-101` runs silently | `StartupNotice.cpp`; `main.cpp:102-127` |
+| Startup note while the hgs command line is updated | Windows | done (`zerus-5wmh.13.14.4`) | `tauri/startup_note.rs`: shown only after 500 ms of `session-host status` or `install`, with Qt's text, never focused, gone when they end; started in `tauri/platform/windows/startup.rs:77-106` | `StartupNotice.cpp`; `main.cpp:102-127` |
 | Update checks, Settings > Updates, status-bar New version and Restart to finish update, alert once per release, Windows links and winget only | all | done | `tauri/updates.rs:751-866,1313-1323`; `ui/screens/settings/Updates.tsx:73-140`; `App.tsx:76-85`; `core/updates.rs:604-607,720-727` | `UpdatesWidget.h`; `UpdateController.cpp`; `WindowsUpdateTrust.cpp` |
 
 ## Settings, machines, accounts, projects, new session, tasks, worktrees, terminal and processes

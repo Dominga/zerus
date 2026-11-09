@@ -5,7 +5,8 @@ import { AgentLogo, Icon } from "../lib/icons";
 import { providerName } from "../lib/usage";
 import { sessionSwitchAccount, sessionSwitchPreview } from "../../bridge";
 import { accountsPage, loadAccounts } from "../../store/accounts";
-import { accountGroups, accountOf, consumeAccountSwitch, movable, moveOutcome, switchOutcome, switchRequest } from "../../store/accountSwitch";
+import { accountGroups, accountOf, consumeAccountSwitch, movable, moveOutcome, switchOutcome, switchRequest, takesSession } from "../../store/accountSwitch";
+import { trText } from "../../text";
 import type { Session } from "./types";
 
 interface Choice { id: string; label: string; provider: string }
@@ -104,14 +105,17 @@ export function AccountSwitchChip(props: { session: Session; compact?: boolean; 
                     <For each={group.rows}>
                       {(option) => {
                         const own = () => group.provider === provider() && option.id === current();
+                        const ready = () => takesSession(option);
                         return (
-                          <button type="button" role="menuitem" class="acct-switch-row" disabled={own()}
+                          <button type="button" role="menuitem" class="acct-switch-row" disabled={own() || !ready()}
+                            title={trText(option.detail)}
                             onClick={() => ask({ id: option.id, label: option.label, provider: group.provider })}>
                             <AgentLogo agent={group.provider} size={12} fallback={<Icon name="accounts" size={12} />} />
                             <span class="ell">{option.label || option.id}</span>
                             <Show when={own()}><Icon name="check" size={12} /></Show>
-                            <Show when={!own() && group.provider === provider()}><span class="dim">{option.usage.status}</span></Show>
-                            <Show when={group.provider !== provider()}><span class="dim">{tr("Move")}</span></Show>
+                            <Show when={!own() && !ready()}><span class="dim">{tr("Unavailable account")}</span></Show>
+                            <Show when={!own() && ready() && group.provider === provider()}><span class="dim">{option.usage.status}</span></Show>
+                            <Show when={!own() && ready() && group.provider !== provider()}><span class="dim">{tr("Move")}</span></Show>
                           </button>
                         );
                       }}

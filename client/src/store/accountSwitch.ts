@@ -18,7 +18,9 @@ export const movable = (provider: string) => (MOVE_AGENTS as readonly string[]).
 export const accountOf = (provider: string, accountId: string) =>
   accountId || `native-${provider}`;
 
-const signedOut = new Set(["signed_out", "expired", "credentials_locked", "credentials_unavailable", "desktop_session_unavailable"]);
+const signedOut = new Set(["signed-out", "expired", "keychain", "desktop", "unavailable"]);
+/** Not installed or not reachable here: never a choice and never a row. */
+const absent = new Set(["not-installed", "offline"]);
 
 /** The choices in the session's menu, the current one first and marked. */
 export function accountOptions(view: AccountsView, host: string, provider: string, current: string): Profile[] {
@@ -38,37 +40,58 @@ export function accountOptions(view: AccountsView, host: string, provider: strin
 /** One agent's accounts in the chip's menu. */
 export interface AccountGroup { provider: string; rows: Profile[] }
 
-/** Whether a profile can take a session: installed and online here, and for
- * Claude, Codex and Kimi signed in. DeepSeek and OpenCode run on their
- * native configuration. */
-function usable(profile: Profile): boolean {
-  if (!profile.installed || profile.online === false || profile.state === "not-installed" || profile.state === "offline") return false;
+/** Whether a profile can take this session now; its `detail` says why not.
+ * DeepSeek and OpenCode run on their native configuration whatever their usage
+ * says; every other agent needs a signed-in account that is not refused. */
+export function takesSession(profile: Profile): boolean {
+  if (!profile.installed || profile.online === false || absent.has(profile.state)) return false;
   if (profile.provider === "dsh" || profile.provider === "opencode") return true;
-  return profile.signed_in === true && !signedOut.has(profile.state);
+  if (signedOut.has(profile.state)) return false;
+  return profile.signed_in === true;
 }
 
-/** Task 352: every usable account of every agent on the session's computer,
- * grouped by agent: the session's own agent first (its current account first
- * and marked), then the others in MOVE_AGENTS order. The own agent's other
- * accounts are offered only where it switches in place. */
+/** Task 432: signed in on this computer, yet this computer cannot run it now
+ * (an unavailable, expired or locked account). The chooser names it unavailable
+ * with its reason instead of hiding it, as the owner asked on 2026-11-09. */
+function signedInHere(profile: Profile): boolean {
+  return profile.installed && profile.online !== false && !absent.has(profile.state)
+    && profile.state !== "signed-out" && profile.signed_in === true;
+}
+
+/** Task 352 (432): every account of every agent on the session's computer, grouped
+ * by agent: the session's own agent first (its current account first and marked),
+ * then the others in MOVE_AGENTS order. The own agent's other accounts are offered
+ * only where it switches in place. One row per account: the core already groups a
+ * native profile with the named profile of the same identity ("Default account"
+ * and "Default"), so the row the session runs on, else the named copy, stands for
+ * the account instead of both appearing. */
 export function accountGroups(view: AccountsView, host: string, provider: string, current: string): AccountGroup[] {
   const groups = new Map<string, Profile[]>();
-  const seen = new Set<string>();
   for (const account of view.accounts) {
-    for (const profile of account.members) {
-      if (profile.host !== host || !movable(profile.provider) || seen.has(`${profile.provider}/${profile.id}`)) continue;
-      const own = profile.provider === provider;
-      const currentRow = own && profile.id === current;
-      if (!currentRow && (!usable(profile) || (own && !switchable(provider)))) continue;
-      seen.add(`${profile.provider}/${profile.id}`);
-      groups.set(profile.provider, [...(groups.get(profile.provider) ?? []), profile]);
-    }
+    const members = account.members.filter((profile) => profile.host === host && movable(profile.provider));
+    if (!members.length) continue;
+    const row = members.find((profile) => profile.id === current)
+      ?? members.find((profile) => !profile.native && profile.provider === provider && named(profile.label))
+      ?? members.find((profile) => !profile.native && named(profile.label))
+      ?? members[0];
+    const own = row.provider === provider;
+    const currentRow = own && row.id === current;
+    const nowhere = !takesSession(row) && !signedInHere(row);
+    if (!currentRow && ((own && !switchable(provider)) || nowhere)) continue;
+    const rows = groups.get(row.provider) ?? [];
+    rows.push(row);
+    groups.set(row.provider, rows);
   }
   const order = [provider, ...MOVE_AGENTS.filter((agent) => agent !== provider)];
   return order.filter((agent) => groups.has(agent)).map((agent) => ({
     provider: agent,
     rows: (groups.get(agent) ?? []).sort((a, b) => Number(b.id === current) - Number(a.id === current)),
   }));
+}
+
+/** AccountCatalog::named: a label that names the account, not the provider's default. */
+function named(label: string): boolean {
+  return !!label && label !== "Default account" && label !== "Native DeepSeek account";
 }
 
 /** The line the chip shows after a move to another agent. */

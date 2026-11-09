@@ -74,7 +74,8 @@ describe("the team bar's strip layout (task #426)", () => {
     const text = fs.readFileSync(new URL("client/src/ui/styles/teams.css", new URL("../../../../", import.meta.url)), "utf8");
     const rule = (prefix: string) => text.split("\n").find((line) => line.trim().startsWith(prefix)) ?? "";
     // The bar never shrinks; the mode control and its button clip and ellipsize.
-    expect(rule(".team-progress {")).toMatch(/flex: none;/);
+    // Task #427 keeps the bar inside a min and a max width instead of fixed.
+    expect(rule(".team-progress {")).toMatch(/min-width: 80px;/);
     expect(rule(".team-bar {")).toMatch(/overflow: hidden;/);
     expect(rule(".team-bar .team-mode {")).toMatch(/min-width: 0;/);
     expect(rule(".team-bar .team-mode {")).toMatch(/overflow: hidden;/);

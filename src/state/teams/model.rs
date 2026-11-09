@@ -3243,6 +3243,11 @@ pub(crate) struct Team {
     /// {"preset":""} means "checked, no repository to profile".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode_proposal: Option<serde_json::Value>,
+    /// Task 336 (owner, 2026-11-08): the owner kept the team's settings for the
+    /// project's profile ({preset, fingerprint, at}); the working-mode block
+    /// stays away until the profile changes materially.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_kept: Option<serde_json::Value>,
     /// Task 271 (owner, 2026-11-08): the lead playbook (the working-mode preset
     /// and the rules a-(i), src/state/teams/playbook.rs), stored with the
     /// team and carried in its lore by the lead brief.

@@ -10326,9 +10326,14 @@ it makes, not one the lead must remember.
   - `branch-pipeline` - a branch per task cut from `base_branch` (the
     integration line), the `code` pipeline (review -> tests), accepted work
     landing through the merge queue. It pays for a code repository whose tests
-    run: no LFS, fewer than 20 files of 5 MiB or more, binary bytes under 512
-    MiB and under 20% of the tracked bytes, no engine markers, and at least one
-    test suite provider.
+    run: no LFS and no engine markers, and at least one test suite provider.
+    Task 336 (owner, 2026-11-08): when the source files are the majority by
+    count and the tests run, the preset stays `branch-pipeline` until the
+    binaries are far above the size floor (2 GiB of tracked bytes or 1 GiB of
+    binaries); the binary share alone never flips it (design previews and
+    fixtures live in code repositories). Without that code-first shape the old
+    rules hold: 512 MiB of binaries, a 20% share, 20 or more large assets, LFS
+    or engine markers choose the shared folder.
   - `branch-per-task` - the same branches and base without a pipeline, for code
     with no test subsystem.
   - `shared-folder` - one folder for every member, the soft file locks per task
@@ -10348,10 +10353,19 @@ it makes, not one the lead must remember.
   with `preset`, the `proposal` and `disagreeing` (what the settings still miss).
   A create request may name `working_mode` (`auto` is the default for a Git
   repository).
+- **Keep this team's settings** (task 336): the owner records the choice for
+  the project's profile as it is now (`{preset, fingerprint, at}` on the team;
+  `hgs team keep-working-mode --json`, `forget-working-mode` to drop it). The
+  disagreement block and the playbook's mode item stay away while the preset
+  and the profile's fingerprint (files, bytes, source and binary counts, large
+  assets, suites, LFS, merge queue) are unchanged; a material profile change,
+  or another preset's keep, brings the proposal back. Accepting a mode card
+  forgets the keep.
 - **A running team** whose settings disagree with its profile gets ONE owner
   card from the lead (`kind:"working-mode"`, the preset, its settings and the
   reasons), created at a safe point only: the team runs or is paused and no
-  attempt is open. The card is not repeated for the same preset; an Allow writes
+  attempt is open. The owner's Keep (above) silences it until the profile
+  changes materially. The card is not repeated for the same preset; an Allow writes
   the preset's settings (the owner setting the mode directly may also use
   `hgs team settings` for the fields the lead cannot change). A card whose mode
   is already in force, or whose project now profiles to another mode, withdraws

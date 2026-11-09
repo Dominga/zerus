@@ -46,6 +46,10 @@ function Card(props: { cards: ProposalCards; state: CardState; onAnswered?: () =
   const card = () => props.state.card;
   const when = () => askedAt(card().at);
   const off = () => props.state.sending;
+  const [reasonOpen, setReasonOpen] = createSignal(false);
+  const reasonText = () => card().reason ? tr("%1: %2", card().by, card().reason) : "";
+  // A reason that can outgrow a few lines gets More; the CSS clamps it.
+  const longReason = () => reasonText().length > 160 || reasonText().split("\n").length > 3;
   const answer = async (allow: boolean) => {
     const outcome = await props.cards.answer(card().id, allow);
     if (outcome && outcome !== "cancelled" && outcome !== "stale" && outcome.outcome === "done") props.onAnswered?.();
@@ -65,7 +69,10 @@ function Card(props: { cards: ProposalCards; state: CardState; onAnswered?: () =
       <For each={card().lines}>{(line) => <div class="team-proposal-change">{line}</div>}</For>
       <Show when={card().command}><code class="team-proposal-command" data-proposal-command>{card().command}</code></Show>
       <Show when={card().folder}><div class="team-proposal-change" data-proposal-folder>{tr("Folder: %1", card().folder)}</div></Show>
-      <Show when={card().reason}><div class="team-proposal-reason">{tr("%1: %2", card().by, card().reason)}</div></Show>
+      <Show when={card().reason}>
+        <div class="team-proposal-reason" classList={{ clamped: !reasonOpen() }}>{reasonText()}</div>
+        <Show when={longReason()}><button type="button" class="link team-proposal-more" onClick={() => setReasonOpen((open) => !open)}>{reasonOpen() ? tr("Show less") : tr("Show more")}</button></Show>
+      </Show>
       <Show when={props.state.notice}><div class="team-proposal-notice" role="status">{props.state.notice}</div></Show>
       <Show when={!props.state.gone} fallback={
         <div class="team-proposal-answers"><span class="grow" /><button class="btn small ghost" onClick={() => props.cards.dismiss(card().id)}>{tr("Dismiss")}</button></div>

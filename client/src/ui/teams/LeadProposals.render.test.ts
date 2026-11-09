@@ -138,6 +138,32 @@ describe("the lead's proposal cards in its Activity (task 217)", () => {
     expect(html).toContain('aria-label="Proposals"');
   });
 
+  it("clamps a long reason and keeps Allow and Deny in the card", async () => {
+    const members = [member("lead", NAME, true)];
+    const long = proposal({ id: "p3", kind: "settings", reason: "a long reason ".repeat(20), change: { op: "settings", summary: "Change the team's settings", lines: ["integration_folder: old → new"] } });
+    aLead([summary("t1", [listed("lead", NAME, true)])], { t1: view("t1", members, [long]) });
+    const html = render();
+    expect(html).toContain('class="team-proposal-reason clamped"');
+    expect(html).toContain(">Show more<");
+    expect(html).toContain(">Allow<");
+    expect(html).toContain(">Deny<");
+    // Task 367 (owner, 2026-11-08): the strip in the owner's Team pane grows
+    // with its cards instead of scrolling inside a box shorter than one card,
+    // and only a long reason is clamped, to four lines with More.
+    const { readFileSync } = await import(/* @vite-ignore */ ["node", "fs"].join(":")) as { readFileSync(path: URL): string };
+    const css = String(readFileSync(new URL("../styles/teams.css", import.meta.url))).replace(/\r\n/g, "\n");
+    const rule = (selector: string) => {
+      const at = css.indexOf(`${selector} {`);
+      expect(at, selector).toBeGreaterThan(-1);
+      return css.slice(at, css.indexOf("}", at));
+    };
+    const strip = rule(".team-conversation > .team-proposals");
+    expect(strip).toContain("max-height: none");
+    expect(strip).toContain("overflow: visible");
+    expect(rule(".team-proposal-reason.clamped")).toMatch(/-webkit-line-clamp:\s*4/);
+    expect(rule(".team-proposal-answers")).toContain("flex: none");
+  });
+
   it("draws nothing for a member's session", () => {
     aLead([summary("t1", [listed("lead", NAME, true), listed("dev", DEV, false)])],
       { t1: view("t1", [member("lead", NAME, true), member("dev", DEV, false)], [limits()]) }, { name: DEV });

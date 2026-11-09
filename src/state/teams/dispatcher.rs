@@ -4565,9 +4565,24 @@ pub(crate) fn with_git_answers<T>(prefetch: impl FnOnce(), then: impl FnOnce() -
 }
 
 pub(crate) fn git_at(folder: &str, args: &[&str]) -> Option<String> {
+    // Task #393: a blank folder is no repository. A `git -C "" rev-parse`
+    // reads the process's own folder and was seen in the status and inbox
+    // reads; it is never started.
+    if folder.trim().is_empty() {
+        return None;
+    }
     let key = (folder.to_owned(), args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<String>>());
     if let Some(answer) = GIT_MEMO.with(|memo| memo.borrow().as_ref().and_then(|memo| memo.get(&key).cloned())) {
         return answer;
+    }
+    // Task #393: the answer stays for this process's next tick while the
+    // repository's HEAD (its ref, or its commit) is the same, so a worker
+    // tick reads one project's folder once instead of every body reading it.
+    let head = head_key(folder);
+    if !head.is_empty() {
+        if let Some(answer) = git_cache_get(&key, &head) {
+            return answer;
+        }
     }
     let answer = (|| {
         let output = git_command(folder).args(args).output().ok()?;
@@ -4578,10 +4593,86 @@ pub(crate) fn git_at(folder: &str, args: &[&str]) -> Option<String> {
     })();
     GIT_MEMO.with(|memo| {
         if let Some(memo) = memo.borrow_mut().as_mut() {
-            memo.insert(key, answer.clone());
+            memo.insert(key.clone(), answer.clone());
         }
     });
+    if !head.is_empty() {
+        git_cache_put(key, head, answer.clone());
+    }
     answer
+}
+
+/// Task #393: the repository's HEAD as a cache key, read from its files, never
+/// by starting Git: the HEAD file, the ref it names (a worktree's refs live in
+/// its common folder), or the commit of a detached HEAD.
+pub(crate) fn head_key(folder: &str) -> String {
+    let dot = std::path::Path::new(folder).join(".git");
+    let gitdir = if dot.is_dir() {
+        dot
+    } else {
+        let Ok(text) = std::fs::read_to_string(&dot) else { return String::new() };
+        let Some(path) = text.trim().strip_prefix("gitdir:") else { return String::new() };
+        let path = std::path::PathBuf::from(path.trim());
+        if path.is_absolute() { path } else { dot.parent().unwrap_or(std::path::Path::new(folder)).join(path) }
+    };
+    let Ok(head) = std::fs::read_to_string(gitdir.join("HEAD")) else { return String::new() };
+    let mut key = head.trim().to_owned();
+    if let Some(reference) = head.trim().strip_prefix("ref: ") {
+        let common = std::fs::read_to_string(gitdir.join("commondir"))
+            .ok()
+            .map(|common| {
+                let path = std::path::PathBuf::from(common.trim());
+                if path.is_absolute() { path } else { gitdir.join(path) }
+            })
+            .unwrap_or_else(|| gitdir.clone());
+        let mut found = false;
+        for dir in [&gitdir, &common] {
+            if let Ok(value) = std::fs::read_to_string(dir.join(reference)) {
+                key.push('=');
+                key.push_str(value.trim());
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            if let Ok(packed) = std::fs::read_to_string(common.join("packed-refs")) {
+                for line in packed.lines() {
+                    if let Some((sha, name)) = line.split_once(' ') {
+                        if name == reference {
+                            key.push('=');
+                            key.push_str(sha);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    key
+}
+
+type GitCacheKey = (String, Vec<String>);
+type GitCacheEntry = (String, Option<String>);
+static GIT_CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<GitCacheKey, GitCacheEntry>>> =
+    std::sync::OnceLock::new();
+
+fn git_cache() -> &'static std::sync::Mutex<std::collections::HashMap<GitCacheKey, GitCacheEntry>> {
+    GIT_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn git_cache_get(key: &GitCacheKey, head: &str) -> Option<Option<String>> {
+    let cache = git_cache().lock().ok()?;
+    let (entry_head, answer) = cache.get(key)?;
+    (entry_head == head).then(|| answer.clone())
+}
+
+fn git_cache_put(key: GitCacheKey, head: String, answer: Option<String>) {
+    let Ok(mut cache) = git_cache().lock() else { return };
+    // A worker's ticks see many folders; the bound keeps the map small.
+    if cache.len() > 4096 {
+        cache.clear();
+    }
+    cache.insert(key, (head, answer));
 }
 
 /// F1.4: the reason a member's folder cannot be started in, or None when it
@@ -6344,6 +6435,9 @@ pub(crate) fn replace_prompt_text(team: &Team, member: &Member) -> String {
 /// U48: one git command in a member's folder, the repository's hooks and
 /// fsmonitor off, bounded in time: its output, or why it failed.
 fn git_bounded(folder: &str, args: &[&str]) -> std::result::Result<String, (bool, String)> {
+    if folder.trim().is_empty() {
+        return Err((false, "the member's folder is empty: no Git read".into()));
+    }
     let mut command = git_command(folder);
     command.args(args).env("LC_ALL", "C");
     let outcome = super::templates::run_tree(&mut command, Duration::from_secs(60), None);
@@ -11749,6 +11843,10 @@ mod dispatcher_stages;
 #[cfg(test)]
 #[path = "tests/dispatcher_restart.rs"]
 mod dispatcher_restart;
+
+#[cfg(test)]
+#[path = "tests/dispatcher_git_cache.rs"]
+mod dispatcher_git_cache;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_approval.rs"]

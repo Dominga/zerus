@@ -1608,3 +1608,26 @@ fn ctest_queue_missing_probe_program_or_placeholder_is_not_run() {
         assert!(database.last_green(&team.id, "gui", "").unwrap().is_none());
     }
 }
+
+/// Task #393 (owner, 2026-11-08): a landing the queue recorded is on the line
+/// already; the finished task is named landed from its record, not read from
+/// Git again. The line here holds no such commit, so only the record can
+/// decide it.
+#[test]
+fn a_landing_the_queue_recorded_is_not_read_from_git_again() {
+    let repo = repo();
+    let mut team = team(&repo);
+    team.settings.integration_folder = repo.lead.to_string_lossy().into_owned();
+    let merged = "0123456789abcdef0123456789abcdef01234567".to_owned();
+    team.task_mut(1).unwrap().status = TaskStatus::Accepted;
+    team.task_mut(1).unwrap().merge = Some(MergeEntry {
+        state: "landed".into(),
+        author: "dev".into(),
+        commit: merged.clone(),
+        merged: merged.clone(),
+        ..Default::default()
+    });
+    let view = landing(&team);
+    assert_eq!(view["landed"], json!([{"task":1,"commit":merged}]), "{}", view);
+    assert!(view["unlanded"].as_array().unwrap().is_empty(), "{}", view);
+}

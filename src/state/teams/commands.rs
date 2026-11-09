@@ -654,6 +654,152 @@ pub(crate) fn strip_stage_facts(value: &mut Value) {
     }
 }
 
+/// Task #393 (owner, 2026-11-08): the polled status stays bounded. Report text
+/// is clipped, the test-function lists are dropped (their counts stay), an
+/// attempt carries its last run instead of every run's arguments, and only the
+/// newest lead changes and proposals are listed. The full record of one task is
+/// `hgs team status --task N`; the full lead changes are `hgs team
+/// lead-changes`, and a proposal's stored form is what the card shows.
+pub(crate) fn bound_status(value: &mut Value, team: &Team) {
+    const REPORT_TEXT: usize = 300;
+    const TASK_TEXT: usize = 400;
+    const RUN_TAIL: usize = 200;
+    const PAGE: usize = 20;
+    fn clip(text: &str, limit: usize) -> String {
+        if text.chars().count() <= limit {
+            text.to_owned()
+        } else {
+            let mut cut: String = text.chars().take(limit).collect();
+            cut.push_str("... (clipped; hgs team status --task N has the full record)");
+            cut
+        }
+    }
+    let by_id: std::collections::HashMap<u32, &super::model::Task> = team.tasks.iter().map(|task| (task.id, task)).collect();
+    if let Some(tasks) = value["tasks"].as_array_mut() {
+        for value in tasks {
+            // The cancelled tasks may be filtered out of the view, so the task
+            // is found by its id, never by position.
+            let Some(task) = value["id"].as_u64().and_then(|id| u32::try_from(id).ok()).and_then(|id| by_id.get(&id).copied()) else {
+                continue;
+            };
+            // A finished task is a stub in the polled status: its reports and
+            // runs are in `hgs team status --task N`, and its landing in the
+            // lead changes.
+            if task.status.finished() && task.archived.is_none() {
+                *value = super::model::task_stub(task);
+                continue;
+            }
+            for field in ["description", "criteria", "decision_reason"] {
+                if let Some(text) = value[field].as_str() {
+                    let clipped = clip(text, TASK_TEXT);
+                    value[field] = json!(clipped);
+                }
+            }
+            if let Some(object) = value.as_object_mut() {
+                object.remove("baseline");
+                object.remove("output");
+                object.remove("prepare");
+                object.remove("stage_spans");
+            }
+            let Some(attempts) = value.get_mut("attempts").and_then(|attempts| attempts.as_array_mut()) else { continue };
+            for attempt in attempts {
+                if let Some(report) = attempt.get_mut("report").and_then(|report| report.as_object_mut()) {
+                    if let Some(text) = report.get("text").and_then(|text| text.as_str()) {
+                        let clipped = clip(text, REPORT_TEXT);
+                        report.insert("text".into(), json!(clipped));
+                    }
+                    if let Some(tests) = report.get_mut("tests").and_then(|tests| tests.as_object_mut()) {
+                        for bucket in ["functions_added", "functions_removed"] {
+                            if let Some(bucket) = tests.get_mut(bucket).and_then(|bucket| bucket.as_object_mut()) {
+                                bucket.remove("names");
+                            }
+                        }
+                    }
+                }
+                if let Some(runs) = attempt.get_mut("runs").and_then(|runs| runs.as_array_mut()) {
+                    let total = runs.len();
+                    if let Some(last) = runs.last() {
+                        let mut brief = serde_json::Map::new();
+                        for key in ["template", "at", "exit", "ms", "timed_out"] {
+                            if let Some(field) = last.get(key) {
+                                brief.insert(key.into(), field.clone());
+                            }
+                        }
+                        if let Some(tail) = last.get("tail").and_then(|tail| tail.as_str()) {
+                            brief.insert("tail".into(), json!(clip(tail, RUN_TAIL)));
+                        }
+                        *runs = vec![Value::Object(brief)];
+                    }
+                    attempt["runs_total"] = json!(total);
+                }
+            }
+        }
+    }
+    // Task #393: a polled member row keeps the newest jobs, services and queue
+    // entries with their counts; the cards read the rest on demand.
+    if let Some(members) = value.get_mut("members").and_then(|list| list.as_array_mut()) {
+        for member in members.iter_mut() {
+            if let Some(object) = member.as_object_mut() {
+                for (field, count) in [("jobs", "jobs_total"), ("services", "services_total"), ("queue", "queue_total")] {
+                    if let Some(list) = object.get_mut(field).and_then(|list| list.as_array_mut()) {
+                        let total = list.len();
+                        if total > 3 {
+                            list.truncate(3);
+                        }
+                        object.insert(count.into(), json!(total));
+                    }
+                }
+            }
+        }
+    }
+
+    // Task #393: a phase's change history is the plan's archive, not a polled
+    // row; the phases keep their state, tasks and notes.
+    if let Some(phases) = value.get_mut("phases").and_then(|list| list.as_array_mut()) {
+        for phase in phases.iter_mut() {
+            if let Some(object) = phase.as_object_mut() {
+                object.remove("changes");
+            }
+        }
+    }
+    // The owner's cards are the open proposals; a decided one is in the history.
+    let proposal_total = value.get_mut("proposals").and_then(|list| list.as_array_mut()).map(|proposals| {
+        let total = proposals.len();
+        proposals.retain(|proposal| proposal["state"] == "open");
+        if proposals.len() > PAGE {
+            proposals.truncate(PAGE);
+        }
+        total
+    });
+    if let Some(total) = proposal_total.filter(|total| *total > 0) {
+        value["proposals_total"] = json!(total);
+    }
+    // Task #393: a lead change's before/after phase snapshots are the plan's
+    // history, not a polled row; the newest twenty keep their summary alone.
+    if let Some(changes) = value.get_mut("lead_changes").and_then(|list| list.as_array_mut()) {
+        for change in changes.iter_mut() {
+            if let Some(object) = change.as_object_mut() {
+                object.remove("phases_before");
+                object.remove("phases_after");
+                object.remove("added");
+                object.remove("removed");
+                object.remove("changed");
+            }
+            if let Some(summary) = change.get("summary").and_then(|summary| summary.as_str()) {
+                let clipped = clip(summary, 300);
+                change["summary"] = json!(clipped);
+            }
+        }
+    }
+    if let Some(changes) = value.get_mut("lead_changes").and_then(|list| list.as_array_mut()) {
+        let count = changes.len();
+        changes.truncate(PAGE);
+        if count > 0 {
+            value["lead_changes_total"] = json!(count);
+        }
+    }
+}
+
 /// The team with its live members when the caller listed sessions (F7).
 #[cfg(test)]
 pub(super) fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::Seen]>) -> Value {
@@ -5741,6 +5887,9 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             if team.settings.build_broker {
                 value["build_states"] = super::broker::builds_view(&team, now())["members"].clone();
             }
+            // Task #393: the polled status is bounded; `status --task N` above
+            // answers with the task's full record.
+            bound_status(&mut value, &team);
             Ok(value)
         }
         "inbox" => inbox_command(input),
@@ -6326,6 +6475,10 @@ mod inbox_notices;
 #[cfg(test)]
 #[path = "tests/commands_standing_rules.rs"]
 mod commands_standing_rules;
+
+#[cfg(test)]
+#[path = "tests/commands_bounded.rs"]
+mod commands_bounded;
 
 
 

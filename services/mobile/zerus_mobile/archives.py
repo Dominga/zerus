@@ -56,7 +56,8 @@ def preview(value):
     page(value,{})
     fields={'name','cmd','agent','project','tag','run_id','conversation_id','archive_id','archived_at','created',
             'state','tracked','resumable','cwd','cwd_canonical','git_root','git_branch','git_worktree','model',
-            'phase','activity','activity_summary','completion_reason','allowed_actions','action_reasons','account_id'}
+            'phase','activity','activity_summary','completion_reason','allowed_actions','action_reasons','account_id',
+            'notification_preferences'}
     rows=[];size=2
     for raw in value['sessions']:
         row={k:v for k,v in raw.items() if k in fields}

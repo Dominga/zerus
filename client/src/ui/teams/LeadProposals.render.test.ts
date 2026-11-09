@@ -138,6 +138,18 @@ describe("the lead's proposal cards in its Activity (task 217)", () => {
     expect(html).toContain('aria-label="Proposals"');
   });
 
+  // Task #338: one card to the owner is drawn in full once, with its Allow and
+  // Deny, and nowhere twice (the wait strip only counts and links to it).
+  it("draws one card once", () => {
+    const members = [member("lead", NAME, true)];
+    aLead([summary("t1", [listed("lead", NAME, true)])], { t1: view("t1", members, [limits()]) });
+    const html = render();
+    expect(html.match(/class="team-proposals"/g)?.length).toBe(1);
+    expect(html.match(/data-proposal="p1"/g)?.length).toBe(1);
+    expect(html.match(/>Allow</g)?.length).toBe(1);
+    expect(html.match(/>Deny</g)?.length).toBe(1);
+  });
+
   it("draws nothing for a member's session", () => {
     aLead([summary("t1", [listed("lead", NAME, true), listed("dev", DEV, false)])],
       { t1: view("t1", [member("lead", NAME, true), member("dev", DEV, false)], [limits()]) }, { name: DEV });

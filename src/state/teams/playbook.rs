@@ -372,7 +372,13 @@ pub(crate) fn brief(team: &Team) -> String {
         .map(|entry| if entry.merged.is_empty() { entry.commit.clone() } else { entry.merged.clone() })
         .rfind(|commit| !commit.is_empty())
         .unwrap_or_default();
-    lines.push(format!("The integration line's last landing: {}.", if head.is_empty() { "nothing landed yet".to_owned() } else { head.chars().take(9).collect() }));
+    // Task #404 (owner, 2026-11-09): the lead answers the owner first and is
+    // never the bottleneck: one command per tool call, long work in the
+    // background, one task read at a time.
+    lines.push(
+        "Work fast: answer the owner first, before anything else; one team command per tool call (never chain mutations); read one task with hgs team status --task N, not the whole status; tests, reviews, waits and builds run in the background, never in the foreground; decide reports at once, and above 8 members or 20 open tasks keep a sub-lead and review pipelines so you are never the bottleneck."
+            .to_owned(),
+    );    lines.push(format!("The integration line's last landing: {}.", if head.is_empty() { "nothing landed yet".to_owned() } else { head.chars().take(9).collect() }));
     let idlers: Vec<String> = team
         .members
         .iter()

@@ -6148,6 +6148,16 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
         println!("{}", result["digest"].as_str().unwrap_or_default());
         return Ok(0);
     }
+    // Task #404 (owner, 2026-11-09): `hgs team status --task N [--team ID]`, one
+    // task instead of the whole status, which a slow store makes expensive.
+    if args.first().map(String::as_str) == Some("status") && args.iter().any(|arg| arg == "--task") && file.is_none() && !args.iter().any(|arg| arg == "--json") {
+        let number = args.iter().position(|arg| arg == "--task").and_then(|index| args.get(index + 1)).cloned().unwrap_or_default();
+        let task = number.trim_start_matches('#').parse::<u64>().ok().filter(|task| *task > 0).ok_or_else(|| format!("--task takes a positive task number, not {number:?}"))?;
+        let team = args.iter().position(|arg| arg == "--team").and_then(|index| args.get(index + 1)).cloned().unwrap_or_default();
+        let result = run("status", &json!({"team":team,"task":task}), false).map_err(|e| e.to_string())?;
+        println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+        return Ok(0);
+    }
     // Task 128: `hgs team lore find <words> | plans | show <id> | export [--team ID]`.
     if args.first().map(String::as_str) == Some("lore") && file.is_none() && !args.iter().any(|arg| arg == "--json") {
         let mut team = String::new();

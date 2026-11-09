@@ -1,6 +1,6 @@
 import { createSignal } from "solid-js";
 import { tr } from "../i18n";
-import type { MemoryCall, MemoryMoved, MemoryOp, MemoryOutcome, MemoryView } from "../bridge";
+import type { MemoryCall, MemoryHit, MemoryMoved, MemoryOp, MemoryOutcome, MemoryView } from "../bridge";
 import type { Text } from "../text";
 
 // Task 126 (owner, 2026-11-07): project memory, Qt's ProjectMemoryPanel.
@@ -51,6 +51,13 @@ export function createProjectMemory(port: Port) {
   const [failed, setFailed] = createSignal(false);
   const [error, setError] = createSignal<Text>();
   const [notice, setNotice] = createSignal("");
+  // Task #397: the project's search and the notes lore reports with it (the
+  // model download says there what it is doing); the notice can be dismissed.
+  const [found, setFound] = createSignal<{ hits: MemoryHit[]; store: string; query: string }>();
+  const [searching, setSearching] = createSignal(false);
+  const [searchError, setSearchError] = createSignal<Text>();
+  const [notes, setNotes] = createSignal<string[]>([]);
+  const [notesDismissed, setNotesDismissed] = createSignal(false);
   let generation = 0;
 
   async function reload(keep?: Text) {
@@ -64,8 +71,31 @@ export function createProjectMemory(port: Port) {
     if (current !== generation) return;
     setLoading(false);
     if (outcome.outcome === "done") { setView(outcome.view); setError(keep); return; }
-    setFailed(true); setError(outcome.detail);
+    if (outcome.outcome === "failed" || outcome.outcome === "unsupported") { setFailed(true); setError(outcome.detail); }
   }
+
+  /** Searches the project's store and its team sub-stores; each hit names its store. */
+  async function search(query: string): Promise<void> {
+    const text = query.trim();
+    if (!project() || !text) return;
+    const current = generation;
+    setSearching(true); setSearchError(undefined);
+    let outcome: MemoryOutcome;
+    try { outcome = await port.call({ project: project(), op: { op: "find", query: text, limit: 10 } }); }
+    catch (thrown) { outcome = { outcome: "failed", detail: message(thrown) }; }
+    if (current !== generation) return;
+    setSearching(false);
+    if (outcome.outcome === "found") {
+      setFound({ hits: outcome.hits, store: outcome.store, query: outcome.query });
+      setNotes(outcome.notes); setNotesDismissed(false);
+    } else if (outcome.outcome === "failed" || outcome.outcome === "unsupported") {
+      setFound(undefined); setSearchError(outcome.detail);
+    }
+  }
+  /** The notes still worth showing: the owner dismissed the last ones. */
+  const openNotes = () => (notesDismissed() ? [] : notes());
+  const dismissNotes = () => setNotesDismissed(true);
+  const clearSearch = () => { setFound(undefined); setSearchError(undefined); };
 
   async function write(op: MemoryOp): Promise<boolean> {
     if (!project() || loading() || failed() || !view()) return false;
@@ -83,7 +113,9 @@ export function createProjectMemory(port: Port) {
         return true;
       case "uncertain": void reload(outcome.detail); return false;
       case "unsupported": setFailed(true); setError(outcome.detail); return false;
-      default: setError(outcome.detail); return false;
+      case "failed": setError(outcome.detail); return false;
+      // A search is not a write; it never reaches here.
+      default: return false;
     }
   }
 
@@ -102,9 +134,12 @@ export function createProjectMemory(port: Port) {
       if (next === project()) return;
       setProjectSignal(next);
       setNotice("");
+      setFound(undefined); setSearchError(undefined); setNotes([]);
       void reload();
     },
     reload: () => reload(),
+    // Task #397: the search and the notes it brings; the owner dismisses them.
+    found, searching, searchError, openNotes, dismissNotes, clearSearch, search,
     setEnabled(enabled: boolean) {
       const now = view();
       return now && now.enabled !== enabled ? write({ op: "enable", enabled, expected_revision: now.revision }) : Promise.resolve(false);

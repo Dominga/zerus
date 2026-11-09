@@ -104,4 +104,31 @@ describe("project memory", () => {
     expect(sizeText(512)).toBe("512 B");
     expect(movedText({ from: "/a", to: "/b", files: 2, bytes: 2048, old_kept: true })).toBe("Moved 2 files (2.0 KiB) and checked them. The old store is kept at /a.");
   });
+
+  // Task #397: a search over the project and its team sub-stores, each hit
+  // named with its store, and the model notice the owner can dismiss.
+  it("searches every store and keeps the notes until they are dismissed", async () => {
+    const { memory, calls } = fixture((call) => call.op.op === "find"
+      ? { outcome: "found", store: "/state/lore/projects/p-1", query: call.op.query, notes: ["fetching the model (12%)"],
+          hits: [
+            { id: "p1", kind: "decision", title: "Warm the cache", store: "project", via: "text", score: 0.8 },
+            { id: "t1", kind: "fault", title: "Cold starts", store: "team Core", via: "text", score: 0.4 },
+          ] }
+      : done({ enabled: true, exists: true, revision: 2, index: "built" }));
+    memory.setProject("p-1");
+    await tick();
+    await memory.search("  cache warm  ");
+    expect(calls[1]).toEqual({ project: "p-1", op: { op: "find", query: "cache warm", limit: 10 } });
+    expect(memory.found()?.hits.map((hit) => [hit.id, hit.store])).toEqual([["p1", "project"], ["t1", "team Core"]]);
+    expect(memory.openNotes()).toEqual(["fetching the model (12%)"]);
+    memory.dismissNotes();
+    expect(memory.openNotes()).toEqual([]);
+    // A refused search says why and shows no hits.
+    const refused = fixture(() => ({ outcome: "failed", detail: { source: "no lore binary" } }));
+    refused.memory.setProject("p-1");
+    await tick();
+    await refused.memory.search("cache");
+    expect(refused.memory.found()).toBeUndefined();
+    expect(refused.memory.searchError()).toEqual({ source: "no lore binary" });
+  });
 });

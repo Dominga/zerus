@@ -7,4 +7,17 @@
   .pm-error { margin: 0; color: var(--z-color-danger); font-size: var(--fs-sm); white-space: pre-wrap; }
   .pm-old { margin: 0; padding-left: 22px; font-size: var(--fs-sm); }
   .proj-memory-row { margin-bottom: 12px; }
+  /* Task #397: the search over the project and its team sub-stores. */
+  .pm-search { align-items: center; gap: 6px; }
+  .pm-search .field { flex: 1 1 auto; min-width: 0; }
+  .pm-results { min-width: 0; }
+  .pm-results ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 2px; }
+  .pm-hit { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 3px 6px; border-radius: var(--z-radius-sm); background: var(--z-color-field); font-size: var(--fs-sm); }
+  .pm-hit-kind { flex: none; font-size: var(--fs-xs); color: var(--z-color-muted); text-transform: uppercase; letter-spacing: .04em; }
+  .pm-hit-title { flex: 1 1 auto; min-width: 0; color: var(--z-color-text); }
+  .pm-hit-store { flex: none; font-size: var(--fs-xs); color: var(--z-color-text-3); }
+  .pm-model-notice { position: relative; padding: 6px 28px 6px 8px; border: 1px solid var(--z-color-warn); border-radius: var(--z-radius-sm); background: var(--z-color-field); font-size: var(--fs-sm); color: var(--z-color-text); }
+  .pm-model-notice b { display: block; margin-bottom: 2px; color: var(--z-color-warn); }
+  .pm-model-notice ul { margin: 0; padding-left: 18px; font-size: var(--fs-xs); color: var(--z-color-text-2); }
+  .pm-model-notice .icon-btn { position: absolute; top: 4px; right: 4px; }
 }

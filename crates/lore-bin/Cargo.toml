@@ -18,7 +18,7 @@ cuda = ["zerus-lore/cuda"]
 [dependencies]
 # The one source of lore is CodeLore. To change lore: commit there, then move this
 # rev (and this package's Cargo.lock) to the new commit; see docs/lore.md.
-zerus-lore = { package = "codelore", git = "https://github.com/WhiteWh/CodeLore", rev = "8fdb66bf3fa52423a78487ca8df09ab85c9ce4fe" }
+zerus-lore = { package = "codelore", git = "https://github.com/WhiteWh/CodeLore", rev = "27c42c5163f88c6bea3694dd477b995be62e896c" }
 
 [dev-dependencies]
 sha2 = "0.10"

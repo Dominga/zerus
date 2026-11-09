@@ -359,3 +359,23 @@ fn a_held_lock_is_temporary() {
     assert!(is_transient("lore/x.jsonl: another process holds the file, so it could not be replaced; nothing was committed - try again when it is free"));
     assert!(!is_transient("refused, nothing was written: fault x: `cause` is required"));
 }
+
+/// Task #397: a search at the project root finds the team sub-stores and each
+/// hit names the store it came from; `show` and `plans` stay single-store.
+#[test]
+fn a_find_over_every_store_names_each_one() {
+    let team = Team { id: TEAM.into(), name: "Core".into(), ..Default::default() };
+    // The find asks lore for every sub-store; the other reads do not.
+    assert_eq!(read_args("find", &["cache".into()]), ["find", "cache", "--stores", "all"]);
+    assert_eq!(read_args("show", &["t33fbafeb-p1".into()]), ["show", "t33fbafeb-p1"]);
+    assert_eq!(read_args("plans", &[]), ["plans"]);
+    // Hits from the project root: its own records, this team's sub-store, another team's.
+    let mut value = json!({"results":[{"store":".","record":{"id":"p1"}},{"store":"teams/33fbafeb","record":{"id":"t1"}},
+        {"store":"teams/bbbbbbbb","record":{"id":"t2"}}],"notes":[]});
+    label_hits(&mut value, "project", &team);
+    let stores: Vec<&str> = value["results"].as_array().unwrap().iter().map(|hit| hit["store"].as_str().unwrap_or_default()).collect();
+    assert_eq!(stores, ["project", "team Core", "team bbbbbbbb"], "{value}");
+    // The workspace's own root is this team; a hit without a store is its own.
+    assert_eq!(store_label("workspace", ".", &team), "team Core");
+    assert_eq!(store_label("project", "./", &team), "project");
+}

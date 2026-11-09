@@ -176,6 +176,48 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
     const row = memberRow(props.computer, props.team.members.find((member) => member.id === target.member));
     if (row) { setSelectedKey(row.key); setDetailTab("activity"); }
   };
+  // Task #451: the working-mode block's buttons answer visibly. A refusal says
+  // why in the block (dismissible), Keep hides it only after hgs kept it, and
+  // Propose says what hgs did: a card in Waiting for you, or that the settings
+  // already follow the project's profile (the block then leaves by itself).
+  const [modeNotice, setModeNotice] = createSignal("");
+  const [modeNoticeTone, setModeNoticeTone] = createSignal<"info" | "danger">("info");
+  const [modeBusy, setModeBusy] = createSignal(false);
+  const keepMode = async () => {
+    if (modeBusy()) return;
+    setModeBusy(true); setModeNotice("");
+    const outcome = await actions.keepWorkingMode();
+    setModeBusy(false);
+    if (!outcome || outcome === "cancelled") return;
+    if (outcome.outcome === "done") {
+      markWorkingModeKept(props.team);
+      toast(tr("Working mode kept"), tr("This team's settings stay; the block returns when the project's profile changes."));
+      return;
+    }
+    setModeNoticeTone("danger");
+    setModeNotice(actions.notice || tr("The working mode was not kept."));
+  };
+  const proposeMode = async () => {
+    if (modeBusy()) return;
+    setModeBusy(true); setModeNotice("");
+    const outcome = await actions.proposeWorkingMode();
+    setModeBusy(false);
+    if (!outcome || outcome === "cancelled") return;
+    if (outcome.outcome === "failed" || outcome.outcome === "uncertain") {
+      setModeNoticeTone("danger");
+      setModeNotice(actions.notice || tr("The proposal was not sent."));
+      return;
+    }
+    setModeNoticeTone("info");
+    const receipt = outcome.receipt ?? {};
+    const status = typeof receipt.status === "string" ? receipt.status : "";
+    const named = [receipt.title, receipt.working_mode].find((value): value is string => typeof value === "string" && value !== "") || "";
+    const text = status === "already"
+      ? tr("The project's profile selects %1, and this team's settings already follow it.", named)
+      : tr("The switch is on its card in Waiting for you: Allow applies it.");
+    setModeNotice(text);
+    toast(tr("Working mode"), text);
+  };
   return (
     <>
       <TeamBar computer={props.computer} team={props.team} state={state()} problemTasks={problemTasks()}
@@ -190,11 +232,12 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
           title={props.team.working_mode!.proposal?.title || props.team.working_mode!.proposal?.preset || props.team.working_mode!.preset}
           reasons={props.team.working_mode!.proposal?.reasons ?? []}
           disagreeing={props.team.working_mode!.disagreeing ?? []}
-          onKeep={() => void new TeamActionModel(windowPort, () => ({ computer: props.computer, team: props.team }))
-            .keepWorkingMode().then((outcome) => { if (outcome && outcome !== "cancelled") markWorkingModeKept(props.team); })}
-          onPropose={() => void new TeamActionModel(windowPort, () => ({ computer: props.computer, team: props.team }))
-            .proposeWorkingMode(props.team.working_mode!.proposal?.preset || props.team.working_mode!.preset,
-              props.team.working_mode!.proposal?.title || "")}
+          busy={modeBusy()}
+          notice={modeNotice()}
+          noticeTone={modeNoticeTone()}
+          onDismissNotice={() => setModeNotice("")}
+          onKeep={() => void keepMode()}
+          onPropose={() => void proposeMode()}
           onClose={() => closeWorkingMode(props.team)} />
       </Show>
       <Show when={props.failure}><div class="team-strip danger" role="status"><Icon name="circle-alert" size={14} /><span class="ell">{props.failure}</span></div></Show>

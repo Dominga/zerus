@@ -1183,8 +1183,10 @@ impl TeamAction {
             }
             Self::WaitingRestore { id } => word(id, "Waiting item id"),
             Self::ProposeWorkingMode { preset, reason } => {
-                if !matches!(preset.as_str(), "branch-pipeline" | "branch-per-task" | "shared-folder") {
-                    return Err("The working mode is branch-pipeline, branch-per-task or shared-folder.".into());
+                // Task #451: "auto" is the project's profile as it is now, which
+                // the block's Propose the switch asks for.
+                if !matches!(preset.as_str(), "auto" | "branch-pipeline" | "branch-per-task" | "shared-folder") {
+                    return Err("The working mode is auto, branch-pipeline, branch-per-task or shared-folder.".into());
                 }
                 plain(reason, "A reason", 2000)
             }

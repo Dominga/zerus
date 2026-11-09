@@ -60,4 +60,25 @@ describe("the working-mode row (task #337)", () => {
     expect(rule).toMatch(/align-items: center;/);
     expect(rule).not.toMatch(/flex-direction: column;/);
   });
+
+  // Task #451 (owner, 2026-11-09): every press answers. What hgs did, or why it
+  // refused, stays under the row until the owner dismisses it; the buttons rest
+  // while their call runs.
+  it("says what a press did or why it was refused, dismissibly", () => {
+    expect(row()).not.toContain("data-working-mode-note");
+    const sent = render({ preset: "branch-pipeline", title: "Branch pipeline", reasons: [], disagreeing: ["folder policy"],
+      notice: "The switch is on its card in Waiting for you: Allow applies it.", onKeep: () => {}, onPropose: () => {}, onClose: () => {} });
+    expect(sent).toContain("data-working-mode-note");
+    expect(sent).toContain("Allow applies it");
+    expect(sent).toContain("data-working-mode-notice-close");
+    const refused = render({ preset: "shared-folder", title: "One shared folder", reasons: [], disagreeing: ["one shared folder"],
+      notice: "Only the lead proposes a change to your team", noticeTone: "danger", onKeep: () => {}, onPropose: () => {}, onClose: () => {}, onDismissNotice: () => {} });
+    expect(refused).toContain("danger");
+    expect(refused).toContain("Only the lead proposes a change to your team");
+    // A press in flight rests both buttons, never a second request.
+    const busy = render({ preset: "branch-pipeline", title: "Branch pipeline", reasons: [], disagreeing: [], busy: true,
+      onKeep: () => {}, onPropose: () => {}, onClose: () => {} });
+    expect(busy).toMatch(/data-working-mode-keep[^>]*disabled/);
+    expect(busy).toMatch(/data-working-mode-switch[^>]*disabled/);
+  });
 });

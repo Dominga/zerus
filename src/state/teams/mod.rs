@@ -47,6 +47,7 @@ pub(crate) mod store;
 pub(crate) mod templates;
 pub(crate) mod test_queue;
 pub(crate) mod test_results;
+pub(crate) mod tick_clock;
 pub(crate) mod test_runners;
 pub(crate) mod merge_queue;
 pub(crate) mod timing;

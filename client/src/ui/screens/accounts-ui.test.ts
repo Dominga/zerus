@@ -65,18 +65,20 @@ describe("accounts page", () => {
     expect(memberStateLabel("signed-out")).toBe("Sign-in needed");
   });
 
-  it("uses structured identity fields with the core's trimming and title deduplication", () => {
+  it("keeps reported identity visible even when it repeats the editable title", () => {
     const withIdentity = (label: string, identity: Account["usage"]["identity"]) => ({
       ...account([member()]), label, usage: usageOf({ identity }),
     });
     const empty = { email: "", name: "", plan: "", organization: "", account_id: "", auth_method: "" };
     expect(identityFields(withIdentity("Work", empty))).toEqual({ name: "", email: "", organization: "", plan: "", signIn: "" });
+    expect(identityFields(withIdentity("person@example.test", empty)).email).toBe("");
+    expect(identityFields(withIdentity("person@example.test", { ...empty, email: " person@example.test " })).email).toBe("person@example.test");
     expect(identityFields(withIdentity("Work", { ...empty, email: "work@example.test", auth_method: "none" })))
       .toEqual({ name: "", email: "work@example.test", organization: "", plan: "", signIn: "" });
     expect(identityFields(withIdentity("Work", { ...empty, name: " Ада 例 ", email: "ada@example.test", organization: "Организация 例", plan: "Team", auth_method: "passkey" })))
       .toEqual({ name: "Ада 例", email: "ada@example.test", organization: "Организация 例", plan: "Team", signIn: "passkey" });
     expect(identityFields(withIdentity("ada@example.test", { ...empty, name: " Work ", email: "ADA@example.test", organization: "work" })))
-      .toEqual({ name: "Work", email: "", organization: "", plan: "", signIn: "" });
+      .toEqual({ name: "Work", email: "ADA@example.test", organization: "work", plan: "", signIn: "" });
   });
 
   it("words the summary as Qt does", () => {
@@ -97,5 +99,46 @@ describe("accounts page", () => {
     expect(creditsText({ balance: "lots", unlimited: false })).toBe("Credits available: —");
     expect(creditsText({ balance: "12.5", unlimited: false })).toMatch(/^Credits available: 12[.,]50$/);
     expect(creditsText(null)).toBeUndefined();
+  });
+});
+
+describe("account list sorting and filters", () => {
+  const row = (key: string, provider: string, label: string, host = "workstation"): Account => ({
+    ...account([member({ key: `${host}\u001f${key}`, host, machine: host, provider })], key), provider, label,
+  });
+  const view = (...accounts: Account[]) => ({ ...emptyAccounts(), accounts });
+
+  it("groups agents and alphabetizes each group by default without changing catalog order", () => {
+    const original = [row("k", "kimi", "Alpha"), row("cz", "codex", "Zulu"), row("clz", "claude", "Zulu"), row("ca", "codex", "alpha"), row("cla", "claude", "Alpha")];
+    const catalog = view(...original);
+    expect(visibleAccounts(catalog, "*").map((a) => a.key)).toEqual(["cla", "clz", "ca", "cz", "k"]);
+    expect(catalog.accounts).toEqual(original);
+    expect(visibleAccounts(view(...original.toReversed()), "*").map((a) => a.key)).toEqual(["cla", "clz", "ca", "cz", "k"]);
+  });
+
+  it("uses a deterministic key tie-break and natural account-number ordering", () => {
+    const catalog = view(row("ten", "codex", "Account 10"), row("b", "codex", "account 2"), row("a", "codex", "Account 2"));
+    expect(visibleAccounts(catalog, "*").map((a) => a.key)).toEqual(["a", "b", "ten"]);
+  });
+
+  it("offers name-only order without losing or merging equal labels from different agents", () => {
+    const catalog = view(row("cla", "claude", "Zulu"), row("co", "codex", "Alpha"), row("ki", "kimi", "Alpha"));
+    expect(visibleAccounts(catalog, "*", { sort: "name" }).map((a) => a.key)).toEqual(["co", "ki", "cla"]);
+  });
+
+  it("combines machine, provider and case-insensitive text filters", () => {
+    const catalog = view(row("one", "codex", "Work", "studio"), row("two", "claude", "Work", "studio"), row("three", "codex", "Work", "laptop"));
+    expect(visibleAccounts(catalog, "studio", { provider: "codex", query: "  wOrK  " }).map((a) => a.key)).toEqual(["one"]);
+    expect(visibleAccounts(catalog, "studio", { provider: "kimi" })).toEqual([]);
+    expect(visibleAccounts(catalog, "*", { query: "not found" })).toEqual([]);
+    expect(visibleAccounts(catalog, "*", { provider: "*", query: " " })).toHaveLength(3);
+  });
+
+  it("searches reported identity and machine labels without adding missing catalog accounts", () => {
+    const known = row("known", "kimi", "Personal", "studio");
+    known.usage = usageOf({ identity: { ...known.usage.identity, name: "Ада Example", email: "office@example.test", organization: "Research" } });
+    const catalog = view(known);
+    for (const query of ["АДА", "OFFICE@", "research", "studio", "Kimi"]) expect(visibleAccounts(catalog, "*", { query })).toEqual([known]);
+    expect(visibleAccounts(view(), "*", { query: "office@" })).toEqual([]);
   });
 });

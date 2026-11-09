@@ -21,7 +21,7 @@ import { UsageMeters } from "../components/UsageMeter";
 import { accountManagement } from "../../store/accountManagement";
 import { accountSetup } from "../../store/accountSetup";
 import {accountDistribution} from "../../store/accountDistribution";
-import { creditsText, identityFields, loginLabel, memberStateLabel, memberStateText, memberOf, panelWindow, profileTags, summaryLine, tone, visibleAccounts, visibleMembers } from "./accounts-ui";
+import { creditsText, identityFields, loginLabel, memberStateLabel, memberStateText, memberOf, panelWindow, profileTags, summaryLine, tone, visibleAccounts, visibleMembers, type AccountSort } from "./accounts-ui";
 import { tr } from "../../i18n";
 import { trText } from "../../text";
 
@@ -48,8 +48,8 @@ function ProfileTag(props: { tag?: string; id: string }) {
   return <Show when={props.tag}><span class="acct-pid tabular" title={tr("Profile %1", props.id)}>{props.tag}</span></Show>;
 }
 
-function AccountRow(props: { a: Account; now: number }) {
-  const on = () => selectedAccount() === props.a.key;
+function AccountRow(props: { a: Account; now: number; selected: boolean }) {
+  const on = () => props.selected;
   const tags = createMemo(() => profileTags(props.a));
   const pick = () => {
     closeManagement();clearManagementNotice();
@@ -136,6 +136,13 @@ function Detail(props: { a: Account }) {
     const f = fields();
     return !f.name && !f.email && !f.organization && !f.plan && !f.signIn && props.a.identity_note ? trText(props.a.identity_note) : "";
   });
+  const metadata = createMemo(() => [
+    { kind: "name", label: tr("Name"), value: fields().name },
+    { kind: "email", label: tr("Email"), value: fields().email },
+    { kind: "organization", label: tr("Organization"), value: fields().organization },
+    { kind: "plan", label: tr("Plan"), value: fields().plan },
+    { kind: "sign-in", label: tr("Sign-in"), value: fields().signIn },
+  ].filter((field) => !!field.value));
   const [moreOpen, setMoreOpen] = createSignal(false);
   const [moreQuery, setMoreQuery] = createSignal("");
   let moreButton: HTMLButtonElement | undefined, moreInput: HTMLInputElement | undefined;
@@ -180,8 +187,8 @@ function Detail(props: { a: Account }) {
           <AccountMarkCircle mark={accountMark(props.a, settings)} size={22} />
           <h2 class="ell" title={props.a.label} aria-label={props.a.label}>{props.a.label}</h2>
           <AgentBadge agent={agentKind(props.a.provider)} />
+          <span class="dim am-hidden" classList={{ shown: accountAppearance(settings, props.a.members).hidden }} title={tr("Hidden on session cards")} aria-label={tr("Hidden on session cards")} aria-hidden={!accountAppearance(settings, props.a.members).hidden}>{tr("Hidden on session cards")}</span>
         </div>
-        <span class="dim am-hidden" classList={{ shown: accountAppearance(settings, props.a.members).hidden }} title={tr("Hidden on session cards")} aria-label={tr("Hidden on session cards")} aria-hidden={!accountAppearance(settings, props.a.members).hidden}>{tr("Hidden on session cards")}</span>
         <div class="acct-title-actions">
           <button class="btn" onClick={event=>setMarkEditor({ origin: event.currentTarget })}><Icon name="palette" size={13} />{tr("Color and mark…")}</button>
           <button class="btn" disabled={managementBusy()} onClick={event=>void openCatalog("rename",props.a.key,m().key,event.currentTarget)}><Icon name="pencil" size={13} />{tr("Rename…")}</button>
@@ -189,16 +196,9 @@ function Detail(props: { a: Account }) {
       </div>
       <Show when={markEditor()}>{(editor) => <Suspense><AccountMarkDialog account={props.a} origin={editor().origin} close={() => setMarkEditor(undefined)} /></Suspense>}</Show>
       <div class="acct-identity selectable">
-        <div class="acct-meta-identity">
-          <span class="acct-meta-label">{tr("Identity")}</span>
-          <Show when={identityNote()} fallback={<>
-            <MetadataValue kind="name" label={tr("Name")} value={fields().name} />
-            <MetadataValue kind="email" label={tr("Email")} value={fields().email} />
-            <MetadataValue kind="organization" label={tr("Organization")} value={fields().organization} />
-          </>}>{(note) => <span class="acct-meta-value acct-meta-note muted ell" data-meta="note" title={note()} aria-label={`${tr("Identity")}: ${note()}`}>{note()}</span>}</Show>
-        </div>
-        <div class="acct-meta-field"><span class="acct-meta-label">{tr("Plan")}</span><MetadataValue kind="plan" label={tr("Plan")} value={fields().plan} /></div>
-        <div class="acct-meta-field"><span class="acct-meta-label">{tr("Sign-in")}</span><MetadataValue kind="sign-in" label={tr("Sign-in")} value={fields().signIn} /></div>
+        <Index each={metadata()} fallback={<div class="acct-meta-note muted" data-meta="note" title={identityNote() || tr("Unavailable")} aria-label={`${tr("Identity")}: ${identityNote() || tr("Unavailable")}`}>{identityNote() || tr("Unavailable")}</div>}>
+          {(field) => <div class="acct-meta-field"><span class="acct-meta-label" title={field().label}>{field().label}</span><MetadataValue kind={field().kind} label={field().label} value={field().value} /></div>}
+        </Index>
       </div>
 
       <section class="acct-card box">
@@ -329,7 +329,18 @@ function Detail(props: { a: Account }) {
 export function AccountsScreen() {
   onCleanup(closeManagement);
   const view = accountsPage;
-  const visible = createMemo(() => visibleAccounts(view(), accountMachine()));
+  const [query, setQuery] = createSignal("");
+  const [provider, setProvider] = createSignal("*");
+  const [sort, setSort] = createSignal<AccountSort>("agent");
+  const providerOptions = createMemo(() => {
+    const values = new Set(view().accounts.map((a) => a.provider));
+    if (provider() !== "*") values.add(provider());
+    return [...values].sort((a, b) => providerName(a).localeCompare(providerName(b)));
+  });
+  const filtered = () => !!query().trim() || provider() !== "*" || accountMachine() !== "*";
+  const changed = () => { closeManagement(); clearManagementNotice(); };
+  const clearFilters = () => { changed(); setQuery(""); setProvider("*"); setAccountMachine("*"); };
+  const visible = createMemo(() => visibleAccounts(view(), accountMachine(), { query: query(), provider: provider(), sort: sort() }));
   // The rows' reset times re-render every 15 s; one timer serves every row.
   const now = useNow(15_000);
   // An Overview card asks for a profile: select its account once it is listed.
@@ -337,6 +348,8 @@ export function AccountsScreen() {
     const key = requestedProfile();
     const account = key ? view().accounts.find((a) => a.members.some((m) => m.key === key)) : undefined;
     if (!account) return;
+    // Explicit account navigation must not be hidden by this pane's text/agent filters.
+    setQuery(""); setProvider("*");
     closeManagement();accountManagement.clearNotice();
     setSelectedAccount(account.key);
     setSelectedProfile(key);
@@ -379,16 +392,21 @@ export function AccountsScreen() {
           <p class="muted acct-summary">{tr("Your accounts across all machines. Choose an account to manage where it is available.")}</p>
           <For each={view().notices}>{(notice) => <Status kind="warn">{notice}</Status>}</For>
           <Show when={!view().no_hosts}>
-            <Dropdown class="field acct-filter" aria-label={tr("Machine")} value={accountMachine()} onChange={(value) => {closeManagement();clearManagementNotice();setAccountMachine(value);}} options={[{ value: "*", label: tr("All machines") }, ...((view().hosts) ?? []).map((h) => ({ value: h.computer, label: h.label }))]} />
+            <div class="acct-filters">
+              <TextInput class="field acct-search" type="search" aria-label={tr("Search accounts")} placeholder={tr("Search accounts")} value={query()} onInput={(event) => { changed(); setQuery(event.currentTarget.value); }} />
+              <Dropdown class="field acct-filter" aria-label={tr("Machine")} value={accountMachine()} onChange={(value) => { changed(); setAccountMachine(value); }} options={[{ value: "*", label: tr("All machines") }, ...((view().hosts) ?? []).map((h) => ({ value: h.computer, label: h.label }))]} />
+              <Dropdown class="field acct-provider-filter" aria-label={tr("Agent")} value={provider()} onChange={(value) => { changed(); setProvider(value); }} options={[{ value: "*", label: tr("All agents") }, ...providerOptions().map((value) => ({ value, label: providerName(value) }))]} />
+              <Dropdown class="field acct-sort" aria-label={tr("Sort accounts")} value={sort()} onChange={(value) => { changed(); setSort(value === "name" ? "name" : "agent"); }} options={[{ value: "agent", label: tr("Agent type, then name") }, { value: "name", label: tr("Account name") }]} />
+            </div>
             <Show when={view().snapshot}>
-              <div class="row acct-count"><Show when={view().pending}><Spinner size={12} /></Show><span class="muted ell">{summaryLine(view(), visible().length)}</span></div>
+              <div class="row acct-count"><Show when={view().pending}><Spinner size={12} /></Show><span class="muted ell grow">{summaryLine(view(), visible().length)}</span><Show when={filtered()}><button class="btn small" onClick={clearFilters}>{tr("Clear filters")}</button></Show></div>
             </Show>
           </Show>
           <div class="acct-scroll" ref={list} role="list" aria-label={tr("Agent accounts")} onKeyDown={step}>
             <Show when={!view().no_hosts}>
               <Show when={view().snapshot} fallback={<div class="acct-loading"><div class="row"><Spinner /><span>{tr("Loading accounts…")}</span></div><p class="muted">{tr("Checking accounts across your machines.")}</p></div>}>
-                <Show when={visible().length} fallback={<p class="muted acct-none">{accountMachine() === "*" ? tr("No accounts.") : tr("No accounts on %1.", filterName())}</p>}>
-                  <Index each={visible()}>{(a) => <div role="listitem"><AccountRow a={a()} now={now()} /></div>}</Index>
+                <Show when={visible().length} fallback={<p class="muted acct-none">{query().trim() || provider() !== "*" ? tr("No accounts match these filters.") : accountMachine() === "*" ? tr("No accounts.") : tr("No accounts on %1.", filterName())}</p>}>
+                  <Index each={visible()}>{(a) => <div role="listitem"><AccountRow a={a()} now={now()} selected={current()?.key === a().key} /></div>}</Index>
                 </Show>
                 <Show when={view().truncated > 0}><p class="dim acct-none">{tr("%1 more accounts are not shown.", view().truncated)}</p></Show>
               </Show>

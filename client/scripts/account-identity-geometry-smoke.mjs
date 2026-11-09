@@ -16,7 +16,7 @@ const HARNESS = [
   "client/scripts/account-identity-geometry-smoke.html",
   "client/scripts/account-identity-geometry-smoke.mjs",
 ];
-const CASES = ["loading", "kimi", "codex", "claude", "unavailable", "claude-late"];
+const CASES = ["loading", "kimi", "codex", "codex-email", "claude", "unavailable", "claude-late"];
 const TITLE_CASES = ["short", "email-label", "switch-long", "long-label", "localized-label", "hidden-short", "hidden-long", "unhidden-short"];
 let titleLabels;
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -148,6 +148,9 @@ function checkGeometry(details, baseline, label) {
     throw new Error(`${label}: horizontal overflow ${details.mainScrollWidth} > ${details.mainClientWidth}`);
   }
   if (details.actions.length !== 2) throw new Error(`${label}: title actions missing`);
+  closeTo(details.provider.left - details.accountLabel.right, 10, `${label}: provider follows the title`);
+  closeTo(details.accountLabel.left - details.mark.right, 10, `${label}: one title gap after the mark`);
+  if (details.provider.right > details.titleMain.right + 0.02) throw new Error(`${label}: provider overlaps actions`);
   if (baseline) {
     for (const key of ["machines", "usage"]) closeTo(details[key].top, baseline[key].top, `${label}: ${key} top`);
     for (const key of ["title", "identity"]) closeTo(details[key].height, baseline[key].height, `${label}: ${key} height`);
@@ -155,7 +158,7 @@ function checkGeometry(details, baseline, label) {
       for (const metric of ["top", "height", "left", "right"]) closeTo(details[key][metric], baseline[key][metric], `${label}: ${key} ${metric}`);
     }
     for (const key of ["mark", "provider"]) {
-      for (const metric of ["top", "height", "right"]) closeTo(details[key][metric], baseline[key][metric], `${label}: ${key} ${metric}`);
+      for (const metric of key === "mark" ? ["top", "height", "right"] : ["top", "height"]) closeTo(details[key][metric], baseline[key][metric], `${label}: ${key} ${metric}`);
     }
     closeTo(details.accountLabel.height, baseline.accountLabel.height, `${label}: account label height`);
     closeTo(details.identity.bottom, baseline.identity.bottom, `${label}: header bottom`);
@@ -167,6 +170,10 @@ async function runCase(bidi, widthName, caseName, output) {
   if (caseName === "loading" || caseName === "short") details = await bidi.json("window.accountIdentityFixture.reset()");
   else if (caseName === "kimi") details = await bidi.json("window.accountIdentityFixture.update('kimi')");
   else if (caseName === "codex") details = await bidi.json("window.accountIdentityFixture.select('Codex Work')");
+  else if (caseName === "codex-email") {
+    details = await bidi.json("window.accountIdentityFixture.update('codex-email')");
+    if (details.metadata.find((field) => field.kind === 'email')?.text !== 'codex@example.test' || details.accountLabel.text !== 'codex@example.test') throw Error('reported identity equal to title was hidden');
+  }
   else if (caseName === "claude") details = await bidi.json("window.accountIdentityFixture.select('Claude Team')");
   else if (caseName === "unavailable") details = await bidi.json("window.accountIdentityFixture.update('unavailable')");
   else if (caseName === "claude-late") details = await bidi.json("window.accountIdentityFixture.update('claude-late')");
@@ -188,6 +195,57 @@ async function runCase(bidi, widthName, caseName, output) {
     : ["short", "email-label", "switch-long", "long-label", "localized-label", "unhidden-short"].includes(caseName) ? false : undefined;
   if (hiddenExpected !== undefined && !!details.hidden?.shown !== hiddenExpected) throw new Error(`${widthName}/${caseName}: hidden status mismatch`);
   return { details, image: `${output}/accounts-${widthName}-${caseName}.png` };
+}
+
+async function checkAccountFilters(bidi, output) {
+  await bidi.viewport(1100);
+  await bidi.json("window.accountIdentityFixture.reset()");
+  const states = [];
+  const read = () => bidi.json(`({ rows: [...document.querySelectorAll('.acct-row')].map(row => row.querySelector('b').textContent),
+    selected: document.querySelector('.acct-row[aria-current="true"] b')?.textContent,
+    detail: document.querySelector('.acct-title h2')?.textContent })`);
+  const expectRows = async (name, rows) => {
+    const state = await read();
+    if (JSON.stringify(state.rows) !== JSON.stringify(rows)) throw Error(`${name}: ${JSON.stringify(state)}`);
+    if (rows.length && state.selected !== state.detail) throw Error(`${name}: selection differs from displayed account`);
+    states.push({name, ...state});
+  };
+  const search = async (value) => {
+    await bidi.json(`(() => { const input = document.querySelector('.acct-search'); input.focus(); input.value = ${JSON.stringify(value)}; input.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
+    await pause(30);
+  };
+  const choose = async (selector, label) => {
+    await bidi.json(`(() => { document.querySelector(${JSON.stringify(selector)}).click(); return true; })()`);
+    await bidi.json(`(() => { const option = [...document.querySelectorAll('[role="option"]')].find(item => item.textContent.trim() === ${JSON.stringify(label)}); if (!option) throw Error('missing option'); option.click(); return true; })()`);
+    await pause(30);
+  };
+  await expectRows('default agent/name order', ['Claude Team', 'Codex Work', 'Kimi Personal']);
+  await search('  cOdEx  ');
+  await expectRows('case-insensitive search', ['Codex Work']);
+  await choose('.acct-provider-filter', 'Kimi');
+  await expectRows('combined query/provider gives no matches', []);
+  await search('');
+  await expectRows('provider filter', ['Kimi Personal']);
+  await choose('.acct-filter', 'Workstation');
+  await expectRows('combined machine/provider', ['Kimi Personal']);
+  await bidi.json(`(() => { [...document.querySelectorAll('.acct-count button')].find(button => button.textContent === 'Clear filters').click(); return true; })()`);
+  await expectRows('clear filters retains catalog accounts', ['Claude Team', 'Codex Work', 'Kimi Personal']);
+  await bidi.json("window.accountIdentityFixture.setLabel('A personal')");
+  await expectRows('default order still groups a renamed account by agent', ['Claude Team', 'Codex Work', 'A personal']);
+  await choose('.acct-sort', 'Account name');
+  await expectRows('explicit alphabetical sort', ['A personal', 'Claude Team', 'Codex Work']);
+  await choose('.acct-sort', 'Agent type, then name');
+  await expectRows('restore default order', ['Claude Team', 'Codex Work', 'A personal']);
+  await bidi.json('window.accountIdentityFixture.reset()');
+  await search('Codex');
+  await choose('.acct-provider-filter', 'Kimi');
+  await bidi.json("window.accountIdentityFixture.requestProfile('claude')");
+  await expectRows('explicit requested account clears hiding filters', ['Claude Team', 'Codex Work', 'Kimi Personal']);
+  if ((await read()).selected !== 'Claude Team') throw Error('explicit requested account was not selected');
+  await bidi.json('window.accountIdentityFixture.echoMetadata()');
+  await expectRows('unchanged metadata refresh preserves displayed selection and nodes', ['Claude Team', 'Codex Work', 'Kimi Personal']);
+  const screenshot = `${output}/accounts-list-filters.png`;
+  return { states, screenshot, screenshot_sha256: await bidi.capture(screenshot) };
 }
 
 const args = process.argv.slice(2);
@@ -269,12 +327,13 @@ try {
     results[widthName] = captures;
   }
 
+  const listFilters = await checkAccountFilters(bidi, output);
   await bidi.call("browsingContext.navigate", { context: bidi.context, url: `${url}?lang=ru`, wait: "complete" });
   await bidi.viewport(720);
   await waitReady(bidi);
   let baseline;
   const captures = [];
-  for (const caseName of ["loading", "kimi", "codex"]) {
+  for (const caseName of ["loading", "kimi", "codex", "codex-email"]) {
     const { details, image } = await runCase(bidi, "narrow-ru", caseName, output);
     if (details.language !== "ru") throw new Error("Russian fixture did not load its catalog");
     checkGeometry(details, baseline, `narrow-ru/${caseName}`);
@@ -290,9 +349,9 @@ try {
   if (failures.length) throw new Error(`Fixture failures: ${JSON.stringify(failures)}`);
   writeFileSync(`${output}/provenance.json`, `${JSON.stringify({
     source, harness, inputs, url, firefox: execFileSync(firefox, ["--version"], { encoding: "utf8" }).trim(),
-    results, failures, ipc_calls: calls,
+    results, list_filters: listFilters, failures, ipc_calls: calls,
   }, null, 2)}\n`);
-  console.log(`PASS ${Object.values(results).flat().length} captures; stable Machines and usage tops; full metadata; no management IPC`);
+  console.log(`PASS ${Object.values(results).flat().length} captures + ${listFilters.states.length} list-filter controls; stable Machines and usage tops; full metadata; no management IPC`);
   console.log(`${output}/provenance.json`);
 } finally {
   if (bidi) bidi.ws.close();

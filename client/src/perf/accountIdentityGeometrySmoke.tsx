@@ -1,7 +1,7 @@
 // Real Accounts screen with synthetic identities and no management IPC.
 // Run client/scripts/account-identity-geometry-smoke.mjs for the isolated Firefox evidence.
 import { render } from "solid-js/web";
-import { accountsPage, setAccountsPage } from "../store/accounts";
+import { accountsPage, setAccountsPage, setRequestedProfile } from "../store/accounts";
 import { emptyAccounts, emptyUsage, type Account, type Identity, type Profile } from "../types";
 import type { Text } from "../text";
 import "../ui/styles/base.css";
@@ -80,7 +80,9 @@ const initialView = () => ({
   ...emptyAccounts(), snapshot: true, loaded_machines: 1, accounts: initialAccounts(),
   hosts: [{ computer: "workstation", name: "workstation", label: "Workstation", online: true }],
 });
-const updates = { loading: kimiLoading, kimi: kimiLoaded, unavailable: claudeUnavailable, "claude-late": claudeLate };
+const updates = { loading: kimiLoading, kimi: kimiLoaded, unavailable: claudeUnavailable, "claude-late": claudeLate,
+  "codex-email": () => account("codex", "codex@example.test", "codex", { ...EMPTY_IDENTITY, email: "codex@example.test", plan: "Team", auth_method: "ChatGPT" }),
+};
 type Update = keyof typeof updates;
 
 Object.assign(window, { __TAURI_INTERNALS__: { invoke: async (command: string) => {
@@ -120,6 +122,12 @@ function geometry() {
     const shown = hidden.classList.contains("shown");
     check(hidden.textContent === hidden.title && hidden.getAttribute("aria-label") === hidden.title, "hidden status keeps full tooltip and accessible text");
     check(getComputedStyle(hidden).visibility === (shown ? "visible" : "hidden") && hidden.getAttribute("aria-hidden") === String(!shown), "hidden status is exposed only when true");
+  }
+  for (const field of detail.querySelectorAll<HTMLElement>(".acct-meta-field")) {
+    const label = field.querySelector<HTMLElement>(".acct-meta-label")!;
+    const value = field.querySelector<HTMLElement>(".acct-meta-value")!;
+    check(label.getBoundingClientRect().height <= 20.02 && getComputedStyle(label).whiteSpace === "nowrap", "metadata labels never wrap into another row");
+    check(value.getBoundingClientRect().left >= label.getBoundingClientRect().right, "metadata label and value do not overlap");
   }
   for (const value of metadata) {
     if (value.text !== "—") {
@@ -234,6 +242,17 @@ async function run() {
     setLabel,
     setHidden,
     machineKeyboard,
+    echoMetadata: async () => {
+      const current = selectedFixtureAccount(), before = document.querySelector(".acct-meta-field");
+      setAccountsPage({ ...accountsPage(), accounts: accountsPage().accounts.map((item) => item.key === current.key ? {
+        ...item, usage: { ...item.usage, identity: { ...item.usage.identity } },
+      } : item) });
+      await settle(); check(document.querySelector(".acct-meta-field") === before, "unchanged metadata refresh preserves field nodes"); return geometry();
+    },
+    requestProfile: async (provider: string) => {
+      const account = accountsPage().accounts.find((item) => item.provider === provider)!;
+      setRequestedProfile(account.members[0].key); await settle(); return geometry();
+    },
     reset: async () => { await clearHidden(); setAccountsPage(initialView()); await settle(); return select(TITLE_LABELS.short); },
     inputs: () => ({
       initial: initialView(), updates: { kimi: kimiLoaded(), unavailable: claudeUnavailable(), "claude-late": claudeLate() },

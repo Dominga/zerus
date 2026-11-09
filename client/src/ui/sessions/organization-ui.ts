@@ -94,6 +94,13 @@ export function moveChoices(g: GroupingOut, current: readonly string[]): (Header
 
 export const projectColor = (h: Pick<HeaderOut, "color" | "palette">) => h.color ?? `var(--z-entity-palette-${h.palette})`;
 
+/**
+ * The frame around a project in the session list (owner, 2026-11-09): the
+ * colour the project is marked with, and the neutral border for a project
+ * without a colour of its own.
+ */
+export const folderFrameColor = (h: Pick<HeaderOut, "color">) => h.color ?? "var(--z-color-border)";
+
 /** A Sessions list filter chip: a machine, or a project by its id. */
 export interface FilterChip { id: string; label: string; kind: "m" | "p" | "a"; provider?: string }
 /**

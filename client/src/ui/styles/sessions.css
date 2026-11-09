@@ -76,6 +76,10 @@
   .rowhit.dragged .scard { opacity: .45; }
   .sp-scroll.organizing .rowhit:hover .scard:not(.selected) { background: transparent; }
 
+  /* A project is a folder framed in its own colour (owner, 2026-11-09): the frame
+     wraps the header and every card, folded or unfolded, 2 px inside its rows. */
+  .group-frame { position: absolute; left: 0; right: 0; top: 0; border: 1px solid var(--frame); border-radius: 10px; pointer-events: none; }
+
   /* Project header: 40 px row, band (2,5,-2,-3) radius 6, contents inset 9. */
   .group-band { position: absolute; left: 2px; right: 2px; top: 5px; height: 32px; display: flex; align-items: center; gap: 6px; padding: 0 9px; border-radius: 6px; text-align: left; }
   .group-band { padding-right: 36px; }
@@ -89,9 +93,11 @@
   .gb-count.hot { background: var(--z-list-count-hot-bg); color: var(--z-list-count-hot); }
   .gb-count.working { background: var(--z-list-count-working-bg); color: var(--z-list-count-working); animation: count-pulse 1.6s ease-in-out infinite; }
 
-  /* Card: row 94, card (2,4,-2,-6) = 84 px, radius 8. Instant hover like Qt. */
-  .scard { position: absolute; left: 2px; right: 2px; top: 4px; bottom: 6px; border-radius: 8px; border: 1px solid transparent; background: transparent; color: var(--z-list-text); }
-  .rowhit:hover .scard { background: var(--z-color-row-hover); }
+  /* Card: row 94, card (2,4,-2,-6) = 84 px, radius 8. Instant hover like Qt.
+     The surface and its frame are the skin's card tokens (owner, 2026-11-09): a
+     couple of tones above the list's pane, with a distinct hover and selection. */
+  .scard { position: absolute; left: 2px; right: 2px; top: 4px; bottom: 6px; border-radius: 8px; border: 1px solid var(--z-color-card-border); background: var(--z-color-card); color: var(--z-list-text); }
+  .rowhit:hover .scard { background: var(--z-color-card-hover); }
   /* Selection as in the owner's prototype (2026-11-07): the skin's green-tinted card surface and an
      accent-mixed border (at least 3:1 on the card in every skin); edge marks still draw on top. */
   .scard.selected, .rowhit:hover .scard.selected { background: var(--z-color-card-selected); border-color: color-mix(in srgb, var(--z-color-accent) 55%, var(--z-color-card-selected-border)); }
@@ -124,7 +130,7 @@
   .sc-mute { flex: none; margin-right: 4px; color: var(--z-list-badge-muted); }
   /* The crossed bell sits right after the name (owner, 2026-11-08). */
   .sc-title + .sc-mute { margin-left: 6px; margin-right: 0; }
-  .sc-l1 > .sbadge { margin-left: 8px; flex-shrink: .001; }
+  .sc-l1 > .sbadge { margin-left: 8px; flex: 0 0 auto; max-width: 100%; }
   .sc-l1 > .sc-title { flex-shrink: 1; }
   .sc-extra { display: contents; }
   .sc-extra .sbadge { margin-left: 6px; width: 22px; }
@@ -163,11 +169,14 @@
   .sc-kids.open .chev { rotate: 180deg; }
   .sc-kids.static { background: transparent; padding-right: 6px; }
 
-  /* Status badge: 20 px, radius 5, 11 px Medium; glyph centred at x+11, caption from 23 (7 neutral). */
-  .sbadge { position: relative; flex: 0 1 auto; min-width: 26px; display: inline-flex; align-items: center; height: 20px; padding: 0 8px 0 23px; border-radius: 5px; font-size: 11px; font-weight: 500; white-space: nowrap; overflow: hidden;
+  /* Status badge: 20 px, radius 5, 11 px Medium; glyph centred at x+11, caption from 23 (7 neutral).
+     A badge never leaves its card (owner, 2026-11-09): it keeps the width its
+     caption needs and the title gives way first; a caption too long for the card
+     is cut with an ellipsis inside the badge, never by the card. */
+  .sbadge { position: relative; flex: 0 0 auto; min-width: 26px; max-width: 100%; display: inline-flex; align-items: center; height: 20px; padding: 0 8px 0 23px; border-radius: 5px; font-size: 11px; font-weight: 500; white-space: nowrap; overflow: hidden;
     background: var(--z-list-badge-neutral-bg); color: var(--z-list-badge-neutral-fg); }
   .sbadge.k-neutral { padding-left: 7px; }
-  .sbadge .sb-label { overflow: hidden; text-overflow: ellipsis; }
+  .sbadge .sb-label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .sbadge .sb-glyph { position: absolute; left: 5px; top: 4px; }
   .sbadge .sb-mark { position: absolute; left: 11px; top: 10.5px; width: 0; height: 0; }
   .sbadge .sb-mark::before { content: ""; position: absolute; left: -2.5px; top: -2.5px; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
@@ -188,10 +197,10 @@
   .sbadge.k-deps, .sbadge.k-build, .sbadge.k-cooling, .sbadge.k-cold, .sbadge.k-stopped { background: transparent; color: var(--tone); border-radius: 10px; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tone) 50%, transparent); }
   .sbadge.k-deps { --tone: var(--z-list-state-deps); background: color-mix(in srgb, var(--tone) 11%, transparent); }
   .sbadge.k-build { --tone: var(--z-list-state-build); }
-  .sbadge.k-cooling { --tone: var(--z-list-state-cooling); padding-right: 29px; }
+  .sbadge.k-cooling { --tone: var(--z-list-state-cooling); padding-right: 31px; }
   .sbadge.k-cold { --tone: var(--z-list-state-cold); background: color-mix(in srgb, var(--tone) 11%, transparent); }
   .sbadge.k-stopped { --tone: var(--z-list-state-stopped); }
-  .sbadge .sb-heat { position: absolute; right: 7px; top: 50%; width: 16px; height: 3px; margin-top: -1.5px; border-radius: 1.5px; background: color-mix(in srgb, currentColor 25%, transparent); }
+  .sbadge .sb-heat { position: absolute; right: 8px; top: 50%; width: 16px; height: 3px; margin-top: -1.5px; border-radius: 1.5px; background: color-mix(in srgb, currentColor 25%, transparent); }
   .sbadge .sb-heat::after { content: ""; position: absolute; inset: 0 auto 0 0; width: calc(var(--heat) * 100%); border-radius: inherit; background: currentColor; }
   /* Line 3 of a state card: the state's glyph, its reason, and a cold card's + New and Resume. */
   .sc-state-ico { flex: none; margin-right: 6px; color: var(--tone, currentColor); }
@@ -270,7 +279,7 @@
   /* Compact (collapsed) row: 40 px row, 30 px card; status, provider, mute and expand at the right. */
   .scard.compact { display: flex; align-items: center; padding: 2px 3px 0 11px; bottom: 6px; }
   .scard.compact .sc-title { flex: 1 1 auto; line-height: 22px; }
-  .scard.compact .sbadge { flex-shrink: .001; }
+  .scard.compact .sbadge { flex: 0 0 auto; max-width: 100%; }
   .scard.compact .sbadge, .scard.compact .agent-badge, .scard.compact .sc-mute { margin-left: 6px; margin-right: 0; }
   /* A muted row: the name keeps its width and the bell after it takes the rest. */
   .scard.compact .sc-title:has(+ .sc-mute) { flex: 0 1 auto; }

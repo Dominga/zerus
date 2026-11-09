@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  chipColor, createOrgDialogs, deleteTargets, deleteText, editEntry, headerEntries, headerMenuState, moveChoices, movedText, nameProblem, projectColor,
+  chipColor, createOrgDialogs, deleteTargets, deleteText, editEntry, folderFrameColor, headerEntries, headerMenuState, moveChoices, movedText, nameProblem, projectColor,
   type HeaderActions, type OrgStore,
 } from "./organization-ui";
 import { translateWithCatalog } from "../../i18n";
@@ -51,6 +51,11 @@ describe("project menu rules", () => {
     expect(projectColor({ color: null, palette: 4 })).toBe("var(--z-entity-palette-4)");
     expect(nameProblem("  ")).toBe("Enter a project name.");
     expect(nameProblem(" Release ")).toBeUndefined();
+  });
+
+  it("frames a folder in its own colour, the neutral border when it has none (task #457)", () => {
+    expect(folderFrameColor({ color: "#3fb950" })).toBe("#3fb950");
+    expect(folderFrameColor({ color: null })).toBe("var(--z-color-border)");
   });
 
   it("colours a project chip as its header band, and a machine chip or an unlisted project by its name's slot", () => {

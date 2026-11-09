@@ -331,7 +331,7 @@ class SessionSettings(test_effort.EffortTransport):
         record=json.loads(self.record_path.read_text())
         self.assertFalse(record.get('input_pending_at'));self.assertIn('settings_unconfirmed_at',record)
         info=self.inspect();self.assertFalse(info['first_message_can_send'])
-        self.assertIn('did not react',info['first_message_reason'])
+        self.assertIn('has not shown the last model',info['first_message_reason'])
         self.assertEqual(self.received(),b'/model')
 
     def test_pending_settings_apply_before_ready_message(self):

@@ -102,6 +102,47 @@ pub(crate) struct SessionView {
     pub(crate) cache_details: String,
     pub(crate) context: session_usage::ContextChip,
     pub(crate) clear: ClearControl,
+    pub(crate) settings_check: Option<SettingsCheckView>,
+}
+
+/// Task #7: a model or effort change the agent has not visibly taken, as the
+/// inspection's `settings_confirmation` reports it while its state is
+/// `unknown` (a confirmed one lets the next send through). The composer bar
+/// explains it and offers Check again and, while Terminal shows an empty
+/// prompt with no dialog, Continue anyway. Only an hgs that reports the field
+/// takes `hgs settings --check`; an older one keeps its refusal.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct SettingsCheckView {
+    pub requested_model: String,
+    pub requested_effort: String,
+    pub shown_model: String,
+    pub shown_effort: String,
+    /// Terminal shows an empty prompt and no dialog: Continue anyway is offered.
+    pub at_prompt: bool,
+    pub reason: String,
+}
+
+/// The bar's state from an inspection (task #7); none for a child agent, an
+/// offline computer or a change the agent's evidence confirmed.
+pub(crate) fn settings_check(
+    details: &Value,
+    online: bool,
+    child: bool,
+) -> Option<SettingsCheckView> {
+    let shown = details
+        .get("settings_confirmation")
+        .filter(|value| value.is_object())?;
+    if child || !online || shown.get("state").and_then(Value::as_str) != Some("unknown") {
+        return None;
+    }
+    Some(SettingsCheckView {
+        requested_model: text(shown, "requested_model").to_owned(),
+        requested_effort: text(shown, "requested_effort").to_owned(),
+        shown_model: text(shown, "shown_model").to_owned(),
+        shown_effort: text(shown, "shown_effort").to_owned(),
+        at_prompt: flag(shown, "at_prompt"),
+        reason: text(shown, "reason").to_owned(),
+    })
 }
 
 /// What Qt's session hint reads (`SessionsWindow.cpp:3913-3922, 3955-3958`).
@@ -755,6 +796,7 @@ pub(crate) fn session_view(composers: &Composers, hub: &Hub, composer: &Composer
         cache_details: cache::details(details, recorded, local),
         // Qt's `m_contextUsage->setData(m_details["session_usage"], recorded)` (3788).
         context: session_usage::context(&details["session_usage"], recorded),
+        settings_check: settings_check(details, ctx.online, ctx.session.subagent.is_some()),
     }
 }
 
@@ -3852,6 +3894,43 @@ pub(crate) mod tests {
         c.open(Some(session()));
         c.observe(&state(details));
         until(c, |v| v.loaded)
+    }
+
+    #[test]
+    fn an_unknown_settings_change_shows_its_bar_and_a_confirmed_one_does_not() {
+        // Task #7: the inspection's state reaches every composer's bar.
+        let unknown = json!({"state":"unknown","requested_model":"claude-sonnet-5-5","requested_effort":"high",
+            "shown_model":"claude-opus-5-5","shown_effort":"medium","at_prompt":true,"reason":"The agent shows claude-opus-5-5"});
+        let mut details = ready();
+        details["settings_confirmation"] = unknown.clone();
+        let root = dir("settings-check-bar");
+        let (c, _fake) = send_hub(&root);
+        let view = opened(&c, details.clone());
+        let bar = view.settings_check.clone().expect("the bar");
+        assert_eq!(
+            (
+                bar.requested_model.as_str(),
+                bar.requested_effort.as_str(),
+                bar.at_prompt
+            ),
+            ("claude-sonnet-5-5", "high", true)
+        );
+        assert_eq!(bar.reason, "The agent shows claude-opus-5-5");
+        // A dialog in Terminal: the bar stays without Continue anyway.
+        let mut dialog = unknown.clone();
+        dialog["at_prompt"] = json!(false);
+        assert!(
+            !settings_check(&json!({"settings_confirmation":dialog}), true, false)
+                .unwrap()
+                .at_prompt
+        );
+        // Confirmed, settled (null), an older hgs (absent), offline or a child: no bar.
+        for shown in [json!({"state":"confirmed"}), Value::Null] {
+            assert!(settings_check(&json!({"settings_confirmation":shown}), true, false).is_none());
+        }
+        assert!(settings_check(&json!({}), true, false).is_none());
+        assert!(settings_check(&details, false, false).is_none());
+        assert!(settings_check(&details, true, true).is_none());
     }
 
     fn archive_session() -> SessionRef {

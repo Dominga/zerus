@@ -51,6 +51,15 @@ pub enum Action {
         #[serde(default)]
         without_terminal: bool,
     },
+    /// Task #7: `hgs settings NAME --check [--accept] --json`. Checks the
+    /// agent's own evidence for a model or effort change it has not visibly
+    /// taken (Check again); `accept` is the person's confirmation to continue
+    /// with what the agent shows, which hgs takes only at an empty prompt with
+    /// no dialog (Continue anyway). Nothing is typed into the agent.
+    SettingsCheck {
+        #[serde(default)]
+        accept: bool,
+    },
     Interrupt {
         turn_started: f64,
     },
@@ -397,6 +406,17 @@ pub fn invocation(
         target.name.clone()
     };
     let (mut args, stdin, local, peer, request) = match action {
+        Action::SettingsCheck { accept } => {
+            if target.run_id.is_empty() {
+                return Err("Refresh the session before checking its model settings.".into());
+            }
+            let mut args = vec!["settings".to_owned(), name, "--check".to_owned()];
+            if *accept {
+                args.push("--accept".to_owned());
+            }
+            args.push("--json".to_owned());
+            (args, None, 15, 30, None)
+        }
         Action::Settings {
             model,
             effort,
@@ -1227,6 +1247,7 @@ pub fn classify(target: &Target, action: &Action, invocation: &Invocation, exit:
             without_terminal,
             ..
         } => classify_settings(target, invocation, model, effort, *without_terminal, exit),
+        Action::SettingsCheck { .. } => classify_settings_check(exit),
         Action::Interrupt { .. } | Action::CompactContext => {
             classify_typed(target, invocation, exit, &["submitted"])
         }
@@ -1910,6 +1931,31 @@ fn classify_read(target: &Target, exit: Exit) -> Outcome {
 }
 
 /// `runWrite`: exit 0 is done; Archive and Terminate may report their worktree.
+/// Task #7: the check prints the `settings_confirmation` state (`none`,
+/// `confirmed`, `unknown` or `accepted`); its receipt is that state. A refusal
+/// (`--accept` while a dialog shows) names why, and nothing was changed.
+fn classify_settings_check(exit: Exit) -> Outcome {
+    match exit {
+        Exit::Code {
+            code: 0, stdout, ..
+        } => match serde_json::from_slice::<Value>(&stdout) {
+            Ok(receipt) if receipt.get("state").and_then(Value::as_str).is_some() => {
+                done(receipt, None)
+            }
+            _ => failed("hgs gave no settings check result"),
+        },
+        Exit::TimedOut => failed("The settings check timed out; nothing was changed."),
+        Exit::StartFailed(error) => failed(error),
+        Exit::WriteFailed => failed("could not send the request"),
+        Exit::Abnormal { stderr } => {
+            failed(trimmed_stderr(&stderr).unwrap_or_else(|| "hgs ended abnormally".to_owned()))
+        }
+        Exit::Code { code, stderr, .. } => failed(
+            trimmed_stderr(&stderr).unwrap_or_else(|| format!("hgs exited with code {code}")),
+        ),
+    }
+}
+
 fn classify_write(exit: Exit, may_clean_up: bool) -> Outcome {
     match exit {
         Exit::Code {
@@ -2023,6 +2069,60 @@ mod tests {
                 .args
                 .ends_with(&["settings".into(), t.name, "--json".into()]));
         }
+    }
+
+    #[test]
+    fn a_settings_check_types_nothing_and_reports_the_agents_state() {
+        // Task #7: Check again and Continue anyway, here and on a peer.
+        for (accept, flags) in [
+            (false, vec!["--check", "--json"]),
+            (true, vec!["--check", "--accept", "--json"]),
+        ] {
+            let action = Action::SettingsCheck { accept };
+            for computer in ["", "mac"] {
+                let t = target(computer);
+                let call = invocation(&t, &action, "request-1").unwrap();
+                assert!(call.stdin.is_none());
+                let mut wanted = vec!["settings".to_owned(), t.name.clone()];
+                wanted.extend(flags.iter().map(|flag| (*flag).to_owned()));
+                assert!(call.args.ends_with(&wanted), "{:?}", call.args);
+                assert!(!call.args.iter().any(|arg| arg == "--session-id"));
+            }
+            let unknown = br#"{"state":"unknown","requested_model":"m","at_prompt":false,"reason":"A dialog shows"}"#;
+            match classify(
+                &target(""),
+                &action,
+                &invocation(&target(""), &action, "r").unwrap(),
+                exit0(unknown, ""),
+            ) {
+                Outcome::Done { receipt, .. } => assert_eq!(receipt["state"], "unknown"),
+                other => panic!("{other:?}"),
+            }
+        }
+        let action = Action::SettingsCheck { accept: true };
+        let call = invocation(&target(""), &action, "r").unwrap();
+        let refused = Exit::Code {
+            code: 1,
+            stdout: vec![],
+            stderr: "hgs: The agent's Terminal is not at an empty prompt. Nothing was changed"
+                .into(),
+        };
+        assert!(
+            matches!(classify(&target(""), &action, &call, refused), Outcome::Failed { detail } if detail.contains("Nothing was changed"))
+        );
+        assert!(matches!(
+            classify(&target(""), &action, &call, exit0(b"not json", "")),
+            Outcome::Failed { .. }
+        ));
+        // An unconfirmed session's identity is needed; the webview sends the kind.
+        let mut stale = target("");
+        stale.run_id.clear();
+        assert!(invocation(&stale, &action, "r").is_err());
+        assert_eq!(
+            serde_json::from_value::<Action>(json!({"kind":"settings_check","accept":true}))
+                .unwrap(),
+            action
+        );
     }
 
     #[test]

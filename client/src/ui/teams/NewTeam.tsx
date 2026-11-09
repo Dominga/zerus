@@ -308,7 +308,7 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
                 </select>
                 <select value={lead().account} disabled={lead().mode !== "new"} aria-label={tr("Account")} onChange={(event) => setLead({ ...lead(), account: event.currentTarget.value })}>
                   <option value="">{tr("Default account")}</option>
-                  <For each={accountsFor(lead().agent)}>{(account) => <option value={account.id}>{account.signedIn ? account.label || account.id : tr("%1 (signed out)", account.label || account.id)}</option>}</For>
+                  <For each={accountsFor(lead().agent)}>{(account) => <option value={account.id} selected={account.id === lead().account}>{account.signedIn ? account.label || account.id : tr("%1 (signed out)", account.label || account.id)}</option>}</For>
                 </select>
               </div>
             </fieldset>
@@ -465,8 +465,8 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
                 <For each={props.computers.filter((choice) => choice.alias)}>{(choice) => <option value={choice.alias}>{choice.label}</option>}</For>
               </select>
               <select class="nt-account" value={member.account} aria-label={tr("Account")} onChange={(event) => setMember(index(), { account: event.currentTarget.value })}>
-                <option value="">{tr("Default account")}</option>
-                <For each={accountsFor(member.agent, member.computer)}>{(account) => <option value={account.id}>{account.signedIn ? account.label || account.id : tr("%1 (signed out)", account.label || account.id)}</option>}</For>
+                <option value="" selected={!member.account}>{tr("Default account")}</option>
+                <For each={accountsFor(member.agent, member.computer)}>{(account) => <option value={account.id} selected={account.id === member.account}>{account.signedIn ? account.label || account.id : tr("%1 (signed out)", account.label || account.id)}</option>}</For>
               </select>
               <label class="nt-check" title={tr("Own worktree")}>
                 <input type="checkbox" checked={member.folder === "worktree"} disabled={!props.git || policy().policy === "shared"}

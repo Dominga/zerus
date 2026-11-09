@@ -3157,6 +3157,11 @@ pub(crate) struct Team {
     /// digest; at most one an hour.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub starved_digest_at: Option<f64>,
+    /// Task #464 (owner, 2026-11-09): the accepted tasks the landing merger was
+    /// already woken for, newest last (bounded): a new accept wakes it again,
+    /// an old one never does.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub landing_told: Vec<u32>,
     #[serde(default)]
     pub folder: String,
     #[serde(default)]

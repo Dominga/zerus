@@ -26,6 +26,21 @@ pub(crate) fn lead_plans(team: &Team, actor: &Actor) -> bool {
     actor.is_lead(team) && matches!(team.status, TeamStatus::Running | TeamStatus::Paused)
 }
 
+/// Owner, 2026-11-10: the lead relaunches by itself, without a card, a member
+/// that did not start (its start failed, or the approved team never got its
+/// session) or that Zerus marks stuck. Any other relaunch stays the owner's.
+pub(crate) fn lead_relaunches(team: &Team, member_id: &str) -> bool {
+    if !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) || member_id == team.lead {
+        return false;
+    }
+    let Some(member) = team.member(member_id) else { return false };
+    if member.state == MemberState::Removed {
+        return false;
+    }
+    let not_started = member.state == MemberState::NotCreated && (!member.error.trim().is_empty() || member.session.is_none());
+    not_started || !member.error.trim().is_empty() || member.stuck.is_some()
+}
+
 /// The lead's card for planning inside the approved goal is refused at the
 /// CLI with the operation to run instead (cards stored before stay
 /// decidable).

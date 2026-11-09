@@ -4532,7 +4532,11 @@ fn adopt_existing_sessions(store: &Store, request: &str, input: &Value, op: &str
         }
     } else if drafted {
         // The lead keeps its own session; the others are checked.
-        for member in filled["set"]["members"].as_array_mut().into_iter().flatten().filter(|member| member["id"] != team.lead.as_str()) {
+        // Owner, 2026-11-10: get_mut, never IndexMut: indexing inserted
+        // "members": null into an update that did not carry members, and the
+        // draft refused every save of settings or plan mode alone.
+        let members = filled.get_mut("set").and_then(|set| set.get_mut("members")).and_then(Value::as_array_mut);
+        for member in members.into_iter().flatten().filter(|member| member["id"] != team.lead.as_str()) {
             adopt_members(store, &team, std::slice::from_mut(member))?;
         }
     } else if joined {
@@ -4999,7 +5003,10 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
             // #728: except a stuck member when the owner set lead_restarts_stuck;
             // that route is the lead's own decision.
             let id = text(input, "member");
+            // Owner, 2026-11-10: a member that did not start or is stuck is
+            // relaunched by the lead without a card.
             if id.is_empty()
+                || super::lead_plan::lead_relaunches(team, id)
                 || (team.settings.lead_restarts_stuck && team.member(id).is_some_and(|member| member.stuck.is_some()))
             {
                 WordRule::default()
@@ -5181,6 +5188,14 @@ fn check_phase_word(
     // A decline is the owner's alone and needs no word; the change refuses
     // anyone else.
     if !matches!(caller, Actor::Member(id) if *id == team.lead) || input["decline"].as_bool() == Some(true) {
+        return Ok(());
+    }
+    // Task 162 and the owner, 2026-11-10: inside the approved goal adding a
+    // task is the lead's own operation (ops::add_to_phase records it in the
+    // owner's digest); asking for a word here refused what propose refuses
+    // as a card, a loop with no way through.
+    let worded = input.get("owner_word").is_some_and(Value::is_object) || input["confirm"].as_str().is_some_and(|id| !id.is_empty());
+    if !worded && super::lead_plan::lead_plans(team, caller) {
         return Ok(());
     }
     let phase = input["phase"].as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| *n > 0).context("A phase number is required")?;

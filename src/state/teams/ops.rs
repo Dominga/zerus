@@ -2457,6 +2457,11 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
     // word, and only while none of its work has started, so nothing done is
     // erased. Only a plain draft waits for approval.
     let draft = team.phases.iter().any(|phase| phase.n == n && phase.state.is_draft());
+    // Owner, 2026-11-10: approving a phase that is already approved, running
+    // or done is what the owner wanted anyway; it answers so, never an error.
+    if approve && team.phases.iter().any(|phase| phase.n == n && phase.state.is_accepted()) {
+        return Ok(json!({"status":"approved","phase":n,"already":true}));
+    }
     let accepted = !approve && team.phases.iter().any(|phase| phase.n == n && phase.state.is_accepted());
     // U56: an accepted phase left with no tasks (they were moved out, U58) is
     // not done: it stays yours to discard, or the lead's on your word. An empty
@@ -7658,7 +7663,9 @@ fn apply_with_checks(team: &mut Team, op: &str, input: &Value, actor: &Actor, of
             ensure!(
                 matches!(actor, Actor::Human)
                     || (actor.is_lead(team)
-                        && (input["roster_word"].as_bool() == Some(true) || (team.settings.lead_restarts_stuck && stuck))),
+                        && (input["roster_word"].as_bool() == Some(true)
+                            || (team.settings.lead_restarts_stuck && stuck)
+                            || super::lead_plan::lead_relaunches(team, &member_id))),
                 "Only you relaunch a member; the lead proposes {{\"kind\":\"relaunch\",\"member\":\"ID\"}} as a card (hgs guide team-propose); the owner allows it with a click, or the owner's setting lead_restarts_stuck for a stuck member (hgs team settings with {{\"lead_restarts_stuck\":true}})"
             );
             let id = member_id;

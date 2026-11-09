@@ -4214,11 +4214,13 @@ fn detect_wait(store: &mut Store, team: &Team, task_id: u32) -> anyhow::Result<(
     let session = member.session.clone().context("the member has no session")?;
     let at = now();
     let mut found: Option<(String, String)> = None;
+    let mut background = !member.jobs.is_empty();
     if member.computer.is_empty() {
         for claim in super::super::builds::running_for(&session.name) {
             if claim["session"]["run_id"] != session.run_id.as_str() {
                 continue;
             }
+            background = true;
             let label = claim["label"].as_str().unwrap_or_default();
             let command = claim["command"].as_str().unwrap_or_default();
             let cwd = std::path::PathBuf::from(claim["cwd"].as_str().unwrap_or("."));
@@ -4229,7 +4231,10 @@ fn detect_wait(store: &mut Store, team: &Team, task_id: u32) -> anyhow::Result<(
             }
         }
     }
-    if found.is_none() {
+    // Task #413 (owner, 2026-11-09): a member with a background monitor or job
+    // of its own is waiting on that work, so a repeated command beside it is
+    // not a loop Zerus parks.
+    if found.is_none() && !background {
         let events: Vec<Value> = hgs(&session.host, &["inspect", &session.name, "--after", "0"], None, Duration::from_secs(15))
             .ok()
             .filter(|output| output.status.success())
@@ -4237,7 +4242,27 @@ fn detect_wait(store: &mut Store, team: &Team, task_id: u32) -> anyhow::Result<(
             .and_then(|value| value.get("events").and_then(Value::as_array).cloned())
             .unwrap_or_default();
         if let Some((command, times)) = super::wait_loops::repeated_check(&events, attempt.delivered_at.unwrap_or(attempt.sent_at)) {
-            found = Some((format!("it ran `{command}` {times} times at intervals"), command));
+            // Task #413: a repeated check is a loop only while the state it
+            // reads stands. The member's folder HEAD is that state: a
+            // fast-forward moves it on every run, so the run is work, not a
+            // wait; a first observation is never enough to park on.
+            let folder = if member.computer.is_empty() {
+                member_folder_path(team, &member).ok().filter(|folder| !folder.is_empty())
+            } else {
+                None
+            };
+            let head = folder.as_deref().and_then(|folder| git_at(folder, &["rev-parse", "HEAD"])).unwrap_or_default();
+            if !head.is_empty() && !super::wait_loops::unchanged_state(&head, &attempt.wait_head) {
+                return change(store, &team.id, |team, _| {
+                    if let Some(open) = team.task_mut(task_id).and_then(|task| task.attempts.iter_mut().find(|found| found.id == attempt.id)) {
+                        open.wait_checked_at = at;
+                        open.wait_head = head.clone();
+                    }
+                    Ok(())
+                });
+            }
+            let state = if head.is_empty() { String::new() } else { format!(", with HEAD {} unchanged", head.chars().take(9).collect::<String>()) };
+            found = Some((format!("it ran `{command}` {times} times at intervals{state}"), command));
         }
     }
     let Some((why, text)) = found else {

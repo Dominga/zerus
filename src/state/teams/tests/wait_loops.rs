@@ -89,6 +89,28 @@ fn the_same_read_only_check_repeated_at_intervals_is_a_loop() {
 }
 
 #[test]
+fn a_repeated_command_that_advances_the_repository_is_work() {
+    // Task #413: merger2's landing command matched 'git log' but merged the
+    // next task and fast-forwarded the line each run; it is never a loop.
+    let landing = "git merge --ff-only land412/line; git log -1; git branch --show-current";
+    let events = vec![tool(landing, 100.0), tool(landing, 300.0), tool(landing, 500.0)];
+    assert_eq!(repeated_check(&events, 0.0), None, "a merge is work, not a poll");
+    for work in ["git rebase main", "git checkout -b x", "git cherry-pick abc", "git reset --hard", "git pull", "git push"] {
+        let events = vec![tool(work, 100.0), tool(work, 300.0), tool(work, 500.0)];
+        assert_eq!(repeated_check(&events, 0.0), None, "{work}");
+    }
+    // A true poll of the same state still counts.
+    let poll = "git log -1 --format=%H";
+    let events = vec![tool(poll, 100.0), tool(poll, 300.0), tool(poll, 500.0)];
+    assert_eq!(repeated_check(&events, 0.0), Some((poll.to_owned(), 3)));
+    // The state must stand between observations: a moved HEAD is a fast-forward
+    // (work), an unchanged one is the wait loop.
+    assert!(unchanged_state("abc", "abc"));
+    assert!(!unchanged_state("def", "abc"), "a moved HEAD is work");
+    assert!(!unchanged_state("", ""), "an unknown state is never parked on");
+}
+
+#[test]
 fn the_guessed_condition_is_a_ci_run_a_version_or_a_time() {
     let (ci, what) = guess_condition("gh api repos/WhiteWh/zerus/actions/runs/123456", 0.0);
     assert_eq!(ci, json!({"kind":"ci","repo":"WhiteWh/zerus","run":123456}));

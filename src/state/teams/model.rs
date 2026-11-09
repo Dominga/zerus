@@ -2144,6 +2144,10 @@ pub(crate) struct Attempt {
     /// work (its runs and repeated checks), at most every five minutes.
     #[serde(default, skip_serializing_if = "is_zero_f64")]
     pub wait_checked_at: f64,
+    /// Task #413: the member's folder HEAD when a repeated check was last
+    /// seen; the check is a wait loop only while that state stands.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub wait_head: String,
     /// Task 156: the decisions this attempt's member was told of while it worked.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decisions_told: Vec<String>,

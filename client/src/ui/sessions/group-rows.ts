@@ -102,12 +102,22 @@ export function groupRows(input: ListInput): Row[] {
       .map((m) => everyone.find((s) => sessionIs(m.session, s.computer, s)))
       .filter((s): s is Session => !!s));
   }
-  const nested = new Set<string>();
-  for (const [team, lead] of leadOf) {
-    if (!teamFor.has(lead.key)) continue;
-    const visibleLead = [...input.members.values()].some((list) => list.some((s) => s.key === lead.key && input.visible(s)));
-    if (visibleLead) for (const member of membersOf.get(team) ?? []) nested.add(member.key);
-  }
+  /**
+   * Task 431: a team member is folded under its lead only in the project folder
+   * that actually lists that lead. Before, a lead visible in any project folded
+   * its members everywhere, so a folder whose lead sits in another project (or is
+   * filtered out there) kept its header and hid every session behind it.
+   */
+  const nested = (list: readonly Session[], key: string): boolean => {
+    const team = teamFor.get(key);
+    if (!team) return false;
+    const lead = leadOf.get(team.id);
+    if (!lead || !list.some((s) => s.key === lead.key && input.visible(s))) return false;
+    return (membersOf.get(team.id) ?? []).some((member) => member.key === key);
+  };
+  // The project folder whose cards are being built: a team tree shows only the
+  // members that folder lists (task 431).
+  let scope: readonly Session[] = [];
   const card = (s: Session, extra: Partial<Extract<Row, { type: "card" }>> = {}) => {
       const current = currentChildren(s, input.online(s));
       const roster = input.children === false ? [] : (input.roster?.(s) ?? s.subagents ?? []);
@@ -125,7 +135,7 @@ export function groupRows(input: ListInput): Row[] {
       const changed = kids.length !== roster.length || kids.some((child, index) => child !== roster[index]);
       const shown = changed ? { ...s, subagents: kids } : s;
       const summary = teamFor.get(s.key);
-      const teamMembers = summary ? membersOf.get(summary.id) ?? [] : [];
+      const teamMembers = summary ? (membersOf.get(summary.id) ?? []).filter((m) => scope.some((s) => s.key === m.key)) : [];
       const isLead = !!summary && leadOf.get(summary.id)?.key === s.key;
       const membersShown = isLead && teamMembers.length > 0 && !(input.teamFolded?.(summary!.id) ?? false);
       out.push({ type: "card", id: s.key, session: shown, expandable: isLead && teamMembers.length > 0, expanded: expanded || membersShown, compactRow: input.compact(s.key), ...extra, team,
@@ -143,7 +153,8 @@ export function groupRows(input: ListInput): Row[] {
   // or a parent elsewhere leaves the card at top level. A Teams member
   // listed under its lead is not a card of its own.
   const cards = (members: readonly Session[]) => {
-    const list = members.filter((s) => !nested.has(s.key));
+    scope = members;
+    const list = members.filter((s) => !nested(members, s.key));
     const parentOf = new Map<string, string>();
     if (input.parentKey) {
       const shown = new Set(list.map((s) => s.key));

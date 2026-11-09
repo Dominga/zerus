@@ -2136,3 +2136,16 @@ fn a_queued_call_says_where_its_result_arrives() {
         assert!(queued["note"].as_str().unwrap().contains("team message"), "{queued}");
     });
 }
+
+/// Task #466 (owner, 2026-11-09): the startup trust requests stay the owner's to
+/// answer, never a team lead's (CLAUDE.md: who answers, not where).
+#[test]
+fn a_startup_trust_request_is_the_owners_to_answer_in_person() {
+    let trust = json!({"trust_request":true,"source":"claude_bypass_warning","can_answer":true});
+    let approval = json!({"approval":true,"source":"claude_tool_approval","can_answer":true});
+    assert!(!owner_only_trust(&trust, &Actor::Human));
+    assert!(owner_only_trust(&trust, &Actor::Member("lead".into())));
+    assert!(owner_only_trust(&trust, &Actor::ParentLead));
+    // An ordinary approval is the lead's to answer, as before.
+    assert!(!owner_only_trust(&approval, &Actor::Member("lead".into())));
+}

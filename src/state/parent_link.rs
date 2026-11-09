@@ -208,7 +208,7 @@ pub(crate) fn decorate(sessions: &mut [Value]) {
 }
 
 /// Native questions only the person may answer: folder and hook trust.
-const PERSON_ONLY_QUESTIONS: [&str; 4] = ["claude-trust:", "codex-trust:", "kimi-trust:", "codex-hooks-trust:"];
+const PERSON_ONLY_QUESTIONS: [&str; 5] = ["claude-trust:", "claude-bypass:", "codex-trust:", "kimi-trust:", "codex-hooks-trust:"];
 
 /// Whether a live row holds a request only the person can answer (spec 2.2):
 /// a tool or permission approval, folder or hook trust, or signing in. A

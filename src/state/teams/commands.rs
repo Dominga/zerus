@@ -3084,6 +3084,12 @@ pub(crate) fn denies(label: &str) -> bool {
     label.starts_with("deny") || label.starts_with("no") || label == "reject"
 }
 
+/// Task #466 (owner, 2026-11-09): a startup trust request (`trust_request`) is
+/// the owner's to answer in person, never a team lead's.
+fn owner_only_trust(card: &Value, by: &Actor) -> bool {
+    card["trust_request"] == true && !matches!(by, Actor::Human)
+}
+
 fn answer(input: &Value) -> anyhow::Result<Value> {
     let team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
     // Section 9.6: a sub-team's permission request may be answered one level
@@ -3122,6 +3128,14 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
         .find(|card| card["question_id"] == question.as_str() && card["question_hash"] == hash.as_str())
         .cloned()
         .context("This question changed or is no longer pending")?;
+    // Task #466 (owner, 2026-11-09): a startup trust request - Claude's bypass
+    // permissions warning or its folder trust, Codex's hook trust - is the
+    // owner's to answer in person, never a team lead's (CLAUDE.md: the rule is
+    // about who answers, not where).
+    ensure!(
+        !owner_only_trust(&card, &by),
+        "This request is the owner's to answer in person; a team lead cannot answer it"
+    );
     let selected: Vec<&str> = input["answers"]
         .as_array()
         .into_iter()

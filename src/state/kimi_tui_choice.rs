@@ -355,8 +355,10 @@ fn navigate(
                 // while replacing the trust dialog with its main screen.
                 // Wait without sending more keys; acknowledge only after
                 // the pinned process owns a verified input terminal again.
-                let settling = exiting || (key == "Enter" && string(question, "source") == "claude_folder_trust"
-                    && Instant::now() < deadline);
+                // Task #466: the bypass-permissions warning is replaced by the
+                // same main screen after its Enter.
+                let startup = ["claude_folder_trust", "claude_bypass_warning"].contains(&string(question, "source"));
+                let settling = exiting || (key == "Enter" && startup && Instant::now() < deadline);
                 if let Err(error) = input::checked_terminal(&active, false) {
                     if settling {
                         continue;

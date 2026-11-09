@@ -1374,3 +1374,54 @@ fn an_ordinary_approval_has_no_always_button_and_no_subagent_rows() {
     odd["questions"][0]["options"] = json!([{"id": "x", "label": "Maybe"}]);
     assert_eq!(decision(&question(odd), true), None);
 }
+
+// Task #466 (owner, 2026-11-09): Claude's Bypass Permissions startup warning is
+// the owner's card, not a read-only "Answer this in Terminal" one: its two
+// native choices are buttons and "Yes, I accept" is the answer the chooser
+// takes (the second row, confirmed with Enter). The automatic approvals never
+// answer it, and the card is a trust request (only the person answers).
+fn claude_bypass(hash: &str) -> Value {
+    json!({"question_id": format!("claude-bypass:{hash}"), "question_hash": hash,
+        "run_id": "run-1", "conversation_id": "", "source": "claude_bypass_warning",
+        "answer_transport": "claude_tui", "can_answer": true, "trust_request": true, "created_at": 1.0,
+        "questions": [{"id": "bypass", "header": "Bypass permissions",
+            "question": "WARNING: Claude Code running in Bypass Permissions mode",
+            "body": "In Bypass Permissions mode, Claude Code will not ask for your approval before running potentially dangerous commands.\nThis mode should only be used in a sandboxed container/VM that has restricted internet access and can easily be restored if damaged.\nBy proceeding, you accept all responsibility for actions taken while running in Bypass Permissions mode.\nhttps://code.claude.com/docs/en/security",
+            "multi_select": false, "allow_other": false,
+            "options": [{"id": "bypass_0", "label": "No, exit"}, {"id": "bypass_1", "label": "Yes, I accept"}]}]})
+}
+
+#[test]
+fn task_466_a_claude_bypass_permissions_warning_is_answerable_from_its_card() {
+    let hash = "ab".repeat(32);
+    let raw = claude_bypass(&hash);
+    let shown = question(raw.clone());
+    let view = card(&shown, &AnswerDraft::default(), &ctx());
+    // The card's own choices, selectable: never the Terminal-only list.
+    assert!(!view.read_only, "the warning is answered on its card");
+    assert_eq!(
+        shown.items[0].options.iter().map(|option| option.label.as_str()).collect::<Vec<_>>(),
+        ["No, exit", "Yes, I accept"]
+    );
+    // Answering "Yes, I accept" sends its option id; hgs turns it into the
+    // chooser's second row and one Enter through the guarded native path.
+    let mut draft = AnswerDraft::default();
+    draft.answers.insert("bypass".into(), ItemAnswer {
+        options: ["bypass_1".to_string()].into_iter().collect(), text: String::new(), other: false,
+    });
+    let (sent, complete) = answers(&shown, &draft);
+    assert!(complete);
+    assert_eq!(sent, vec![AnswerItem::Choice {
+        question_id: "bypass".into(), selected_option_ids: vec!["bypass_1".into()], text: String::new(),
+    }]);
+    // The answer is accepted before the conversation exists (startup request).
+    let stdin = zerus_client_core::actions::answer_input("claude/scratch/work", &raw, &sent,
+        "12345678-1234-4234-8234-123456789012").expect("a startup request answers before its conversation");
+    let input: Value = serde_json::from_slice(&stdin).unwrap();
+    assert_eq!((input["expected_conversation_id"].clone(), input["answers"][0]["selected_option_ids"].clone()),
+        (json!(""), json!(["bypass_1"])));
+    // The startup-trust rule: the owner answers it. Never an automatic approval.
+    assert_eq!(raw["trust_request"], json!(true));
+    assert!(zerus_client_core::approvals::automatic::once("claude", &raw).is_none(),
+        "an automatic approval never answers the warning");
+}

@@ -4838,17 +4838,22 @@ options. When Claude waits for input and no request explains it, Activity shows
 the chooser visible at the bottom of Terminal, such as **Session paused**, in
 the same read-only way. A new prompt ends any earlier request.
 
-Supported startup prompts include Claude workspace trust and auto-mode consent,
-Codex folder access, **Hooks need review** and **Update available**, and Kimi
-folder/MCP trust. These can appear before a conversation exists, but only with
-verified startup identity.
+Supported startup prompts include Claude workspace trust, its **Bypass
+Permissions** warning and auto-mode consent, Codex folder access, **Hooks need
+review** and **Update available**, and Kimi folder/MCP trust. These can appear
+before a conversation exists, but only with verified startup identity.
 A recognized panel must show its native title, folder, exact choices and key
 hint. Its explanation is shown verbatim and pinned to the answer, so changed
 native wording stays answerable: Claude workspace trust preserves its full
 permissions warning, Kimi includes the visible MCP commands, and Claude's
 auto-mode and resume panels keep their explanation and cost warning. Zerus adds
 descriptions only for reviewed text. In a Git subdirectory or worktree, Codex
-folder access names the repository root that Codex will trust. Claude wraps a
+folder access names the repository root that Codex will trust. Claude's bypass
+permissions warning is the owner's card: its two choices are buttons, and the
+owner's own click sends the arrows and one Enter to that run's terminal through
+the guarded native path (`claude_tui`). The card carries `trust_request`, so the
+automatic approvals never answer it and a team lead's answer is refused; its
+exact warning, choices and hint must match, or it stays read-only. Claude wraps a
 long workspace path across rows; the joined rows must still equal the launch
 folder exactly.
 Codex 0.167 can offer **Back to Agent Command Center** instead of **Quit**.

@@ -168,9 +168,9 @@ mod tests {
         let record = finish().unwrap();
         assert_eq!(record.slowest, "listing");
         assert!(record.slowest_ms >= 30 && record.ms >= record.slowest_ms, "{record:?}");
-        let status = status();
-        assert!(status["running"].is_null());
-        assert_eq!(status["last"]["slowest"], "listing");
+        let first = status();
+        assert!(first["running"].is_null());
+        assert_eq!(first["last"]["slowest"], "listing");
         // The record is bounded.
         for _ in 0..(RECENT + 5) {
             begin();

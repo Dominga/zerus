@@ -1,7 +1,7 @@
 name: Fork Windows build
 
-# WhiteWh/zerus only; not part of upstream Zerus. Owner, 2026-11-09 ("сборка
-# только по пинку"): builds run ONLY on a manual dispatch - a push builds
+# WhiteWh/zerus only; not part of upstream Zerus. Owner, 2026-11-09 ("build
+# only on a pin"): builds run ONLY on a manual dispatch - a push builds
 # nothing, and a pushed tag is no trigger either. The dispatch picks one channel:
 #   numbered  a `whitewh-<run number>` release with the Windows ZIP and the
 #             stable `zerus-fork-feed.json` feed that existing fork builds

@@ -404,6 +404,7 @@ fn profile_usage(entry: &FleetEntry, raw: &Value, r: &UsageRef, state: &Accounts
         .filter(|cached| cached.is_object())
     {
         let cached = usage::usage(cached);
+        let (cached_status, cached_auth) = (cached.status.clone(), cached.auth_status.clone());
         if data.is_none() {
             // Until the first inspect answers, the cached inspection stands in
             // (owner ruling; Qt seeds identity and checked_at only).
@@ -413,9 +414,9 @@ fn profile_usage(entry: &FleetEntry, raw: &Value, r: &UsageRef, state: &Accounts
             u.balances = cached.balances;
             u.credits = cached.credits;
             u.retry_at = cached.retry_at;
-            if cached.status == "rate_limited" {
-                u.status = cached.status;
-                u.auth_status = cached.auth_status;
+            if cached_status == "rate_limited" {
+                u.status = cached_status.clone();
+                u.auth_status = cached_auth.clone();
             }
             u.seeded = true;
         } else if matches!(u.status.as_str(), "unavailable" | "offline")
@@ -423,6 +424,14 @@ fn profile_usage(entry: &FleetEntry, raw: &Value, r: &UsageRef, state: &Accounts
         {
             u.identity = cached.identity;
             u.checked_at = cached.checked_at;
+        }
+        // Task 432: the sign-in fact belongs to the account, not to the quota read.
+        // Between inspects, or after one that failed, the catalog's cached
+        // `account_status` is the only evidence of it: without this an account that
+        // is signed in was reported as signed out, and the session chooser dropped
+        // it ("No other signed-in account."). A signed-out cache never signs in.
+        if u.auth_status.is_empty() && cached_status != "signed_out" {
+            u.auth_status = cached_auth;
         }
     }
     u
@@ -455,6 +464,10 @@ fn member(
             "credentials_locked" => (Keychain, crate::text!("The login Keychain on %1 is locked. Unlock it in Keychain Access, then refresh.", m())),
             "desktop_session_unavailable" => (Desktop, crate::text!("Desktop sign-in on %1 is unavailable. Log in to macOS and check the HGS installation.", m())),
             "credentials_unavailable" => (Unavailable, crate::text!("The saved sign-in on %1 could not be used. Check Keychain access or sign in again.", m())),
+            // Task 432: a profile that is signed in but whose status read came back
+            // unavailable is not another copy of a ready account: the session chooser
+            // must name it unavailable with this line, never hide or offer it.
+            "unavailable" => (Unavailable, crate::text!("Account status is unavailable on %1.", m())),
             "expired" => (Expired, crate::text!("Sign-in expired on %1.", m())),
             "loading" => (Checking, crate::text!("Checking sign-in on %1…", m())),
             _ if signed_in => (Ready, crate::text!("Ready on %1.", m())),
@@ -2255,6 +2268,95 @@ mod tests {
         assert_eq!(view.accounts.len(), 1024);
         assert_eq!(view.truncated, 6 * 256 - 1024);
         assert_eq!(view.notices.len(), 16);
+    }
+
+    /// Task 432: the exact rows this computer's `hgs account ls` lists for provider
+    /// claude - the native "Default account", the named copy "Default" that groups
+    /// with it, the second signed-in "Additional", and "GB10 (local)" whose status
+    /// read failed. The composer's session chooser reads this view, so a signed-in
+    /// account must stay signed in between inspects (and after a failed one), the
+    /// unavailable one must keep its reason, and the native copy must not become a
+    /// second account beside its named one.
+    #[test]
+    fn the_session_chooser_keeps_a_signed_in_account_and_names_the_unavailable_one() {
+        fn home(id: &str) -> String {
+            format!("C:\\Users\\example\\.config\\hgs\\accounts\\{id}")
+        }
+        fn claude(id: &str, label: &str, native: bool, revision: &str, status: &str, identity: Value) -> Value {
+            let path = if native { "C:\\Users\\example\\.claude".to_owned() } else { home(id) };
+            json!({
+                "id": id, "provider": "claude", "label": label, "native": native, "installed": true,
+                "is_default": native, "portable": false, "credential_file": true,
+                "home": path,
+                "auth_revision": revision,
+                "account_status": {"status": status, "auth_status": "signed_in", "checked_at": 100,
+                    "retry_at": null, "credits": {}, "balances": [],
+                    "windows": [{"id":"seven_day","used_percent":84.0,"window_minutes":10080}],
+                    "identity": identity},
+            })
+        }
+        let default_identity = json!({"auth_method":"claude.ai","email":"whitles.w@example.test",
+            "organization":"whitles.w@example.test's Organization","plan":"max"});
+        let additional_identity = json!({"auth_method":"claude.ai","email":"whitles.ae@example.test",
+            "organization":"whitles.ae@example.test's Organization","plan":"max"});
+        let mut state = AccountsState::default();
+        state.catalogs.insert(
+            ComputerId::local(),
+            CatalogSlot {
+                requested: Some(0),
+                data: Some(json!({
+                    "profiles": [
+                        claude("native-claude", "Default account", true, "27fdd", "ok", default_identity.clone()),
+                        claude("claude-57584158dd", "Default", false, "b7731", "ok", default_identity.clone()),
+                        claude("claude-58bd4dcf8c", "Additional", false, "060ed", "ok", additional_identity),
+                        claude("gb10-claude", "GB10 (local)", false, "eaf90", "unavailable",
+                            json!({"auth_method":"oauth_token"})),
+                    ],
+                    "removed_profiles": [],
+                    "revision": "r1",
+                })),
+                ..CatalogSlot::default()
+            },
+        );
+        // GB10's inspect answered `unavailable`; no other profile has been read yet.
+        state.usage.insert(
+            (ComputerId::local(), "gb10-claude".to_owned(), home("gb10-claude")),
+            UsageSlot { attempted: Some(0), failed: true, ..UsageSlot::default() },
+        );
+        let view = project(&[entry("", "live", 0)], &state, &mut AccountsDisplay::default());
+        let find = |id: &str| {
+            view.accounts
+                .iter()
+                .flat_map(|account| &account.members)
+                .find(|profile| profile.id == id)
+                .unwrap_or_else(|| panic!("{id} is not in the view"))
+                .clone()
+        };
+        let group_of = |id: &str| {
+            view.accounts
+                .iter()
+                .find(|account| account.members.iter().any(|member| member.id == id))
+                .unwrap_or_else(|| panic!("{id} has no account"))
+        };
+        // Additional is signed in before its first inspect: the cached
+        // `account_status` carries the sign-in, the missing read only says the
+        // quota is still being checked.
+        let additional = find("claude-58bd4dcf8c");
+        assert!(additional.signed_in, "{additional:?}");
+        assert_eq!(additional.state, MemberState::Checking);
+        assert_eq!(group_of("claude-58bd4dcf8c").label, "Additional");
+        // Native and its named copy are one account, labelled by the named one.
+        let default = group_of("claude-57584158dd");
+        let members: Vec<&str> = default.members.iter().map(|member| member.id.as_str()).collect();
+        assert_eq!(members, ["native-claude", "claude-57584158dd"]);
+        assert_eq!(default.label, "Default");
+        assert_eq!(view.accounts.len(), 3, "{:?}", view.accounts.iter().map(|a| &a.key).collect::<Vec<_>>());
+        // GB10 is signed in but this computer cannot read it: unavailable, with its
+        // own line, never silently dropped and never offered as ready.
+        let gb10 = find("gb10-claude");
+        assert!(gb10.signed_in, "{gb10:?}");
+        assert_eq!(gb10.state, MemberState::Unavailable);
+        assert_eq!(gb10.detail.english(), "Account status is unavailable on workstation.");
     }
 }
 

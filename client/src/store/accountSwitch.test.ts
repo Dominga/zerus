@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AccountsView, Profile } from "../types";
-import { accountGroups, accountOf, accountOptions, accountSwitchRequested, consumeAccountSwitch, movable, moveOutcome, requestAccountSwitch, switchOutcome, switchable } from "./accountSwitch";
+import { trText } from "../text";
+import { accountGroups, accountOf, accountOptions, accountSwitchRequested, consumeAccountSwitch, movable, moveOutcome, requestAccountSwitch, switchOutcome, switchable, takesSession } from "./accountSwitch";
 
 const profile = (id: string, provider: string, host: string, signed = true, state = "ready"): Profile => ({
   key: `${host}/${provider}/${id}`, host, machine: host, id, label: id.toUpperCase(), provider,
@@ -10,8 +11,16 @@ const profile = (id: string, provider: string, host: string, signed = true, stat
   opencode: null,
 } as unknown as Profile);
 
+/** One account as the core's `group` makes it: one identity, its machines' rows. */
+const account = (key: string, label: string, members: Profile[], provider = "claude") => ({
+  key, label, provider, installed: true, machines: [""], members,
+  usage: {}, permission: "", identity_lines: [], identity_note: null,
+});
+
 const view = (members: Profile[]): AccountsView => ({
-  hosts: [], accounts: [{ key: "a", label: "A", provider: "claude", installed: true, machines: [""], members, usage: {}, permission: "", identity_lines: [], identity_note: null }],
+  hosts: [],
+  // The core groups a profile's identities: distinct profiles are distinct accounts.
+  accounts: members.map((member) => account(member.id, member.label, [member], member.provider)),
   overview: [], snapshot: false, loading: false, pending: 0, loaded_machines: 1, busy: false, notices: [], no_hosts: null, truncated: 0,
 } as unknown as AccountsView);
 
@@ -76,6 +85,48 @@ describe("account switch entry points", () => {
     expect(consumeAccountSwitch("pc\nrun:two")).toBe(false);
     expect(consumeAccountSwitch("pc\nrun:one")).toBe(true);
     expect(accountSwitchRequested()).toBe("");
+  });
+});
+
+describe("task 432: the owner's own account list", () => {
+  // The exact rows `hgs account ls` listed for provider claude on the owner's
+  // computer on 2026-11-09: the native "Default account", the named "Default"
+  // copy that groups with it, "Additional" (account_status ok, auth_status
+  // signed_in, portable false) and "GB10 (local)" (signed in, status
+  // unavailable). The composer's chooser said "No other signed-in account."
+  const row = (id: string, label: string, extra: Partial<Profile> = {}): Profile => ({
+    ...profile(id, "claude", ""), label, state: "ready", signed_in: true, ...extra,
+  } as Profile);
+  const view432 = (): AccountsView => ({
+    hosts: [],
+    accounts: [
+      account("default", "Default", [row("native-claude", "Default account", { native: true }), row("claude-57584158dd", "Default")]),
+      account("additional", "Additional", [row("claude-58bd4dcf8c", "Additional")]),
+      account("gb10", "GB10 (local)", [row("gb10-claude", "GB10 (local)", {
+        state: "unavailable",
+        detail: { source: "Account status is unavailable on %1.", args: [{ kind: "verbatim", value: "workstation" }] },
+      })]),
+    ],
+    overview: [], snapshot: true, loading: false, pending: 0, loaded_machines: 1, busy: false, notices: [], no_hosts: null, truncated: 0,
+  } as unknown as AccountsView);
+  const rows = (current: string) => accountGroups(view432(), "", "claude", current)[0].rows;
+
+  it("offers the other signed-in Claude account to a Default session", () => {
+    expect(rows("claude-57584158dd").map((entry) => entry.id))
+      .toEqual(["claude-57584158dd", "claude-58bd4dcf8c", "gb10-claude"]);
+    expect(rows(accountOf("claude", "")).map((entry) => entry.id))
+      .toEqual(["native-claude", "claude-58bd4dcf8c", "gb10-claude"]);
+  });
+
+  it("does not show the native copy of Default as a second account", () => {
+    expect(rows("claude-57584158dd").filter((entry) => entry.id === "native-claude")).toEqual([]);
+  });
+
+  it("marks GB10 unavailable with its reason instead of hiding it", () => {
+    const gb10 = rows("claude-57584158dd").find((entry) => entry.id === "gb10-claude")!;
+    expect(takesSession(gb10)).toBe(false);
+    expect(trText(gb10.detail)).toContain("unavailable on workstation");
+    expect(takesSession(rows("claude-57584158dd")[1])).toBe(true);
   });
 });
 

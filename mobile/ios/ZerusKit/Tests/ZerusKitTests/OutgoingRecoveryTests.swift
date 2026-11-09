@@ -13,7 +13,7 @@ final class OutgoingRecoveryTests: XCTestCase {
         OutgoingMessage(requestId: originalId, target: target, text: "Original payload", attachments: [attachment], createdAt: 1,
                         status: "uncertain", submittedAt: 0, submittedText: "", error: "Original unconfirmed result")
     }
-    private var editor: Draft { Draft(target: target, text: "A different new composition", revision: "current", generation: "new-editor") }
+    private var editor: Draft { Draft(target: target, text: "A different new composition", updatedAt: 1_000, revision: "current", generation: "new-editor") }
 
     func testDismissalSurvivesSealedRestartAndRetainsOriginalEvidence() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -154,7 +154,7 @@ final class OutgoingRecoveryTests: XCTestCase {
         XCTAssertTrue(probe.claim(target, navigation: 1, message: dismissed.outgoing[0], busy: false))
         XCTAssertFalse(probe.claim(target, navigation: 1, message: dismissed.outgoing[0], busy: false))
         let receipt = Event(id: "receipt:original", role: "You", text: message.text, time: "", at: 2,
-                            source: "hgs_delivery", requestId: originalId)
+                            requestId: originalId, source: "hgs_delivery")
         var unrelated = receipt
         unrelated.requestId = nextId
         XCTAssertTrue(ConversationMerge.merge(target: target, native: [unrelated], outgoing: dismissed.outgoing).recordedRequestIds.isEmpty)

@@ -174,7 +174,7 @@ struct MessageBubble: View {
     private func recovery(_ message: OutgoingMessage) -> some View {
         let flight = app.conversation.receiptFlights.contains("outgoing:\(message.requestId)")
         return VStack(alignment: .leading, spacing: 4) {
-            if !message.error.isEmpty { Text(message.error).font(.footnote).foregroundStyle(Theme.amber) }
+            if !message.error.isEmpty && !message.deliveryDismissed { Text(message.error).font(.footnote).foregroundStyle(Theme.amber) }
             if message.status == "uncertain" {
                 Text(message.deliveryDismissed ? OutgoingRecoveryPolicies.dismissedExplanation : OutgoingRecoveryPolicies.explanation)
                     .font(.caption).foregroundStyle(Theme.muted)

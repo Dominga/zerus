@@ -133,13 +133,7 @@
 .team-working-mode .team-working-mode-wrong { color: var(--z-color-text-3); min-width: 0; }
 .team-working-mode .grow { flex: 1; }
 
-/* Task #314 (F1): an indented member card keeps the pane's right edge, and
-   its badges shrink before the provider chip or Resume is cut. */
-.scard.team-member { left: 24px; right: 2px; width: auto; max-width: calc(100% - 26px); }
-.scard.team-member .sc-l1, .scard.team-member .sc-l2, .scard.team-member .sc-l3, .scard.team-member .sc-foot { right: 6px; }
-.scard.team-member .sc-title { min-width: 0; }
-.scard.team-member .agent-badge { flex: 0 1 auto; min-width: 0; max-width: 104px; }
-.scard.team-member .sc-l3 > .ell { min-width: 0; }
+/* Task #314 (F1)'s member-card rules moved to sessions.css with the session list's own class names (task 425). */
 /* Task #314 (F10): New team fills the window; only the form body scrolls and
    the footer stays visible instead of a second page scrollbar. */
 .newteam-page, .newteam-page.embedded { width: 100%; max-width: none; box-sizing: border-box; overflow: hidden; }

@@ -58,6 +58,21 @@ describe("a team's rows", () => {
     const rows = groupRows(input(false, () => summary, true));
     expect(rows.filter((r) => r.type === "card").map((r) => r.session.name)).toEqual([lead.name]);
   });
+
+  it("folds a team under its lead and restores its members in order (task 425)", () => {
+    const lead = row("run:lead", "claude/p/lead");
+    const member = row("run:core", "claude/p/core");
+    const summary = team(lead.name, member.name);
+    const teamOf = (s: { name: string }) => (s.name === lead.name || s.name === member.name ? summary : undefined);
+    const cards = (collapsed: boolean) => groupRows(input(true, teamOf, collapsed)).filter((r) => r.type === "card");
+    const folded = cards(true);
+    expect(folded.map((r) => r.session.name)).toEqual([lead.name]);
+    // The lead keeps its strip and stays expandable, so its toggle can unfold the team again.
+    expect(folded[0]).toMatchObject({ teamSummary: summary, expandable: true });
+    const open = cards(false);
+    expect(open.map((r) => r.session.name)).toEqual([lead.name, member.name]);
+    expect(open[1]).toMatchObject({ depth: 1, teamFirst: true, teamLast: true });
+  });
 });
 
 

@@ -55,6 +55,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs desktop watch|request --json    private local desktop-v1 IPC
        hgs desktop feed --json             passive owner source data, no reader launch
        hgs desktop registration --json    preview this user's passive service definition
+       hgs desktop store-check --json     read-only: whether a start gets past the desktop store and its rollback backup
        hgs desktop registration --json --background    preview Unix background definition
        hgs desktop registration mode-check --json   verify an interactive mode-switch caller
        hgs desktop revoke-hold --json --request-id UUID   retain original rollback exclusion until stdin EOF

@@ -134,6 +134,33 @@ fn an_empty_leftover_backup_is_retained_and_the_backup_is_made_again() {
     assert_eq!(fs::read_dir(&retained[0]).unwrap().count(), 0);
 }
 
+/// Task #440: `hgs desktop store-check` tells, read-only, whether a start
+/// gets past the store and its rollback backup; the window relaunches only
+/// when it does.
+#[test]
+fn the_store_check_reads_the_backup_state_without_writing() {
+    let temp = tempfile::tempdir().unwrap();
+    let location = make_old(&temp.path().canonicalize().unwrap().join("state/desktop"));
+    let check = || super::super::store::store_check(&location);
+    assert_eq!((check()["code"].clone(), check()["opens"].clone()), (serde_json::json!("backup_needed"), serde_json::json!(true)));
+    platform::private_dir(&location.root.join(BACKUP)).unwrap();
+    assert_eq!((check()["code"].clone(), check()["opens"].clone()), (serde_json::json!("empty_leftover"), serde_json::json!(true)));
+    fs::write(location.root.join(BACKUP).join("partial"), b"x").unwrap();
+    assert_eq!((check()["code"].clone(), check()["opens"].clone()), (serde_json::json!("backup_incomplete"), serde_json::json!(false)));
+    fs::remove_file(location.root.join(BACKUP).join("partial")).unwrap();
+    fs::remove_dir(location.root.join(BACKUP)).unwrap();
+    let owner = location.lock().unwrap();
+    {
+        let handoff = location.handoff_lock().unwrap();
+        Original::new(&location, &owner, &handoff).unwrap().prepare(Some(34)).unwrap();
+    }
+    let before = backup_bytes(&location);
+    assert_eq!(check()["code"], "backup_present");
+    assert_eq!(backup_bytes(&location), before, "the check writes nothing");
+    let db = Connection::open(location.root.join(DATABASE)).unwrap();
+    assert_eq!(schema(&db), 34, "the check never migrates");
+}
+
 /// Task #421: the backup of an older store (schema 30, the owner's) completes:
 /// its manifest, the database and, when there is one, the WAL.
 #[test]

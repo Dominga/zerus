@@ -473,6 +473,9 @@ describe("notification ownership presentation", () => {
     expect(child.check).toBe("Desktop service");
     expect(child.next).toContain("hgs desktop serve");
     expect(ownershipNotice(refused("child_failed", "other"))).toContain("Zerus could not take over its sessions (Desktop service)");
+    // Task #440: a planned self-restart is said ahead of the refusal.
+    const restarting = view({ native_recovery: true, native_recovery_reason: { code: "child_failed", check: "other" }, native_recovery_restart_at: 1_800_000_000_000 });
+    expect(ownershipNotice(restarting)).toBe("Zerus restarts its window to finish starting. Your drafts are saved.");
     // The notice says it instead of a bare "not ready"; without a reason the old notice stays.
     const notice = ownershipNotice(refused("frontend_binding_unavailable", "binding"));
     expect(notice).toContain("Zerus could not take over its sessions (App binding)");

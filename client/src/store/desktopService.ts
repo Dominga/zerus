@@ -509,6 +509,9 @@ export function ownershipNotice(view: NotificationOwnership | undefined): string
       return tr("Background activation is unavailable. Update Zerus and its desktop service, then Resume to check again.");
     return tr("Background work is paused. Resume to activate the service explicitly.");
   }
+  // Task #440: the window restarts itself to finish starting; said ahead.
+  if (view.native_recovery && view.native_recovery_restart_at)
+    return tr("Zerus restarts its window to finish starting. Your drafts are saved.");
   // Task 180: the refused takeover names its check and the next step.
   const refused = takeoverRefusal(view);
   if (refused) return `${tr("Zerus could not take over its sessions")} (${refused.check}): ${refused.reason} ${refused.next}`;

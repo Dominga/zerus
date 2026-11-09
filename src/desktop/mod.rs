@@ -238,6 +238,11 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> cl
                 println!("{}", registration::preview(config, &location)?);
                 Ok(())
             }
+            // Task #440: read-only; whether a start would get past the store.
+            ["store-check", "--json"] => {
+                println!("{}", store::store_check(&location));
+                Ok(())
+            }
             ["revoke-hold", "--json", "--request-id", id] => {
                 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                 {

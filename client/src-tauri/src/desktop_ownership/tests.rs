@@ -1166,6 +1166,14 @@ mod native {
                 service.snapshot().notification_ownership.unwrap()["native_recovery"],
                 true
             );
+            // Task #440 (A): the window's own re-check is a status read only:
+            // without a grant it never leaves recovery and never mutates.
+            assert!(!service.recheck_recovery().await, "no grant, no exit from recovery");
+            assert_eq!(
+                service.snapshot().notification_ownership.unwrap()["native_recovery"],
+                true
+            );
+            assert!(f.calls("frontend-request").is_empty(), "the re-check is read-only");
             let watches = f.calls("watch").len();
             service.retry();
             wait_for("settled retry and replacement watch", || {

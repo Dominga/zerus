@@ -141,6 +141,15 @@ fn startup_recovery() -> bool {
     STARTUP_RECOVERY.load(Ordering::Acquire) == 1
 }
 
+/// Task #440: whether the window still waits in startup recovery.
+pub(crate) fn in_startup_recovery() -> bool {
+    startup_recovery()
+}
+
+/// Task #440 (C): when the window restarts itself to finish starting (unix
+/// ms; 0 = no restart planned), shown with the takeover refusal.
+static RECOVERY_RESTART_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Task 180: the code of the check that refused the native takeover (a fixed
 /// code, never child text), shown with its next step instead of an empty
 /// list or a bare "not ready".
@@ -164,6 +173,10 @@ fn ownership_display(
     value["native_recovery"] = json!(startup_recovery());
     if let Some(reason) = startup_recovery_reason() {
         value["native_recovery_reason"] = reason;
+    }
+    let restart_at = RECOVERY_RESTART_AT.load(Ordering::Acquire);
+    if startup_recovery() && restart_at > 0 {
+        value["native_recovery_restart_at"] = json!(restart_at);
     }
     value["activation"] = serde_json::to_value(activation).ok()?;
     value["activation"]["business_ready"] = business_ready.into();
@@ -793,6 +806,30 @@ impl Service {
             self.wake_connection(true);
         }
         view
+    }
+    /// Task #440 (A): one read-only re-check while the window waits in
+    /// startup recovery. When a running service now grants ownership,
+    /// `ownership_result` leaves recovery (1 -> 2) and the connection is woken,
+    /// so the list loads without a window restart. Nothing is started or
+    /// acted on; true once recovery has been left.
+    pub(crate) async fn recheck_recovery(&self) -> bool {
+        if !startup_recovery() || self.shared.stopped.load(Ordering::Acquire) {
+            return false;
+        }
+        let _ = self.ownership_result().await;
+        if startup_recovery() {
+            return false;
+        }
+        self.wake_connection(false);
+        true
+    }
+    /// Task #440 (C): the window restarts itself at `at` (unix ms); the
+    /// ownership notice says so ahead of it.
+    pub(crate) async fn announce_restart(&self, at: u64) {
+        RECOVERY_RESTART_AT.store(at, Ordering::Release);
+        self.shared
+            .publish_ownership(crate::desktop_ownership::Phase::Result)
+            .await;
     }
     pub(crate) async fn ownership_result(&self) -> crate::desktop_ownership::View {
         let view = self.shared.ownership.request(None, None, None).await;

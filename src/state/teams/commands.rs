@@ -667,6 +667,7 @@ pub(crate) fn bound_status(value: &mut Value, team: &Team) {
     const TASK_TEXT: usize = 400;
     const RUN_TAIL: usize = 200;
     const PAGE: usize = 20;
+    const STAGE_SPANS: usize = 5;
     fn clip(text: &str, limit: usize) -> String {
         if text.chars().count() <= limit {
             text.to_owned()
@@ -697,11 +698,21 @@ pub(crate) fn bound_status(value: &mut Value, team: &Team) {
                     value[field] = json!(clipped);
                 }
             }
+            // The stage spans stay, in a bounded form: the newest few, each its
+            // kind, round, state and whether it runs (the times and the member
+            // are in `hgs team status --task N`).
+            if let Some(spans) = value.get_mut("stage_spans").and_then(|spans| spans.as_array_mut()) {
+                let first = spans.len().saturating_sub(STAGE_SPANS);
+                *spans = spans
+                    .split_off(first)
+                    .into_iter()
+                    .map(|span| json!({"kind":span["kind"],"round":span["round"],"state":span["state"],"running":span["running"]}))
+                    .collect();
+            }
             if let Some(object) = value.as_object_mut() {
                 object.remove("baseline");
                 object.remove("output");
                 object.remove("prepare");
-                object.remove("stage_spans");
             }
             let Some(attempts) = value.get_mut("attempts").and_then(|attempts| attempts.as_array_mut()) else { continue };
             for attempt in attempts {

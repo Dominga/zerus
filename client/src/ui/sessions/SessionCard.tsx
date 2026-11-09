@@ -567,20 +567,25 @@ function TeamBar(props: { label: string; done: number; total: number; muted?: bo
 /** The lead's team strip (SessionCardDelegate.h:468-541): both bars, status, ?N, members. */
 export function TeamStrip(props: { team: TeamSummary; expanded: boolean; onToggle: () => void }) {
   const status = () => TEAM_STATUS[props.team.status] ?? props.team.status;
+  // Task 425: the session list's own class names (sc-team-*): the Team tab's
+  // .team-strip, .team-status and .team-members rules must not reach them.
   return (
-    <div class="team-strip" title={`${props.team.name}\n${tr("%1 of %2 phases finished; discarded drafts do not count", props.team.phases_done, props.team.phases_total)}`}>
-      <button class="team-toggle" aria-expanded={props.expanded} title={props.expanded ? tr("Hide team members") : tr("Show team members")}
-        onClick={(e) => { e.stopPropagation(); props.onToggle(); }}>
+    <div class="sc-team-strip" title={`${props.team.name}
+${tr("%1 of %2 phases finished; discarded drafts do not count", props.team.phases_done, props.team.phases_total)}`}>
+      <button type="button" class="sc-team-toggle" data-team-toggle aria-expanded={props.expanded}
+        aria-label={props.expanded ? tr("Hide team members") : tr("Show team members")} title={props.expanded ? tr("Hide team members") : tr("Show team members")}
+        onClick={(e) => { e.stopPropagation(); props.onToggle(); }} onDblClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") e.stopPropagation(); }}>
+        <Icon name="chevron-right" size={12} class="chev" />
         <Icon name="users" size={14} />
+        <span class="sc-team-count">{props.team.members.length}</span>
       </button>
       <TeamBar label={`${props.team.phase ? `P${props.team.phase} ` : ""}${props.team.phase_done}/${props.team.phase_total}`}
         done={props.team.phase_done} total={props.team.phase_total} />
       <TeamBar label={`${props.team.phases_done}/${props.team.phases_total}`} done={props.team.phases_done}
         total={props.team.phases_total} muted />
-      <span class="team-status" classList={{ stuck: props.team.status === "stuck" }}>{tr(status())}</span>
-      <Show when={props.team.attention > 0}><span class="team-answers">?{props.team.attention}</span></Show>
-      <span class="grow" />
-      <span class="team-members">{props.team.members.length}</span>
+      <span class={props.team.status === "stuck" ? "sc-team-status stuck" : "sc-team-status"}>{tr(status())}</span>
+      <Show when={props.team.attention > 0}><span class="sc-team-answers">?{props.team.attention}</span></Show>
     </div>
   );
 }
@@ -642,11 +647,13 @@ export function SessionCard(props: {
   };
   return (
     <div class="scard tiled" classList={{ selected: props.selected, offline: statusOf(s()) === "offline", muted: !!s().muted,
-      "team-lead": !!props.teamSummary, "team-member": !!props.member, "team-first": !!props.teamFirst, "team-last": !!props.teamLast }}
+      "sc-team-lead": !!props.teamSummary, "sc-member": !!props.member, "sc-member-first": !!props.teamFirst, "sc-member-last": !!props.teamLast }}
       // Task #330: a member's box spans the row (its content is indented by
       // the stylesheet), so the hover highlight and the card reach the pane
       // edge; the old inline left shrank both and left the indent unpainted.
-      style={{ left: "2px" }} data-emphasis={emphasis(s())}
+      // Task 425: a member's card is an ordinary card inside the tree's indent
+      // (the stylesheet places it); the connector runs in the indent beside it.
+      style={props.member ? undefined : { left: "2px" }} data-emphasis={emphasis(s())}
       title={fullTooltip(s(), props.teamSummary)}>
       <span class="sc-tile"><AgentTile agent={s().agent} /></span>
       <div class="sc-l1">

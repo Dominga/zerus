@@ -469,30 +469,43 @@
   .rowhit.stale { opacity: .62; }
 }
 
-  /* The lead's team strip (Qt SessionCardDelegate::paintTeamStrip) */
-  .team-strip { position: absolute; left: 7px; right: 7px; top: 82px; height: 21px; display: flex; align-items: center;
-    gap: 7px; padding: 0 7px; border: 1px solid var(--z-color-card-border); border-radius: 7px; background: var(--z-color-card);
-    font-size: 10px; color: var(--z-list-muted); }
-  .team-strip .grow { flex: 1; }
-  .team-toggle { display: inline-flex; align-items: center; padding: 0; border: 0; background: transparent; color: var(--z-list-muted); cursor: pointer; }
-  .team-toggle[aria-expanded="true"] svg { transform: rotate(90deg); }
-  .tbar { display: inline-flex; align-items: center; gap: 4px; }
+  /* The lead's team strip (Qt SessionCardDelegate::paintTeamStrip). Task 425:
+     the session list's own names (sc-team-*, sc-member): the Team tab's
+     .team-strip, .team-status, .team-members and .team-member rules gave the
+     strip 34 px and a bottom rule and squeezed a member card into a 14 px bar. */
+  .sc-team-strip { position: absolute; left: 7px; right: 7px; top: 82px; height: 21px; box-sizing: border-box; display: flex; align-items: center;
+    gap: 7px; padding: 0 7px 0 3px; border: 1px solid var(--z-color-card-border); border-radius: 7px; background: var(--z-color-card);
+    font-size: 10px; color: var(--z-list-muted); overflow: hidden; white-space: nowrap; }
+  .sc-team-toggle { flex: none; display: inline-flex; align-items: center; gap: 3px; height: 17px; padding: 0 4px; border: 0; border-radius: 4px;
+    background: transparent; color: var(--z-list-muted); font: inherit; cursor: pointer; }
+  .sc-team-toggle:hover { background: var(--z-list-counter-hover, var(--z-color-hover)); color: var(--z-list-text); }
+  .sc-team-toggle:focus-visible { outline: 1px solid var(--z-color-accent); }
+  .sc-team-toggle .chev { transition: rotate var(--z-motion-base) var(--ease); }
+  .sc-team-toggle[aria-expanded="true"] .chev { rotate: 90deg; }
+  .sc-team-count { font-variant-numeric: tabular-nums; }
+  .tbar { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
   .tbar-label { font-variant-numeric: tabular-nums; }
   .tbar-track { width: 26px; height: 3px; border-radius: 2px; background: var(--z-color-border); overflow: hidden; }
   .tbar-fill { display: block; height: 100%; border-radius: 2px; background: var(--z-color-accent); }
   .tbar.muted .tbar-fill { background: var(--z-color-accent-muted); }
-  .team-status { padding: 1px 7px; border-radius: 9px; color: var(--z-color-text-3); white-space: nowrap; }
-  .team-status.stuck { color: var(--z-color-warn); background: color-mix(in srgb, var(--z-color-warn) 11%, transparent); }
-  .team-answers { font-weight: 600; color: var(--z-color-text-3); }
-  .team-members { color: var(--z-list-dim); }
-  /* Task #330: a member under its lead spans the row, its content indented
-     22 px, so the hover highlight covers the whole card at the pane edge. */
-  .scard.team-member { left: 2px; right: 2px; padding-left: 22px; }
-  .scard.team-member::before { content: ""; position: absolute; left: 12px; top: -8px; bottom: -6px; width: 1px;
-    background: var(--z-list-tree-line); }
-  .scard.team-member.team-last::before { bottom: 50%; }
-  .scard.team-member::after { content: ""; position: absolute; left: 12px; top: 50%; width: 10px; height: 1px;
-    background: var(--z-list-tree-line); }
+  .sc-team-status { min-width: 0; overflow: hidden; text-overflow: ellipsis; padding: 1px 7px; border-radius: 9px; color: var(--z-color-text-3); }
+  .sc-team-status.stuck { color: var(--z-color-warn); background: color-mix(in srgb, var(--z-color-warn) 11%, transparent); }
+  .sc-team-answers { flex: none; font-weight: 600; color: var(--z-color-text-3); }
+  /* Task 425: a member under its lead is an ordinary card inside a 26 px
+     indent; the tree runs in the indent as one line from the lead's card
+     down to the last member, with an elbow into each member card. A row is
+     104 px and its card spans 4..98, so the line reaches 10 px above the card
+     (the lead's card bottom and the row gap) and 6 px below it. */
+  .scard.sc-member { left: 26px; right: 2px; }
+  .scard.sc-member .sc-title { min-width: 0; }
+  .scard.sc-member .agent-badge { flex: 0 1 auto; min-width: 0; max-width: 104px; }
+  .scard.sc-member .sc-l3 > .ell { min-width: 0; }
+  .scard.sc-member::before { content: ""; position: absolute; left: -13px; top: -11px; bottom: -7px; width: 1px;
+    background: var(--z-list-tree-line); pointer-events: none; }
+  .scard.sc-member.sc-member-last::before { bottom: auto; height: 33px; }
+  .scard.sc-member::after { content: ""; position: absolute; left: -13px; top: 21px; width: 22px; height: 1px;
+    background: var(--z-list-tree-line); pointer-events: none; }
+  :root[data-tree-lines="indent"] .scard.sc-member::before, :root[data-tree-lines="indent"] .scard.sc-member::after { display: none; }
 
 /* Task #247: Qt's TerminalScreen context menu (Copy selection, Paste). */
 .term-menu { position: fixed; z-index: 60; min-width: 150px; display: flex; flex-direction: column; padding: 4px; border: 1px solid var(--z-color-card-border); border-radius: 8px; background: var(--z-color-surface); box-shadow: 0 8px 22px rgb(0 0 0 / 0.25); }

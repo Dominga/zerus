@@ -131,33 +131,79 @@ describe("full and compact session question presentation", () => {
   });
 });
 
-describe("a team member's row (task 330)", () => {
-  it("keeps a team member's box at the pane edge and its row connector", async () => {
+describe("a team member's row and the team tree (tasks 330, 425)", () => {
+  const styles = async () => {
     const { readFileSync } = await import(/* @vite-ignore */ ["node", "fs"].join(":")) as { readFileSync(path: URL): string };
-    const stylesheet = String(readFileSync(new URL("../../ui/styles/sessions.css", import.meta.url)));
+    const read = (name: string) => String(readFileSync(new URL(`../../ui/styles/${name}.css`, import.meta.url))).replace(/\r\n/g, "\n");
+    const stylesheet = read("sessions");
+    // Parse the stylesheet, never a literal run of its text.
     const rule = (selector: string) => {
       const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      return stylesheet.replace(/\r\n/g, "\n").match(new RegExp(`${escaped} \\{([^}]*)\\}`))?.[1] ?? "";
+      return stylesheet.match(new RegExp(`(?:^|\\n)\\s*${escaped} \\{([^}]*)\\}`))?.[1] ?? "";
     };
-    const html = render(false, row(), true, undefined, { member: true, depth: 1, teamFirst: true });
-    expect(html).toContain("team-member");
-    expect(html).toMatch(/style="[^"]*left:\s*2px/);
-    expect(html).not.toMatch(/left:\s*24px/);
+    return { read, rule };
+  };
+  const px = (text: string, property: string) => Number(text.match(new RegExp(`(?:^|[;\\s])${property}:\\s*(-?\\d+)px`))?.[1] ?? NaN);
 
-    // Parse the stylesheet, never a literal run of its text: the box spans the
-    // row (and so does the hover), its content stays indented, and the vertical
-    // connector runs from the row above to the last member's centre.
-    const member = rule(".scard.team-member");
-    expect(stylesheet).toContain(".scard.team-member");
-    expect(member).toMatch(/left:\s*2px/);
-    expect(member).toMatch(/right:\s*2px/);
-    expect(member).toMatch(/padding-left:\s*22px/);
-    const before = rule(".scard.team-member::before");
-    expect(before).toMatch(/left:\s*12px/);
-    expect(before).toMatch(/top:\s*-8px/);
-    expect(before).toMatch(/bottom:\s*-6px/);
-    expect(rule(".scard.team-member.team-last::before")).toMatch(/bottom:\s*50%/);
-    expect(rule(".scard.team-member::after")).toMatch(/top:\s*50%/);
+  it("lays a member card out as an ordinary card inside the indent, with the session list's own class names", async () => {
+    const { read, rule } = await styles();
+    const html = render(false, row(), true, undefined, { member: true, depth: 1, teamFirst: true });
+    expect(html).toMatch(/class="scard tiled[^"]*sc-member[^"]*sc-member-first/);
+    // The Team tab's .team-member (flex, padding, border, background) squeezed it into a 14 px bar.
+    expect(html).not.toMatch(/class="[^"]*team-member/);
+    expect(html).not.toMatch(/style="[^"]*left:\s*2px/);
+    const member = rule(".scard.sc-member");
+    expect(px(member, "left")).toBe(26);
+    expect(px(member, "right")).toBe(2);
+    expect(member).not.toMatch(/padding|max-width|display/);
+    // Narrow lists: the badge and line 3 shrink inside the card instead of overflowing it.
+    expect(rule(".scard.sc-member .agent-badge")).toMatch(/min-width:\s*0/);
+    expect(rule(".scard.sc-member .sc-title")).toMatch(/min-width:\s*0/);
+    // No other stylesheet styles these names, so no rule of another view reaches them.
+    for (const name of ["teams", "plan", "newteam", "app", "base"]) {
+      expect(read(name), name).not.toMatch(/\.sc-member|\.sc-team-strip|\.sc-team-status/);
+    }
+  });
+
+  it("draws one continuous line from the lead's card to the last member, with an elbow into each card", async () => {
+    const { rule } = await styles();
+    // A card spans its 104 px row from 4 to 98 (top 4, bottom 6), and the lead's card ends 6 px above its row's end:
+    // the line reaches past the gaps on both sides, so consecutive rows join with no break.
+    const card = rule(".scard");
+    expect(px(card, "top")).toBe(4);
+    expect(px(card, "bottom")).toBe(6);
+    const line = rule(".scard.sc-member::before");
+    expect(px(line, "top")).toBeLessThanOrEqual(-(4 + 6));
+    expect(px(line, "bottom")).toBeLessThanOrEqual(-6);
+    const elbow = rule(".scard.sc-member::after");
+    // The elbow starts on the line and reaches into the card.
+    expect(px(elbow, "left")).toBe(px(line, "left"));
+    expect(px(elbow, "left") + px(elbow, "width")).toBeGreaterThan(0);
+    // The last member's line stops at its elbow.
+    const last = rule(".scard.sc-member.sc-member-last::before");
+    expect(px(line, "top") + px(last, "height")).toBeGreaterThanOrEqual(px(elbow, "top"));
+    expect(px(line, "top") + px(last, "height")).toBeLessThanOrEqual(px(elbow, "top") + 2);
+  });
+
+  it("gives the lead a strip of its own height with a keyboard-reachable fold toggle", async () => {
+    const { rule } = await styles();
+    const team = { name: "T", status: "running", phase: 9, phase_done: 207, phase_total: 230, phases_done: 8, phases_total: 9, attention: 3, members: ["a", "b"] };
+    const open = render(false, row(), true, undefined, { teamSummary: team, expanded: true });
+    expect(open).toContain('class="sc-team-strip"');
+    expect(open).not.toMatch(/class="team-strip"|class="team-members"|class="team-status/);
+    const toggle = (html: string) => html.match(/<button[^>]*class="sc-team-toggle"[^>]*>/)?.[0] ?? "";
+    expect(toggle(open)).toContain('type="button"');
+    expect(toggle(open)).toContain('aria-expanded="true"');
+    expect(toggle(open)).toContain('aria-label="Hide team members"');
+    const folded = render(false, row(), true, undefined, { teamSummary: team, expanded: false });
+    expect(toggle(folded)).toContain('aria-expanded="false"');
+    expect(toggle(folded)).toContain('aria-label="Show team members"');
+    // The Team tab's .team-strip gave it 34 px and a bottom rule past the card's edge.
+    const strip = rule(".sc-team-strip");
+    expect(px(strip, "height")).toBe(21);
+    expect(strip).toMatch(/box-sizing:\s*border-box/);
+    expect(strip).toMatch(/overflow:\s*hidden/);
+    expect(rule('.sc-team-toggle[aria-expanded="true"] .chev')).toMatch(/rotate:\s*90deg/);
   });
 });
 describe("session cards at the narrow side panel (task 343)", () => {
@@ -180,11 +226,10 @@ describe("session cards at the narrow side panel (task 343)", () => {
     expect(container("@container (max-width: 360px)")).toContain(".sc-cold button");
 
     const member = render(false, row(), true, undefined, { member: true, depth: 1, teamFirst: true });
-    expect(member).toContain("team-member");
-    expect(member).toMatch(/style="[^"]*left:\s*2px/);
+    expect(member).toContain("sc-member");
     const lead = render(false, row(), true, undefined, { teamSummary: { name: "T", status: "running", phase: 1, phase_done: 1, phase_total: 2,
       phases_done: 1, phases_total: 2, attention: 0, members: [] } });
-    expect(lead).toContain("team-strip");
+    expect(lead).toContain("sc-team-strip");
   });
 });
 

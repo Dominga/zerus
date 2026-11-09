@@ -177,10 +177,10 @@ struct DraftsScreen: View {
             HStack {
                 Text(message.target.session).font(.subheadline.weight(.semibold)).lineLimit(1)
                 Spacer()
-                Tag(text: DeliveryLabel.text(message.status), color: message.blocksSending || message.status == "failed" ? Theme.amber : Theme.mint)
+                Tag(text: DeliveryLabel.text(message.status), color: ["sending", "uncertain", "failed"].contains(message.status) ? Theme.amber : Theme.mint)
             }
             if !message.text.isEmpty { Text(verbatim: message.text).lineLimit(8).textSelection(.enabled) }
-            if !message.error.isEmpty { Text(message.error).font(.footnote).foregroundStyle(Theme.amber) }
+            if !message.error.isEmpty && !message.deliveryDismissed { Text(message.error).font(.footnote).foregroundStyle(Theme.amber) }
             HStack(spacing: 16) {
                 if let session = app.sessions.first(where: { message.belongs(to: $0.target) }) {
                     Button("Open") { onOpen(session.target) }

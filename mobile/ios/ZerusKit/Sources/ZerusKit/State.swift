@@ -181,9 +181,10 @@ public struct OutgoingMessage: Codable, Hashable, Sendable {
     public var submittedAt: Double
     public var submittedText: String
     public var error: String
+    public var deliveryDismissed: Bool
 
     public init(requestId: String, target: Target, text: String, attachments: [Attachment], createdAt: Double, status: String = "sending",
-                submittedAt: Double = 0, submittedText: String = "", error: String = "") {
+                submittedAt: Double = 0, submittedText: String = "", error: String = "", deliveryDismissed: Bool = false) {
         self.requestId = requestId
         self.target = target
         self.text = text
@@ -193,6 +194,25 @@ public struct OutgoingMessage: Codable, Hashable, Sendable {
         self.submittedAt = submittedAt
         self.submittedText = submittedText
         self.error = error
+        self.deliveryDismissed = deliveryDismissed
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case requestId, target, text, attachments, createdAt, status, submittedAt, submittedText, error, deliveryDismissed
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        requestId = try values.decode(String.self, forKey: .requestId)
+        target = try values.decode(Target.self, forKey: .target)
+        text = try values.decode(String.self, forKey: .text)
+        attachments = try values.decode([Attachment].self, forKey: .attachments)
+        createdAt = try values.decode(Double.self, forKey: .createdAt)
+        status = try values.decode(String.self, forKey: .status)
+        submittedAt = try values.decode(Double.self, forKey: .submittedAt)
+        submittedText = try values.decode(String.self, forKey: .submittedText)
+        error = try values.decode(String.self, forKey: .error)
+        deliveryDismissed = try values.decodeIfPresent(Bool.self, forKey: .deliveryDismissed) ?? false
     }
 
     public func recover() -> OutgoingMessage {
@@ -204,7 +224,7 @@ public struct OutgoingMessage: Codable, Hashable, Sendable {
     }
 
     public func belongs(to current: Target) -> Bool { target == current || target.resolves(to: current) }
-    public var blocksSending: Bool { status == "sending" || status == "uncertain" }
+    public var blocksSending: Bool { status == "sending" || status == "uncertain" && !deliveryDismissed }
     /// Its delivery needs review: the message offers Review, and Check delivery while uncertain.
     public var recoverable: Bool { status == "failed" || status == "uncertain" }
 }

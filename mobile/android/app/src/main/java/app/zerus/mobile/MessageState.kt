@@ -7,10 +7,11 @@ import kotlin.math.abs
 
 data class OutgoingMessage(val requestId: String, val target: Target, val text: String,
     val attachments: List<Attachment>, val createdAt: Double, val status: String = "sending",
-    val submittedAt: Double = 0.0, val submittedText: String = "", val error: String = "") {
-    fun recover() = if (status == "sending") copy(status = "uncertain", error = "Delivery was interrupted. Check its receipt before sending again.") else this
+    val submittedAt: Double = 0.0, val submittedText: String = "", val error: String = "",
+    val deliveryDismissed: Boolean = false) {
+    fun recover() = if (status == "sending") copy(status = "uncertain", error = "Delivery was interrupted. Check its receipt before sending again.", deliveryDismissed = false) else this
     fun belongsTo(current: Target): Boolean = target == current || target.resolvesTo(current)
-    val blocksSending get() = status in listOf("sending", "uncertain")
+    val blocksSending get() = status == "sending" || status == "uncertain" && !deliveryDismissed
 }
 
 /** Only the initial blank conversation can acquire an identity under the same verified run. */
@@ -83,10 +84,11 @@ object MessageCodec {
         .put("attachments", JSONArray(draft.attachments.map(Attachment::toJson))).put("revision", draft.revision).put("detached", draft.detachedId).put("generation", draft.generation)
     fun outgoing(value: JSONObject) = OutgoingMessage(value.getString("request"), target(value), value.getString("text"),
         value.optJSONArray("attachments")?.objects().orEmpty().map(Attachment::fromJson), value.getDouble("created"), value.getString("status"),
-        value.optDouble("submitted", 0.0), value.string("submitted_text"), value.string("error")).recover()
+        value.optDouble("submitted", 0.0), value.string("submitted_text"), value.string("error"), value.opt("delivery_dismissed") == true).recover()
     fun outgoingJson(message: OutgoingMessage) = targetJson(message.target).put("request", message.requestId).put("text", message.text)
         .put("attachments", JSONArray(message.attachments.map(Attachment::toJson))).put("created", message.createdAt).put("status", message.status)
         .put("submitted", message.submittedAt).put("submitted_text", message.submittedText).put("error", message.error)
+        .put("delivery_dismissed", message.deliveryDismissed)
     private fun contextOperation(value: JSONObject): ContextOperation {
         val operation = value.getString("operation")
         val dismiss = if (value.has("dismiss_prompt")) {

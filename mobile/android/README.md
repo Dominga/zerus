@@ -808,6 +808,16 @@ selections and custom text remain editable while navigating; an incomplete earli
 answer is offered for review before submission. Existing exact-request, approval
 and cold-context consent checks still apply to the final send.
 
+`MobileDeliveryRecoverySmokeInstrumentation` checks an unconfirmed outgoing message
+without reposting it. Build with
+`-PzerusInstrumentationRunner=app.zerus.mobile.MobileDeliveryRecoverySmokeInstrumentation`
+using the same isolated emulator procedure. Run with `-e scenario recovery`, then
+force-stop the test app and run `-e scenario restart` without clearing its data.
+These phases check physical dismissal during a pending receipt lookup, persisted
+warning state and editor, a distinct next send, and exact original confirmation.
+On fresh test data, `-e scenario timeout` exercises the actual 45-second send and
+manual receipt deadlines. It does not shorten production timeouts.
+
 `QuestionDeliverySmokeInstrumentation` exercises physical Next/Enter/Send all controls,
 retained per-question answers, one complete synthetic answer, confirmed and missing
 receipt recovery, and native-to-canonical read progress with a later unseen reply.

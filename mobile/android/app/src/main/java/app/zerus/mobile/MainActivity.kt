@@ -379,17 +379,23 @@ class MainActivity : ComponentActivity() {
             TextButton(onClick = { model.review(draft); review = null }) { Text("Prepare again") }
             TextButton(onClick = { model.checkReceipt(draft); review = null }) { Text("Check receipt") }
         }, dismissButton = { TextButton(onClick = { review = null }) { Text("Cancel") } }) }
-    reviewOutgoing?.let { message -> ZerusAlertDialog(onDismissRequest = { reviewOutgoing = null }, title = { Text("Review delivery") },
+    reviewOutgoing?.let { message ->
+        val canDismiss = !message.deliveryDismissed && message.status in listOf("uncertain", "failed")
+        ZerusAlertDialog(onDismissRequest = { reviewOutgoing = null }, title = { Text("Review delivery") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text(if (message.status == "uncertain") "This message may already have reached ${message.target.session}. Check its receipt and conversation before preparing another send."
+            Text(if (message.status == "uncertain") "This message may already have reached ${message.target.session}. Check its receipt and conversation for confirmation."
                 else "This message was not accepted. Review it before trying again.")
             if (message.text.isNotBlank()) SelectionContainer { Text(message.text, maxLines = 8, overflow = TextOverflow.Ellipsis) }
             AttachmentRows(message.attachments.map(Attachment::displayed), message.target, model)
-            Text("Your current composition is kept in Saved drafts. Preparing again does not send the message.", color = Muted, style = MaterialTheme.typography.bodySmall)
-        } }, confirmButton = { TextButton(enabled = "outgoing:${message.requestId}" !in model.receiptFlights,
-            onClick = { model.prepareOutgoing(message); reviewOutgoing = null }) { Text("Prepare again") }
+            if (canDismiss) Text(OUTGOING_WARNING_DISMISSAL_NOTICE, color = Muted, style = MaterialTheme.typography.bodySmall)
+            if (message.status == "failed") Text("Your current composition is kept in Saved drafts. Preparing again does not send the message.", color = Muted, style = MaterialTheme.typography.bodySmall)
+        } }, confirmButton = {
+            if (message.status == "failed") TextButton(enabled = "outgoing:${message.requestId}" !in model.receiptFlights && "dismiss:${message.requestId}" !in model.receiptFlights,
+                onClick = { model.prepareOutgoing(message); reviewOutgoing = null }) { Text("Prepare again") }
             TextButton(enabled = "outgoing:${message.requestId}" !in model.receiptFlights,
                 onClick = { model.checkOutgoing(message); reviewOutgoing = null }) { Text("Check receipt") }
+            if (canDismiss) TextButton(enabled = "dismiss:${message.requestId}" !in model.receiptFlights,
+                onClick = { model.dismissOutgoing(message); reviewOutgoing = null }) { Text("Dismiss warning") }
         }, dismissButton = { TextButton(onClick = { reviewOutgoing = null }) { Text("Cancel") } }) }
     discard?.let { draft -> ZerusAlertDialog(onDismissRequest = { discard = null }, title = { Text("Discard saved draft?") },
         text = { Text("This removes the private draft for ${draft.target.session} from this phone.") },
@@ -1239,12 +1245,12 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                     }
                 }
                 if (outgoing != null && outgoing.status in listOf("failed", "uncertain")) {
-                    if (outgoing.error.isNotBlank()) Text(outgoing.error, color = Amber, style = MaterialTheme.typography.bodySmall)
+                    if (!outgoing.deliveryDismissed && outgoing.error.isNotBlank()) Text(outgoing.error, color = Amber, style = MaterialTheme.typography.bodySmall)
                     Row {
                         if (outgoing.status == "uncertain") TextButton(onClick = { model.checkOutgoing(outgoing) },
                             enabled = "outgoing:" + outgoing.requestId !in model.receiptFlights) { Text("Check delivery") }
-                        TextButton(onClick = { onReview(outgoing) },
-                            enabled = "outgoing:" + outgoing.requestId !in model.receiptFlights) { Text("Review") }
+                        if (!outgoing.deliveryDismissed) TextButton(onClick = { onReview(outgoing) },
+                            enabled = "dismiss:" + outgoing.requestId !in model.receiptFlights) { Text("Review") }
                     }
                 }
             }
@@ -1333,7 +1339,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         else "Refresh to verify the session before sending."
     val canSend = (editor.text.isNotBlank() || draft.attachments.isNotEmpty()) && (draft.attachments.isEmpty() || model.attachmentReason(target).isBlank()) && !model.sendingBlocked(target) && !model.contextBlocked(target) &&
         draft.status == "editing" && !model.demo && online && target.run.isNotBlank() && model.storageReady && blockReason.isBlank()
-    val previous = model.outgoing.lastOrNull { it.belongsTo(target) && it.status in listOf("sending", "uncertain") }
+    val previous = model.outgoing.lastOrNull { it.belongsTo(target) && it.blocksSending }
     val sendReason = when {
         recording -> "Stop recording before sending a message. Your typed draft is kept."
         model.demo -> "Pair to send a message."
@@ -1382,7 +1388,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         PendingAttachmentSelection(model, target)
         if (previous?.status == "uncertain") OutgoingRecovery(previous,
             "outgoing:${previous.requestId}" in model.receiptFlights,
-            { model.checkOutgoing(previous) }, { onReviewOutgoing(previous) })
+            { model.checkOutgoing(previous) }, { onReviewOutgoing(previous) },
+            dismissing = "dismiss:${previous.requestId}" in model.receiptFlights)
         CompactMessageInput(state = editor, placeholder = "Message",
             modifier = if (retainedPreview) Modifier.weight(1f, fill = false) else Modifier,
             sharedPreviewSpace = retainedPreview,
@@ -1486,14 +1493,14 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         items(unresolved.sortedByDescending { it.createdAt }, key = { "outgoing:${it.requestId}" }) { message ->
             Card(colors = CardDefaults.cardColors(containerColor = Surface)) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(message.target.session, fontWeight = FontWeight.SemiBold)
-                Tag(deliveryLabel(message.status), if (message.blocksSending || message.status == "failed") Amber else Mint)
+                Tag(deliveryLabel(message.status), if (message.status in listOf("sending", "uncertain", "failed")) Amber else Mint)
                 if (message.text.isNotBlank()) SelectionContainer { Text(message.text, maxLines = 8, overflow = TextOverflow.Ellipsis) }
                 AttachmentRows(message.attachments.map(Attachment::displayed), message.target, model)
-                if (message.error.isNotBlank()) Text(message.error, color = Amber, style = MaterialTheme.typography.bodySmall)
+                if (!message.deliveryDismissed && message.error.isNotBlank()) Text(message.error, color = Amber, style = MaterialTheme.typography.bodySmall)
                 Row {
                     model.sessions.find { message.belongsTo(it.target) }?.let { session -> TextButton(onClick = { model.open(session) }) { Text("Open") } }
                     if (message.status == "uncertain") TextButton(onClick = { model.checkOutgoing(message) }, enabled = "outgoing:${message.requestId}" !in model.receiptFlights) { Text("Check delivery") }
-                    if (message.status in listOf("failed", "uncertain")) TextButton(onClick = { onReviewOutgoing(message) }, enabled = "outgoing:${message.requestId}" !in model.receiptFlights) { Text("Review") }
+                    if (!message.deliveryDismissed && message.status in listOf("failed", "uncertain")) TextButton(onClick = { onReviewOutgoing(message) }, enabled = "dismiss:${message.requestId}" !in model.receiptFlights) { Text("Review") }
                 }
             } }
         }

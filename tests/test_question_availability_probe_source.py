@@ -14,7 +14,7 @@ original_review_fixture = _focus_projection.original_review_fixture
 # Fixture pin includes one-time post-resume live-label preparation; the approval harness retains exact 95ef by reverse projection.
 MAIN = ROOT / "mobile/android/app/src/main/java/app/zerus/mobile"
 # Keep the reviewed 9b217ddd/b9c1e29c reconstruction pins unchanged. The exact
-# fixtures first reverse the recent-Activity, child-session and visible-refresh
+# fixtures first reverse delivery recovery, recent-Activity, child-session and visible-refresh
 # additions, then the reviewed task-tracker additions to 86aeab6d, then
 # the composed workspace and push-registration changes to ac601e36,
 # then the 962699e6 read-catalog/badge update and c1eebe96 mobile checkout
@@ -43,9 +43,14 @@ CHILD_SESSION_UPDATES = ROOT / "tests/fixtures/question-availability-child-sessi
 CHILD_SESSION_UPDATES_SHA = "c97d445dacc9121bad6f7618c2938a699d5a6cd1364c9f9d05ac959ad5937fc7"
 # Exact two-file delta in 16a21484f, after reviewing its fresh-inspection identity,
 # presentation ownership and unchanged question/send gates (zerus-l8ldt). Reverse
-# it first; keep all original policy, verification-writer and workspace pins.
+# it after newer reviewed updates; keep all original policy, verification-writer and workspace pins.
 RECENT_ACTIVITY_UPDATES = ROOT / "tests/fixtures/question-availability-recent-activity-updates.patch"
 RECENT_ACTIVITY_UPDATES_SHA = "05f9cb60d46c095e91561d5bdfe6c7d76c850218fd6ca9b44958ffebdb7e730c"
+# Exact local delivery-dismissal UI, durable recovery and bounded send/read delta
+# from 859cb4f (zerus-a4mub.2, .7). Question eligibility, native availability,
+# every verification assignment and all historical reconstruction pins stay exact.
+DELIVERY_RECOVERY_UPDATES = ROOT / "tests/fixtures/question-availability-delivery-recovery-updates.patch"
+DELIVERY_RECOVERY_UPDATES_SHA = "9606f2de9579fb7100e4ca0878a4574cb919a651bf37743cee23177674b8a25e"
 WORKSPACE_BASE_SHA = {
     "ZerusViewModel.kt": "5932d92ca74ccf37da9595a580bcb1457c93c83951976606c8defa8d1ee83326",
     "MainActivity.kt": "f68902349d1e0ac939582e9e139548663f5763c430a3c566f8823d9f045645f0",
@@ -97,6 +102,7 @@ def reverse_reviewed_patch(name, source, fixture, fixture_sha):
 
 
 def reverse_reviewed_updates(name, source):
+    source = reverse_reviewed_patch(name, source, DELIVERY_RECOVERY_UPDATES, DELIVERY_RECOVERY_UPDATES_SHA)
     source = reverse_reviewed_patch(name, source, RECENT_ACTIVITY_UPDATES, RECENT_ACTIVITY_UPDATES_SHA)
     source = reverse_reviewed_patch(name, source, CHILD_SESSION_UPDATES, CHILD_SESSION_UPDATES_SHA)
     source = reverse_reviewed_patch(name, source, VISIBLE_REFRESH_UPDATES, VISIBLE_REFRESH_UPDATES_SHA)
@@ -122,6 +128,8 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
         for name, digest in WORKSPACE_BASE_SHA.items():
             with self.subTest(source=name):
                 current = reverse_reviewed_patch(name, (MAIN / name).read_text(),
+                                                DELIVERY_RECOVERY_UPDATES, DELIVERY_RECOVERY_UPDATES_SHA)
+                current = reverse_reviewed_patch(name, current,
                                                 RECENT_ACTIVITY_UPDATES, RECENT_ACTIVITY_UPDATES_SHA)
                 current = reverse_reviewed_patch(name, current,
                                                 CHILD_SESSION_UPDATES, CHILD_SESSION_UPDATES_SHA)
@@ -185,6 +193,34 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
             for replacement in (addition.rstrip("\n") + " // changed reviewed addition\n", "", addition + addition):
                 with self.subTest(source=name, replacement=replacement):
                     self.assertFalse(original_source(name, source.replace(addition, replacement, 1)))
+
+    def test_delivery_recovery_projection_refuses_changed_missing_or_duplicate_reviewed_hunks(self):
+        additions = {
+            "ZerusViewModel.kt": "    fun dismissOutgoing(message: OutgoingMessage) = viewModelScope.launch {\n",
+            "MainActivity.kt": "        val canDismiss = !message.deliveryDismissed && message.status in listOf(\"uncertain\", \"failed\")\n",
+        }
+        for name, addition in additions.items():
+            source = (MAIN / name).read_text()
+            self.assertEqual(source.count(addition), 1)
+            for replacement in (addition.rstrip("\n") + " // changed reviewed addition\n", "", addition + addition):
+                with self.subTest(source=name, replacement=replacement):
+                    self.assertFalse(original_source(name, source.replace(addition, replacement, 1)))
+
+    def test_delivery_recovery_projection_keeps_local_intent_and_inflight_guards_protected(self):
+        for name, expressions in {
+            "ZerusViewModel.kt": (
+                "if (!storageReady || flight in receiptFlights || message.requestId in deliveryFlights) return@launch",
+                "MessageChanges.dismissOutgoing(state, message, recoverInterruptedSending = true)"),
+            "MainActivity.kt": (
+                "if (message.status == \"failed\") TextButton(enabled =",
+                "model.dismissOutgoing(message); reviewOutgoing = null",
+                "val previous = model.outgoing.lastOrNull { it.belongsTo(target) && it.blocksSending }"),
+        }.items():
+            source = (MAIN / name).read_text()
+            for expression in expressions:
+                with self.subTest(source=name, guard=expression):
+                    self.assertEqual(source.count(expression), 1)
+                    self.assertFalse(original_source(name, source.replace(expression, "false", 1)))
 
     def test_recent_activity_projection_keeps_fresh_inspection_and_publication_ownership_protected(self):
         source = (MAIN / "ZerusViewModel.kt").read_text()

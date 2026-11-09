@@ -1,0 +1,167 @@
+diff --git a/mobile/android/app/src/main/java/app/zerus/mobile/MainActivity.kt b/mobile/android/app/src/main/java/app/zerus/mobile/MainActivity.kt
+index 1db4a79fc55c83cd2b98b32dc70f6db2494541f9..3544ed29e1a2623c5b873435a806a8093ac46221 100644
+--- a/mobile/android/app/src/main/java/app/zerus/mobile/MainActivity.kt
++++ b/mobile/android/app/src/main/java/app/zerus/mobile/MainActivity.kt
+@@ -379,17 +379,23 @@ class MainActivity : ComponentActivity() {
+             TextButton(onClick = { model.review(draft); review = null }) { Text("Prepare again") }
+             TextButton(onClick = { model.checkReceipt(draft); review = null }) { Text("Check receipt") }
+         }, dismissButton = { TextButton(onClick = { review = null }) { Text("Cancel") } }) }
+-    reviewOutgoing?.let { message -> ZerusAlertDialog(onDismissRequest = { reviewOutgoing = null }, title = { Text("Review delivery") },
++    reviewOutgoing?.let { message ->
++        val canDismiss = !message.deliveryDismissed && message.status in listOf("uncertain", "failed")
++        ZerusAlertDialog(onDismissRequest = { reviewOutgoing = null }, title = { Text("Review delivery") },
+         text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+-            Text(if (message.status == "uncertain") "This message may already have reached ${message.target.session}. Check its receipt and conversation before preparing another send."
++            Text(if (message.status == "uncertain") "This message may already have reached ${message.target.session}. Check its receipt and conversation for confirmation."
+                 else "This message was not accepted. Review it before trying again.")
+             if (message.text.isNotBlank()) SelectionContainer { Text(message.text, maxLines = 8, overflow = TextOverflow.Ellipsis) }
+             AttachmentRows(message.attachments.map(Attachment::displayed), message.target, model)
+-            Text("Your current composition is kept in Saved drafts. Preparing again does not send the message.", color = Muted, style = MaterialTheme.typography.bodySmall)
+-        } }, confirmButton = { TextButton(enabled = "outgoing:${message.requestId}" !in model.receiptFlights,
+-            onClick = { model.prepareOutgoing(message); reviewOutgoing = null }) { Text("Prepare again") }
++            if (canDismiss) Text(OUTGOING_WARNING_DISMISSAL_NOTICE, color = Muted, style = MaterialTheme.typography.bodySmall)
++            if (message.status == "failed") Text("Your current composition is kept in Saved drafts. Preparing again does not send the message.", color = Muted, style = MaterialTheme.typography.bodySmall)
++        } }, confirmButton = {
++            if (message.status == "failed") TextButton(enabled = "outgoing:${message.requestId}" !in model.receiptFlights && "dismiss:${message.requestId}" !in model.receiptFlights,
++                onClick = { model.prepareOutgoing(message); reviewOutgoing = null }) { Text("Prepare again") }
+             TextButton(enabled = "outgoing:${message.requestId}" !in model.receiptFlights,
+                 onClick = { model.checkOutgoing(message); reviewOutgoing = null }) { Text("Check receipt") }
++            if (canDismiss) TextButton(enabled = "dismiss:${message.requestId}" !in model.receiptFlights,
++                onClick = { model.dismissOutgoing(message); reviewOutgoing = null }) { Text("Dismiss warning") }
+         }, dismissButton = { TextButton(onClick = { reviewOutgoing = null }) { Text("Cancel") } }) }
+     discard?.let { draft -> ZerusAlertDialog(onDismissRequest = { discard = null }, title = { Text("Discard saved draft?") },
+         text = { Text("This removes the private draft for ${draft.target.session} from this phone.") },
+@@ -1239,12 +1245,12 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+                     }
+                 }
+                 if (outgoing != null && outgoing.status in listOf("failed", "uncertain")) {
+-                    if (outgoing.error.isNotBlank()) Text(outgoing.error, color = Amber, style = MaterialTheme.typography.bodySmall)
++                    if (!outgoing.deliveryDismissed && outgoing.error.isNotBlank()) Text(outgoing.error, color = Amber, style = MaterialTheme.typography.bodySmall)
+                     Row {
+                         if (outgoing.status == "uncertain") TextButton(onClick = { model.checkOutgoing(outgoing) },
+                             enabled = "outgoing:" + outgoing.requestId !in model.receiptFlights) { Text("Check delivery") }
+-                        TextButton(onClick = { onReview(outgoing) },
+-                            enabled = "outgoing:" + outgoing.requestId !in model.receiptFlights) { Text("Review") }
++                        if (!outgoing.deliveryDismissed) TextButton(onClick = { onReview(outgoing) },
++                            enabled = "dismiss:" + outgoing.requestId !in model.receiptFlights) { Text("Review") }
+                     }
+                 }
+             }
+@@ -1333,7 +1339,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+         else "Refresh to verify the session before sending."
+     val canSend = (editor.text.isNotBlank() || draft.attachments.isNotEmpty()) && (draft.attachments.isEmpty() || model.attachmentReason(target).isBlank()) && !model.sendingBlocked(target) && !model.contextBlocked(target) &&
+         draft.status == "editing" && !model.demo && online && target.run.isNotBlank() && model.storageReady && blockReason.isBlank()
+-    val previous = model.outgoing.lastOrNull { it.belongsTo(target) && it.status in listOf("sending", "uncertain") }
++    val previous = model.outgoing.lastOrNull { it.belongsTo(target) && it.blocksSending }
+     val sendReason = when {
+         recording -> "Stop recording before sending a message. Your typed draft is kept."
+         model.demo -> "Pair to send a message."
+@@ -1382,7 +1388,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+         PendingAttachmentSelection(model, target)
+         if (previous?.status == "uncertain") OutgoingRecovery(previous,
+             "outgoing:${previous.requestId}" in model.receiptFlights,
+-            { model.checkOutgoing(previous) }, { onReviewOutgoing(previous) })
++            { model.checkOutgoing(previous) }, { onReviewOutgoing(previous) },
++            dismissing = "dismiss:${previous.requestId}" in model.receiptFlights)
+         CompactMessageInput(state = editor, placeholder = "Message",
+             modifier = if (retainedPreview) Modifier.weight(1f, fill = false) else Modifier,
+             sharedPreviewSpace = retainedPreview,
+@@ -1486,14 +1493,14 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+         items(unresolved.sortedByDescending { it.createdAt }, key = { "outgoing:${it.requestId}" }) { message ->
+             Card(colors = CardDefaults.cardColors(containerColor = Surface)) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                 Text(message.target.session, fontWeight = FontWeight.SemiBold)
+-                Tag(deliveryLabel(message.status), if (message.blocksSending || message.status == "failed") Amber else Mint)
++                Tag(deliveryLabel(message.status), if (message.status in listOf("sending", "uncertain", "failed")) Amber else Mint)
+                 if (message.text.isNotBlank()) SelectionContainer { Text(message.text, maxLines = 8, overflow = TextOverflow.Ellipsis) }
+                 AttachmentRows(message.attachments.map(Attachment::displayed), message.target, model)
+-                if (message.error.isNotBlank()) Text(message.error, color = Amber, style = MaterialTheme.typography.bodySmall)
++                if (!message.deliveryDismissed && message.error.isNotBlank()) Text(message.error, color = Amber, style = MaterialTheme.typography.bodySmall)
+                 Row {
+                     model.sessions.find { message.belongsTo(it.target) }?.let { session -> TextButton(onClick = { model.open(session) }) { Text("Open") } }
+                     if (message.status == "uncertain") TextButton(onClick = { model.checkOutgoing(message) }, enabled = "outgoing:${message.requestId}" !in model.receiptFlights) { Text("Check delivery") }
+-                    if (message.status in listOf("failed", "uncertain")) TextButton(onClick = { onReviewOutgoing(message) }, enabled = "outgoing:${message.requestId}" !in model.receiptFlights) { Text("Review") }
++                    if (!message.deliveryDismissed && message.status in listOf("failed", "uncertain")) TextButton(onClick = { onReviewOutgoing(message) }, enabled = "dismiss:${message.requestId}" !in model.receiptFlights) { Text("Review") }
+                 }
+             } }
+         }
+diff --git a/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt b/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
+index cf2290c4e70751fa82755b5ba416d371fce6a817..cc76fd9b1462384493cd691a2b2368e0c51a7716 100644
+--- a/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
++++ b/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
+@@ -3269,25 +3269,28 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+         lastOwnSend = target to id
+         var attempted = false; var rejected: RelayException? = null
+         try {
+-            val files = attachmentStore.payload(message.attachments)
+-            check(fresh(target) && connections.any { it.id == connection.id }) { "The session changed before transport. Review the saved message." }
+-            if (intent != null) {
+-                val cleared = written.drafts.first { it.key == original.key }
+-                check(continuation?.requestId == intent.requestId && intent.permitsTransport(selected?.target, navigationId, android.os.SystemClock.elapsedRealtime(), cleared, draft(target)) &&
+-                    ContextPolicies.compactStatus(messageState.contextOperations.first { it.requestId == intent.requestId }, activity!!) == "completed") { "Compact continuation was canceled. The captured message was not sent and remains recoverable." }
++            val receipt = withTimeout(45_000) {
++                val files = attachmentStore.payload(message.attachments)
++                check(fresh(target) && connections.any { it.id == connection.id }) { "The session changed before transport. Review the saved message." }
++                if (intent != null) {
++                    val cleared = written.drafts.first { it.key == original.key }
++                    check(continuation?.requestId == intent.requestId && intent.permitsTransport(selected?.target, navigationId, android.os.SystemClock.elapsedRealtime(), cleared, draft(target)) &&
++                        ContextPolicies.compactStatus(messageState.contextOperations.first { it.requestId == intent.requestId }, activity!!) == "completed") { "Compact continuation was canceled. The captured message was not sent and remains recoverable." }
++                }
++                val payload = target.json().put("request_id", id).put("text", message.text).put("attachments", files)
++                if (expectedCompactionId.isNotBlank()) payload.put("expected_compaction_id", expectedCompactionId)
++                attempted = true
++                val initial = try { api.submit(connection, target, "send", payload, id) }
++                catch (e: RelayException) { if (e.status in listOf(400, 401, 403, 404, 409, 413, 429)) rejected = e; throw e }
++                api.await(connection, initial)
+             }
+-            val payload = target.json().put("request_id", id).put("text", message.text).put("attachments", files)
+-            if (expectedCompactionId.isNotBlank()) payload.put("expected_compaction_id", expectedCompactionId)
+-            attempted = true
+-            val initial = try { api.submit(connection, target, "send", payload, id) }
+-            catch (e: RelayException) { if (e.status in listOf(400, 401, 403, 404, 409, 413, 429)) rejected = e; throw e }
+-            settleOutgoing(message, api.await(connection, initial))
++            settleOutgoing(message, receipt)
+         } catch (e: Exception) {
+-            val failure = rejected?.message ?: if (attempted) "Delivery is unconfirmed. Check its receipt before sending again." else
++            val failure = rejected?.message ?: if (attempted) "Delivery is unconfirmed. Check its receipt or dismiss the warning to continue." else
+                 (e as? AttachmentException)?.message ?: "The saved message was not sent. Review it before trying again."
+             try { durable({ state -> MessageChanges.result(state, id) { it.copy(status = if (attempted && rejected == null) "uncertain" else "failed", error = failure) } }) }
+             catch (_: Exception) { error = "Could not save the delivery result. The original outgoing message remains recoverable. Check its receipt." }
+-            if (e is CancellationException) throw e
++            if (e is CancellationException && e !is kotlinx.coroutines.TimeoutCancellationException) throw e
+         } finally { if (intent != null) { continuationEnqueuing = ""; continuation = null }; deliveryFlights -= id; syncOutgoing() }
+     }
+     private suspend fun settleOutgoing(message: OutgoingMessage, receipt: JSONObject) {
+@@ -3305,18 +3308,30 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+         val flight = "outgoing:${message.requestId}"
+         if (flight in receiptFlights || message.status == "sending") return@launch
+         receiptFlights += flight
+-        try { kotlinx.coroutines.withTimeout(45_000) { settleOutgoing(message, api.await(connection, api.receipt(connection, message.requestId))) } }
++        try {
++            val receipt = withTimeout(45_000) { api.await(connection, api.receipt(connection, message.requestId)) }
++            settleOutgoing(message, receipt)
++        }
++        catch (_: kotlinx.coroutines.TimeoutCancellationException) { if (!automatic) error = "Receipt check timed out. You can dismiss the warning and continue; the original message remains saved." }
+         catch (e: CancellationException) { throw e }
+         catch (_: Exception) { if (!automatic) error = "Receipt unavailable. The outgoing message remains saved." }
+         finally { receiptFlights -= flight }
+     }
++    fun dismissOutgoing(message: OutgoingMessage) = viewModelScope.launch {
++        val flight = "dismiss:${message.requestId}"
++        if (!storageReady || flight in receiptFlights || message.requestId in deliveryFlights) return@launch
++        receiptFlights += flight
++        try { durable({ state -> MessageChanges.dismissOutgoing(state, message, recoverInterruptedSending = true) }) }
++        catch (_: Exception) { error = "Could not save the dismissal. Your message and current composition are preserved." }
++        finally { receiptFlights -= flight }
++    }
+     fun prepareOutgoing(message: OutgoingMessage) {
+-        if ("outgoing:${message.requestId}" in receiptFlights) return
++        if (message.status != "failed" || "outgoing:${message.requestId}" in receiptFlights) return
+         val restored = Draft(message.target, message.text, attachments = message.attachments)
+         val parkedId = UUID.randomUUID().toString()
+         try { editState { state ->
+             val current = state.outgoing.find { it.requestId == message.requestId }
+-            if (current == null || current.status !in listOf("failed", "uncertain")) state else {
++            if (current != message || current.status != "failed") state else {
+                 val editor = state.drafts.find { it.target == message.target && it.questionId.isBlank() && it.detachedId.isBlank() }
+                 val parked = editor?.takeIf { it.text.isNotBlank() || it.attachments.isNotEmpty() }?.copy(detachedId = parkedId)
+                 state.copy(drafts = state.drafts.filterNot { it.key == restored.key } + listOfNotNull(parked) + restored,

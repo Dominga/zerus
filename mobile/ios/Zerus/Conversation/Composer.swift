@@ -26,7 +26,7 @@ struct Composer: View {
         let draft = model.draft(target)
         let reason = sendReason(draft)
         let canSend = reason.isEmpty && (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.attachments.isEmpty)
-        let previous = model.normalizedOutgoing.last { $0.belongs(to: target) && ["sending", "uncertain"].contains($0.status) }
+        let previous = model.normalizedOutgoing.last { $0.belongs(to: target) && $0.blocksSending }
         VStack(alignment: .leading, spacing: 6) {
             ContextFooter(session: session, captureDraft: capture)
             if draft.status != "editing" {
@@ -146,6 +146,16 @@ struct Composer: View {
                 .frame(width: 44, height: 44)
                 .disabled(checking)
                 .accessibilityLabel("Review previous message")
+            Button { Task { await model.dismissOutgoing(message) } } label: {
+                VStack(spacing: 0) {
+                    Text("Dismiss")
+                    Text("on this phone").font(.caption2)
+                }
+            }
+                .font(.caption.weight(.semibold))
+                .frame(minWidth: 44, minHeight: 44)
+                .accessibilityLabel("Dismiss previous delivery warning on this phone")
+                .accessibilityHint(OutgoingRecoveryPolicies.explanation)
         }
         .padding(.leading, 12)
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
@@ -249,7 +259,7 @@ struct Composer: View {
         } else {
             block = "Refresh to verify the session before sending."
         }
-        let previous = model.normalizedOutgoing.last { $0.belongs(to: target) && ["sending", "uncertain"].contains($0.status) }
+        let previous = model.normalizedOutgoing.last { $0.belongs(to: target) && $0.blocksSending }
         if app.demo { return "Pair to send a message." }
         if !app.storageReady { return "Private storage is not ready. Sending is unavailable." }
         if draft.status == "submitting" { return "Sending the saved draft. Wait for its result." }

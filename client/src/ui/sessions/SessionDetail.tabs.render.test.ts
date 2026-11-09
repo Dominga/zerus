@@ -71,7 +71,7 @@ const STUBS: Record<string, string> = {
   "src/ui/teams/NewTeamPage": `export const NewTeamPage = () => "[new team form]";`,
   "src/ui/teams/Waiting": `export const WaitingBanner = () => null;`,
   "src/ui/teams/ProposalCards": `export const LeadProposals = () => null;`,
-  "src/ui/teams/leadTeam": `export const teamAnswers = () => 0;`,
+  "src/ui/teams/leadTeam": `export const teamAnswers = () => 2;`,
   "src/ui/components/DesktopServiceStatus": `export const PausedServiceDetail = () => null; export const servicePausedEmpty = () => false;`,
   "src/ui/screens/TaskView": `export default () => "[task view]";`,
 };
@@ -111,13 +111,8 @@ beforeAll(async () => {
         if (id.startsWith("\0sessiondetail-stub:")) return STUBS[id.slice("\0sessiondetail-stub:".length)];
         if (id === entry) return `import {createComponent} from 'solid-js';
           import {renderToString} from 'solid-js/web';
-          import {TAB_ORDER, tabs} from '/src/ui/sessions/SessionDetail.tsx';
-          const Row = () => TAB_ORDER.map((id) => {
-            const tab = tabs().find((found) => found.id === id);
-            return '<button class="tab" role="tab" data-tab-id="' + id + '"' + (tab && tab.show ? '' : ' hidden') + '>'
-              + (tab ? tab.label : '') + '</button>';
-          }).join('');
-          export const render = () => renderToString(() => createComponent(Row, {}));
+          import {SessionTabRow, tabs} from '/src/ui/sessions/SessionDetail.tsx';
+          export const render = () => renderToString(() => createComponent(SessionTabRow, {}));
           export const shown = (id) => !!(tabs().find((tab) => tab.id === id)?.show);`;
         return undefined;
       },
@@ -153,5 +148,33 @@ describe("the session tab row (task #361)", () => {
     // the tab; the strip hides the button so a data update cannot remount it).
     expect(shown("newteam")).toBe(false);
     expect(shown("team")).toBe(true);
+  });
+});
+
+describe("the session tab row's spacing (task #426)", () => {
+  it("renders each tab with its own label and a real gap, the team's badge apart and the underline on its own tab", async () => {
+    state({ session, team });
+    const html = plain(render());
+    expect(html).toContain('class="detail-tabs tabs" role="tablist"');
+    const chunk = (id: string) => html.split(`data-tab="${id}"`)[1]?.split("</button>")[0] ?? "";
+    for (const id of ["activity", "team"]) {
+      expect(html).toMatch(new RegExp(`<button[^>]*class="tab[^"]*"[^>]*data-tab="${id}"`));
+      // The label is its own span, so a narrow window shortens it with an ellipsis.
+      expect(chunk(id)).toContain('<span class="tab-label">');
+      expect(chunk(id)).toContain("</span>");
+    }
+    // "?N" stands apart from its label: the tab's own gap plus its margin.
+    expect(chunk("team")).toMatch(/<span[^>]*class="tab-count"/);
+    // The spacing itself is the skin's: a gap between the tabs, padding on each
+    // (the inspector's row uses the same tab spacing) and the underline inside
+    // the active tab only.
+    const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as { readFileSync(path: URL, encoding: "utf8"): string };
+    const text = fs.readFileSync(new URL("client/src/ui/styles/detail.css", new URL("../../../../", import.meta.url)), "utf8");
+    // The rules are written across lines, so read each block as one.
+    expect(text).toMatch(/\.detail-tabs \{[^}]*gap: 6px;/);
+    expect(text).toMatch(/\.detail-tabs \.tab \{[^}]*padding: 0 10px;/);
+    expect(text).toMatch(/\.detail-tabs \.tab \{[^}]*flex: 0 1 auto;/);
+    expect(text).toMatch(/\.detail-tabs \.tab\.on \{[^}]*flex-shrink: 0;/);
+    expect(text).toMatch(/\.detail-tabs \.tab\.on::after \{[^}]*left: 8px; right: 8px;/);
   });
 });

@@ -387,19 +387,7 @@ export function SessionDetail() {
               {/* Task 317 (F13): the lead's session carries its team bar and strip as Qt's
                   lead header does; the Team tab has its own bar. */}
               <Show when={detailTab() !== "team"}><LeadTeamHeader /></Show>
-              <div class="detail-tabs tabs" role="tablist">
-                <For each={TAB_ORDER}>{(id) => {
-                  const tab = () => tabs().find((found) => found.id === id);
-                  return (
-                    <button class="tab" role="tab" data-tab={id} data-tab-id={id} hidden={!tab()?.show} classList={{ on: detailTab() === id }}
-                      aria-selected={detailTab() === id} onClick={() => { if (id === "terminal") terminal.opened(); setDetailTab(id); }}>
-                      {tab()?.label}<Show when={id === "team" && teamAnswers(selectedTeam()) > 0}><span class="tab-count" data-tip={tr("Needs your answer")}>?{teamAnswers(selectedTeam())}</span></Show>
-                    </button>
-                  );
-                }}</For>
-                <span class="grow" />
-                <Show when={!inspectorOpen()}><button class="icon-btn small" data-cmd="show-side-panel" aria-label={tr("Show side panel")} data-tip={inspectorHint(tr("Show tasks, plan, agents, details and worktrees"))} data-tip-pos="left" onClick={() => setInspectorOpen(true)}><Icon name="panel-right" size={15} /></button></Show>
-              </div>
+              <SessionTabRow />
               <div class="tab-body">
                 <Switch>
                   <Match when={detailTab() === "activity"}>
@@ -439,5 +427,33 @@ export function SessionDetail() {
         {/* The composer's questions and Clear session, also from the header on another tab; the field takes the focus back. */}
         <ComposerDialogsSlot onClosed={() => { if (document.activeElement === document.body) document.querySelector<HTMLTextAreaElement>(".cmp-editor")?.focus(); }} />
     </section>
+  );
+}
+
+/**
+ * Task #426 (owner, screenshot of package 167): the session view's tab row. The
+ * skin's tab spacing lives here as one component so a render test pins it: each
+ * tab carries the standard padding and the row a real gap between the tabs, the
+ * team's "?N" badge stands apart from its label (the tab's own gap plus a small
+ * margin), and the active underline stays under its own tab. The label is its
+ * own span so a narrow window shortens it with an ellipsis instead of letting
+ * the tabs run into each other; the row scrolls rather than squeezing them.
+ */
+export function SessionTabRow() {
+  return (
+    <div class="detail-tabs tabs" role="tablist">
+      <For each={TAB_ORDER}>{(id) => {
+        const tab = () => tabs().find((found) => found.id === id);
+        return (
+          <button class="tab" role="tab" data-tab={id} data-tab-id={id} hidden={!tab()?.show} classList={{ on: detailTab() === id }}
+            aria-selected={detailTab() === id} onClick={() => { if (id === "terminal") terminal.opened(); setDetailTab(id); }}>
+            <span class="tab-label">{tab()?.label}</span>
+            <Show when={id === "team" && teamAnswers(selectedTeam()) > 0}><span class="tab-count" data-tip={tr("Needs your answer")}>?{teamAnswers(selectedTeam())}</span></Show>
+          </button>
+        );
+      }}</For>
+      <span class="grow" />
+      <Show when={!inspectorOpen()}><button class="icon-btn small" data-cmd="show-side-panel" aria-label={tr("Show side panel")} data-tip={inspectorHint(tr("Show tasks, plan, agents, details and worktrees"))} data-tip-pos="left" onClick={() => setInspectorOpen(true)}><Icon name="panel-right" size={15} /></button></Show>
+    </div>
   );
 }

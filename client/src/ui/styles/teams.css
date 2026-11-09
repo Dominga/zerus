@@ -17,8 +17,15 @@
   .team-tab .tone-planning { --tone: var(--z-color-info); }
 
   /* The team bar: 44 px, name, badge, progress, accepted/total, age. */
-  .team-bar { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 14px; border-bottom: 1px solid var(--z-color-divider); }
+  .team-bar { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 14px; border-bottom: 1px solid var(--z-color-divider); min-width: 0; overflow: hidden; }
   .team-name { font-size: var(--fs-md, 14px); min-width: 0; max-width: 34%; }
+  /* Task #426 (owner, screenshot of package 167): the bar's texts shorten with an
+     ellipsis before anything else loses its place, so the green phase progress
+     bar, which keeps its width, never covers the "Switch to standard…" text. */
+  .team-bar .team-mode { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+  .team-mode .btn { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+  .team-mode .btn > .ell { flex: 1 1 auto; min-width: 0; }
+  .team-mode .pt-chip { flex: none; }
   .team-badge { display: inline-flex; align-items: center; height: 18px; padding: 0 8px; border-radius: 9px; font-size: 10.5px; font-weight: 600;
     color: var(--tone); border: 1px solid var(--tone); white-space: nowrap; }
   .team-badge.tone-warn { background: var(--z-color-warn-bg); }

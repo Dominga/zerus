@@ -254,3 +254,8 @@
   .nsd-terminal { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--z-color-text-2); }
   .nsd-start { min-width: 120px; }
 }
+
+/* Owner, 2026-11-10: the Source switch's icon and label sit on one line
+   (unlayered: the packaged order put the button reset over the layer). */
+.nsd-segbtn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; line-height: 1; }
+.nsd-segbtn > svg { flex: none; }

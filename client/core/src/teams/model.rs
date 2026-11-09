@@ -304,11 +304,22 @@ impl TeamsModel {
         if let Some(read) = self.queued.pop_front() {
             return Some(read);
         }
+        // Owner, 2026-11-10 ("вход в team очень долгий"): reads run one at a
+        // time, so among the due ones the opened team comes first (its status,
+        // then inbox and feed), before the list, Waiting and the catalog.
+        let rank = |slot: &Slot| match slot {
+            Slot::Status => 0,
+            Slot::Inbox => 1,
+            Slot::Feed => 2,
+            Slot::List => 3,
+            Slot::Waiting => 4,
+            _ => 5,
+        };
         let (slot, _) = self
             .due
             .iter()
             .filter(|(_, due)| **due <= now)
-            .min_by_key(|(_, due)| **due)?;
+            .min_by_key(|(slot, due)| (rank(slot), **due))?;
         let slot = *slot;
         let team = self.watched().map(str::to_owned);
         let read = match (slot, team) {

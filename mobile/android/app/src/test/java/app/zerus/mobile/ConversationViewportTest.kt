@@ -46,9 +46,58 @@ class ConversationViewportTest {
     }
     @Test fun jumpAndUserScrollSetFollowingIntentExplicitly() {
         val following = ConversationViewport.latest(ConversationFollowState(opened = true, following = false))
-        assertEquals(keys.lastIndex, ConversationViewport.content(following, keys, "", null).index)
+        assertTrue(following.following)
+        assertNull(ConversationViewport.content(following, keys, "", null).index)
         assertFalse(ConversationViewport.userScrolled(following, false).following)
         assertTrue(ConversationViewport.userScrolled(following, true).following)
+    }
+    @Test fun metadataOnlyRefreshDoesNotRepeatTheOpeningOrOwnSendScroll() {
+        val opened = ConversationViewport.content(ConversationFollowState(), keys, "", null)
+        assertEquals(keys.lastIndex, opened.index)
+        assertNull(ConversationViewport.content(opened.state, keys.toList(), "", null).index)
+        val sent = ConversationViewport.content(opened.state, keys, "own", "event:last")
+        assertEquals(2, sent.index)
+        val acknowledged = ConversationViewport.content(sent.state, keys.toList(), "own", "event:last")
+        assertNull(acknowledged.index)
+        assertEquals(sent.state, acknowledged.state)
+        assertTrue(acknowledged.state.following)
+    }
+    @Test fun appendedContentDefersFollowingUntilItsActualLayoutIsMeasured() {
+        val following = ConversationFollowState(opened = true, following = true, ownSendId = "own")
+        val expanded = listOf("status", "event:first", "event:last", "event:new", "tail")
+        val update = ConversationViewport.content(following, expanded, "own", "event:last")
+        assertNull(update.index)
+        assertEquals(following, update.state)
+        // A same-key text expansion has the same contract; content() cannot
+        // know the new row height before LazyColumn measures it.
+        assertNull(ConversationViewport.content(update.state, expanded.toList(), "own", "event:last").index)
+    }
+    @Test fun inheritedDividersUseTheSameIndicesAsTheRenderedMessagesAndTail() {
+        val events = listOf(
+            Event("a", "You", "Source A", "", inheritedFrom = "source-a"),
+            Event("b", "AgentMessage", "Same source", "", inheritedFrom = "source-a"),
+            Event("c", "You", "Source B", "", inheritedFrom = "source-b"),
+            Event("d", "You", "Own message", "")
+        )
+        val rendered = ConversationViewport.keys(events, unreadBoundary = "b", hasWarning = true,
+            hasBoundedNotice = true, queueVisible = true, questionsVisible = true)
+        assertEquals(listOf("history:earlier", "history:status", "history:warning", "history:bounded",
+            "history:missing-anchor", "history:inherited:a", "event:a", "history:unread", "event:b",
+            "history:inherited:c", "event:c", "history:inherited:d", "event:d", "history:newer",
+            "history:queue", "history:questions", "history:tail"), rendered)
+        val own = ConversationViewport.content(ConversationFollowState(opened = true, following = false),
+            rendered, "new-send", "event:d")
+        assertEquals(12, own.index)
+        assertEquals("event:d", rendered[own.index!!])
+        assertEquals(rendered.lastIndex, ConversationViewport.loadedLatest(own.state, rendered, false, "").index)
+    }
+    @Test fun emptyAndOrdinaryRowsHaveNoPhantomInheritedSeparator() {
+        assertEquals(listOf("history:earlier", "history:status", "history:missing-anchor",
+            "history:empty", "history:newer", "history:tail"), ConversationViewport.keys(emptyList()))
+        assertFalse(ConversationViewport.keys(emptyList(), conversationLoading = true).contains("history:empty"))
+        val ordinary = ConversationViewport.keys(listOf(Event("own", "You", "Own message", "")))
+        assertEquals(listOf("history:earlier", "history:status", "history:missing-anchor",
+            "event:own", "history:newer", "history:tail"), ordinary)
     }
     @Test fun shortRestoredConversationFollowsWhenTailIsAlreadyFullyVisible() {
         val reading = ConversationFollowState(opened = true,following = false)

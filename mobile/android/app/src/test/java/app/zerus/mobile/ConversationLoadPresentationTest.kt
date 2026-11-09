@@ -84,27 +84,6 @@ class ConversationLoadPresentationTest {
         assertNull(ConversationLoadPresentation.status(false, true, true, true, true, true))
     }
 
-    @Test fun pinnedBannerDistinguishesSavedMessagesFromVerifiedActivityAndHistory() {
-        val waiting = ConversationLoadPresentation.status(true, true, false, true, false, false, opening = true)
-        val cached = ConversationLoadPresentation.banner(waiting, true, false, false, false)!!
-        assertEquals("Checking activity and messages…", cached.text)
-        assertEquals("Showing saved messages.", cached.detail)
-        assertTrue(cached.spinner)
-
-        val inspected = ConversationLoadPresentation.banner(null, true, true, false, false)!!
-        assertEquals("Latest activity checked", inspected.text)
-        assertEquals("Showing available messages.", inspected.detail)
-        val complete = ConversationLoadPresentation.banner(null, true, true, true, false)!!
-        assertEquals("Message history loaded.", complete.detail)
-        assertFalse(complete.spinner)
-
-        val failed = ConversationLoadPresentation.banner(null, true, false, true, false)!!
-        assertEquals("Showing saved messages", failed.text)
-        assertEquals("Refresh to check for updates.", failed.detail)
-        assertFalse(failed.spinner)
-        assertNull(ConversationLoadPresentation.banner(waiting, true, true, true, true))
-    }
-
     @Test fun historyNavigationDoesNotInheritOldSpinnerDeadline() {
         var time = 0L
         val gate = LoadingGate({ time })

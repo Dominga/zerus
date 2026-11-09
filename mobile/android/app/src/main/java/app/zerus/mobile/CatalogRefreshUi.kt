@@ -12,29 +12,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
-/** Remains readable after a fast request; an account refresh continues independently
- * on its computer and is described on that account, not as phone network activity. */
+/** Successful background sync is quiet; the toolbar already shows active progress. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable fun CatalogRefreshStatus(model:ZerusViewModel) {
     if(model.demo || !model.storageReady || model.connections.isEmpty()) return
     val state=model.catalogRefresh
     if(state.workspaces.isEmpty()) return
     var details by remember { mutableStateOf(false) }
-    val received=state.workspaces.mapNotNull { it.lastReceivedAt }.maxOrNull()?.let {
-        java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date((it*1000).toLong()))
-    }
-    val summary=when {
-        state.running -> "Updating…"
-        state.failures>0 -> "Update failed · Saved data kept"
-        else -> received?.let { "Updated $it" } ?: "Connected"
-    }
-    val tone=if(state.failures>0 && !state.running) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
-    Surface(color=MaterialTheme.colorScheme.surfaceContainerLow) {
+    val tone=MaterialTheme.colorScheme.error
+    if(!state.running && state.failures>0) Surface(color=MaterialTheme.colorScheme.surfaceContainerLow) {
         Row(Modifier.fillMaxWidth().heightIn(min=40.dp).padding(start=16.dp,end=4.dp),verticalAlignment=Alignment.CenterVertically) {
-            Box(Modifier.size(14.dp),contentAlignment=Alignment.Center) {
-                if(state.running) CircularProgressIndicator(Modifier.size(14.dp),strokeWidth=2.dp)
-            }
-            Text(summary,Modifier.weight(1f).padding(horizontal=8.dp,vertical=8.dp),
+            Text("Update failed · Saved data kept",Modifier.weight(1f).padding(horizontal=8.dp,vertical=8.dp),
                 style=MaterialTheme.typography.labelSmall,color=tone,maxLines=1,overflow=TextOverflow.Ellipsis)
             IconButton(onClick={details=true},modifier=Modifier.size(40.dp)) { Icon(Icons.Default.Info,"Refresh details",Modifier.size(18.dp),tint=tone) }
         }

@@ -63,7 +63,7 @@ class ConversationFeedbackSmokeInstrumentation : Instrumentation() {
         // Compose exposes the action label and state as separate virtual nodes.
         val root = uiAutomation.rootInActiveWindow
         return find(root) { it.contentDescription?.toString() == "Refresh" } != null &&
-            find(root) { it.text?.toString() in setOf("Checking activity and messages…", "Loading message history…", "Checking latest activity…") } != null &&
+            find(root) { it.stateDescription?.toString() in setOf("Checking activity and messages…", "Loading message history…", "Checking latest activity…") } != null &&
             find(root) { it.className?.toString() == "android.widget.ProgressBar" } != null
     }
     private fun screenshot(name: String) {
@@ -181,7 +181,7 @@ class ConversationFeedbackSmokeInstrumentation : Instrumentation() {
             history.get().countDown()
             await("fresh history and settled indicator") { text(fresh) != null && main { !model.detailBusy && !model.olderLoading && model.activityVerified } && !progressVisible() }
             check(historyReads.get() == 1) { "Opening fetched the complete page twice" }
-            check(text("Message history loaded.") != null)
+            check(text("Message history loaded.") == null && text("Latest activity checked") == null)
             failInspection.set(true)
             main { model.refreshActivity(explicit = true) }
             await("failed read keeps history and clears progress") { main { model.error.isNotBlank() && !model.detailBusy } && text(fresh) != null && !progressVisible() }

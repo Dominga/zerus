@@ -12,6 +12,38 @@ class UnreadPresentationTest {
         assertNull(UnreadPresentation.badge(null,0))
         assertEquals("?",UnreadPresentation.badge(null,null,true)!!.text)
     }
+    @Test fun recentReadsDoNotReuseAnUnverifiedHistoricalCount() {
+        val target=Target("computer","session","run","conversation","workspace")
+        val reply=Event("native:shown","AgentMessage","Synthetic reply","",nativeType="AgentMessage")
+        val before=ConversationReadState().head(target,"canonical-epoch",34,34,true)
+        val read=before.visible(target,listOf(reply))
+        val record=read.record(target)!!
+        assertEquals(0L,record.readThrough)
+        assertEquals(34L,record.headIncoming)
+        assertEquals(34,ConversationReadPolicies.lowerBound(record,listOf(reply)))
+        val loaded=listOf(reply).count { ConversationReadPolicies.unread(record,it) }
+        assertEquals(0,loaded)
+        assertNull(UnreadPresentation.conversationBadge(null,loaded))
+        // Presentation does not acknowledge historical messages or manufacture a watermark.
+        assertEquals(0L,read.record(target)!!.readThrough)
+    }
+    @Test fun genuinelyUnseenLoadedRepliesKeepTheirLowerBoundNearTheTail() {
+        val badge=UnreadPresentation.conversationBadge(null,34)!!
+        assertEquals("34",badge.text)
+        assertEquals("34 unread in loaded messages",badge.label)
+        assertTrue(badge.description.contains("conversation total is not verified"))
+        assertEquals("34+",UnreadPresentation.badge(null,34)!!.text)
+        assertEquals("Latest",UnreadPresentation.latest().text)
+        assertEquals("Jump to latest messages",UnreadPresentation.latest().description)
+        assertFalse(UnreadPresentation.latest().description.contains(badge.text))
+    }
+    @Test fun currentCanonicalEvidenceSupersedesLoadedSubsetCounts() {
+        assertNull(UnreadPresentation.conversationBadge(0,3))
+        assertEquals("2",UnreadPresentation.conversationBadge(2,0)!!.text)
+        assertNull(UnreadPresentation.conversationBadge(null,0))
+        assertNull(UnreadPresentation.conversationBadge(null,null))
+        assertEquals("Loading latest…",UnreadPresentation.latest(true).text)
+    }
     @Test fun savedReaderAnchorHasPriorityOverUnreadBoundary() {
         val position = UnreadPresentation.opening(null,SavedConversationViewport("old",37),"new",keys)
         assertEquals("event:old",position.anchor!!.itemKey)

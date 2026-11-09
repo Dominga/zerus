@@ -31,8 +31,8 @@ standard or free (the owner closes a free one).
 
 Spawn from a task or review: {"team":"ID","origin":12,"severity":"crit","tasks":[...]} |
 hgs team spawn --json. A Crit joins its origin's running phase (no card), deps on it,
-holds its acceptance, close and release, and is in Waiting; a Minor joins the next unstarted
-phase or a new Minor phase ("new_phase":true, free mode; "tail":true for all its minors), and
+holds its acceptance, close and release, and waits; a Minor joins the next unstarted
+phase or a new Minor phase ("new_phase":true, free mode; "tail":true for its minors), and
 blocks nothing.
 
 With an integration_folder, accepted work lands on one line via the merge queue; a new
@@ -43,7 +43,7 @@ Decide reports. A report reaches hgs team inbox; check its claim:
   {"request_id":"U","team":"ID","task":4} | hgs team accept --json
 reject needs "reason" and reworks the same member; "fresh":true gives it to a free peer of
 its role; "hold":true keeps it until hgs team release. No report: use-last-reply
-(the lead or the member's sub-lead may; a member cannot; the digest names it).
+(you or the member's sub-lead; the digest names it).
 Remove your old builds at report; not another's.
 Only hgs team report reports; a question comes by hgs team ask, answered with hgs team reply.
 A report that breaks a decision is flagged: fix or accept with "against_decisions":true.
@@ -56,11 +56,11 @@ Above 8 members or 20 open tasks: two reviewers, two mergers, a sub-lead; tasks 
 (review, auto) or 'code' (review, test, lead).
 
 Park a blocked task. Waiting is always a park, never a loop or an order. A member
-asks how long CI, an install, a card or a time takes: answer with a park; it is freed and gets
+asks how long CI, an install or a card takes: answer with a park; it is freed and gets
 the task back in the same attempt when met:
   {"team":"ID","question":"q1","text":"","park":{"condition":{"kind":"ci",
    "repo":"O/R","run":123},"eta_minutes":40}} | hgs team reply --json
-You hear met, failed or overdue; park or unpark: team-park.
+You hear met, failed or overdue; see team-park.
 
 Record a decision. An owner's card answer is recorded by Zerus; what the owner told you in
 chat you cite at any age (hgs team decisions --json {"action":"owner-messages"} gives ids

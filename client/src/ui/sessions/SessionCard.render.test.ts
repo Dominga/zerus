@@ -141,7 +141,13 @@ describe("a team member's row and the team tree (tasks 330, 425)", () => {
       const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       return stylesheet.match(new RegExp(`(?:^|\\n)\\s*${escaped} \\{([^}]*)\\}`))?.[1] ?? "";
     };
-    return { read, rule };
+    // The declaration that wins: an unlayered rule outranks every layered one in
+    // either layer order, and the member rules are restated unlayered at the end.
+    const effectiveRule = (selector: string) => {
+      const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return [...stylesheet.matchAll(new RegExp(`(?:^|\\n)\\s*${escaped} \\{([^}]*)\\}`, "g"))].at(-1)?.[1] ?? "";
+    };
+    return { read, rule, effectiveRule };
   };
   const px = (text: string, property: string) => Number(text.match(new RegExp(`(?:^|[;\\s])${property}:\\s*(-?\\d+)px`))?.[1] ?? NaN);
 
@@ -226,19 +232,33 @@ describe("a team member's row and the team tree (tasks 330, 425)", () => {
     expect(source).toMatch(/class="sc-team-strip"[^>]*\n?[^>]*onClick=\{\(e\) => \{ e\.stopPropagation\(\); props\.onToggle\(\); \}\}/);
   });
 
-  it("keeps a member's state badge whole on a narrow list, the title giving way (task 452)", async () => {
-    const { rule } = await styles();
-    // The container queries cap every card's badge at 104 px (360 px wide) or 128 px; a member's
-    // badge keeps its whole caption and the cooling bar, and its title shortens first.
-    const badge = rule(".scard.sc-member .sc-l1 > .sbadge");
-    // No narrow-list cap; on a line too narrow even for the caption it shrinks inside the card (task 455).
-    expect(badge).toMatch(/max-width:\s*none/);
-    expect(badge).toMatch(/flex-shrink:\s*1/);
-    expect(badge).toMatch(/min-width:\s*0/);
+  it("fits a member card inside the indent: the chip and the badge stay whole, the title and branch ellipsize (tasks 452, 455)", async () => {
+    const { read, rule, effectiveRule } = await styles();
+    // A member card is 26 px narrower for the tree's indent. The container queries cap every
+    // card's badge (128/104 px) and chip (30 %), so a member's chip and badge keep their whole
+    // box instead: the machine alias is never cut to 'ms' and the caption keeps its cooling bar.
+    const badge = effectiveRule(".scard.sc-member .sc-l1 > .sbadge");
+    expect(badge).toMatch(/flex:\s*0 0 auto/);
+    expect(badge).toMatch(/max-width:\s*100%/);
+    expect(badge).not.toMatch(/flex-shrink:\s*1/);
+    const chip = effectiveRule(".scard.sc-member .sc-l2 > .mbadge");
+    expect(chip).toMatch(/flex:\s*0 0 auto/);
+    expect(chip).toMatch(/max-width:\s*100%/);
+    // The title and the branch are the lines that give way, each with its own ellipsis.
     expect(rule(".scard.sc-member .sc-title")).toMatch(/min-width:\s*0/);
-    // The badge clips nothing of its own: the label ellipsizes only past the line's room, and the bar stays inside its padding.
-    expect(rule(".sbadge .sb-label")).toMatch(/text-overflow:\s*ellipsis/);
-    expect(px(rule(".sbadge.k-cooling"), "padding-right")).toBeGreaterThanOrEqual(7 + 16);
+    const html = render(false, row(), true, undefined, { member: true, depth: 1, teamFirst: true });
+    const title = html.match(/<span class="sc-title ell"[^>]*>/)?.[0] ?? "";
+    // No 72 px floor inside the indent: the title shrinks before the chip or the badge lose a pixel.
+    expect(title).toMatch(/min-width:\s*0px/);
+    expect(html).toMatch(/class="sc-title ell"/);
+    expect(html).toMatch(/class="sc-meta ell"/);
+    expect(html).toMatch(/class="entity mbadge/);
+    expect(html).toMatch(/class="sbadge k-/);
+    // The unlayered restatements come after the container queries, so they win in either layer order.
+    const css = read("sessions");
+    for (const selector of [".scard.sc-member .sc-l1 > .sbadge { flex: 0 0 auto", ".scard.sc-member .sc-l2 > .mbadge { flex: 0 0 auto"]) {
+      expect(css.lastIndexOf(selector)).toBeGreaterThan(css.indexOf("@container (max-width: 360px)"));
+    }
   });
 });
 describe("session cards at the narrow side panel (task 343)", () => {

@@ -673,7 +673,10 @@ export function SessionCard(props: {
         {/* Supervision and Mute are independent: the arrow before the name,
             the crossed bell right after it (owner, 2026-11-08). */}
         <Show when={s().parent?.state === "live"}><SupervisedMark session={s()} /></Show>
-        <span class="sc-title ell" style={titleReserve(s().title, 72)} title={s().name}>{s().title}</span>
+        {/* Task 455 (attempt 3): a member card is narrower by the tree's indent;
+            its title gives way first (an ellipsis) so the state badge and the
+            machine chip after it keep their whole box. */}
+        <span class="sc-title ell" style={titleReserve(s().title, props.member ? 0 : 72)} title={s().name}>{s().title}</span>
         <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
         <StatusBadge kind={kind()} caption={statusCaption(s())} heat={state().shown.heat} title={state().kind ? state().shown.tooltip : undefined} />
         <Show when={visibleUnreadReply(s(), computerFresh(s().computer)) && (s().status === "working" || s().status === "attention" || s().draft)}>

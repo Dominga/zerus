@@ -518,10 +518,14 @@
   .scard.sc-member .agent-badge { flex: 0 1 auto; min-width: 0; max-width: 104px; }
   .scard.sc-member .sc-l3 > .ell { min-width: 0; }
   /* Task 452: a member's state badge keeps its whole caption (the cooling
-     bar beside it) without the narrow-list cap; task 455: on a line too
-     narrow even for that, it shortens with an ellipsis instead of leaving
-     the card, as the title (which keeps a few letters) does. */
-  .scard.sc-member .sc-l1 > .sbadge { max-width: none; flex-shrink: 1; min-width: 0; }
+     bar beside it) without the narrow-list cap; task 455 (attempt 3, owner
+     2026-11-09): a member card sits 26 px inside the list for the tree's
+     indent, so its machine chip and its badge keep their whole box there
+     (the chip never shortens to 'ms') and the title and branch lines give
+     way with an ellipsis instead. Restated unlayered at the end of this file
+     because the container queries below cap every card's badge and chip. */
+  .scard.sc-member .sc-l1 > .sbadge { flex: 0 0 auto; max-width: 100%; }
+  .scard.sc-member .sc-l2 > .mbadge { flex: 0 0 auto; max-width: 100%; }
   .scard.sc-member::before { content: ""; position: absolute; left: -13px; top: -11px; bottom: -7px; width: 1px;
     background: var(--z-list-tree-line); pointer-events: none; }
   .scard.sc-member.sc-member-last::before { bottom: auto; height: 33px; }
@@ -558,3 +562,14 @@
   .sc-l1 > .sbadge { max-width: 104px; }
   .sc-cold button { padding: 0 6px; }
 }
+
+/* Task 455 (attempt 3, owner 2026-11-09): a member card sits 26 px inside the
+   list for the tree's indent, so its lines have 26 px less room than a lead's.
+   The machine chip and the state badge keep their whole box — the chip never
+   shortens to 'ms' and the badge never clips its caption or its cooling bar —
+   and the title and branch lines take the shrink, with their own ellipsis.
+   Unlayered on purpose: the container queries above cap every card's badge and
+   chip, and an unlayered rule outranks the layered member rules whatever order
+   the owner's build delivers the layers in. */
+.scard.sc-member .sc-l1 > .sbadge { flex: 0 0 auto; max-width: 100%; }
+.scard.sc-member .sc-l2 > .mbadge { flex: 0 0 auto; max-width: 100%; }

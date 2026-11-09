@@ -194,6 +194,14 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             subagents:Value::Null });
     }
 
+    // Task #406 (owner, 2026-11-09): one alarm when ready tasks wait while a
+    // phase of the worker's tick has held it for five minutes, naming it.
+    if team.status == TeamStatus::Running {
+        if let Some(item) = worker_stall(team, crate::state::now()) {
+            items.push(item);
+        }
+    }
+
     // A queued merge that failed and was rolled back waits for the lead to fix
     // the runner/tests map or to retry it.
     if active {
@@ -2120,6 +2128,28 @@ pub(crate) fn full_run_text(proposal: &super::model::FullRunProposal) -> String 
 }
 
 /// #718: what a report's change does to the tests, on the lead's card.
+/// Task #406: the alarm for ready tasks behind a worker held by one phase.
+pub(crate) fn worker_stall(team: &Team, now: f64) -> Option<Item> {
+    let ready = super::plan::ready(team);
+    let first = *ready.first()?;
+    let (step, held) = super::tick_clock::stall(now)?;
+    let minutes = (held / 60.0).floor() as u64;
+    Some(Item {
+        kind: "stalled",
+        key: "worker_stall".into(),
+        task: Some(first),
+        member: team.lead.clone(),
+        since: now - held,
+        summary: format!(
+            "{} ready task(s) wait (#{first} first): the team worker has been held by '{step}' for {minutes} min and hands out nothing",
+            ready.len()
+        ),
+        command: "hgs team worker --stop (it ends within 5 s; the next team command starts it again)".into(),
+        detail: "hgs team status --json shows worker_tick: the phase running now, the last tick and the slowest recent one.".into(),
+        subagents: Value::Null,
+    })
+}
+
 pub(crate) fn tests_text(tests: &Value) -> String {
     if tests["files"].as_u64().unwrap_or(0) == 0 {
         return "Tests: no test file changed.".into();

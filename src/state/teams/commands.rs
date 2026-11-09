@@ -5909,6 +5909,9 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             // Task 270 (owner, 2026-11-08): the project's working mode: the
             // preset the team follows, the cached proposal with its reasons, and
             // what the settings still miss of it (no Git read on a poll).
+            // Task #406: the worker's tick: the phase running now, the last
+            // tick and the slowest recent one (bounded).
+            value["worker_tick"] = super::tick_clock::status();
             let disagreeing = super::working_mode::cached_disagreement(&team).map(|(_, wrong)| wrong);
             value["working_mode"] = json!({
                 "preset": team.working_mode,

@@ -10750,7 +10750,20 @@ fn recover(store: &mut Store) -> anyhow::Result<()> {
 }
 
 /// One pass over every running team. Returns whether any team is active.
+/// Task #406: the tick is measured (`tick_clock`); a slow one names its
+/// slowest phase in the worker's log.
 pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
+    super::tick_clock::begin();
+    let result = tick_teams(store, host);
+    if let Some(record) = super::tick_clock::finish() {
+        if record.ms >= super::tick_clock::SLOW_TICK.as_millis() {
+            eprintln!("hgs team worker: tick took {} ms; slowest: {} ({} ms)", record.ms, record.slowest, record.slowest_ms);
+        }
+    }
+    result
+}
+
+fn tick_teams(store: &mut Store, host: &str) -> anyhow::Result<bool> {
     let loaded: Vec<Team> = store.teams(false, 10_000)?;
     // Task 185: the pulses built on the worker since the last tick, and one
     // loaded team's expired pulses, retired here rather than at a turn end. A
@@ -10776,7 +10789,7 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
     if teams.is_empty() && super::owner_queue::watched().is_empty() {
         return Ok(false);
     }
-    let output = match listing(|| hgs("", &["ls", "--json", "--no-archives"], None, LIST_TIMEOUT)) {
+    let output = match super::tick_clock::phase("listing", || listing(|| hgs("", &["ls", "--json", "--no-archives"], None, LIST_TIMEOUT))) {
         Some(result) => result?,
         // The previous session listing may still run: skip this tick, never
         // overlap two `hgs ls` children (U2).
@@ -10786,20 +10799,11 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
     let listing: Value = serde_json::from_slice(&output.stdout).context("invalid hgs ls output")?;
     let sessions = seen(&listing);
     let listed = listed_hosts(&listing);
-    sample_usage(&teams, &sessions);
-    for team in &teams {
-        if let Err(error) = take_outbox(store, team, &sessions) {
-            eprintln!("hgs team worker: {}: outbox: {error}", team.name);
-        }
-    }
-    // Task 209: the native context meter, a bounded number of inspects a tick;
-    // the reload below carries the readings into this tick's steps.
-    sample_contexts(store, &teams, &sessions, now());
-    let teams: Vec<Team> = teams.iter().filter_map(|t| store.load(&t.id).ok().flatten()).collect();
-    defer_watched(&teams, &sessions);
+    // Task #406 (owner, 2026-11-09): hand-outs and answers first, for every
+    // team, before any step that reads git, walks files or waits on a child.
+    // A night of idle members came from hand-outs queued behind reports'
+    // test deltas, merge checks and slow listings.
     for (index, team) in teams.iter().enumerate() {
-        // Task 287: a member's call waiting for the store gets it between two
-        // teams (SQLite's busy wait queues nobody).
         if index > 0 {
             std::thread::sleep(TEAM_YIELD);
         }
@@ -10808,12 +10812,42 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
         if let Err(error) = super::doorbell::mark_taken(store, team) {
             eprintln!("hgs team worker: {}: taken hand-outs: {error}", team.name);
         }
-        run_team_steps(store, team, &sessions, &listed, host);
+        super::tick_clock::phase(&format!("hand-outs: {}", team.name), || run_team_steps(store, team, &sessions, &listed, host, Pass::Urgent));
+    }
+    sample_usage(&teams, &sessions);
+    for team in &teams {
+        // Task #406: a member's report reads git (its test delta); the outbox
+        // waits for the next tick once this one has used its budget.
+        if !within_budget("outbox", &team.id, OUTBOX_BUDGET) {
+            continue;
+        }
+        if let Err(error) = super::tick_clock::phase(&format!("outbox: {}", team.name), || take_outbox(store, team, &sessions)) {
+            eprintln!("hgs team worker: {}: outbox: {error}", team.name);
+        }
+    }
+    // Task 209: the native context meter, a bounded number of inspects a tick;
+    // the reload below carries the readings into this tick's steps.
+    super::tick_clock::phase("contexts", || sample_contexts(store, &teams, &sessions, now()));
+    let teams: Vec<Team> = teams.iter().filter_map(|t| store.load(&t.id).ok().flatten()).collect();
+    defer_watched(&teams, &sessions);
+    for (index, team) in teams.iter().enumerate() {
+        // Task 287: a member's call waiting for the store gets it between two
+        // teams (SQLite's busy wait queues nobody).
+        if index > 0 {
+            std::thread::sleep(TEAM_YIELD);
+        }
+        // A report the outbox took this tick may free a member: its next
+        // hand-out goes now, before the team's other steps.
+        super::tick_clock::phase(&format!("hand-outs: {}", team.name), || run_team_steps(store, team, &sessions, &listed, host, Pass::Urgent));
+        super::tick_clock::phase(&format!("steps: {}", team.name), || run_team_steps(store, team, &sessions, &listed, host, Pass::Rest));
         // U62 (#717): the team's test queue. An empty queue is a no-op (no load
         // read); a read is at most once per 30 s, and results become notices.
         // U62 (#760): the merge queue first, so its tests run in the same tick.
-        if let Err(error) = merge_queue_tick(store, &team.id, now()) {
-            eprintln!("hgs team worker: {}: merge queue: {error}", team.name);
+        // Task #406: its git merges wait for a tick with time left.
+        if within_budget("merge", &team.id, MERGE_BUDGET) {
+            if let Err(error) = super::tick_clock::phase(&format!("merge queue: {}", team.name), || merge_queue_tick(store, &team.id, now())) {
+                eprintln!("hgs team worker: {}: merge queue: {error}", team.name);
+            }
         }
         // Task 174: queued suites run minutes (a merge's Qt suites tens of
         // minutes): never in the tick. One thread per team runs them.
@@ -10825,6 +10859,71 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
     Ok(true)
 }
 
+/// Task #406: the time a tick may have used before a team's outbox (reports
+/// with their git reads) waits for the next tick.
+const OUTBOX_BUDGET: Duration = Duration::from_secs(4);
+/// Task #406: the same for a team's merge queue (its git merges).
+const MERGE_BUDGET: Duration = Duration::from_secs(4);
+/// Task #406: a team's other steps of one tick, after its hand-outs.
+const STEPS_BUDGET: Duration = Duration::from_secs(2);
+/// Task #406: a heavy phase skipped this many ticks in a row runs anyway, so
+/// a busy worker never starves it.
+const MAX_SKIPS: u32 = 5;
+
+/// Task #406: whether a heavy phase of `team` runs in this tick: while the
+/// tick is within `budget`, or once it was skipped `MAX_SKIPS` ticks in a row.
+fn within_budget(kind: &str, team: &str, budget: Duration) -> bool {
+    use std::sync::Mutex;
+    use std::collections::BTreeMap;
+    static SKIPS: Mutex<Option<BTreeMap<String, u32>>> = Mutex::new(None);
+    let key = format!("{kind}:{team}");
+    let mut skips = SKIPS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let skips = skips.get_or_insert_with(BTreeMap::new);
+    let skipped = skips.get(&key).copied().unwrap_or(0);
+    if super::tick_clock::elapsed() <= budget || skipped >= MAX_SKIPS {
+        skips.remove(&key);
+        true
+    } else {
+        skips.insert(key, skipped + 1);
+        false
+    }
+}
+
+/// Task #406: which steps of a tick run first: hand-outs, resumes, adopting a
+/// member's session and the messages and decisions a member waits for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Pass {
+    Urgent,
+    Rest,
+}
+
+pub(crate) fn urgent(step: &Step) -> bool {
+    matches!(
+        step,
+        Step::HandOut { .. }
+            | Step::Resume { .. }
+            | Step::Adopt { .. }
+            | Step::Started { .. }
+            | Step::TellDecision { .. }
+            | Step::RingMessages { .. }
+            | Step::InterruptMessages { .. }
+            | Step::ContinueUrgent { .. }
+    )
+}
+
+/// Task #406: the steps of one pass, in their order; the rest pass stops at
+/// its budget and leaves the others to the next tick (they are derived from
+/// the team again then).
+pub(crate) fn pass_steps(steps: Vec<Step>, pass: Pass) -> Vec<Step> {
+    steps.into_iter().filter(|step| urgent(step) == (pass == Pass::Urgent)).collect()
+}
+
+/// The step's kind, for the tick's measurement.
+fn step_kind(step: &Step) -> String {
+    let text = format!("{step:?}");
+    text.split([' ', '{', '(']).next().unwrap_or_default().to_owned()
+}
+
 /// Task 287: the pause between two teams of a tick, longer than SQLite's
 /// longest busy-wait sleep, so a waiting member call takes the lock.
 const TEAM_YIELD: Duration = Duration::from_millis(100);
@@ -10833,7 +10932,7 @@ const TEAM_YIELD: Duration = Duration::from_millis(100);
 /// transaction. Every change the steps make goes to the store's working copy
 /// of the team (`Store::begin_batch`), which is written once at the end; a
 /// change with a request id or of the working tier writes it first.
-fn run_team_steps(store: &mut Store, team: &Team, sessions: &[Seen], listed: &BTreeSet<String>, host: &str) {
+fn run_team_steps(store: &mut Store, team: &Team, sessions: &[Seen], listed: &BTreeSet<String>, host: &str, pass: Pass) {
     if let Err(error) = store.begin_batch(&team.id) {
         eprintln!("hgs team worker: {}: {error:#}", team.name);
     }
@@ -10842,10 +10941,21 @@ fn run_team_steps(store: &mut Store, team: &Team, sessions: &[Seen], listed: &BT
     }
     let fresh = store.load(&team.id).ok().flatten();
     let team = fresh.as_ref().unwrap_or(team);
-    for step in steps_with(team, sessions, now(), Some(listed)) {
+    let started = Instant::now();
+    let steps = pass_steps(steps_with(team, sessions, now(), Some(listed)), pass);
+    let total = steps.len();
+    for (index, step) in steps.into_iter().enumerate() {
+        // Task #406: the rest of a team's steps wait for the next tick once
+        // this pass used its budget; hand-outs never wait.
+        if pass == Pass::Rest && started.elapsed() > STEPS_BUDGET {
+            eprintln!("hgs team worker: {}: {} step(s) left to the next tick (budget)", team.name, total - index);
+            break;
+        }
+        let at = Instant::now();
         if let Err(error) = run_step(store, team, &step, host) {
             eprintln!("hgs team worker: {}: {step:?}: {error}", team.name);
         }
+        super::tick_clock::note(&format!("{}: {}", team.name, step_kind(&step)), at.elapsed());
     }
     if let Err(error) = store.end_batch() {
         eprintln!("hgs team worker: {}: the tick's changes were not written: {error:#}", team.name);
@@ -11793,6 +11903,39 @@ fn worker_pass(files: &WorkerFiles, tick: impl FnOnce() -> anyhow::Result<bool>)
     WorkerPass::Ticked(tick())
 }
 
+/// Task #406: how long a stop request waits for the tick it arrived in.
+const STOP_GRACE: Duration = Duration::from_secs(4);
+
+/// Task #406 (owner, 2026-11-09): `hgs team worker --stop` kept waiting 30+
+/// minutes behind a tick until a taskkill. A watchdog beside the ticks ends the
+/// worker once a stop request has waited `STOP_GRACE` for the tick: whatever
+/// the tick was sending stays unconfirmed, and the next start recovers it
+/// (`recover`), so nothing is sent twice.
+fn stop_watchdog(dir: PathBuf, ended: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    std::thread::spawn(move || {
+        let files = WorkerFiles::new(dir);
+        let mut requested: Option<Instant> = None;
+        loop {
+            if ended.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            requested = if files.stop_requested() { requested.or_else(|| Some(Instant::now())) } else { None };
+            if stop_overdue(requested, Instant::now()) {
+                let step = super::tick_clock::status()["running"]["step"].as_str().unwrap_or("a tick").to_owned();
+                files.log(&format!("stop: the tick ({step}) did not end within {} s; ending in it", STOP_GRACE.as_secs()));
+                files.finish("stop requested");
+                std::process::exit(0);
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    });
+}
+
+/// Task #406: a stop request that has waited the grace for the tick.
+fn stop_overdue(requested: Option<Instant>, now: Instant) -> bool {
+    requested.is_some_and(|at| now.duration_since(at) >= STOP_GRACE)
+}
+
 /// Sleeps a tick in small slices, so a stop request ends the worker promptly.
 fn sleep_or_stop(files: &WorkerFiles, duration: Duration) {
     let started = Instant::now();
@@ -11820,6 +11963,9 @@ pub(crate) fn worker() -> Result<i32> {
         return Ok(0);
     };
     files.start();
+    // Task #406: a stop request ends the worker within 5 s, even in a tick.
+    let ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    stop_watchdog(worker_dir(), ended.clone());
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
     let started = fs::metadata(&executable).and_then(|m| m.modified()).ok();
     let config = crate::config::Config::load().map_err(|e| e.to_string())?;
@@ -11868,6 +12014,7 @@ pub(crate) fn worker() -> Result<i32> {
         }
         sleep_or_stop(&files, TICK);
     };
+    ended.store(true, std::sync::atomic::Ordering::SeqCst);
     files.finish(exit.reason());
     drop(lock);
     if exit == WorkerExit::Updated {
@@ -12012,6 +12159,10 @@ mod dispatcher_live_edit;
 #[cfg(test)]
 #[path = "tests/dispatcher_lead.rs"]
 mod dispatcher_lead;
+
+#[cfg(test)]
+#[path = "tests/dispatcher_tick_budget.rs"]
+mod dispatcher_tick_budget;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_outbox.rs"]

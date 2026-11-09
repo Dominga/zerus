@@ -148,6 +148,16 @@ class InputTransport(unittest.TestCase):
             time.sleep(.02)
         self.fail("fixture timed out")
 
+    def wait_until(self, callback, timeout, describe=lambda: ""):
+        """Polls `callback` until it holds or `timeout` seconds of wall clock
+        pass. For an event a loaded runner reaches far later than a quiet one
+        (zerus-eubyp); `describe` says what the fixture saw when it gave up."""
+        deadline = time.monotonic() + timeout
+        while not callback():
+            if time.monotonic() >= deadline:
+                self.fail(f"fixture timed out after {timeout} s: {describe()}")
+            time.sleep(.02)
+
     def payload(self, **updates):
         value = dict(request_id=str(uuid.uuid4()), text="hello", attachments=[],
                      expected_run_id=self.run_id, expected_conversation_id=self.conversation_id)

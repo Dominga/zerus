@@ -71,8 +71,11 @@ pub(super) enum Ended {
 
 #[cfg(test)]
 pub(super) use original_child::{
-    AFTER_FINAL_CHECK, READ_ERROR, REFUSE_PRE_EXEC, SPAWNED, WAIT_ERROR, WAIT_ERROR_AFTER_OUTPUT,
+    READ_ERROR, REFUSE_PRE_EXEC, SPAWNED, WAIT_ERROR, WAIT_ERROR_AFTER_OUTPUT,
 };
+// Only the Linux pinned-image tests rewrite an image after the final check.
+#[cfg(all(test, target_os = "linux"))]
+pub(super) use original_child::AFTER_FINAL_CHECK;
 
 /// Runs the original child to its end, or to the deadline. `resources` is the
 /// guard that every still-open original pipe keeps until its real end.

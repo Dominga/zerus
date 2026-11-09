@@ -464,14 +464,31 @@ impl Runtime {
             && u.items == 0
             && u.legacy_spools == 0;
         let drained = drained && u.controls == 0;
+        // Fleet availability is per computer. One unavailable peer must not
+        // degrade a healthy stream; complete coverage remains separate data.
+        // Neither value supplies source identity or permission for a write.
         let ready = !self.stopping
+            && self.computers.values().any(|c| {
+                c.accepting && matches!(c.status, ComputerStatus::Live | ComputerStatus::Polled)
+            });
+        let all_sources_ready = !self.stopping
             && self.error.is_none()
             && self.computers.len() == self.desired.len() + 1
             && self.computers.values().all(|c| {
                 c.accepting && matches!(c.status, ComputerStatus::Live | ComputerStatus::Polled)
             });
         json!({"epoch":self.epoch,"state":if drained {"drained"} else if self.stopping {"stopping"} else {"running"},
-            "drained":drained,"transport_ready":ready,
+            "drained":drained,"transport_ready":ready,"all_sources_ready":all_sources_ready,
+            "connections":std::iter::once("").chain(self.desired.iter().map(String::as_str)).map(|id| {
+                let c = self.computers.get(&ComputerId(id.into()));
+                let status = c.map(|c| c.status).unwrap_or(ComputerStatus::Probing);
+                let online = c.is_some_and(|c| c.accepting)
+                    && matches!(status, ComputerStatus::Live | ComputerStatus::Polled);
+                let label = if !online && matches!(status, ComputerStatus::Live | ComputerStatus::Polled) {
+                    "reconnecting"
+                } else { status.name() };
+                json!({"id":id,"status":label,"attempt":status.attempt()})
+            }).collect::<Vec<_>>(),
             "display_only":true,"authority":false,"error":self.error,
             "workers":u.workers,"readers":u.readers,"connecting":u.connecting,
             "ingress_bytes":u.bytes,"ingress_items":u.items,"high_ingress_bytes":u.high_bytes,

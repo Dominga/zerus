@@ -50,6 +50,50 @@ fn local_computer_alias_is_distinct_from_a_named_peer() {
     }
     assert!(put_intent(&mut db, &local, 1, &json!({})).is_err());
 }
+
+#[test]
+fn startup_question_identity_needs_the_original_run_and_question() {
+    let mut db = database();
+    let startup = |run: &str, question: &str| Identity {
+        kind: Kind::Post,
+        target: Target::StartupQuestion {
+            computer: String::new(),
+            run: run.into(),
+            question: question.into(),
+        },
+        edge: "startup_question".into(),
+    };
+    let original = startup("run", "codex-trust:one");
+    let first = put_intent(&mut db, &original, 1, &json!({})).unwrap();
+    assert_eq!(
+        put_intent(&mut db, &original, 1, &json!({})).unwrap(),
+        first
+    );
+    for other in [
+        startup("another-run", "codex-trust:one"),
+        startup("run", "codex-trust:two"),
+    ] {
+        assert_ne!(put_intent(&mut db, &other, 1, &json!({})).unwrap(), first);
+    }
+    for invalid in [
+        startup("", "question"),
+        startup("run", ""),
+        startup("run", "bad\nquestion"),
+    ] {
+        assert!(put_intent(&mut db, &invalid, 1, &json!({})).is_err());
+    }
+    let mut wrong_kind = original.clone();
+    wrong_kind.kind = Kind::Presence;
+    assert!(put_intent(&mut db, &wrong_kind, 1, &json!({})).is_err());
+    let mut empty_conversation = identity("startup_question");
+    if let Target::Session { conversation, .. } = &mut empty_conversation.target {
+        conversation.clear();
+    }
+    assert!(
+        put_intent(&mut db, &empty_conversation, 1, &json!({})).is_err(),
+        "ordinary conversation identity is never weakened"
+    );
+}
 fn request(intent: &str, n: u32) -> Reserve {
     Reserve {
         request_id: id(n + 10),

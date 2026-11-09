@@ -184,6 +184,20 @@ describe("the plan's Graph, Board and Layers (task 197)", () => {
     expect(html).not.toContain('data-scroll="graph/t1/2"');
   });
 
+  it("shows one health figure and no 'lead' label in the phase header, in every mode (task 356)", () => {
+    const { team, graph } = fixture();
+    // The core names who accepts a phase in acceptance: lead or owner.
+    team.phases[0].acceptance = "lead";
+    team.phases[1].acceptance = "owner";
+    for (const initialMode of ["graph", "board", "layers"]) {
+      const html = plain(render({ team, graph, problems, now, initialMode }));
+      const head = html.slice(html.indexOf('data-phase-head="1"'), html.indexOf('data-phase-head="2"'));
+      expect(head.match(/Healthy \d+\/\d+/g), initialMode).toEqual(["Healthy 4/5"]);
+      expect(html, initialMode).not.toContain("pt-acceptance");
+      expect(html, initialMode).not.toMatch(/>\s*(lead|owner)\s*</);
+    }
+  });
+
   it("gives a folded phase card its closing border and four round corners, with one frame when open (task 332)", async () => {
     const { team, graph } = fixture();
     team.phases[1].status = "done";
@@ -230,6 +244,23 @@ describe("the plan's Graph, Board and Layers (task 197)", () => {
     expect(plain(html)).toContain("←#2 #3 #1");
     expect(html).toContain("Backend");
     expect(html).toContain('data-scroll="board/t1/1"');
+  });
+
+  it("shows a No report card's kept last reply and 'Use last reply as report' (task #415)", () => {
+    const { team, graph } = fixture();
+    const target = team.tasks.find((task) => task.id === 2)!;
+    target.no_report = true;
+    target.attempt_id = "a7";
+    const html = plain(render({ team, graph, problems, now, initialMode: "board",
+      noReportReply: (id: number) => (id === 2 ? "Done: the parser and its tests" : ""),
+      onUseLastReply: () => {} }));
+    expect(html).toContain("Done: the parser and its tests");
+    expect(html).toContain("Use last reply as report");
+    expect(html).toContain('data-action="use-last-reply"');
+    expect(html).toContain('data-no-report="true"');
+    // The card is still the card: its task, title and column stay.
+    expect(html).toContain('data-task="2"');
+    expect(html).toContain("Store");
   });
 
   it("marks a Crit node and its links violet and a Minor phase and task quietly", () => {

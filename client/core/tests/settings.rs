@@ -523,6 +523,77 @@ fn machine_appearance_editing_is_local_and_color_reset_preserves_style() {
 }
 
 #[test]
+fn account_marks_are_local_per_profile_and_removable() {
+    let scratch = Scratch::new("account-marks");
+    let path = scratch.0.join("settings.json");
+    let settings = Settings::open(path.clone(), None);
+    assert_eq!(settings.get("sessions/accountMarks"), "letter");
+    assert_eq!(
+        settings.set("sessions/accountMarks", json!("emoji")),
+        Ok(json!("emoji"))
+    );
+    let color = "accounts/color/studio%1Fclaude-a1";
+    let mark = "accounts/mark/studio%1Fclaude-a1";
+    assert_eq!(settings.set(color, json!("#2b97ff")), Ok(json!("#2b97ff")));
+    assert_eq!(settings.set(mark, json!("x")), Ok(json!("x")));
+    for invalid in [
+        "accounts/color/",
+        "accounts/color/a/b",
+        "accounts/mark/a\\b",
+    ] {
+        assert!(
+            settings.set(invalid, json!("#2b97ff")).is_err(),
+            "{invalid}"
+        );
+    }
+    assert!(settings.all().contains_key(color));
+    assert_eq!(settings.set(mark, Value::Null), Ok(Value::Null));
+    assert!(!settings.all().contains_key(mark));
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    let reopened = Settings::open(path, None);
+    assert_eq!(reopened.get(color), "#2b97ff");
+    assert!(!reopened.all().contains_key(mark));
+    assert_eq!(reopened.get("sessions/accountMarks"), "emoji");
+}
+
+#[test]
+fn account_marks_can_be_hidden_per_account_and_everywhere() {
+    // zerus-sa9qn.13: presentation only; labels and colors stay.
+    let scratch = Scratch::new("account-marks-hidden");
+    let settings = Settings::open(scratch.0.join("settings.json"), None);
+    assert_eq!(settings.get("sessions/showAccountMarks"), true);
+    assert_eq!(
+        settings.set("sessions/showAccountMarks", json!(false)),
+        Ok(json!(false))
+    );
+    let hidden = "accounts/hide/studio%1Fclaude-a1";
+    assert_eq!(settings.set(hidden, json!(true)), Ok(json!(true)));
+    assert!(settings.set(hidden, json!("yes")).is_err());
+    assert!(settings.set("accounts/hide/a/b", json!(true)).is_err());
+    assert_eq!(settings.set(hidden, Value::Null), Ok(Value::Null));
+    assert!(!settings.all().contains_key(hidden));
+}
+
+#[test]
+fn new_child_rows_start_compact_unless_turned_off() {
+    // zerus-sa9qn.14: a client flag, on by default, and the device's record.
+    let scratch = Scratch::new("compact-new-children");
+    let settings = Settings::open(scratch.0.join("settings.json"), None);
+    assert_eq!(settings.get("sessions/compactNewChildren"), true);
+    assert_eq!(
+        settings.set("sessions/compactNewChildren", json!(false)),
+        Ok(json!(false))
+    );
+    assert_eq!(settings.get("sessions/childRowsSeen"), "");
+    let seen = r#"{"11111111-1111-4111-8111-111111111111":[1,["a"]]}"#;
+    assert_eq!(
+        settings.set("sessions/childRowsSeen", json!(seen)),
+        Ok(json!(seen))
+    );
+}
+
+#[test]
 fn set_normalizes_persists_and_tells_listeners() {
     let scratch = Scratch::new("set");
     let path = scratch.0.join("data/settings.json");

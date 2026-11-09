@@ -12,6 +12,9 @@ Report once, when the task is done:
 Say what changed and how you checked it. A progress line is interim; only hgs team
 report reports, and a report on a task you did not take is refused.
 
+Remove the builds, extra CARGO_TARGET_DIRs, worktrees and package folders you made for
+a task when you report (keep your target); never another's; rmdir a node_modules junction.
+
 Blocked: ask the lead. The attempt stays open:
   {"request_id":"UUID","team":"ID","attempt":"ATTEMPT","text":"..."} | hgs team ask --json
 A question goes through hgs team ask, never a report. Anything else for the lead:
@@ -24,13 +27,13 @@ expect --json. Your pulse for the lead, each part at most 500 characters:
 First: hgs team lore find. Builds and tests: hgs guide team-run and team-tests. Codex on
 Windows: team-run too. Leading a team: hgs guide team-lead.
 
-Scratch teams (the QA right). With the operate profile (the QA right) you run live
-checks in your own scratch teams: hgs team create --json from your session with a
-folder inside the team's scratch root (its scratch_root, or <team folder>/.qa-scratch).
-You lead it, its plan needs no card, it uses the team's own agents, and its member
-count and tree budgets are capped by the parent. Outside the root, without the right,
-or before the owner granted the team's standing rule, the create is refused. Zerus
-stops it when the task you held when creating it is accepted, rejected or cancelled.
+Scratch teams (the QA right). With the operate profile you run live checks in your own
+scratch teams: hgs team create --json from your session with a folder under the team's
+scratch root (its scratch_root, or <team folder>/.qa-scratch). You lead it, its plan needs
+no card, the parent's caps apply. Outside the root, without the right, or before the
+owner's standing rule, a create is refused. Zerus stops it when the task you held then is
+decided.
 
 A performance run checks the machine first, and a comparison alternates the
 binaries in rounds (hgs guide team-tests).
+Tauri shows archive stubs; open a report to read that task only.

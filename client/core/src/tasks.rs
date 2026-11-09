@@ -58,14 +58,52 @@ pub fn page_call(
     limit: usize,
     after: Option<&str>,
 ) -> Result<TaskCall, String> {
+    scoped_page_call(project, stage, limit, after, None)
+}
+
+/// One session's view of a stage: the tasks its identity owns and, in To do
+/// and Backlog, those for any session. The session is its identity
+/// (`launch_id:...` or `run_id:...`), never its name, on the computer `host`
+/// names (empty: this computer).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageScope<'a> {
+    pub host: &'a str,
+    pub session_id: &'a str,
+}
+
+/// The reply of an hgs that cannot read one session's view.
+pub const UPDATE_FOR_SESSION_PAGES: &str = "Update hgs to read one session's tasks.";
+
+/// [`page_call`], of one session's view when `scope` is set.
+pub fn scoped_page_call(
+    project: &str,
+    stage: &str,
+    limit: usize,
+    after: Option<&str>,
+    scope: Option<PageScope>,
+) -> Result<TaskCall, String> {
+    let plain = |v: &str, most: usize| v.len() <= most && !v.chars().any(char::is_control);
     if !valid_project(project)
         || !STAGES.contains(&stage)
         || !(1..=PAGE_LIMIT).contains(&limit)
-        || after.is_some_and(|c| c.is_empty() || c.len() > 512 || c.chars().any(char::is_control))
+        || after.is_some_and(|c| c.is_empty() || !plain(c, 512))
+        || scope.is_some_and(|s| {
+            !plain(s.host, 256)
+                || !plain(s.session_id, 256)
+                || !s.session_id.split_once(':').is_some_and(|(kind, id)| {
+                    matches!(kind, "launch_id" | "run_id") && !id.is_empty()
+                })
+        })
     {
         return Err("Invalid task page request.".into());
     }
-    Ok(TaskCall::list_page(project, stage, limit, after))
+    Ok(TaskCall::list_page(
+        project,
+        stage,
+        limit,
+        after,
+        scope.map(|s| (s.host, s.session_id)),
+    ))
 }
 
 /// A page reply, only when it is the requested page of this project's stage:
@@ -76,6 +114,26 @@ pub fn checked_page(
     stage: &str,
     limit: usize,
 ) -> Result<Value, String> {
+    checked_scoped_page(reply, project, stage, limit, None)
+}
+
+/// [`checked_page`], and when `scope` is set, only the view of that session:
+/// an hgs that does not echo it read another view and is refused.
+pub fn checked_scoped_page(
+    reply: &Map<String, Value>,
+    project: &str,
+    stage: &str,
+    limit: usize,
+    scope: Option<PageScope>,
+) -> Result<Value, String> {
+    if let Some(scope) = scope {
+        let echo = reply.get("session");
+        if echo.and_then(|e| e["host"].as_str()) != Some(scope.host)
+            || echo.and_then(|e| e["session_id"].as_str()) != Some(scope.session_id)
+        {
+            return Err(UPDATE_FOR_SESSION_PAGES.into());
+        }
+    }
     if reply.get("project").and_then(|p| p["id"].as_str()) != Some(project) {
         return Err("The task page did not match the selected project.".into());
     }
@@ -92,12 +150,16 @@ pub fn checked_page(
     {
         return Err("Invalid task page.".into());
     }
-    Ok(json!({
+    let mut out = json!({
         "tasks": tasks,
         "page": page,
         "counts": reply.get("counts").cloned().unwrap_or(Value::Null),
         "revision": reply.get("revision").cloned().unwrap_or(Value::Null),
-    }))
+    });
+    if scope.is_some() {
+        out["session"] = reply["session"].clone();
+    }
+    Ok(out)
 }
 
 /// One change of a followed project's task list.
@@ -495,6 +557,95 @@ mod tests {
         assert_eq!(
             checked_page(&old, "p1", "todo", 2).unwrap_err(),
             "Update hgs to read task pages."
+        );
+    }
+
+    #[test]
+    fn a_session_page_names_its_identity_and_is_checked_against_it() {
+        let here = PageScope {
+            host: "",
+            session_id: "launch_id:L1",
+        };
+        let call = scoped_page_call("p1", "todo", 50, Some("c"), Some(here)).unwrap();
+        assert_eq!(
+            call.args,
+            [
+                "list",
+                "--stage",
+                "todo",
+                "--limit",
+                "50",
+                "--after",
+                "c",
+                "--session",
+                "launch_id:L1",
+                "--project",
+                "p1"
+            ]
+        );
+        let there = PageScope {
+            host: "mac",
+            session_id: "run_id:R1",
+        };
+        let call = scoped_page_call("p1", "done", 20, None, Some(there)).unwrap();
+        assert_eq!(
+            &call.args[5..9],
+            ["--session", "run_id:R1", "--host", "mac"]
+        );
+        assert_eq!(
+            scoped_page_call("p1", "todo", 5, None, None).unwrap().args,
+            page_call("p1", "todo", 5, None).unwrap().args
+        );
+        for (host, session_id) in [
+            ("", ""),
+            ("", "codex/api"),
+            ("", "launch_id:"),
+            ("", "launch_id:a\nb"),
+            ("a\nb", "launch_id:x"),
+            ("", &*format!("launch_id:{}", "x".repeat(300))),
+        ] {
+            assert!(
+                scoped_page_call("p1", "todo", 5, None, Some(PageScope { host, session_id }))
+                    .is_err(),
+                "{host:?} {session_id:?}"
+            );
+        }
+        let reply = |echo: Value| {
+            json!({"project": {"id": "p1"}, "tasks": [{"uuid": "u", "stage": "todo"}], "counts": {"todo": 1}, "revision": "r",
+                   "page": {"schema": 1, "stage": "todo", "limit": 2, "position": 0, "total": 1, "next": null, "previous": null},
+                   "session": echo})
+            .as_object()
+            .unwrap()
+            .clone()
+        };
+        let good = checked_scoped_page(
+            &reply(json!({"host": "mac", "session_id": "run_id:R1"})),
+            "p1",
+            "todo",
+            2,
+            Some(there),
+        )
+        .unwrap();
+        assert_eq!(good["session"]["session_id"], "run_id:R1");
+        assert_eq!(good["page"]["total"], 1);
+        // Another session's view, or none (an hgs that ignored --session), is refused.
+        for echo in [
+            json!({"host": "", "session_id": "run_id:R1"}),
+            json!({"host": "mac", "session_id": "run_id:R2"}),
+            Value::Null,
+        ] {
+            assert_eq!(
+                checked_scoped_page(&reply(echo.clone()), "p1", "todo", 2, Some(there))
+                    .unwrap_err(),
+                UPDATE_FOR_SESSION_PAGES,
+                "{echo}"
+            );
+        }
+        let mut whole = reply(Value::Null);
+        whole.remove("session");
+        assert_eq!(
+            checked_scoped_page(&whole, "p1", "todo", 2, Some(there)).unwrap_err(),
+            UPDATE_FOR_SESSION_PAGES
         );
     }
 }

@@ -55,15 +55,42 @@ impl Drop for Permit {
 }
 
 pub(crate) fn non_agent() -> bool {
-    isolate(false, Duration::from_secs(90))
+    isolate(Context::NonAgent, Duration::from_secs(90))
 }
 pub(crate) fn native() -> bool {
-    isolate(true, Duration::from_secs(30))
+    isolate(Context::Native, Duration::from_secs(30))
 }
-fn isolate(native: bool, timeout: Duration) -> bool {
+/// Desktop component models own their configuration and terminal context.
+/// Remove inherited context only in a fresh original test process, before its
+/// fixture, frozen environment or process-wide mode/caller cache is created.
+pub(crate) fn desktop_fixture() -> bool {
+    isolate(Context::DesktopFixture, Duration::from_secs(90))
+}
+#[derive(Clone, Copy)]
+enum Context {
+    NonAgent,
+    Native,
+    DesktopFixture,
+}
+fn desktop_keys() -> Vec<std::ffi::OsString> {
+    std::env::vars_os()
+        .map(|(key, _)| key)
+        .filter(|key| {
+            let bytes = key.as_encoded_bytes();
+            bytes.starts_with(b"HGS_") || bytes.starts_with(b"TMUX")
+        })
+        .collect()
+}
+fn isolate(context: Context, timeout: Duration) -> bool {
     let thread = std::thread::current();
     let case = thread.name().expect("named libtest fixture");
-    let clean = AGENT.iter().all(|key| std::env::var_os(key).is_none())
+    let native = matches!(context, Context::Native);
+    let keys = if matches!(context, Context::DesktopFixture) {
+        desktop_keys()
+    } else {
+        AGENT.map(std::ffi::OsString::from).into()
+    };
+    let clean = keys.iter().all(|key| std::env::var_os(key).is_none())
         && (!native
             || std::env::var(zerus_client_core::desktop::service::MODE_ENV).as_deref() == Ok("0"));
     if let Some(original) = std::env::var_os(REENTRY) {
@@ -76,7 +103,7 @@ fn isolate(native: bool, timeout: Duration) -> bool {
     }
     let original = case.to_owned();
     run_case(case, timeout, move |command| {
-        for key in AGENT {
+        for key in keys {
             command.env_remove(key);
         }
         // Select Native explicitly. Absence alone would depend on the
@@ -89,6 +116,70 @@ fn isolate(native: bool, timeout: Duration) -> bool {
         command.env(REENTRY, original);
     });
     true
+}
+
+#[test]
+fn desktop_fixtures_drop_each_inherited_context_prefix_without_changing_the_parent() {
+    const STAGE: &str = "ZERUS_DESKTOP_CONTEXT_FIXTURE";
+    const RAW: &str = "ZERUS_DESKTOP_CONTEXT_RAW";
+    if std::env::var_os(STAGE).is_some() {
+        if desktop_fixture() {
+            return;
+        }
+        let injected = std::env::var_os(STAGE).unwrap();
+        assert!(
+            std::env::var_os(injected).is_none(),
+            "isolated original retained its injected context"
+        );
+        assert!(desktop_keys().is_empty());
+        assert_eq!(std::env::var(RAW).unwrap(), "unrelated-value");
+        return;
+    }
+    let before = run::FrozenEnvironment::capture().unwrap();
+    let thread = std::thread::current();
+    for key in [
+        "HGS_SESSION_ID",
+        "HGS_LAUNCH_ID",
+        "HGS_STATE_DIR",
+        "HGS_DESKTOP_SERVICE",
+        "TMUX",
+        "TMUX_PANE",
+    ] {
+        run_case(
+            thread.name().unwrap(),
+            Duration::from_secs(90),
+            move |command| {
+                for inherited in desktop_keys() {
+                    command.env_remove(inherited);
+                }
+                command
+                    .env(STAGE, key)
+                    .env(RAW, "unrelated-value")
+                    .env(key, "synthetic-context");
+            },
+        );
+    }
+    assert!(before.current(), "fixture changed its parent's environment");
+}
+
+#[test]
+fn a_marked_dirty_desktop_fixture_refuses_without_a_successor() {
+    const CHILD: &str = "ZERUS_DESKTOP_CONTEXT_REFUSAL";
+    if std::env::var_os(CHILD).is_some() {
+        let before = SPAWNS.load(Ordering::Relaxed);
+        assert!(std::panic::catch_unwind(desktop_fixture).is_err());
+        assert_eq!(SPAWNS.load(Ordering::Relaxed), before);
+        return;
+    }
+    let thread = std::thread::current();
+    let case = thread.name().unwrap();
+    let original = case.to_owned();
+    run_case(case, Duration::from_secs(90), move |command| {
+        command
+            .env(CHILD, "1")
+            .env(REENTRY, original)
+            .env("HGS_LAUNCH_ID", "synthetic-launch");
+    });
 }
 fn run_case(case: &str, timeout: Duration, configure: impl FnOnce(&mut Command) + Send + 'static) {
     // Acquire before PROCESS_TREE: a sampler may hold its exclusive side while

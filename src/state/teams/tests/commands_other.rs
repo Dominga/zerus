@@ -622,6 +622,15 @@ fn the_leads_answer_reaches_the_members_subagent_card() {
         });
         super::super::dispatcher::set_fake_hgs(None);
         result.unwrap();
+        // Task #349: the lead's answer is in the approval journal, with its
+        // source, its member and team, the question and the answer given.
+        let journal = crate::approval_log::root();
+        let entries = crate::approval_log::entries(&journal, &json!({"source":"team lead dsh/x/lead"})).unwrap();
+        assert_eq!(entries["entries"].as_array().unwrap().len(), 1, "{entries}");
+        assert_eq!(entries["entries"][0]["team"], "rv");
+        assert_eq!(entries["entries"][0]["member"], "dev");
+        assert_eq!(entries["entries"][0]["answer"], "allow: Yes");
+        assert!(entries["entries"][0]["prompt"].as_str().unwrap().contains("Start 2 subagents"), "{entries}");
         let calls = calls.borrow();
         let answer = calls.iter().find(|(args, _)| args.first().map(String::as_str) == Some("answer")).expect("hgs answer was called");
         assert_eq!(answer.0, vec!["answer".to_owned(), "claude/x/dev".to_owned(), "--json".to_owned()]);
@@ -1164,7 +1173,9 @@ fn every_stdin_json_reader_drops_a_bom() {
     // Streams and framed protocols that never parse JSON from stdin.
     let streams = ["peer_channel.rs", "screen/mod.rs", "platform/windows.rs", "cli.rs", "desktop/feed/io.rs",
         // A length-framed request between Zerus's own processes, not typed JSON.
-        "desktop/windows_registration/native.rs"];
+        "desktop/windows_registration/native.rs",
+        // Its test child reads length-framed binary requests from stdin.
+        "platform/worktree_membership/objects/loan/peer/tests.rs"];
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = vec![root.clone()];
     let mut missing = Vec::new();
@@ -1201,9 +1212,9 @@ fn every_stdin_json_reader_drops_a_bom() {
     }
     assert!(readers >= 25, "only {readers} readers found");
     assert!(missing.is_empty(), "stdin JSON readers that keep a BOM: {missing:?}");
-    // `send` strips it inside submit, before its digest.
+    // `send` strips it inside submit_core (every origin goes through it), before its digest.
     let input = std::fs::read_to_string(root.join("state/input.rs")).unwrap();
-    let submit = input.find("pub(super) fn submit(").unwrap();
+    let submit = input.find("fn submit_core(").unwrap();
     assert!(input[submit..submit + 400].contains("without_bom(input)"));
 }
 

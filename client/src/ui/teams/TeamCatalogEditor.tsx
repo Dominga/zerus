@@ -11,6 +11,7 @@ import {
   includeBlock, modelOptions, moveBlock, plateAnswers, promptBlocks, proposalMark, proposalOf, swatchColor, type ModelChoice, type PromptChange,
 } from "./catalogControls";
 import "../styles/catalog.css";
+import { TextInput, TextArea } from "../lib/TextField";
 
 // Task #44: Qt's TeamCatalogEditor. The header holds Open Team designer,
 // Import…, Export…, Revert, Save catalog, Discard draft and Apply
@@ -258,7 +259,7 @@ export function ModelMenu(props: { item: Item; roles: RoleContext; value: string
   createEffect(on(() => `${str(props.item.computer)}\n${str(props.item.account)}\n${str(props.item.agent)}`, () => props.roles.catalogs.request(props.item), { defer: true }));
   return (
     <>
-      <input class="cat-model" list={listId} value={props.value} placeholder={tr("default model")} aria-label={props.label}
+      <TextInput class="cat-model" list={listId} value={props.value} placeholder={tr("default model")} aria-label={props.label}
         onChange={(event) => props.onChange(event.currentTarget.value.trim())} />
       <datalist id={listId}><For each={options()}>{(option) => <option value={option.id}>{option.label}</option>}</For></datalist>
     </>
@@ -363,9 +364,9 @@ function Field(props: { editor: CatalogEditorStore; spec: CatalogFieldSpec; valu
     }
     switch (spec.type) {
       case "multiline":
-        return <textarea id={fieldId} rows={5} value={str(props.value)} onChange={(event) => void props.onChange(event.currentTarget.value)} />;
+        return <TextArea id={fieldId} rows={5} value={str(props.value)} onChange={(event) => void props.onChange(event.currentTarget.value)} />;
       case "number":
-        return <input id={fieldId} type="number" min={spec.min} max={spec.max} value={str(props.value ?? spec.min ?? 0)}
+        return <TextInput id={fieldId} type="number" min={spec.min} max={spec.max} value={str(props.value ?? spec.min ?? 0)}
           onChange={(event) => void props.onChange(Number.parseInt(event.currentTarget.value, 10) || 0)} />;
       case "bool":
         return <input id={fieldId} type="checkbox" checked={props.value === true} onChange={(event) => void props.onChange(event.currentTarget.checked)} />;
@@ -374,11 +375,11 @@ function Field(props: { editor: CatalogEditorStore; spec: CatalogFieldSpec; valu
           <For each={spec.options ?? []}>{([value, name]) => <option value={value}>{tr(name)}</option>}</For>
         </select>;
       case "words":
-        return <input id={fieldId} value={words(props.value)} placeholder={tr("Comma-separated")} onChange={(event) => void props.onChange(splitWords(event.currentTarget.value))} />;
+        return <TextInput id={fieldId} value={words(props.value)} placeholder={tr("Comma-separated")} onChange={(event) => void props.onChange(splitWords(event.currentTarget.value))} />;
       case "list":
         return <Rows editor={props.editor} spec={spec} value={Array.isArray(props.value) ? (props.value as Item[]) : []} onChange={props.onChange} roleItem={props.roleItem} roles={props.roles} />;
       default:
-        return <input id={fieldId} value={str(props.value)} onChange={(event) => void props.onChange(event.currentTarget.value)} />;
+        return <TextInput id={fieldId} value={str(props.value)} onChange={(event) => void props.onChange(event.currentTarget.value)} />;
     }
   };
   return (
@@ -459,7 +460,7 @@ function Routing(props: { editor: CatalogEditorStore; set: (kind: CatalogKind, i
       <button type="button" class="btn ghost small cat-add" disabled={props.editor.busy()} onClick={() => void props.add()}>{tr("+ Rule")}</button>
       <div class="cat-try">
         <label for="cat-try-goal">{tr("Try it")}</label>
-        <input id="cat-try-goal" value={goal()} placeholder={tr("A goal or issue title…")} onInput={(event) => setGoal(event.currentTarget.value)}
+        <TextInput id="cat-try-goal" value={goal()} placeholder={tr("A goal or issue title…")} onInput={(event) => setGoal(event.currentTarget.value)}
           onKeyDown={(event) => { if (event.key === "Enter") void tryIt(); }} />
         <button type="button" class="btn small" disabled={!goal().trim()} onClick={() => void tryIt()}>{tr("Try")}</button>
         <Show when={answer()}><span class="cat-try-answer" role="status">{answer()}</span></Show>
@@ -476,7 +477,7 @@ function PlanningRules(props: { editor: CatalogEditorStore }) {
     <div class="cat-rules">
       <label for="cat-planning-rules">{tr("Planning rules")}</label>
       <span class="cat-hint">{tr("Every lead plans by these rules; they are sent with its brief.")}</span>
-      <textarea id="cat-planning-rules" rows={16} value={props.editor.view()?.planning_rules ?? ""}
+      <TextArea id="cat-planning-rules" rows={16} value={props.editor.view()?.planning_rules ?? ""}
         onChange={(event) => void props.editor.edit({ op: "planning_rules", text: event.currentTarget.value })} />
       <div class="cat-rules-foot">
         <span class="grow" />

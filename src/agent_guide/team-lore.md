@@ -6,8 +6,9 @@ outcomes, the owner's decisions, the faults of fixed findings and the
 newest test readings, as records CodeLore's rules accept.
 
 Search before you ask or diagnose:
-  hgs team lore find WORDS [--team ID]   the workspace, and the project's
-                                         store too in project mode
+  hgs team lore find WORDS [--team ID]   the workspace, the project's store
+                                         and its team sub-stores; each hit
+                                         names its store (project, team NAME)
   hgs team lore show ID [--team ID]      one record
 After a compaction, recall the plan before anything else:
   hgs team lore plans [--team ID]        plans, counts and the open items

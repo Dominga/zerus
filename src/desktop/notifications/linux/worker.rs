@@ -740,7 +740,8 @@ pub(super) fn run(
                                         until,
                                         stop,
                                         true,
-                                        native::notify_async(&connection, owner, title, &escaped),
+                                        // The headless service has no interface language: Qt's English source.
+                                        native::notify_async(&connection, owner, title, &escaped, "Open session"),
                                     ) {
                                         Ok(Ok(reply))
                                             if reply_from(&reply, &mappings.namespace.owner) =>

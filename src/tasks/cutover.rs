@@ -8,7 +8,7 @@ use crate::swarm::{self, TaskMember};
 use serde_json::{json, Value};
 use std::time::UNIX_EPOCH;
 use std::time::Duration;
-use zerus_replica::{Actor, TASK_SCHEMA};
+use zerus_replica::Actor;
 
 /// One fence check's whole budget, counted once from its start (C3).
 const FENCE_BUDGET: Duration = Duration::from_secs(15);
@@ -111,39 +111,12 @@ fn member(member: &TaskMember, project: &str) -> Value {
     })
 }
 
-/// The first reason this member keeps the project's cutover open, if any:
-/// never seen, another replica protocol, an older task schema, no valid
-/// store, no exchange of the project, one not complete (whatever reason it
-/// gives, or none), or none since the latest cutover write here. It fails
-/// closed: anything this does not positively know as complete keeps it open.
+/// The first reason this member keeps the project's cutover open, if any
+/// (`swarm::cutover_open`): anything this does not positively know as
+/// complete keeps it open.
 fn closing(member: &TaskMember, project: &str, latest: Option<i64>) -> Option<Value> {
-    let closed = |reason: &str, at: Option<i64>| {
-        Some(json!({"member": member.alias, "project": project, "reason": reason, "at": at}))
-    };
-    let Some(replica) = &member.replica else {
-        return closed("unseen", None);
-    };
-    let seen = Some(ms(replica.seen_at));
-    if replica.protocol != Some(swarm::REPLICA_PROTOCOL) {
-        return closed("protocol", seen);
-    }
-    if replica.task_schema.is_none_or(|schema| schema < TASK_SCHEMA) {
-        return closed("task_schema", seen);
-    }
-    if replica.store.as_deref().is_none_or(|store| !zerus_replica::ids::is_uuid(store)) {
-        return closed("store", seen);
-    }
-    let Some(exchanged) = replica.projects.get(project) else {
-        return closed("no_inventory", None);
-    };
-    if !exchanged.complete {
-        let reason = exchanged.reason.map_or("incomplete", |reason| reason.as_str());
-        return closed(reason, Some(ms(exchanged.at)));
-    }
-    if latest.is_some_and(|latest| ms(exchanged.at) < latest) {
-        return closed("inventory_before_cutover", Some(ms(exchanged.at)));
-    }
-    None
+    let (reason, at) = swarm::cutover_open(member.replica.as_ref(), project, latest)?;
+    Some(json!({"member": member.alias, "project": project, "reason": reason, "at": at}))
 }
 
 /// `--project P --task T --check`, all within `deadline` from the command's
@@ -186,6 +159,14 @@ fn fence_check(config: &Config, id: &str, name: &str, task: &str, deadline: std:
 /// replica data and repairs like a sync; it creates no floor and no attempt,
 /// and grants no send authority.
 fn check(config: &Config, id: &str, name: &str, uuid: &str, deadline: std::time::Instant) -> Result<Value> {
+    // The task's certificate, read only: whether it would be reused now
+    // (C3e). The check never writes one.
+    let certificate = match swarm::fence::admit_certified(config, id, uuid, deadline, |_, _| Ok(()))
+        .map_err(fail)?
+    {
+        Ok(()) => json!({"valid": true}),
+        Err(closed) => json!({"valid": false, "reason": closed.reason}),
+    };
     let (universe, proved) =
         swarm::fence::prove(config, &swarm::fence::Ssh(config), id, uuid, deadline).map_err(fail)?;
     let (closed, proof) = match proved {
@@ -210,6 +191,7 @@ fn check(config: &Config, id: &str, name: &str, uuid: &str, deadline: std::time:
         "universe_closed": universe.closed().map(|(node, reason)| json!({"node": node, "reason": reason})),
         "closed": closed.map(|c| json!({"node": c.node, "reason": c.reason})),
         "proof": proof,
+        "certificate": certificate,
     }))
 }
 
@@ -234,6 +216,7 @@ fn prose(closed: &Value, project: &str) -> String {
 mod tests {
     use super::*;
     use crate::swarm::ReplicaMember;
+    use zerus_replica::TASK_SCHEMA;
 
     /// review-n on #1452 R2: the budget covers the check's entry too: a
     /// catalog lock held past it refuses within it.

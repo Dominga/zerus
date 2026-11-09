@@ -3,6 +3,61 @@ use serde_json::json;
 use zerus_watch_protocol::SessionRef;
 
 const ID: &str = "00000000-0000-4000-8000-000000000001";
+
+#[test]
+fn git_frames_keep_the_original_route_and_failed_reads_never_preserve_clean_state() {
+    let spec = Subscription {
+        topic: topic::GIT.into(),
+        path: Some("/fixture".into()),
+        ..Default::default()
+    };
+    let mut route = Route::new("configured-alias", ID.into(), spec.clone()).unwrap();
+    ready(&mut route);
+    let state = native(
+        99,
+        json!({"t":"state","topic":"git","key":"/fixture","rev":2,
+        "value":{"state":"ok","root":"/fixture","changed_files":0,"ahead":0,"behind":0}}),
+    );
+    let changes = route.apply("detail", &value(1, state)).unwrap();
+    assert!(
+        matches!(&changes[..], [Change::Git { key, update: crate::GitUpdate::State { value, .. }, .. }]
+        if key == "/fixture" && value.changed_files == Some(0))
+    );
+    let failed = native(
+        100,
+        json!({"t":"error","topic":"git","key":"/fixture","fatal":false,"code":"git_status_failed","message":"fixture"}),
+    );
+    assert!(
+        matches!(&route.apply("detail", &value(2, failed)).unwrap()[..],
+        [Change::Git { update: crate::GitUpdate::Unavailable { code }, .. }] if code == "git_status_failed")
+    );
+    let mut replaced = status("ready");
+    replaced["generation"] = json!(2);
+    replaced["revision"] = json!(2);
+    route.apply("detail_status", &replaced).unwrap();
+    assert!(route
+        .apply(
+            "detail",
+            &value(
+                3,
+                native(
+                    101,
+                    json!({"t":"state","topic":"git","key":"/fixture","rev":3,"value":{}})
+                )
+            )
+        )
+        .unwrap()
+        .is_empty());
+    let mut wrong = spec.clone();
+    wrong.session = Some(SessionRef {
+        name: "codex/fixture/a".into(),
+        ..Default::default()
+    });
+    assert!(Key::new("", &wrong).is_err());
+    let mut wrong = spec;
+    wrong.topic = topic::ORGANIZATION.into();
+    assert!(Key::new("", &wrong).is_err());
+}
 fn route(topic: &str) -> Route {
     let subscription = Subscription {
         topic: topic.into(),

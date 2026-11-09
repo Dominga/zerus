@@ -244,7 +244,8 @@ mod tests {
     #[test]
     fn the_lead_page_is_one_readable_page_with_worked_examples() {
         let lead = TOPICS.iter().find(|(name, _)| *name == "team-lead").unwrap().1;
-        let crlf = lead.len() + lead.matches('\n').count();
+        // Only a bare LF grows in a CRLF checkout (as in the small-pages test below).
+        let crlf = lead.len() + lead.matches('\n').count() - lead.matches("\r\n").count();
         assert!((LEAD_MIN..=LEAD_LIMIT).contains(&lead.len()) && crlf <= LEAD_LIMIT, "{} bytes", lead.len());
         for example in ["Plan a goal.", "Run phases alongside.", "Decide reports.", "Park a blocked task.", "Record a decision.", "Publish through the release gate."] {
             assert!(lead.contains(example), "no example: {example}");

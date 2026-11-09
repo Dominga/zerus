@@ -1,3 +1,4 @@
+import { TextInput } from "../lib/TextField";
 import { Index, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import type { PickerView } from "./opencode-models";
 import { composing } from "../lib/keys";
@@ -78,7 +79,7 @@ export function ModelList(props: { view: () => PickerView; act: ModelPickerActio
   };
   return (
     <div class="ocm">
-      <input ref={search} disabled={props.disabled} class="field" type="search" placeholder={tr("Search models")} aria-label={tr("Search models")} maxLength={SEARCH_LIMIT} value={text()}
+      <TextInput ref={search} disabled={props.disabled} class="field" type="search" placeholder={tr("Search models")} aria-label={tr("Search models")} maxLength={SEARCH_LIMIT} value={text()}
         onInput={(e) => onSearch(e.currentTarget.value)}
         onKeyDown={(e) => {
           // Escape closes the popup, as Qt's: WebKit's search field would only clear itself.

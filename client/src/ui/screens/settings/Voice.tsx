@@ -1,3 +1,4 @@
+import { TextInput } from "../../lib/TextField";
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -278,28 +279,28 @@ function ProviderEditor(props: { editor: EditorView }) {
         <p class="muted">{editor().computer}</p>
         <p class="muted">{editor().readiness}</p>
         <div class="form-row"><label for="voice-name">{tr("Name")}</label>
-          <input id="voice-name" class="field" maxLength={128} disabled={busy()} value={name()} onInput={(e) => setName(e.currentTarget.value)}
+          <TextInput id="voice-name" class="field" maxLength={128} disabled={busy()} value={name()} onInput={(e) => setName(e.currentTarget.value)}
             placeholder={remote() ? "e.g. Team transcription server" : "e.g. Russian speech"} /></div>
         <div class="form-row"><label for="voice-id">{tr("Profile ID")}</label>
-          <input id="voice-id" class="field mono" maxLength={64} readOnly={!editor().create} disabled={busy()} value={id()} onInput={(e) => setId(e.currentTarget.value)} /></div>
+          <TextInput id="voice-id" class="field mono" maxLength={64} readOnly={!editor().create} disabled={busy()} value={id()} onInput={(e) => setId(e.currentTarget.value)} /></div>
         <div class="form-row"><label for="voice-type">{tr("Type")}</label>
           <Select id="voice-type" value={adapter()} options={types()} disabled={busy()} onChange={(chosen) => { setRetyped(true); setAdapter(chosen); }} /></div>
         <div class="form-row"><label for="voice-model">{tr("Model")}</label>
           <Show when={remote()} fallback={
             <Select id="voice-model" value={model()} options={models().map((m) => ({ value: m, label: m }))} disabled={busy()} onChange={setModel} />
           }>
-            <input id="voice-model" class="field mono" maxLength={128} list="voice-models" disabled={busy()} value={model()} onInput={(e) => setModel(e.currentTarget.value)} />
+            <TextInput id="voice-model" class="field mono" maxLength={128} list="voice-models" disabled={busy()} value={model()} onInput={(e) => setModel(e.currentTarget.value)} />
             <datalist id="voice-models"><For each={models()}>{(m) => <option value={m} />}</For></datalist>
           </Show>
         </div>
         <div class="form-row"><label for="voice-language">{tr("Language")}</label>
-          <input id="voice-language" class="field mono voice-lang" maxLength={2} placeholder={tr("Auto-detect")} disabled={busy()} value={language()} onInput={(e) => setLanguage(e.currentTarget.value)} /></div>
+          <TextInput id="voice-language" class="field mono voice-lang" maxLength={2} placeholder={tr("Auto-detect")} disabled={busy()} value={language()} onInput={(e) => setLanguage(e.currentTarget.value)} /></div>
         <Show when={remote()} fallback={
           <div class="form-row"><label for="voice-device">{tr("Device")}</label>
             <Select id="voice-device" value={device()} options={devices().map((d) => ({ value: d, label: d }))} disabled={busy()} onChange={setDevice} /></div>
         }>
           <div class="form-row"><label for="voice-url">{tr("Base URL")}</label>
-            <input id="voice-url" class="field mono" maxLength={2048} placeholder="https://speech.example.net/v1" disabled={busy()} value={url()} onInput={(e) => setUrl(e.currentTarget.value)} /></div>
+            <TextInput id="voice-url" class="field mono" maxLength={2048} placeholder="https://speech.example.net/v1" disabled={busy()} value={url()} onInput={(e) => setUrl(e.currentTarget.value)} /></div>
           <div class="form-row"><span />
             <Check label={trNoop("Allow unencrypted HTTP for a local or private server")} checked={insecure()} disabled={busy()} onChange={setInsecure} /></div>
           <div class="form-row"><label for="voice-credential">{tr("API key")}</label>
@@ -309,7 +310,7 @@ function ProviderEditor(props: { editor: EditorView }) {
               { value: "remove", label: trNoop("Remove API key") },
             ]} /></div>
           <div class="form-row"><label for="voice-key">{tr("New API key")}</label>
-            <input id="voice-key" class="field" type="password" maxLength={8192} autocomplete="off" disabled={busy() || credential() !== "replace"}
+            <TextInput id="voice-key" class="field" type="password" maxLength={8192} autocomplete="off" disabled={busy() || credential() !== "replace"}
               value={key()} onInput={(e) => setKey(e.currentTarget.value)} /></div>
         </Show>
         <Lines class="hint voice-help" text={tr(HELP[adapter()] ?? OTHER_HELP)} />

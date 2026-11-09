@@ -67,7 +67,7 @@ object SessionDetailsPresentation {
         else -> effort.replaceFirstChar { it.uppercase() }
     }
 
-    fun parse(raw: JSONObject?, target: Target, verified: Boolean): SessionDetailsView {
+    fun parse(raw: JSONObject?, target: Target, verified: Boolean, now: Double = System.currentTimeMillis() / 1000.0): SessionDetailsView {
         val record = raw ?: JSONObject()
         val recorded = !verified || target.archiveId.isNotBlank()
         val recordedAgents = recorded || record.string("state").ifBlank { "running" } != "running" ||
@@ -84,6 +84,7 @@ object SessionDetailsPresentation {
             }
             add(ContextDetail("Process", record.string("process_state").ifBlank { "Not reported" }))
             add(ContextDetail("Activity", record.string("activity").ifBlank { "Not reported" }))
+            if (target.archiveId.isBlank()) addAll(KeepWarmPresentation.fields(record, now))
             record.string("error").takeIf { it.isNotBlank() }?.let { add(ContextDetail("Native error", it)) }
         }
         val goalRaw = record.optJSONObject("goal")

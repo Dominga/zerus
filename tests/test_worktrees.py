@@ -69,6 +69,50 @@ class Worktrees(Repository,unittest.TestCase):
         self.assertEqual(result.returncode,0,result.stderr)
         return json.loads(result.stdout)
 
+    def test_explicit_stop_seals_future_starts_without_inventing_a_past_result(self):
+        state=Path(self.env['HGS_STATE_DIR']);store=state/'worktree-requests'
+        store.mkdir(parents=True,mode=0o700);state.chmod(0o700)
+        request=str(uuid.uuid4());args=self.receipt_create(request)
+        original=[item for item in args[3:] if item!='--receipt']
+        fingerprint=hashlib.sha256(json.dumps(original,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
+        before=set(store.iterdir())
+        self.assertEqual(self.receipt_control('status',request)['status'],'not_found')
+        self.assertEqual(set(store.iterdir()),before)
+        self.assertFalse((state/'worktree-requests.identity.json').exists(),'status must not initialize coverage')
+        cancel=[str(HGS),'worktrees','cancel','--request-id',request,'--fingerprint',fingerprint,'--json']
+        result=subprocess.run(cancel,env=self.env,text=True,capture_output=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr);fence=json.loads(result.stdout)
+        self.assertEqual(fence['status'],'fenced');self.assertEqual(fence['past_outcome'],'unknown')
+        self.assertTrue(fence['future_starts_fenced']);self.assertNotIn('effects_started',fence)
+        receipt=store/f'{request}.json';saved=receipt.read_bytes()
+        for delayed in (args,[item for item in args if item!='--receipt']):
+            result=subprocess.run(delayed,env=self.env,text=True,capture_output=True,timeout=8)
+            self.assertEqual(result.returncode,0,result.stderr);self.assertEqual(json.loads(result.stdout),fence)
+            self.assertFalse((self.root/'receipt-checkout').exists())
+            self.assertEqual(self.git('-C',str(self.repo),'branch','--list','receipt-work'),'')
+        self.assertEqual(self.receipt_control('status',request),fence)
+        result=subprocess.run(cancel,env=self.env,text=True,capture_output=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr);self.assertEqual(json.loads(result.stdout),fence)
+        self.assertEqual(receipt.read_bytes(),saved)
+        wrong=cancel.copy();wrong[wrong.index('--fingerprint')+1]='0'*64
+        result=subprocess.run(wrong,env=self.env,text=True,capture_output=True,timeout=5)
+        self.assertNotEqual(result.returncode,0);self.assertEqual(receipt.read_bytes(),saved)
+
+    def test_a_replaced_empty_receipt_store_never_erases_the_original_fence(self):
+        state=Path(self.env['HGS_STATE_DIR']);store=state/'worktree-requests'
+        store.mkdir(parents=True,mode=0o700);state.chmod(0o700)
+        request=str(uuid.uuid4());args=self.receipt_create(request)
+        fingerprint=hashlib.sha256(json.dumps([item for item in args[3:] if item!='--receipt'],ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
+        cancel=[str(HGS),'worktrees','cancel','--request-id',request,'--fingerprint',fingerprint,'--json']
+        result=subprocess.run(cancel,env=self.env,text=True,capture_output=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr)
+        saved=(store/f'{request}.json').read_bytes();retained=state/'original-requests-retained';store.rename(retained);store.mkdir(mode=0o700)
+        for command in (cancel,args,[str(HGS),'worktrees','status','--request-id',request,'--json']):
+            result=subprocess.run(command,env=self.env,text=True,capture_output=True,timeout=8)
+            self.assertNotEqual(result.returncode,0)
+        self.assertEqual((retained/f'{request}.json').read_bytes(),saved)
+        self.assertFalse((store/f'{request}.json').exists());self.assertFalse((self.root/'receipt-checkout').exists())
+
     def test_receipt_replays_original_result_and_refuses_changed_arguments(self):
         request=str(uuid.uuid4());args=self.receipt_create(request)
         first=subprocess.run(args,env=self.env,text=True,capture_output=True,timeout=10)
@@ -297,7 +341,7 @@ class Cleanup(Repository,unittest.TestCase):
             identity=str(uuid.uuid4());path=state/'archives'/(identity+'.json')
             record={'version':1,'name':name,'agent':'codex','archive_id':identity,'cwd':str(cwd),'archived_at':time.time()}
         elif backend=='dsh':
-            path=state/'dsh/bindings'/(hashlib.sha256(name.encode()).hexdigest()+'.json');record={'backend':'dsh','name':name,'agent':'dsh','cwd':str(cwd)}
+            path=state/'dsh/bindings'/(hashlib.sha256(name.encode()).hexdigest()+'.json');record={'backend':'dsh','name':name,'agent':'dsh','conversation_id':'session-'+str(uuid.uuid4()),'cwd':str(cwd)}
         else:
             path=state/(hashlib.sha256(name.encode()).hexdigest()+'.json');record={'version':1,'name':name,'agent':'codex','launch_dir':str(cwd),'cwd':str(self.root)}
         path.parent.mkdir(parents=True,exist_ok=True);path.write_text(json.dumps(record))
@@ -328,6 +372,12 @@ class Cleanup(Repository,unittest.TestCase):
         lost=self.linked('lost');self.git('-C',str(lost),'checkout','-q','--detach');self.commit(lost,'only here')
         kept=self.linked('kept');self.git('-C',str(kept),'checkout','-q','--detach','main')
         for path in (locked,parent,nested,busy,bound,deep,archived,lost,kept):self.age(path)
+        # Raw fixture files have no verified compact coverage yet. Review must
+        # stay conservative until an ordinary archive read reconciles them.
+        cold=self.row(archived,self.review())
+        self.assertIn('archives_unavailable',codes(cold['notes']))
+        page=subprocess.run([str(HGS),'archives','--json'],input='{"limit":1}',env=self.env,text=True,capture_output=True,timeout=20)
+        self.assertEqual(page.returncode,0,page.stdout+page.stderr)
         data=self.review()
         row=self.row(locked,data);self.assertEqual(codes(row['reasons']),['locked']);self.assertIn('in use',row['reasons'][0]['message'])
         row=self.row(parent,data);self.assertEqual(codes(row['reasons']),['nested']);self.assertEqual(row['nested'],[str(nested.resolve())])

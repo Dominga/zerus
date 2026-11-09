@@ -1,38 +1,40 @@
 Run only the tests your change touches (hgs guide tests)
 
-A project says how in .zerus/tests.toml; the owner may override it in the team
-settings. Without the file Zerus only proposes what it detects; nothing is enforced.
+.zerus/tests.toml sets rules; the owner may override them in team settings.
+Without it Zerus only proposes detected tests and enforces nothing.
 
-  hgs test affected                 tests for your uncommitted changes, with time
-  hgs test affected BASE..HEAD      the same for a range; --staged for the index
-  hgs test affected --files A B     the same for named files
-  hgs test affected --full          the whole set and its time (never run it:
-                                    the full run is the owner's call)
-  hgs test config                   providers, areas and the full-run policy
-  hgs test map --check              fails when a tracked file is in no area or a
-                                    test file in no provider's map
-  hgs test map --write              refresh the committed snapshot of the map
-  hgs test durations --record LOG --provider NAME   keep a run's times
-  hgs test tools                    the tools the tests need here
+  hgs test affected                 uncommitted changes, with time
+  hgs test affected BASE..HEAD      a range; --staged for the index
+  hgs test affected --files A B     named files
+  hgs test affected --full          the whole set and time; only the owner
+                                    authorizes a full run
+  hgs test config                   providers, areas and full-run policy
+  hgs test map --check              fails on unmapped files/tests
+  hgs test map --write              refresh the map snapshot
+  hgs test durations --record LOG --provider NAME   record run times
+  hgs test tools                    tools needed here
 
-The map is read from the sources when you ask; the committed file stands in
-only for a build this checkout cannot read. Only tracked files count: git add
-a new test.
-Each run line is a command for its folder. A team member sends its printed
-"hgs team run" requests, the build first: cargo-test, qt-test, cmake-build
-and ctest, py-test (cython-build first), msbuild-build and vstest, ue-build
-and ue-test; hgs run takes the other kinds. A QtTest change inside test
-functions also names the binary with only those functions.
-A file the map does not know runs its whole area; a file in no area is named,
-never skipped. Tests marked manual (real agents, hosts) run only by hand;
-tests built elsewhere run in the CI.
-Every action takes --dir DIR, --team TEAM (the owner's override) and --json.
-Never install a tool: Zerus offers a missing one to the owner. Propose it
-on the question card and work without it.
+Sources refresh the map; its snapshot covers unavailable builds. Only tracked
+files count: git add new tests. Each run line names its command and folder.
+Send printed hgs team run requests, build first: cargo-test, qt-test,
+cmake-build/ctest, cython-build/py-test, msbuild-build/vstest, ue-build/ue-test.
+hgs run takes other kinds. QtTest function changes name binary:function.
+Unknown files run their whole area; files in no area are named, never skipped.
+Manual tests (real agents, hosts) run by hand; elsewhere tests run in CI.
+Every action accepts --dir DIR, --team TEAM (owner override) and --json.
+Never install a tool: propose it on the question card (Waiting for you),
+then work without it.
 
-.zerus/tests.toml: [map], [full] (where, policy), [retries], [budgets],
-[isolation], [build_cache], [merge_queue], [resources.NAME] and [[provider]]
-(name, kind cargo|ctest|pytest|cython|unittest|gradle|npm|msbuild|unreal|
-command, root, sources, tests, manual, elsewhere, affected build|paths|all,
-[[provider.paths]], command, manifest, widen, build_dir); every field:
-docs/reference.md, Affected tests.
+Windows private-store fixtures use owner_only_dir on a missing tempdir child.
+Keep existing ACLs unchanged; never repair Temp or weaken privacy checks.
+
+Local merge-queue CTest probes, configures missing builds, always builds, then
+tests under one deadline. Build failures are not retried as flaky tests.
+Machine vars/env stay in untracked .zerus/tests.local.toml; failed probes are
+not run here, never green. Owner overrides apply to every stage; remote
+runners are unchanged.
+
+Config: [map], [full], [retries], [budgets], [isolation], [build_cache],
+[merge_queue], resources and providers (cargo, ctest, pytest, cython, unittest,
+gradle, npm, msbuild, unreal, command); paths, manifest, build_dir and all
+fields: docs/reference.md, Affected tests.

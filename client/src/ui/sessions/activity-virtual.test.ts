@@ -4,6 +4,7 @@ import { activityFlow, activityGeometryValid, activityRange, activityText, check
 import { loadMarkdown } from "./markdown";
 import type { TranscriptItem } from "./types";
 import { ACTIVITY_RESIZE_OVERSCAN } from "./activity-heights";
+import { TOOL_OUTPUT } from "./tool-output";
 
 const geometryRow = (index: number, top: number, bottom: number, start = top): ActivityGeometryRow => ({
   index, key: `item-${index}`, top, bottom, height: bottom - top, start, domStart: top,
@@ -14,7 +15,8 @@ describe("Activity copy and virtual retention", () => {
     await loadMarkdown();
     const items: TranscriptItem[] = [
       { id: "first", kind: "agent", at: "10:00", body: "First **reply** with `code` and https://example.com." },
-      { id: "tool", kind: "tools", at: "10:01", title: "Bash", body: "npm test", lines: ["hidden output"] },
+      { id: "tool", kind: "tools", at: "10:01", title: "Bash", body: "npm test",
+        events: [{ label: "Tool finished / Bash", at: "10:01", size: 13, detail: () => "hidden output" }] },
       { id: "media", kind: "media", media: "voice", at: "10:02", state: "submitted", durationMs: 60_000,
         waveform: [], transcript: "voice transcript" },
       { id: "last", kind: "user", at: "10:03", body: "Last loaded message" },
@@ -27,8 +29,30 @@ describe("Activity copy and virtual retention", () => {
     expect(collapsed).not.toContain("voice transcript");
     expect(collapsed.indexOf("First reply")).toBeLessThan(collapsed.indexOf("Last loaded message"));
     const expanded = activityText(items, { tool: true, media: true });
+    expect(expanded).toContain("Tool finished / Bash");
     expect(expanded).toContain("hidden output");
     expect(expanded).toContain("voice transcript");
+  });
+
+  it("copies an expanded tool output as far as it shows (zerus-5wmh.13.8.1)", () => {
+    const big = "z".repeat(5_000_000);
+    const items: TranscriptItem[] = [{ id: "tool", kind: "tool", at: "10:01", title: "Tool finished / Bash", body: "z…",
+      events: [{ label: "Tool finished / Bash", at: "10:01", size: big.length, detail: () => big }] }];
+    expect(activityText(items, { tool: true }).length).toBeLessThan(TOOL_OUTPUT.first + 200);
+    expect(activityText(items, { tool: true }, { "tool#0": TOOL_OUTPUT.first + TOOL_OUTPUT.step }))
+      .toContain("z".repeat(TOOL_OUTPUT.first + TOOL_OUTPUT.step));
+  });
+
+  it("copies thinking and an opened subagent report as their Markdown shows (zerus-5wmh.13.8.2)", async () => {
+    await loadMarkdown();
+    const items: TranscriptItem[] = [
+      { id: "think", kind: "thinking", at: "10:00", body: "Check **the** `config` first" },
+      { id: "report", kind: "report", at: "10:01", title: "Done", body: "# Result\n\n- **one** item" },
+    ];
+    expect(activityText(items)).toContain("Check the config first");
+    expect(activityText(items)).not.toContain("**");
+    expect(activityText(items)).not.toContain("one item");
+    expect(activityText(items, { report: true })).toContain("Result\none item");
   });
 
   it("keeps a loading or playing media row mounted while it is scrolled out", () => {

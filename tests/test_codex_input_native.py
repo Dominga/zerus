@@ -10,6 +10,7 @@ import time
 import tomllib
 import uuid
 import unittest
+from unittest import mock
 
 import test_clear_context_native as native
 import test_codex_async_questions_native as questions
@@ -144,6 +145,43 @@ class NativeCodexStartup(test_pause.Harness):
             time.sleep(.1)
         self.fail(label + '\n' + self.screen())
 
+    def turn_completed(self, text):
+        # SessionStart or a previous Stop can still describe idle after Enter.
+        # Require this exact provider request too; never resend to make it true.
+        record = self.binding(self.name)
+        return (any(row['texts'][-1:] == [text] for row in self.server.requests)
+                and record.get('activity') == 'idle' and not record.get('expected_id'))
+
+    def pause_settled_original(self):
+        # SessionStart can publish idle before this turn's UserPromptSubmit.
+        # Only these preflight refusals prove that pause sent no signal.
+        name = self.name
+        original = self.binding(name)
+        fields = ('run_id', 'conversation_id', 'pid', 'process_start')
+        identity = tuple(original.get(key) for key in fields)
+        self.assertTrue(all(identity), 'The fixture must retain its original native binding')
+        refusals = {
+            f'hgs: {name}: activity changed while checking; retry pause',
+            f'hgs: {name}: agent is busy or unconfirmed; wait for its answer before pausing',
+        }
+        deadline = time.monotonic() + 20  # Existing fixture command budget, not per retry.
+        last = ''
+        while True:
+            current = self.binding(name)
+            self.assertEqual(tuple(current.get(key) for key in fields), identity,
+                             'The original changed while waiting to pause; never adopt another run')
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self.fail('The original did not settle for pause within 20 s: ' + last)
+            result = subprocess.run([str(test_pause.HGS), 'pause', name], env=self.env,
+                                    capture_output=True, text=True, timeout=remaining)
+            if result.returncode == 0:
+                return result.stdout
+            last = result.stdout + result.stderr
+            if result.returncode != 1 or result.stdout or result.stderr.strip() not in refusals:
+                self.fail(last)  # A possible signal, timeout or another refusal is never retried.
+            time.sleep(min(.1, max(0, deadline - time.monotonic())))
+
     def launch(self, trust=False):
         self.name = 'codex/p/startup'
         args = [] if trust else ['--dangerously-bypass-hook-trust']
@@ -199,6 +237,117 @@ class NativeCodexStartup(test_pause.Harness):
         self.assertEqual(result.returncode, 0, result.stderr + '\n' + self.screen())
         self.assertEqual(json.loads(result.stdout)['status'], 'answered')
         self.deliver_first()
+
+    def test_resumed_and_restored_hook_review_blocks_input_until_the_person_answers(self):
+        def card():
+            return next((q for q in self.inspect().get('pending_questions', [])
+                         if q.get('source') == 'codex_hooks_trust'), None)
+
+        def answer(question):
+            record = self.binding(self.name)
+            payload = dict(request_id=str(uuid.uuid4()), expected_run_id=record['run_id'],
+                           expected_conversation_id=record.get('conversation_id') or '',
+                           question_id=question['question_id'], expected_question_hash=question['question_hash'],
+                           answers=[dict(question_id='hooks_trust', selected_option_ids=['trust'], text='')])
+            result = subprocess.run([str(test_pause.HGS), 'answer', self.name, '--json'],
+                                    input=json.dumps(payload), env=self.env, text=True,
+                                    capture_output=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr + '\n' + self.screen())
+
+        def message(text):
+            record = self.binding(self.name)
+            payload = dict(request_id=str(uuid.uuid4()), expected_run_id=record['run_id'],
+                           expected_conversation_id=record['conversation_id'], text=text)
+            return subprocess.run([str(test_pause.HGS), 'send', self.name, '--json'],
+                                  input=json.dumps(payload), env=self.env, text=True,
+                                  capture_output=True, timeout=20)
+
+        self.launch(trust=True)
+        initial = self.until('The initial native hook review must be explicit', card)
+        answer(initial)
+        self.deliver_first()
+        conversation = self.binding(self.name)['conversation_id']
+        hooks = self.native_home / 'hooks.json'
+        original = hooks.read_bytes()
+        stamp = hooks.stat().st_mtime_ns
+        previous = self.binding(self.name)['run_id']
+        self.pause_settled_original()
+        self.hgs('resume', self.name, '-d')
+        self.until('The unchanged resume must reach its native composer', lambda:
+                   self.binding(self.name).get('run_id') != previous and '›' in self.screen()
+                   and 'Hooks need review' not in self.screen())
+        self.assertEqual((hooks.read_bytes(), hooks.stat().st_mtime_ns), (original, stamp))
+        self.assertIsNone(card(), 'An unchanged registration must not request trust again')
+        unchanged = 'Synthetic unchanged-hook resume.'
+        result = message(unchanged)
+        self.assertEqual(result.returncode, 0, result.stderr + '\n' + self.screen())
+        self.until('The resumed turn must finish', lambda: self.turn_completed(unchanged))
+
+        for mode in ('resume', 'restore'):
+            with self.subTest(mode=mode):
+                previous = self.binding(self.name)['run_id']
+                self.pause_settled_original()
+                # Change one of our fixture's existing definitions, not its
+                # executable or trust state. Codex must request new consent.
+                document = json.loads(hooks.read_text())
+                document['hooks']['SessionStart'][0]['hooks'][0]['timeout'] += 1
+                hooks.write_text(json.dumps(document, indent=2))
+                options = []
+                if mode == 'restore':
+                    self.hgs('archive', self.name)
+                    archived = next(json.loads(path.read_text())
+                                    for path in (self.root / 'state/archives').glob('*.json')
+                                    if json.loads(path.read_text()).get('name') == self.name)
+                    options = ['--archive', archived['archive_id']]
+                self.hgs('resume', self.name, *options, '-d')
+                self.until('The new original run must be bound', lambda:
+                           self.binding(self.name).get('run_id') not in (None, previous))
+                review = self.until('The saved conversation must expose its real hook review', card)
+                self.assertEqual(review['conversation_id'], conversation)
+                self.assertEqual(review['run_id'], self.binding(self.name)['run_id'])
+                self.assertNotEqual(review['question_hash'], initial['question_hash'])
+                result = message('MUST NOT ENTER THE HOOK TRUST DIALOG')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('hook trust review', result.stderr)
+                self.assertIn('› 1. Review hooks', self.screen())
+                self.assertFalse(any('MUST NOT ENTER' in text
+                                     for request in self.server.requests for text in request['texts']))
+                answer(review)  # This fixture's explicit decision; never automatic trust.
+                text = 'Synthetic after ' + mode + ' hook review.'
+                result = message(text)
+                self.assertEqual(result.returncode, 0, result.stderr + '\n' + self.screen())
+                self.until('The original resumed conversation must complete its turn',
+                           lambda: self.turn_completed(text))
+                self.assertEqual(self.binding(self.name)['conversation_id'], conversation)
+                self.assertEqual(sum(row['texts'][-1:] == [text] for row in self.server.requests), 1)
+
+    def test_hook_review_pause_rechecks_each_original_after_preflight_refusals(self):
+        real_run = subprocess.run
+        refused, paused = {}, []
+        errors = ('agent is busy or unconfirmed; wait for its answer before pausing',
+                  'activity changed while checking; retry pause')
+
+        def run(argv, *args, **kwargs):
+            if argv == [str(test_pause.HGS), 'pause', getattr(self, 'name', None)]:
+                run_id = self.binding(self.name)['run_id']
+                count = refused.get(run_id, 0)
+                if count < len(errors):
+                    refused[run_id] = count + 1
+                    # A fixture preflight refusal: no native pause call occurred.
+                    return subprocess.CompletedProcess(argv, 1, '', f'hgs: {self.name}: {errors[count]}\n')
+                result = real_run(argv, *args, **kwargs)
+                if result.returncode == 0:
+                    paused.append(run_id)
+                return result
+            return real_run(argv, *args, **kwargs)
+
+        with mock.patch.object(subprocess, 'run', side_effect=run):
+            # Delegate every trust, send, resume, archive and scope assertion to
+            # the original native contract. A missing retry at either call site fails.
+            self.test_resumed_and_restored_hook_review_blocks_input_until_the_person_answers()
+        self.assertEqual(len(refused), 3)
+        self.assertEqual(list(refused.values()), [2, 2, 2])
+        self.assertEqual(paused, list(refused))
 
     def untrusted(self, git=False):
         self.server.collaboration = False

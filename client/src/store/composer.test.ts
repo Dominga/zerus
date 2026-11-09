@@ -1,3 +1,4 @@
+import { pasteNative, samePaste, type PasteBinding } from "../ui/sessions/paste-files";
 import { describe, expect, it } from "vitest";
 import { createRoot } from "solid-js";
 import { createComposer, draftKey, nameDraftKey, EDIT_MS, flushWhenHidden, MAX_TEXT_BYTES, reportVisibility, statusLine, TOO_LONG, type ComposerPort, type Images, type Notices } from "./composer";
@@ -48,13 +49,15 @@ function fakes(reply: SendReply = { kind: "sending" }, opened: ComposerView | nu
     answer: async (token, answer) => { calls.push(`answer ${token} ${JSON.stringify(answer)}`); return answerReply; },
     remove: async (_h, index) => { calls.push(`remove ${index}`); }, undo: async () => { calls.push("undo"); },
     allowRetry: async () => { calls.push("allow retry"); }, cancelSend: async () => { calls.push("cancel send"); },
-    interrupted: async () => { calls.push("interrupted"); },
+    interrupted: async () => { calls.push("interrupted"); return 7; },
+    interruptFailed: async (stop: number) => { calls.push(`interruptFailed ${stop}`); },
     clear: async (_h, run, conversation, dismiss) => { calls.push(`clear ${run} ${conversation} ${dismiss}`); return { kind: "notice", text: "Context cleared. Your draft is ready to send.", error: false }; },
     refresh: async (h) => { calls.push(`refresh ${h}`); },
     openAttachment: async (path) => { calls.push(`open file ${path}`); return openReply(); },
     localRetry: async (h, id) => { calls.push(`retry ${h} ${id}`); return retryReply; },
     localDelete: async (h, id) => { calls.push(`delete ${h} ${id}`); },
     localInspect: async (h, id) => { calls.push(`inspect ${h} ${id}`); return { kind: "terminal" }; },
+    inboxRemove: async (h, run, conversation, id) => { calls.push(`inbox ${h} ${run} ${conversation} ${id}`); return { outcome: "removed" }; },
   };
   const notify: Notices = (tone, text, sticky) => { notices.push(`${tone} ${sticky ? "sticky" : "timed"} ${text}`); };
   let clock = 0;
@@ -102,6 +105,63 @@ describe("child draft identity", () => {
     for (const other of [null, "", "not-a-uuid", id.toUpperCase(), "00000000-0000-0000-0000-000000000000"]) {
       expect(draftKey({ ...SESSION, session_id: other }), String(other)).toBe(KEY);
     }
+  });
+});
+
+describe("composer Stop and the interrupted prompt (zerus-5wmh.13.4)", () => {
+  it("numbers the Stop and reports its refusal by that number, even after another composer opened", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      expect(await c.interrupted()).toBe(0);
+      c.apply(view());
+      const stopped = await c.interrupted();
+      expect(stopped).toBe(7);
+      // zerus-btmir: the refusal belongs to that Stop, not to whichever composer is open now.
+      c.apply(view({ handle: 2, key: "fixture\nclaude/project/other" }));
+      await c.interruptFailed(stopped);
+      await c.interruptFailed(0);
+      expect(f.calls).toEqual(["interrupted", "interruptFailed 7"]);
+    });
+  });
+
+  // review-win-d's controls for PR #1778 (zerus-c0xz8): typing Rust has not received yet wins.
+  for (const when of ["before", "after"] as const) {
+    it(`keeps the next draft typed ${when} Stop rather than the offered old prompt`, async () => {
+      const f = fakes();
+      await createRoot(async () => {
+        const c = createComposer(f.port, f.timers);
+        c.apply(view());
+        if (when === "before") c.input("my next message", 15, 15);
+        await c.interrupted();
+        if (when === "after") c.input("my next message", 15, 15);
+        expect(f.calls.some((call) => call.startsWith("edit "))).toBe(false);
+        c.apply(view({ offer: { id: 1, text: "the interrupted old prompt" } }));
+        f.advance(EDIT_MS);
+        await tick();
+        expect(c.text()).toBe("my next message");
+        expect(f.calls.filter((call) => call.startsWith("edit "))).toEqual(["edit 1 my next message"]);
+      });
+    });
+  }
+
+  it("takes an offer into an empty field once, as an ordinary edit", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view());
+      c.apply(view({ offer: { id: 4, text: "Fix the build" } }));
+      expect(c.text()).toBe("Fix the build");
+      expect(c.selection()).toEqual({ start: 13, end: 13 });
+      f.advance(EDIT_MS);
+      await tick();
+      expect(f.calls.filter((call) => call.startsWith("edit "))).toEqual(["edit 1 Fix the build"]);
+      // The same offer again (a repeated view) is not taken twice.
+      c.input("", 0, 0);
+      f.advance(EDIT_MS); await tick();
+      c.apply(view({ offer: { id: 4, text: "Fix the build" } }));
+      expect(c.text()).toBe("");
+    });
   });
 });
 
@@ -959,6 +1019,108 @@ describe("dropped files (MessageComposer::attachDroppedFiles, 961-967)", () => {
   });
 });
 
+describe("pasted copied files (MessageComposer insertFromMimeData, 186-196)", () => {
+  it("attach in place of the selection, as a pasted image, after the typing is saved", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view());
+      c.input("hello world", 11, 6);
+      await c.attachPasted(["/srv/home/example/notes.txt", "/srv/home/example/plan.png"]);
+      expect(f.calls.slice(-2)).toEqual(["edit 1 hello world", "attach /srv/home/example/notes.txt,/srv/home/example/plan.png 6-11"]);
+      c.apply(view({ sending: true }));
+      const before = f.calls.length;
+      await c.attachPasted(["/srv/a.txt"]);
+      expect(f.calls.length, "nothing attaches while the composer is locked").toBe(before);
+    });
+  });
+});
+
+describe("a paste that waits for the native clipboard (zerus-voy7d)", () => {
+  // The reviewer's control: a real composer, the actual pasteNative and its binding.
+  for (const change of ["typing", "a selection change"] as const) {
+    it(`does nothing after ${change}`, async () => {
+      const f = fakes();
+      await createRoot(async () => {
+        const c = createComposer(f.port, f.timers);
+        c.apply(view({ text: "original draft", position: 14, anchor: 14 }));
+        const opened = c.view()!, at = c.selection();
+        const bound: PasteBinding = { handle: opened.handle, key: opened.key, epoch: opened.text_epoch, text: c.text(), start: at.start, end: at.end };
+        let answer!: (paths: string[] | null) => void;
+        const effects: string[] = [];
+        const pending = pasteNative({ kind: "native", ask: true, image: undefined, text: "clipboard text" }, {
+          native: () => new Promise((resolve) => { answer = resolve; }),
+          current: () => samePaste(c.view(), bound, c.locked(), c.text(), c.selection()),
+          attach: () => { effects.push("attach"); }, image: () => { effects.push("image"); }, text: () => { effects.push("text"); },
+        });
+        if (change === "typing") c.input("user typed after paste", 22, 22); else c.select(0, 14);
+        answer(null); await pending;
+        expect(effects, "ordinary edits and selection changes keep text_epoch, but end this paste").toEqual([]);
+      });
+    });
+  }
+
+  it("applies when nothing changed meanwhile", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view({ text: "original draft", position: 14, anchor: 14 }));
+      const opened = c.view()!, at = c.selection();
+      const bound: PasteBinding = { handle: opened.handle, key: opened.key, epoch: opened.text_epoch, text: c.text(), start: at.start, end: at.end };
+      const effects: string[] = [];
+      await pasteNative({ kind: "native", ask: true, image: undefined, text: "clipboard text" }, {
+        native: async () => null,
+        current: () => samePaste(c.view(), bound, c.locked(), c.text(), c.selection()),
+        attach: () => { effects.push("attach"); }, image: () => { effects.push("image"); }, text: (t) => { effects.push(`text ${t}`); },
+      });
+      expect(effects).toEqual(["text clipboard text"]);
+    });
+  });
+});
+
+describe("a paste keeps the range it was accepted at (zerus-ptyzp)", () => {
+  // The reviewer's control: the typing is still being saved and the read-only field gets a new selection.
+  function held(f: ReturnType<typeof fakes>) {
+    let edited!: () => void;
+    f.port.edit = async (_h, rev, _epoch, text) => { f.calls.push(`edit ${rev} ${text}`); await new Promise<void>((resolve) => { edited = resolve; }); };
+    return () => edited();
+  }
+
+  it("pasted files attach at the original range", async () => {
+    const f = fakes();
+    const release = held(f);
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view()); c.input("draft to preserve", 5, 5);
+      const opened = c.view()!, at = c.selection();
+      const bound: PasteBinding = { handle: opened.handle, key: opened.key, epoch: opened.text_epoch, text: c.text(), start: at.start, end: at.end };
+      let attaching: Promise<void> | undefined;
+      await pasteNative({ kind: "native", ask: true, image: undefined, text: "" }, {
+        native: async () => ["/srv/a.txt"], current: () => samePaste(c.view(), bound, c.locked(), c.text(), c.selection()),
+        attach: (paths) => { attaching = c.attachPasted(paths); }, image: () => {}, text: () => {},
+      });
+      expect(c.locked()).toBe(true);
+      c.select(0, c.text().length);
+      release(); await attaching;
+      expect(f.calls.at(-1), "a selection in the read-only field does not retarget the accepted paste").toBe("attach /srv/a.txt 5-5");
+    });
+  });
+
+  it("a pasted image goes in at the original range", async () => {
+    const f = fakes();
+    const release = held(f);
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      f.port.pasteImage = async (_h, bytes, start, end) => { f.calls.push(`paste ${bytes.length} ${start}-${end}`); };
+      c.apply(view()); c.input("draft to preserve", 6, 2);
+      const pasting = c.pasteImage(new Blob([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], { type: "image/png" }));
+      c.select(0, c.text().length);
+      release(); await pasting;
+      expect(f.calls.at(-1)).toBe("paste 4 2-6");
+    });
+  });
+});
+
 describe("opening a draft attachment (MessageComposer::openAttachment, 1067-1085)", () => {
   const shot = { name: "shot.png", mime: "image/png", reference: "[Image #1]", bytes: 8, path: "draft/1/2/0", excerpt: null };
 
@@ -1043,6 +1205,30 @@ describe("the batch envelope", () => {
     expect(isEmptyBatch(normalize({ composer_events: events }))).toBe(false);
     expect(normalize({ composer_events: events }).composer_events).toEqual(events);
     expect(normalize({ draft_keys: [KEY] }).draft_keys).toEqual([KEY]);
+  });
+
+  describe("Remove of a not-delivered OpenCode message (zerus-5wmh.13.6)", () => {
+    it("asks Rust for exactly the composer, run, conversation and message the dialog opened for", async () => {
+      const f = fakes();
+      await createRoot(async () => {
+        const c = createComposer(f.port, f.timers, images(1, 1), f.notify);
+        c.apply(view({}));
+        expect(await c.inboxRemove(1, "run-1", "conv-1", "msg_queued01")).toEqual({ outcome: "removed" });
+        expect(f.calls).toEqual(["inbox 1 run-1 conv-1 msg_queued01"]);
+      });
+    });
+
+    it("a call that failed in transport may have removed it: uncertain, never retried", async () => {
+      const f = fakes();
+      let calls = 0;
+      const port: ComposerPort = { ...f.port, inboxRemove: () => { calls++; return Promise.reject(new Error("ipc closed")); } };
+      await createRoot(async () => {
+        const c = createComposer(port, f.timers, images(1, 1), f.notify);
+        c.apply(view({}));
+        expect(await c.inboxRemove(1, "run-1", "conv-1", "msg_queued01")).toEqual({ outcome: "uncertain", detail: "ipc closed" });
+        expect(calls).toBe(1);
+      });
+    });
   });
 
   describe("local rows (Task 7)", () => {

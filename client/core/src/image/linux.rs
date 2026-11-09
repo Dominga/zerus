@@ -9,7 +9,7 @@ use std::{
         },
     },
     path::{Path, PathBuf},
-    process::Command,
+    process::{Child, Command},
     time::{Duration, Instant},
 };
 
@@ -143,6 +143,56 @@ pub struct Pin {
     script: bool,
     folders: Vec<Folder>,
 }
+
+/// Correlation from this snapshot's SAME unreaped native child. This supplies
+/// no role, consent or exit witness, and cannot be constructed from a PID.
+pub struct OriginalChild {
+    pid: u32,
+    parent: u32,
+    birth: String,
+}
+impl OriginalChild {
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+    pub fn parent(&self) -> u32 {
+        self.parent
+    }
+    pub fn birth(&self) -> &str {
+        &self.birth
+    }
+}
+
+fn child_identity(child: &Child) -> io::Result<(u32, String)> {
+    let mut bytes = Vec::new();
+    File::open(format!("/proc/{}/stat", child.id()))?
+        .take(4097)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > 4096 {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let text = std::str::from_utf8(&bytes).map_err(io::Error::other)?;
+    let fields = text
+        .rsplit_once(") ")
+        .ok_or(io::ErrorKind::InvalidData)?
+        .1
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    let parent = fields
+        .get(1)
+        .ok_or(io::ErrorKind::InvalidData)?
+        .parse::<u32>()
+        .map_err(io::Error::other)?;
+    let birth = *fields.get(19).ok_or(io::ErrorKind::InvalidData)?;
+    if parent != std::process::id()
+        || birth.len() > 20
+        || birth.is_empty()
+        || !birth.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    Ok((parent, birth.into()))
+}
 impl Pin {
     /// Capture one immutable execution image. The fixed `/proc/self/exe` input
     /// opens the kernel's running object itself, not a reopened installed name.
@@ -207,6 +257,38 @@ impl Pin {
     }
     pub fn executable(&self) -> &Path {
         &self.program
+    }
+    /// Observe the actual kernel exe object while the original child still
+    /// owns its unreleased input. Scripts cannot establish this native-image
+    /// identity: their executing object would be an interpreter. On refusal
+    /// close stdin and return the SAME Child to its owner's ordinary reaper.
+    /// A later socket borrower still needs fresh kernel object/birth checks.
+    pub fn observe_original_child(&self, child: &mut Child) -> io::Result<OriginalChild> {
+        let result = (|| {
+            if self.script || child.stdin.is_none() || child.try_wait()?.is_some() {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+            let before = child_identity(child)?;
+            let actual = File::open(format!("/proc/{}/exe", child.id()))?;
+            let expected = stamp(&self.image)?;
+            if !sealed(&actual)
+                || stamp(&actual)? != expected
+                || child_identity(child)? != before
+                || child.try_wait()?.is_some()
+                || stamp(&File::open(format!("/proc/{}/exe", child.id()))?)? != expected
+            {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+            Ok(OriginalChild {
+                pid: child.id(),
+                parent: before.0,
+                birth: before.1,
+            })
+        })();
+        if result.is_err() {
+            drop(child.stdin.take());
+        }
+        result
     }
     pub fn inherit(&self, command: &mut Command) -> io::Result<()> {
         if command.get_program() != self.executable() || !sealed(&self.image) {

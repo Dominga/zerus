@@ -165,8 +165,9 @@ fn exact_previous_store_upgrade_adds_only_the_independent_answer_leaf() {
             .unwrap(),
         crate::desktop::store::SCHEMA
     );
-    // Its own two tables, then the compact-to-send leaf's two.
-    assert_eq!(tables(&store.db), before + 2 + 2);
+    // Its own two tables, then the compact-to-send and session resume
+    // leaves' two each.
+    assert_eq!(tables(&store.db), before + 2 + 2 + 2);
     assert_eq!(ledger::undrained(&store.db).unwrap(), 0);
     assert_eq!(
         store.operation_status()["kinds"]["deferred_answer"]["undrained"],
@@ -1231,6 +1232,24 @@ mod actor {
         epoch: String,
         config: Config,
         owner: Arc<crate::platform::FileLock>,
+        /// The epoch's sealed negatives: every runtime of this epoch shares them.
+        fences: Arc<crate::desktop::not_admitted::Fences>,
+    }
+    /// An executor closure behind [`Execute`], its signature inferred.
+    fn erased(
+        execute: impl Fn(
+                &Path,
+                &wire::Plan,
+                &[String],
+                &[u8],
+                &Arc<InheritedLock>,
+                &Arc<dyn Send + Sync>,
+            ) -> Ended
+            + Send
+            + Sync
+            + 'static,
+    ) -> Arc<Execute> {
+        Arc::new(execute)
     }
     impl Fixture {
         /// `execute` stands in for the one child; it also receives the CLI
@@ -1287,12 +1306,30 @@ mod actor {
             .unwrap();
             let owner = Arc::new(location.lock().unwrap());
             let exclusion = Arc::new(location.handoff_lock().unwrap());
-            let mut runtime = runtime::Runtime::new(&config, &epoch, owner.clone()).unwrap();
+            let fences = Arc::new(crate::desktop::not_admitted::Fences::default());
+            let mut runtime =
+                runtime::Runtime::new(&config, &epoch, owner.clone(), fences.clone()).unwrap();
+            Self::install(&mut runtime, &config.state, execute);
+            runtime.poll(&mut store, Some(exclusion.clone()));
+            Self {
+                _temp: temp,
+                location,
+                store,
+                runtime,
+                exclusion,
+                epoch,
+                config,
+                owner,
+                fences,
+            }
+        }
+        /// The fixture's executor, observer and macOS fence on `runtime`.
+        fn install(runtime: &mut runtime::Runtime, state: &Path, execute: Option<Arc<Execute>>) {
             // This synthetic source/Validated seam tests the actor, not native
             // authentication or an installed frontend authority positive.
             match execute {
                 Some(execute) => {
-                    let state = config.state.clone();
+                    let state = state.to_path_buf();
                     runtime.fixture_executor(
                         MACHINE,
                         Arc::new(move |plan, args, input, lock, resources| {
@@ -1317,17 +1354,19 @@ mod actor {
             // The shared actor logic is tested on every platform; the macOS
             // fence has its own test.
             runtime.fixture_mac_fence(false);
-            runtime.poll(&mut store, Some(exclusion.clone()));
-            Self {
-                _temp: temp,
-                location,
-                store,
-                runtime,
-                exclusion,
-                epoch,
-                config,
-                owner,
-            }
+        }
+        /// Destroys the runtime and builds it again under the same epoch,
+        /// as the service does when it restarts its background runtime.
+        fn rebuild(&mut self, execute: Arc<Execute>) {
+            let torn = std::mem::replace(
+                &mut self.runtime,
+                runtime::Runtime::new(&self.config, &self.epoch, self.owner.clone(), self.fences.clone())
+                    .unwrap(),
+            );
+            drop(torn);
+            Self::install(&mut self.runtime, &self.config.state, Some(execute));
+            self.runtime
+                .poll(&mut self.store, Some(self.exclusion.clone()));
         }
         fn original(&self) -> Verified {
             super::original(&self.location.configuration, &self.epoch)
@@ -1864,7 +1903,10 @@ os._exit(0)"#;
             .frontend(&mut f.store, authority, Some(f.exclusion.clone()));
         writer.join().unwrap();
         assert_eq!(answer["accepted"], false, "consumed after it expired");
-        assert_eq!(answer["code"], "deferred_answer_unavailable");
+        // Refused after the empty read and before the admission: it never
+        // started, so it is answered not admitted and sealed (zerus-tlb9q).
+        assert_eq!(answer["code"], wire::NOT_ADMITTED);
+        assert!(f.fences.deferred_answer.sealed(&original.plan.request_id));
         assert!(ledger::load(&f.store.db, &original.plan.request_id)
             .unwrap()
             .is_none());
@@ -1973,7 +2015,7 @@ os._exit(0)"#;
         let mut f = Fixture::new(|_, _, _, _, _, _| panic!("recovered send must not execute"));
         let original = f.original();
         assert!(f.admit(&original).accepted);
-        f.runtime = runtime::Runtime::new(&f.config, &f.epoch, f.owner.clone()).unwrap();
+        f.runtime = runtime::Runtime::new(&f.config, &f.epoch, f.owner.clone(), f.fences.clone()).unwrap();
         // A new runtime fences macOS again; the fixture's runs without it.
         f.runtime.fixture_mac_fence(false);
         f.runtime.fixture_executor(
@@ -2318,7 +2360,7 @@ os._exit(0)"#;
         // Teardown: the worker's own loan outlives the runtime.
         let torn = std::mem::replace(
             &mut f.runtime,
-            runtime::Runtime::new(&f.config, &f.epoch, f.owner.clone()).unwrap(),
+            runtime::Runtime::new(&f.config, &f.epoch, f.owner.clone(), f.fences.clone()).unwrap(),
         );
         drop(torn);
         // The fixture's and the new runtime's copies, plus the worker's.
@@ -2384,6 +2426,234 @@ os._exit(0)"#;
         assert!(!f.row(&original).receipt.drained, "left to its runtime");
         f.until("settled", |f| f.row(&original).receipt.drained);
         assert_eq!(f.row(&original).receipt.phase, Phase::Recorded);
+    }
+
+    /// `original`'s request with content that no longer verifies: refused
+    /// in the writer transaction after its empty read.
+    fn broken(original: &Verified) -> Intent {
+        let mut bad = original.intent.clone();
+        bad.original = "{}".into();
+        bad
+    }
+    fn offer(f: &mut Fixture, intent: Intent) -> wire::Admission {
+        let request = json!(
+            zerus_client_core::desktop::ui_requests::Request::DeferredAnswer {
+                intent: Box::new(intent),
+            }
+        );
+        serde_json::from_value(f.runtime.frontend(
+            &mut f.store,
+            ui_authority::Validated::fixture(&request),
+            Some(f.exclusion.clone()),
+        ))
+        .unwrap()
+    }
+    fn no_row(f: &Fixture, request_id: &str) -> bool {
+        ledger::load(&f.store.db, request_id).unwrap().is_none()
+    }
+    /// Polls a while: nothing sealed may start in that time.
+    fn idle(f: &mut Fixture) {
+        for _ in 0..20 {
+            f.runtime.poll(&mut f.store, Some(f.exclusion.clone()));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+    /// A fixture whose one child answers and counts itself, and the same
+    /// executor for a rebuilt runtime.
+    fn counting() -> (Arc<AtomicUsize>, Fixture) {
+        let ran = Arc::new(AtomicUsize::new(0));
+        let f = Fixture::build(Some(answering(ran.clone())));
+        (ran, f)
+    }
+    fn answering(ran: Arc<AtomicUsize>) -> Arc<Execute> {
+        erased(move |state, plan, _, _, _, _| {
+            ran.fetch_add(1, Ordering::SeqCst);
+            answered(state, plan);
+            Ended::Exited { code: 0 }
+        })
+    }
+
+    /// zerus-tlb9q, desktop-u's pin: a request refused before its admission
+    /// with no row is answered not admitted and sealed for the epoch; an
+    /// otherwise admissible copy of the same request that arrives after it
+    /// gets the same answer and never runs. The lookup never answers it.
+    #[test]
+    fn a_request_refused_before_admission_is_sealed_and_its_copy_never_runs() {
+        let (ran, mut f) = counting();
+        let original = f.original();
+        let id = original.plan.request_id.clone();
+        let refused = offer(&mut f, broken(&original));
+        assert_eq!(
+            (refused.accepted, refused.durable, refused.code.as_str()),
+            (false, false, wire::NOT_ADMITTED)
+        );
+        assert!(refused.not_admitted(&original.intent), "{}", refused.code);
+        assert!(no_row(&f, &id) && f.fences.deferred_answer.sealed(&id));
+        let copy = f.admit(&original);
+        assert!(copy.not_admitted(&original.intent), "{}", copy.code);
+        idle(&mut f);
+        assert_eq!(ran.load(Ordering::SeqCst), 0, "the copy never ran");
+        assert!(no_row(&f, &id));
+        let query = wire::Query::for_plan(original.intent.scope.clone(), &original.plan).unwrap();
+        let lookup = super::super::query(&f.store, &json!({"op": "deferred_answer_result", "query": query}));
+        assert_eq!(
+            (lookup["found"].as_bool(), lookup.get("code")),
+            (Some(false), None)
+        );
+    }
+
+    /// zerus-5llxc: another connection's request is never answered not
+    /// admitted nor sealed, even when its permit expires after the empty
+    /// read or when this epoch sealed its ID.
+    #[test]
+    fn another_connections_request_is_never_not_admitted() {
+        let (_, mut f) = counting();
+        let foreign = super::original(&f.location.configuration, &uuid::Uuid::new_v4().to_string());
+        let request = json!(
+            zerus_client_core::desktop::ui_requests::Request::DeferredAnswer {
+                intent: Box::new(foreign.intent.clone()),
+            }
+        );
+        let expired = ui_authority::Validated::fixture_expiring(
+            &request,
+            Instant::now() - Duration::from_secs(1),
+        );
+        let reply = f
+            .runtime
+            .frontend(&mut f.store, expired, Some(f.exclusion.clone()));
+        assert_eq!(reply["code"], "deferred_answer_unavailable", "{reply}");
+        assert!(!f.fences.deferred_answer.sealed(&foreign.plan.request_id));
+        // This epoch's seal is no answer for another connection's copy.
+        let original = f.original();
+        assert!(offer(&mut f, broken(&original)).not_admitted(&original.intent));
+        let mut intent = original.intent.clone();
+        intent.scope.service_epoch = uuid::Uuid::new_v4().to_string();
+        let copy = intent.verify().unwrap();
+        let reply = f.admit(&copy);
+        assert_eq!(reply.code, "deferred_answer_unavailable");
+        assert!(!reply.not_admitted(&copy.intent));
+        assert!(no_row(&f, &original.plan.request_id));
+    }
+
+    /// The seal belongs to the epoch: the background runtime destroyed and
+    /// built again under the same epoch still refuses the sealed request,
+    /// and a request of another epoch's connection is never sealed.
+    #[test]
+    fn a_runtime_rebuilt_in_the_same_epoch_keeps_the_seal() {
+        let (ran, mut f) = counting();
+        let original = f.original();
+        let id = original.plan.request_id.clone();
+        assert!(offer(&mut f, broken(&original)).not_admitted(&original.intent));
+        f.rebuild(answering(ran.clone()));
+        let copy = f.admit(&original);
+        assert!(copy.not_admitted(&original.intent), "{}", copy.code);
+        idle(&mut f);
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+        assert!(no_row(&f, &id));
+        // The rebuilt runtime still admits a new request.
+        let other = f.original();
+        assert!(f.admit(&other).accepted);
+        f.until("settled", |f| f.row(&other).receipt.drained);
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        // A request of another epoch's connection: unavailable, not sealed.
+        let stale = super::original(&f.location.configuration, &uuid::Uuid::new_v4().to_string());
+        let reply = f.admit(&stale);
+        assert_eq!(
+            (reply.accepted, reply.code.as_str()),
+            (false, "deferred_answer_unavailable")
+        );
+        assert!(!reply.not_admitted(&stale.intent));
+        assert!(!f.fences.deferred_answer.sealed(&stale.plan.request_id));
+        assert!(no_row(&f, &stale.plan.request_id));
+    }
+
+    /// Before the writer transaction the refusal is proven by a fresh empty
+    /// read; a request whose row exists, a failure from the admission on and
+    /// a full fence all stay unavailable and unsealed.
+    #[test]
+    fn only_a_proven_absence_is_not_admitted() {
+        // Refused before the transaction (the owner stops): proven absent.
+        let (_, mut f) = counting();
+        let original = f.original();
+        f.runtime.request_stop();
+        let stopped = f.admit(&original);
+        assert!(stopped.not_admitted(&original.intent), "{}", stopped.code);
+        assert!(no_row(&f, &original.plan.request_id));
+        // Another connection's request refused there is never sealed.
+        let stale = super::original(&f.location.configuration, &uuid::Uuid::new_v4().to_string());
+        let reply = f.admit(&stale);
+        assert_eq!(reply.code, "deferred_answer_unavailable");
+        assert!(!f.fences.deferred_answer.sealed(&stale.plan.request_id));
+
+        // Refused before the transaction while another writer holds the
+        // store: nothing is proven.
+        let (_, mut f) = counting();
+        let original = f.original();
+        f.runtime.request_stop();
+        let mut other = rusqlite::Connection::open(f.location.root.join("state.sqlite3")).unwrap();
+        let held = other
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        f.store.db.busy_timeout(Duration::from_millis(1)).unwrap();
+        let busy = f.admit(&original);
+        drop(held);
+        assert_eq!(
+            (busy.accepted, busy.code.as_str()),
+            (false, "deferred_answer_unavailable")
+        );
+        assert!(!f.fences.deferred_answer.sealed(&original.plan.request_id));
+
+        // A row exists: the same refusal stays unavailable.
+        let (_, mut f) = counting();
+        let original = f.original();
+        assert!(f.admit(&original).accepted);
+        f.until("settled", |f| f.row(&original).receipt.drained);
+        let existing = offer(&mut f, broken(&original));
+        assert_eq!(
+            (existing.accepted, existing.code.as_str()),
+            (false, "deferred_answer_unavailable")
+        );
+        f.runtime.request_stop();
+        let stopped = f.admit(&original);
+        assert_eq!(stopped.code, "deferred_answer_unavailable");
+        assert!(!f.fences.deferred_answer.sealed(&original.plan.request_id));
+
+        // The admission itself fails: unavailable although no row is left,
+        // and nothing is sealed.
+        let (ran, mut f) = counting();
+        let original = f.original();
+        f.store
+            .db
+            .execute_batch(
+                "CREATE TEMP TRIGGER refuse BEFORE INSERT ON desktop_deferred_answers \
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+        let failed = f.admit(&original);
+        assert_eq!(
+            (failed.accepted, failed.code.as_str()),
+            (false, "deferred_answer_unavailable")
+        );
+        assert!(no_row(&f, &original.plan.request_id));
+        assert!(!f.fences.deferred_answer.sealed(&original.plan.request_id));
+        f.store.db.execute_batch("DROP TRIGGER refuse;").unwrap();
+        assert!(f.admit(&original).accepted, "an unavailable refusal seals nothing");
+        f.until("settled", |f| f.row(&original).receipt.drained);
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+
+        // A full fence mints no new negative; its sealed IDs stay sealed.
+        let (_, mut f) = counting();
+        for n in 0..crate::desktop::not_admitted::BOUND {
+            assert!(f.fences.deferred_answer.seal(&format!("sealed-{n}")));
+        }
+        let original = f.original();
+        let full = offer(&mut f, broken(&original));
+        assert_eq!(
+            (full.accepted, full.code.as_str()),
+            (false, "deferred_answer_unavailable")
+        );
+        assert!(!f.fences.deferred_answer.sealed(&original.plan.request_id));
+        assert!(f.fences.deferred_answer.sealed("sealed-0"));
     }
 }
 

@@ -107,7 +107,7 @@ fn compile(shape: &str) -> anyhow::Result<Regex> {
 
 /// A path a slot took: inside the member's folder, no `..`, and an existing
 /// path still inside once links are resolved.
-fn inside(path: &str, folder: &Path) -> bool {
+pub(crate) fn inside(path: &str, folder: &Path) -> bool {
     if path.is_empty() || !folder.is_absolute() {
         return false;
     }

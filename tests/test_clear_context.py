@@ -41,6 +41,7 @@ RESUMED_CODEX = r'''
 #include <stdio.h>
 #include <string.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 static char text[512]; static size_t length; static int cleared;
 static void show(void) {
@@ -72,8 +73,14 @@ int main(int argc, char **argv) {
                 if (!strcmp(text, "/clear") && access("refuse-clear", F_OK)) {
                     if (!access("end-before-reset", F_OK)) {
                         append("clear-waiting", "1", 1);
-                        int i; for (i = 0; i < 5000 && access("end-observed", F_OK); ++i) usleep(1000);
-                        if (i == 5000) return 3;
+                        /* The test observes the native end, then answers: seconds on a
+                           loaded runner. A wall-clock bound only stops a test that never does. */
+                        struct timespec from, at; clock_gettime(CLOCK_MONOTONIC, &from);
+                        while (access("end-observed", F_OK)) {
+                            clock_gettime(CLOCK_MONOTONIC, &at);
+                            if (at.tv_sec - from.tv_sec >= 60) return 3;
+                            usleep(1000);
+                        }
                     }
                     cleared = 1; close(open("native-cleared", O_CREAT | O_WRONLY, 0600));
                 }
@@ -307,6 +314,7 @@ class ResumedClearContext(unittest.TestCase):
  write_record=test_input.InputTransport.write_record
  tmux=test_input.InputTransport.tmux
  wait_for=test_input.InputTransport.wait_for
+ wait_until=test_input.InputTransport.wait_until
  received=test_input.InputTransport.received
  tearDown=test_input.InputTransport.tearDown
  setUp=ClearContext.setUp
@@ -316,7 +324,9 @@ class ResumedClearContext(unittest.TestCase):
  usage_history=ClearContext.usage_history
  def resumed(self):
   test_input.InputTransport.resumed_unconfirmed(self,native=RESUMED_CODEX)
-  self.wait_for(lambda:'Previous fixture answer' in self.tmux('capture-pane','-p','-t',self.pane))
+  # The resumed native draws its history after starting: seconds under load.
+  screen=lambda:self.tmux('capture-pane','-p','-t',self.pane,check=False)
+  self.wait_until(lambda:'Previous fixture answer' in screen(),30,screen)
   self.record.update(cwd='/fixture',prompt='Previous fixture request',last_message='Previous fixture answer');self.write_record()
  def started(self,source='clear'):
   new=str(uuid.uuid4())
@@ -503,7 +513,17 @@ class ResumedClearContext(unittest.TestCase):
   (self.root/'end-before-reset').touch()
   with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
    clear=pool.submit(self.clear)
-   self.wait_for(lambda:(self.root/'clear-waiting').exists())
+   # The agent marks clear-waiting when hgs presses Enter, after its checks,
+   # the typed /clear and its settle: past two seconds on a loaded runner
+   # (zerus-eubyp). A clear that ends first failed, and says why.
+   waiting=lambda:(self.root/'clear-waiting').exists()
+   def seen():
+    record=json.loads(self.record_path.read_text())
+    return (f"clear {'ended' if clear.done() else 'running'}, received {self.received()!r}, "
+            f"record {dict((k,record.get(k)) for k in ('activity','phase','conversation_state','clear_context_request'))}, "
+            f"screen {self.tmux('capture-pane','-p','-t',self.pane,check=False)!r}")
+   self.wait_until(lambda:waiting() or clear.done(),30,seen)
+   if not waiting():self.fail(f'the clear ended before the agent saw its Enter: {clear.result()!r}; {seen()}')
    self.hook(dict(hook_event_name='SessionEnd',session_id=self.conversation_id,reason='other'))
    ended=json.loads(self.record_path.read_text())
    self.assertEqual(ended['conversation_state'],'ended')

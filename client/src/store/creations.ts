@@ -91,6 +91,8 @@ export function createCreations(deps: CreationsDeps) {
   /** Ids an event named before the first read answered; that read never overwrites them. */
   const early = new Set<string>();
   let loaded = false;
+  /** When this window started reading creations (desktop-clock Unix seconds). */
+  let startedAt = 0;
   /** The version each card's details were read for. */
   const read = new Map<string, number>();
 
@@ -118,13 +120,18 @@ export function createCreations(deps: CreationsDeps) {
   });
   const pendingCards = createMemo(() => creations().filter((c) => !confirmed().has(c.id)));
 
-  function notice(c: CreationCard) {
+  function notice(c: CreationCard, known: boolean) {
     const n = noticeOf(c);
     if (!n || notices.get(c.id) === n.key) return;
     notices.delete(c.id);
     notices.set(c.id, n.key);
     if (notices.size > NOTICE_LIMIT) notices.delete(notices.keys().next().value!);
-    deps.notify("error", n.text, true);
+    // A failure that settled before this window started (first seen already
+    // failed, last changed earlier) stays on its card; only a failure that happens
+    // while the window is open raises a toast. Otherwise an old failed
+    // creation came back at every restart (owner 2026-11-07).
+    if (!known && (c.updated ?? c.created) < startedAt) return;
+    deps.notify("error", n.text);
   }
 
   /** Selects a card: the session selection and an open subagent end (3717-3728). */
@@ -148,6 +155,7 @@ export function createCreations(deps: CreationsDeps) {
 
   /** The changed handler (1571-1586): a hidden card loses its reveal and selection; failures show once. */
   function changed(c: CreationCard) {
+    const known = !!cards[c.id];
     batch(() => {
       setCards(c.id, cards[c.id] ? reconcile(c) : c);
       setVersions(c.id, (v) => (v ?? 0) + 1);
@@ -158,7 +166,7 @@ export function createCreations(deps: CreationsDeps) {
         if (selectedCreation() === c.id) deps.setSelectedKey(undefined);
       }
     });
-    notice(c);
+    notice(c, known);
   }
 
   /** Bound: its card goes; a selected one hands the selection to its exact session (3036-3039, 3253-3255). */
@@ -200,6 +208,7 @@ export function createCreations(deps: CreationsDeps) {
 
   /** Listens, then reads every card; events that came first win over the read. */
   async function start(): Promise<() => void> {
+    startedAt = Math.floor(Date.now() / 1000);
     const stop = await deps.bridge.onCreations(apply);
     let view: CreationCard[] = [];
     try { view = await deps.bridge.creationsView(); } catch { /* the browser build has no host */ }
@@ -285,6 +294,18 @@ export function createCreations(deps: CreationsDeps) {
     for (const list of shownCards(scope, { ...state, adoptedGroup }).values()) n += list.length;
     return n;
   });
+  /**
+   * The cards a search shows (SessionSearch.cpp:287-305): unbound, shown
+   * pending, under All or Active, inside the machine, account, folder and
+   * project scopes, whose details contain the query; in card order. None
+   * without a query.
+   */
+  const searchCards = createMemo((): CreationCard[] => {
+    const scope = deps.scope();
+    if (!scope.query || (scope.filter !== "all" && scope.filter !== "active")) return [];
+    const shown = shownCards(scope, { ...placement(), revealed: undefined });
+    return [...shown.values()].flat().sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  });
   /** The footer's creations, after the sessions' text or alone. */
   const creationFooter = (afterSessions: boolean) => footerText(shownCount(), afterSessions);
   const creationStatusMenu = () => statusMenu(creations(), choose);
@@ -340,7 +361,7 @@ export function createCreations(deps: CreationsDeps) {
   return {
     creations, selectedCreation, selectedCard, revealed, adopted, cardVersion: (id: string) => versions[id] ?? 0,
     start, apply, selectCreation, choose, act, editChoices, returnToFilters, admitted, adopt,
-    withCreations, creationCount: shownCount, creationFooter, creationStatusMenu,
+    withCreations, creationCount: shownCount, creationFooter, creationStatusMenu, searchCards,
     hideCreation: (id: string) => act(id, "hide"),
     details: (id: string) => deps.bridge.creationDetails(id),
   };
@@ -383,6 +404,7 @@ export const creationStatusMenu = app.creationStatusMenu;
 export const creationFooter = app.creationFooter;
 /** The shown creation rows, also when sessions are absent or a project is collapsed. */
 export const creationCount = app.creationCount;
+export const searchCards = app.searchCards;
 export const withCreations = app.withCreations;
 export const runCreationAction = app.act;
 export const hideCreation = app.hideCreation;

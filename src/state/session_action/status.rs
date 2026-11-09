@@ -209,6 +209,23 @@ pub(crate) fn observe_original(root: &Path, name: &str, original: &[u8]) -> Resu
     observe(root, &request, name)
 }
 
+/// [`observe_original`]'s projection of receipt bytes that a service read
+/// itself from its own held original store (no final link, bounded, after
+/// the physical drain), never a path read here: the same request decoding
+/// and the same exact matching rule. `None` is that read's verified absence.
+/// Input and output are DATA, never consent, a retry, current ownership or
+/// drain proof (zerus-5wmh.66.4.9).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn observe_held(name: &str, original: &[u8], receipt: Option<&[u8]>) -> Result<Value> {
+    let request = decode_request(original, name)?;
+    validate(&request, name)?;
+    match receipt {
+        None => Ok(unavailable(&request, name)),
+        Some(bytes) if bytes.len() as u64 > LIMIT => Err(INVALID.into()),
+        Some(bytes) => project(bytes, &request, name),
+    }
+}
+
 pub(in crate::state) fn dispatch(args: &[String]) -> Result<i32> {
     let bytes = input_bytes(args, "session-action-status")?;
     println!(

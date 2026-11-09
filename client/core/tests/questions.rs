@@ -1272,6 +1272,92 @@ fn a_subagent_card_lists_its_subagents_and_answers_with_its_own_options() {
     assert_eq!(listed.heading.english(), "Start 2 subagents");
 }
 
+/// Task #396 (owner, 2026-11-09, package 161): the card hgs builds from
+/// Claude's own chooser for a batch of three Explore subagents (the screen
+/// transport: `approval_choices`, the native option ids and labels).
+fn native_subagent_card() -> Value {
+    json!({"question_id": "claude-approval:h396", "question_hash": "h396", "run_id": "run-1", "conversation_id": "conv-1",
+        "source": "claude_tool_approval", "created_at": 1.0, "can_answer": true, "answer_unavailable_reason": "",
+        "approval": true, "approval_choices": true, "answer_transport": "claude_tui",
+        "subagent_confirmation": true, "subagent_calls": ["toolu_a", "toolu_b", "toolu_c"],
+        "subagents": [
+            {"id": "toolu_a", "type": "Explore", "model": "haiku", "description": "Arena participants and spawn events"},
+            {"id": "toolu_b", "type": "Explore", "model": "haiku", "description": "HUD and Neo widget architecture"},
+            {"id": "toolu_c", "type": "Explore", "model": "haiku", "description": "Boss presets table and boss BPs"}],
+        "questions": [{"id": "approval", "header": "Subagents", "allow_other": false,
+            "question": "Start 3 subagents: Explore (model haiku): Arena participants and spawn events; Explore (model haiku): HUD and Neo widget architecture; Explore (model haiku): Boss presets table and boss BPs",
+            "body": "Agent
+
+Explore(Arena participants and spawn events)",
+            "options": [{"id": "1", "label": "Yes", "scope": "once"},
+                        {"id": "2", "label": "Yes, and don't ask again for Agent commands in D:\\Work\\Arena", "scope": "broader"},
+                        {"id": "3", "label": "No", "scope": "once"}]}]})
+}
+
+#[test]
+fn a_subagent_card_read_from_claudes_chooser_offers_allow_all_and_deny() {
+    // The owner's dead card: the chooser was read (approval_choices), so the
+    // buttons were hidden, and a subagent card shows its rows, not the option
+    // list - no Allow all, no Deny and a disabled Submit.
+    let form = question(native_subagent_card());
+    let view = card(&form, &AnswerDraft::default(), &ctx());
+    assert_eq!(view.heading.english(), "Start 3 subagents");
+    assert_eq!(view.subagents.len(), 3);
+    assert!(view.approve.visible && view.approve.enabled, "Allow all answers it");
+    assert!(view.deny.visible && view.deny.enabled, "Deny answers it");
+    assert_eq!(view.approve.label.english(), "Allow all");
+    assert!(!view.submit.visible, "no dead Submit");
+    assert!(!view.read_only);
+    assert_eq!(view.status.english(), "Allow all starts every subagent listed; Deny stops them all.");
+    // Allow all and Deny press Claude's own one-time Yes and No.
+    assert_eq!(serde_json::to_value(decision(&form, true).unwrap()).unwrap(),
+        json!([{"question_id": "approval", "selected_option_ids": ["1"], "text": ""}]));
+    assert_eq!(serde_json::to_value(decision(&form, false).unwrap()).unwrap(),
+        json!([{"question_id": "approval", "selected_option_ids": ["3"], "text": ""}]));
+    assert!(view.always.visible);
+    assert_eq!(q::always_option(&form).as_deref(), Some("2"));
+}
+
+#[test]
+fn a_subagent_chooser_with_longer_labels_still_answers_with_its_one_time_yes_and_no() {
+    let mut raw = native_subagent_card();
+    raw["questions"][0]["options"] = json!([
+        {"id": "1", "label": "Yes, allow all", "scope": "once"},
+        {"id": "2", "label": "Yes, and don't ask again", "scope": "broader"},
+        {"id": "3", "label": "No, and tell Claude what to do differently (esc)", "scope": "once"}]);
+    let form = question(raw);
+    assert_eq!(serde_json::to_value(decision(&form, true).unwrap()).unwrap()[0]["selected_option_ids"], json!(["1"]));
+    assert_eq!(serde_json::to_value(decision(&form, false).unwrap()).unwrap()[0]["selected_option_ids"], json!(["3"]));
+    // A broader Yes is never Allow all, and "Nothing" is not No.
+    raw = native_subagent_card();
+    raw["questions"][0]["options"] = json!([
+        {"id": "2", "label": "Yes, and don't ask again", "scope": "broader"},
+        {"id": "4", "label": "Nothing", "scope": "once"}]);
+    assert_eq!(decision(&question(raw), true), None);
+}
+
+#[test]
+fn a_subagent_card_whose_choices_cannot_be_read_points_to_the_terminal() {
+    let unreadable = "Zerus cannot read this request's choices; answer it in the terminal.";
+    // The chooser was not read: hgs offers no choices and cannot answer it.
+    let mut raw = native_subagent_card();
+    raw["can_answer"] = json!(false);
+    raw["approval_choices"] = json!(false);
+    raw["answer_unavailable_reason"] = json!("Zerus cannot read this approval completely. Enlarge Terminal or answer it there.");
+    raw["questions"][0]["options"] = json!([]);
+    // Choices without a one-time Yes and No cannot be answered by the buttons either.
+    let mut odd = native_subagent_card();
+    odd["questions"][0]["options"] = json!([{"id": "1", "label": "Maybe", "scope": "once"}]);
+    for raw in [raw, odd] {
+        let view = card(&question(raw), &AnswerDraft::default(), &ctx());
+        assert_eq!(view.status.english(), unreadable);
+        assert!(view.read_only, "Open Terminal is the main action");
+        assert!(!view.submit.visible, "no dead Submit");
+        assert!(!view.approve.visible && !view.deny.visible && !view.always.visible);
+        assert_eq!(view.subagents.len(), 3, "the calls stay visible");
+    }
+}
+
 #[test]
 fn an_ordinary_approval_has_no_always_button_and_no_subagent_rows() {
     let mut raw = ask("plain", false, 1.0);

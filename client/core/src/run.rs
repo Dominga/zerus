@@ -4,6 +4,8 @@ mod hidden;
 #[cfg(unix)]
 pub mod rendezvous;
 pub(crate) mod startup;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod worktree_custody;
 #[cfg(windows)]
 pub use hidden::{HiddenError, ProcessIdentity};
 
@@ -19,6 +21,13 @@ use std::time::{Duration, Instant};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod custody;
+// Original helper I/O custody; it supplies no native-operation authority.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod joined;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod writer_custody;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use joined::{run_owned_joined_observed, GuardedChild, JoinedSpawn};
 
 /// A noisy child keeps no more than this much of its standard error.
 const STDERR_CAP: usize = 64 * 1024;

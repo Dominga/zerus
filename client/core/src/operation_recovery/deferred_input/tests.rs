@@ -158,3 +158,59 @@ fn a_compact_to_send_reserves_its_send_with_its_compaction() {
     single_with_send.send_request_id = Some(send);
     assert!(!single_with_send.valid());
 }
+
+/// zerus-5wmh.66.4.9: a version 3 resume-then-send reserves its send with
+/// its receipted resume. Version 3 is exactly a resume (never a fresh start
+/// or a resume with compaction), its family `action_receipts`, with a
+/// distinct canonical send ID; version 1 keeps the direct `resume_input`.
+#[test]
+fn a_session_resume_reserves_its_send_with_its_resume() {
+    for kind in [Kind::Send, Kind::Answer, Kind::CompactToSend] {
+        assert!(Checkpoint::reserve_session_resume(intent(kind)).is_none());
+    }
+    for start in [Start::Fresh, Start::ResumeCompact] {
+        let mut other = intent(Kind::ResumeToSend);
+        other.start = Some(start);
+        assert!(Checkpoint::reserve_session_resume(other).is_none());
+    }
+    let paired = Checkpoint::reserve_session_resume(intent(Kind::ResumeToSend)).unwrap();
+    assert_eq!(paired.version, SESSION_RESUME_VERSION);
+    assert_eq!(paired.receipts, ACTION_RECEIPTS);
+    assert_eq!(paired.receipt_family(), ACTION_RECEIPTS);
+    assert_eq!(paired.start, Some(Start::Resume));
+    let send = paired.send_request_id.clone().unwrap();
+    assert!(canonical_uuid(&send) && send != paired.request_id);
+    assert!(paired.valid());
+    let text = serde_json::to_string(&paired).unwrap();
+    assert_eq!(serde_json::from_str::<Checkpoint>(&text).unwrap(), paired);
+    // Version 1 of the same kind keeps the direct path's family.
+    let direct = Checkpoint::reserve(intent(Kind::ResumeToSend));
+    assert_eq!(direct.receipt_family(), "resume_input");
+    assert!(direct.valid());
+    let invalid = |change: &dyn Fn(&mut Checkpoint)| {
+        let mut copy = paired.clone();
+        change(&mut copy);
+        !copy.valid()
+    };
+    assert!(invalid(&|c| c.send_request_id = None));
+    assert!(invalid(&|c| c.send_request_id = Some(c.request_id.clone())));
+    assert!(invalid(&|c| c.send_request_id = Some("not-a-uuid".into())));
+    assert!(invalid(&|c| c.send_request_id = Some(send.to_uppercase())));
+    assert!(invalid(&|c| c.receipts = "resume_input".into()));
+    assert!(invalid(&|c| c.version = VERSION));
+    assert!(invalid(&|c| c.version = COMPACT_TO_SEND_VERSION));
+    assert!(invalid(&|c| c.start = Some(Start::Fresh)));
+    assert!(invalid(&|c| c.start = Some(Start::ResumeCompact)));
+    assert!(invalid(&|c| c.start = None));
+    assert!(invalid(&|c| {
+        c.kind = Kind::CompactToSend;
+        c.start = None;
+    }));
+    // A version 1 record with action_receipts, or with a send, is invalid.
+    let mut direct_action = direct.clone();
+    direct_action.receipts = ACTION_RECEIPTS.into();
+    assert!(!direct_action.valid());
+    let mut direct_with_send = direct;
+    direct_with_send.send_request_id = Some(send);
+    assert!(!direct_with_send.valid());
+}

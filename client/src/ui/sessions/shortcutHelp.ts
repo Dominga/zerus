@@ -1,4 +1,4 @@
-import { COMMANDS, keys, nativeText, parseSequence, platform, type Platform } from "../../store/shortcuts";
+import { COMMANDS, keys, nativeText, parseSequence, platform, terminalSafe, type Command, type Platform, type Sequence } from "../../store/shortcuts";
 import { tr, trNoop } from "../../i18n";
 
 export interface ShortcutHelpRow { group: string; title: string; chord: string }
@@ -26,9 +26,13 @@ export function fixedShortcutRows(on: Platform = platform): ShortcutHelpRow[] {
 
 const GROUPS: Record<string, string> = { "Go to": trNoop("Navigation"), Sessions: trNoop("Sessions"), "Session view": trNoop("Sessions"), Messages: trNoop("Composer"), "Content scale": trNoop("Composer") };
 
+/** A chord as Settings > Keyboard shows it: ✓ when it still reaches Zerus while Terminal has focus. */
+const helpChord = (command: Command, key: Sequence, on: Platform) =>
+  `${nativeText(key, on)}${command.scope === "window" && terminalSafe(key[0], on) ? " ✓" : ""}`;
+
 export function shortcutHelpRows(on: Platform = platform): ShortcutHelpRow[] {
   return [
-    ...COMMANDS.map((command) => ({ group: tr(GROUPS[command.group] ?? command.group), title: tr(command.title), chord: keys(command.id, on).map((key) => nativeText(key, on)).join(", ") })),
+    ...COMMANDS.map((command) => ({ group: tr(GROUPS[command.group] ?? command.group), title: tr(command.title), chord: keys(command.id, on).map((key) => helpChord(command, key, on)).join(", ") })),
     ...fixedShortcutRows(on),
   ];
 }

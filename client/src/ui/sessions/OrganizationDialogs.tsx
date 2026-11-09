@@ -1,16 +1,17 @@
+import { Dropdown } from "../lib/Dropdown";
+import { TextInput } from "../lib/TextField";
 import { For, Show, createEffect, createSignal } from "solid-js";
 import { Icon } from "../lib/icons";
-import * as organization from "../../store/organization";
 import type { MenuEntry } from "../../store/ui";
 import type { Session } from "./types";
-import { createOrgDialogs, deleteText, nameProblem, projectColor, type OrgDialog } from "./organization-ui";
+import { deleteText, nameProblem, projectColor, type OrgDialog } from "./organization-ui";
 import { tr } from "../../i18n";
+import { dialogs } from "./org-dialogs";
 
 // The organization dialogs: Move to project (also for a selection), New
 // project, Rename project and Delete project, in one modal host as
 // ActionDialogs. Their rules and calls are organization-ui.ts's.
 
-const dialogs = createOrgDialogs(organization);
 const { dialog, close } = dialogs;
 
 export const openMoveDialog = (rows: readonly Session[]): void => dialogs.openMove(rows);
@@ -48,7 +49,7 @@ function NameDialog(props: { title: string; initial: string }) {
       <div class="dlg-head"><Icon name="folder" size={18} class="accent" /><h2 id="org-dlg-title">{props.title}</h2></div>
       <div class="dlg-body">
         <label class="dlg-label" for="org-name">{tr("Project name")}</label>
-        <input id="org-name" data-initial class="dlg-input" value={value()} onInput={(e) => setValue(e.currentTarget.value)} />
+        <TextInput id="org-name" data-initial class="dlg-input" value={value()} onInput={(e) => setValue(e.currentTarget.value)} />
       </div>
       <div class="dlg-foot">
         <span class="spacer" />
@@ -66,9 +67,7 @@ function DeleteDialog(props: Extract<OrgDialog, { kind: "delete" }>) {
       <div class="dlg-head"><Icon name="triangle-alert" size={18} class="accent" /><h2 id="org-dlg-title">{tr("Delete project")}</h2></div>
       <div class="dlg-body">
         <p class="confirm-body" id="org-dlg-body">{deleteText(props.name)}</p>
-        <select class="field" style={{ width: "100%", "margin-top": "12px" }} aria-label={tr("Project that receives the sessions")} value={target()} onChange={(e) => setTarget(e.currentTarget.value)}>
-          <For each={props.options}>{(p) => <option value={p.id}>{p.name}</option>}</For>
-        </select>
+        <Dropdown class="field" style={{ width: "100%", "margin-top": "12px" }} aria-label={tr("Project that receives the sessions")} value={target()} onChange={(value) => setTarget(value)} options={[...((props.options) ?? []).map((p) => ({ value: p.id, label: p.name }))]} />
       </div>
       <div class="dlg-foot">
         <span class="spacer" />

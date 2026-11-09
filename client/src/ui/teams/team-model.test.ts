@@ -66,7 +66,7 @@ describe("member states", () => {
   it("Running: working names its task, sending, submitted, idle and a member that starts later", () => {
     const t = team({ tasks: [task({ id: 3, title: "Saved cards API", status: "in_progress", attempt_state: "delivered", attempts: 1 })] });
     const dev = { ...of(t, "dev"), queue: [3] };
-    expect(memberStatus(t, dev)).toMatchObject({ kind: "working", text: "Working on #3 Saved cards API", short: "#3", tone: "active", task: 3 });
+    expect(memberStatus(t, dev)).toMatchObject({ kind: "working", text: "Working on #3 Saved cards API", short: "Working", tone: "active", task: 3 });
     expect(currentTask(t, dev)?.id).toBe(3);
     const sending = team({ tasks: [task({ id: 4, status: "assigned", attempt_state: "delivering" })] });
     expect(memberStatus(sending, of(sending, "dev"))).toMatchObject({ kind: "sent", text: "Sending #4 Task 4", tone: "assigned" });

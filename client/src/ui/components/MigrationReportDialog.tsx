@@ -1,6 +1,5 @@
 import { For, Show, createMemo, createResource, onCleanup, onMount } from "solid-js";
 import { desktopService, retainedSourceDetails } from "../../store/desktopService";
-import { loadQtPreferences, qtPreferenceRows } from "../../store/qtPreferences";
 import { tr } from "../../i18n";
 import { loadLegacyProjects, legacyProjectRow } from "../../store/legacyProjects";
 
@@ -8,9 +7,6 @@ import { loadLegacyProjects, legacyProjectRow } from "../../store/legacyProjects
 export function MigrationReportDialog(props: { origin: HTMLElement; close(): void }) {
   const origin = props.origin;
   const details = createMemo(() => retainedSourceDetails(desktopService.state()));
-  // The one-time Qt preference import, read locally from Settings: key names only.
-  const [preferences] = createResource(() => loadQtPreferences().catch(() => undefined));
-  const preferenceRows = createMemo(() => qtPreferenceRows(preferences()));
   const [legacy] = createResource(() => loadLegacyProjects().catch(() => undefined));
   const legacyRow = createMemo(() => legacyProjectRow(legacy()));
   let dialog!: HTMLDialogElement, closeButton!: HTMLButtonElement;
@@ -22,7 +18,7 @@ export function MigrationReportDialog(props: { origin: HTMLElement; close(): voi
   return <dialog ref={dialog} class="dlg" style={{ width: "600px" }} aria-labelledby="migration-report-title" onCancel={props.close} onClose={props.close}>
     <div class="dlg-head"><h2 id="migration-report-title">{tr("Migration report")}</h2></div>
     <div class="dlg-body">
-      <Show when={details() || preferenceRows().length || legacyRow()} fallback={<p>{tr("No migration report is available for this connection.")}</p>}>
+      <Show when={details() || legacyRow()} fallback={<p>{tr("No migration report is available for this connection.")}</p>}>
         <For each={["settings", "creations", "capture", "localReads", "localReadsReport", "drafts", "draftsReport", "downloads", "downloadsReport", "worktreeCache", "worktreeCacheReport"] as const}>{(key) => <Show when={details()?.[key]}>{(value) => <section>
           <h3>{key === "settings" ? tr("Qt and Zerus settings") : key === "creations" ? tr("Saved creation report") : key === "capture" ? tr("Session creation journal") : key === "localReads" ? tr("Local read marks") : key === "drafts" ? tr("Drafts") : key === "draftsReport" ? tr("Historical drafts report") : key === "downloads" ? tr("Downloaded files") : key === "downloadsReport" ? tr("Historical downloaded files report") : key === "worktreeCache" ? tr("Saved folder catalogs") : key === "worktreeCacheReport" ? tr("Historical folder catalog report") : tr("Historical local read-mark report")}</h3>
           <p>{value().reason}</p>
@@ -32,17 +28,6 @@ export function MigrationReportDialog(props: { origin: HTMLElement; close(): voi
               <dt>{tr("Report status")}</dt><dd>{value().phase ?? tr("Not created yet")}</dd></dl>
           </details>
         </section>}</Show>}</For>
-        <Show when={preferenceRows().length}>
-          <section>
-            <h3>{tr("Qt preferences")}</h3>
-            <p class="hint">{tr("Read once from the Qt app. Zerus never changes the Qt settings, and this list shows setting names, not their values.")}</p>
-            <dl><For each={preferenceRows()}>{(row) => <>
-              <dt>{row.label}</dt>
-              <dd>{row.status}: <For each={row.keys}>{(key, index) => <>{index() > 0 ? ", " : ""}<code>{key}</code></>}</For>
-                <Show when={row.reason}>{(reason) => <> ({tr("reason")}: <code>{reason()}</code>)</>}</Show></dd>
-            </>}</For></dl>
-          </section>
-        </Show>
         <Show when={legacyRow()}>{(row) => <section>
           <h3>{tr("Legacy project lists")}</h3>
           <p class="hint">{tr("Project lists are read once per verified computer. Only missing links are added; existing Zerus choices are kept.")}</p>

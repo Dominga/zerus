@@ -249,8 +249,8 @@ dependencies = [
 
 [[package]]
 name = "codelore"
-version = "0.4.0"
-source = "git+https://github.com/WhiteWh/CodeLore?rev=8fdb66bf3fa52423a78487ca8df09ab85c9ce4fe#8fdb66bf3fa52423a78487ca8df09ab85c9ce4fe"
+version = "0.4.1"
+source = "git+https://github.com/WhiteWh/CodeLore?rev=27c42c5163f88c6bea3694dd477b995be62e896c#27c42c5163f88c6bea3694dd477b995be62e896c"
 dependencies = [
  "anyhow",
  "candle-core",

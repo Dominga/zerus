@@ -11,7 +11,7 @@ describe("the lead's proposal cards' place in the Activity", () => {
     const read = (path: string) => fs.readFileSync(new URL(path, import.meta.url), "utf8").replace(/\r\n/g, "\n");
     const detail = read("./SessionDetail.tsx");
     const at = (text: string) => detail.indexOf(text);
-    const queue = at("<QueuePanel />"), proposals = at("<LeadProposals />"), question = at("<QuestionCard />");
+    const queue = at("<QueuePanel />"), proposals = at("<LeadProposals />"), question = at("<QuestionSlot />");
     const composer = at('<div class="cmp-col"><Composer /></div>');
     expect(queue).toBeGreaterThan(-1);
     expect(proposals).toBeGreaterThan(queue);

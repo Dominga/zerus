@@ -1,4 +1,5 @@
-import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
+import { Dropdown } from "../lib/Dropdown";
+import { Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import { Icon } from "../lib/icons";
 import * as bridge from "../../bridge";
 import { flag, setSetting } from "../../store/settings";
@@ -29,6 +30,13 @@ export function VoiceToolbar(props: { voice: SessionVoice; compact: boolean }) {
       <Icon name={recording() ? icon(shown()?.voice_icon ?? "stop") : video() ? "video" : "mic"} size={13} />
       {recording() ? shown()?.voice_label : shown()?.state === "starting" || shown()?.state === "saving" ? shown()?.voice_label : video() ? tr("Video") : tr("Voice")}
     </button>
+    {/* Qt's Stop and preview (SpeechComposer.cpp:90-92,469): stops and keeps the
+        recording for review, like Space or Esc. Where the record button
+        itself stops to preview, it would only repeat that button. */}
+    <Show when={shown()?.stop_preview && shown()?.voice_icon !== "stop"}>
+      <button type="button" class="tchip" title={tr("Stop and keep the recording for review. Space or Esc does the same.")}
+        onClick={() => { void props.voice.input({ kind: "stop", forget_send: false }); }}><Icon name="square" size={13} /><Show when={!props.compact}>{tr("Stop and preview")}</Show></button>
+    </Show>
     <button type="button" class="tchip icon" disabled={changingMode() || !shown()?.mode_enabled || recording()}
       aria-label={video() ? tr("Switch to voice recording") : tr("Switch to video recording")} data-tip={video() ? tr("Switch to voice recording") : tr("Switch to video recording")}
       onClick={() => {
@@ -40,7 +48,9 @@ export function VoiceToolbar(props: { voice: SessionVoice; compact: boolean }) {
       <button type="button" class="tchip" title={tr("Cancel recording")} onClick={() => { void props.voice.input({ kind: "discard" }); }}><Icon name="x" size={13} /><Show when={!props.compact}>{tr("Cancel recording")}</Show></button>
     </Show>
     <Show when={shown()?.notice_visible}>
-      <span class="tchip warn" title={shown()?.notice_detail}><Icon name="mic" size={13} /><Show when={!props.compact}>{shown()?.notice_label}</Show></span>
+      {/* Qt's result chip: opens the full notice, or the microphone recovery (SpeechComposer.cpp 492-499). */}
+      <button type="button" class="tchip warn" title={shown()?.notice_detail} aria-label={shown()?.notice_label} aria-haspopup="dialog"
+        onClick={() => props.voice.openNotice()}><Icon name="mic" size={13} /><Show when={!props.compact}>{shown()?.notice_label}</Show></button>
     </Show>
   </>;
 }
@@ -110,11 +120,8 @@ export function VoicePreview(props: { voice: SessionVoice }) {
       <div class="cmp-voice-preview">
         <span class="muted">{shown()?.preview}</span>
         <button type="button" class="btn small" disabled={!shown()?.play_enabled || (shown()?.state !== "preview" && shown()?.state !== "uncertain")} onClick={() => { void play(); }}>{playing() ? trc("media playback", "Pause") : trc("media playback", "Play")}</button>
-        <select class="field" aria-label={tr("Voice provider")} title={shown()?.provider_tooltip} value={shown()?.provider ?? -1} disabled={!shown()?.provider_enabled}
-          onChange={(event) => { void voice.input({ kind: "choose_provider", index: Number(event.currentTarget.value) }); }}>
-          <Show when={shown()?.provider == null}><option value={-1}>{shown()?.provider_placeholder}</option></Show>
-          <For each={shown()?.providers ?? []}>{(provider, i) => <option value={i()}>{provider.label}</option>}</For>
-        </select>
+        <Dropdown class="field" aria-label={tr("Voice provider")} title={shown()?.provider_tooltip} value={shown()?.provider ?? -1} disabled={!shown()?.provider_enabled}
+          onChange={(value) => { void voice.input({ kind: "choose_provider", index: Number(value) }); }} options={[...(shown()?.provider == null ? [{ value: -1, label: shown()?.provider_placeholder }] : []), ...((shown()?.providers ?? []) ?? []).map((provider, i) => ({ value: i, label: provider.label }))]} />
         <button type="button" class="btn small" title={tr("Refresh available voice providers without recording again")} disabled={!shown()?.refresh_enabled} onClick={() => { void voice.input({ kind: "refresh" }); }}>{shown()?.refresh_label}</button>
         <button type="button" class="btn small" disabled={!shown()?.discard_enabled} onClick={() => { void voice.input({ kind: "discard" }); }}>{shown()?.discard_label}</button>
         <button type="button" class="btn small primary" disabled={!shown()?.send_enabled} onClick={() => { void voice.input({ kind: "send" }); }}>{shown()?.send_label}</button>
@@ -130,8 +137,10 @@ function VoiceDialogs(props: { voice: SessionVoice }) {
   const voice = props.voice;
   const [permission, setPermission] = createSignal<{ text: string; can_open: boolean }>();
   let previousFocus: HTMLElement | undefined;
-  const active = () => !!voice.ask() || voice.permission();
-  const cancel = () => { voice.confirm(false); voice.closePermission(); };
+  // The microphone recovery, else a question, else the notice the chip opened.
+  const kind = () => voice.permission() ? "permission" : voice.ask() ? "ask" : voice.notice() !== undefined ? "notice" : undefined;
+  const active = () => !!kind();
+  const cancel = () => { voice.confirm(false); voice.closePermission(); voice.closeNotice(); };
   createEffect(() => {
     if (!dialog) return;
     if (!active()) { if (dialog.open) dialog.close(); return; }
@@ -139,17 +148,23 @@ function VoiceDialogs(props: { voice: SessionVoice }) {
     queueMicrotask(() => dialog.querySelector<HTMLElement>("[data-initial]")?.focus());
   });
   createEffect(() => { if (voice.permission()) void bridge.voicePermission().then(setPermission); });
-  const title = () => voice.permission() ? tr("Microphone access") : voice.ask()?.kind === "discard" ? tr("Discard voice recording?") : tr("Continue with a cold cache?");
-  const body = () => { const ask = voice.ask(); return voice.permission() ? permission()?.text : ask?.kind === "discard" ? tr("Delete the saved, unsent voice recording for %1?", ask.session) : ask?.warning; };
+  const title = () => kind() === "permission" ? tr("Microphone access") : kind() === "notice" ? tr("Voice message")
+    : voice.ask()?.kind === "discard" ? tr("Discard voice recording?") : tr("Continue with a cold cache?");
+  const body = () => {
+    const ask = voice.ask();
+    return kind() === "permission" ? permission()?.text : kind() === "notice" ? voice.notice()
+      : ask?.kind === "discard" ? tr("Delete the saved, unsent voice recording for %1?", ask.session) : ask?.warning;
+  };
   return <dialog class="dlg" ref={dialog} role="alertdialog" aria-labelledby="voice-dialog-title" style={{ width: "520px" }}
     onCancel={(event) => { event.preventDefault(); cancel(); }} onClose={() => { cancel(); if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true }); }}>
-    <div class="dlg-head"><Icon name={voice.permission() ? "mic" : "triangle-alert"} size={18} class="accent" /><h2 id="voice-dialog-title">{title()}</h2></div>
+    <div class="dlg-head"><Icon name={kind() === "ask" ? "triangle-alert" : "mic"} size={18} class="accent" /><h2 id="voice-dialog-title">{title()}</h2></div>
     <div class="dlg-body"><div class="confirm-body" style={{ "white-space": "pre-wrap" }}>{body()}</div></div>
     <div class="dlg-foot"><span class="spacer" />
-      <Show when={voice.permission()} fallback={<>
+      <Show when={kind() === "notice"}><button type="button" class="btn primary" data-initial onClick={() => voice.closeNotice()}>{tr("Close")}</button></Show>
+      <Show when={kind() === "permission"} fallback={<Show when={kind() === "ask"}>
         <button type="button" class={voice.ask()?.kind === "discard" ? "btn solid-danger" : "btn"} onClick={() => voice.confirm(true)}>{voice.ask()?.kind === "discard" ? tr("Discard recording") : tr("Send with full context")}</button>
         <button type="button" class="btn primary" data-initial onClick={cancel}>{tr("Cancel")}</button>
-      </>}>
+      </Show>}>
         <Show when={permission()?.can_open}><button type="button" class="btn" onClick={() => {
           void bridge.voiceOpenSettings().then(() => voice.closePermission(), () => setPermission((old) => ({ can_open: old?.can_open ?? false, text: `${tr("Could not open system settings automatically.")}\n\n${old?.text ?? ""}` })));
         }}>{tr("Open microphone settings")}</button></Show>

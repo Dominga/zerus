@@ -1,6 +1,6 @@
-//! WhiteWh fork: the team state machine. Every change is a pure function of
-//! the team, the request and who asks, so the CLI and the dispatcher share it
-//! and tests need no processes.
+//! WhiteWh fork: the team state machine shared by the CLI and dispatcher.
+//! Only the opt-in prerequisite check spawns Git, for draft commit/branch
+//! requirements. Calls get five seconds, within a shared ten-second deadline.
 use super::super::now;
 use super::model::*;
 use super::plan;
@@ -48,6 +48,12 @@ impl Actor {
             Actor::Member(id) => *id == team.lead || (!member.is_empty() && team.reviewer_of(member) == *id),
             Actor::ParentLead | Actor::Intake(_) => false,
         }
+    }
+    /// Task #362 (owner, 2026-11-08): whether this caller may use `member`'s
+    /// last reply as that member's report: the lead, or the sub-lead the member
+    /// reports to; never the member itself.
+    pub(crate) fn uses_reply_of(&self, team: &Team, member: &str) -> bool {
+        matches!(self, Actor::Member(id) if !member.is_empty() && *id != member && (*id == team.lead || team.reviewer_of(member) == *id))
     }
 }
 
@@ -127,6 +133,40 @@ fn text<'a>(input: &'a Value, key: &str) -> &'a str {
 
 fn task_id(input: &Value) -> anyhow::Result<u32> {
     input["task"].as_u64().and_then(|id| u32::try_from(id).ok()).filter(|id| *id > 0).context("A task number is required")
+}
+
+/// Task #362: the member whose attempt `input["attempt"]` names, for the
+/// last-reply rule; empty when the request names none.
+fn attempt_member_of(team: &Team, input: &Value) -> String {
+    let id = text(input, "attempt");
+    team.tasks
+        .iter()
+        .flat_map(|task| &task.attempts)
+        .find(|attempt| attempt.id == id)
+        .map(|attempt| attempt.member.clone())
+        .unwrap_or_default()
+}
+
+/// Task #362: whether this attempt is the one a lead's last-reply report will
+/// land on: still open, or the newest reported one it replaces.
+fn will_report(team: &Team, id: u32, attempt: &str, member: &str) -> bool {
+    let Some(task) = team.task(id) else { return false };
+    if task.open_attempt().is_some_and(|found| found.id == attempt && found.member == member) {
+        return true;
+    }
+    let newest = task.attempts.iter().rev().find(|found| found.state == AttemptState::Reported);
+    task.status.reported() && newest.is_some_and(|found| found.id == attempt && found.member == member)
+}
+
+/// A quoted reply in a feed event or the digest: one line, at most `limit`
+/// characters.
+fn quoted(text: &str, limit: usize) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() > limit {
+        format!("{}...", line.chars().take(limit.saturating_sub(3)).collect::<String>())
+    } else {
+        line
+    }
 }
 
 fn clean(value: &str, max: usize, what: &str) -> anyhow::Result<String> {
@@ -256,6 +296,50 @@ fn parse_member(value: &Value) -> anyhow::Result<Member> {
     parse_member_as(value, "A member", super::strict::MEMBER_EXAMPLE)
 }
 
+/// Task #6: a permissions mode its agent does not have (Codex has no `auto`) is
+/// refused where it is set, never when the member cannot start. The member's
+/// `permissions` field is `auto`, `bypass` or empty (the agent's own mode).
+pub(crate) fn check_permission_mode(agent: &str, mode: &str) -> anyhow::Result<()> {
+    if mode.is_empty() {
+        return Ok(());
+    }
+    ensure!(["auto", "bypass"].contains(&mode), "must be auto or bypass, not \"{mode}\"");
+    if crate::accounts::validate_permission_mode(agent, mode).is_ok() {
+        return Ok(());
+    }
+    let takes: Vec<&str> = crate::accounts::permission_modes(agent).iter().copied().filter(|mode| *mode != "provider").collect();
+    let agent = super::dispatcher::agent_label(agent);
+    if takes.is_empty() {
+        bail!("{agent} takes its permissions from its own configuration, so the field stays empty");
+    }
+    bail!("{agent} has no \"{mode}\" permissions mode; it takes {}", takes.join(", "))
+}
+
+/// Task #7: the "After a task" policy a member keeps: keep (empty), compact or
+/// clear, with the criterion (percent of the context window or tokens used) and
+/// its threshold. A field that does not fit is refused by name.
+pub(crate) fn check_after_task(agent: &str, mode: &str, on: &str, at: u32) -> anyhow::Result<()> {
+    ensure!(matches!(mode, "" | "compact" | "clear"), "field \"after_task\" must be empty (keep), compact or clear, not \"{mode}\"");
+    ensure!(matches!(on, "" | "percent" | "tokens"), "field \"after_task_on\" must be percent or tokens, not \"{on}\"");
+    if mode.is_empty() {
+        ensure!(
+            on.is_empty() && at == 0,
+            "field \"after_task\": \"after_task_on\" and \"after_task_at\" only go with compact or clear"
+        );
+        return Ok(());
+    }
+    ensure!(!on.is_empty(), "field \"after_task_on\" names the criterion: percent or tokens");
+    ensure!(at > 0, "field \"after_task_at\" is a positive threshold");
+    if on == "percent" {
+        ensure!(at <= 100, "field \"after_task_at\" is 1 to 100 percent, not {at}");
+    } else {
+        ensure!(at <= 10_000_000, "field \"after_task_at\" is at most 10000000 tokens, not {at}");
+    }
+    let supported = if mode == "clear" { super::dispatcher::native_context(agent, "clear") } else { super::dispatcher::native_context(agent, "compact") };
+    ensure!(supported, "field \"after_task\": {} has no {mode}-context action", super::dispatcher::agent_label(agent));
+    Ok(())
+}
+
 /// Owner feedback 2026-11-04 (9, 11): an unknown field or a wrong type names
 /// itself, the accepted fields and an example.
 fn parse_member_as(value: &Value, what: &str, example: &str) -> anyhow::Result<Member> {
@@ -275,6 +359,10 @@ fn parse_member_as(value: &Value, what: &str, example: &str) -> anyhow::Result<M
     // Task 154: the agent's own selection as the solo launch takes it
     // (provider, bypass, auto or native:{...}), DeepSeek's presets included.
     member.permissions = super::rights::check_selection(&member.agent, &member.permissions).map_err(field("permissions"))?;
+    // Task #6: a plain auto or bypass must exist for the agent (Codex has no auto).
+    if ["auto", "bypass"].contains(&member.permissions.as_str()) {
+        check_permission_mode(&member.agent, &member.permissions).map_err(field("permissions"))?;
+    }
     ensure!(
         member.permissions_profile.is_empty() || super::rights::PROFILES.contains(&member.permissions_profile.as_str()),
         "{who}: field \"permissions_profile\" is {}, not \"{}\"",
@@ -291,11 +379,19 @@ fn parse_member_as(value: &Value, what: &str, example: &str) -> anyhow::Result<M
         "{who}: field \"context_before_task\" is none, compact or clear, not \"{}\"",
         member.context_before_task
     );
+    // Task #7: the After-a-task policy, checked here so a plan or add-member
+    // cannot store one the agent cannot run.
+    check_after_task(&member.agent, &member.after_task, &member.after_task_on, member.after_task_at)
+        .map_err(|error| anyhow::anyhow!("{who}: {error}"))?;
     member.launch_id.clear();
     member.error.clear();
     member.host_waits = 0;
     member.rights_relaunch = false;
     member.inbox = Inbox::default();
+    // Task #6: the dispatcher's pending changes are its own record, never an
+    // input field a plan or add-member could set.
+    member.prompt_change = None;
+    member.model_switch = None;
     if !member.parent.is_empty() {
         member.parent = member_id(&member.parent).map_err(field("parent"))?;
     }
@@ -387,8 +483,31 @@ fn clean_output(paths: &mut Vec<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn validate_requires(requires: &[Prerequisite]) -> anyhow::Result<()> {
+    ensure!(requires.len() <= 32, "A task has at most 32 prerequisites");
+    for requirement in requires {
+        match requirement {
+            Prerequisite::Task { task } => ensure!(*task > 0, "A prerequisite task number is positive"),
+            Prerequisite::Commit { commit } => ensure!((4..=64).contains(&commit.len()) && commit.bytes().all(|b| b.is_ascii_hexdigit()), "A prerequisite commit is a hexadecimal object id"),
+            Prerequisite::Branch { branch } => super::templates::check_branch(branch)?,
+        }
+    }
+    Ok(())
+}
+
+fn target_hours(input: &Value) -> anyhow::Result<Option<f64>> {
+    match input.get("target_hours") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => {
+            let hours = value.as_f64().filter(|h| h.is_finite() && *h > 0.0).context("target_hours is a positive number or null")?;
+            Ok(Some(hours))
+        }
+    }
+}
+
 fn parse_task(value: &Value) -> anyhow::Result<Task> {
     let mut task: Task = super::strict::parse(value, &[], "A task", super::strict::TASK_EXAMPLE)?;
+    validate_requires(&task.requires)?;
     // Task #26: every refusal names the task and the field.
     let who = format!("Task #{}", task.id);
     let field = |name: &str| {
@@ -469,6 +588,7 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
         task.estimate_source = "none".into();
     }
     task.status = TaskStatus::Draft;
+    task.archived = None;
     // `plan` (and `create`'s planning tasks) always start phase 1; `extend`
     // sets the computed phase afterwards.
     task.phase = 1;
@@ -757,6 +877,7 @@ fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
         phases.push(Phase {
             n,
             title,
+            target_hours: target_hours(value)?,
             barrier: value["barrier"].as_bool() == Some(true),
             approval,
             state: PhaseState::Draft,
@@ -957,6 +1078,7 @@ fn draft_phases(team: &mut Team, listed: Option<&Value>, by: &str) -> anyhow::Re
                 phases.push(Phase {
                     n,
                     title: clean(value["title"].as_str().unwrap_or_default().trim(), 120, "A phase title")?,
+                    target_hours: target_hours(value)?,
                     barrier: value["barrier"].as_bool() == Some(true),
                     // A phase the draft had keeps its place and its proposer.
                     order: old.map_or(0, |old| old.order()),
@@ -1175,9 +1297,36 @@ fn switch_memory_mode(team: &mut Team, input: &Value, actor: &Actor, events: &mu
     Ok(json!({"status":"switched","from":from,"to":to,"memory":memory}))
 }
 
+/// Task #6: the fields `members_update` takes. `clear_context_first` goes with
+/// a new `prompt`; agent, account and computer stay with Swap member.
+const MEMBER_UPDATE_FIELDS: [&str; 16] = [
+    "id",
+    "role",
+    "folder",
+    "directory",
+    "prompt",
+    "clear_context_first",
+    "model",
+    "effort",
+    "permissions",
+    "permissions_profile",
+    "context_before_task",
+    "after_task",
+    "after_task_on",
+    "after_task_at",
+    "models",
+    "iron_rules",
+];
+
+/// Task #6: the fields a member that already has a session takes, because they
+/// reach it from its next task or at its next start; the other fields of
+/// `MEMBER_UPDATE_FIELDS` need a member without one.
+const STATIC_MEMBER_FIELDS: [&str; 3] = ["role", "folder", "directory"];
+
 /// F1.5: the lead or owner changes a team's settings and its members in place.
-/// While Planning any member changes; a running team only members without a
-/// session. A wider permissions profile keeps the B5 confirmation.
+/// While Planning any member changes; a running team takes the fields that reach
+/// a member that has a session from its next task. A wider permissions profile
+/// keeps the B5 confirmation.
 fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you change the team's settings");
     ensure!(
@@ -1197,21 +1346,35 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
     let mut changed = Vec::new();
     let mut widen = Vec::new();
     for update in input["members_update"].as_array().into_iter().flatten() {
+        // Task #6: a field the operation does not take is refused by name, never
+        // dropped in silence; agent, account and computer stay with Swap member.
+        super::strict::check_keys(update, &MEMBER_UPDATE_FIELDS, "A member update", super::strict::MEMBER_UPDATE_EXAMPLE)?;
         let id = text(update, "id").to_owned();
         ensure!(!id.is_empty(), "A member update names its member");
-        let member = team.members.iter_mut().find(|member| member.id == id).with_context(|| format!("Unknown member {id}"))?;
-        // U46: the context before a task only changes the next hand-out, so the
-        // owner may set it on a running member that has a session too; every
-        // other field still changes only on a member without one. #581 N6: so
-        // does its model list (U45), which only the next switch reads.
-        let context_only = update.as_object().is_some_and(|fields| {
-            fields.keys().any(|key| key == "context_before_task" || key == "models"|| key == "iron_rules")
-                && fields.keys().all(|key| {
-                    key == "id" || key == "context_before_task" || key == "models"|| key == "iron_rules"
-                })
-        });
+        // Task #6: the clear is a checkbox for the new prompt, off by default.
+        let clear_first = match update.get("clear_context_first") {
+            Some(value) => Some(value.as_bool().with_context(|| format!("Member \"{id}\": field \"clear_context_first\" is true or false"))?),
+            None => None,
+        };
         ensure!(
-            planning || member.session.is_none() || context_only,
+            clear_first.is_none() || update.get("prompt").is_some(),
+            "Member \"{id}\": field \"clear_context_first\" goes with a new \"prompt\""
+        );
+        let member = team.members.iter_mut().find(|member| member.id == id).with_context(|| format!("Unknown member {id}"))?;
+        ensure!(member.state != MemberState::Removed, "Member \"{id}\" was removed");
+        // Task #6: the lead changes only a member's model and effort while the
+        // team runs; every other field is the owner's, as a settings card. The
+        // context action and the model list keep their own refusals below.
+        let lead_fields = ["id", "model", "effort", "context_before_task", "models"];
+        ensure!(
+            planning || matches!(actor, Actor::Human) || update.as_object().is_some_and(|fields| fields.keys().all(|key| lead_fields.contains(&key.as_str()))),
+            "The lead changes only a member's model and effort: propose {{\"kind\":\"settings\",\"members_update\":[...]}} as a card (hgs guide team-propose); the owner allows it with a click"
+        );
+        // Task #6: the live fields change a member that has a session too; the
+        // rest still needs a member without one.
+        let live = update.as_object().is_some_and(|fields| fields.keys().all(|key| !STATIC_MEMBER_FIELDS.contains(&key.as_str())));
+        ensure!(
+            planning || member.session.is_none() || live,
             "A running team changes only members without a session"
         );
         if let Some(rules) = update.get("iron_rules") {
@@ -1230,7 +1393,59 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
             member.role = role;
         }
         if let Some(prompt) = update.get("prompt") {
-            member.prompt = clean(prompt.as_str().unwrap_or_default(), 8000, "A role prompt")?;
+            let prompt = clean(prompt.as_str().unwrap_or_default(), 8000, "A role prompt")?;
+            // Task #6: a start prompt that changes on a member that runs is sent
+            // to it as the message that replaces its earlier instructions, after
+            // the clear the owner asked for. The checkbox needs that new message.
+            let replacing = !planning && member.session.is_some() && prompt != member.prompt;
+            ensure!(
+                clear_first != Some(true) || replacing,
+                "Member \"{id}\": field \"clear_context_first\" needs a new \"prompt\" for a member that runs"
+            );
+            if replacing {
+                ensure!(
+                    clear_first != Some(true) || super::dispatcher::native_context(&member.agent, "clear"),
+                    "Member \"{id}\": {} has no clear-context action; leave \"clear_context_first\" off",
+                    super::dispatcher::agent_label(&member.agent)
+                );
+                // The review: a clear still waiting is kept, and the flag stays on
+                // when either edit asked for it; a clear whose send is in flight
+                // is done, so the newer prompt is a change of its own.
+                let before = member.prompt_change.take().unwrap_or_default();
+                let waiting = before.sent_at.is_none();
+                member.prompt_change = Some(PromptChange {
+                    clear_context: (waiting && before.clear_context) || clear_first == Some(true),
+                    clear: if waiting { before.clear } else { None },
+                    ..Default::default()
+                });
+            }
+            member.prompt = prompt;
+        }
+        if update.get("model").is_some() || update.get("effort").is_some() {
+            let model = update.get("model").map(|value| value.as_str().unwrap_or_default().trim().to_owned()).unwrap_or_else(|| member.model.clone());
+            let effort = update.get("effort").map(|value| value.as_str().unwrap_or_default().trim().to_owned()).unwrap_or_else(|| member.effort.clone());
+            ensure!(model.is_empty() || super::models::valid_name(&model), "Member \"{id}\": field \"model\" is a model id of at most 120 characters");
+            ensure!(effort.is_empty() || super::models::valid_name(&effort), "Member \"{id}\": field \"effort\" is an effort word of at most 120 characters");
+            // Task #6: a model or effort change reaches a running session before
+            // its next task; an agent that cannot switch takes it at its next
+            // start. The values its session ran before are kept for a refusal.
+            let can_switch = super::models::SWITCHING.contains(&member.agent.as_str());
+            if !planning && member.session.is_some() && can_switch && (model != member.model || effort != member.effort) {
+                let before = member.model_switch.take().unwrap_or_default();
+                let (from_model, from_effort) = if before.model.is_empty() {
+                    (member.model.clone(), member.effort.clone())
+                } else {
+                    (before.from_model, before.from_effort)
+                };
+                member.model_switch = Some(ModelSwitch { model: model.clone(), effort: effort.clone(), from_model, from_effort });
+            }
+            member.model = model;
+            member.effort = effort;
+        }
+        if let Some(permissions) = update.get("permissions") {
+            let permissions = permissions.as_str().unwrap_or_default().to_owned();
+            check_permission_mode(&member.agent, &permissions).map_err(|error| anyhow::anyhow!("Member \"{id}\": field \"permissions\": {error}"))?;
+            member.permissions = permissions;
         }
         if let Some(profile) = update.get("permissions_profile") {
             let profile = profile.as_str().unwrap_or_default().to_owned();
@@ -1255,6 +1470,27 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
             );
             member.context_before_task = context;
         }
+        // Task #7: the owner sets the After-a-task policy; it reaches the
+        // member's next hand-out, so a running member takes it too.
+        if update.get("after_task").is_some() || update.get("after_task_on").is_some() || update.get("after_task_at").is_some() {
+            ensure!(matches!(actor, Actor::Human), "Only you set a member's After a task policy");
+            let named = |key: &str, current: &str| {
+                update.get(key).map(|value| value.as_str().unwrap_or_default().trim().to_owned()).unwrap_or_else(|| current.to_owned())
+            };
+            let mode = named("after_task", &member.after_task);
+            let on = named("after_task_on", &member.after_task_on);
+            let at = match update.get("after_task_at") {
+                Some(value) => value
+                    .as_u64()
+                    .and_then(|value| u32::try_from(value).ok())
+                    .with_context(|| format!("Member \"{id}\": field \"after_task_at\" is a whole number"))?,
+                None => member.after_task_at,
+            };
+            check_after_task(&member.agent, &mode, &on, at).map_err(|error| anyhow::anyhow!("Member \"{id}\": {error}"))?;
+            member.after_task = mode;
+            member.after_task_on = on;
+            member.after_task_at = at;
+        }
         // #581 N6, spec 2: the owner edits the models a member may switch
         // between; an empty list leaves only its launch model.
         if let Some(models) = update.get("models") {
@@ -1278,7 +1514,12 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
         );
         let mut merged = serde_json::to_value(&team.settings)?;
         for (field, value) in given {
-            merged[field] = value.clone();
+            if field == "phase_checks" {
+                let checks = value.as_object().context("phase_checks is an object")?;
+                for (check, enabled) in checks { merged[field][check] = enabled.clone(); }
+            } else {
+                merged[field] = value.clone();
+            }
         }
         let updated: Settings = serde_json::from_value(merged).context("Invalid settings")?;
         super::super::iron_rules::validate(&json!(updated.iron_rules))?;
@@ -1324,7 +1565,8 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
 /// Spec 6.1 lets the lead set resume_after_limits too.
-pub(crate) const OWNER_SETTINGS: [&str; 28] = [
+pub(crate) const OWNER_SETTINGS: [&str; 29] = [
+    "phase_checks",
     "approval",
     // Task 126: the owner chooses the team's memory and its store.
     "memory",
@@ -1423,8 +1665,8 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
     }
     let values = input["tasks"].as_array().filter(|tasks| !tasks.is_empty()).context("A phase needs at least one task")?;
     ensure!(values.len() <= 50, "A phase has at most 50 tasks");
-    ensure!(team.tasks.len() + values.len() <= 500, "A team has at most 500 tasks (it has {})", team.tasks.len());
-    ensure!(team.phases.len() < 100, "A team has at most 100 phases");
+    ensure!(team.tasks.iter().filter(|task| task.archived.is_none()).count() + values.len() <= 500, "A team has at most 500 live tasks (it has {})", team.tasks.iter().filter(|task| task.archived.is_none()).count());
+    ensure!(team.phases.iter().filter(|phase| phase.archived.is_none()).count() < 100, "A team has at most 100 live phases");
     // F10: with "phase": N the tasks join that draft phase instead of a new one.
     // U58: a queued or approved phase with no delivered attempt takes them too.
     let target = match input.get("phase") {
@@ -1478,7 +1720,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
     // numbers, and drafts close the gaps (F285). #754: tasks numbered otherwise
     // take those numbers, their dependencies with them.
     let renumbered = renumber_new_tasks(team, &mut tasks)?;
-    let last = team.tasks.iter().map(|task| task.id).max().unwrap_or(0);
+    let last = team.tasks.iter().map(|task| task.id).max().unwrap_or(0).max(team.last_archived_task);
     let next = last.checked_add(1).context("Task numbers are exhausted")?;
     let end = next.checked_add(tasks.len() as u32).context("Task numbers are exhausted")?;
     let wanted: BTreeSet<u32> = (next..end).collect();
@@ -1567,18 +1809,25 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
         return Ok(json!({"status":"edited","phase":n,"tasks":ids,"validation":validation,"renumbered":renumbered_json(&renumbered)}));
     }
     if let Some(n) = free_open {
-        // U59: the open phase's record takes the new tasks; no phase is added.
+        // U59: reuse the live phase, or start a new one after archived history.
         if let Some(at) = team.phases.iter().position(|phase| phase.n == n) {
             team.phases[at].tasks.extend(ids.iter().copied());
+        } else if n > 1 {
+            team.phases.push(Phase { n, title: title.clone(), state: PhaseState::Approved,
+                approval: Approval::Auto, tasks: ids.clone(), added_by: by.clone(), added_at: now(),
+                ..Default::default() });
         }
         events.push(Event::new("phase_edited", with_origins(json!({"by":by,"phase":n,"diff":{"added":ids},"free":true}), team, &ids)));
         return Ok(json!({"status":"added","phase":n,"tasks":ids,"validation":validation,"renumbered":renumbered_json(&renumbered)}));
     }
     team.phases.push(Phase {
+        archived: None,
         n,
         order,
         kind: PhaseKind::Plan,
         title: title.clone(),
+        target_hours: target_hours(input)?,
+        checks: None,
         barrier,
         approval,
         state,
@@ -1676,7 +1925,7 @@ fn intake_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSe
     }) {
         bail!("The key's urgent phase {} is still open; finish it before adding more", open.n);
     }
-    let last = team.tasks.iter().map(|task| task.id).max().unwrap_or(0);
+    let last = team.tasks.iter().map(|task| task.id).max().unwrap_or(0).max(team.last_archived_task);
     let next = last.checked_add(1).context("Task numbers are exhausted")?;
     let mut tasks = Vec::new();
     for (index, value) in values.iter().enumerate() {
@@ -1775,7 +2024,7 @@ fn renumber_new_tasks(team: &Team, tasks: &mut [Task]) -> anyhow::Result<BTreeMa
     for task in tasks.iter() {
         ensure!(given.insert(task.id), "Task #{} is given twice among the new tasks", task.id);
     }
-    let next = team.tasks.iter().map(|task| task.id).max().unwrap_or(0).checked_add(1).context("Task numbers are exhausted")?;
+    let next = team.tasks.iter().map(|task| task.id).max().unwrap_or(0).max(team.last_archived_task).checked_add(1).context("Task numbers are exhausted")?;
     let mut numbers = BTreeMap::new();
     for (index, task) in tasks.iter().enumerate() {
         let number = u32::try_from(index).ok().and_then(|index| next.checked_add(index)).context("Task numbers are exhausted")?;
@@ -1791,6 +2040,11 @@ fn renumber_new_tasks(team: &Team, tasks: &mut [Task]) -> anyhow::Result<BTreeMa
                     task.id,
                     dep.task
                 ),
+            }
+        }
+        for requirement in &mut task.requires {
+            if let Prerequisite::Task { task: id } = requirement {
+                if let Some(number) = numbers.get(id) { *id = *number; }
             }
         }
         // Task #60: an origin among the new tasks moves with them (#754); any
@@ -1881,7 +2135,7 @@ fn add_to_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSe
     // The tasks as they would join: numbered on from the highest live id,
     // Pending in this phase; validated in place and put back.
     let check = |team: &mut Team, tasks: &[Task]| -> anyhow::Result<plan::Validation> {
-        let next = team.tasks.iter().map(|task| task.id).max().unwrap_or(0) + 1;
+        let next = team.tasks.iter().map(|task| task.id).max().unwrap_or(0).max(team.last_archived_task) + 1;
         let wanted: BTreeSet<u32> = (next..next + tasks.len() as u32).collect();
         ensure!(tasks.iter().map(|task| task.id).collect::<BTreeSet<u32>>() == wanted, "New tasks are numbered from #{next}");
         let first_new = team.tasks.len();
@@ -1895,7 +2149,7 @@ fn add_to_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSe
     let Some(confirm) = input["confirm"].as_str().filter(|id| !id.is_empty()) else {
         let values = input["tasks"].as_array().filter(|tasks| !tasks.is_empty()).context("Name at least one task to add")?;
         ensure!(values.len() <= ADDED_TASKS, "At most {ADDED_TASKS} tasks join a running phase at once");
-        ensure!(team.tasks.len() + values.len() <= 500, "A team has at most 500 tasks (it has {})", team.tasks.len());
+        ensure!(team.tasks.iter().filter(|task| task.archived.is_none()).count() + values.len() <= 500, "A team has at most 500 live tasks (it has {})", team.tasks.iter().filter(|task| task.archived.is_none()).count());
         let mut tasks = values.iter().map(parse_task).collect::<anyhow::Result<Vec<Task>>>()?;
         for task in &mut tasks {
             task.phase = n;
@@ -2171,7 +2425,7 @@ fn spawn(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
 
 /// Approves a draft phase once every phase before it ended (owner), or discards
 /// it with its tasks (the lead or the owner, F10).
-fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, offline: &BTreeSet<String>, events: &mut Vec<Event>, run_checks: bool) -> anyhow::Result<Value> {
     if approve {
         ensure_subteam_approver(team, actor)?;
     }
@@ -2262,6 +2516,14 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
     let wanted: BTreeSet<u32> = ids.iter().copied().collect();
     if approve {
         accept_blockers(team, at, offline)?;
+        if run_checks {
+            let checks = plan::phase_checks(team, &team.phases[at], std::time::Instant::now() + plan::PHASE_CHECK_TIMEOUT);
+            ensure!(checks.unresolved.is_empty() || input["approve_anyway"].as_bool() == Some(true),
+                "Unresolved prerequisites: {}. Choose Approve anyway to override this check", checks.unresolved.join("; "));
+            if team.settings.phase_checks.critical_path_target || team.settings.phase_checks.unresolved_prerequisites {
+                team.phases[at].checks = Some(checks);
+            }
+        }
     }
     let label = actor.label(team);
     let count = ids.len();
@@ -2275,7 +2537,7 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
         team.phases[at].owner_word = owner_word.clone();
         events.push(Event::new(
             "phase_approved",
-            json!({"by":label,"phase":n,"tasks":count,"owner_word":owner_word,"state":state,"alongside":alongside}),
+            json!({"by":label,"phase":n,"tasks":count,"owner_word":owner_word,"state":state,"alongside":alongside,"approve_anyway":input["approve_anyway"].as_bool() == Some(true)}),
         ));
         Ok(json!({"status":"phase_approved","phase":n,"tasks":ids,"owner_word":owner_word,"phase_state":state,"alongside":alongside}))
     } else {
@@ -2508,6 +2770,9 @@ fn set_phase_acceptance(team: &mut Team, input: &Value, actor: &Actor, events: &
 
 /// The tasks of phase `n` by outcome, for the acceptance's summary.
 pub(crate) fn phase_outcome(team: &Team, n: u32) -> Value {
+    if let Some(phase) = team.phases.iter().find(|phase| phase.n == n).and_then(|phase| phase.archived.as_ref()) {
+        return json!({"accepted":phase.accepted,"rejected":phase.rejected,"cancelled":phase.cancelled});
+    }
     let count = |status: TaskStatus| team.tasks.iter().filter(|task| task.phase == n && task.status == status).count();
     json!({"accepted":count(TaskStatus::Accepted),"rejected":count(TaskStatus::Rejected),"cancelled":count(TaskStatus::Cancelled)})
 }
@@ -2869,7 +3134,7 @@ fn add_build_task(team: &mut Team, phase: u32, by: &str, events: &mut Vec<Event>
     );
     super::merge_queue::migrate_legacy_ranges(team);
     let build_merge_ranges = super::merge_queue::open_merge_ranges(team);
-    let id = team.tasks.iter().map(|task| task.id).max().unwrap_or(0) + 1;
+    let id = team.tasks.iter().map(|task| task.id).max().unwrap_or(0).max(team.last_archived_task) + 1;
     let assignee = if team.member(&team.lead).is_some() { team.lead.clone() } else { String::new() };
     // U62 (#760): the merge queue tested its merged range already; the build
     // checks only what came after. A suite the queue could not run here is
@@ -2932,15 +3197,23 @@ pub(crate) fn stuck_minutes(team: &Team) -> f64 {
     if minutes == 0 { 10.0 } else { f64::from(minutes) }
 }
 
-/// U59: the open phase of a free team: the latest approved phase, or phase 1
-/// (the approved initial plan) when no phase was extended yet.
+/// U59: the latest live approved phase, the implicit initial phase, or a new
+/// phase number after the archived history when no live phase remains.
 pub(crate) fn open_phase(team: &Team) -> u32 {
     team.phases
         .iter()
         .rev()
-        .find(|phase| phase.state == PhaseState::Approved)
+        .find(|phase| phase.state == PhaseState::Approved && phase.archived.is_none())
         .map(|phase| phase.n)
-        .unwrap_or(1)
+        .unwrap_or_else(|| {
+            if team.tasks.iter().any(|task| task.phase == 1 && task.archived.is_none()) {
+                return 1;
+            }
+            if team.archive_totals.phases == 0 && team.phases.iter().all(|phase| phase.archived.is_none()) {
+                return 1;
+            }
+            team.phases.iter().map(|phase| phase.n).max().map_or(1, |n| n.saturating_add(1))
+        })
 }
 
 /// Task #58 (owner, 2026-11-06): the phase that takes tasks as they come, if
@@ -2957,9 +3230,9 @@ pub(crate) fn free_phase(team: &Team) -> Option<u32> {
     team.phases
         .iter()
         .rev()
-        .filter(|phase| phase.state == PhaseState::Approved)
+        .filter(|phase| phase.state == PhaseState::Approved && phase.archived.is_none())
         .map(|phase| phase.n)
-        .chain(std::iter::once(1))
+        .chain(std::iter::once(1).filter(|n| !team.phases.iter().any(|phase| phase.n == *n && phase.archived.is_some())))
         .find(|n| team.phase_modes.get(n) == Some(&PlanMode::Free))
 }
 
@@ -3151,7 +3424,7 @@ fn renumber_drafts(team: &mut Team) -> Value {
     let phase_map: Vec<(u32, u32)> =
         drafts.iter().enumerate().map(|(index, old)| (*old, last_number + 1 + index as u32)).collect();
     let mut task_map: Vec<(u32, u32)> = Vec::new();
-    let mut next = base + 1;
+    let mut next = base.max(team.last_archived_task) + 1;
     for old in &drafts {
         let Some(phase) = team.phases.iter().find(|phase| phase.n == *old) else { continue };
         let mut ids = phase.tasks.clone();
@@ -3181,6 +3454,11 @@ fn renumber_drafts(team: &mut Team) -> Value {
     }
     let map: std::collections::BTreeMap<u32, u32> = task_map.iter().copied().collect();
     for task in &mut team.tasks {
+        for requirement in &mut task.requires {
+            if let Prerequisite::Task { task: id } = requirement {
+                if let Some(number) = map.get(id) { *id = *number; }
+            }
+        }
         for dep in &mut task.deps {
             if let Some(new) = map.get(&dep.task) {
                 dep.task = *new;
@@ -3284,6 +3562,13 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
     let by = actor.label(team);
     let mut diff = json!({"updated":[],"removed":[]});
     let mut changes: Vec<Value> = Vec::new();
+    if input.get("target_hours").is_some() {
+        let target = target_hours(input)?;
+        if proposed.phases[at].target_hours != target {
+            changes.push(json!({"kind":"changed","field":"target_hours","from":proposed.phases[at].target_hours,"to":target}));
+            proposed.phases[at].target_hours = target;
+        }
+    }
     if let Some(value) = input.get("title") {
         let title = clean(value.as_str().unwrap_or_default().trim(), 120, "A phase title")?;
         if proposed.phases[at].title != title {
@@ -3404,6 +3689,15 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
             }
             task.pinned = pinned;
             fields.push("pinned");
+        }
+        if let Some(requires) = value.get("requires") {
+            let requires: Vec<Prerequisite> = serde_json::from_value(requires.clone()).context("Invalid requires")?;
+            validate_requires(&requires)?;
+            if task.requires != requires {
+                changes.push(json!({"kind":"changed","task":id,"field":"requires","from":task.requires,"to":requires}));
+                task.requires = requires;
+            }
+            fields.push("requires");
         }
         // Owner 2026-10-31: the lead's estimate in minutes; null clears it and
         // Zerus computes it from the history again.
@@ -4057,7 +4351,13 @@ fn checked_finding(team: &Team, finding: &Value) -> anyhow::Result<CheckedFindin
 }
 
 fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
-    report_with(team, input, actor, false, events)
+    report_with(team, input, actor, false, false, events)
+}
+
+/// Task #362: the member's last reply becomes the report; the lead, or the
+/// member's sub-lead, may do it for the member.
+fn use_last_reply(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    report_with(team, input, actor, false, true, events)
 }
 
 /// #684 N1, #718: a member's report records its folder's HEAD and branch, so a
@@ -4081,7 +4381,7 @@ fn report_git(team: &Team, id: u32, by_member: &str) -> (String, String, Option<
     let test_delta = if head.is_empty() || team.folder.is_empty() {
         None
     } else {
-        let base = super::dispatcher::git_at(&team.folder, &["rev-parse", "HEAD"]).unwrap_or_default();
+        let base = delta_base(team, &folder);
         match crate::test_discipline::load(std::path::Path::new(&team.folder), None) {
             Ok(loaded) if !base.is_empty() && loaded.active() => super::test_results::report_delta(&folder, &base, &loaded.config),
             _ => None,
@@ -4090,22 +4390,58 @@ fn report_git(team: &Team, id: u32, by_member: &str) -> (String, String, Option<
     (head, branch, test_delta)
 }
 
+/// Task #401: where a report's change starts: the nearest merge-base of the
+/// member's HEAD with the team's line (`base_branch`) or the lead's checkout.
+/// The lead's checkout alone was a day behind the line, so every report
+/// covered some 1300 files of other people's work.
+pub(crate) fn delta_base(team: &Team, folder: &str) -> String {
+    let mut candidates = Vec::new();
+    if !team.settings.base_branch.is_empty() {
+        candidates.push(team.settings.base_branch.clone());
+    }
+    if let Some(lead) = super::dispatcher::git_at(&team.folder, &["rev-parse", "HEAD"]).filter(|lead| !lead.is_empty()) {
+        candidates.push(lead);
+    }
+    let mut best: Option<(u64, String)> = None;
+    for candidate in candidates {
+        let Some(base) = super::dispatcher::git_at(folder, &["merge-base", "HEAD", &candidate]).filter(|base| !base.is_empty()) else { continue };
+        let ahead = super::dispatcher::git_at(folder, &["rev-list", "--count", &format!("{base}..HEAD")])
+            .and_then(|count| count.parse::<u64>().ok())
+            .unwrap_or(u64::MAX);
+        if best.as_ref().is_none_or(|(fewest, _)| ahead < *fewest) {
+            best = Some((ahead, base));
+        }
+    }
+    best.map(|(_, base)| base).unwrap_or_default()
+}
+
 /// Task 287: the git reads an operation will make, made now, before the store's
 /// transaction, for `dispatcher::with_git_answers` to serve inside it: a
 /// report's folder HEAD, branch and test delta (`report_git`).
 pub(crate) fn prefetch_git(team: &Team, op: &str, input: &Value, actor: &Actor) {
-    if op != "report" || input["interim"].as_bool() == Some(true) {
+    if !matches!(op, "report" | "use-last-reply") || input["interim"].as_bool() == Some(true) {
         return;
     }
     let Ok(id) = task_id(input) else { return };
-    if let Actor::Member(member) = actor {
-        let _ = report_git(team, id, member);
+    // Task #362: a use-last-reply reports a member's attempt: its folder is the
+    // member's, not the lead's or the owner's.
+    let named = attempt_member_of(team, input);
+    let member = if named.is_empty() {
+        match actor {
+            Actor::Member(member) => member.clone(),
+            _ => String::new(),
+        }
+    } else {
+        named
+    };
+    if !member.is_empty() {
+        let _ = report_git(team, id, &member);
     }
 }
 
 /// `captured`: Zerus records the member's last reply (A2); it never enters the
 /// pipeline's stages (#538 C1).
-fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, from_reply: bool, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     let id = task_id(input)?;
     // U36: a stage member's verdict names its stage run as the attempt.
     if let Some(result) = super::pipeline::stage_report(team, input, actor, events)? {
@@ -4187,7 +4523,27 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
         ));
         return Ok(json!({"status":"interim","task":id,"attempt":n}));
     }
-    let (folder_head, folder_branch, test_delta) = report_git(team, id, &by_member);
+    // Task #362 (owner, 2026-11-08): the lead, or the sub-lead the member
+    // reports to, uses that member's last reply as the report. The attempt is
+    // the member's; the lead is its author, and the report stays on it.
+    let target = team
+        .task(id)
+        .and_then(|task| task.attempts.iter().find(|attempt| attempt.id == attempt_id))
+        .map(|attempt| attempt.member.clone())
+        .unwrap_or_default();
+    let delegated = from_reply && !by_member.is_empty() && !target.is_empty() && target != by_member && actor.reviews(team, &target);
+    // The report is the attempt's: its folder's HEAD, branch and test delta are
+    // the member's, whoever takes the last reply.
+    let git_member = if target.is_empty() { by_member.as_str() } else { target.as_str() };
+    let (folder_head, folder_branch, test_delta) = report_git(team, id, git_member);
+    // Task #362: the owner also sees the lead's action in the lead-changes
+    // digest, with the reply quoted. It is recorded before the task borrow
+    // below; a stale attempt records nothing.
+    if delegated && will_report(team, id, attempt_id, &target) {
+        let role = team.role_of(&target);
+        let quote = quoted(&body, 400);
+        super::lead_plan::report_recorded(team, id, &role, &quote, &label);
+    }
     // C1: the lead reports its own task and accepts it in one step; nobody
     // else accepts on a report.
     if accept {
@@ -4196,7 +4552,7 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(task.attempts.iter().any(|a| a.id == attempt_id), "Task #{id} has no attempt {attempt_id}");
     let current = task.open_attempt().map(|a| (a.id.clone(), a.member.clone(), a.n));
-    let open = current.filter(|(open, member, _)| open == attempt_id && (by_member.is_empty() || *member == by_member));
+    let open = current.filter(|(open, member, _)| open == attempt_id && (by_member.is_empty() || *member == by_member || (delegated && *member == target)));
     if let Some((open_id, member, n)) = open {
         if accept {
             ensure!(member == team_lead, "Task #{id} is not the lead's own task: accept it with hgs team accept");
@@ -4218,6 +4574,7 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
         };
         let attempt = task.attempts.iter_mut().find(|a| a.id == open_id).unwrap();
         attempt.state = AttemptState::Reported;
+        let quote = if delegated { Some(quoted(&body, 400)) } else { None };
         attempt.report = Some(Report { text: body, at: now(), structured: structured.clone(), unstructured: structured.is_none(), captured, tests: test_delta.clone(), ..Default::default() });
         attempt.interim = None;
         attempt.folder_head = folder_head.clone();
@@ -4225,7 +4582,7 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
         attempt.no_report = false;
         attempt.check = check_result;
         // The lead hears of a report unless it wrote it.
-        attempt.notice = if member == team_lead { Notice::None } else { Notice::Pending };
+        attempt.notice = if member == team_lead || delegated { Notice::None } else { Notice::Pending };
         task.status = TaskStatus::Submitted;
         task.decided_by = None;
         let title = task.title.clone();
@@ -4233,7 +4590,13 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
         // Spec 5.6: "Report to QA lead" when a sub-lead reviews it.
         let reviewer = team.reviewer_of(&member);
         let to = if reviewer.is_empty() { String::new() } else { team.role_of(&reviewer) };
-        events.push(Event::new("reported", json!({"by":role,"to":to,"task":id,"title":title,"attempt":n,"human":by_member.is_empty()})));
+        if delegated {
+            // Task #362: the feed names the lead as the author, the member it
+            // is for, and quotes the reply it took.
+            events.push(Event::new("reported", json!({"by":label,"for":role,"to":to,"task":id,"title":title,"attempt":n,"human":false,"text":quote})));
+        } else {
+            events.push(Event::new("reported", json!({"by":role,"to":to,"task":id,"title":title,"attempt":n,"human":by_member.is_empty()})));
+        }
         if accept {
             let decided = decide(team, input, actor, true, events)?;
             let status = decided["status"].clone();
@@ -4271,7 +4634,7 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
     let replaceable = task.status.reported()
         && attempt.state == AttemptState::Reported
         && newest.as_deref() == Some(attempt.id.as_str())
-        && (by_member.is_empty() || attempt.member == by_member);
+        && (by_member.is_empty() || attempt.member == by_member || (delegated && attempt.member == target));
     if replaceable {
         let n = attempt.n;
         let member = attempt.member.clone();
@@ -4282,6 +4645,7 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
         if report.replaced.len() > 3 {
             report.replaced.remove(0);
         }
+        let quote = if delegated { Some(quoted(&body, 400)) } else { None };
         report.text = body;
         report.structured = structured.clone();
         report.unstructured = structured.is_none();
@@ -4298,16 +4662,24 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
         attempt.interim = None;
         // The lead hears the real report as a report, not as the captured one;
         // U36: a stage still reading it tells the lead after the last stage.
-        if member != team_lead && task.status == TaskStatus::Submitted {
+        if member != team_lead && !delegated && task.status == TaskStatus::Submitted {
             attempt.notice = Notice::Pending;
         }
         let (in_stage, submitted) = (task.status.in_stage(), task.status == TaskStatus::Submitted);
         let title = task.title.clone();
         let role = team.role_of(&member);
-        events.push(Event::new(
-            "report_replaced",
-            json!({"by":role,"task":id,"title":title,"attempt":n,"human":by_member.is_empty()}),
-        ));
+        if delegated {
+            // Task #362: the lead's action, its member and the reply it took.
+            events.push(Event::new(
+                "report_replaced",
+                json!({"by":label,"for":role,"task":id,"title":title,"attempt":n,"human":false,"text":quote}),
+            ));
+        } else {
+            events.push(Event::new(
+                "report_replaced",
+                json!({"by":role,"task":id,"title":title,"attempt":n,"human":by_member.is_empty()}),
+            ));
+        }
         // #538 C1: the real report that replaces a captured one enters the
         // stages; #595 N4: one replaced while a stage reads it starts that
         // stage again on the new text.
@@ -4518,6 +4890,7 @@ fn swap_one(team: &mut Team, input: &Value, id: &str, keep_session: bool, actor:
             // Feedback 14: the new session needs the old one's name.
             member.replaced = Some(old);
         }
+        let before_agent = member.agent.clone();
         let fields =
             [("agent", &mut member.agent), ("model", &mut member.model), ("effort", &mut member.effort), ("account", &mut member.account)];
         // Task 135: what the swap changes, for the new session's handoff brief.
@@ -4536,6 +4909,12 @@ fn swap_one(team: &mut Team, input: &Value, id: &str, keep_session: bool, actor:
             // knew, so its first message is the handoff brief (task 135).
             member.handoff = Some(HandoffNeed { why: "swap".to_owned(), at, from: from.clone(), changes: said });
         }
+        // Task #6: the member's permissions mode must exist for the agent it now
+        // runs (Claude's auto is no mode for Codex); a native selection is checked
+        // by check_selection.
+        if member.agent != before_agent && ["auto", "bypass"].contains(&member.permissions.as_str()) {
+            check_permission_mode(&member.agent, &member.permissions).map_err(|error| anyhow::anyhow!("Member \"{id}\": field \"permissions\": {error}"))?;
+        }
         // Feedback 12: a swap's role prompt was ignored; it changes now.
         if let Some(prompt) = input["prompt"].as_str().filter(|prompt| !prompt.trim().is_empty()) {
             member.prompt = clean_text(prompt, 8000, "A role prompt")?;
@@ -4553,6 +4932,10 @@ fn swap_one(team: &mut Team, input: &Value, id: &str, keep_session: bool, actor:
             member.session = session;
             member.launch_after_swap = member.session.is_none();
             member.state = if member.session.is_some() { MemberState::Active } else { MemberState::NotCreated };
+            // Task #6: a swapped session starts on its own values; the changes
+            // pending for the session it replaced do not follow it.
+            member.model_switch = None;
+            member.prompt_change = None;
         } else {
             member.launch_after_swap = false;
         }
@@ -5874,7 +6257,10 @@ fn decide_proposal(team: &mut Team, input: &Value, actor: &Actor, offline: &BTre
         return Ok(json!({"status":"rejected","proposal":id}));
     }
     let member = team.proposals[at]["member"].clone();
-    let change = team.proposals[at]["change"].clone();
+    let mut change = team.proposals[at]["change"].clone();
+    if kind == "approve-phase" {
+        change["input"]["approve_anyway"] = json!(input["approve_anyway"].as_bool() == Some(true));
+    }
     if kind == "question" {
         // #740: the owner's answer, an offered option or words of the owner's
         // own, reaches the lead's inbox with the question.
@@ -5919,7 +6305,8 @@ fn trial(team: &Team, kind: &str, member: &Value, change: &Value, mode: &str) ->
         let mut copy = team.clone();
         let mut value = change["input"].clone();
         value["team"] = json!(team.id);
-        apply(&mut copy, kind, &value, &Actor::Human, &BTreeSet::new(), &mut Vec::new())?;
+        if kind == "approve-phase" { value["approve_anyway"] = json!(true); }
+        apply_with_checks(&mut copy, kind, &value, &Actor::Human, &BTreeSet::new(), &mut Vec::new(), false)?;
     }
     if kind == "swap-member" {
         for entry in change["members"].as_array().into_iter().flatten() {
@@ -6136,6 +6523,8 @@ fn run_proposal(team: &mut Team, kind: &str, member: &Value, change: &Value, mod
             let base = change["base_branch"].as_str().unwrap_or_default();
             super::working_mode::apply(&mut team.settings, &preset, base)?;
             team.working_mode = preset.clone();
+            // The settings now follow this preset: a former Keep is spent.
+            team.mode_kept = None;
             events.push(Event::new("working_mode_switched", json!({"preset":preset,"by":reason,"proposal":id})));
             json!({"working_mode":preset})
         }
@@ -6228,6 +6617,7 @@ fn owner_op_change(team: &Team, op: &str, input: &Value) -> anyhow::Result<Value
             fields.remove("revision");
         }
     }
+    if op == "approve-phase" { given.as_object_mut().unwrap().remove("approve_anyway"); }
     if op == "settings" {
         ensure!(given.get("settings").is_some_and(Value::is_object) || given.get("members_update").is_some(),
             "A settings proposal names \"settings\" (or \"members_update\"), such as {{\"kind\":\"settings\",\"settings\":{{\"max_members\":8}},\"reason\":\"...\"}}");
@@ -6678,6 +7068,77 @@ fn move_task(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Eve
     Ok(json!({"status":"moved","task":id,"from":from,"to":n}))
 }
 
+/// Task #370 (owner, 2026-11-08): queue a landing for an accepted task again,
+/// as a merge or, when the line would carry a rejected attempt, as a cherry-pick
+/// of the task's own commit.
+fn land(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you queue a landing");
+    let id = task_id(input)?;
+    let cherry = input["cherry_pick"].as_bool() == Some(true);
+    let label = actor.label(team);
+    let assignee = team.task(id).map(|task| task.assignee.clone()).unwrap_or_default();
+    let folder = team.member(&assignee).and_then(|member| super::dispatcher::member_folder_path(team, member).ok()).unwrap_or_default();
+    let task = team.task_mut(id).context("Unknown task")?;
+    ensure!(task.status == TaskStatus::Accepted || task.merge.is_some(), "Task #{id} is not accepted; there is nothing to land");
+    ensure!(task.landed.is_none(), "Task #{id} is marked landed; nothing waits");
+    if task.merge.as_ref().is_some_and(|entry| entry.state == "testing") {
+        bail!("Task #{id} is merged into the integration line and its tests run; wait for the queue's result");
+    }
+    let attempt = task
+        .attempts
+        .iter()
+        .rev()
+        .find(|attempt| attempt.state == AttemptState::Reported && !attempt.folder_head.is_empty())
+        .cloned();
+    match task.merge.as_mut() {
+        Some(entry) => {
+            entry.state = "queued".into();
+            entry.retry = true;
+            entry.blocked = false;
+            entry.cherry_pick = cherry;
+            entry.note.clear();
+            entry.wait_reason = MergeWaitReason::Other;
+            entry.prev.clear();
+            entry.merged.clear();
+            entry.conflict_files.clear();
+            entry.resolve_task = None;
+        }
+        None => {
+            let attempt = attempt.context("Task #{id} has no reported commit to land")?;
+            task.merge = Some(MergeEntry {
+                state: "queued".into(),
+                author: assignee.clone(),
+                commit: attempt.folder_head.clone(),
+                branch: attempt.folder_branch.clone(),
+                folder: folder.clone(),
+                at: now(),
+                by: label.clone(),
+                by_owner: matches!(actor, Actor::Human),
+                cherry_pick: cherry,
+                ..Default::default()
+            });
+        }
+    }
+    events.push(Event::new("landing_requested", json!({"by":label,"task":id,"cherry_pick":cherry})));
+    Ok(json!({"status":"queued","task":id,"cherry_pick":cherry}))
+}
+
+/// Task #370: mark an accepted task landed by a named commit on the integration
+/// line, for work that reached the line as a cherry-pick; journaled.
+fn mark_landed(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you mark a task landed");
+    let id = task_id(input)?;
+    let commit = text(input, "commit").trim().to_owned();
+    ensure!(!commit.is_empty(), "Name the integration line's commit: {{\"commit\":\"...\"}}");
+    ensure!(team.task(id).is_some_and(|task| task.status == TaskStatus::Accepted), "Only an accepted task is marked landed");
+    ensure!(super::merge_queue::landed(team, &commit), "That commit is not on the integration line");
+    let label = actor.label(team);
+    if let Some(task) = team.task_mut(id) {
+        task.landed = Some(Landed { commit: commit.clone(), by: label.clone(), at: now() });
+    }
+    events.push(Event::new("task_marked_landed", json!({"by":label,"task":id,"commit":commit})));
+    Ok(json!({"status":"landed","task":id,"commit":commit}))
+}
 fn retry(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     let id = task_id(input)?;
     let assignee = team.task(id).map(|task| task.assignee.clone()).unwrap_or_default();
@@ -6805,6 +7266,9 @@ fn cancel(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     let phase_build = task.phase_build;
     task.status = TaskStatus::Cancelled;
     task.fresh_retry = false;
+    // Task #6: a model switch left waiting on the cancelled task claims no
+    // member any more (its member's own edit is not held back by it).
+    task.prepare.retain(|step| step.step != "model");
     tell_revoked(team, id, working, "it was cancelled".into());
     // #759: the tasks it held start once their other dependencies are done;
     // the event and the lead's inbox name them for a re-plan.
@@ -6864,6 +7328,11 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
 }
 
 fn apply_op(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    apply_with_checks(team, op, input, actor, offline, events, true)
+}
+
+// Trial copies validate every ordinary guard without spawning phase-check Git.
+fn apply_with_checks(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>, run_checks: bool) -> anyhow::Result<Value> {
     // N14: the word is checked again on the stored team inside the change. Two
     // requests sent at once both pass the CLI's pre-check on their own read;
     // the store serializes them, and only the second sees the first's record.
@@ -6910,12 +7379,16 @@ fn apply_op(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &B
         "intake-key" => intake_key(team, input, actor, events),
         "edit-draft" => check_land_choices(team, input).and_then(|()| edit_draft(team, input, actor, offline, events)),
         "reports-to" | "sub-lead" => hierarchy(team, op, input, actor, events),
+        "archive-phases" => {
+            ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only you or the lead migrate closed phases");
+            Ok(json!({"status":"phases_archived"}))
+        }
         "move-phase" => move_phase(team, input, actor, events),
         "add-to-phase" => add_to_phase(team, input, actor, offline, events),
         // Task #229: a Crit or Minor spawned from a task or review.
         "spawn" => spawn(team, input, actor, offline, events),
-        "approve-phase" => decide_phase(team, input, actor, true, offline, events),
-        "discard-phase" => decide_phase(team, input, actor, false, offline, events),
+        "approve-phase" => decide_phase(team, input, actor, true, offline, events, run_checks),
+        "discard-phase" => decide_phase(team, input, actor, false, offline, events, run_checks),
         "return-to-draft" => return_to_draft(team, input, actor, events),
         // U63 (owner, 2026-10-31): a phase's pause and the owner's acceptance.
         "pause-phase" => pause_phase(team, input, actor, events),
@@ -6927,6 +7400,21 @@ fn apply_op(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &B
         "settings" => settings(team, input, actor, events),
         "rights" => rights(team, input, actor, events),
         "switch-memory-mode" => switch_memory_mode(team, input, actor, events),
+        // Task 336 (owner, 2026-11-08): the owner keeps the team's settings for
+        // the project's profile as it is now; the block stays away until the
+        // profile changes materially.
+        "keep-working-mode" => {
+            ensure!(matches!(actor, Actor::Human), "Only you keep the team's settings");
+            let kept = super::working_mode::keep(team, super::super::now())?;
+            events.push(Event::new("working_mode_kept", kept.clone()));
+            Ok(kept)
+        }
+        "forget-working-mode" => {
+            ensure!(matches!(actor, Actor::Human), "Only you forget the kept working mode");
+            let had = team.mode_kept.take().is_some();
+            events.push(Event::new("working_mode_kept_forgotten", json!({"had":had})));
+            Ok(json!({"forgotten":had}))
+        }
         // Task 159: checked and journaled here; `hgs team scratch-rule` keeps it.
         "scratch-rule" => {
             ensure!(matches!(actor, Actor::Human), "Only you grant the scratch-team rule: the lead proposes it, {{\"kind\":\"scratch-rule\",\"folder\":\"D:/scratch\",\"agents\":[\"claude\"],\"reason\":\"...\"}} | hgs team propose --json");
@@ -6986,9 +7474,22 @@ fn apply_op(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &B
             Ok(set_status(team, TeamStatus::Archived, "archived", actor, events))
         }
         "report" | "use-last-reply" => {
-            ensure!(op == "report" || matches!(actor, Actor::Human), "Only you use a last reply as the report");
+            // Task #362 (owner, 2026-11-08): the lead, and the sub-lead a
+            // member reports to, may use that member's last reply as the
+            // report; a member still cannot do it for itself.
+            if op == "use-last-reply" {
+                let member = attempt_member_of(team, input);
+                ensure!(
+                    matches!(actor, Actor::Human) || actor.uses_reply_of(team, &member),
+                    "Only the lead or you use a last reply as the report"
+                );
+            }
             ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
-            report(team, input, actor, events)
+            if op == "use-last-reply" {
+                use_last_reply(team, input, actor, events)
+            } else {
+                report(team, input, actor, events)
+            }
         }
         "ask" => ask(team, input, actor, events),
         "reply" => reply(team, input, actor, events),
@@ -7009,6 +7510,9 @@ fn apply_op(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &B
         "skip-stage" => super::pipeline::skip_stage(team, input, actor, events),
         "send-back" => super::pipeline::send_back(team, input, actor, events),
         "retry" => retry(team, input, actor, events),
+        // Task #370: queue an accepted task's landing (a merge or a cherry-pick).
+        "land" => land(team, input, actor, events),
+        "landed" => mark_landed(team, input, actor, events),
         "take-over" => take_over(team, input, actor, events),
         "cancel" => cancel(team, input, actor, events),
         "check" => check(team, input, actor, events),
@@ -7468,6 +7972,16 @@ fn apply_op(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &B
             ));
         } else if !decided {
             team.idle = Notice::None;
+        }
+    }
+    if run_checks && matches!(op, "plan" | "extend" | "edit-draft" | "rework-phase" | "return-to-draft" | "undo-reject-phase" | "move-phase" | "move-task" | "settings" | "approve" | "accept" | "cancel" | "discard-phase") {
+        let enabled = team.settings.phase_checks.critical_path_target || team.settings.phase_checks.unresolved_prerequisites;
+        let deadline = std::time::Instant::now() + plan::PHASE_CHECK_TIMEOUT;
+        let checks: Vec<_> = team.phases.iter().map(|phase| {
+            (enabled && phase.state.is_draft()).then(|| plan::phase_checks(team, phase, deadline))
+        }).collect();
+        for (phase, result) in team.phases.iter_mut().zip(checks) {
+            if phase.state.is_draft() { phase.checks = result; }
         }
     }
     Ok(result)

@@ -695,6 +695,18 @@ final class OpeningPositionTests: XCTestCase {
         XCTAssertEqual(memory, UnreadPresentation.opening(memory: memory, saved: SavedConversationViewport(eventId: "old", offset: 10), boundary: "new", keys: keys).anchor)
     }
 
+    func testSavedFollowingTailDoesNotRestoreAnOlderMessage() {
+        let saved = SavedConversationViewport(eventId: "old", offset: 37, cursor: "old-cursor", epoch: "epoch", following: true)
+        let unread = UnreadPresentation.opening(memory: nil, saved: saved, boundary: "new", keys: keys)
+        XCTAssertEqual(unread.anchor?.itemKey, "history:unread")
+        XCTAssertFalse(unread.unavailableSaved)
+        let tail = UnreadPresentation.opening(memory: nil, saved: saved, boundary: "", keys: keys)
+        XCTAssertNil(tail.anchor)
+        XCTAssertFalse(tail.unavailableSaved)
+        let reading = ConversationAnchor(itemKey: "event:new", offset: 11, following: false)
+        XCTAssertEqual(UnreadPresentation.opening(memory: reading, saved: saved, boundary: "new", keys: keys).anchor, reading)
+    }
+
     func testMissingSavedPositionIsExplicitAndNeverFallsToTail() {
         let withUnread = UnreadPresentation.opening(memory: nil, saved: SavedConversationViewport(eventId: "missing", offset: 10), boundary: "new", keys: keys)
         XCTAssertTrue(withUnread.unavailableSaved)

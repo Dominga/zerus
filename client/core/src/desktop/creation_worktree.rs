@@ -14,6 +14,7 @@ use std::collections::HashSet;
 pub use super::creation_clone::Scope;
 
 pub const ABI: &str = "desktop-creation-worktree-v1";
+pub const CONTROL_HELP_MARKER: &str = "Desktop creation worktree receipt control: future-fence-v1";
 pub const HELP_MARKER: &str = "Desktop creation worktree ABI: desktop-creation-worktree-v1";
 /// Leaves room for the authenticated envelope inside the existing control line.
 pub const SOURCE_BYTES: usize = 32 << 10;
@@ -86,6 +87,42 @@ impl Plan {
             destination: text("destination")?,
         };
         plan.valid().then_some(plan)
+    }
+    /// Correlation DATA for the owning computer's direct metadata command,
+    /// including remote and Windows paths. This returns only a hash; it does
+    /// not construct a local service plan or relax `valid`/`Intent::verify`.
+    pub fn receipt_fingerprint(id: &str, value: &Value) -> Option<String> {
+        if !creation::valid_operation(id, value) {
+            return None;
+        }
+        let text = |key| value[key].as_str().map(str::to_owned);
+        let plan = Self {
+            worktree_request_id: text("worktree_id")?,
+            expected_machine: text("expected_machine")?,
+            path: text("worktree_source").or_else(|| text("target"))?,
+            common_dir: text("worktree_common")?,
+            branch: text("branch")?,
+            destination: text("destination")?,
+        };
+        let absolute = |path: &String| {
+            path.len() <= PATH_BYTES
+                && !path.chars().any(char::is_control)
+                && paths::absolute(
+                    path,
+                    if paths::windows_shaped(path) {
+                        Style::Windows
+                    } else {
+                        Style::Posix
+                    },
+                )
+        };
+        (uuid(&plan.worktree_request_id)
+            && uuid(&plan.expected_machine)
+            && branch(&plan.branch)
+            && [&plan.path, &plan.common_dir, &plan.destination]
+                .iter()
+                .all(|p| absolute(p)))
+        .then(|| hash(&serde_json::to_vec(&plan.arguments()).expect("fixed receipt arguments")))
     }
     pub fn valid(&self) -> bool {
         uuid(&self.worktree_request_id)
@@ -348,7 +385,7 @@ pub const TEXT_BYTES: usize = 2048;
 /// The original receipt fields the creation reducer checks. Everything else,
 /// such as the ownership record and its repeated paths, stays in the CLI
 /// receipt store.
-const RESULT_FIELDS: [&str; 10] = [
+const RESULT_FIELDS: [&str; 12] = [
     "schema",
     "request_id",
     "fingerprint",
@@ -359,6 +396,8 @@ const RESULT_FIELDS: [&str; 10] = [
     "effects_started",
     "detail",
     "resource_error",
+    "future_starts_fenced",
+    "past_outcome",
 ];
 /// The longest prefix of `text` whose JSON encoding fits `limit` bytes.
 fn bounded_text(text: &str, limit: usize) -> String {
@@ -410,6 +449,33 @@ pub struct Admission {
     pub receipt: Option<Receipt>,
 }
 impl Admission {
+    /// This is a refusal reason, not an ID-wide no-effects witness. Generic
+    /// service errors can occur after commit and retain the Unknown outcome.
+    pub fn refusal_answer(&self, intent: &Intent) -> Option<crate::creation::Answer> {
+        let reason = self.refusal(intent)?;
+        Some(crate::creation::Answer {
+            ok: false,
+            data: serde_json::json!({"status":if self.code=="creation_worktree_unavailable" {"unconfirmed"}else{"refused"},"request_id":intent.worktree_request_id}),
+            error: reason.into(),
+        })
+    }
+    pub fn refusal(&self, intent: &Intent) -> Option<&'static str> {
+        if self.abi != ABI
+            || self.request_id != intent.worktree_request_id
+            || self.scope != intent.scope
+            || self.accepted
+            || self.durable
+            || self.receipt.is_some()
+        {
+            return None;
+        }
+        match self.code.as_str() {
+            "creation_worktree_predecessor_unsettled" => Some("Worktree admission refused: the previous attempt is not a drained, confirmed failure. Stop setup and review its retained result before creating a new session."),
+            "creation_worktree_capacity" => Some("Worktree admission refused: the desktop service's retained request capacity is full. No new attempt was admitted."),
+            "creation_worktree_unavailable" => Some("The desktop service could not confirm this worktree request. Its result is unknown. Stop setup or check its original result; it will not be resent."),
+            _ => None,
+        }
+    }
     pub fn matches(&self, intent: &Intent) -> bool {
         self.abi == ABI
             && self.request_id == intent.worktree_request_id
@@ -586,6 +652,77 @@ impl Lookup {
     }
 }
 
+/// A metadata-only observation or explicit future-start exclusion. This carries
+/// the native reducer's plan, never a GUI-supplied receipt path or effect permit.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlAction {
+    Status,
+    Cancel,
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlRequest {
+    pub request_id: String,
+    pub scope: Scope,
+    pub creation_id: String,
+    pub plan: Plan,
+    pub action: ControlAction,
+}
+impl ControlRequest {
+    pub fn valid(&self) -> bool {
+        uuid(&self.request_id) && self.scope.valid() && uuid(&self.creation_id) && self.plan.valid()
+    }
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlReply {
+    pub abi: String,
+    pub request_id: String,
+    pub scope: Scope,
+    pub action: ControlAction,
+    pub receipt: Option<Value>,
+}
+impl ControlReply {
+    pub fn matches(&self, request: &ControlRequest) -> bool {
+        request.valid()
+            && self.abi == ABI
+            && self.request_id == request.request_id
+            && self.scope == request.scope
+            && self.action == request.action
+            && self.receipt.as_ref().is_none_or(|v| {
+                v["schema"] == 1
+                    && v["request_id"] == request.plan.worktree_request_id
+                    && v["fingerprint"].as_str() == request.plan.request_fingerprint().as_deref()
+                    && serde_json::to_vec(v).is_ok_and(|v| v.len() <= RESULT_BYTES)
+            })
+    }
+}
+/// A future-start fence is deliberately NOT a failed/no-effects receipt. It
+/// cannot settle historical uncertainty, reconstruct consent or release custody.
+pub fn fenced_operation(id: &str, operation: &Value, value: &Value) -> bool {
+    Plan::receipt_fingerprint(id, operation).is_some_and(|fingerprint| {
+        fence_fields(
+            value,
+            operation["worktree_id"].as_str().unwrap_or(""),
+            &fingerprint,
+        )
+    })
+}
+pub fn fenced(value: &Value, plan: &Plan) -> bool {
+    plan.request_fingerprint()
+        .is_some_and(|fingerprint| fence_fields(value, &plan.worktree_request_id, &fingerprint))
+}
+fn fence_fields(value: &Value, id: &str, fingerprint: &str) -> bool {
+    value["schema"] == 1
+        && value["request_id"] == id
+        && value["fingerprint"].as_str() == Some(fingerprint)
+        && value["status"] == "fenced"
+        && value["future_starts_fenced"] == true
+        && value["past_outcome"] == "unknown"
+        && value.get("effects_started").is_none()
+}
+
 #[cfg(test)]
 pub(super) fn test_intent() -> Intent {
     tests::checkpoint()
@@ -689,6 +826,66 @@ mod tests {
             }
         }
         panic!("the real creation reducer did not request its worktree")
+    }
+
+    #[test]
+    fn a_large_cached_catalog_does_not_fill_the_effect_checkpoint_or_change_its_plan() {
+        let original = checkpoint();
+        let expected = original.clone().verify().unwrap();
+        let mut value: Value = serde_json::from_str(&original.original).unwrap();
+        let worktrees: Vec<_> = (0..219)
+            .map(|n| {
+                json!({
+                    "path":format!("/srv/repos/{}/work-{n}", "x".repeat(160)),
+                    "branch":format!("work-{n}"),"available":true,
+                })
+            })
+            .collect();
+        value["catalog"] = json!({"common_dir":"/srv/repo/.git","state":"ok",
+            "worktrees":worktrees});
+        value["opaque_future"] = json!({"keep":"original fields remain bound"});
+        let saved = value.clone();
+        let mut intent = original.clone();
+        intent.original = serde_json::to_string(&value).unwrap();
+        assert!(intent.original.len() > SOURCE_BYTES);
+        assert!(
+            intent.clone().verify().is_err(),
+            "the old full-card input is refused"
+        );
+        intent.original = creation::effect_checkpoint(&value).unwrap();
+        assert!(intent.original.len() < SOURCE_BYTES);
+        let verified = intent.verify().unwrap();
+        assert!(verified.plan == expected.plan);
+        let projected: Value = serde_json::from_str(&verified.intent.original).unwrap();
+        let mut expected_checkpoint = saved.clone();
+        expected_checkpoint["catalog"]
+            .as_object_mut()
+            .unwrap()
+            .remove("worktrees");
+        assert_eq!(
+            projected, expected_checkpoint,
+            "all other original fields are retained"
+        );
+        assert!(projected["catalog"].get("worktrees").is_none());
+        assert_eq!(
+            projected["catalog"]["common_dir"],
+            saved["catalog"]["common_dir"]
+        );
+        assert_eq!(projected["opaque_future"], saved["opaque_future"]);
+        assert_eq!(value, saved, "the journal/recovery catalog was not mutated");
+        assert_eq!(
+            verified.binding.source_sha256,
+            hash(verified.intent.original.as_bytes())
+        );
+        assert_eq!(verified.binding.plan_sha256, expected.binding.plan_sha256);
+
+        // Only this cached list is omitted. Do not truncate other input to fit,
+        // raise a cap or let an oversized unknown field through the verifier.
+        value["opaque_future"] = json!("x".repeat(SOURCE_BYTES + 1));
+        let mut oversized = original;
+        oversized.original = creation::effect_checkpoint(&value).unwrap();
+        assert!(oversized.original.len() > SOURCE_BYTES);
+        assert!(oversized.verify().is_err());
     }
 
     #[test]
@@ -970,6 +1167,88 @@ mod tests {
         let mut intent = checkpoint();
         intent.original = " ".repeat(SOURCE_BYTES + 1);
         assert!(intent.verify().is_err());
+    }
+
+    #[test]
+    fn direct_receipt_hashes_preserve_remote_and_windows_identity_without_service_admission() {
+        let intent = checkpoint();
+        for (host, source, common, destination) in [
+            ("peer", "/srv/repo", "/srv/repo/.git", "/srv/new"),
+            (
+                "peer",
+                r"C:\fixture\repo",
+                r"C:\fixture\repo\.git",
+                r"C:\fixture\new",
+            ),
+        ] {
+            let mut operation: Value = serde_json::from_str(&intent.original).unwrap();
+            operation["host"] = json!(host);
+            operation["target"] = json!(source);
+            operation["worktree_source"] = json!(source);
+            operation["worktree_common"] = json!(common);
+            operation["destination"] = json!(destination);
+            assert!(Plan::from_operation(&intent.creation_id, &operation).is_none());
+            let invocation = worktrees::create_invocation(
+                &ComputerId::from(host),
+                source,
+                common,
+                operation["branch"].as_str().unwrap(),
+                BASE,
+                destination,
+                &intent.worktree_request_id,
+                true,
+                MACHINE,
+            );
+            let after = invocation.args.iter().position(|s| s == "create").unwrap() + 1;
+            let original: Vec<_> = invocation.args[after..]
+                .iter()
+                .filter(|s| *s != "--receipt")
+                .cloned()
+                .collect();
+            let fingerprint = hash(&serde_json::to_vec(&original).unwrap());
+            assert_eq!(
+                Plan::receipt_fingerprint(&intent.creation_id, &operation),
+                Some(fingerprint.clone())
+            );
+            let value = json!({"schema":1,"request_id":intent.worktree_request_id,"fingerprint":fingerprint,"status":"fenced","future_starts_fenced":true,"past_outcome":"unknown"});
+            assert!(fenced_operation(&intent.creation_id, &operation, &value));
+            let mut changed = operation.clone();
+            changed["branch"] = json!("another");
+            assert!(!fenced_operation(&intent.creation_id, &changed, &value));
+        }
+    }
+
+    #[test]
+    fn admission_refusals_remain_exact_and_fences_never_mean_no_past_effects() {
+        let intent = checkpoint();
+        let plan = intent.clone().verify().unwrap().plan;
+        let mut refusal = Admission {
+            abi: ABI.into(),
+            request_id: intent.worktree_request_id.clone(),
+            scope: intent.scope.clone(),
+            accepted: false,
+            durable: false,
+            code: "creation_worktree_predecessor_unsettled".into(),
+            receipt: None,
+        };
+        assert!(refusal.refusal(&intent).is_some());
+        refusal.request_id = uuid::Uuid::new_v4().to_string();
+        assert!(refusal.refusal(&intent).is_none());
+        refusal.request_id = intent.worktree_request_id.clone();
+        refusal.scope.service_epoch = uuid::Uuid::new_v4().to_string();
+        assert!(refusal.refusal(&intent).is_none());
+        let value = json!({"schema":1,"request_id":plan.worktree_request_id,"fingerprint":plan.request_fingerprint().unwrap(),"status":"fenced","future_starts_fenced":true,"past_outcome":"unknown"});
+        assert!(fenced(&value, &plan));
+        for (key, changed) in [
+            ("effects_started", json!(false)),
+            ("past_outcome", json!("failed")),
+            ("future_starts_fenced", json!(false)),
+            ("fingerprint", json!("0".repeat(64))),
+        ] {
+            let mut value = value.clone();
+            value[key] = changed;
+            assert!(!fenced(&value, &plan), "{key}");
+        }
     }
 
     #[test]

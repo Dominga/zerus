@@ -46,6 +46,13 @@ fn the_exchange_wire_is_a_strict_computer_scoped_read() {
         minimal["payload"].as_object_mut().unwrap().remove(key);
     }
     protocol::request(&minimal).unwrap();
+    // Opening a missing Done task has always used an empty version. The
+    // shallow snapshot travels in existing bytes, without a new wire key.
+    let mut fetch = minimal.clone();
+    fetch["payload"]["inventory"]["tasks"][TASK] = json!({});
+    protocol::request(&fetch).unwrap();
+    fetch["payload"]["shallow"] = json!(true);
+    assert!(protocol::request(&fetch).is_err());
     let mut bad = value.clone();
     bad["session"] = json!("codex/example");
     assert!(protocol::request(&bad).is_err());

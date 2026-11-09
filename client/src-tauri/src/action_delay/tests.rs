@@ -33,6 +33,92 @@ fn due(delays: &Delays, id: &str) {
     assert!(delays.wait(id));
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn explicit_remove_undo_keeps_the_same_original_claim_without_a_second_activation() {
+    let actions = actions();
+    let delays = Delays::default();
+    let mut capture = captured("programs");
+    capture.action = Action::Terminate;
+    capture.state = "running".into();
+    let running = Arc::new(
+        actions
+            .begin(Lane::key(&capture.target, &capture.action), &capture.action)
+            .unwrap(),
+    );
+    assert!(delays.begin(&actions, id(), vec![capture.clone()]).is_err());
+    let original = running.claim();
+    let group = id();
+    delays
+        .begin_with(
+            &actions,
+            group.clone(),
+            vec![capture.clone()],
+            Some(original.clone()),
+        )
+        .unwrap();
+    due(&delays, &group);
+    let (_, delayed) = delays
+        .take(
+            &Reference {
+                id: group,
+                index: 0,
+            },
+            &capture.target,
+            &capture.action,
+        )
+        .unwrap();
+    assert!(Arc::ptr_eq(&original, &delayed));
+    assert!(actions
+        .begin(Lane::key(&capture.target, &capture.action), &capture.action)
+        .is_none());
+    drop(delayed);
+    drop(original);
+    assert!(
+        actions
+            .begin(Lane::key(&capture.target, &capture.action), &capture.action)
+            .is_none(),
+        "delay settlement does not retire original Source custody"
+    );
+    drop(running);
+    assert!(actions
+        .begin(Lane::key(&capture.target, &capture.action), &capture.action)
+        .is_some());
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn explicit_remove_delay_cannot_borrow_another_target_or_actions_claim() {
+    let actions = actions();
+    let other_actions = self::actions();
+    let delays = Delays::default();
+    let mut capture = captured("programs");
+    capture.action = Action::Terminate;
+    capture.state = "running".into();
+    let running = Arc::new(
+        actions
+            .begin(Lane::key(&capture.target, &capture.action), &capture.action)
+            .unwrap(),
+    );
+    let mut changed = capture.clone();
+    changed.target.name.push_str("-other");
+    assert!(delays
+        .begin_with(&actions, id(), vec![changed], Some(running.claim()))
+        .is_err());
+    assert!(delays
+        .begin_with(
+            &other_actions,
+            id(),
+            vec![capture.clone()],
+            Some(running.claim())
+        )
+        .is_err());
+    capture.action = Action::Archive;
+    assert!(delays
+        .begin_with(&actions, id(), vec![capture], Some(running.claim()))
+        .is_err());
+}
+
 #[test]
 fn pending_reserves_the_existing_write_lane_without_blocking_messages() {
     let actions = actions();

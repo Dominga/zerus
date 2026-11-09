@@ -132,6 +132,13 @@ pub(super) fn carry_fresh_start(previous: &Value, record: &mut Value) {
     // that session lives: a session in the ID layout stays there (P3a).
     if let Some(id) = previous.get("session_id") { record["session_id"] = id.clone(); }
     if let Some(layout) = previous.get("layout") { record["layout"] = layout.clone(); }
+    // A fresh conversation cannot downgrade the original Git-lock proof.
+    if let Some(marker) = previous.get("worktree_protection") { record["worktree_protection"] = marker.clone(); }
+    // Preserve opaque transition evidence, even null or malformed. Rebuilding
+    // the same session must not erase a later admission check's negative fence.
+    if let Some(marker) = previous.get("layout_transition") { record["layout_transition"] = marker.clone(); }
+    // The session keeps the parent that launched or adopted it (zerus-sa9qn.2).
+    if let Some(parent) = previous.get("parent") { record["parent"] = parent.clone(); }
 }
 
 // Earlier conversations of this session's Activity, oldest first. Only
@@ -1148,13 +1155,14 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     }
     #[test] fn fresh_starts_continue_the_activity_timeline_like_a_clear() {
         let previous=json!({"run_id":"old-run","conversation_id":"second","cleared_conversations":["first"],"journal_name":"anchor","permission_override":"native:{\"mode\":\"acceptEdits\"}",
-            "launch_label":"codex/p/launched"});
+            "launch_label":"codex/p/launched","worktree_protection":"owner-nonce"});
         let mut record=json!({"run_id":"run","conversation_id":null});
         carry_fresh_start(&previous,&mut record);
         assert_eq!(earlier_conversations(&record),json!(["first","second"]));
         assert_eq!(record["journal_name"],"anchor");
         assert_eq!(record["permission_override"],"native:{\"mode\":\"acceptEdits\"}");
         assert_eq!(record["launch_label"],"codex/p/launched");
+        assert_eq!(record["worktree_protection"],"owner-nonce");
         observe_start(&mut record,&json!({"session_id":"third","source":"startup"}));
         record["conversation_id"]=json!("third");
         assert!(record["fresh_from"].is_null());

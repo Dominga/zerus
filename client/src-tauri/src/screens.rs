@@ -1007,10 +1007,19 @@ impl Screens {
 
     /// Sessions' account picker refreshes catalog bindings only. It neither
     /// pretends the Accounts screen is visible nor queues profile inspects.
-    pub fn filter_accounts(&self, force: bool) -> Revisioned<AccountsView> {
+    /// `only` limits a forced read to those computers (account marks read a
+    /// newly live computer once, zerus-j648h); `None` reads every host.
+    pub fn filter_accounts(
+        &self,
+        force: bool,
+        only: Option<&[ComputerId]>,
+    ) -> Revisioned<AccountsView> {
         if force && self.0.allowed {
             let mut hub = self.current();
-            let hosts = account_hosts(&hub.fleet);
+            let mut hosts = account_hosts(&hub.fleet);
+            if let Some(only) = only {
+                hosts.retain(|host| only.contains(host));
+            }
             let now = self.now();
             let runs: Vec<Run> = hosts
                 .into_iter()
@@ -1464,12 +1473,31 @@ pub async fn session_switch_account(
     .map_err(|error| error.to_string())?
 }
 
+/// Task 352: what choosing an account would do for a session (the same
+/// agent's switch, or a move to another agent), for the confirmation.
+#[tauri::command]
+pub async fn session_switch_preview(session: String, account: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        zerus_client_core::account_switch::preview(&zerus_client_core::default_hgs(), &session, &account)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[tauri::command(async)]
 pub fn account_filters_view(
     state: State<'_, Screens>,
     force: bool,
+    hosts: Option<Vec<String>>,
 ) -> Result<Revisioned<AccountsView>, String> {
-    Ok(state.filter_accounts(force))
+    let only = hosts.map(|hosts| {
+        hosts
+            .into_iter()
+            .take(256)
+            .map(ComputerId)
+            .collect::<Vec<_>>()
+    });
+    Ok(state.filter_accounts(force, only.as_deref()))
 }
 
 #[tauri::command(async)]
@@ -2212,17 +2240,26 @@ mod tests {
     #[test]
     fn sessions_account_picker_refreshes_catalogs_without_profile_or_session_inspects() {
         let h = harness(local_accounts(), true);
-        assert!(h.screens.filter_accounts(true).catalog_loading);
+        assert!(h.screens.filter_accounts(true, None).catalog_loading);
         h.drain();
-        let view = h.screens.filter_accounts(false);
+        let view = h.screens.filter_accounts(false, None);
         assert!(!view.catalog_loading);
         assert!(!view.accounts.is_empty());
         assert_eq!(h.count("account ls"), 1);
         assert!(h.fake.calls().iter().all(|call| !call.contains("inspect")));
-        h.screens.filter_accounts(true);
+        h.screens.filter_accounts(true, None);
         h.drain();
         assert_eq!(h.count("account ls"), 2);
         assert!(h.fake.calls().iter().all(|call| !call.contains("inspect")));
+        // Account marks ask only the computers they name (zerus-j648h).
+        h.screens
+            .filter_accounts(true, Some(&[ComputerId("elsewhere".into())]));
+        h.drain();
+        assert_eq!(h.count("account ls"), 2, "an unlisted host reads nothing");
+        h.screens
+            .filter_accounts(true, Some(&[ComputerId::local()]));
+        h.drain();
+        assert_eq!(h.count("account ls"), 3);
     }
 
     #[test]

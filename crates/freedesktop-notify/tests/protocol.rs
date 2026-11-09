@@ -121,7 +121,8 @@ fn notify_keeps_the_existing_app_identity_actions_and_wire_values() {
             &client,
             server.owner(),
             "Session",
-            "&lt;b&gt;literal &amp; body&lt;/b&gt;"
+            "&lt;b&gt;literal &amp; body&lt;/b&gt;",
+            "Open session"
         )
         .unwrap(),
         42
@@ -160,7 +161,8 @@ fn async_methods_keep_the_same_packet_and_never_retry_zero_or_errors() {
             client.inner(),
             server.owner(),
             "Session",
-            "&lt;body&gt;"
+            "&lt;body&gt;",
+            "Open session"
         ))
         .unwrap()
         .body()
@@ -199,6 +201,7 @@ fn async_methods_keep_the_same_packet_and_never_retry_zero_or_errors() {
             server.owner(),
             "Session",
             "body",
+            "Open session",
         ));
         if outcome == 3 {
             assert_eq!(result.unwrap().body().deserialize::<u32>().unwrap(), 0);
@@ -220,7 +223,7 @@ fn refusal_unknown_and_zero_identity_are_returned_without_retry() {
         (2, "org.freedesktop.DBus.Error.NoReply"),
     ] {
         server.outcome.store(outcome, Ordering::Relaxed);
-        match notify(&client, server.owner(), "Session", "body") {
+        match notify(&client, server.owner(), "Session", "body", "Open session") {
             Err(zbus::Error::MethodError(name, _, _)) => assert_eq!(name.as_str(), error),
             result => panic!("expected original method error: {result:?}"),
         }
@@ -229,7 +232,7 @@ fn refusal_unknown_and_zero_identity_are_returned_without_retry() {
     }
     server.outcome.store(3, Ordering::Relaxed);
     assert_eq!(
-        notify(&client, server.owner(), "Session", "body").unwrap(),
+        notify(&client, server.owner(), "Session", "body", "Open session").unwrap(),
         0
     );
     server.calls.recv_timeout(WAIT).unwrap();

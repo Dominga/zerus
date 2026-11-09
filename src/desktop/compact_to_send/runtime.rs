@@ -5,13 +5,20 @@
 //! same live operation waits, off the actor and within one never-renewed
 //! budget, for the session's slot to show it completed, and only then
 //! prepares, reserves and spawns the send. A restart never resumes a wait.
-use super::child::{self, Ended};
+// Only the Linux runner starts an original child; macOS refuses every
+// original at admission.
+#[cfg(target_os = "linux")]
+use super::child;
+use super::child::Ended;
+use super::consent::Consent;
 use super::ledger::{self, Child};
 use super::receipt::{self, Evidence, Observed, Roots};
 use super::slot::{self, Slot};
-use super::{consent::Consent, target};
+#[cfg(any(test, target_os = "linux"))]
+use super::target;
 use crate::desktop::creation_clone::lease::{Lease, Machine};
 use crate::desktop::custody::Observation;
+use crate::desktop::not_admitted;
 use crate::{
     config::Config,
     desktop::{
@@ -43,7 +50,24 @@ use zerus_desktop_ledger::operations::{
 
 /// The refusal of every macOS original until a qualified child seam exists.
 pub(super) const MAC_UNAVAILABLE: &str = "compact_to_send_native_image_unavailable";
+/// The conservative refusal: the request may have been admitted.
+const UNAVAILABLE: &str = "compact_to_send_unavailable";
+/// How far one admission got before it ended (zerus-tlb9q).
+#[derive(Clone, Copy)]
+enum Proof {
+    /// Before the writer transaction: nothing read yet.
+    Before,
+    /// In the writer transaction, before the ledger's read succeeded.
+    Unprovable,
+    /// The ledger has no row for this request, read in this transaction.
+    NoRow,
+    /// The ledger has a row for this request.
+    Existing,
+    /// The admission itself was entered.
+    Admitting,
+}
 /// Each whole child, the CLI's own lock wait included.
+#[cfg(target_os = "linux")]
 pub(super) const DEADLINE: Duration = Duration::from_secs(30);
 /// The one bounded deadline of the receipt read after the physical drain,
 /// never renewed: a later result is Unknown.
@@ -55,8 +79,10 @@ const PROBE_EVERY: Duration = Duration::from_millis(250);
 pub(super) const WAIT: Duration = Duration::from_secs(600);
 /// How often the waiting operation reads its slot again.
 const POLL_EVERY: Duration = Duration::from_millis(500);
-/// The whole operation from its admission: both children, both receipt
-/// reads, the wait and a margin. Nothing starts after it.
+/// The whole operation from its own first turn, when it gets the work slot:
+/// both children, both receipt reads, the wait and a margin. Nothing starts
+/// after it. Time queued behind another operation does not count
+/// (zerus-qw7wp).
 pub(super) const CHAIN: Duration = Duration::from_secs(690);
 #[cfg(test)]
 type Hook = Arc<dyn Fn() + Send + Sync>;
@@ -157,6 +183,9 @@ pub(in crate::desktop) struct Runtime {
     charges: Option<u64>,
     /// macOS refuses every original (see [`MAC_UNAVAILABLE`]).
     mac_fence: bool,
+    /// This epoch's sealed negatives: they outlive this runtime
+    /// ([`crate::desktop::not_admitted`], zerus-tlb9q).
+    fences: Arc<crate::desktop::not_admitted::Fences>,
     /// This service's own running image, pinned once from the kernel's
     /// `/proc/self/exe`. Each child executes that pinned image; without it (a
     /// test image, or an image already gone) no child starts.
@@ -165,7 +194,7 @@ pub(in crate::desktop) struct Runtime {
     /// The receipt read's deadline after the drain ([`READ_WAIT`]).
     read_wait: Duration,
     /// The wait's budget ([`WAIT`]), its read interval ([`POLL_EVERY`]) and
-    /// the whole operation's deadline from admission ([`CHAIN`]).
+    /// the whole operation's bound from its first turn ([`CHAIN`]).
     wait: Duration,
     poll_every: Duration,
     chain: Duration,
@@ -183,7 +212,12 @@ pub(in crate::desktop) struct Runtime {
     slot_hook: Option<Hook>,
 }
 impl Runtime {
-    pub fn new(config: &Config, epoch: &str, owner: Arc<platform::FileLock>) -> Result<Self> {
+    pub fn new(
+        config: &Config,
+        epoch: &str,
+        owner: Arc<platform::FileLock>,
+        fences: Arc<crate::desktop::not_admitted::Fences>,
+    ) -> Result<Self> {
         let location = Location::new(config)?;
         Ok(Self {
             #[cfg(test)]
@@ -203,6 +237,7 @@ impl Runtime {
             failed: false,
             charges: None,
             mac_fence: cfg!(target_os = "macos"),
+            fences,
             #[cfg(target_os = "linux")]
             image: crate::self_exec::ensure()
                 .and_then(|()| Pin::open(std::path::Path::new("/proc/self/exe")))
@@ -300,12 +335,21 @@ impl Runtime {
         exclusion: Option<Arc<HandoffLock>>,
     ) -> Value {
         let id = authority.id().to_owned();
+        // Only this epoch's own request is ever answered not admitted or
+        // sealed; another connection's stays unavailable (zerus-tlb9q).
+        let ours = authority.deferred_input_scope() == Some(&self.scope);
+        // A request this epoch answered not admitted never admits: a copy of
+        // it queued behind that refusal gets the same answer.
+        if ours && self.fences.compact_to_send.sealed(&id) {
+            return self.refusal(id, wire::NOT_ADMITTED);
+        }
         // No qualified seam yet attests the code a macOS child runs before it
         // receives private input: refuse before any row or child.
         if self.mac_fence {
             return self.refusal(id, MAC_UNAVAILABLE);
         }
         self.refresh(store, exclusion);
+        let mut proof = Proof::Before;
         let result = (|| -> Result<wire::Admission> {
             ensure!(
                 !self.stopping && !self.failed && store.creation_recovery_ok(),
@@ -320,9 +364,19 @@ impl Runtime {
                 .as_ref()
                 .context("compact-to-send lease unavailable")?
                 .clone();
+            proof = Proof::Unprovable;
             let tx = store
                 .db
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            // The ledger's word on this request, read first in this writer
+            // transaction: only a successful empty read lets a refusal
+            // before the admission settle as never started.
+            let original = ledger::load(&tx, &id)?;
+            proof = if original.is_none() {
+                Proof::NoRow
+            } else {
+                Proof::Existing
+            };
             // The original opaque permit, consumed AFTER the writer lock.
             let intent = authority.compact_to_send()?;
             ensure!(
@@ -336,8 +390,9 @@ impl Runtime {
                 self.machine.as_ref(),
                 self.exclusion.as_ref(),
             )?;
-            let original = ledger::load(&tx, &id)?;
-            let consent = Consent::admitted(verified, lease.clone(), Instant::now() + self.chain)?;
+            let consent = Consent::admitted(verified, lease.clone(), self.chain)?;
+            // From here on nothing proves the request was not admitted.
+            proof = Proof::Admitting;
             let row = ledger::admit(
                 &tx,
                 &consent.original,
@@ -360,9 +415,27 @@ impl Runtime {
                 receipt: Some(row.receipt),
             })
         })();
-        match result {
-            Ok(value) => json!(value),
-            Err(_) => self.refusal(id, "compact_to_send_unavailable"),
+        match (result, proof) {
+            (Ok(value), _) => json!(value),
+            // Refused before the admission, with no row in this transaction.
+            (Err(_), Proof::NoRow) if ours => self.not_admitted(id),
+            // Refused before the transaction: a fresh writer transaction on
+            // the same held store proves the absence first.
+            (Err(_), Proof::Before)
+                if ours && not_admitted::no_row(&mut store.db, |tx| ledger::load(tx, &id)) =>
+            {
+                self.not_admitted(id)
+            }
+            (Err(_), _) => self.refusal(id, UNAVAILABLE),
+        }
+    }
+    /// The closed refusal of a request proven never admitted, sealed for the
+    /// epoch before the reply; a full fence mints none (zerus-tlb9q).
+    fn not_admitted(&self, id: String) -> Value {
+        if self.fences.compact_to_send.seal(&id) {
+            self.refusal(id, wire::NOT_ADMITTED)
+        } else {
+            self.refusal(id, UNAVAILABLE)
         }
     }
     fn check(
@@ -639,6 +712,10 @@ impl Runtime {
             return Ok(());
         };
         self.check(&store.db, &consent, &row, None)?;
+        // The operation's first turn: its whole bound starts now, not at its
+        // admission, so a wait ahead of it in the one work slot cannot use
+        // it up (zerus-qw7wp).
+        consent.chain();
         self.prepare(&row, Child::Compaction, consent, None)
     }
     /// Starts `child`'s preparation off the actor: its exact custody and its
@@ -785,7 +862,7 @@ impl Runtime {
                     if child == Child::Compaction && !settled.drained {
                         // One budget from here, never renewed, within the
                         // operation's own deadline.
-                        let until = (Instant::now() + self.wait).min(consent.chain);
+                        let until = (Instant::now() + self.wait).min(consent.chain());
                         self.work = Some(Work::Waiting {
                             id: id.clone(),
                             consent: consent.clone(),
@@ -928,22 +1005,25 @@ impl Runtime {
         {
             return self.end_wait(store, &id, ledger::VETOED);
         }
+        // The wait's own budget ends at `until` (never past the operation's
+        // deadline): a completed read that ends after it, however it began,
+        // starts nothing.
+        let expired = if until >= consent.chain() {
+            ledger::CHAIN_EXPIRED
+        } else {
+            ledger::WAIT_EXPIRED
+        };
         match slot {
-            Some(Slot::Completed) if Instant::now() < consent.chain => {
+            Some(Slot::Completed) if Instant::now() < until => {
                 return self.prepare(&row, Child::Send, consent, Some((roots, token)));
             }
-            Some(Slot::Completed) => return self.end_wait(store, &id, ledger::CHAIN_EXPIRED),
+            Some(Slot::Completed) => return self.end_wait(store, &id, expired),
             Some(Slot::Ended(code)) => return self.end_wait(store, &id, code),
             Some(Slot::Waiting) | None => {}
         }
         let now = Instant::now();
         if now >= until {
-            let code = if until >= consent.chain {
-                ledger::CHAIN_EXPIRED
-            } else {
-                ledger::WAIT_EXPIRED
-            };
-            return self.end_wait(store, &id, code);
+            return self.end_wait(store, &id, expired);
         }
         if now < next {
             self.work = Some(Work::Waiting {
@@ -1048,13 +1128,21 @@ impl Runtime {
     pub(super) fn fixture_prepare_hook(&mut self, hook: Hook) {
         self.prepare_hook = Some(hook);
     }
-    /// Sets the wait's budget, its read interval and the operation's
-    /// deadline from admission.
+    /// Sets the wait's budget, its read interval and the operation's bound
+    /// from its first turn.
     #[cfg(test)]
     pub(super) fn fixture_wait(&mut self, wait: Duration, every: Duration, chain: Duration) {
         self.wait = wait;
         self.poll_every = every;
         self.chain = chain;
+    }
+    /// `Some(None)` proves a live queued consent whose own turn has not
+    /// started its clock; `None` means no such original was admitted.
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    pub(super) fn fixture_chain_started(&self, id: &str) -> Option<Option<Instant>> {
+        self.admitted
+            .get(id)
+            .map(|consent| consent.fixture_chain_started())
     }
     #[cfg(test)]
     pub(super) fn fixture_mac_fence(&mut self, on: bool) {
@@ -1114,7 +1202,7 @@ fn original(
         if !target::current(roots, plan)
             || (child == Child::Send && slot::read(roots, plan) != Slot::Completed)
             || consent.cancel.load(Ordering::Acquire)
-            || Instant::now() >= consent.chain
+            || Instant::now() >= consent.chain()
         {
             return Ended::NotStarted;
         }
@@ -1122,7 +1210,7 @@ fn original(
     }
     #[cfg(target_os = "linux")]
     if let Some(image) = image {
-        let deadline = (Instant::now() + DEADLINE).min(consent.chain);
+        let deadline = (Instant::now() + DEADLINE).min(consent.chain());
         return child::run(
             image.executable(),
             &args,

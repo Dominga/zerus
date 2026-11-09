@@ -9,6 +9,11 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
+// Dormant ID-input facade. Existing picker controllers do not call it.
+#[cfg(unix)]
+#[allow(dead_code)]
+mod picker_scope;
+
 const MAX_TAIL: u64 = 8 * 1024 * 1024;
 const LEVELS: &[&str] = &[
     "off", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "on",
@@ -233,7 +238,8 @@ fn claude_rule_indicator(line: &str) -> Option<String> {
 /// signed cloud catalog, so its model switch offered nothing. Its models are
 /// the gateway's list, read within 3 s and kept for a minute.
 fn gateway_catalog(record: &Value) -> Vec<ModelOption> {
-    static CACHE: OnceLock<Mutex<BTreeMap<String, (Instant, Vec<ModelOption>)>>> = OnceLock::new();
+    type CatalogCache = Mutex<BTreeMap<String, (Instant, Vec<ModelOption>)>>;
+    static CACHE: OnceLock<CatalogCache> = OnceLock::new();
     let Some(server) = gateway_server(record) else { return vec![] };
     let key = super::model_servers::root(&server);
     let cache = CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
@@ -2215,6 +2221,7 @@ pub(super) fn dispatch_settings(args: &[String]) -> Result<i32> {
     // share the label.
     expect(name, &request.expected_run_id, &request.expected_conversation_id)?;
     let mut record = read(name)?;
+    terminating::check_mutation(&record)?;
     if string(&record, "run_id") != request.expected_run_id
         || string(&record, "conversation_id") != request.expected_conversation_id
     {
@@ -2318,6 +2325,7 @@ pub(super) fn pending_applies(record: &Value) -> bool {
 }
 
 pub(super) fn apply_pending(name: &str, record: Value) -> Result<Value> {
+    terminating::check_mutation(&record)?;
     if !pending_applies(&record) {
         return Ok(record);
     }

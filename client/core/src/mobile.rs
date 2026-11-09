@@ -22,6 +22,7 @@ use serde_json::{Map, Value};
 
 use crate::actions::{Exit, Invocation};
 
+pub mod autostart;
 pub mod computer_codes;
 pub mod connector_actions;
 pub mod enrollment;
@@ -34,7 +35,39 @@ pub mod phone_actions;
 /// "mobile" as an agent to launch.
 pub const PHONES_MARKER: &str = "mobile phones|invite|revoke-phone";
 pub const STOP_MARKER: &str = "Workspace stop ABI: service-preflight-v1";
-pub const STOP_UNAVAILABLE: &str = "Stop is not available with this connector version. You can change the workspace while the connector is stopped.";
+pub const STOP_UNAVAILABLE: &str = "Zerus can't stop the connector on this computer. You can change the workspace while the connector is stopped.";
+/// The connector's closed result for a Stop its preflight refused before offering
+/// any marker. Only this, bound to the call, ever means that nothing changed.
+pub const STOP_REFUSED_BEFORE_EFFECT: &str = "stop-refused-before-effect";
+/// What the person reads for that refusal: nothing happened, and why.
+pub const STOP_REFUSED: &str =
+    "Zerus can't stop this connector because it can't confirm how it was started. Nothing changed.";
+
+/// How a lifecycle call that may send Stop ended without an answer. Everything
+/// but the closed refusal is an unknown outcome, whatever its text says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Failure {
+    StopRefused,
+    Other(String),
+}
+impl Failure {
+    pub fn message(&self) -> String {
+        match self {
+            Failure::StopRefused => STOP_REFUSED.into(),
+            Failure::Other(error) => error.clone(),
+        }
+    }
+}
+impl From<String> for Failure {
+    fn from(error: String) -> Self {
+        Failure::Other(error)
+    }
+}
+impl From<&str> for Failure {
+    fn from(error: &str) -> Self {
+        Failure::Other(error.into())
+    }
+}
 pub const WORKSPACE_UNCONFIRMED: &str = "Workspace operation was not confirmed. Refresh status before continuing. Verify that the matching computer connector is installed.";
 /// The connector's status reply, at most.
 const STATUS_BYTES: usize = 64 * 1024;
@@ -63,21 +96,16 @@ pub fn config_path() -> PathBuf {
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
     };
-    if cfg!(windows) {
-        if let Some(root) = absolute("HGS_CONFIG_DIR") {
-            return root.join("mobile").join("connector.json");
-        }
-        let home = absolute("HOME").or_else(home_dir).unwrap_or_default();
-        return home
-            .join(".config")
-            .join("hgs")
-            .join("mobile")
-            .join("connector.json");
-    }
-    let root = absolute("XDG_CONFIG_HOME")
-        .or_else(|| home_dir().map(|home| home.join(".config")))
-        .unwrap_or_default();
-    root.join("hgs").join("mobile").join("connector.json")
+    zerus_watch_protocol::session_labels::configuration_path(
+        if cfg!(windows) {
+            absolute("HOME").or_else(home_dir)
+        } else {
+            home_dir()
+        },
+        absolute("XDG_CONFIG_HOME"),
+        absolute("HGS_CONFIG_DIR"),
+        cfg!(windows),
+    )
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -130,11 +158,25 @@ pub fn connector_program(hgs: &Path, client_dir: Option<&Path>) -> PathBuf {
     found.or(bundled).unwrap_or_else(|| PathBuf::from(name))
 }
 
+/// The connector packaged beside this app, with no staged-CLI or PATH fallback:
+/// what automatic start may run. Missing or unusable means unavailable.
+pub fn packaged_connector(client_dir: &Path) -> Option<PathBuf> {
+    let name = if cfg!(windows) {
+        "zerus-mobile-connector.exe"
+    } else {
+        "zerus-mobile-connector"
+    };
+    let path = client_dir.join(name);
+    executable(&path).then_some(path)
+}
+
 /// Exact selection for a local nested CLI: PATH alone cannot override an old
-/// connector beside the staged hgs. Never send this local path to a peer.
+/// connector beside the staged hgs, and a CLI without a sibling must not reach
+/// another connector on PATH. Never send this local path to a peer.
 const CONNECTOR_ENV: &str = "ZERUS_CLIENT_MOBILE_CONNECTOR_PATH";
 
-#[cfg(any(windows, test))]
+/// The connector the status probe uses ([`connector_program`] with this app's
+/// folder), for a local call only, and only as an absolute path.
 fn phone_connector(hgs: &Path, call: &Invocation, directory: Option<&Path>) -> Option<String> {
     if call.args.first().is_some_and(|arg| arg.starts_with('@')) {
         return None;
@@ -146,16 +188,23 @@ fn phone_connector(hgs: &Path, call: &Invocation, directory: Option<&Path>) -> O
         .flatten()
 }
 
+/// A phone call through the CLI with the connector the status probe selected,
+/// on every platform (zerus-ihrzs): the probe and the nested launch name the
+/// same program. Without an absolute selection the CLI keeps its own order.
 fn run_phone_cli(hgs: &Path, call: &Invocation, cap: usize) -> Result<Exit, crate::run::TooLarge> {
-    #[cfg(windows)]
-    let connector = {
-        let directory = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(Path::to_path_buf));
-        phone_connector(hgs, call, directory.as_deref())
-    };
-    #[cfg(not(windows))]
-    let connector: Option<String> = None;
+    let directory = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf));
+    run_phone_cli_from(hgs, call, cap, directory.as_deref())
+}
+
+fn run_phone_cli_from(
+    hgs: &Path,
+    call: &Invocation,
+    cap: usize,
+    client_dir: Option<&Path>,
+) -> Result<Exit, crate::run::TooLarge> {
+    let connector = phone_connector(hgs, call, client_dir);
     run_phone_cli_in(hgs, call, cap, connector.as_deref())
 }
 
@@ -588,6 +637,16 @@ fn workspace_request(
     action: &str,
     payload: &Value,
 ) -> Result<Value, String> {
+    let exit = workspace_call(connector, config, action, payload)?;
+    workspace_reply(exit, false).map(Value::Object)
+}
+
+fn workspace_call(
+    connector: &Path,
+    config: &Path,
+    action: &str,
+    payload: &Value,
+) -> Result<Option<Exit>, String> {
     connector_available(connector)?;
     let call = Invocation {
         args: vec![
@@ -600,8 +659,43 @@ fn workspace_request(
         timeout: Duration::from_secs(70),
         request_id: None,
     };
-    let exit = crate::run::run_without(connector, &call, &[], &CONNECTOR_UNSET, STATUS_BYTES).ok();
-    workspace_reply(exit, false).map(Value::Object)
+    Ok(crate::run::run_without(connector, &call, &[], &CONNECTOR_UNSET, STATUS_BYTES).ok())
+}
+
+/// The one Stop call of the connector's workspace protocol, for this exact
+/// configuration and generation.
+fn workspace_stop(
+    connector: &Path,
+    config: &Path,
+    revision: &str,
+    generation: &str,
+) -> Result<Value, Failure> {
+    let payload = serde_json::json!({"expected_revision":revision,"generation":generation});
+    let exit = workspace_call(connector, config, "stop", &payload)?;
+    if stop_refused(&exit, revision, generation) {
+        return Err(Failure::StopRefused);
+    }
+    workspace_reply(exit, false)
+        .map(Value::Object)
+        .map_err(Failure::from)
+}
+
+/// Only the connector's closed result for this very call: not its error text, a
+/// timeout, a malformed reply, or a refusal naming another generation.
+fn stop_refused(exit: &Option<Exit>, revision: &str, generation: &str) -> bool {
+    let Some(Exit::Code {
+        code: 1, stdout, ..
+    }) = exit
+    else {
+        return false;
+    };
+    let Ok(Value::Object(reply)) = serde_json::from_slice::<Value>(stdout) else {
+        return false;
+    };
+    reply.get("ok") == Some(&Value::Bool(false))
+        && reply.get("refusal").and_then(Value::as_str) == Some(STOP_REFUSED_BEFORE_EFFECT)
+        && reply.get("generation").and_then(Value::as_str) == Some(generation)
+        && reply.get("expected_revision").and_then(Value::as_str) == Some(revision)
 }
 
 /// HgsClient's failureDetail for an `hgs` call that did not finish cleanly;

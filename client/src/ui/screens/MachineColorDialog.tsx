@@ -1,3 +1,5 @@
+import { Dropdown } from "../lib/Dropdown";
+import { TextInput } from "../lib/TextField";
 import { For, createSignal, onCleanup, onMount } from "solid-js";
 import { Icon } from "../lib/icons";
 import { machineAppearance } from "../../store/machineAppearance";
@@ -54,8 +56,8 @@ export default function MachineColorDialog(props: { alias: string; origin?: HTML
       <div class="cd-swatches" role="radiogroup" aria-label={tr("Color")} onKeyDown={stepSwatch}>
         <For each={SWATCHES}>{(color) => <button class="cd-swatch" role="radio" aria-checked={hex().toLowerCase() === color} tabIndex={!busy() && color === tabColor() ? 0 : -1} aria-label={color} classList={{ on: hex().toLowerCase() === color }} style={{ "--sw": color }} disabled={busy()} onClick={() => setHex(color)} />}</For>
       </div>
-      <div class="form-row"><label for="cd-hex">{tr("Hex")}</label><input id="cd-hex" class="field mono" maxLength={7} value={hex()} aria-invalid={!valid()} disabled={busy()} onInput={(event) => setHex(event.currentTarget.value)} /></div>
-      <div class="form-row"><label for="cd-style">{tr("Style")}</label><select id="cd-style" class="field" value={vivid() ? "bright" : "soft"} disabled={busy()} onChange={(event) => setVivid(event.currentTarget.value === "bright")}><option value="soft">{tr("Soft fill")}</option><option value="bright">{tr("Bright fill")}</option></select></div>
+      <div class="form-row"><label for="cd-hex">{tr("Hex")}</label><TextInput id="cd-hex" class="field mono" maxLength={7} value={hex()} aria-invalid={!valid()} disabled={busy()} onInput={(event) => setHex(event.currentTarget.value)} /></div>
+      <div class="form-row"><label for="cd-style">{tr("Style")}</label><Dropdown id="cd-style" class="field" value={vivid() ? "bright" : "soft"} disabled={busy()} onChange={(value) => setVivid(value === "bright")} options={[{ value: "soft", label: tr("Soft fill") }, { value: "bright", label: tr("Bright fill") }]} /></div>
       <label class="btn ghost cd-more">{tr("More colors…")}<input type="color" value={valid() ? hex() : "#2b97ff"} disabled={busy()} onInput={(event) => setHex(event.currentTarget.value)} /></label>
     </div>
     <div class="dlg-foot"><span class="spacer" /><button class="btn" disabled={busy()} onClick={props.close}>{tr("Cancel")}</button><button class="btn primary" disabled={busy() || !valid()} onClick={() => void apply()}>{tr("Apply")}</button></div>

@@ -654,6 +654,9 @@ fn should_close(
     let Some(current) = current else {
         return Some("session ended");
     };
+    if terminating::pending(current) {
+        return Some("session terminating");
+    }
     if string(current, "run_id") != string(bound, "run_id") {
         return Some("run changed");
     }
@@ -822,6 +825,9 @@ fn serve(
     let mut first: Option<Value> = None;
     let (record, card) = loop {
         if let Some(record) = read_own_run(name, token)? {
+            if terminating::pending(&record) {
+                return Ok(());
+            }
             let card = match kind {
                 Kind::Question => bind(&record, event),
                 Kind::Approval => {
@@ -1581,6 +1587,23 @@ mod tests {
         let mut exited = bound.clone();
         exited["process_start"] = json!("not this process");
         assert_eq!(should_close(Kind::Question, Some(&exited), &bound, &card), Some("agent exited"));
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn a_termination_fence_closes_the_original_answer_without_emitting_it() {
+        let bound = live_record();
+        let card = hook_card("toolu_1");
+        assert_eq!(should_close(Kind::Question, Some(&bound), &bound, &card), None);
+        for marker in [Value::Null, json!(false), json!("damaged"), json!({})] {
+            let mut current = bound.clone();
+            current["terminating"] = marker;
+            for kind in [Kind::Question, Kind::Approval] {
+                assert_eq!(should_close(kind, Some(&current), &bound, &card), Some("session terminating"));
+                assert_eq!(withheld(kind, Some(&current), &bound, &card, &event(), false, |_| panic!("closed channel cannot deliver")),
+                    Some("question changed before delivery"));
+            }
+        }
     }
 
     #[test]

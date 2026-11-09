@@ -3,6 +3,7 @@ import rail from "./Rail.tsx?raw";
 import about from "../screens/settings/About.tsx?raw";
 import { setSetting } from "../../store/settings";
 import { shortcutTooltip } from "../../store/shortcuts";
+import { attentionBadgeText } from "./rail-badge";
 
 const overridden = ["go.sessions", "session.new"];
 
@@ -42,5 +43,13 @@ describe("Rail installed-build identity", () => {
     expect(about).toContain('installedAppName(appBuildInfo())');
     expect(about).not.toContain('__APP_VERSION__');
     expect(about).not.toContain('invoke<BuildInfo>("build_info")');
+  });
+});
+
+describe("Rail attention badge (Qt SessionsWindow.cpp:3374-3381)", () => {
+  it("caps the count at 99+, and the Sessions button names the exact count", () => {
+    expect([1, 99, 100, 12345].map(attentionBadgeText)).toEqual(["1", "99", "99+", "99+"]);
+    expect(rail).toContain('tr("Sessions — %1 need attention", counts().attention)');
+    expect(rail).toContain("attentionBadgeText(counts().attention)");
   });
 });

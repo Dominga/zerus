@@ -1122,7 +1122,12 @@ impl Composers {
         let facts = AnswerFacts {
             online,
             state: row.state.clone(),
-            updating: (self.0.deps.facts)(&a.session.computer, &a.session.name).is_some(),
+            updating: (self.0.deps.facts)(
+                &a.session.computer,
+                &a.session.name,
+                text(&a.captured, "run_id"),
+            )
+            .is_some(),
             inspect_error: ctx.as_ref().is_some_and(|c| c.facts.inspect_error),
         };
         let (run, conversation) = (

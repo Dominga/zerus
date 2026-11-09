@@ -1,3 +1,4 @@
+import { chooseDropdown } from "./dropdown";
 // Real Add account dialog, synthetic choices and a captured submit: no account writes.
 // Start Vite, then: dbus-run-session -- python3 scripts/menu-smoke.py
 //   --url http://127.0.0.1:1420/scripts/account-agent-keyboard-smoke.html
@@ -41,7 +42,7 @@ async function run() {
     await frame();
     const options = () => [...document.querySelectorAll<HTMLButtonElement>('.acct-agents [role="option"]')];
     const option = (label: string) => options().find((row) => row.querySelector("b")?.textContent === label)!;
-    const account = () => document.querySelector<HTMLSelectElement>("#aa-saved")!;
+    const account = () => document.querySelector<HTMLButtonElement>("#aa-saved")!;
     const name = () => document.querySelector<HTMLInputElement>("#aa-name")!;
     const state = (label: string, id: string, focus = true) => {
       check(options().filter((row) => row.getAttribute("aria-selected") === "true").length === 1 && option(label).getAttribute("aria-selected") === "true", `${label}: selected`);
@@ -55,12 +56,12 @@ async function run() {
       document.activeElement!.dispatchEvent(event); check(event.defaultPrevented, `${key}: browser scroll prevented`); state(label, id);
     };
     const changeHost = (key: string) => {
-      const select = document.querySelector<HTMLSelectElement>("#aa-host")!;
-      select.value = key; select.dispatchEvent(new Event("change", { bubbles: true }));
+      const select = document.querySelector<HTMLButtonElement>("#aa-host")!;
+      chooseDropdown(select, key);
     };
     state("Codex", "codex-a", false); check(option("OpenCode").disabled, "unavailable OpenCode stays disabled");
     option("Codex").focus(); key("ArrowDown", "Claude", "claude-a"); key("ArrowUp", "Codex", "codex-a");
-    account().value = "codex-b"; account().dispatchEvent(new Event("change", { bubbles: true }));
+    chooseDropdown(account(), "codex-b"); check(document.activeElement === account(), "dropdown returns focus to its trigger"); option("Codex").focus();
     key("ArrowLeft", "Codex", "codex-b"); key("Home", "Codex", "codex-b");
     for (const modifier of ["altKey", "ctrlKey", "metaKey"]) {
       const event = new KeyboardEvent("keydown", { key: "ArrowDown", [modifier]: true, bubbles: true, cancelable: true });

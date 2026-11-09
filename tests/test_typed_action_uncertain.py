@@ -38,6 +38,8 @@ class TypedCompact(unittest.TestCase):
         result = self.compact()
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn('Compact delivery uncertain', result.stderr)
+        # Sending Enter completes before the raw-terminal fake journals it.
+        self.wait_for(lambda: self.received() == b'/compact\r')
         self.assertEqual(self.received(), b'/compact\r')
 
     def test_an_unverified_command_whose_record_fails_stays_uncertain(self):
@@ -73,14 +75,16 @@ class TypedClear(unittest.TestCase):
         on_keys(self, 'Enter', BLOCK_RECEIPTS.format('clear_receipts'))
         stderr = self.clear(success=False)
         self.assertIn('Clear delivery uncertain', stderr)
+        self.wait_for(lambda: self.received() == b'/clear\r')
         self.assertEqual(self.received(), b'/clear\r')
 
     def test_a_record_unreadable_after_enter_is_delivery_uncertain(self):
-        # The agent ignores the Enter, and the confirmation cannot read the
-        # session again.
+        # The fake records Enter before freeze skips its processing. The
+        # unreadable session can fail confirmation before that read completes.
         on_keys(self, 'Enter', 'touch "$INPUT_FIXTURE/freeze"\nrm -f "{0}"\nmkdir -p "{0}/blocked"\n'.format(self.record_path))
         stderr = self.clear(success=False)
         self.assertIn('Clear delivery uncertain', stderr)
+        self.wait_for(lambda: self.received() == b'/clear\r')
         self.assertEqual(self.received(), b'/clear\r')
 
     def test_a_refusal_before_input_stays_definite(self):

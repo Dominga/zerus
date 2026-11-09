@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createRoot, createSignal } from "solid-js";
 import { createStore } from "solid-js/store";
 import { createCreations, type CreationsDeps } from "./creations";
+import { createNoticeBus, NOTICE_MS, type NoticeBus } from "./notices";
 import { toSession } from "./catalog";
 import { RESOLVED, creationRowId, type CardScope, type ListScope } from "../ui/sessions/creations-ui";
 import type { CreationCard, CreationEvent, GroupingOut, ViewRow } from "../types";
@@ -31,7 +32,7 @@ const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve()
 /** The commands a card may send; anything else (a composer, a draft) fails the test. */
 const CREATION_COMMANDS = ["onCreations", "creationsView", "creationDetails", "creationAction", "creationPlan"];
 
-function setup(view: CreationCard[] = [], options: { grouping?: GroupingOut; plans?: Record<string, Record<string, unknown> | null>; details?: Record<string, string>; refuse?: string } = {}) {
+function setup(view: CreationCard[] = [], options: { bus?: NoticeBus; grouping?: GroupingOut; plans?: Record<string, Record<string, unknown> | null>; details?: Record<string, string>; refuse?: string } = {}) {
   return createRoot((dispose) => {
     const calls: { name: string; args: unknown[] }[] = [];
     let listener: ((e: CreationEvent) => void) | undefined;
@@ -64,7 +65,7 @@ function setup(view: CreationCard[] = [], options: { grouping?: GroupingOut; pla
     let page = "dashboard";
     const store = createCreations({
       bridge,
-      notify: (tone, text, sticky) => notices.push({ tone, text, sticky }),
+      notify: (tone, text, sticky) => { notices.push({ tone, text, sticky }); options.bus?.notify(tone, text, sticky); },
       openNewSession: async (o) => { opened.push(o); },
       selectedKey, setSelectedKey,
       closeSubagent: () => setSubagent(undefined),
@@ -440,17 +441,78 @@ describe("Edit choices… (1525-1528)", () => {
 });
 
 describe("the notices (1577-1586)", () => {
-  it("show once per state and error, sticky", async () => {
-    const t = setup([card("a", { state: "failed", caption: "Creation failed", error: "No folder." })]);
+  // A creation made after this window started (unix seconds); older failures stay quiet.
+  const LIVE = 4_000_000_000;
+  it.each(["failed", "unknown", "storage_error"].flatMap((state) => [-1, 0, 1].map((offset) => ({ state, offset }))))(
+    "uses last state change for a first-seen old creation ($state, $offset seconds from start)", async ({ state, offset }) => {
+      vi.useFakeTimers();
+      const now = 1_794_000_000;
+      vi.setSystemTime(now * 1000);
+      const failed = card("late", { state, error: "Late failure.", created: now - 3600, updated: now + offset });
+      const t = setup([failed]);
+      try {
+        await t.started;
+        expect(t.store.creations()[0]).toMatchObject({ error: "Late failure.", created: now - 3600, updated: now + offset });
+        expect(t.notices).toHaveLength(offset < 0 ? 0 : 1);
+        t.emit(failed);
+        expect(t.notices).toHaveLength(offset < 0 ? 0 : 1);
+      } finally { t.dispose(); vi.useRealTimers(); }
+    },
+  );
+  it("show once per state and error, using the normal toast timer", async () => {
+    const t = setup([card("a", { state: "failed", caption: "Creation failed", error: "No folder.", created: LIVE })]);
     await t.started;
-    t.emit(card("a", { state: "failed", caption: "Creation failed", error: "No folder." }));
-    t.emit(card("a", { state: "failed", caption: "Creation failed", error: "Still no folder." }));
-    t.emit(card("a", { state: "queued" }));
-    t.emit(card("a", { state: "unknown", caption: "Creation result unknown", error: "Still no folder." }));
+    t.emit(card("a", { state: "failed", caption: "Creation failed", error: "No folder.", created: LIVE }));
+    t.emit(card("a", { state: "failed", caption: "Creation failed", error: "Still no folder.", created: LIVE }));
+    t.emit(card("a", { state: "queued", created: LIVE }));
+    t.emit(card("a", { state: "unknown", caption: "Creation result unknown", error: "Still no folder.", created: LIVE }));
     expect(t.notices).toEqual([
-      { tone: "error", text: "Creation tag-a: Creation failed\nNo folder.", sticky: true },
-      { tone: "error", text: "Creation tag-a: Creation failed\nStill no folder.", sticky: true },
-      { tone: "error", text: "Creation tag-a: Creation result unknown\nStill no folder.", sticky: true },
+      { tone: "error", text: "Creation tag-a: Creation failed\nNo folder.", sticky: undefined },
+      { tone: "error", text: "Creation tag-a: Creation failed\nStill no folder.", sticky: undefined },
+      { tone: "error", text: "Creation tag-a: Creation result unknown\nStill no folder.", sticky: undefined },
+    ]);
+    t.dispose();
+  });
+
+  it("expires failed and unknown toasts while retaining card details and once-per-state delivery", async () => {
+    vi.useFakeTimers();
+    const bus = createNoticeBus();
+    const failed = card("a", { state: "failed", error: "Name already exists.", can_edit: true, created: LIVE });
+    const t = setup([failed], { bus });
+    try {
+      await t.started;
+      expect(bus.notices()).toHaveLength(1); expect(bus.notices()[0].sticky).toBe(false);
+      vi.advanceTimersByTime(NOTICE_MS); expect(bus.notices()).toHaveLength(0);
+      expect(t.store.creations()[0].error).toBe("Name already exists.");
+      t.emit(failed); expect(bus.notices()).toHaveLength(0);
+      const unknown = { ...failed, state: "unknown", can_edit: false };
+      t.emit(unknown); expect(bus.notices()).toHaveLength(1);
+      vi.advanceTimersByTime(NOTICE_MS); expect(bus.notices()).toHaveLength(0);
+      t.emit(unknown); expect(bus.notices()).toHaveLength(0);
+      expect(t.store.creations()[0].state).toBe("unknown");
+    } finally { t.dispose(); vi.useRealTimers(); }
+  });
+
+  it("keep a failure that settled before the window started on its card, without a toast at every restart", async () => {
+    const old = 1_793_000_000;
+    const t = setup([
+      card("gone", { state: "failed", caption: "Creation failed", error: "This session already has an account.", created: old }),
+      card("busy", { state: "queued", created: old }),
+    ]);
+    await t.started;
+    // The settled failure is still on its card, but raises no toast.
+    expect(t.store.creations().find((c) => c.id === "gone")?.error).toBe("This session already has an account.");
+    t.emit(card("gone", { state: "failed", caption: "Creation failed", error: "This session already has an account.", created: old }));
+    expect(t.notices).toEqual([]);
+    // A creation seen in progress that fails while the window is open shows one.
+    t.emit(card("busy", { state: "failed", caption: "Creation failed", error: "No folder.", created: old }));
+    // So does a new failure of the settled card, and a creation first seen failing after the start.
+    t.emit(card("gone", { state: "unknown", caption: "Creation result unknown", error: "Lost.", created: old }));
+    t.emit(card("fresh", { state: "failed", caption: "Creation failed", error: "Name already exists.", created: LIVE }));
+    expect(t.notices.map((n) => n.text)).toEqual([
+      "Creation tag-busy: Creation failed\nNo folder.",
+      "Creation tag-gone: Creation result unknown\nLost.",
+      "Creation tag-fresh: Creation failed\nName already exists.",
     ]);
     t.dispose();
   });
@@ -458,12 +520,12 @@ describe("the notices (1577-1586)", () => {
   it("remember 128 creations", async () => {
     const t = setup();
     await t.started;
-    for (let i = 0; i < 129; i++) t.emit(card(`n${i}`, { state: "storage_error", created: i }));
+    for (let i = 0; i < 129; i++) t.emit(card(`n${i}`, { state: "storage_error", created: LIVE + i }));
     expect(t.notices).toHaveLength(129);
     // The newest is remembered; the oldest was forgotten and shows again.
-    t.emit(card("n128", { state: "storage_error", created: 128 }));
+    t.emit(card("n128", { state: "storage_error", created: LIVE + 128 }));
     expect(t.notices).toHaveLength(129);
-    t.emit(card("n0", { state: "storage_error", created: 0 }));
+    t.emit(card("n0", { state: "storage_error", created: LIVE }));
     expect(t.notices).toHaveLength(130);
     t.dispose();
   });
@@ -477,6 +539,24 @@ describe("the footer and the search", () => {
     expect(t.store.creationFooter(false)).toBe("2 creations");
     t.setScope({ filter: "archived", hosts: [], query: "", projects: [] });
     expect(t.store.creationFooter(true)).toBe("");
+    t.dispose();
+  });
+
+  it("lists the cards a search shows, for the search results (SessionSearch.cpp:287-305, zerus-5wmh.13.17.3)", async () => {
+    const t = setup([card("a"), card("b"), card("c", { show_pending: false })], { details: { a: "tag-a\n\nFolder: /workspace/match", b: "tag-b", c: "tag-c match" } });
+    await t.started;
+    expect(t.store.searchCards()).toEqual([]);
+    t.setScope({ filter: "all", hosts: [], query: "MATCH", projects: [] });
+    await flush();
+    expect(t.store.searchCards().map((c) => c.id)).toEqual(["a"]);
+    t.setScope({ filter: "active", hosts: [], query: "match", projects: [] });
+    await flush();
+    expect(t.store.searchCards().map((c) => c.id)).toEqual(["a"]);
+    for (const filter of ["archived", "paused", "attention"] as const) {
+      t.setScope({ filter, hosts: [], query: "match", projects: [] });
+      await flush();
+      expect(t.store.searchCards()).toEqual([]);
+    }
     t.dispose();
   });
 

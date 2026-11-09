@@ -1,3 +1,4 @@
+import { TextInput } from "../lib/TextField";
 import { Show, createSignal, onCleanup, onMount } from "solid-js";
 import { sessionForks } from "../../store/sessionForks";
 import type { Details } from "../../types";
@@ -28,7 +29,7 @@ export default function ForkDialog(props: { row: ActionRow; details: Details; cl
       <div class="dlg-body">
         <p class="muted">{tr("The fork continues this conversation in a new session. The original keeps running.")}</p>
         <div class="form-row"><label for="fork-tag">{tr("New session name")}</label>
-          <input ref={input} id="fork-tag" class="field" data-initial autofocus value={tag()} disabled={sessionForks.working()} onInput={(event) => setTag(event.currentTarget.value)} /></div>
+          <TextInput ref={input} id="fork-tag" class="field" data-initial autofocus value={tag()} disabled={sessionForks.working()} onInput={(event) => setTag(event.currentTarget.value)} /></div>
         <Show when={problem()}><div class="hint dlg-error">{problem()}</div></Show>
         <Show when={!problem() && resolved() !== tag()}><div class="hint">{tr("That name is in use. The fork will be named %1.", resolved())}</div></Show>
       </div>

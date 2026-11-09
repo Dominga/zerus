@@ -37,10 +37,13 @@ class Mobile(test_tasks.DeliveryFixture):
         return result.stderr.strip().removeprefix("hgs: ")
 
     def accept(self, task):
-        self.hgs("send", task["ref"])
+        sent = self.hgs("send", task["ref"])
+        origin = sent["task"]["execution"]["current"]["id"]
+        self.assertEqual(origin, sent["receipt"]["request_id"])
         self.wait_received(task["text"])
         self.confirm()
-        self.as_agent("report", task["ref"], "--json", text="Done.")
+        result = json.loads(self.as_agent("report-attempt", task["ref"], "--attempt", origin, "--json", text="Done."))
+        self.assertTrue(result["moved_to_review"])
         self.hgs("stage", task["ref"], "done")
 
     def test_a_phone_sends_a_task_to_a_session_here(self):
@@ -51,6 +54,15 @@ class Mobile(test_tasks.DeliveryFixture):
         self.assertLessEqual(set(answer), {"schema", "ok", "task", "stage", "session", "receipt"})
         self.wait_received("Add rate limiting")
         self.assertEqual(self.hgs("get", task["ref"])["task"]["stage"], "active")
+
+    def test_a_person_can_review_and_accept_active_managed_work_without_an_agent_report(self):
+        task = self.add("Explicit human review", "--target", self.name)
+        sent = self.hgs("send", task["ref"])["task"]
+        self.assertEqual(sent["stage"], "active")
+        self.assertGreater(sent["execution"]["attempts"], 0)
+        reviewed = self.hgs("report", task["ref"], text="The person verified this work.")
+        self.assertTrue(reviewed["moved_to_review"])
+        self.assertEqual(self.hgs("stage", task["ref"], "done")["task"]["stage"], "done")
 
     def test_a_send_refused_before_the_paste_says_why(self):
         task = self.add("Add rate limiting")
@@ -66,6 +78,9 @@ class Mobile(test_tasks.DeliveryFixture):
         self.assertIn("no task", self.mobile("mobile-send", unknown, ok=False)["error"])
 
     def test_a_send_that_could_not_record_is_uncertain(self):
+        # The legacy route pastes first: a record that then fails is
+        # uncertain. The person's hold keeps this unfloored task on it.
+        self.hgs("cutover", "--project", "orchard", "--hold", "on")
         task = self.add("Add rate limiting")
         self.hgs("comment", task["ref"], text="A first comment writes its updates file.")
         tasks = self.state / "replica" / hashlib.sha256(b"project-1").hexdigest() / "tasks"
@@ -79,6 +94,25 @@ class Mobile(test_tasks.DeliveryFixture):
         self.assertTrue(answer.get("uncertain"), answer)
         self.assertTrue(answer["error"].startswith("the prompt was sent, but the task could not record it"), answer)
         self.wait_received("Add rate limiting")
+
+    def test_a_send_whose_attempt_cannot_be_saved_sends_nothing(self):
+        # C3 activation: the attempt is saved before any input, so a task
+        # that cannot be written sends nothing; that is no uncertainty.
+        task = self.add("Add rate limiting")
+        self.hgs("comment", task["ref"], text="A first comment writes its updates file.")
+        tasks = self.state / "replica" / hashlib.sha256(b"project-1").hexdigest() / "tasks"
+        updates = tasks / (task["uuid"] + ".updates")
+        updates.chmod(0o400)
+        try:
+            answer = self.mobile("mobile-send", self.send_request(task), ok=False)
+        finally:
+            updates.chmod(0o600)
+        self.assertNotIn("uncertain", answer)
+        self.assertIn("Permission denied", answer["error"])
+        self.assertEqual(self.received(), "")
+        # The floor's write-ahead mark was written before the failed save, so
+        # this copy is now kept for review, never read as one without it.
+        self.assertIn("could not be read", self.hgs("get", task["ref"], ok=False))
 
     def test_a_phone_cancels_a_task(self):
         task = self.add("Add rate limiting")

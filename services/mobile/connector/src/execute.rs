@@ -273,6 +273,18 @@ impl<N: Native + 'static> Connector<N> {
 
     /// `_execute_claimed`: the receipt of a claimed request.
     async fn execute_claimed(&self, request: &Map<String, Value>, request_id: &str) -> Value {
+        let selection = self.labels_selection(
+            request
+                .get("session")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            request.get("payload"),
+        );
+        crate::runtime::SESSION_LABEL_SELECTION
+            .scope(selection, self.execute_claimed_inner(request, request_id))
+            .await
+    }
+    async fn execute_claimed_inner(&self, request: &Map<String, Value>, request_id: &str) -> Value {
         if self.flags.get().windows_gateway
             && !request
                 .get("operation")
@@ -748,16 +760,29 @@ impl<N: Native + 'static> Connector<N> {
                     // is uncertain. The original claimed UUID is never executed again.
                     mutation_started.set(true);
                 }
-                let result = self
-                    .call(crate::session_projects::call(
-                        &validated.operation,
-                        payload,
-                        session,
-                    ))
-                    .await?;
+                let selected = crate::runtime::SESSION_LABEL_SELECTION
+                    .try_with(Clone::clone)
+                    .ok()
+                    .flatten();
+                let mut call =
+                    crate::session_projects::call(&validated.operation, payload, session);
+                if let Some(selected) = &selected {
+                    call.payload.as_mut().unwrap()["session_id"] = json!(selected.id);
+                }
+                let result = self.call(call).await?;
+                let mut native_result = result.clone();
+                if let Some(selected) = &selected {
+                    if result["session_id"] != selected.id {
+                        return Err(Failure::text("native project session ID changed"));
+                    }
+                    native_result
+                        .as_object_mut()
+                        .ok_or(Failure::Generic)?
+                        .remove("session_id");
+                }
                 if !crate::session_projects::result_valid(
                     &validated.operation,
-                    &result,
+                    &native_result,
                     payload,
                     session,
                 ) {
@@ -765,10 +790,11 @@ impl<N: Native + 'static> Connector<N> {
                         "native project assignment acknowledgement did not match",
                     ));
                 }
-                if validated.operation == "project_assign" && result["status"] == "assigned" {
+                if validated.operation == "project_assign" && native_result["status"] == "assigned"
+                {
                     self.state.borrow_mut().project_next_poll = 0.0;
                 }
-                Ok(result)
+                Ok(native_result)
             }
             "hooks_status" => {
                 let payload = payload.expect("validated");
@@ -1038,8 +1064,9 @@ impl<N: Native + 'static> Connector<N> {
         Ok(Value::Object(result))
     }
 
-    /// History head indexing makes bounded native progress locally: up to 31
-    /// more reads within 2 s, while the head changes.
+    /// Full history pages make bounded native indexing progress locally: up
+    /// to 31 more reads within 2 s. A one-row metadata probe yields after its
+    /// first read so catalog counts do not monopolize the serial native queue.
     async fn history(
         &self,
         session: &str,
@@ -1054,7 +1081,8 @@ impl<N: Native + 'static> Connector<N> {
         let selected = ["before", "after", "around", "around_incoming_seq"]
             .iter()
             .any(|key| payload.get(*key).is_some());
-        if !selected {
+        let metadata_only = payload.get("limit").and_then(Value::as_u64) == Some(1);
+        if !selected && !metadata_only {
             for _ in 0..31 {
                 if !result
                     .as_object()

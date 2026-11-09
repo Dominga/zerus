@@ -16,6 +16,10 @@ pub const SUMMARY_CHARS: usize = 240;
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ViewRow {
+    /// Native service catalog provenance, retained only inside the frontend's
+    /// existing mirror. Renderer JSON and cached rows cannot supply it.
+    #[serde(skip)]
+    pub catalog_source: Option<(String, u64, u64)>,
     /// The session's full name, its identity in `hgs` commands.
     pub name: String,
     /// The card title: the tag, else the name after its project, else the project.
@@ -101,6 +105,9 @@ pub struct ViewRow {
     pub summary: String,
     /// The last hook event, seconds since the Unix epoch.
     pub updated_at: Option<f64>,
+    /// The host's Keep cache warm state (`keep_warm` of the listing), as reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_warm: Option<Value>,
     /// When an archived row was archived (epoch seconds).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<f64>,
@@ -116,6 +123,18 @@ pub struct ViewRow {
     /// session by it as well (`session_selector`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// The session that launched or adopted this one (zerus-sa9qn.2), when the
+    /// listing reports a well-formed link. Presentation and attention routing
+    /// only; it never authorizes an action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<ParentLink>,
+    /// A supervised child (zerus-sa9qn.3): its computer lists its parent as
+    /// running there, and it holds no request only the person can answer
+    /// (`human_request`: an approval, folder or hook trust, signing in). Its
+    /// replies, questions, errors and exits are the parent's to handle, so
+    /// they draw no attention, as for a muted session; its state is unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quiet: bool,
     /// The raw `state` (`running`, `paused`, `stopped`, `archived`, ...);
     /// `running` when the row lists none (a live session).
     pub state: String,
@@ -199,10 +218,18 @@ pub struct ViewRow {
     /// The checkout's root (`git_root`), empty outside Git. The worktree
     /// picker counts sessions by it.
     pub git_root: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub git_metadata_state: String,
+    #[serde(skip_serializing_if = "is_false")]
+    pub git_detached: bool,
     /// Linked checkout name from the existing Git worktree metadata. Main
     /// checkouts and rows without verified metadata leave the chip absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
+    /// False excludes folder removal only after an available native Git read;
+    /// unavailable or unreported metadata still needs inspection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_worktree: Option<bool>,
     /// The row's `terminal_supported`, else true unless the agent is
     /// `dsh` or `opencode` (`HgsClient.cpp:217`).
     pub terminal_supported: bool,
@@ -317,6 +344,58 @@ pub struct ChildFacts {
     pub phase: String,
     pub request: String,
     pub started: Option<f64>,
+}
+
+/// A child's parent session as the child's computer lists it (`parent` in
+/// `hgs ls --json`): the parent's machine and durable session ID, hints to
+/// match an older parent record and to name it, and its state in that same
+/// listing (`live`, `saved`, `archived` or `missing`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ParentLink {
+    pub machine: String,
+    pub session_id: String,
+    pub name: String,
+    pub conversation_id: String,
+    pub run_id: String,
+    pub state: String,
+    /// When the link was recorded (launch or adoption), Unix seconds; 0 unknown.
+    pub at: i64,
+}
+
+impl ParentLink {
+    fn from_row(row: &Value) -> Option<Self> {
+        let link = row.get("parent")?.as_object()?;
+        let field = |key: &str| {
+            link.get(key)
+                .and_then(Value::as_str)
+                .filter(|s| s.len() <= 512 && !s.chars().any(char::is_control))
+                .unwrap_or("")
+                .to_owned()
+        };
+        let parent = Self {
+            machine: field("machine"),
+            session_id: field("session_id"),
+            name: field("name"),
+            conversation_id: field("conversation_id"),
+            run_id: field("run_id"),
+            state: field("state"),
+            at: link
+                .get("at")
+                .and_then(Value::as_i64)
+                .filter(|at| *at > 0)
+                .unwrap_or(0),
+        };
+        let identity = crate::creation::canonical_uuid(&parent.session_id)
+            || (parent.session_id.is_empty() && !parent.conversation_id.is_empty());
+        (crate::creation::canonical_uuid(&parent.machine) && identity && !parent.name.is_empty())
+            .then_some(parent)
+    }
+
+    /// The child's computer verified this parent running there.
+    pub fn live(&self) -> bool {
+        self.state == "live"
+    }
 }
 
 /// Valid shared notification preferences: muted, and the suppressed baseline.
@@ -520,8 +599,17 @@ impl<'a> Session<'a> {
             && !(self.conversation_state == "ended" && self.activity != "idle")
     }
 
+    /// A keep-warm ping is running: the agent works, but not on the person's turn.
+    fn keep_warm_turn(&self) -> bool {
+        object(self.row, "keep_warm")
+            .and_then(|warm| warm.get("turn_active"))
+            .and_then(Value::as_bool)
+            == Some(true)
+    }
+
     fn reply_in_progress(&self) -> bool {
-        self.current_activity()
+        !self.keep_warm_turn()
+            && self.current_activity()
             && (self.activity == "busy"
                 || self.background > 0
                 || self.subagents_active > 0
@@ -562,6 +650,27 @@ impl<'a> Session<'a> {
             && !self.conversation_id.is_empty()
             && !reply.is_empty()
             && self.read_mark("reply_id") != reply
+    }
+
+    /// A request only the person can answer that this row shows by itself: a
+    /// tool or permission approval of the session or of a native subagent
+    /// (zerus-dn4ia), a failed sign-in or a required one. The host adds folder
+    /// and hook trust, which only its pending questions show.
+    fn person_only_request(&self) -> bool {
+        let approval = |child: &Value| {
+            ["display_state", "state"]
+                .iter()
+                .any(|key| child.get(*key).and_then(Value::as_str) == Some("approval"))
+        };
+        self.phase == "approval"
+            || self.error_kind() == "authentication"
+            || text(self.row, "activity_summary") == "Sign in required"
+            || object(self.row, "subagents").is_some_and(|map| map.values().any(approval))
+            || self
+                .row
+                .get("subagent_previews")
+                .and_then(Value::as_array)
+                .is_some_and(|list| list.iter().any(approval))
     }
 
     fn child_needs_input(&self) -> bool {
@@ -677,6 +786,9 @@ impl<'a> Session<'a> {
         }
         if !acknowledged && self.current_activity() && self.child_needs_input() {
             return caption("attention", "Needs input");
+        }
+        if self.keep_warm_turn() {
+            return caption("ready", "Warming cache");
         }
         match self.phase {
             "compacting" => return caption("working", "Compacting"),
@@ -1287,6 +1399,7 @@ pub fn row(value: &Value) -> ViewRow {
     };
     let flag = |field: &str| value.get(field).and_then(Value::as_bool);
     ViewRow {
+        catalog_source: None,
         name: session.name.to_owned(),
         title: session.title(),
         display_title: session.display_title(),
@@ -1335,6 +1448,7 @@ pub fn row(value: &Value) -> ViewRow {
         effort: some(text(value, "effort")),
         summary: simplified(&session.summary()),
         updated_at: number(value, "last_event_at").filter(|at| *at > 0.0),
+        keep_warm: object(value, "keep_warm").map(|warm| Value::Object(warm.clone())),
         archived_at: number(value, "archived_at"),
         turn_started: session.turn_started(),
         launch_id: some(text(value, "launch_id")),
@@ -1342,6 +1456,12 @@ pub fn row(value: &Value) -> ViewRow {
         conversation_id: some(session.conversation_id),
         session_id: some(text(value, "session_id"))
             .filter(|id| crate::creation::canonical_uuid(id)),
+        parent: ParentLink::from_row(value),
+        // Only an explicit host classification quiets a row; an older or
+        // unknown host keeps the person's attention (zerus-b5oin).
+        quiet: ParentLink::from_row(value).is_some_and(|parent| parent.live())
+            && value.get("human_request") == Some(&Value::Bool(false))
+            && !session.person_only_request(),
         // A live row lists no state; Qt reads it as running (`HgsClient.cpp`).
         state: session.state.to_owned(),
         session_state: text(value, "session_state").to_owned(),
@@ -1422,6 +1542,12 @@ pub fn row(value: &Value) -> ViewRow {
         cwd: text(value, "cwd").to_owned(),
         cwd_canonical: text(value, "cwd_canonical").to_owned(),
         git_root: text(value, "git_root").to_owned(),
+        git_metadata_state: text(value, "git_metadata_state").to_owned(),
+        git_detached: value["git_detached"] == true,
+        git_worktree: match flag("git_worktree") {
+            Some(false) if !matches!(text(value, "git_metadata_state"), "ok" | "not_repo") => None,
+            reported => reported,
+        },
         worktree: (value.get("git_worktree").and_then(Value::as_bool) == Some(true))
             .then(|| {
                 path_parts(text(value, "git_root"))
@@ -1486,6 +1612,72 @@ mod tests {
 
     /// zerus-ucck P1c: a row keeps the listing's durable session ID only in
     /// its canonical form, and a row without one serializes as before.
+    #[test]
+    fn a_row_keeps_a_well_formed_parent_link() {
+        let machine = "11111111-1111-4111-8111-111111111111";
+        let session = "22222222-2222-4222-8222-222222222222";
+        let link = json!({"schema":1,"machine":machine,"host":"arch","session_id":session,
+            "name":"claude/p/lead","conversation_id":"c","run_id":"r","source":"launch","at":1,"state":"live"});
+        let listed = row(&json!({"name":"codex/p/kid","parent":link}));
+        let parent = listed.parent.clone().unwrap();
+        assert_eq!(
+            (
+                parent.machine.as_str(),
+                parent.session_id.as_str(),
+                parent.name.as_str()
+            ),
+            (machine, session, "claude/p/lead")
+        );
+        assert!(parent.live());
+        assert_eq!(
+            serde_json::to_value(&listed).unwrap()["parent"]["state"],
+            "live"
+        );
+        // The link time: when a new child row starts compact (zerus-sa9qn.14).
+        assert_eq!(serde_json::to_value(&listed).unwrap()["parent"]["at"], 1);
+        let mut undated = link.clone();
+        undated["at"] = json!(-5);
+        assert_eq!(
+            row(&json!({"name":"codex/p/kid","parent":undated}))
+                .parent
+                .map(|parent| parent.at),
+            Some(0)
+        );
+        let mut older = link.clone();
+        older["session_id"] = json!("");
+        assert!(
+            row(&json!({"name":"codex/p/kid","parent":older}))
+                .parent
+                .is_some(),
+            "conversation fallback"
+        );
+        for (key, value) in [
+            ("machine", json!("arch")),
+            ("session_id", json!("X")),
+            ("name", json!("")),
+            ("machine", json!(7)),
+        ] {
+            let mut bad = link.clone();
+            bad[key] = value;
+            assert_eq!(
+                row(&json!({"name":"codex/p/kid","parent":bad})).parent,
+                None,
+                "{key}"
+            );
+        }
+        let mut saved = link;
+        saved["state"] = json!("saved");
+        assert!(!row(&json!({"name":"codex/p/kid","parent":saved}))
+            .parent
+            .unwrap()
+            .live());
+        assert_eq!(row(&json!({"name":"codex/p/kid"})).parent, None);
+        assert!(serde_json::to_value(row(&json!({"name":"codex/p/kid"})))
+            .unwrap()
+            .get("parent")
+            .is_none());
+    }
+
     #[test]
     fn a_row_keeps_only_a_canonical_session_id() {
         let id = "3f2a9c1d-0b4e-4d6a-9c1d-2e3f4a5b6c7d";
@@ -1987,6 +2179,41 @@ mod tests {
     }
 
     #[test]
+    fn a_keep_warm_ping_turn_reads_as_ready_not_work() {
+        let warm = json!({"enabled": true, "until": null, "revision": 2, "state": "warming",
+            "next_at": null, "reason": "", "turn_active": true});
+        let ping = row(
+            &json!({"tracked": true, "state": "running", "process_state": "running",
+            "phase": "working", "activity": "busy", "conversation_id": "c", "run_id": "r",
+            "reply_id": "7:1.0", "keep_warm": warm}),
+        );
+        assert_eq!(
+            (ping.status.as_str(), ping.caption.as_str()),
+            ("ready", "Warming cache")
+        );
+        assert!(
+            ping.unread_candidate,
+            "the previous reply stays the candidate"
+        );
+        assert_eq!(ping.keep_warm.as_ref().unwrap()["revision"], 2);
+        assert_eq!(
+            serde_json::to_value(&ping).unwrap()["keep_warm"]["turn_active"],
+            true
+        );
+        // The person's own turn, or a ping that also needs a decision, is not quiet.
+        let mut working = json!({"tracked": true, "phase": "working", "activity": "busy",
+            "keep_warm": {"enabled": true, "turn_active": false}});
+        assert_eq!(row(&working).status, "working");
+        working["keep_warm"]["turn_active"] = json!(true);
+        working["phase"] = json!("approval");
+        assert_eq!(row(&working).status, "attention");
+        assert_eq!(
+            row(&json!({"tracked": true, "activity": "idle"})).keep_warm,
+            None
+        );
+    }
+
+    #[test]
     fn background_summary_counts_commands() {
         let view = row(
             &json!({"tracked": true, "phase": "idle", "activity": "idle",
@@ -2390,6 +2617,37 @@ mod tests {
 mod worktree_chip_tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn a_reported_ordinary_folder_is_distinct_from_unreported_or_invalid_metadata() {
+        for (value, expected) in [
+            (
+                json!({"git_worktree": false, "git_metadata_state": "ok"}),
+                Some(false),
+            ),
+            (
+                json!({"git_worktree": false, "git_metadata_state": "not_repo"}),
+                Some(false),
+            ),
+            (json!({"git_worktree": false}), None),
+            (
+                json!({"git_worktree": false, "git_metadata_state": null}),
+                None,
+            ),
+            (
+                json!({"git_worktree": false, "git_metadata_state": "unavailable"}),
+                None,
+            ),
+            (json!({"git_worktree": true}), Some(true)),
+            (json!({}), None),
+            (json!({"git_worktree": null}), None),
+            (json!({"git_worktree": "false"}), None),
+        ] {
+            let projected = row(&value);
+            assert_eq!(projected.git_worktree, expected);
+            let wire = serde_json::to_value(projected).unwrap();
+            assert_eq!(wire.get("git_worktree").and_then(Value::as_bool), expected);
+        }
+    }
     #[test]
     fn linked_checkout_chip_uses_recorded_git_metadata() {
         assert_eq!(row(&json!({"git_worktree":true,"git_root":"/srv/example/api-work","cwd":"/srv/example/api-work/src"})).worktree.as_deref(), Some("api-work"));

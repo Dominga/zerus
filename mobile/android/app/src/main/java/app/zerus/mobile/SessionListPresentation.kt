@@ -11,14 +11,21 @@ data class SessionListPresentation(
     companion object {
         fun prepare(sessions: List<Session>, machines: List<Machine>, projects: List<ProjectSummary>,
             selectedMachines: Set<MachineKey>, query: String, project: ProjectKey?, filter: SessionFilter,
-            drafts: List<Draft>, archiveRange: ArchiveRange = ArchiveRange()): SessionListPresentation {
+            drafts: List<Draft>, archiveRange: ArchiveRange = ArchiveRange(), teams: TeamCollapse = TeamCollapse()): SessionListPresentation {
             val scoped = SessionFilters.scoped(sessions, machines, selectedMachines, query, project)
             val drafted = SessionFilters.draftedSessions(sessions, drafts)
             val online = machines.filter { it.online }.mapTo(hashSetOf()) { MachineKey(it.connectionId, it.id) }
             fun online(row: Session) = SessionFilters.machineKey(row.target) in online
             val visible = scoped.filter { SessionFilters.matches(it, filter, online(it), it.target.key in drafted) &&
                 (filter != SessionFilter.Archive || it.raw.optDouble("archived_at",0.0).let { at -> at >= archiveRange.from && at < archiveRange.until }) }
-            return SessionListPresentation(SessionFilters.grouped(visible, projects),
+            // Child sessions nest under a parent listed in the same project group (zerus-sa9qn.4).
+            val uuids = machines.associate { MachineKey(it.connectionId, it.id) to it.machineId }
+            fun uuid(row: Session) = uuids[SessionFilters.machineKey(row.target)]
+            val parentKey = ChildSessions.parentIndex(sessions, ::uuid)
+            val groups = SessionFilters.grouped(visible, projects).map { group ->
+                group.copy(cards = ChildSessions.nest(group.sessions, parentKey, ::online) { teams.collapsed(it, uuid(it)) })
+            }
+            return SessionListPresentation(groups,
                 SessionFilters.counts(scoped, machines, drafted),
                 SessionFilters.machineCounts(sessions, machines, filter, drafted, project),
                 if (filter == SessionFilter.Archive) emptyList() else scoped.filter { ReadAllPolicies.listCandidate(it, online(it)) }.map { it.target }, visible.size)

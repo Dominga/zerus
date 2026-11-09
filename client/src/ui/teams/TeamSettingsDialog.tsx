@@ -6,6 +6,7 @@ import { teamAction } from "../../bridge";
 import type { TeamMemberView, TeamView } from "../../types";
 import { checkTestConfig, overrideText, parseOverride, readTestConfig, sourceLine, testsLines, testsPatch, type TestConfig } from "./testsSettings";
 import "../styles/newteam.css";
+import { TextArea, TextInput } from "../lib/TextField";
 
 type TeamSettings = Record<string, unknown>;
 
@@ -196,14 +197,14 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
       <div class="nt-body">
         <h3>{tr("Team iron rules")}</h3>
         <p class="nt-note">{tr("Mandatory additions to project rules. Only you, or the lead quoting your verified word, may change them.")}</p>
-        <textarea class="nt-rules" rows={4} data-team-rules placeholder={tr("One additional rule per line (20 maximum)")}
+        <TextArea class="nt-rules" rows={4} data-team-rules placeholder={tr("One additional rule per line (20 maximum)")}
           value={rules()} onInput={(event) => setRules(event.currentTarget.value)} />
         {/* Task 324 (Qt TeamSettingsDialog): the member rules come right after the team's rules. */}
         <For each={current.members.filter((member) => member.state !== "removed")}>
           {(member) => (
             <label class="nt-field">
               <span>{tr("%1: member iron rules", member.role || member.id)}</span>
-              <textarea
+              <TextArea
                 class="nt-rules"
                 rows={2}
                 placeholder={tr("One additional rule per line (20 maximum)")}
@@ -220,8 +221,8 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
           {tr("A branch per task")}
         </label>
         <div class="nt-row">
-          <input value={template()} onInput={(event) => setTemplate(event.currentTarget.value)} placeholder={tr("Branch name template")} />
-          <input value={base()} onInput={(event) => setBase(event.currentTarget.value)} placeholder={tr("the lead's branch")} />
+          <TextInput value={template()} onInput={(event) => setTemplate(event.currentTarget.value)} placeholder={tr("Branch name template")} />
+          <TextInput value={base()} onInput={(event) => setBase(event.currentTarget.value)} placeholder={tr("the lead's branch")} />
         </div>
         <p class="nt-note">{tr("The branch name: {id} is the task, {member} the member and {team8} the team's first eight characters")}</p>
 
@@ -252,7 +253,7 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
           </ul>
         </Show>
         <p class="nt-note">{tr("Your override, as JSON shaped like .zerus/tests.toml: providers merge by name, templates replace the project's list. Empty: the project's file alone.")}</p>
-        <textarea rows={8} class="nt-mono" data-tests-override value={tests()} placeholder={'{"provider": [{"name": "python", "kind": "pytest", "results": {"format": "junit", "path": "out/pytest.xml"}}]}'}
+        <TextArea rows={8} class="nt-mono" data-tests-override value={tests()} placeholder={'{"provider": [{"name": "python", "kind": "pytest", "results": {"format": "junit", "path": "out/pytest.xml"}}]}'}
           onInput={(event) => { setTests(event.currentTarget.value); setTestCheck(undefined); }} />
         <div class="nt-row">
           <button type="button" class="btn ghost small" data-tests-check disabled={checking()} title={tr("Ask hgs whether the project's file with this override loads; nothing is written")}
@@ -292,7 +293,7 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
               )}</For>
             </div>
             <div class="nt-line">
-              <input placeholder={tr("+ model")} value={adding()[member.id]?.model ?? ""} data-field="model-add"
+              <TextInput placeholder={tr("+ model")} value={adding()[member.id]?.model ?? ""} data-field="model-add"
                 onInput={(event) => setAdding({ ...adding(), [member.id]: { model: event.currentTarget.value, effort: adding()[member.id]?.effort ?? "" } })} />
               <select value={adding()[member.id]?.effort ?? ""}
                 onChange={(event) => setAdding({ ...adding(), [member.id]: { model: adding()[member.id]?.model ?? "", effort: event.currentTarget.value } })}>
@@ -320,7 +321,7 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
           </div>
         )}</Show>
         <div class="nt-line">
-          <input placeholder={tr("Key name, such as health watcher")} value={intakeLabel()} maxLength={60} onInput={(event) => setIntakeLabel(event.currentTarget.value)} data-field="intake-label" />
+          <TextInput placeholder={tr("Key name, such as health watcher")} value={intakeLabel()} maxLength={60} onInput={(event) => setIntakeLabel(event.currentTarget.value)} data-field="intake-label" />
           <button type="button" class="btn ghost small" disabled={!intakeLabel().trim() || intakes().length >= 8}
             title={intakes().length >= 8 ? tr("A team keeps at most eight keys; revoke one first") : undefined} onClick={() => void createIntake()}>{tr("Create key")}</button>
         </div>

@@ -12,8 +12,6 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub const FILE: &str = "replica-members.json";
@@ -155,18 +153,78 @@ fn path(config: &Config) -> PathBuf {
 }
 
 fn read_at(path: &Path) -> BTreeMap<String, Member> {
-    let mut bytes = Vec::new();
-    let read = fs::File::open(path).and_then(|file| file.take(MAX_BYTES + 1).read_to_end(&mut bytes));
-    if read.is_err() || bytes.len() as u64 > MAX_BYTES {
-        return BTreeMap::new();
+    super::read_regular(path, MAX_BYTES)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// The first reason `record` keeps `project`'s cutover open (C2), with when
+/// it was observed: never seen, another replica protocol, an older task
+/// schema, no valid store, no exchange of the project, one not complete
+/// (whatever reason it gives, or none), or none since `latest`, the latest
+/// cutover write here. It fails closed: anything not positively known as
+/// complete keeps it open. Shared by the cutover status and the first
+/// floor's bootstrap gate (C3 activation), so both read one definition.
+pub fn open_reason(
+    record: Option<&Member>,
+    project: &str,
+    latest: Option<i64>,
+) -> Option<(&'static str, Option<i64>)> {
+    let Some(replica) = record else {
+        return Some(("unseen", None));
+    };
+    let seen = Some(replica.seen_at as i64);
+    if replica.protocol != Some(super::replica::PROTOCOL) {
+        return Some(("protocol", seen));
     }
-    serde_json::from_slice(&bytes).unwrap_or_default()
+    if replica
+        .task_schema
+        .is_none_or(|schema| schema < zerus_replica::TASK_SCHEMA)
+    {
+        return Some(("task_schema", seen));
+    }
+    if replica
+        .store
+        .as_deref()
+        .is_none_or(|store| !zerus_replica::ids::is_uuid(store))
+    {
+        return Some(("store", seen));
+    }
+    let Some(exchanged) = replica.projects.get(project) else {
+        return Some(("no_inventory", None));
+    };
+    let at = Some(exchanged.at as i64);
+    if !exchanged.complete {
+        return Some((
+            exchanged.reason.map_or("incomplete", Incomplete::as_str),
+            at,
+        ));
+    }
+    if latest.is_some_and(|latest| (exchanged.at as i64) < latest) {
+        return Some(("inventory_before_cutover", at));
+    }
+    None
 }
 
 /// Every member's entry, read without the lock. A missing, oversized or
-/// damaged file reads as none.
+/// damaged file reads as none; nothing at the path makes the read wait.
 pub fn read(config: &Config) -> BTreeMap<String, Member> {
     read_at(&path(config))
+}
+
+/// Every member's entry, for a decision that must fail closed (C3e's
+/// certificate reuse, desktop-u on #1471): a missing file is no entries, but
+/// a damaged, oversized, unreadable or irregular one is an error, never an
+/// empty record set that would compare as "nothing changed".
+pub fn read_strict(
+    config: &Config,
+) -> std::result::Result<BTreeMap<String, Member>, super::Unread> {
+    match super::read_regular(&path(config), MAX_BYTES) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| super::Unread::Unreadable),
+        Err(super::Unread::Missing) => Ok(BTreeMap::new()),
+        Err(unread) => Err(unread),
+    }
 }
 
 /// Keeps only the entries of current members, at the membership change
@@ -321,6 +379,7 @@ mod tests {
     //! verified observation and go with the membership.
     use super::*;
     use serde_json::json;
+    use std::fs;
 
     const A: &str = "11111111-1111-4111-8111-111111111111";
     const B: &str = "22222222-2222-4222-8222-222222222222";
@@ -369,6 +428,45 @@ mod tests {
 
     fn record(config: &Config) -> Option<Member> {
         read(config).remove("peer")
+    }
+
+    /// review-win-c on #1471: no read of the records waits on what is at
+    /// their path. The ordinary read takes anything unusable as none; the
+    /// strict one (certificate reuse) refuses it and takes only a missing
+    /// file as none.
+    #[test]
+    fn the_records_are_read_without_waiting_and_strictly_when_asked() {
+        use super::super::Unread;
+        let (_dir, config) = fixture();
+        let file = path(&config);
+        assert_eq!(
+            (read(&config), read_strict(&config)),
+            (BTreeMap::new(), Ok(BTreeMap::new()))
+        );
+        assert!(seen(&config, "peer", &observed("node-a", A), 10).unwrap());
+        assert_eq!(read_strict(&config).unwrap(), read(&config));
+        assert_eq!(read(&config).len(), 1);
+        fs::write(&file, b"{damaged").unwrap();
+        assert_eq!(
+            (read(&config), read_strict(&config)),
+            (BTreeMap::new(), Err(Unread::Unreadable))
+        );
+        #[cfg(unix)]
+        {
+            fs::remove_file(&file).unwrap();
+            let fifo = std::ffi::CString::new(file.as_os_str().as_encoded_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+            let (sent, received) = std::sync::mpsc::channel();
+            let reader = config.clone();
+            std::thread::spawn(move || {
+                let _ = sent.send((read(&reader), read_strict(&reader)));
+            });
+            let Ok(both) = received.recv_timeout(std::time::Duration::from_secs(5)) else {
+                let _ = fs::OpenOptions::new().write(true).open(&file);
+                panic!("a read of the records waited on a FIFO");
+            };
+            assert_eq!(both, (BTreeMap::new(), Err(Unread::NotRegular)));
+        }
     }
 
     #[test]

@@ -323,3 +323,18 @@ fn the_memory_mode_switches_by_the_owner_or_the_leads_card() {
         assert!(events.iter().any(|event| event.kind == "memory_mode_denied"));
     });
 }
+
+/// Task #397: a hit of the project's search names the store that holds it: the
+/// project itself, or the team whose workspace is `teams/<short id>`.
+#[test]
+fn a_search_hit_names_its_store() {
+    assert_eq!(find_store_label("."), "project");
+    assert_eq!(find_store_label("./"), "project");
+    assert_eq!(find_store_label(""), "project");
+    let team = find_store_label("teams/33fbafeb");
+    assert!(team.starts_with("team ") && !team.contains('/'), "{team}");
+    // A record deeper in the team's workspace belongs to the same team.
+    assert_eq!(find_store_label("teams/33fbafeb/records"), team);
+    // Anything else keeps its own name.
+    assert_eq!(find_store_label("elsewhere"), "elsewhere");
+}

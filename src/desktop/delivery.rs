@@ -30,6 +30,12 @@ use zerus_desktop_ledger::reads;
 /// Root schema leaf: catalog rows carry the approval-phase flag that the
 /// automatic-approval scan visits first (zerus-5wmh.66.3.33).
 pub(super) const SCHEMA: i64 = 22;
+/// Schema leaf: the durable policy stores the approval categories
+/// (zerus-sz42x.2).
+pub(super) const CATEGORIES_SCHEMA: i64 = 33;
+pub(super) fn migrate_categories(db: &Connection) -> Result<()> {
+    state::migrate_categories(db)
+}
 #[cfg(test)]
 pub(super) fn remove_approval_fixture(db: &Connection) {
     // Rewind the later schema-23 creation worktree leaf too, never leaving it
@@ -81,17 +87,69 @@ pub(super) fn result_request(store: &Store, value: &Value) -> Value {
 }
 
 pub(super) fn decorate_passive(store: &Store, value: &mut Value) {
-    let enabled = state::policy(&store.db).ok().map(|policy| policy.enabled);
+    let policy = state::policy(&store.db).ok();
+    let enabled = policy.map(|policy| policy.enabled);
+    let categories = policy.map(|policy| policy.categories.ids());
     value["automatic_approvals"] = json!(enabled);
+    value["automatic_approval_categories"] = json!(categories);
     value["lifecycle"]["background"]["approvals"]["enabled"] = json!(enabled);
+    value["lifecycle"]["background"]["approvals"]["categories"] = json!(categories);
     for component in ["reads", "approvals"] {
         // No runtime is not evidence that an older owner has drained.
         value["lifecycle"]["background"][component]["drained"] = false.into();
     }
 }
 
-/// A reachable authenticated frontend can turn the durable opt-in OFF even
-/// without background workers. No enable, generic JSON or writer grant here.
+/// A category change from the request, if any: Err for invalid IDs.
+fn requested_categories(ids: Option<Vec<String>>) -> std::result::Result<Option<policy::Set>, ()> {
+    ids.map(|ids| policy::Set::from_ids(&ids).ok_or(())).transpose()
+}
+
+/// The committed policy a category change is checked against. A switch
+/// change never reads it, so turning approvals off needs only a writable
+/// store, whatever the stored categories hold.
+enum Checked {
+    Switch,
+    Categories {
+        current: state::Policy,
+        set: policy::Set,
+    },
+}
+impl Checked {
+    fn of(store: &Store, enabled: bool, categories: Option<policy::Set>) -> std::result::Result<Self, &'static str> {
+        let Some(set) = categories else {
+            return Ok(Self::Switch);
+        };
+        let current = state::policy(&store.db).map_err(|_| "delivery_store_refused")?;
+        // A category change never turns the switch on or off.
+        if current.enabled != enabled {
+            return Err("approval_policy_changed");
+        }
+        Ok(Self::Categories { current, set })
+    }
+    /// Whether the change can approve more than before: turning the switch
+    /// on, or adding a category while it is on. Only such a change needs
+    /// ready background workers; reducing consent never waits for them.
+    fn widens(&self, enabled: bool) -> bool {
+        match self {
+            Self::Switch => enabled,
+            Self::Categories { current, set } => {
+                current.enabled && !current.categories.contains_all(*set)
+            }
+        }
+    }
+    /// Whether approvals in flight may no longer be admitted.
+    fn narrows(&self, enabled: bool) -> bool {
+        match self {
+            Self::Switch => !enabled,
+            Self::Categories { current, set } => !set.contains_all(current.categories),
+        }
+    }
+}
+
+/// A reachable authenticated frontend can turn the durable opt-in OFF, and
+/// change categories in a way that approves nothing more, even without
+/// background workers. No enable, generic JSON or writer grant here.
 pub(super) fn passive_frontend_request(
     store: &mut Store,
     authority: super::ui_authority::Validated,
@@ -101,15 +159,32 @@ pub(super) fn passive_frontend_request(
     if authority.operation() != "automatic_approvals" {
         return refused("desktop_background_unavailable");
     }
-    match authority.into_request() {
+    let (enabled, categories) = match authority.into_request() {
         Ok(zerus_client_core::desktop::ui_requests::Request::AutomaticApprovals {
-            enabled: false,
+            enabled,
+            categories,
             ..
-        }) => state::set_policy(&mut store.db, &id, false)
-            .unwrap_or_else(|_| refused("delivery_store_refused")),
-        Ok(_) => refused("desktop_background_unavailable"),
-        Err(_) => refused("frontend_identity_expired"),
+        }) => match requested_categories(categories) {
+            Ok(categories) => (enabled, categories),
+            Err(()) => return refused("invalid_delivery_request"),
+        },
+        Ok(_) => return refused("desktop_background_unavailable"),
+        Err(_) => return refused("frontend_identity_expired"),
+    };
+    match state::policy_receipt(&store.db, &id, enabled, categories) {
+        Ok(Some(receipt)) => return receipt,
+        Err(_) => return refused("delivery_store_refused"),
+        Ok(None) => (),
     }
+    let checked = match Checked::of(store, enabled, categories) {
+        Ok(checked) => checked,
+        Err(code) => return refused(code),
+    };
+    if checked.widens(enabled) {
+        return refused("desktop_background_unavailable");
+    }
+    state::set_policy(&mut store.db, &id, enabled, categories)
+        .unwrap_or_else(|_| refused("delivery_store_refused"))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -145,9 +220,11 @@ impl Phase {
 #[derive(Clone)]
 enum Completion {
     NotStarted,
+    /// A reserved answer its categories no longer admitted; never started.
+    Withheld,
     Unknown,
     Read(reads::Outcome),
-    Inspection(Option<Value>),
+    Inspection(Option<policy::Selected>),
     Answer {
         status: &'static str,
         detail: String,
@@ -155,7 +232,7 @@ enum Completion {
 }
 enum Work {
     Read(reads::ReadMark),
-    Inspect(policy::Candidate),
+    Inspect(policy::Candidate, policy::Set),
     Answer { target: Target, action: Action },
 }
 struct Job {
@@ -168,6 +245,9 @@ struct Job {
 }
 impl Job {
     fn not_started(phase: Phase, lease: Arc<Lease>) -> Self {
+        Self::settled(phase, lease, Completion::NotStarted)
+    }
+    fn settled(phase: Phase, lease: Arc<Lease>, result: Completion) -> Self {
         let (_, receive) = mpsc::sync_channel(1);
         Self {
             phase,
@@ -175,7 +255,7 @@ impl Job {
             cancel: Arc::new(AtomicBool::new(false)),
             receive,
             thread: None,
-            result: Some(Completion::NotStarted),
+            result: Some(result),
         }
     }
     fn ready(&mut self) -> bool {
@@ -346,6 +426,7 @@ impl Runtime {
             |code| json!({"request_id":request_id,"accepted":false,"durable":false,"code":code});
         let Ok(zerus_client_core::desktop::ui_requests::Request::AutomaticApprovals {
             enabled,
+            categories,
             ..
         }) = authority.into_request()
         else {
@@ -354,21 +435,28 @@ impl Runtime {
         if !state::canonical(&request_id) {
             return refused("invalid_request_id");
         }
-        match state::policy_receipt(&store.db, &request_id, enabled) {
+        let Ok(categories) = requested_categories(categories) else {
+            return refused("invalid_delivery_request");
+        };
+        match state::policy_receipt(&store.db, &request_id, enabled, categories) {
             Ok(Some(receipt)) => return receipt,
             Err(_) => return refused("delivery_store_refused"),
             Ok(None) => (),
         }
-        if enabled
+        let checked = match Checked::of(store, enabled, categories) {
+            Ok(checked) => checked,
+            Err(code) => return refused(code),
+        };
+        if checked.widens(enabled)
             && (!self.approvals_ready()
                 || self.writer_epoch(store).ok().flatten().as_ref() != self.writer_token.as_ref())
         {
             return refused("desktop_background_unavailable");
         }
-        if !enabled {
+        if checked.narrows(enabled) {
             self.cancel_approvals();
         }
-        let result = state::set_policy(&mut store.db, &request_id, enabled);
+        let result = state::set_policy(&mut store.db, &request_id, enabled, categories);
         if result.is_err() {
             self.approval_error = Some("approval_policy_uncommitted");
             self.cancel_approvals();
@@ -454,19 +542,19 @@ impl Runtime {
                     Completion::NotStarted
                 } else {
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let cap = if matches!(&work, Work::Inspect(_)) {
+                        let cap = if matches!(&work, Work::Inspect(..)) {
                             8 << 20
                         } else {
                             1 << 20
                         };
                         let exit = run(&inv, cap, &stop, resource);
                         match work {
-                            Work::Inspect(target) => Completion::Inspection(match exit {
+                            Work::Inspect(target, allowed) => Completion::Inspection(match exit {
                                 Exit::Code {
                                     code: 0, stdout, ..
-                                } => serde_json::from_slice(&stdout)
-                                    .ok()
-                                    .and_then(|details| policy::question(&target, &details)),
+                                } => serde_json::from_slice(&stdout).ok().and_then(|details| {
+                                    policy::question(&target, &details, allowed, policy::now())
+                                }),
                                 _ => None,
                             }),
                             Work::Read(mark) => {
@@ -666,6 +754,13 @@ impl Runtime {
         self.policy.is_some_and(|p| p.enabled) && self.approval_error.is_none()
     }
 
+    /// The approval categories the committed policy keeps on; none without
+    /// a policy.
+    fn categories(&self) -> policy::Set {
+        self.policy
+            .map_or(policy::Set::EMPTY, |policy| policy.categories)
+    }
+
     /// The approval-phase rows of this scan, in pass order. A pass moves past
     /// a row only once it was inspected or found to need nothing; at the first
     /// candidate without a free approval slot the scan stops, and the next one
@@ -744,7 +839,7 @@ impl Runtime {
         }
         self.recent.push_back((key, now));
         let inv = zerus_client_core::details::details_invocation(&candidate.target.target, None);
-        let work = Work::Inspect(candidate.target.clone());
+        let work = Work::Inspect(candidate.target.clone(), self.categories());
         let job = self.launch(Phase::Inspect(candidate), inv, work, lease);
         self.jobs.push(job);
         true
@@ -765,6 +860,7 @@ impl Runtime {
             Phase::Answer { audit, .. } => {
                 let (status, detail) = match result {
                     Completion::NotStarted => ("cancelled", policy::CANCELLED),
+                    Completion::Withheld => ("cancelled", policy::CATEGORY_CANCELLED),
                     Completion::Answer { status, detail } if complete => (*status, detail.as_str()),
                     _ => ("unknown", UNKNOWN),
                 };
@@ -792,10 +888,16 @@ impl Runtime {
                 {
                     return Ok(false);
                 }
-                let Completion::Inspection(Some(question)) = result else {
+                let Completion::Inspection(Some(selected)) = result else {
                     return Ok(false);
                 };
-                if policy::once(&candidate.target.provider, question).is_none() {
+                let question = &selected.question;
+                // The categories again, right before the durable reservation,
+                // at the current time: a warm cache may have expired since.
+                let categories = selected.required(policy::now());
+                if policy::once(&candidate.target.provider, question).is_none()
+                    || !self.categories().permits(categories)
+                {
                     return Ok(false);
                 }
                 if self.journal.is_none() {
@@ -810,7 +912,8 @@ impl Runtime {
                     &candidate.target.target.computer
                 };
                 let reply=approval_log::begin(self.journal.as_mut().expect("opened actor journal"),
-                    &json!({"host":host,"session":candidate.target.target.name,"provider":candidate.target.provider,"question":question}))
+                    &json!({"host":host,"session":candidate.target.target.name,"provider":candidate.target.provider,"question":question,
+                        "categories":categories.ids()}))
                     .map_err(|_|anyhow::anyhow!("approval reservation unavailable"))?;
                 let Some(reservation) =
                     policy::reserved(&reply, &candidate.target.provider, question)
@@ -828,11 +931,15 @@ impl Runtime {
                     request: reservation.request,
                 };
                 let inv = actions::invocation(&target, &action, &audit.request);
+                // And once more before native input: a reserved attempt whose
+                // categories no longer admit it finishes cancelled, unsent.
+                let admitted = self.categories().permits(selected.required(policy::now()));
                 let phase = Phase::Answer {
                     candidate: candidate.clone(),
                     audit,
                 };
                 *job = match inv {
+                    _ if !admitted => Job::settled(phase, job.lease.clone(), Completion::Withheld),
                     Ok(inv) => self.launch(
                         phase,
                         inv,
@@ -892,10 +999,13 @@ impl Runtime {
     pub fn decorate(&self, value: &mut Value) {
         value["lifecycle"]["background"]["reads"] = self.component(self.reads_ready(), None);
         let enabled = self.policy.map(|policy| policy.enabled);
+        let categories = self.policy.map(|policy| policy.categories.ids());
         let mut approvals = self.component(self.approvals_ready(), enabled);
         approvals["enabled"] = json!(enabled);
+        approvals["categories"] = json!(categories);
         value["lifecycle"]["background"]["approvals"] = approvals;
         value["automatic_approvals"] = json!(enabled);
+        value["automatic_approval_categories"] = json!(categories);
     }
     pub fn status(&self) -> Value {
         let active = self.jobs.len();
@@ -908,6 +1018,7 @@ impl Runtime {
             "writer_ready":self.writer,"active":active,"retained_slots":retained,"slot_limit":SLOTS,
             "reads":{"queue":self.read_status,"error":self.read_error,"limit":READS},
             "approvals":{"enabled":self.policy.map(|p|p.enabled),"revision":self.policy.map(|p|p.revision),
+                "categories":self.policy.map(|p|p.categories.ids()),
                 "error":self.approval_error,"limit":APPROVALS},"drained":self.drained()})
     }
 }

@@ -1,6 +1,7 @@
 """Indexed archive pages on private synthetic records; no agent or live mark is touched."""
 import json
 import os
+import shlex
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -24,8 +25,8 @@ class ArchivePages(unittest.TestCase):
         ident=str(uuid.UUID(int=index+1));value=dict(version=1,name=f'codex/example/archived-{index}',agent='codex',run_id=f'run-{index}',conversation_id=f'conversation-{index}',state='archived',archive_id=ident,archived_at=at,created=1,cwd='/synthetic/project',**extra)
         path=self.archives/(ident+'.json');temp=path.with_suffix('.tmp');temp.write_text(json.dumps(value),encoding='utf-8');temp.replace(path)
         return value
-    def run_query(self,query=None,fail=False):
-        r=subprocess.run([str(HGS),'archives','--json'],input=json.dumps(query or {}),capture_output=True,text=True,env=self.env,timeout=30)
+    def run_query(self,query=None,fail=False,bounded=False):
+        r=subprocess.run([str(HGS),'archives','--json']+(['--bounded'] if bounded else []),input=json.dumps(query or {}),capture_output=True,text=True,env=self.env,timeout=30)
         if fail:self.assertNotEqual(r.returncode,0,r.stdout);return r
         self.assertEqual(r.returncode,0,r.stderr);return json.loads(r.stdout)
     def test_thousands_bounded_pages_ties_and_complete_no_duplicates(self):
@@ -139,5 +140,59 @@ class ArchivePages(unittest.TestCase):
         self.assertEqual(position,0)
         next_page=self.run_query({'cursor':page['next_cursor']})
         for change in ({'query':'changed'},{'from':1},{'until':200}):self.run_query(dict(cursor=next_page['previous_cursor'],**change),True)
+
+    # zerus-080n8: bounded pages answer only requests that opt in with --bounded.
+    EXACT_KEYS={'version','sessions','next_cursor','previous_cursor','position','total','from','until','query'}
+    def test_bounded_pages_are_opt_in_and_the_exact_page_keeps_its_payload(self):
+        for i in range(60):self.record(i,100+i)
+        exact=self.run_query({'limit':50})
+        self.assertEqual(set(exact),self.EXACT_KEYS)
+        bounded=self.run_query({'limit':50},bounded=True)
+        self.assertEqual(set(bounded),self.EXACT_KEYS|{'total_capped','position_capped','partial','searched'})
+        self.assertEqual((bounded['total'],bounded['total_capped'],bounded['partial'],bounded['position'],bounded['position_capped']),(60,False,False,0,False))
+        self.assertEqual([r['archive_id'] for r in bounded['sessions']],[r['archive_id'] for r in exact['sessions']])
+        self.assertEqual(bounded['searched'],51)
+        rest=self.run_query({'limit':50,'cursor':bounded['next_cursor']},bounded=True)
+        self.assertEqual((len(rest['sessions']),rest['position'],rest['next_cursor'],rest['partial']),(10,50,'',False))
+        # The exact reader also continues a bounded page's cursor: it is the same (at, id) keyset.
+        self.assertEqual(len(self.run_query({'limit':50,'cursor':bounded['next_cursor']})['sessions']),10)
+        for args in (['archives','lookup','--json','--bounded'],['archives','--bounded','--json'],['archives','--json','--bounded','--bounded']):
+            r=subprocess.run([str(HGS),*args],input='{}',capture_output=True,text=True,env=self.env,timeout=30)
+            self.assertNotEqual(r.returncode,0,args)
+        helped=subprocess.run([str(HGS),'--help'],capture_output=True,text=True,env=self.env,timeout=30)
+        self.assertIn('archive-bounded-pages-v1',[line.strip() for line in helped.stdout.splitlines()])
+    def test_a_peer_gets_bounded_pages_only_when_its_cli_lists_the_marker(self):
+        dry=subprocess.run([str(HGS),'--dry-run','@peer','archives','--json','--bounded'],capture_output=True,text=True,env=dict(self.env,HGS_PEERS='peer'),timeout=30)
+        self.assertEqual(dry.returncode,0,dry.stderr)
+        words=shlex.split(dry.stdout.strip().splitlines()[-1]);script=words[-1].replace(' --dry-run','')
+        self.assertEqual(words[words.index('peer')+1:words.index('peer')+3],['sh','-c'])
+        for marker,expected in ((True,['archives','--json','--bounded']),(False,['archives','--json'])):
+            home=self.root/('peer-new' if marker else 'peer-old');bin_dir=home/'.local'/'bin';bin_dir.mkdir(parents=True)
+            stub=bin_dir/'hgs';stub.write_text('#!/bin/sh\nif [ "$1" = --help ]; then echo usage; %s exit 0; fi\nprintf "%%s\\n" "$@" > "$HOME/called"\n' % ('echo "       archive-bounded-pages-v1";' if marker else ''),encoding='utf-8');stub.chmod(0o700)
+            ran=subprocess.run(['sh','-c',script],env={'HOME':str(home),'PATH':'/usr/bin:/bin'},capture_output=True,text=True,timeout=30)
+            self.assertEqual(ran.returncode,0,ran.stderr)
+            self.assertEqual((home/'called').read_text(encoding='utf-8').split(),expected)
+
+    def test_bounded_pages_cut_by_bytes_reach_every_row_in_both_directions(self):
+        # zerus-m0boz: about 9.5 kB of metadata per row, so 250 kB holds 26 of a 50-row page.
+        for i in range(80):
+            value=self.record(i,100+i,title='\U0001f9ed'*1024);value['cwd']='/synthetic/'+'p'*3000
+            path=self.archives/(value['archive_id']+'.json');path.write_text(json.dumps(value),encoding='utf-8')
+        expected=[str(uuid.UUID(int=i+1)) for i in reversed(range(80))]
+        page=self.run_query({'limit':50},bounded=True);older=[];sizes=[]
+        while True:
+            older+=[r['archive_id'] for r in page['sessions']];sizes.append(len(page['sessions']))
+            if not page['next_cursor']:break
+            page=self.run_query({'limit':50,'cursor':page['next_cursor']},bounded=True)
+        self.assertEqual(older,expected);self.assertTrue(all(n<50 for n in sizes) and len(sizes)>2,sizes)
+        newer=[];pages=[]
+        while page['previous_cursor']:
+            page=self.run_query({'limit':50,'cursor':page['previous_cursor']},bounded=True)
+            ids=[r['archive_id'] for r in page['sessions']];pages.append(ids);newer+=ids
+            # Each page's position is the count of rows newer than its first one.
+            self.assertEqual(page['position'],expected.index(ids[0]))
+        self.assertEqual(sorted(newer),sorted(expected[:80-sizes[-1]]))
+        self.assertEqual(len(newer),len(set(newer)))
+        for ids in pages:self.assertEqual(ids,sorted(ids,key=expected.index))
 
 if __name__=='__main__':unittest.main()

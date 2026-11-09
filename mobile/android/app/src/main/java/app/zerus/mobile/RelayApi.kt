@@ -1,8 +1,11 @@
 package app.zerus.mobile
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Call
@@ -135,26 +138,37 @@ class RelayApi internal constructor(private val client: OkHttpClient = OkHttpCli
     }
     suspend fun await(connection: Connection, initial: JSONObject, maxPolls: Int = 35, pollDelayMs:Long = 800,
         firstPollDelayMs:Long = pollDelayMs): JSONObject {
-        var current = initial
-        var polls = maxPolls
-        if (connection.protocolVersion == 2 && resultStream.available(connection) && maxPolls > 0 && current.string("state") in listOf("queued", "claimed")) {
-            val id = current.getString("request_id")
+        if (connection.protocolVersion == 2 && resultStream.available(connection) && maxPolls > 0 && initial.string("state") in listOf("queued", "claimed")) {
+            val id = initial.getString("request_id")
             prepareReceiptWatch(connection, id)
-            val ordinary = pollDelayMs.coerceIn(50, 1000)
-            val started = System.nanoTime()
-            // A readiness hint never bypasses fresh membership, signature,
-            // request/route binding or journal settlement in receipt().
-            val signaled = RelayReadTiming.measure(RelayReadTiming.Stage.ResultSignalWait) {
-                resultStream.ready(connection, id, minOf(25_000L, maxPolls * ordinary))
+            return coroutineScope {
+                val ordinary = pollDelayMs.coerceIn(50, 1000)
+                // A hint may accelerate a receipt, but a connected silent socket
+                // must never postpone ordinary receipt recovery. One watcher is
+                // shared by this bounded polling campaign and consumed at most once.
+                val readiness = async {
+                    val signaled = RelayReadTiming.measure(RelayReadTiming.Stage.ResultSignalWait) {
+                        resultStream.ready(connection, id, minOf(25_000L, maxPolls * ordinary))
+                    }
+                    RelayReadTiming.point(if (signaled) RelayReadTiming.Stage.ResultSignalReady else RelayReadTiming.Stage.ResultSignalFallback)
+                    signaled
+                }
+                var consumed = false
+                try {
+                    ReceiptPolling.await(initial,maxPolls,pollDelayMs,firstPollDelayMs,
+                        pause = { pause -> RelayReadTiming.measure(RelayReadTiming.Stage.PollDelay) {
+                            if (consumed) delay(pause)
+                            else if (withTimeoutOrNull(pause) { readiness.await() } != null) consumed = true
+                        } },
+                        // The ordinary path still verifies fresh membership,
+                        // signature, original request/route and journal settlement.
+                        receipt = { receipt(connection,it) })
+                } finally {
+                    readiness.cancel()
+                }
             }
-            RelayReadTiming.point(if (signaled) RelayReadTiming.Stage.ResultSignalReady else RelayReadTiming.Stage.ResultSignalFallback)
-            // Also reconcile once after a dropped/unsupported/silent stream.
-            // The elapsed stream wait consumes the EXISTING wait budget rather
-            // than adding another complete polling campaign after a timeout.
-            polls = (maxPolls - 1 - (System.nanoTime() - started) / 1_000_000 / ordinary).coerceAtLeast(0).toInt()
-            current = receipt(connection, id)
         }
-        return ReceiptPolling.await(current,polls,pollDelayMs,firstPollDelayMs,
+        return ReceiptPolling.await(initial,maxPolls,pollDelayMs,firstPollDelayMs,
             pause={ RelayReadTiming.measure(RelayReadTiming.Stage.PollDelay) { delay(it) } },
             receipt={ receipt(connection,it) })
     }

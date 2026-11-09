@@ -65,7 +65,7 @@ mod read_pressure {
         let j = &f.connector.journal;
         for index in 1..=1024 {
             let p = pair(f, profile, index, OperationClass::Read, 256 * 1024);
-            if j.pressure_fixture_usage().1 + p.result.len() as i64 > LIMIT {
+            if j.pressure_fixture_result_bytes() + p.result.len() as i64 > LIMIT {
                 return index as usize - 1;
             }
             seed(j, &p, true, crate::now() - age);

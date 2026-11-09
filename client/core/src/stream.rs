@@ -393,6 +393,7 @@ pub(crate) fn read_line(
 }
 
 enum Input {
+    GitRows(Vec<String>),
     SourceResnapshot,
     SourceControls(crate::source::ControlBatch),
     Reconnect,
@@ -585,6 +586,12 @@ impl StreamHandle {
     /// its catalog or subscriptions. False online, stopped or already pending.
     pub fn reconnect(&self) -> bool {
         !self.stopped() && self.retry.request(&self.tx)
+    }
+
+    pub fn git_rows(&self, keys: Vec<String>) -> bool {
+        keys.len() <= crate::git::VISIBLE_FOLDERS
+            && !self.stopped()
+            && self.tx.try_send(Input::GitRows(keys)).is_ok()
     }
 
     pub fn computer(&self) -> &ComputerId {
@@ -1004,6 +1011,7 @@ fn spawn_with(
         stop: stop.clone(),
         retry: retry.clone(),
         state: CatalogState::new(),
+        git: crate::git::subscriptions::Subscriptions::default(),
         generation: 0,
         child: None,
         stdin: None,
@@ -1075,6 +1083,7 @@ struct Supervisor {
     stop: Arc<AtomicBool>,
     retry: Arc<Retry>,
     state: CatalogState,
+    git: crate::git::subscriptions::Subscriptions,
     generation: u64,
     child: Option<Child>,
     stdin: Option<ChildStdin>,
@@ -1251,6 +1260,7 @@ impl Supervisor {
             }
             match self.rx.recv_timeout(left) {
                 Ok(Input::Stop) | Err(RecvTimeoutError::Disconnected) => return false,
+                Ok(Input::GitRows(keys)) => self.git.wanted(keys),
                 Ok(Input::Subscribe { key }) => self.state.follow(&key),
                 Ok(Input::Unsubscribe { key, .. }) => self.state.unfollow(&key),
                 Ok(Input::SubscribeProcesses { key }) => self.state.processes_mut().follow(&key),
@@ -1343,6 +1353,7 @@ impl Supervisor {
                 .max(Duration::from_millis(1));
             match self.rx.recv_timeout(left) {
                 Ok(Input::Stop) | Err(RecvTimeoutError::Disconnected) => return false,
+                Ok(Input::GitRows(keys)) => self.git.wanted(keys),
                 Ok(Input::Subscribe { key }) => self.state.follow(&key),
                 Ok(Input::Unsubscribe { key, .. }) => {
                     self.state.unfollow(&key);
@@ -1654,6 +1665,10 @@ impl Supervisor {
                     return Outcome::Ended;
                 }
                 Ok(Input::Line { .. } | Input::Closed { .. }) => {}
+                Ok(Input::GitRows(keys)) => {
+                    self.git.wanted(keys);
+                    self.reconcile_git();
+                }
                 Ok(Input::Subscribe { key }) => self.subscribe(&key),
                 Ok(Input::Unsubscribe { key, session }) => {
                     self.state.unfollow(&key);
@@ -1769,8 +1784,28 @@ impl Supervisor {
         }
     }
 
+    fn reconcile_git(&mut self) {
+        let (controls, changes) =
+            self.git
+                .reconcile(&mut self.state, &self.computer, Instant::now());
+        for control in controls {
+            self.write(&control);
+        }
+        for change in changes {
+            self.emit(change);
+        }
+    }
     fn handle(&mut self, frame: &Frame) {
         let changes = self.state.apply(&self.computer, frame);
+        let (controls, git_changes) =
+            self.git
+                .frame(&mut self.state, &self.computer, frame, Instant::now());
+        for control in controls {
+            self.write(&control);
+        }
+        for change in git_changes {
+            self.emit(change);
+        }
         for change in changes {
             if matches!(change, Change::Organization { .. }) {
                 self.organization_changed();
@@ -2136,6 +2171,10 @@ impl Supervisor {
 
     /// Ends the running stream: EOF first, then a kill after the grace time.
     fn close(&mut self) {
+        for change in self.git.disconnected(&mut self.state, &self.computer) {
+            self.emit(change);
+        }
+
         if let Some(source) = &self.source {
             source.resnapshot.close();
         }

@@ -42,7 +42,7 @@ export function openSession(target: OpenSession, options: OpenSessionOptions = {
     // A reused key never selects another run/conversation. Navigation data
     // grants no callback or native writer authority. A cold view can still
     // have the preceding catalog identity while its current frame loads.
-    if (row && row.state !== "archived" && row.runId === expected.run && row.conversationId === expected.conversation) {
+    if (row && row.state !== "archived" && row.runId === expected.run && (row.conversationId ?? "") === expected.conversation) {
       revealSession(target, options);
     } else if (performance.now() < until) {
       // One O(1) lookup and one timer, only for this requested cold-view open.

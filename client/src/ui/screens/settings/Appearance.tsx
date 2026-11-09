@@ -6,6 +6,7 @@ import { previewColumn } from "../../sessions/Activity";
 import { flag, num, setSetting, settingsLoaded, text } from "../../../store/settings";
 import { appearanceFor, chooseSkin, chooseTheme, chosenSkin, skin, skinList, skins, systemLight, theme, type Theme } from "../../../skin/runtime";
 import type { ResolvedSkin } from "../../../skin/skin";
+import { previewLayout } from "../../../skin/choice";
 import { Group, Row, SectionHead, Select, Slider, Check, Actions } from "./ui";
 import { tr, trNoop } from "../../../i18n";
 
@@ -32,6 +33,9 @@ const VARIANT_TEXT: Record<string, Record<string, string>> = {
   "sessions-pane": { left: trNoop("Sessions on the left"), right: trNoop("Sessions on the right") },
   inspector: { docked: trNoop("Side panel docked"), collapsed: trNoop("Side panel collapsed") },
   "activity-column": { centered: trNoop("Centered Activity"), full: trNoop("Full-width Activity") },
+  // Task 348: Compact's layout, named as the others are.
+  "side-panel": { tabs: trNoop("Side panel tabs"), sections: trNoop("Side panel sections") },
+  chrome: { system: trNoop("System title bar"), unified: trNoop("One title bar with the controls") },
 };
 
 /** Variants that differ from the base skin, as a short readable list. */
@@ -43,34 +47,75 @@ export function variantSummary(s: ResolvedSkin): string {
   return parts.length ? parts.join(", ") : tr("Standard components and layout");
 }
 
-/** A miniature of the workspace painted only with the skin's own tokens. */
+/**
+ * A miniature of the workspace painted only with the skin's own tokens, in the
+ * skin's own layout (task 348): Compact's one title bar with the window
+ * controls and its side panel of sections, a labeled rail, sessions on the
+ * right, a collapsed side panel, a full-width Activity and indented subagents
+ * each show, so two skins with other layouts never look alike.
+ */
 export function SkinPreview(props: { skin: ResolvedSkin }) {
   const s = () => props.skin;
   const c = (k: string) => tok(s(), "color", k);
   const r = () => `${Math.max(2, num0(s(), "radius", "card") * 0.6)}px`;
+  const l = () => previewLayout(s());
   return (
-    <div class="skin-prev" aria-hidden="true" style={{ background: c("page"), "border-color": c("divider") }}>
-      <div class="skp-rail" style={{ background: c("pane"), "border-color": c("divider") }}>
-        <i style={{ background: c("accent") }} /><i style={{ background: c("muted") }} /><i style={{ background: c("muted") }} />
-      </div>
-      <div class="skp-list" style={{ background: c("pane"), "border-color": c("divider") }}>
-        <For each={["status-working", "status-attention", "status-error"] as const}>
-          {(st, i) => (
-            <div class="skp-card" style={{ background: i() === 0 ? c("card-selected") : "transparent", "border-color": i() === 0 ? c("card-selected-border") : "transparent", "border-radius": r() }}>
-              <span class="skp-dot" style={{ background: c(st) }} />
-              <span class="skp-line" style={{ background: c("text-2"), width: `${64 - i() * 12}%` }} />
-            </div>
-          )}
-        </For>
-      </div>
-      <div class="skp-detail" style={{ background: c("surface"), "border-color": c("divider"), "border-radius": r() }}>
-        <span class="skp-bubble" style={{ background: c("bubble"), "border-radius": r() }} />
-        <span class="skp-msg" style={{ background: c("tile"), "border-color": c("accent"), "border-radius": r() }}>
-          <span class="skp-line" style={{ background: c("text-3"), width: "80%" }} />
-          <span class="skp-line" style={{ background: c("text-3"), width: "55%" }} />
-        </span>
-        <span class="skp-btn" style={{ background: c("accent"), "border-radius": r() }} />
-        <span class="skp-font" style={{ color: c("text"), "font-family": (s().tokens.font?.ui as string[] | undefined)?.map((f) => `"${f}"`).join(", ") }}>Aa</span>
+    <div class="skin-prev" aria-hidden="true" style={{ background: c("page"), "border-color": c("divider") }}
+      data-chrome={l().chrome} data-rail={l().rail} data-sessions={l().sessions} data-inspector={l().inspector}
+      data-side-panel={l().sidePanel} data-activity={l().activity} data-tree={l().tree}>
+      <Show when={l().chrome === "unified"}>
+        <div class="skp-title" style={{ background: c("pane"), "border-color": c("divider") }}>
+          <span class="skp-line" style={{ background: c("accent"), width: "14%" }} />
+          <span class="skp-tab" style={{ background: c("card-selected") }} />
+          <span class="skp-tab" style={{ background: c("tile") }} />
+          <span class="grow" />
+          <For each={[0, 1, 2]}>{() => <b style={{ background: c("muted") }} />}</For>
+        </div>
+      </Show>
+      <div class="skp-body">
+        <div class="skp-rail" style={{ background: c("pane"), "border-color": c("divider") }}>
+          <For each={["accent", "muted", "muted"]}>{(k) => (
+            <span class="skp-rail-item"><i style={{ background: c(k) }} /><Show when={l().rail === "labeled"}><span class="skp-line" style={{ background: c("text-3") }} /></Show></span>
+          )}</For>
+        </div>
+        <div class="skp-list" style={{ background: c("pane"), "border-color": c("divider") }}>
+          <For each={["status-working", "status-attention", "status-error"] as const}>
+            {(st, i) => (
+              <div class="skp-card" classList={{ "skp-child": i() > 0 }}
+                style={{ background: i() === 0 ? c("card-selected") : "transparent", "border-color": i() === 0 ? c("card-selected-border") : "transparent", "border-radius": r(),
+                  ...(i() > 0 && l().tree === "lines" ? { "border-left-color": c("divider") } : {}) }}>
+                <span class="skp-dot" style={{ background: c(st) }} />
+                <span class="skp-line" style={{ background: c("text-2"), width: `${64 - i() * 12}%` }} />
+              </div>
+            )}
+          </For>
+        </div>
+        <div class="skp-detail" style={{ background: c("surface"), "border-color": c("divider"), "border-radius": r() }}>
+          <span class="skp-bubble" style={{ background: c("bubble"), "border-radius": r() }} />
+          <span class="skp-msg" style={{ background: c("tile"), "border-color": c("accent"), "border-radius": r() }}>
+            <span class="skp-line" style={{ background: c("text-3"), width: "80%" }} />
+            <span class="skp-line" style={{ background: c("text-3"), width: "55%" }} />
+          </span>
+          <span class="skp-btn" style={{ background: c("accent"), "border-radius": r() }} />
+          <span class="skp-font" style={{ color: c("text"), "font-family": (s().tokens.font?.ui as string[] | undefined)?.map((f) => `"${f}"`).join(", ") }}>Aa</span>
+        </div>
+        <Show when={l().inspector === "docked"}>
+          <div class="skp-side" style={{ background: c("pane"), "border-color": c("divider") }}>
+            <Show when={l().sidePanel === "sections"} fallback={
+              <>
+                <span class="skp-side-tabs"><For each={[0, 1, 2]}>{(i) => <i style={{ background: i === 0 ? c("accent") : c("muted") }} />}</For></span>
+                <For each={[70, 50, 60]}>{(w) => <span class="skp-line" style={{ background: c("text-3"), width: `${w}%` }} />}</For>
+              </>
+            }>
+              <For each={[60, 45, 55]}>{(w) => (
+                <span class="skp-section" style={{ "border-color": c("divider") }}>
+                  <span class="skp-line" style={{ background: c("text-2"), width: `${w}%` }} />
+                  <span class="skp-line" style={{ background: c("text-3"), width: `${w - 15}%` }} />
+                </span>
+              )}</For>
+            </Show>
+          </div>
+        </Show>
       </div>
     </div>
   );

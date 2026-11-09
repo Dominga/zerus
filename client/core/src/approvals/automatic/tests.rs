@@ -101,15 +101,61 @@ fn native_opencode_and_deepseek_choose_only_the_reviewed_once_option() {
 fn fresh_details_bind_the_original_run_conversation_and_bounded_question() {
     let target = candidate("", &row()).unwrap();
     let mut details = json!({"runtime_state":"live","process_state":"running","run_id":"run-one","conversation_id":"conversation-one","pending_questions":[q()]});
-    assert!(question(&target, &details).is_some());
+    let all = Set::defaults().with(Category::Paid);
+    assert!(question(&target, &details, all, 0.0).is_some());
     details["conversation_id"] = json!("other");
-    assert!(question(&target, &details).is_none());
+    assert!(question(&target, &details, all, 0.0).is_none());
     details["conversation_id"] = json!("conversation-one");
     details["pending_questions"][0]["run_id"] = json!("other");
-    assert!(question(&target, &details).is_none());
+    assert!(question(&target, &details, all, 0.0).is_none());
     details["pending_questions"][0] = q();
     details["pending_questions"][0]["extension"] = json!("x".repeat(MAX_QUESTION));
-    assert!(question(&target, &details).is_none());
+    assert!(question(&target, &details, all, 0.0).is_none());
+}
+#[test]
+fn a_request_in_a_manual_category_is_skipped_and_another_may_qualify() {
+    let target = candidate("", &row()).unwrap();
+    let mut bash = q();
+    bash["questions"][0]["header"] = json!("Bash");
+    let mut search = q();
+    search["question_id"] = json!("approval-two");
+    search["questions"][0]["header"] = json!("WebSearch");
+    let mut details = json!({"runtime_state":"live","process_state":"running","run_id":"run-one","conversation_id":"conversation-one","pending_questions":[search, bash]});
+    let selected = question(&target, &details, Set::defaults(), 0.0).unwrap();
+    assert_eq!(selected.question["questions"][0]["header"], "Bash");
+    assert_eq!(selected.required(0.0), Set::EMPTY.with(Category::Shell));
+    // Shell off: nothing qualifies.
+    let no_shell = Set::from_fn(|c| c.default_on() && c != Category::Shell);
+    assert!(question(&target, &details, no_shell, 0.0).is_none());
+    // Paid on: the first pending request qualifies.
+    let paid = question(&target, &details, Set::defaults().with(Category::Paid), 0.0).unwrap();
+    assert_eq!(paid.required(0.0), Set::EMPTY.with(Category::Paid));
+    // A cold cache makes every request paid.
+    details["cache_hint"] = json!({"status":"cold"});
+    assert!(question(&target, &details, Set::defaults(), 0.0).is_none());
+    let cold = question(&target, &details, Set::defaults().with(Category::Paid), 0.0).unwrap();
+    assert_eq!(cold.question["questions"][0]["header"], "WebSearch");
+    // Nothing is approved without any category.
+    assert!(question(&target, &details, Set::EMPTY, 0.0).is_none());
+}
+#[test]
+fn a_warm_cache_selected_in_time_needs_paid_once_it_expires() {
+    let target = candidate("", &row()).unwrap();
+    let mut bash = q();
+    bash["questions"][0]["header"] = json!("Bash");
+    let details = json!({"runtime_state":"live","process_state":"running","run_id":"run-one","conversation_id":"conversation-one",
+        "pending_questions":[bash],"session_usage":{"prompt_cache":{"status":"warm","expires_at":102.0}},
+        "cache_hint":{"status":"warm"},"unrelated":"x".repeat(4096)});
+    let selected = question(&target, &details, Set::defaults(), 100.5).unwrap();
+    assert_eq!(selected.required(101.9), Set::EMPTY.with(Category::Shell));
+    assert_eq!(
+        selected.required(102.0),
+        Set::EMPTY.with(Category::Shell).with(Category::Paid)
+    );
+    assert!(!Set::defaults().permits(selected.required(102.0)));
+    // The witness keeps only the cache fields the rule reads.
+    assert!(!selected.cache.to_string().contains("unrelated"));
+    assert!(question(&target, &details, Set::defaults(), 102.0).is_none());
 }
 #[test]
 fn only_a_fresh_exact_durable_reservation_admits_delivery() {

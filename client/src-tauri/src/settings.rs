@@ -154,43 +154,6 @@ pub async fn hgs_setting(
     .map_err(|error| error.to_string())
 }
 
-/// The release notice applies only to the real switch identity, never a replay.
-#[tauri::command]
-pub async fn qt_upgrade_notice(app: AppHandle, store: State<'_, Store>) -> Result<bool, String> {
-    use tauri::Manager;
-    let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|value| !value.is_empty());
-    Ok(app.state::<crate::identity::Identity>().is_switch()
-        && !replay
-        && store.0.qt_upgrade_notice_pending())
-}
-
-#[tauri::command]
-pub async fn qt_upgrade_notice_ack(app: AppHandle, store: State<'_, Store>) -> Result<(), String> {
-    use tauri::Manager;
-    if !app.state::<crate::identity::Identity>().is_switch()
-        || std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|value| !value.is_empty())
-    {
-        return Ok(());
-    }
-    let settings = store.0.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        settings.acknowledge_qt_upgrade_notice()?;
-        if !settings.flush_within(Duration::from_secs(5)) {
-            return Err("The upgrade notice could not be saved. Try again.".into());
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|_| "The upgrade notice could not be saved. Try again.".to_owned())?
-}
-
-/// What the one-time Qt preference import did, by key name only, for the
-/// Migration report. Read-only and local: nothing is published.
-#[tauri::command]
-pub async fn settings_qt_preferences(store: State<'_, Store>) -> Result<Value, String> {
-    Ok(store.0.preference_report())
-}
-
 /// Read-only, key-only migration summary. Journal decoding stays off main.
 #[tauri::command]
 pub async fn settings_legacy_projects(app: AppHandle) -> Result<Value, String> {
@@ -214,7 +177,9 @@ pub async fn settings_set(
     key: String,
     value: Value,
 ) -> Result<Value, String> {
-    if crate::desktop_service::mode() && key == "automaticApprovals/enabled" {
+    if crate::desktop_service::mode()
+        && (key == "automaticApprovals/enabled" || key.starts_with("automaticApprovals/category/"))
+    {
         return Err(
             "Automatic approval settings must be changed through the background service.".into(),
         );

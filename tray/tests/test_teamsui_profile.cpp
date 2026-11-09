@@ -1,3 +1,5 @@
+#include "TeamArchive.h"
+#include "TeamTaskCard.h"
 // WhiteWh fork, #713: the agent-team UI tests of the pipeline profile and the
 // heat tint.
 // The fixture (the fake hgs, its teams and the shot helpers) is shared:
@@ -247,6 +249,9 @@ private slots:
     }
     void init() { setUp(); }
     void cleanup() { tearDown(); }
+    void archivedPhasesAndProfileUseSummaries();
+    void archivedReportsLoadOnDemandAndRetry();
+    void archivedReportResponsesAreBounded();
     void profileViewShowsThePhaseAndItsLosses();
     void profileTimelineZoomsAndTheSidesFold();
     void profileReadsInBoundedPagesAndKeepsABoundedCache();
@@ -259,6 +264,135 @@ private slots:
     void timelineLanesMatchTheTauriCoreOnTheTeamsReplies();
     void waitingForAPersonHasItsOwnKindAndTheLegendWrapsAtEveryWidth();
 };
+
+static QJsonObject archivedTeam()
+{
+    auto value = team();
+    const QJsonObject archive{{"tasks", 120}, {"accepted", 118}, {"rejected", 1}, {"cancelled", 1}, {"closed_at", 5000}};
+    value["phases"] = QJsonArray{QJsonObject{{"n", 7}, {"title", "Archived checkout"}, {"state", "approved"}, {"archived", archive}}};
+    value["tasks"] = QJsonArray{QJsonObject{{"id", 701}, {"phase", 7}, {"title", "Saved task"}, {"status", "accepted"}, {"assignee", "backend"},
+        {"archived", QJsonObject{{"accepted_at", 5000}, {"timing", QJsonObject{{"worked_s", 1234}}}}}}};
+    return value;
+}
+
+void TestTeamsUiProfile::archivedPhasesAndProfileUseSummaries()
+{
+    const auto value = archivedTeam();
+    const auto parsed = Teams::parse(value);
+    const auto groups = Teams::phaseGroups(parsed);
+    QCOMPARE(groups.size(), 1);
+    QVERIFY(groups.first().finished());
+    QCOMPARE(groups.first().archivedTotal, 120);
+    QVERIFY(Teams::phaseHeading(groups.first()).endsWith("120/120"));
+    QCOMPARE(parsed.tasks.first().timing.worked, 1234);
+    auto noStubs = parsed; noStubs.tasks.clear();
+    QCOMPARE(Teams::phaseGroups(noStubs).size(), 1); // headers survive stub eviction
+    HgsClient client(FakeCli::program(script())); TeamController controller(&client);
+    TeamProfile::Cache cache(&controller); TeamProfileView profile(&controller, &cache);
+    profile.setTeam(parsed); profile.setPhase(7); profile.show();
+    QVERIFY(profile.findChild<QPushButton *>("teamProfileArchivedTask"));
+    QCOMPARE(cache.reads(), 0); // no fabricated timeline from the stub
+    auto headerOnly = value; headerOnly["tasks"] = QJsonArray();
+    setTeam(headerOnly);
+    TeamPanel panel(&controller); TeamWorkspace workspace(&controller, &panel);
+    workspace.resize(1400, 900); workspace.show();
+    controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QLabel *>("teamPhaseArchivedSummary"));
+    QVERIFY(workspace.findChild<QLabel *>("teamPhaseArchivedSummary")->text().contains("120 tasks"));
+    workspace.hide();
+
+    int opened = 0; profile.openTask = [&opened](int task) { opened = task; };
+    profile.findChild<QPushButton *>("teamProfileArchivedTask")->click(); QCOMPARE(opened, 701);
+
+    QJsonArray headers, tasks;
+    for (int n = 1; n <= 50; ++n) {
+        headers.append(QJsonObject{{"n", n}, {"title", QString("Phase %1").arg(n)}, {"archived", QJsonObject{{"tasks", 120}, {"accepted", 120}}}});
+        tasks.append(QJsonObject{{"id", n}, {"title", QString("Task %1").arg(n)}, {"status", "accepted"},
+            {"archived", QJsonObject{{"accepted_at", 5000}, {"timing", QJsonObject{{"worked_s", 1234}}}}}});
+    }
+    const auto pages = [](const QJsonArray &items) {
+        return QJsonDocument(QJsonObject{{"0", QJsonObject{{"items", items}, {"next_cursor", 50}}},
+            {"50", QJsonObject{{"items", QJsonArray{items.first()}}, {"next_cursor", QJsonValue()}}}}).toJson();
+    };
+    QVERIFY(FakeCli::replace(script()+".archivephases", pages(headers)));
+    QVERIFY(FakeCli::replace(script()+".archivetasks", pages(tasks)));
+    auto *archive = new TeamArchive(&controller, parsed); archive->show(); QPointer<TeamArchive> guard(archive);
+    auto *list = archive->findChild<QListWidget *>("teamArchivePhases");
+    auto *table = archive->findChild<QTableWidget *>("teamArchiveTasks");
+    QTRY_COMPARE(list->count(), 50);
+    list->setCurrentRow(0); QTRY_COMPARE(table->rowCount(), 50);
+    QCOMPARE(table->item(0, 3)->text(), TeamProfile::duration(1234));
+    archive->findChild<QPushButton *>("teamArchiveNextTasks")->click();
+    QTRY_COMPARE(table->rowCount(), 1); // replace, never accumulate
+    archive->findChild<QPushButton *>("teamArchiveNextPhases")->click();
+    QTRY_COMPARE(list->count(), 1);
+    int archiveReads = 0;
+    for (const auto &input : calls(script(), "status")) {
+        if (!input.contains("archived_phase") && !input.contains("archived_phases")) continue;
+        ++archiveReads;
+        QCOMPARE(input.value("limit").toInt(), 50);
+        QVERIFY(input.contains("archived_phase") || input.contains("archived_phases"));
+    }
+    QVERIFY(archiveReads >= 4);
+    archive->close(); QTRY_VERIFY(!guard);
+    // A phase link seeks directly, even when thousands of earlier phases exist.
+    const QJsonObject directPage{{"6", QJsonObject{{"items", QJsonArray{value.value("phases").toArray().first()}}, {"next_cursor", QJsonValue()}}}};
+    QVERIFY(FakeCli::replace(script()+".archivephases", QJsonDocument(directPage).toJson()));
+    auto *direct = new TeamArchive(&controller, parsed, nullptr, 7); direct->show();
+    QPointer<TeamArchive> directGuard(direct);
+    QTRY_COMPARE(direct->findChild<QTableWidget *>("teamArchiveTasks")->rowCount(), 50);
+    QVERIFY(calls(script(), "status").last().value("archived_phase").toInt() == 7);
+    direct->close(); QTRY_VERIFY(!directGuard);
+
+}
+
+void TestTeamsUiProfile::archivedReportsLoadOnDemandAndRetry()
+{
+    const auto parsed = Teams::parse(archivedTeam());
+    auto full = parsed.tasks.first().json();
+    full["attempts"] = QJsonArray{QJsonObject{{"n", 1}, {"state", "reported"}, {"member", "backend"}, {"report", QJsonObject{{"text", "Saved full report"}, {"at", 5000}}}}};
+    QVERIFY(FakeCli::replace(script()+".task", QJsonDocument(full).toJson()));
+    QVERIFY(FakeCli::replace(script()+".taskhold", "hold"));
+    HgsClient client(FakeCli::program(script())); TeamController controller(&client);
+    TeamTaskCard card; card.setController(&controller); card.show();
+    QCOMPARE(calls(script(), "status").size(), 0);
+    card.setTask(parsed, 701, {}, true);
+    QVERIFY(card.findChild<QLabel *>("teamTaskHistoryState"));
+    int ticks = 0; QTimer timer; timer.setInterval(1); connect(&timer, &QTimer::timeout, [&ticks] { ++ticks; }); timer.start();
+    QTRY_VERIFY(ticks > 5); // the held CLI leaves the GUI event loop free
+    card.setTask(parsed, 701, {}, true); // polling must not issue another read
+    QFile::remove(script()+".taskhold");
+    QTRY_VERIFY(!card.findChild<QLabel *>("teamTaskHistoryState"));
+    QCOMPARE(calls(script(), "status").size(), 1);
+    QCOMPARE(calls(script(), "status").first().value("task").toInt(), 701);
+    QVERIFY(!calls(script(), "status").first().contains("request_id"));
+    QVERIFY(card.findChild<QLabel *>("teamReportText"));
+    QCOMPARE(card.findChild<QLabel *>("teamReportText")->text(), QString("Saved full report"));
+    // An explicit restore to live work must replace the archived detail.
+    auto restored = parsed; restored.tasks.first().archived = false;
+    restored.tasks.first().status = "in_progress";
+    card.setTask(restored, 701, {}, true);
+    QVERIFY(!card.findChild<QLabel *>("teamReportText"));
+    // Selecting another team with the same task id releases the prior result.
+    auto other = parsed; other.id = "team-2";
+    QVERIFY(FakeCli::replace(script()+".taskrefuse", "refuse"));
+    card.setTask(other, 701, {}, true);
+    QTRY_VERIFY(card.findChild<QPushButton *>("teamTaskHistoryRetry"));
+    QVERIFY(card.findChild<QLabel *>("teamTaskHistoryState")->text().contains("Archive unavailable"));
+    QFile::remove(script()+".taskrefuse");
+    card.findChild<QPushButton *>("teamTaskHistoryRetry")->click();
+    QTRY_VERIFY(!card.findChild<QLabel *>("teamTaskHistoryState"));
+}
+
+void TestTeamsUiProfile::archivedReportResponsesAreBounded()
+{
+    QByteArray oversized(8 * 1024 * 1024 + 1, 'x');
+    QVERIFY(FakeCli::replace(script()+".task", oversized));
+    HgsClient client(FakeCli::program(script())); TeamController controller(&client);
+    TeamTaskCard card; card.setController(&controller); card.setTask(Teams::parse(archivedTeam()), 701, {}, true);
+    QTRY_VERIFY(card.findChild<QPushButton *>("teamTaskHistoryRetry"));
+    QVERIFY(!card.findChild<QLabel *>("teamTaskHistoryState")->text().isEmpty());
+}
 
 // U38 (#665): Profile beside Graph, Board and Layers, from hgs team profile
 // and hgs team spans: the summary, the member lanes with the real and planned

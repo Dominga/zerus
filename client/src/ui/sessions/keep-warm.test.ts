@@ -1,81 +1,104 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_HOURS, KEEPALIVE_ENVELOPE, hoursOf, isKeepalive, parseHours, sliderHours, toggledHours, warmable } from "./keep-warm";
-import { buildTranscript, timeText } from "./transcript";
-import type { ActivityEvent } from "../../types";
-import type { ActivityItem } from "./types";
+import { ALWAYS, choiceAt, durationLabel, durationMark, headerKeepWarm, keepWarmOf, mergeKeepWarm, positionOf, remainingText, statusLine, tooltipLines } from "./keep-warm";
+import type { KeepWarmState } from "../../types";
 
-const A = "a".repeat(64), B = "b".repeat(64);
-
-describe("Keep cache warm's saved hours (CacheKeepalive::hours)", () => {
-  it("reads Qt's JSON object as Qt reads it, clamped to 0..24", () => {
-    const saved = parseHours(JSON.stringify({ [A]: 3, [B]: 30, c: 2.5, d: "4", e: -1, f: 0 }));
-    expect([...saved]).toEqual([[A, 3], [B, 24]]);
-    for (const broken of [undefined, "", "  ", "[]", "[1]", "null", "not json", "5", 3]) expect(parseHours(broken).size).toBe(0);
-  });
-
-  it("finds a session by its exact identity only", () => {
-    const saved = parseHours(JSON.stringify({ [A]: 3, [B]: 5 }));
-    expect(hoursOf(saved, [A, B])).toBe(3);
-    expect(hoursOf(saved, [B, A])).toBe(5);
-    expect(hoursOf(saved, ["c".repeat(64), A])).toBe(0);
-    expect(hoursOf(saved, undefined)).toBe(0);
-    expect(hoursOf(parseHours(JSON.stringify({ short: 2 })), ["short", A])).toBe(0);
-  });
-
-  it("is offered for a listed conversation, never an archived one", () => {
-    expect(warmable({ conversationId: "c", state: "running", compactKeys: [A, B] })).toBe(true);
-    expect(warmable({ conversationId: "c", state: "paused", compactKeys: [A, B] })).toBe(true);
-    expect(warmable({ conversationId: "c", state: "archived", compactKeys: [A, B] })).toBe(false);
-    expect(warmable({ conversationId: "", state: "running", compactKeys: [A, B] })).toBe(false);
-    expect(warmable({ conversationId: "c", state: "running" })).toBe(false);
-  });
-
-  it("toggles off or one hour, and the slider shows 1 to 8", () => {
-    expect(toggledHours(0)).toBe(DEFAULT_HOURS);
-    expect(toggledHours(5)).toBe(0);
-    expect([0, 1, 5, 8, 24].map(sliderHours)).toEqual([1, 1, 5, 8, 8]);
-  });
-
-  it("recognizes hgs's notice and the message in a native history", () => {
-    expect(isKeepalive({ origin: "cache_keepalive", detail: "Cache warmed" }, "notice")).toBe(true);
-    expect(isKeepalive({ origin: "peer_message", detail: "hi" }, "notice")).toBe(false);
-    expect(isKeepalive({ detail: `${KEEPALIVE_ENVELOPE}Reply with exactly: ok</zerus-cache-keepalive>` }, "user")).toBe(true);
-    expect(isKeepalive({ detail: `quoted ${KEEPALIVE_ENVELOPE}` }, "user")).toBe(false);
-    expect(isKeepalive({ detail: KEEPALIVE_ENVELOPE }, "assistant")).toBe(false);
-  });
+const NOW = 1_794_000_000;
+const state = (extra: Partial<KeepWarmState> = {}): KeepWarmState => ({
+  enabled: true, until: NOW + 3 * 3600, revision: 2, state: "waiting", next_at: null, reason: "", turn_active: false, ...extra,
 });
 
-describe("kept-warm caches in Activity (ActivityView.cpp:1239-1251, 1367-1370)", () => {
-  const notice = (seq: number, at: number): ActivityEvent => ({ seq, at, type: "UserPromptSubmit", origin: "cache_keepalive", detail: "Cache warmed" });
-  const reply = (seq: number, at: number, detail = "ok"): ActivityEvent => ({ seq, at, type: "Stop", detail });
-
-  it("keepalives in a row are one quiet line without their replies, at the last one's time", () => {
-    const events: ActivityEvent[] = [
-      { seq: 1, at: 10, type: "UserPromptSubmit", detail: "build it" }, reply(2, 20, "done"),
-      notice(3, 300), reply(4, 301), notice(5, 600), reply(6, 601),
-      { seq: 7, at: 900, type: "UserPromptSubmit", detail: "next" },
-    ];
-    const items = buildTranscript(events) as ActivityItem[];
-    expect(items.map((i) => [i.kind, i.body])).toEqual([
-      ["user", "build it"], ["agent", "done"], ["context", "Cache warmed 2 times while idle"], ["user", "next"],
-    ]);
-    expect(items[2].at).toBe(timeText(600));
+describe("keep cache warm presentation", () => {
+  it("accepts only a well-formed host state", () => {
+    expect(keepWarmOf({ enabled: true, until: null, revision: 1, state: "waiting", next_at: null, reason: "", turn_active: false })?.until).toBeNull();
+    for (const bad of [undefined, null, "on", { enabled: "yes", revision: 1 }, { enabled: true }, { enabled: true, revision: -1 }])
+      expect(keepWarmOf(bad)).toBeUndefined();
   });
 
-  it("one keepalive reads Cache warmed while idle, also from its message text", () => {
-    const native: ActivityEvent[] = [
-      { seq: 1, at: 50, type: "UserPromptSubmit", detail: `${KEEPALIVE_ENVELOPE}Zerus keeps this conversation's prompt cache warm. Reply with exactly: ok</zerus-cache-keepalive>` },
-      { seq: 2, at: 51, type: "AgentMessage", detail: "ok" }, reply(3, 52),
-    ];
-    const items = buildTranscript(native) as ActivityItem[];
-    expect(items.map((i) => [i.kind, i.body, i.at])).toEqual([["context", "Cache warmed while idle", timeText(50)]]);
+  it("keeps the newest revision and the details only the Details read reports", () => {
+    const listing = state({ revision: 3, enabled: false, until: null, state: "off" });
+    const inspected = state({ revision: 2, supported: true, ttl_seconds: 3600, interval_seconds: 2880, reason_code: "" });
+    const merged = mergeKeepWarm(listing, inspected, undefined)!;
+    expect([merged.revision, merged.enabled, merged.ttl_seconds, merged.interval_seconds]).toEqual([3, false, 3600, 2880]);
+    // A confirmed local change wins until the host reports a newer revision.
+    const confirmed = state({ revision: 4, enabled: true, until: null });
+    expect(mergeKeepWarm(listing, inspected, confirmed)!.until).toBeNull();
+    expect(mergeKeepWarm(undefined, undefined, undefined)).toBeUndefined();
   });
 
-  it("an event between two keepalives keeps them apart", () => {
-    const events: ActivityEvent[] = [notice(1, 300), reply(2, 301), { seq: 3, at: 400, type: "PreToolUse", tool: "Bash", detail: "ls" }, notice(4, 600)];
-    const items = buildTranscript(events) as ActivityItem[];
-    expect(items.map((i) => [i.kind, i.body])).toEqual([
-      ["context", "Cache warmed while idle"], ["tool", "ls"], ["context", "Cache warmed while idle"],
+  it("keeps the Details read's eligibility reason over the listing's empty one", () => {
+    const reason = "DeepSeek keeps its context cache for hours without pings.";
+    const merged = mergeKeepWarm(state({ enabled: false, state: "off", reason: "" }), state({ enabled: false, state: "off", supported: false, reason_code: "deepseek", reason }))!;
+    expect([merged.supported, merged.reason]).toEqual([false, reason]);
+  });
+
+  it("maps 1 to 7 hours and Always onto the slider", () => {
+    expect(positionOf(state({ until: null }), NOW)).toBe(8);
+    expect(positionOf(state({ until: NOW + 2.5 * 3600 }), NOW)).toBe(3);
+    expect(positionOf(state({ until: NOW + 60 }), NOW)).toBe(1);
+    expect(positionOf(state({ until: NOW + 20 * 3600 }), NOW)).toBe(7);
+    expect(positionOf(undefined, NOW)).toBe(2);
+    expect([durationLabel(1), durationLabel(7), durationLabel(8)]).toEqual(["1 h", "7 h", "Always"]);
+  });
+
+  it("keeps a fresh choice at its hours with a clock read up to 30 s old or a host clock a few minutes ahead (zerus-ua4bi)", () => {
+    for (let hours = 1; hours <= 7; hours++) {
+      expect(positionOf(state({ until: NOW + hours * 3600 }), NOW - 30)).toBe(hours);
+      expect(positionOf(state({ until: NOW + hours * 3600 + 120 }), NOW)).toBe(hours);
+    }
+    // Past those first minutes the hours left still round up.
+    expect(positionOf(state({ until: NOW + 3600 + 20 * 60 }), NOW)).toBe(2);
+  });
+
+  it("offers exactly the choices the host accepts: 1 to 7 hours or Always (zerus-ua4bi)", () => {
+    const positions = Array.from({ length: ALWAYS }, (_, i) => i + 1);
+    expect(positions.map(choiceAt)).toEqual([1, 2, 3, 4, 5, 6, 7].map((hours) => ({ kind: "hours", hours })).concat([{ kind: "always" } as never]));
+  });
+
+  it("marks Always with an infinity sign, keeping Always as its name (zerus-ua4bi)", () => {
+    expect([durationMark(1), durationMark(7), durationMark(ALWAYS)]).toEqual(["1 h", "7 h", "\u221e"]);
+    expect(durationLabel(ALWAYS)).toBe("Always");
+  });
+
+  it("sums the header mark up: nothing while off, an infinity sign for Always, else the time left (zerus-yacns)", () => {
+    expect(headerKeepWarm(undefined, NOW, 0)).toBeUndefined();
+    expect(headerKeepWarm(state({ enabled: false, until: null, state: "off" }), NOW, 0)).toBeUndefined();
+    const always = headerKeepWarm(state({ until: null }), NOW, 0)!;
+    expect([always.mark, always.label]).toEqual(["\u221e", "Keep cache warm: Always"]);
+    const timed = headerKeepWarm(state({ until: NOW + 2 * 3600 + 14 * 60 + 5, next_at: NOW + 600 }), NOW, 0)!;
+    expect([timed.mark, timed.label]).toEqual(["2 h 14 m", "Keep cache warm: 2 h 14 m left"]);
+    expect(timed.tooltip.split("\n")).toEqual(["Keep cache warm: 2 h 14 m left", "Next ping in 10 m", "Each ping reads the whole cached context from this account's usage.", "Click to change it in Details."]);
+    expect(headerKeepWarm(state({ until: NOW + 3 * 3600 }), NOW, 0)!.mark).toBe("3 h");
+    expect(headerKeepWarm(state({ until: NOW + 45 * 60 + 30 }), NOW, 0)!.mark).toBe("45 m");
+    expect(headerKeepWarm(state({ until: NOW + 30 }), NOW, 0)!.mark).toBe("<1 m");
+  });
+
+  it("says how long is left without dot separators", () => {
+    expect(remainingText(state({ until: NOW + 2 * 3600 + 14 * 60 + 5 }), NOW)).toBe("2 h 14 m left");
+    expect(remainingText(state({ until: NOW + 45 * 60 }), NOW)).toBe("45 m left");
+    expect(remainingText(state({ until: NOW + 20 }), NOW)).toBe("Less than a minute left");
+    expect(remainingText(state({ until: null }), NOW)).toBe("Always");
+    expect(remainingText(state({ enabled: false }), NOW)).toBe("");
+  });
+
+  it("explains the state, the reason and ineligible agents in one line", () => {
+    expect(statusLine(state({ supported: false, reason_code: "claude_short_ttl", reason: "Claude uses a 5-minute cache on this account. Keeping it warm would cost about as much as rebuilding it." }), NOW))
+      .toBe("Claude uses a 5-minute cache on this account. Keeping it warm would cost about as much as rebuilding it.");
+    expect(statusLine(state({ state: "cold", reason: "The cache went cold. Keeping it warm resumes after your next message." }), NOW))
+      .toBe("The cache went cold. Keeping it warm resumes after your next message.");
+    expect(statusLine(state({ next_at: NOW + 600 }), NOW)).toBe("Next ping in 10 m");
+    expect(statusLine(state({ turn_active: true }), NOW)).toBe("Warming the cache now");
+    expect(statusLine(state({ enabled: false, state: "off" }), NOW)).toBe("");
+  });
+
+  it("states the interval, pings per hour and what each ping costs", () => {
+    const lines = tooltipLines(state({ ttl_seconds: 3600, interval_seconds: 2880, ttl_source: "native_usage" }), 331_000);
+    expect(lines).toEqual([
+      "The cache lasts about 1 h, as the agent reported.",
+      "Pings every 48 m while idle, about 1.3 an hour.",
+      "Each ping reads the whole cached context (about 331k tokens) from this account's usage.",
     ]);
+    expect(tooltipLines(state({ ttl_seconds: 1800, interval_seconds: 1440, ttl_source: "provider_default" }), 0)[0])
+      .toBe("The cache lasts about 30 m, the provider's documented default.");
+    expect(tooltipLines(state({}), 0)).toEqual(["Each ping reads the whole cached context from this account's usage."]);
   });
 });

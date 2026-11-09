@@ -862,7 +862,7 @@ fn extend_limits_are_refused_clearly() {
     )
     .unwrap_err()
     .to_string();
-    assert_eq!(error, "A team has at most 500 tasks (it has 500)");
+    assert_eq!(error, "A team has at most 500 live tasks (it has 500)");
     let mut team = running_team();
     team.phases = (0..100).map(|i| Phase { n: i + 2, state: PhaseState::Approved, ..Default::default() }).collect();
     let error = extend(
@@ -874,7 +874,21 @@ fn extend_limits_are_refused_clearly() {
     )
     .unwrap_err()
     .to_string();
-    assert_eq!(error, "A team has at most 100 phases");
+    assert_eq!(error, "A team has at most 100 live phases");
+}
+
+#[test]
+fn archived_tasks_and_phases_do_not_consume_live_limits() {
+    let mut team = running_team();
+    team.tasks.extend((3..=1002).map(|id| Task { id, phase: 2, title: format!("Closed {id}"),
+        status: TaskStatus::Accepted, archived: Some(Default::default()), ..Default::default() }));
+    team.phases = (2..=102).map(|n| Phase { n, state: PhaseState::Approved,
+        archived: Some(Default::default()), ..Default::default() }).collect();
+    team.last_archived_task = 1002;
+    let added = extend(&mut team, &json!({"tasks":[{"id":1003,"title":"New work","assignee":"dev"}]}),
+        &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
+    assert_eq!(added["tasks"], json!([1003]));
+    assert_eq!(team.tasks.iter().filter(|task| task.archived.is_none()).count(), 3);
 }
 
 #[test]
@@ -1038,7 +1052,7 @@ fn extend_refuses_dependencies_on_cancelled_or_rejected_tasks() {
 }
 
 #[test]
-fn cancelling_a_draft_phases_last_task_discards_the_phase() {
+fn cancelling_a_draft_phases_last_archived_task_discards_the_phase() {
     let mut team = running_team();
     let mut events = Vec::new();
     let none = BTreeSet::new();
@@ -1488,7 +1502,7 @@ fn a_drafts_task_phases_survive_create_team() {
     apply(&mut team, "draft", &json!({"action":"update","revision":1,"set":{"members":[{"id":"dev","role":"Backend","agent":"claude"}]}}), &lead, &none, &mut events).unwrap();
     let tasks: Vec<Value> = (1..=6u32)
         .map(|id| {
-            let phase = (id + 1) / 2;
+            let phase = id.div_ceil(2);
             let mut task = json!({"id":id,"title":format!("Task {id}"),"assignee":"dev"});
             if phase > 1 {
                 task["phase"] = json!(phase);
@@ -1834,4 +1848,173 @@ fn a_warned_addition_expires_or_is_declined() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("unknown or expired"), "{error}");
+}
+
+#[test]
+fn phase_checks_are_off_by_default_through_approval() {
+    let mut team = running_team();
+    let mut events = Vec::new();
+    apply(&mut team, "extend", &json!({"target_hours":0.5,"tasks":[{"id":3,"title":"Later","assignee":"dev","estimate_minutes":90,"requires":[{"task":999}]}]}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    let result = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    assert_eq!(result["status"], "phase_approved");
+    assert!(result.get("approve_anyway").is_none());
+    assert!(result["tasks"].is_array());
+    assert!(result["alongside"].is_boolean());
+    assert!(result["phase_state"].is_string());
+}
+
+#[test]
+fn phase_target_warns_but_approval_succeeds() {
+    let mut team = running_team();
+    let mut events = Vec::new();
+    apply(&mut team, "settings", &json!({"settings":{"phase_checks":{"critical_path_target":true}}}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    apply(&mut team, "extend", &json!({"target_hours":0.5,"tasks":[{"id":3,"title":"Later","assignee":"dev","estimate_minutes":90}]}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    let checks = serde_json::to_value(&team.phases[0]).unwrap();
+    assert_eq!(checks["checks"]["target_exceeded"], true);
+    assert_eq!(checks["checks"]["known_hours"], 1.5);
+    let result = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    assert_eq!(result["status"], "phase_approved");
+}
+
+#[test]
+fn phase_prerequisite_refuses_then_explicit_override_approves() {
+    let mut team = running_team();
+    let mut events = Vec::new();
+    apply(&mut team, "settings", &json!({"settings":{"phase_checks":{"unresolved_prerequisites":true}}}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    apply(&mut team, "extend", &json!({"tasks":[{"id":3,"title":"Later","assignee":"dev","requires":[{"task":1}]}]}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    let error = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap_err().to_string();
+    assert!(error.contains("Unresolved prerequisites"), "{error}");
+    assert_eq!(team.phases[0].state, PhaseState::Draft);
+    let result = apply(&mut team, "approve-phase", &json!({"phase":2,"approve_anyway":true}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    assert_eq!(result["status"], "phase_approved");
+}
+
+#[test]
+fn phase_checks_use_estimates_and_keep_missing_estimates_explicit() {
+    let mut team = running_team();
+    let mut events = Vec::new();
+    apply(&mut team, "settings", &json!({"settings":{"phase_checks":{"critical_path_target":true}}}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    apply(&mut team, "extend", &json!({"target_hours":2,"tasks":[
+        {"id":3,"title":"Long","assignee":"dev","estimate_minutes":90},
+        {"id":4,"title":"Unknown","assignee":"qa","deps":[{"task":3}]},
+        {"id":5,"title":"Short","assignee":"dev","estimate_minutes":10},
+        {"id":6,"title":"Short 2","assignee":"qa","estimate_minutes":10,"deps":[{"task":5}]},
+        {"id":7,"title":"Short 3","assignee":"dev","estimate_minutes":10,"deps":[{"task":6}]}]}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    let checks = serde_json::to_value(&team.phases[0]).unwrap();
+    assert_eq!(checks["checks"]["known_hours"], 1.5);
+    assert_eq!(checks["checks"]["missing_estimates"], 1);
+    assert_eq!(checks["checks"]["target_exceeded"], false);
+    // Unit weights still serialize the original count-based profile path.
+    let tasks: Vec<_> = team.tasks.iter().filter(|task| task.phase == 2).collect();
+    let profile = super::super::profile::profile(&team, &tasks, &[], &[], &Default::default(), &Default::default(), 100.0);
+    assert_eq!(serde_json::to_string(&profile["critical_path"]["planned"]).unwrap(), r#"{"length":3,"tasks":[5,6,7]}"#);
+    apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+}
+
+#[test]
+fn phase_task_prerequisites_use_phase_order_and_never_add_dependencies() {
+    let mut team = running_team();
+    team.tasks[0].status = TaskStatus::Accepted;
+    let mut events = Vec::new();
+    apply(&mut team, "settings", &json!({"settings":{"phase_checks":{"unresolved_prerequisites":true}}}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    apply(&mut team, "extend", &json!({"tasks":[
+        {"id":20,"title":"First","assignee":"dev","requires":[{"task":21},{"task":1}]},
+        {"id":21,"title":"Second","assignee":"qa"}]}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    assert!(team.task(3).unwrap().deps.is_empty());
+    assert!(team.phases[0].checks.as_ref().unwrap().unresolved.is_empty());
+    apply(&mut team, "edit-draft", &json!({"phase":2,"tasks_update":[{"id":3,"requires":[{"task":3},{"task":999}]}]}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    let checks = team.phases[0].checks.as_ref().unwrap();
+    assert!(checks.unresolved.iter().any(|reason| reason.contains("itself")));
+    assert!(checks.unresolved.iter().any(|reason| reason.contains("does not exist")));
+    assert!(apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &BTreeSet::new(), &mut events).is_err());
+    apply(&mut team, "edit-draft", &json!({"phase":2,"tasks_update":[{"id":3,"requires":[{"task":4},{"task":1}]}]}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+}
+
+#[test]
+fn phase_git_prerequisites_recheck_ancestry_on_approval() {
+    let _guard = crate::state::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git").arg("-C").arg(dir.path()).args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", dir.path().join("no-global-config")).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+    git(&["init", "--initial-branch=main"]);
+    git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    git(&["tag", "tag-only"]);
+    git(&["checkout", "-b", "prerequisite"]);
+    git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "required"]);
+    let required = git(&["rev-parse", "HEAD"]);
+    git(&["checkout", "main"]);
+    let mut team = running_team();
+    team.folder = dir.path().to_string_lossy().into_owned();
+    team.settings.base_branch = "main".into();
+    let mut events = Vec::new();
+    apply(&mut team, "settings", &json!({"settings":{"phase_checks":{"unresolved_prerequisites":true}}}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    apply(&mut team, "extend", &json!({"tasks":[{"id":3,"title":"Later","assignee":"dev","requires":[{"commit":base},{"branch":"prerequisite"},{"commit":required},{"branch":"tag-only"}]}]}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    assert_eq!(team.phases[0].checks.as_ref().unwrap().unresolved.len(), 3);
+    assert!(team.phases[0].checks.as_ref().unwrap().unresolved.iter().any(|reason| reason.contains("tag-only")));
+    assert!(apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &BTreeSet::new(), &mut events).is_err());
+    git(&["branch", "tag-only", &base]);
+    git(&["merge", "--ff-only", "prerequisite"]);
+    // Six ancestry reads together exceed five seconds, but each has its own window.
+    // Leave scheduling headroom for the injected delays under parallel test load.
+    plan::PHASE_CHECK_TIMEOUT_OVERRIDE.with(|timeout| {
+        timeout.set(Some(std::time::Duration::from_secs(60)));
+    });
+    plan::BEFORE_PREREQUISITE_GIT.with(|delay| delay.set(Some(|| std::thread::sleep(std::time::Duration::from_secs(1)))));
+    let started = std::time::Instant::now();
+    let approved = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &BTreeSet::new(), &mut events);
+    plan::BEFORE_PREREQUISITE_GIT.with(|delay| delay.set(None));
+    plan::PHASE_CHECK_TIMEOUT_OVERRIDE.with(|timeout| timeout.set(None));
+    approved.unwrap();
+    assert!(started.elapsed() >= std::time::Duration::from_secs(6));
+    assert!(team.phases[0].checks.as_ref().unwrap().unresolved.is_empty());
+}
+
+#[test]
+fn phase_check_settings_patch_independently() {
+    let mut team = running_team();
+    let mut events = Vec::new();
+    for setting in ["critical_path_target", "unresolved_prerequisites"] {
+        let input = json!({"settings":{"phase_checks":{setting:true}}});
+        apply(&mut team, "settings", &input, &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    }
+    assert!(team.settings.phase_checks.critical_path_target);
+    assert!(team.settings.phase_checks.unresolved_prerequisites);
+}
+
+#[test]
+fn a_free_phase_never_reuses_an_archived_header() {
+    let mut team = running_team();
+    team.plan_mode = PlanMode::Free;
+    for task in &mut team.tasks {
+        task.status = TaskStatus::Accepted;
+        task.archived = Some(Default::default());
+    }
+    team.phases = vec![Phase { n: 1, state: PhaseState::Approved, archived: Some(Default::default()), ..Default::default() }];
+    assert_eq!(open_phase(&team), 2);
+    let added = extend(&mut team, &json!({"tasks":[{"id":3,"title":"Next","assignee":"dev"}]}),
+        &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
+    assert_eq!(added["phase"], 2);
+    assert!(team.phases.iter().any(|phase| phase.n == 2 && phase.archived.is_none()));
+    assert_eq!(open_phase(&team), 2);
+    assert!(team.phases[0].archived.is_some());
+}
+
+#[test]
+fn phase_checks_refresh_and_clear_for_sent_back_drafts() {
+    let mut team = running_team();
+    let mut events = Vec::new();
+    let none = BTreeSet::new();
+    apply(&mut team, "extend", &json!({"target_hours":0.5,"tasks":[{"id":3,"title":"Later","assignee":"dev","estimate_minutes":90}]}), &Actor::Human, &none, &mut events).unwrap();
+    apply(&mut team, "reject-phase", &json!({"phase":2,"comment":"Rework the plan"}), &Actor::Human, &none, &mut events).unwrap();
+    assert_eq!(team.phases[0].state, PhaseState::Rejected);
+    apply(&mut team, "settings", &json!({"settings":{"phase_checks":{"critical_path_target":true}}}), &Actor::Human, &none, &mut events).unwrap();
+    assert!(team.phases[0].checks.as_ref().unwrap().target_exceeded);
+    apply(&mut team, "settings", &json!({"settings":{"phase_checks":{"critical_path_target":false}}}), &Actor::Human, &none, &mut events).unwrap();
+    assert!(team.phases[0].checks.is_none());
 }

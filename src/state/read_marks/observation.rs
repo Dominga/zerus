@@ -375,9 +375,11 @@ mod tests {
     }
     #[test]
     fn exact_binding_missing_source_and_current_observation_are_explicit() {
-        let dir = tempfile::tempdir().unwrap();
-        let record = dir.path().join("record.json");
-        let path = dir.path().join("marks.json");
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("private");
+        crate::platform::owner_only_dir(&dir).unwrap();
+        let record = dir.join("record.json");
+        let path = dir.join("marks.json");
         let view = json!({"name":"renamed","run_id":"run","conversation_id":"conversation"});
         let mut binding = view.clone();
         binding["version"] = json!(1);
@@ -398,7 +400,7 @@ mod tests {
             format!("sha256:{:x}", Sha256::digest(&data))
         );
         assert_eq!(before, fs::read(&path).unwrap());
-        assert!(!dir.path().join("read-marks.lock").exists());
+        assert!(!dir.join("read-marks.lock").exists());
         let mut wrong = view.clone();
         wrong["run_id"] = json!("other-run");
         assert_eq!(
@@ -412,11 +414,13 @@ mod tests {
     }
     #[test]
     fn oversized_or_replaced_source_is_unavailable() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("marks.json");
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("private");
+        crate::platform::owner_only_dir(&dir).unwrap();
+        let path = dir.join("marks.json");
         write(&path, b"{}");
         let snapshot = bytes(&path, deadline()).unwrap().unwrap();
-        let replacement = dir.path().join("new");
+        let replacement = dir.join("new");
         write(&replacement, b"[]");
         fs::remove_file(&path).unwrap();
         fs::rename(&replacement, &path).unwrap();

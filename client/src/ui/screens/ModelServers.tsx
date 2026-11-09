@@ -15,6 +15,7 @@ import {
   agentChoices, ago, canStart, downUse, footText, hostText, machineNames, pill, projectOf, sessionSummary, sinceText, stateTone, summary, tagFor,
 } from "./model-servers";
 import "../styles/model-servers.css";
+import { TextInput } from "../lib/TextField";
 
 // Task 67: Qt's ModelServersPage. Every server of this computer with its API
 // address (copied in one click), SSH host, free memory and models: their
@@ -150,13 +151,13 @@ function SessionDialog(props: { server: ModelServer; model: string; onClose(): v
         </div>
         <label for="ms-folder">{tr("Folder")}</label>
         <div class="row">
-          <input id="ms-folder" class="field mono grow" list="ms-folders" value={folder()} onInput={(e) => setFolder(e.currentTarget.value)} />
+          <TextInput id="ms-folder" class="field mono grow" list="ms-folders" value={folder()} onInput={(e) => setFolder(e.currentTarget.value)} />
           <datalist id="ms-folders"><For each={folders()}>{(f) => <option value={f} />}</For></datalist>
           <button type="button" class="btn" onClick={() => setBrowsing(true)}>{tr("Browse…")}</button>
         </div>
         <label for="ms-tag">{tr("Name")}</label>
         <div class="row"><span class="mono muted">{`${agent()}/${projectOf(folder())}/`}</span>
-          <input id="ms-tag" class="field mono grow" maxLength={60} value={tag()} onInput={(e) => { setTag(e.currentTarget.value); setTagEdited(true); }} /></div>
+          <TextInput id="ms-tag" class="field mono grow" maxLength={60} value={tag()} onInput={(e) => { setTag(e.currentTarget.value); setTagEdited(true); }} /></div>
         <span>{tr("For this session")}</span>
         <pre class="ms-summary mono">{sessionSummary(agent(), props.server, model())}</pre>
       </div>

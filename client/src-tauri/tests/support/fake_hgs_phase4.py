@@ -56,8 +56,8 @@ if args[:1] == ["native-ui"] and len(args) >= 2:
     raise SystemExit(0)
 
 if args[:1] == ["inspect"] and len(args) >= 2:
-    if "--subagent" in args:
-        agent = args[args.index("--subagent") + 1]
+    if "--agent" in args:
+        agent = args[args.index("--agent") + 1]
         key = args[1] + "\n" + agent
         if key in config.get("subagent_inspect", {}):
             emit(config["subagent_inspect"][key])

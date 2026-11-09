@@ -1,8 +1,15 @@
 import {describe,it,expect} from "vitest";
-import {accountModelChoices,accountModelView,permissionExplanation} from "./account-defaults";
+import {accountModelChoices,accountModelView,computerList,permissionExplanation,savesOn} from "./account-defaults";
 import type {AccountModelCatalog,AccountEditView} from "../../bridge";
 const catalog:AccountModelCatalog={models:[{id:"example",label:"Example model",effort_options:["low","high"]}],defaults:{model:"example",effort:"high"},provider_defaults:{model:"native",effort:"low"},effort_supported:true};
 describe("account-specific defaults",()=>{
+  it("names every computer an account edit saves on (zerus-f0uz8)",()=>{
+    expect(computerList(["arch","mac","va-kids"],"en")).toBe("arch, mac, and va-kids");
+    expect(computerList(["arch","mac"],"ru")).toBe("arch и mac");
+    expect(savesOn({label:"Work",machine:"arch",machines:["arch"]})).toBe("Work on arch");
+    expect(savesOn({label:"Work",machine:"arch"})).toBe("Work on arch");
+    expect(savesOn({label:"Work",machine:"arch",machines:["arch","mac"]})).toBe("Work on arch and mac");
+  });
   it("uses the captured account's choices and preserves a missing saved model",()=>{
     expect(accountModelChoices(catalog).map(m=>m.label)).toEqual(["Example model"]);
     const missing={...catalog,defaults:{model:"old",effort:"high"}};

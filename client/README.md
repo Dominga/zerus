@@ -1290,10 +1290,16 @@ save has not started cannot dispatch during shutdown.
 The catalog retains at most 256 native children per session, never the
 hook-profile fallback. The list follows Qt's completed-child rule, retaining
 the selected child and nongroup children with drafts. A child Activity is one
-bounded replacement page of at most 200 events from `inspect --subagent`, read
-only while that exact child is visible and online; it never inherits the
-parent's live state or grows a history. Child attachments carry the same exact
-agent identity.
+bounded replacement page of at most 200 events from `inspect NAME --agent ID`
+(the CLI's child option; `--subagent` is refused), read only while that exact
+child is visible and online; it never inherits the
+parent's live state or grows a history. "Reading activity…" lasts only until
+the first answer: an offline computer, a parent with no run or conversation
+identity, a refused read and a read with no answer after 20 seconds each end in
+their reason, and the reads resume once they can. A child shows no other row's
+sent messages, and a brief visit to one leaves its parent's receipt on screen
+while that receipt waits for its journal event. Child attachments carry the same
+exact agent identity.
 
 A child with a matching inspection and `send_supported` gets the ordinary
 composer layout and durable draft under
@@ -1924,6 +1930,14 @@ built app using a private D-Bus/Xvfb, private state and fake hgs. It covers reco
 outcomes, explicit discard, unknown non-replay, source-change refusal, inspection,
 Escape and Keep, with captures of the approved chip/dialog states. The fixture
 never deletes even its own synthetic worktree files.
+
+While a folder is being checked, removed or restored, the status bar shows
+**Background tasks** with a count, and its list names each folder and state. It
+reads the native cleanup store's `busy` and `activity` fields, so it needs no
+polling and ends only when the work has. It covers Terminate + Remove only and
+adds no retry or cancel. Kept and unknown results stay on the working-folder chip
+beside it. To check its placement, focus and dismissal in WebKit, serve Vite and run
+`client/scripts/menu-smoke.py --title "Zerus background tasks regression (synthetic)" --url http://127.0.0.1:<port>/scripts/background-tasks-smoke.html`.
 
 An archived session whose folder stays for review has a sticky **Session
 archived** notice with structured counts, **Review…** and **Restore session**.

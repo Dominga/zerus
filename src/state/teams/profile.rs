@@ -377,26 +377,28 @@ fn page_of(items: &[&Loss], value: impl Fn(&Loss) -> i64, field: &str, cursor: O
 }
 
 /// The longest planned dependency chain among the scope's tasks, by task
-/// count; ties go to the lower ids.
-fn planned_path(tasks: &[&Task]) -> Vec<u32> {
+/// weight, then task count; ties go to the lower ids. The profile uses unit
+/// weights to preserve its original count-based output.
+pub(crate) fn planned_path(tasks: &[&Task], weight: fn(&Task) -> u64) -> Vec<u32> {
     let ids: BTreeSet<u32> = tasks.iter().map(|task| task.id).collect();
     let by_id: BTreeMap<u32, &Task> = tasks.iter().map(|task| (task.id, *task)).collect();
-    let mut memo: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut memo: BTreeMap<u32, (u64, usize)> = BTreeMap::new();
     // In id order a task's deps usually come first; a cycle counts once.
-    fn depth(id: u32, by_id: &BTreeMap<u32, &Task>, ids: &BTreeSet<u32>, memo: &mut BTreeMap<u32, usize>, seen: &mut BTreeSet<u32>) -> usize {
+    fn depth(id: u32, by_id: &BTreeMap<u32, &Task>, ids: &BTreeSet<u32>, memo: &mut BTreeMap<u32, (u64, usize)>, seen: &mut BTreeSet<u32>, weight: fn(&Task) -> u64) -> (u64, usize) {
         if let Some(found) = memo.get(&id) {
             return *found;
         }
         if !seen.insert(id) {
-            return 0;
+            return (0, 0);
         }
         let deps = by_id.get(&id).map(|task| task.deps.iter().map(|dep| dep.task).filter(|dep| ids.contains(dep)).collect::<Vec<_>>()).unwrap_or_default();
-        let found = 1 + deps.into_iter().map(|dep| depth(dep, by_id, ids, memo, seen)).max().unwrap_or(0);
+        let previous = deps.into_iter().map(|dep| depth(dep, by_id, ids, memo, seen, weight)).max().unwrap_or((0, 0));
+        let found = (by_id.get(&id).map_or(0, |task| weight(task)) + previous.0, previous.1 + 1);
         memo.insert(id, found);
         found
     }
     for id in &ids {
-        depth(*id, &by_id, &ids, &mut memo, &mut BTreeSet::new());
+        depth(*id, &by_id, &ids, &mut memo, &mut BTreeSet::new(), weight);
     }
     let Some(mut at) = ids.iter().copied().max_by_key(|id| (memo[id], std::cmp::Reverse(*id))) else { return Vec::new() };
     let mut path = vec![at];
@@ -405,7 +407,7 @@ fn planned_path(tasks: &[&Task]) -> Vec<u32> {
         .iter()
         .map(|dep| dep.task)
         .filter(|dep| ids.contains(dep) && !path.contains(dep))
-        .max_by_key(|dep| (memo.get(dep).copied().unwrap_or(0), std::cmp::Reverse(*dep)))
+        .max_by_key(|dep| (memo.get(dep).copied().unwrap_or((0, 0)), std::cmp::Reverse(*dep)))
     {
         path.push(next);
         at = next;
@@ -601,7 +603,7 @@ pub(crate) fn profile(team: &Team, tasks: &[&Task], timelines: &[Value], all: &[
     by_time.sort_by(|a, b| b.s.cmp(&a.s).then_with(|| a.id.cmp(&b.id)));
     let mut by_tokens: Vec<&Loss> = losses.iter().filter(|loss| loss.tokens.is_some_and(|tokens| tokens > 0)).collect();
     by_tokens.sort_by(|a, b| b.tokens.cmp(&a.tokens).then_with(|| a.id.cmp(&b.id)));
-    let planned = planned_path(tasks);
+    let planned = planned_path(tasks, |_| 1);
     let (real, real_s) = real_path(tasks, &extents);
     let off_plan: Vec<u32> = real.iter().copied().filter(|id| !planned.contains(id)).collect();
     let (spent, unknown) = {

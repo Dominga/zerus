@@ -1,0 +1,6 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Zerus session list accessibility regression (synthetic)</title></head>
+<body><div id="root"></div><script type="module">
+import("../src/perf/sessionListAccessibilitySmoke.tsx").catch(error =>
+  window.webkit.messageHandlers.result.postMessage(JSON.stringify({failures: [String(error)]})));
+</script></body></html>

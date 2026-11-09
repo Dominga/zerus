@@ -74,11 +74,13 @@ extension ConversationModel {
     @discardableResult
     func loadHistory(_ target: Target, _ direction: String, _ cursor: String = "", latest: Bool = false) -> Task<Void, Never>? {
         guard selected?.target == target, !olderLoading else { return nil }
+        lastHistoryWasLatest = false
         if target.run.isEmpty || target.conversation.isEmpty || !app.connections.contains(where: { $0.id == target.connectionId }) {
             olderError = historyReason(target)
             return nil
         }
         let navigation = navigationId
+        let intent = historyIntent
         lastHistoryRequest = (target, direction, cursor)
         olderLoading = true
         olderError = ""
@@ -87,7 +89,7 @@ extension ConversationModel {
             guard let self else { return }
             var published = false
             defer {
-                if !published && self.selected?.target == target && self.navigationId == navigation {
+                if !published && self.selected?.target == target && self.navigationId == navigation && self.historyIntent == intent {
                     self.olderLoading = false
                     if self.pendingHistoryPosition != target.key { self.readPositionReady = true }
                 }
@@ -104,6 +106,8 @@ extension ConversationModel {
                     try await HistoryReadPaths.read(network: { try await self.historyOnce(target, direction, cursor) },
                                                     cached: { try await pages?.read(target, mode: direction, cursor: cursor) })
                 }, head: { try await self.historyOnce(target, "", "") })
+                try Task.checkCancellation()
+                guard self.selected?.target == target, self.navigationId == navigation, self.historyIntent == intent else { return }
                 let mode = reopened.head ? "" : direction
                 let page = reopened.result.page, verified = reopened.result.verified
                 if !verified { self.currentHistoryHeads.remove(ConversationReadPolicies.key(target)) }
@@ -116,18 +120,19 @@ extension ConversationModel {
                     RollingConversationHistory.merge(target: target, previousTarget: target, previous: previous, incoming: page.events).supersededIds
                         .merging(HistoryAliases.exact(page.events, known: knownIds)) { $1 }
                 }.value
+                try Task.checkCancellation()
+                guard self.selected?.target == target, self.navigationId == navigation, self.historyIntent == intent else { return }
                 if !aliases.isEmpty { self.editRead { $0.supersede(target, aliases) } }
                 self.observeHistoryHead(page, verified: verified)
-                guard self.selected?.target == target, self.navigationId == navigation else { return }
+                guard self.selected?.target == target, self.navigationId == navigation, self.historyIntent == intent else { return }
                 if mode.isEmpty && verified && !page.complete {
                     self.historyIndexing = page.indexing
                     self.historyComplete = false
                     self.olderLoading = false
                     self.readPositionReady = true
-                    if latest {
-                        self.olderError = page.indexing ? "Message history is still indexing. Try again shortly."
-                            : "This computer could not provide the latest message history. Refresh to try again."
-                    }
+                    self.olderError = page.indexing ? "Earlier message history is still indexing. Try again shortly."
+                        : "This computer could not provide earlier message history. Try again."
+                    self.hasOlder = true
                     self.captureUnreadBoundary(target, self.events)
                     return
                 }
@@ -143,8 +148,10 @@ extension ConversationModel {
                     !self.unreadBoundaryCaptured, let marker {
                     self.readPositionReady = false
                     let unread = try await self.historyOnce(target, "unread", HistoryRequests.unreadCursor(epoch: page.epoch, readThrough: marker.readThrough))
+                    try Task.checkCancellation()
+                    guard self.historyIntent == intent else { return }
                     self.observeHistoryHead(unread)
-                    guard self.selected?.target == target, self.navigationId == navigation else { return }
+                    guard self.selected?.target == target, self.navigationId == navigation, self.historyIntent == intent else { return }
                     self.publishWindow(target, HistoryWindow.from(unread), complete: unread.complete, indexing: unread.indexing)
                     published = true
                     self.lastHistoryObservation = self.activeFrame?.observedAt ?? 0
@@ -155,12 +162,14 @@ extension ConversationModel {
                     if (mode == "before" || mode == "after"), let old, old.epoch == page.epoch { return old.merge(page, direction: mode) }
                     return HistoryWindow.from(page)
                 }.value
+                try Task.checkCancellation()
+                guard self.selected?.target == target, self.navigationId == navigation, self.historyIntent == intent else { return }
                 self.publishWindow(target, window, complete: page.complete && verified, indexing: page.indexing, boundary: aliases[self.firstUnreadEventId])
                 self.lastHistoryObservation = self.activeFrame?.observedAt ?? 0
                 published = true
             } catch is CancellationError {
             } catch {
-                if self.selected?.target == target && self.navigationId == navigation {
+                if self.selected?.target == target && self.navigationId == navigation && self.historyIntent == intent {
                     self.olderError = ReadFailure.message(error, "conversation")
                     self.currentHistoryHeads.remove(ConversationReadPolicies.key(target))
                 }
@@ -171,6 +180,7 @@ extension ConversationModel {
     }
 
     func retryHistory(_ target: Target) {
+        if lastHistoryWasLatest { jumpToLatest(target); return }
         if let request = lastHistoryRequest, request.target == target { loadHistory(target, request.direction, request.cursor) }
         else { loadHistory(target, "") }
     }
@@ -187,19 +197,99 @@ extension ConversationModel {
         if let window = historyWindows[target.key], window.hasAfter, let after = window.after { loadHistory(target, "after", after) }
     }
 
+    /// The native recent tail does not depend on historical indexing or exact unread totals.
     @discardableResult
-    func jumpToLatest(_ target: Target) -> Task<Void, Never>? { loadHistory(target, "", latest: true) }
+    func jumpToLatest(_ target: Target) -> Task<Void, Never>? {
+        guard selected?.target == target,
+              let connection = app.connections.first(where: { $0.id == target.connectionId }) else { return nil }
+        let navigation = navigationId
+        lastHistoryWasLatest = true
+        // Navigation may remain unchanged while an old asynchronous cache restore
+        // passes through the same empty window. An explicit latest intent supersedes it.
+        historyIntent += 1
+        let intent = historyIntent
+        latestHistoryIntent = intent
+        olderTask?.cancel()
+        viewportPageTask?.cancel()
+        // Retire observers of the previous reading intent without cancelling the
+        // shared native inspection, which the fresh recent read waits behind.
+        detailGate.cancel()
+        detailTask?.cancel()
+        detailTimer?.cancel()
+        detailBusy = false
+        detailProgress = false
+        presentationRevision += 1
+        presentationTask?.cancel()
+        olderLoading = true
+        olderError = ""
+        let task = Task { [weak self] in
+            guard let self else { return }
+            @MainActor func current() -> Bool {
+                self.selected?.target == target && self.navigationId == navigation && self.historyIntent == intent && self.app.connections.contains(connection)
+            }
+            defer {
+                if self.latestHistoryIntent == intent { self.latestHistoryIntent = nil }
+                if current() { self.olderLoading = false; self.readPositionReady = true }
+            }
+            do {
+                let inspected = try await self.inspectOnce(connection, target, fresh: true, current: current).value
+                guard inspected.target == target else {
+                    throw ZerusError(.unavailable, "The conversation changed. Refresh before loading its latest messages.")
+                }
+                guard current() else { return }
+                guard !inspected.inspectedEvents.isEmpty || self.events.isEmpty else {
+                    throw ZerusError(.unavailable, "This computer could not provide the latest messages. Loaded messages remain available; try again.")
+                }
+                let recent = await Task.detached(priority: .userInitiated) {
+                    let bounded = RollingConversationHistory.merge(target: target, previousTarget: target, previous: [], incoming: inspected.inspectedEvents)
+                    return inspected.with(events: bounded.events, truncated: inspected.truncated || bounded.truncated,
+                                          window: nil, indexComplete: false, indexing: false)
+                }.value
+                guard current() else { return }
+                self.historyWindows[target.key] = nil
+                self.currentHistoryHeads.remove(ConversationReadPolicies.key(target))
+                self.historyEpoch = ""
+                self.historyComplete = false
+                self.historyIndexing = false
+                self.hasNewer = false
+                if let last = recent.events.last {
+                    self.editRead { $0.viewport(target, eventId: last.id, offset: 0, following: true) }
+                }
+                self.restoreHistoryAttempt = target.key + (self.readState.record(target)?.viewport?.cursor ?? "")
+                self.pendingHistoryPublication = target.key
+                self.rememberFrame(recent)
+                self.installFrame(recent, verified: true)
+                // Return only after the caller can choose its scroll target from
+                // the newly installed rows, including an identical recent read.
+                await self.presentationTask?.value
+            } catch is CancellationError {
+            } catch {
+                if current() { self.olderError = ReadFailure.message(error, "conversation") }
+            }
+        }
+        olderTask = task
+        return task
+    }
 
     func restoreSavedWindow(_ target: Target, navigation: Int64) {
-        guard let saved = readState.record(target)?.viewport, !saved.cursor.isEmpty, let pages else { return }
+        guard let saved = readState.record(target)?.viewport, !saved.following, !saved.cursor.isEmpty, let pages else { return }
+        let intent = historyIntent
+        let originalWindow = historyWindows[target.key]
         readPositionReady = false
         Task { [weak self] in
             var published = false
             defer {
-                if let self, !published, self.selected?.target == target, self.navigationId == navigation { self.readPositionReady = true }
+                if let self, !published, self.selected?.target == target, self.navigationId == navigation,
+                   self.historyIntent == intent, self.readState.record(target)?.viewport == saved,
+                   !self.olderLoading, self.pendingHistoryPublication != target.key { self.readPositionReady = true }
             }
-            guard let page = try? await HistoryReadPaths.saved({ try await pages.read(target, mode: "around", cursor: saved.cursor) }),
-                  let self, self.selected?.target == target, self.navigationId == navigation, !self.events.contains(where: { $0.id == saved.eventId }) else { return }
+            guard let page = try? await HistoryReadPaths.saved(current: {
+                self?.selected?.target == target && self?.navigationId == navigation && self?.historyIntent == intent &&
+                    self?.readState.record(target)?.viewport == saved
+            }, { try await pages.read(target, mode: "around", cursor: saved.cursor) }),
+                  let self, self.selected?.target == target, self.navigationId == navigation, self.historyIntent == intent,
+                  self.readState.record(target)?.viewport == saved, self.historyWindows[target.key] == originalWindow,
+                  !self.events.contains(where: { $0.id == saved.eventId }) else { return }
             self.publishWindow(target, HistoryWindow.from(page))
             self.restoreHistoryAttempt = target.key + saved.cursor
             published = true
@@ -207,22 +297,20 @@ extension ConversationModel {
     }
 
     func restoreHistory(_ target: Target) {
-        guard historyNetworkReason(target).isEmpty, !olderLoading else { return }
-        let saved = readState.record(target)?.viewport
-        let key = target.key + (saved?.cursor ?? "")
+        guard historyNetworkReason(target).isEmpty, !olderLoading,
+              let saved = readState.record(target)?.viewport, !saved.following, !saved.cursor.isEmpty else { return }
+        let key = target.key + saved.cursor
         guard restoreHistoryAttempt != key else { return }
         restoreHistoryAttempt = key
-        if let saved, !saved.cursor.isEmpty, !events.contains(where: { $0.id == saved.eventId }) {
+        if !events.contains(where: { $0.id == saved.eventId }) {
             readPositionReady = false
             loadHistory(target, "around", saved.cursor)
-        } else if historyWindows[target.key] == nil {
-            loadHistory(target, "")
         }
     }
 
     /// Bounded metadata-only probes keep unread counts current without opening every chat.
     func watchHistoryHeads(priority: Target? = nil) {
-        guard historyHeadTask == nil, readTrackingReady, !demo else { return }
+        guard (priority != nil || selected == nil), historyHeadTask == nil, readTrackingReady, !demo else { return }
         historyHeadTask = Task { [weak self] in
             guard let self else { return }
             defer { self.historyHeadTask = nil }
@@ -248,21 +336,14 @@ extension ConversationModel {
             let chosen = self.historyHeadScheduler.choose(candidates.map(\.0), now: ProcessInfo.processInfo.systemUptime)
             guard !chosen.isEmpty else { return }
             for target in chosen {
+                if priority == nil && self.selected != nil { return }
                 var success = false
                 do {
                     let page = try await self.historyOnce(target, "", "", limit: 1)
                     success = true
                     guard self.app.sessions.contains(where: { $0.target == target }), self.historyNetworkReason(target).isEmpty,
                           self.app.machines.contains(where: { $0.key == target.machineKey && $0.online }) else { continue }
-                    self.observeHistoryHead(page)
-                    if self.selected?.target == target && self.historyWindows[target.key] == nil {
-                        if page.complete && !self.olderLoading {
-                            self.restoreHistoryAttempt = ""
-                            self.loadHistory(target, "")
-                        } else if page.indexing {
-                            self.historyIndexing = true
-                        }
-                    }
+                    self.observeHistoryHead(page, verified: priority != nil || self.selected?.target != target || self.historyWindows[target.key] != nil)
                     if let hint = candidates.first(where: { $0.0 == target })?.1 { self.historySnapshotHints[ConversationReadPolicies.key(target)] = hint }
                     self.adoptSharedReads()
                     if self.selected?.target == target { self.shareRead(target) }

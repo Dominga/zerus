@@ -114,6 +114,52 @@ class RemoteLoginShells(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(self.received(), (expected, body))
 
+    def test_path_info_reaches_only_a_peer_whose_help_names_it(self):
+        # An older hgs would take the unknown verb as a session launch (zerus-5wmh.13.18).
+        executable = self.peer / '.local/bin/hgs'
+        path = '/srv/' + TRICKY
+        for name, shell in login_shells().items():
+            with self.subTest(shell=name):
+                executable.write_text(PEER_HGS)
+                old = self.hgs(shell, '@peer', 'path-info', '--path', path)
+                self.assertNotEqual(old.returncode, 0)
+                self.assertIn('update the selected computer', old.stderr.lower())
+                self.assertFalse((self.peer / 'argv.json').exists())
+                executable.write_text(PEER_HGS.replace("'hooks-health-v1'", "'hooks-health-v1' 'hgs [@host] path-info --path <path>'"))
+                result = self.hgs(shell, '@peer', 'path-info', '--path', path)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.received(), (['path-info', '--path', path], ''))
+                # ~ arrives unexpanded: the peer's hgs expands ~/ and refuses ~user.
+                for tilde in ("~/plan's notes.md", '~other/plan.md'):
+                    self.assertEqual(self.hgs(shell, '@peer', 'path-info', '--path', tilde).returncode, 0)
+                    self.assertEqual(self.received(), (['path-info', '--path', tilde], ''))
+                self.assertNotIn('-t', json.loads((self.root / 'ssh-args.json').read_text()))
+
+    def test_a_guarded_path_info_needs_both_markers_and_keeps_its_tilde(self):
+        # --expect-machine wraps the actual command; guarded-create-v1 alone
+        # never authorizes path-info (zerus-3skhm), and the wrapped path's
+        # ~ arrives as written too (zerus-ie12o).
+        machine = '22222222-2222-4222-8222-222222222222'
+        executable = self.peer / '.local/bin/hgs'
+        for name, shell in login_shells().items():
+            with self.subTest(shell=name):
+                executable.write_text(PEER_HGS.replace("'hooks-health-v1'", "'hooks-health-v1' 'guarded-create-v1'"))
+                old = self.hgs(shell, '@peer', '--expect-machine', machine, 'path-info', '--path', '~/plan.md')
+                self.assertNotEqual(old.returncode, 0)
+                self.assertIn('update the selected computer', old.stderr.lower())
+                self.assertFalse((self.peer / 'argv.json').exists())
+                executable.write_text(PEER_HGS.replace("'hooks-health-v1'", "'hooks-health-v1' 'hgs [@host] path-info --path <path>'"))
+                unguarded = self.hgs(shell, '@peer', '--expect-machine', machine, 'path-info', '--path', '~/plan.md')
+                self.assertNotEqual(unguarded.returncode, 0, "a peer without guarded-create-v1 cannot check the machine")
+                self.assertFalse((self.peer / 'argv.json').exists())
+                executable.write_text(PEER_HGS.replace("'hooks-health-v1'", "'hooks-health-v1' 'guarded-create-v1' 'hgs [@host] path-info --path <path>'"))
+                for path in ('~/plan.md', "~/plan's notes.md", '~other/plan.md', '/srv/' + TRICKY):
+                    result = self.hgs(shell, '@peer', '--expect-machine', machine, 'path-info', '--path', path)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    argv = self.received()[0]
+                    self.assertEqual((argv[:2], argv[-3:]), (['--expect-machine', machine], ['path-info', '--path', path]))
+                self.assertNotIn('-t', json.loads((self.root / 'ssh-args.json').read_text()))
+
     def test_plain_commands_deliver_quotes_and_backslashes_exactly(self):
         for name, shell in login_shells().items():
             with self.subTest(shell=name):
@@ -196,8 +242,11 @@ class RemoteLoginShells(unittest.TestCase):
                 self.assertNotEqual(refused.returncode, 0, refused.stdout)
                 self.assertIn('update the selected computer to select sessions by ID', refused.stderr)
                 self.assertFalse((self.peer / 'argv.json').exists())
+        # A current peer lists every capability these calls need, including
+        # keep-warm's own (#1686, zerus-on03r).
         executable.write_text(older.replace("'  lifecycle-receipt-status-v1'",
-                                            "'  lifecycle-receipt-status-v1' '  session-id-selector-v1' '  session-reference-selector-v1'"))
+                                            "'  lifecycle-receipt-status-v1' '  session-id-selector-v1' '  session-reference-selector-v1'"
+                                            " '  session-keep-warm-v1'"))
         for call in calls:
             with self.subTest(call=call[1:3], peer='current'):
                 run(call)

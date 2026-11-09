@@ -402,6 +402,40 @@ describe("service approval intents", () => {
     expect(send.mock.calls).toEqual([["request-1", true], ["request-2", false]]);
     expect(read).toHaveBeenCalledOnce();
   });
+  it("sends a complete category set with the committed switch and settles only on its exact receipt", async () => {
+    const ids = ["read", "edit", "other"];
+    const send = vi.fn(async (request_id: string, enabled: boolean, categories?: string[]) =>
+      ({ request_id, enabled, categories, op: "automatic_approvals", accepted: true, durable: true }));
+    const intent = createServiceApprovalIntent(send, () => "request-1");
+    await intent.submitCategories(true, ids);
+    expect(send).toHaveBeenCalledExactlyOnceWith("request-1", true, ids);
+    expect(intent.pending()).toBeUndefined();
+    const other = createServiceApprovalIntent(async (request_id, enabled) =>
+      ({ request_id, enabled, categories: ["read"], op: "automatic_approvals", accepted: true, durable: true }), () => "request-2");
+    await expect(other.submitCategories(true, ids)).rejects.toThrow("not confirmed");
+    expect(other.pending()).toEqual({ id: "request-2", enabled: true, categories: ids });
+    await expect(other.submitCategories(true, ids)).rejects.toThrow("unconfirmed");
+  });
+  it("settles a category change refused for a switch changed elsewhere, so the next edit may go", async () => {
+    const send = vi.fn(async (request_id: string) => ({ request_id, op: "automatic_approvals", accepted: false, durable: false, pending: false, code: "approval_policy_changed" }));
+    const intent = createServiceApprovalIntent(send, () => "request-1");
+    await expect(intent.submitCategories(true, ["read"])).rejects.toThrow("turned on or off elsewhere");
+    expect(intent.pending()).toBeUndefined();
+  });
+  it("restores an uncertain category change after a reload and confirms it by its exact set", async () => {
+    const send = vi.fn();
+    const read = vi.fn(async () => ({ request_id: "native-original", op: "automatic_approvals", enabled: false,
+      categories: ["read", "paid"], accepted: true, durable: true, pending: false }));
+    const reloaded = createServiceApprovalIntent(send, () => "fresh-id", read);
+    await reloaded.check();
+    expect(reloaded.pending()).toBeUndefined();
+    const pending = vi.fn(async () => ({ request_id: "native-original", op: "automatic_approvals", enabled: false,
+      categories: ["read", "paid"], accepted: null, durable: false, pending: true }));
+    const waiting = createServiceApprovalIntent(send, () => "fresh-id", pending);
+    await expect(waiting.check()).rejects.toThrow("not confirmed");
+    expect(waiting.pending()).toEqual({ id: "native-original", enabled: false, categories: ["read", "paid"] });
+    expect(send).not.toHaveBeenCalled();
+  });
 
 });
 

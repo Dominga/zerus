@@ -24,6 +24,9 @@ describe("team feed lines (task 198)", () => {
   it("words a task's life with its title and attempt", () => {
     expect(line("handed_out", { by: "Zerus", to: "Backend", task: 3, attempt: 2 })).toMatchObject({ text: "Task to Backend, #3 Saved cards API, attempt 2", by: "Lead" });
     expect(line("delivered", { task: 3 }).text).toBe("Delivered #3 Saved cards API");
+    // Task #362: the lead's use of a member's last reply quotes the reply.
+    expect(line("reported", { by: "Lead", for: "Backend", task: 3, attempt: 1, text: "Done: the parser" }))
+      .toMatchObject({ text: "Report to Lead, #3 Saved cards API, attempt 1: “Done: the parser”", by: "Lead" });
     expect(line("interim_report", { member: "Backend", task: 3, attempt: 1, text: "half done" }))
       .toMatchObject({ text: "Interim report, #3 Saved cards API, attempt 1: “half done”", tone: "active", by: "Backend" });
     expect(line("unconfirmed", { task: 3, error: "timeout" })).toMatchObject({ text: "Delivery unconfirmed, #3 Saved cards API (timeout)", tone: "danger" });

@@ -7,6 +7,7 @@ import { expandAllCollapsedEntry } from "../sessions/background-menu";
 import { windowLayer, setWindowLayer } from "../../store/windowLayer";
 import { skin } from "../../skin/runtime";
 import { newSessionFromRail } from "../sessions/newsession-view";
+import { attentionBadgeText } from "./rail-badge";
 import { shortcutTooltip } from "../../store/shortcuts";
 import { openAbout } from "../../store/desk";
 import { trNoop, tr } from "../../i18n";
@@ -21,9 +22,10 @@ import { installedAppName, railVersion } from "../screens/settings/about-version
 // Glyphs and the 24px icon size follow tray/src/SessionsWindow.cpp:328-351.
 // Sessions is the one live screen of this phase; the others show where they will be.
 
+// Task #361: Qt's rail has no New team button; a new team starts at
+// "+ New team" on the selected session's tab row (SessionDetail).
 export const ITEMS: { id: Page; icon: string; label: string; tip: string; command: string }[] = [
   { id: "sessions", icon: "sessions", label: "Sessions", tip: "Sessions", command: "go.sessions" },
-  { id: "newteam", icon: "users", label: "New team", tip: "New team", command: "go.newteam" },
   { id: "designer", icon: "palette", label: "Team designer", tip: "Team designer", command: "go.designer" },
   { id: "projects", icon: "projects", label: "Projects", tip: "Projects", command: "go.projects" },
   { id: "machines", icon: "machines", label: "Machines", tip: trNoop("Machines and connection status"), command: "go.machines" },
@@ -54,12 +56,14 @@ export function Rail() {
       <For each={shown()}>
         {(item) => (
           <button class="rail-btn" classList={{ on: page() === item.id }} aria-current={page() === item.id ? "page" : undefined}
-            aria-label={tr(item.label)}
-            data-tip={labeled() ? undefined : shortcutTooltip(tr(item.tip), item.command)} data-tip-pos="right" onClick={() => setPage(item.id)}
+            aria-label={item.id === "sessions" && counts().attention > 0 ? tr("Sessions — %1 need attention", counts().attention) : tr(item.label)}
+            // A labeled rail shows its names, but the capped badge keeps its exact count on hover, as Qt always did (zerus-nfmh1).
+            data-tip={item.id === "sessions" && counts().attention > 0 ? shortcutTooltip(tr("Sessions — %1 need attention", counts().attention), item.command)
+              : labeled() ? undefined : shortcutTooltip(tr(item.tip), item.command)} data-tip-pos="right" onClick={() => setPage(item.id)}
             onContextMenu={(e) => { if (item.id !== "sessions") return; e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, items: [markAllEntry(), expandAllCollapsedEntry()] }); }}>
             <Icon name={item.icon} size={24} />
             <Show when={item.id === "sessions" && counts().attention > 0}>
-              <span class="rail-badge">{counts().attention}</span>
+              <span class="rail-badge" aria-hidden="true">{attentionBadgeText(counts().attention)}</span>
             </Show>
             <Show when={item.id === "waiting" && (waiting()?.total ?? 0) > 0}>
               <span class="rail-badge">{waiting()!.total}</span>

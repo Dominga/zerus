@@ -406,3 +406,68 @@ fn changes_pages_preserve_partial_cursors_without_claiming_walk_completion() {
     p["items"] = json!(vec![p["items"][0].clone(); CATALOG_ROWS + 1]);
     assert!(ChangePage::checked(p, REQUEST, EPOCH, "peer").is_err());
 }
+
+#[test]
+fn display_roster_includes_ungreeted_peers_without_creating_source_identity() {
+    let mut value = status();
+    value["background_runtime"] = json!({"epoch":EPOCH,"state":"running",
+        "display_only":true,"authority":false,"connections":[
+            {"id":"","status":"live","attempt":0},
+            {"id":"broken.example","status":"reconnecting","attempt":3}]});
+    let mut state = state();
+    state.status(&value).unwrap();
+    let rows = state.snapshot().fleet_computers.as_ref().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[1].id, "broken.example");
+    assert_eq!(rows[1].status, "reconnecting");
+    assert!(
+        state.sources().is_none(),
+        "display rows establish no source identity"
+    );
+    state.disconnect("unavailable");
+    assert!(state.snapshot().fleet_computers.is_none());
+}
+
+#[test]
+fn malformed_or_wrong_scope_connection_rosters_are_unknown() {
+    let valid = json!({"epoch":EPOCH,"state":"running","display_only":true,"authority":false,
+        "connections":[{"id":"","status":"live","attempt":0}]});
+    for (key, bad) in [
+        ("epoch", json!(REQUEST)),
+        ("authority", json!(true)),
+        ("display_only", json!(false)),
+        ("state", json!("stopping")),
+        (
+            "connections",
+            json!([{"id":"peer","status":"made-up","attempt":0}]),
+        ),
+        (
+            "connections",
+            json!([{"id":"peer","status":"live","attempt":false}]),
+        ),
+        (
+            "connections",
+            json!([{"id":"peer","status":"live","attempt":4294967296u64}]),
+        ),
+        (
+            "connections",
+            json!([{"id":"peer","status":"live","attempt":0},
+                             {"id":"peer","status":"live","attempt":0}]),
+        ),
+        (
+            "connections",
+            Value::Array(
+                (0..65)
+                    .map(|n| json!({"id":format!("p{n}"),"status":"live","attempt":0}))
+                    .collect(),
+            ),
+        ),
+    ] {
+        let mut input = valid.clone();
+        input[key] = bad;
+        assert!(
+            checked_connections(&input, EPOCH).is_none(),
+            "accepted malformed {key}"
+        );
+    }
+}

@@ -1,3 +1,4 @@
+import { TextInput } from "../lib/TextField";
 import { Show, createSignal, onMount, onCleanup } from "solid-js";
 import { Icon } from "../lib/icons";
 import type { AccountPrompt } from "../../store/accountManagement";
@@ -29,7 +30,7 @@ export default function AccountCatalogDialog(props: { prompt: AccountPrompt; clo
             ? tr("OpenCode will disappear from Accounts and New session for %1 in every Zerus connected to %1, including Zerus running on %1.\n\nIts native configuration, provider credentials and existing sessions on %1 are kept.\n\nTo use it here again, choose Add account.", view.machine)
             : tr("This account will disappear from Accounts and New session for %1 in every Zerus connected to %1, including Zerus running on %1.\n\nSign-in credentials and existing sessions on %1 are kept. The account stays available on its other machines.\n\nTo use it here again, choose Add account or Add to %1. Zerus can reuse the saved sign-in.", view.machine)}</p>
         </div>}>
-          <div class="form-row"><label for="rn-name">{tr("Account name")}</label><input id="rn-name" class="field" data-initial maxlength={160} value={label()} onInput={event=>setLabel(event.currentTarget.value)}/></div>
+          <div class="form-row"><label for="rn-name">{tr("Account name")}</label><TextInput id="rn-name" class="field" data-initial maxlength={160} value={label()} onInput={event=>setLabel(event.currentTarget.value)}/></div>
         </Show>
       </div>
       <div class="dlg-foot"><span class="spacer" />

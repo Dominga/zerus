@@ -6,7 +6,9 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use zerus_replica::execution::EXECUTION_TASK_SCHEMA as EXECUTION;
-use zerus_replica::phone::{answer, Answer, Budget, Exchange, Progress, Request};
+use zerus_replica::phone::{
+    answer, answer_with, Answer, Budget, Exchange, Inventories, Progress, Request,
+};
 use zerus_replica::{Actor, Inventory, NewTask, ProjectStore, SessionKey, Stage, Target, TaskDoc};
 
 fn store(root: &Path) -> ProjectStore {
@@ -942,4 +944,608 @@ fn held_tasks_arrive_at_the_execution_schema_across_pages() {
         assert!(!copy.needs_schema_repair());
     }
     assert_eq!(live_digest(&phone), live_digest(&computer));
+}
+
+/// Inventories from the store itself, recording what each call saw.
+struct Recorded<'a> {
+    store: &'a ProjectStore,
+    calls: Vec<String>,
+}
+
+impl Inventories for Recorded<'_> {
+    fn phone(&mut self, theirs: &Inventory) -> zerus_replica::Result<Inventory> {
+        let ours = self.store.phone_inventory(theirs)?;
+        self.calls.push(format!("phone {}", ours.tasks.len()));
+        Ok(ours)
+    }
+
+    fn live_digest(&mut self) -> zerus_replica::Result<String> {
+        self.calls.push("live".into());
+        Ok(self.store.live_inventory()?.0.digest())
+    }
+}
+
+#[test]
+fn an_answer_reads_its_inventories_from_the_source_it_is_given_after_the_import() {
+    let (phone_root, computer_root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (phone, computer) = (store(phone_root.path()), store(computer_root.path()));
+    add(&computer, "Add rate limiting");
+    let mut done = add(&computer, "Document the limits");
+    accept(&computer, &mut done);
+    // The phone brings a task the computer does not hold yet.
+    let new = add(&phone, "Written on the phone");
+    let bytes = phone.load(new.uuid()).unwrap().snapshot().unwrap();
+    let ask = json!({"schema": 1, "project": "project-1", "inventory": {"project": {}, "tasks": {}},
+        "updates": [{"task": new.uuid(), "bytes": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes)}]});
+    let mut recorded = Recorded {
+        store: &computer,
+        calls: Vec::new(),
+    };
+    let given = answer_with(&computer, request(ask.clone()), &mut recorded).unwrap();
+    // Asked once each, after the phone's task was imported: two live tasks.
+    assert_eq!(recorded.calls, ["phone 2", "live"]);
+    assert_eq!(given.imported, 1);
+    // The store's own inventories give the same answer (the task is already here now).
+    let again = answer(&computer, request(ask)).unwrap();
+    assert_eq!(again.imported, 0);
+    assert_eq!(
+        Answer {
+            imported: 1,
+            ..again
+        },
+        given
+    );
+}
+
+fn raw_task(bytes: &[u8]) -> loro::LoroDoc {
+    let raw = loro::LoroDoc::new();
+    raw.import(bytes).unwrap();
+    raw
+}
+
+fn update_bytes(answer: &Answer, uuid: &str) -> Vec<u8> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    STANDARD
+        .decode(
+            &answer
+                .updates
+                .iter()
+                .find(|u| u.task.as_deref() == Some(uuid))
+                .unwrap()
+                .bytes,
+        )
+        .unwrap()
+}
+
+fn fetch_done(phone: &ProjectStore, computer: &ProjectStore, uuid: &str) {
+    let mut exchange = Exchange::new();
+    exchange.fetch([uuid.to_owned()]);
+    let mut run = Run::default();
+    while step(&mut exchange, phone, computer, &mut run) {}
+    settled(run);
+}
+
+#[test]
+fn a_done_fetch_is_shallow_but_keeps_the_complete_task_state_and_attempt_facts() {
+    use zerus_replica::execution::{Receipt, ReportKind};
+    let (_a, _b, phone, computer) = pair();
+    let mut task = add(&computer, "Investigate and repair task replication");
+    // A long-lived requirement: many revisions, discussion, then one exact
+    // execution. The visible log stays; superseded text operations do not.
+    for revision in 1..=120 {
+        let sections: String = (0..24).map(|n| format!(
+            "Section {n}: review protocol revision {revision}, preserve request identity {}, and verify bounded offline recovery.\n",
+            noise(&format!("revision-{revision}-section-{n}"), 32)
+        )).collect();
+        task.edit_text(
+            &format!("# Task replication, revision {revision}\n{sections}"),
+            &Actor::Person,
+            revision + 1,
+        )
+        .unwrap();
+        if revision % 3 == 0 {
+            task.comment(
+                &format!("Revision {revision} reviewed; preserve reports and attempt evidence."),
+                &Actor::Person,
+                revision + 2,
+            )
+            .unwrap();
+        }
+    }
+    task.floor().unwrap();
+    computer.save(&mut task).unwrap();
+    reserve_first_attempt(&computer, task.uuid());
+    let mut task = computer.load(task.uuid()).unwrap();
+    let id = "11111111-1111-4111-8111-111111111111";
+    let executor = task.attempt(id).unwrap().unwrap().executor;
+    let receipt = Receipt {
+        request_id: id.into(),
+        name: "codex/api".into(),
+        run_id: "run-api".into(),
+        conversation_id: "conversation-api".into(),
+        first_message: false,
+        digest: "ab".repeat(32),
+        submitted: true,
+    };
+    task.settle_attempt(
+        id,
+        zerus_replica::Settlement::Receipt(&receipt),
+        &Actor::Person,
+        200,
+    )
+    .unwrap();
+    task.record_start(&Actor::Agent(executor.clone()), 201)
+        .unwrap();
+    assert!(
+        task.report_attempt(
+            id,
+            "Ready for review.",
+            ReportKind::Ready,
+            None,
+            &Actor::Agent(executor),
+            202
+        )
+        .unwrap()
+        .moves
+    );
+    task.set_stage(Stage::Done, &Actor::Person, 203).unwrap();
+    computer.save(&mut task).unwrap();
+    assert!(task.floor_record().is_some());
+    let full = task.snapshot().unwrap();
+    let answered = answer(&computer, request(json!({"schema":1,"project":"project-1","inventory":{"project":{},"tasks":{task.uuid():{}}}}))).unwrap();
+    let shallow = update_bytes(&answered, task.uuid());
+    let raw = raw_task(&shallow);
+    assert!(raw.is_shallow());
+    assert_eq!(raw.get_deep_value(), raw_task(&full).get_deep_value());
+    assert_eq!(raw.oplog_vv(), raw_task(&full).oplog_vv());
+    assert!(
+        shallow.len() < full.len(),
+        "full {}, shallow {}",
+        full.len(),
+        shallow.len()
+    );
+    println!(
+        "120 requirement revisions, 40 comments, one completed attempt: full={} shallow={}",
+        full.len(),
+        shallow.len()
+    );
+    let value = serde_json::to_value(&answered).unwrap();
+    assert_eq!(value["schema"], 1);
+    for required in ["schema", "imported", "refused", "updates", "more", "digest"] {
+        assert!(value.get(required).is_some());
+        let mut missing = value.clone();
+        missing.as_object_mut().unwrap().remove(required);
+        assert!(
+            serde_json::from_value::<Answer>(missing).is_err(),
+            "missing {required}"
+        );
+    }
+    assert_eq!(value.as_object().unwrap().len(), 6);
+    fetch_done(&phone, &computer, task.uuid());
+    let loaded = phone.load(task.uuid()).unwrap();
+    assert_eq!(loaded.floor_record(), task.floor_record());
+    assert_eq!(
+        loaded.attempt_facts(id).unwrap(),
+        task.attempt_facts(id).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(loaded.view().unwrap()).unwrap(),
+        serde_json::to_value(task.view().unwrap()).unwrap()
+    );
+}
+
+#[test]
+fn only_an_empty_version_done_fetch_changes_its_encoding() {
+    let (_a, _b, phone, computer) = pair();
+    let mut task = add(&computer, "Retain the ordinary live and desktop exchange");
+    let empty = || {
+        request(
+            json!({"schema":1,"project":"project-1","inventory":{"project":{},"tasks":{task.uuid():{}}}}),
+        )
+    };
+    assert!(!raw_task(&update_bytes(
+        &answer(&computer, empty()).unwrap(),
+        task.uuid()
+    ))
+    .is_shallow());
+    accept(&computer, &mut task);
+    // Ordinary desktop initial replication still carries the full document.
+    let (ours, _) = computer.inventory().unwrap();
+    let (full, _) = computer
+        .updates_for(&ours, &Inventory::default(), usize::MAX)
+        .unwrap();
+    assert!(!raw_task(
+        &full
+            .iter()
+            .find(|u| matches!(&u.document,zerus_replica::Document::Task(id) if id==task.uuid()))
+            .unwrap()
+            .bytes
+    )
+    .is_shallow());
+    // A cached full copy requests a nonempty version, and keeps that copy.
+    let imported = phone.import_updates(full).unwrap();
+    assert!(imported.refused.is_empty());
+    let before = phone.load(task.uuid()).unwrap();
+    comment(
+        &computer,
+        task.uuid(),
+        "A later comment uses the existing delta",
+    );
+    let request = Request {
+        schema: 1,
+        project: "project-1".into(),
+        inventory: phone.inventory().unwrap().0,
+        range: None,
+        updates: vec![],
+        resume: None,
+    };
+    let answer = answer(&computer, request).unwrap();
+    let bytes = update_bytes(&answer, task.uuid());
+    assert_eq!(
+        bytes,
+        computer
+            .load(task.uuid())
+            .unwrap()
+            .export_since(&before.version())
+            .unwrap()
+    );
+    settled(run(&phone, &computer, Budget::default()));
+    assert!(!raw_task(&phone.load(task.uuid()).unwrap().snapshot().unwrap()).is_shallow());
+}
+
+#[test]
+fn a_shallow_done_copy_keeps_later_comments_and_a_desktop_reopen() {
+    let (root, _b, phone, computer) = pair();
+    let mut task = add(&computer, "Continue after opening Done on the phone");
+    accept(&computer, &mut task);
+    fetch_done(&phone, &computer, task.uuid());
+    let path = task_file(root.path(), task.uuid());
+    let bytes = fs::read(&path).unwrap();
+    // Merely opening the cached Done task again never rewrites its files.
+    fetch_done(&phone, &computer, task.uuid());
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    comment(&computer, task.uuid(), "Later on the computer");
+    settled(run(&phone, &computer, Budget::default()));
+    comment(&phone, task.uuid(), "Later on the phone");
+    settled(run(&phone, &computer, Budget::default()));
+    let mut reopened = computer.load(task.uuid()).unwrap();
+    reopened.set_stage(Stage::Todo, &Actor::Person, 8).unwrap();
+    computer.save(&mut reopened).unwrap();
+    settled(run(&phone, &computer, Budget::default()));
+    assert_eq!(
+        phone.load(task.uuid()).unwrap().stage().unwrap(),
+        Stage::Todo
+    );
+    assert_eq!(comments(&phone, task.uuid()), 2);
+    assert_eq!(
+        phone.inventory().unwrap().0,
+        computer.inventory().unwrap().0
+    );
+}
+
+fn pre_root_pair(phone: &ProjectStore, computer: &ProjectStore) -> String {
+    let mut task = add(computer, "Original task text before accepting it");
+    let mut offline = TaskDoc::from_bytes(&task.snapshot().unwrap()).unwrap();
+    task.edit_text("Entirely different final requirement", &Actor::Person, 2)
+        .unwrap();
+    accept(computer, &mut task);
+    // Seed the independently specified shallow form, so this recovery
+    // control does not depend on the candidate answerer's encoding choice.
+    let raw = raw_task(&task.snapshot().unwrap());
+    let bytes = raw
+        .export(loro::ExportMode::shallow_snapshot(&raw.oplog_frontiers()))
+        .unwrap();
+    let imported = phone
+        .import_updates(vec![zerus_replica::Update {
+            document: zerus_replica::Document::Task(task.uuid().into()),
+            bytes,
+        }])
+        .unwrap();
+    assert!(imported.refused.is_empty());
+    // Another computer still holds the earlier branch. Its edit depends on
+    // characters the phone's new shallow root no longer retains.
+    offline
+        .edit_text(
+            "Original task text with an offline change",
+            &Actor::Person,
+            5,
+        )
+        .unwrap();
+    let delta = offline.export_since(&task.version()).unwrap();
+    let imported = computer
+        .import_updates(vec![zerus_replica::Update {
+            document: zerus_replica::Document::Task(task.uuid().into()),
+            bytes: delta,
+        }])
+        .unwrap();
+    assert!(imported.refused.is_empty());
+    task.uuid().into()
+}
+
+fn refuse_then_request_fresh(
+    exchange: &mut Exchange,
+    phone: &ProjectStore,
+    computer: &ProjectStore,
+    uuid: &str,
+) -> Request {
+    let before = phone.load(uuid).unwrap().version();
+    let request = exchange.next_request(phone).unwrap().unwrap();
+    assert!(!request.inventory.tasks[uuid].is_empty());
+    let answered = answer(computer, request).unwrap();
+    let progress = exchange.accept(phone, answered).unwrap();
+    assert_eq!(progress.refused_here.len(), 1);
+    assert!(progress.refused_here[0].error.contains("shallow history"));
+    assert_eq!(phone.load(uuid).unwrap().version(), before);
+    let fresh = exchange.next_request(phone).unwrap().unwrap();
+    assert!(fresh.inventory.tasks[uuid].is_empty());
+    assert!(fresh
+        .updates
+        .iter()
+        .all(|u| u.task.as_deref() != Some(uuid)));
+    fresh
+}
+
+#[test]
+fn pre_root_concurrency_refuses_then_refreshes_only_a_fully_covered_copy() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    for legacy_full_answer in [false, true] {
+        let (root, _b, phone, computer) = pair();
+        let uuid = pre_root_pair(&phone, &computer);
+        let path = task_file(root.path(), &uuid);
+        let saved = fs::read(&path).unwrap();
+        let mut exchange = Exchange::new();
+        let fresh = refuse_then_request_fresh(&mut exchange, &phone, &computer, &uuid);
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            saved,
+            "refusal never clears the copy"
+        );
+        let mut reply = answer(&computer, fresh).unwrap();
+        if legacy_full_answer {
+            reply
+                .updates
+                .iter_mut()
+                .find(|u| u.task.as_deref() == Some(&uuid))
+                .unwrap()
+                .bytes = STANDARD.encode(computer.load(&uuid).unwrap().snapshot().unwrap());
+        }
+        exchange.accept(&phone, reply).unwrap();
+        let mut rest = Run::default();
+        while step(&mut exchange, &phone, &computer, &mut rest) {}
+        settled(rest);
+        assert_eq!(
+            phone.load(&uuid).unwrap().version(),
+            computer.load(&uuid).unwrap().version()
+        );
+        assert_eq!(
+            serde_json::to_value(phone.load(&uuid).unwrap().view().unwrap()).unwrap(),
+            serde_json::to_value(computer.load(&uuid).unwrap().view().unwrap()).unwrap()
+        );
+    }
+}
+
+#[test]
+fn pre_root_refresh_keeps_unsent_edits_including_a_writer_after_the_request() {
+    for edit_after_request in [false, true] {
+        let (root, _b, phone, computer) = pair();
+        let uuid = pre_root_pair(&phone, &computer);
+        if !edit_after_request {
+            comment(&phone, &uuid, "Unsent local edit");
+        }
+        let mut exchange = Exchange::new();
+        let fresh = refuse_then_request_fresh(&mut exchange, &phone, &computer, &uuid);
+        let reply = answer(&computer, fresh).unwrap();
+        if edit_after_request {
+            comment(&phone, &uuid, "A writer after the fresh request");
+        }
+        let before = phone.load(&uuid).unwrap().version();
+        let path = task_file(root.path(), &uuid);
+        let saved = fs::read(&path).unwrap();
+        let error = exchange.accept(&phone, reply).unwrap_err().to_string();
+        assert!(
+            error.contains("unsent edits") && error.contains("review"),
+            "{error}"
+        );
+        assert_eq!(phone.load(&uuid).unwrap().version(), before);
+        assert_eq!(fs::read(path).unwrap(), saved);
+        assert_eq!(comments(&phone, &uuid), 1);
+        assert_eq!(comments(&computer, &uuid), 0);
+    }
+}
+
+#[test]
+fn a_shallow_done_fetch_uses_the_existing_multipart_resume_and_restart() {
+    let (_a, _b, phone, computer) = pair();
+    let mut task = add(&computer, "Inspect a large completed discussion");
+    for n in 0..5 {
+        task.comment(
+            &noise(&format!("shallow-comment-{n}"), 60_000),
+            &Actor::Person,
+            n + 2,
+        )
+        .unwrap();
+    }
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let data: Vec<u8> = (0u64..24_000)
+        .flat_map(|i| Sha256::digest(i.to_le_bytes()))
+        .collect();
+    let attachment = zerus_replica::TaskAttachment {
+        name: "capture.png".into(),
+        mime: "image/png".into(),
+        data_base64: STANDARD.encode(&data),
+        reference: "[Image #1]".into(),
+    };
+    task.set_attachments(std::slice::from_ref(&attachment), &Actor::Person, 8)
+        .unwrap();
+    accept(&computer, &mut task);
+    let mut exchange = Exchange::new();
+    exchange.fetch([task.uuid().into()]);
+    let first = exchange.next_request(&phone).unwrap().unwrap();
+    let reply = answer(&computer, first).unwrap();
+    let part = reply
+        .part
+        .as_ref()
+        .expect("large shallow state still uses parts");
+    assert_eq!(part.offset, 0);
+    let first_hash = part.sha256.clone();
+    exchange.accept(&phone, reply).unwrap();
+    let next = exchange.next_request(&phone).unwrap().unwrap();
+    assert_eq!(next.resume.as_ref().unwrap().sha256, first_hash);
+    let continued = answer(&computer, next.clone()).unwrap();
+    assert!(continued.part.as_ref().unwrap().offset > 0);
+    // A changed document restarts the same bounded part protocol at zero.
+    comment(
+        &computer,
+        task.uuid(),
+        "Changed while the old parts were in flight",
+    );
+    let restarted = answer(&computer, next).unwrap();
+    assert_eq!(restarted.part.as_ref().unwrap().offset, 0);
+    assert_ne!(restarted.part.as_ref().unwrap().sha256, first_hash);
+    exchange.accept(&phone, restarted).unwrap();
+    let mut rest = Run::default();
+    while step(&mut exchange, &phone, &computer, &mut rest) {}
+    settled(rest);
+    assert_eq!(comments(&phone, task.uuid()), 6);
+    assert_eq!(
+        phone.load(task.uuid()).unwrap().attachments().unwrap(),
+        [attachment]
+    );
+    assert!(raw_task(&phone.load(task.uuid()).unwrap().snapshot().unwrap()).is_shallow());
+}
+
+#[test]
+fn a_fresh_fetch_never_replaces_a_copy_that_became_damaged() {
+    let (root, _b, phone, computer) = pair();
+    let uuid = pre_root_pair(&phone, &computer);
+    let mut exchange = Exchange::new();
+    let fresh = refuse_then_request_fresh(&mut exchange, &phone, &computer, &uuid);
+    let reply = answer(&computer, fresh).unwrap();
+    let path = task_file(root.path(), &uuid);
+    fs::write(&path, b"damaged after the request").unwrap();
+    let error = exchange.accept(&phone, reply).unwrap_err().to_string();
+    assert!(!error.is_empty());
+    assert_eq!(fs::read(path).unwrap(), b"damaged after the request");
+}
+
+#[test]
+fn a_shallow_snapshot_does_not_lower_an_unknown_task_schema_or_enable_writes() {
+    let (_a, _b, phone, computer) = pair();
+    let mut task = add(&computer, "A task from a newer app");
+    accept(&computer, &mut task);
+    let raw = raw_task(&task.snapshot().unwrap());
+    raw.get_map("meta").insert("schema", 999).unwrap();
+    let mut task = TaskDoc::from_bytes(&raw.export(loro::ExportMode::Snapshot).unwrap()).unwrap();
+    computer.save(&mut task).unwrap();
+    fetch_done(&phone, &computer, task.uuid());
+    let mut loaded = phone.load(task.uuid()).unwrap();
+    assert_eq!(loaded.stored_schema(), 999);
+    assert!(raw_task(&loaded.snapshot().unwrap()).is_shallow());
+    assert!(loaded
+        .comment("Must stay read-only", &Actor::Person, 8)
+        .is_err());
+}
+
+#[test]
+fn a_phone_keeps_accepting_done_snapshots_from_an_older_full_answerer() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let (_a, _b, phone, computer) = pair();
+    let mut task = add(&computer, "A Done task from an older answerer");
+    accept(&computer, &mut task);
+    let mut exchange = Exchange::new();
+    exchange.fetch([task.uuid().into()]);
+    let requested = exchange.next_request(&phone).unwrap().unwrap();
+    assert!(requested.inventory.tasks[task.uuid()].is_empty());
+    let legacy:Answer=serde_json::from_value(json!({"schema":1,"imported":0,"refused":[],"updates":[{"task":task.uuid(),"bytes":STANDARD.encode(task.snapshot().unwrap())}],"more":false,"digest":live_digest(&computer)})).unwrap();
+    exchange.accept(&phone, legacy).unwrap();
+    let mut rest = Run::default();
+    while step(&mut exchange, &phone, &computer, &mut rest) {}
+    settled(rest);
+    let loaded = phone.load(task.uuid()).unwrap();
+    assert!(!raw_task(&loaded.snapshot().unwrap()).is_shallow());
+    assert_eq!(
+        serde_json::to_value(loaded.view().unwrap()).unwrap(),
+        serde_json::to_value(task.view().unwrap()).unwrap()
+    );
+}
+
+#[test]
+fn review_a_fresh_fetch_keeps_a_corrupted_unsent_update_block_for_review() {
+    let (root, _b, phone, computer) = pair();
+    let uuid = pre_root_pair(&phone, &computer);
+    let mut exchange = Exchange::new();
+    let fresh = refuse_then_request_fresh(&mut exchange, &phone, &computer, &uuid);
+    let reply = answer(&computer, fresh).unwrap();
+    comment(
+        &phone,
+        &uuid,
+        "Unsent comment whose bytes must be kept for review",
+    );
+    assert_eq!(comments(&phone, &uuid), 1);
+    let snapshot = task_file(root.path(), &uuid);
+    let updates = snapshot.with_extension("updates");
+    let saved_snapshot = fs::read(&snapshot).unwrap();
+    let mut damaged_update = fs::read(&updates).unwrap();
+    // Keep the original complete local block, changing only its checksum.
+    assert!(damaged_update.len() > 5);
+    damaged_update[4] ^= 1;
+    fs::write(&updates, &damaged_update).unwrap();
+    let result = exchange.accept(&phone, reply);
+    eprintln!(
+        "refresh={result:?}; snapshot_same={}; updates_same={}; local_comments={}",
+        fs::read(&snapshot).unwrap() == saved_snapshot,
+        fs::read(&updates).ok().as_ref() == Some(&damaged_update),
+        comments(&phone, &uuid)
+    );
+    assert!(
+        result.is_err(),
+        "a damaged local update must refuse the fresh replacement"
+    );
+    assert_eq!(fs::read(snapshot).unwrap(), saved_snapshot);
+    assert_eq!(fs::read(updates).unwrap(), damaged_update);
+}
+
+#[test]
+fn a_fresh_fetch_keeps_a_truncated_unsent_block_unchanged() {
+    let (root, _b, phone, computer) = pair();
+    let uuid = pre_root_pair(&phone, &computer);
+    let mut exchange = Exchange::new();
+    let fresh = refuse_then_request_fresh(&mut exchange, &phone, &computer, &uuid);
+    let reply = answer(&computer, fresh).unwrap();
+    comment(&phone, &uuid, "Unsent comment in a cut block");
+    let snapshot = task_file(root.path(), &uuid);
+    let updates = snapshot.with_extension("updates");
+    let saved = fs::read(&snapshot).unwrap();
+    let mut cut = fs::read(&updates).unwrap();
+    cut.pop().unwrap();
+    fs::write(&updates, &cut).unwrap();
+    let error = exchange.accept(&phone, reply).unwrap_err().to_string();
+    assert!(error.contains("updates are not whole"), "{error}");
+    assert_eq!(fs::read(snapshot).unwrap(), saved);
+    assert_eq!(fs::read(updates).unwrap(), cut);
+}
+
+#[test]
+fn a_fresh_fetch_keeps_a_complete_but_unapplied_unsent_block_unchanged() {
+    let (root, _b, phone, computer) = pair();
+    let uuid = pre_root_pair(&phone, &computer);
+    let mut exchange = Exchange::new();
+    let fresh = refuse_then_request_fresh(&mut exchange, &phone, &computer, &uuid);
+    let reply = answer(&computer, fresh).unwrap();
+    comment(&phone, &uuid, "The missing dependency");
+    comment(&phone, &uuid, "An unsent comment depending on it");
+    let snapshot = task_file(root.path(), &uuid);
+    let updates = snapshot.with_extension("updates");
+    let saved = fs::read(&snapshot).unwrap();
+    let blocks = fs::read(&updates).unwrap();
+    // Remove the first whole block, leaving the second one's framing and
+    // checksum intact but its dependency absent from the saved snapshot.
+    let first = 8 + u32::from_le_bytes(blocks[..4].try_into().unwrap()) as usize;
+    assert!(first < blocks.len());
+    let pending = blocks[first..].to_vec();
+    fs::write(&updates, &pending).unwrap();
+    let error = exchange.accept(&phone, reply).unwrap_err().to_string();
+    assert!(error.contains("cannot be read"), "{error}");
+    assert_eq!(fs::read(snapshot).unwrap(), saved);
+    assert_eq!(fs::read(updates).unwrap(), pending);
 }

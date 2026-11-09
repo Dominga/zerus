@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actionNeeded, headerAttention, isActive, isWorking, needsAttention, visibleUnreadReply } from "./attention";
+import { actionNeeded, countedAttention, countedHeaderAttention, headerAttention, isActive, isWorking, needsAttention, quietAttention, visibleUnreadReply } from "./attention";
 import type { Session } from "../ui/sessions/types";
 
 const row = (extra: Partial<Session> = {}): Session =>
@@ -62,5 +62,23 @@ describe("visibleUnreadReply (HgsClient.h:104-105)", () => {
     expect(visibleUnreadReply(row({ unread: true, unreadReply: true }), true)).toBe(true);
     expect(visibleUnreadReply(row({ unread: true, unreadCandidate: false }), true)).toBe(true);
     expect(visibleUnreadReply(row({ state: "archived", unread: true }), false)).toBe(false);
+  });
+});
+
+describe("supervised children (zerus-sa9qn.3)", () => {
+  it("never counts a quiet child's request or reply, but keeps it in the filters", () => {
+    const asking = row({ status: "attention", attentionNeeded: true, actionNeeded: true, quiet: true });
+    expect(needsAttention(asking, true)).toBe(true);
+    expect(quietAttention(asking)).toBe(true);
+    expect(countedAttention(asking, true)).toBe(false);
+    expect(countedHeaderAttention(asking, true)).toBe(false);
+    expect(countedAttention(row({ status: "attention", attentionNeeded: true, actionNeeded: true }), true)).toBe(true);
+  });
+
+  it("still counts the person's own Review later mark on a quiet child, never on a muted one", () => {
+    expect(countedAttention(row({ quiet: true, reviewLater: true }), true)).toBe(true);
+    expect(countedHeaderAttention(row({ quiet: true, reviewLater: true }), false)).toBe(true);
+    expect(countedAttention(row({ quiet: true, muted: true, reviewLater: true }), true)).toBe(false);
+    expect(countedAttention(row({ quiet: true, reviewLater: true, state: "archived" }), true)).toBe(false);
   });
 });

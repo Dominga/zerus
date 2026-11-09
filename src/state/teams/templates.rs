@@ -200,7 +200,7 @@ pub(crate) const BUILTIN: &[Template] = &[
     // runner leg stays the owner's step by hand (docs/release-candidate.md).
     Template {
         id: "release-candidate",
-        summary: "the fork release candidate's local leg on a Windows worker: Qt offscreen suites, fork handoff/update, the Tauri build and portable zip self-test with the fork build and feed, recorded for the commit",
+        summary: "the fork release candidate's local leg on a Windows worker: fork handoff/update, the Tauri build and portable zip self-test with the fork build and feed (no Qt), each step's seconds and the zip size recorded for the commit",
         program: "python",
         args: &["scripts/release-candidate.py", "--commit={commit}", "--fork-build={fork_build}", "--fork-feed={fork_feed}"],
         params: &[

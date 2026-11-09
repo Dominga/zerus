@@ -27,13 +27,17 @@ import { duration, memberProgress, memberStatus, progress, shownMembers, stateLa
 import { roleStyle } from "./roles";
 import { TeamProposals } from "./ProposalCards";
 import { ledTeamOf, leadsTeam } from "./leadTeam";
-import { TeamReports } from "./TeamReports";
+import { ArchivedTaskReport, TeamReports } from "./TeamReports";
+import { WorkingModeRow } from "./WorkingModeRow";
+import { closeWorkingMode, markWorkingModeKept, workingModeShown } from "../../store/workingMode";
 import { WaitingBanner } from "./Waiting";
 import { Blockers, PhaseActions, TaskActions, TeamBarActions, TeamBarChips, TeamModeControl, TeamQuestions, createPlanEditing } from "./TeamActions";
+import { noReportReply } from "./noReport";
 import { TeamActions as TeamActionModel } from "./actions";
 import { composer } from "../../store/composer";
 import type { ComputerId, TeamCall, TeamMemberView, TeamTaskView, TeamView } from "../../types";
 import type { Session } from "../sessions/types";
+import { TextArea } from "../lib/TextField";
 
 // The Team tab (Qt's TeamWorkspace, design D3, HANDOFF §14): the team bar and
 // its strips, the canvas, and a side column split between the members and the
@@ -92,6 +96,9 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [catalogOpen, setCatalogOpen] = createSignal(false);
   const [tests, setTests] = createSignal<TeamTestsView | null>(null);
+  const [reportTask, setReportTask] = createSignal<number | null>(null);
+  const reportTeam = createMemo(() => props.team.id);
+  createEffect(() => { props.computer; reportTeam(); setReportTask(null); });
   const graph = () => teams.graph(props.computer, props.team.id);
   const profile = () => teams.profile(props.computer, props.team.id);
   // Task 196: the phase header's actions (PhaseActions) replace the plan's
@@ -174,24 +181,19 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
         onSettings={() => setSettingsOpen(true)}
         onCatalog={() => setCatalogOpen(true)} />
       <WaitingBanner />
-      <TeamReports computer={props.computer} team={props.team} />
-      <Show when={props.team.working_mode?.disagreeing?.length ? props.team.working_mode.disagreeing : undefined}>
-        {(wrong) => (
-          <section class="team-working-mode" data-working-mode={props.team.working_mode!.preset}>
-            <b>{tr("Working mode: the project suggests %1", props.team.working_mode!.proposal?.title || props.team.working_mode!.proposal?.preset || props.team.working_mode!.preset)}</b>
-            <p>{tr("This team's settings differ: %1", wrong().join(", "))}</p>
-            <Show when={props.team.working_mode!.proposal?.reasons?.length}>
-              <ul><For each={props.team.working_mode!.proposal!.reasons}>{(reason) => <li>{reason}</li>}</For></ul>
-            </Show>
-            <button type="button" class="btn small" data-working-mode-switch
-              onClick={() => void new TeamActionModel(windowPort, () => ({ computer: props.computer, team: props.team }))
-                .proposeWorkingMode(props.team.working_mode!.proposal?.preset || props.team.working_mode!.preset,
-                  props.team.working_mode!.proposal?.title || "")}>
-              {tr("Propose the switch")}
-            </button>
-            <TeamProposals computer={props.computer} team={props.team} />
-          </section>
-        )}
+      <TeamReports computer={props.computer} team={props.team} onOpenReport={setReportTask} />
+      <Show when={reportTask()}>{(task) => <ArchivedTaskReport computer={props.computer} team={reportTeam()} task={task()} onClose={() => setReportTask(null)} />}</Show>
+      <Show when={workingModeShown(props.team)}>
+        <WorkingModeRow preset={props.team.working_mode!.preset}
+          title={props.team.working_mode!.proposal?.title || props.team.working_mode!.proposal?.preset || props.team.working_mode!.preset}
+          reasons={props.team.working_mode!.proposal?.reasons ?? []}
+          disagreeing={props.team.working_mode!.disagreeing ?? []}
+          onKeep={() => void new TeamActionModel(windowPort, () => ({ computer: props.computer, team: props.team }))
+            .keepWorkingMode().then((outcome) => { if (outcome && outcome !== "cancelled") markWorkingModeKept(props.team); })}
+          onPropose={() => void new TeamActionModel(windowPort, () => ({ computer: props.computer, team: props.team }))
+            .proposeWorkingMode(props.team.working_mode!.proposal?.preset || props.team.working_mode!.preset,
+              props.team.working_mode!.proposal?.title || "")}
+          onClose={() => closeWorkingMode(props.team)} />
       </Show>
       <Show when={props.failure}><div class="team-strip danger" role="status"><Icon name="circle-alert" size={14} /><span class="ell">{props.failure}</span></div></Show>
       <Show when={state() === "stuck"}>
@@ -244,10 +246,13 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
                 onLoadProfile={() => { void teamsProfile(props.computer); }}
                 loadTimeline={(phase) => teamTimeline(props.computer, props.team.id, phase)}
                 onLoadTests={loadTests}
+                onOpenReport={setReportTask}
                 taskActions={(id) => {
                   const task = props.team.tasks.find((candidate) => candidate.id === id);
-                  return task ? <TaskActions computer={props.computer} team={props.team} task={task} /> : <></>;
+                  return task && !task.archived ? <TaskActions computer={props.computer} team={props.team} task={task} /> : <></>;
                 }}
+                noReportReply={(id) => noReportReply(teams.inbox(props.computer, props.team.id)?.items ?? [], id)}
+                onUseLastReply={(task) => void new TeamActionModel(windowPort, () => ({ computer: props.computer, team: props.team })).useLastReply(task)}
                 phaseActions={(n) => <PhaseActions computer={props.computer} team={props.team} phase={n} owner={props.owner} />}
                 editing={plan.editing()}
                 problems={planProblems()}
@@ -440,6 +445,8 @@ function SideColumn(props: {
 }) {
   const members = createMemo(() => shownMembers(props.team));
   const lead = createMemo(() => props.team.members.find((member) => member.lead));
+  // Task #347: the Members header explains the card colours on hover.
+  const memberLegend = () => tr("State colours: working, building and running tests are blue; waiting for its own job, for the lead or for a person is amber; needs your answer, blocked or failed is red; idle or done is grey; paused or offline is muted and hatched.");
   // Spec 5.6: the members as a tree; a folded sub-lead hides its reports.
   const [folded, setFolded] = createSignal<Set<string>>(new Set());
   const tree = createMemo(() => {
@@ -456,7 +463,7 @@ function SideColumn(props: {
       <SideLists team={props.team} onGo={props.onGo} />
       <TeamQuestions computer={props.computer} team={props.team} />
       <section class="team-members" style={{ height: `${teamLayout.membersShare()}%` }} aria-label={tr("Members")}>
-        <div class="team-section-head"><b>{tr("Members")}</b><span class="dim mono">{members().length}</span>
+        <div class="team-section-head" title={memberLegend()}><b>{tr("Members")}</b><span class="dim mono">{members().length}</span>
           <span class="grow" />
           <Show when={canAdd()}>
             <button type="button" class="btn ghost small" data-action="add-member" title={tr("Add a member; it starts with the first task it gets")} onClick={() => setAdding(true)}>{tr("+ Member")}</button>
@@ -552,7 +559,7 @@ export function LeadConversation(props: { computer: ComputerId; lead?: Pick<Team
       {props.children}
       <Show when={own()} fallback={
         <div class="cmp-col team-coordinator-draft">
-          <textarea class="field" rows={2} data-coordinator-draft aria-label={props.label} placeholder={props.placeholder} value={text()}
+          <TextArea class="field" rows={2} data-coordinator-draft aria-label={props.label} placeholder={props.placeholder} value={text()}
             onInput={(event) => setText(event.currentTarget.value)}
             onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); carry(); } }} />
           <button class="btn small primary" data-coordinator-send onClick={carry}>{props.send}</button>

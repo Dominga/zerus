@@ -21,6 +21,12 @@ fn structured_kind(text: &str) -> Option<&'static str> {
 // Native structured refusal/reset evidence precedes a known transient message.
 // Generic saved error_kind=quota is deliberately not native type/code evidence.
 pub(super) fn native_kind(error: &Value) -> Option<&'static str> {
+    // A present non-string is invalid evidence, not an absent native code.
+    // Keep it manual even when the human message contains a known 429 window.
+    if ["native_error_type", "native_error_code"].iter()
+        .any(|key| error.get(*key).is_some_and(|value| !value.is_string())) {
+        return Some("provider");
+    }
     if category(string(error, "detail")) == "provider_policy" { return Some("provider_policy"); }
     let mut reset = None;
     for key in ["native_error_type", "native_error_code"] {
@@ -40,8 +46,15 @@ pub(super) fn rolling_rate_limit(text: &str) -> bool {
     };
     // Kimi's rolling rate window is separate from its monthly total quota.
     // Its native error includes quota wording and an upsell, but no reset time.
+    rolling_window_reset(rest) && rolling_window_context(&text, prefix)
+}
+
+fn rolling_window_reset(rest: &str) -> bool {
     rest.trim_start().starts_with("your quota will reset when the current 5-hour window ends.")
-        && prefix.chars().last().is_none_or(|c| !c.is_ascii_alphanumeric())
+}
+
+fn rolling_window_context(text: &str, prefix: &str) -> bool {
+    prefix.chars().last().is_none_or(|c| !c.is_ascii_alphanumeric())
         && structured_kind(prefix).is_none()
         && !["authentication", "auth_error", "autherror", "auth error", "auth failed", "auth_failed",
              "auth failure", "authorization", "not authorized", "not authorised", "unauthorized", "unauthorised",
@@ -50,6 +63,30 @@ pub(super) fn rolling_rate_limit(text: &str) -> bool {
              "max-tokens", "token limit", "model_not_found", "model not found", "not supported", "invalid request"]
             .iter().any(|word| text.contains(word))
         && !prefix.split(|c: char| !c.is_ascii_alphanumeric()).any(|word| ["401", "403"].contains(&word))
+}
+
+pub(super) const KIMI_RATE_LIMIT_TYPE: &str = "APIProviderRateLimitError";
+
+/// Kimi 2.5.2's StopFailure supplies the native type but leaves HTTP status
+/// out of error_message. Retain that evidence rather than inventing a 429 in
+/// the displayed error. A generic saved quota/rate label is not this proof.
+pub(super) fn rolling_rate_error(error: &Value) -> bool {
+    if native_kind(error).is_some() { return false; }
+    if rolling_rate_limit(&native_detail(error)) { return true; }
+    let code = match error.get("native_error_code") {
+        None => "",
+        Some(Value::String(code)) => code,
+        _ => return false,
+    };
+    if string(error, "source") != "provider_hook"
+        || string(error, "native_error_type") != KIMI_RATE_LIMIT_TYPE
+        || !code.is_empty() {
+        return false;
+    }
+    let text = string(error, "detail").to_lowercase().replace('’', "'");
+    let Some(rest) = text.strip_prefix("you've reached your 5-hour usage limit.") else { return false; };
+    rolling_window_reset(rest) && rolling_window_context(&text, "") && structured_kind(&text).is_none()
+        && !text.split(|c: char| !c.is_ascii_alphanumeric()).any(|word| ["401", "403"].contains(&word))
 }
 
 pub(super) fn native_detail(error: &Value) -> String {
@@ -172,12 +209,14 @@ pub(super) fn apply(output: &mut Value, error: &Value) {
     // Normalize saved failures too; older hooks used the generic rate-limit kind.
     let mut error = error.clone();
     let detail = native_detail(&error);
-    let rolling = rolling_rate_limit(&detail);
+    let rolling = rolling_rate_error(&error);
     let native = native_kind(&error);
     let kind = if let Some(kind) = native {
         kind.to_owned()
-    } else if rolling && !["", "provider", "quota", "rate_limit"].contains(&string(&error, "error_kind")) {
-        string(&error, "error_kind").to_owned()
+    } else if rolling {
+        if ["", "provider", "quota", "rate_limit"].contains(&string(&error, "error_kind")) {
+            "rate_limit".to_owned()
+        } else { string(&error, "error_kind").to_owned() }
     } else {
         category(&format!("{} {}", string(&error, "error_kind"), detail)).to_owned()
     };
@@ -551,6 +590,56 @@ mod tests {
         assert!(!completed_failure(&record),"another conversation cannot borrow completion");
     }
     const KIMI_WINDOW: &str = "429 You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends. To continue now, purchase extra usage or upgrade your plan: https://example.invalid/subscription?tab=quota";
+
+    #[test]
+    fn typed_kimi_window_keeps_its_native_message_and_failure_identity() {
+        let detail = KIMI_WINDOW.strip_prefix("429 ").unwrap();
+        let mut error = event("native-window", 123.0, detail, "provider_hook");
+        assert_eq!(error["error_kind"], "quota");
+        assert!(!rolling_rate_error(&error), "the message alone is not native status evidence");
+        error["native_error_type"] = json!(KIMI_RATE_LIMIT_TYPE);
+        error["native_error_code"] = json!("");
+        assert!(rolling_rate_error(&error));
+        let mut output = json!({"run_id":"original-run","conversation_id":"original-conversation"});
+        apply(&mut output, &error);
+        assert_eq!(output["provider_error"]["error_kind"], "rate_limit");
+        assert_eq!(output["provider_error"]["detail"], detail);
+        assert_eq!(output["provider_error"]["native_error_type"], KIMI_RATE_LIMIT_TYPE);
+        assert_eq!(failure_id(&output["provider_error"]), failure_id(&error));
+        assert_eq!(output["run_id"], "original-run");
+        assert_eq!(output["conversation_id"], "original-conversation");
+        assert!(output["provider_error"].get("reset_at").is_none());
+        assert!(output["provider_error"].get("retry_not_before").is_none());
+        for kind in ["authentication", "context_limit", "provider_policy"] {
+            error["error_kind"] = json!(kind);
+            apply(&mut output, &error);
+            assert_eq!(output["provider_error"]["error_kind"], kind);
+        }
+    }
+
+    #[test]
+    fn typed_window_never_promotes_missing_evidence_or_permanent_errors() {
+        let detail = KIMI_WINDOW.strip_prefix("429 ").unwrap();
+        let valid = json!({"source":"provider_hook","detail":detail,"native_error_type":KIMI_RATE_LIMIT_TYPE});
+        for (key, value) in [("source", "provider_log"), ("native_error_type", ""),
+            ("native_error_type", "OtherRateLimitError"), ("native_error_code", "quota"),
+            ("native_error_code", "authentication"), ("native_error_code", "provider_policy"),
+            ("native_error_code", "model_unavailable"), ("native_error_code", "unknown") ] {
+            let mut error = valid.clone(); error[key] = json!(value);
+            assert!(!rolling_rate_error(&error), "{error}");
+        }
+        for value in [Value::Null, json!(429), json!({}), json!([])] {
+            let mut error = valid.clone(); error["native_error_code"] = value;
+            assert!(!rolling_rate_error(&error), "{error}");
+        }
+        for message in ["You've reached your 5-hour usage limit.".to_owned(),
+            detail.replace("5-hour", "weekly"), format!("{detail} HTTP 401"), format!("{detail} HTTP 403"),
+            format!("{detail} monthly quota exhausted"), format!("{detail} insufficient credit"),
+            format!("{detail} content_filter"), format!("{detail} invalid_request_error")] {
+            let mut error = valid.clone(); error["detail"] = json!(message);
+            assert!(!rolling_rate_error(&error), "{error}");
+        }
+    }
 
     #[test]
     fn kimi_rolling_window_is_a_rate_limit_despite_quota_and_upgrade_wording() {

@@ -987,8 +987,10 @@ class NativeKimi(lifecycle.Harness):
             return state if state.get('phase') == 'error' and state.get('provider_error') else None
         failure = self.until(failed, name)
         self.assertEqual(failure['provider_error']['error_kind'], 'rate_limit')
-        self.assertIn('429', failure['provider_error']['detail'])
-        self.assertIn(self.model_server.failure, failure['provider_error']['detail'])
+        # Kimi 2.5.2 puts the rate-limit evidence in the type, not a status
+        # prefix in error_message. Preserve that native message verbatim.
+        self.assertEqual(failure['provider_error']['native_error_type'], 'APIProviderRateLimitError')
+        self.assertEqual(failure['provider_error']['detail'], self.model_server.failure)
         self.assertFalse(failure['provider_error'].get('reset_at'))
         self.assertEqual(len(self.requests), 1)  # Native attempts finished first.
         self.assertEqual(self.held(text), 1)

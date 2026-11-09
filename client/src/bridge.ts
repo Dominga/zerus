@@ -4,9 +4,9 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type ActivityEvent, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalEvent, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget, type Answer, type ComposerTab, type ComposerView, type Inspect, type SendReply, type SessionRef, type AttachmentRef, type Fetched, type TaskFileSource, type ConflictsPage, type DraftSource, type SavedDraftDetail, type SavedDraftsPage, type QuestionEdit, type QuestionReply, type ClearControl, emptyUsage, type TerminalFinished, type SessionUsageRef, type Usage, type HgsSettingName, type HgsSettingOutcome } from "./types";
 import type { CreatedWorktree, CreationAction, CreationAdmission, CreationCard, CreationEvent, FolderOut, LaunchAccounts, LaunchChoices, LaunchPlan, LaunchStart, MachineMeta, NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, RepositoryFields } from "./types";
+import type { Text } from "./text";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
-import type { Text } from "./text";
 import { emptyUpdatesView, type UpdateChannel, type UpdatesView } from "./types";
 
 // The one path from the Rust side to the stores. The frontend asks for the next
@@ -15,10 +15,6 @@ import { emptyUpdatesView, type UpdateChannel, type UpdatesView } from "./types"
 // poll. A batch is applied in the frame after it arrives, at most one per
 // frame. Outside Tauri (`npm run dev` in a browser) a built-in replay of the
 // synthetic fixture stands in, so the UI works without the app.
-
-/** A local explanation only, with no runtime, import or permission action. */
-export const qtUpgradeNotice = () => desktop<boolean>("qt_upgrade_notice", {});
-export const acknowledgeQtUpgradeNotice = () => desktop<void>("qt_upgrade_notice_ack", {});
 
 export type BridgeMode = "tauri" | "replay";
 
@@ -29,6 +25,19 @@ export interface Source extends ActivityPort {
 let source: Source | undefined;
 
 export const inTauri = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+/** Task 409: the client log's last line, its writer, and the whole log in the system viewer. */
+export const logLatest = () => inTauri() ? invoke<string | null>("log_latest") : Promise.resolve(null);
+export const logWrite = (level: string, text: string) => inTauri() ? invoke<void>("log_write", { level, text }) : Promise.resolve();
+export const openLog = () => inTauri() ? invoke<void>("log_open") : Promise.resolve();
+
+/** Content-free invariant evidence through the existing capped stderr logger. */
+export async function reportDetailInvariant(line: string): Promise<void> {
+  if (inTauri()) {
+    try { await invoke<void>("perf_log", { line }); return; } catch { /* Best-effort evidence; no retry or UI operation. */ }
+  }
+  console.warn(line);
+}
 
 export const nativeUiOpen = (request: import("./store/native-ui-model").NativeRequest, reload: boolean, embedded: boolean) => desktop<import("./store/native-ui-model").NativeStatus>("native_ui_open", { request, reload, embedded });
 export const nativeUiRetire = () => inTauri() ? invoke<void>("native_ui_retire") : Promise.resolve();
@@ -44,6 +53,7 @@ export async function followTasks(project: string | null): Promise<void> {
 
 
 export const taskEditorOpen = (target: import("./store/taskEditor").TaskEditorTarget) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_open", { ...target });
+export const reviewTaskCopy = (project: string, uuid: string, fingerprint?: string) => desktop<import("./store/taskCopyReview").CopyReviewReply>("task_copy_review", { project, uuid, fingerprint: fingerprint ?? null });
 export const taskEditorEdit = (input: Pick<import("./store/taskEditor").TaskEditorView, "handle" | "rev" | "text" | "position" | "anchor">) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_edit", { input });
 export const taskEditorPick = (handle: number, start: number, end: number) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_pick", { handle, start, end });
 export const taskEditorRemove = (handle: number, index: number) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_files", { handle, change: { kind: "remove", index } });
@@ -116,6 +126,9 @@ export const teamRoleModels = (computer: ComputerId, agent: string, account: str
 /** Task 11: reads one team once, as an answer in Waiting for you does before it sends. */
 export const teamRead = (computer: ComputerId, team: string) =>
   inTauri() ? invoke<import("./types").TeamView>("team_read", { computer, team }) : Promise.reject(new Error("Teams need the desktop app."));
+/** Reads exactly one selected live or archived task, never the team history. */
+export const teamTaskRead = (computer: ComputerId, team: string, task: number) =>
+  teamsOnly<import("./types").TeamTaskDetailView>("team_task_read", { computer, team, task });
 /** Reads the watched team's feed page before the oldest event shown; false when there is none to read. */
 export const teamsOlder = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_older", { computer }) : Promise.resolve(false);
 /** Task 75: why this process is sandboxed, null on a normal desktop. */
@@ -131,6 +144,9 @@ export const sandboxFolderGrant = (folder: string, elevated: boolean) =>
 /** Task 69: moves one local session to another account after the owner confirms. */
 export const sessionSwitchAccount = (session: string, account: string, request: string) =>
   inTauri() ? invoke<Record<string, unknown>>("session_switch_account", { session, account, request }) : Promise.reject(new Error("Accounts need the desktop app."));
+/** Task 352: what an account choice would do (the same agent's switch, or a move to another agent). */
+export const sessionSwitchPreview = (session: string, account: string) =>
+  inTauri() ? invoke<Record<string, unknown>>("session_switch_preview", { session, account }) : Promise.reject(new Error("Accounts need the desktop app."));
 /** Task 51: loads the next older Waiting page; false when there is none. */
 export const teamsWaitingOlder = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_waiting_older", { computer }) : Promise.resolve(false);
 /** Task 51: raises or clears Waiting item notifications through the native notifier. */
@@ -152,7 +168,10 @@ export const teamTimeline = (computer: ComputerId, team: string, phase: number |
 /** The UUID of the task a deep link's short reference names, after one bounded read that checks it. */
 export const resolveTaskReference = (project: string, reference: string) => desktop<string>("task_reference", { project, reference });
 /** One further page of a board stage after a cursor (`task list --stage --limit --after`). */
-export const readTaskPage = (project: string, stage: string, limit: number, after: string | null) => desktop<unknown>("task_page", { project, stage, limit, after });
+/** One session's view of a stage: its identity (`launch_id:...` or `run_id:...`) on its computer (empty: this one). */
+export type TaskScope = { host: string; sessionId: string };
+export const readTaskPage = (project: string, stage: string, limit: number, after: string | null, scope?: TaskScope) =>
+  desktop<unknown>("task_page", { project, stage, limit, after, ...(scope ? { session: scope.sessionId, host: scope.host || null } : {}) });
 export const openTaskAttachment = (path: string) => desktop<string | null>("task_attachment_open", { path });
 /** One file of a task, read when its card needs it, checked against its page and kept in the private cache. */
 export const readTaskAttachment = (project: string, task: string, source: TaskFileSource) =>
@@ -293,6 +312,7 @@ export function normalize(b: Partial<Batch>): Batch {
     upserts: b.upserts ?? e.upserts, removes: b.removes ?? e.removes, replaces: b.replaces ?? e.replaces, computers: b.computers ?? e.computers,
     machines: b.machines ?? [], activity: b.activity ?? e.activity, tasks: b.tasks ?? [], groups: b.groups ?? [], grouping: b.grouping ?? undefined,
     desktop_service: b.desktop_service ?? undefined,
+    git: b.git ?? [],
     processes_view: b.processes_view ?? undefined,
     composer: b.composer ?? undefined, draft_keys: b.draft_keys ?? undefined, composer_events: b.composer_events ?? undefined,
     // Task 76: the Teams views (list, Waiting, a team) arrive in batch.teams;
@@ -306,6 +326,10 @@ export const activityPort: ActivityPort = {
   follow: (request) => source?.follow(request) ?? Promise.resolve(),
   unfollow: (computer, key) => source?.unfollow(computer, key) ?? Promise.resolve(),
 };
+
+/** Bounded current row identities; native code selects the actual paths. */
+export const gitRows = (rows: { computer: string; key: string }[]) =>
+  inTauri() ? invoke<void>("git_rows", { rows }) : Promise.resolve();
 
 /** Process RSS and CPU of the app, when running in Tauri. */
 export async function metrics(windowMs?: number): Promise<Record<string, unknown> | undefined> {
@@ -326,6 +350,25 @@ export async function runAction(target: Target, action: Action, delay?: import("
 export async function setNotifications(target: Target, muted: boolean, expectedRevision: number | null): Promise<Record<string, unknown>> {
   if (!inTauri()) throw new Error("Actions need the desktop app.");
   return invoke<Record<string, unknown>>("set_notifications", { target, muted, expectedRevision });
+}
+
+/** What the person chose for Keep cache warm (core `keep_warm::Choice`). */
+export type KeepWarmChoice = { kind: "off" } | { kind: "hours"; hours: number } | { kind: "always" };
+
+/**
+ * Turns Keep cache warm on or off for a session; resolves with the host's
+ * confirmed `keep_warm`. A rejection carries the host's reason.
+ */
+export async function setKeepWarm(target: Target, choice: KeepWarmChoice, expectedRevision: number): Promise<Record<string, unknown>> {
+  if (!inTauri()) throw new Error("Actions need the desktop app.");
+  return invoke<Record<string, unknown>>("set_keep_warm", { target, choice, expectedRevision });
+}
+
+/** A session's parent link change (zerus-sa9qn.9), checked by its host; resolves with the host's reply. */
+export type ParentChange = { kind: "clear" } | { kind: "set"; session_id: string; name: string; conversation_id: string; run_id: string; replace: boolean };
+export async function setParent(target: Target, change: ParentChange): Promise<Record<string, unknown>> {
+  if (!inTauri()) throw new Error("Actions need the desktop app.");
+  return invoke<Record<string, unknown>>("set_parent", { target, change });
 }
 
 /** The inspect fields of a session; null when they are unavailable. */
@@ -411,6 +454,12 @@ export async function copyCommand(computer: string, name: string, archiveId: str
   return invoke<string>("copy_command", { computer, name, archiveId });
 }
 
+/** Open an external terminal attached only to the selected existing run. */
+export async function sessionTerminalOpen(target: Target): Promise<string | null> {
+  if (!inTauri()) throw "Actions need the desktop app.";
+  return invoke<string | null>("session_terminal_open", { target });
+}
+
 /**
  * One checked page of a computer's archive (`archive_page`, `hgs [@alias] archives --json`);
  * `request` is the archive store's request number. Rejects with Qt's text for
@@ -463,12 +512,42 @@ export async function copyText(text: string): Promise<void> {
   await navigator.clipboard.writeText(text);
 }
 
+/** Reference an existing file's local check (zerus-5wmh.13.5): one bounded metadata call in Rust, per dialog. */
+export type FileReferenceCheck = { status: "file"; path: string } | { status: "missing" } | { status: "busy" };
+export const fileReferenceCheck = (dialog: number, path: string): Promise<FileReferenceCheck> =>
+  inTauri() ? invoke<FileReferenceCheck>("file_reference_check", { dialog, path }) : Promise.resolve({ status: "missing" });
+/**
+ * A remote computer's existence check (zerus-5wmh.13.18): `hgs path-info`,
+ * one bounded call per dialog that its close cancels. "unchecked" is a
+ * computer without the command, whose path is inserted as before.
+ */
+export type FileReferenceRemoteCheck = { status: "file" | "missing" | "unreadable" | "unchecked" | "busy" | "superseded" };
+/** Whether the remote computer checks paths; null while that is unknown. */
+export const fileReferenceRemoteSupport = (dialog: number, computer: string): Promise<boolean | null> =>
+  inTauri() ? invoke<boolean | null>("file_reference_remote_support", { dialog, computer }) : Promise.resolve(null);
+export const fileReferenceCheckRemote = (dialog: number, computer: string, path: string): Promise<FileReferenceRemoteCheck> =>
+  inTauri() ? invoke<FileReferenceRemoteCheck>("file_reference_check_remote", { dialog, computer, path }) : Promise.resolve({ status: "unchecked" });
+/** The dialog closed: its remote calls end. */
+export const fileReferenceCancel = (dialog: number): Promise<void> => inTauri() ? invoke<void>("file_reference_cancel", { dialog }) : Promise.resolve();
+/** Browse… for an existing local file: only its path, null when none was chosen. */
+export const fileReferencePick = (): Promise<string | null> => inTauri() ? invoke<string | null>("file_reference_pick") : Promise.resolve(null);
+
 /** Copies `text` exactly as it is (a process's command, as Qt's ProcessView copies it); refuses only an empty text. */
 export async function copyVerbatim(text: string): Promise<void> {
   if (inTauri()) return invoke<void>("copy_verbatim", { text });
   if (!text) throw "nothing to copy: the command is empty";
   if (!navigator.clipboard) throw "The clipboard is unavailable.";
   await navigator.clipboard.writeText(text);
+}
+
+/** The files copied in a file manager, for a paste into the composer: null when the clipboard holds none (clipboard.rs `clipboard_files`). */
+export const clipboardFiles = (): Promise<string[] | null> => inTauri() ? invoke<string[] | null>("clipboard_files") : Promise.resolve(null);
+
+/** The clipboard's text for a paste into Terminal: from Rust in the app, the page's clipboard in a browser. */
+export async function pasteText(): Promise<string> {
+  if (inTauri()) return invoke<string>("paste_text");
+  if (!navigator.clipboard) throw "The clipboard is unavailable.";
+  return navigator.clipboard.readText();
 }
 
 // Project organization edits (client/src-tauri `organization.rs`). Each is
@@ -568,13 +647,15 @@ export async function accountsView(force = false): Promise<AccountsView> {
   if (!inTauri()) return emptyAccounts([DESKTOP_ONLY]);
   return invoke<AccountsView>("accounts_view", { force });
 }
-export type AccountEditKind = "rename" | "default" | "remove" | "permissions" | "model";
+export type AccountEditKind = "rename" | "default" | "remove" | "permissions" | "model" | "scope" | "mark";
 export interface AccountModelCatalog {
   models: {id:string;label:string;effort_options:string[]}[];
   defaults: {model:string;effort:string}; provider_defaults: {model:string;effort:string}; effort_supported:boolean;
 }
-export interface AccountEditValues {label?:string;mode?:string;model?:string;effort?:string}
-export interface AccountEditView { handle: string; kind: AccountEditKind; label: string; machine: string; provider: string; permission_mode?:string; permission_detail?:string; models?:AccountModelCatalog|null; permissions?:PermissionEditor|null }
+export interface AccountEditValues {label?:string;mode?:string;model?:string;effort?:string;color?:string;emoji?:string}
+export interface AccountEditView { handle: string; kind: AccountEditKind; label: string; machine: string; provider: string; permission_mode?:string; permission_detail?:string; models?:AccountModelCatalog|null; permissions?:PermissionEditor|null;
+  /** Every computer the edit saves on, the selected one first; whether their values differ now; per-computer permissions (zerus-f0uz8). */
+  machines?: string[]; differs?: boolean; per_computer?: boolean }
 /** Task 68: the native permission catalog as client/core projects it (Qt's PermissionCatalog). */
 export interface PermissionOption { value: string; label: string; description: string }
 export interface PermissionChoice { label: Text; value: string; tooltip: Text; explanation: Text; bypass: boolean; unavailable: boolean; editor: boolean }
@@ -600,15 +681,20 @@ export type MemoryOp =
   | { op: "read" }
   | { op: "enable"; enabled: boolean; expected_revision: number; request_id?: string }
   | { op: "store"; store: string; expected_revision: number; request_id?: string }
-  | { op: "move"; to: string; expected_revision: number; request_id?: string };
+  | { op: "move"; to: string; expected_revision: number; request_id?: string }
+  // Task #397: the project's store and its team sub-stores (`find --stores all`).
+  | { op: "find"; query: string; limit?: number };
 export interface MemoryCall { project: string; op: MemoryOp }
 export interface MemoryView {
   enabled: boolean; store: string; default_store: string; default: boolean; revision: number; moved_from: string[];
   exists: boolean; records: number; files: number; bytes: number; index: "none" | "built" | "stale";
 }
 export interface MemoryMoved { from: string; to: string; files: number; bytes: number; old_kept: boolean }
+/** One hit of a memory search, named with the store that holds it (task #397). */
+export interface MemoryHit { id: string; kind: string; title: string; store: string; via: string; score: number }
 export type MemoryOutcome =
   | { outcome: "done"; view: MemoryView; moved?: MemoryMoved; request_id?: string }
+  | { outcome: "found"; store: string; query: string; hits: MemoryHit[]; notes: string[] }
   | { outcome: "unsupported"; detail: Text }
   | { outcome: "failed"; detail: Text; request_id?: string }
   | { outcome: "uncertain"; detail: Text; request_id: string };
@@ -686,7 +772,10 @@ export async function projectMemory(call: MemoryCall): Promise<MemoryOutcome> {
   if (!inTauri()) throw new Error(DESKTOP_ONLY);
   return invoke("project_memory", { call });
 }
-export interface AccountEditResult { notices: string[]; errors: string[] }
+/** Notices are translated prose (zerus-0y2yx); errors carry hgs's own text. */
+export interface AccountEditResult { notices: Text[]; errors: string[];
+  /** A mark edit's members whose computer keeps no marks (an older hgs), and those whose computer saved it (zerus-sa9qn.6). */
+  local?: string[]; marked?: string[] }
 export async function accountEditOpen(account: string, profile: string, kind: AccountEditKind): Promise<AccountEditView> {
   if (!inTauri()) throw new Error(DESKTOP_ONLY);
   return invoke("account_edit_open", { account, profile, kind });
@@ -694,6 +783,11 @@ export async function accountEditOpen(account: string, profile: string, kind: Ac
 export async function accountEditApply(handle: string, values: AccountEditValues): Promise<AccountEditResult> {
   if (!inTauri()) throw new Error(DESKTOP_ONLY);
   return invoke("account_edit_apply", { request: { handle, ...values } });
+}
+/** Move this desktop's mark of one member profile to its computer, filling only what it has no value for (zerus-sa9qn.6). */
+export async function accountMarkMigrate(profile: string, color: string, emoji: string): Promise<boolean> {
+  if (!inTauri()) return false;
+  return invoke<boolean>("account_mark_migrate", { profile, color, emoji });
 }
 export async function accountEditClose(handle: string): Promise<void> {
   if (inTauri()) await invoke("account_edit_close", { handle });
@@ -725,7 +819,8 @@ export async function accountSetupClose(handle:string) {if(inTauri())await invok
 export interface AccountDistributionMachine {key:string;machine:string;platform:string;version:string;blocked:string|null;present:boolean;saved:boolean}
 export interface AccountDistributionForm {handle:string;label:string;provider:string;machines:AccountDistributionMachine[];sources:{key:string;label:string}[]}
 export type AccountDistributionState="pending"|"working"|"added"|"needs-signin"|"failed"|"unknown";
-export interface AccountDistributionProgress {handle:string;host:string;machine:string;state:AccountDistributionState;text:string;saved:boolean;profile:string|null}
+/** `note`: a setting the new profile did not take, translated (zerus-f0uz8). */
+export interface AccountDistributionProgress {handle:string;host:string;machine:string;state:AccountDistributionState;text:string;note?:Text|null;saved:boolean;profile:string|null}
 export interface AccountDistributionValues {hosts:string[];method:"copy"|"signin"|"apikey";use_saved:boolean;source:string;label:string;profile_id:string;api_key:string}
 export async function accountDistributionOpen(account:string,profile:string):Promise<AccountDistributionForm> {
   if(!inTauri())throw new Error(DESKTOP_ONLY);return invoke("account_distribution_open",{account,profile});
@@ -739,9 +834,9 @@ export async function accountDistributionProgress(handle:string,receive:(row:Acc
   return listen<AccountDistributionProgress>("account-distribution-progress",event=>{if(event.payload.handle===handle)receive(event.payload);});
 }
 /** Sessions' explicit account chooser reads catalogs, without profile inspects. */
-export async function accountFiltersView(force = false): Promise<AccountsView> {
+export async function accountFiltersView(force = false, hosts?: string[]): Promise<AccountsView> {
   if (!inTauri()) return emptyAccounts([DESKTOP_ONLY]);
-  return invoke<AccountsView>("account_filters_view", { force });
+  return invoke<AccountsView>("account_filters_view", hosts ? { force, hosts } : { force });
 }
 
 /** The Machines view; `force` is Refresh. */
@@ -1129,7 +1224,10 @@ export const sendPush = (handle: number, rev: number, epoch: number, text: strin
 export const queueSendNow = (queueId: string | null) => desktop<boolean>("queue_send_now", { queue_id: queueId });
 export const sendAnswer = (token: number, answer: Answer) => desktop<SendReply>("send_answer", { token, answer });
 export const sendCancel = (handle: number) => desktop<void>("send_cancel", { handle });
-export const sendInterrupted = (handle: number) => desktop<void>("send_interrupted", { handle });
+/** Before a Stop: Rust numbers the Stop whose prompt it keeps (0 for none). */
+export const sendInterrupted = (handle: number) => desktop<number>("send_interrupted", { handle });
+/** That Stop's interrupt was refused: its prompt alone goes, whichever session is open by then. */
+export const sendInterruptFailed = (stop: number) => desktop<void>("send_interrupt_failed", { stop });
 /** U35 Cancel on a held row (`hgs send-cancel`); false when nothing started. */
 export const heldCancel = (handle: number, requestId: string) => desktop<boolean>("held_cancel", { handle, request_id: requestId });
 /** Send it on the Terminal draft bar: Enter in Terminal for the draft shown; false when nothing started. */
@@ -1139,6 +1237,9 @@ export const clearContext = (handle: number, run: string, conversation: string, 
   desktop<SendReply>("clear_context", { handle, run, conversation, dismiss, delay });
 export const localRetry = (handle: number, id: string) => desktop<SendReply>("local_retry", { handle, id });
 export const localDelete = (handle: number, id: string) => desktop<void>("local_delete", { handle, id });
+/** Remove one not-delivered OpenCode message after the person confirmed it (src-tauri composer/inbox.rs); Rust checks it again first. */
+export const inboxRemove = (handle: number, run: string, conversation: string, messageId: string) =>
+  desktop<import("./types").InboxRemoveReply>("inbox_remove", { handle, run_id: run, conversation_id: conversation, message_id: messageId });
 export const localInspect = (handle: number, id: string) => desktop<Inspect | null>("local_inspect", { handle, id });
 /** Reads an Activity attachment into the private cache, after the reads ahead of it (composer/fetch.rs). */
 export async function attachmentFetch(computer: string, file: AttachmentRef): Promise<Fetched> {
@@ -1229,11 +1330,19 @@ export const sessionFolderStatus = (computer: string, directory: string) => desk
 export const sessionFolderOpen = (input: import("./store/sessionFolders").FolderRequest, kind: "folder" | "shell") => desktop<string | null>("session_folder_open", { input, kind });
 
 export const terminationCleanupConfirm = (id: string, delay?: import("./store/endActionBusy").EndReference) => desktop<Outcome>("termination_cleanup_confirm", { id, delay });
-export const terminationCleanupOffer = (target: Target) => desktop<{ id: string; checked: boolean } | null>("termination_cleanup_offer", { target });
+export const terminationCleanupOffer = (target: Target) => desktop<import("./ui/sessions/termination-offer").CleanupOffer | null>("termination_cleanup_offer", { target });
 export const terminationCleanupCancel = (id: string) => desktop<void>("termination_cleanup_cancel", { id });
+export interface ProgramForceOffer { confirmation: string; remaining_millis: number; revision: number; programs: readonly import("./ui/sessions/termination-offer").CleanupProgram[] }
+export const terminationProgramForceOffer = (id: string) => desktop<ProgramForceOffer>("termination_program_force_offer", { id });
+export const terminationProgramForceConfirm = (id: string, confirmation: string) => desktop<import("./store/terminationCleanup").CleanupView>("termination_program_force_confirm", { id, confirmation });
+export const terminationProgramForceCancel = (id: string, confirmation: string) => desktop<import("./store/terminationCleanup").CleanupView>("termination_program_force_cancel", { id, confirmation });
 export const terminationCleanupView = () => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_view", {});
 export const terminationCleanupCheck = (id: string) => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_check", { id });
 export const terminationCleanupRemove = (revision: number, consents: import("./store/terminationCleanup").Consents) => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_remove", { revision, consents });
+export const terminationCleanupManualOffer = (id: string) => desktop<import("./store/terminationCleanup").ManualCleanupView>("termination_cleanup_manual_offer", { id });
+export const terminationCleanupManualCancel = (confirmation: string) => desktop<void>("termination_cleanup_manual_cancel", { confirmation });
+export const terminationCleanupManualConfirm = (id: string, confirmation: string, consents: import("./store/terminationCleanup").Consents) => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_manual_confirm", { id, confirmation, consents });
+export const terminationCleanupDismiss = (id: string, revision: number) => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_dismiss", { id, revision });
 export const terminationCleanupKeep = (revision: number) => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_keep", { revision });
 export const terminationCleanupRestore = (source: import("./store/terminationCleanup").RestoreSource) => desktop<Outcome>("termination_cleanup_restore", { source });
 export const terminationCleanupInspect = (id: string, file = "", offset = 0) => desktop<import("./store/terminationCleanup").Inspection>("termination_cleanup_inspect", { id, file, offset });
@@ -1268,7 +1377,7 @@ export async function attachmentMedia(computer: string, file: AttachmentRef, vid
 }
 
 /** Timing/reservations only: every effect still uses its original native writer. */
-export const actionDelayBegin = (id: string, captures: import("./store/endActionBusy").EndCapture[]) => desktop<void>("action_delay_begin", { id, captures });
+export const actionDelayBegin = (id: string, captures: import("./store/endActionBusy").EndCapture[], cleanupId?: string) => desktop<void>("action_delay_begin", { id, captures, ...(cleanupId ? { cleanupId } : {}) });
 export const untrackedShellIdentity = (target: Target) => desktop<import("./types").UntrackedShellIdentity>("untracked_shell_identity", { target });
 export const actionDelayWait = (id: string) => desktop<boolean>("action_delay_wait", { id });
 export const actionDelayCancel = (id: string) => desktop<void>("action_delay_cancel", { id });

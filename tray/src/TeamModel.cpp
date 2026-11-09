@@ -2326,7 +2326,10 @@ FeedLine feedLine(const Team &team, const QJsonObject &event)
     else if (k == "unconfirmed") { t = tr("Delivery unconfirmed · %1%2 (%3)").arg(ref, attempt, d.value("error").toString()); line.tone = Tone::Danger; }
     else if (k == "reported") {
         const QString to = d.value("to").toString();
-        t = tr("Report to %1 · %2%3").arg(to.isEmpty() ? tr("Lead") : to, ref, attempt);
+        const QString text = d.value("text").toString();
+        // Task #362: the lead's use of a member's last reply quotes the reply.
+        t = text.isEmpty() ? tr("Report to %1 · %2%3").arg(to.isEmpty() ? tr("Lead") : to, ref, attempt)
+                           : tr("Report to %1 · %2%3: “%4”").arg(to.isEmpty() ? tr("Lead") : to, ref, attempt, text);
     }
     else if (k == "interim_report") {
         const QString text = d.value("text").toString();

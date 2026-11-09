@@ -1190,6 +1190,15 @@ pub(crate) struct MergeRange {
     pub merged: String,
 }
 
+/// Task #370: an accepted task the lead marked landed by a named commit on
+/// the integration line (its work arrived as a cherry-pick).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Landed {
+    pub commit: String,
+    pub by: String,
+    pub at: f64,
+}
+
 /// U62 (#760): an accepted report in the merge queue: the commit its author
 /// reported, and, while its tests run, the lead branch before and after.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -1251,6 +1260,14 @@ pub(crate) struct MergeEntry {
     /// Task #267: the files the landing conflicted in.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conflict_files: Vec<String>,
+    /// Task #370: the accepted commit carries a commit of a rejected attempt;
+    /// the landing waits for a cherry-pick of the task's own commit.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocked: bool,
+    /// Task #370: land by cherry-picking the accepted commit, never merging
+    /// its branch.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cherry_pick: bool,
 }
 
 /// U62 (#760): one merge the queue kept, with the range it tested.
@@ -2333,6 +2350,10 @@ pub(crate) struct Task {
     /// its affected tests on the merged commit; the task stays undecided.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge: Option<MergeEntry>,
+    /// Task #370: the lead marked this accepted task landed by a named line
+    /// commit (a cherry-pick of its work); journaled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landed: Option<Landed>,
     /// At most one open range per task; repeated returns widen it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub untested_merge: Option<MergeRange>,

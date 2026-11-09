@@ -6,10 +6,12 @@ import { ReportDecision, TaskReportRead, reportLine, reportRows, type ReportRow 
 import { teamTaskRead } from "../../bridge";
 import type { ComputerId, TeamView } from "../../types";
 
-// The reports the owner decides in the Team tab (task 11, Qt TeamPanel):
-// an escalated report is accepted or rejected with the member's comment; an
-// attempt without a report takes the member's last reply. Each sends once;
-// a refusal says why on its row.
+// The reports the lead or the owner decides in the Team tab (task 11, Qt
+// TeamPanel): an escalated report is accepted or rejected with the member's
+// comment; an attempt without a report takes the member's last reply (task #362:
+// the lead and the member's sub-lead may take it too, so the block stays in the
+// lead's session; a member cannot use its own). Each sends once; a refusal says
+// why on its row.
 
 function Report(props: { computer: ComputerId; team: TeamView; row: ReportRow }) {
   const { model, tick } = useModel((changed) => new ReportDecision(windowPort, { computer: props.computer, team: props.team.id, teamName: props.team.name }, changed));

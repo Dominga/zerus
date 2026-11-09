@@ -34908,6 +34908,11 @@ Approve it only if they need it.</source>
       <translation type="unfinished" />
     </message>
     <message>
+      <location filename="../src/TeamModel.cpp" line="2271" />
+      <source>Report to %1 · %2%3: “%4”</source>
+      <translation>Отчёт %1 · %2%3: «%4»</translation>
+    </message>
+    <message>
       <location filename="../src/TeamModel.cpp" line="2222" />
       <source>Interim report · %1%2</source>
       <translation type="unfinished" />

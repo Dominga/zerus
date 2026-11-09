@@ -3918,6 +3918,7 @@
   "Report on #%1 %2 from %3 waits for your decision": "Отчёт по #%1 %2 от %3 ждёт вашего решения",
   "Report status": "Состояние отчёта",
   "Report to %1, %2%3": "Отчёт для %1, %2%3",
+  "Report to %1, %2%3: “%4”": "Отчёт для %1, %2%3: «%4»",
   "Report to lead": "Отчёт лиду",
   "Reported by the agent. A finished response does not complete this goal.": "Об этом сообщил агент. Завершенный ответ не означает, что эта цель достигнута.",
   "Reported by the agent. Completion: %1": "Об этом сообщил агент. Условие выполнения: %1",

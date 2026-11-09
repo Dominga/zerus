@@ -166,7 +166,9 @@ fn reviewer_of(team: &Team, item: &Item) -> String {
         // #538 N3: a report a sub-lead may not accept is the lead's.
         ("report", Some(task)) if super::pipeline::lead_accepts_only(task) => team.lead.clone(),
         // The lead's own task has no reviewer: it stays the lead's.
-        ("report" | "question" | "stalled" | "interim_report", Some(task)) if !task.assignee.is_empty() && task.assignee != team.lead => {
+        // Task #362: a member's missing report is its reviewer's, so the lead
+        // or the sub-lead it reports to can use the member's last reply.
+        ("report" | "question" | "stalled" | "interim_report" | "no_report", Some(task)) if !task.assignee.is_empty() && task.assignee != team.lead => {
             team.reviewer_of(&task.assignee)
         }
         _ => team.lead.clone(),
@@ -197,16 +199,21 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
     if active {
         for task in &team.tasks {
             let Some(entry) = task.merge.as_ref().filter(|entry| {
-                entry.state == "queued"
+                (entry.state == "queued" || entry.state == "blocked")
                     && !entry.note.is_empty()
                     && entry.wait_reason != super::model::MergeWaitReason::Busy
             }) else { continue };
-            let next = match entry.wait_reason {
+            // Task #370: a blocked landing offers the cherry-pick of the task's own commit.
+            let next = if entry.blocked {
+                "Land the task's own commit as a cherry-pick: the merge would carry a rejected attempt's commit.".to_owned()
+            } else {
+                match entry.wait_reason {
                 super::model::MergeWaitReason::Rollback => "The merge could not be rolled back; revert it, then retry or reject.",
                 super::model::MergeWaitReason::Runners => "Fix the runner or machine config, then accept or retry the merge.",
                 super::model::MergeWaitReason::Selection => "Fix the tests map, then accept or retry the merge.",
                 super::model::MergeWaitReason::Ancestry => "Check the lead branch and git access, then accept or retry the merge.",
                 _ => "Fix the cause, then accept or retry the merge.",
+                }.to_owned()
             };
             items.push(Item {
                 subagents: Value::Null,
@@ -217,8 +224,8 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
                 since: entry.at,
                 summary: summary(&format!("#{} merge waits: {}", task.id, entry.note)),
                 command: format!(
-                    "{} | hgs team retry --json",
-                    json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id})
+                    "{} | hgs team land --json",
+                    json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id,"cherry_pick":entry.blocked})
                 ),
                 detail: format!("{} {next}", entry.note),
             });
@@ -232,11 +239,17 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             let task = entry["task"].as_u64().unwrap_or_default() as u32;
             let why = entry["why"].as_str().unwrap_or_default();
             let resolve = entry["resolve"].as_u64();
-            let next = match resolve {
-                Some(resolve) => format!("The resolve task #{resolve} resolves the conflict; the landing retries once it is decided."),
-                None => "Retry the landing, or resolve it by hand and accept again.".to_owned(),
+            // Task #370: a blocked landing offers a cherry-pick of the task's
+            // own commit; the merge would carry a rejected attempt's commit.
+            let blocked = entry["blocked"].as_bool() == Some(true);
+            let next = if blocked {
+                "The accepted commit carries a commit of a rejected attempt, so the queue refuses to merge its branch. Land the task's own commit as a cherry-pick.".to_owned()
+            } else {
+                match resolve {
+                    Some(resolve) => format!("The resolve task #{resolve} resolves the conflict; the landing retries once it is decided."),
+                    None => "Land it again, or resolve it by hand and accept again.".to_owned(),
+                }
             };
-            let target = resolve.unwrap_or(u64::from(task));
             items.push(Item {
                 subagents: Value::Null,
                 kind: "unlanded",
@@ -245,7 +258,7 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
                 member: team.name_of(team.task(task).map(|task| task.assignee.as_str()).unwrap_or_default()),
                 since: team.task(task).and_then(|task| task.merge.as_ref()).map_or(team.updated, |entry| entry.at),
                 summary: summary(&format!("#{task} is accepted but not on the integration line: {why}")),
-                command: format!("{} | hgs team retry --json", json!({"request_id":PLACEHOLDER,"team":team.id,"task":target})),
+                command: format!("{} | hgs team land --json", json!({"request_id":PLACEHOLDER,"team":team.id,"task":task,"cherry_pick":blocked})),
                 detail: format!("Accepted work lands on {} ({}) at acceptance through the queue. {next}", landing["branch"].as_str().unwrap_or_default(), landing["head"].as_str().unwrap_or_default()),
             });
         }
@@ -1312,7 +1325,8 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             since: ended,
             summary: summary(&format!("{role} ended its turn {minutes} min ago on #{} without a report: {}", task.id, task.title)),
             // One action: this reply as the report. The CLI reads the attempt's
-            // kept reply (or its session's last one); the lead decides.
+            // kept reply (or its session's last one); the lead, or the member's
+            // sub-lead, decides (task #362: the lead may run it too).
             command: format!(
                 "{} | hgs team use-last-reply --json",
                 json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id,"attempt":attempt.id})

@@ -2494,6 +2494,34 @@ previous one on the attempt. A question is not a report: it goes through
 `hgs team ask` (the lead answers it with `hgs team reply`), never
 `hgs team report`.
 
+A turn may end without a report. Zerus keeps its last reply and the attempt
+open, and the lead's inbox lists it as a missing report with the reply and the
+one command that takes it: `hgs team use-last-reply --json` with the task and
+attempt (task #362). The lead, the sub-lead the member reports to, and the
+owner may run it; a member cannot use its own last reply as its report. The
+reply becomes the attempt's report (so the task `submitted` and its pipeline
+runs) and the feed event names the lead, the member it is for and the quoted
+reply, while the lead-changes digest records the action with the reply quoted;
+it is no plan change, so it cannot be reverted. The command without an attempt
+uses the task's open attempt, and without `text` the CLI reads the attempt's
+kept reply (or the member's session, for an older record).
+
+### The integration line: landing, cherry-picks and rejected attempts
+
+With an integration folder, accepted work lands on the line through the merge
+queue. Task #370 (owner, 2026-11-08) adds three rules:
+
+- A task counts as landed when the line holds an equivalent of its accepted
+  commits (`git cherry`, a patch-id match) as well as when the commit is an
+  ancestor, and when the lead marks it landed by a named line commit:
+  `{"request_id":"UUID","team":"ID","task":N,"commit":"LINE-COMMIT"} | hgs team landed --json` (the lead or the owner; the mark is journaled as `task_marked_landed`).
+- A landing refuses a range that carries a commit of a rejected attempt of any
+  task: the queue merges no member branch then, keeps the task undecided, and
+  the lead's inbox offers a cherry-pick of the task's own commit instead:
+  `{"request_id":"UUID","team":"ID","task":N,"cherry_pick":true} | hgs team land --json`
+  (`hgs team land` also re-queues a landing with or without the cherry-pick).
+- A task whose reported commit is not in the integration repository at all
+  (another project's work) never appears as unlanded.
 ### Free planning: the plan mode and the open phase
 
 A team plans in `standard` mode (the default) or `free` mode. `hgs team status`

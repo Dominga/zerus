@@ -68,6 +68,36 @@ pub(crate) fn landed(team: &Team, commit: &str) -> bool {
     !commit.is_empty() && ancestry(team.integration_folder(), commit) == Ancestry::Yes
 }
 
+/// Task #370: whether the integration repository knows the commit at all. Work
+/// another repository holds is never this line's to land.
+fn in_repository(team: &Team, commit: &str) -> bool {
+    let folder = team.integration_folder();
+    !folder.is_empty() && !commit.is_empty() && git(folder, &["cat-file", "-e", &format!("{commit}^{{commit}}")]).exit == Some(0)
+}
+
+/// Task #370: whether the line already holds the change of `commit` as a
+/// cherry-pick: `git cherry -v` marks a commit with an equivalent patch on the
+/// other side with '-'.
+fn cherry_landed(team: &Team, commit: &str) -> bool {
+    let folder = team.integration_folder();
+    if folder.is_empty() || commit.is_empty() {
+        return false;
+    }
+    let Some(list) = git_text(folder, &["cherry", "-v", "HEAD", commit]) else { return false };
+    list.lines().any(|line| line.starts_with('-') && line.split_whitespace().nth(1) == Some(commit))
+}
+
+/// Task #370: the commits of rejected attempts of every task in the team: a
+/// merge whose range carries one would land rejected code.
+fn rejected_commits(team: &Team) -> Vec<String> {
+    team.tasks
+        .iter()
+        .flat_map(|task| task.attempts.iter())
+        .filter(|attempt| attempt.state == AttemptState::Rejected && !attempt.folder_head.is_empty())
+        .map(|attempt| attempt.folder_head.clone())
+        .collect()
+}
+
 /// Task #267: the integration line for status and the lead's inbox: its branch
 /// and head, the accepted work that is on it, and every accepted task that is
 /// not, with the reason (the queue's state, its resolve task, or no queue).
@@ -115,11 +145,23 @@ pub(crate) fn landing(team: &Team) -> Value {
         } else {
             on_the_line(&commit)
         };
-        if on_line {
-            landed.push(json!({"task":task.id,"commit":if merged.is_empty() { commit.clone() } else { merged.clone() }}));
+        // Task #370: the line holding an equivalent patch of the accepted
+        // commit (a cherry-pick) counts as landed, and so does a landing the
+        // lead marked by a named line commit.
+        let equivalent = !on_line && in_repository(team, &commit) && cherry_landed(team, &commit);
+        let marked = task.landed.as_ref().map(|landed| landed.commit.clone()).filter(|named| !named.is_empty() && ancestry(folder, named) == Ancestry::Yes);
+        if on_line || equivalent || marked.is_some() {
+            landed.push(json!({"task":task.id,"commit":if merged.is_empty() { commit.clone() } else { merged.clone() },
+                "equivalent":equivalent,"marked":marked}));
             continue;
         }
         if task.status != TaskStatus::Accepted {
+            continue;
+        }
+        // Task #370: a task whose output is outside this repository (another
+        // project's work) never waits as unlanded.
+        if !commit.is_empty() && !in_repository(team, &commit) {
+            landed.push(json!({"task":task.id,"commit":commit,"outside":true}));
             continue;
         }
         let (state, why, resolve) = match task.merge.as_ref() {
@@ -136,7 +178,8 @@ pub(crate) fn landing(team: &Team) -> Value {
             ),
             None => ("not_queued".to_owned(), "accepted, but no landing is queued".to_owned(), None),
         };
-        unlanded.push(json!({"task":task.id,"commit":commit,"state":state,"why":why,"resolve":resolve}));
+        unlanded.push(json!({"task":task.id,"commit":commit,"state":state,"why":why,"resolve":resolve,
+            "blocked":task.merge.as_ref().is_some_and(|entry| entry.blocked)}));
     }
     json!({"folder":folder,"branch":branch,"head":head,"landed":landed,"unlanded":unlanded})
 }
@@ -274,6 +317,9 @@ pub(crate) enum Merged {
     Conflict(Vec<String>),
     /// The lead's folder cannot take it now (uncommitted changes); it waits.
     Busy(String),
+    /// Task #370: the range carries a rejected attempt's commit; the queue
+    /// refuses the merge and offers a cherry-pick of the task's own commit.
+    Blocked(String),
     Failed(String),
 }
 
@@ -310,7 +356,7 @@ fn git_text(folder: &str, args: &[&str]) -> Option<String> {
 /// Merges the reported commit into the lead's folder, as the lead's own
 /// merges do: hooks and the repository's code-running config off, a clone's
 /// branch fetched first; a conflict is aborted and its files named.
-pub(crate) fn merge(lead: &str, entry: &MergeEntry, message: &str) -> Merged {
+pub(crate) fn merge(lead: &str, entry: &MergeEntry, message: &str, rejected: &[String]) -> Merged {
     let listing = git_text(lead, &["config", "--list", "--show-scope", "--name-only"]).unwrap_or_default();
     if let Some(reason) = super::dispatcher::refused_repository_config(&listing) {
         return Merged::Failed(format!("This repository {reason}; Zerus does not merge in it"));
@@ -331,11 +377,30 @@ pub(crate) fn merge(lead: &str, entry: &MergeEntry, message: &str) -> Merged {
     if git(lead, &["cat-file", "-e", &format!("{}^{{commit}}", entry.commit)]).exit != Some(0) {
         return Merged::Failed(format!("The reported commit {} is not in the repository", entry.commit));
     }
+    // Task #370: never merge a range that carries a commit of a rejected
+    // attempt of any task; cherry-pick the task's own commit instead.
+    if !entry.cherry_pick {
+        for commit in rejected.iter().filter(|commit| **commit != entry.commit) {
+            let carried = git(lead, &["merge-base", "--is-ancestor", commit, &entry.commit]).exit == Some(0)
+                && git(lead, &["merge-base", "--is-ancestor", commit, "HEAD"]).exit != Some(0);
+            if carried {
+                return Merged::Blocked(format!(
+                    "The accepted commit {} carries {}, a commit of a rejected attempt; a merge would land rejected code. Land the task's own commit as a cherry-pick instead: hgs team land --json with \"cherry_pick\":true.",
+                    entry.commit.chars().take(9).collect::<String>(),
+                    commit.chars().take(9).collect::<String>()
+                ));
+            }
+        }
+    }
     if git(lead, &["merge-base", "--is-ancestor", &entry.commit, "HEAD"]).exit == Some(0) {
         return Merged::Done { merged: prev.clone(), prev };
     }
     let driver = i18n_driver_config();
-    let outcome = git(lead, &["-c", driver.as_str(), "merge", "--no-edit", "-m", message, &entry.commit]);
+    let outcome = if entry.cherry_pick {
+        git(lead, &["-c", driver.as_str(), "cherry-pick", "-x", &entry.commit])
+    } else {
+        git(lead, &["-c", driver.as_str(), "merge", "--no-edit", "-m", message, &entry.commit])
+    };
     if outcome.exit == Some(0) {
         let merged = git_text(lead, &["rev-parse", "HEAD"]).unwrap_or_default();
         return Merged::Done { prev, merged };
@@ -346,7 +411,7 @@ pub(crate) fn merge(lead: &str, entry: &MergeEntry, message: &str) -> Merged {
         .map(str::to_owned)
         .filter(|line| !line.is_empty())
         .collect();
-    let _ = git(lead, &["merge", "--abort"]);
+    let _ = if entry.cherry_pick { git(lead, &["cherry-pick", "--abort"]) } else { git(lead, &["merge", "--abort"]) };
     if files.is_empty() {
         Merged::Failed(format!("The merge failed:\n{}", outcome.tail))
     } else {
@@ -713,7 +778,8 @@ where
     let title = team.task(id).map(|task| task.title.clone()).unwrap_or_default();
     let short: String = entry.commit.chars().take(8).collect();
     let message = format!("Merge accepted work from {} ({short}) (#{id}): {title}", team.name_of(&entry.author));
-    match merge(team.integration_folder(), &entry, &message) {
+    let rejected = rejected_commits(team);
+    match merge(team.integration_folder(), &entry, &message, &rejected) {
         Merged::Busy(note) => {
             if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
                 if found.note == note && found.wait_reason == MergeWaitReason::Busy {
@@ -722,6 +788,22 @@ where
                 found.note = note;
                 found.wait_reason = MergeWaitReason::Busy;
             }
+            Ok(true)
+        }
+        // Task #370: the landing refuses and waits for a cherry-pick of the
+        // task's own commit; nothing is merged and the task stays accepted.
+        Merged::Blocked(note) => {
+            if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
+                if found.note == note && found.blocked {
+                    return Ok(migrated);
+                }
+                found.state = "blocked".into();
+                found.blocked = true;
+                found.note = note;
+                found.wait_reason = MergeWaitReason::Other;
+                found.retry = false;
+            }
+            events.push(Event::new("landing_blocked", json!({"task":id,"commit":entry.commit})));
             Ok(true)
         }
         Merged::Conflict(files) => {

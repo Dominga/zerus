@@ -1019,6 +1019,9 @@ QWidget *TeamPanel::problemActions(const Team &team, const Member &member, const
         cancel->setToolTip(tr("Nothing arrived: the task returns to Pending"));
     } else if (status.kind == "no_report" && task && attempt) {
         add(tr("Remind"), "teamRemind", true, [this, t = team, member, id = task->id] { remind(t, member, id); });
+        // Task #362: the lead, or the member's sub-lead, takes a member's last
+        // reply as its report too; the member's own card keeps the action for
+        // the owner.
         add(tr("Use last reply as report"), "teamUseLastReply", false, [this, id = task->id, attemptId = attempt->id] {
             act("use-last-reply", {{"task", id}, {"attempt", attemptId}});
         });

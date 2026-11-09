@@ -543,7 +543,7 @@ fn a_lead_accept_or_retry_resumes_a_queued_retry() {
     };
     let items = crate::state::teams::inbox::items_for(&team, "lead");
     let item = items.iter().find(|item| item.kind == "merge_waiting").expect("the lead sees the retry");
-    assert!(item.command.contains("hgs team retry --json"), "{}", item.command);
+    assert!(item.command.contains("hgs team land --json"), "{}", item.command);
     let mut events = Vec::new();
     let accepted = ops::apply(&mut team, "accept", &json!({"task":1}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
     assert_eq!(accepted["status"], "merge_retry");
@@ -950,12 +950,12 @@ fn status_and_the_lead_inbox_name_accepted_work_that_is_not_landed() {
     let inbox = crate::state::teams::inbox::items(&team);
     let item = inbox.iter().find(|item| item.kind == "unlanded").expect("the lead's item");
     assert!(item.summary.contains("#1 is accepted but not on the integration line"), "{}", item.summary);
-    assert!(item.command.contains("hgs team retry"));
+    assert!(item.command.contains("hgs team land"));
     // Once the queue lands its commit, it is on the line and the item leaves.
     let commit = run_git(&repo.member, &["rev-parse", "HEAD"]);
     run_git(&repo.lead, &["merge", "--no-edit", "-q", &commit]);
     let view = crate::state::teams::commands::view_with_cancelled(&team, &[], None, false);
-    assert_eq!(view["integration"]["landed"], json!([{"task":1,"commit":commit}]), "{}", view["integration"]);
+    assert_eq!(view["integration"]["landed"], json!([{"task":1,"commit":commit,"equivalent":false,"marked":null}]), "{}", view["integration"]);
     assert!(view["integration"]["unlanded"].as_array().unwrap().is_empty());
     assert!(crate::state::teams::inbox::items(&team).iter().all(|item| item.kind != "unlanded"));
 }
@@ -1385,7 +1385,6 @@ fn an_unusable_integration_folder_holds_the_queue_with_its_note() {
 
 
 
-
 fn ctest_repo() -> Repo {
     let repo = repo_providers(r#"[[provider]]
 name = "gui"
@@ -1630,4 +1629,94 @@ fn a_landing_the_queue_recorded_is_not_read_from_git_again() {
     let view = landing(&team);
     assert_eq!(view["landed"], json!([{"task":1,"commit":merged}]), "{}", view);
     assert!(view["unlanded"].as_array().unwrap().is_empty(), "{}", view);
+}
+/// Task #370: a cherry-pick of the accepted change counts as landed, and the
+/// lead may mark a landing by a named line commit.
+#[test]
+fn cherry_picked_work_counts_as_landed_and_the_lead_can_mark_a_landing() {
+    let repo = repo();
+    write(&repo.member, "work.txt", "work\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "The accepted work"]);
+    let accepted = run_git(&repo.member, &["rev-parse", "HEAD"]);
+    // The merger cherry-picks the accepted change onto the line.
+    run_git(&repo.lead, &["cherry-pick", &accepted]);
+    // The line keeps the change with a commit of its own: the patch, not the sha, matches.
+    run_git(&repo.lead, &["commit", "--amend", "-q", "-m", "Land: the accepted work"]);
+    let line = head(&repo);
+    let mut team = team(&repo);
+    team.task_mut(1).unwrap().status = TaskStatus::Accepted;
+    team.task_mut(1).unwrap().merge = None;
+    let view = landing(&team);
+    assert!(view["unlanded"].as_array().unwrap().is_empty(), "{view}");
+    assert_eq!(view["landed"][0]["task"], 1);
+    assert_eq!(view["landed"][0]["equivalent"], true, "{view}");
+    // A commit the line does not carry is unlanded until the lead marks the
+    // landing by a commit that is on the line.
+    write(&repo.member, "more.txt", "more\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "More accepted work"]);
+    let more = run_git(&repo.member, &["rev-parse", "HEAD"]);
+    team.task_mut(1).unwrap().attempts[0].folder_head = more.clone();
+    let view = landing(&team);
+    assert_eq!(view["unlanded"][0]["task"], 1, "{view}");
+    let mut events = Vec::new();
+    let value = ops::apply(&mut team, "landed", &json!({"task":1,"commit":line}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+    assert_eq!(value["status"], "landed");
+    assert!(events.iter().any(|event| event.kind == "task_marked_landed"), "{events:?}");
+    let view = landing(&team);
+    assert!(view["unlanded"].as_array().unwrap().is_empty(), "{view}");
+    assert_eq!(view["landed"][0]["marked"], line);
+    // The line commit must be on the line.
+    let error = ops::apply(&mut team, "landed", &json!({"task":1,"commit":more}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap_err().to_string();
+    assert!(error.contains("not on the integration line"), "{error}");
+}
+
+/// Task #370: a landing refuses a range carrying a rejected attempt's commit
+/// and offers a cherry-pick of the task's own commit.
+#[test]
+fn a_landing_refuses_a_range_with_a_rejected_attempt_and_offers_a_cherry_pick() {
+    let repo = repo();
+    write(&repo.member, "rejected.txt", "rejected\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "A rejected try"]);
+    let rejected = run_git(&repo.member, &["rev-parse", "HEAD"]);
+    write(&repo.member, "accepted.txt", "accepted\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "The accepted work"]);
+    let accepted = run_git(&repo.member, &["rev-parse", "HEAD"]);
+    let mut team = team(&repo);
+    team.settings.integration_folder = repo.lead.to_string_lossy().into_owned();
+    team.task_mut(1).unwrap().attempts[0].folder_head = accepted.clone();
+    team.task_mut(1).unwrap().attempts.push(Attempt { n: 2, id: "A0".into(), member: "dev".into(), state: AttemptState::Rejected, folder_head: rejected.clone(), ..Default::default() });
+    accept(&mut team);
+    let database = database(&repo);
+    let mut events = Vec::new();
+    step_here(&mut team, &database, 100.0, &mut events).unwrap();
+    let entry = team.task(1).unwrap().merge.clone().unwrap();
+    assert!(entry.blocked, "{entry:?}");
+    assert!(entry.note.contains("rejected attempt") && entry.note.contains("cherry-pick"), "{}", entry.note);
+    assert!(!repo.lead.join("accepted.txt").exists() && !repo.lead.join("rejected.txt").exists());
+    // The queue's advice is the cherry-pick landing of the task's own commit.
+    let inbox = crate::state::teams::inbox::items(&team);
+    let item = inbox.iter().find(|item| item.kind == "merge_waiting").unwrap_or_else(|| panic!("no merge_waiting item: {inbox:?}"));
+    assert!(item.command.contains("hgs team land") && item.command.contains("cherry_pick"), "{}", item.command);
+    ops::apply(&mut team, "land", &json!({"task":1,"cherry_pick":true}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+    step_here(&mut team, &database, 101.0, &mut events).unwrap();
+    assert!(repo.lead.join("accepted.txt").exists());
+    assert!(!repo.lead.join("rejected.txt").exists());
+}
+
+/// Task #370: work that belongs to another repository is never unlanded here.
+#[test]
+fn an_out_of_repo_task_is_never_unlanded() {
+    let repo = repo();
+    let mut team = team(&repo);
+    team.task_mut(1).unwrap().status = TaskStatus::Accepted;
+    team.task_mut(1).unwrap().merge = None;
+    team.task_mut(1).unwrap().attempts[0].folder_head = "0123456789abcdef0123456789abcdef01234567".into();
+    let view = landing(&team);
+    assert!(view["unlanded"].as_array().unwrap().is_empty(), "{view}");
+    assert_eq!(view["landed"][0]["outside"], true, "{view}");
+    assert!(crate::state::teams::inbox::items(&team).iter().all(|item| item.kind != "unlanded"));
 }

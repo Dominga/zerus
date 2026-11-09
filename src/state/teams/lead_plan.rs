@@ -124,7 +124,32 @@ pub(crate) fn record(team: &mut Team, op: &str, tasks_before: &[Task], phases_be
     events.push(Event::new("lead_changed_plan", json!({"change":id,"op":op,"by":by,"summary":summary,"added":added,
         "changed":changed.iter().map(|task| task.id).collect::<Vec<_>>()})));
     team.lead_changes.push(LeadChange { id, op: op.to_owned(), summary, by: by.to_owned(), at, tasks_before: changed, added, phases_before: phases, phases_added: added_phases, ..Default::default() });
-    // Bounded: the oldest seen or reverted ones leave first, then the oldest.
+    trim(team);
+}
+
+/// Task #362 (owner, 2026-11-08): the lead, or a member's sub-lead, used that
+/// member's last reply as the report. The owner sees it in the digest with the
+/// reply quoted; it is no plan change and cannot be reverted.
+pub(crate) fn report_recorded(team: &mut Team, task: u32, role: &str, reply: &str, by: &str) {
+    let n = team.lead_changes.iter().filter_map(|change| change.id.strip_prefix("lc")?.parse::<u32>().ok()).max().unwrap_or(0) + 1;
+    let id = format!("lc{n}");
+    let summary = format!("{role}'s last reply as the report on #{task}: \"{}\"", clipped(reply, 160));
+    team.lead_changes.push(LeadChange { id, op: "use-last-reply".into(), summary, by: by.to_owned(), at: super::super::now(), ..Default::default() });
+    trim(team);
+}
+
+/// One line, at most `limit` characters.
+fn clipped(text: &str, limit: usize) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() > limit {
+        format!("{}...", line.chars().take(limit.saturating_sub(3)).collect::<String>())
+    } else {
+        line
+    }
+}
+
+/// Bounded: the oldest seen or reverted changes leave first, then the oldest.
+fn trim(team: &mut Team) {
     while team.lead_changes.len() > LEAD_CHANGES_KEPT {
         let at = team.lead_changes.iter().position(|change| change.seen || change.reverted_at.is_some()).unwrap_or(0);
         team.lead_changes.remove(at);
@@ -150,6 +175,8 @@ pub(crate) fn revert(team: &mut Team, input: &Value, actor: &Actor, events: &mut
     let at = team.lead_changes.iter().position(|change| change.id == id).with_context(|| format!("Unknown lead change {id:?}"))?;
     let change = team.lead_changes[at].clone();
     ensure!(change.reverted_at.is_none(), "Lead change {id} is already reverted");
+    // Task #362: a report is no plan change; it has nothing to restore.
+    ensure!(change.op != "use-last-reply", "Lead change {id} is a report, not a plan change: it cannot be reverted");
     let tasks = touched(&change);
     let phases = touched_phases(&change);
     if let Some(later) = team.lead_changes[at + 1..]
@@ -243,11 +270,20 @@ pub(crate) fn digest(team: &Team) -> Option<(String, f64, Value)> {
     let shown: Vec<Value> = list
         .iter()
         .take(20)
-        .map(|change| json!({"id":change.id,"summary":change.summary,"at":change.at,"op":change.op,
-            "revert":format!("{{\"team\":\"{}\",\"change\":\"{}\",\"by\":\"human\"}} | hgs team revert-lead-change --json", team.id, change.id)}))
+        .map(|change| {
+            let mut entry = json!({"id":change.id,"summary":change.summary,"at":change.at,"op":change.op});
+            // Task #362: a report has nothing to revert; the plan changes do.
+            if change.op != "use-last-reply" {
+                entry["revert"] = json!(format!("{{\"team\":\"{}\",\"change\":\"{}\",\"by\":\"human\"}} | hgs team revert-lead-change --json", team.id, change.id));
+            }
+            entry
+        })
         .collect();
     let first = list.first().map(|change| change.summary.clone()).unwrap_or_default();
-    let title = if count == 1 {
+    let only_report = count == 1 && list[0].op == "use-last-reply";
+    let title = if only_report {
+        "The lead used a member's last reply as the report".to_owned()
+    } else if count == 1 {
         format!("The lead changed the plan: {first}")
     } else {
         format!("The lead changed the plan {count} times inside the approved goal, newest: {first}")

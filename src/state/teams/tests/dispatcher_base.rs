@@ -34,6 +34,7 @@ fn a_hand_out_keeps_the_branch_that_holds_the_reported_commit() {
     let mut team = super::support::team();
     team.folder = project.display().to_string();
     team.settings.integration_folder = line.display().to_string();
+    team.line_branch = "main".into();
     {
         let dev = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
         dev.folder = MemberFolder::Worktree;
@@ -67,6 +68,7 @@ fn a_reused_task_branch_is_left_alone() {
     fs::create_dir(&project).unwrap();
     team.folder = project.display().to_string();
     team.settings.integration_folder = line.display().to_string();
+    team.line_branch = "main".into();
     let branch = format!("team/{}/{}-2", &team.id[..8.min(team.id.len())], tag("dev"));
     let folder = dir.path().join("dev-folder");
     git(&line, &["worktree", "add", "-q", "-b", &branch, folder.to_str().unwrap(), "main"]);

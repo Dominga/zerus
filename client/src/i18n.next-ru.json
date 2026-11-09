@@ -1265,6 +1265,7 @@
   "More members than the limit (the lead is not counted)": "Участников больше лимита (лид не считается)",
   "More task actions": "Другие действия с задачей",
   "More tasks could not be read: %1": "Не удалось прочитать следующие задачи: %1",
+  "More team actions": "Ещё действия команды",
   "More than 64 cleanup candidates. Filter by project or computer first.": "Кандидатов на очистку больше 64. Сначала отфильтруйте по проекту или компьютеру.",
   "More worktree options": "Другие параметры рабочего дерева",
   "Motion": "Анимация",

@@ -510,7 +510,7 @@ const ICON: Partial<Record<BarAction["id"], string>> = { approve: "play", resume
  * The bar's actions. `planMode` is the owner's free/standard choice for the
  * approval; `sendToCoordinator` puts Send back's message to the coordinator.
  */
-export function TeamBarActions(props: { computer: ComputerId; team: ActTeam; planMode: string; sendToCoordinator: (text: string) => void; finishOpen?: () => boolean; setFinishOpen?: (open: boolean) => void }) {
+export function TeamBarActions(props: { computer: ComputerId; team: ActTeam; planMode: string; sendToCoordinator: (text: string) => void; finishOpen?: () => boolean; setFinishOpen?: (open: boolean) => void; compact?: "none" | "low" | "high"; onSettings?: () => void; onCatalog?: () => void }) {
   const { model, tick } = useModel((changed) => new TeamActions(windowPort, () => ({ computer: props.computer, team: props.team }), changed));
   const read = () => (tick(), model);
   const [localFinish, setLocalFinish] = createSignal(false);
@@ -520,6 +520,19 @@ export function TeamBarActions(props: { computer: ComputerId; team: ActTeam; pla
   const [findingsOpen, setFindingsOpen] = createSignal(false);
   const [nextGoalOpen, setNextGoalOpen] = createSignal(false);
   const actions = createMemo(() => barActions(props.team, props.planMode));
+  // Task #427: below 1100 px the lower-priority actions (Resume after limits,
+  // Team settings, Catalog) fold into More; below 900 px Pause and Stop fold
+  // too, so the strip stays one row.
+  const overflow = createMemo<ReadonlySet<string>>(() => {
+    if (props.compact === "low") return new Set(["resumeLimits"]);
+    if (props.compact === "high") return new Set(actions().map((action) => action.id));
+    return new Set();
+  });
+  const moved = () => props.compact === "low" || props.compact === "high";
+  const [moreOpen, setMoreOpen] = createSignal(false);
+  const inline = createMemo(() => actions().filter((action) => !overflow().has(action.id)));
+  const folded = () => actions().filter((action) => overflow().has(action.id));
+  const moreIds = () => ["settings", "catalog", ...folded().map((action) => action.id)].join(" ");
   const impact = () => subtreeImpact(props.team, teams.list(props.computer)?.teams ?? []);
   const run = (action: BarAction) => {
     switch (action.id) {
@@ -538,7 +551,7 @@ export function TeamBarActions(props: { computer: ComputerId; team: ActTeam; pla
   };
   return (
     <div class="team-bar-actions" role="toolbar" aria-label={tr("Team actions")}>
-      <For each={actions()}>{(action) => (
+      <For each={inline()}>{(action) => (
         <button type="button" class="btn small" data-action={action.id} title={action.tip}
           classList={{ primary: action.primary, danger: action.danger, ghost: action.id === "discard", on: !!action.checked }}
           aria-pressed={action.checked === undefined ? undefined : action.checked} disabled={!action.enabled || read().busy}
@@ -546,6 +559,28 @@ export function TeamBarActions(props: { computer: ComputerId; team: ActTeam; pla
           <Show when={ICON[action.id]}><Icon name={ICON[action.id]!} size={12} /></Show>{action.text}
         </button>
       )}</For>
+      <Show when={moved()}>
+        <button type="button" class="btn small ghost team-more-btn" data-more="" data-overflow={moreIds()}
+          aria-haspopup="menu" aria-expanded={moreOpen()} onClick={() => setMoreOpen(!moreOpen())}>
+          {tr("More")}<Icon name="chevron-down" size={12} />
+        </button>
+        <div class="menu team-more-menu" role="menu" aria-label={tr("More team actions")} hidden={!moreOpen()}>
+          <Show when={props.onSettings}>
+            <button type="button" role="menuitem" class="menu-item" data-more-item="settings"
+              onClick={() => { setMoreOpen(false); props.onSettings?.(); }}>{tr("Team settings")}</button>
+          </Show>
+          <Show when={props.onCatalog}>
+            <button type="button" role="menuitem" class="menu-item" data-more-item="catalog"
+              onClick={() => { setMoreOpen(false); props.onCatalog?.(); }}>{tr("Catalog")}</button>
+          </Show>
+          <For each={folded()}>{(action) => (
+            <button type="button" role="menuitem" class="menu-item" data-more-item={action.id} disabled={!action.enabled || read().busy}
+              title={action.tip} onClick={() => { setMoreOpen(false); run(action); }}>
+              <Show when={ICON[action.id]}><Icon name={ICON[action.id]!} size={12} /></Show>{action.text}
+            </button>
+          )}</For>
+        </div>
+      </Show>
       <Show when={read().notice}><span class="team-proposal-notice" role="status">{read().notice}</span></Show>
       <Show when={finishOpen()}>
         <TextDialog title={tr("Finish %1?", props.team.name)} hint={tr("Every task is decided. The summary goes to the lead and the team becomes Done.")}

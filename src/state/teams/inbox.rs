@@ -2110,6 +2110,16 @@ pub(crate) fn tests_text(tests: &Value) -> String {
     if tests["files"].as_u64().unwrap_or(0) == 0 {
         return "Tests: no test file changed.".into();
     }
+    // Task #401: a change too large to read file by file has its counts only.
+    if tests["bounded"] == true {
+        return format!(
+            "Tests: +{} -{} lines in {} test file(s) of {} changed; functions not listed for a change this large.",
+            tests["lines_added"].as_u64().unwrap_or(0),
+            tests["lines_removed"].as_u64().unwrap_or(0),
+            tests["files"].as_u64().unwrap_or(0),
+            tests["changed_files"].as_u64().unwrap_or(0)
+        );
+    }
     let added = tests["functions_added"]["total"].as_u64().unwrap_or(0);
     let removed = tests["functions_removed"]["total"].as_u64().unwrap_or(0);
     let names = |key: &str| -> String {

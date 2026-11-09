@@ -21,6 +21,21 @@ Two legs now stand between a commit and `whitewh/main`:
    workflow on that tag, and records its green conclusion. That tag publishes
    an experimental prerelease, never the latest release, no feed.
 
+### Manual builds only (task #446)
+
+Owner, 2026-11-09 ("сборка только по пинку"): nothing builds on a push, so a
+pushed `whitewh-exp-*` tag no longer starts `fork-windows.yml`, and the runner leg
+cannot be started that way any more. Until the gate in
+`scripts/publish_whitewh_main.py` is reworked, the runner evidence comes from a
+manual dispatch instead:
+
+- a **probe** dispatch from the candidate branch (`Actions -> Fork Windows
+  build -> Run workflow`) runs the same build, package and self-test and
+  publishes nothing; that zip has neither a fork build number nor a feed;
+- once the candidate is on `whitewh/main`, a dispatch from there with
+  `channel: numbered` publishes `whitewh-<run number>` with the stable feed
+  (docs/fork-updates.md).
+
 ## Pre-flight by hand
 
 ```

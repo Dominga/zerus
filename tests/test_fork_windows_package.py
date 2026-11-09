@@ -106,33 +106,36 @@ class ForkPackageTests(unittest.TestCase):
 
 
 class ForkWorkflowTests(unittest.TestCase):
+    """Task #446: the manual build packages through the same release candidate as
+    the local packages do; task #388: no Qt step and no Qt in the zip."""
+
     def setUp(self):
         self.text = (ROOT / ".github/workflows/fork-windows.yml").read_text(encoding="utf-8")
         steps = self.text.split("\n      - ")
         self.step = lambda words: next(step for step in steps if words in step)
         self.index = lambda words: next(index for index, step in enumerate(steps) if words in step)
 
-    def test_the_fork_builds_and_packages_the_tauri_app_with_its_identity(self):
-        build = self.step("name: Build the Tauri Windows desktop with the fork channel")
-        self.assertIn("npm run tauri -- build --ci --no-bundle --config src-tauri/tauri.windows.switch.conf.json --features video", build)
-        package = self.step("name: Portable zip from the tested executables")
-        for part in ["package-windows.py --fork", "--lore target/lore/release/lore.exe", "--gui target/windows-next/release/hgs-tray.exe",
-                     "--mobile-relay services/mobile/relay/target/release/zerus-relay.exe",
-                     "--frontend-licenses artifacts/windows-frontend-licenses",
-                     "check-windows-portable.py artifacts/zerus-windows-x86_64.zip --run --selftest"]:
-            self.assertIn(part, package)
+    def test_the_fork_builds_and_packages_through_the_release_candidate(self):
+        candidate = self.step("name: Release candidate build, package and self-test")
+        self.assertIn('python scripts/release-candidate.py --commit "$COMMIT"', candidate)
+        self.assertIn('--fork-build "$ZERUS_FORK_BUILD" --fork-feed "$ZERUS_FORK_FEED_URL"', candidate)
+        # The release candidate runs the Tauri build, the package and the
+        # self-test through scripts/release-candidate-local.py.
+        local = (ROOT / "scripts/release-candidate-local.py").read_text(encoding="utf-8")
+        for part in ["npm", "run", "tauri", "--", "build", "--ci", "--no-bundle",
+                     "src-tauri/tauri.windows.switch.conf.json", "--features", "video",
+                     "package-windows.py", "--fork", "check-windows-portable.py", "--selftest"]:
+            self.assertIn(part, local)
         self.assertNotIn("package-windows-qt.py", self.text)
         self.assertNotIn("--qt-fallback", self.text)
-        self.assertIn("ZERUS_FORK_BUILD: ${{ !startsWith(github.ref, 'refs/tags/whitewh-exp-') && github.run_number || '' }}", self.text)
+        self.assertIn("ZERUS_FORK_BUILD:", self.text)
         self.assertIn("ZERUS_FORK_FEED_URL:", self.text)
-        # The prerequisites and the tests come before the zip.
-        zip_step = self.index("name: Portable zip from the tested executables")
-        for words in ["name: Install the locked Zerus Next frontend", "name: Frontend runtime license notices",
-                      "name: WebView2 Evergreen prerequisite",
-                      "name: Fork update channel and the Qt-to-Tauri handoff",
-                      "name: Build the Tauri Windows desktop with the fork channel"]:
-            self.assertLess(self.index(words), zip_step, words)
-        self.assertLess(zip_step, self.index("name: Update feed"))
+        # The tests and the package come before the publication.
+        candidate_at = self.index("name: Release candidate build, package and self-test")
+        for words in ["name: Rust tests", "name: Latest publication contract tests",
+                      "name: WebView2 Evergreen prerequisite"]:
+            self.assertLess(self.index(words), candidate_at, words)
+        self.assertLess(candidate_at, self.index("name: Update feed"))
 
     def test_the_fork_builds_and_tests_no_qt(self):
         # Task #388: no Qt install, cache, ccache, CMake build or offscreen suites.
@@ -234,4 +237,5 @@ class ReleaseCandidateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 

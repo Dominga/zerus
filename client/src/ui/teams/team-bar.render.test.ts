@@ -200,3 +200,79 @@ describe("the lead session's team strip (task #427)", () => {
     expect(css).not.toMatch(/\.team-progress, \.team-count, \.team-age \{ display: none;/);
   });
 });
+
+// Task 458 (owner, package 168, D:/Tools/zerus-build/owner-team-actions-168.png):
+// "Resume after limits", "Pause" and "Stop…" drew as bare text with their icons.
+// The markup already carried the skin's classes; what was missing was anything
+// the strip itself guarantees, because the packaged build can open the components
+// layer before base.css's reset (task 449). These tests pin the classes and the
+// strip's own unlayered rules, so no action can fall back to bare text.
+describe("the team strip's actions are the skin's buttons (task 458)", () => {
+  /** The opening tag of the button carrying `data-action=<id>`. */
+  const tagOf = (html: string, id: string) => html.match(new RegExp(`<button[^>]*data-action="${id}"[^>]*>`))?.[0] ?? "";
+  const classesOf = (tag: string) => (tag.match(/class="([^"]*)"/)?.[1] ?? "").split(/\s+/).filter(Boolean);
+
+  it("draws every strip action as a small skin button, with its icon inside", () => {
+    const html = plain(render(team(), 1200));
+    for (const id of ACTIONS) {
+      const tag = tagOf(html, id);
+      expect(tag).not.toBe("");
+      const classes = classesOf(tag);
+      expect(classes).toContain("btn");
+      expect(classes).toContain("small");
+      // The standard button size and the danger kind are the skin's, not a
+      // one-off of the strip.
+      expect(tag).toContain("type=\"button\"");
+    }
+    // Pause and Stop carry their icons inside the button, so the icon sits in the
+    // button's own gap beside the label instead of standing as bare text.
+    const pause = html.slice(html.indexOf(tagOf(html, "pause")));
+    expect(pause.slice(0, 260)).toContain("<svg");
+    // Nothing in the toolbar is a bare label: each action is a button.
+    expect([...html.matchAll(/<button[^>]*data-action="/g)]).toHaveLength(ACTIONS.length);
+  });
+
+  it("makes Stop the danger button with red text and an outline, never a filled red", () => {
+    const html = plain(render(team(), 1200));
+    const stop = tagOf(html, "stop");
+    const classes = classesOf(stop);
+    expect(classes).toContain("danger");
+    // A filled red is only the confirming dialog's own button (solid-danger);
+    // Stop here is the outline kind, and never the accent primary.
+    expect(classes).not.toContain("solid-danger");
+    expect(classes).not.toContain("primary");
+  });
+
+  it("keeps the More menu a skin control at the narrow widths", () => {
+    const html = plain(render(team(), 900));
+    const more = html.match(/<button[^>]*data-more[^>]*>/)?.[0] ?? "";
+    expect(classesOf(more)).toEqual(expect.arrayContaining(["btn", "small", "ghost"]));
+    // Team settings, Catalog and the folded actions are menu items, not bare text.
+    const item = html.match(/<button[^>]*data-more-item="settings"[^>]*>/)?.[0] ?? "";
+    expect(item).toContain('class="menu-item"');
+    expect(html.match(/<button[^>]*data-more-item="catalog"[^>]*>/)?.[0] ?? "").toContain('class="menu-item"');
+  });
+
+  it("states the button skin unlayered for the strip and the Team tab", async () => {
+    const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as { readFileSync(path: URL, encoding: "utf8"): string };
+    const css = fs.readFileSync(new URL("client/src/ui/styles/teams.css", new URL("../../../../", import.meta.url)), "utf8");
+    // The height, padding, border and surface of the skin's button, for both
+    // surfaces the owner pointed at, and the small size the strip uses.
+    expect(css).toContain(":is(.team-bar, .team-tab) .btn {");
+    expect(css).toMatch(/:is\(\.team-bar, \.team-tab\) \.btn \{[^}]*height: var\(--control-h\);/);
+    expect(css).toMatch(/:is\(\.team-bar, \.team-tab\) \.btn \{[^}]*padding: 0 12px;/);
+    expect(css).toMatch(/:is\(\.team-bar, \.team-tab\) \.btn \{[^}]*border: 1px solid var\(--z-color-border\);/);
+    expect(css).toMatch(/:is\(\.team-bar, \.team-tab\) \.btn\.small \{[^}]*padding: 0 8px;/);
+    // Stop's danger kind: red text and a translucent red outline, and the filled
+    // red kept for the confirming dialog alone.
+    expect(css).toMatch(/:is\(\.team-bar, \.team-tab\) \.btn\.danger \{[^}]*color: var\(--z-color-danger\);/);
+    expect(css).toMatch(/:is\(\.team-bar, \.team-tab\) \.btn\.danger \{[^}]*border-color: color-mix\(in srgb, var\(--z-color-danger\) 45%, transparent\);/);
+    expect(css).toMatch(/:is\(\.team-bar, \.team-tab\) \.btn\.solid-danger \{[^}]*background: var\(--z-color-danger\);/);
+    // The keyboard ring and the disabled state keep their skin too.
+    expect(css).toMatch(/:is\(\.team-bar, \.team-tab\) \.btn:focus-visible \{[^}]*outline: 2px solid var\(--z-color-focus\);/);
+    expect(css).toMatch(/:is\(\.team-bar, \.team-tab\) \.btn:disabled[^{]*\{[^}]*opacity: \.5;/);
+    // The strip's own rules are unlayered: no @layer around them.
+    const block = css.slice(css.indexOf(":is(.team-bar, .team-tab) .btn {"));
+    expect(block).not.toMatch(/@layer/);
+  });
+});

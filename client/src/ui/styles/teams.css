@@ -389,3 +389,43 @@
   background-image: repeating-linear-gradient(135deg, transparent 0 5px, color-mix(in srgb, var(--z-color-muted) 7%, transparent) 5px 10px);
 }
 .team-member-card[data-state-color="dim"] { --member-state: var(--z-color-dim); }
+
+/* Task 458 (owner, package 168, D:/Tools/zerus-build/owner-team-actions-168.png):
+   the team strip's and the Team tab's actions keep the skin's button look
+   whatever order the document's cascade layers arrive in. The packaged build
+   opens the components layer in a chunk stylesheet before base.css declares
+   reset, so the reset's `button { padding: 0; border: 0; background: none }`
+   outranked .btn and "Resume after limits", "Pause" and "Stop…" drew as bare
+   text (task 449 met the same inversion on the question card). Unlayered, so
+   they win either way, with the skin's own values: the standard height, padding,
+   border, surface, hover, focus ring, disabled opacity and small size; Stop and
+   Discard take the danger outline and red text, never a filled red -- only a
+   confirming dialog's own button is filled (solid-danger). */
+:is(.team-bar, .team-tab) .btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  height: var(--control-h); padding: 0 12px; border-radius: var(--z-radius-md);
+  border: 1px solid var(--z-color-border); background: var(--z-color-surface); color: var(--z-color-text);
+  font-size: var(--fs-sm); white-space: nowrap;
+  transition: background var(--z-motion-fast), border-color var(--z-motion-fast), color var(--z-motion-fast);
+}
+:is(.team-bar, .team-tab) .btn.small { height: calc(var(--control-h) - 6px); padding: 0 8px; font-size: var(--fs-xs); }
+:is(.team-bar, .team-tab) .btn:hover { background: var(--z-color-hover); }
+:is(.team-bar, .team-tab) .btn:disabled, :is(.team-bar, .team-tab) .btn[aria-disabled="true"] { opacity: .5; cursor: default; }
+:is(.team-bar, .team-tab) .btn:focus-visible { outline: 2px solid var(--z-color-focus); outline-offset: 1px; }
+:is(.team-bar, .team-tab) .btn.primary { background: var(--z-color-accent); border-color: var(--z-color-accent); color: var(--z-color-accent-text); font-weight: 600; }
+:is(.team-bar, .team-tab) .btn.primary:hover { background: var(--z-color-accent-hover); }
+:is(.team-bar, .team-tab) .btn.ghost { border-color: transparent; background: transparent; }
+:is(.team-bar, .team-tab) .btn.ghost:hover { background: var(--z-color-hover); }
+:is(.team-bar, .team-tab) .btn.danger { color: var(--z-color-danger); border-color: color-mix(in srgb, var(--z-color-danger) 45%, transparent); }
+:is(.team-bar, .team-tab) .btn.danger:hover { background: var(--z-color-danger-bg); }
+:is(.team-bar, .team-tab) .btn.solid-danger { background: var(--z-color-danger); border-color: var(--z-color-danger); color: var(--z-color-danger-text); font-weight: 600; }
+:is(.team-bar, .team-tab) .btn > svg { flex: none; }
+/* The More menu the narrow strip folds Team settings, Catalog and the actions
+   into keeps the skin's item too, so none of them is bare text either. */
+:is(.team-bar, .team-tab) .menu-item { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 26px; padding: 3px 8px;
+  border-radius: var(--z-radius-sm); text-align: left; color: var(--z-color-text-2); }
+:is(.team-bar, .team-tab) .menu-item:hover, :is(.team-bar, .team-tab) .menu-item:focus-visible { background: var(--z-color-hover); color: var(--z-color-text); outline: none; }
+:is(.team-bar, .team-tab) .menu-item.danger { color: var(--z-color-danger); }
+:is(.team-bar, .team-tab) .menu-item[aria-disabled="true"] { opacity: .45; cursor: default; }
+:is(.team-bar, .team-tab) .menu-item[aria-disabled="true"]:hover { background: none; color: var(--z-color-text-2); }
+:is(.team-bar, .team-tab) .menu-item > svg { flex: none; }

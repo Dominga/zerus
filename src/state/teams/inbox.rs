@@ -281,6 +281,43 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             });
         }
     }
+    // Task #464 (owner, 2026-11-09): accepted work waits for a hand landing and
+    // no merger holds a landing task: one line for the lead, with the ready
+    // command. Information, never a decision; the task's own report is decided.
+    // Only a hand landing (no queue entry) reaches here: the queue lands its own.
+    if active && super::merge_queue::landing_task(team).is_none() {
+        let hand: Vec<Value> = super::merge_queue::waiting_to_land(team, crate::state::now())
+            .and_then(|waiting| waiting["tasks"].as_array().cloned())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|task| task["state"] == "not_queued")
+            .collect();
+        if let Some(first) = hand.first().cloned() {
+            let task = first["task"].as_u64().unwrap_or_default() as u32;
+            let age = first["age"].as_f64().unwrap_or_default();
+            let since = crate::state::now() - age * 60.0;
+            let named: Vec<String> = hand.iter().take(8).map(|task| format!("#{} ({} min)", task["task"], task["age"])).collect();
+            let more = hand.len().saturating_sub(named.len());
+            let mut line = format!("accepted, waiting to land: {}", named.join(", "));
+            if more > 0 {
+                line.push_str(&format!(" and {more} more"));
+            }
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "waiting_to_land",
+                key: "waiting_to_land".into(),
+                task: None,
+                member: "Zerus".into(),
+                since,
+                summary: summary(&line),
+                command: format!(
+                    "{{\"request_id\":\"UUID\",\"team\":\"{}\",\"task\":{task},\"commit\":\"<the line's merge commit>\"}} | hgs team landed --json  (merge the commits into the line by hand first; Zerus marks each landed once it is on the line)",
+                    team.id
+                ),
+                detail: String::new(),
+            });
+        }
+    }
     // A rework keeps its member indefinitely. Show the wait even when that
     // member has an approval or usage limit rather than a stored task wait.
     for task in team.tasks.iter().filter(|task| active && task.rework() && task.status == TaskStatus::Pending

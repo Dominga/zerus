@@ -923,13 +923,22 @@ fn a_dependent_waits_while_its_predecessors_work_is_not_on_the_line() {
     team.task_mut(1).unwrap().status = TaskStatus::Accepted;
     team.tasks.push(Task { id: 2, title: "Dependent".into(), assignee: "dev".into(), status: TaskStatus::Pending,
         deps: vec![crate::state::teams::model::Dependency { task: 1, kind: crate::state::teams::model::DependencyKind::Hard }], ..Default::default() });
-    let step = crate::state::teams::dispatcher::prepare_dependencies(&team, 2, "dev").expect("the dependencies step");
+    // Task #464 (owner, 2026-11-09): the author of the accepted work never
+    // waits for its landing - its folder holds the commit it made, so there is
+    // nothing to prepare; the landing is the merger's business.
+    assert!(crate::state::teams::dispatcher::prepare_dependencies(&team, 2, "dev").is_none(), "the author waits for nothing");
+    // Another member's task built on the same work still starts only from the
+    // line: it does not hold that commit in its folder.
+    team.members.push(Member { id: "qa".into(), role: "Tester".into(), agent: "codex".into(), state: MemberState::Active,
+        directory: repo.member.to_string_lossy().into_owned(), ..Default::default() });
+    let step = crate::state::teams::dispatcher::prepare_dependencies(&team, 2, "qa").expect("the dependencies step");
     assert_eq!(step.result, "refused", "{step:?}");
     assert!(step.reason.contains("not on the integration line yet") && step.reason.contains("#1"), "{step:?}");
-    // Once the work is on the line, the step no longer merges anything.
+    // Once the work is on the line, neither waits for a landing any more.
     let commit = run_git(&repo.member, &["rev-parse", "HEAD"]);
     run_git(&repo.lead, &["merge", "--no-edit", "-q", &commit]);
-    let step = crate::state::teams::dispatcher::prepare_dependencies(&team, 2, "dev").expect("the dependencies step");
+    assert!(crate::state::teams::dispatcher::prepare_dependencies(&team, 2, "dev").is_none(), "the author waits for nothing");
+    let step = crate::state::teams::dispatcher::prepare_dependencies(&team, 2, "qa").expect("the dependencies step");
     assert_eq!(step.result, "skipped", "{step:?}");
     assert!(step.reason.contains("lands on the integration line"), "{step:?}");
 }

@@ -429,6 +429,10 @@ pub(crate) enum Step {
     CheckSilent { task: u32, last: f64 },
     /// The member is idle without a ready task while tasks are open (C7).
     Starving { member: String },
+    /// Task #464 (owner, 2026-11-09): the queue is off and accepted work waits
+    /// for a landing; the merger that holds the landing task hears it once for
+    /// each newly accepted task, so it lands them instead of going cold.
+    WakeLanding { member: String, tasks: Vec<u32> },
     /// Task 173: the member's session works with nothing handed to it.
     Unassigned { member: String, what: String, task: Option<u32> },
     UnassignedEnded { member: String },
@@ -1622,6 +1626,25 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     // The lead hears once that every task is decided; the next work re-arms it.
     if team.idle == Notice::Pending && lead_free {
         steps.push(Step::AllDecided);
+    }
+    // Task #464 (owner, 2026-11-09): the queue is off and accepted work waits
+    // for a landing. Once for each accepted task, the merger that holds the
+    // landing task hears it, so a finished turn never leaves the leading edge
+    // cold; a landing it already heard of is never told again.
+    if let Some((member, _)) = super::merge_queue::landing_task(team) {
+        if let Some(waiting) = super::merge_queue::waiting_to_land(team, now) {
+            let fresh: Vec<u32> = waiting["tasks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|task| task["state"] == "not_queued")
+                .filter_map(|task| task["task"].as_u64().map(|id| id as u32))
+                .filter(|id| !team.landing_told.contains(id))
+                .collect();
+            if !fresh.is_empty() {
+                steps.push(Step::WakeLanding { member, tasks: fresh });
+            }
+        }
     }
     // Open tasks Zerus gave to another member with the same role, in one
     // message to the free lead.
@@ -6889,32 +6912,39 @@ pub(crate) fn prepare_dependencies(team: &Team, task_id: u32, member_id: &str) -
             return None;
         }
         let names = wanted.iter().map(|work| format!("#{}", work.task)).collect::<Vec<_>>().join(", ");
-        // A dependent starts only from what is on the line: while a landing
-        // waits (the queue, its tests or a conflict's resolve task), it waits
-        // with that reason instead of starting without its predecessor.
-        if let Some(missing) = wanted.iter().find(|work| !super::merge_queue::landed(team, &work.commit)) {
-            let state = team.task(missing.task).and_then(|task| task.merge.as_ref()).map_or_else(|| "no landing".to_owned(), |entry| {
-                if entry.state == "conflict" { format!("its landing conflicts; resolve task #{} waits", entry.resolve_task.unwrap_or_default()) } else { format!("its landing is {}", entry.state) }
-            });
+        // Task #464 (owner, 2026-11-09): its own accepted work never waits for
+        // a landing - its folder holds the commits it made - and a landing
+        // task is the landing: it starts without waiting for what it lands.
+        let own = wanted.iter().all(|work| work.author == member_id);
+        let landing = team.task(task_id).is_some_and(super::merge_queue::is_landing);
+        if !own && !landing {
+            // A dependent starts only from what is on the line: while a landing
+            // waits (the queue, its tests or a conflict's resolve task), it waits
+            // with that reason instead of starting without its predecessor.
+            if let Some(missing) = wanted.iter().find(|work| !super::merge_queue::landed(team, &work.commit)) {
+                let state = team.task(missing.task).and_then(|task| task.merge.as_ref()).map_or_else(|| "no landing".to_owned(), |entry| {
+                    if entry.state == "conflict" { format!("its landing conflicts; resolve task #{} waits", entry.resolve_task.unwrap_or_default()) } else { format!("its landing is {}", entry.state) }
+                });
+                return Some(PrepareStep {
+                    step: "dependencies".into(),
+                    member: String::new(),
+                    from: String::new(),
+                    to: names,
+                    at: now(),
+                    result: "refused".into(),
+                    reason: format!("#{}'s accepted work ({}) is not on the integration line yet: {state}", missing.task, missing.commit.chars().take(9).collect::<String>()),
+                });
+            }
             return Some(PrepareStep {
                 step: "dependencies".into(),
                 member: String::new(),
                 from: String::new(),
                 to: names,
                 at: now(),
-                result: "refused".into(),
-                reason: format!("#{}'s accepted work ({}) is not on the integration line yet: {state}", missing.task, missing.commit.chars().take(9).collect::<String>()),
+                result: "skipped".into(),
+                reason: "the accepted work lands on the integration line; the folder starts from its head".into(),
             });
         }
-        return Some(PrepareStep {
-            step: "dependencies".into(),
-            member: String::new(),
-            from: String::new(),
-            to: names,
-            at: now(),
-            result: "skipped".into(),
-            reason: "the accepted work lands on the integration line; the folder starts from its head".into(),
-        });
     }
     let wanted = accepted_predecessors(team, task_id);
     if wanted.is_empty() || member_id == team.lead {
@@ -9379,6 +9409,12 @@ pub(crate) fn starved_actions(team: &Team, members: &[String]) -> Vec<String> {
             break;
         }
     }
+    // Task #464 (owner, 2026-11-09): accepted work waits for a hand landing:
+    // name the state plainly (how many, the merger that holds the landing task
+    // and whether it is cold), never "waiting for the lead to review".
+    if let Some(line) = super::merge_queue::landing_line(team, crate::state::now()) {
+        lines.push(line);
+    }
     lines
 }
 
@@ -9412,6 +9448,51 @@ pub(crate) fn starved_text(team: &Team, members: &[String], now: f64) -> Option<
     text += &terminal;
     text += "At most one starved digest an hour (hgs guide team-lead).";
     Some(text)
+}
+
+/// Task #464 (owner, 2026-11-09): a lead accept with the merge queue off wakes
+/// the merger that holds the landing task, once for each newly accepted task:
+/// what waits, its commit and the line it goes to. The landing is the
+/// merger's business; the author is free and never waits for it.
+fn wake_landing(store: &mut Store, team: &Team, member: &str, tasks: &[u32]) -> anyhow::Result<()> {
+    let Some(session) = team.member(member).and_then(|found| found.session.clone()) else { return Ok(()) };
+    let mut lines = Vec::new();
+    for id in tasks {
+        let Some(task) = team.task(*id) else { continue };
+        let commit = super::merge_queue::accepted_commit(task).unwrap_or_default();
+        let short: String = commit.chars().take(9).collect();
+        let named = if short.is_empty() { String::new() } else { format!(" ({short})") };
+        lines.push(format!("#{id} {}{named}", task.title));
+    }
+    if lines.is_empty() {
+        return Ok(());
+    }
+    let line = super::merge_queue::integration_branch(team).unwrap_or_default();
+    let text = format!(
+        "[Zerus team \u{b7} from: Zerus \u{b7} landing]\n{} accepted task(s) wait for a landing on {line}:\n- {}\n\
+         The lead accepted them and the merge queue is off: land each commit into the line by hand and report the line's head. \
+         An accepted task whose commit is on the line is marked landed by itself (or hgs team landed --json names it); \
+         its author is free already and must not be asked to wait for the landing.",
+        tasks.len(),
+        lines.join("\n- ")
+    );
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let outcome = super::doorbell::post_and_ring(store, &team.id, member, &session, &request_id, "landing", "zerus", Urgency::Normal, &text);
+    if matches!(outcome, Sent::Refused(_)) {
+        return Ok(());
+    }
+    let tasks = tasks.to_vec();
+    change(store, &team.id, |team, events| {
+        for id in &tasks {
+            if !team.landing_told.contains(id) {
+                team.landing_told.push(*id);
+            }
+        }
+        let excess = team.landing_told.len().saturating_sub(500);
+        team.landing_told.drain(..excess);
+        events.push(Event::new("landing_woken", json!({"member":team.role_of(member),"tasks":tasks})));
+        Ok(())
+    })
 }
 
 /// Tells the lead once an hour at most which members starve on the plan and
@@ -10276,6 +10357,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             }
             Ok(())
         }),
+        Step::WakeLanding { member, tasks } => wake_landing(store, team, member, tasks),
         Step::PlanStarved { members } => tell_lead_starved(store, team, members),
         Step::BackgroundStart { member } => change(store, &team.id, |team, _| {
             if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {

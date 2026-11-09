@@ -36,6 +36,9 @@ mod dispatcher_phase_start;
 #[path = "dispatcher_starved.rs"]
 mod dispatcher_starved;
 
+#[path = "dispatcher_landing_wake.rs"]
+mod dispatcher_landing_wake;
+
 #[path = "dispatcher_revoked.rs"]
 mod dispatcher_revoked;
 

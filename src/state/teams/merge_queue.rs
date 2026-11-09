@@ -278,11 +278,79 @@ pub(crate) fn waiting_to_land(team: &Team, now: f64) -> Option<Value> {
             "age":minutes(*since),"state":state})).collect::<Vec<_>>()}))
 }
 
+/// Task #464 (owner, 2026-11-09): whether a task is a landing one - its own
+/// title names the landing ("Rolling landing batch N", "Land 352 and 347").
+/// Its member is the merger: hand landings are its business, never the
+/// authors' and never the lead's review.
+pub(crate) fn is_landing(task: &Task) -> bool {
+    let title = task.title.to_lowercase();
+    title.contains("rolling landing") || title.trim_start().starts_with("land ")
+}
+
+/// Task #464: the open landing task and the member that holds it, in number
+/// order; None when nobody has one (the lead's inbox names the wait instead).
+pub(crate) fn landing_task(team: &Team) -> Option<(String, u32)> {
+    let mut found: Vec<&Task> = team
+        .tasks
+        .iter()
+        .filter(|task| !task.status.finished() && !task.assignee.is_empty() && task.assignee != team.lead && is_landing(task))
+        .collect();
+    found.sort_by_key(|task| (task.status != TaskStatus::InProgress && task.status != TaskStatus::Assigned, task.id));
+    found.first().map(|task| (task.assignee.clone(), task.id))
+}
+
+/// Task #464: the commit an accepted task's report named, when the task is
+/// accepted and its work still waits to land.
+pub(crate) fn accepted_commit(task: &Task) -> Option<String> {
+    if task.status != TaskStatus::Accepted || task.landed.is_some() {
+        return None;
+    }
+    task.attempts
+        .iter()
+        .rev()
+        .find(|attempt| attempt.state == AttemptState::Reported && !attempt.folder_head.is_empty())
+        .map(|attempt| attempt.folder_head.clone())
+}
+
+/// Task #464: one plain line the lead's starved digest uses for accepted work
+/// that waits for a hand landing: how many, the merger that holds the landing
+/// task and whether it is cold, or that nobody has one. None when nothing
+/// waits.
+pub(crate) fn landing_line(team: &Team, now: f64) -> Option<String> {
+    let waiting = waiting_to_land(team, now)?;
+    let hand: Vec<Value> = waiting["tasks"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|task| task["state"] == "not_queued")
+        .collect();
+    if hand.is_empty() {
+        return None;
+    }
+    let named: Vec<String> = hand.iter().take(8).map(|task| format!("#{} ({} min)", task["task"], task["age"])).collect();
+    let mut line = format!("accepted, waiting to land: {}", named.join(", "));
+    let more = hand.len().saturating_sub(named.len());
+    if more > 0 {
+        line.push_str(&format!(" and {more} more"));
+    }
+    match landing_task(team) {
+        Some((member, task)) => {
+            let who = team.name_of(&member);
+            let cold = team.member(&member).is_some_and(|member| member.starved_since.is_some());
+            Some(format!(
+                "{line}; {who} {} #{task} - wake it with a hand-out (hgs team retry/continue) or land them by hand, then accept with \"merged\":true",
+                if cold { "is cold with" } else { "holds" }
+            ))
+        }
+        None => Some(format!("{line}; no merger task is open: land them by hand and accept with \"merged\":true, or add a landing task")),
+    }
+}
+
 /// Task #267: the integration line for status and the lead's inbox: its branch
 /// and head, the accepted work that is on it, and every accepted task that is
 /// not, with the reason (the queue's state, its resolve task, or no queue).
-pub(crate) fn landing(team: &Team) -> Value {
-    let folder = team.integration_folder();
+pub(crate) fn landing(team: &Team) -> Value {    let folder = team.integration_folder();
     let branch = integration_branch(team).unwrap_or_default();
     let head = integration_head(team).unwrap_or_default();
     let mut landed = Vec::new();

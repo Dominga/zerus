@@ -75,8 +75,10 @@ export function TitleBar(props: { mode?: () => BridgeMode | "starting"; logTitle
         <span class="tb-search-text">{tr("Search sessions, IDs and messages…")}</span>
       </button>
       {/* Task 409: the client log's last line, beside the search; clicking it
-          opens the whole log (the title bar takes the place of the status bar). */}
-      <button type="button" class="tb-log" data-log-line title={props.logTitle ?? tr("Open log")} aria-label={tr("Open log")} onClick={appLog.open}>
+          opens the whole log (the title bar takes the place of the status bar).
+          Task 424: the line and its icon are pale grey (muted), brighter only on
+          hover/focus; an error line is a muted red instead. */}
+      <button type="button" class="tb-log muted" classList={{ "tb-log-error": appLog.level() === "error" }} data-log-line title={props.logTitle ?? tr("Open log")} aria-label={tr("Open log")} onClick={appLog.open}>
         <Icon name="file-text" size={14} />
         <span class="tb-log-text ell">{appLog.latest()}</span>
       </button>

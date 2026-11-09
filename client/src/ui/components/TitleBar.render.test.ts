@@ -30,7 +30,7 @@ const STUBS: Record<string, string> = {
   "src/ui/screens/settings/about-version": `export const installedAppName = () => "Zerus"; export const railVersion = () => "0.48";`,
   "src/skin/runtime": `export const skin = () => ({ layout: { rail: "icons" } });`,
   // Task 409: the title bar's own new parts, read from the test's global state.
-  "src/store/appLog": `export const appLog = { latest: () => globalThis.__bar.log ?? "", open: () => { globalThis.__bar.opened = (globalThis.__bar.opened ?? 0) + 1; }, record: () => {}, start: () => {}, stop: () => {} };`,
+  "src/store/appLog": `export const appLog = { latest: () => globalThis.__bar.log ?? "", level: () => globalThis.__bar.logLevel ?? "connection", open: () => { globalThis.__bar.opened = (globalThis.__bar.opened ?? 0) + 1; }, record: () => {}, start: () => {}, stop: () => {} };`,
   "src/store/updates": `export const updates = () => ({ quiet: false, available: !!globalThis.__bar.update, restart_required: false,
     login_item_deprioritized: false, version: "0.49.0" }); export const updateCommands = { restart: async () => {} };`,
   "src/ui/components/DesktopServiceStatus": `export const DesktopServiceStatus = () => "[service]";`,
@@ -71,7 +71,7 @@ beforeAll(async () => {
 
 afterAll(async () => { await server?.close(); });
 
-const state = (value: { page: string; strip: boolean; log?: string; update?: boolean }) => { (globalThis as Record<string, unknown>).__bar = value; };
+const state = (value: { page: string; strip: boolean; log?: string; logLevel?: string; update?: boolean }) => { (globalThis as Record<string, unknown>).__bar = value; };
 const plain = (html: string) => html.replace(/<!--[^>]*-->/g, "");
 const order = (html: string, needles: string[]) => needles.map((needle) => html.indexOf(needle));
 
@@ -151,5 +151,37 @@ describe("the title bar's log line and version (task 409)", () => {
     const css = String(readFileSync(new URL("../styles/app.css", import.meta.url)));
     expect(css).not.toContain(".statusbar");
     expect(css).toContain(".tb-log {");
+  });
+});
+
+// Task 424 (owner, 2026-11-09): the log line and its icon are pale grey in every
+// skin, brighter only on hover or focus, and an error line is a muted red.
+describe("the title bar's pale log line (task 424)", () => {
+  it("carries the muted class and draws in the skin's dim token", async () => {
+    state({ page: "sessions", strip: false, log: "msi-old: reconnecting (attempt 4)" });
+    const html = plain(render());
+    const line = html.slice(html.lastIndexOf("<button", html.indexOf("data-log-line")), html.indexOf("[unpinned]"));
+    expect(line).toMatch(/class="tb-log muted\b/);
+    expect(line).toContain("[file-text]");
+    expect(line).toContain("msi-old: reconnecting (attempt 4)");
+    const { readFileSync } = await import(/* @vite-ignore */ ["node", "fs"].join(":")) as { readFileSync(path: URL): string };
+    const css = String(readFileSync(new URL("../styles/app.css", import.meta.url)));
+    // The faint token, and the icon inherits it (currentColor).
+    expect(css).toMatch(/\.tb-log \{[^}]*color: var\(--z-color-dim\);/);
+    expect(css).not.toMatch(/\.tb-log \{[^}]*color: var\(--z-color-muted\);/);
+    // Bright only on hover and focus.
+    expect(css).toMatch(/\.tb-log:hover, \.tb-log:focus-visible \{[^}]*color: var\(--z-color-text\);/);
+    // An error line is a muted red, and still brightens to the danger colour.
+    expect(css).toMatch(/\.tb-log\.tb-log-error \{[^}]*color: color-mix\(in srgb, var\(--z-color-danger\) 60%, var\(--z-color-dim\)\);/);
+    expect(css).toMatch(/\.tb-log\.tb-log-error:hover, \.tb-log\.tb-log-error:focus-visible \{[^}]*color: var\(--z-color-danger\);/);
+  });
+
+  it("adds the error class only while the last line is an error", () => {
+    state({ page: "sessions", strip: false, log: "Windows: the runtime failed to start", logLevel: "error" });
+    const error = plain(render());
+    expect(error).toMatch(/class="tb-log muted tb-log-error\b/);
+    state({ page: "sessions", strip: false, log: "5 of 5 machines connected", logLevel: "connection" });
+    expect(plain(render())).toMatch(/class="tb-log muted\b/);
+    expect(plain(render())).not.toContain("tb-log-error");
   });
 });

@@ -8,7 +8,7 @@ import type { MemberStatus } from "./team-model";
 // the dialogs it opens; the state model, roles and progress stay production.
 const entry = "\0member-card-render";
 let server: ViteDevServer | undefined;
-let render: (member: TeamMemberView, status: MemberStatus) => string;
+let render: (member: TeamMemberView, status: MemberStatus, options?: { rowKey?: string; selectedKey?: string }) => string;
 
 const mocks = new Map(["../../i18n", "../lib/icons", "../../store/catalog", "../../store/teams", "../../store/composer", "../../store/ui", "./ProposalCards", "./actions", "./TeamActions", "./SwapMemberDialog", "./roles", "./permissionAnswers", "./members"].map((id) => [id, `\0member-${id}`] as const));
 
@@ -29,9 +29,9 @@ beforeAll(async () => {
         if (base === "../../i18n") return `export const tr = (s, ...args) => s.replace(/%(\d+)/g, (_, n) => String(args[n - 1])); export const trNoop = (s) => s;`;
         if (base === "../lib/icons") return `export const Icon = () => null; export const AgentGlyph = () => null;`;
         if (base === "../../store/catalog") return `export const agentKind = (agent) => agent || "claude";`;
-        if (base === "../../store/teams") return `export const memberRow = () => undefined;`;
+        if (base === "../../store/teams") return `export const memberRow = () => (globalThis.__memberRowKey ? { key: globalThis.__memberRowKey } : undefined);`;
         if (base === "../../store/composer") return `export const composer = { view: () => undefined, locked: () => true, input() {}, text: () => "" };`;
-        if (base === "../../store/ui") return `export const selected = () => undefined; export const setDetailTab = () => {}; export const setSelectedKey = () => {}; export const now = () => 0;`;
+        if (base === "../../store/ui") return `export const selected = () => (globalThis.__selectedKey ? { key: globalThis.__selectedKey } : undefined); export const setDetailTab = () => {}; export const setSelectedKey = () => {}; export const now = () => 0;`;
         if (base === "./ProposalCards") return `export const windowPort = { send: async () => ({outcome: "failed"}) };
           const methods = ["pauseMember", "resumeMember", "relaunch", "drain", "removeMember", "subLead", "reportsTo", "answerMember", "addMember"];
           export const useModel = (make) => ({ model: Object.assign(make(() => {}), Object.fromEntries(methods.map((name) => [name, async () => ({})]))), tick: () => 0 });`;
@@ -46,10 +46,14 @@ beforeAll(async () => {
         if (id === entry) return `import {createComponent} from "solid-js";
           import {renderToString} from "solid-js/web";
           import {MemberCard} from "/src/ui/teams/MemberCard.tsx";
-          export const render = (member, status) => renderToString(() => createComponent(MemberCard, {
-            computer: "host", team: {id: "t1", status: "running", members: [member], tasks: [{id: 3, assignee: member.id, status: "assigned", attempt_state: "delivering", title: "Fix the thing"}], settings: {}},
-            member, status, depth: 1, focused: false, onFocus() {}, folded: false, onFold() {}, onTask() {},
-          }));`;
+          export const render = (member, status, options = {}) => {
+            globalThis.__memberRowKey = options.rowKey;
+            globalThis.__selectedKey = options.selectedKey;
+            return renderToString(() => createComponent(MemberCard, {
+              computer: "host", team: {id: "t1", status: "running", members: [member], tasks: [{id: 3, assignee: member.id, status: "assigned", attempt_state: "delivering", title: "Fix the thing"}], settings: {}},
+              member, status, depth: 1, focused: false, onFocus() {}, folded: false, onFold() {}, onTask() {},
+            }));
+          };`;
         return undefined;
       },
     }, solid({ ssr: true })],
@@ -122,5 +126,41 @@ describe("the compact member card (task 347)", () => {
     expect(html.match(/class="team-member-line sub"/g)).toHaveLength(1);
     expect(html).not.toContain("team-member-pulse");
     expect(html).not.toContain("team-member-marks");
+  });
+});
+
+describe("the member row's state and its session (task 355)", () => {
+  /** Solid's SSR comments sit between a text node's markers; strip them to read the row. */
+  const plain = (html: string) => html.replace(/<!--\$-->|<!--\/-->/g, "");
+
+  it("shows the state as a word in its colour with the task number beside it", () => {
+    const cases: [string, string, number][] = [
+      ["working", "Working", 3], ["idle", "Idle", 0], ["paused", "Paused", 0],
+      ["offline", "Offline", 0], ["stuck", "Stuck", 3], ["answer", "Answer", 3],
+      ["failed", "Failed", 0], ["input_blocked", "Blocked", 3],
+    ];
+    for (const [kind, word, task] of cases) {
+      const html = plain(render(member(), status(kind, { short: word, task })));
+      expect(html, kind).toContain(`data-state="${kind}"`);
+      expect(html, kind).toContain(`>${word}<`);
+      if (task > 0) expect(html, kind).toContain(`data-task-number="${task}">#${task}<`);
+      else expect(html, kind).not.toContain("data-task-number");
+    }
+  });
+
+  it("shows a queued task beside an idle member, so it does not read as work", () => {
+    const html = plain(render(member({ queue: [342] }), status("idle", { short: "Idle", task: 0 })));
+    expect(html).toContain(">Idle<");
+    expect(html).toContain('data-task-number="342">#342<');
+    expect(html).toContain("data-state=\"idle\"");
+  });
+
+  it("marks the row of the session you are looking at as you", () => {
+    const session = (name: string) => ({ host: "", name, run_id: "r", conversation_id: "c" });
+    const you = render(member({ session: session("claude/p/me") }), status("working"), { rowKey: "row-me", selectedKey: "row-me" });
+    expect(you).toContain("data-you");
+    expect(you).toContain(">you<");
+    const other = render(member({ session: session("claude/p/other") }), status("working"), { rowKey: "row-other", selectedKey: "row-me" });
+    expect(other).not.toContain("data-you");
   });
 });

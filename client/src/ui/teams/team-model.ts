@@ -108,7 +108,8 @@ export function memberStatus(team: TeamView, member: TeamMemberView, live: Membe
     return make("stuck", minutes > 0 ? tr("No progress for %1 min", minutes) : tr("Stuck"), tr("Stuck"), "warn", task, true, "hourglass");
   }
   if (current?.attempt_state === "delivering") return make("sent", tr("Sending #%1 %2", current.id, current.title), tr("Sending"), "assigned", task);
-  if (current) return make("working", tr("Working on #%1 %2", current.id, current.title), `#${current.id}`, "active", task);
+  // Task 355: the row's word, with the task number beside it in the card.
+  if (current) return make("working", tr("Working on #%1 %2", current.id, current.title), tr("Working"), "active", task);
   const last = team.tasks.find((t) => t.assignee === member.id && (t.status === "submitted" || t.status === "in_review" || t.status === "in_test"));
   if (last?.status === "submitted") return make("submitted", tr("Submitted"), tr("Submitted"), "done", last.id);
   if (last) {

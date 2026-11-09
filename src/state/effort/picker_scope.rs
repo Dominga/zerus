@@ -16,6 +16,9 @@ use crate::state::{
 };
 use std::os::unix::fs::{FileExt, MetadataExt};
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod helper;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Receipts {
     Effort,
@@ -151,7 +154,7 @@ impl Binding {
 /// A failed method never drops any of them, even after possible delivery.
 /// Nested work borrows this object; it cannot reacquire it or renew its clock.
 pub(super) struct Scope<'a> {
-    writer: &'a Guard,
+    writer: Writer<'a>,
     writer_file: Original,
     state: Directory,
     sessions: Directory,
@@ -166,6 +169,19 @@ pub(super) struct Scope<'a> {
     refused: Option<String>,
 }
 
+enum Writer<'a> {
+    Borrowed(&'a Guard),
+    Owned(Guard),
+}
+impl Writer<'_> {
+    fn get(&self) -> &Guard {
+        match self {
+            Self::Borrowed(writer) => writer,
+            Self::Owned(writer) => writer,
+        }
+    }
+}
+
 impl<'a> Scope<'a> {
     /// Existing objects ONLY, with no legacy fallback or receipt reservation.
     /// Receipt parents must already have been prepared by the original writer.
@@ -175,12 +191,21 @@ impl<'a> Scope<'a> {
         receipts: Receipts,
         until: Instant,
     ) -> Result<Self> {
+        Self::acquire(Writer::Borrowed(writer), expected, receipts, until)
+    }
+
+    fn acquire(
+        writer: Writer<'a>,
+        expected: &Value,
+        receipts: Receipts,
+        until: Instant,
+    ) -> Result<Self> {
         check_time(until)?;
         let state =
             Directory::open(&crate::platform::canonical(root()).map_err(|e| e.to_string())?)?;
         let writer_file = Original::open(&state, ".lock".into())?;
         if crate::platform::FileIdentity::of(&writer_file.file).map_err(|e| e.to_string())?
-            != writer.identity().map_err(|e| e.to_string())?
+            != writer.get().identity().map_err(|e| e.to_string())?
         {
             return Err("The actual picker state writer changed".into());
         }
@@ -235,7 +260,7 @@ impl<'a> Scope<'a> {
             }
         }
         if crate::platform::canonical(root()).map_err(|e| e.to_string())? != self.state.path
-            || self.writer.identity().map_err(|e| e.to_string())?
+            || self.writer.get().identity().map_err(|e| e.to_string())?
                 != crate::platform::FileIdentity::of(&self.writer_file.file)
                     .map_err(|e| e.to_string())?
         {
@@ -320,6 +345,15 @@ impl<'a> Scope<'a> {
     /// Monotonic DATA, never a historical no-start or delivery receipt.
     pub(super) fn may_have_sent(&self) -> bool {
         self.may_have_sent
+    }
+}
+
+impl Scope<'static> {
+    /// Transfer the SAME actual writer, never a reopened or cloned lock guard.
+    /// The caller must acquire it with its existing bounded writer method.
+    /// Only this owned form may outlive a cancelled helper's original caller.
+    fn owned(writer: Guard, expected: &Value, receipts: Receipts, until: Instant) -> Result<Self> {
+        Self::acquire(Writer::Owned(writer), expected, receipts, until)
     }
 }
 

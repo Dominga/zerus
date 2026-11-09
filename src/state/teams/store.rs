@@ -556,6 +556,8 @@ impl Store {
                 CREATE INDEX IF NOT EXISTS team_task_archive_phase ON team_task_archive(team,phase,task);
                 CREATE TABLE IF NOT EXISTS team_phase_archive(team TEXT NOT NULL,phase INTEGER NOT NULL,header TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(team,phase));
                 CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY,digest TEXT NOT NULL,receipt TEXT NOT NULL,at REAL NOT NULL);
+                -- Task #469: the store's one-time data backfills, named.
+                CREATE TABLE IF NOT EXISTS store_migrations(name TEXT PRIMARY KEY,at REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS working_pulses(id TEXT PRIMARY KEY,team TEXT NOT NULL,member TEXT NOT NULL,
                     task INTEGER NOT NULL,done TEXT NOT NULL,next TEXT NOT NULL,blocked TEXT NOT NULL,at REAL NOT NULL,
                     source TEXT NOT NULL,expires REAL);
@@ -606,6 +608,9 @@ impl Store {
         if write {
             // Task 288: every team not yet in rows, one transaction each.
             rows::migrate(&db)?;
+            // Task #469: archived stubs take their dependencies from the
+            // archive's payload, once; later opens find the marker.
+            backfill_archive_stubs(&db)?;
         }
         Ok(Self { db, batch: None, cache: std::cell::RefCell::new(std::collections::HashMap::new()), has_layout })
     }
@@ -841,6 +846,8 @@ impl Store {
     fn resolved(&self, team: Option<Team>) -> anyhow::Result<Option<Team>> {
         let Some(mut team) = team else { return Ok(None) };
         resolve_dependencies(&self.db, &mut team, &Value::Null)?;
+        // Task #469: a stub archived before stubs kept their dependencies.
+        restore_stub_deps(&self.db, &mut team)?;
         Ok(Some(team))
     }
 
@@ -883,11 +890,17 @@ impl Store {
         })
     }
 
-    /// Stable keyset page of frozen task stubs, through the phase index.
+    /// Stable keyset page of frozen task stubs, through the phase index. Task
+    /// #469: a stub archived before stubs kept their dependencies takes them
+    /// from the full task's payload, so the plan of a done phase keeps its
+    /// layers and links.
     pub(crate) fn archived_tasks(&self, team: &str, phase: u32, after: u32, limit: i64) -> anyhow::Result<Value> {
         let limit = limit.clamp(1, PAGE);
         archive_page(&self.db,
-            "SELECT CASE WHEN length(CAST(stub AS BLOB))<=65536 THEN stub ELSE NULL END FROM team_task_archive WHERE team=?1 AND phase=?2 AND task>?3 ORDER BY task LIMIT ?4",
+            "SELECT CASE WHEN length(CAST(stub AS BLOB))<=65536 THEN
+                CASE WHEN COALESCE(json_array_length(stub,'$.deps'),0)=0 AND json_array_length(payload,'$.deps')>0
+                  THEN json_set(stub,'$.deps',json(json_extract(payload,'$.deps'))) ELSE stub END
+             ELSE NULL END FROM team_task_archive WHERE team=?1 AND phase=?2 AND task>?3 ORDER BY task LIMIT ?4",
             params![team,phase,after,limit+1], limit, "id")
     }
 
@@ -1278,6 +1291,9 @@ impl Store {
         let input = request.map_or(Value::Null, |(_, input)| input.clone());
         restore_phase(&transaction, &mut team, &input)?;
         resolve_dependencies(&transaction, &mut team, &input)?;
+        // Task #469: the stubs a change writes keep the dependencies of the
+        // tasks archived before stubs did, so a done phase's plan survives.
+        restore_stub_deps(&transaction, &mut team)?;
         let mut events = Vec::new();
         let mut receipt = change(&mut team, &mut events)?;
         let at = now();
@@ -1461,6 +1477,49 @@ fn has_archive(db: &Connection) -> anyhow::Result<bool> {
     Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='team_task_archive')", [], |row| row.get(0))?)
 }
 
+/// Task #469: the name of the archived-stub backfill in `store_migrations`.
+const STUB_DEPS: &str = "archived-stub-deps-469";
+
+/// Task #469: one bounded pass over the store's archived stubs, which take the
+/// dependencies they lost from the archive's payload (a done phase drew in one
+/// layer without links). Both copies are patched where they live, never by
+/// loading a team; the marker stops the pass after the first one.
+fn backfill_archive_stubs(db: &Connection) -> anyhow::Result<()> {
+    if !has_archive(db)? {
+        return Ok(());
+    }
+    let done: bool =
+        db.query_row("SELECT EXISTS(SELECT 1 FROM store_migrations WHERE name=?1)", [STUB_DEPS], |row| row.get(0))?;
+    if done {
+        return Ok(());
+    }
+    // The task rows of the plan (layout 2) and the archive's own stub copy
+    // (what `archived_tasks` pages and dependency resolution read).
+    let pass = (|| -> anyhow::Result<()> {
+        db.execute_batch("BEGIN IMMEDIATE")?;
+        db.execute_batch(
+            "UPDATE team_tasks SET payload=json_set(team_tasks.payload,'$.deps',json(json_extract(a.payload,'$.deps')))
+               FROM team_task_archive a
+               WHERE a.team=team_tasks.team AND a.task=team_tasks.task
+                 AND json_type(team_tasks.payload,'$.archived') IS NOT NULL
+                 AND COALESCE(json_array_length(team_tasks.payload,'$.deps'),0)=0
+                 AND json_array_length(a.payload,'$.deps')>0;
+             UPDATE team_task_archive SET stub=json_set(stub,'$.deps',json(json_extract(payload,'$.deps')))
+               WHERE COALESCE(json_array_length(stub,'$.deps'),0)=0 AND json_array_length(payload,'$.deps')>0;",
+        )?;
+        Ok(())
+    })();
+    match pass {
+        Ok(()) => db.execute_batch("COMMIT")?,
+        Err(error) => {
+            let _ = db.execute_batch("ROLLBACK");
+            return Err(error);
+        }
+    }
+    db.execute("INSERT INTO store_migrations(name,at) VALUES(?1,?2)", params![STUB_DEPS, now()])?;
+    Ok(())
+}
+
 fn archive_page(db: &Connection, sql: &str, args: impl rusqlite::Params, limit: i64, key: &str) -> anyhow::Result<Value> {
     if !has_archive(db)? { return Ok(json!({"items":[],"next_cursor":null})); }
     let mut query = db.prepare(sql)?;
@@ -1625,13 +1684,58 @@ fn resolve_dependencies(db: &Connection, team: &mut Team, input: &Value) -> anyh
     if !has_archive(db)? {
         return Ok(());
     }
-    let mut query = db.prepare("SELECT stub FROM team_task_archive WHERE team=?1 AND task=?2")?;
+    let mut query = db.prepare(
+        "SELECT CASE WHEN COALESCE(json_array_length(stub,'$.deps'),0)=0 AND json_array_length(payload,'$.deps')>0
+         THEN json_set(stub,'$.deps',json(json_extract(payload,'$.deps'))) ELSE stub END
+         FROM team_task_archive WHERE team=?1 AND task=?2",
+    )?;
     for id in ids {
         if team.task(id).is_some() {
             continue;
         }
         if let Some(stub) = query.query_row(params![team.id, id], |row| row.get::<_, String>(0)).optional()? {
             team.archive_deps.insert(id, serde_json::from_str(&stub)?);
+        }
+    }
+    Ok(())
+}
+
+/// Task #469: a stub written before stubs kept their dependencies drew its done
+/// phase in one layer, without links. The full task stays in the archive's
+/// payload, so the stub takes the dependencies the plan lays out from there,
+/// for its layers and its links. Bounded by the plan's stub window and asked
+/// for only when a stub has none; the write path saves what this fills.
+fn restore_stub_deps(db: &Connection, team: &mut Team) -> anyhow::Result<()> {
+    let missing: Vec<u32> = team
+        .tasks
+        .iter()
+        .filter(|task| task.archived.is_some() && task.deps.is_empty())
+        .map(|task| task.id)
+        .take(ARCHIVED_TASK_WINDOW)
+        .collect();
+    if missing.is_empty() || !has_archive(db)? {
+        return Ok(());
+    }
+    let mut query = db.prepare(
+        "SELECT CAST(j.value AS INTEGER),json_extract(a.payload,'$.deps') FROM json_each(?2) j
+         JOIN team_task_archive a ON a.team=?1 AND a.task=CAST(j.value AS INTEGER)",
+    )?;
+    let rows: Vec<(u32, Option<String>)> = query
+        .query_map(params![team.id, serde_json::to_string(&missing)?], |row| {
+            Ok((row.get::<_, u32>(0)?, row.get::<_, Option<String>>(1)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut found: std::collections::HashMap<u32, Vec<super::model::Dependency>> = std::collections::HashMap::new();
+    for (id, text) in rows {
+        let Some(text) = text.filter(|text| text != "[]") else { continue };
+        let deps: Vec<super::model::Dependency> = serde_json::from_str(&text)?;
+        if !deps.is_empty() {
+            found.insert(id, deps);
+        }
+    }
+    for task in &mut team.tasks {
+        if let Some(deps) = found.remove(&task.id) {
+            task.deps = deps;
         }
     }
     Ok(())
@@ -1706,6 +1810,9 @@ fn archive_tasks(
             title: task.title.clone(),
             assignee: task.assignee.clone(),
             status: task.status,
+            // Task #469: the plan draws a done phase's layers and links from
+            // its dependencies, so the stub keeps them and the origin.
+            deps: task.deps.clone(),
             origin: task.origin,
             archived: Some(summary),
             ..Default::default()

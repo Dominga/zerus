@@ -1516,6 +1516,8 @@ pub struct NewTeamView {
     pub working_mode: Value,
     pub members: Vec<DraftMember>,
     pub tasks: Vec<TaskView>,
+    /// Owner, 2026-11-09: the draft's phases for New team's Phases page.
+    pub phases: Vec<PhaseView>,
     pub draft: DraftView,
     pub validation: Validation,
     pub updated: f64,
@@ -1554,6 +1556,7 @@ pub fn new_team(value: &Value, view: &TeamView) -> Option<NewTeamView> {
             })
             .collect(),
         tasks: view.tasks.clone(),
+        phases: view.phases.clone(),
         draft: view.draft.clone().unwrap_or_default(),
         validation: view.validation.clone(),
         updated: view.updated,

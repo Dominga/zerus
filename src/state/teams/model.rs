@@ -3751,10 +3751,14 @@ impl Team {
     }
 }
 
-/// Archived rows have a deliberately small wire representation.
+/// Archived rows have a deliberately small wire representation: what the plan
+/// still draws of a done phase. Its dependencies (task #469) and the task it
+/// was spawned from are among them, or the phase falls into one layer without
+/// links; its history stays in the archive's payload.
 pub(crate) fn task_stub(task: &Task) -> serde_json::Value {
     let mut stub = serde_json::json!({"id":task.id,"phase":task.phase,"title":task.title,"assignee":task.assignee,
         "status":task.status,"archived":task.archived});
+    if !task.deps.is_empty() { stub["deps"] = serde_json::to_value(&task.deps).unwrap_or_default(); }
     if let Some(origin) = task.origin { stub["origin"] = serde_json::json!(origin); }
     stub
 }

@@ -5702,10 +5702,15 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                         // Feedback 2026-11-04 (6): an object changes only the
                         // members it names ({"dev":{"model":"opus"}}, null removes
                         // one, a new id adds it); a list replaces them all.
+                        // Owner, 2026-11-09: a desktop save that arrives with its
+                        // members encoded as JSON text is read as that list; any
+                        // other shape names what it got, never a bare refusal.
+                        let decoded = value.as_str().and_then(|text| serde_json::from_str::<Value>(text).ok());
+                        let value = decoded.as_ref().unwrap_or(value);
                         let value = &match value {
                             Value::Object(patches) => patch_members(team, patches)?,
                             Value::Array(_) => value.clone(),
-                            _ => bail!("Members are a list of members, or an object of changes by member id such as {{\"dev\":{{\"model\":\"opus\"}}}}"),
+                            other => bail!("Members are a list of members, or an object of changes by member id such as {{\"dev\":{{\"model\":\"opus\"}}}}; this update sent {}", match other { Value::Null => "null", Value::Bool(_) => "true/false", Value::Number(_) => "a number", Value::String(_) => "text", _ => "something else" }),
                         };
                         let mut members: Vec<Member> = value
                             .as_array()

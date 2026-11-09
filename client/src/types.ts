@@ -1407,7 +1407,13 @@ export interface TeamView {
   id: string; name: string; status: string; project: string; folder: string; goal: string; plan_mode: string; lead: string;
   revision: number; created: number; updated: number; waiting_for_lead: boolean; pending_phase: number | null;
   /** Task #308: the team's working mode, the proposal and what its settings miss. */
-  working_mode?: { preset: string; proposal?: { preset: string; title: string; reasons: string[]; settings?: Record<string, unknown> } | null; disagreeing?: string[] };
+  working_mode?: {
+    preset: string;
+    proposal?: { preset: string; title: string; reasons: string[]; settings?: Record<string, unknown>; fingerprint?: string } | null;
+    disagreeing?: string[];
+    /** Task #337: the preset and profile the owner kept, until the profile changes. */
+    kept?: { preset: string; fingerprint: string; at: number } | null;
+  };
   /** F7: the team a next goal came from, and the one it led to. */
   previous?: string; next?: string;
   /** Task #58: the phase that takes tasks as they come, and whether hgs sends each phase's mode. */
@@ -1535,6 +1541,8 @@ export type TeamAction =
   | { kind: "waiting_restore"; id: string }
   /** Task #308: proposes a working mode; its card allows the switch. */
   | { kind: "propose_working_mode"; preset: string; reason?: string }
+  /** Task #337: the owner keeps the team's settings for the project's profile. */
+  | { kind: "keep_working_mode" }
   /** Task #218: a member moves to another agent/account/model or to an existing session. */
   | { kind: "swap-member"; member: string; agent?: string; model?: string; effort?: string; account?: string; session?: TeamSessionView }
   | { kind: "take_over"; task: number }

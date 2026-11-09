@@ -265,6 +265,14 @@ describe("task card", () => {
     expect(f.asked.at(-1)).toMatchObject({ name: "teamWorkingModeConfirm" });
   });
 
+  it("Task #337: keeps the team's settings without a confirmation", async () => {
+    const f = fake();
+    await actionsOf(f, team()).keepWorkingMode();
+    expect(f.sent.at(-1)?.action).toEqual({ kind: "keep_working_mode" });
+    // Nothing about the team changes: no owner dialog comes first.
+    expect(f.asked).toHaveLength(0);
+  });
+
   it("Task #296: finds the next team's lead once its list arrives", () => {
     const list = { teams: [{ id: "t9", members: [
       { id: "dev", role: "Backend", agent: "codex", state: "active", computer: "", lead: false, session: { host: "", name: "codex/x/dev", run_id: "r", conversation_id: "c" } },

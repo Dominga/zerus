@@ -780,6 +780,13 @@ export class TeamActions {
     return this.run(`working-mode:${preset}`, { kind: "propose_working_mode", preset, reason },
       { name: "teamWorkingModeConfirm", title: tr("Switch the working mode?"), text: tr("Propose switching this team to %1? Its settings follow the project's proposal.", preset), action: tr("Propose the switch") });
   }
+  /**
+   * Task #337: the owner keeps the team's settings for the project's profile;
+   * nothing about the team changes, so no confirmation.
+   */
+  keepWorkingMode() {
+    return this.run("working-mode:keep", { kind: "keep_working_mode" });
+  }
   /** Move earlier or later among the movable phases (drafts and accepted ones not started). */
   movePhase(phase: number, later: boolean) {
     const team = this.where().team;

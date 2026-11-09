@@ -28,6 +28,8 @@ import { roleStyle } from "./roles";
 import { TeamProposals } from "./ProposalCards";
 import { ledTeamOf, leadsTeam } from "./leadTeam";
 import { ArchivedTaskReport, TeamReports } from "./TeamReports";
+import { WorkingModeRow } from "./WorkingModeRow";
+import { closeWorkingMode, markWorkingModeKept, workingModeShown } from "../../store/workingMode";
 import { WaitingBanner } from "./Waiting";
 import { Blockers, PhaseActions, TaskActions, TeamBarActions, TeamBarChips, TeamModeControl, TeamQuestions, createPlanEditing } from "./TeamActions";
 import { TeamActions as TeamActionModel } from "./actions";
@@ -179,25 +181,17 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
       <WaitingBanner />
       <TeamReports computer={props.computer} team={props.team} onOpenReport={setReportTask} />
       <Show when={reportTask()}>{(task) => <ArchivedTaskReport computer={props.computer} team={reportTeam()} task={task()} onClose={() => setReportTask(null)} />}</Show>
-      <Show when={props.team.working_mode?.disagreeing?.length ? props.team.working_mode.disagreeing : undefined}>
-        {(wrong) => (
-          <section class="team-working-mode" data-working-mode={props.team.working_mode!.preset}>
-            <b>{tr("Working mode: the project suggests %1", props.team.working_mode!.proposal?.title || props.team.working_mode!.proposal?.preset || props.team.working_mode!.preset)}</b>
-            <p>{tr("This team's settings differ: %1", wrong().join(", "))}</p>
-            <Show when={props.team.working_mode!.proposal?.reasons?.length}>
-              <ul><For each={props.team.working_mode!.proposal!.reasons}>{(reason) => <li>{reason}</li>}</For></ul>
-            </Show>
-            <button type="button" class="btn small" data-working-mode-switch
-              onClick={() => void new TeamActionModel(windowPort, () => ({ computer: props.computer, team: props.team }))
-                .proposeWorkingMode(props.team.working_mode!.proposal?.preset || props.team.working_mode!.preset,
-                  props.team.working_mode!.proposal?.title || "")}>
-              {tr("Propose the switch")}
-            </button>
-            {/* Task #338: the owner's cards live once, in the coordinator's conversation
-                (Qt's TeamWorkspace setCards; the session's Activity has them too, as
-                Qt's mainProposalCards). This notice only names the disagreement. */}
-          </section>
-        )}
+      <Show when={workingModeShown(props.team)}>
+        <WorkingModeRow preset={props.team.working_mode!.preset}
+          title={props.team.working_mode!.proposal?.title || props.team.working_mode!.proposal?.preset || props.team.working_mode!.preset}
+          reasons={props.team.working_mode!.proposal?.reasons ?? []}
+          disagreeing={props.team.working_mode!.disagreeing ?? []}
+          onKeep={() => void new TeamActionModel(windowPort, () => ({ computer: props.computer, team: props.team }))
+            .keepWorkingMode().then((outcome) => { if (outcome && outcome !== "cancelled") markWorkingModeKept(props.team); })}
+          onPropose={() => void new TeamActionModel(windowPort, () => ({ computer: props.computer, team: props.team }))
+            .proposeWorkingMode(props.team.working_mode!.proposal?.preset || props.team.working_mode!.preset,
+              props.team.working_mode!.proposal?.title || "")}
+          onClose={() => closeWorkingMode(props.team)} />
       </Show>
       <Show when={props.failure}><div class="team-strip danger" role="status"><Icon name="circle-alert" size={14} /><span class="ell">{props.failure}</span></div></Show>
       <Show when={state() === "stuck"}>

@@ -201,6 +201,20 @@ export function Choice(props: {
   let root!: HTMLDivElement;
   let button!: HTMLButtonElement;
   const [active, setActive] = createSignal<string>();
+  // Task #433: the menu is fixed to the viewport, so the dialog's own overflow
+  // never clips it and it always sits above the rows after its field.
+  const [box, setBox] = createSignal<{ left: number; top: number; width: number }>({ left: 8, top: 8, width: 0 });
+  const place = () => {
+    const b = button.getBoundingClientRect();
+    const width = Math.max(0, Math.min(b.width, Math.max(0, window.innerWidth - 16)));
+    const below = Math.max(0, window.innerHeight - b.bottom - 12), above = Math.max(0, b.top - 12);
+    const down = below >= 160 || below >= above;
+    setBox({
+      left: Math.max(8, Math.min(b.left, window.innerWidth - width - 8)),
+      top: down ? b.bottom + 4 : Math.max(8, b.top - Math.min(280, above) - 4),
+      width,
+    });
+  };
   // A row of the dense menu is unavailable when its reason is set; keys skip it.
   const reason = (key: string) => (props.dense ? props.tip?.(key) : undefined);
   const usable = () => (props.dense ? props.keys.filter((key) => !reason(key)) : props.keys);
@@ -211,7 +225,7 @@ export function Choice(props: {
     if (at < 0) return by > 0 ? keys[0] : keys[keys.length - 1];
     return keys[Math.max(0, Math.min(keys.length - 1, at + by))];
   };
-  const show = () => { setActive(props.selected); props.onOpen(true); };
+  const show = () => { setActive(props.selected); place(); props.onOpen(true); };
   const pick = (key: string | undefined) => {
     props.onOpen(false);
     button.focus();
@@ -265,7 +279,8 @@ export function Choice(props: {
         <Icon name="chevron-down" size={14} class="ns-choice-chevron" />
       </button>
       <Show when={props.open}>
-        <ul class="ns-choice-list" classList={{ "nsd-menu": props.dense }} id={`${props.id}-list`} role="listbox" aria-label={props.label}>
+        <ul class="ns-choice-list" classList={{ "nsd-menu": props.dense }} id={`${props.id}-list`} role="listbox" aria-label={props.label}
+          style={{ position: "fixed", left: `${box().left}px`, top: `${box().top}px`, "min-width": `${box().width}px` }}>
           <Show when={props.dense && props.header}><li class="nsd-menu-header" role="presentation">{props.header}</li></Show>
           <For each={props.keys}>{(key, index) => {
             const why = () => reason(key);
@@ -643,6 +658,13 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
               disabled={!fields()} onInput={(e) => act.setNewProjectName(e.currentTarget.value)} />
           </Show>
         </Show>
+        <span class="nsd-cap">{tr("Source")}</span>
+        <div class="nsd-seg nsd-wide" role="group" aria-label={tr("Source")}>
+          <button type="button" class="nsd-segbtn" data-keys="button" data-source="folder" classList={{ on: !s().repository }} aria-pressed={!s().repository}
+            disabled={!fields()} onClick={() => act.setSource(false)}><Icon name="folder" size={14} />{tr("Working folder")}</button>
+          <button type="button" class="nsd-segbtn" data-keys="button" data-source="repository" classList={{ on: s().repository }} aria-pressed={s().repository}
+            disabled={!fields() || !online()} onClick={() => act.setSource(true)}><Icon name="git-branch" size={14} />{tr("Git repository")}</button>
+        </div>
         <Show when={!s().repository}>
           <span class="nsd-cap">{tr("Folder")}</span>
           <Choice id="nsd-folder" label={tr("Working folder")} dense check header={tr("Working folder on %1", denseMachine())} keys={folderKeys()}
@@ -761,6 +783,14 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
           <span /><span class="nsd-problem nsd-wide" role="status">{s().error}</span>
         </Show>
       </div>
+      <Show when={s().accounts[s().account]?.profile?.permission_label.source ? s().accounts[s().account]?.profile : undefined}>{(p) => (
+        <>
+          <div class="nsd-rule" />
+          <div class="ns-perm dim nsd-wide" data-perm title={[trText(p().permission_hint), tr("Change it on the Accounts screen.")].filter(Boolean).join("\n")}>
+            {p().permission_default ? tr("Permissions: %1 (Zerus default)", trText(p().permission_label)) : tr("Permissions: %1", trText(p().permission_label))}
+          </div>
+        </>
+      )}</Show>
       <div class="nsd-rule" />
       <div class="nsd-footer">
         <label class="check nsd-terminal" title={form()?.open_terminal_tooltip ? trText(form()!.open_terminal_tooltip) : undefined}>
@@ -1038,10 +1068,10 @@ export function NewSessionDialog() {
         }}
         onClose={() => { if (newSession()) closeNewSession(); }}>
         <Show when={newSession()}>{(state) => <NewSessionForm s={state} popup={popup} setPopup={setPopup} confirm={confirm} />}</Show>
+        <Show when={newSession()?.pickerOpen}>
+          <ModelPopover view={() => newSession()?.picker ?? EMPTY_PICKER} act={PICKER} anchor={() => document.getElementById("ns-model")} />
+        </Show>
       </dialog>
-      <Show when={newSession()?.pickerOpen}>
-        <ModelPopover view={() => newSession()?.picker ?? EMPTY_PICKER} act={PICKER} anchor={() => document.getElementById("ns-model")} />
-      </Show>
       <NewSessionChildren />
       <LaunchWarning confirm={confirm} />
     </>

@@ -30,7 +30,7 @@ function team(): TeamView {
     ] as never,
     tasks: [
       { id: 1, title: "One", status: "accepted", assignee: "dev", phase: 1, deps: [], estimate_minutes: 0, attempts: 1, attempt_state: "", decided_by: "", pinned: false, output: [], waits: "" },
-      { id: 2, title: "Two", status: "in_progress", assignee: "dev", phase: 1, deps: [], estimate_minutes: 0, attempts: 1, attempt_state: "", decided_by: "", pinned: false, output: [], waits: "" },
+      { id: 2, title: "Two", status: "submitted", assignee: "dev", phase: 1, deps: [], estimate_minutes: 0, attempts: 1, attempt_state: "", decided_by: "", pinned: false, output: [], waits: "" },
     ] as never,
     phases: [{ n: 9, title: "Phase 9", state: "approved", status: "in_work", done: 1, total: 2, barrier: false, auto: false, acceptance: "", paused: false, health: "" }] as never,
     proposals: [], attention: [], validation: { errors: [], warnings: [] }, health: { critical_path: 0, parallelism: 0, warnings: [] },
@@ -137,6 +137,47 @@ describe("the lead session's team strip (task #427)", () => {
     expect(html).toContain("team-progress");
     expect(html).toContain("team-count");
     expect(html).toContain('data-strip-time');
+  });
+
+  it("joins the progress segments into one track, a minimum for a non-zero one and a per-state tooltip (task #438)", async () => {
+    const html = plain(render(team(), 1200));
+    // The fixture has one accepted and one in-progress task: two segments joined
+    // edge to edge, and no zero-width sliver for the empty states.
+    expect(html).toContain('class="seg accepted"');
+    expect(html).toContain('class="seg submitted"');
+    expect(html).toMatch(/flex-grow:\s*1/);
+    expect(html).not.toContain('class="seg active"');
+    expect(html).not.toContain('class="seg problem"');
+    // The tooltip carries every state's count, the empty ones included.
+    expect(html).toContain("Accepted 1, Submitted 1, In progress 0, Problems 0");
+    const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as { readFileSync(path: URL, encoding: "utf8"): string };
+    const css = fs.readFileSync(new URL("client/src/ui/styles/teams.css", new URL("../../../../", import.meta.url)), "utf8");
+    const track = css.split("\n").find((line) => line.trim().startsWith(".team-progress {")) ?? "";
+    expect(track).toMatch(/gap: 0;/);
+    expect(track).toMatch(/overflow: hidden;/);
+    expect(track).toMatch(/border-radius: 3px;/);
+    const segment = css.split("\n").find((line) => line.trim().startsWith(".team-progress .seg {")) ?? "";
+    expect(segment).toMatch(/min-width: 3px;/);
+    expect(segment).toMatch(/border-radius: 0;/);
+    expect(css).toContain(".team-progress .seg:first-child { border-top-left-radius: 3px;");
+    expect(css).toContain(".team-progress .seg:last-child { border-top-right-radius: 3px;");
+    // No detached sliver rules from the old painting.
+    expect(css).not.toContain('.team-progress .seg:not([style*="width: 0%"])');
+  });
+
+  it("takes its own height and pushes the row below it (task #438)", async () => {
+    const html = plain(render(team(), 1200));
+    expect(html).toContain("data-strip");
+    const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as { readFileSync(path: URL, encoding: "utf8"): string };
+    const css = fs.readFileSync(new URL("client/src/ui/styles/teams.css", new URL("../../../../", import.meta.url)), "utf8");
+    const bar = css.split("\n").find((line) => line.trim().startsWith(".team-bar {")) ?? "";
+    expect(bar).toMatch(/min-height: 44px;/);
+    expect(bar).toMatch(/height: auto;/);
+    expect(bar).toMatch(/flex: none;/);
+    const lead = css.split("\n").find((line) => line.trim().startsWith(".lead-team {")) ?? "";
+    expect(lead).toMatch(/display: flex;/);
+    expect(lead).toMatch(/flex-direction: column;/);
+    expect(lead).toMatch(/overflow: visible;/);
   });
 
   it("keeps the strip's one-row CSS: no wrap, a shrinking name, a bounded progress and a nowrap time", async () => {

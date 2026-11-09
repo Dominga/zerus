@@ -136,18 +136,59 @@ describe("a project folder's rows (task 431)", () => {
     expect(rows.filter((r) => r.type === "header" && r.project === "b")[0]).toMatchObject({ collapsed: true, total: 4 });
   });
 
-  it("keeps a team's members in their own folder when the lead is filed elsewhere", () => {
+  it("lists every live member under its lead, in team order, whatever folder each member is filed in (task 455)", () => {
+    // Task 455 replaces 431's rule (members stayed in their own folder): the owner's team had its lead
+    // in ZERUS and 13 of 14 members in their own worktree folders, and showed one member.
     const lead = row("run:boss", "claude/a/boss");
-    const members = ["one", "two", "three", "four"].map((suffix) => row(`run:m-${suffix}`, `claude/b/${suffix}`));
+    const nearby = row("run:m-near", "claude/a/near");
+    const away = ["one", "two", "three"].map((suffix) => row(`run:m-${suffix}`, `claude/b/${suffix}`));
+    const elsewhere = row("run:m-far", "claude/c/far");
+    const roster = [away[1], nearby, elsewhere, away[0], away[2]];
+    const summary = multiTeam(lead.name, roster.map((m) => m.name));
+    const all = [lead, nearby, ...away, elsewhere];
+    const { input } = folders({ a: [lead, nearby], b: away, c: [elsewhere] });
+    const rows = groupRows({ ...input, teamOf: (s) => (all.some((m) => m.name === s.name) ? summary : undefined) } as ListInput);
+    expect(cardsOf(rows, "a")).toEqual([lead.name, ...roster.map((m) => m.name)]);
+    // Nowhere else, and their emptied folders are not drawn as headers alone.
+    expect(cardsOf(rows, "b")).toEqual([]);
+    expect(rows.filter((r) => r.type === "header" && (r.project === "b" || r.project === "c"))).toEqual([]);
+    expect(rows.filter((r) => r.type === "card")).toHaveLength(all.length);
+    const cards = rows.filter((r) => r.type === "card");
+    // The strip's count is the member rows shown; the tree's ends are marked.
+    expect(cards[0]).toMatchObject({ teamSummary: summary, teamMembersShown: roster.length, expandable: true, expanded: true });
+    expect(cards.slice(1).map((r) => r.depth)).toEqual(roster.map(() => 1));
+    expect(cards[1]).toMatchObject({ teamFirst: true, teamLast: false });
+    expect(cards.at(-1)).toMatchObject({ teamFirst: false, teamLast: true });
+  });
+
+  it("leaves the members in their own folders while the lead is not shown, and keeps them nowhere while the team is folded", () => {
+    const lead = row("run:boss", "claude/a/boss");
+    const members = ["one", "two"].map((suffix) => row(`run:m-${suffix}`, `claude/b/${suffix}`));
     const summary = multiTeam(lead.name, members.map((m) => m.name));
-    const { input, sessions } = folders({ a: [lead], b: members });
-    const rows = groupRows({ ...input, teamOf: (s) => (s.name === lead.name || members.some((m) => m.name === s.name) ? summary : undefined) } as ListInput);
-    // The members' own folder draws them; before the fix it showed the header alone.
-    expect(cardsOf(rows, "b")).toEqual(members.map((m) => m.name));
-    // The lead's folder draws the lead only, so no session appears twice.
-    expect(cardsOf(rows, "a")).toEqual([lead.name]);
-    expect(rows.filter((r) => r.type === "card")).toHaveLength(5);
-    expect(sessions.a).toHaveLength(1);
+    const teamOf = (s: { name: string }) => (s.name === lead.name || members.some((m) => m.name === s.name) ? summary : undefined);
+    const { input } = folders({ a: [lead], b: members });
+    // The lead filtered out: its members list in their own folder, as ordinary rows.
+    const hidden = groupRows({ ...input, visible: (s: Session) => s.key !== lead.key, teamOf } as ListInput);
+    expect(cardsOf(hidden, "b")).toEqual(members.map((m) => m.name));
+    expect(hidden.filter((r) => r.type === "card" && r.depth)).toEqual([]);
+    // Folded: the lead alone, its strip counting the members it hides.
+    const folded = groupRows({ ...input, teamOf, teamFolded: () => true } as ListInput);
+    expect(folded.filter((r) => r.type === "card").map((r) => r.session.name)).toEqual([lead.name]);
+    expect(folded.find((r) => r.type === "card")).toMatchObject({ teamMembersShown: 2, expanded: false, expandable: true });
+  });
+
+  it("keeps a sub-team's lead in its own place with its own team", () => {
+    const lead = row("run:boss", "claude/a/boss");
+    const sublead = row("run:sub", "claude/b/sub");
+    const worker = row("run:w", "claude/b/worker");
+    const subworker = row("run:sw", "claude/c/subworker");
+    const parent = multiTeam(lead.name, [sublead.name, worker.name]);
+    const child = { ...multiTeam(sublead.name, [subworker.name]), id: "t2", name: "Sub" };
+    const teamOf = (s: { name: string }) => (s.name === lead.name || s.name === worker.name ? parent : s.name === sublead.name || s.name === subworker.name ? child : undefined);
+    const { input } = folders({ a: [lead], b: [sublead, worker], c: [subworker] });
+    const rows = groupRows({ ...input, teamOf } as ListInput);
+    expect(cardsOf(rows, "a")).toEqual([lead.name, worker.name]);
+    expect(cardsOf(rows, "b")).toEqual([sublead.name, subworker.name]);
   });
 });
 

@@ -18,7 +18,9 @@ export type Row =
       /** A child whose parent is not shown above it: the parent's name. */
       fromParent?: { name: string; key?: string };
       /** A Teams lead's team (its strip); a member under its lead is `teamFirst` and `teamLast` at the ends. */
-      teamSummary?: TeamSummary; teamFirst?: boolean; teamLast?: boolean }
+      teamSummary?: TeamSummary; teamFirst?: boolean; teamLast?: boolean;
+      /** Task 455: a lead's member rows (the strip counts exactly these). */
+      teamMembersShown?: number }
   | { type: "child"; id: string; parent: Session; child: Subagent; first: boolean; last: boolean }
   | { type: "creation"; id: string; creation: CreationCard };
 
@@ -92,32 +94,38 @@ export function groupRows(input: ListInput): Row[] {
     if (team) teamFor.set(s.key, team);
   }
   const leadOf = new Map<string, Session>();
-  const membersOf = new Map<string, Session[]>();
+  const rosterOf = new Map<string, Session[]>();
   for (const team of new Set(teamFor.values())) {
     const leadMember = team.members.find((m) => m.lead);
     const lead = leadMember ? everyone.find((s) => sessionIs(leadMember.session, s.computer, s)) : undefined;
     if (!lead) continue;
     leadOf.set(team.id, lead);
-    membersOf.set(team.id, team.members.filter((m) => !m.lead)
+    rosterOf.set(team.id, team.members.filter((m) => !m.lead)
       .map((m) => everyone.find((s) => sessionIs(m.session, s.computer, s)))
       .filter((s): s is Session => !!s));
   }
+  const wanted = (id: string) => !input.projects.length || input.projects.includes(id);
+  const projectOf = new Map<string, string>();
+  for (const [id, list] of input.members) for (const s of list) projectOf.set(s.key, id);
   /**
-   * Task 431: a team member is folded under its lead only in the project folder
-   * that actually lists that lead. Before, a lead visible in any project folded
-   * its members everywhere, so a folder whose lead sits in another project (or is
-   * filtered out there) kept its header and hid every session behind it.
+   * Task 455 (owner, 2026-11-09): an unfolded team shows every live member
+   * under its lead, in team order, whatever project folder a member's session
+   * is filed in (members run in their own worktree folders), and nowhere else.
+   * This replaces task 431's rule, which kept only the members of the lead's
+   * own folder under it and split the team. A lead that is not shown (filtered
+   * out, or in a project the filter leaves out) takes no members: they stay in
+   * their own folders. A member that leads its own team (a sub-team) keeps its
+   * own place with its team.
    */
-  const nested = (list: readonly Session[], key: string): boolean => {
-    const team = teamFor.get(key);
-    if (!team) return false;
-    const lead = leadOf.get(team.id);
-    if (!lead || !list.some((s) => s.key === lead.key && input.visible(s))) return false;
-    return (membersOf.get(team.id) ?? []).some((member) => member.key === key);
-  };
-  // The project folder whose cards are being built: a team tree shows only the
-  // members that folder lists (task 431).
-  let scope: readonly Session[] = [];
+  const leadKeys = new Set([...leadOf.values()].map((lead) => lead.key));
+  const membersOf = new Map<string, Session[]>();
+  const nested = new Set<string>();
+  for (const [team, lead] of leadOf) {
+    if (!teamFor.has(lead.key) || !input.visible(lead) || !wanted(projectOf.get(lead.key) ?? "")) continue;
+    const shown = (rosterOf.get(team) ?? []).filter((member) => member.key !== lead.key && !leadKeys.has(member.key) && input.visible(member) && !nested.has(member.key));
+    membersOf.set(team, shown);
+    for (const member of shown) nested.add(member.key);
+  }
   const card = (s: Session, extra: Partial<Extract<Row, { type: "card" }>> = {}) => {
       const current = currentChildren(s, input.online(s));
       const roster = input.children === false ? [] : (input.roster?.(s) ?? s.subagents ?? []);
@@ -135,11 +143,11 @@ export function groupRows(input: ListInput): Row[] {
       const changed = kids.length !== roster.length || kids.some((child, index) => child !== roster[index]);
       const shown = changed ? { ...s, subagents: kids } : s;
       const summary = teamFor.get(s.key);
-      const teamMembers = summary ? (membersOf.get(summary.id) ?? []).filter((m) => scope.some((s) => s.key === m.key)) : [];
+      const teamMembers = summary && leadOf.get(summary.id)?.key === s.key ? membersOf.get(summary.id) ?? [] : [];
       const isLead = !!summary && leadOf.get(summary.id)?.key === s.key;
       const membersShown = isLead && teamMembers.length > 0 && !(input.teamFolded?.(summary!.id) ?? false);
       out.push({ type: "card", id: s.key, session: shown, expandable: isLead && teamMembers.length > 0, expanded: expanded || membersShown, compactRow: input.compact(s.key), ...extra, team,
-                 teamSummary: isLead ? summary : undefined });
+                 teamSummary: isLead ? summary : undefined, teamMembersShown: isLead ? teamMembers.length : undefined });
       if (expanded) kids.forEach((child, i) => out.push({ type: "child", id: `${s.key}/${child.id}`, parent: shown, child, first: i === 0, last: i === kids.length - 1 }));
       if (membersShown) {
         teamMembers.forEach((member, i) => out.push({
@@ -153,8 +161,7 @@ export function groupRows(input: ListInput): Row[] {
   // or a parent elsewhere leaves the card at top level. A Teams member
   // listed under its lead is not a card of its own.
   const cards = (members: readonly Session[]) => {
-    scope = members;
-    const list = members.filter((s) => !nested(members, s.key));
+    const list = members.filter((s) => !nested.has(s.key));
     const parentOf = new Map<string, string>();
     if (input.parentKey) {
       const shown = new Set(list.map((s) => s.key));
@@ -238,7 +245,6 @@ export function groupRows(input: ListInput): Row[] {
       card(s, { depth, parentKey: parent, lastChild: parent ? last : undefined, team: counts && { ...counts, collapsed }, ...from });
     }
   };
-  const wanted = (id: string) => !input.projects.length || input.projects.includes(id);
   const headers = input.grouping.loaded ? input.grouping.headers : [];
   if (headers.length <= 1) {
     // One project, or none presented yet: no header, and nothing collapses (293, 324, 326).
@@ -248,7 +254,8 @@ export function groupRows(input: ListInput): Row[] {
   for (const h of headers) {
     if (!wanted(h.id)) continue;
     const all = input.members.get(h.id) ?? [];
-    const list = all.filter(input.visible);
+    // Task 455: members shown under a lead elsewhere are not this folder's rows.
+    const list = all.filter((s) => input.visible(s) && !nested.has(s.key));
     // A project without visible members stays hidden while filtering, when
     // the owner asked to hide empty projects (the default), and when the
     // organization cannot reach it (SessionsWindowRows.cpp:559, 323).

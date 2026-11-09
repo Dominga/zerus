@@ -185,25 +185,60 @@ describe("a team member's row and the team tree (tasks 330, 425)", () => {
     expect(px(line, "top") + px(last, "height")).toBeLessThanOrEqual(px(elbow, "top") + 2);
   });
 
-  it("gives the lead a strip of its own height with a keyboard-reachable fold toggle", async () => {
+  it("puts the fold control at the strip's right end: a small icon button with the member count and Fold or Unfold team (task 452)", async () => {
     const { rule } = await styles();
-    const team = { name: "T", status: "running", phase: 9, phase_done: 207, phase_total: 230, phases_done: 8, phases_total: 9, attention: 3, members: ["a", "b"] };
+    const team = { name: "T", status: "running", phase: 9, phase_done: 257, phase_total: 258, phases_done: 8, phases_total: 9, attention: 3,
+      members: Array.from({ length: 14 }, (_, i) => `m${i}`) };
+    const strip = (html: string) => html.match(/<div[^>]*class="sc-team-strip"[\s\S]*?<\/button>\s*(?:<!--[^>]*-->\s*)*<\/div>/)?.[0] ?? "";
+    const toggle = (html: string) => html.match(/<button[^>]*class="icon-btn small sc-team-toggle"[^>]*>/)?.[0] ?? "";
     const open = render(false, row(), true, undefined, { teamSummary: team, expanded: true });
-    expect(open).toContain('class="sc-team-strip"');
     expect(open).not.toMatch(/class="team-strip"|class="team-members"|class="team-status/);
-    const toggle = (html: string) => html.match(/<button[^>]*class="sc-team-toggle"[^>]*>/)?.[0] ?? "";
+    // The button is the strip's last element, after the count: its right end.
+    const openStrip = strip(open);
+    expect(openStrip).not.toBe("");
+    expect(openStrip.indexOf("14 members")).toBeGreaterThan(openStrip.indexOf("Running"));
+    expect(openStrip.indexOf('class="icon-btn small sc-team-toggle"')).toBeGreaterThan(openStrip.indexOf("14 members"));
     expect(toggle(open)).toContain('type="button"');
     expect(toggle(open)).toContain('aria-expanded="true"');
-    expect(toggle(open)).toContain('aria-label="Hide team members"');
+    expect(toggle(open)).toContain('aria-label="Fold team"');
+    expect(toggle(open)).toContain('title="Fold team"');
     const folded = render(false, row(), true, undefined, { teamSummary: team, expanded: false });
+    expect(strip(folded)).toContain("14 hidden");
+    expect(strip(folded)).toContain('data-folded="1"');
     expect(toggle(folded)).toContain('aria-expanded="false"');
-    expect(toggle(folded)).toContain('aria-label="Show team members"');
-    // The Team tab's .team-strip gave it 34 px and a bottom rule past the card's edge.
-    const strip = rule(".sc-team-strip");
-    expect(px(strip, "height")).toBe(21);
-    expect(strip).toMatch(/box-sizing:\s*border-box/);
-    expect(strip).toMatch(/overflow:\s*hidden/);
-    expect(rule('.sc-team-toggle[aria-expanded="true"] .chev')).toMatch(/rotate:\s*90deg/);
+    expect(toggle(folded)).toContain('aria-label="Unfold team"');
+    // The normal small icon-button size, with hover and keyboard focus states; the chevron turns when folded.
+    const button = rule(".sc-team-toggle.icon-btn.small");
+    expect(px(button, "width")).toBe(22);
+    expect(px(button, "height")).toBe(22);
+    expect(rule(".sc-team-toggle.icon-btn.small:hover")).toMatch(/background:/);
+    expect(rule(".sc-team-toggle.icon-btn.small:focus-visible")).toMatch(/outline:\s*2px solid/);
+    expect(rule('.sc-team-toggle[aria-expanded="false"] .chev')).toMatch(/rotate:\s*-90deg/);
+    // The strip holds the button (26 px), stays inside the card and folds on a click anywhere on it.
+    const box = rule(".sc-team-strip");
+    expect(px(box, "height")).toBe(26);
+    expect(px(box, "top") + px(box, "height")).toBeLessThanOrEqual(104 + 26 - 4 - 6);
+    expect(box).toMatch(/box-sizing:\s*border-box/);
+    expect(box).toMatch(/overflow:\s*hidden/);
+    expect(box).toMatch(/cursor:\s*pointer/);
+    const { readFileSync } = await import(/* @vite-ignore */ ["node", "fs"].join(":")) as { readFileSync(path: URL): string };
+    const source = String(readFileSync(new URL("./SessionCard.tsx", import.meta.url)));
+    expect(source).toMatch(/class="sc-team-strip"[^>]*\n?[^>]*onClick=\{\(e\) => \{ e\.stopPropagation\(\); props\.onToggle\(\); \}\}/);
+  });
+
+  it("keeps a member's state badge whole on a narrow list, the title giving way (task 452)", async () => {
+    const { rule } = await styles();
+    // The container queries cap every card's badge at 104 px (360 px wide) or 128 px; a member's
+    // badge keeps its whole caption and the cooling bar, and its title shortens first.
+    const badge = rule(".scard.sc-member .sc-l1 > .sbadge");
+    // No narrow-list cap; on a line too narrow even for the caption it shrinks inside the card (task 455).
+    expect(badge).toMatch(/max-width:\s*none/);
+    expect(badge).toMatch(/flex-shrink:\s*1/);
+    expect(badge).toMatch(/min-width:\s*0/);
+    expect(rule(".scard.sc-member .sc-title")).toMatch(/min-width:\s*0/);
+    // The badge clips nothing of its own: the label ellipsizes only past the line's room, and the bar stays inside its padding.
+    expect(rule(".sbadge .sb-label")).toMatch(/text-overflow:\s*ellipsis/);
+    expect(px(rule(".sbadge.k-cooling"), "padding-right")).toBeGreaterThanOrEqual(7 + 16);
   });
 });
 describe("session cards at the narrow side panel (task 343)", () => {

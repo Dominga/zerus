@@ -487,16 +487,19 @@
      the session list's own names (sc-team-*, sc-member): the Team tab's
      .team-strip, .team-status, .team-members and .team-member rules gave the
      strip 34 px and a bottom rule and squeezed a member card into a 14 px bar. */
-  .sc-team-strip { position: absolute; left: 7px; right: 7px; top: 82px; height: 21px; box-sizing: border-box; display: flex; align-items: center;
-    gap: 7px; padding: 0 7px 0 3px; border: 1px solid var(--z-color-card-border); border-radius: 7px; background: var(--z-color-card);
-    font-size: 10px; color: var(--z-list-muted); overflow: hidden; white-space: nowrap; }
-  .sc-team-toggle { flex: none; display: inline-flex; align-items: center; gap: 3px; height: 17px; padding: 0 4px; border: 0; border-radius: 4px;
-    background: transparent; color: var(--z-list-muted); font: inherit; cursor: pointer; }
-  .sc-team-toggle:hover { background: var(--z-list-counter-hover, var(--z-color-hover)); color: var(--z-list-text); }
-  .sc-team-toggle:focus-visible { outline: 1px solid var(--z-color-accent); }
+  .sc-team-strip { position: absolute; left: 7px; right: 7px; top: 80px; height: 26px; box-sizing: border-box; display: flex; align-items: center;
+    gap: 7px; padding: 0 2px 0 8px; border: 1px solid var(--z-color-card-border); border-radius: 7px; background: var(--z-color-card);
+    font-size: 10px; color: var(--z-list-muted); overflow: hidden; white-space: nowrap; cursor: pointer; }
+  .sc-team-strip:hover { border-color: color-mix(in srgb, var(--z-color-accent) 35%, var(--z-color-card-border)); }
+  .sc-team-strip .grow { flex: 1; }
+  /* Task 452: the fold control, a normal small icon button at the strip's right end. */
+  .sc-team-toggle.icon-btn.small { flex: none; width: 22px; height: 22px; border: 0; border-radius: 5px; background: transparent; color: var(--z-list-text, var(--z-color-text)); cursor: pointer; }
+  .sc-team-toggle.icon-btn.small:hover { background: var(--z-list-counter-hover, var(--z-color-hover)); }
+  .sc-team-toggle.icon-btn.small:focus-visible { outline: 2px solid var(--z-color-focus); outline-offset: -1px; }
   .sc-team-toggle .chev { transition: rotate var(--z-motion-base) var(--ease); }
-  .sc-team-toggle[aria-expanded="true"] .chev { rotate: 90deg; }
-  .sc-team-count { font-variant-numeric: tabular-nums; }
+  .sc-team-toggle[aria-expanded="false"] .chev { rotate: -90deg; }
+  .sc-team-count { flex: none; font-size: 11px; color: var(--z-list-text, var(--z-color-text-2)); font-variant-numeric: tabular-nums; }
+  .sc-team-strip[data-folded] .sc-team-count { color: var(--z-color-accent); font-weight: 600; }
   .tbar { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
   .tbar-label { font-variant-numeric: tabular-nums; }
   .tbar-track { width: 26px; height: 3px; border-radius: 2px; background: var(--z-color-border); overflow: hidden; }
@@ -514,6 +517,11 @@
   .scard.sc-member .sc-title { min-width: 0; }
   .scard.sc-member .agent-badge { flex: 0 1 auto; min-width: 0; max-width: 104px; }
   .scard.sc-member .sc-l3 > .ell { min-width: 0; }
+  /* Task 452: a member's state badge keeps its whole caption (the cooling
+     bar beside it) without the narrow-list cap; task 455: on a line too
+     narrow even for that, it shortens with an ellipsis instead of leaving
+     the card, as the title (which keeps a few letters) does. */
+  .scard.sc-member .sc-l1 > .sbadge { max-width: none; flex-shrink: 1; min-width: 0; }
   .scard.sc-member::before { content: ""; position: absolute; left: -13px; top: -11px; bottom: -7px; width: 1px;
     background: var(--z-list-tree-line); pointer-events: none; }
   .scard.sc-member.sc-member-last::before { bottom: auto; height: 33px; }

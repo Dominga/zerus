@@ -565,27 +565,38 @@ function TeamBar(props: { label: string; done: number; total: number; muted?: bo
 }
 
 /** The lead's team strip (SessionCardDelegate.h:468-541): both bars, status, ?N, members. */
-export function TeamStrip(props: { team: TeamSummary; expanded: boolean; onToggle: () => void }) {
+export function TeamStrip(props: { team: TeamSummary; expanded: boolean; onToggle: () => void; shown?: number }) {
   const status = () => TEAM_STATUS[props.team.status] ?? props.team.status;
+  const fold = () => (props.expanded ? tr("Fold team") : tr("Unfold team"));
+  // Task 455: the count is the member rows the list shows under the lead (live
+  // members, wherever their sessions are filed), else the team's members.
+  const members = () => props.shown ?? props.team.members.filter((member) => !member.lead).length;
+  const count = () => (props.expanded ? tr("%1 members", members()) : tr("%1 hidden", members()));
   // Task 425: the session list's own class names (sc-team-*): the Team tab's
   // .team-strip, .team-status and .team-members rules must not reach them.
+  // Task 452 (owner, 2026-11-09): the fold control is a chevron button at the
+  // strip's right end, beside the member count, and the whole strip folds or
+  // unfolds the team on a click; the button keeps the keyboard.
   return (
-    <div class="sc-team-strip" title={`${props.team.name}
-${tr("%1 of %2 phases finished; discarded drafts do not count", props.team.phases_done, props.team.phases_total)}`}>
-      <button type="button" class="sc-team-toggle" data-team-toggle aria-expanded={props.expanded}
-        aria-label={props.expanded ? tr("Hide team members") : tr("Show team members")} title={props.expanded ? tr("Hide team members") : tr("Show team members")}
-        onClick={(e) => { e.stopPropagation(); props.onToggle(); }} onDblClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") e.stopPropagation(); }}>
-        <Icon name="chevron-right" size={12} class="chev" />
-        <Icon name="users" size={14} />
-        <span class="sc-team-count">{props.team.members.length}</span>
-      </button>
+    <div class="sc-team-strip" data-team-strip data-folded={props.expanded ? undefined : "1"}
+      title={`${props.team.name}
+${tr("%1 of %2 phases finished; discarded drafts do not count", props.team.phases_done, props.team.phases_total)}
+${fold()}`}
+      onClick={(e) => { e.stopPropagation(); props.onToggle(); }} onDblClick={(e) => e.stopPropagation()}>
       <TeamBar label={`${props.team.phase ? `P${props.team.phase} ` : ""}${props.team.phase_done}/${props.team.phase_total}`}
         done={props.team.phase_done} total={props.team.phase_total} />
       <TeamBar label={`${props.team.phases_done}/${props.team.phases_total}`} done={props.team.phases_done}
         total={props.team.phases_total} muted />
       <span class={props.team.status === "stuck" ? "sc-team-status stuck" : "sc-team-status"}>{tr(status())}</span>
       <Show when={props.team.attention > 0}><span class="sc-team-answers">?{props.team.attention}</span></Show>
+      <span class="grow" />
+      <span class="sc-team-count">{count()}</span>
+      <button type="button" class="icon-btn small sc-team-toggle" data-team-toggle aria-expanded={props.expanded}
+        aria-label={fold()} title={fold()}
+        onClick={(e) => { e.stopPropagation(); props.onToggle(); }} onDblClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") e.stopPropagation(); }}>
+        <Icon name="chevron-down" size={16} class="chev" />
+      </button>
     </div>
   );
 }
@@ -623,6 +634,8 @@ export function SessionCard(props: {
   /** A Teams lead's team: its strip, and the fold of its members under it. */
   teamSummary?: TeamSummary;
   onToggleMembers?: () => void;
+  /** Task 455: the member rows listed under this lead. */
+  teamMembersShown?: number;
   /** A Teams member listed under its lead: indented, first and last of the group get the connector's ends. */
   member?: boolean;
   depth?: number;
@@ -701,7 +714,7 @@ export function SessionCard(props: {
         </Show>
         <Show when={props.team}>{(team) => <TeamToggle team={team()} onToggle={props.onToggleTeam} />}</Show>
       </div>
-      <Show when={props.teamSummary}><TeamStrip team={props.teamSummary!} expanded={props.expanded} onToggle={() => props.onToggleMembers?.()} /></Show>
+      <Show when={props.teamSummary}><TeamStrip team={props.teamSummary!} expanded={props.expanded} shown={props.teamMembersShown} onToggle={() => props.onToggleMembers?.()} /></Show>
     </div>
   );
 }

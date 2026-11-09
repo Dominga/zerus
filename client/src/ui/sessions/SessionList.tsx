@@ -1004,7 +1004,7 @@ function ListRow(props: { id: string; list: RowSource }) {
                 onToggleChildren={() => setExpandedChildren(v().session.key, !expandedChildren[v().session.key])}
                 onCold={(action) => coldAction(v().session, action)} onChip={(kind) => openChip(v().session, kind)}
                 team={v().team} onToggleTeam={() => setTeamCollapsed(v().session.key, !teamCollapsed(v().session.key))}
-                teamSummary={v().teamSummary} onToggleMembers={() => v().teamSummary && setTeamsCollapsed(v().teamSummary!.id, !teamsCollapsed(v().teamSummary!.id))}
+                teamSummary={v().teamSummary} teamMembersShown={v().teamMembersShown} onToggleMembers={() => v().teamSummary && setTeamsCollapsed(v().teamSummary!.id, !teamsCollapsed(v().teamSummary!.id))}
                 member={v().teamFirst !== undefined} depth={v().depth} teamFirst={v().teamFirst} teamLast={v().teamLast}
                 fromParent={v().fromParent} onOpenParent={(key) => { setSelectedKey(key); setRevealing(key); }} />
             </Show>

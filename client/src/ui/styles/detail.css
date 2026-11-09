@@ -637,6 +637,18 @@
 /* A required question card hides the composer's input without unmounting it. */
 .composer [hidden] { display: none !important; }
 
+/* Task 453 (owner, screenshot of package 168: "Я кому говорил убрать эту
+   границу?"): the composer is one frame. The field inside it draws no frame of
+   its own, focused or not; the composer's own border shows the focus. The rule
+   is unlayered: the base layer's `:focus-visible` ring is what put a second,
+   inner frame around the field, and a component-layer `outline: none` loses to
+   it whenever the document's cascade layers arrive in the other order
+   (development CSS is injected per module, so a component stylesheet may open
+   the components layer before base.css declares reset, base, components). */
+.composer .cmp-editor,
+.composer .cmp-editor:focus,
+.composer .cmp-editor:focus-visible { border: 0; outline: none; box-shadow: none; }
+
 /* The question card (Qt's QuestionCard), between Activity and the composer, in
    the reading column. Questions and approvals read as needing attention, after
    the owner's prototype: warn border and tint, card-coloured option rows. */

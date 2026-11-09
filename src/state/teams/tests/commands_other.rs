@@ -622,6 +622,15 @@ fn the_leads_answer_reaches_the_members_subagent_card() {
         });
         super::super::dispatcher::set_fake_hgs(None);
         result.unwrap();
+        // Task #349: the lead's answer is in the approval journal, with its
+        // source, its member and team, the question and the answer given.
+        let journal = crate::approval_log::root();
+        let entries = crate::approval_log::entries(&journal, &json!({"source":"team lead dsh/x/lead"})).unwrap();
+        assert_eq!(entries["entries"].as_array().unwrap().len(), 1, "{entries}");
+        assert_eq!(entries["entries"][0]["team"], "rv");
+        assert_eq!(entries["entries"][0]["member"], "dev");
+        assert_eq!(entries["entries"][0]["answer"], "allow: Yes");
+        assert!(entries["entries"][0]["prompt"].as_str().unwrap().contains("Start 2 subagents"), "{entries}");
         let calls = calls.borrow();
         let answer = calls.iter().find(|(args, _)| args.first().map(String::as_str) == Some("answer")).expect("hgs answer was called");
         assert_eq!(answer.0, vec!["answer".to_owned(), "claude/x/dev".to_owned(), "--json".to_owned()]);

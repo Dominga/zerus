@@ -4354,6 +4354,18 @@ durable request UUID; an existing reservation never permits another delivery.
 `list` supports exact `host`/`session` filters and `before` or `after` record IDs.
 `detail` reads one entry. The command itself never sends native input.
 
+Task #349: the journal is the one list of every approval not given by the owner
+in person. Besides the automatic entries (source `automatic`) it records the
+team lead's answers (`hgs team answer`, source `team lead <session>`) and
+Zerus's own safe answers (source `Zerus safe-call rule` for a single in-scope
+`hgs team` call, `safe-action shape` for a recorded safe action), each with its
+computer, session, team, member, question, command and the answer given. An
+entry is written durably before the answer is delivered; a delivery that fails
+settles the same entry as failed, and nothing is sent when the journal cannot be
+written. `list` also takes exact `source` and `team` filters; its 50-entry pages
+stay on the indexes and record-ID cursors, and older entries are never
+backfilled.
+
 **Saved drafts** below the session list lets you preview, copy or restore drafts
 from ended or missing sessions into the current session. It lists the most
 recently edited drafts first; each row names the draft's session and computer

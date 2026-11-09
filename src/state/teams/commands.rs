@@ -3116,11 +3116,62 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
         .find(|card| card["question_id"] == question.as_str() && card["question_hash"] == hash.as_str())
         .cloned()
         .context("This question changed or is no longer pending")?;
+    let selected: Vec<&str> = input["answers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|answer| answer["selected_option_ids"].as_array().into_iter().flatten())
+        .filter_map(|id| id.as_str())
+        .collect();
+    let deny = card["questions"].as_array().into_iter().flatten().any(|item| {
+        item["options"].as_array().into_iter().flatten().any(|option| {
+            option["id"].as_str().is_some_and(|id| selected.contains(&id))
+                && option["label"].as_str().is_some_and(denies)
+        })
+    });
+    let tool = card["questions"]
+        .as_array()
+        .and_then(|items| items.first())
+        .and_then(|item| item["header"].as_str())
+        .or_else(|| card["tool"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    // Task #349 (owner, 2026-11-08): the approval journal is the one place for
+    // an approval not given by the owner in person. A lead's answer is written
+    // there, with its source, before it is delivered; a failed delivery settles
+    // the same entry. The owner's own answer needs no journal.
+    let journal_root = crate::approval_log::root();
+    let journal = if matches!(&by, Actor::Human) {
+        None
+    } else {
+        let lead_name = if parent_authority {
+            parent.as_ref().and_then(|parent| parent.member(&parent.lead)).and_then(|lead| lead.session.as_ref())
+        } else {
+            team.member(&team.lead).and_then(|lead| lead.session.as_ref())
+        }.map(|lead| lead.name.clone()).unwrap_or_else(|| "lead".to_owned());
+        let labels: Vec<String> = card["questions"].as_array().into_iter().flatten()
+            .flat_map(|item| item["options"].as_array().into_iter().flatten())
+            .filter(|option| option["id"].as_str().is_some_and(|id| selected.contains(&id)))
+            .filter_map(|option| option["label"].as_str().map(str::to_owned))
+            .collect();
+        let answer_text = format!("{}: {}", if deny { "deny" } else { "allow" },
+            if labels.is_empty() { selected.join(", ") } else { labels.join(", ") });
+        let entry = json!({"host": if session.host.is_empty() { "local" } else { session.host.as_str() },
+            "session": session.name,"source":format!("team lead {lead_name}"),"team":team.id,"member":member_id,
+            "question":card["questions"][0]["question"],"command":card["command"],"answer":answer_text,"status":"answered"});
+        match crate::approval_log::note(&journal_root, &entry) {
+            Ok(id) => Some(id),
+            Err(error) => bail!("The approval journal could not record this answer; nothing was sent: {error}"),
+        }
+    };
     let request = json!({"request_id":uuid::Uuid::new_v4().to_string(),"expected_run_id":session.run_id,
         "expected_conversation_id":session.conversation_id,"question_id":question,"expected_question_hash":hash,"answers":input["answers"]});
     let output = super::dispatcher::hgs(&session.host, &["answer", &session.name, "--json"], Some(&request), std::time::Duration::from_secs(120))?;
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        if let Some(id) = journal {
+            let _ = crate::approval_log::settle(&journal_root, id, "failed", &error);
+        }
         // The owner, 2026-11-05: Kimi refuses an answer from outside its
         // Terminal while another of its requests waits; the lead then had a
         // request it could never answer. It goes to the owner at once.
@@ -3146,28 +3197,11 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
         }
         bail!("{error}");
     }
+    if let Some(id) = journal {
+        let _ = crate::approval_log::settle(&journal_root, id, "approved", "");
+    }
     // B2: a denied permission's text reaches the member as one message, and
     // B1: the lead's or owner's answer is recorded with its reason.
-    let selected: Vec<&str> = input["answers"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .flat_map(|answer| answer["selected_option_ids"].as_array().into_iter().flatten())
-        .filter_map(|id| id.as_str())
-        .collect();
-    let deny = card["questions"].as_array().into_iter().flatten().any(|item| {
-        item["options"].as_array().into_iter().flatten().any(|option| {
-            option["id"].as_str().is_some_and(|id| selected.contains(&id))
-                && option["label"].as_str().is_some_and(denies)
-        })
-    });
-    let tool = card["questions"]
-        .as_array()
-        .and_then(|items| items.first())
-        .and_then(|item| item["header"].as_str())
-        .or_else(|| card["tool"].as_str())
-        .unwrap_or_default()
-        .to_owned();
     let reason = text(input, "text").trim().to_owned();
     // N5: the answer is recorded even when the denial message cannot be sent.
     let denial_error = if deny && !reason.is_empty() {

@@ -8673,6 +8673,34 @@ fn command_is_hgs(command: &str) -> bool {
 /// it fails, the question stays in the lead's inbox as any other.
 fn allow_safe(store: &mut Store, team: &Team, member_id: &str, pending: &PendingQuestion, action: &Value, answer: &Value) -> anyhow::Result<()> {
     let session = team.member(member_id).and_then(|member| member.session.clone()).context("the member has no session")?;
+    let role = team.role_of(member_id);
+    // Task #346: an action Zerus answers by itself names how (e.g. its own-scope
+    // team call); a recorded safe action keeps its `safe action <id>` line.
+    let by = action["answer_by"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("safe action {}", action["id"].as_str().unwrap_or_default()));
+    // Task #349 (owner, 2026-11-08): the approval journal is the one place for
+    // an approval not given by the owner in person. Zerus's own safe answer is
+    // written there, with its source, before it is delivered; a failed
+    // delivery settles the same entry.
+    let journal_root = crate::approval_log::root();
+    let journal = {
+        let label = pending.card["questions"].as_array().into_iter().flatten()
+            .flat_map(|item| item["options"].as_array().into_iter().flatten())
+            .find(|option| option["id"] == answer["allow"])
+            .and_then(|option| option["label"].as_str())
+            .unwrap_or("allow");
+        let source = if action["answer_by"].as_str().is_some() { "Zerus safe-call rule" } else { "safe-action shape" };
+        let entry = json!({"host": if session.host.is_empty() { "local" } else { session.host.as_str() },
+            "session": session.name,"source":source,"team":team.id,"member":member_id,
+            "question":pending.card["questions"][0]["question"],"command":pending.card["tool_input"]["command"].as_str().or_else(|| pending.card["command"].as_str()).unwrap_or(""),
+            "answer":format!("allow: {label}"),"status":"answered"});
+        match crate::approval_log::note(&journal_root, &entry) {
+            Ok(id) => Some(id),
+            Err(error) => anyhow::bail!("The approval journal could not record this safe answer; nothing was sent: {error}"),
+        }
+    };
     let request = json!({"request_id":uuid::Uuid::new_v4().to_string(),"expected_run_id":session.run_id,
         "expected_conversation_id":session.conversation_id,"question_id":pending.question_id,
         "expected_question_hash":pending.question_hash,"answers":[{"question_id":answer["question_id"],"selected_option_ids":[answer["allow"]]}]});
@@ -8681,13 +8709,13 @@ fn allow_safe(store: &mut Store, team: &Team, member_id: &str, pending: &Pending
         Ok(output) => Err(String::from_utf8_lossy(&output.stderr).trim().to_owned()),
         Err(error) => Err(error.to_string()),
     };
-    let role = team.role_of(member_id);
-    // Task #346: an action Zerus answers by itself names how (e.g. its own-scope
-    // team call); a recorded safe action keeps its `safe action <id>` line.
-    let by = action["answer_by"]
-        .as_str()
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("safe action {}", action["id"].as_str().unwrap_or_default()));
+    if let Err(error) = &delivered {
+        if let Some(id) = journal {
+            let _ = crate::approval_log::settle(&journal_root, id, "failed", error);
+        }
+    } else if let Some(id) = journal {
+        let _ = crate::approval_log::settle(&journal_root, id, "approved", "");
+    }
     change(store, &team.id, |team, events| {
         let found = team.members.iter_mut().find(|m| m.id == member_id).context("unknown member")?;
         let question = pending.question_id.as_str();

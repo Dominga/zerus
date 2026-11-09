@@ -37,6 +37,7 @@ import { confirmKeepWarm, currentKeepWarm, keepWarmTarget } from "./keep-warm-st
 import { moveEntry, openCreateProjectDialog, openDeleteProjectDialog, openRenameProjectDialog } from "./OrganizationDialogs";
 import { backgroundEntries } from "./background-menu";
 import { chipColor, headerEntries, projectColor, type FilterChip } from "./organization-ui";
+import { headerFrames } from "./folder-frames";
 import { newSessionForProject, newSessionFromCold, newSessionFromPanel } from "./newsession-view";
 import { openChip } from "./row-actions";
 import { CreationCard, CreationTile } from "./CreationCard";
@@ -529,7 +530,9 @@ function useRows(strip: boolean) {
   const ref = (el: HTMLElement) => { scrollEl = el; requestAnimationFrame(() => virtualizer._willUpdate()); };
   // Fixed heights per row type, so every row's offset is known without the DOM.
   const offsets = createMemo(() => { let y = 0; return heights().map((h) => { const t = y; y += h; return t; }); });
-  return { ref, rows, virtualizer, byId, keys, gitKeys, startOf, offsets, heights, heightOf: (id: string) => { const i = rows().findIndex((r) => r.id === id); return heights()[i] ?? 94; } };
+  // One frame per project, around its header row alone (owner, 2026-11-09).
+  const frames = createMemo(() => headerFrames(rows(), heights()));
+  return { ref, rows, virtualizer, byId, keys, gitKeys, startOf, offsets, heights, frames, heightOf: (id: string) => { const i = rows().findIndex((r) => r.id === id); return heights()[i] ?? 94; } };
 }
 
 /** The panel slide in flight, and the timer that ends it. */
@@ -812,6 +815,9 @@ export function SessionList() {
               aria-label={tr("Agent sessions; Ctrl-click to select several; drag to organize, left/right to collapse or expand a group")}>
               <Show when={list.rows().length} fallback={<NoMatches />}>
                 <div role="presentation" style={{ height: `${list.virtualizer.getTotalSize()}px`, position: "relative" }}>
+                  <For each={list.frames()}>{(frame) => (
+                    <div class="group-frame" data-frame={frame.id} aria-hidden="true" style={{ transform: `translateY(${frame.top}px)`, height: `${frame.height}px`, "--frame": frame.frame }} />
+                  )}</For>
                   <DropIndicator />
                   <For each={list.keys()}>{(id) => <ListRow id={id} list={list} />}</For>
                 </div>

@@ -197,4 +197,54 @@ fn the_lead_keeps_a_task_after_its_dependency_was_cancelled() {
     assert!(error.contains("no cancelled dependency"), "{error}");
 }
 
+/// Task #460 (owner, 2026-11-09): a refused queued call is information, one
+/// item per failure keyed by that failure's own request id. A failure ageing
+/// out of the 24 h window closes its item and pages nothing again; a new
+/// failure is the only thing told, once; the item never makes the digest
+/// urgent, however urgent the member's own message was.
+#[test]
+fn a_refused_queued_call_is_told_once_and_never_urgent() {
+    use crate::state::teams::inbox::{informational, items, mark_told, urgency, Item};
+    use crate::state::teams::working::Urgency;
+    let now = crate::state::now();
+    let failure = |id: &str, member: &str, minutes: f64| {
+        json!({"member":member,"op":"ask","request_id":id,"error":"attempt does not run for this member","urgent":true,"at":now - minutes * 60.0})
+    };
+    let first = "11111111-1111-4111-8111-111111111111";
+    let second = "22222222-2222-4222-8222-222222222222";
+    let mut team = running_team();
+    team.outbox_failures = vec![failure(first, "qa", 1400.0), failure(second, "core2", 15.0)];
+    let listed: Vec<Item> = items(&team).into_iter().filter(|item| item.kind == "refused_queued_call").collect();
+    assert_eq!(listed.len(), 2, "one item per failure: {listed:?}");
+    assert_eq!(listed[0].key, format!("refused_queued_call:{first}"));
+    assert_eq!(listed[1].key, format!("refused_queued_call:{second}"));
+    // Each item names its own failure, and its command asks nothing of the lead.
+    assert!(listed[0].summary.contains("qa") && !listed[0].summary.contains("core2"), "{}", listed[0].summary);
+    assert!(listed[1].summary.contains("core2") && !listed[1].summary.contains("qa"), "{}", listed[1].summary);
+    assert!(listed.iter().all(informational), "{:?}", listed.iter().map(|item| &item.command).collect::<Vec<_>>());
+    // The record's `urgent` was the member's message: the lead's digest is normal.
+    assert_eq!(urgency(listed.iter()), Urgency::Normal);
+    // Told once: the digest's mark covers both items and a second pass names none.
+    let mut told: Vec<String> = Vec::new();
+    let open: BTreeSet<String> = items(&team).into_iter().map(|item| item.key).collect();
+    mark_told(&mut told, &listed, &open);
+    assert!(items(&team).iter().all(|item| told.contains(&item.key)), "nothing is told twice");
+    // The oldest ages out of the 24 h window: its item closes, no key changes.
+    let mut aged = team.clone();
+    aged.outbox_failures[0]["at"] = json!(now - 25.0 * 3600.0);
+    let left: Vec<Item> = items(&aged).into_iter().filter(|item| item.kind == "refused_queued_call").collect();
+    assert_eq!(left.len(), 1, "the aged failure closes its item: {left:?}");
+    assert_eq!(left[0].key, format!("refused_queued_call:{second}"));
+    assert!(left.iter().all(|item| told.contains(&item.key)), "ageing out is no new notice");
+    // A new failure is the only thing told again, and only once.
+    let third = "33333333-3333-4333-8333-333333333333";
+    let mut fresh = aged.clone();
+    fresh.outbox_failures.push(failure(third, "hgs", 1.0));
+    let arrived: Vec<Item> = items(&fresh).into_iter().filter(|item| !told.contains(&item.key)).collect();
+    assert_eq!(arrived.len(), 1, "one notice for the new failure: {arrived:?}");
+    assert_eq!(arrived[0].key, format!("refused_queued_call:{third}"));
+    let open: BTreeSet<String> = items(&fresh).into_iter().map(|item| item.key).collect();
+    mark_told(&mut told, &arrived, &open);
+    assert!(items(&fresh).iter().all(|item| told.contains(&item.key)), "the new failure is told once");
+}
 

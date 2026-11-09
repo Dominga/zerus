@@ -18,11 +18,21 @@ const SUMMARY_CHARS: usize = 300;
 pub(crate) const URGENT_KINDS: [&str; 7] = ["question", "permission", "terminal_question", "crashed", "input_blocked", "member_stuck", "urgent_unread"];
 
 pub(crate) fn urgency<'a>(items: impl IntoIterator<Item = &'a Item>) -> super::working::Urgency {
-    if items.into_iter().any(|item| URGENT_KINDS.contains(&item.kind)) {
+    // Task #460 (owner, 2026-11-09): an item whose command asks nothing of the
+    // lead ("no action") is information, whatever its kind: it never makes the
+    // digest urgent.
+    if items.into_iter().any(|item| !informational(item) && URGENT_KINDS.contains(&item.kind)) {
         super::working::Urgency::Urgent
     } else {
         super::working::Urgency::Normal
     }
+}
+
+/// Task #460: an item the lead cannot act on is information for the digest:
+/// its command starts with "no action". It never makes the digest urgent, and
+/// its key is fixed while it is open, so it is told once.
+pub(crate) fn informational(item: &Item) -> bool {
+    item.command.starts_with("no action")
 }
 
 /// One thing on the lead's desk. `key` names it across ticks, so the coalesced
@@ -1480,34 +1490,31 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
     }
     // Task #275: a sandboxed member's queued call the worker refused or that
     // failed; the member is told as a team message and the lead reads why.
+    // Task #460 (owner, 2026-11-09: 'junk reminders'): each failure is one
+    // informational item, keyed by its own request id - never by the oldest
+    // failure's time. A failure ageing out of the 24 h window closes its item
+    // and makes no new notice; only a genuinely new failure is told, once. Its
+    // command asks nothing of the lead, so it never makes the digest urgent.
     if active || finished {
         let cutoff = crate::state::now() - 24.0 * 3600.0;
-        let failures: Vec<&Value> = team
-            .outbox_failures
-            .iter()
-            .filter(|failure| failure["at"].as_f64().unwrap_or(0.0) >= cutoff)
-            .collect();
-        if !failures.is_empty() {
-            let since = failures.iter().filter_map(|failure| failure["at"].as_f64()).fold(f64::INFINITY, f64::min);
-            let named: Vec<String> = failures
-                .iter()
-                .map(|failure| {
-                    let member = failure["member"].as_str().unwrap_or_default();
-                    let op = failure["op"].as_str().unwrap_or("call");
-                    let error = failure["error"].as_str().unwrap_or("no reason recorded");
-                    format!("{member}'s queued {op}: {error}")
-                })
-                .collect();
+        for failure in team.outbox_failures.iter().filter(|failure| failure["at"].as_f64().unwrap_or(0.0) >= cutoff) {
+            let at = failure["at"].as_f64().unwrap_or(0.0);
+            let member = failure["member"].as_str().unwrap_or_default();
+            let op = failure["op"].as_str().unwrap_or("call");
+            let error = failure["error"].as_str().unwrap_or("no reason recorded");
+            // A record from before task #275 carries no id; its time still
+            // names it, and every failure with an id keeps that id for good.
+            let id = failure["request_id"].as_str().filter(|id| !id.is_empty()).map(str::to_owned).unwrap_or_else(|| format!("{at:.0}"));
             items.push(Item {
                 subagents: Value::Null,
                 kind: "refused_queued_call",
-                key: format!("refused_queued_call:{since:.0}"),
+                key: format!("refused_queued_call:{id}"),
                 task: None,
                 member: "Zerus".into(),
-                since,
-                summary: summary(&format!("A queued call was refused: {}", named.join("; "))),
+                since: at,
+                summary: summary(&format!("A queued {op} from {member} was refused: {error}")),
                 command: "no action: the member was told at its next safe point; hgs team status --json shows the team".into(),
-                detail: named.join("; "),
+                detail: String::new(),
             });
         }
     }

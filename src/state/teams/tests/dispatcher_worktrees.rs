@@ -91,6 +91,13 @@ fn a_commit_records_its_sha_and_refuses_another_branch() {
     // Task 272: the catalogs' driver is passed with -c at merge time, never
     // configured in a repository; a repository that configures it is refused.
     assert!(refused_repository_config("local\tmerge.i18n.driver\n").is_some());
+    // Task 377 (owner, 2026-11-08): the repository may carry Zerus's own union
+    // driver as a value (the line does); its exact command is ours, any other
+    // value or another driver is still refused.
+    let ours = format!("local\tmerge.i18n.driver={}\n", super::super::super::merge_queue::I18N_MERGE_DRIVER);
+    assert_eq!(refused_repository_config(&ours), None);
+    assert!(refused_repository_config("local\tmerge.i18n.driver=rm -rf /\n").is_some());
+    assert!(refused_repository_config("local\tmerge.ours.driver=ours\n").is_some());
     assert_eq!(refused_repository_config("local\tmerge.ff\n"), None);
     // C2: a call with more than 1 MB of output finishes without blocking:
     // git show --name-only prints every file of this commit.

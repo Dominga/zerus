@@ -291,7 +291,7 @@ fn git_text(folder: &str, args: &[&str]) -> Option<String> {
 /// merges do: hooks and the repository's code-running config off, a clone's
 /// branch fetched first; a conflict is aborted and its files named.
 pub(crate) fn merge(lead: &str, entry: &MergeEntry, message: &str) -> Merged {
-    let listing = git_text(lead, &["config", "--list", "--show-scope", "--name-only"]).unwrap_or_default();
+    let listing = git_text(lead, &["config", "--list", "--show-scope"]).unwrap_or_default();
     if let Some(reason) = super::dispatcher::refused_repository_config(&listing) {
         return Merged::Failed(format!("This repository {reason}; Zerus does not merge in it"));
     }

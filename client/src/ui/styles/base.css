@@ -327,7 +327,7 @@
    border.) The rule names the scroll containers, so a popup restyles only them,
    not the whole document; popups.test.ts keeps both lists complete. */
 @layer variants {
-  :root[data-platform="linux"]:has(:is(.menu, .att-pop, .archive-pop, .acct-more, .acct-switch-pop, .ns-choice-list, .tk-tip, .goto-scrim, .cat-confirm, .nt-confirm, .pm-lane-menu, .designer-model-menu, .term-menu, dialog.ns-model-pop[open], dialog.diff-dlg[open], :popover-open))
+  :root[data-platform="linux"]:has(:is(.menu, .att-pop, .archive-pop, .acct-more, .acct-switch-pop, .ns-choice-list, .tk-tip, .goto-scrim, .goto, .cat-confirm, .nt-confirm, .pm-lane-menu, .designer-model-menu, .term-menu, dialog.ns-model-pop[open], dialog.diff-dlg[open], :popover-open))
     :is(.dlg-body, .set-scroll, .perf-host, .content-search-list, .act-scroll, .act-table-wrap, .act-code, .act-queue-text,
       .insp-scroll, .insp-tabs, .proc-list, .proc-output, .draft-list, .draft-preview, .qcard-scroll, .fb-list, .goto-list,
       .shortcut-help-list, .mach-page, .mach-log, .acct-scroll, .acct-main-scroll, .acct-more-list, .atm-list, .atm-results,
@@ -338,7 +338,7 @@
       .cat-form, .cat-routing, .cat-rules, .designer-draft, .newteam-page, .catalog-page, .nsd-acc-list,
       .pm-board, .pm-column-body, .pm-layers, .pm-layer-body, .pm-lanes, .pm-profile, .pm-tests, .pm-profile-scroll, .tl-host, .cl-list, .diff-text,
       .xterm-viewport):not(
-      :is(.menu, .att-pop, .archive-pop, .acct-more, .acct-switch-pop, .ns-choice-list, .tk-tip, .goto-scrim, .cat-confirm, .nt-confirm, .pm-lane-menu, .designer-model-menu, .term-menu, dialog.ns-model-pop[open], dialog.diff-dlg[open], :popover-open) *) {
+      :is(.menu, .att-pop, .archive-pop, .acct-more, .acct-switch-pop, .ns-choice-list, .tk-tip, .goto-scrim, .goto, .cat-confirm, .nt-confirm, .pm-lane-menu, .designer-model-menu, .term-menu, dialog.ns-model-pop[open], dialog.diff-dlg[open], :popover-open) *) {
     scrollbar-width: none;
   }
 }

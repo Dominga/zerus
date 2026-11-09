@@ -332,6 +332,9 @@ pub enum TeamAction {
         #[serde(default)]
         reason: String,
     },
+    /// Task #337: the owner keeps the team's settings for the project's current
+    /// profile, so the working-mode block stays away until the profile changes.
+    KeepWorkingMode,
     /// Task #230: the owner marks the lead's plan changes seen, or reverts one.
     SeenLeadChanges,
     RevertLeadChange {
@@ -707,6 +710,7 @@ impl TeamAction {
             Self::NextGoal { .. } => "next-goal",
             Self::Create { .. } => "create",
             Self::ProposeWorkingMode { .. } => "propose",
+            Self::KeepWorkingMode => "keep-working-mode",
             Self::SeenLeadChanges => "seen-lead-changes",
             Self::RevertLeadChange { .. } => "revert-lead-change",
             Self::WaitingDismiss { .. } | Self::WaitingRestore { .. } => "waiting",
@@ -1167,6 +1171,7 @@ impl TeamAction {
                 task(parent.task)
             }
             Self::SeenLeadChanges => Ok(()),
+            Self::KeepWorkingMode => Ok(()),
             Self::RevertLeadChange { change } => word(change, "lead change id"),
             Self::WaitingDismiss { id, state, team } => {
                 word(id, "Waiting item id")?;
@@ -1606,6 +1611,7 @@ impl TeamAction {
                 put("parent", json!({"team": parent.team, "task": parent.task}));
             }
             Self::SeenLeadChanges => put("by", json!("human")),
+            Self::KeepWorkingMode => put("by", json!("human")),
             Self::RevertLeadChange { change } => {
                 put("change", json!(change));
                 put("by", json!("human"));
@@ -2199,4 +2205,11 @@ mod tests {
         .is_err());
     }
 
+    #[test]
+    fn a_kept_working_mode_call_keeps_the_team_settings_for_the_owner() {
+        let action = TeamAction::KeepWorkingMode;
+        assert_eq!(action.op(), "keep-working-mode");
+        assert!(action.check().is_ok());
+        assert_eq!(Value::Object(action.input()), json!({"by": "human"}));
+    }
 }

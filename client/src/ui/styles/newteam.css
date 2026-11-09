@@ -125,9 +125,13 @@
 /* Task #308: the project's working-mode proposal. */
 .nt-working-mode { border: 1px solid var(--z-color-border); border-radius: var(--z-radius-lg); padding: 8px 10px; display: flex; flex-direction: column; gap: 5px; }
 .nt-working-reasons { margin: 0; padding-left: 18px; color: var(--z-color-text-3); font-size: var(--fs-sm); }
-.team-working-mode { border: 1px solid color-mix(in srgb, var(--z-color-warn) 55%, var(--z-color-border)); background: color-mix(in srgb, var(--z-color-warn) 6%, var(--z-color-raised)); border-radius: var(--z-radius-lg); padding: 7px 10px; display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
-.team-working-mode b { color: var(--z-color-warn); }
-.team-working-mode ul { margin: 0; padding-left: 18px; font-size: var(--fs-sm); color: var(--z-color-text-3); }
+/* Task #308, #337: the project's working-mode suggestion, as one compact row
+   (its title row, the differing settings and the three actions); the reasons
+   stay in the row's tooltip. */
+.team-working-mode { border: 1px solid color-mix(in srgb, var(--z-color-warn) 55%, var(--z-color-border)); background: color-mix(in srgb, var(--z-color-warn) 6%, var(--z-color-raised)); border-radius: var(--z-radius-lg); padding: 6px 10px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 6px 0; font-size: var(--fs-sm); }
+.team-working-mode > b { color: var(--z-color-warn); font-weight: 600; min-width: 0; }
+.team-working-mode .team-working-mode-wrong { color: var(--z-color-text-3); min-width: 0; }
+.team-working-mode .grow { flex: 1; }
 
 /* Task #314 (F1): an indented member card keeps the pane's right edge, and
    its badges shrink before the provider chip or Resume is cut. */

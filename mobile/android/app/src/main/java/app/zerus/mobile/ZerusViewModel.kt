@@ -360,7 +360,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val record=indexedReadRecord(target)
         if(!readTrackingReady) return null
         if(record?.incomplete == true || readState.records.size >= 500 && record == null) return null
-        return ConversationReadPolicies.lowerBound(record,loadedRows(target))
+        // A saved canonical head may overlap these inspection IDs without a
+        // proven alias. It is not a current count of the loaded messages.
+        return loadedRows(target)?.count { ConversationReadPolicies.unread(record,it) }
     }
     fun unreadCount(target:Target):Int? {
         val record=indexedReadRecord(target) ?: return null
@@ -443,7 +445,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         if(page.complete && verified) currentHistoryHeads+=ConversationReadPolicies.key(page.target) else currentHistoryHeads-=ConversationReadPolicies.key(page.target)
         refreshReadAttention()
     }
-    private fun publishWindow(target:Target,page:HistoryWindow,complete:Boolean=false,indexing:Boolean=false,boundary:String?=null) {
+    private fun publishWindow(target:Target,page:HistoryWindow,complete:Boolean=false,indexing:Boolean=false,boundary:String?=null,aliases:Map<String,String> = emptyMap()) {
         // A page reaching the head shows the latest inspection's inbox rows, never an older copy.
         val inspected=(frames[target.key] ?: activeFrame?.takeIf { it.target==target })?.inspectedEvents
         val window=if(page.atHead && inspected!=null) page.copy(inbox=HistoryInspection.inbox(inspected)) else page
@@ -460,7 +462,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             historyComplete=complete;historyIndexing=indexing
             return
         }
-        installFrame(head.copy(events=window.displayed,presentation=null,truncated=head.truncated || window.hasBefore || window.hasAfter,window=window,indexComplete=complete,indexing=indexing,unreadBoundary=boundary),activityVerified)
+        installFrame(head.copy(events=window.displayed,presentation=null,truncated=head.truncated || window.hasBefore || window.hasAfter,window=window,indexComplete=complete,indexing=indexing,unreadBoundary=boundary,supersededIds=aliases),activityVerified)
     }
     /** Projection responses are display evidence only: never call observeHistoryHead,
      * readWriter.supersede, installFrame or the ordinary delivery-settling presentation path. */
@@ -569,7 +571,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 val old=historyWindows[target.key]
                 val window=withContext(Dispatchers.Default) { if(mode in setOf("before","after") && old?.epoch==page.epoch) old.merge(page,mode) else HistoryWindow.from(page) }
-                publishWindow(target,window,page.complete && verifiedPage,page.indexing,aliases[firstUnreadEventId]);lastHistoryObservation=activeFrame?.observedAt ?: 0L;published=true
+                publishWindow(target,window,page.complete && verifiedPage,page.indexing,aliases[firstUnreadEventId],aliases);lastHistoryObservation=activeFrame?.observedAt ?: 0L;published=true
             } catch(e:CancellationException) { throw e }
             catch(e:Exception) { if(selected?.target==target && navigationId==navigation && historyViewIntent==intent) { olderError=ReadFailure.message(e,"conversation");currentHistoryHeads-=ConversationReadPolicies.key(target) } }
             finally { if(!published && selected?.target==target && navigationId==navigation && historyViewIntent==intent) { olderLoading=false;if(pendingHistoryPosition!=target.key) readPositionReady=true } }
@@ -858,7 +860,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     var activityVerified by mutableStateOf(false); private set
     var historyCached by mutableStateOf(false); private set
     var conversationHistoryTruncated by mutableStateOf(false); private set
-    private data class Frame(val target: Target, val raw: JSONObject, val events: List<Event>, val questions: List<Question>, val observedAt: Long, val bytes: Int, val truncated: Boolean = false, var presentation: Presentation? = null,val window:HistoryWindow?=null,val indexComplete:Boolean=false,val indexing:Boolean=false,val unreadBoundary:String?=null,val inspectedEvents:List<Event> = emptyList(),val settingsInspectionStartNanos:Long=0)
+    private data class Frame(val target: Target, val raw: JSONObject, val events: List<Event>, val questions: List<Question>, val observedAt: Long, val bytes: Int, val truncated: Boolean = false, var presentation: Presentation? = null,val window:HistoryWindow?=null,val indexComplete:Boolean=false,val indexing:Boolean=false,val unreadBoundary:String?=null,val inspectedEvents:List<Event> = emptyList(),val settingsInspectionStartNanos:Long=0,val supersededIds:Map<String,String> = emptyMap())
+    internal val conversationSupersededIds:Map<String,String> get() = activeFrame?.supersededIds.orEmpty()
     private data class Presentation(val messages: List<OutgoingMessage>, val events: List<Event>, val questions: List<Question>)
     private data class FrameInstall(val source: Frame, val frame: Frame, val guarded: HistoryWindow?, val changed: Boolean)
     private data class FramePreparation(val install: FrameInstall, val state: MessageState,
@@ -1171,7 +1174,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 Triple(Frame(resolved,raw,events,NativeParser.questions(raw),observedAt,
                     raw.toString().toByteArray(Charsets.UTF_8).size+EventHistoryCodec.encode(events).toString().toByteArray(Charsets.UTF_8).size,
                     retained.truncated || previous?.truncated==true || raw.optBoolean("mobile_history_truncated") || raw.optBoolean("history_truncated") ||
-                        raw.optBoolean("message_events_truncated") || raw.optBoolean("provider_messages_truncated"),window=window,indexComplete=historyComplete && !nativeUnknown,indexing=historyIndexing,inspectedEvents=incoming,settingsInspectionStartNanos=settingsInspectionStartNanos),retained.supersededIds,window)
+                        raw.optBoolean("message_events_truncated") || raw.optBoolean("provider_messages_truncated"),window=window,indexComplete=historyComplete && !nativeUnknown,indexing=historyIndexing,inspectedEvents=incoming,settingsInspectionStartNanos=settingsInspectionStartNanos,supersededIds=retained.supersededIds),retained.supersededIds,window)
             }
             // A page can publish during Default parsing. Rebase before mutating the
             // window map, so the older inspection snapshot cannot erase that page.

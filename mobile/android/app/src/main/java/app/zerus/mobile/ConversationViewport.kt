@@ -8,6 +8,33 @@ data class ConversationScroll(val state: ConversationFollowState, val index: Int
     val failure: String = "")
 
 object ConversationViewport {
+    /** The exact LazyColumn order, including fork-source separators. */
+    fun keys(events: List<Event>, unreadBoundary: String = "", hasWarning: Boolean = false,
+        hasBoundedNotice: Boolean = false, conversationLoading: Boolean = false,
+        queueVisible: Boolean = false, questionsVisible: Boolean = false,
+        eventKey: (Event) -> String = { "event:" + it.id }): List<String> = buildList {
+        add("history:earlier")
+        add("history:status")
+        if (hasWarning) add("history:warning")
+        if (hasBoundedNotice) add("history:bounded")
+        add("history:missing-anchor")
+        var inheritedSource = ""
+        events.forEach { event ->
+            if (event.inheritedFrom != inheritedSource) {
+                add(inheritedKey(eventKey(event)))
+                inheritedSource = event.inheritedFrom
+            }
+            if (event.id == unreadBoundary) add("history:unread")
+            add(eventKey(event))
+        }
+        if (events.isEmpty() && !conversationLoading) add("history:empty")
+        add("history:newer")
+        if (queueVisible) add("history:queue")
+        if (questionsVisible) add("history:questions")
+        add("history:tail")
+    }
+    fun inheritedKey(eventKey: String): String = "history:inherited:" + eventKey.removePrefix("event:")
+
     /** The row of this phone's latest send, to bring into view. */
     fun own(events: List<Event>, ownSendId: String): Event? = events.lastOrNull { it.outgoingId == ownSendId || it.receiptRequestId == ownSendId }
     fun content(state: ConversationFollowState, keys: List<String>, ownSendId: String, ownItemKey: String?): ConversationScroll {
@@ -21,7 +48,10 @@ object ConversationViewport {
             return if (index != null) ConversationScroll(state.copy(opened = true, following = false, ownSendId = ownSendId), index, anchor!!.offset)
                 else ConversationScroll(state.copy(opened = true, following = true, ownSendId = ownSendId, anchor = null), keys.lastIndex)
         }
-        return ConversationScroll(state, if (state.following) keys.lastIndex else null)
+        // Once positioned, metadata and delivery updates must not reposition
+        // the list. Following newly laid-out content belongs to the measured
+        // tail observer, which also sees same-key message height changes.
+        return ConversationScroll(state)
     }
     fun userScrolled(state: ConversationFollowState, atEnd: Boolean) = state.copy(following = atEnd)
     fun settled(state: ConversationFollowState,atEnd: Boolean,hasNewer: Boolean): ConversationFollowState =

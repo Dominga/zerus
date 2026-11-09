@@ -24,11 +24,14 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.PlatformTextStyle
+import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
@@ -200,10 +203,17 @@ private fun subagentChildren(model: ZerusViewModel, session: Session, online: Bo
 
 /** The account mark: a circle in the account color with its letter, then the label (spec 3.2). */
 @Composable internal fun AccountMarkChip(mark: AccountMark, modifier: Modifier = Modifier) {
+    val diameter = with(LocalDensity.current) { 16.sp.toDp() }.coerceAtLeast(16.dp)
+    // An inherited body line height does not fit the mark, even with a smaller font size.
+    val letterStyle = MaterialTheme.typography.labelSmall.copy(
+        fontSize = 10.sp, lineHeight = 10.sp, letterSpacing = 0.sp, fontWeight = FontWeight.SemiBold,
+        platformStyle = PlatformTextStyle(includeFontPadding = false),
+        lineHeightStyle = LineHeightStyle(LineHeightStyle.Alignment.Center, LineHeightStyle.Trim.Both),
+    )
     Row(modifier.clearAndSetSemantics { contentDescription = "Account: ${mark.label}" },
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        Box(Modifier.size(16.dp).clip(CircleShape).background(Color(mark.color)), contentAlignment = Alignment.Center) {
-            Text(mark.letter, color = Color(mark.ink), fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+        Box(Modifier.size(diameter).clip(CircleShape).background(Color(mark.color)), contentAlignment = Alignment.Center) {
+            Text(mark.letter, color = Color(mark.ink), style = letterStyle, maxLines = 1, softWrap = false)
         }
         Text(mark.label, Modifier.widthIn(max = 96.dp), color = MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)

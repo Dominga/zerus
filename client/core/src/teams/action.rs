@@ -1504,7 +1504,7 @@ impl TeamAction {
                 put("from_account", json!(from_account));
                 put("to_account", json!(to_account));
             }
-            Self::AddMember { member } => put("members", json!([member])),
+            Self::AddMember { member } => put("members", json!([hgs_member(member)])),
             Self::IntakeKey { label, revoke } => {
                 if revoke.is_empty() {
                     put("label", json!(label.trim()));
@@ -1671,7 +1671,7 @@ impl TeamAction {
             } => {
                 put("action", json!("start"));
                 put("folder", json!(folder));
-                put("lead", lead.clone());
+                put("lead", hgs_member(lead));
                 for (key, value) in [
                     ("name", name),
                     ("project", project),
@@ -1686,7 +1686,7 @@ impl TeamAction {
             Self::DraftUpdate { revision, set } => {
                 put("action", json!("update"));
                 put("revision", json!(revision));
-                put("set", set.clone());
+                put("set", hgs_draft_set(set));
             }
             Self::DraftSeen { fields } => {
                 put("action", json!("seen"));
@@ -2109,9 +2109,99 @@ fn read_status(hgs: &Path, call: &TeamCall) -> Result<Value, String> {
     }
 }
 
+/// Task #465: the member fields hgs team takes from the desktop, shared with
+/// hgs's own test that checks them against its member model.
+static MEMBER_FIELDS: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
+    let list: Value = serde_json::from_str(include_str!("member_fields.json")).expect("member_fields.json");
+    list["fields"]
+        .as_array()
+        .expect("member_fields.json lists its fields")
+        .iter()
+        .filter_map(|field| field.as_str().map(str::to_owned))
+        .collect()
+});
+
+/// Task #465 (owner, package 168): New team's lead is the form's row, with
+/// client-only keys (`lead`, a null `session`, an empty `folder`); hgs's strict
+/// check refused it ("The lead has no field \"lead\""). A member goes to hgs
+/// with only the fields hgs takes: a null value is no value, and an empty
+/// `folder` is hgs's default (its folder kind has no empty value).
+pub(crate) fn hgs_member(member: &Value) -> Value {
+    let Some(fields) = member.as_object() else {
+        return member.clone();
+    };
+    let kept = fields
+        .iter()
+        .filter(|(key, value)| {
+            MEMBER_FIELDS.iter().any(|field| field == key.as_str())
+                && !value.is_null()
+                && !(key.as_str() == "folder" && value.as_str() == Some(""))
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    Value::Object(kept)
+}
+
+/// A draft update's `set`: a members list goes through [`hgs_member`]; the
+/// object form (changes by member id, null removes one) and other fields stay.
+fn hgs_draft_set(set: &Value) -> Value {
+    let mut set = set.clone();
+    if let Some(members) = set.get_mut("members").and_then(Value::as_array_mut) {
+        for member in members.iter_mut() {
+            *member = hgs_member(member);
+        }
+    }
+    set
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Task #465: New team's lead and members reach hgs with only hgs's
+    /// member fields (the shared list hgs checks against its model).
+    #[test]
+    fn draft_and_added_members_carry_only_the_fields_hgs_takes() {
+        let row = json!({"id":"lead","role":"Lead","agent":"claude","model":"","effort":"","account":"",
+            "permissions":"","computer":"","folder":"","prompt":"Plan it","lead":true,"session":null});
+        let start = TeamAction::DraftStart {
+            folder: "D:/example/team".into(),
+            name: "Scratch".into(),
+            lead: row.clone(),
+            project: String::new(),
+            project_id: String::new(),
+            template: String::new(),
+        };
+        let input = start.input();
+        let lead = input["lead"].as_object().unwrap();
+        for key in lead.keys() {
+            assert!(MEMBER_FIELDS.contains(key), "the lead sends {key}, which hgs does not take");
+        }
+        for gone in ["lead", "session", "folder"] {
+            assert!(!lead.contains_key(gone), "{gone} stays out: {lead:?}");
+        }
+        assert_eq!(lead["agent"], "claude");
+        assert_eq!(lead["prompt"], "Plan it");
+        // An existing session as lead keeps its session.
+        let mut this = row.clone();
+        this["session"] = json!({"host":"","name":"claude/plan","run_id":"","conversation_id":""});
+        assert_eq!(hgs_member(&this)["session"]["name"], "claude/plan");
+        // A draft update's members list goes the same way; a worktree folder stays.
+        let mut dev = row.clone();
+        dev["id"] = json!("dev");
+        dev["lead"] = json!(false);
+        dev["folder"] = json!("worktree");
+        let update = TeamAction::DraftUpdate { revision: 3, set: json!({"members":[row, dev],"goal":"Ship"}) };
+        let input = update.input();
+        let members = input["set"]["members"].as_array().unwrap();
+        assert!(members.iter().all(|member| member.get("lead").is_none() && member.get("session").is_none()), "{members:?}");
+        assert_eq!(members[1]["folder"], "worktree");
+        assert_eq!(input["set"]["goal"], "Ship");
+        let patches = TeamAction::DraftUpdate { revision: 3, set: json!({"members":{"dev":{"model":"opus"},"old":null}}) };
+        assert_eq!(patches.input()["set"]["members"], json!({"dev":{"model":"opus"},"old":null}));
+        let add = TeamAction::AddMember { member: json!({"role":"Backend","agent":"claude","lead":false}) };
+        assert_eq!(add.input()["members"], json!([{"role":"Backend","agent":"claude"}]));
+    }
 
     fn lane_edit() -> TeamAction {
         TeamAction::EditTasks {

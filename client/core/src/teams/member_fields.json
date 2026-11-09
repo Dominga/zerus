@@ -1,0 +1,26 @@
+{
+  "note": "Task #465: the member fields the desktop sends to hgs team for a draft lead, a draft member or an added member. Each one is a field of hgs's team member model; hgs's strict.rs test checks this list against that model.",
+  "fields": [
+    "id",
+    "role",
+    "agent",
+    "account",
+    "model",
+    "effort",
+    "models",
+    "permissions",
+    "permissions_profile",
+    "computer",
+    "folder",
+    "directory",
+    "session",
+    "prompt",
+    "iron_rules",
+    "context_before_task",
+    "after_task",
+    "after_task_on",
+    "after_task_at",
+    "parent",
+    "sub"
+  ]
+}

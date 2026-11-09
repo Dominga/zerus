@@ -145,6 +145,22 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Task #465: every member field the desktop sends (the list shared with
+    /// client/core) is one this model takes, so the strict check never
+    /// refuses a New team lead or member for a client-only key.
+    #[test]
+    fn the_desktops_member_fields_are_the_models() {
+        let shared: Value = serde_json::from_str(include_str!("../../../client/core/src/teams/member_fields.json")).unwrap();
+        let known = fields::<super::super::model::Member>();
+        let sent = shared["fields"].as_array().unwrap();
+        assert!(!sent.is_empty());
+        for field in sent {
+            let field = field.as_str().unwrap();
+            assert!(known.contains(&field), "the desktop sends {field}, which a member does not take: {known:?}");
+        }
+        assert!(!known.contains(&"lead"), "lead is the desktop's own key");
+    }
+
     #[test]
     fn the_fields_come_from_the_model() {
         let known = fields::<super::super::model::Member>();

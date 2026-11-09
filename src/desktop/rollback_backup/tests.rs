@@ -141,7 +141,7 @@ fn an_empty_leftover_backup_is_retained_and_the_backup_is_made_again() {
 fn the_store_check_reads_the_backup_state_without_writing() {
     let temp = tempfile::tempdir().unwrap();
     let location = make_old(&temp.path().canonicalize().unwrap().join("state/desktop"));
-    let check = || super::super::store::store_check(&location);
+    let check = || super::super::store_check(&location);
     assert_eq!((check()["code"].clone(), check()["opens"].clone()), (serde_json::json!("backup_needed"), serde_json::json!(true)));
     platform::private_dir(&location.root.join(BACKUP)).unwrap();
     assert_eq!((check()["code"].clone(), check()["opens"].clone()), (serde_json::json!("empty_leftover"), serde_json::json!(true)));

@@ -594,6 +594,13 @@ pub fn run() {
                 }
                 // Task 110: a second start never exits silently. It brings the
                 // running Zerus (either client) forward or says what runs.
+                // Task #456: a development build (a team's tauri-launch) never
+                // shows a blocking dialog; it prints the refusal and exits.
+                #[cfg(feature = "live")]
+                instance::Claim::Duplicate(reason) if !identity.is_switch() => {
+                    eprintln!("zerus-client: another instance of this development build is running but did not answer ({reason})");
+                    std::process::exit(4);
+                }
                 #[cfg(feature = "live")]
                 instance::Claim::Duplicate(_) => {
                     second_start::settle(context, second_start::Refusal::Unanswered, !options.background);
@@ -603,6 +610,11 @@ pub fn run() {
                 instance::Claim::Duplicate(reason) => {
                     eprintln!("zerus-client: another Zerus is running but did not answer ({reason})");
                     return;
+                }
+                #[cfg(feature = "live")]
+                instance::Claim::Failed(error) if !identity.is_switch() => {
+                    eprintln!("zerus-client: this development build cannot claim its single-instance channel: {error}");
+                    std::process::exit(3);
                 }
                 #[cfg(feature = "live")]
                 instance::Claim::Failed(error) => {
@@ -619,6 +631,11 @@ pub fn run() {
                     std::process::exit(3);
                 }
                 // Nothing was forwarded to that server; say so instead of exiting silently.
+                #[cfg(all(windows, feature = "live"))]
+                instance::Claim::Untrusted if !identity.is_switch() => {
+                    eprintln!("zerus-client: the activation pipe of this development build belongs to an untrusted process");
+                    std::process::exit(5);
+                }
                 #[cfg(all(windows, feature = "live"))]
                 instance::Claim::Untrusted => {
                     startup_error::record("instance.claim", "activation_pipe_untrusted");

@@ -898,10 +898,13 @@ fn a_dirty_folder_is_committed_before_it_starts_from_the_integration_head() {
     let step = crate::state::teams::dispatcher::prepare_integration_base(&team, 1, "dev").expect("the base step");
     assert_eq!(step.result, "done", "{step:?}");
     assert!(step.reason.contains("starts from the integration head"), "{step:?}");
-    // The old work is committed on the old branch first, then the folder is at
-    // the integration head.
+    // Task #382: the unfinished work is committed on the branch the folder was
+    // on, which keeps that commit; the folder moves to the task's own branch at
+    // the integration head. The old branch is never reset.
     assert_eq!(run_git(&repo.member, &["rev-parse", "HEAD"]), head(&repo));
-    assert_eq!(run_git(&repo.member, &["log", "-1", "--format=%s", "task/1@{1}"]), "Zerus: dev's unfinished work before task #1");
+    assert_eq!(run_git(&repo.member, &["log", "-1", "--format=%s", "task/1"]), "Zerus: dev's unfinished work before task #1");
+    let task_branch = format!("team/{}/dev-1", &team.id[..8.min(team.id.len())]);
+    assert_eq!(run_git(&repo.member, &["rev-parse", "--abbrev-ref", "HEAD"]), task_branch);
     assert_eq!(run_git(&repo.member, &["show", "HEAD:a.txt"]), "one", "the head is the integration line's");
     // A folder already at the head is left alone.
     let step = crate::state::teams::dispatcher::prepare_integration_base(&team, 1, "dev").expect("the base step again");

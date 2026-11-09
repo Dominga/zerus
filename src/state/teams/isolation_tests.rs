@@ -1,6 +1,6 @@
 use super::*;
 use crate::state::teams::templates::{execute_as, Plan};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 /// A member's folder and a person of its own: home, temporary, crash dump and
 /// Zerus state folders, none of them the real ones.
@@ -91,11 +91,15 @@ fn a_test_runs_with_its_own_home_data_temporary_and_xdg_folders() {
     }
     // The person's git identity is a copy in the run's home.
     assert!(run_folder.join("home").join(".gitconfig").is_file());
-    // The newest run folders are kept, the older ones go.
+    // A suite running beside this one owns its folder: a fresh run folder is
+    // never pruned, however many there are (Task #418).
     for _ in 0..KEEP_RUNS + 2 {
         run(&fixture, &plan);
     }
-    assert_eq!(fs::read_dir(&runs).unwrap().count(), KEEP_RUNS);
+    assert_eq!(fs::read_dir(&runs).unwrap().count(), KEEP_RUNS * 2 - 2, "a fresh run folder is kept");
+    // Once they are old, the count bound applies again.
+    prune_at(&runs, SystemTime::now() + Duration::from_secs(KEEP_FRESH_SECS + 3600));
+    assert_eq!(fs::read_dir(&runs).unwrap().count(), KEEP_RUNS - 1);
 }
 
 #[test]
@@ -218,3 +222,14 @@ fn a_qt_test_run_keeps_each_suites_output_in_its_tail() {
     assert!(outcome.failures.iter().any(|name| name.contains("feedLines")), "{:?}", outcome.failures);
 }
 
+
+/// Task #418: a run folder a concurrent suite may still be using is never
+/// pruned; only one older than the fresh window goes, so a live suite's
+/// isolated TEMP survives a neighbour's cleanup.
+#[test]
+fn a_fresh_run_folder_is_never_pruned() {
+    let now = SystemTime::now();
+    assert!(!prunable(now, now));
+    assert!(!prunable(now - Duration::from_secs(60), now));
+    assert!(prunable(now - Duration::from_secs(KEEP_FRESH_SECS + 1), now));
+}

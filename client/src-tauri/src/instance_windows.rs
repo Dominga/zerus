@@ -158,6 +158,18 @@ impl InstanceState {
     }
 }
 
+/// Task #456: where an instance keeps its lock file. The switch build (and
+/// the Qt GUI it replaces) keeps `hgdev\hgs-tray`; any other identity - a
+/// development build a team launches beside the owner's Zerus - has a folder
+/// of its own, so it never depends on the owner's folder or its access.
+fn lock_directory(name: &str, local: &Path) -> std::path::PathBuf {
+    if name == "hgs-tray" {
+        local.join("hgdev").join("hgs-tray")
+    } else {
+        local.join("hgdev").join(name)
+    }
+}
+
 fn key(name: &str, home: &Path) -> String {
     zerus_client_core::desktop::windows::activation_name(name, home)
 }
@@ -498,11 +510,13 @@ fn claim_inner(
     if home.as_os_str().is_empty() {
         return Claim::Failed("The Windows profile directory is unavailable".into());
     }
+    let directory = lock_directory(
+        name,
+        &std::env::var_os("LOCALAPPDATA")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| home.join("AppData/Local")),
+    );
     let name = key(name, &home);
-    let directory = std::env::var_os("LOCALAPPDATA")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| home.join("AppData/Local"))
-        .join("hgdev/hgs-tray");
     claim_guarded(&name, &directory, activation, reply, canonical, admitted)
 }
 
@@ -633,6 +647,38 @@ fn claim_guarded(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Task #456: the switch build and a development build claim distinct
+    /// channels and lock folders; only the switch takes the global mutex.
+    #[test]
+    fn two_identities_claim_distinct_channels_and_lock_folders() {
+        let local = std::path::Path::new("C:/Users/example/AppData/Local");
+        let home = std::path::Path::new("C:/Users/example");
+        let switch = "hgs-tray";
+        let dev = "zerus-client-dev.zerus.next.d593d7a40f84";
+        assert_ne!(key(switch, home), key(dev, home));
+        assert_eq!(lock_directory(switch, local), local.join("hgdev").join("hgs-tray"));
+        assert_eq!(lock_directory(dev, local), local.join("hgdev").join(dev));
+        assert_ne!(lock_directory(switch, local), lock_directory(dev, local));
+        assert!(Canonical::name("S-1-5-21-1").starts_with("com.hgdev.hgs-tray.gui-"));
+    }
+
+    /// Task #456: an instance of one identity runs; another identity's start
+    /// claims its own channel beside it instead of failing or asking.
+    #[test]
+    fn a_development_build_starts_beside_a_running_other_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let unique = uuid::Uuid::new_v4().simple().to_string();
+        let owner_name = format!("zerus-test-owner-{unique}");
+        let dev_name = format!("zerus-test-dev-{unique}");
+        let owner = claim_guarded(&owner_name, &temp.path().join("owner"), Activation::Show, None, None, || {});
+        assert!(matches!(owner, Claim::Claimed(_)), "the running identity claims its channel");
+        let dev = claim_guarded(&dev_name, &temp.path().join("dev"), Activation::Show, None, None, || {});
+        assert!(matches!(dev, Claim::Claimed(_)), "the other identity claims its own channel beside it");
+        drop(dev);
+        drop(owner);
+    }
+
     mod canonical_tests {
         use super::*;
         include!("instance_windows_tests.rs");

@@ -47,6 +47,44 @@ const selector = (rule: { prelude: string }) => rule.prelude.replace(/\s+/g, " "
 const draws = (value: string | undefined) => !!value && !/^(0|none|0\s+\w+\s+transparent)\b/.test(value);
 const layered = (inside: string[]) => inside.some((frame) => frame.startsWith("@layer"));
 
+/** One selector part that applies to the focused field inside the composer:
+ *  the composer's and the field's own classes, only the focus pseudo-classes,
+ *  or a bare `:focus-visible` ring, which matches every element. */
+function matchesFocusedField(part: string) {
+  if (/[>+~]|:not\(|\[/.test(part)) return false;
+  const compounds = part.trim().split(/\s+/);
+  let field = false;
+  for (const compound of compounds) {
+    const clean = compound.replace(/::[\w-]+/g, "");
+    const classes = [...clean.matchAll(/\.([\w-]+)/g)].map((match) => match[1]);
+    const pseudos = [...clean.matchAll(/:([\w-]+)/g)].map((match) => match[1]);
+    if (!pseudos.every((name) => name === "focus" || name === "focus-visible")) return false;
+    if (classes.some((name) => name !== "cmp-editor" && name !== "composer")) return false;
+    if (classes.includes("cmp-editor")) field = true;
+  }
+  return field || (compounds.length === 1 && compounds[0].startsWith(":"));
+}
+
+const weight = (part: string) => [...part.replace(/::[\w-]+/g, "").matchAll(/\.[\w-]+|:[\w-]+/g)].length;
+const layerOf = (inside: string[]) => inside.find((frame) => frame.startsWith("@layer"))?.slice("@layer".length).trim() ?? "";
+
+/** The winning declared value of `property` for the focused field under the
+ *  given layer order: the layer's rank first (unlayered is last), then the
+ *  selector's weight, then source order. */
+function winning(property: string, order: string[]) {
+  let best: { rank: number; weight: number; value: string } | undefined;
+  for (const rule of all) {
+    const part = rule.prelude.split(",").map((text) => text.trim()).find(matchesFocusedField);
+    const value = part === undefined ? undefined : declares(rule.body, property);
+    if (value === undefined) continue;
+    const layer = layerOf(rule.inside);
+    const rank = layer === "" ? order.length : order.indexOf(layer);
+    const node = { rank, weight: weight(part!), value };
+    if (!best || node.rank > best.rank || (node.rank === best.rank && node.weight >= best.weight)) best = node;
+  }
+  return best?.value;
+}
+
 describe("the composer's frame (task 453)", () => {
   it("gives the field inside the composer no border and no outline, in any state, in every stylesheet", () => {
     const field = all.filter((rule) => rule.prelude.includes(".cmp-editor"));
@@ -69,6 +107,20 @@ describe("the composer's frame (task 453)", () => {
     expect(suppression, "an unlayered rule silencing the field's border and focus outline").toBeDefined();
     // No colour of its own: it cannot differ between skins, light or dark.
     expect(suppression!.body).not.toContain("var(--z-color");
+  });
+
+  it("wins the cascade for the focused field in both layer orders, which is the regression", () => {
+    // Task 453 and #426/#449: the ring came back because the base layer's
+    // `:focus-visible` outranked the field's component-layer `outline: none`
+    // when the document's layers arrived in the other order. The winner is
+    // computed here from the stylesheets themselves, for the declared order and
+    // for the inverted one, so a rule that only wins in one order fails.
+    const declared = ["reset", "base", "components", "variants", "utilities"];
+    const inverted = ["reset", "components", "base", "variants", "utilities"];
+    for (const order of [declared, inverted]) {
+      expect(winning("outline", order), `outline wins 'none' with layers ${order.join(",")}`).toBe("none");
+      expect(winning("border", order), `border wins '0' with layers ${order.join(",")}`).toBe("0");
+    }
   });
 
   it("draws exactly one frame, the composer's own, and the composer shows the focus", () => {

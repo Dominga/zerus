@@ -32,26 +32,25 @@ describe("lead session notice modes (task 244)", () => {
     expect(foldNoticeTurns(items, "full")).toEqual(items);
   });
 
-  it("collapsed folds each notice and the lead's reply to it; the owner's turns stay whole", () => {
+  it("collapsed folds each notice; the lead's reply always shows in full; the owner's turns stay whole", () => {
+    // Owner, 2026-11-09: a folded reply hid the lead's answers to the owner,
+    // whose messages reach the lead in the middle of a notice's turn.
     const shown = foldNoticeTurns(items, "collapsed");
     expect(shape(shown)).toEqual([
       "user", "agent",                        // the owner's turn
-      "fold:notice", "fold:reply",            // the inbox notice and the lead's tools and answer
+      "fold:notice", "tools", "agent",        // the inbox notice folded; the lead's tools and answer shown
       "system", "user", "agent",              // a doorbell with the owner's message in one turn: the owner's
-      "fold:notice", "fold:reply",            // a member's message and its answer
+      "fold:notice", "agent",                 // a member's message folded; its answer shown
       "system", "agent",                      // "from: You" is the owner's own team message
     ]);
-    const notice = shown[2] as ActivityItem, reply = shown[3] as ActivityItem;
+    const notice = shown[2] as ActivityItem;
     expect(notice.title).toBe("Report to lead: Side panel");
     expect(notice.sender).toBe("Zerus");
     expect(notice.folded!.map((item) => item.id)).toEqual([items[2].id]);
-    expect(reply.sender).toBe("Lead's reply");
-    expect(reply.title).toBe("Accepted #185; the next task goes out.");
-    expect(reply.folded!.map((item) => item.kind)).toEqual(["tools", "agent"]);
   });
 
-  it("silent shows neither the notices nor the replies to them, and never the owner's turns", () => {
-    expect(shape(foldNoticeTurns(items, "silent"))).toEqual(["user", "agent", "system", "user", "agent", "system", "agent"]);
+  it("silent hides the notices but never the lead's replies or the owner's turns", () => {
+    expect(shape(foldNoticeTurns(items, "silent"))).toEqual(["user", "agent", "tools", "agent", "system", "user", "agent", "agent", "system", "agent"]);
   });
 
   it("keeps history before the first prompt and a notice left without a reply", () => {

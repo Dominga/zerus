@@ -25,12 +25,28 @@ pub const STORE_ROWS: usize = 65_536;
 pub const STORE_BYTES: usize = 64 << 20;
 
 /// Inactive is deliberately before *any* SQLite access or lazy migration.
-/// No production admission path calls this leaf yet.
+/// Only the activation-gated service actor may open this support.
 pub fn open(db: &mut Connection) -> Result<Option<Store<'_>>> {
+    open_checked(db, |_| Ok(()))
+}
+
+pub fn open_checked(
+    db: &mut Connection,
+    verify: impl FnOnce(&Connection) -> Result<()>,
+) -> Result<Option<Store<'_>>> {
     if !TASK_CONTROLS {
         return Ok(None);
     }
-    store::open_enabled(db).map(Some)
+    store::open_enabled_checked(db, verify).map(Some)
+}
+
+/// Status never initializes or repairs the ledger, including on a new store.
+/// The actor must still own the original connection and native caller proof.
+pub fn existing(db: &mut Connection) -> Result<Option<Store<'_>>> {
+    if !TASK_CONTROLS {
+        return Ok(None);
+    }
+    store::existing_enabled(db)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

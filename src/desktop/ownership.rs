@@ -282,6 +282,9 @@ pub(super) struct Grant {
     origin: Origin,
 }
 impl Grant {
+    pub(super) fn current_connection(&self, db: &Connection) -> Result<bool> {
+        Ok(self.matches(&row(db, &self.configuration)?))
+    }
     pub(super) fn current(&self, store: &Store) -> Result<bool> {
         Ok(self.matches(&row(&store.db, &self.configuration)?))
     }

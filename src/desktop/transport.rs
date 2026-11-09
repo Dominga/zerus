@@ -1,9 +1,7 @@
 //! Reuse authenticated host pipes on Windows; same-UID sockets on Unix.
 use super::store::Location;
 use anyhow::Result;
-use std::time::Duration;
-#[cfg(windows)]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub const TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -179,6 +177,115 @@ mod native {
     pub fn shutdown(stream: &Stream) {
         let _ = stream.shutdown(Shutdown::Both);
     }
+
+    /// Private deadline overload. Nonblocking connect and one poll use the
+    /// caller's original budget, including a full Unix listen backlog.
+    pub fn connect_until(location: &Location, until: Instant) -> Result<Option<Stream>> {
+        use std::os::{
+            fd::{FromRawFd, OwnedFd},
+            unix::ffi::OsStrExt,
+        };
+        ensure!(
+            Instant::now() < until,
+            "desktop connection deadline expired"
+        );
+        let path = path(location)?;
+        match fs::symlink_metadata(&path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            result => {
+                result?;
+            }
+        }
+        verify(&path)?;
+        // SAFETY: scalar socket options, transferred immediately to OwnedFd.
+        let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        if raw < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        ensure!(
+            unsafe { libc::fcntl(raw, libc::F_SETFD, libc::FD_CLOEXEC) } == 0,
+            "cannot pin desktop connection"
+        );
+        let stream = Stream::from(fd);
+        stream.set_nonblocking(true)?;
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        address.sun_family = libc::AF_UNIX as _;
+        let bytes = path.as_os_str().as_bytes();
+        ensure!(
+            bytes.len() < address.sun_path.len(),
+            "desktop socket path is too long"
+        );
+        for (to, from) in address.sun_path.iter_mut().zip(bytes) {
+            *to = *from as _;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            address.sun_len = std::mem::size_of_val(&address) as _;
+        }
+        // SAFETY: a complete sockaddr_un with a bounded, NUL-terminated name.
+        if unsafe {
+            libc::connect(
+                raw,
+                (&address as *const libc::sockaddr_un).cast(),
+                std::mem::size_of_val(&address) as _,
+            )
+        } != 0
+        {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::ConnectionRefused {
+                return Ok(None);
+            }
+            if error.raw_os_error() != Some(libc::EINPROGRESS) {
+                return Err(error.into());
+            }
+            loop {
+                let remaining = until.saturating_duration_since(Instant::now());
+                ensure!(!remaining.is_zero(), "desktop connection deadline expired");
+                let mut event = libc::pollfd {
+                    fd: raw,
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                let millis = remaining.as_millis().max(1).min(i32::MAX as u128) as i32;
+                // SAFETY: one live socket and exactly one writable pollfd.
+                let count = unsafe { libc::poll(&mut event, 1, millis) };
+                if count < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                ensure!(
+                    count > 0 && Instant::now() < until,
+                    "desktop connection deadline expired"
+                );
+                let mut error: libc::c_int = 0;
+                let mut size = std::mem::size_of_val(&error) as libc::socklen_t;
+                // SAFETY: live socket and correctly sized writable SO_ERROR.
+                if unsafe {
+                    libc::getsockopt(
+                        raw,
+                        libc::SOL_SOCKET,
+                        libc::SO_ERROR,
+                        (&mut error as *mut libc::c_int).cast(),
+                        &mut size,
+                    )
+                } != 0
+                {
+                    return Err(io::Error::last_os_error().into());
+                }
+                if error != 0 {
+                    return Err(io::Error::from_raw_os_error(error).into());
+                }
+                break;
+            }
+        }
+        ensure!(
+            Instant::now() < until,
+            "desktop connection deadline expired"
+        );
+        stream.set_nonblocking(false)?;
+        authenticate(&stream)?;
+        Ok(Some(stream))
+    }
 }
 
 #[cfg(windows)]
@@ -233,6 +340,17 @@ mod native {
     }
     pub fn connect(location: &Location) -> Result<Option<Stream>> {
         match pipe::connect(&name(location)?, Instant::now() + TIMEOUT) {
+            Ok(stream) => Ok(Some(stream)),
+            Err(pipe::ConnectError::NoHost) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+    pub fn connect_until(location: &Location, until: Instant) -> Result<Option<Stream>> {
+        anyhow::ensure!(
+            Instant::now() < until,
+            "desktop connection deadline expired"
+        );
+        match pipe::connect(&name(location)?, until) {
             Ok(stream) => Ok(Some(stream)),
             Err(pipe::ConnectError::NoHost) => Ok(None),
             Err(error) => Err(error.into()),

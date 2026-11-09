@@ -20,8 +20,8 @@ pub(crate) fn help_marker() -> Option<&'static str> {
     TASK_CONTROLS.then_some(HELP_MARKER)
 }
 
-pub(super) fn dispatch(_config: &Config, args: &[String]) -> Result<i32> {
-    let result = command(args);
+pub(super) fn dispatch(config: &Config, args: &[String]) -> Result<i32> {
+    let result = command(config, args);
     match result {
         Ok(value) if value["ok"] == false && !args.iter().any(|s| s == "--json") => {
             Err(fail(value["error"].as_str().unwrap_or(INACTIVE)))
@@ -42,7 +42,7 @@ pub(super) fn dispatch(_config: &Config, args: &[String]) -> Result<i32> {
     }
 }
 
-fn command(args: &[String]) -> std::result::Result<Value, (&'static str, String)> {
+fn command(config: &Config, args: &[String]) -> std::result::Result<Value, (&'static str, String)> {
     let command = if args.first().is_some_and(|s| s == "begin-attempt") {
         wire::begin(&args[1..]).map(Command::Begin)
     } else {
@@ -62,14 +62,8 @@ fn command(args: &[String]) -> std::result::Result<Value, (&'static str, String)
             "attempted":false,"operation":operation,"request_id":request_id,"reference":reference}),
         );
     }
-    // A capability on disk is not proof of a compatible loaded adapter. Until
-    // slice 3 supplies the original verified runtime, every new entry remains
-    // explicitly closed even if the gate were changed prematurely.
-    Err((
-        "task_control_native_path_unverified",
-        "The original task-control native path has not been verified. Nothing was attempted."
-            .into(),
-    ))
+    crate::desktop::task_controls::request(config, command)
+        .map_err(|e| ("task_control_service_unavailable", e.to_string()))
 }
 
 pub(super) fn session_instructions(original: &str) -> Cow<'_, str> {

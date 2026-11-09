@@ -23,6 +23,7 @@ pub(super) fn request(config: &Config, command: Command) -> Result<Value> {
     if !TASK_CONTROLS {
         anyhow::bail!("Task controls are inactive. Nothing was attempted.");
     }
+    let deadline = Instant::now() + TOTAL;
     let envelope = Envelope::new(command).map_err(anyhow::Error::msg)?;
     let location = Location::new(config)?;
     let computer = config
@@ -30,7 +31,6 @@ pub(super) fn request(config: &Config, command: Command) -> Result<Value> {
         .first()
         .map(String::as_str)
         .unwrap_or("this computer");
-    let deadline = Instant::now() + TOTAL;
     Ok(invoke(&envelope, computer, |op, body| {
         exchange(&location, op, body, deadline)
     }))
@@ -43,20 +43,29 @@ fn exchange(
     deadline: Instant,
 ) -> Result<Option<Value>> {
     anyhow::ensure!(Instant::now() < deadline, "task-control request deadline");
-    let Some(stream) = super::super::connection(location, operation, body)? else {
+    let Some(stream) = super::super::connection_until(location, operation, body, deadline)? else {
         return Ok(None);
     };
     let remaining = deadline.saturating_duration_since(Instant::now());
     anyhow::ensure!(!remaining.is_zero(), "task-control request deadline");
     stream.set_read_timeout(Some(remaining))?;
-    let bytes = protocol::line(&mut BufReader::new(stream), REPLY_BYTES)?
+    let bytes = super::read_until(&mut BufReader::new(stream), REPLY_BYTES, deadline)?
         .context("task-control service disconnected")?;
-    let frame: Value = serde_json::from_slice(&bytes)?;
+    reply(operation, &bytes).map(Some)
+}
+
+fn reply(operation: &str, bytes: &[u8]) -> Result<Value> {
+    let frame: Value = serde_json::from_slice(bytes)?;
+    let kind = if operation == "status" {
+        "status"
+    } else {
+        "response"
+    };
     anyhow::ensure!(
-        frame["abi"] == protocol::ABI && frame["t"] == "response",
+        frame["abi"] == protocol::ABI && frame["t"] == kind,
         "task-control service refused the request"
     );
-    Ok(Some(frame["value"].clone()))
+    Ok(frame["value"].clone())
 }
 
 fn update(computer: &str, id: &str) -> Value {
@@ -123,6 +132,22 @@ fn invoke(
 mod tests {
     use super::*;
     const ID: &str = "00000000-0000-4000-8000-000000000001";
+    #[test]
+    fn the_probe_uses_the_existing_status_frame_not_an_effect_response() {
+        let frame = |kind: &str| {
+            serde_json::to_vec(&json!({"abi":protocol::ABI,"epoch":ID,"seq":1,
+            "t":kind,"value":{"task_controls":{"schema":1,"capability":"task-control-v1"}}}))
+            .unwrap()
+        };
+        assert_eq!(
+            reply("status", &frame("status")).unwrap()["task_controls"]["schema"],
+            1
+        );
+        assert!(reply("status", &frame("response")).is_err());
+        assert!(reply(OP, &frame("status")).is_err());
+        assert!(reply(OP, &frame("response")).is_ok());
+        assert!(reply("status", br#"{"abi":"desktop-v0","t":"status","value":{}}"#).is_err());
+    }
     fn envelope() -> Envelope {
         Envelope::read(&serde_json::to_vec(&json!({"schema":1,"request_id":ID,
             "command":{"operation":"begin","input":{"reference":"orchard/T-234567","attempt":"00000000-0000-4000-8000-000000000002"}}})).unwrap()).unwrap()

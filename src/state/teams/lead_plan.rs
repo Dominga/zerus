@@ -123,7 +123,21 @@ pub(crate) fn record(team: &mut Team, op: &str, tasks_before: &[Task], phases_be
     let summary = if words.is_empty() { format!("changed phase {}", phases.iter().map(|phase| phase.n.to_string()).collect::<Vec<_>>().join(", ")) } else { words.join("; ") };
     events.push(Event::new("lead_changed_plan", json!({"change":id,"op":op,"by":by,"summary":summary,"added":added,
         "changed":changed.iter().map(|task| task.id).collect::<Vec<_>>()})));
-    team.lead_changes.push(LeadChange { id, op: op.to_owned(), summary, by: by.to_owned(), at, tasks_before: changed, added, phases_before: phases, phases_added: added_phases, ..Default::default() });
+    let (changed_ids, phases_changed) = (changed.iter().map(|task: &Task| task.id).collect(), phases.iter().map(|phase: &Phase| phase.n).collect());
+    team.lead_changes.push(LeadChange {
+        id,
+        op: op.to_owned(),
+        summary,
+        by: by.to_owned(),
+        at,
+        tasks_before: changed,
+        added,
+        phases_before: phases,
+        phases_added: added_phases,
+        changed: changed_ids,
+        phases_changed,
+        ..Default::default()
+    });
     trim(team);
 }
 
@@ -157,12 +171,14 @@ fn trim(team: &mut Team) {
 }
 
 /// The tasks a change touched.
+/// Task #4 (team ede724c4): from the ids the head keeps, so a later change's
+/// snapshots are never read for it.
 fn touched(change: &LeadChange) -> BTreeSet<u32> {
-    change.tasks_before.iter().map(|task| task.id).chain(change.added.iter().copied()).collect()
+    change.changed_tasks().into_iter().chain(change.added.iter().copied()).collect()
 }
 
 fn touched_phases(change: &LeadChange) -> BTreeSet<u32> {
-    change.phases_before.iter().map(|phase| phase.n).chain(change.phases_added.iter().copied()).collect()
+    change.changed_phases().into_iter().chain(change.phases_added.iter().copied()).collect()
 }
 
 /// The owner reverts one of the lead's changes: the tasks it changed are as
@@ -177,6 +193,9 @@ pub(crate) fn revert(team: &mut Team, input: &Value, actor: &Actor, events: &mut
     ensure!(change.reverted_at.is_none(), "Lead change {id} is already reverted");
     // Task #362: a report is no plan change; it has nothing to restore.
     ensure!(change.op != "use-last-reply", "Lead change {id} is a report, not a plan change: it cannot be reverted");
+    // Task #4 (team ede724c4): the store loads the change's snapshots from
+    // `team_lead_changes` before the revert; without them it would restore nothing.
+    ensure!(!change.history_missing(), "Lead change {id}'s history could not be read; nothing changed");
     let tasks = touched(&change);
     let phases = touched_phases(&change);
     if let Some(later) = team.lead_changes[at + 1..]
@@ -235,7 +254,7 @@ pub(crate) fn revert(team: &mut Team, input: &Value, actor: &Actor, events: &mut
     found.seen = true;
     events.push(Event::new("lead_change_reverted", json!({"change":id,"by":by,"summary":change.summary})));
     Ok(json!({"status":"reverted","change":id,"summary":change.summary,"removed":change.added,
-        "restored":change.tasks_before.iter().map(|task| task.id).collect::<Vec<_>>()}))
+        "restored":change.changed_tasks()}))
 }
 
 /// The owner has seen the digest: its changes leave Waiting (each stays
@@ -343,7 +362,7 @@ pub(crate) fn list(team: &Team, limit: usize) -> Value {
         .take(limit.clamp(1, 200))
         .map(|change| json!({"id":change.id,"op":change.op,"summary":change.summary,"by":change.by,"at":change.at,
             "seen":change.seen,"reverted_at":change.reverted_at,"added":change.added,"phases_added":change.phases_added,
-            "changed":change.tasks_before.iter().map(|task| task.id).collect::<Vec<_>>()}))
+            "changed":change.changed_tasks()}))
         .collect();
     json!({"team":team.id,"changes":shown,"total":team.lead_changes.len()})
 }

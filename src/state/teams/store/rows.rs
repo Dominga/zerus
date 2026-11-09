@@ -23,15 +23,36 @@
 //! (`layout` 1), as every team did before; `layout` NULL is a team not yet
 //! migrated. Each team migrates in its own transaction at a write open, so the
 //! migration is idempotent and resumes where it stopped.
-use super::super::model::{Attempt, Task};
+//!
+//! Task #4 of team ede724c4 (owner, 2026-11-10): team 33fbafeb's head was
+//! 2.4 MB, 2.2 MB of it the lead changes' `tasks_before`/`phases_before`
+//! snapshots, rewritten by every head change. Layout 3 keeps them in
+//! `team_lead_changes(team, id, rev, payload)`, written once when the change
+//! is recorded and read on demand (a revert); the head keeps each change's
+//! summary fields and the ids it changed (`changed`, `phases_changed`). A head
+//! of layout 2 (task 288) is read the same and moves to layout 3 at a write
+//! open, one transaction a team. An hgs of task 288 reads `layout` 3 as a whole
+//! record and refuses it (the tasks sentinel), so it never rewrites the head
+//! without the history.
+use super::super::model::{Attempt, LeadChange, Phase, Task};
 use super::*;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// The value `"tasks"` holds in a head: not a list, so an older hgs's
 /// deserialization fails and it never rewrites the record without its tasks.
-pub(super) const SENTINEL: &str = "stored in team_tasks (Zerus team store layout 2): this hgs is too old to read this team";
-pub(super) const ROWS: i64 = 2;
+pub(super) const SENTINEL: &str = "stored in team_tasks (Zerus team store layout 3): this hgs is too old to read this team";
+/// Rows with the lead changes' snapshots in `team_lead_changes` (task #4).
+pub(super) const ROWS: i64 = 3;
+/// Task 288's rows: the snapshots still in the head; read the same as
+/// `ROWS`, migrated to it at a write open.
+pub(super) const TASK_ROWS: i64 = 2;
 pub(super) const JSON: i64 = 1;
+
+/// Whether a team of this layout is stored in rows.
+pub(super) fn is_rows(layout: Option<i64>) -> bool {
+    matches!(layout, Some(ROWS) | Some(TASK_ROWS))
+}
 
 pub(super) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS team_tasks(team TEXT NOT NULL,task INTEGER NOT NULL,ord INTEGER NOT NULL,
         rev INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(team,task));
@@ -40,7 +61,20 @@ pub(super) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS team_tasks(team TEXT
         rev INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(team,task,ord));
     CREATE INDEX IF NOT EXISTS team_attempts_rev ON team_attempts(team,rev);
     CREATE TRIGGER IF NOT EXISTS team_rows_delete AFTER DELETE ON teams BEGIN
-        DELETE FROM team_tasks WHERE team=OLD.id; DELETE FROM team_attempts WHERE team=OLD.id; END;";
+        DELETE FROM team_tasks WHERE team=OLD.id; DELETE FROM team_attempts WHERE team=OLD.id; END;
+    CREATE TABLE IF NOT EXISTS team_lead_changes(team TEXT NOT NULL,id TEXT NOT NULL,rev INTEGER NOT NULL,payload TEXT NOT NULL,
+        PRIMARY KEY(team,id));
+    CREATE TRIGGER IF NOT EXISTS team_lead_changes_delete AFTER DELETE ON teams BEGIN
+        DELETE FROM team_lead_changes WHERE team=OLD.id; END;";
+
+/// A lead change's snapshots, as its `team_lead_changes` row holds them.
+#[derive(Default, Deserialize, Serialize)]
+pub(crate) struct History {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks_before: Vec<Task>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phases_before: Vec<Phase>,
+}
 
 /// A copy of one team as the store last read or wrote it, with the texts its
 /// rows hold, so a change finds what it changed without serializing the rest.
@@ -68,7 +102,11 @@ pub(crate) struct Saved {
 /// Adds the row tables and the `layout` and `head_rev` columns, once.
 pub(super) fn ensure_schema(db: &Connection) -> anyhow::Result<()> {
     let columns: Vec<String> = db.prepare("SELECT name FROM pragma_table_info('teams')")?.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
-    let has_tables: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='team_attempts')", [], |row| row.get(0))?;
+    let has_tables: bool = db.query_row(
+        "SELECT (SELECT COUNT(*) FROM sqlite_master WHERE name IN ('team_attempts','team_lead_changes','team_lead_changes_delete'))=3",
+        [],
+        |row| row.get(0),
+    )?;
     if has_tables && columns.iter().any(|name| name == "layout") && columns.iter().any(|name| name == "head_rev") {
         return Ok(());
     }
@@ -160,11 +198,12 @@ fn head_row(db: &Connection, id: &str, with_payload: bool) -> anyhow::Result<Opt
 /// exist. A record of the whole-record layout is parsed as before.
 pub(crate) fn read(db: &Connection, id: &str) -> anyhow::Result<Option<Snapshot>> {
     let Some(head) = head_row(db, id, true)? else { return Ok(None) };
-    if head.layout != Some(ROWS) {
+    if !is_rows(head.layout) {
         let mut team: Team = serde_json::from_str(&head.payload).context("Invalid team record")?;
         team.revision = head.revision;
         return Ok(Some(Snapshot { revision: head.revision, layout: head.layout.unwrap_or(0), team, head: String::new(), tasks: HashMap::new() }));
     }
+    let layout = head.layout.unwrap_or(ROWS);
     let mut team = parse_head(&head.payload)?;
     let mut texts = HashMap::new();
     let rows: Vec<(u32, String)> = db
@@ -189,7 +228,7 @@ pub(crate) fn read(db: &Connection, id: &str) -> anyhow::Result<Option<Snapshot>
     }
     team.revision = head.revision;
     team.updated = head.updated;
-    Ok(Some(Snapshot { revision: head.revision, layout: ROWS, team, head: head.payload, tasks: texts }))
+    Ok(Some(Snapshot { revision: head.revision, layout, team, head: head.payload, tasks: texts }))
 }
 
 /// Brings `snapshot` up to the stored revision, reading only the rows written
@@ -200,7 +239,7 @@ pub(crate) fn refresh(db: &Connection, id: &str, snapshot: &mut Snapshot) -> any
     if head.revision == snapshot.revision {
         return Ok(true);
     }
-    if head.layout != Some(ROWS) || snapshot.layout != ROWS {
+    if !is_rows(head.layout) || head.layout != Some(snapshot.layout) {
         let Some(fresh) = read(db, id)? else { return Ok(false) };
         *snapshot = fresh;
         return Ok(true);
@@ -274,7 +313,7 @@ pub(crate) fn refresh(db: &Connection, id: &str, snapshot: &mut Snapshot) -> any
 /// The team as read by a list query (its row's columns), assembled from its
 /// rows in layout 2.
 pub(super) fn decode(db: &Connection, id: &str, revision: i64, updated: f64, layout: Option<i64>, payload: &str) -> anyhow::Result<Team> {
-    if layout != Some(ROWS) {
+    if !is_rows(layout) {
         let mut team: Team = serde_json::from_str(payload).context("Invalid team record")?;
         team.revision = revision as u64;
         return Ok(team);
@@ -325,6 +364,8 @@ pub(crate) fn save(tx: &Connection, base: Option<&Snapshot>, team: &mut Team) ->
     let id = team.id.clone();
     let rev = team.revision;
     if !keyable(team) || legacy() {
+        // The whole record carries the lead changes' snapshots again.
+        fill_history(tx, team)?;
         let payload = serde_json::to_string(&*team)?;
         let status = serde_json::to_value(team.status)?;
         tx.execute(
@@ -336,10 +377,12 @@ pub(crate) fn save(tx: &Connection, base: Option<&Snapshot>, team: &mut Team) ->
         )?;
         tx.execute("DELETE FROM team_tasks WHERE team=?1", params![id])?;
         tx.execute("DELETE FROM team_attempts WHERE team=?1", params![id])?;
+        tx.execute("DELETE FROM team_lead_changes WHERE team=?1", params![id])?;
         return Ok(Saved { layout: if keyable(team) { 0 } else { JSON }, head: None, tasks: Vec::new(), removed: Vec::new(), full: true });
     }
-    let head = head_text(team)?;
     let base = base.filter(|base| base.layout == ROWS);
+    save_lead_changes(tx, &id, rev, base.map(|base| base.team.lead_changes.as_slice()), team)?;
+    let head = head_text(team)?;
     let Some(base) = base else {
         // Every row: a new team, a migration, a change of layout.
         write_head(tx, team, &head, ROWS)?;
@@ -416,6 +459,79 @@ pub(crate) fn save(tx: &Connection, base: Option<&Snapshot>, team: &mut Team) ->
     Ok(Saved { layout: ROWS, head: head_changed.then_some(head), tasks, removed, full: false })
 }
 
+/// Task #4 (team ede724c4): the lead changes' snapshots go to their own rows
+/// and leave `team`, so the head keeps only the summary fields and the ids.
+/// A change's row is written once, when it is recorded (it is not in `base`,
+/// the copy the change was made from, or there is no copy); a change that left
+/// the list (trimmed) loses its row. A change without snapshots in memory
+/// keeps its stored row.
+fn save_lead_changes(tx: &Connection, id: &str, rev: u64, base: Option<&[LeadChange]>, team: &mut Team) -> anyhow::Result<()> {
+    let kept: std::collections::HashSet<&str> = team.lead_changes.iter().map(|change| change.id.as_str()).collect();
+    let gone: Vec<String> = match base {
+        Some(base) => base.iter().filter(|old| !kept.contains(old.id.as_str())).map(|old| old.id.clone()).collect(),
+        None => tx
+            .prepare("SELECT id FROM team_lead_changes WHERE team=?1")?
+            .query_map(params![id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?
+            .into_iter()
+            .filter(|stored| !kept.contains(stored.as_str()))
+            .collect(),
+    };
+    for change in &gone {
+        tx.execute("DELETE FROM team_lead_changes WHERE team=?1 AND id=?2", params![id, change])?;
+    }
+    let known: std::collections::HashSet<String> = base.unwrap_or_default().iter().map(|old| old.id.clone()).collect();
+    for change in &mut team.lead_changes {
+        let new = base.is_none() || !known.contains(&change.id);
+        if change.tasks_before.is_empty() && change.phases_before.is_empty() {
+            if new && base.is_some() {
+                // A new change of this id: no row of an older one stays.
+                tx.execute("DELETE FROM team_lead_changes WHERE team=?1 AND id=?2", params![id, change.id])?;
+            }
+            continue;
+        }
+        change.changed = change.tasks_before.iter().map(|task| task.id).collect();
+        change.phases_changed = change.phases_before.iter().map(|phase| phase.n).collect();
+        let history = History { tasks_before: std::mem::take(&mut change.tasks_before), phases_before: std::mem::take(&mut change.phases_before) };
+        if new {
+            tx.execute(
+                "INSERT INTO team_lead_changes(team,id,rev,payload) VALUES(?1,?2,?3,?4)
+                 ON CONFLICT(team,id) DO UPDATE SET rev=excluded.rev,payload=excluded.payload",
+                params![id, change.id, rev as i64, serde_json::to_string(&history)?],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// One lead change's snapshots, read on demand (a revert); None when the
+/// store holds none for it.
+pub(crate) fn lead_change_history(db: &Connection, team: &str, change: &str) -> anyhow::Result<Option<History>> {
+    let text: Option<String> =
+        db.query_row("SELECT payload FROM team_lead_changes WHERE team=?1 AND id=?2", params![team, change], |row| row.get(0)).optional()?;
+    text.map(|text| serde_json::from_str(&text).context("Invalid lead change row")).transpose()
+}
+
+/// Puts the stored snapshots back into every lead change that lacks them, for
+/// a write of the whole record.
+fn fill_history(db: &Connection, team: &mut Team) -> anyhow::Result<()> {
+    if !team.lead_changes.iter().any(LeadChange::history_missing) {
+        return Ok(());
+    }
+    let rows: HashMap<String, String> = db
+        .prepare("SELECT id,payload FROM team_lead_changes WHERE team=?1")?
+        .query_map(params![team.id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for change in team.lead_changes.iter_mut().filter(|change| change.history_missing()) {
+        if let Some(text) = rows.get(&change.id) {
+            let history: History = serde_json::from_str(text).context("Invalid lead change row")?;
+            change.tasks_before = history.tasks_before;
+            change.phases_before = history.phases_before;
+        }
+    }
+    Ok(())
+}
+
 /// The copy after a committed write: `team` as written, with the texts.
 pub(crate) fn after(base: Option<Snapshot>, team: Team, saved: Saved) -> Snapshot {
     match base.filter(|base| !saved.full && base.layout == ROWS) {
@@ -450,33 +566,56 @@ pub(super) fn migrate(db: &Connection) -> anyhow::Result<usize> {
         return Ok(0);
     }
     let ids: Vec<String> = db
-        .prepare("SELECT id FROM teams WHERE layout IS NULL")?
-        .query_map([], |row| row.get(0))?
+        .prepare("SELECT id FROM teams WHERE layout IS NULL OR layout=?1")?
+        .query_map(params![TASK_ROWS], |row| row.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     let mut migrated = 0;
     for id in ids {
-        let write = begin(db, std::panic::Location::caller(), &id)?;
-        let Some(head) = head_row(&write, &id, true)? else { continue };
-        if head.layout.is_some() {
-            continue;
-        }
-        let Ok(mut team) = serde_json::from_str::<Team>(&head.payload) else {
-            // A record this hgs cannot read stays as it is, for the hgs that wrote it.
-            write.execute("UPDATE teams SET layout=?2 WHERE id=?1", params![id, JSON])?;
-            commit(write)?;
-            continue;
-        };
-        team.revision = head.revision;
-        team.updated = head.updated;
-        if keyable(&team) {
-            save(&write, None, &mut team)?;
+        // Task #4 (team ede724c4): a team that cannot migrate now stays as it
+        // was (this hgs reads it) and the next write open tries again; it
+        // never fails the open, so nothing blocks creating a team.
+        if let Ok(true) = migrate_one(db, &id) {
             migrated += 1;
-        } else {
-            write.execute("UPDATE teams SET layout=?2 WHERE id=?1", params![id, JSON])?;
         }
-        commit(write)?;
     }
     Ok(migrated)
+}
+
+/// One team's migration in its own transaction; whether it moved.
+#[track_caller]
+fn migrate_one(db: &Connection, id: &str) -> anyhow::Result<bool> {
+    let write = begin(db, std::panic::Location::caller(), id)?;
+    let Some(head) = head_row(&write, id, true)? else { return Ok(false) };
+    if head.layout == Some(TASK_ROWS) {
+        // Task #4: only the head and the lead changes' rows are written; the
+        // task and attempt rows stay as they are.
+        let Some(snapshot) = read(&write, id)? else { return Ok(false) };
+        let mut team = snapshot.team;
+        save_lead_changes(&write, id, team.revision, None, &mut team)?;
+        let text = head_text(&mut team)?;
+        write_head(&write, &team, &text, ROWS)?;
+        commit(write)?;
+        return Ok(true);
+    }
+    if head.layout.is_some() {
+        return Ok(false);
+    }
+    let Ok(mut team) = serde_json::from_str::<Team>(&head.payload) else {
+        // A record this hgs cannot read stays as it is, for the hgs that wrote it.
+        write.execute("UPDATE teams SET layout=?2 WHERE id=?1", params![id, JSON])?;
+        commit(write)?;
+        return Ok(false);
+    };
+    team.revision = head.revision;
+    team.updated = head.updated;
+    let moved = keyable(&team);
+    if moved {
+        save(&write, None, &mut team)?;
+    } else {
+        write.execute("UPDATE teams SET layout=?2 WHERE id=?1", params![id, JSON])?;
+    }
+    commit(write)?;
+    Ok(moved)
 }
 
 #[cfg(test)]

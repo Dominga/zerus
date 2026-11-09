@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import select
+import signal
 import shlex
 import socket
 import ssl
@@ -36,6 +37,8 @@ class NativeClaudeUsageLimit(unittest.TestCase):
     answer = questions.Questions.answer
     hook = questions.Questions.hook
 
+    team_account = False
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='hgs-claude-limit-native-')
         self.addCleanup(self.temp.cleanup)
@@ -48,6 +51,8 @@ class NativeClaudeUsageLimit(unittest.TestCase):
         work.mkdir()
         config = self.root / '.claude'
         config.mkdir()
+        subscription = 'team' if self.team_account else 'max'
+        tier = 'default_claude_team' if self.team_account else 'default_claude_max_20x'
         self.account = dict(accountUuid='00000000-0000-4000-8000-000000000001',
                             organizationUuid='00000000-0000-4000-8000-000000000002',
                             billingType='stripe_subscription', hasExtraUsageEnabled=False)
@@ -59,8 +64,8 @@ class NativeClaudeUsageLimit(unittest.TestCase):
         (config / '.credentials.json').write_text(json.dumps({'claudeAiOauth': dict(
             accessToken='fixture-token', refreshToken='fixture-refresh',
             expiresAt=int((time.time() + 86400) * 1000),
-            scopes=['user:inference', 'user:profile'], subscriptionType='max',
-            rateLimitTier='default_claude_max_20x')}))
+            scopes=['user:inference', 'user:profile'], subscriptionType=subscription,
+            rateLimitTier=tier)}))
         # An explicit config directory also isolates macOS Keychain service
         # identity. The native master config lives beside credentials there.
         (config / '.claude.json').write_bytes((self.root / '.claude.json').read_bytes())
@@ -68,6 +73,8 @@ class NativeClaudeUsageLimit(unittest.TestCase):
         self.reset = int(time.time()) + 5 * 86400
         fixture = self
         self.requests = []
+        # The shared timeout reporter expects tool payloads, not our (method, path) pairs.
+        self.native_requests = []
 
         class Server(BaseHTTPRequestHandler):
             def log_message(self, *args): pass
@@ -78,9 +85,9 @@ class NativeClaudeUsageLimit(unittest.TestCase):
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
                 self.wfile.write(json.dumps({'account': {'uuid': fixture.account['accountUuid'],
-                    'has_claude_max': True}, 'organization': {
-                    'uuid': fixture.account['organizationUuid'], 'organization_type': 'claude_max',
-                    'billing_type': 'stripe_subscription', 'rate_limit_tier': 'default_claude_max_20x',
+                    'has_claude_max': not fixture.team_account}, 'organization': {
+                    'uuid': fixture.account['organizationUuid'], 'organization_type': 'claude_team' if fixture.team_account else 'claude_max',
+                    'billing_type': 'stripe_subscription', 'rate_limit_tier': tier,
                     'has_extra_usage_enabled': False}}).encode())
 
             def do_POST(self):
@@ -167,8 +174,9 @@ class NativeClaudeUsageLimit(unittest.TestCase):
         self.wait_for(lambda: "You've hit your weekly limit" in self.screen())
         # The error is drawn before the modal. Wait for the complete panel;
         # sending a slash command during that transition can hit the new modal.
+        third = 'Ask your admin for more usage' if self.team_account else 'Switch to usage credits'
         self.wait_for(lambda: all(text in self.screen() for text in [
-            'Enter to confirm · Esc to cancel', 'Switch to usage credits', 'Wait here, then continue automatically']))
+            'Enter to confirm · Esc to cancel', third, 'Wait here, then continue automatically']))
         history = next(config.glob('projects/*/*.jsonl'))
         self.conversation_id = history.stem
         pid = int(self.tmux('display-message', '-p', '-t', self.pane, '#{pane_pid}'))
@@ -249,6 +257,126 @@ class NativeClaudeUsageLimit(unittest.TestCase):
         self.assertIn('no longer pending', self.answer(stale, success=False))
         self.assertEqual(self.inspect()['pending_questions'], [])
         self.assertEqual(self.requests, before)
+
+
+@unittest.skipUnless(native.CLAUDE, 'Set HGS_CLAUDE_TEST_BIN for private native quota qualification')
+class NativeClaudeOrganizationUsageLimit(unittest.TestCase):
+    """The official executable must draw the admin variant itself; no screen injection."""
+    team_account = True
+    setUp = NativeClaudeUsageLimit.setUp
+    script = NativeClaudeUsageLimit.script
+    tmux = NativeClaudeUsageLimit.tmux
+    write_record = NativeClaudeUsageLimit.write_record
+    wait_for = NativeClaudeUsageLimit.wait_for
+    screen = NativeClaudeUsageLimit.screen
+    inspect = NativeClaudeUsageLimit.inspect
+    answer = NativeClaudeUsageLimit.answer
+    hook = NativeClaudeUsageLimit.hook
+    payload = NativeClaudeUsageLimit.payload
+
+    def test_admin_choice_opens_native_confirmation_without_confirming_or_replaying(self):
+        options = self.card['questions'][0]['options']
+        self.assertIn('Ask your admin for more usage', [o['label'] for o in options])
+        self.assertTrue(self.card['can_answer'])
+        self.assertNotIn('approval', self.card)
+        self.assertTrue(all('selected' not in option for option in options))
+        before = [r for r in self.requests if r[0] == 'POST']
+        payload = self.payload('Ask your admin')
+        # This is a second, unnumbered native confirmation, not the usage
+        # menu we bound. Keep the original result uncertain rather than
+        # treating a new footer as acknowledgement or confirming the request.
+        self.assertIn('delivery uncertain', self.answer(payload, success=False))
+        self.assertIn('Request usage credits from your admin', self.screen())
+        self.assertIn('❯ Cancel', self.screen())
+        self.assertEqual([r for r in self.requests if r[0] == 'POST'], before)
+        self.assertIn('delivery uncertain', self.answer(payload, success=False))
+        self.assertIn('❯ Cancel', self.screen())
+        self.assertFalse(any(q['source'] == 'claude_usage_limit' for q in self.inspect()['pending_questions']))
+        self.assertEqual([r for r in self.requests if r[0] == 'POST'], before)
+
+
+
+class UsageLimitSnapshotPolicy(unittest.TestCase):
+    """Scripted terminal policy/transport controls, not real-Claude coverage."""
+    script = fixtures.InputTransport.script
+    tmux = fixtures.InputTransport.tmux
+    write_record = fixtures.InputTransport.write_record
+    wait_for = fixtures.InputTransport.wait_for
+    tearDown = fixtures.InputTransport.tearDown
+    received = fixtures.InputTransport.received
+    inspect = questions.Questions.inspect
+    answer = questions.Questions.answer
+    payload = NativeClaudeUsageLimit.payload
+
+    def setUp(self):
+        fixtures.InputTransport.setUp(self)
+        self.record.update(agent='claude', run_identity_version=1, supervisor={},
+                           launch_dir='/work/example', phase='error', activity='idle')
+        self.write_record()
+        self.menu = (Path(__file__).parent / 'fixtures/claude-usage-limit.txt').read_text()
+        self.menu = self.menu.replace('Stop and wait for limit to reset', 'Keep this turn stopped')
+        self.show(self.menu)
+        self.card = self.inspect()['pending_questions'][0]
+
+    def show(self, text):
+        (self.root / 'screen').write_text('\x1b[2J\x1b[H' + text.replace('\n', '\r\n'))
+        os.kill(self.record['pid'], signal.SIGUSR1)
+        def displayed(value):
+            return '\n'.join(line.rstrip() for line in value.splitlines()).strip()
+        self.wait_for(lambda: displayed(self.tmux('capture-pane', '-p', '-t', self.pane)) == displayed(text))
+
+    def test_unknown_label_is_manual_and_the_original_request_is_not_replayed(self):
+        self.assertTrue(self.card['can_answer'])
+        self.assertNotIn('approval', self.card)
+        self.assertEqual(self.received(), b'')
+        (self.root / 'replies').write_text(json.dumps([['0d', '\x1b[2J\x1b[HReady for a new message']]))
+        payload = self.payload('Keep this turn stopped')
+        receipt = self.answer(payload)
+        self.assertEqual(receipt['status'], 'answered')
+        self.assertEqual(self.received(), b'\r')
+        self.assertEqual(self.answer(payload), receipt)
+        self.assertEqual(self.received(), b'\r')
+
+    def test_changed_menu_and_request_identity_refuse_before_input(self):
+        payload = self.payload('Keep this turn stopped')
+        changed = dict(payload, expected_conversation_id='another-conversation')
+        self.answer(changed, success=False)
+        self.assertEqual(self.received(), b'')
+        self.show(self.menu.replace('Switch to usage credits', 'Ask your admin for more usage'))
+        self.answer(payload, success=False)
+        self.assertEqual(self.received(), b'')
+
+    def test_partial_quoted_and_unbound_panels_have_no_input_capability(self):
+        for invalid in [self.menu.replace('Enter to confirm · Esc to cancel', 'Enter to confirm'),
+                        '\n'.join('> ' + line for line in self.menu.splitlines()),
+                        self.menu.replace('  3.', '  4.')]:
+            self.show(invalid)
+            self.assertFalse(any(q['source'] == 'claude_usage_limit' for q in self.inspect()['pending_questions']))
+        self.show(self.menu)
+        for field in ['run_identity_version', 'supervisor']:
+            original = self.record.pop(field)
+            self.write_record()
+            self.assertFalse(any(q['source'] == 'claude_usage_limit' for q in self.inspect()['pending_questions']))
+            self.record[field] = original
+        self.assertEqual(self.received(), b'')
+
+    def test_a_changed_highlight_at_the_final_capture_refuses_before_input(self):
+        # The real private pane and all identities stay fixed. Alternate only
+        # its reported highlight so no adjacent pre-input snapshots can agree.
+        wrapper = self.bin / 'tmux'
+        wrapper.rename(self.bin / 'tmux-real')
+        self.script('tmux', '#!/usr/bin/env python3\n' + '''
+import pathlib,subprocess,sys
+root=pathlib.Path(__file__).resolve().parent
+r=subprocess.run([str(root/'tmux-real'),*sys.argv[1:]],capture_output=True)
+out=r.stdout
+if 'capture-pane' in sys.argv and '-e' not in sys.argv:
+ p=root/'captures';n=int(p.read_text())+1 if p.exists() else 1;p.write_text(str(n))
+ if n%2==0:out=out.replace('❯ 1.'.encode(),b'  1.').replace(b'  2.','❯ 2.'.encode())
+sys.stdout.buffer.write(out);sys.stderr.buffer.write(r.stderr);sys.exit(r.returncode)
+''')
+        self.answer(self.payload('Keep this turn stopped'), success=False)
+        self.assertEqual(self.received(), b'')
 
 
 if __name__ == '__main__':

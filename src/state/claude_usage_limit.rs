@@ -5,7 +5,6 @@ use super::*;
 use sha2::{Digest, Sha256};
 
 const TITLE: &str = "What do you want to do?";
-const STOP: &str = "Stop and wait for limit to reset";
 const FOOTER: &str = "Enter to confirm · Esc to cancel";
 
 struct Panel {
@@ -27,79 +26,114 @@ fn rule(row: &str) -> bool {
 }
 
 fn parse(screen: &str) -> Option<Panel> {
-    let rows: Vec<_> = screen.trim().lines().map(str::trim).collect();
-    let top = rows.iter().rposition(|row| rule(row))?;
-    let panel = &rows[top + 1..];
-    if panel.len() < 5 || panel[0] != TITLE || !panel[1].is_empty() || *panel.last()? != FOOTER {
+    // The capture is bounded too. Never treat a clipped or control-bearing
+    // transcript as a native menu, even when called outside the capture path.
+    if screen.len() > 512 * 1024
+        || screen
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\r'))
+    {
         return None;
     }
-    let first = panel
-        .iter()
-        .position(|row| row.starts_with("1. ") || row.starts_with("❯ 1. "))?;
+    let rows: Vec<_> = screen.trim_end().lines().map(str::trim_end).collect();
+    let top = rows.iter().rposition(|row| rule(row.trim()))?;
+    let panel = &rows[top + 1..];
+    if panel.len() < 5
+        || panel[0].trim() != TITLE
+        || !panel[1].is_empty()
+        || panel.last()?.trim() != FOOTER
+    {
+        return None;
+    }
+    let first = panel.iter().position(|row| {
+        let row = row.trim_start();
+        row.starts_with("1. ") || row.starts_with("❯ 1. ")
+    })?;
     if !panel[first - 1].is_empty() || !panel[panel.len() - 2].is_empty() {
         return None;
     }
+    // The native panel can be inset as a whole; wrapping is relative to it.
+    let left = panel[0].len() - panel[0].trim_start().len();
     let mut labels: Vec<String> = Vec::new();
     let mut selected = None;
+    let mut label_column = 0;
     for row in &panel[first..panel.len() - 2] {
         if row.is_empty() {
             continue;
         }
-        let text = if let Some(text) = row.strip_prefix('❯') {
-            if selected.replace(labels.len()).is_some() {
-                return None;
-            }
-            text.trim_start()
-        } else {
-            row
-        };
-        if let Some((number, text)) = text
+        let text = row.trim_start();
+        let cursor = text.starts_with('❯');
+        let text = text.strip_prefix("❯ ").unwrap_or(text);
+        if let Some((number, label)) = text
             .split_once(". ")
-            .filter(|(n, _)| n.chars().all(|c| c.is_ascii_digit()))
+            .filter(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
         {
-            if number.parse::<usize>().ok()? != labels.len() + 1 || text.is_empty() {
+            // Native numbering is contiguous and unambiguous, not a quoted
+            // list, a second cursor, an omitted row or a numbered continuation.
+            if row.len() - row.trim_start().len() < left
+                || row.len() - row.trim_start().len() > left + 2
+                || number != (labels.len() + 1).to_string()
+                || label.trim().is_empty()
+                || labels.len() == 10
+            {
                 return None;
             }
-            labels.push(text.into());
+            if cursor && selected.replace(labels.len()).is_some() {
+                return None;
+            }
+            label_column = left + 2 + number.len() + 2;
+            labels.push(normalized(label));
         } else {
-            if row.starts_with('❯') {
+            // Wrapped labels start at their text column, not at the native
+            // numbering/cursor column. Keep indentation until this check.
+            if cursor || row.len() - text.len() < label_column {
                 return None;
             }
             let label = labels.last_mut()?;
             label.push(' ');
-            label.push_str(text);
+            label.push_str(&normalized(text));
+        }
+        if labels.last()?.len() > 4096 {
+            return None;
         }
     }
-    // The generic title alone must never turn another native menu into this one.
-    if labels.len() > 10
-        || !labels.iter().any(|label| label == STOP)
-        || labels
-            .iter()
-            .enumerate()
-            .any(|(i, label)| labels[..i].contains(label))
+    if labels
+        .iter()
+        .enumerate()
+        .any(|(i, label)| labels[..i].contains(label))
     {
         return None;
     }
-    // The native error and reset/help link sit above the panel's rule. They
-    // remain useful even when a later background hook cleared provider_error.
+    // The title/footer are shared by other menus. Require the native usage
+    // notice as context, independently of option wording and provider_error
+    // (a later background hook can clear that record). This does not admit a
+    // generic question, a billing follow-up or a quoted transcript on its own.
     let notice = rows[..top]
         .iter()
         .rposition(|row| {
-            let row = row.trim_start_matches('⎿').trim_start();
-            (row.starts_with("You've hit your ") || row.starts_with("You’ve hit your "))
-                && row.contains("limit")
+            let row = row.trim().trim_start_matches('⎿').trim_start();
+            row.starts_with("You've hit your ") || row.starts_with("You’ve hit your ")
         })
         .map(|start| {
             rows[start..top]
                 .iter()
                 .take(8)
                 .take_while(|row| !row.is_empty())
-                .map(|row| row.trim_start_matches('⎿').trim_start())
+                .map(|row| row.trim().trim_start_matches('⎿').trim_start())
                 .collect::<Vec<_>>()
                 .join(" ")
-        })
-        .unwrap_or_default();
-    let banner = rows[top].trim_matches(['─', '▔']).trim();
+        })?;
+    if !notice
+        .split('·')
+        .next()?
+        .split("Use your")
+        .next()?
+        .split_whitespace()
+        .any(|word| word.starts_with("limit"))
+    {
+        return None;
+    }
+    let banner = rows[top].trim().trim_matches(['─', '▔']).trim();
     let body = normalized(&[notice.as_str(), banner, &panel[2..first].join(" ")].join(" "));
     Some(Panel {
         body,
@@ -108,18 +142,10 @@ fn parse(screen: &str) -> Option<Panel> {
     })
 }
 
-fn supported(label: &str) -> bool {
-    [
-        STOP,
-        "Switch to usage credits",
-        "Switch to extra usage",
-        "Wait here, then continue automatically shortly",
-        "Wait here, then continue automatically when the limit resets",
-    ]
-    .contains(&label)
-        || label
-            .strip_prefix("Wait here, then continue automatically at ")
-            .is_some_and(|at| !at.is_empty() && at.len() <= 100)
+fn acknowledged(screen: &str) -> bool {
+    // A partial redraw of this or another choice panel is not an answer.
+    // No option's wording establishes acknowledgement or grants another input.
+    !screen.trim().is_empty() && !screen.contains(TITLE) && !screen.contains("Enter to confirm")
 }
 
 fn eligible(record: &Value) -> bool {
@@ -175,13 +201,12 @@ fn card(record: &Value, panel: &Panel) -> Option<Value> {
             .to_string()
         )
     );
-    let can_answer = panel.labels.iter().all(|label| supported(label));
     Some(
         json!({"question_id":format!("claude-usage-limit:{hash}"),"question_hash":hash,
         "tool_call_id":"claude_usage_limit","agent_id":"main","run_id":record["run_id"],
         "conversation_id":record["conversation_id"],"created_at":0,"source":"claude_usage_limit",
-        "can_answer":can_answer,"answer_transport":"claude_tui",
-        "answer_unavailable_reason":if can_answer { "" } else { "Review these account or billing choices in Terminal." },
+        "can_answer":true,"answer_transport":"claude_tui",
+        "answer_unavailable_reason":"",
         "questions":[{"id":"usage_limit","header":"Usage limit","question":TITLE,"body":body,
             "multi_select":false,"allow_other":false,
             "options":panel.labels.iter().enumerate().map(|(i,label)|json!({"id":format!("limit_{i}"),"label":label})).collect::<Vec<_>>()}]}),
@@ -230,7 +255,7 @@ pub(super) fn answer(record: &Value, question: &Value, answers: &Value) -> Resul
         chosen,
         options.len(),
         snapshot,
-        |screen| !screen.trim().is_empty() && !screen.contains(TITLE) && !screen.contains(STOP),
+        acknowledged,
         false,
     )
 }
@@ -297,7 +322,10 @@ mod tests {
             SCREEN.replace("❯ 1.", "1."),
             SCREEN.replace("  3.", "❯ 3."),
             SCREEN.replace("  3.", "  4."),
-            SCREEN.replace(STOP, "Wait"),
+            SCREEN.replace(
+                "You've hit your weekly limit",
+                "A different native question",
+            ),
             SCREEN.replace('─', " "),
             format!("{SCREEN}\n❯ new draft"),
         ] {
@@ -305,7 +333,7 @@ mod tests {
         }
     }
     #[test]
-    fn wrapping_status_banners_and_unknown_billing_choices() {
+    fn wrapping_status_banners_and_changed_question_identity() {
         let wrapped = SCREEN.replace(
             "continue automatically at",
             "continue automatically\n      at",
@@ -324,19 +352,167 @@ mod tests {
                 .unwrap()
                 .contains("$5")
         );
-        let unknown = SCREEN.replace(
-            "Switch to usage credits",
-            "Add funds to continue with usage credits",
-        );
-        assert_eq!(
-            card(&record(), &parse(&unknown).unwrap()).unwrap()["can_answer"],
-            false
-        );
-        assert!(snapshot(&record(), &unknown).is_none());
         let changed = SCREEN.replace("Oct 20", "Oct 21");
         assert_ne!(
             snapshot(&record(), SCREEN).unwrap().0,
             snapshot(&record(), &changed).unwrap().0
         );
+    }
+    #[test]
+    fn manual_choices_follow_the_complete_menu_not_a_label_catalog() {
+        for (stop, wait, third) in [
+            (
+                "Stop and wait for limit to reset",
+                "Wait here, then continue automatically at Oct 20, 1pm",
+                "Ask your admin for more usage",
+            ),
+            (
+                "Keep this turn stopped",
+                "Wait until tomorrow",
+                "Review organization options",
+            ),
+            (
+                "Остановиться",
+                "Подождать до сброса",
+                "Спросить администратора",
+            ),
+        ] {
+            let screen = SCREEN
+                .replace("Stop and wait for limit to reset", stop)
+                .replace(
+                    "Wait here, then continue automatically at Oct 20, 1pm",
+                    wait,
+                )
+                .replace("Switch to usage credits", third);
+            let panel = parse(&screen).expect("complete native usage menu");
+            let question = card(&record(), &panel).unwrap();
+            assert_eq!(question["can_answer"], true, "{third}");
+            assert_eq!(question["questions"][0]["options"][2]["label"], third);
+            assert_eq!(question["questions"][0]["options"][2]["id"], "limit_2");
+            assert!(snapshot(&record(), &screen).is_some());
+            assert!(question.get("approval").is_none());
+        }
+    }
+    #[test]
+    fn menu_shape_and_usage_context_are_required_independently_of_labels() {
+        let no_notice = SCREEN.lines().skip(2).collect::<Vec<_>>().join("\n");
+        let quoted = SCREEN
+            .lines()
+            .map(|line| format!("> {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for invalid in [
+            no_notice,
+            quoted,
+            SCREEN.replace(
+                "You've hit your weekly limit",
+                "You've hit your next milestone",
+            ),
+            SCREEN.replace("  3. Switch to usage credits", "  3."),
+            SCREEN.replace("  3.", "  03."),
+            SCREEN.replace(
+                "Switch to usage credits",
+                "Stop and wait for limit to reset",
+            ),
+            SCREEN.replace("  3. Switch to usage credits", "  not a numbered option"),
+            SCREEN.replace(FOOTER, &format!("4. extra choice\n{FOOTER}")),
+            SCREEN.replace(
+                "  3. Switch to usage credits",
+                "  3. Switch\n   incomplete indentation",
+            ),
+            SCREEN.replace("  3.", "\t3."),
+            SCREEN.replace("  3.", "❯ 3."),
+            format!("{SCREEN}\nadditional output"),
+        ] {
+            assert!(parse(&invalid).is_none(), "{invalid}");
+        }
+        let extra = (4..=10)
+            .map(|i| format!("  {i}. Choice {i}\n"))
+            .collect::<String>();
+        let ten = SCREEN.replace("\nEnter to confirm", &format!("{extra}\nEnter to confirm"));
+        assert_eq!(parse(&ten).unwrap().labels.len(), 10);
+        assert!(
+            parse(&ten.replace("\nEnter to confirm", "  11. One more\n\nEnter to confirm"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn wrapping_wording_and_original_bindings_remain_in_the_question_hash() {
+        let screen = SCREEN.replace(
+            "Switch to usage credits",
+            "Review an unfamiliar organization setting",
+        );
+        let wrapped = screen
+            .replace("unfamiliar organization", "unfamiliar\n     organization")
+            .replace("weekly limit", "weekly\nlimit");
+        let hash = snapshot(&record(), &screen).unwrap().0;
+        assert_eq!(
+            snapshot(&record(), &screen.replace('\n', "\r\n"))
+                .unwrap()
+                .0,
+            hash
+        );
+        assert_eq!(snapshot(&record(), &wrapped).unwrap().0, hash);
+        for changed in [
+            screen.replace("organization", "account"),
+            screen.replace("Oct 20", "Nov 12"),
+        ] {
+            assert_ne!(snapshot(&record(), &changed).unwrap().0, hash);
+        }
+        for field in [
+            "run_id",
+            "pane",
+            "pid",
+            "process_start",
+            "conversation_id",
+            "expected_id",
+            "launch_dir",
+        ] {
+            let mut changed = record();
+            changed[field] = json!("different");
+            assert_ne!(snapshot(&changed, &screen).unwrap().0, hash, "{field}");
+        }
+        for field in [
+            "run_identity_version",
+            "supervisor",
+            "run_id",
+            "conversation_id",
+        ] {
+            let mut changed = record();
+            changed.as_object_mut().unwrap().remove(field);
+            assert!(snapshot(&changed, &screen).is_none(), "{field}");
+        }
+    }
+
+    #[test]
+    fn a_partial_next_menu_is_not_an_acknowledgement_or_a_followup_answer() {
+        for screen in [
+            "",
+            TITLE,
+            "Enter to confirm",
+            "New menu\nEnter to confirm · Esc to cancel",
+        ] {
+            assert!(!acknowledged(screen));
+        }
+        assert!(acknowledged(
+            "Claude Code will continue automatically tomorrow"
+        ));
+    }
+    #[test]
+    fn native_panel_inset_keeps_relative_numbering_and_wrapping() {
+        let screen = SCREEN.replace(
+            "Switch to usage credits",
+            "Ask your admin\n     for more usage",
+        );
+        let hash = snapshot(&record(), &screen).unwrap().0;
+        for left in [3, 6] {
+            let inset = screen
+                .lines()
+                .map(|line| format!("{}{line}", " ".repeat(left)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(snapshot(&record(), &inset).unwrap().0, hash);
+        }
     }
 }

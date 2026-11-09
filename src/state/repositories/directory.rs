@@ -560,7 +560,7 @@ impl Directory {
             let file = OpenOptions::new()
                 .read(true)
                 .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-                .share_mode(FILE_SHARE_READ)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
                 .open(ancestor)
                 .map_err(|e| format!("Cannot pin clone directory: {e}"))?;
             let meta = file.metadata().map_err(|e| e.to_string())?;
@@ -616,7 +616,7 @@ impl Directory {
                 &mut status,
                 std::ptr::null(),
                 FILE_ATTRIBUTE_NORMAL,
-                FILE_SHARE_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
                 FILE_CREATE,
                 FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
                 std::ptr::null(),
@@ -698,6 +698,27 @@ mod tests {
             Directory::open(&created.path).unwrap().private().unwrap(),
             expected
         );
+        created.verify().unwrap();
+    }
+
+    /// Task #421 (os error 32 of 2026-11-09): a directory pinned by open or
+    /// by create accepts a file published into it.
+    #[cfg(windows)]
+    #[test]
+    fn a_pinned_directory_accepts_a_published_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = crate::platform::canonical(temp.path()).unwrap();
+        let parent = Directory::open(&path).unwrap();
+        parent.write_new("opened.json", b"one").unwrap();
+        let created = parent.create("backup", "unused").unwrap();
+        created.write_new("created.json", b"two").unwrap();
+        created.write_new_file("retained.json", b"three").unwrap();
+        assert_eq!(std::fs::read(path.join("opened.json")).unwrap(), b"one");
+        assert_eq!(std::fs::read(path.join("backup/created.json")).unwrap(), b"two");
+        assert_eq!(std::fs::read(path.join("backup/retained.json")).unwrap(), b"three");
+        // Publication never clobbers, and the pins still deny a rename.
+        assert!(created.write_new("created.json", b"other").is_err());
+        assert!(std::fs::rename(&created.path, path.join("moved")).is_err());
         created.verify().unwrap();
     }
 

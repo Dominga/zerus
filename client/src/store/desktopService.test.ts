@@ -468,6 +468,11 @@ describe("notification ownership presentation", () => {
     expect(takeoverRefusal(refused("agent_descended_frontend_refused", "ancestry"))!.check).toBe("Process ancestry");
     expect(takeoverRefusal(refused("ownership_not_settled", "ownership_journal"))!.check).toBe("Ownership journal");
     expect(takeoverRefusal(refused("timed_out", "other"))!.reason).toContain("timed_out");
+    // Task #421: a takeover whose hgs child failed names the desktop service and a working next step.
+    const child = takeoverRefusal(refused("child_failed", "other"))!;
+    expect(child.check).toBe("Desktop service");
+    expect(child.next).toContain("hgs desktop serve");
+    expect(ownershipNotice(refused("child_failed", "other"))).toContain("Zerus could not take over its sessions (Desktop service)");
     // The notice says it instead of a bare "not ready"; without a reason the old notice stays.
     const notice = ownershipNotice(refused("frontend_binding_unavailable", "binding"));
     expect(notice).toContain("Zerus could not take over its sessions (App binding)");

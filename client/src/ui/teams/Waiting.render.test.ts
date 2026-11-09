@@ -24,6 +24,7 @@ const catalog = "\0waiting-render-catalog";
 let server: ViteDevServer | undefined;
 let renderPage: (view: TeamWaitingView) => string;
 let renderBanner: (view: TeamWaitingView) => string;
+let renderBannerOpen: (view: TeamWaitingView) => string;
 
 const NOW = 1_800_000_000;
 
@@ -131,17 +132,19 @@ beforeAll(async () => {
           };`;
         if (id === entry) return `import {createComponent} from 'solid-js';
           import {renderToString} from 'solid-js/web';
-          import {WaitingPage, WaitingBanner} from '/src/ui/teams/Waiting.tsx';
+          import {WaitingPage, WaitingBanner, WaitingBannerView} from '/src/ui/teams/Waiting.tsx';
           import {state} from '${stores}';
           const show = (view, component) => { state.view = view; return renderToString(() => createComponent(component, {})); };
           export const renderPage = (view) => show(view, WaitingPage);
-          export const renderBanner = (view) => show(view, WaitingBanner);`;
+          export const renderBanner = (view) => show(view, WaitingBanner);
+          export const renderBannerOpen = (view) => { state.view = view; return renderToString(() => createComponent(WaitingBannerView, { items: view.items, total: view.total, open: true, onToggle: () => {}, onOpenList: () => {} })); };`;
       },
     }, solid({ ssr: true })],
   });
   const module = await server.ssrLoadModule(entry);
   renderPage = module.renderPage;
   renderBanner = module.renderBanner;
+  renderBannerOpen = module.renderBannerOpen;
 });
 
 afterAll(async () => { await server?.close(); });
@@ -172,6 +175,32 @@ describe("Waiting for you and the Activity strip (task 116)", () => {
       expect(one, found.kind).toContain(escaped(found.title));
       expect(one, `${found.kind} control`).toContain(control(found));
     }
+  });
+
+  // Task 429 (owner, 2026-11-09, "why this duplicate?"): the banner's head row
+  // repeated the first item while the expanded list showed it again.
+  it("names its first item only while folded and draws each row once when open", () => {
+    const items = fixture();
+    const folded = renderBanner({ items, total: items.length, more: false, next: null });
+    expect(folded).toContain(`${items.length} wait for you`);
+    // Folded: the head keeps the newest item as its one row, so Show all is not needed to answer it.
+    expect(folded).toContain(`title="${escaped(items[0].title)}"`);
+    expect(folded.match(/class="team-waiting-row/g) ?? []).toHaveLength(1);
+    expect(folded).toContain("Show all");
+
+    const open = renderBannerOpen({ items, total: items.length, more: false, next: null });
+    // Expanded: the head is the count of the rows below (BANNER_ROWS) and Hide; no item is named twice.
+    expect(open).toContain("5 wait for you");
+    expect(open).toContain("Hide");
+    expect(open).toContain(`Open the waiting list (${items.length})`);
+    expect(open.match(/class="team-waiting-row/g) ?? []).toHaveLength(5);
+    for (const shown of items.slice(0, 5)) {
+      // One row draws the title once (its title attribute); the head does not repeat it.
+      const drawn = open.split(`title="${escaped(shown.title)}"`).length - 1;
+      expect(drawn, shown.title).toBe(1);
+    }
+    // The rows the cap leaves out stay in the waiting list, not in the banner.
+    expect(open).not.toContain(escaped(items[5].title));
   });
 
   it("does not stack in-window notices, as Qt (task 323 N7)", () => {

@@ -426,32 +426,41 @@ export function WaitingPage() {
 /**
  * Task 384 (owner, 2026-11-08): the strip above Activity keeps its count on one
  * line and shows the newest item as a two-line row with its kind and its own
- * answer, so a card's Allow/Deny is reachable without Show all. The row is the
- * newest non-digest item; the lead-changes digest has its own row in the list.
+ * answer, so a card's Allow/Deny is reachable without Show all.
+ * Task 429 (owner, 2026-11-09): that row shows only while the list is folded;
+ * expanded, the head is the count and Hide and the list holds every row once, so
+ * no item is drawn twice and the count matches the rows.
  */
+export function WaitingBannerView(props: { items: readonly TeamWaitingItem[]; total?: number; open: boolean; onToggle: () => void; onOpenList: () => void }) {
+  const rows = () => props.items.slice(0, BANNER_ROWS);
+  const newest = () => bannerHeadItem(props.items);
+  return <>
+    <div class="team-waiting-banner-head">
+      <Icon name="bell" size={14} />
+      <b data-banner-count>{tr("%1 wait for you", props.open ? rows().length : props.items.length)}</b>
+      <span class="grow" />
+      <Show when={props.items.length > 1}>
+        <button class="btn small ghost" data-banner-all onClick={props.onToggle}>{props.open ? tr("Hide") : tr("Show all")}</button>
+      </Show>
+    </div>
+    <Show when={!props.open}>{newest() ? <Row item={newest()!} compact newest /> : null}</Show>
+    <Show when={props.open}>
+      <For each={rows()}>{(item) => <Row item={item} compact />}</For>
+      <button class="btn small ghost" onClick={props.onOpenList}>{tr("Open the waiting list (%1)", props.total ?? props.items.length)}</button>
+    </Show>
+  </>;
+}
+
+/** The Team tab's banner: one item is one line; several fold into a count that opens to the newest rows. */
 export function WaitingBanner() {
   onCleanup(showWaiting());
   const [open, setOpen] = createSignal(false);
   const items = () => waiting()?.items ?? [];
   createEffect(() => announce(items(), !waiting()?.more));
-  const newest = () => bannerHeadItem(items()) ?? items()[0];
-  const rest = () => items().filter((item) => item.id !== newest()?.id).slice(0, BANNER_ROWS - 1);
   return (
     <Show when={items().length > 0}>
       <div class="team-waiting-banner" role="region" aria-label={tr("Waiting for you")}>
-        <div class="team-waiting-banner-head">
-          <Icon name="bell" size={14} />
-          <b data-banner-count>{tr("%1 wait for you", items().length)}</b>
-          <span class="grow" />
-          <Show when={items().length > 1}>
-            <button class="btn small ghost" data-banner-all onClick={() => setOpen(!open())}>{open() ? tr("Hide") : tr("Show all")}</button>
-          </Show>
-        </div>
-        <Show when={newest()}>{(item) => <Row item={item()} compact newest />}</Show>
-        <Show when={open()}>
-          <For each={rest()}>{(item) => <Row item={item} compact />}</For>
-          <button class="btn small ghost" onClick={() => setPage("waiting")}>{tr("Open the waiting list (%1)", waiting()?.total ?? items().length)}</button>
-        </Show>
+        <WaitingBannerView items={items()} total={waiting()?.total} open={open()} onToggle={() => setOpen(!open())} onOpenList={() => setPage("waiting")} />
       </div>
     </Show>
   );

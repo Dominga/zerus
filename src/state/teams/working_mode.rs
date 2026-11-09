@@ -60,6 +60,11 @@ pub(crate) struct ProjectProfile {
     pub source_files: u64,
     pub binary_bytes: u64,
     pub large_assets: u64,
+    /// Task #451 (owner, 2026-11-09): design previews, docs images and test
+    /// fixtures. They are tracked and count in the totals above, but they are
+    /// not runtime assets: they never make the repository binary-heavy.
+    pub preview_files: u64,
+    pub preview_bytes: u64,
     /// Git LFS is configured for the repository (`.gitattributes` or `.git/lfs`).
     pub lfs: bool,
     /// The engine markers found: `.uproject`, `.uplugin`, `Content/`, `Binaries/`.
@@ -90,21 +95,20 @@ impl ProjectProfile {
         self.suites > 0 && self.source_files > self.binary_files
     }
 
-    /// A repository too heavy to clone per member: a game project with engine
-    /// assets, LFS, or a binary repository. A code repository with tests and
-    /// mostly source files stays light until its binaries are far above the
-    /// size floor (task 336).
+    /// A repository too heavy to clone per member. Task #451 (owner,
+    /// 2026-11-09): only real signals count - Git LFS, a game project's engine
+    /// assets, many large binaries, or a repository far beyond the size floors.
+    /// Design previews, docs images and fixtures are not in `binary_bytes` or
+    /// `large_assets` (see `preview_path`), so a code repository with many
+    /// suites and source files keeps the branch pipeline.
     pub(crate) fn heavy(&self) -> bool {
-        if self.lfs || !self.engine.is_empty() {
+        if self.lfs || !self.engine.is_empty() || self.large_assets >= LARGE_ASSETS {
             return true;
         }
         if self.code_first() {
             return self.bytes >= BIG_BYTES || self.binary_bytes >= HUGE_BINARY_BYTES;
         }
-        self.bytes >= BIG_BYTES
-            || self.binary_bytes >= BINARY_BYTES
-            || self.binary_share() >= BINARY_SHARE
-            || self.large_assets >= LARGE_ASSETS
+        self.bytes >= BIG_BYTES || self.binary_bytes >= BINARY_BYTES || self.binary_share() >= BINARY_SHARE
     }
 
     pub(crate) fn mib(bytes: u64) -> u64 {
@@ -145,6 +149,8 @@ impl Proposal {
                 "binary_bytes": self.profile.binary_bytes,
                 "binary_share": (self.profile.binary_share() * 100.0).round() / 100.0,
                 "large_assets": self.profile.large_assets,
+                "preview_files": self.profile.preview_files,
+                "preview_bytes": self.profile.preview_bytes,
                 "lfs": self.profile.lfs,
                 "engine": self.profile.engine,
                 "suites": self.profile.suites,
@@ -170,6 +176,19 @@ pub(crate) fn binary_path(path: &str) -> bool {
     path.rsplit_once('.')
         .map(|(_, extension)| BINARY.iter().any(|known| extension.eq_ignore_ascii_case(known)))
         .unwrap_or(false)
+}
+
+/// Task #451 (owner, 2026-11-09): the tracked files that are not runtime
+/// assets. `design/` holds prototypes and original artwork (AGENTS.md), a docs
+/// image illustrates a page, and `tests/fixtures/` is test data. They are
+/// tracked and measured in the totals, but they never decide that a code
+/// repository with its tests is one shared folder.
+pub(crate) fn preview_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.starts_with("design/")
+        || (lower.starts_with("docs/") && binary_path(&lower))
+        || lower.starts_with("tests/fixtures/")
+        || lower.contains("/tests/fixtures/")
 }
 
 fn git(folder: &Path, args: &[&str]) -> Option<String> {
@@ -218,6 +237,13 @@ pub(crate) fn profile(folder: &Path) -> Option<ProjectProfile> {
         let size: u64 = fields.next().and_then(|size| size.parse().ok()).unwrap_or(0);
         profile.files += 1;
         profile.bytes = profile.bytes.saturating_add(size);
+        // Task #451: previews, docs images and fixtures count in the totals but
+        // never as binaries, large assets or engine markers.
+        if preview_path(path) {
+            profile.preview_files += 1;
+            profile.preview_bytes = profile.preview_bytes.saturating_add(size);
+            continue;
+        }
         if binary_path(path) {
             profile.binary_files += 1;
             profile.binary_bytes = profile.binary_bytes.saturating_add(size);
@@ -276,6 +302,13 @@ fn select(profile: &ProjectProfile) -> (String, String, Vec<String>, String) {
     }
     if profile.large_assets > 0 {
         reasons.push(format!("{} files of {} MiB or more", profile.large_assets, ProjectProfile::mib(LARGE_ASSET)));
+    }
+    if profile.preview_files > 0 {
+        reasons.push(format!(
+            "{} design, docs and fixture files ({} MiB) are not runtime assets: they are not counted as binaries",
+            profile.preview_files,
+            ProjectProfile::mib(profile.preview_bytes)
+        ));
     }
     if !profile.engine.is_empty() {
         reasons.push(format!("engine assets ({}): a game project", profile.engine.join(", ")));

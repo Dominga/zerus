@@ -30,4 +30,22 @@ describe("the Team tab's proposal cards (task #338)", () => {
     expect(notice).toContain("data-working-mode-switch");
     expect(notice).toContain("Propose the switch");
   });
+
+  // Task #451 (owner, 2026-11-09): "I press the button and got no result". The
+  // block's buttons now answer: the row takes what hgs did or why it refused
+  // (dismissible) and rests while the call runs; Keep records the choice only
+  // after hgs kept it; Propose asks for the profile as it is now, never a cached
+  // preset.
+  it("answers every press of the working-mode block", () => {
+    expect(source).toContain("notice={modeNotice()}");
+    expect(source).toContain('onDismissNotice={() => setModeNotice("")}');
+    expect(source).toContain("busy={modeBusy()}");
+    const keep = source.slice(source.indexOf("const keepMode"), source.indexOf("const proposeMode"));
+    expect(keep).toContain('outcome.outcome === "done"');
+    expect(keep.indexOf('outcome.outcome === "done"')).toBeLessThan(keep.indexOf("markWorkingModeKept"));
+    expect(source).toContain("proposeWorkingMode()");
+    expect(source).not.toContain("proposeWorkingMode(props.team");
+    expect(modeRow).toContain("data-working-mode-note");
+    expect(modeRow).toContain("data-working-mode-notice-close");
+  });
 });

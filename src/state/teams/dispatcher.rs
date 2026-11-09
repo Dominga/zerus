@@ -38,6 +38,10 @@ const STARVED_DIGEST_EVERY: f64 = 60.0 * 60.0;
 const LIST_TIMEOUT: Duration = Duration::from_secs(30);
 /// The worker's log keeps at most this much before it starts over.
 const LOG_BYTES: u64 = 64 * 1024;
+/// Task #451 (owner, 2026-11-09): how long a cached project profile is trusted.
+/// The tick re-reads the project after this, so the working-mode advice follows
+/// the repository (and the current classifier) and a stale block corrects itself.
+pub(crate) const MODE_CHECK_SECONDS: f64 = 10.0 * 60.0;
 
 /// The worker's directory: its lock, pid, heartbeat, stop request and log.
 pub(crate) fn worker_dir() -> PathBuf {
@@ -2240,8 +2244,19 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     // compares settings and never runs Git for it.
     if matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
         let open = team.proposals.iter().any(|proposal| proposal["kind"] == "working-mode" && proposal["state"] == "open");
-        if team.mode_proposal.is_none() {
-            steps.push(Step::ModeCheck);
+        // Task #451 (owner, 2026-11-09): the cached profile is re-read when it
+        // is older than MODE_CHECK_SECONDS, so a block left over from an older
+        // profile (or an older hgs) stops proposing the wrong mode. A profile
+        // written before this field reads as stale once and is then fresh.
+        let stale = team.mode_proposal.as_ref().is_some_and(|proposal| {
+            now - proposal["checked_at"].as_f64().unwrap_or(0.0) >= MODE_CHECK_SECONDS
+        });
+        if team.mode_proposal.is_none() || stale {
+            // One re-read now; the card for the fresh profile comes on a later
+            // tick, so a stale cache never proposes a mode the project lost.
+            if !open && team.tasks.iter().all(|task| task.open_attempt().is_none()) {
+                steps.push(Step::ModeCheck);
+            }
         } else if !open {
             if let Some((preset, wrong)) = super::working_mode::cached_disagreement(team) {
                 let offered = team.proposals.iter().any(|found| {
@@ -4148,9 +4163,11 @@ fn tell_lead(store: &mut Store, team: &Team, kind: &str, text: &str) {
 /// working-mode proposal on the team, so later ticks only compare settings.
 fn check_working_mode(store: &mut Store, team: &Team) -> anyhow::Result<()> {
     let folder = std::path::PathBuf::from(team.folder.trim());
-    let proposal = super::working_mode::propose(&folder)
+    let mut proposal = super::working_mode::propose(&folder)
         .map(|proposal| proposal.value())
         .unwrap_or_else(|| json!({"preset":""}));
+    // Task #451: when the profile was read, so a stale block is refreshed.
+    proposal["checked_at"] = json!(crate::state::now());
     change(store, &team.id, |team, _events| {
         team.mode_proposal = Some(proposal);
         Ok(())
@@ -4164,6 +4181,12 @@ fn propose_working_mode(store: &mut Store, team: &Team, preset: &str, title: &st
     // The cached proposal still names this preset, and the settings still
     // disagree with it: a stale step creates no card.
     if !super::working_mode::cached_disagreement(team).is_some_and(|(found, _)| found == preset) {
+        return Ok(());
+    }
+    // Task #451: the card follows the project as it is now. When the profile
+    // moved since the step was computed, nothing is proposed here: the tick
+    // re-reads the cache (ModeCheck) and offers the new mode on a later tick.
+    if super::working_mode::propose(&std::path::PathBuf::from(team.folder.trim())).is_some_and(|proposal| proposal.preset != preset) {
         return Ok(());
     }
     let reason = format!(

@@ -1,6 +1,6 @@
 import type { Account, AccountsView, MemberState, Profile, ProjectedWindow } from "../../types";
-import { current, dayTime, forecast, fromProjected, pace, period, thresholdTone, type Tone } from "../lib/usage";
-import { tr } from "../../i18n";
+import { current, dayTime, forecast, fromProjected, pace, period, thresholdTone, providerName, type Tone } from "../lib/usage";
+import { tr, uiLanguage } from "../../i18n";
 
 // Pure texts and selection rules of the Accounts screen (AccountsPage.cpp).
 
@@ -87,9 +87,22 @@ export function profileTags(a: Account): Map<string, string> {
   return tags;
 }
 
-/** The accounts with a member on `machine` ("*" is every machine). */
-export const visibleAccounts = (view: AccountsView, machine: string): Account[] =>
-  machine === "*" ? view.accounts : view.accounts.filter((a) => a.members.some((m) => m.host === machine));
+export type AccountSort = "agent" | "name";
+export interface AccountListOptions { query?: string; provider?: string; sort?: AccountSort }
+
+/** Filter the current catalog without changing it; group by agent, then name by default. */
+export function visibleAccounts(view: AccountsView, machine: string, options: AccountListOptions = {}): Account[] {
+  const language = uiLanguage(), compare = new Intl.Collator(language, { numeric: true, sensitivity: "base" }).compare;
+  const query = (options.query ?? "").trim().toLocaleLowerCase(language);
+  return view.accounts.filter((a) => {
+    if (machine !== "*" && !a.members.some((m) => m.host === machine)) return false;
+    if (options.provider && options.provider !== "*" && a.provider !== options.provider) return false;
+    return !query || [a.label, providerName(a.provider), a.usage.identity.name, a.usage.identity.email,
+      a.usage.identity.organization, ...a.members.map((m) => m.machine)]
+      .some((value) => value.toLocaleLowerCase(language).includes(query));
+  }).sort((a, b) => (options.sort === "name" ? 0 : compare(providerName(a.provider), providerName(b.provider)))
+    || compare(a.label, b.label) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+}
 
 /** updateRefreshState (AccountsPage.cpp:440-447) once the first snapshot is in and hosts exist; `visible` counts the listed accounts. */
 export function summaryLine(view: AccountsView, visible: number): string {

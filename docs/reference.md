@@ -2522,6 +2522,24 @@ queue. Task #370 (owner, 2026-11-08) adds three rules:
   (`hgs team land` also re-queues a landing with or without the cherry-pick).
 - A task whose reported commit is not in the integration repository at all
   (another project's work) never appears as unlanded.
+
+Task #443 (owner, 2026-11-09) adds the queue-off rule. With the merge queue off
+(no `integration_folder`, the owner's p92: a hand landing in the team's own
+folder) an accept decides at once: the task is `accepted` and its work waits for
+the merger's hand landing. Such a task - the queue's landing still `queued` or
+`testing` with no failure note, or a hand landing with no merge entry
+(`not_queued`) - is never a "decision waiting": no report item, no idle digest
+entry and no `report waiting` reminder. `hgs team status` names it in one line
+instead, `waiting_to_land`: `line` ("accepted, waiting to land: #426 (26 min),
+..."), `more`, and each task's `commit`, `age` and `state`; the line also lists
+the queue's own waiting landings, so it is one place whatever the line's
+setting. A failed, blocked or conflicted landing stays the lead's: its
+`merge_waiting` item and the report reach the lead again. When the accepted
+commit becomes an ancestor of the line (or of the team folder's HEAD when the
+line is off), Zerus accepts the task and marks it landed by itself
+(`landed.by` "Zerus", the `tasks_landed` event): the lead never accepts it a
+second time with `"merged":true`.
+
 ### Free planning: the plan mode and the open phase
 
 A team plans in `standard` mode (the default) or `free` mode. `hgs team status`

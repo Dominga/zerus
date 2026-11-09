@@ -1778,3 +1778,79 @@ fn a_merge_regenerates_the_projects_generated_files_into_its_commit() {
     assert!(files.lines().any(|file| file == "generated.txt"), "{files}");
     assert!(run_git(&repo.lead, &["status", "--porcelain"]).is_empty(), "the merge commit carries it");
 }
+
+/// Task #443 (owner, 2026-11-09): with the queue off the lead's accept decides
+/// at once and a hand landing waits: the status names it in one "accepted,
+/// waiting to land" line with its age, and when the merger lands the commit
+/// Zerus marks it landed by itself (no second accept with "merged":true).
+#[test]
+fn an_accepted_commit_on_the_line_is_landed_by_itself() {
+    let repo = repo();
+    // The queue is off: the accept decides, and the merger lands by hand.
+    let path = repo.lead.join(".zerus/tests.toml");
+    std::fs::write(&path, format!("version = 1\n[merge_queue]\nenabled = false\n{}", unit_provider())).unwrap();
+    run_git(&repo.lead, &["add", "."]);
+    run_git(&repo.lead, &["commit", "-q", "-m", "the queue is off"]);
+    write(&repo.member, "b.txt", "work\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "work"]);
+    let commit = run_git(&repo.member, &["rev-parse", "HEAD"]);
+    let mut team = team(&repo);
+    let decided = accept(&mut team);
+    assert_eq!(decided["status"], "accepted");
+    assert_eq!(decided["landing"]["state"], "not_queued");
+    let task = team.task(1).unwrap();
+    assert_eq!((task.status, task.merge.is_none()), (TaskStatus::Accepted, true));
+    assert!(waits_for_landing(task));
+    // One status line with its age, not one reminder per task.
+    let at = task.attempts[0].decided_at.expect("the accept time");
+    let line = waiting_to_land(&team, at + 26.0 * 60.0).expect("the waiting line");
+    assert_eq!(line["line"], json!("accepted, waiting to land: #1 (26 min)"));
+    assert_eq!((line["tasks"][0]["task"].clone(), line["tasks"][0]["state"].clone()), (json!(1), json!("not_queued")));
+    let view = super::super::commands::view_with(&team, &[], None);
+    assert!(view["waiting_to_land"]["line"].as_str().unwrap_or_default().starts_with("accepted, waiting to land: #1 ("), "{}", view["waiting_to_land"]);
+    // Not on the line yet: nothing lands by itself.
+    assert!(landed_by_ancestry(&team, at + 60.0).is_empty());
+    // The merger lands the commit by hand.
+    run_git(&repo.lead, &["merge", "--no-ff", "-q", "-m", "Land #1", "task/1"]);
+    assert_eq!(landed_by_ancestry(&team, at + 120.0), vec![(1, commit.clone())]);
+    let mut events = Vec::new();
+    assert!(record_landed(&mut team, &[(1, commit.clone())], at + 120.0, &mut events).unwrap());
+    let task = team.task(1).unwrap();
+    assert_eq!(task.landed.as_ref().map(|landed| (landed.commit.as_str(), landed.by.as_str())), Some((commit.as_str(), "Zerus")));
+    assert!(!waits_for_landing(task));
+    assert!(waiting_to_land(&team, at + 120.0).is_none(), "nothing waits to land");
+    assert!(events.iter().any(|event| event.kind == "tasks_landed" && event.payload["by"] == "Zerus"), "{events:?}");
+    // A second look changes nothing.
+    assert!(!record_landed(&mut team, &[(1, commit)], at + 180.0, &mut Vec::new()).unwrap());
+}
+
+/// Task #443: a report accepted while the queue was on, whose landing is still
+/// queued when the queue is turned off, is landed by itself once a hand
+/// landing puts its commit on the line; the queue entry never decides it.
+#[test]
+fn a_queued_landing_on_the_line_is_accepted_and_landed_by_itself() {
+    let repo = repo();
+    write(&repo.member, "b.txt", "work\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "work"]);
+    let commit = run_git(&repo.member, &["rev-parse", "HEAD"]);
+    let mut team = team(&repo);
+    assert_eq!(accept(&mut team)["status"], "merge_queued");
+    assert_eq!(team.task(1).unwrap().status, TaskStatus::Submitted, "the queue entry leaves it undecided");
+    assert!(waits_for_landing(team.task(1).unwrap()), "a queued landing waits to land");
+    let line = waiting_to_land(&team, 26.0 * 60.0).expect("the waiting line");
+    assert_eq!(line["tasks"][0]["state"], "queued");
+    // The queue never lands it (the queue is off); the merger does.
+    assert!(landed_by_ancestry(&team, 100.0).is_empty());
+    run_git(&repo.lead, &["merge", "--no-ff", "-q", "-m", "Land #1", "task/1"]);
+    assert_eq!(landed_by_ancestry(&team, 200.0), vec![(1, commit.clone())]);
+    let mut events = Vec::new();
+    assert!(record_landed(&mut team, &[(1, commit.clone())], 200.0, &mut events).unwrap());
+    let task = team.task(1).unwrap();
+    assert_eq!(task.status, TaskStatus::Accepted, "the landing accepted the task");
+    assert!(task.merge.is_none(), "the queue entry goes");
+    assert_eq!(task.landed.as_ref().map(|landed| landed.commit.clone()), Some(commit));
+    assert!(!waits_for_landing(task));
+}
+

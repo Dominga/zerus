@@ -135,6 +135,42 @@ fn an_undecided_report_reminds_the_lead_once_after_the_configured_minutes() {
 }
 
 #[test]
+fn a_report_waiting_to_land_never_reminds_the_lead() {
+    // Task #443 (owner, 2026-11-09): the lead accepted the report, and only
+    // the landing waits; a reminder would name a decided report.
+    let mut team = team();
+    {
+        let task = team.task_mut(1).unwrap();
+        task.attempts.push(Attempt {
+            n: 1,
+            id: "A1".into(),
+            member: "dev".into(),
+            state: AttemptState::Reported,
+            report: Some(Report { text: "Done and checked".into(), at: 1000.0, ..Default::default() }),
+            ..Default::default()
+        });
+        task.status = TaskStatus::Submitted;
+        task.merge = Some(MergeEntry {
+            state: "queued".into(),
+            author: "dev".into(),
+            commit: "46de9c4d5a6345395d221dcaa3eaf48aed0a1d71".into(),
+            at: 1000.0,
+            ..Default::default()
+        });
+    }
+    let lead = session("claude/x/lead", "r0", true);
+    let dev = session("codex/x/dev", "r1", false);
+    let after = team.settings.remind_lead_minutes as f64 * 60.0;
+    assert!(
+        !steps(&team, &[lead.clone(), dev.clone()], 1000.0 + after * 3.0).iter().any(|s| matches!(s, Step::RemindReport { .. })),
+        "a landing waiting is no report to remind"
+    );
+    // A failed landing is the lead's report to decide again.
+    team.task_mut(1).unwrap().merge.as_mut().unwrap().note = "the merge could not be rolled back".into();
+    assert!(steps(&team, &[lead, dev], 1000.0 + after * 3.0).iter().any(|s| matches!(s, Step::RemindReport { task: 1 })));
+}
+
+#[test]
 fn members_replies_are_muted_for_the_owner_once_per_conversation() {
     let mut team = team();
     let mut dev = session("codex/x/dev", "r1", true);

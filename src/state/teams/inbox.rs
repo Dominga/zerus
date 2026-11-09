@@ -1043,8 +1043,11 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
         });
     }
     for task in &team.tasks {
-        // A report to decide (C2).
-        if task.status == TaskStatus::Submitted {
+        // A report to decide (C2). Task #443: a report the lead accepted whose
+        // work waits for its landing (the queue's, or a hand landing) is
+        // decided: it is never a decision waiting and gets no reminder; the
+        // lead's status names it in one "accepted, waiting to land" line.
+        if task.status == TaskStatus::Submitted && !super::merge_queue::waits_for_landing(task) {
             if let Some(attempt) = task.attempts.iter().rev().find(|attempt| attempt.state == AttemptState::Reported) {
                 if let Some(report) = &attempt.report {
                     items.push(Item {

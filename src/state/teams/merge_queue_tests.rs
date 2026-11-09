@@ -1863,3 +1863,28 @@ fn a_queued_landing_on_the_line_is_accepted_and_landed_by_itself() {
     assert!(!waits_for_landing(task));
 }
 
+
+/// Owner's team, 2026-11-10: a pipeline-returned attempt is the base of the
+/// rework on top of it, never a rejected attempt that blocks the landing.
+#[test]
+fn a_pipeline_returned_attempt_does_not_block_its_rework() {
+    let repo = repo();
+    write(&repo.member, "base.txt", "the main work\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "The main work, returned by review"]);
+    let returned = run_git(&repo.member, &["rev-parse", "HEAD"]);
+    write(&repo.member, "fix.txt", "the fix\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "The fix on top"]);
+    let accepted = run_git(&repo.member, &["rev-parse", "HEAD"]);
+    let mut team = team(&repo);
+    team.settings.integration_folder = repo.lead.to_string_lossy().into_owned();
+    team.task_mut(1).unwrap().attempts[0].folder_head = accepted.clone();
+    team.task_mut(1).unwrap().attempts.push(Attempt { n: 2, id: "A0".into(), member: "dev".into(), state: AttemptState::Rejected, pipeline_return: true, folder_head: returned, ..Default::default() });
+    accept(&mut team);
+    let database = database(&repo);
+    let mut events = Vec::new();
+    step_here(&mut team, &database, 100.0, &mut events).unwrap();
+    let entry = team.task(1).unwrap().merge.clone().unwrap();
+    assert!(!entry.blocked, "{entry:?}");
+}

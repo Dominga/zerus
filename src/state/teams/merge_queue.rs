@@ -95,11 +95,16 @@ fn cherry_landed(team: &Team, commit: &str) -> bool {
 
 /// Task #370: the commits of rejected attempts of every task in the team: a
 /// merge whose range carries one would land rejected code.
+///
+/// Owner's team, 2026-11-10: an attempt the pipeline returned (its review or
+/// test round) is not the lead's rejection. Its member fixes it with commits
+/// on top, so it is the base of the accepted work; a cherry-pick of the last
+/// fix alone would drop it.
 fn rejected_commits(team: &Team) -> Vec<String> {
     team.tasks
         .iter()
         .flat_map(|task| task.attempts.iter())
-        .filter(|attempt| attempt.state == AttemptState::Rejected && !attempt.folder_head.is_empty())
+        .filter(|attempt| attempt.state == AttemptState::Rejected && !attempt.pipeline_return && !attempt.folder_head.is_empty())
         .map(|attempt| attempt.folder_head.clone())
         .collect()
 }

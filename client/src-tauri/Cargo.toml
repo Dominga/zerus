@@ -114,6 +114,8 @@ embed-resource = "3"
 [dev-dependencies]
 # The subscriber's silence deadline is tested without thirty wall-clock seconds.
 tokio = { version = "1", default-features = false, features = ["test-util"] }
+# A relaunch test keeps its count in a scratch folder (task 440); every platform runs it.
+tempfile = "3"
 
 # Dependencies optimised once keep the debug app responsive.
 [profile.dev.package."*"]

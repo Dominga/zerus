@@ -997,9 +997,15 @@ pub(super) fn store_check(location: &Location) -> serde_json::Value {
         Some(1..=34) => match std::fs::read_dir(&backup) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => "backup_needed",
             Err(_) => "backup_unreadable",
-            Ok(mut entries) if entries.next().is_none() => "empty_leftover",
-            Ok(_) if backup.join("manifest.json").is_file() => "backup_present",
-            Ok(_) => "backup_incomplete",
+            Ok(mut entries) => {
+                if entries.next().is_none() {
+                    "empty_leftover"
+                } else if backup.join("manifest.json").is_file() {
+                    "backup_present"
+                } else {
+                    "backup_incomplete"
+                }
+            }
         },
         Some(_) => "current",
         None => "absent",

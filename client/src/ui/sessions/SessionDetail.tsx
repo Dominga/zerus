@@ -193,7 +193,7 @@ createRoot(() => {
     if (!s) return undefined;
     const followed = followedFor(s.key);
     const details = detailsFor(s, !computerOffline(s.computer), followed);
-    return JSON.stringify([s.key, s.name, s.runId, s.cmd, s.state, s.terminalSupported, s.terminalReported, s.terminalAttachSupported,
+    return JSON.stringify([s.key, s.name, s.runId, s.terminalConversationId ?? s.conversationId, s.cmd, s.state, s.terminalSupported, s.terminalReported, s.terminalAttachSupported,
       s.terminalAttachReported, !computerOffline(s.computer), followed.value ?? details ?? null]);
   });
   // Another selection: input stops reaching the previous session before anything is awaited.
@@ -210,7 +210,7 @@ createRoot(() => {
     }).then((status) => {
       if (selected()?.key !== s.key) return;
       setTerminalTexts(status);
-      void terminal.setTarget({ computer: s.computer, name: s.name, run_id: s.runId ?? "", machine: s.machine }, status);
+      void terminal.setTarget({ computer: s.computer, name: s.name, run_id: s.runId ?? "", conversation_id: s.terminalConversationId ?? s.conversationId, machine: s.machine }, status);
     });
   }));
   // Leaving the Sessions page disconnects, and coming back does not connect (SessionsWindow.cpp:1637, QStackedWidget::currentChanged).

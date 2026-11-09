@@ -324,6 +324,13 @@
 .team-next-goal-dialog { width: min(620px, 94vw); }
 .team-next-goal-dialog .nt-field { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; font-size: var(--fs-sm); color: var(--z-color-muted); }
 .team-task-delegate { margin: 4px 0; }
+/* Task #415: a No report task's last reply and the choices decided from the card. */
+.team-no-report { margin: 4px 0 6px; padding: 6px 8px; border: 1px solid color-mix(in srgb, var(--z-color-warn) 45%, var(--z-color-border)); border-radius: var(--z-radius-md); background: color-mix(in srgb, var(--z-color-warn) 5%, var(--z-color-card)); }
+.team-no-report-head { display: flex; align-items: center; gap: 6px; font-size: var(--fs-xs); }
+.team-no-report-text { margin: 4px 0; color: var(--z-color-text-2); font-size: var(--fs-xs); white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+.team-no-report-text.open { display: block; overflow: visible; }
+.team-no-report-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.team-no-report .pm-empty { margin: 4px 0; }
 
 /* Task 251: the lead's tool_missing inbox row. */
 .team-drawer-row.team-inbox-tool { display: flex; flex-direction: column; align-items: stretch; gap: 4px; padding: 6px 8px; }

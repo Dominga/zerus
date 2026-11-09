@@ -578,3 +578,20 @@ describe("Task 225: the dialogs Qt kept and Tauri lost", () => {
     expect(f.sent.at(-1)?.action).toEqual({ kind: "create", name: "Cart fixes", parent: { team: "t1", task: 4 } });
   });
 });
+
+describe("Task #415: a No report task", () => {
+  it("turns the attempt's last reply into the report without a dialog", async () => {
+    const f = fake();
+    const t = task({ id: 5, status: "in_progress", attempts: 1, no_report: true, attempt_id: "a7" });
+    await actionsOf(f, team({ tasks: [t] })).useLastReply(t);
+    expect(f.sent.at(-1)?.action).toEqual({ kind: "use_last_reply", task: 5, attempt: "a7" });
+    expect(f.asked).toHaveLength(0);
+  });
+
+  it("sends nothing when the task has no attempt", async () => {
+    const f = fake();
+    const t = task({ id: 5, no_report: true });
+    expect(await actionsOf(f, team()).useLastReply(t)).toBe("failed");
+    expect(f.sent).toHaveLength(0);
+  });
+});

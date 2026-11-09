@@ -1,31 +1,20 @@
 //! A second start never exits silently (task 110).
 //!
 //! When another Zerus holds the single-instance channel and this start could
-//! not hand its activation over — the Qt GUI (same identity and pipe, another
-//! image), a Zerus Next that does not answer, or a pipe this start may not
-//! open — it looks for that Zerus itself: same user, same Windows session, an
-//! `hgs-tray.exe` image (or this build's own file name). An already visible
-//! window of it is brought to the front with this process's own foreground
-//! right; nothing is written to an unverified pipe and no right is passed on.
-//! Otherwise a native message names what runs and how to switch. A background
-//! start (login, `--background`) stays quiet, as before; the fork's update
-//! restart is unchanged, because its helper waits for the old process to exit.
+//! not hand its activation over — a Zerus that does not answer, or a pipe this
+//! start may not open — it looks for that Zerus itself: same user, same Windows
+//! session, an `hgs-tray.exe` image (or this build's own file name). An already
+//! visible window of it is brought to the front with this process's own
+//! foreground right; nothing is written to an unverified pipe and no right is
+//! passed on. Otherwise a native message names what runs and how to switch. A
+//! background start (login, `--background`) stays quiet, as before; the fork's
+//! update restart is unchanged, because its helper waits for the old process to
+//! exit.
 use zerus_client_core::text::Text;
-
-/// Which client a running Zerus is, read from the modules it loaded.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Client {
-    /// The Qt GUI (`Qt6Core.dll` is loaded).
-    Qt,
-    /// Zerus Next, the Tauri client.
-    Next,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Running {
     pub pid: u32,
-    /// None when its modules could not be read.
-    pub client: Option<Client>,
 }
 
 /// Why this start could not hand its activation over.
@@ -71,26 +60,10 @@ pub(crate) fn decide(
     // Verbatim: a process number is a name here, not a count.
     let pid = |found: &Running| found.pid.to_string();
     match (running.first(), refusal) {
-        (Some(found @ Running { client: Some(Client::Qt), .. }), _) => Step::Message {
-            title: zerus_client_core::text!("Zerus is already running"),
-            text: zerus_client_core::text!(
-                "Zerus (the Qt version) is already running as process %1, so Zerus Next did not start. Open it from its icon in the notification area. To use Zerus Next instead, quit Zerus from that icon's menu, then start Zerus Next again.",
-                pid(found)
-            ),
-            error: false,
-        },
-        (Some(found @ Running { client: Some(Client::Next), .. }), _) => Step::Message {
-            title: zerus_client_core::text!("Zerus is already running"),
-            text: zerus_client_core::text!(
-                "Zerus Next is already running as process %1 but did not answer this start. Open it from its icon in the notification area. If it does not respond, quit it from that icon's menu or end it in Task Manager, then start Zerus again.",
-                pid(found)
-            ),
-            error: false,
-        },
         (Some(found), _) => Step::Message {
             title: zerus_client_core::text!("Zerus is already running"),
             text: zerus_client_core::text!(
-                "Another Zerus is already running as process %1 but did not answer this start. Open it from its icon in the notification area, or quit it, then start Zerus again.",
+                "Zerus Next is already running as process %1 but did not answer this start. Open it from its icon in the notification area. If it does not respond, quit it from that icon's menu or end it in Task Manager, then start Zerus again.",
                 pid(found)
             ),
             error: false,
@@ -151,7 +124,7 @@ use native::{raise, running};
 
 #[cfg(windows)]
 mod native {
-    use super::{Client, Running};
+    use super::Running;
     use crate::platform::windows::{own_sid, owned, token_sid};
     use std::os::windows::io::{AsRawHandle, OwnedHandle};
     use windows_sys::Win32::{
@@ -199,10 +172,7 @@ mod native {
             {
                 continue;
             }
-            found.push(Running {
-                pid,
-                client: client_of(pid),
-            });
+            found.push(Running { pid });
         }
         found
     }
@@ -220,31 +190,6 @@ mod native {
             more = unsafe { Process32NextW(snapshot.as_raw_handle(), &mut entry) } != 0;
         }
         list
-    }
-
-    /// Qt when Qt6Core.dll is loaded; None when the modules cannot be read.
-    fn client_of(pid: u32) -> Option<Client> {
-        let snapshot = owned(unsafe {
-            CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid)
-        })
-        .ok()?;
-        let mut entry: MODULEENTRY32W = unsafe { std::mem::zeroed() };
-        entry.dwSize = std::mem::size_of::<MODULEENTRY32W>() as u32;
-        let mut names = Vec::new();
-        let mut more = unsafe { Module32FirstW(snapshot.as_raw_handle(), &mut entry) } != 0;
-        while more && names.len() < 4096 {
-            names.push(text(&entry.szModule));
-            more = unsafe { Module32NextW(snapshot.as_raw_handle(), &mut entry) } != 0;
-        }
-        (!names.is_empty()).then(|| client_by_modules(&names))
-    }
-
-    pub(super) fn client_by_modules(names: &[String]) -> Client {
-        if names.iter().any(|name| name.eq_ignore_ascii_case("Qt6Core.dll")) {
-            Client::Qt
-        } else {
-            Client::Next
-        }
     }
 
     fn token(pid: u32) -> Option<OwnedHandle> {
@@ -332,17 +277,14 @@ mod tests {
     fn english(text: &Text) -> String {
         crate::native_text::render(text)
     }
-    fn qt(pid: u32) -> Running {
-        Running { pid, client: Some(Client::Qt) }
-    }
-    fn next(pid: u32) -> Running {
-        Running { pid, client: Some(Client::Next) }
+    fn one(pid: u32) -> Running {
+        Running { pid }
     }
 
     #[test]
     fn a_visible_window_of_the_running_zerus_comes_forward_instead_of_a_message() {
         let mut tried = Vec::new();
-        let step = decide(&Refusal::Unanswered, true, &[qt(40), next(41)], |pid| {
+        let step = decide(&Refusal::Unanswered, true, &[one(40), one(41)], |pid| {
             tried.push(pid);
             pid == 41
         });
@@ -351,32 +293,25 @@ mod tests {
     }
 
     #[test]
-    fn the_message_names_the_running_client_and_how_to_switch() {
+    fn the_message_names_the_running_zerus_and_how_to_start_it() {
         let Step::Message { title, text, error } =
-            decide(&Refusal::Unanswered, true, &[qt(1234)], |_| false)
+            decide(&Refusal::Unanswered, true, &[one(1234)], |_| false)
         else {
             panic!("a message")
         };
         assert!(!error);
         assert_eq!(english(&title), "Zerus is already running");
         let text = english(&text);
-        assert!(text.contains("Qt version") && text.contains("process 1234"), "{text}");
-        assert!(text.contains("To use Zerus Next instead, quit Zerus"), "{text}");
+        assert!(text.contains("process 1234"), "{text}");
+        assert!(!text.contains("Qt"), "{text}");
 
         let Step::Message { text, .. } =
-            decide(&Refusal::Failed("Access is denied.".into()), true, &[next(77)], |_| false)
+            decide(&Refusal::Failed("Access is denied.".into()), true, &[one(77)], |_| false)
         else {
             panic!("a message")
         };
         let text = english(&text);
         assert!(text.starts_with("Zerus Next is already running as process 77"), "{text}");
-
-        let Step::Message { text, .. } =
-            decide(&Refusal::Unanswered, true, &[Running { pid: 5, client: None }], |_| false)
-        else {
-            panic!("a message")
-        };
-        assert!(english(&text).starts_with("Another Zerus is already running as process 5"));
     }
 
     #[test]
@@ -401,7 +336,7 @@ mod tests {
     #[test]
     fn a_background_start_stays_quiet_and_an_unknown_pipe_owner_keeps_its_warning() {
         let never = |_| -> bool { panic!("a background start raises nothing") };
-        assert_eq!(decide(&Refusal::Unanswered, false, &[qt(1)], never), Step::Quiet);
+        assert_eq!(decide(&Refusal::Unanswered, false, &[one(1)], never), Step::Quiet);
         assert_eq!(
             decide(&Refusal::Failed("x".into()), false, &[], never),
             Step::Quiet
@@ -409,16 +344,16 @@ mod tests {
         // No Zerus runs: the pipe is another program's, whatever was asked.
         assert_eq!(decide(&Refusal::Untrusted, false, &[], never), Step::Untrusted);
         assert_eq!(decide(&Refusal::Untrusted, true, &[], never), Step::Untrusted);
-        // The Qt GUI behind an unverifiable pipe is a running Zerus.
+        // A running Zerus behind an unverifiable pipe is raised, not warned at.
         assert_eq!(
-            decide(&Refusal::Untrusted, true, &[qt(9)], |pid| pid == 9),
+            decide(&Refusal::Untrusted, true, &[one(9)], |pid| pid == 9),
             Step::Raised(9)
         );
     }
 
     #[test]
     fn messages_never_separate_values_with_dots() {
-        for running in [vec![qt(1)], vec![next(2)], vec![Running { pid: 3, client: None }], vec![]] {
+        for running in [vec![one(1)], vec![one(2), one(3)], vec![]] {
             for refusal in [Refusal::Unanswered, Refusal::Failed("e".into())] {
                 if let Step::Message { text, .. } = decide(&refusal, true, &running, |_| false) {
                     let text = english(&text);
@@ -454,17 +389,11 @@ mod tests {
         };
         let _ = child.kill();
         let _ = child.wait();
-        let ours = found.iter().find(|running| running.pid == pid).expect("the child is found");
-        assert_ne!(ours.client, Some(Client::Qt));
+        assert!(found.iter().any(|running| running.pid == pid), "the child is found");
         let own = std::process::id();
         assert!(native::running_named(&["ping.exe".to_owned()])
             .iter()
             .all(|running| running.pid != own));
-        assert_eq!(
-            native::client_by_modules(&["KERNEL32.DLL".into(), "qt6core.dll".into()]),
-            Client::Qt
-        );
-        assert_eq!(native::client_by_modules(&["WebView2Loader.dll".into()]), Client::Next);
         // ping has no window: nothing would come forward.
         assert!(native::window_of(pid).is_none());
     }

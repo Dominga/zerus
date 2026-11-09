@@ -1,4 +1,3 @@
-import { showQtUpgradeNotice } from "./store/qtUpgrade";
 import { DesktopServiceStatus } from "./ui/components/DesktopServiceStatus";
 import { MachinesStatus } from "./ui/components/MachinesStatus";
 import { BackgroundTasksChip } from "./ui/screens/BackgroundTasks";
@@ -123,7 +122,6 @@ function zoom(scale: number) {
 }
 
 export function App(props: { mode: () => BridgeMode | "starting" }) {
-  createEffect(() => { if (props.mode() === "tauri") void showQtUpgradeNotice(); });
   installUiLanguage();
   createEffect(() => { document.documentElement.lang = uiLanguage(); });
   createEffect(() => applySkin(skin()));

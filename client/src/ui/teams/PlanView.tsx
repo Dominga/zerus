@@ -1,6 +1,7 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { Icon } from "../lib/icons";
+import { Dropdown } from "../lib/Dropdown";
 import { tr } from "../../i18n";
 import type { PlanGraph, TeamView } from "./types";
 import type { TeamBuildsView, TeamProfileView, TeamTaskView, TeamTestsView, TeamTimelineView } from "../../types";
@@ -810,16 +811,18 @@ export function PlanView(props: PlanViewProps): JSX.Element {
   return (
     <section class={`pt-plan${props.class ? ` ${props.class}` : ""}`} aria-label={tr("Plan")}>
       <header class="pt-plan-bar">
-        <PlanModeBar mode={mode()} includeCancelled={includeCancelled()} onMode={setMode} onCancelled={setIncludeCancelled} />
-        <Show when={shownMode()}>
-          <Show when={mode() !== "board" && !planning()}>
-            <div class="pm-segment" role="radiogroup" aria-label={tr("Show")} data-filter={filter()}>
-              <For each={[["all", tr("All")], ["active", tr("Active")], ["problems", tr("Problems")]] as const}>
-                {([value, label]) => (
-                  <button type="button" role="radio" aria-checked={filter() === value} classList={{ on: filter() === value }}
-                    data-filter-value={value} onClick={() => setFilter(value)}>{label}</button>
-                )}
-              </For>
+        <div class="pm-tools" role="toolbar" aria-label={tr("Plan view")}>
+          <PlanModeBar mode={mode()} onMode={setMode} />
+          <Show when={shownMode() && mode() !== "board" && !planning()}>
+            <div class="pm-group" data-plan-group="filter">
+              <div class="pm-segment" role="radiogroup" aria-label={tr("Show")} data-filter={filter()}>
+                <For each={[["all", tr("All")], ["active", tr("Active")], ["problems", tr("Problems")]] as const}>
+                  {([value, label]) => (
+                    <button type="button" role="radio" aria-checked={filter() === value} classList={{ on: filter() === value }}
+                      data-filter-value={value} onClick={() => setFilter(value)}>{label}</button>
+                  )}
+                </For>
+              </div>
             </div>
           </Show>
           <Show when={member()}>
@@ -827,53 +830,68 @@ export function PlanView(props: PlanViewProps): JSX.Element {
               title={tr("A click on a member's card shows only its tasks. Click here or press Esc to show every member again.")}
               onClick={() => chooseMember("")}>{tr("Only %1's tasks", memberName())}<Icon name="x" size={11} /></button>
           </Show>
-          <label class="pm-check" title={tr("Tint each task by how late it is against the plan, or by the tokens it lost")}>
-            <span>{tr("Heat")}</span>
-            <select class="pm-heat-mode" value={heatMode()} onChange={(event) => switchHeat(event.currentTarget.value as HeatMode)}>
-              <option value="off">{tr("Off")}</option>
-              <option value="time">{tr("Lateness")}</option>
-              <option value="tokens">{tr("Tokens")}</option>
-            </select>
-          </label>
-          <Show when={finishedCount() > 0 || hideFinished()}>
-            <label class="pm-check" title={finishedCount() === 1 ? tr("1 phase has every task decided") : tr("%1 phases have every task decided", finishedCount())}>
-              <input type="checkbox" class="pm-hide-finished" checked={hideFinished()} onChange={(event) => switchHide(event.currentTarget.checked)} />
-              {tr("Hide finished")}
-            </label>
+          <Show when={mode() !== "profile" && mode() !== "tests"}>
+            <div class="pm-group pm-switches" data-plan-group="switches">
+              <button type="button" class="pm-toggle" classList={{ on: includeCancelled() }} aria-pressed={includeCancelled()}
+                data-toggle="cancelled" onClick={() => setIncludeCancelled(!includeCancelled())}>
+                <Icon name="eye" size={12} />{tr("Show cancelled")}
+              </button>
+              <Show when={shownMode()}>
+                <label class="pm-check pm-heat" title={tr("Tint each task by how late it is against the plan, or by the tokens it lost")}>
+                  <span>{tr("Heat")}</span>
+                  <Dropdown class="pm-heat-pick" aria-label={tr("Heat")} value={heatMode()} onChange={(next) => switchHeat(next as HeatMode)}
+                    options={[{ value: "off", label: tr("Off") }, { value: "time", label: tr("Lateness") }, { value: "tokens", label: tr("Tokens") }]} />
+                </label>
+                <Show when={finishedCount() > 0 || hideFinished()}>
+                  <button type="button" class="pm-toggle" classList={{ on: hideFinished() }} aria-pressed={hideFinished()} data-toggle="finished"
+                    title={finishedCount() === 1 ? tr("1 phase has every task decided") : tr("%1 phases have every task decided", finishedCount())}
+                    onClick={() => switchHide(!hideFinished())}>
+                    <Icon name="eye-off" size={12} />{tr("Hide finished")}
+                  </button>
+                </Show>
+                <Show when={props.onAutoAccept}>
+                  <button type="button" class="pm-toggle" classList={{ on: autoAccept() }} aria-pressed={autoAccept()} data-toggle="auto-accept"
+                    title={autoAccept() ? tr("Auto accepts a draft phase at its first hand-out") : tr("A draft phase waits for your approval")}
+                    onClick={() => props.onAutoAccept?.(!autoAccept())}>
+                    <Icon name="sparkles" size={12} />{tr("Auto-accept drafts")}
+                  </button>
+                </Show>
+              </Show>
+            </div>
           </Show>
-          <Show when={props.onAutoAccept}>
-            <label class="pm-check" title={autoAccept() ? tr("Auto accepts a draft phase at its first hand-out") : tr("A draft phase waits for your approval")}>
-              <input type="checkbox" class="pm-auto-accept" checked={autoAccept()} onChange={(event) => props.onAutoAccept?.(event.currentTarget.checked)} />
-              {tr("Auto-accept drafts")}
-            </label>
+          <span class="pt-grow" />
+          <div class="pm-group pm-legend-group" data-plan-group="legend">
+            {/* Task 342 (owner, 2026-11-08): the five task states, as the cards tint. */}
+            <span class="pt-legend pt-state-legend" aria-label={tr("Task states")} data-state-legend>
+              <span class="pt-legend-item"><i class="pt-swatch pt-swatch-done" />{tr("Done")}</span>
+              <span class="pt-legend-item"><i class="pt-swatch pt-swatch-work" />{tr("In progress")}</span>
+              <span class="pt-legend-item"><i class="pt-swatch pt-swatch-review" />{tr("In review")}</span>
+              <span class="pt-legend-item"><i class="pt-swatch pt-swatch-notstarted" />{tr("Not started")}</span>
+              <span class="pt-legend-item"><i class="pt-swatch pt-swatch-cancelled" />{tr("Cancelled")}</span>
+            </span>
+          </div>
+          <Show when={mode() === "graph"}>
+            <div class="pm-group" data-plan-group="links">
+              <span class="pt-legend" aria-label={tr("Link legend")}>
+                <span class="pt-legend-item"><i class="pt-legend-dep" />{tr("Depends on")}</span>
+                <span class="pt-legend-item"><i class="pt-legend-origin" />{tr("Spawned from")}</span>
+              </span>
+            </div>
+            <div class="pm-group pm-zoom" data-plan-group="zoom">
+              <button type="button" class="icon-btn small" aria-label={tr("Zoom out")} onClick={() => stepZoom(-0.1)}><Icon name="minus" size={12} /></button>
+              <span class="pm-zoom-value" data-zoom={zoom()}>{Math.round(zoom() * 100)}%</span>
+              <button type="button" class="icon-btn small" aria-label={tr("Zoom in")} onClick={() => stepZoom(0.1)}><Icon name="plus" size={12} /></button>
+              <button type="button" class="btn ghost small" onClick={fit}><Icon name="maximize-2" size={12} />{tr("Fit")}</button>
+            </div>
           </Show>
-        </Show>
-        <span class="pt-grow" />
-        {/* Task 342 (owner, 2026-11-08): the five task states, as the cards tint. */}
-        <span class="pt-legend pt-state-legend" aria-label={tr("Task states")} data-state-legend>
-          <span class="pt-legend-item"><i class="pt-swatch pt-swatch-done" />{tr("Done")}</span>
-          <span class="pt-legend-item"><i class="pt-swatch pt-swatch-work" />{tr("In progress")}</span>
-          <span class="pt-legend-item"><i class="pt-swatch pt-swatch-review" />{tr("In review")}</span>
-          <span class="pt-legend-item"><i class="pt-swatch pt-swatch-notstarted" />{tr("Not started")}</span>
-          <span class="pt-legend-item"><i class="pt-swatch pt-swatch-cancelled" />{tr("Cancelled")}</span>
-        </span>
-        <Show when={mode() === "graph"}>
-          <span class="pt-legend" aria-label={tr("Link legend")}>
-            <span class="pt-legend-item"><i class="pt-legend-dep" />{tr("Depends on")}</span>
-            <span class="pt-legend-item"><i class="pt-legend-origin" />{tr("Spawned from")}</span>
-          </span>
-          <span class="pm-zoom">
-            <button type="button" class="icon-btn small" aria-label={tr("Zoom out")} onClick={() => stepZoom(-0.1)}><Icon name="minus" size={12} /></button>
-            <span class="pm-zoom-value" data-zoom={zoom()}>{Math.round(zoom() * 100)}%</span>
-            <button type="button" class="icon-btn small" aria-label={tr("Zoom in")} onClick={() => stepZoom(0.1)}><Icon name="plus" size={12} /></button>
-            <button type="button" class="btn ghost small" onClick={fit}>{tr("Fit")}</button>
-          </span>
-        </Show>
-        <Show when={shownMode()}>
-          <button type="button" class="btn ghost small" data-expand-all onClick={() => (allOpen() ? collapseAll() : expandAll())}>
-            {allOpen() ? tr("Collapse all") : tr("Expand all")}
-          </button>
-        </Show>
+          <Show when={shownMode()}>
+            <div class="pm-group" data-plan-group="fold">
+              <button type="button" class="btn ghost small" data-expand-all onClick={() => (allOpen() ? collapseAll() : expandAll())}>
+                <Icon name={allOpen() ? "arrow-up-to-line" : "chevrons-down"} size={12} />{allOpen() ? tr("Collapse all") : tr("Expand all")}
+              </button>
+            </div>
+          </Show>
+        </div>
       </header>
       <Show when={props.team.archived_phases_not_shown}>
         <p class="pt-detail-note">{tr("%1 older archived phases are not shown here", props.team.archived_phases_not_shown ?? 0)}</p>

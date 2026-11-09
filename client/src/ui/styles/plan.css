@@ -407,6 +407,21 @@
 .pm-zoom { display: inline-flex; align-items: center; gap: 2px; }
 .pm-zoom-value { min-width: 38px; text-align: center; color: var(--z-color-muted); font-size: var(--fs-2xs); font-variant-numeric: tabular-nums; }
 
+/* Task #436 (owner, screenshot of package 167): the plan toolbar is a row of
+   segmented control groups with a divider between them and the legend grouped
+   at the right. Every view button carries its icon, Fit and Collapse all carry
+   theirs, and the toggles are the skin's chips. */
+.pm-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; width: 100%; }
+.pm-tools > .pm-group { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.pm-tools > .pm-group + .pm-group { padding-left: 10px; border-left: 1px solid var(--z-color-divider); }
+.pm-mode { display: inline-flex; align-items: center; gap: 5px; }
+.pm-mode-label { white-space: nowrap; }
+.pm-heat { gap: 6px; }
+.pm-heat-pick { min-width: 96px; font-size: var(--fs-xs); }
+.pm-toggle { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 9px; border: 0; border-radius: 12px; background: var(--z-color-hover); color: var(--z-color-muted); font: inherit; font-size: var(--fs-xs); cursor: pointer; }
+.pm-toggle:hover { color: var(--z-color-text); }
+.pm-toggle.on { color: var(--z-color-text); background: var(--z-color-segment-on); }
+
 /* Board (P7): each phase's columns; the titles stay pinned. */
 .pm-board-scroll, .pm-layers-scroll { padding: 6px 12px 24px; }
 .pm-phase { margin-bottom: 10px; }

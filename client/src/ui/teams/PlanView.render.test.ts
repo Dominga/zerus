@@ -19,6 +19,7 @@ const catalog = "\0plan-render-catalog";
 const timeView = "\0plan-render-time";
 const actions = "\0plan-render-actions";
 const skin = "\0plan-render-skin";
+const dropdown = "\0plan-render-dropdown";
 let server: ViteDevServer | undefined;
 let render: (props: Record<string, unknown>) => string;
 type Hover = { enter(id: number): number | null; leave(current: number | null, id: number): number | null; focus(current: number | null, id: number, keyboard: boolean): number | null };
@@ -83,7 +84,7 @@ beforeAll(async () => {
     plugins: [{
       name: "plan-render-mocks", enforce: "pre",
       resolveId(id) {
-        if ([entry, translations, settingsStore, sessionCard, catalog, timeView, actions, skin].includes(id)) return id;
+        if ([entry, translations, settingsStore, sessionCard, catalog, timeView, actions, skin, dropdown].includes(id)) return id;
         if (id === "../../i18n") return translations;
         if (id === "../../store/settings") return settingsStore;
         if (id === "../sessions/SessionCard") return sessionCard;
@@ -91,6 +92,7 @@ beforeAll(async () => {
         if (id === "./TimeView") return timeView;
         if (id === "./actions") return actions;
         if (id === "../../skin/runtime") return skin;
+        if (id === "../lib/Dropdown") return dropdown;
         return undefined;
       },
       load(id) {
@@ -102,6 +104,11 @@ beforeAll(async () => {
         if (id === timeView) return `export const ProfileTime = () => null;`;
         if (id === actions) return `export const stageName = (kind) => kind;`;
         if (id === skin) return `export const skin = () => ({ appearance: 'light' });`;
+        // Task 407/436: the skin's Dropdown calls createUniqueId(), which the
+        // plain renderToString harness cannot use; the stand-in shows the chosen
+        // option so the toolbar's heat control still reads.
+        if (id === dropdown) return `export const Dropdown = (props) => "[" + (props["aria-label"] ?? "") + ":" +
+          ((props.options ?? []).find((option) => String(option.value) === String(props.value))?.label ?? "") + "]";`;
         if (id === entry) return `import {createComponent} from 'solid-js';
           import {renderToString} from 'solid-js/web';
           import {PlanView} from '/src/ui/teams/PlanView.tsx';
@@ -166,16 +173,45 @@ describe("the plan's Graph, Board and Layers (task 197)", () => {
     const { team, graph } = fixture();
     const html = render({ team, graph, problems, now, onAutoAccept: () => {} });
     for (const text of ['data-filter-value="all"', 'data-filter-value="active"', 'data-filter-value="problems"']) expect(html).toContain(text);
-    expect(html).toContain('<option value="tokens">Tokens</option>');
-    expect(html).toContain('<option value="time">Lateness</option>');
+    // Heat is the skin's Dropdown, not a native select (task #436).
+    expect(html).toMatch(/\[Heat:(Off|Lateness|Tokens)\]/);
+    expect(html).not.toContain('class="pm-heat-mode"');
     expect(html).toContain("Auto-accept drafts");
-    expect(html).toMatch(/class="pm-auto-accept"[^>]*checked/);
+    expect(html).toContain('data-toggle="auto-accept"');
+    expect(html).toContain('aria-pressed="false"');
     expect(html).toContain('data-zoom="1"');
     expect(html).toContain("Fit");
     // A member filter names the member and dims the others' cards.
     const focused = render({ team, graph, problems, now, member: "qa" });
     expect(focused).toContain("Only Tester's tasks");
     expect(focused.match(/pt-card-off/g)?.length).toBe(5);
+  });
+
+  it("restores the toolbar's icons and grouped segments (task #436)", async () => {
+    const { team, graph } = fixture();
+    const html = render({ team, graph, problems, now, onAutoAccept: () => {} });
+    // Every view button carries its icon in the toolbar's view group.
+    const view = html.slice(html.indexOf('data-plan-group="view"'));
+    for (const mode of ["graph", "board", "layers", "lanes", "profile", "tests"]) {
+      const start = view.indexOf(`data-mode="${mode}"`);
+      expect(start, mode).toBeGreaterThan(-1);
+      expect(view.slice(start, view.indexOf("</button>", start)), mode).toContain("<svg");
+    }
+    // Each control group is its own segment; the legend sits with the other groups.
+    for (const group of ["view", "filter", "switches", "legend", "links", "zoom", "fold"]) {
+      expect(html, group).toContain(`data-plan-group="${group}"`);
+    }
+    // Fit and Expand or Collapse all carry their icons too.
+    const fitAt = html.indexOf("Fit");
+    expect(fitAt).toBeGreaterThan(-1);
+    expect(html.slice(Math.max(0, fitAt - 300), fitAt)).toContain("<svg");
+    expect(html).toMatch(/data-expand-all[\s\S]{0,80}<svg/);
+    // The stylesheet keeps the groups apart with a divider and the toggles as chips.
+    const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as { readFileSync(path: URL, encoding: "utf8"): string };
+    const css = fs.readFileSync(new URL("client/src/ui/styles/plan.css", new URL("../../../../", import.meta.url)), "utf8");
+    expect(css).toMatch(/\.pm-tools > \.pm-group \{[^}]*display: inline-flex/);
+    expect(css).toMatch(/\.pm-tools > \.pm-group \+ \.pm-group \{[^}]*border-left: 1px solid/);
+    expect(css).toMatch(/\.pm-toggle \{[^}]*border-radius: 12px/);
   });
 
   it("collapses a phase to one line with its tasks' titles", () => {

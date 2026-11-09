@@ -181,3 +181,36 @@ describe("the side panel (task 206)", () => {
     expect(plain(html)).toContain("Plan &amp; agents");
   });
 });
+
+// Task 435 (owner, 2026-11-09, "the paddings drifted again"): every inspector
+// section keeps one rhythm - the same row grid (icon column, value, right-aligned
+// label) in Environment and Tasks, and sub-blocks such as Subagents aligned with
+// that grid instead of the card's edge.
+describe("the inspector's row rhythm (task 435)", () => {
+  it("gives Environment and Tasks the same row class", () => {
+    state({ skin: sections });
+    const html = plain(render());
+    // Every labelled row of Environment and Tasks is the one row element:
+    // icon column, value, right-aligned label.
+    for (const label of ["machine", "directory", "branch", "model", "last event", "status", "action", "Done", "In progress"]) {
+      expect(html).toMatch(new RegExp(`class="irow[^"]*"[^>]*>[\\s\\S]*?<span[^>]*class="irow-label">${label}</span>`));
+    }
+    // And both sections use that grid throughout, not a mix of row shapes.
+    expect(html.match(/class="irow\b/g)?.length ?? 0).toBeGreaterThanOrEqual(10);
+  });
+
+  it("aligns a sub-block with the row grid, not with the card's edge", async () => {
+    state({ skin: sections });
+    const html = plain(render());
+    // Subagents is a row: an empty icon slot starts its text where every value starts.
+    expect(html).toMatch(/class="irow side-members-head"><span class="irow-ico"><\/span>/);
+    const { readFileSync } = await import(/* @vite-ignore */ ["node", "fs"].join(":")) as { readFileSync(path: URL): string };
+    const css = String(readFileSync(new URL("../styles/inspector.css", import.meta.url)));
+    // One icon column and gap, and the sub-blocks use them.
+    expect(css).toMatch(/\.inspector \{ --insp-row-ico: 16px; --insp-row-gap: 10px;/);
+    expect(css).toMatch(/\.irow-ico \{[^}]*width: var\(--insp-row-ico\);/);
+    for (const rule of ["\\.side-finished", "\\.side-actions", "\\.side-member", "\\.icard-text"]) {
+      expect(css).toMatch(new RegExp(`${rule} \\{[^}]*calc\\(var\\(--insp-row-ico\\) \\+ var\\(--insp-row-gap\\)\\)`));
+    }
+  });
+});

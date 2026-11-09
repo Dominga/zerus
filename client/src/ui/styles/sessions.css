@@ -467,7 +467,6 @@
    replaces them, and the status bar's note about them. */
 @layer components {
   .rowhit.stale { opacity: .62; }
-  .statusbar .stale-note { color: var(--z-color-warn); overflow: hidden; text-overflow: ellipsis; }
 }
 
   /* The lead's team strip (Qt SessionCardDelegate::paintTeamStrip) */

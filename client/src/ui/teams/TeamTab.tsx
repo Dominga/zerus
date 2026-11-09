@@ -193,7 +193,9 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
                   props.team.working_mode!.proposal?.title || "")}>
               {tr("Propose the switch")}
             </button>
-            <TeamProposals computer={props.computer} team={props.team} />
+            {/* Task #338: the owner's cards live once, in the coordinator's conversation
+                (Qt's TeamWorkspace setCards; the session's Activity has them too, as
+                Qt's mainProposalCards). This notice only names the disagreement. */}
           </section>
         )}
       </Show>

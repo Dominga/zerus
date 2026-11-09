@@ -344,6 +344,16 @@ fn input() -> Result<Value> {
     Ok(serde_json::from_slice(&bytes)?)
 }
 
+fn adoption_input(cap: usize) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    std::io::stdin()
+        .take(cap as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(bytes.len() <= cap, "adoption request is too large");
+    adoption::unique_bytes(&bytes, "adoption request")?;
+    Ok(bytes)
+}
+
 pub fn dispatch(config: &Config, args: &[String], dry: bool) -> cli::Result<i32> {
     if dry {
         return Err(cli::Error::new(
@@ -385,23 +395,23 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
             if args.len() == 3 {
                 adoption::preview_remote(config, alias()?)
             } else {
-                adoption::preview_destination(config, input()?)
+                adoption::preview_destination(config, adoption_input(64 * 1024)?)
             }
         }
         "adopt" => {
             ensure!(args == ["adopt"] || args == ["adopt", "--json"] || args.len() == 3 && args[2] == "--json", "usage: hgs swarm adopt [PEER] --json");
             if args.len() == 3 {
-                adoption::adopt_source(config, alias()?, input()?)
+                adoption::adopt_source(config, alias()?, adoption_input(32 * 1024 * 1024)?)
             } else {
-                adoption::adopt_destination(config, input()?)
+                adoption::adopt_destination(config, adoption_input(32 * 1024 * 1024)?)
             }
         }
         "adoption-status" => {
             ensure!(args.len() == 2 && args[1] == "--json" || args.len() == 3 && args[2] == "--json", "usage: hgs swarm adoption-status [PEER] --json");
             if args.len() == 3 {
-                adoption::status_remote(config, alias()?, input()?)
+                adoption::status_remote(config, alias()?, adoption_input(64 * 1024)?)
             } else {
-                adoption::status_destination(config, input()?)
+                adoption::status_destination(config, adoption_input(64 * 1024)?)
             }
         }
         "session-labels-context" => {

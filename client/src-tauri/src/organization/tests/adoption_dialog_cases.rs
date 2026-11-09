@@ -1,5 +1,6 @@
 use super::*;
 use crate::organization::adoption_dialog::{Action, View};
+use sha2::Digest;
 use zerus_client_core::swarm::adoption::{CAPABILITY, DRIVE_UNSUPPORTED};
 
 const NODE: &str = "00000000-0000-4000-8000-000000000001";
@@ -21,50 +22,33 @@ fn machines() -> Value {
 
 fn component(swarm: &str) -> Value {
     json!({
-        "state": "missing",
-        "swarm_id": swarm,
-        "raw_sha256": null,
-        "canonical_sha256": "c".repeat(64),
-        "count": 0,
+        "state": "missing", "swarm_id": swarm, "raw_sha256": null, "raw_len": null,
+        "canonical_sha256": "c".repeat(64), "count": 0, "parent_closure": true,
     })
 }
 
 fn preview_reply(eligible: bool) -> Value {
+    let source = json!({
+        "node_id": NODE, "swarm_id": SWARM, "imported": true,
+        "catalog_digest": "a".repeat(64), "catalog_raw_sha256": "9".repeat(64),
+        "outer_store_sha256": "e".repeat(64), "primary": component(SWARM), "twins": component(SWARM),
+        "capabilities": [CAPABILITY, "session_id", "session_id_memberships_v1"],
+        "configuration_revision": "b".repeat(64),
+    });
+    let destination = json!({
+        "node_id": PEER_NODE, "swarm_id": PEER_SWARM, "catalog_digest": "f".repeat(64),
+        "outer_store_sha256": "0".repeat(64), "primary": component(PEER_SWARM), "twins": component(PEER_SWARM),
+        "empty_form": "untouched_uninitialized", "self_bindings_valid": true, "bindings_sha256": "1".repeat(64),
+        "peers_empty": true, "membership_valid": true, "membership_epoch": null, "membership_generation": 0,
+        "membership_sha256": null, "qt_absent": true, "drive_absent": true, "eligible": eligible,
+        "reasons": if eligible { json!([]) } else { json!(["occupied"]) },
+    });
+    let preview_sha256 = format!("{:x}", sha2::Sha256::digest(serde_json::to_vec(&json!({
+        "version": 1, "direction": "initiator_to_empty_destination", "source": source, "destination": destination,
+    })).unwrap()));
     json!({
-        "schema": 1,
-        "capability": CAPABILITY,
-        "eligible": eligible,
-        "preview_sha256": "d".repeat(64),
-        "drive_status": DRIVE_UNSUPPORTED,
-        "source": {
-            "node_id": NODE,
-            "swarm_id": SWARM,
-            "catalog_digest": "a".repeat(64),
-            "outer_store_sha256": "e".repeat(64),
-            "primary": component(SWARM),
-            "twins": component(SWARM),
-        },
-        "destination": {
-            "node_id": PEER_NODE,
-            "swarm_id": PEER_SWARM,
-            "catalog_digest": "f".repeat(64),
-            "outer_store_sha256": "0".repeat(64),
-            "primary": component(PEER_SWARM),
-            "twins": component(PEER_SWARM),
-            "reasons": if eligible { json!([]) } else { json!(["occupied"]) },
-        },
-    })
-}
-
-fn settled() -> Value {
-    json!({
-        "phase": "settled",
-        "request_sha256": "1".repeat(64),
-        "binding_sha256": "2".repeat(64),
-        "destination_peers": {},
-        "destination_bindings": "self_only",
-        "drive_status": DRIVE_UNSUPPORTED,
-        "sync": "sync_peer_completed",
+        "schema": 1, "capability": CAPABILITY, "eligible": eligible, "preview_sha256": preview_sha256,
+        "drive_status": DRIVE_UNSUPPORTED, "source": source, "destination": destination,
     })
 }
 
@@ -73,7 +57,7 @@ fn config() -> Value {
         "machines": [{"stdout": machines()}],
         "adoption-preview": [{"stdout": preview_reply(true)}],
         "get": [{"stdout": local()}],
-        "adopt": [{"stdout": settled(), "echo": ["request_id"]}],
+        "adopt": [{"complete_adoption_receipt": "settled"}],
         "adoption-status": [{"stdout": {"journal": {"phase": "remote_committed"}}, "echo": ["request_id"]}],
         "apply": [],
     })
@@ -149,10 +133,11 @@ fn eligible_action_settles_with_original_identity_and_no_reverse_peer() {
     preview(&org, &id);
     org.adoption_request(Some(&id), Some(Action::Adopt), false)
         .unwrap();
-    wait_until("the adoption settlement", || {
-        calls(&fake, "adopt").len() == 1 && !org.lock().sync.busy()
+    wait_until("the adoption result", || {
+        calls(&fake, "adopt").len() == 1 && view(&org, &id)["busy"] == false
     });
     let done = view(&org, &id);
+    assert!(!org.lock().sync.busy(), "original was not settled: {done}");
     assert_eq!(done["error"], false);
     assert!(
         done["status"]
@@ -189,43 +174,109 @@ fn ineligible_preview_has_no_mutation_path() {
 }
 
 #[test]
-fn lost_reply_stays_original_and_resume_requires_status_and_drain() {
+fn lost_reply_retains_the_original_and_resume_is_read_only_status() {
     let mut settings = config();
-    settings["adopt"] = json!([
-        {"exit": 1, "stderr": "fixture reply lost"},
-        {"stdout": settled(), "echo": ["request_id"]},
-    ]);
+    settings["adopt"] = json!([{"exit": 1, "stderr": "fixture reply lost"}]);
     let (fake, org, _) = fixture(settings, true);
     let id = open(&org);
     preview(&org, &id);
     org.adoption_request(Some(&id), Some(Action::Adopt), false)
         .unwrap();
     wait_until("the original drain", || {
-        calls(&fake, "get").len() >= 2
-            && view(&org, &id)["can_resume"] == true
-            && view(&org, &id)["busy"] == false
+        view(&org, &id)["can_resume"] == true && view(&org, &id)["busy"] == false
     });
     assert!(org.lock().sync.busy());
     assert_eq!(calls(&fake, "adopt").len(), 1);
-    org.adoption_request(Some(&id), Some(Action::Status), false)
+    for action in [Action::Status, Action::Resume] {
+        org.adoption_request(Some(&id), Some(action), false)
+            .unwrap();
+        wait_until("the read-only original status", || {
+            view(&org, &id)["busy"] == false
+        });
+        assert!(org.lock().sync.busy());
+    }
+    assert_eq!(calls(&fake, "adopt").len(), 1);
+    assert_eq!(calls(&fake, "adoption-status").len(), 2);
+    let payload: Value =
+        serde_json::from_str(calls(&fake, "adopt")[0]["stdin"].as_str().unwrap()).unwrap();
+    assert!(payload.get("previous_lease_drained").is_none());
+    assert!(uuid::Uuid::parse_str(payload["lease_id"].as_str().unwrap()).is_ok());
+    fake.finish(org);
+}
+
+#[test]
+fn generation_drift_during_held_preflight_never_invokes_adoption() {
+    let mut settings = config();
+    settings["machines"] = json!([
+        {"stdout": machines()}, {"stdout": machines()}, {"stdout": machines(), "gate": "hold-adopt"},
+    ]);
+    let (fake, org, _) = fixture(settings, true);
+    let id = open(&org);
+    preview(&org, &id);
+    org.lock().source_generation = 1;
+    org.adoption_request(Some(&id), Some(Action::Adopt), false)
         .unwrap();
-    wait_until("the original remote status and fresh read", || {
-        calls(&fake, "adoption-status").len() == 1
-            && calls(&fake, "get").len() >= 3
-            && view(&org, &id)["busy"] == false
+    wait_until("the held original preflight", || {
+        calls(&fake, "machine").len() >= 3
     });
-    org.adoption_request(Some(&id), Some(Action::Resume), false)
+    org.lock().source_generation = 3;
+    std::fs::write(fake.dir.join("hold-adopt"), b"release").unwrap();
+    wait_until("the retained original ticket", || {
+        view(&org, &id)["busy"] == false
+    });
+    assert!(calls(&fake, "adopt").is_empty());
+    assert!(org.lock().sync.busy());
+    assert_eq!(view(&org, &id)["can_resume"], true);
+    fake.finish(org);
+}
+
+#[test]
+fn configuration_drift_and_wrong_endpoint_retain_the_original_ticket() {
+    for wrong_endpoint in [false, true] {
+        let mut settings = config();
+        settings["adopt"] = json!([{
+            "complete_adoption_receipt": "settled", "gate": "hold-settle",
+            "receipt_mutation": if wrong_endpoint { json!({"original.destination.node_id": NODE}) } else { json!({}) },
+        }]);
+        let (fake, org, _) = fixture(settings, true);
+        let id = open(&org);
+        preview(&org, &id);
+        org.adoption_request(Some(&id), Some(Action::Adopt), false)
+            .unwrap();
+        wait_until("the held terminal reply", || {
+            calls(&fake, "adopt").len() == 1
+        });
+        if !wrong_endpoint {
+            org.lock().adoption.as_mut().unwrap().drift_configuration();
+        }
+        std::fs::write(fake.dir.join("hold-settle"), b"release").unwrap();
+        wait_until("the rejected original settlement", || {
+            view(&org, &id)["busy"] == false
+        });
+        assert!(org.lock().sync.busy());
+        assert_eq!(view(&org, &id)["can_resume"], true);
+        assert_eq!(calls(&fake, "adopt").len(), 1);
+        fake.finish(org);
+    }
+}
+
+#[test]
+fn actual_output_pipe_drain_precedes_native_settlement() {
+    let mut settings = config();
+    settings["adopt"] =
+        json!([{"complete_adoption_receipt": "settled", "hold_output": "release-pipes"}]);
+    let (fake, org, _) = fixture(settings, true);
+    let id = open(&org);
+    preview(&org, &id);
+    org.adoption_request(Some(&id), Some(Action::Adopt), false)
         .unwrap();
-    wait_until("the original local settlement", || {
-        calls(&fake, "adopt").len() == 2 && !org.lock().sync.busy()
+    wait_until("the live output pipes", || calls(&fake, "adopt").len() == 1);
+    assert!(org.lock().sync.busy());
+    std::fs::write(fake.dir.join("release-pipes"), b"release").unwrap();
+    wait_until("the drained original settlement", || {
+        !org.lock().sync.busy()
     });
-    let payloads: Vec<Value> = calls(&fake, "adopt")
-        .iter()
-        .map(|call| serde_json::from_str(call["stdin"].as_str().unwrap()).unwrap())
-        .collect();
-    assert_eq!(payloads[0]["request_id"], payloads[1]["request_id"]);
-    assert_eq!(payloads[0]["native_ticket"], payloads[1]["native_ticket"]);
-    assert_eq!(payloads[0]["previous_lease_drained"], false);
-    assert_eq!(payloads[1]["previous_lease_drained"], true);
+    assert_eq!(calls(&fake, "adopt").len(), 1);
+    assert_eq!(view(&org, &id)["error"], false);
     fake.finish(org);
 }

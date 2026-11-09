@@ -3057,14 +3057,32 @@ creation. It is removed with a parent barrier only after all components verify;
 terminal receipt remains partial/unknown and read-only. Older binaries are not
 claimed to honor the guard.
 
-Exactly two continuations exist: a durable original `refused_not_started` with
-zero product effects plus fresh identical proof, or a terminal
-`remote_committed` with an explicitly unstarted local source-membership phase.
-Both require the original native owner, request/body, configuration, source
-preimages, per-UUID lease, and physical child/pipe drain. A lost reply, changed
+Exactly two continuations exist, and only within the original live CLI call: a
+durable original `refused_not_started` with zero product effects plus fresh
+identical proof, or a terminal `remote_committed` with an explicitly unstarted
+local source-membership phase. Both require the original native owner,
+request/body, configuration, source preimages, per-UUID lease, and actual child
+exit plus both physical pipe EOFs within the original 25-second deadline. A
+receipt, idle output, byte count, or serialized drain claim is not drain proof.
+A distinct or restarted CLI has only original-status and fully validated
+committed-receipt lookup; it cannot continue mutation. A lost reply, changed
 context, active or unknown writer, restarted owner, missing receipt, or stranded
-guard is status-only; no new UUID, automatic remote retry, duplicate cleanup or
-third destination repair is permitted.
+guard is `Partial`/`Unknown` and status-only. No new UUID, remote replay after
+an unknown result, duplicate cleanup, or third destination repair is permitted.
+The native dialog rechecks the original generation, endpoint cards,
+configuration, ticket and resource custody before invocation and settlement;
+its later review action is read-only, not another adoption call.
+
+Adoption-specific raw JSON rejects duplicate object keys recursively before a
+typed map is constructed. The source catalog and sidecars must match their
+declared source and source-node machine operation. The original destination is
+validated independently against its own empty preimage, whose swarm may differ
+from the source. The complete main/primary/twins candidate, cross-component
+closure, aggregate operations, parent edges and encoded wire size are checked
+before any journal, guard or product effect. Terminal and settlement receipts
+must match the full original request and all component preimages and postimages;
+a same-UUID or hash-shaped response is insufficient. `guard_cleared` is durable
+before `remote_committed`; a crash between them remains manual/status-only.
 
 ### Phone notification timing
 

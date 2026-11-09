@@ -115,7 +115,7 @@ export default function ProjectSwarmDialog(props: { projects: Project[]; connect
             <div class="row">
               <button class="btn primary" disabled={adoptionBusy() || !adoptionView()?.can_adopt || adoptionView()?.preview?.alias !== adoptionAlias()} onClick={() => void adoption.adopt()}>{tr("Adopt this catalog")}</button>
               <button class="btn" disabled={adoptionBusy() || !adoptionView()?.can_resume} onClick={() => void adoption.status()}>{tr("Review original status")}</button>
-              <button class="btn" disabled={adoptionBusy() || !adoptionView()?.can_resume} onClick={() => void adoption.resume()}>{tr("Continue original")}</button>
+              <button class="btn" disabled={adoptionBusy() || !adoptionView()?.can_resume} onClick={() => void adoption.status()}>{tr("Review original outcome")}</button>
             </div>
           </div>
         </Show>

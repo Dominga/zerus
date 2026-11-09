@@ -23,10 +23,14 @@ with (root / 'calls').open('a') as file: file.write(alias + ' ' + ' '.join(args)
 if alias == 'b' and (root / 'old-cli').exists() and args[1:2] in (['adoption-preview'], ['adopt']):
     print('unknown adoption command', file=sys.stderr); sys.exit(1)
 if alias == 'b' and args[1:2] == ['adopt']:
-    request = json.loads(sys.stdin.read())
+    raw = sys.stdin.read()
+    request = json.loads(raw)
+    if (root / 'capture-request').exists():
+        (root / 'captured-request.json').write_text(raw)
+        print('{}'); sys.exit(0)
     process = subprocess.Popen([os.environ['SWARM_TEST_HGS'], *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, text=True)
-    process.stdin.write(json.dumps(request)); process.stdin.close()
-    if (root / 'fail-primary').exists() or (root / 'fail-removal').exists():
+    process.stdin.write(raw); process.stdin.close()
+    if (root / 'fail-primary').exists() or (root / 'fail-removal').exists() or (root / 'fail-after-guard-cleared').exists():
         journal = root / 'b/swarm/adoption-journal' / (request['request_id'] + '.json')
         import signal, time
         deadline = time.monotonic() + 15
@@ -49,11 +53,50 @@ if alias == 'b' and args[1:2] == ['adopt']:
                     (root / 'fault-injected').touch()
                     os.kill(process.pid, signal.SIGCONT)
                     break
+            if (root / 'fail-after-guard-cleared').exists() and phase == 'guard_cleared':
+                os.kill(process.pid, signal.SIGKILL)
+                (root / 'fault-injected').touch()
+                break
             time.sleep(.0001)
     stdout, stderr = process.stdout.read(), process.stderr.read()
     process.wait(timeout=30)
+    if (root / 'refuse-once').exists():
+        (root / 'refuse-once').unlink()
+        (root / 'b/swarm/drive-folders.json').unlink(missing_ok=True)
     if (root / 'lose-reply').exists():
         sys.stderr.write('fixture reply lost'); sys.exit(1)
+    if (root / 'duplicate-reply').exists():
+        marker = (root / 'duplicate-reply').read_text()
+        if marker == 'identical':
+            stdout = '{"schema":1,"schema":1,' + stdout[1:]
+        elif marker == 'before':
+            stdout = '{"phase":"refused_not_started",' + stdout[1:]
+        else:
+            stdout = stdout[:-1] + ',"phase":"refused_not_started"}'
+    if (root / 'tamper-reply').exists():
+        import uuid
+        body = json.loads(stdout)
+        marker = (root / 'tamper-reply').read_text()
+        if marker == 'destination':
+            body['original']['destination']['node_id'] = str(uuid.uuid4())
+        elif marker == 'source':
+            body['original']['source']['outer_store_sha256'] = '0' * 64
+        elif marker == 'owner':
+            body['original']['owner_sha256'] = '0' * 64
+        elif marker == 'component':
+            body['primary_receipt']['source']['count'] += 1
+        elif marker == 'guard':
+            body['guard_cleared'] = False
+        stdout = json.dumps(body, separators=(',', ':'))
+    if (root / 'cap-reply').exists():
+        stdout += ' ' * (65536 - len(stdout.encode()))
+    if (root / 'overflow-reply').exists():
+        stdout += ' ' * (65537 - len(stdout.encode()))
+    if (root / 'hold-pipes').exists():
+        subprocess.Popen(['/bin/sh', '-c', 'while [ ! -f "$1" ]; do sleep .02; done', 'sh', str(root / 'release-pipes')],
+                         stdout=sys.stdout, stderr=sys.stderr,
+                         env={'PATH': '/usr/bin:/bin', 'HOME': str(root)})
+        (root / 'descendant-holding').touch()
     sys.stdout.write(stdout); sys.stderr.write(stderr); sys.exit(process.returncode)
 os.execve(os.environ['SWARM_TEST_HGS'], [os.environ['SWARM_TEST_HGS'], *args], env)
 '''
@@ -62,6 +105,41 @@ os.execve(os.environ['SWARM_TEST_HGS'], [os.environ['SWARM_TEST_HGS'], *args], e
 def project(identifier):
     return dict(id=identifier, name='Shared project', color='#123456', vivid=False,
                 folders=[dict(id='folder-shared', machine='a', path='/a', name='')], sessions=[])
+
+
+def enc(value, sort=False):
+    return json.dumps(value, separators=(',', ':'), sort_keys=sort).encode()
+
+
+def sha(value):
+    return hashlib.sha256(value).hexdigest()
+
+
+def struct_op(operation):
+    key = operation['key']
+    fields = {'project': ['id', 'field'], 'machine': ['id', 'field'], 'folder': ['id'],
+              'session': ['machine', 'session'], 'preference': ['field'], 'order': ['field']}[key['kind']]
+    return dict(id=operation['id'], actor=operation['actor'], clock=operation['clock'],
+                key=dict(kind=key['kind'], **{field: key[field] for field in fields}),
+                parents=operation['parents'], value=operation['value'])
+
+
+def catbytes(catalog):
+    return enc(dict(schema=catalog['schema'], swarm_id=catalog['swarm_id'],
+                    operations={key: struct_op(operation) for key, operation in sorted(catalog['operations'].items())}))
+
+
+def rehash(request):
+    source = dict(request['source'], configuration_revision='')
+    preview = sha(enc(dict(version=1, direction=request['direction'], source=request['source'],
+                           destination=request['destination']), sort=True))
+    request['preview_sha256'] = preview
+    request['request_sha256'] = sha(enc(dict(
+        version=1, request_id=request['request_id'], direction=request['direction'], source=source,
+        destination=request['destination'], destination_preview_sha256=preview), sort=True))
+    request['binding_sha256'] = sha(enc(dict(
+        request_sha256=request['request_sha256'], source_alias=request['source_alias'],
+        source_configuration_revision=request['source_configuration_revision']), sort=True))
 
 
 class SwarmAdoption(unittest.TestCase):
@@ -101,6 +179,66 @@ class SwarmAdoption(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stderr)
         return result.stderr
 
+    def raw(self, node, *args, data=None):
+        env = dict(self.env, HGS_CONFIG_DIR=str(self.root / node), HGS_STATE_DIR=str(self.root / node / 'state'))
+        return subprocess.run([str(HGS), 'swarm', *args], input=data,
+                              env=env, capture_output=True, timeout=40)
+
+    def tree(self, node):
+        directory = self.root / node / 'swarm'
+        return {str(path.relative_to(directory)): sha(path.read_bytes())
+                for path in directory.rglob('*') if path.is_file()}
+
+    def capture_request(self):
+        self.empty_destination(False)
+        (self.root / 'capture-request').touch()
+        preview = self.call('a', 'adoption-preview', 'b', '--json')
+        result = self.raw('a', 'adopt', 'b', '--json', data=enc(self.options(preview)))
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        request = json.loads((self.root / 'captured-request.json').read_text())
+        previous = tuple(request[key] for key in ('preview_sha256', 'request_sha256', 'binding_sha256'))
+        rehash(request)
+        self.assertEqual(previous, tuple(request[key] for key in ('preview_sha256', 'request_sha256', 'binding_sha256')))
+        return request
+
+    def metrics_request(self, total_edges=500736, target_bytes=None):
+        request = self.capture_request()
+        catalog = json.loads(request['source_catalog_json'])
+        node = request['source']['node_id']
+        session = str(uuid.uuid4())
+        operations = {}
+        roots = [str(uuid.uuid4()) for _ in range(1024)]
+        for identifier in roots:
+            operations[identifier] = dict(id=identifier, actor=node, clock=1,
+                key=dict(kind='session', machine=node, session=session), parents=[], value=None)
+        remaining = total_edges
+        while remaining:
+            parents = roots[:min(1024, remaining)]
+            remaining -= len(parents)
+            identifier = str(uuid.uuid4())
+            operations[identifier] = dict(id=identifier, actor=node, clock=2,
+                key=dict(kind='session', machine=node, session=session), parents=parents, value=None)
+        graph = dict(schema=1, swarm_id=catalog['swarm_id'], operations=operations)
+
+        def update(padding=0):
+            canonical = catbytes(graph)
+            raw = b' ' * padding + canonical
+            request['source_primary_json'] = raw.decode()
+            request['source']['primary'] = dict(state='nonempty', swarm_id=graph['swarm_id'],
+                raw_sha256=sha(raw), raw_len=len(raw), canonical_sha256=sha(canonical),
+                count=len(operations), parent_closure=True)
+            rehash(request)
+            return len(enc(request))
+
+        update()
+        if target_bytes is not None:
+            difference = target_bytes - len(enc(request))
+            self.assertGreaterEqual(difference, 0, difference)
+            update(difference)
+            self.assertEqual(len(enc(request)), target_bytes)
+        self.assertEqual(sum(len(operation['parents']) for operation in operations.values()), total_edges)
+        return request
+
     def join(self, node, peer):
         preview = self.call(node, 'preview', peer)
         self.call(node, 'join', peer, data=dict(node_id=preview['node_id'], swarm_id=preview['swarm_id'], project_map={}, prefer_peer_memberships=False))
@@ -134,10 +272,10 @@ class SwarmAdoption(unittest.TestCase):
         if bootstrapped:
             self.call('b', 'get')
 
-    def options(self, preview, drained=False):
+    def options(self, preview):
         return dict(request_id=str(uuid.uuid4()), preview=preview,
                     native_ticket='fixture-native-owner', native_generation=1,
-                    previous_lease_drained=drained)
+                    lease_id=str(uuid.uuid4()))
 
     def adopt(self, bootstrapped):
         self.empty_destination(bootstrapped)
@@ -189,7 +327,7 @@ class SwarmAdoption(unittest.TestCase):
         (self.root / 'fail-primary').touch()
         error = self.call('a', 'adopt', 'b', '--json', data=options, ok=False)
         self.assertTrue((self.root / 'fault-injected').exists())
-        self.assertIn('Is a directory', error)
+        self.assertIn('NotRegular', error)
         guard = self.root / 'b/swarm/adoption-pending.json'
         self.assertTrue(guard.exists())
         status = self.call('b', 'adoption-status', '--json', data={'request_id': options['request_id']})
@@ -203,35 +341,30 @@ class SwarmAdoption(unittest.TestCase):
         self.assertEqual(duplicate, status)
         self.assertEqual(guard.read_bytes(), original)
 
-    def test_refused_not_started_continuation_reuses_the_original_request(self):
+    def test_refused_not_started_continuation_reuses_the_original_live_call(self):
         self.empty_destination(False)
         preview = self.call('a', 'adoption-preview', 'b', '--json')
         options = self.options(preview)
-        drive = self.root / 'b/swarm/drive-folders.json'
-        drive.write_bytes(b'')
-        refused = self.call('a', 'adopt', 'b', '--json', data=options)
-        self.assertEqual(refused['outcome'], 'refused_not_started')
-        self.assertFalse((self.root / 'b/swarm/adoption-pending.json').exists())
-        drive.unlink()
-        options['previous_lease_drained'] = True
-        settled = self.call('a', 'adopt', 'b', '--json', data=options)
+        (self.root / 'b/swarm/drive-folders.json').write_bytes(b'')
+        (self.root / 'refuse-once').touch()
+        settled = self.call('a', 'adopt', 'b', '--json', data=options, timeout=35)
         self.assertEqual(settled['phase'], 'settled')
         calls = (self.root / 'calls').read_text().splitlines()
         self.assertEqual(sum(line.split()[1:3] == ['swarm', 'adopt'] for line in calls), 2)
+        duplicate = self.call('a', 'adopt', 'b', '--json', data=options)
+        self.assertEqual(duplicate, settled)
+        options['previous_lease_drained'] = True
+        self.call('a', 'adopt', 'b', '--json', data=options, ok=False)
 
-    def test_remote_committed_status_permits_only_local_source_membership(self):
+    def test_failed_reply_reconciles_only_inside_the_original_live_call(self):
         self.empty_destination(False)
         preview = self.call('a', 'adoption-preview', 'b', '--json')
         options = self.options(preview)
         (self.root / 'lose-reply').touch()
-        error = self.call('a', 'adopt', 'b', '--json', data=options, ok=False)
-        self.assertIn('fixture reply lost', error)
-        (self.root / 'lose-reply').unlink()
-        blocked = self.call('a', 'adopt', 'b', '--json', data=options, ok=False)
-        self.assertIn('drain', blocked)
-        options['previous_lease_drained'] = True
         settled = self.call('a', 'adopt', 'b', '--json', data=options)
         self.assertEqual(settled['phase'], 'settled')
+        duplicate = self.call('a', 'adopt', 'b', '--json', data=options)
+        self.assertEqual(duplicate, settled)
         calls = (self.root / 'calls').read_text().splitlines()
         self.assertEqual(sum(line.split()[1:3] == ['swarm', 'adopt'] for line in calls), 1)
         self.assertEqual(sum(line.split()[1:3] == ['swarm', 'adoption-status'] for line in calls), 1)
@@ -246,9 +379,9 @@ class SwarmAdoption(unittest.TestCase):
         status = self.call('b', 'adoption-status', '--json', data={'request_id': options['request_id']})
         remote = status['journal']['receipts']['remote']
         for component in ('primary_receipt', 'twins_receipt'):
-            self.assertEqual(remote[component]['source_state'], 'missing')
-            self.assertEqual(remote[component]['destination_state'], 'missing')
-            self.assertIsNone(remote[component]['original_source_raw_sha256'])
+            self.assertEqual(remote[component]['source']['state'], 'missing')
+            self.assertEqual(remote[component]['destination']['state'], 'missing')
+            self.assertIsNone(remote[component]['source']['raw_sha256'])
 
     def test_present_empty_destination_becomes_missing_only_after_proved_empty_removal(self):
         (self.root / 'a/swarm/session-id-memberships.json').unlink()
@@ -266,8 +399,8 @@ class SwarmAdoption(unittest.TestCase):
         status = self.call('b', 'adoption-status', '--json', data={'request_id': options['request_id']})
         remote = status['journal']['receipts']['remote']
         for component in ('primary_receipt', 'twins_receipt'):
-            self.assertEqual(remote[component]['source_state'], 'missing')
-            self.assertEqual(remote[component]['destination_state'], 'missing')
+            self.assertEqual(remote[component]['source']['state'], 'missing')
+            self.assertEqual(remote[component]['destination']['state'], 'missing')
             self.assertIsNone(remote[component]['destination_raw_sha256'])
         self.assertFalse(status['guard_present'])
 
@@ -285,8 +418,8 @@ class SwarmAdoption(unittest.TestCase):
         self.call('a', 'adopt', 'b', '--json', data=options)
         status = self.call('b', 'adoption-status', '--json', data={'request_id': options['request_id']})
         remote = status['journal']['receipts']['remote']
-        self.assertEqual(remote['primary_receipt']['source_state'], 'valid_empty')
-        self.assertEqual(remote['twins_receipt']['source_state'], 'valid_empty')
+        self.assertEqual(remote['primary_receipt']['source']['state'], 'valid_empty')
+        self.assertEqual(remote['twins_receipt']['source']['state'], 'valid_empty')
         self.assertEqual(remote['primary_receipt']['destination_raw_sha256'], hashlib.sha256(primary).hexdigest())
         self.assertEqual(remote['twins_receipt']['destination_raw_sha256'], hashlib.sha256(twins).hexdigest())
 
@@ -389,6 +522,181 @@ class SwarmAdoption(unittest.TestCase):
         self.call('b', 'get', ok=False)
         duplicate = self.call('b', 'adoption-status', '--json', data={'request_id': options['request_id']})
         self.assertEqual(duplicate, status)
+
+
+    def test_duplicate_raw_maps_refuse_before_source_or_destination_effects(self):
+        for mode in ('identical', 'before', 'after'):
+            with self.subTest(mode=mode):
+                self.setUp()
+                path = self.root / 'a/swarm/catalog.json'
+                store = json.loads(path.read_text())
+                operations = store['catalog']['operations']
+                identifier, original = next(iter(operations.items()))
+                rewritten = json.loads(json.dumps(original))
+                rewritten['value'] = 'rewritten immutable body'
+                pair = [original, original] if mode == 'identical' else [original, rewritten]
+                if mode == 'after':
+                    pair.reverse()
+                pairs = [(identifier, value) for value in pair]
+                pairs.extend((key, value) for key, value in operations.items() if key != identifier)
+                store['catalog']['operations'] = '__RAW_PAIRS__'
+                body = enc(store).replace(b'"__RAW_PAIRS__"', b'{' + b','.join(
+                    enc(key) + b':' + enc(value) for key, value in pairs) + b'}')
+                path.write_bytes(body)
+                self.empty_destination(False)
+                before = self.tree('b')
+                self.call('a', 'adoption-preview', 'b', '--json', ok=False)
+                self.assertEqual(path.read_bytes(), body)
+                self.assertEqual(self.tree('b'), before)
+        self.setUp()
+        self.empty_destination(False)
+        path = self.root / 'b/swarm/catalog.json'
+        store = json.loads(path.read_text())
+        store['peers'] = '__RAW_PEERS__'
+        body = enc(store).replace(b'"__RAW_PEERS__"', b'{"duplicate":null,"duplicate":null}')
+        path.write_bytes(body)
+        before = self.tree('b')
+        self.call('a', 'adoption-preview', 'b', '--json', ok=False)
+        self.assertEqual(path.read_bytes(), body)
+        self.assertEqual(self.tree('b'), before)
+
+    def test_rehashed_source_identity_and_duplicate_request_have_no_destination_effect(self):
+        request = self.capture_request()
+        request['source']['swarm_id'] = str(uuid.uuid4())
+        rehash(request)
+        before = self.tree('b')
+        result = self.raw('b', 'adopt', '--json', data=enc(request))
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn(b'declared source/catalog swarm mismatch', result.stderr)
+        self.assertEqual(self.tree('b'), before)
+        body = enc(request).replace(b'"request_id":', b'"request_id":"duplicate","request_id":', 1)
+        result = self.raw('b', 'adopt', '--json', data=body)
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn(b'duplicate object key', result.stderr)
+        self.assertEqual(self.tree('b'), before)
+
+    def test_aggregate_edge_counter_is_pre_effect_and_at_boundary_candidate_commits(self):
+        request = self.metrics_request(500736, 21029685)
+        before = self.tree('b')
+        result = self.raw('b', 'adopt', '--json', data=enc(request))
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn(b'parent edges exceed 500000', result.stderr)
+        self.assertEqual(self.tree('b'), before)
+        self.setUp()
+        request = self.metrics_request(500000)
+        result = self.raw('b', 'adopt', '--json', data=enc(request))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = json.loads(result.stdout)
+        self.assertEqual(receipt['phase'], 'remote_committed')
+        self.assertFalse((self.root / 'b/swarm/adoption-pending.json').exists())
+        self.assertEqual((self.root / 'b/swarm/session-id-memberships.json').read_bytes(),
+                         request['source_primary_json'].encode())
+
+    def start_original(self, options):
+        env = dict(self.env, HGS_CONFIG_DIR=str(self.root / 'a'), HGS_STATE_DIR=str(self.root / 'a/state'))
+        process = subprocess.Popen([str(HGS), 'swarm', 'adopt', 'b', '--json'], stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        self.addCleanup(process.stdout.close)
+        self.addCleanup(process.stderr.close)
+        process.stdin.write(enc(options))
+        process.stdin.close()
+        import time
+        deadline = time.monotonic() + 15
+        while not (self.root / 'descendant-holding').exists() and time.monotonic() < deadline:
+            self.assertIsNone(process.poll())
+            time.sleep(.01)
+        self.assertTrue((self.root / 'descendant-holding').exists())
+        return process
+
+    def test_exact_cap_open_pipes_exclude_another_process_until_actual_eof(self):
+        self.empty_destination(False)
+        preview = self.call('a', 'adoption-preview', 'b', '--json')
+        options = self.options(preview)
+        (self.root / 'cap-reply').touch()
+        (self.root / 'hold-pipes').touch()
+        process = self.start_original(options)
+        self.assertNotIn('b', json.loads((self.root / 'a/swarm/catalog.json').read_text())['peers'])
+        error = self.call('a', 'adopt', 'b', '--json', data=options, ok=False)
+        self.assertIn('read-only', error)
+        (self.root / 'release-pipes').touch()
+        stdout = process.stdout.read()
+        process.wait(timeout=40)
+        self.assertEqual(process.returncode, 0, process.stderr.read())
+        self.assertEqual(json.loads(stdout)['phase'], 'settled')
+        duplicate = self.call('a', 'adopt', 'b', '--json', data=options)
+        self.assertEqual(duplicate['phase'], 'settled')
+
+    def test_duplicate_replies_and_overflow_never_write_source_membership(self):
+        for mode in ('identical', 'before', 'after', 'overflow'):
+            with self.subTest(mode=mode):
+                self.setUp()
+                self.empty_destination(False)
+                preview = self.call('a', 'adoption-preview', 'b', '--json')
+                options = self.options(preview)
+                (self.root / ('overflow-reply' if mode == 'overflow' else 'duplicate-reply')).write_text(mode)
+                self.call('a', 'adopt', 'b', '--json', data=options, ok=False)
+                self.assertNotIn('b', json.loads((self.root / 'a/swarm/catalog.json').read_text())['peers'])
+                journal = self.root / 'a/swarm/adoption-journal' / (options['request_id'] + '.json')
+                self.assertEqual(json.loads(journal.read_text())['phase'], 'source_pending')
+                self.call('a', 'adopt', 'b', '--json', data=options, ok=False)
+
+    def test_wrong_original_receipts_retain_source_intent_without_membership(self):
+        for mode in ('destination', 'source', 'owner', 'component', 'guard'):
+            with self.subTest(mode=mode):
+                self.setUp()
+                self.empty_destination(False)
+                preview = self.call('a', 'adoption-preview', 'b', '--json')
+                options = self.options(preview)
+                (self.root / 'tamper-reply').write_text(mode)
+                self.call('a', 'adopt', 'b', '--json', data=options, ok=False)
+                self.assertNotIn('b', json.loads((self.root / 'a/swarm/catalog.json').read_text())['peers'])
+                journal = self.root / 'a/swarm/adoption-journal' / (options['request_id'] + '.json')
+                self.assertEqual(json.loads(journal.read_text())['phase'], 'source_pending')
+                self.call('a', 'adopt', 'b', '--json', data=options, ok=False)
+
+    def test_timeout_without_eof_remains_manual_and_never_replays(self):
+        self.empty_destination(False)
+        preview = self.call('a', 'adoption-preview', 'b', '--json')
+        options = self.options(preview)
+        (self.root / 'hold-pipes').touch()
+        process = self.start_original(options)
+        stdout = process.stdout.read()
+        process.wait(timeout=40)
+        self.assertNotEqual(process.returncode, 0, process.stderr.read())
+        self.assertEqual(stdout, b'')
+        (self.root / 'release-pipes').touch()
+        self.assertNotIn('b', json.loads((self.root / 'a/swarm/catalog.json').read_text())['peers'])
+        self.call('a', 'adopt', 'b', '--json', data=options, ok=False)
+
+    def test_guard_cleared_crash_is_status_only_and_cannot_be_finalized(self):
+        self.empty_destination(False)
+        preview = self.call('a', 'adoption-preview', 'b', '--json')
+        options = self.options(preview)
+        (self.root / 'fail-after-guard-cleared').touch()
+        self.call('a', 'adopt', 'b', '--json', data=options, ok=False)
+        self.assertTrue((self.root / 'fault-injected').exists())
+        status = self.call('b', 'adoption-status', '--json', data={'request_id': options['request_id']})
+        self.assertEqual(status['journal']['phase'], 'guard_cleared')
+        self.assertFalse(status['guard_present'])
+        self.assertNotIn('remote', status['journal']['receipts'])
+        before = self.tree('b')
+        self.call('b', 'get', ok=False)
+        self.call('b', 'adopt', '--json', data={'request_id': options['request_id']}, ok=False)
+        self.assertEqual(self.tree('b'), before)
+        self.assertNotIn('b', json.loads((self.root / 'a/swarm/catalog.json').read_text())['peers'])
+
+    def test_local_membership_failure_is_write_ahead_and_not_settled(self):
+        self.empty_destination(False)
+        preview = self.call('a', 'adoption-preview', 'b', '--json')
+        options = self.options(preview)
+        membership = self.root / 'a/swarm/membership.json'
+        membership.unlink()
+        membership.mkdir()
+        self.call('a', 'adopt', 'b', '--json', data=options, ok=False)
+        journal = self.root / 'a/swarm/adoption-journal' / (options['request_id'] + '.json')
+        self.assertEqual(json.loads(journal.read_text())['phase'], 'source_membership_started')
+        self.assertNotIn('b', json.loads((self.root / 'a/swarm/catalog.json').read_text())['peers'])
+        self.call('a', 'adopt', 'b', '--json', data=options, ok=False)
 
 
 if __name__ == '__main__':

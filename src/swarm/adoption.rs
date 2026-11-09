@@ -9,13 +9,18 @@ use super::{
 };
 use crate::{config::Config, platform};
 use anyhow::{Context, Result, ensure};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{
+    Deserialize, Deserializer as _, Serialize,
+    de::{DeserializeOwned, Error as _},
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    io::{Read as _, Write as _},
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 const MAIN_BYTES: u64 = 128 * 1024 * 1024;
@@ -39,14 +44,39 @@ enum ComponentState {
     Nonempty,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Phase {
+    SourcePending,
+    DestinationPending,
+    MainStarted,
+    MainCommitted,
+    PrimaryStarted,
+    PrimaryCommitted,
+    TwinsStarted,
+    TwinsCommitted,
+    ComponentsVerified,
+    GuardClearing,
+    GuardCleared,
+    RemoteCommitted,
+    SourceMembershipStarted,
+    SourceMembershipCommitted,
+    Settled,
+    RefusedNotStarted,
+    Partial,
+    Unknown,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ComponentProof {
     state: ComponentState,
     swarm_id: String,
     raw_sha256: Option<String>,
+    raw_len: Option<u64>,
     canonical_sha256: String,
     count: usize,
+    parent_closure: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -64,8 +94,10 @@ impl RawComponent {
             state: self.state,
             swarm_id: self.swarm_id.clone(),
             raw_sha256: self.raw.as_deref().map(sha256),
+            raw_len: self.raw.as_ref().map(|raw| raw.len() as u64),
             canonical_sha256: sha256(&self.canonical),
             count: self.count,
+            parent_closure: true,
         }
     }
 }
@@ -86,6 +118,7 @@ struct SourceSummary {
     swarm_id: String,
     imported: bool,
     catalog_digest: String,
+    catalog_raw_sha256: String,
     outer_store_sha256: String,
     primary: ComponentProof,
     twins: ComponentProof,
@@ -104,8 +137,12 @@ struct DestinationProof {
     twins: ComponentProof,
     empty_form: String,
     self_bindings_valid: bool,
+    bindings_sha256: String,
     peers_empty: bool,
     membership_valid: bool,
+    membership_epoch: Option<String>,
+    membership_generation: u64,
+    membership_sha256: Option<String>,
     qt_absent: bool,
     drive_absent: bool,
     eligible: bool,
@@ -141,7 +178,7 @@ enum Role {
 #[serde(deny_unknown_fields)]
 struct RegistryEntry {
     role: Role,
-    phase: String,
+    phase: Phase,
     request_sha256: String,
     binding_sha256: String,
     lease_id: String,
@@ -165,37 +202,130 @@ impl Default for Registry {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OriginalProof {
+    request_id: String,
+    request_sha256: String,
+    binding_sha256: String,
+    owner_sha256: String,
+    lease_id: String,
+    native_generation: u64,
+    source_alias: String,
+    source_configuration_revision: String,
+    source: SourceSummary,
+    destination: DestinationProof,
+    source_catalog_raw_sha256: String,
+    request_raw_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MainReceipt {
+    original_source_catalog_sha256: String,
+    expected_source_catalog_digest: String,
+    destination_catalog_digest: String,
+    original_destination_store_sha256: String,
+    destination_store_sha256: String,
+    destination_bindings_sha256: String,
+    destination_peers_empty: bool,
+    parent_closure: bool,
+    postread: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ComponentReceipt {
+    component: String,
+    source: ComponentProof,
+    destination: ComponentProof,
+    destination_raw_sha256: Option<String>,
+    destination_raw_len: Option<u64>,
+    parent_closure: bool,
+    postread: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TerminalProof {
+    schema: u32,
+    phase: Phase,
+    outcome: String,
+    request_id: String,
+    request_sha256: String,
+    binding_sha256: String,
+    owner_sha256: String,
+    original: OriginalProof,
+    main_receipt: MainReceipt,
+    primary_receipt: ComponentReceipt,
+    twins_receipt: ComponentReceipt,
+    post_destination: DestinationProof,
+    destination_peers: BTreeMap<String, Value>,
+    destination_bindings: String,
+    guard_cleared: bool,
+    drive_status: String,
+    membership_by_id_ready: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RefusalReceipt {
+    schema: u32,
+    phase: Phase,
+    outcome: String,
+    request_id: String,
+    request_sha256: String,
+    binding_sha256: String,
+    original: OriginalProof,
+    reasons: Vec<String>,
+    product_effects: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceMembershipReceipt {
+    original_source_store_sha256: String,
+    source_store_sha256: String,
+    destination_node_id: String,
+    peer_added: String,
+    postread: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SettledReceipt {
+    schema: u32,
+    phase: Phase,
+    request_id: String,
+    request_sha256: String,
+    binding_sha256: String,
+    original: OriginalProof,
+    remote: TerminalProof,
+    source_membership: SourceMembershipReceipt,
+    destination_peers: BTreeMap<String, Value>,
+    destination_bindings: String,
+    sync: String,
+    drive_status: String,
+    membership_by_id_ready: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Journal {
     schema: u32,
-    request_id: String,
     role: Role,
-    phase: String,
-    request_sha256: String,
-    binding_sha256: String,
-    lease_id: String,
-    owner_sha256: String,
-    source_node_id: String,
-    source_swarm_id: String,
-    destination_node_id: String,
-    destination_swarm_id: String,
-    source_store_sha256: String,
-    destination_store_sha256: String,
-    primary: ComponentProof,
-    twins: ComponentProof,
-    destination_primary: ComponentProof,
-    destination_twins: ComponentProof,
+    phase: Phase,
+    original: OriginalProof,
     source_membership_started: bool,
     receipts: BTreeMap<String, Value>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Guard {
     schema: u32,
     request_id: String,
-    phase: String,
+    phase: Phase,
     request_sha256: String,
     binding_sha256: String,
     lease_id: String,
@@ -210,6 +340,15 @@ struct Guard {
     twins: ComponentProof,
     destination_primary: ComponentProof,
     destination_twins: ComponentProof,
+    request_raw_sha256: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CandidateMetrics {
+    main_plus_primary_ops: usize,
+    twins_entries: usize,
+    total_parent_edges: usize,
+    encoded_request_bytes: usize,
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -221,6 +360,7 @@ fn canonical_uuid(value: &str) -> bool {
 }
 
 fn bounded<T: DeserializeOwned>(bytes: &[u8], what: &str) -> Result<T> {
+    unique_bytes(bytes, what)?;
     serde_json::from_slice(bytes).with_context(|| format!("parse {what}"))
 }
 
@@ -300,6 +440,9 @@ fn read_primary(directory: &Path, catalog: &Catalog) -> Result<RawComponent> {
         Some(bytes) => Ok(bytes.clone()),
         None => Err(Unread::Missing),
     };
+    if let Some(bytes) = &raw {
+        unique_bytes(bytes, "primary ID membership graph")?;
+    }
     let primary = Memberships::from_read(catalog, &read)
         .map_err(|error| anyhow::anyhow!("invalid primary ID membership: {error:#}"))?;
     primary.view(catalog)?;
@@ -395,6 +538,7 @@ fn source_summary(config: &Config, snapshot: &Snapshot) -> Result<SourceSummary>
         swarm_id: snapshot.store.catalog.swarm_id.clone(),
         imported: snapshot.store.imported,
         catalog_digest: snapshot.catalog_digest.clone(),
+        catalog_raw_sha256: sha256(&serde_json::to_vec(&snapshot.store.catalog)?),
         outer_store_sha256: snapshot.outer_sha256.clone(),
         primary: snapshot.primary.proof(),
         twins: snapshot.twins.proof(),
@@ -501,8 +645,13 @@ fn destination_proof(config: &Config, snapshot: &Snapshot) -> Result<Destination
         twins: snapshot.twins.proof(),
         empty_form: empty_form.into(),
         self_bindings_valid,
+        bindings_sha256: sha256(&serde_json::to_vec(&store.bindings)?),
         peers_empty: store.peers.is_empty(),
         membership_valid,
+        membership_epoch: membership_snapshot(config)?.map(|(_, proof)| proof.epoch),
+        membership_generation: membership_snapshot(config)?
+            .map_or(0, |(_, proof)| proof.generation),
+        membership_sha256: membership_snapshot(config)?.map(|(bytes, _)| sha256(&bytes)),
         qt_absent,
         drive_absent,
         eligible,
@@ -510,7 +659,7 @@ fn destination_proof(config: &Config, snapshot: &Snapshot) -> Result<Destination
     })
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MembershipProof {
     epoch: String,
@@ -519,17 +668,68 @@ struct MembershipProof {
     catalog: String,
 }
 
-fn destination_membership(config: &Config, snapshot: &Snapshot) -> Result<bool> {
+fn membership_snapshot(config: &Config) -> Result<Option<(Vec<u8>, MembershipProof)>> {
     let path = config.dir.join("swarm/membership.json");
     let Some(bytes) = read_component(&path, 4096)? else {
+        return Ok(None);
+    };
+    let proof = bounded(&bytes, "destination membership")?;
+    Ok(Some((bytes, proof)))
+}
+
+fn destination_membership(config: &Config, snapshot: &Snapshot) -> Result<bool> {
+    let Some((_, membership)) = membership_snapshot(config)? else {
         return Ok(!snapshot.store.imported);
     };
-    let membership: MembershipProof = bounded(&bytes, "destination membership")?;
     let empty_peers: BTreeMap<String, String> = BTreeMap::new();
     Ok(canonical_uuid(&membership.epoch)
         && membership.generation == 1
         && membership.peers == sha256(&serde_json::to_vec(&empty_peers)?)
         && membership.catalog == snapshot.outer_sha256)
+}
+
+fn post_destination_proof(
+    config: &Config,
+    snapshot: &Snapshot,
+    original: &OriginalProof,
+) -> Result<DestinationProof> {
+    let empty_peers: BTreeMap<String, String> = BTreeMap::new();
+    let (_, membership) = membership_snapshot(config)?
+        .ok_or_else(|| anyhow::anyhow!("adopted destination membership is missing"))?;
+    let expected_generation = original.destination.membership_generation.max(1);
+    let membership_valid = canonical_uuid(&membership.epoch)
+        && original
+            .destination
+            .membership_epoch
+            .as_ref()
+            .is_none_or(|epoch| epoch == &membership.epoch)
+        && membership.generation == expected_generation
+        && membership.peers == sha256(&serde_json::to_vec(&empty_peers)?)
+        && membership.catalog == snapshot.outer_sha256;
+    let bindings_sha256 = sha256(&serde_json::to_vec(&snapshot.store.bindings)?);
+    Ok(DestinationProof {
+        node_id: snapshot.store.node_id.clone(),
+        swarm_id: snapshot.store.catalog.swarm_id.clone(),
+        catalog_digest: snapshot.catalog_digest.clone(),
+        outer_store_sha256: snapshot.outer_sha256.clone(),
+        primary: snapshot.primary.proof(),
+        twins: snapshot.twins.proof(),
+        empty_form: "adopted_source_catalog".into(),
+        self_bindings_valid: bindings_sha256 == original.destination.bindings_sha256,
+        bindings_sha256,
+        peers_empty: snapshot.store.peers.is_empty(),
+        membership_valid,
+        membership_epoch: Some(membership.epoch),
+        membership_generation: membership.generation,
+        membership_sha256: Some(sha256(
+            &read_component(&config.dir.join("swarm/membership.json"), 4096)?
+                .ok_or_else(|| anyhow::anyhow!("adopted destination membership disappeared"))?,
+        )),
+        qt_absent: super::bootstrap::qt_store_absent(config),
+        drive_absent: drive_footprint::foreign_transition(&config.dir.join("swarm")).is_ok(),
+        eligible: false,
+        reasons: vec!["adopted_source_catalog".into()],
+    })
 }
 
 fn make_preview(source: SourceSummary, destination: DestinationProof) -> Result<Preview> {
@@ -551,9 +751,8 @@ fn make_preview(source: SourceSummary, destination: DestinationProof) -> Result<
     })
 }
 
-pub(crate) fn preview_destination(config: &Config, value: Value) -> Result<Value> {
-    let request: PreviewRequest =
-        bounded(&serde_json::to_vec(&value)?, "adoption preview request")?;
+pub(crate) fn preview_destination(config: &Config, bytes: Vec<u8>) -> Result<Value> {
+    let request: PreviewRequest = bounded(&bytes, "adoption preview request")?;
     let snapshot = capture(config)?;
     let destination = destination_proof(config, &snapshot)?;
     let preview = make_preview(request.source, destination)?;
@@ -566,13 +765,18 @@ pub(crate) fn preview_remote(config: &Config, alias: &str) -> Result<Value> {
     let request = serde_json::to_value(PreviewRequest {
         source: source.clone(),
     })?;
-    let reply = transport::run(
+    let reply = original_request(
         config,
         alias,
         &["swarm", "adoption-preview", "--json"],
-        Some(&request),
+        &serde_json::to_vec(&request)?,
     )?;
-    let preview: Preview = bounded(&serde_json::to_vec(&reply)?, "adoption preview")?;
+    ensure!(
+        reply.evidence.status.success(),
+        "{alias}: {}",
+        String::from_utf8_lossy(&reply.stderr).trim()
+    );
+    let preview: Preview = bounded(&reply.bytes, "adoption preview")?;
     ensure!(preview.source == source, "preview source changed");
     ensure!(
         preview.preview_sha256
@@ -601,7 +805,33 @@ fn journal_path(directory: &Path, request_id: &str) -> Result<PathBuf> {
 
 fn load_registry(directory: &Path) -> Result<Registry> {
     match super::read_regular(&registry_path(directory), REGISTRY_BYTES) {
-        Ok(bytes) => bounded(&bytes, "adoption registry"),
+        Ok(bytes) => {
+            let registry: Registry = bounded(&bytes, "adoption registry")?;
+            ensure!(registry.schema == 1, "unsupported adoption registry");
+            ensure!(
+                registry.entries.len() <= MAX_ENTRIES,
+                "adoption registry is full"
+            );
+            for (request_id, entry) in &registry.entries {
+                ensure!(
+                    canonical_uuid(request_id) && canonical_uuid(&entry.lease_id),
+                    "invalid adoption registry identity"
+                );
+                for hash in [&entry.request_sha256, &entry.binding_sha256] {
+                    ensure!(
+                        hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                        "invalid adoption registry proof"
+                    );
+                }
+            }
+            if let Some(active) = &registry.active {
+                ensure!(
+                    registry.entries.contains_key(active),
+                    "active adoption registry entry is missing"
+                );
+            }
+            Ok(registry)
+        }
         Err(Unread::Missing) => Ok(Registry::default()),
         Err(reason) => anyhow::bail!("adoption registry unavailable: {reason:?}"),
     }
@@ -623,7 +853,14 @@ fn write_registry(directory: &Path, registry: &Registry) -> Result<()> {
 
 fn load_journal(directory: &Path, request_id: &str) -> Result<Option<Journal>> {
     match super::read_regular(&journal_path(directory, request_id)?, JOURNAL_BYTES) {
-        Ok(bytes) => Ok(Some(bounded(&bytes, "adoption journal")?)),
+        Ok(bytes) => {
+            let journal: Journal = bounded(&bytes, "adoption journal")?;
+            ensure!(
+                journal.schema == 1 && journal.original.request_id == request_id,
+                "adoption journal identity mismatch"
+            );
+            Ok(Some(journal))
+        }
         Err(Unread::Missing) => Ok(None),
         Err(reason) => anyhow::bail!("adoption journal unavailable: {reason:?}"),
     }
@@ -635,7 +872,10 @@ fn write_journal(directory: &Path, journal: &Journal) -> Result<()> {
         bytes.len() as u64 <= JOURNAL_BYTES,
         "adoption journal exceeds 64KiB"
     );
-    store_replace(&journal_path(directory, &journal.request_id)?, &bytes)
+    store_replace(
+        &journal_path(directory, &journal.original.request_id)?,
+        &bytes,
+    )
 }
 
 fn prepare_journal_directory(directory: &Path) -> Result<()> {
@@ -666,53 +906,73 @@ pub(crate) fn guard_load(config: &Config) -> Result<()> {
 }
 
 pub(crate) fn guard_directory(directory: &Path) -> Result<()> {
-    match super::read_regular(&directory.join(GUARD_FILE), GUARD_BYTES) {
-        Ok(bytes) => {
-            let guard: Guard = bounded(&bytes, "active adoption guard")?;
-            ensure!(guard.schema == 1, "unsupported adoption guard");
-            anyhow::bail!(
-                "an adoption is partially committed; ordinary catalog writes are unavailable"
-            )
-        }
-        Err(Unread::Missing) => {}
-        Err(reason) => anyhow::bail!("adoption guard unavailable: {reason:?}"),
+    if read_guard(directory)?.is_some() {
+        anyhow::bail!("an adoption is partially committed; ordinary catalog writes are unavailable")
     }
     let registry = load_registry(directory)?;
-    if registry.active.as_ref().is_some_and(|request_id| {
-        registry.entries.get(request_id).is_some_and(|entry| {
-            entry.role == Role::Destination && entry.phase != "remote_committed"
-        })
-    }) {
-        anyhow::bail!(
+    ensure!(registry.schema == 1, "unsupported adoption registry");
+    if let Some(active) = registry.active {
+        let entry = registry
+            .entries
+            .get(&active)
+            .ok_or_else(|| anyhow::anyhow!("active adoption registry entry is missing"))?;
+        ensure!(
+            entry.role != Role::Destination || entry.phase == Phase::RemoteCommitted,
             "an active adoption guard is missing; ordinary catalog writes are unavailable"
-        )
+        );
     }
     Ok(())
 }
 
+fn read_guard(directory: &Path) -> Result<Option<Guard>> {
+    match super::read_regular(&directory.join(GUARD_FILE), GUARD_BYTES) {
+        Ok(bytes) => {
+            let guard: Guard = bounded(&bytes, "active adoption guard")?;
+            ensure!(guard.schema == 1, "unsupported adoption guard");
+            ensure!(canonical_uuid(&guard.request_id), "invalid guard request");
+            Ok(Some(guard))
+        }
+        Err(Unread::Missing) => Ok(None),
+        Err(reason) => anyhow::bail!("adoption guard unavailable: {reason:?}"),
+    }
+}
+
 fn guard_from(journal: &Journal) -> Guard {
+    let original = &journal.original;
     Guard {
         schema: 1,
-        request_id: journal.request_id.clone(),
-        phase: journal.phase.clone(),
-        request_sha256: journal.request_sha256.clone(),
-        binding_sha256: journal.binding_sha256.clone(),
-        lease_id: journal.lease_id.clone(),
-        owner_sha256: journal.owner_sha256.clone(),
-        source_node_id: journal.source_node_id.clone(),
-        source_swarm_id: journal.source_swarm_id.clone(),
-        destination_node_id: journal.destination_node_id.clone(),
-        destination_swarm_id: journal.destination_swarm_id.clone(),
-        source_store_sha256: journal.source_store_sha256.clone(),
-        destination_store_sha256: journal.destination_store_sha256.clone(),
-        primary: journal.primary.clone(),
-        twins: journal.twins.clone(),
-        destination_primary: journal.destination_primary.clone(),
-        destination_twins: journal.destination_twins.clone(),
+        request_id: original.request_id.clone(),
+        phase: journal.phase,
+        request_sha256: original.request_sha256.clone(),
+        binding_sha256: original.binding_sha256.clone(),
+        lease_id: original.lease_id.clone(),
+        owner_sha256: original.owner_sha256.clone(),
+        source_node_id: original.source.node_id.clone(),
+        source_swarm_id: original.source.swarm_id.clone(),
+        destination_node_id: original.destination.node_id.clone(),
+        destination_swarm_id: original.destination.swarm_id.clone(),
+        source_store_sha256: original.source.outer_store_sha256.clone(),
+        destination_store_sha256: original.destination.outer_store_sha256.clone(),
+        primary: original.source.primary.clone(),
+        twins: original.source.twins.clone(),
+        destination_primary: original.destination.primary.clone(),
+        destination_twins: original.destination.twins.clone(),
+        request_raw_sha256: original.request_raw_sha256.clone(),
     }
 }
 
 fn write_guard(directory: &Path, journal: &Journal) -> Result<()> {
+    ensure!(
+        journal.role == Role::Destination,
+        "source has no adoption guard"
+    );
+    ensure!(
+        !matches!(
+            journal.phase,
+            Phase::GuardCleared | Phase::RemoteCommitted | Phase::Settled
+        ),
+        "terminal or guard-cleared phase cannot recreate a guard"
+    );
     let bytes = serde_json::to_vec(&guard_from(journal))?;
     ensure!(
         bytes.len() as u64 <= GUARD_BYTES,
@@ -728,8 +988,7 @@ struct AdoptOptions {
     preview: Preview,
     native_ticket: String,
     native_generation: u64,
-    #[serde(default)]
-    previous_lease_drained: bool,
+    lease_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -752,6 +1011,79 @@ struct AdoptionRequest {
     source_catalog_json: String,
     source_primary_json: Option<String>,
     source_twins_json: Option<String>,
+}
+
+struct OriginalLease {
+    request: AdoptionRequest,
+    outer_raw: Vec<u8>,
+    request_raw_sha256: String,
+    deadline: Instant,
+    drain: Option<DrainEvidence>,
+    retried_refusal: bool,
+    _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl OriginalLease {
+    fn new(request: AdoptionRequest, request_raw_sha256: String, outer_raw: Vec<u8>) -> Self {
+        Self {
+            request,
+            outer_raw,
+            request_raw_sha256,
+            _not_send: std::marker::PhantomData,
+            deadline: Instant::now() + ORIGINAL_CALL_LIMIT,
+            drain: None,
+            retried_refusal: false,
+        }
+    }
+
+    fn original(&self) -> OriginalProof {
+        OriginalProof {
+            request_id: self.request.request_id.clone(),
+            request_sha256: self.request.request_sha256.clone(),
+            binding_sha256: self.request.binding_sha256.clone(),
+            owner_sha256: self.request.owner_sha256.clone(),
+            lease_id: self.request.lease_id.clone(),
+            native_generation: self.request.native_generation,
+            source_alias: self.request.source_alias.clone(),
+            source_configuration_revision: self.request.source_configuration_revision.clone(),
+            source: self.request.source.clone(),
+            destination: self.request.destination.clone(),
+            source_catalog_raw_sha256: sha256(self.request.source_catalog_json.as_bytes()),
+            request_raw_sha256: self.request_raw_sha256.clone(),
+        }
+    }
+
+    fn call(&mut self, config: &Config, words: &[&str], input: &[u8]) -> Result<RawReply> {
+        ensure!(
+            Instant::now() < self.deadline,
+            "original adoption deadline expired"
+        );
+        let reply = OriginalResources::spawn(
+            config,
+            &self.request.source_alias,
+            words,
+            input,
+            self.request.request_id.clone(),
+            self.deadline,
+        )?
+        .drain()?;
+        self.drain = Some(reply.evidence.clone());
+        Ok(reply)
+    }
+
+    fn observe_drain(&self) -> Result<()> {
+        let evidence = self.drain.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("original child and both pipes have not physically drained")
+        })?;
+        ensure!(
+            evidence.request_id == self.request.request_id
+                && evidence.stdout_eof
+                && evidence.stderr_eof
+                && Instant::now() <= evidence.deadline,
+            "original drain evidence does not match this request"
+        );
+        Ok(())
+    }
 }
 
 fn request_hash(request_id: &str, preview: &Preview) -> Result<String> {
@@ -793,7 +1125,6 @@ fn build_request(
     alias: &str,
     options: &AdoptOptions,
     snapshot: &Snapshot,
-    lease_id: Option<String>,
 ) -> Result<AdoptionRequest> {
     ensure!(
         options.preview.eligible,
@@ -817,7 +1148,8 @@ fn build_request(
         source.configuration_revision == machines_revision(config)?,
         "machine configuration changed"
     );
-    let lease_id = lease_id.unwrap_or_else(catalog::new_id);
+    ensure!(canonical_uuid(&options.lease_id), "invalid adoption lease");
+    let lease_id = options.lease_id.clone();
     let owner_sha256 = owner_hash(&options.native_ticket, options.native_generation, &lease_id)?;
     let request_sha256 = request_hash(&options.request_id, &options.preview)?;
     let binding_sha256 = sha256(&serde_json::to_vec(&json!({
@@ -868,30 +1200,15 @@ fn source_configuration(config: &Config) -> Result<String> {
     machines_revision(config)
 }
 
-fn new_journal(request: &AdoptionRequest, role: Role) -> Journal {
+fn new_journal(original: OriginalProof, role: Role) -> Journal {
     Journal {
         schema: 1,
-        request_id: request.request_id.clone(),
         role,
         phase: match role {
-            Role::Source => "source_pending",
-            Role::Destination => "destination_pending",
-        }
-        .into(),
-        request_sha256: request.request_sha256.clone(),
-        binding_sha256: request.binding_sha256.clone(),
-        lease_id: request.lease_id.clone(),
-        owner_sha256: request.owner_sha256.clone(),
-        source_node_id: request.source.node_id.clone(),
-        source_swarm_id: request.source.swarm_id.clone(),
-        destination_node_id: request.destination.node_id.clone(),
-        destination_swarm_id: request.destination.swarm_id.clone(),
-        source_store_sha256: request.source.outer_store_sha256.clone(),
-        destination_store_sha256: request.destination.outer_store_sha256.clone(),
-        primary: request.source.primary.clone(),
-        twins: request.source.twins.clone(),
-        destination_primary: request.destination.primary.clone(),
-        destination_twins: request.destination.twins.clone(),
+            Role::Source => Phase::SourcePending,
+            Role::Destination => Phase::DestinationPending,
+        },
+        original,
         source_membership_started: false,
         receipts: BTreeMap::new(),
     }
@@ -900,270 +1217,630 @@ fn new_journal(request: &AdoptionRequest, role: Role) -> Journal {
 fn registry_entry(journal: &Journal) -> RegistryEntry {
     RegistryEntry {
         role: journal.role,
-        phase: journal.phase.clone(),
-        request_sha256: journal.request_sha256.clone(),
-        binding_sha256: journal.binding_sha256.clone(),
-        lease_id: journal.lease_id.clone(),
+        phase: journal.phase,
+        request_sha256: journal.original.request_sha256.clone(),
+        binding_sha256: journal.original.binding_sha256.clone(),
+        lease_id: journal.original.lease_id.clone(),
     }
 }
 
-fn advance(
-    directory: &Path,
-    journal: &mut Journal,
-    phase: &str,
-    active: bool,
-    guard: bool,
-) -> Result<()> {
-    journal.phase = phase.into();
+fn exclude_other_active(registry: &Registry, request_id: &str) -> Result<()> {
+    if let Some(current) = registry.active.as_ref().filter(|id| *id != request_id) {
+        ensure!(
+            registry.entries.get(current).is_none_or(|entry| {
+                matches!(entry.phase, Phase::Settled | Phase::RemoteCommitted)
+            }),
+            "another adoption is active on this catalog"
+        );
+    }
+    Ok(())
+}
+
+fn start_journal(directory: &Path, journal: &Journal) -> Result<()> {
+    ensure!(
+        load_journal(directory, &journal.original.request_id)?.is_none(),
+        "an original journal already exists"
+    );
     prepare_journal_directory(directory)?;
     let mut registry = load_registry(directory)?;
-    if active {
-        if let Some(current) = registry
-            .active
-            .as_ref()
-            .filter(|current| **current != journal.request_id)
-        {
-            if registry
-                .entries
-                .get(current)
-                .is_some_and(|entry| entry.phase != "settled")
-            {
-                anyhow::bail!("another adoption is active on this catalog")
-            }
-        }
-        registry.active = Some(journal.request_id.clone());
-    } else if registry.active.as_deref() == Some(journal.request_id.as_str()) {
-        registry.active = None;
+    exclude_other_active(&registry, &journal.original.request_id)?;
+    if journal.phase != Phase::RefusedNotStarted {
+        registry.active = Some(journal.original.request_id.clone());
     }
     registry
         .entries
-        .insert(journal.request_id.clone(), registry_entry(journal));
+        .insert(journal.original.request_id.clone(), registry_entry(journal));
     write_journal(directory, journal)?;
     write_registry(directory, &registry)?;
-    if guard {
+    if journal.role == Role::Destination && journal.phase == Phase::DestinationPending {
         write_guard(directory, journal)?;
     }
     Ok(())
 }
 
-pub(crate) fn adopt_source(config: &Config, alias: &str, value: Value) -> Result<Value> {
-    let options: AdoptOptions = bounded(&serde_json::to_vec(&value)?, "adoption options")?;
+fn advance_original(
+    directory: &Path,
+    expected: &Journal,
+    phase: Phase,
+    active: bool,
+    guard: bool,
+    reset_refused: bool,
+) -> Result<Journal> {
+    let actual = load_journal(directory, &expected.original.request_id)?
+        .ok_or_else(|| anyhow::anyhow!("original adoption journal disappeared"))?;
+    let membership_write_ahead = !actual.source_membership_started
+        && expected.source_membership_started
+        && expected.phase == Phase::RemoteCommitted
+        && phase == Phase::SourceMembershipStarted;
+    ensure!(
+        actual.schema == 1
+            && actual.role == expected.role
+            && actual.phase == expected.phase
+            && actual.original == expected.original
+            && (actual.source_membership_started == expected.source_membership_started
+                || membership_write_ahead)
+            && actual
+                .receipts
+                .iter()
+                .all(|(key, value)| expected.receipts.get(key) == Some(value)),
+        "stale original adoption journal"
+    );
+    let permitted = if reset_refused {
+        expected.phase == Phase::RefusedNotStarted
+            && ((expected.role == Role::Source && phase == Phase::SourcePending)
+                || (expected.role == Role::Destination
+                    && matches!(phase, Phase::DestinationPending | Phase::RefusedNotStarted)))
+    } else {
+        matches!(
+            (expected.role, expected.phase, phase),
+            (Role::Source, Phase::SourcePending, Phase::RemoteCommitted)
+                | (Role::Source, Phase::SourcePending, Phase::RefusedNotStarted)
+                | (
+                    Role::Source,
+                    Phase::RefusedNotStarted,
+                    Phase::RemoteCommitted
+                )
+                | (
+                    Role::Source,
+                    Phase::RemoteCommitted,
+                    Phase::SourceMembershipStarted
+                )
+                | (
+                    Role::Source,
+                    Phase::SourceMembershipStarted,
+                    Phase::SourceMembershipCommitted
+                )
+                | (
+                    Role::Source,
+                    Phase::SourceMembershipCommitted,
+                    Phase::Settled
+                )
+                | (
+                    Role::Destination,
+                    Phase::DestinationPending,
+                    Phase::MainStarted
+                )
+                | (
+                    Role::Destination,
+                    Phase::DestinationPending,
+                    Phase::RefusedNotStarted
+                )
+                | (Role::Destination, Phase::MainStarted, Phase::MainCommitted)
+                | (
+                    Role::Destination,
+                    Phase::MainCommitted,
+                    Phase::PrimaryStarted
+                )
+                | (
+                    Role::Destination,
+                    Phase::PrimaryStarted,
+                    Phase::PrimaryCommitted
+                )
+                | (
+                    Role::Destination,
+                    Phase::PrimaryCommitted,
+                    Phase::TwinsStarted
+                )
+                | (
+                    Role::Destination,
+                    Phase::TwinsStarted,
+                    Phase::TwinsCommitted
+                )
+                | (
+                    Role::Destination,
+                    Phase::TwinsCommitted,
+                    Phase::ComponentsVerified
+                )
+                | (
+                    Role::Destination,
+                    Phase::ComponentsVerified,
+                    Phase::GuardClearing
+                )
+                | (Role::Destination, Phase::GuardClearing, Phase::GuardCleared)
+                | (
+                    Role::Destination,
+                    Phase::GuardCleared,
+                    Phase::RemoteCommitted
+                )
+        )
+    };
+    ensure!(permitted, "non-monotone original adoption transition");
+    let mut next = expected.clone();
+    next.phase = phase;
+    let mut registry = load_registry(directory)?;
+    ensure!(
+        registry
+            .entries
+            .get(&next.original.request_id)
+            .is_some_and(|entry| {
+                entry.role == expected.role
+                    && entry.phase == expected.phase
+                    && entry.request_sha256 == expected.original.request_sha256
+                    && entry.binding_sha256 == expected.original.binding_sha256
+                    && entry.lease_id == expected.original.lease_id
+            }),
+        "stale original adoption registry"
+    );
+    exclude_other_active(&registry, &next.original.request_id)?;
+    if active {
+        registry.active = Some(next.original.request_id.clone());
+    } else if registry.active.as_deref() == Some(next.original.request_id.as_str()) {
+        registry.active = None;
+    }
+    registry
+        .entries
+        .insert(next.original.request_id.clone(), registry_entry(&next));
+    write_journal(directory, &next)?;
+    write_registry(directory, &registry)?;
+    if guard {
+        ensure!(
+            next.role == Role::Destination,
+            "source has no destination guard"
+        );
+        write_guard(directory, &next)?;
+    }
+    Ok(next)
+}
+
+fn original_proof(request: &AdoptionRequest, request_raw_sha256: &str) -> OriginalProof {
+    OriginalProof {
+        request_id: request.request_id.clone(),
+        request_sha256: request.request_sha256.clone(),
+        binding_sha256: request.binding_sha256.clone(),
+        owner_sha256: request.owner_sha256.clone(),
+        lease_id: request.lease_id.clone(),
+        native_generation: request.native_generation,
+        source_alias: request.source_alias.clone(),
+        source_configuration_revision: request.source_configuration_revision.clone(),
+        source: request.source.clone(),
+        destination: request.destination.clone(),
+        source_catalog_raw_sha256: sha256(request.source_catalog_json.as_bytes()),
+        request_raw_sha256: request_raw_sha256.into(),
+    }
+}
+
+fn validate_terminal_receipt(original: &OriginalProof, receipt: &TerminalProof) -> Result<()> {
+    ensure!(
+        receipt.schema == 1 && receipt.phase == Phase::RemoteCommitted,
+        "invalid terminal schema"
+    );
+    ensure!(
+        receipt.outcome == "remote_committed" && receipt.guard_cleared,
+        "terminal guard is not cleared"
+    );
+    ensure!(
+        receipt.original == *original,
+        "terminal original context mismatch"
+    );
+    ensure!(
+        receipt.request_id == original.request_id
+            && receipt.request_sha256 == original.request_sha256
+            && receipt.binding_sha256 == original.binding_sha256
+            && receipt.owner_sha256 == original.owner_sha256,
+        "terminal request/owner mismatch"
+    );
+    ensure!(
+        receipt.destination_peers.is_empty()
+            && receipt.destination_bindings == "self_only"
+            && receipt.drive_status == "unsupported_uninitialized_without_reverse_peer"
+            && !receipt.membership_by_id_ready,
+        "terminal acquired unsupported membership"
+    );
+    let post = &receipt.post_destination;
+    ensure!(
+        post.node_id == original.destination.node_id
+            && post.swarm_id == original.source.swarm_id
+            && post.catalog_digest == original.source.catalog_digest
+            && post.primary == original.source.primary
+            && post.twins == original.source.twins
+            && post.bindings_sha256 == original.destination.bindings_sha256
+            && post.self_bindings_valid
+            && post.peers_empty
+            && post.membership_valid
+            && post.membership_sha256.is_some()
+            && post.qt_absent
+            && post.drive_absent,
+        "terminal post-adoption destination mismatch"
+    );
+    let main = &receipt.main_receipt;
+    ensure!(
+        main.original_source_catalog_sha256 == original.source_catalog_raw_sha256
+            && main.expected_source_catalog_digest == original.source.catalog_digest
+            && main.destination_catalog_digest == original.source.catalog_digest
+            && main.original_destination_store_sha256 == original.destination.outer_store_sha256
+            && main.destination_store_sha256 == post.outer_store_sha256
+            && main.destination_bindings_sha256 == original.destination.bindings_sha256
+            && main.destination_peers_empty
+            && main.parent_closure
+            && main.postread,
+        "terminal main receipt mismatch"
+    );
+    for (kind, component) in [
+        ("primary", &receipt.primary_receipt),
+        ("twins", &receipt.twins_receipt),
+    ] {
+        let expected = if kind == "primary" {
+            &original.source.primary
+        } else {
+            &original.source.twins
+        };
+        ensure!(
+            component.component == kind
+                && &component.source == expected
+                && &component.destination == expected
+                && component.destination_raw_sha256 == expected.raw_sha256
+                && component.destination_raw_len == expected.raw_len
+                && component.parent_closure
+                && component.postread,
+            "terminal {kind} receipt mismatch"
+        );
+    }
+    Ok(())
+}
+
+fn validate_settled_receipt(original: &OriginalProof, receipt: &SettledReceipt) -> Result<()> {
+    ensure!(
+        receipt.schema == 1 && receipt.phase == Phase::Settled,
+        "invalid settlement schema"
+    );
+    ensure!(
+        receipt.original == *original,
+        "settled original context mismatch"
+    );
+    ensure!(
+        receipt.request_id == original.request_id
+            && receipt.request_sha256 == original.request_sha256
+            && receipt.binding_sha256 == original.binding_sha256,
+        "settled request mismatch"
+    );
+    validate_terminal_receipt(original, &receipt.remote)?;
+    let membership = &receipt.source_membership;
+    ensure!(
+        membership.original_source_store_sha256 == original.source.outer_store_sha256
+            && membership.destination_node_id == original.destination.node_id
+            && membership.peer_added == original.source_alias
+            && membership.postread
+            && membership.source_store_sha256 != original.source.outer_store_sha256,
+        "source membership proof mismatch"
+    );
+    ensure!(
+        receipt.destination_peers.is_empty()
+            && receipt.destination_bindings == "self_only"
+            && receipt.sync == "sync_peer_completed"
+            && receipt.drive_status == "unsupported_uninitialized_without_reverse_peer"
+            && !receipt.membership_by_id_ready,
+        "settlement has unsupported membership"
+    );
+    Ok(())
+}
+
+fn validate_refusal(original: &OriginalProof, receipt: &RefusalReceipt) -> Result<()> {
+    ensure!(
+        receipt.schema == 1
+            && receipt.phase == Phase::RefusedNotStarted
+            && receipt.outcome == "refused_not_started"
+            && receipt.original == *original
+            && receipt.request_id == original.request_id
+            && receipt.request_sha256 == original.request_sha256
+            && receipt.binding_sha256 == original.binding_sha256
+            && !receipt.product_effects
+            && receipt.reasons.len() <= 32
+            && receipt.reasons.iter().all(|reason| reason.len() <= 2048),
+        "invalid zero-effect refusal"
+    );
+    Ok(())
+}
+
+pub(crate) fn adopt_source(config: &Config, alias: &str, bytes: Vec<u8>) -> Result<Value> {
+    let options: AdoptOptions = bounded(&bytes, "adoption options")?;
     let directory = config.dir.join("swarm");
-    let existing = load_journal(&directory, &options.request_id)?;
-    if let Some(journal) = &existing {
-        if journal.phase == "settled" {
-            let receipt = journal
-                .receipts
-                .get("settlement")
-                .ok_or_else(|| anyhow::anyhow!("settled adoption receipt is unavailable"))?;
-            return bounded_reply(receipt);
-        }
-        ensure!(
-            journal.role == Role::Source,
-            "request belongs to another endpoint"
-        );
-        ensure!(
-            matches!(
-                journal.phase.as_str(),
-                "source_pending" | "remote_committed" | "refused_not_started"
-            ),
-            "original adoption is not eligible for continuation"
-        );
-        ensure!(
-            options.previous_lease_drained,
-            "previous CLI child and pipe drain is not established"
-        );
-    }
     let lock = AdoptionLock::acquire(config)?;
+    if let Some(journal) = load_journal(&directory, &options.request_id)? {
+        return read_only_original(config, alias, &options, journal, &lock);
+    }
     let snapshot = capture_locked(config, &lock)?;
-    let request = build_request(
-        config,
-        alias,
-        &options,
-        &snapshot,
-        existing.as_ref().map(|j| j.lease_id.clone()),
-    )?;
-    if let Some(journal) = &existing {
-        ensure!(
-            journal.request_sha256 == request.request_sha256,
-            "request UUID/body mismatch"
-        );
-        ensure!(
-            journal.binding_sha256 == request.binding_sha256,
-            "request binding mismatch"
-        );
-        ensure!(
-            journal.owner_sha256 == request.owner_sha256,
-            "native owner/lease mismatch"
-        );
-    }
-    let mut journal = existing
-        .clone()
-        .unwrap_or_else(|| new_journal(&request, Role::Source));
-    if existing.is_none()
-        || existing
-            .as_ref()
-            .is_some_and(|journal| journal.phase == "refused_not_started")
-    {
-        advance(&directory, &mut journal, "source_pending", true, false)?;
-    }
+    let request = build_request(config, alias, &options, &snapshot)?;
+    let request_bytes = serde_json::to_vec(&request)?;
+    ensure!(
+        request_bytes.len() <= REQUEST_BYTES,
+        "aggregate adoption request exceeds 32MiB"
+    );
+    validate_source_candidate(&request, request_bytes.len())?;
+    let request_raw_sha256 = sha256(&request_bytes);
+    let mut lease = OriginalLease::new(request, request_raw_sha256, snapshot.outer_raw.clone());
+    let journal = new_journal(lease.original(), Role::Source);
+    start_journal(&directory, &journal)?;
     drop(lock);
-    if existing
-        .as_ref()
-        .is_some_and(|journal| journal.phase == "source_pending")
-    {
-        let status = status_remote(config, alias, json!({"request_id": request.request_id}))?;
-        let remote_journal = status["journal"].clone();
-        ensure!(
-            remote_journal["role"] == "destination",
-            "remote adoption endpoint mismatch"
-        );
-        ensure!(
-            remote_journal["request_sha256"] == request.request_sha256,
-            "remote request hash mismatch"
-        );
-        ensure!(
-            remote_journal["binding_sha256"] == request.binding_sha256,
-            "remote binding mismatch"
-        );
-        ensure!(
-            remote_journal["owner_sha256"] == request.owner_sha256,
-            "remote owner hash mismatch"
-        );
-        if remote_journal["phase"] == "refused_not_started" {
-            let refusal = remote_journal["receipts"]["refusal"].clone();
-            ensure!(
-                refusal["outcome"] == "refused_not_started",
-                "invalid refusal receipt"
-            );
-            journal.receipts.insert("refusal".into(), refusal.clone());
-            advance(
-                &directory,
-                &mut journal,
-                "refused_not_started",
-                false,
-                false,
-            )?;
-            return bounded_reply(&refusal);
-        }
-        ensure!(
-            remote_journal["phase"] == "remote_committed",
-            "remote adoption is still partial or unknown"
-        );
-        let receipt = remote_journal["receipts"]["remote"].clone();
-        ensure!(
-            receipt["phase"] == "remote_committed",
-            "invalid remote receipt"
-        );
-        ensure!(
-            receipt["request_sha256"] == request.request_sha256,
-            "remote receipt request mismatch"
-        );
-        ensure!(
-            receipt["binding_sha256"] == request.binding_sha256,
-            "remote receipt binding mismatch"
-        );
-        for component in ["main_receipt", "primary_receipt", "twins_receipt"] {
-            ensure!(
-                receipt[component].is_object(),
-                "remote component receipt is incomplete"
-            );
-        }
-        journal.receipts.insert("remote".into(), receipt);
-        advance(&directory, &mut journal, "remote_committed", true, false)?;
+    finish_adopt_reply(config, &mut lease, &request_bytes, journal)
+}
+
+fn read_only_original(
+    config: &Config,
+    alias: &str,
+    options: &AdoptOptions,
+    journal: Journal,
+    lock: &AdoptionLock,
+) -> Result<Value> {
+    ensure!(journal.role == Role::Source, "request belongs to another endpoint");
+    let snapshot = capture_locked(config, lock)?;
+    if journal.phase == Phase::Settled {
+        let original = &journal.original;
+        let preview = make_preview(options.preview.source.clone(), options.preview.destination.clone())?;
+        ensure!(options.preview == preview, "original preview changed");
+        ensure!(original.source == options.preview.source && original.destination == options.preview.destination,
+            "original endpoint preimages changed");
+        ensure!(original.request_id == options.request_id && original.lease_id == options.lease_id
+            && original.native_generation == options.native_generation,
+            "original request or lease changed");
+        ensure!(original.request_sha256 == request_hash(&options.request_id, &options.preview)?,
+            "original request body hash mismatch");
+        ensure!(original.source_alias == alias
+            && original.source_configuration_revision == options.preview.source.configuration_revision,
+            "original source binding changed");
+        let binding = sha256(&serde_json::to_vec(&json!({
+            "request_sha256": original.request_sha256,
+            "source_alias": alias,
+            "source_configuration_revision": original.source_configuration_revision,
+        }))?);
+        ensure!(original.binding_sha256 == binding, "original request binding mismatch");
+        ensure!(original.owner_sha256 == owner_hash(
+            &options.native_ticket, options.native_generation, &options.lease_id)?,
+            "original native owner mismatch");
+        ensure!(original.source_catalog_raw_sha256 == options.preview.source.catalog_raw_sha256
+            && original.request_raw_sha256.len() == 64
+            && original.request_raw_sha256.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "original raw request proof mismatch");
+        ensure!(snapshot.store.node_id == original.source.node_id
+            && snapshot.store.catalog.swarm_id == original.source.swarm_id
+            && machines_revision(config)? == original.source_configuration_revision
+            && snapshot.store.peers.get(alias).is_some_and(|peer| peer.node == original.destination.node_id),
+            "settled source or membership changed");
+        let value = journal.receipts.get("settlement")
+            .ok_or_else(|| anyhow::anyhow!("settled receipt is unavailable"))?;
+        let receipt: SettledReceipt = bounded(&serde_json::to_vec(value)?, "settled receipt")?;
+        validate_settled_receipt(original, &receipt)?;
+        return bounded_reply(&receipt);
     }
-    if journal.phase != "remote_committed" {
-        let bytes = serde_json::to_vec(&request)?;
+    let request = build_request(config, alias, options, &snapshot)?;
+    let request_bytes = serde_json::to_vec(&request)?;
+    validate_source_candidate(&request, request_bytes.len())?;
+    let original = original_proof(&request, &sha256(&request_bytes));
+    ensure!(journal.original == original, "original full request/context mismatch");
+    anyhow::bail!("original adoption is Partial/Unknown and read-only in a distinct CLI; no continuation is available")
+}
+
+fn source_journal(config: &Config, lock: &AdoptionLock, lease: &OriginalLease) -> Result<Journal> {
+    let journal = load_journal(&config.dir.join("swarm"), &lease.request.request_id)?
+        .ok_or_else(|| anyhow::anyhow!("original source journal is missing"))?;
+    ensure!(
+        journal.role == Role::Source && journal.original == lease.original(),
+        "original source context changed"
+    );
+    let snapshot = capture_locked(config, lock)?;
+    ensure!(snapshot.outer_raw == lease.outer_raw, "original outer store bytes changed");
+    ensure!(
+        source_summary(config, &snapshot)? == lease.request.source,
+        "original source changed"
+    );
+    ensure!(
+        machines_revision(config)? == lease.request.source_configuration_revision,
+        "source configuration changed"
+    );
+    Ok(journal)
+}
+
+fn finish_adopt_reply(
+    config: &Config,
+    lease: &mut OriginalLease,
+    request_bytes: &[u8],
+    mut journal: Journal,
+) -> Result<Value> {
+    let directory = config.dir.join("swarm");
+    let reply = lease.call(config, &["swarm", "adopt"], request_bytes)?;
+    if !reply.evidence.status.success() {
+        match reconcile_remote_committed(config, lease) {
+            Ok(terminal) => return finish_remote_committed(config, lease, journal, terminal),
+            Err(status) => {
+                let stderr = String::from_utf8_lossy(&reply.stderr);
+                return Err(status).context(format!(
+                    "original remote adoption failed: {}",
+                    stderr.trim()
+                ));
+            }
+        }
+    }
+    let phase = parse_unique(&reply.bytes)?["phase"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    if phase == "refused_not_started" {
+        let refusal: RefusalReceipt = bounded(&reply.bytes, "adoption refusal")?;
+        validate_refusal(&lease.original(), &refusal)?;
+        let lock = AdoptionLock::acquire(config)?;
         ensure!(
-            bytes.len() <= REQUEST_BYTES,
-            "aggregate adoption request exceeds 32MiB"
+            source_journal(config, &lock, lease)? == journal,
+            "stale original source journal"
         );
-        let reply = transport::run(
-            config,
-            alias,
-            &["swarm", "adopt"],
-            Some(&serde_json::from_slice(&bytes)?),
+        journal
+            .receipts
+            .insert("refusal".into(), serde_json::to_value(&refusal)?);
+        journal = advance_original(
+            &directory,
+            &journal,
+            Phase::RefusedNotStarted,
+            false,
+            false,
+            false,
         )?;
-        let reply_value: Value = bounded(&serde_json::to_vec(&reply)?, "remote adoption receipt")?;
-        if reply_value["outcome"] == "refused_not_started" {
-            journal.phase = "refused_not_started".into();
-            journal
-                .receipts
-                .insert("refusal".into(), reply_value.clone());
-            advance(
+        drop(lock);
+        if !lease.retried_refusal {
+            lease.retried_refusal = true;
+            let input = serde_json::to_vec(&PreviewRequest {
+                source: lease.request.source.clone(),
+            })?;
+            let reply = lease.call(config, &["swarm", "adoption-preview", "--json"], &input)?;
+            ensure!(
+                reply.evidence.status.success(),
+                "refusal preview is unavailable"
+            );
+            let preview: Preview = bounded(&reply.bytes, "refusal preview")?;
+            ensure!(
+                preview.eligible
+                    && preview.source == lease.request.source
+                    && preview.destination == lease.request.destination
+                    && preview.preview_sha256 == lease.request.preview_sha256,
+                "fresh original preview is not identical"
+            );
+            let lock = AdoptionLock::acquire(config)?;
+            ensure!(
+                source_journal(config, &lock, lease)? == journal,
+                "stale refused source journal"
+            );
+            journal = advance_original(
                 &directory,
-                &mut journal,
-                "refused_not_started",
+                &journal,
+                Phase::SourcePending,
+                true,
                 false,
-                false,
+                true,
             )?;
-            return bounded_reply(&reply_value);
+            drop(lock);
+            return finish_adopt_reply(config, lease, request_bytes, journal);
         }
-        ensure!(
-            reply_value["phase"] == "remote_committed",
-            "remote adoption is not committed"
-        );
-        ensure!(
-            reply_value["request_sha256"] == request.request_sha256,
-            "remote request hash mismatch"
-        );
-        ensure!(
-            reply_value["binding_sha256"] == request.binding_sha256,
-            "remote binding mismatch"
-        );
-        journal.receipts.insert("remote".into(), reply_value);
-        advance(&directory, &mut journal, "remote_committed", true, false)?;
+        return bounded_reply(&refusal);
     }
-    complete_source_membership(config, alias, &request, journal)
+    ensure!(
+        phase == "remote_committed",
+        "remote adoption is partial or unknown"
+    );
+    let terminal: TerminalProof = bounded(&reply.bytes, "remote terminal proof")?;
+    finish_remote_committed(config, lease, journal, terminal)
+}
+
+fn reconcile_remote_committed(config: &Config, lease: &mut OriginalLease) -> Result<TerminalProof> {
+    let input = serde_json::to_vec(&json!({"request_id": lease.request.request_id}))?;
+    let reply = lease.call(config, &["swarm", "adoption-status", "--json"], &input)?;
+    ensure!(
+        reply.evidence.status.success(),
+        "original remote status is unavailable"
+    );
+    let status: StatusReply = bounded(&reply.bytes, "original remote status")?;
+    ensure!(
+        status.schema == 1 && status.request_id == lease.request.request_id,
+        "status request mismatch"
+    );
+    ensure!(
+        !status.guard_present && status.journal.role == Role::Destination,
+        "remote guard or role mismatch"
+    );
+    ensure!(
+        status.journal.original == lease.original()
+            && status.journal.phase == Phase::RemoteCommitted,
+        "remote original is partial or has another context"
+    );
+    let receipt = status
+        .journal
+        .receipts
+        .get("remote")
+        .ok_or_else(|| anyhow::anyhow!("remote terminal receipt is missing"))?;
+    let terminal: TerminalProof = bounded(&serde_json::to_vec(receipt)?, "remote terminal proof")?;
+    validate_terminal_receipt(&lease.original(), &terminal)?;
+    Ok(terminal)
+}
+
+fn finish_remote_committed(
+    config: &Config,
+    lease: &mut OriginalLease,
+    mut journal: Journal,
+    terminal: TerminalProof,
+) -> Result<Value> {
+    lease.observe_drain()?;
+    validate_terminal_receipt(&lease.original(), &terminal)?;
+    let lock = AdoptionLock::acquire(config)?;
+    ensure!(
+        source_journal(config, &lock, lease)? == journal,
+        "stale original source journal"
+    );
+    ensure!(
+        matches!(
+            journal.phase,
+            Phase::SourcePending | Phase::RefusedNotStarted
+        ),
+        "terminal would regress the source phase"
+    );
+    journal
+        .receipts
+        .insert("remote".into(), serde_json::to_value(&terminal)?);
+    let journal = advance_original(
+        &config.dir.join("swarm"),
+        &journal,
+        Phase::RemoteCommitted,
+        true,
+        false,
+        false,
+    )?;
+    drop(lock);
+    complete_source_membership(config, lease, journal, terminal)
 }
 
 fn complete_source_membership(
     config: &Config,
-    alias: &str,
-    request: &AdoptionRequest,
+    lease: &OriginalLease,
     mut journal: Journal,
+    terminal: TerminalProof,
 ) -> Result<Value> {
+    lease.observe_drain()?;
+    validate_terminal_receipt(&lease.original(), &terminal)?;
     ensure!(
-        journal.phase == "remote_committed",
-        "source membership requires terminal remote proof"
-    );
-    ensure!(
-        !journal.source_membership_started,
+        journal.phase == Phase::RemoteCommitted && !journal.source_membership_started,
         "source membership is already started or unknown"
     );
     let directory = config.dir.join("swarm");
+    let request = &lease.request;
+    let alias = &request.source_alias;
     let mut lock = AdoptionLock::acquire(config)?;
+    ensure!(
+        source_journal(config, &lock, lease)? == journal,
+        "stale original source journal"
+    );
     let snapshot = capture_locked(config, &lock)?;
-    let current = source_summary(config, &snapshot)?;
-    ensure!(
-        current == request.source,
-        "source changed before local membership"
-    );
-    ensure!(
-        owner_hash(
-            &request.native_ticket,
-            request.native_generation,
-            &request.lease_id
-        )? == journal.owner_sha256,
-        "native owner changed"
-    );
     ensure!(
         !snapshot.store.peers.contains_key(alias),
         "source membership already exists without a receipt"
     );
     journal.source_membership_started = true;
-    advance(
+    journal = advance_original(
         &directory,
-        &mut journal,
-        "source_membership_started",
+        &journal,
+        Phase::SourceMembershipStarted,
         true,
+        false,
         false,
     )?;
     let mut store = snapshot.store;
-    let original = snapshot.outer_raw.clone();
-    let previous_catalog = store.catalog.digest();
+    let original = lease.outer_raw.clone();
     store.peers.insert(
-        alias.into(),
+        alias.clone(),
         Peer {
             node: request.destination.node_id.clone(),
             last_sync: 0,
@@ -1173,16 +1850,10 @@ fn complete_source_membership(
     let saved = lock.adoption_save_main(config, store, original)?;
     let after = capture_locked(config, &lock)?;
     ensure!(
-        after.store.catalog.digest() == previous_catalog,
+        after.store.catalog.digest() == request.source.catalog_digest
+            && after.primary.proof() == request.source.primary
+            && after.twins.proof() == request.source.twins,
         "source history changed during membership save"
-    );
-    ensure!(
-        after.primary.proof() == request.source.primary,
-        "source primary changed during membership save"
-    );
-    ensure!(
-        after.twins.proof() == request.source.twins,
-        "source twins changed during membership save"
     );
     ensure!(
         after
@@ -1192,48 +1863,54 @@ fn complete_source_membership(
             .is_some_and(|peer| peer.node == request.destination.node_id),
         "source membership postread mismatch"
     );
+    let membership = SourceMembershipReceipt {
+        original_source_store_sha256: request.source.outer_store_sha256.clone(),
+        source_store_sha256: sha256(&saved),
+        destination_node_id: request.destination.node_id.clone(),
+        peer_added: alias.clone(),
+        postread: true,
+    };
     journal.receipts.insert(
         "source_membership".into(),
-        json!({
-            "request_id": request.request_id,
-            "request_sha256": request.request_sha256,
-            "binding_sha256": request.binding_sha256,
-            "source_store_sha256": sha256(&saved),
-            "destination_node_id": request.destination.node_id,
-            "peer_added": alias,
-            "postread": true,
-        }),
+        serde_json::to_value(&membership)?,
     );
-    advance(
+    journal = advance_original(
         &directory,
-        &mut journal,
-        "source_membership_committed",
+        &journal,
+        Phase::SourceMembershipCommitted,
+        false,
         false,
         false,
     )?;
     drop(lock);
     transport::sync_peer(config, alias).context("targeted adoption sync")?;
-    let settled = json!({
-        "schema": 1,
-        "phase": "settled",
-        "request_id": request.request_id,
-        "request_sha256": request.request_sha256,
-        "binding_sha256": request.binding_sha256,
-        "source_node_id": request.source.node_id,
-        "source_swarm_id": request.source.swarm_id,
-        "destination_node_id": request.destination.node_id,
-        "destination_swarm_id": request.destination.swarm_id,
-        "source_membership": "committed",
-        "destination_peers": {},
-        "destination_bindings": "self_only",
-        "sync": "sync_peer_completed",
-        "drive_status": "unsupported_uninitialized_without_reverse_peer",
-        "membership_by_id_ready": false,
-    });
+    let settled = SettledReceipt {
+        schema: 1,
+        phase: Phase::Settled,
+        request_id: request.request_id.clone(),
+        request_sha256: request.request_sha256.clone(),
+        binding_sha256: request.binding_sha256.clone(),
+        original: lease.original(),
+        remote: terminal,
+        source_membership: membership,
+        destination_peers: BTreeMap::new(),
+        destination_bindings: "self_only".into(),
+        sync: "sync_peer_completed".into(),
+        drive_status: "unsupported_uninitialized_without_reverse_peer".into(),
+        membership_by_id_ready: false,
+    };
+    validate_settled_receipt(&lease.original(), &settled)?;
+    let _lock = AdoptionLock::acquire(config)?;
+    let actual = load_journal(&directory, &request.request_id)?
+        .ok_or_else(|| anyhow::anyhow!("source membership journal disappeared"))?;
+    ensure!(
+        actual == journal,
+        "source membership journal changed during sync"
+    );
     journal
         .receipts
-        .insert("settlement".into(), settled.clone());
-    advance(&directory, &mut journal, "settled", false, false)?;
+        .insert("settlement".into(), serde_json::to_value(&settled)?);
+    advance_original(&directory, &journal, Phase::Settled, false, false, false)?;
     bounded_reply(&settled)
 }
 
@@ -1242,6 +1919,9 @@ fn decode_primary(raw: Option<Vec<u8>>, catalog: &Catalog) -> Result<RawComponen
         Some(bytes) => Ok(bytes.clone()),
         None => Err(Unread::Missing),
     };
+    if let Some(bytes) = &raw {
+        unique_bytes(bytes, "primary ID membership graph")?;
+    }
     let primary = Memberships::from_read(catalog, &read)?;
     primary.view(catalog)?;
     let canonical = primary.bytes()?;
@@ -1323,7 +2003,10 @@ fn decode_twins(raw: Option<Vec<u8>>, catalog: &Catalog) -> Result<RawComponent>
     })
 }
 
-fn validate_request(_config: &Config, request: &AdoptionRequest) -> Result<Catalog> {
+fn validate_source_candidate(
+    request: &AdoptionRequest,
+    encoded_request_bytes: usize,
+) -> Result<Catalog> {
     ensure!(
         request.schema == 1 && request.direction == "initiator_to_empty_destination",
         "unsupported adoption request"
@@ -1369,8 +2052,30 @@ fn validate_request(_config: &Config, request: &AdoptionRequest) -> Result<Catal
     let catalog: Catalog = bounded(request.source_catalog_json.as_bytes(), "source catalog")?;
     catalog.validate()?;
     ensure!(
+        request.source.imported && catalog.swarm_id == request.source.swarm_id,
+        "declared source/catalog swarm mismatch"
+    );
+    ensure!(
         catalog.digest() == request.source.catalog_digest,
         "source catalog body/hash mismatch"
+    );
+    ensure!(
+        request.source.catalog_raw_sha256 == sha256(request.source_catalog_json.as_bytes()),
+        "source catalog raw body/hash mismatch"
+    );
+    ensure!(catalog.operations.values().any(|operation| {
+        operation.actor == request.source.node_id
+            && matches!(&operation.key, Key::Machine { id, field } if id == &request.source.node_id && field == "name")
+            && operation.value.as_str().is_some_and(|name| !name.is_empty())
+    }), "source node has no machine-name operation");
+    let expected_capabilities = BTreeSet::from([
+        CAPABILITY.to_owned(),
+        catalog::SESSION_ID_KIND.to_owned(),
+        session_memberships::CAPABILITY.to_owned(),
+    ]);
+    ensure!(
+        request.source.capabilities == expected_capabilities,
+        "source capability floor mismatch"
     );
     let primary = decode_primary(
         request
@@ -1389,104 +2094,184 @@ fn validate_request(_config: &Config, request: &AdoptionRequest) -> Result<Catal
         &catalog,
     )?;
     ensure!(
-        primary.proof() == request.source.primary,
-        "source primary body/hash mismatch"
+        primary.proof() == request.source.primary && primary.swarm_id == request.source.swarm_id,
+        "source primary body/hash/swarm mismatch"
     );
     ensure!(
-        twins.proof() == request.source.twins,
-        "source twins body/hash mismatch"
+        twins.proof() == request.source.twins && twins.swarm_id == request.source.swarm_id,
+        "source twins body/hash/swarm mismatch"
     );
-    if primary.state == ComponentState::Nonempty {
-        ensure!(
-            request
-                .source
-                .capabilities
-                .contains(session_memberships::CAPABILITY),
-            "source lacks primary capability"
-        );
-    }
-    if twins.state == ComponentState::Nonempty {
-        ensure!(
-            request
-                .source
-                .capabilities
-                .contains(catalog::SESSION_ID_KIND),
-            "source lacks twins capability"
-        );
-    }
+    let metrics = candidate_metrics(request, &catalog, encoded_request_bytes)?;
+    ensure!(
+        metrics.main_plus_primary_ops == catalog.operations.len() + primary.count
+            && metrics.twins_entries == twins.count
+            && metrics.encoded_request_bytes == encoded_request_bytes,
+        "candidate metrics mismatch"
+    );
     Ok(catalog)
 }
 
-pub(crate) fn adopt_destination(config: &Config, value: Value) -> Result<Value> {
-    let bytes = serde_json::to_vec(&value)?;
+fn candidate_metrics(
+    request: &AdoptionRequest,
+    catalog: &Catalog,
+    encoded_request_bytes: usize,
+) -> Result<CandidateMetrics> {
+    let primary_edges = match request.source_primary_json.as_deref() {
+        Some(raw) => {
+            let graph: Catalog = bounded(raw.as_bytes(), "primary ID membership graph")?;
+            graph.validate()?;
+            graph
+                .operations
+                .values()
+                .try_fold(0usize, |total, operation| {
+                    total
+                        .checked_add(operation.parents.len())
+                        .ok_or_else(|| anyhow::anyhow!("parent edge count overflow"))
+                })?
+        }
+        None => 0,
+    };
+    let total_parent_edges =
+        catalog
+            .operations
+            .values()
+            .try_fold(primary_edges, |total, operation| {
+                total
+                    .checked_add(operation.parents.len())
+                    .ok_or_else(|| anyhow::anyhow!("parent edge count overflow"))
+            })?;
+    let metrics = CandidateMetrics {
+        main_plus_primary_ops: catalog
+            .operations
+            .len()
+            .checked_add(request.source.primary.count)
+            .ok_or_else(|| anyhow::anyhow!("operation count overflow"))?,
+        twins_entries: request.source.twins.count,
+        total_parent_edges,
+        encoded_request_bytes,
+    };
+    ensure!(
+        metrics.main_plus_primary_ops <= 100_000,
+        "combined adoption operations exceed 100000"
+    );
+    ensure!(
+        metrics.twins_entries <= 100_000,
+        "adoption twins exceed 100000"
+    );
+    ensure!(
+        metrics.total_parent_edges <= 500_000,
+        "adoption parent edges exceed 500000"
+    );
+    ensure!(
+        metrics.encoded_request_bytes <= REQUEST_BYTES,
+        "aggregate adoption request exceeds 32MiB"
+    );
+    Ok(metrics)
+}
+
+pub(crate) fn adopt_destination(config: &Config, bytes: Vec<u8>) -> Result<Value> {
     ensure!(
         bytes.len() <= REQUEST_BYTES,
         "aggregate adoption request exceeds 32MiB"
     );
     let request: AdoptionRequest = bounded(&bytes, "adoption request")?;
-    let source_catalog = validate_request(config, &request)?;
+    let source_catalog = validate_source_candidate(&request, bytes.len())?;
+    let original = original_proof(&request, &sha256(&bytes));
     let directory = config.dir.join("swarm");
-    if let Some(existing) = load_journal(&directory, &request.request_id)? {
+    let mut lock = AdoptionLock::acquire(config)?;
+    let existing = load_journal(&directory, &request.request_id)?;
+    if let Some(journal) = &existing {
         ensure!(
-            existing.request_sha256 == request.request_sha256,
-            "request UUID/body mismatch"
+            journal.role == Role::Destination && journal.original == original,
+            "original destination request/context mismatch"
         );
-        ensure!(
-            existing.binding_sha256 == request.binding_sha256,
-            "request binding mismatch"
-        );
-        if existing.phase == "remote_committed" {
-            let receipt = existing
+        if journal.phase == Phase::RemoteCommitted {
+            let receipt = journal
                 .receipts
                 .get("remote")
                 .ok_or_else(|| anyhow::anyhow!("committed adoption receipt is unavailable"))?;
-            return bounded_reply(receipt);
+            let receipt: TerminalProof =
+                bounded(&serde_json::to_vec(receipt)?, "committed terminal proof")?;
+            validate_terminal_receipt(&original, &receipt)?;
+            return bounded_reply(&receipt);
         }
         ensure!(
-            existing.phase == "refused_not_started",
+            journal.phase == Phase::RefusedNotStarted,
             "partial destination adoption is status-only"
         );
+        let refusal: RefusalReceipt = bounded(
+            &serde_json::to_vec(
+                journal
+                    .receipts
+                    .get("refusal")
+                    .ok_or_else(|| anyhow::anyhow!("original refusal is missing"))?,
+            )?,
+            "original refusal",
+        )?;
+        validate_refusal(&original, &refusal)?;
     }
-    let mut lock = AdoptionLock::acquire(config)?;
     let snapshot = capture_locked(config, &lock)?;
     let destination = destination_proof(config, &snapshot)?;
-    let mut journal = new_journal(&request, Role::Destination);
-    if !destination.eligible {
+    let mut journal = new_journal(original.clone(), Role::Destination);
+    if let Some(previous) = &existing {
+        journal.receipts = previous.receipts.clone();
+    }
+    if !destination.eligible || destination != request.destination {
         let mut reasons = destination.reasons.clone();
         if destination != request.destination {
             reasons.push("destination changed after preview".into());
         }
-        let refusal = json!({
-            "schema": 1,
-            "outcome": "refused_not_started",
-            "phase": "refused_not_started",
-            "request_id": request.request_id,
-            "request_sha256": request.request_sha256,
-            "binding_sha256": request.binding_sha256,
-            "reasons": reasons,
-            "product_effects": false,
-        });
-        journal.receipts.insert("refusal".into(), refusal.clone());
-        advance(
-            &directory,
-            &mut journal,
-            "refused_not_started",
-            false,
-            false,
-        )?;
+        let refusal = RefusalReceipt {
+            schema: 1,
+            phase: Phase::RefusedNotStarted,
+            outcome: "refused_not_started".into(),
+            request_id: request.request_id.clone(),
+            request_sha256: request.request_sha256.clone(),
+            binding_sha256: request.binding_sha256.clone(),
+            original: original.clone(),
+            reasons,
+            product_effects: false,
+        };
+        validate_refusal(&original, &refusal)?;
+        journal.phase = Phase::RefusedNotStarted;
+        journal
+            .receipts
+            .insert("refusal".into(), serde_json::to_value(&refusal)?);
+        if let Some(previous) = existing {
+            ensure!(
+                previous.phase == Phase::RefusedNotStarted && previous.original == original,
+                "refusal original context changed"
+            );
+            advance_original(
+                &directory,
+                &previous,
+                Phase::RefusedNotStarted,
+                false,
+                false,
+                true,
+            )?;
+        } else {
+            start_journal(&directory, &journal)?;
+        }
         return bounded_reply(&refusal);
     }
-    ensure!(
-        destination == request.destination,
-        "destination changed after preview"
-    );
-    advance(&directory, &mut journal, "destination_pending", true, true)?;
+    if let Some(previous) = existing {
+        journal = advance_original(
+            &directory,
+            &previous,
+            Phase::DestinationPending,
+            true,
+            true,
+            true,
+        )?;
+    } else {
+        start_journal(&directory, &journal)?;
+    }
     let destination_node = snapshot.store.node_id.clone();
     let destination_bindings = serde_json::to_vec(&snapshot.store.bindings)?;
-    advance(&directory, &mut journal, "main_started", true, true)?;
+    journal = advance_original(&directory, &journal, Phase::MainStarted, true, true, false)?;
     let mut destination_store = snapshot.store;
     let destination_original = snapshot.outer_raw.clone();
-    let previous_destination_digest = destination_store.catalog.digest();
     destination_store.catalog = source_catalog.clone();
     destination_store.imported = true;
     let saved = lock.adoption_save_main(config, destination_store, destination_original)?;
@@ -1507,51 +2292,72 @@ pub(crate) fn adopt_destination(config: &Config, value: Value) -> Result<Value> 
         serde_json::to_vec(&main_store.bindings)? == destination_bindings,
         "destination bindings changed"
     );
-    journal.receipts.insert(
-        "main".into(),
-        json!({
-            "request_id": request.request_id,
-            "request_sha256": request.request_sha256,
-            "binding_sha256": request.binding_sha256,
-            "original_source_catalog_sha256": sha256(request.source_catalog_json.as_bytes()),
-            "expected_source_catalog_digest": source_catalog.digest(),
-            "destination_catalog_digest": main_store.catalog.digest(),
-            "destination_store_sha256": sha256(&saved),
-            "pre_phase_digest": previous_destination_digest,
-            "post_phase_digest": main_store.catalog.digest(),
-            "parent_closure": true,
-        }),
-    );
-    advance(&directory, &mut journal, "main_committed", true, true)?;
-    commit_component(
+    let main = MainReceipt {
+        original_source_catalog_sha256: original.source_catalog_raw_sha256.clone(),
+        expected_source_catalog_digest: source_catalog.digest(),
+        destination_catalog_digest: main_store.catalog.digest(),
+        original_destination_store_sha256: original.destination.outer_store_sha256.clone(),
+        destination_store_sha256: sha256(&saved),
+        destination_bindings_sha256: sha256(&destination_bindings),
+        destination_peers_empty: main_store.peers.is_empty(),
+        parent_closure: true,
+        postread: true,
+    };
+    journal
+        .receipts
+        .insert("main".into(), serde_json::to_value(&main)?);
+    journal = advance_original(
+        &directory,
+        &journal,
+        Phase::MainCommitted,
+        true,
+        true,
+        false,
+    )?;
+    journal = commit_component(
         &directory,
         "primary",
         request.source_primary_json.as_deref(),
         &source_catalog,
-        &mut journal,
+        journal,
     )?;
-    commit_component(
+    journal = commit_component(
         &directory,
         "twins",
         request.source_twins_json.as_deref(),
         &source_catalog,
-        &mut journal,
+        journal,
     )?;
     let verified = capture_locked(config, &lock)?;
     ensure!(
-        verified.store.catalog.digest() == source_catalog.digest(),
-        "final main verification failed"
+        verified.store.catalog.digest() == source_catalog.digest()
+            && verified.primary.proof() == request.source.primary
+            && verified.twins.proof() == request.source.twins
+            && verified.store.node_id == destination_node
+            && serde_json::to_vec(&verified.store.bindings)? == destination_bindings
+            && verified.store.peers.is_empty(),
+        "final component verification failed"
     );
+    journal = advance_original(
+        &directory,
+        &journal,
+        Phase::ComponentsVerified,
+        true,
+        true,
+        false,
+    )?;
+    journal = advance_original(
+        &directory,
+        &journal,
+        Phase::GuardClearing,
+        true,
+        true,
+        false,
+    )?;
     ensure!(
-        verified.primary.proof() == request.source.primary,
-        "final primary verification failed"
+        read_guard(&directory)? == Some(guard_from(&journal)),
+        "active guard changed before removal"
     );
-    ensure!(
-        verified.twins.proof() == request.source.twins,
-        "final twins verification failed"
-    );
-    advance(&directory, &mut journal, "components_verified", true, true)?;
-    advance(&directory, &mut journal, "guard_clearing", true, true)?;
     match fs::remove_file(directory.join(GUARD_FILE)) {
         Ok(()) => platform::sync_dir(&directory)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1559,42 +2365,68 @@ pub(crate) fn adopt_destination(config: &Config, value: Value) -> Result<Value> 
         }
         Err(error) => return Err(error.into()),
     }
+    journal = advance_original(
+        &directory,
+        &journal,
+        Phase::GuardCleared,
+        true,
+        false,
+        false,
+    )?;
     let verified = capture_locked(config, &lock)?;
     ensure!(
-        verified.store.catalog.digest() == source_catalog.digest(),
-        "terminal main verification failed"
+        read_guard(&directory)?.is_none(),
+        "terminal guard is present"
     );
     ensure!(
-        verified.primary.proof() == request.source.primary,
-        "terminal primary verification failed"
+        verified.store.catalog.digest() == source_catalog.digest()
+            && verified.primary.proof() == request.source.primary
+            && verified.twins.proof() == request.source.twins
+            && verified.store.node_id == destination_node
+            && serde_json::to_vec(&verified.store.bindings)? == destination_bindings
+            && verified.store.peers.is_empty(),
+        "terminal component verification failed"
     );
-    ensure!(
-        verified.twins.proof() == request.source.twins,
-        "terminal twins verification failed"
-    );
-    let remote = json!({
-        "schema": 1,
-        "phase": "remote_committed",
-        "outcome": "remote_committed",
-        "request_id": request.request_id,
-        "request_sha256": request.request_sha256,
-        "binding_sha256": request.binding_sha256,
-        "owner_sha256": request.owner_sha256,
-        "source_node_id": request.source.node_id,
-        "source_swarm_id": request.source.swarm_id,
-        "destination_node_id": request.destination.node_id,
-        "destination_swarm_id": request.destination.swarm_id,
-        "destination_peers": {},
-        "destination_bindings": "self_only",
-        "main_receipt": journal.receipts["main"],
-        "primary_receipt": journal.receipts["primary"],
-        "twins_receipt": journal.receipts["twins"],
-        "drive_status": "unsupported_uninitialized_without_reverse_peer",
-        "membership_by_id_ready": false,
-    });
-    journal.receipts.insert("remote".into(), remote.clone());
-    advance(&directory, &mut journal, "remote_committed", false, false)?;
+    let remote = TerminalProof {
+        schema: 1,
+        phase: Phase::RemoteCommitted,
+        outcome: "remote_committed".into(),
+        request_id: request.request_id.clone(),
+        request_sha256: request.request_sha256.clone(),
+        binding_sha256: request.binding_sha256.clone(),
+        owner_sha256: request.owner_sha256.clone(),
+        original: original.clone(),
+        main_receipt: main,
+        primary_receipt: journal_receipt(&journal, "primary")?,
+        twins_receipt: journal_receipt(&journal, "twins")?,
+        post_destination: post_destination_proof(config, &verified, &original)?,
+        destination_peers: BTreeMap::new(),
+        destination_bindings: "self_only".into(),
+        guard_cleared: true,
+        drive_status: "unsupported_uninitialized_without_reverse_peer".into(),
+        membership_by_id_ready: false,
+    };
+    validate_terminal_receipt(&original, &remote)?;
+    journal
+        .receipts
+        .insert("remote".into(), serde_json::to_value(&remote)?);
+    advance_original(
+        &directory,
+        &journal,
+        Phase::RemoteCommitted,
+        false,
+        false,
+        false,
+    )?;
     bounded_reply(&remote)
+}
+
+fn journal_receipt<T: DeserializeOwned>(journal: &Journal, key: &str) -> Result<T> {
+    let value = journal
+        .receipts
+        .get(key)
+        .ok_or_else(|| anyhow::anyhow!("missing {key} receipt"))?;
+    bounded(&serde_json::to_vec(value)?, "stored adoption receipt")
 }
 
 fn commit_component(
@@ -1602,15 +2434,37 @@ fn commit_component(
     kind: &str,
     raw: Option<&str>,
     catalog: &Catalog,
-    journal: &mut Journal,
-) -> Result<()> {
-    let phase = format!("{kind}_started");
-    advance(directory, journal, &phase, true, true)?;
-    let path = directory.join(match kind {
-        "primary" => session_memberships::FILE,
-        "twins" => super::session_ids::FILE,
+    mut journal: Journal,
+) -> Result<Journal> {
+    let (path, started, committed, original, expected) = match kind {
+        "primary" => (
+            directory.join(session_memberships::FILE),
+            Phase::PrimaryStarted,
+            Phase::PrimaryCommitted,
+            journal.original.destination.primary.clone(),
+            journal.original.source.primary.clone(),
+        ),
+        "twins" => (
+            directory.join(super::session_ids::FILE),
+            Phase::TwinsStarted,
+            Phase::TwinsCommitted,
+            journal.original.destination.twins.clone(),
+            journal.original.source.twins.clone(),
+        ),
         _ => anyhow::bail!("unknown adoption component"),
-    });
+    };
+    journal = advance_original(directory, &journal, started, true, true, false)?;
+    let cap = if kind == "primary" {
+        session_memberships::MAX_BYTES
+    } else {
+        COMPONENT_BYTES
+    };
+    let before = read_component(&path, cap)?;
+    ensure!(
+        before.as_deref().map(sha256) == original.raw_sha256
+            && before.as_ref().map(|bytes| bytes.len() as u64) == original.raw_len,
+        "{kind} destination preimage changed"
+    );
     if let Some(raw) = raw {
         store_replace(&path, raw.as_bytes())?;
     } else {
@@ -1625,68 +2479,92 @@ fn commit_component(
     } else {
         decode_twins(raw.map(|text| text.as_bytes().to_vec()), catalog)?
     };
-    let expected = if kind == "primary" {
-        journal.primary.clone()
-    } else {
-        journal.twins.clone()
-    };
+    let destination = component.proof();
     ensure!(
-        component.proof() == expected,
+        destination == expected,
         "{kind} first-copy postread mismatch"
     );
-    journal.receipts.insert(
-        kind.into(),
-        json!({
-            "request_id": journal.request_id,
-            "request_sha256": journal.request_sha256,
-            "binding_sha256": journal.binding_sha256,
-            "component": kind,
-            "source_state": expected.state,
-            "destination_state": component.state,
-            "source_swarm_id": expected.swarm_id,
-            "destination_swarm_id": component.swarm_id,
-            "original_source_raw_sha256": expected.raw_sha256,
-            "destination_raw_sha256": component.raw.as_deref().map(sha256),
-            "expected_source_canonical_sha256": expected.canonical_sha256,
-            "destination_canonical_sha256": sha256(&component.canonical),
-            "count": component.count,
-            "parent_closure": true,
-        }),
-    );
-    let phase = format!("{kind}_committed");
-    advance(directory, journal, &phase, true, true)
+    let receipt = ComponentReceipt {
+        component: kind.into(),
+        source: expected.clone(),
+        destination,
+        destination_raw_sha256: component.raw.as_deref().map(sha256),
+        destination_raw_len: component.raw.as_ref().map(|bytes| bytes.len() as u64),
+        parent_closure: true,
+        postread: true,
+    };
+    journal
+        .receipts
+        .insert(kind.into(), serde_json::to_value(&receipt)?);
+    advance_original(directory, &journal, committed, true, true, false)
 }
 
-pub(crate) fn status_destination(config: &Config, value: Value) -> Result<Value> {
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct StatusRequest {
-        request_id: String,
-    }
-    let request: StatusRequest = bounded(&serde_json::to_vec(&value)?, "adoption status request")?;
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StatusRequest {
+    request_id: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StatusReply {
+    schema: u32,
+    request_id: String,
+    journal: Journal,
+    guard_present: bool,
+}
+
+pub(crate) fn status_destination(config: &Config, bytes: Vec<u8>) -> Result<Value> {
+    let request: StatusRequest = bounded(&bytes, "adoption status request")?;
+    ensure!(
+        canonical_uuid(&request.request_id),
+        "invalid adoption request UUID"
+    );
     let directory = config.dir.join("swarm");
     let journal = load_journal(&directory, &request.request_id)?
         .ok_or_else(|| anyhow::anyhow!("adoption request is unavailable"))?;
-    let guard_present = !matches!(
-        super::read_regular(&directory.join(GUARD_FILE), GUARD_BYTES),
-        Err(Unread::Missing)
-    );
-    bounded_reply(&json!({
-        "schema": 1,
-        "request_id": request.request_id,
-        "journal": journal,
-        "guard_present": guard_present,
-    }))
+    let guard_present = match super::read_regular(&directory.join(GUARD_FILE), GUARD_BYTES) {
+        Ok(bytes) => {
+            let guard: Guard = bounded(&bytes, "status adoption guard")?;
+            ensure!(
+                guard.request_id == journal.original.request_id && guard == guard_from(&journal),
+                "active guard does not match the original journal"
+            );
+            true
+        }
+        Err(Unread::Missing) => false,
+        Err(_) => true,
+    };
+    bounded_reply(&StatusReply {
+        schema: 1,
+        request_id: request.request_id,
+        journal,
+        guard_present,
+    })
 }
 
-pub(crate) fn status_remote(config: &Config, alias: &str, value: Value) -> Result<Value> {
-    let reply = transport::run(
+pub(crate) fn status_remote(config: &Config, alias: &str, bytes: Vec<u8>) -> Result<Value> {
+    let request: StatusRequest = bounded(&bytes, "adoption status request")?;
+    ensure!(
+        canonical_uuid(&request.request_id),
+        "invalid adoption request UUID"
+    );
+    let reply = original_request(
         config,
         alias,
         &["swarm", "adoption-status", "--json"],
-        Some(&value),
+        &bytes,
     )?;
-    bounded_reply(&reply)
+    ensure!(
+        reply.evidence.status.success(),
+        "original remote status is unavailable"
+    );
+    let status: StatusReply = bounded(&reply.bytes, "adoption status")?;
+    ensure!(
+        status.schema == 1 && status.request_id == request.request_id,
+        "adoption status request mismatch"
+    );
+    bounded_reply(&status)
 }
 
 #[cfg(test)]
@@ -1732,9 +2610,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         guard_directory(temp.path()).unwrap();
         let request = catalog::new_id();
-        let entry = |role, phase: &str| RegistryEntry {
+        let entry = |role, phase| RegistryEntry {
             role,
-            phase: phase.into(),
+            phase,
             request_sha256: "a".repeat(64),
             binding_sha256: "b".repeat(64),
             lease_id: catalog::new_id(),
@@ -1742,15 +2620,326 @@ mod tests {
         let mut registry = Registry {
             schema: 1,
             active: Some(request.clone()),
-            entries: BTreeMap::from([(request.clone(), entry(Role::Destination, "main_committed"))]),
+            entries: BTreeMap::from([(
+                request.clone(),
+                entry(Role::Destination, Phase::MainCommitted),
+            )]),
         };
         write_registry(temp.path(), &registry).unwrap();
         assert!(guard_directory(temp.path()).is_err());
-        registry.entries.insert(request.clone(), entry(Role::Destination, "remote_committed"));
+        registry.entries.insert(
+            request.clone(),
+            entry(Role::Destination, Phase::RemoteCommitted),
+        );
         write_registry(temp.path(), &registry).unwrap();
         guard_directory(temp.path()).unwrap();
-        registry.entries.insert(request.clone(), entry(Role::Source, "source_pending"));
+        registry
+            .entries
+            .insert(request.clone(), entry(Role::Source, Phase::SourcePending));
         write_registry(temp.path(), &registry).unwrap();
         guard_directory(temp.path()).unwrap();
     }
+}
+
+const ORIGINAL_CALL_LIMIT: Duration = Duration::from_secs(25);
+
+#[derive(Clone)]
+struct DrainEvidence {
+    request_id: String,
+    status: std::process::ExitStatus,
+    stdout_eof: bool,
+    stderr_eof: bool,
+    deadline: Instant,
+}
+
+struct RawReply {
+    bytes: Vec<u8>,
+    stderr: Vec<u8>,
+    evidence: DrainEvidence,
+}
+
+enum ReadOutcome {
+    Eof(Vec<u8>),
+    Overflow,
+    Io(std::io::Error),
+}
+
+struct OriginalResources {
+    ssh: platform::SshChild,
+    request_id: String,
+    deadline: Instant,
+    writer: std::sync::mpsc::Receiver<std::io::Result<()>>,
+    stdout: std::sync::mpsc::Receiver<ReadOutcome>,
+    stderr: std::sync::mpsc::Receiver<ReadOutcome>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl OriginalResources {
+    fn spawn(
+        config: &Config,
+        alias: &str,
+        words: &[&str],
+        input: &[u8],
+        request_id: String,
+        deadline: Instant,
+    ) -> Result<Self> {
+        ensure!(
+            config.peers.iter().any(|peer| peer == alias) && !config.is_self(alias),
+            "choose a locally configured remote machine"
+        );
+        ensure!(
+            !alias.starts_with('-') && !alias.chars().any(char::is_whitespace),
+            "invalid connection alias"
+        );
+        ensure!(
+            Instant::now() < deadline,
+            "original adoption deadline expired"
+        );
+        let remote = crate::remote_shell::hgs_within(config, alias, words, deadline)?;
+        let mut command = crate::ssh_bytes::command(&remote)?;
+        command
+            .args([
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "ServerAliveInterval=5",
+                "-o",
+                "ServerAliveCountMax=2",
+            ])
+            .args(crate::machines::ssh_options(config, alias))
+            .arg(alias)
+            .arg(remote);
+        let mut ssh = platform::spawn_ssh(&mut command, true, true, true)?;
+        let (writer_tx, writer) = std::sync::mpsc::channel();
+        let (stdout_tx, stdout) = std::sync::mpsc::channel();
+        let (stderr_tx, stderr) = std::sync::mpsc::channel();
+        let mut stdin = ssh.stdin.take().expect("ssh stdin");
+        let body = input.to_vec();
+        let mut workers = vec![std::thread::spawn(move || {
+            let result = stdin.write_all(&body).and_then(|_| stdin.flush());
+            drop(stdin);
+            let _ = writer_tx.send(result);
+        })];
+        for (reader, sender, cap) in [
+            (
+                ssh.stdout.take().expect("ssh stdout"),
+                stdout_tx,
+                SUMMARY_BYTES,
+            ),
+            (
+                ssh.stderr.take().expect("ssh stderr"),
+                stderr_tx,
+                SUMMARY_BYTES,
+            ),
+        ] {
+            workers.push(std::thread::spawn(move || {
+                let _ = sender.send(Self::read_limited(reader, cap));
+            }));
+        }
+        Ok(Self {
+            ssh,
+            request_id,
+            deadline,
+            writer,
+            stdout,
+            stderr,
+            workers,
+        })
+    }
+
+    fn read_limited(mut reader: Box<dyn std::io::Read + Send>, cap: usize) -> ReadOutcome {
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 16 * 1024];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => return ReadOutcome::Eof(bytes),
+                Ok(count) => {
+                    if bytes.len().saturating_add(count) > cap {
+                        return ReadOutcome::Overflow;
+                    }
+                    bytes.extend_from_slice(&chunk[..count]);
+                }
+                Err(error) => return ReadOutcome::Io(error),
+            }
+        }
+    }
+
+    fn receive<T>(
+        receiver: &std::sync::mpsc::Receiver<T>,
+        deadline: Instant,
+        what: &str,
+    ) -> Result<T> {
+        receiver
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| anyhow::anyhow!("original {what} did not finish before the 25s deadline"))
+    }
+
+    fn drain(self) -> Result<RawReply> {
+        let Self {
+            mut ssh,
+            request_id,
+            deadline,
+            writer,
+            stdout,
+            stderr,
+            workers,
+        } = self;
+        Self::receive(&writer, deadline, "request writer")??;
+        let status = loop {
+            if let Some(status) = ssh.child.try_wait()? {
+                break status;
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "original remote child did not exit before the 25s deadline"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let stdout = Self::receive(&stdout, deadline, "stdout EOF")?;
+        let stderr = Self::receive(&stderr, deadline, "stderr EOF")?;
+        for worker in workers {
+            worker
+                .join()
+                .map_err(|_| anyhow::anyhow!("original I/O worker panicked"))?;
+        }
+        ensure!(
+            Instant::now() <= deadline,
+            "original drain exceeded the 25s deadline"
+        );
+        let bytes = match stdout {
+            ReadOutcome::Eof(bytes) => bytes,
+            ReadOutcome::Overflow => anyhow::bail!("original remote reply exceeds 64KiB"),
+            ReadOutcome::Io(error) => return Err(error.into()),
+        };
+        let stderr = match stderr {
+            ReadOutcome::Eof(bytes) => bytes,
+            ReadOutcome::Overflow => anyhow::bail!("original remote error exceeds 64KiB"),
+            ReadOutcome::Io(error) => return Err(error.into()),
+        };
+        Ok(RawReply {
+            bytes,
+            stderr,
+            evidence: DrainEvidence {
+                request_id,
+                status,
+                stdout_eof: true,
+                stderr_eof: true,
+                deadline,
+            },
+        })
+    }
+}
+
+fn original_request(
+    config: &Config,
+    alias: &str,
+    words: &[&str],
+    input: &[u8],
+) -> Result<RawReply> {
+    OriginalResources::spawn(
+        config,
+        alias,
+        words,
+        input,
+        catalog::new_id(),
+        Instant::now() + ORIGINAL_CALL_LIMIT,
+    )?
+    .drain()
+}
+
+struct UniqueVisitor;
+
+impl<'de> serde::de::Visitor<'de> for UniqueVisitor {
+    type Value = Value;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("JSON with unique object keys")
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
+        Ok(Value::Bool(value))
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+        Ok(Value::Number(value.into()))
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(Value::Number(value.into()))
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
+        serde_json::Number::from_f64(value)
+            .map(Value::Number)
+            .ok_or_else(|| E::custom("non-finite JSON number"))
+    }
+
+    fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(Value::String(value.into()))
+    }
+
+    fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+        Ok(Value::String(value))
+    }
+
+    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_some<D: serde::de::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(UniqueVisitor)
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut values = Vec::new();
+        while let Some(value) = seq.next_element_seed(UniqueVisitor)? {
+            values.push(value);
+        }
+        Ok(Value::Array(values))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut values = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if values.contains_key(&key) {
+                return Err(A::Error::custom(format!("duplicate object key: {key}")));
+            }
+            let value = map.next_value_seed(UniqueVisitor)?;
+            values.insert(key, value);
+        }
+        Ok(Value::Object(values))
+    }
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for UniqueVisitor {
+    type Value = Value;
+
+    fn deserialize<D: serde::de::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+fn parse_unique(bytes: &[u8]) -> Result<Value> {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let value = deserializer.deserialize_any(UniqueVisitor)?;
+    deserializer.end()?;
+    Ok(value)
+}
+
+pub(crate) fn unique_bytes(bytes: &[u8], what: &str) -> Result<()> {
+    parse_unique(bytes)
+        .with_context(|| format!("parse {what} with unique object keys"))
+        .map(|_| ())
 }

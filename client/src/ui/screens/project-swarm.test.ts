@@ -151,4 +151,25 @@ describe("Project adoption controller", () => {
     expect(await state.resume()).toBe(false);
     state.dispose();
   });
+
+  it("allows explicit read-only status but never a resume mutation", async () => {
+    const calls: string[] = [];
+    const state = createAdoption(port(async (command) => {
+      calls.push(command);
+      if (command === "project_adoption_open" || command === "project_adoption_view") return {
+        ...adoptionFrame(), can_resume: true, mode: "reconcile",
+      };
+      if (command === "project_adoption_status") return {
+        ...adoptionFrame(), can_resume: true, mode: "reconcile", status: "Partial or unknown: review manually",
+      };
+      throw Error(`unexpected ${command}`);
+    }));
+    await state.open();
+    expect(await state.resume()).toBe(false);
+    expect(await state.status()).toBe(true);
+    expect(calls).not.toContain("project_adoption_resume");
+    expect(calls).not.toContain("project_adoption_adopt");
+    expect(calls.filter((call) => call === "project_adoption_status")).toHaveLength(1);
+    state.dispose();
+  });
 });

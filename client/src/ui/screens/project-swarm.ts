@@ -121,7 +121,7 @@ export function createAdoption(call: Call = invoke) {
   const action = async (kind: "preview" | "adopt" | "status" | "resume", args: Record<string, unknown>) => {
     const current = frame();
     if (gone || working() || !current || current.busy) return false;
-    const allowed = kind === "preview" ? current.can_preview : kind === "adopt" ? current.can_adopt : current.can_resume;
+    const allowed = kind === "preview" ? current.can_preview : kind === "adopt" ? current.can_adopt : kind === "status" ? current.can_resume : false;
     if (!allowed) return false;
     ++epoch; setWorking(true); setError("");
     try { adopt(await call<AdoptionView>(`project_adoption_${kind}`, { id: current.id, ...args })); return true; }

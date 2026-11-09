@@ -45,6 +45,43 @@ impl Drop for Resources {
     }
 }
 
+struct NativeContext {
+    generation: u64,
+    digest: String,
+    configuration: String,
+    source_card: (String, String),
+    destination_card: (String, String),
+    ticket: usize,
+    request_id: String,
+    drained: bool,
+    resources: Weak<Resources>,
+}
+
+impl NativeContext {
+    fn current(&self, hub: &Hub, context: &Context) -> Result<(), String> {
+        let preview = context.preview.as_ref().ok_or(EXTERNAL_CHANGED)?;
+        let ticket = context.ticket.as_deref().ok_or(EXTERNAL_CHANGED)?;
+        let adoption = context.adoption.as_ref().ok_or(EXTERNAL_CHANGED)?;
+        let local = hub.sync.observed_value().ok_or(EXTERNAL_CHANGED)?;
+        if !preview.eligible()
+            || hub.source_generation != self.generation
+            || self.configuration != context.configuration
+            || self.source_card != preview.source_card()
+            || self.destination_card != preview.destination_card()
+            || self.digest != local["digest"]
+            || self.ticket != std::ptr::from_ref(ticket) as usize
+            || self.request_id != adoption.request_id()
+            || !preview.matches_source(&local)
+            || local["node_id"] != ticket.snapshot()["node_id"]
+            || local["swarm_id"] != ticket.snapshot()["swarm_id"]
+            || (self.drained && self.resources.upgrade().is_some())
+        {
+            return Err(EXTERNAL_CHANGED.into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub(super) enum Action {
     Config,
@@ -94,7 +131,8 @@ pub(super) struct Context {
     status: String,
     error: bool,
     changing: bool,
-    ticket: Option<ExternalTicket>,
+    ticket: Option<Box<ExternalTicket>>,
+    native: Option<NativeContext>,
     expected: Option<Observation>,
     outcome: Option<Result<String, String>>,
     receipt: Option<Value>,
@@ -115,6 +153,7 @@ impl Context {
             error: false,
             changing: false,
             ticket: None,
+            native: None,
             expected: None,
             outcome: None,
             receipt: None,
@@ -196,24 +235,30 @@ impl Context {
                     return Err(EXTERNAL_CHANGED.into());
                 }
                 let generation = hub.source_generation.checked_add(1).ok_or(STOPPED)?;
-                self.ticket = Some(hub.sync.begin_external(hub.sync.revision())?);
+                let ticket = Box::new(hub.sync.begin_external(hub.sync.revision())?);
                 hub.source_generation = generation;
-                self.adoption = Some(preview.adopt(uuid::Uuid::new_v4().to_string(), generation)?);
+                let adoption = preview.adopt(uuid::Uuid::new_v4().to_string(), generation)?;
+                self.native = Some(NativeContext {
+                    generation,
+                    digest: local["digest"].as_str().ok_or(EXTERNAL_CHANGED)?.into(),
+                    configuration: self.configuration.clone(),
+                    source_card: preview.source_card(),
+                    destination_card: preview.destination_card(),
+                    ticket: std::ptr::from_ref(ticket.as_ref()) as usize,
+                    request_id: adoption.request_id().into(),
+                    drained: false,
+                    resources: Weak::new(),
+                });
+                self.ticket = Some(ticket);
+                self.adoption = Some(adoption);
                 self.changing = true;
                 self.status = "Copying the complete project catalog…".into();
                 self.stage = Stage::Queued(read_work(Step::AdoptConfig, Read::Machines)?);
             }
-            Action::Resume => {
-                if self.ticket.is_none() || self.adoption.is_none() {
-                    return Err(EXTERNAL_CHANGED.into());
-                }
-                self.changing = true;
-                self.adoption = Some(self.adoption.as_ref().expect("original adoption").after_drain());
-                self.status = "Rechecking the original adoption before continuing…".into();
-                self.stage = Stage::Queued(read_work(Step::AdoptConfig, Read::Machines)?);
-            }
-            Action::Status => {
+            Action::Resume | Action::Status => {
                 let adoption = self.adoption.as_ref().ok_or(EXTERNAL_CHANGED)?;
+                self.status =
+                    "Reviewing the original adoption status. No new mutation will be sent.".into();
                 self.stage = Stage::Queued(Work {
                     step: Step::Status,
                     invocation: adoption::status_invocation(
@@ -226,6 +271,11 @@ impl Context {
         Ok(())
     }
 
+    #[cfg(all(test, unix))]
+    pub(super) fn drift_configuration(&mut self) {
+        self.configuration = "changed".into();
+    }
+
     fn failed(&mut self, error: String) {
         self.status = error;
         self.error = true;
@@ -233,7 +283,12 @@ impl Context {
         self.stage = Stage::Idle;
     }
 
-    fn result(&mut self, step: Step, result: Result<Exit, String>) -> Result<(), String> {
+    fn result(
+        &mut self,
+        step: Step,
+        result: Result<Exit, String>,
+        hub: &Hub,
+    ) -> Result<(), String> {
         let exit = result?;
         match step {
             Step::Config => {
@@ -252,14 +307,26 @@ impl Context {
             }
             Step::Preview(alias) => {
                 let preview = adoption::Preview::checked(&alias, object(exit)?)?;
+                let local = hub.sync.observed_value().ok_or(EXTERNAL_CHANGED)?;
+                if preview.configuration_revision() != self.configuration
+                    || !preview.matches_source(&local)
+                {
+                    return Err(EXTERNAL_CHANGED.into());
+                }
                 self.status = preview.reason();
                 self.preview = Some(preview);
                 self.stage = Stage::Idle;
             }
             Step::AdoptConfig => {
                 let config = reads::decode(&Read::Machines, exit).map_err(|e| e.to_string())?;
+                self.native
+                    .as_ref()
+                    .ok_or(EXTERNAL_CHANGED)?
+                    .current(hub, self)?;
                 let preview = self.preview.as_ref().ok_or(EXTERNAL_CHANGED)?;
-                if adoption::revision(&config, preview.alias())? != self.configuration {
+                if adoption::revision(&config, preview.alias())? != self.configuration
+                    || preview.configuration_revision() != self.configuration
+                {
                     return Err(zerus_client_core::machine_connections::CHANGED.into());
                 }
                 self.stage = Stage::Queued(read_work(Step::AdoptLocal, Read::Swarm)?);
@@ -274,16 +341,25 @@ impl Context {
                 {
                     return Err(EXTERNAL_CHANGED.into());
                 }
+                let invocation = self
+                    .adoption
+                    .as_ref()
+                    .ok_or(EXTERNAL_CHANGED)?
+                    .invocation()?;
+                self.native
+                    .as_ref()
+                    .ok_or(EXTERNAL_CHANGED)?
+                    .current(hub, self)?;
                 self.stage = Stage::Queued(Work {
                     step: Step::Mutation,
-                    invocation: self
-                        .adoption
-                        .as_ref()
-                        .ok_or(EXTERNAL_CHANGED)?
-                        .invocation()?,
+                    invocation,
                 });
             }
             Step::Mutation => {
+                self.native
+                    .as_ref()
+                    .ok_or(EXTERNAL_CHANGED)?
+                    .current(hub, self)?;
                 let reply = self
                     .adoption
                     .as_ref()
@@ -292,7 +368,7 @@ impl Context {
                 self.outcome = Some(match reply["phase"].as_str() {
                     Some("settled") => Ok("Adoption completed. Drive folders remain uninitialized without reverse enrollment.".into()),
                     Some("refused_not_started") => Err("The destination refused before changing its catalog. Review the original request before continuing.".into()),
-                    Some("remote_committed") => Err("The destination committed. The original source membership requires reconciliation.".into()),
+                    Some("remote_committed") => Err("The destination committed, but the original call did not settle local membership. Review manually; no new mutation will be sent.".into()),
                     _ => Err(adoption::INVALID.into()),
                 });
                 self.receipt = Some(reply);
@@ -300,16 +376,18 @@ impl Context {
             }
             Step::Status => {
                 let reply = object(exit)?;
-                if reply["request_id"]
-                    != self.adoption.as_ref().ok_or(EXTERNAL_CHANGED)?.request_id()
-                {
+                let adoption = self.adoption.as_ref().ok_or(EXTERNAL_CHANGED)?;
+                if reply["request_id"] != adoption.request_id() {
                     return Err(adoption::INVALID.into());
                 }
                 let phase = reply["journal"]["phase"]
                     .as_str()
                     .ok_or(adoption::INVALID)?;
+                if phase == "remote_committed" {
+                    adoption.receipt(&reply["journal"]["receipts"]["remote"])?;
+                }
                 self.outcome = Some(Err(format!(
-                    "Original adoption status: {phase}. Review before continuing."
+                    "Original adoption status: {phase}. Review manually; this status is read-only."
                 )));
                 self.receipt = Some(reply);
                 self.stage = Stage::Queued(read_work(Step::Fresh, Read::Swarm)?);
@@ -431,6 +509,9 @@ impl Organization {
             let Some(context) = hub.adoption.as_mut() else {
                 return false;
             };
+            if !self.0.allowed && context.ticket.is_some() {
+                return false;
+            }
             match std::mem::replace(&mut context.stage, Stage::Idle) {
                 Stage::Queued(work) => {
                     context.stage = Stage::Running;
@@ -443,7 +524,25 @@ impl Organization {
                 } if resources.upgrade().is_none() => {
                     let mut context = hub.adoption.take().unwrap();
                     let needs_fresh = context.ticket.is_some() && !matches!(work.step, Step::Fresh);
-                    if let Err(error) = context.result(work.step, result) {
+                    let drained = matches!(work.step, Step::Mutation);
+                    if drained {
+                        if let Some(native) = context.native.as_mut() {
+                            native.drained = true;
+                            native.resources = resources;
+                        }
+                    }
+                    let checked = if drained {
+                        context
+                            .native
+                            .as_ref()
+                            .map_or(Err(EXTERNAL_CHANGED.into()), |native| {
+                                native.current(&hub, &context)
+                            })
+                    } else {
+                        Ok(())
+                    };
+                    let result = checked.and_then(|()| context.result(work.step, result, &hub));
+                    if let Err(error) = result {
                         if needs_fresh {
                             context.outcome = Some(Err(error));
                             context.stage = read_work(Step::Fresh, Read::Swarm)
@@ -501,7 +600,7 @@ impl Organization {
     }
 
     fn adoption_settle_source(&self) {
-        if self.0.hub.is_poisoned() {
+        if self.0.hub.is_poisoned() || !self.0.allowed {
             return;
         }
         let source = {
@@ -533,6 +632,11 @@ fn adoption_settle(hub: &mut Hub, source: &OrganizationSnapshot, now: u64) -> bo
         return false;
     };
     let ready = matches!(context.stage, Stage::Source)
+        && context.native.as_ref().is_some_and(|native| {
+            native.drained
+                && native.resources.upgrade().is_none()
+                && native.current(hub, &context).is_ok()
+        })
         && context.expected.as_ref().is_some_and(|expected| {
             source.node_id == expected.value["node_id"].as_str().unwrap_or_default()
                 && source.swarm_id == expected.value["swarm_id"].as_str().unwrap_or_default()
@@ -556,6 +660,7 @@ fn adoption_settle(hub: &mut Hub, source: &OrganizationSnapshot, now: u64) -> bo
                         Ok(()) => {
                             hub.source_generation = generation;
                             context.ticket = None;
+                            context.native = None;
                             context.adoption = None;
                             context.stage = Stage::Idle;
                             match context

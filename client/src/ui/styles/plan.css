@@ -518,3 +518,9 @@
 .pt-row:has(> .pt-phase-awaiting) > :is(.pt-free-accepted, .pt-phase-body) { border-color: color-mix(in srgb, var(--z-color-warn) 55%, var(--z-color-card-border)); }
 
 
+
+/* Task 428: the selected card keeps its own look while it is the selection;
+   the hover look (pt-card-on, :hover) follows the pointer only. */
+.pt-card.pt-card-selected { border-color: var(--z-color-accent); box-shadow: 0 0 0 1px var(--z-color-accent) inset; background: color-mix(in srgb, var(--z-color-accent) 8%, var(--z-color-surface)); }
+.pt-card:focus { outline: none; }
+.pt-card:focus-visible { outline: 2px solid var(--z-color-focus); outline-offset: 1px; }

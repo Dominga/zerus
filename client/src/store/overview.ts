@@ -109,7 +109,8 @@ export function liveSessions(rows: readonly Session[], computers: Record<Compute
  * only while its chain of live parents ends at a card shown here, which stands
  * for its team. A child whose own request needs the person (not quiet) always
  * stays, and so do a child whose parent is not live here and a parent loop.
- * `parentOf` is the session list's parent lookup (`parentKeyOf`).
+ * `parentOf` is the parent a card really nests under (`nestKeyOf`, task 467):
+ * a session another one merely launched stays a Main card.
  */
 export function mainSessions(live: readonly Session[], parentOf: (s: Session) => string | undefined): Session[] {
   const byKey = new Map(live.map((s) => [s.key, s]));

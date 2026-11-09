@@ -303,6 +303,16 @@ describe("supervised and muted children (owner 2026-11-08)", () => {
       expect(order(render(compact, row({ parent: { ...parent, state: "missing" }, muted: true })))).toEqual(["sc-title", "sc-mute", "sbadge"]);
     }
   });
+
+  it("names who started a launched session instead of claiming it is supervised (task 467)", () => {
+    const started = { fromParent: { name: parent.name, key: "\nrun:lead" } };
+    const full = render(false, row({ parent: { ...parent, source: "launch" } }), true, undefined, started);
+    expect(order(full)).toEqual(["sc-title", "sbadge"]);
+    expect(full).toContain("sc-from");
+    expect(full).toContain("Started by codex/project/lead");
+    // A compact row keeps its own row too; it has no room for the hint.
+    expect(order(render(true, row({ parent: { ...parent, source: "launch" } }), true, undefined, started))).toEqual(["sc-title", "sbadge"]);
+  });
 });
 
 describe("subagent rows (owner 2026-11-08)", () => {

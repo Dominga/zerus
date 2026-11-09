@@ -16,6 +16,7 @@ import { followedFor } from "../../store/actions";
 import { flag } from "../../store/settings";
 import { compactSessionRows, hideEmptyProjects } from "./session-prefs";
 import { rosterFor } from "./subagents";
+import { dependsOnParent } from "./parent-link";
 import type { Session } from "./types";
 
 // Flattened list model. Heights match tray/src/SessionCardDelegate.h
@@ -118,6 +119,22 @@ export function parentIndex(rows: Iterable<Session>, machineOf: (computer: strin
 /** A listed row's parent key: set only when its parent row is listed too (a child session). */
 export const parentKeyOf = createMemo(() => parentIndex(orderedRows(), (computer) => machineCards[computer]?.machine_id));
 
+/**
+ * Task 467: the parent a card really nests under. A link that only launched
+ * the session (hgs's `source: launch`, a plain `hgs launch` included) is only
+ * "started by": the card stays top level with the hint, unless it leads a
+ * sub-team of the parent's team. `parentKeyOf` keeps the full lookup for the
+ * hint and for cycles.
+ */
+export const nestKeyOf = createMemo(() => {
+  const index = parentKeyOf();
+  const rows = new Map(orderedRows().map((s) => [s.key, s] as const));
+  return (s: Session): string | undefined => {
+    const key = index(s);
+    return key && dependsOnParent(s, rows.get(key), (row) => teams.teamOf(row)) ? key : undefined;
+  };
+});
+
 /** The live list's inputs: the filters, grouping and row state the list reads. */
 function listScope() {
   const f = stateFilter();
@@ -139,7 +156,7 @@ function listScope() {
     childDraft: (s: Session, child: { id: string }) => hasDraftKey(`${s.computer}\n${s.name}\n${s.conversationId ?? ""}\n${child.id}`),
     teamOf: (s: Session) => teams.teamOf(s),
     teamFolded: (id: string) => teamsCollapsed(id),
-    parentKey: parentKeyOf(), teamCollapsed,
+    parentKey: parentKeyOf(), nestKey: nestKeyOf(), teamCollapsed,
   };
 }
 

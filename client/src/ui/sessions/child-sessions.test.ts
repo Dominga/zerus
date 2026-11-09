@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { toSession } from "../../store/catalog";
 import { groupRows, parentIndex, rowHeight, ROW_HEIGHT, type ListInput, type Row } from "./model";
-import type { GroupingOut, ParentLinkOut, ViewRow } from "../../types";
+import { dependsOnParent } from "./parent-link";
+import type { GroupingOut, ParentLinkOut, TeamSummary, ViewRow } from "../../types";
 import type { Session } from "./types";
 
 // The list model's module reads the page's query (store/ui.ts); the tests run without a page.
@@ -24,6 +25,25 @@ const rows = (list: Session[], extra: Partial<ListInput> = {}, all: Session[] = 
 });
 const cards = (out: Row[]) => out.filter((r): r is Extract<Row, { type: "card" }> => r.type === "card");
 const shape = (out: Row[]) => cards(out).map((r) => `${"  ".repeat(r.depth ?? 0)}${r.session.name.slice(-2)}`);
+
+/** The list's nesting lookup with the task 467 rule, as `nestKeyOf` builds it. */
+const nest = (all: Session[], teamOf?: (s: Session) => TeamSummary | undefined) => {
+  const index = parentIndex(all, () => MACHINE);
+  const byKey = new Map(all.map((s) => [s.key, s] as const));
+  return (s: Session) => {
+    const key = index(s);
+    return key && dependsOnParent(s, byKey.get(key), teamOf) ? key : undefined;
+  };
+};
+/** A team whose lead member is `lead`, optionally a sub-team of `parent`. */
+const team = (id: string, lead: Session, parent = ""): TeamSummary => ({
+  id, name: id, status: "running", project: "p", folder: "/p", plan_mode: "standard", lead: "lead",
+  members: [{ id: "lead", role: "Lead", agent: "claude", state: "active", lead: true,
+    session: { host: "", name: lead.name, run_id: lead.runId ?? "", conversation_id: lead.conversationId ?? "" } }],
+  tasks: 1, accepted: 0, submitted: 0, in_review: 0, in_test: 0, attention: 0, open_proposals: 0,
+  waiting_for_lead: false, pending_phase: null, updated: 0, revision: 1, parent,
+  phase: 1, phase_done: 0, phase_total: 1, phases_done: 0, phases_total: 1,
+});
 
 describe("child sessions in the list", () => {
   it("nests children under their parent in rank order, several levels deep", () => {
@@ -80,6 +100,31 @@ describe("child sessions in the list", () => {
     expect(shape(out)).toEqual(["s2", "s3"]);
     expect(cards(out)[0].fromParent).toEqual({ name: "claude/p/s1", key: parent.key });
     expect(cards(out)[1].fromParent).toEqual({ name: "claude/p/s9", key: undefined });
+  });
+
+  it("keeps a session another one merely launched at top level, naming who started it (task 467)", () => {
+    const parent = session(1), child = session(2, undefined, { parent: link(1, { source: "launch" }) });
+    const out = rows([parent, child], { nestKey: nest([parent, child]) }, [parent, child]);
+    expect(shape(out)).toEqual(["s1", "s2"]);
+    expect(cards(out)[1].fromParent).toEqual({ name: "claude/p/s1", key: parent.key });
+    expect(cards(out)[1].parentKey).toBeUndefined();
+  });
+
+  it("nests a launch that starts the lead of a sub-team of the parent's team (task 467)", () => {
+    const parent = session(1), child = session(2, undefined, { parent: link(1, { source: "launch" }) });
+    const all = [parent, child];
+    const parentTeam = team("t1", parent), subTeam = team("t2", child, "t1");
+    const teamOf = (s: Session) => (s.key === parent.key ? parentTeam : s.key === child.key ? subTeam : undefined);
+    expect(shape(rows(all, { nestKey: nest(all, teamOf) }, all))).toEqual(["s1", "  s2"]);
+  });
+
+  it("nests a link a parent adopted or a person set, and one older than its source (task 467)", () => {
+    for (const source of ["adopt", "manual"]) {
+      const list = [session(1), session(2, undefined, { parent: link(1, { source }) })];
+      expect(shape(rows(list, { nestKey: nest(list) }, list))).toEqual(["s1", "  s2"]);
+    }
+    const older = [session(1), session(2, 1)];
+    expect(shape(rows(older, { nestKey: nest(older) }, older))).toEqual(["s1", "  s2"]);
   });
 
   it("never hides a session in a parent loop", () => {

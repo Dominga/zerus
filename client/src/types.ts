@@ -164,6 +164,8 @@ export interface ViewRow {
 
 /** A child's parent as its computer lists it; `state` is live, saved, archived or missing. */
 export interface ParentLinkOut { machine: string; session_id: string; name: string; conversation_id: string; run_id: string; state: string;
+  /** How the link arose (`launch`, `adopt`, `manual`); a launch alone is only "started by" (task 467). */
+  source?: string;
   /** When the link was recorded, Unix seconds; 0 when unknown. */
   at?: number }
 export interface RowOut { computer: ComputerId; key: string; row: ViewRow }

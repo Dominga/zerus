@@ -79,7 +79,11 @@
   /* A project is a folder framed in its own colour around the header row alone
      (owner, 2026-11-09 after the first build: the colour belongs to the folder's
      header, not to its cards). */
-  .group-frame { position: absolute; left: 0; right: 0; top: 0; border: 1px solid var(--frame); border-radius: 8px; pointer-events: none; }
+  /* Task 468 (owner, 2026-11-09 on the lead's build: "прозрачность каймы выстави
+     не более 50%"): the frame is the folder's colour at half, never a solid line;
+     the mix covers a project's own colour and the neutral fallback alike, in both
+     appearances and every skin. */
+  .group-frame { position: absolute; left: 0; right: 0; top: 0; border: 1px solid color-mix(in srgb, var(--frame) 50%, transparent); border-radius: 8px; pointer-events: none; }
 
   /* Project header: 40 px row, band (2,5,-2,-3) radius 6, contents inset 9. */
   .group-band { position: absolute; left: 2px; right: 2px; top: 5px; height: 32px; display: flex; align-items: center; gap: 6px; padding: 0 9px; border-radius: 6px; text-align: left; }
@@ -550,3 +554,4 @@
   .sc-l1 > .sbadge { max-width: 104px; }
   .sc-cold button { padding: 0 6px; }
 }
+

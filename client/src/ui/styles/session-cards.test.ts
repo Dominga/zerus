@@ -32,7 +32,8 @@ it("draws every session card from the skin's card and card-border tokens (task #
 it("frames a project in its own colour around its header row, with the folds and the pointer safe (task #457)", () => {
   const frame = declarations(".group-frame");
   expect(frame.position).toBe("absolute");
-  expect(frame.border).toBe("1px solid var(--frame)");
+  // Task 468: the folder's colour at half, never a solid line (the neutral fallback included).
+  expect(frame.border).toBe("1px solid color-mix(in srgb, var(--frame) 50%, transparent)");
   expect(frame["border-radius"]).toBe("8px");
   // The frame's layer must never take the pointer from a card or header.
   expect(frame["pointer-events"]).toBe("none");
@@ -71,3 +72,4 @@ it("keeps a card's surface a couple of tones apart from the list's pane in every
   }
   expect(missing).toEqual([]);
 });
+

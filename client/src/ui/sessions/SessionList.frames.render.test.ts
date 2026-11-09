@@ -84,3 +84,48 @@ describe("a project's frame in the session list (task #457)", () => {
     expect(alpha.getAttribute("aria-hidden")).toBe("true");
   });
 });
+
+// Task 468 (owner, 2026-11-09: "прозрачность каймы выстави не более 50%"): the
+// folder header's colour frame is the folder's colour at half, the neutral
+// fallback included, in both appearances and every skin.
+describe("the folder frame's stroke is at most half the colour (task 468)", () => {
+  /** The alpha a border colour carries: 1 when it is opaque or unreadable here. */
+  const alphaOf = (colour: string): number => {
+    const rgba = /rgba?\(\s*([^)]*)\)/i.exec(colour);
+    if (rgba) {
+      const parts = rgba[1].split(/[\s,/]+/).filter(Boolean);
+      return parts.length > 3 ? Number(parts[3]) : 1;
+    }
+    // color-mix(in srgb, <colour> N%, transparent) keeps N% of the colour, so the
+    // result's alpha is N/100.
+    const mix = /color-mix\(\s*in srgb\s*,\s*[^,]+?\s([\d.]+)%\s*,\s*transparent\s*\)/i.exec(colour);
+    return mix ? Number(mix[1]) / 100 : 1;
+  };
+
+  it("states the stroke as half the frame colour in the real stylesheet", async () => {
+    // happy-dom gives import.meta.url an http scheme, so the stylesheet is read
+    // from the project folder the tests run in (client/).
+    const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as { readFileSync(path: string, encoding: "utf8"): string };
+    const nodePath = (await import(/* @vite-ignore */ ["node", "path"].join(":"))) as { resolve(...parts: string[]): string };
+    const css = fs.readFileSync(nodePath.resolve(process.cwd(), "src/ui/styles/sessions.css"), "utf8");
+    const rule = css.split("\n").find((line) => line.trim().startsWith(".group-frame {")) ?? "";
+    expect(rule).not.toBe("");
+    const border = /border:\s*([^;]+);/.exec(rule)?.[1] ?? "";
+    expect(border).toContain("var(--frame)");
+    expect(alphaOf(border)).toBeLessThanOrEqual(0.5);
+    // No second, opaque border for the same frame anywhere in the stylesheet.
+    for (const line of css.split("\n")) {
+      if (!line.includes(".group-frame") || !line.includes("border")) continue;
+      const value = /border[^:]*:\s*([^;]+);/.exec(line)?.[1] ?? "";
+      expect(alphaOf(value)).toBeLessThanOrEqual(0.5);
+    }
+  });
+
+  it("covers a project's own colour and the neutral fallback with that one stroke", async () => {
+    const [alpha, beta] = await mount([header("alpha", "#3fb950"), card("a0"), header("beta", null), card("b0")]);
+    // A project's colour and the neutral border both only set --frame; the stroke
+    // that reads it is the single half-opacity rule above.
+    expect(alpha.style.getPropertyValue("--frame")).toBe("#3fb950");
+    expect(beta.style.getPropertyValue("--frame")).toBe("var(--z-color-border)");
+  });
+});

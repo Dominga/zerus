@@ -27,6 +27,9 @@ export function toCoordinator(computer: ComputerId, team: TeamView, text: string
  * after limits, Team settings, Catalog) fold into a More menu; below 900 px
  * the team actions fold too, so nothing overlaps or wraps at any width.
  */
+/** Task #427/#463: the strip's fold thresholds, on the strip's own width. */
+export const compactFor = (width: number): "none" | "low" | "high" => (width < 900 ? "high" : width < 1100 ? "low" : "none");
+
 export function TeamBar(props: {
   computer: ComputerId;
   team: TeamView;
@@ -54,8 +57,25 @@ export function TeamBar(props: {
     window.addEventListener("resize", resize);
     onCleanup(() => window.removeEventListener("resize", resize));
   });
-  const width = () => props.width ?? viewport();
-  const compact = (): "none" | "low" | "high" => (width() < 900 ? "high" : width() < 1100 ? "low" : "none");
+  // Task #463 (owner's dev build, verify-strip-inspector.png): the strip folds by
+  // its own width, not the window's. With the inspector open the strip is much
+  // narrower than the window, so the window's width kept every action inline and
+  // "Pause" was clipped to "Pa" with Stop hidden under the panel. The strip
+  // observes itself, so opening the inspector folds what no longer fits into
+  // More (task 427's menu) instead of cutting it.
+  const [measured, setMeasured] = createSignal(0);
+  let bar: HTMLElement | undefined;
+  onMount(() => {
+    if (!bar) return;
+    const observe = () => setMeasured(Math.round(bar!.getBoundingClientRect().width));
+    observe();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => observe());
+    observer.observe(bar);
+    onCleanup(() => observer.disconnect());
+  });
+  const width = () => props.width ?? (measured() || viewport());
+  const compact = (): "none" | "low" | "high" => compactFor(width());
   // Task #438: one continuous segmented track: no gaps between the segments, a
   // minimum width for a non-zero one, rounded only at the track's two ends.
   const segments = () => [
@@ -67,7 +87,7 @@ export function TeamBar(props: {
   const countsTip = () => [tr("Accepted %1", counts().accepted), tr("Submitted %1", counts().submitted),
     tr("In progress %1", counts().active), tr("Problems %1", counts().problems)].join(", ");
   return (
-    <header class="team-bar" classList={{ "team-bar-compact": compact() !== "none" }} data-compact={compact()} data-strip>
+    <header class="team-bar" ref={bar} classList={{ "team-bar-compact": compact() !== "none" }} data-compact={compact()} data-strip>
       <Icon name="users" size={16} />
       <b class="team-name ell" title={props.team.goal || props.team.name}>{props.team.name}</b>
       <span class={`team-badge tone-${stateTone(props.state)}`} data-state={props.state}>{stateLabel(props.state)}</span>
@@ -103,3 +123,4 @@ export function TeamBar(props: {
     </header>
   );
 }
+

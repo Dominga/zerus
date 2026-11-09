@@ -70,7 +70,8 @@ beforeAll(async () => {
         if (id === memberCard) return `export const toComposer = () => {}; export const memberRow = () => null; export const MemberCard = () => null; export const AddMemberDialog = () => null;`;
         if (id === entry) return `import {createComponent} from 'solid-js';
           import {renderToString} from 'solid-js/web';
-          import {TeamBar} from '/src/ui/teams/team-bar.tsx';
+          import {TeamBar, compactFor} from '/src/ui/teams/team-bar.tsx';
+          export const compact = compactFor;
           export const render = (team, width) => renderToString(() => createComponent(TeamBar,
             { computer: 'c1', team, state: 'running', problemTasks: new Set(), onPhase: () => {}, onSettings: () => {}, onCatalog: () => {}, width }));`;
         return undefined;
@@ -274,5 +275,36 @@ describe("the team strip's actions are the skin's buttons (task 458)", () => {
     // The strip's own rules are unlayered: no @layer around them.
     const block = css.slice(css.indexOf(":is(.team-bar, .team-tab) .btn {"));
     expect(block).not.toMatch(/@layer/);
+  });
+});
+// Task 463 (the owner's dev build, D:/Tools/zerus-build/verify-strip-inspector.png):
+// with the inspector open the strip is far narrower than the window, and folding
+// by the window's width kept every action inline -- "Pause" was clipped to "Pa"
+// and Stop hid under the panel. The strip now measures itself, so its own width
+// picks the fold, and what no longer fits moves into task 427's More menu.
+describe("the strip folds by its own width (task 463)", () => {
+  it("folds at the widths an open inspector leaves", async () => {
+    const { compact } = await server!.ssrLoadModule(entry);
+    // The window may be wide; these are the strip's own widths.
+    expect(compact(1440)).toBe("none");
+    expect(compact(1040)).toBe("low");
+    expect(compact(880)).toBe("high");
+  });
+
+  it("moves the actions that do not fit into More instead of clipping them", () => {
+    // As wide as the strip gets with the inspector open: Team settings, Catalog and
+    // Resume after limits fold; Pause and Stop stay whole and never get cut.
+    const html = plain(render(team(), 1040));
+    expect(html).toContain('data-compact="low"');
+    expect(html).toContain('data-overflow="settings catalog resumeLimits"');
+    expect(html).toContain('data-more-item="resumeLimits"');
+    expect(html).toContain('data-action="pause"');
+    expect(html).toContain('data-action="stop"');
+    expect(html).not.toContain('data-action="resumeLimits"');
+    // Even narrower: the team actions fold too, so nothing is cut or hidden.
+    const narrow = plain(render(team(), 880));
+    expect(narrow).toContain('data-compact="high"');
+    expect(narrow).toContain('data-overflow="settings catalog resumeLimits pause stop"');
+    for (const id of ["resumeLimits", "pause", "stop"]) expect(narrow).toContain(`data-more-item="${id}"`);
   });
 });

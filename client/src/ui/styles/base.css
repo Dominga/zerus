@@ -348,3 +348,22 @@
    inline-flex display. */
 .tab[hidden] { display: none; }
 
+
+/* Task 463 (owner's dev build, D:/Tools/zerus-build/verify-strip-inspector.png):
+   every tab row keeps the skin's tab whatever order the document's cascade
+   layers arrive in. The packaged build opens the components layer in a chunk
+   stylesheet before base.css declares reset, so the reset's
+   `button { padding: 0; border: 0; background: none; color: inherit }` outranks
+   .tab -- the same inversion task 449 met on the question card and 454 on the
+   session tabs. Rows that never stated their own spacing (the inspector's
+   "Plan & agents  Details  Worktrees  Tasks", the catalog's, the plan modes')
+   ran together. Unlayered, so the base tab holds in either order; a row with its
+   own metrics states them unlayered too (detail.css: .detail-tabs, .insp-tabs). */
+.tabs { display: flex; gap: 2px; align-items: flex-end; }
+.tab {
+  position: relative; height: 30px; padding: 0 10px; color: var(--z-color-muted); font-size: var(--fs-sm);
+  display: inline-flex; align-items: center; gap: 6px; border-radius: var(--z-radius-md) var(--z-radius-md) 0 0;
+  transition: color var(--z-motion-fast);
+}
+.tab:hover { color: var(--z-color-text); }
+.tab.on { color: var(--z-color-text); font-weight: 600; }

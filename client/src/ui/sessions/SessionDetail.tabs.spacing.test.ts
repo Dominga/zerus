@@ -156,8 +156,15 @@ function labelSpacing(options: { files: string[]; sources?: Record<string, strin
 
 // Task 454's own lines, taken out to rebuild the stylesheet the owner's app had
 // (the checkout may hand these files back with CRLF endings).
+// Task 463 made the base .tab unlayered, which now states the padding for every
+// row; the owner's build had neither that nor task 454's own lines.
+const withoutBase = (css: string) => {
+  const at = css.indexOf("Task 463 (owner's dev build");
+  return at < 0 ? css : css.slice(0, at);
+};
 const before = {
   ...sheets,
+  "base.css": withoutBase(sheets["base.css"]),
   "detail.css": sheets["detail.css"]
     .replace(/^\.detail-tabs \{ gap: 6px; \}(?:\r?\n|$)/m, "")
     .replace(/^\.detail-tabs \.tab \{ padding: 0 10px; \}(?:\r?\n|$)/m, ""),
@@ -198,4 +205,5 @@ describe("the session tabs' spacing in the packaged app (task 454)", () => {
     expect(sheets["detail.css"]).toMatch(/^\.detail-tabs \.tab \{ padding: 0 10px; \}$/m);
   });
 });
+
 

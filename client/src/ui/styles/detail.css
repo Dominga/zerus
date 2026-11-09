@@ -798,3 +798,9 @@ dialog.session-file { width: min(520px, calc(100vw - 32px)); max-width: calc(100
    and both appearances get the same spacing. */
 .detail-tabs { gap: 6px; }
 .detail-tabs .tab { padding: 0 10px; }
+/* Task 463 (owner's dev build, D:/Tools/zerus-build/verify-strip-inspector.png):
+   the inspector's own tab row gets the same spacing as the session tabs (454),
+   unlayered so the packaged order cannot strip it: a clear gap between tabs and
+   the skin's padding on each, with the smaller type the panel uses. */
+.insp-tabs { gap: 6px; }
+.insp-tabs .tab { padding: 0 10px; font-size: var(--fs-xs); }

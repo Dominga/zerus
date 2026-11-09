@@ -702,6 +702,17 @@ pub(crate) fn sync(store: &mut Store, team_id: &str, bin: Option<&Path>) -> anyh
         }
         Ok(Value::Null)
     })?;
+    // Task #397: the records changed, so each store builds its index once, in
+    // the background: a settled pass, no write held the store when it starts.
+    if !done.written.is_empty() && !truncated && !transient {
+        start_index(bin, &workspace);
+        if let Some(memory) = team.settings.memory.as_ref() {
+            let project = Path::new(&memory.store);
+            if matches!(memory.mode.as_str(), "project" | "read-only") && !memory.store.is_empty() && project != workspace.as_path() {
+                start_index(bin, project);
+            }
+        }
+    }
     Ok(outcome)
 }
 
@@ -899,31 +910,97 @@ pub(crate) fn plain_digest(team: &Team) -> String {
     text
 }
 
+/// Task #397 (owner, 2026-11-08): the store a hit came from, as the reader
+/// names it. A team's workspace lives in the project store as `teams/<team8>`,
+/// so a search run at the project root finds the team records too; without a
+/// name a hit would not say which memory it came from.
+pub(crate) fn store_label(root: &str, relative: &str, team: &Team) -> String {
+    let relative = relative.trim().trim_start_matches("./");
+    if relative.is_empty() || relative == "." {
+        return if root == "project" { "project".into() } else { format!("team {}", team.name) };
+    }
+    let own = &team.id[..8.min(team.id.len())];
+    if let Some(rest) = relative.strip_prefix("teams/") {
+        let id = rest.split('/').next().unwrap_or(rest);
+        return if id == own { format!("team {}", team.name) } else { format!("team {id}") };
+    }
+    relative.to_owned()
+}
+
+/// Names the store of every hit of `find --stores all` in one run.
+fn label_hits(value: &mut Value, root: &str, team: &Team) {
+    let Some(results) = value["results"].as_array_mut() else { return };
+    for hit in results {
+        let relative = hit["store"].as_str().unwrap_or(".").to_owned();
+        hit["store"] = Value::String(store_label(root, &relative, team));
+    }
+}
+
+/// The arguments of a lore read. `find` searches every sub-store (task #397),
+/// so the project's team records are found from the project root; `show` and
+/// `plans` read their own store.
+pub(crate) fn read_args<'a>(command: &'a str, words: &'a [String]) -> Vec<&'a str> {
+    let mut args: Vec<&str> = std::iter::once(command).chain(words.iter().map(String::as_str)).collect();
+    if command == "find" {
+        args.extend(["--stores", "all"]);
+    }
+    args
+}
+
 /// `hgs team lore find|plans|show`: lore's own answer from the workspace (and
 /// the project store in `project` and `read-only`), each result marked with
-/// the store that holds it.
+/// the store that holds it. `find` searches the sub-stores too (`--stores
+/// all`); in project mode one search of the project root answers for the
+/// whole project, the team's own sub-store included, so its hits are not
+/// returned twice.
 pub(crate) fn read(team: &Team, command: &str, words: &[String]) -> anyhow::Result<Value> {
     let (workspace, _) = workspace(team).ok_or_else(|| anyhow::anyhow!("This team keeps plain memory: it has no lore workspace (memory mode {})",
         team.settings.memory.as_ref().map_or("plain", |memory| memory.mode.as_str())))?;
     let bin = lore_bin().ok_or_else(|| anyhow::anyhow!("The lore binary was not found (HGS_LORE, beside hgs, PATH)"))?;
     let memory = team.settings.memory.clone().unwrap_or_default();
-    let mut stores = vec![("workspace", workspace.clone())];
-    if matches!(memory.mode.as_str(), "project" | "read-only") && !memory.store.is_empty() && Path::new(&memory.store) != workspace {
-        stores.push(("project", PathBuf::from(&memory.store)));
-    }
-    let args: Vec<&str> = std::iter::once(command).chain(words.iter().map(String::as_str)).collect();
+    let find = command == "find";
+    let project = matches!(memory.mode.as_str(), "project" | "read-only").then(|| PathBuf::from(&memory.store)).filter(|store| !memory.store.is_empty() && store != &workspace);
+    let stores: Vec<(&str, PathBuf)> = match (find, project.clone()) {
+        // The project root's search answers for the whole project, its teams included.
+        (true, Some(project)) => vec![("project", project)],
+        (_, project) => {
+            let mut stores = vec![("workspace", workspace.clone())];
+            if let Some(project) = project {
+                stores.push(("project", project));
+            }
+            stores
+        }
+    };
+    let args = read_args(command, words);
     let roots = roots(team, &workspace);
     let mut answers = Map::new();
     let mut notes = Vec::new();
     for (name, store) in stores {
         match run_lore(&bin, &store, &args, "", &roots, None) {
-            Ok(value) => {
+            Ok(mut value) => {
+                if find {
+                    label_hits(&mut value, name, team);
+                }
                 answers.insert(name.into(), value);
             }
             Err(error) => notes.push(format!("{name}: {error}")),
         }
     }
     Ok(json!({"team": team.id, "command": command, "stores": answers, "notes": notes}))
+}
+
+/// Task #397: one detached `lore index` for a store whose records changed, so
+/// its status reads built without the reader waiting; it starts only after a
+/// settled pass (no write holds the store then) and lore's own marker keeps a
+/// second search from starting another.
+fn start_index(bin: &Path, store: &Path) {
+    let mut command = Command::new(bin);
+    command.arg("-C").arg(store).arg("index");
+    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    for name in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"] {
+        command.env_remove(name);
+    }
+    let _ = command.spawn();
 }
 
 /// Task 128 (docs/lore.md 4.5): the owner's export of a team's knowledge

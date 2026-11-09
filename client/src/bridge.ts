@@ -676,15 +676,20 @@ export type MemoryOp =
   | { op: "read" }
   | { op: "enable"; enabled: boolean; expected_revision: number; request_id?: string }
   | { op: "store"; store: string; expected_revision: number; request_id?: string }
-  | { op: "move"; to: string; expected_revision: number; request_id?: string };
+  | { op: "move"; to: string; expected_revision: number; request_id?: string }
+  // Task #397: the project's store and its team sub-stores (`find --stores all`).
+  | { op: "find"; query: string; limit?: number };
 export interface MemoryCall { project: string; op: MemoryOp }
 export interface MemoryView {
   enabled: boolean; store: string; default_store: string; default: boolean; revision: number; moved_from: string[];
   exists: boolean; records: number; files: number; bytes: number; index: "none" | "built" | "stale";
 }
 export interface MemoryMoved { from: string; to: string; files: number; bytes: number; old_kept: boolean }
+/** One hit of a memory search, named with the store that holds it (task #397). */
+export interface MemoryHit { id: string; kind: string; title: string; store: string; via: string; score: number }
 export type MemoryOutcome =
   | { outcome: "done"; view: MemoryView; moved?: MemoryMoved; request_id?: string }
+  | { outcome: "found"; store: string; query: string; hits: MemoryHit[]; notes: string[] }
   | { outcome: "unsupported"; detail: Text }
   | { outcome: "failed"; detail: Text; request_id?: string }
   | { outcome: "uncertain"; detail: Text; request_id: string };

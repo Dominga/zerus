@@ -10803,11 +10803,16 @@ status shows the records (nonempty lines of the record files), the files and
 their size, and the index state: `none`, `built`, or `stale` when a record
 file changed after the index.
 
-`hgs project config get|set|move --json` (`project-memory-v1` in help) reads one
-JSON object on stdin naming `project` (the stable identity). Get returns
+`hgs project config get|set|move|find --json` (`project-memory-v1` in help) reads
+one JSON object on stdin naming `project` (the stable identity). Get returns
 `enabled`, `store`, `default_store`, `default`, `revision`, `moved_from` and
 `status` (`exists`, `records`, `files`, `bytes`, `index`). Set takes `enabled`
-and/or `store` (a full path, "" for the default); move takes `to`. Writes are
+and/or `store` (a full path, "" for the default); move takes `to`. Find (task
+#397) takes `query` and an optional `limit` (5 by default) and searches the
+project's own records and its team sub-stores (`lore find --stores all`), so a
+team's workspace is found from the project: every hit names its `store`
+(`project`, or `team NAME`), and `notes` carry what lore reports, the model
+download included. Writes are
 the owner's (`by: "human"`; an agent session is refused) and carry a canonical
 `request_id` and `expected_revision` from get; the same request replays its
 receipt, and a stale revision is refused. Settings and receipts live in
@@ -10857,7 +10862,9 @@ changes per pass, through the `lore` binary (`HGS_LORE`, beside hgs, then
 `lore` field keeps the last pass's hash, the waiting records and the refused
 ids. The lead's inbox message ends with the workspace's open items and the
 newest decisions, at most 10 lines. Reads, from a member's session or with
-`--team ID`: `hgs team lore find WORDS`, `hgs team lore plans` (with the
+`--team ID`: `hgs team lore find WORDS` (the workspace, the project store and
+its team sub-stores, each hit marked with its store: `project` or
+`team NAME`), `hgs team lore plans` (with the
 open items of the newest three phases, phase 1 included) and
 `hgs team lore show ID`; a sandboxed member asks the lead, since brokered
 reads run in the worker's tick; JSON

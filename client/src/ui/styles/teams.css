@@ -363,6 +363,12 @@
 .team-member-card .team-status { max-width: 110px; padding: 0 5px; border-radius: 7px; color: var(--member-state);
   border: 1px solid color-mix(in srgb, var(--member-state) 45%, transparent);
   background: color-mix(in srgb, var(--member-state) 12%, transparent); }
+/* Task 355: the state word keeps its colour, the task number sits beside it,
+   and the row of the session you look at says "you". */
+.team-member-task { flex: none; font-size: 11px; }
+.team-you { flex: none; padding: 0 6px; height: 16px; line-height: 14px; border-radius: 8px; font-size: 10px; font-weight: 600;
+  color: var(--z-color-accent); border: 1px solid color-mix(in srgb, var(--z-color-accent) 45%, transparent);
+  background: color-mix(in srgb, var(--z-color-accent) 12%, transparent); }
 .team-member-card[data-state-color="info"] { --member-state: var(--z-color-info); }
 .team-member-card[data-state-color="warn"] { --member-state: var(--z-color-warn); }
 .team-member-card[data-state-color="danger"] { --member-state: var(--z-color-danger); }

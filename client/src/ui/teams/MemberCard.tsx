@@ -122,6 +122,20 @@ export function MemberCard(props: {
     }
   };
   const assignable = () => props.team.tasks.filter((task) => !["accepted", "rejected", "cancelled", "done"].includes(task.status) && task.assignee !== props.member.id);
+  // Task 355 (owner, 2026-11-08): the row shows its state as a word and its
+  // task number beside it, so a queued task is not read as work; the row of
+  // the session being looked at says "you".
+  const taskNumber = () => props.status.task || props.member.queue[0] || 0;
+  const taskTitle = () => props.team.tasks.find((task) => task.id === taskNumber())?.title ?? "";
+  const detail = () => {
+    if (props.member.error) return props.member.error;
+    if (taskTitle() && ["working", "sent", "submitted", "in_review", "in_test"].includes(props.status.kind)) return taskTitle();
+    return props.status.text === props.status.short ? "" : props.status.text;
+  };
+  const isYou = () => {
+    const row = memberRow(props.computer, props.member);
+    return !!row && row.key === selected()?.key;
+  };
   const stop = (event: Event) => event.stopPropagation();
   return (
     <div class="team-member team-member-card" data-member={props.member.id} data-kind={props.status.kind} data-state-color={memberStateColor(props.status.kind)} role="button" tabindex="0"
@@ -133,6 +147,7 @@ export function MemberCard(props: {
       <div class="team-member-main">
         <div class="team-member-line">
           <span class="role-badge ell" style={roleStyle(props.member.role, props.member.lead)}>{role()}</span>
+          <Show when={isYou()}><span class="team-you" data-you>{tr("you")}</span></Show>
           <Show when={props.member.sub}>
             <button type="button" class="team-sublead" data-action="member-fold" aria-expanded={!props.folded} title={tr("Show or hide its reports")}
               onClick={(event) => { stop(event); props.onFold(); }}>
@@ -185,12 +200,13 @@ export function MemberCard(props: {
         </Show>
         <Show when={waitingForTask(props.team, props.member)} fallback={
           <div class="team-member-line sub">
-            <span class={`team-status tone-${props.status.tone}`} title={props.status.text}><Icon name={props.status.icon} size={12} />{props.status.short}</span>
-            <span class="ell team-member-text" title={props.member.error || props.status.text}>{props.member.error || props.status.text}</span>
+            <span class={`team-status tone-${props.status.tone}`} title={props.status.text} data-state={props.status.kind}><Icon name={props.status.icon} size={12} />{props.status.short}</span>
+            <Show when={taskNumber() > 0}><span class="mono dim team-member-task" data-task-number={taskNumber()}>#{taskNumber()}</span></Show>
+            <Show when={detail()}><span class="ell team-member-text" title={props.member.error || props.status.text}>{detail()}</span></Show>
           </div>
         }>
           <div class="team-member-line sub">
-            <span class="team-status" title={tr("Waiting for a task")}><Icon name="hourglass" size={12} />{tr("Waiting")}</span>
+            <span class="team-status" title={tr("Waiting for a task")} data-state="waiting"><Icon name="hourglass" size={12} />{tr("Waiting")}</span>
             <span class="ell team-member-text">{tr("Waiting for a task")}</span>
           </div>
         </Show>

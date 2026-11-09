@@ -30,57 +30,42 @@ import {
   type PlanMode,
 } from "./planModes";
 
-const MODES: { mode: PlanMode; label: string }[] = [
-  { mode: "graph", label: "Graph" },
-  { mode: "board", label: "Board" },
-  { mode: "layers", label: "Layers" },
-  { mode: "lanes", label: "Lanes" },
-  { mode: "profile", label: "Profile" },
-  { mode: "tests", label: "Tests" },
+const MODES: { mode: PlanMode; label: string; icon: string }[] = [
+  { mode: "graph", label: "Graph", icon: "network" },
+  { mode: "board", label: "Board", icon: "rows-3" },
+  { mode: "layers", label: "Layers", icon: "layers" },
+  { mode: "lanes", label: "Lanes", icon: "layout-dashboard" },
+  { mode: "profile", label: "Profile", icon: "activity" },
+  { mode: "tests", label: "Tests", icon: "list-todo" },
 ];
 
+/**
+ * Task #436 (owner, screenshot of package 167): the plan's view group, one icon
+ * per view, inside the toolbar's own segmented group. The toolbar's other
+ * groups and toggles live in PlanView, which owns their state.
+ */
 export function PlanModeBar(props: {
   mode: PlanMode;
-  includeCancelled: boolean;
   onMode: (mode: PlanMode) => void;
-  onCancelled: (shown: boolean) => void;
-  /** Task 82: the lateness heat on Graph, Board and Layers. */
-  heat?: boolean;
-  onHeat?: (on: boolean) => void;
 }): JSX.Element {
   return (
-    <div class="pm-modes" role="tablist" aria-label={tr("Plan view")}>
+    <div class="pm-modes pm-group" role="tablist" aria-label={tr("Plan view")} data-plan-group="view">
       <For each={MODES}>
         {(item) => (
           <button
             type="button"
             role="tab"
             class="pm-mode"
+            data-mode={item.mode}
             aria-selected={props.mode === item.mode}
             classList={{ on: props.mode === item.mode }}
             onClick={() => props.onMode(item.mode)}
           >
-            {modeLabel(item.mode)}
+            <Icon name={item.icon} size={13} />
+            <span class="pm-mode-label">{modeLabel(item.mode)}</span>
           </button>
         )}
       </For>
-      <span class="grow" />
-      <Show when={props.mode !== "profile" && props.mode !== "tests"}>
-        <label class="pm-check">
-          <input
-            type="checkbox"
-            checked={props.includeCancelled}
-            onChange={(event) => props.onCancelled(event.currentTarget.checked)}
-          />
-          {tr("Show cancelled")}
-        </label>
-        <Show when={props.onHeat && (props.mode === "graph" || props.mode === "board" || props.mode === "layers")}>
-          <label class="pm-check" title={tr("Tint each task by how late it is against the plan; its overrun shows beside it")}>
-            <input type="checkbox" class="pm-heat-toggle" checked={!!props.heat} onChange={(event) => props.onHeat?.(event.currentTarget.checked)} />
-            {tr("Lateness")}
-          </label>
-        </Show>
-      </Show>
     </div>
   );
 }

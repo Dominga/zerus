@@ -36,6 +36,11 @@ const STUBS: Record<string, string> = {
   "src/ui/sessions/worktree-dialogs": `export const sameSessions = () => true;`,
   "src/ui/lib/icons": `export const Icon = (p) => "[" + p.name + (p.class ? " " + p.class : "") + "]"; export const AgentGlyph = (p) => "[" + p.agent + "]";`,
   "src/ui/lib/keys": `export const composing = () => false;`,
+  // Task 407: upstream's Dropdown (8f2b428de) calls createUniqueId() at render
+  // time, and this harness renders with Solid's plain renderToString, which has
+  // no use for unique ids; a field stands in as a plain control, the dialog's
+  // layout being what these tests read.
+  "src/ui/lib/Dropdown": `export const Dropdown = (p) => "[" + (p.id ?? "dropdown") + "]";`,
 };
 const stubId = (key: string) => `\0newsession-stub:${key}`;
 let server: ViteDevServer | undefined;

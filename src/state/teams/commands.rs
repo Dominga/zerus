@@ -766,6 +766,63 @@ pub(crate) fn bound_status(value: &mut Value, team: &Team) {
         }
     }
 
+    // The rows the line added since: a member's recent permission answers and
+    // its asked-question digests are the audit's, its start prompt is clipped,
+    // a handoff keeps its newest few with a clipped text, and the plan's
+    // findings keep their first twenty. The counts stay; the full records are
+    // `hgs team status --task N`, the member's card and the feed.
+    if let Some(members) = value.get_mut("members").and_then(|list| list.as_array_mut()) {
+        for member in members.iter_mut() {
+            let Some(object) = member.as_object_mut() else { continue };
+            for (field, count, keep) in [("permission_answers", "permission_answers_total", 3), ("asked", "asked_total", 0)] {
+                if let Some(list) = object.get_mut(field).and_then(|list| list.as_array_mut()) {
+                    let total = list.len();
+                    list.truncate(keep);
+                    if field == "permission_answers" {
+                        for answer in list.iter_mut() {
+                            for key in ["command", "reason"] {
+                                if let Some(text) = answer[key].as_str() {
+                                    let clipped = clip(text, 160);
+                                    answer[key] = json!(clipped);
+                                }
+                            }
+                        }
+                    }
+                    object.insert(count.into(), json!(total));
+                }
+            }
+            if let Some(prompt) = object.get("prompt").and_then(|prompt| prompt.as_str()) {
+                let clipped = clip(prompt, 300);
+                object.insert("prompt".into(), json!(clipped));
+            }
+        }
+    }
+    if let Some(handoffs) = value.get_mut("handoffs").and_then(|list| list.as_array_mut()) {
+        let total = handoffs.len();
+        if total > 5 {
+            handoffs.drain(..total - 5);
+        }
+        for handoff in handoffs.iter_mut() {
+            if let Some(text) = handoff["text"].as_str() {
+                let clipped = clip(text, 300);
+                handoff["text"] = json!(clipped);
+            }
+        }
+        if total > 5 {
+            value["handoffs_total"] = json!(total);
+        }
+    }
+    if let Some(validation) = value.get_mut("validation").and_then(|validation| validation.as_object_mut()) {
+        for field in ["errors", "warnings"] {
+            if let Some(list) = validation.get_mut(field).and_then(|list| list.as_array_mut()) {
+                let total = list.len();
+                if total > 20 {
+                    list.truncate(20);
+                    validation.insert(format!("{field}_total"), json!(total));
+                }
+            }
+        }
+    }
     // Task #393: a phase's change history is the plan's archive, not a polled
     // row; the phases keep their state, tasks and notes.
     if let Some(phases) = value.get_mut("phases").and_then(|list| list.as_array_mut()) {
@@ -794,6 +851,8 @@ pub(crate) fn bound_status(value: &mut Value, team: &Team) {
             if let Some(object) = change.as_object_mut() {
                 object.remove("phases_before");
                 object.remove("phases_after");
+                object.remove("tasks_before");
+                object.remove("tasks_after");
                 object.remove("added");
                 object.remove("removed");
                 object.remove("changed");

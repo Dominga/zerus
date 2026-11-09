@@ -99,6 +99,10 @@ export interface NewTeamView {
   goal: string;
   /** Task #308 */
   working_mode?: WorkingModeDraft | null;
+  /** Task #8 (team ede724c4): the owner's plan mode, the lead's offer ("" for none) and its reason. */
+  plan_mode?: string;
+  plan_mode_offer?: string;
+  plan_mode_reason?: string;
   addendum: string;
   folder: string;
   settings: Record<string, unknown>;

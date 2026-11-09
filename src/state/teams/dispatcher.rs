@@ -2607,8 +2607,8 @@ fn merge_queue_tick(store: &mut Store, team_id: &str, now: f64) -> anyhow::Resul
         }
         // Every result is in; the merge decides without reading the host's
         // classes or the machine config.
-        return change(store, team_id, |team, events| {
-            super::merge_queue::step(team, &database, now, events, &[], &[]).map(|_| ())
+        return merge_step(store, team_id, &team, &database, |team, events, queue| {
+            super::merge_queue::step_into(team, &database, now, events, || Ok((Vec::new(), Vec::new())), queue)
         });
     }
     // A queued merge (including one rolled back for a retry) merges now. Host
@@ -2621,13 +2621,98 @@ fn merge_queue_tick(store: &mut Store, team_id: &str, now: f64) -> anyhow::Resul
     if !has_queued {
         return Ok(());
     }
-    change(store, team_id, |team, events| {
-        super::merge_queue::step_with(team, &database, now, events, || {
-            let config = crate::config::Config::load().map_err(|error| anyhow::anyhow!("{error}"))?;
-            Ok((super::test_runners::host_classes(), super::test_runners::configured(&config)))
-        })
-        .map(|_| ())
+    merge_step(store, team_id, &team, &database, |team, events, queue| {
+        super::merge_queue::step_into(
+            team,
+            &database,
+            now,
+            events,
+            || {
+                let config = crate::config::Config::load().map_err(|error| anyhow::anyhow!("{error}"))?;
+                Ok((super::test_runners::host_classes(), super::test_runners::configured(&config)))
+            },
+            queue,
+        )
     })
+}
+
+/// Task #1 (team ede724c4): a merge-queue outcome that no longer applies to
+/// the team as stored; the transaction that found it rolls back.
+#[derive(Debug)]
+struct MergeSuperseded(String);
+
+impl std::fmt::Display for MergeSuperseded {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "the merge queue's outcome no longer applies: {}", self.0)
+    }
+}
+
+impl std::error::Error for MergeSuperseded {}
+
+#[cfg(test)]
+type MergeBetween = Box<dyn FnMut(&mut Store, &str)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: a change another writer makes between the merge queue's Git
+    /// step and its write.
+    static MERGE_BETWEEN: std::cell::RefCell<Option<MergeBetween>> = std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(crate) fn set_merge_between(between: Option<MergeBetween>) {
+    MERGE_BETWEEN.with(|slot| *slot.borrow_mut() = between);
+}
+
+/// Task #1 (team ede724c4): one merge-queue step with no Git under the team
+/// store's write lock. The step (git fetch, merge or cherry-pick, merge-base,
+/// reset, the generators and the test selection) runs on a copy of `base`, the
+/// team read without the lock; a short transaction then applies its changes
+/// over the team as stored, enqueues its tests and appends its events. When
+/// another writer changed what the step decided on (`merge_queue::superseded`)
+/// nothing is written: a merge commit the step made is rolled back and the next
+/// tick decides again from the stored team, so a landing is recorded once. A
+/// step that changed nothing writes nothing.
+fn merge_step(
+    store: &mut Store,
+    team_id: &str,
+    base: &Team,
+    database: &super::test_queue::TestStore,
+    step: impl FnOnce(&mut Team, &mut Vec<Event>, &mut Vec<super::test_queue::Request>) -> anyhow::Result<bool>,
+) -> anyhow::Result<()> {
+    let mut ours = base.clone();
+    let mut events = Vec::new();
+    let mut queue = Vec::new();
+    step(&mut ours, &mut events, &mut queue)?;
+    if ours == *base && events.is_empty() && queue.is_empty() {
+        return Ok(());
+    }
+    #[cfg(test)]
+    if let Some(mut between) = MERGE_BETWEEN.with(|slot| slot.borrow_mut().take()) {
+        between(store, team_id);
+        MERGE_BETWEEN.with(|slot| *slot.borrow_mut() = Some(between));
+    }
+    let (base_value, our_value) = (serde_json::to_value(base)?, serde_json::to_value(&ours)?);
+    let written = change(store, team_id, |team, out| {
+        let their_value = serde_json::to_value(&*team)?;
+        if let Some(reason) = super::merge_queue::superseded(&base_value, &our_value, &their_value) {
+            return Err(MergeSuperseded(reason).into());
+        }
+        *team = serde_json::from_value(super::store::merge3(&base_value, &our_value, &their_value))
+            .context("The merge queue's changes did not merge into the team record")?;
+        out.append(&mut events);
+        // The test database is its own file: no Git and no wait on this one.
+        for request in &queue {
+            database.enqueue(request)?;
+        }
+        Ok(())
+    });
+    let Err(error) = written else { return Ok(()) };
+    let Some(superseded) = error.downcast_ref::<MergeSuperseded>() else { return Err(error) };
+    let stored = store.load(team_id)?;
+    let undone = super::merge_queue::undo_superseded(base, &ours, stored.as_ref());
+    eprintln!("hgs team worker: {}: {superseded}; retried on the next tick{}", base.name, undone.map(|note| format!(" ({note})")).unwrap_or_default());
+    Ok(())
 }
 
 /// Task 174: the teams whose test queue runs on its thread now.

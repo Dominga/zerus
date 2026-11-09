@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, type JSX } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount, type JSX } from "solid-js";
 import { tr } from "../../i18n";
 import { AgentGlyph, Icon } from "../lib/icons";
 import { agentKind, computerOffline } from "../../store/catalog";
@@ -8,6 +8,8 @@ import { SHARE, SIDE, dragShare, dragSide, teamLayout, type TeamLayout } from ".
 import { selected, setDetailTab, setPage, setSelectedKey, subagentOpen, toast } from "../../store/ui";
 import { teamAction, teamBuilds, teamTests, teamTimeline, teamsProfile } from "../../bridge";
 import { AddMemberDialog, MemberCard, toComposer } from "./MemberCard";
+import { TeamBar } from "./team-bar";
+import { openRow } from "./openRow";
 import { focusedTasks, memberTree } from "./members";
 import { sideLists, type SideTarget } from "./sideLists";
 import { TeamActions as TeamActionsModel } from "./actions";
@@ -31,7 +33,7 @@ import { ArchivedTaskReport, TeamReports } from "./TeamReports";
 import { WorkingModeRow } from "./WorkingModeRow";
 import { closeWorkingMode, markWorkingModeKept, workingModeShown } from "../../store/workingMode";
 import { WaitingBanner } from "./Waiting";
-import { Blockers, PhaseActions, TaskActions, TeamBarActions, TeamBarChips, TeamModeControl, TeamQuestions, createPlanEditing } from "./TeamActions";
+import { Blockers, PhaseActions, TaskActions, TeamQuestions, createPlanEditing } from "./TeamActions";
 import { noReportReply } from "./noReport";
 import { TeamActions as TeamActionModel } from "./actions";
 import { composer } from "../../store/composer";
@@ -290,71 +292,6 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
 }
 
 /**
- * Task 40: Send back's message reaches the coordinator through its composer
- * (the Tauri client sends a session message only from a composer): the
- * coordinator becomes the selected session, keeps the Team tab, and the
- * message waits in its composer for the owner's Send.
- */
-function toCoordinator(computer: ComputerId, team: TeamView, text: string) {
-  // A draft already typed stays; the message follows it (MemberCard toComposer).
-  toComposer(computer, team.members.find((member) => member.lead), text);
-}
-
-function TeamBar(props: {
-  computer: ComputerId;
-  team: TeamView;
-  state: string;
-  problemTasks: ReadonlySet<number>;
-  onPhase: (phase: number) => void;
-  onSettings: () => void;
-  onCatalog: () => void;
-}) {
-  const [finishOpen, setFinishOpen] = createSignal(false);
-  // U59: the owner's planning mode for the approval (none: as the lead planned).
-  const [freeMode, setFreeMode] = createSignal(false);
-  const counts = createMemo(() => progress(props.team, props.problemTasks));
-  const [now, setNow] = createSignal(Date.now() / 1000);
-  const clock = setInterval(() => setNow(Date.now() / 1000), 60_000);
-  onCleanup(() => clearInterval(clock));
-  const share = (n: number) => (counts().total ? `${(n / counts().total) * 100}%` : "0%");
-  return (
-    <header class="team-bar">
-      <Icon name="users" size={16} />
-      <b class="team-name ell" title={props.team.goal || props.team.name}>{props.team.name}</b>
-      <span class={`team-badge tone-${stateTone(props.state)}`} data-state={props.state}>{stateLabel(props.state)}</span>
-      <TeamModeControl computer={props.computer} team={props.team} />
-      <div class="team-progress" role="img" aria-label={tr("%1 of %2 tasks accepted", counts().accepted, counts().total)}
-        title={tr("%1 of %2 tasks accepted", counts().accepted, counts().total)}>
-        <i class="seg accepted" style={{ width: share(counts().accepted) }} />
-        <i class="seg submitted" style={{ width: share(counts().submitted) }} />
-        <i class="seg active" style={{ width: share(counts().active) }} />
-        <i class="seg problem" style={{ width: share(counts().problems) }} />
-      </div>
-      <span class="mono team-count">{counts().accepted}/{counts().total}</span>
-      <button type="button" class="btn ghost small" onClick={props.onSettings}>{tr("Team settings")}</button>
-      <button type="button" class="btn ghost small" onClick={props.onCatalog}>{tr("Catalog")}</button>
-      <Show when={props.team.created > 0}><span class="dim team-age" title={tr("Since the team was created")}>{duration(now() - props.team.created)}</span></Show>
-      <span class="grow" />
-      <TeamBarChips team={props.team} onPhase={props.onPhase} onFinish={() => setFinishOpen(true)} onLead={() => {
-        // Task 95: the lead's session shows what it waits on.
-        const lead = props.team.members.find((member) => member.lead);
-        if (lead) openRow(memberRow(props.computer, lead));
-      }} />
-      <Show when={props.state === "planning"}><span class="team-note">{tr("The plan waits for your approval")}</span></Show>
-      <Show when={props.state === "done"}><span class="team-note done"><Icon name="check" size={13} />{tr("All tasks are decided")}</span></Show>
-      <Show when={props.team.status === "planning"}>
-        <label class="team-proposal-option" title={tr("One open phase that takes tasks as they come until you close it")}>
-          <input type="checkbox" checked={freeMode()} onChange={(event) => setFreeMode(event.currentTarget.checked)} />{tr("Free planning")}
-        </label>
-      </Show>
-      <TeamBarActions computer={props.computer} team={props.team} planMode={freeMode() ? "free" : ""}
-        sendToCoordinator={(text) => toCoordinator(props.computer, props.team, sendBackMessage(text))}
-        finishOpen={finishOpen} setFinishOpen={setFinishOpen} />
-    </header>
-  );
-}
-
-/**
  * Task 317 (F13): the lead's own session carries its team outside the Team tab
  * too, as Qt's lead header does: the team bar (state, working mode, progress,
  * problems, settings, catalog and the team actions) and a strip naming the team
@@ -486,12 +423,6 @@ function SideColumn(props: {
       <Coordinator computer={props.computer} team={props.team} lead={lead()} status={lead() ? props.statuses.get(lead()!.id) : undefined} />
     </div>
   );
-}
-
-function openRow(row: Session | undefined) {
-  if (!row) return;
-  setSelectedKey(row.key);
-  setDetailTab("activity");
 }
 
 /**

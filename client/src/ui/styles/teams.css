@@ -16,8 +16,12 @@
   .team-tab .tone-danger { --tone: var(--z-color-danger); }
   .team-tab .tone-planning { --tone: var(--z-color-info); }
 
-  /* The team bar: 44 px, name, badge, progress, accepted/total, age. */
-  .team-bar { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 14px; border-bottom: 1px solid var(--z-color-divider); }
+  /* Task #427: one row with fixed gaps; the name shrinks first, the progress
+     bar keeps a min and a max width, and the time never wraps. */
+  .team-bar { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 14px; border-bottom: 1px solid var(--z-color-divider); flex-wrap: nowrap; min-width: 0; overflow: hidden; }
+  .team-bar > * { flex: 0 0 auto; min-width: 0; }
+  .team-bar .grow { flex: 1 1 auto; }
+  .team-bar .team-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .team-name { font-size: var(--fs-md, 14px); min-width: 0; max-width: 34%; }
   .team-badge { display: inline-flex; align-items: center; height: 18px; padding: 0 8px; border-radius: 9px; font-size: 10.5px; font-weight: 600;
     color: var(--tone); border: 1px solid var(--tone); white-space: nowrap; }
@@ -26,14 +30,18 @@
   .team-chip.warn { color: var(--z-color-warn); background: var(--z-color-warn-bg); border: 1px solid color-mix(in srgb, var(--z-color-warn) 45%, transparent);
     border-radius: 9px; padding: 0 8px; font-size: 11px; font-weight: 600; white-space: nowrap; }
   .team-badge.tone-active { background: var(--z-color-accent-bg); }
-  .team-progress { display: flex; gap: 2px; width: 200px; height: 6px; border-radius: 3px; background: var(--z-color-tile, var(--z-color-field)); overflow: hidden; flex: none; }
+  .team-progress { display: flex; gap: 2px; flex: 0 1 clamp(80px, 14vw, 220px); width: auto; min-width: 80px; max-width: 220px; height: 6px; border-radius: 3px; background: var(--z-color-tile, var(--z-color-field)); overflow: hidden; }
   .team-progress .seg { display: block; height: 100%; }
   .team-progress .seg:not([style*="width: 0%"]) { min-width: 2px; }
   .team-progress .accepted { background: var(--z-color-accent-muted); }
   .team-progress .submitted { background: color-mix(in srgb, var(--z-color-accent-muted) 55%, transparent); }
   .team-progress .active { background: var(--z-color-accent); }
   .team-progress .problem { background: var(--z-color-warn); }
-  .team-count { color: var(--z-color-text-2); }
+  .team-count { color: var(--z-color-text-2); white-space: nowrap; }
+  .team-age { white-space: nowrap; flex: none; }
+  .team-bar-actions { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; position: relative; }
+  .team-more-btn { flex: none; }
+  .team-more-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 30; }
   .team-note { display: inline-flex; align-items: center; gap: 5px; color: var(--z-color-info); }
   .team-note.done { color: var(--z-color-accent-muted); }
 
@@ -341,22 +349,10 @@
 .team-inbox-tool-notice { flex-basis: 100%; color: var(--z-color-danger); font-size: var(--fs-2xs); overflow-wrap: anywhere; }
 .team-proposal-command { display: block; margin: 4px 0; padding: 4px 6px; border-radius: 4px; background: var(--z-color-field); color: var(--z-color-text); font-family: var(--z-font-mono); font-size: var(--fs-xs); overflow-wrap: anywhere; user-select: text; }
 
-/* Task #323 (N1): at 1200 px the team bar's progress bar covered the mode
-   button and cut Team settings. Qt's ResponsiveRow drops labels and the
-   progress first; do the same by the bar's own width, never the window's. */
+/* Task #427: the strip is one row at every width; the lower-priority actions
+   fold into a More menu (TeamBarActions) rather than hiding the progress or
+   the time, so nothing overlaps or wraps. */
 .team-tab { container-type: inline-size; }
-@container (max-width: 1150px) {
-  .team-bar { gap: 6px; padding: 0 8px; }
-  .team-progress { width: 90px; }
-  .team-age { display: none; }
-  .team-name { max-width: 26%; }
-}
-@container (max-width: 940px) {
-  .team-bar { gap: 4px; padding: 0 6px; }
-  .team-progress, .team-count, .team-age { display: none; }
-  .team-name { max-width: 170px; }
-  .team-bar .btn { padding: 0 6px; }
-}
 
 /* Task #347: the Members column sits on its own darker surface, and each card
    carries its state on a left bar and the state pill (Qt's palette). */

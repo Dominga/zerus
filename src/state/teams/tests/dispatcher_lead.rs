@@ -103,6 +103,7 @@ fn a_member_on_another_computer_is_resumed_by_that_computer() {
 fn a_safe_action_allows_its_shape_once_and_the_rest_reaches_the_lead() {
     let dir = tempfile::tempdir().unwrap();
     safe_actions::set_test_path(Some(dir.path().join("safe-actions.json")));
+    crate::state::with_test_state_root(dir.path(), || {
     let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
     let mut t = team();
     // Its own id: the question reads are throttled per team and member.
@@ -147,7 +148,15 @@ fn a_safe_action_allows_its_shape_once_and_the_rest_reaches_the_lead() {
     assert_eq!(answers.borrow().len(), 1);
     let saved = store.load("t-safe").unwrap().unwrap();
     assert_eq!(saved.member("dev").unwrap().pending.as_ref().unwrap().question_id, "q2");
+    // Task #349: a safe-action answer is in the approval journal with its source.
+    let journal = crate::approval_log::root();
+    let entries = crate::approval_log::entries(&journal, &json!({"source":"safe-action shape"})).unwrap();
+    assert_eq!(entries["entries"].as_array().unwrap().len(), 1, "{entries}");
+    assert_eq!(entries["entries"][0]["command"], "cargo test --locked --bin hgs teams");
+    assert_eq!(entries["entries"][0]["answer"], "allow: Yes");
+    assert_eq!(entries["entries"][0]["team"], "t-safe");
     safe_actions::set_test_path(None);
+    });
 }
 
 /// U19 (2): a team member's subagent card reaches its lead like any
@@ -420,6 +429,13 @@ fn a_single_team_call_in_the_members_own_scope_is_answered_by_zerus() {
         let events = store.events(&t.id, None, 30).unwrap().to_string();
         assert!(events.contains("permission_answered") && events.contains("own-scope"), "{events}");
         assert!(events.contains("safe_action_reserved") && events.contains("sandbox-scope"), "{events}");
+        // Task #349: Zerus's own-scope safe-call answer is in the approval
+        // journal with its source, before the next answer could be delivered.
+        let journal = crate::approval_log::root();
+        let entries = crate::approval_log::entries(&journal, &json!({"source":"Zerus safe-call rule"})).unwrap();
+        assert_eq!(entries["entries"].as_array().unwrap().len(), 1, "{entries}");
+        assert_eq!(entries["entries"][0]["member"], "qa");
+        assert_eq!(entries["entries"][0]["answer"], "allow: Allow once");
         // The compound script is the lead's: the next read records it unanswered.
         sync_permission_forget(&t.id, "qa");
         let scripted = card("q2", &script);

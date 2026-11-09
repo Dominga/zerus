@@ -171,7 +171,7 @@ pub(crate) fn open(root: &Path) -> Result<Connection> {
     let version: i64 = db
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(bad)?;
-    if !(0..=1).contains(&version) {
+    if !(0..=2).contains(&version) {
         return Err(bad("The approval journal requires a newer hgs CLI"));
     }
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
@@ -183,8 +183,35 @@ pub(crate) fn open(root: &Path) -> Result<Connection> {
       CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session,id DESC);
       CREATE INDEX IF NOT EXISTS attempts_host ON attempts(host,id DESC);
       CREATE INDEX IF NOT EXISTS attempts_host_session ON attempts(host,session,id DESC);").map_err(bad)?;
-    if version == 0 {
-        db.execute_batch("PRAGMA user_version=1").map_err(bad)?;
+    if version < 2 {
+        // Task #349 (owner, 2026-11-08): the journal is the one place for every
+        // approval not given by the owner in person. An automatic entry keeps
+        // its source; a lead's answer and Zerus's safe-call answer add theirs,
+        // with the team, the member, the command and the answer given.
+        let columns: Vec<String> = db
+            .prepare("SELECT name FROM pragma_table_info('attempts')")
+            .map_err(bad)?
+            .query_map([], |row| row.get(0))
+            .map_err(bad)?
+            .collect::<std::result::Result<_, _>>()
+            .map_err(bad)?;
+        for (column, definition) in [
+            ("source", "TEXT NOT NULL DEFAULT 'automatic'"),
+            ("team", "TEXT NOT NULL DEFAULT ''"),
+            ("member", "TEXT NOT NULL DEFAULT ''"),
+            ("command", "TEXT NOT NULL DEFAULT ''"),
+            ("answer", "TEXT NOT NULL DEFAULT ''"),
+        ] {
+            if !columns.iter().any(|name| name == column) {
+                db.execute_batch(&format!("ALTER TABLE attempts ADD COLUMN {column} {definition}")).map_err(bad)?;
+            }
+        }
+        db.execute_batch(
+            "CREATE INDEX IF NOT EXISTS attempts_source ON attempts(source,id DESC);
+             CREATE INDEX IF NOT EXISTS attempts_team ON attempts(team,id DESC);
+             PRAGMA user_version=2;",
+        )
+        .map_err(bad)?;
     }
     platform::sync_dir(&root)?;
     if let Some(parent) = root.parent() {
@@ -301,6 +328,64 @@ pub(crate) fn saved_categories(raw: Option<String>) -> Value {
         .and_then(|value| categories(&value))
         .unwrap_or(Value::Null)
 }
+/// Task #349 (owner, 2026-11-08): the journal's folder under the state root,
+/// so an in-process answer writes where `hgs approval-log list` reads (a
+/// test's state root included).
+pub(crate) fn root() -> std::path::PathBuf {
+    crate::state::state_root().join("approval-audit")
+}
+
+/// Task #349: an approval not given by the owner in person is written here
+/// before it is delivered: a lead's answer (source "team lead <session>") or
+/// Zerus's own safe-call answer ("Zerus safe-call rule" or "safe-action
+/// shape"); the automatic reservation keeps its "automatic" source. The id is
+/// returned so a delivery that failed settles the same entry.
+pub(crate) fn note(path: &Path, entry: &Value) -> Result<i64> {
+    let host = string(entry, "host", 256)?;
+    let session = string(entry, "session", 1024)?;
+    let source = string(entry, "source", 128)?;
+    let short = |key: &str, max: usize| -> Result<String> {
+        let text = entry[key].as_str().unwrap_or("");
+        if text.len() > max || text.chars().any(char::is_control) {
+            return Err(bad(format!("Invalid {key}")));
+        }
+        Ok(text.to_owned())
+    };
+    let team = short("team", 128)?;
+    let member = short("member", 128)?;
+    let command = short("command", 4096)?;
+    let answer = short("answer", 1024)?;
+    let prompt = short("question", 2048)?;
+    let status = entry["status"].as_str().unwrap_or("answered");
+    if !matches!(status, "answered" | "approved" | "failed" | "unknown" | "cancelled") {
+        return Err(bad("Invalid approval outcome"));
+    }
+    let db = open(path)?;
+    let at = chrono::Utc::now().timestamp_millis();
+    let saved = json!({"question": prompt, "command": command, "answer": answer, "source": source, "team": team, "member": member});
+    db.execute("INSERT INTO attempts(identity,request_id,at,host,session,provider,prompt,question,status,source,team,member,command,answer) VALUES(?1,?2,?3,?4,?5,'zerus',?6,?7,?8,?9,?10,?11,?12,?13)",
+        params![format!("answer:{}", uuid::Uuid::new_v4()), uuid::Uuid::new_v4().to_string(), at, host, session, prompt, saved.to_string(), status, source, team, member, command, answer]).map_err(bad)?;
+    Ok(db.last_insert_rowid())
+}
+
+/// Task #349: a delivery that failed settles the entry its `note` reserved.
+pub(crate) fn settle(path: &Path, id: i64, status: &str, detail: &str) -> Result<()> {
+    if !matches!(status, "failed" | "unknown" | "approved" | "answered") {
+        return Err(bad("Invalid approval outcome"));
+    }
+    let detail: String = detail.chars().take(8192).collect();
+    let db = open(path)?;
+    db.execute("UPDATE attempts SET status=?1,detail=?2 WHERE id=?3", params![status, detail, id]).map_err(bad)?;
+    Ok(())
+}
+
+/// Task #349: the journal's page as the reader sees it, from a folder; the
+/// CLI's `list` is the same page.
+pub(crate) fn entries(path: &Path, payload: &Value) -> Result<Value> {
+    let db = open(path)?;
+    list(&db, payload)
+}
+
 fn list(db: &Connection, payload: &Value) -> Result<Value> {
     let reverse = payload.get("after").is_some();
     let cursor = match payload.get(if reverse { "after" } else { "before" }) {
@@ -318,26 +403,34 @@ fn list(db: &Connection, payload: &Value) -> Result<Value> {
     };
     let host = filter_text("host")?;
     let session = filter_text("session")?;
-    if host.len() > 256 || session.len() > 1024 {
+    // Task #349: the journal also filters by who answered (source) and by the
+    // team, so the owner sees only the lead's or Zerus's answers when wanted.
+    let source = filter_text("source")?;
+    let team = filter_text("team")?;
+    if host.len() > 256 || session.len() > 1024 || source.len() > 128 || team.len() > 128 {
         return Err(bad("Invalid journal filter"));
     }
-    // Separate query shapes keep exact-name filters on their indexes, even
-    // with millions of rows. Keyset cursors never scan an OFFSET or COUNT(*).
-    let (filter, values): (&str, Vec<&dyn rusqlite::ToSql>) =
-        match (host.is_empty(), session.is_empty()) {
-            (true, true) => ("", vec![&cursor]),
-            (true, false) => (" AND session=?2", vec![&cursor, &session]),
-            (false, true) => (" AND host=?2", vec![&cursor, &host]),
-            (false, false) => (
-                " AND host=?2 AND session=?3",
-                vec![&cursor, &host, &session],
-            ),
-        };
+    // One exact-name clause per filter, in a fixed order: keyset cursors never
+    // scan an OFFSET or COUNT(*), and each column has its own index.
+    let mut filter = String::new();
+    let mut names: Vec<&str> = Vec::new();
+    for (column, value) in [("host", host), ("session", session), ("source", source), ("team", team)] {
+        if !value.is_empty() {
+            names.push(value);
+            filter.push_str(&format!(" AND {column}=?{}", names.len() + 1));
+        }
+    }
     let operator = if reverse { ">" } else { "<" };
     let order = if reverse { "ASC" } else { "DESC" };
-    let mut statement = db.prepare(&format!("SELECT id,at,host,session,provider,prompt,status,{CATEGORIES} FROM attempts WHERE id{operator}?1{filter} ORDER BY id {order} LIMIT {}",PAGE+1)).map_err(bad)?;
-    let rows = statement.query_map(values.as_slice(),|row| Ok(json!({"id":row.get::<_,i64>(0)?,"at":row.get::<_,i64>(1)?,"host":row.get::<_,String>(2)?,"session":row.get::<_,String>(3)?,"provider":row.get::<_,String>(4)?,"prompt":row.get::<_,String>(5)?,"status":row.get::<_,String>(6)?,
-        "categories":saved_categories(row.get::<_,Option<String>>(7)?)}))).map_err(bad)?;
+    let mut statement = db.prepare(&format!("SELECT id,at,host,session,provider,prompt,status,source,team,member,command,answer,{CATEGORIES} FROM attempts WHERE id{operator}?1{filter} ORDER BY id {order} LIMIT {}",PAGE+1)).map_err(bad)?;
+    let mut values: Vec<&dyn rusqlite::ToSql> = vec![&cursor];
+    for name in &names {
+        values.push(name);
+    }
+    let rows = statement.query_map(values.as_slice(),|row| Ok(json!({"id":row.get::<_,i64>(0)?,"at":row.get::<_,i64>(1)?,"host":row.get::<_,String>(2)?,"session":row.get::<_,String>(3)?,
+        "provider":row.get::<_,String>(4)?,"prompt":row.get::<_,String>(5)?,"status":row.get::<_,String>(6)?,"source":row.get::<_,String>(7)?,
+        "team":row.get::<_,String>(8)?,"member":row.get::<_,String>(9)?,"command":row.get::<_,String>(10)?,"answer":row.get::<_,String>(11)?,
+        "categories":saved_categories(row.get::<_,Option<String>>(12)?)}))).map_err(bad)?;
     let mut entries = rows
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(bad)?;
@@ -396,18 +489,19 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> Re
                 .as_i64()
                 .filter(|id| *id > 0)
                 .ok_or_else(|| bad("Invalid approval journal ID"))?;
-            let row: Option<(String, String, String)> = db
+            let row: Option<(String, String, String, String, String, String, String, String)> = db
                 .query_row(
-                    "SELECT question,status,detail FROM attempts WHERE id=?1",
+                    "SELECT question,status,detail,source,team,member,command,answer FROM attempts WHERE id=?1",
                     [id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
                 )
                 .optional()
                 .map_err(bad)?;
-            let (question, status, detail) =
+            let (question, status, detail, source, team, member, command, answer) =
                 row.ok_or_else(|| bad("Approval journal entry is unavailable"))?;
             let saved = serde_json::from_str::<Value>(&question).map_err(bad)?;
             json!({"id":id,"question":saved["question"],"answers":saved["answers"],"status":status,"detail":detail,
+                "source":source,"team":team,"member":member,"command":command,"answer":answer,
                 "categories":categories(&saved["categories"])})
         }
     };
@@ -837,6 +931,54 @@ mod tests {
             "a valid journal reached through a leaf link is refused"
         );
         assert_eq!(fs::read(&target).unwrap(), original);
+    }
+
+    /// Task #349: the journal is the one place for every approval not given by
+    /// the owner in person. A lead's answer and Zerus's safe-call answer are
+    /// written before delivery, with their source, team, member, question,
+    /// command and answer; the automatic path keeps its own source. Filters by
+    /// source and team are exact, and a failed delivery settles its entry.
+    #[test]
+    fn a_lead_answer_and_a_safe_call_answer_appear_with_their_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("audit");
+        let mut db = open(&root).unwrap();
+        assert_eq!(db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+        let automatic = begin(&mut db, &payload()).unwrap();
+        assert_eq!(automatic["eligible"], true, "the automatic path is unchanged");
+        finish(&db, &json!({"id":automatic["id"],"request_id":automatic["request_id"],"status":"approved"})).unwrap();
+        drop(db);
+        let lead = note(&root, &json!({"host":"desktop-a","session":"claude/x/lead","source":"team lead claude/x/lead",
+            "team":"t1","member":"qa","question":"Allow this command?","command":"hgs team run --json-file req.json",
+            "answer":"allow: Yes","status":"approved"})).unwrap();
+        let safe = note(&root, &json!({"host":"desktop-a","session":"codex/x/qa","source":"Zerus safe-call rule",
+            "team":"t1","member":"qa","question":"Continue?","command":"hgs team status --json-file x.json",
+            "answer":"allow: Yes","status":"answered"})).unwrap();
+        assert!(lead > 0 && safe > lead);
+        let page = |payload: Value| {
+            let db = open(&root).unwrap();
+            list(&db, &payload).unwrap()
+        };
+        let all = page(json!({}));
+        assert_eq!(all["entries"].as_array().unwrap().len(), 3);
+        assert_eq!(all["entries"][0]["source"], "Zerus safe-call rule");
+        let leads = page(json!({"source":"team lead claude/x/lead"}));
+        assert_eq!(leads["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(leads["entries"][0]["team"], "t1");
+        assert_eq!(leads["entries"][0]["member"], "qa");
+        assert_eq!(leads["entries"][0]["command"], "hgs team run --json-file req.json");
+        assert_eq!(leads["entries"][0]["answer"], "allow: Yes");
+        assert_eq!(leads["entries"][0]["prompt"], "Allow this command?");
+        let team = page(json!({"team":"t1"}));
+        assert_eq!(team["entries"].as_array().unwrap().len(), 2);
+        let automatic = page(json!({"source":"automatic"}));
+        assert_eq!(automatic["entries"].as_array().unwrap().len(), 1, "the automatic entries keep their source");
+        // A delivery that failed settles the entry it reserved.
+        settle(&root, safe, "failed", "delivery timed out").unwrap();
+        let failed = page(json!({"source":"Zerus safe-call rule"}));
+        assert_eq!(failed["entries"][0]["status"], "failed");
+        // A note never takes control characters.
+        assert!(note(&root, &json!({"host":"desktop-a","session":"s","source":"safe-action shape","command":"a\u{7}b"})).is_err());
     }
 
     #[cfg(unix)]

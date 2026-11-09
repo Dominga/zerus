@@ -240,6 +240,12 @@ pub(crate) fn host_state_root() -> PathBuf {
     storage::root()
 }
 
+/// Task #349: the state root the private journal writes under, a test's own
+/// state root included (the same folder every state-derived store uses).
+pub(crate) fn state_root() -> PathBuf {
+    storage::root()
+}
+
 pub(super) type Result<T> = std::result::Result<T, String>;
 pub(super) const AGENTS: &[&str] = &["claude", "codex", "kimi"];
 

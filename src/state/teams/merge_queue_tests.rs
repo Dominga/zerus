@@ -1629,7 +1629,7 @@ fn a_checkout_that_is_not_the_line_holds_the_landing_with_a_notice() {
     let entry = team.task(1).unwrap().merge.clone().expect("the queued landing");
     assert!(entry.note.contains("release") && entry.note.contains("master"), "{}", entry.note);
     assert!(entry.merged.is_empty(), "no merge was made");
-    let kinds: Vec<&str> = events.iter().map(|event| event.kind.as_str()).collect();
+    let kinds: Vec<String> = events.iter().map(|event| event.kind.to_string()).collect();
     assert!(kinds.contains(&"merge_wrong_checkout"), "{kinds:?}");
 }
 

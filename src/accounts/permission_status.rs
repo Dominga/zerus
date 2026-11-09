@@ -1,6 +1,8 @@
 //! Read-only account launch defaults. Per-project, managed policies and explicit
 //! session switches may still override these; never present them as live state.
 use super::*;
+use std::io::Read;
+mod opencode;
 
 /// Fill the account row with the discovered catalog and the separate account
 /// launch projection. Discovery is cached per provider by the caller.
@@ -13,7 +15,7 @@ pub(super) fn describe(
     let provider = string_field(row, "provider").to_owned();
     let home = PathBuf::from(string_field(row, "home"));
     let base = permission_catalog::catalog_for(config, &provider, &home, catalogs);
-    let (catalog, current) = permission_catalog::describe_account(
+    let (catalog, mut current) = permission_catalog::describe_account(
         config,
         &provider,
         &home,
@@ -21,13 +23,24 @@ pub(super) fn describe(
         mode,
         &base,
     );
-    let effective = permission_catalog::effective_mode(
+    let mut effective = permission_catalog::effective_mode(
         &provider,
         current["source"].as_str().unwrap_or("provider"),
         mode,
         &current["values"],
     );
-    let detail = current["detail"].clone();
+    let mut detail = current["detail"].clone();
+    if provider == "opencode" && mode == "provider" {
+        // OpenCode keeps its own account-level configuration: read, never changed.
+        if let Some((policy, text)) = opencode::native(&home) {
+            effective = policy.to_owned();
+            detail = json!(text);
+        }
+    } else if mode == "bypass" && row["permission_mode_source"] == "default" {
+        // The Zerus default (T-6hcfnu), not a choice the person made.
+        detail = json!("Zerus default");
+    }
+    current["detail"] = detail.clone();
     row["permission_catalog"] = catalog;
     row["permission_current"] = current;
     row["permission_mode"] = json!(mode);

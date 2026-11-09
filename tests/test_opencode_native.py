@@ -221,12 +221,14 @@ class OpenCodeNative(unittest.TestCase):
         # hgs lists tmux sessions too; an existing private TMUX_TMPDIR keeps it off the
         # user's default server, where a missing directory would fall back to it.
         (root / 'tmux').mkdir(mode=0o700)
+        (root / 'tmp').mkdir(mode=0o700)
         cls.model = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Model)
         cls.model.holding, cls.model.release, cls.model.requests = threading.Event(), threading.Event(), []
         threading.Thread(target=cls.model.serve_forever, daemon=True).start()
         native = Path(NATIVE).absolute()
         cls.env = {'PATH': os.pathsep.join([str(native.parent), os.environ.get('PATH', '')]), 'LANG': 'C.UTF-8',
-                   'HOME': str(root / 'home'), 'XDG_CONFIG_HOME': str(root / 'xdg-config'),
+                   'HOME': str(root / 'home'), 'TMPDIR': str(root / 'tmp'),
+                   'XDG_CONFIG_HOME': str(root / 'xdg-config'),
                    'XDG_DATA_HOME': str(root / 'xdg-data'), 'XDG_CACHE_HOME': str(root / 'xdg-cache'),
                    'XDG_STATE_HOME': str(root / 'xdg-state'), 'OPENCODE_DISABLE_MODELS_FETCH': 'true',
                    'OPENCODE_DISABLE_AUTOUPDATE': 'true', 'OPENCODE_DISABLE_LSP': 'true',
@@ -1175,6 +1177,44 @@ class OpenCodeNative(unittest.TestCase):
         self.assertFalse(self.binding_path(name).exists())
         self.assertFalse(cache.exists())
         self.assertIn((sent['native_message_id'], 'Cached turn'), self.user_messages(conversation))
+
+    def test_12_id_twins_rename_and_forget_only_the_selected_binding(self):
+        first, second = self.create(), self.create()
+        shared = first['name']
+        records = []
+        folder = self.state / 'opencode/sessions'
+        folder.mkdir(exist_ok=True)
+        for inspection in (first, second):
+            path = self.binding_path(inspection['name'])
+            record = json.loads(path.read_text())
+            path.unlink()
+            record.update(name=shared, layout='id', journal_name=record['session_id'])
+            (folder / (record['session_id'] + '.json')).write_text(json.dumps(record))
+            records.append(record)
+        # These are hand-published test fixtures: force the bounded reader scan,
+        # which the real writer's durable index superset will make unnecessary.
+        (self.state / 'labels/.complete').unlink(missing_ok=True)
+        ambiguous = self.hgs(['inspect', shared], success=False)
+        self.assertEqual(ambiguous.returncode, 5, ambiguous.stderr)
+        before = (folder / (records[1]['session_id'] + '.json')).read_bytes()
+        record = records[0]
+        new = 'opencode/workspace/id-renamed-' + uuid.uuid4().hex[:8]
+        renamed = self.hgs(['session-action', shared, '--session-id', record['session_id'], '--json'],
+                           self.payload(record, action='rename', new_name=new))
+        self.assertEqual(renamed['status'], 'completed', renamed)
+        current = self.hgs(['inspect', new, '--session-id', record['session_id']])
+        self.assertEqual((current['session_id'], current['conversation_id']),
+                         (record['session_id'], record['conversation_id']))
+        self.assertEqual((folder / (records[1]['session_id'] + '.json')).read_bytes(), before)
+        record['name'] = new
+        forgotten = self.hgs(['session-action', new, '--session-id', record['session_id'], '--json'],
+                             self.payload(record, action='forget'))
+        self.assertEqual(forgotten['status'], 'completed', forgotten)
+        self.assertFalse((folder / (record['session_id'] + '.json')).exists())
+        self.assertEqual((folder / (records[1]['session_id'] + '.json')).read_bytes(), before)
+        self.assertEqual(self.session(record['conversation_id'])['id'], record['conversation_id'])
+        self.assertFalse(self.binding_path(shared).exists())
+        self.assertFalse(self.binding_path(new).exists())
 
     def test_13_a_long_queued_prompt_names_its_request(self):
         # OpenCode 2.0.32 dates a queued message by its delivery: one queued for 12 s was

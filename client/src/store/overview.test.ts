@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createRoot } from "solid-js";
 import { createCatalog, toSession } from "./catalog";
-import { connectionOf, createOverview, fleetCards, liveSessions, overviewStats } from "./overview";
+import { connectionOf, createOverview, fleetCards, liveSessions, mainSessions, overviewStats } from "./overview";
 import { machineMeta, rowOut } from "./testing";
 import { emptyBatch } from "../types";
 import type { RowMarks, RowsPort } from "./marks";
@@ -40,6 +40,34 @@ describe("overview selectors", () => {
       toSession("", "run:0", rowOut("", 0, { status: "working", updated_at: 20 }).row),
     ];
     expect(liveSessions(rows, { "": live("") }).map((s) => s.catalogKey)).toEqual(["run:2", "run:0", "run:3", "run:1"]);
+  });
+
+  it("Main only drops a child only under a shown card, and keeps one that needs the person", () => {
+    const row = (n: number, fields: Record<string, unknown>) => toSession("", `run:${n}`, rowOut("", n, { status: "working", ...fields }).row);
+    const lead = row(1, {});
+    const child = row(2, {});
+    const grandchild = row(3, {});
+    const asking = row(4, { status: "attention", phase: "approval", needs_action: true, needs_attention: true, human_request: true });
+    const orphan = row(5, {});
+    const loopA = row(6, {});
+    const loopB = row(7, {});
+    const parents: Record<string, string> = {
+      [child.key]: lead.key, [grandchild.key]: child.key, [asking.key]: lead.key,
+      [orphan.key]: "idle-parent-not-on-the-overview", [loopA.key]: loopB.key, [loopB.key]: loopA.key,
+    };
+    const shown = mainSessions([lead, child, grandchild, asking, orphan, loopA, loopB], (s) => parents[s.key]);
+    expect(shown.map((s) => s.key)).toEqual([lead.key, asking.key, orphan.key, loopA.key, loopB.key]);
+    // A quiet supervised child's request is its parent's: it drops out with the others.
+    const quiet = { ...row(8, { status: "attention", phase: "approval", needs_action: true, needs_attention: true }), quiet: true };
+    expect(mainSessions([lead, quiet], (s) => (s.key === quiet.key ? lead.key : undefined)).map((s) => s.key)).toEqual([lead.key]);
+    // ...unless the person marked it Review later, which the attention tile counts.
+    const marked = { ...quiet, reviewLater: true };
+    expect(mainSessions([lead, marked], (s) => (s.key === marked.key ? lead.key : undefined)).map((s) => s.key)).toEqual([lead.key, marked.key]);
+    // A long chain under one card stays linear and drops every link.
+    const chain = Array.from({ length: 20_000 }, (_, i) => ({ ...lead, key: `chain:${i}` }));
+    const started = performance.now();
+    expect(mainSessions(chain, (s) => { const i = Number(s.key.slice(6)); return i ? `chain:${i - 1}` : undefined; }).map((s) => s.key)).toEqual(["chain:0"]);
+    expect(performance.now() - started).toBeLessThan(1_000);
   });
 
   it("sort by Qt's session.needsAttention(), so an asking subagent does not go first (DashboardPage.cpp:453)", () => {

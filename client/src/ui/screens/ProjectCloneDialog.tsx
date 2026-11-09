@@ -1,7 +1,8 @@
+import { Dropdown } from "../lib/Dropdown";
+import { TextInput } from "../lib/TextField";
 import { watchBusyClone } from "./project-clone-status";
-import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
+import { Show, createSignal, onCleanup, onMount } from "solid-js";
 import { Icon } from "../lib/icons";
-import { enhance } from "./ProjectCatalogDialog";
 import { FolderBrowserDialog } from "../components/FolderBrowser";
 import { machineCards } from "../../store/machines";
 import { bus, toast } from "../../store/notices";
@@ -37,7 +38,7 @@ export default function ProjectCloneDialog(props: { project: string; preferred?:
     try { if (view()) { closeRequested = true; await bridge.projectCloneClose(view()!.id); } props.close(); }
     catch (e) {closeRequested = false; setError(String(e));}
   };
-  onMount(() => { dialog.showModal(); queueMicrotask(() => dialog.querySelector<HTMLElement>("select")?.focus()); });
+  onMount(() => { dialog.showModal(); queueMicrotask(() => dialog.querySelector<HTMLElement>('[role="combobox"]')?.focus()); });
   onCleanup(() => { stopFollowing(); gone = true; if (view() && !closeRequested) void bridge.projectCloneClose(view()!.id).catch(() => {}); dialog.close(); if (props.origin.isConnected) props.origin.focus(); });
   const open = async () => {
     const selected = places.find((p) => p.computer === computer()); if (!selected || busy()) return;
@@ -75,17 +76,17 @@ export default function ProjectCloneDialog(props: { project: string; preferred?:
     <dialog ref={dialog} class="dlg su-dlg" style={{width: place() ? "640px" : "460px"}} aria-labelledby="project-clone-title" onCancel={(e) => {e.preventDefault(); void close();}}>
       <div class="dlg-head"><Icon name="download" size={18} class="accent" /><h2 id="project-clone-title">{tr("Clone repository")}</h2><span class="grow" /><button type="button" class="icon-btn" aria-label={tr("Close")} disabled={view()?.cloning && view()?.busy} onClick={() => void close()}><Icon name="x" size={16} /></button></div>
       <Show when={place()} fallback={<>
-        <div class="dlg-body"><div class="form-row"><label for="clone-on">{tr("Clone on computer")}</label><select ref={enhance} id="clone-on" class="field su-rsel" value={computer()} disabled={busy()} onChange={(e) => setComputer(e.currentTarget.value)}><For each={places}>{(p) => <option value={p.computer}>{p.label}</option>}</For></select></div><Show when={error()}><p class="clone-state danger" role="status">{error()}</p></Show></div>
+        <div class="dlg-body"><div class="form-row"><label for="clone-on">{tr("Clone on computer")}</label><Dropdown id="clone-on" class="field su-rsel" value={computer()} disabled={busy()} onChange={(value) => setComputer(value)} options={[...((places) ?? []).map((p) => ({ value: p.computer, label: p.label }))]} /></div><Show when={error()}><p class="clone-state danger" role="status">{error()}</p></Show></div>
         <div class="dlg-foot"><span class="grow" /><button class="btn" onClick={() => void close()}>{tr("Cancel")}</button><button class="btn primary" disabled={!places.length || busy()} onClick={() => void open()}>{tr("Continue")}</button></div>
       </>}>
         <div class="dlg-body">
           <p class="muted">{tr("Computer: %1", place()?.host ?? "")}</p>
-          <div class="form-row"><label for="cl-url">{tr("Repository")}</label><input id="cl-url" class="field mono" maxLength={4096} placeholder="git@example.org:team/project.git" disabled={locked()} value={url()} onInput={(e) => void changeUrl(e.currentTarget.value)} /></div>
-          <div class="form-row"><label for="cl-parent">{tr("Parent folder")}</label><div class="row"><input id="cl-parent" class="field mono grow" maxLength={32768} disabled={locked()} value={parent()} onInput={(e) => setParent(e.currentTarget.value)} /><button class="btn" disabled={locked()} onClick={() => void browse()}>{tr("Browse…")}</button></div></div>
-          <div class="form-row"><label for="cl-name">{tr("Folder name")}</label><input id="cl-name" class="field mono" maxLength={80} disabled={locked()} value={name()} onInput={(e) => {nameEdited = true; setName(e.currentTarget.value);}} /></div>
+          <div class="form-row"><label for="cl-url">{tr("Repository")}</label><TextInput id="cl-url" class="field mono" maxLength={4096} placeholder="git@example.org:team/project.git" disabled={locked()} value={url()} onInput={(e) => void changeUrl(e.currentTarget.value)} /></div>
+          <div class="form-row"><label for="cl-parent">{tr("Parent folder")}</label><div class="row"><TextInput id="cl-parent" class="field mono grow" maxLength={32768} disabled={locked()} value={parent()} onInput={(e) => setParent(e.currentTarget.value)} /><button class="btn" disabled={locked()} onClick={() => void browse()}>{tr("Browse…")}</button></div></div>
+          <div class="form-row"><label for="cl-name">{tr("Folder name")}</label><TextInput id="cl-name" class="field mono" maxLength={80} disabled={locked()} value={name()} onInput={(e) => {nameEdited = true; setName(e.currentTarget.value);}} /></div>
           <div class="form-row"><label>{tr("Destination")}</label><span class="mono su-select ell" title={destination()}>{destination() || "—"}</span></div>
-          <div class="form-row"><label for="cl-proj">{tr("Project")}</label><select ref={enhance} id="cl-proj" class="field su-rsel" value={project()} disabled={locked()} onChange={(e) => setProject(e.currentTarget.value)}><For each={props.projects.filter((p) => p.accessible)}>{(p) => <option value={p.id}>{p.name}</option>}</For><option value={NEW}>{tr("New project…")}</option></select></div>
-          <Show when={project() === NEW}><div class="form-row"><label for="cl-newp">{tr("New project name")}</label><input id="cl-newp" class="field" maxLength={80} disabled={locked()} value={newName()} onInput={(e) => setNewName(e.currentTarget.value)} /></div></Show>
+          <div class="form-row"><label for="cl-proj">{tr("Project")}</label><Dropdown id="cl-proj" class="field su-rsel" value={project()} disabled={locked()} onChange={(value) => setProject(value)} options={[...((props.projects.filter((p) => p.accessible)) ?? []).map((p) => ({ value: p.id, label: p.name })), { value: NEW, label: tr("New project…") }]} /></div>
+          <Show when={project() === NEW}><div class="form-row"><label for="cl-newp">{tr("New project name")}</label><TextInput id="cl-newp" class="field" maxLength={80} disabled={locked()} value={newName()} onInput={(e) => setNewName(e.currentTarget.value)} /></div></Show>
           <p class="hint">{tr("Uses Git access configured on this computer. The checkout remains available if the session cannot start.")}</p>
           <Show when={error() || view()?.status}><div class="clone-state" classList={{warn: view()?.uncertain, danger: !!error() || (!view()?.busy && !view()?.ready && !view()?.uncertain)}} role="status">{error() || view()?.status}</div></Show>
           <Show when={view()?.busy}><div class="su-progress su-indet" role="progressbar" aria-label={view()?.status} aria-valuemin={0} aria-valuemax={100}><i /></div></Show>

@@ -73,6 +73,9 @@ pub fn address(config: &Config, target: &str, name: &str, selector: Option<&str>
         if target.starts_with('-') || target.chars().any(char::is_whitespace) {
             return Err(Error::new(1, "Invalid SSH target"));
         }
+        let mut words = vec!["__dsh-ui-url".to_owned()];
+        if !name.is_empty() { words.push(name.to_owned()); }
+        if let Some(id) = selector { words.extend(["--session-id".into(), id.into()]); }
         let command = match selector {
             Some(id) => {
                 let mut args = vec!["__dsh-ui-url".to_owned()];
@@ -84,7 +87,9 @@ pub fn address(config: &Config, target: &str, name: &str, selector: Option<&str>
             }
             None => format!("~/.local/bin/hgs __dsh-ui-url {}", platform::remote_quote(name)),
         };
-        let out = platform::ssh()
+        let markers = if selector.is_some() { vec![(crate::cli::SELECTOR, true)] } else { vec![] };
+        let command = crate::remote_shell::adapt(config, target, &words, &command, &markers, "Update the selected computer to select sessions by ID")?;
+        let out = platform::ssh_output(crate::ssh_bytes::command(&command)?
             .args(crate::machines::ssh_options(config, target))
             .args([
                 "-o",
@@ -94,7 +99,7 @@ pub fn address(config: &Config, target: &str, name: &str, selector: Option<&str>
                 target,
                 &command,
             ])
-            .output()?;
+            )?;
         if !out.status.success() {
             return Err(Error::new(1, String::from_utf8_lossy(&out.stderr).trim()));
         }

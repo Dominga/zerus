@@ -131,7 +131,12 @@ class SearchIndex(unittest.TestCase):
                   id="message-" + str(i), message="needle response " + str(i))) for i in range(1, 5)]
         transcript.write_text("".join(json.dumps(event) + "\n" for event in events))
         self.warm_source(messages=4)
-        reply = self.indexed()
+        # A first-page read may legally yield at its unchanged work budget.
+        # Continue only that state; unavailable replies must still fail below.
+        for _ in range(12):
+            reply = self.indexed()
+            if reply["index_coverage"]["state"] != "indexing":
+                break
         self.assertEqual(reply["abi"], "content-search-query-v1")
         self.assertEqual(reply["index_coverage"]["state"], "ready")
         self.assertIsNone(reply["fallback"])

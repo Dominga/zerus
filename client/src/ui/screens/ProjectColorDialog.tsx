@@ -1,3 +1,5 @@
+import { Dropdown } from "../lib/Dropdown";
+import { TextInput } from "../lib/TextField";
 import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 import { Icon } from "../lib/icons";
 import { ProjectLabel } from "../components/ProjectLabel";
@@ -46,8 +48,8 @@ export default function ProjectColorDialog(props: { project: Project; origin?: H
     <div class="dlg-body pc-body">
       <ProjectLabel project={{ ...p, color: valid() && hex() !== initial ? hex() : p.color }} vivid={vivid()} class="pc-preview" />
       <div class="pc-swatches" role="group" aria-label={tr("Preset colors")}><For each={SWATCHES}>{(color) => <button class="pc-sw" classList={{ on: hex().toLowerCase() === color }} style={{ background: color }} aria-label={color} title={color} disabled={busy()} onClick={() => setHex(color)} />}</For></div>
-      <div class="form-row"><label for="pc-hex">{tr("Color")}</label><input id="pc-hex" class="field mono pc-hex" maxLength={7} value={hex()} aria-invalid={!valid()} disabled={busy()} onInput={(e) => setHex(e.currentTarget.value)} /></div>
-      <div class="form-row"><label for="pc-style">{tr("Style")}</label><select id="pc-style" class="field" value={vivid() ? "bright" : "soft"} disabled={busy()} onChange={(e) => setVivid(e.currentTarget.value === "bright")}><option value="soft">{tr("Soft fill")}</option><option value="bright">{tr("Bright fill")}</option></select></div>
+      <div class="form-row"><label for="pc-hex">{tr("Color")}</label><TextInput id="pc-hex" class="field mono pc-hex" maxLength={7} value={hex()} aria-invalid={!valid()} disabled={busy()} onInput={(e) => setHex(e.currentTarget.value)} /></div>
+      <div class="form-row"><label for="pc-style">{tr("Style")}</label><Dropdown id="pc-style" class="field" value={vivid() ? "bright" : "soft"} disabled={busy()} onChange={(value) => setVivid(value === "bright")} options={[{ value: "soft", label: tr("Soft fill") }, { value: "bright", label: tr("Bright fill") }]} /></div>
       <button class="btn small pc-more" aria-expanded={more()} disabled={busy()} onClick={() => setMore(!more())}><Icon name="palette" size={12} />{tr("More colors…")}</button>
       <Show when={more()}><div class="pc-picker" role="group" aria-label={tr("Color picker")}><label>{tr("Hue")}<input type="range" min="0" max="359" value={hsl().h} disabled={busy()} onInput={(e) => applyHsl({ h: +e.currentTarget.value })} /></label><label>{tr("Saturation")}<input type="range" min="0" max="100" value={hsl().s} disabled={busy()} onInput={(e) => applyHsl({ s: +e.currentTarget.value })} /></label><label>{tr("Lightness")}<input type="range" min="10" max="90" value={hsl().l} disabled={busy()} onInput={(e) => applyHsl({ l: +e.currentTarget.value })} /></label></div></Show>
     </div><div class="dlg-foot"><span class="grow" /><button class="btn" disabled={busy()} onClick={props.close}>{tr("Cancel")}</button><button class="btn primary" disabled={busy() || !valid()} onClick={() => void apply()}>{tr("Apply")}</button></div>

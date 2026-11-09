@@ -45,6 +45,9 @@ impl Fixture {
         (image, grant)
     }
     fn new() -> Self {
+        Self::with_startup(false)
+    }
+    fn with_startup(startup: bool) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let location = Location {
             root: temp.path().canonicalize().unwrap().join("state/desktop"),
@@ -62,15 +65,28 @@ impl Fixture {
         };
         let mut store = Store::open(&location, &session.service_epoch).unwrap();
         ledger::authorize(&mut store.db, &session.writer_epoch, &session.service_epoch).unwrap();
-        let token=zerus_client_core::attention::encode_token(json!({"host":"peer.example","run":"run","conversation":"conversation","name":"fixture","notice":id()}).as_object().unwrap());
+        let mut target = json!({"host":"peer.example","run":"run","conversation":"conversation","name":"fixture","notice":id()});
+        if startup {
+            target["conversation"] = json!("");
+            target["startup_question"] = json!("codex-trust:original");
+        }
+        let token = zerus_client_core::attention::encode_token(target.as_object().unwrap());
         let intent = ledger::put_intent(
             &mut store.db,
             &Identity {
                 kind: Kind::Post,
-                target: Target::Session {
-                    computer: "peer.example".into(),
-                    run: "run".into(),
-                    conversation: "conversation".into(),
+                target: if startup {
+                    Target::StartupQuestion {
+                        computer: "peer.example".into(),
+                        run: "run".into(),
+                        question: "codex-trust:original".into(),
+                    }
+                } else {
+                    Target::Session {
+                        computer: "peer.example".into(),
+                        run: "run".into(),
+                        conversation: "conversation".into(),
+                    }
                 },
                 edge: id(),
             },
@@ -137,6 +153,38 @@ impl Fixture {
             .unwrap();
         (request_id, queue)
     }
+}
+
+#[test]
+fn startup_click_keeps_the_original_question_through_the_authenticated_handoff() {
+    let mut f = Fixture::with_startup(true);
+    let (_, grant) = f.grant();
+    let mut router = f.router();
+    assert!(f.offer(&mut router).unwrap());
+    let original_id = router.pending[0].id.clone();
+    let launch = router
+        .closed_frontend(
+            &f.store,
+            &f.outbox,
+            &desktop::Observation::Absent,
+            Some(&grant),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(launch.open().valid());
+    assert_eq!(launch.open().activation_id, original_id);
+    assert_eq!(launch.open().target.run, "run");
+    assert_eq!(launch.open().target.conversation, "");
+    assert_eq!(
+        launch.open().target.startup_question.as_deref(),
+        Some("codex-trust:original")
+    );
+    let encoded = wire::encode_navigation(&launch.open().target).unwrap();
+    assert_eq!(
+        wire::decode_navigation(&encoded),
+        Some(launch.open().target.clone())
+    );
+    assert!(router.pending.is_empty());
 }
 
 #[test]

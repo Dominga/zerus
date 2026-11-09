@@ -56,7 +56,11 @@
   .statusbar .sb-usage:hover, .statusbar .sb-usage:focus-visible { background: var(--z-list-usage-hover); color: var(--z-color-text); }
   .session-usage-strip { display: inline-flex; align-items: center; gap: 4px; flex: none; height: 22px; margin-left: auto; }
   .statusbar > :first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .statusbar .machines-status { display: inline-flex; align-items: center; gap: 5px; flex: none; height: 22px; padding: 0 5px; border-radius: var(--z-radius-sm); color: var(--z-color-muted); }
+  .statusbar .machines-status.warn { color: var(--z-color-warn); }
+  .statusbar .machines-status:hover, .statusbar .machines-status:focus-visible { background: var(--z-color-hover); }
   .statusbar .usage-refresh { flex: none; width: 22px; height: 22px; padding: 0; }
+  .statusbar .cleanup-result { flex-shrink: 0; white-space: pre; }
   /* Limit meters (AccountUsage::Button): 11 px text in the pace colour; see UsageMeter.tsx. */
   .usage-meters { display: inline-flex; align-items: center; height: 22px; font-size: 11px; color: var(--z-list-muted); white-space: nowrap; }
   .um-window { display: inline-flex; align-items: center; height: 22px; }

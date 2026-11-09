@@ -3,7 +3,7 @@ package app.zerus.mobile
 import org.json.JSONArray
 import org.json.JSONObject
 
-data class SavedConversationViewport(val eventId:String,val offset:Int,val cursor:String="",val epoch:String="")
+data class SavedConversationViewport(val eventId:String,val offset:Int,val cursor:String="",val epoch:String="",val following:Boolean=false)
 data class ConversationReadRecord(val target:Target,val seen:List<String> = emptyList(),val viewport:SavedConversationViewport? = null,val incomplete:Boolean = false,
     val epoch:String="",val readThrough:Long=0,val headIncoming:Long?=null,val headTotal:Long?=null,val headComplete:Boolean=false,val reviewLater:Boolean=false,val established:Boolean=false)
 data class ConversationReadState(val records:List<ConversationReadRecord> = emptyList()) {
@@ -38,13 +38,13 @@ data class ConversationReadState(val records:List<ConversationReadRecord> = empt
     fun supersede(target:Target,aliases:Map<String,String>):ConversationReadState {
         val old=record(target) ?: return this
         var next=viewed(target,aliases.filterKeys { it in old.seen }.values.toSet())
-        old.viewport?.let { anchor -> aliases[anchor.eventId]?.let { next=next.viewport(target,it,anchor.offset,anchor.cursor,anchor.epoch) } }
+        old.viewport?.let { anchor -> aliases[anchor.eventId]?.let { next=next.viewport(target,it,anchor.offset,anchor.cursor,anchor.epoch,anchor.following) } }
         return next
     }
-    fun viewport(target:Target,eventId:String,offset:Int,cursor:String="",epoch:String=""):ConversationReadState {
+    fun viewport(target:Target,eventId:String,offset:Int,cursor:String="",epoch:String="",following:Boolean=false):ConversationReadState {
         if(eventId.isBlank() || eventId.length > 2048 || offset < 0 || cursor.length > 8192 || epoch.length > 512) return this
         val previous=record(target) ?: ConversationReadRecord(target)
-        return put(previous.copy(viewport=SavedConversationViewport(eventId,offset,cursor,epoch),established=true))
+        return put(previous.copy(viewport=SavedConversationViewport(eventId,offset,cursor,epoch,following),established=true))
     }
     fun promote(action:SessionAction):ConversationReadState {
         val destination=action.resultTarget ?: return this
@@ -88,14 +88,14 @@ object ConversationReadPolicies {
     fun encode(state:ConversationReadState)=JSONArray(state.records.map { row -> MessageCodec.targetJson(row.target).put("seen",JSONArray(row.seen))
         .put("incomplete",row.incomplete).put("epoch",row.epoch).put("read_through",row.readThrough).put("head_incoming",row.headIncoming ?: JSONObject.NULL)
         .put("head_total",row.headTotal ?: JSONObject.NULL).put("head_complete",row.headComplete).put("review_later",row.reviewLater).put("established",row.established)
-        .put("viewport",row.viewport?.let { JSONObject().put("event_id",it.eventId).put("offset",it.offset).put("cursor",it.cursor).put("epoch",it.epoch) } ?: JSONObject.NULL) })
+        .put("viewport",row.viewport?.let { JSONObject().put("event_id",it.eventId).put("offset",it.offset).put("cursor",it.cursor).put("epoch",it.epoch).put("following",it.following) } ?: JSONObject.NULL) })
     fun decode(raw:JSONArray):ConversationReadState {
         require(raw.length() <= 500)
         var total=0
         val rows=raw.objects().map { row ->
             val seen=row.getJSONArray("seen");require(seen.length() <= 5000);total+=seen.length();require(total<=50_000)
             val ids=(0 until seen.length()).map(seen::getString);require(ids.all { it.length <= 2048 })
-            val viewport=row.optJSONObject("viewport")?.let { SavedConversationViewport(it.getString("event_id"),it.getInt("offset"),it.optString("cursor"),it.optString("epoch")) }
+            val viewport=row.optJSONObject("viewport")?.let { SavedConversationViewport(it.getString("event_id"),it.getInt("offset"),it.optString("cursor"),it.optString("epoch"),it.optBoolean("following")) }
             require(viewport == null || viewport.eventId.length<=2048 && viewport.offset>=0 && viewport.cursor.length<=8192 && viewport.epoch.length<=512)
             val epoch=row.optString("epoch");val watermark=row.optLong("read_through");require(epoch.length<=512 && watermark>=0)
             val latest=(row.opt("head_incoming") as? Number)?.toLong();val headTotal=(row.opt("head_total") as? Number)?.toLong()

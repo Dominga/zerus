@@ -479,9 +479,11 @@ impl Broker {
             "online":mark.online,"last_known":!complete,"reset_required":!complete}),
         ))
     }
-    pub fn retire(&mut self, store: &mut Store) -> Result<bool> {
+    /// Each retired source needs its own catalog invalidation, including the
+    /// local computer (the empty name). A producer can own several sources.
+    pub fn retire(&mut self, store: &mut Store) -> Result<Vec<Value>> {
         if self.producer.as_ref().is_none_or(|p| p.alive()) || Instant::now() < self.retry_at {
-            return Ok(false);
+            return Ok(Vec::new());
         }
         let sources: Vec<_> = self.sources.values().map(|e| e.source.clone()).collect();
         if let Err(error) = catalog::disconnect_many(&mut store.db, &sources) {
@@ -489,11 +491,19 @@ impl Broker {
             self.retry_at = Instant::now() + Duration::from_secs(10);
             return Err(error);
         }
+        let changes = self
+            .sources
+            .keys()
+            .map(|computer| {
+                json!({"computer":computer,"display_only":true,"retired":true,
+                    "reset_required":true,"changes_abi":super::catalog_read::CHANGES_ABI})
+            })
+            .collect();
         self.sources.clear();
         self.expected = None;
         self.producer = None;
         self.error = false;
-        Ok(true)
+        Ok(changes)
     }
     pub fn stop(&mut self, store: &mut Store) -> Result<()> {
         if let Some(producer) = &self.producer {

@@ -5,18 +5,47 @@ import { catalog } from "../../store/catalog";
 import { grouping, groupOf, headerOf, INBOX, moveProject, moveToProject } from "../../store/organization";
 import { multi, setMulti, selectedKey } from "../../store/ui";
 import { projectOf } from "./creations-ui";
+import { nestable, setParentDialog } from "../../store/parentLinks";
 
 // Bulk selection and drag-and-drop organisation of the session list, after
 // tray/src/SessionList.cpp (mousePressEvent, selectRange, placement, dropEvent).
 
 // --- Bulk selection --------------------------------------------------------
 
-let anchor: string | undefined;
+/** Where a Shift range starts, and its far end, which Shift+arrows move (Qt's m_rangeAnchor, m_rangeCursor). */
+let anchor: string | undefined, cursor: string | undefined;
 const cardKeys = () => listRows().filter((r) => r.type === "card").map((r) => r.id);
 
 export const multiCount = () => Object.values(multi).filter(Boolean).length;
-export const clearMulti = () => batch(() => { for (const k of Object.keys(multi)) if (multi[k]) setMulti(k, false); });
-export const setAnchor = (key: string) => { anchor = key; };
+/** Ends a bulk selection, and its range: the next Shift key starts again from the open conversation (Qt's clearBulkSelection, zerus-m0dem). */
+export const clearMulti = () => batch(() => { anchor = cursor = undefined; for (const k of Object.keys(multi)) if (multi[k]) setMulti(k, false); });
+/** A plain click or arrow on a card: a later range starts there. */
+export const setAnchor = (key: string) => { anchor = cursor = key; };
+
+export type RangeKey = "ArrowUp" | "ArrowDown" | "Home" | "End";
+
+/**
+ * The card a Shift key extends the range to (SessionList.cpp:589-602): from
+ * the range's far end, else the open conversation; Home and End go to the
+ * first and last card; past either end, none.
+ */
+export function rangeTarget(keys: readonly string[], from: string | undefined, open: string | undefined, key: RangeKey): number | undefined {
+  if (!keys.length) return undefined;
+  let at = from === undefined ? -1 : keys.indexOf(from);
+  if (at < 0 && open !== undefined) at = keys.indexOf(open);
+  const target = key === "Home" ? 0 : key === "End" ? keys.length - 1
+    : key === "ArrowDown" ? (at < 0 ? 0 : at + 1) : (at < 0 ? keys.length - 1 : at - 1);
+  return target >= 0 && target < keys.length ? target : undefined;
+}
+
+/** Shift+Up, Down, Home or End (with Ctrl/Cmd, added to the selection): the card the range reached, if any. */
+export function rangeStep(key: RangeKey, additive: boolean): string | undefined {
+  const keys = cardKeys();
+  const target = rangeTarget(keys, cursor, selectedKey(), key);
+  if (target === undefined) return undefined;
+  bulkSelect(keys[target], additive, true);
+  return keys[target];
+}
 
 /** Ctrl/Cmd toggles one card; Shift selects the range from the anchor (with
  *  Ctrl/Cmd, added to the current selection). The open conversation stays. */
@@ -30,14 +59,16 @@ export function bulkSelect(key: string, additive: boolean, range: boolean) {
       const span = new Set(keys.slice(Math.min(i, j), Math.max(i, j) + 1));
       if (!additive) for (const k of Object.keys(multi)) if (multi[k] && !span.has(k)) setMulti(k, false);
       span.forEach((k) => setMulti(k, true));
-      anchor = from;
+      // Qt: an anchor that is no longer listed restarts at the target.
+      anchor = i >= 0 ? keys[i] : from;
+      cursor = key;
       return;
     }
     // A toggle starts from the open conversation, which is already selected.
     const open = selectedKey();
     if (!multiCount() && open && open !== key) setMulti(open, true);
     setMulti(key, !multi[key]);
-    anchor = key;
+    anchor = cursor = key;
   });
 }
 
@@ -46,7 +77,9 @@ export function bulkSelect(key: string, additive: boolean, range: boolean) {
 export type DragItem = { kind: "session" | "group"; id: string };
 /** Where a drop lands: a group (project) and the session or group it goes
  *  before (none = the end), drawn as a line or as a frame around a header. */
-export type Drop = { group: string; before?: string; line?: number; inset?: number; box?: { top: number; height: number } };
+export type Drop = { group: string; before?: string; line?: number; inset?: number; box?: { top: number; height: number };
+  /** Drop onto this session's card to make the dragged session its child (zerus-sa9qn.9). */
+  nest?: string };
 
 export const SESSION_MIME = "application/x-zerus-session";
 export const [dragItem, setDragItem] = createSignal<DragItem>();
@@ -77,6 +110,12 @@ export function placement(rows: Row[], offsets: number[], heights: number[], ove
   }
   // A session over a header moves into that project (frame around the band).
   if (over.type === "header") return { group, box: { top: top + 6, height: 30 } };
+  // The middle of another card on the same computer nests the dragged session under it.
+  const moving = catalog.rows[item.id];
+  if (over.type === "card" && moving && nestable(moving, over.session)) {
+    const height = heights[i];
+    if (y > top + height * 0.3 && y < top + height * 0.7) return { group, nest: over.session.key, box: { top: top + 4, height: height - 10 } };
+  }
   if (y <= (top + bottom) / 2) return { group, before: over.id, line: top, inset: 12 };
   let n = i + 1;
   while (n < rows.length && rows[n].type === "child") n++;
@@ -90,6 +129,12 @@ export function placement(rows: Row[], offsets: number[], heights: number[], ove
  * its own project too (sessionMoved, moveSession; SessionsWindow.cpp:556-561).
  */
 export function applyDrop(item: DragItem, d: Drop) {
+  if (d.nest) {
+    // A link change is confirmed first; the host checks it.
+    const child = catalog.rows[item.id], parent = catalog.rows[d.nest];
+    if (child && parent && nestable(child, parent)) setParentDialog({ kind: "set", child, parent });
+    return;
+  }
   if (d.before === item.id) return;
   if (item.kind === "group") { void moveProject(item.id, d.before); return; }
   const moving = catalog.rows[item.id] ?? archive.row(item.id);

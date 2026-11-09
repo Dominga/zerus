@@ -95,7 +95,7 @@ export function CreationPanel() {
               <Show when={buttons().stop}>
                 <button class="btn wide" disabled={!buttons().stopEnabled} onClick={() => void runCreationAction(c().id, "stop")}>{buttons().stopText}</button>
               </Show>
-              <Show when={buttons().edit}><button class="btn c1" onClick={() => void editChoices(c().id)}>{tr(BUTTON.edit)}</button></Show>
+              <Show when={buttons().edit}><button class="btn c1" onClick={() => void editChoices(c().id)}>{tr(c().worktree_fenced ? BUTTON.recreate : BUTTON.edit)}</button></Show>
               <button class="btn c2" onClick={() => void hideCreation(c().id)}>{tr(BUTTON.hide)}</button>
               <button class="btn wide" onClick={returnToFilters}>{tr(BUTTON.back)}</button>
               <Show when={fixFolderRights(c())}>

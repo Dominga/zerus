@@ -34,8 +34,10 @@ pub(super) enum Kind {
     IdRecord,
     /// A DeepSeek binding (`dsh::binding`).
     DeepSeek,
+    DeepSeekId,
     /// An OpenCode binding (`opencode::binding`).
     OpenCode,
+    OpenCodeId,
 }
 
 impl Kind {
@@ -44,7 +46,9 @@ impl Kind {
             Kind::Record => "record",
             Kind::IdRecord => "id",
             Kind::DeepSeek => "dsh",
+            Kind::DeepSeekId => "dsh-id",
             Kind::OpenCode => "opencode",
+            Kind::OpenCodeId => "opencode-id",
         }
     }
     fn parse(text: &str) -> Option<Kind> {
@@ -52,7 +56,9 @@ impl Kind {
             "record" => Some(Kind::Record),
             "id" => Some(Kind::IdRecord),
             "dsh" => Some(Kind::DeepSeek),
+            "dsh-id" => Some(Kind::DeepSeekId),
             "opencode" => Some(Kind::OpenCode),
+            "opencode-id" => Some(Kind::OpenCodeId),
             _ => None,
         }
     }
@@ -240,9 +246,20 @@ fn carries(record: &Value, id: &str, name: &str) -> bool {
         && record["rename_shadow"] != true
 }
 
-/// The live or saved session `id`, when its entry still verifies: the record
-/// of that kind under that label carries the ID, with no archive and no rename
-/// shadow. None is a miss; the caller scans.
+/// A provider retires only its own exact cached route, under its binding lock.
+pub(super) fn retire_provider(record: &Value, kind: Kind) {
+    let (id, name) = (string(record, "session_id"), string(record, "name"));
+    if entry(id).is_some_and(|(found, route)| found == name && route == kind) && writable(id) {
+        changed(remove_entry(id));
+    }
+}
+
+/// The index entry alone, read without blocking and never following a record:
+/// the label and kind it names, unverified (zerus-mzgfh).
+pub(super) fn indexed(id: &str) -> Option<(String, Kind)> {
+    entry(id)
+}
+
 pub(super) fn find(id: &str) -> Option<Found> {
     let (name, kind) = entry(id)?;
     let record = match kind {
@@ -251,8 +268,10 @@ pub(super) fn find(id: &str) -> Option<Found> {
             .then(|| storage::read_label(&name).ok())
             .flatten()?,
         Kind::IdRecord => storage::read_id(id).ok()?,
-        Kind::DeepSeek => dsh::binding(&name).ok()?,
-        Kind::OpenCode => opencode::binding(&name).ok()?,
+        Kind::DeepSeek => provider_binding::Provider::DeepSeek.read_label(&name).ok()?,
+        Kind::DeepSeekId => dsh::read_id(id).ok()?,
+        Kind::OpenCode => provider_binding::Provider::OpenCode.read_label(&name).ok()?,
+        Kind::OpenCodeId => opencode::read_id(id).ok()?,
     };
     carries(&record, id, &name).then_some(Found { name, kind, record })
 }

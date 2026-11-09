@@ -16,7 +16,9 @@ import okhttp3.Protocol
 import okhttp3.Response
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.ResponseBody.Companion.toResponseBody
+import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -24,6 +26,7 @@ import java.util.concurrent.atomic.AtomicReference
 
 /** Isolated synthetic catalog and empty inspections; no agents, credentials or deliveries. */
 class SessionRefreshSmokeInstrumentation : Instrumentation() {
+    private val transportFailure=AtomicReference<String?>(null)
     override fun onCreate(arguments: Bundle?) { super.onCreate(arguments); start() }
     override fun onStart() {
         val result = Bundle()
@@ -33,7 +36,7 @@ class SessionRefreshSmokeInstrumentation : Instrumentation() {
             result.putString("stream", "Session refresh passed: 5,000-session projection off main, filtering, retained scroll, empty conversation across repeated held background inspections, explicit and tail-pull refresh and draft retention. Zero deliveries.\n")
             finish(Activity.RESULT_OK, result)
         } catch (error: Throwable) {
-            result.putString("stream", "Session refresh failed: ${error.stackTraceToString()}\n")
+            result.putString("stream", "Session refresh failed: transport=${transportFailure.get()}\n${error.stackTraceToString()}\n")
             finish(Activity.RESULT_CANCELED, result)
         }
     }
@@ -45,7 +48,7 @@ class SessionRefreshSmokeInstrumentation : Instrumentation() {
     private fun await(label: String, timeout: Long = 15_000, condition: () -> Boolean) {
         val deadline = SystemClock.elapsedRealtime() + timeout
         while (!condition()) {
-            check(SystemClock.elapsedRealtime() < deadline) { "Timed out: $label" }
+            check(SystemClock.elapsedRealtime() < deadline) { "Timed out: $label; transport=${transportFailure.get()}" }
             SystemClock.sleep(40)
         }
     }
@@ -154,14 +157,44 @@ class SessionRefreshSmokeInstrumentation : Instrumentation() {
         val raw = JSONObject().put("name", target.session).put("run_id", target.run).put("conversation_id", "")
             .put("state", "running").put("activity", "unknown")
         val client = OkHttpClient.Builder().addInterceptor { chain ->
-            check(chain.request().url.host == "relay.example.test")
-            val input = JSONObject(okio.Buffer().also { chain.request().body?.writeTo(it) }.readUtf8())
-            check(input.string("operation") == "inspect") { "Unexpected operation ${input.string("operation")}" }
-            reads.incrementAndGet()
-            gate.get()?.let { check(it.await(20, TimeUnit.SECONDS)) }
-            val receipt = JSONObject().put("request_id", input.string("request_id")).put("state", "completed").put("result", raw)
-            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("OK")
-                .body(receipt.toString().toResponseBody("application/json".toMediaType())).build()
+            val request=chain.request()
+            fun response(value:JSONObject)=Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("OK")
+                .body(value.toString().toResponseBody("application/json".toMediaType())).build()
+            try {
+                check(request.url.host=="relay.example.test") { "Unexpected synthetic host" }
+                if(request.method=="GET") {
+                    val capabilities=JSONObject().put("protocol_version",1).put("operations",JSONArray(listOf("inspect","voice_profiles")))
+                    val value=when(request.url.encodedPath) {
+                        "/v1/computers" -> {
+                            val row=JSONObject(raw.toString()).put("agent","codex")
+                            val snapshot=JSONObject().put("sessions",JSONArray(listOf(row))).put("mobile_capabilities",capabilities)
+                            val computer=JSONObject().put("id",host.id).put("name",host.name).put("online",true).put("snapshot",snapshot)
+                            JSONObject().put("computers",JSONArray(listOf(computer)))
+                        }
+                        "/v1/capabilities" -> capabilities
+                        else -> throw IOException("Unexpected synthetic GET route ${request.url.encodedPath}")
+                    }
+                    return@addInterceptor response(value)
+                }
+                check(request.method=="POST" && request.url.encodedPath=="/v1/requests") {
+                    "Unexpected synthetic route ${request.method} ${request.url.encodedPath}"
+                }
+                val input=JSONObject(okio.Buffer().also { request.body?.writeTo(it) }.readUtf8())
+                val output=when(input.string("operation")) {
+                    "inspect" -> {
+                        reads.incrementAndGet()
+                        gate.get()?.let { check(it.await(20,TimeUnit.SECONDS)) { "Synthetic inspection gate timed out" } }
+                        raw
+                    }
+                    "voice_profiles" -> JSONObject().put("schema",1).put("computers",JSONArray())
+                    else -> throw IOException("Unexpected synthetic operation ${input.string("operation")}")
+                }
+                response(JSONObject().put("request_id",input.string("request_id")).put("state","completed").put("result",output))
+            } catch(error:Exception) {
+                val failure="Synthetic ${request.method} ${request.url.encodedPath}: ${error.message}"
+                transportFailure.compareAndSet(null,failure)
+                throw IOException(failure,error)
+            }
         }.build()
         try {
             main {
@@ -185,7 +218,7 @@ class SessionRefreshSmokeInstrumentation : Instrumentation() {
             }
             val latch = CountDownLatch(1); gate.set(latch)
             main { model.refreshActivity(explicit = true) }
-            await("explicit refresh") { visible("Refreshing conversation…") }
+            await("explicit refresh") { visible("Checking latest activity…") }
             check(visible("No messages yet.") && !visible("Loading conversation…"))
             latch.countDown(); gate.set(null)
             await("explicit refresh complete") { main { !model.detailBusy } }
@@ -195,14 +228,14 @@ class SessionRefreshSmokeInstrumentation : Instrumentation() {
             val short = CountDownLatch(1); gate.set(short)
             pullUp("No messages yet.", 96f)
             SystemClock.sleep(800)
-            check(main { !model.detailProgress } && !visible("Refreshing conversation…")) { "A short tail pull refreshed" }
+            check(main { !model.detailProgress } && !visible("Checking latest activity…")) { "A short tail pull refreshed" }
             short.countDown(); gate.set(null)
             await("short tail pull settled") { main { !model.detailBusy } }
             val pulled = CountDownLatch(1); gate.set(pulled)
             val beforePull = reads.get()
             pullUp("No messages yet.", 240f)
             // A poll held since the gate opened stays invisible for five seconds.
-            await("tail pull refresh", 1_500) { reads.get() > beforePull && main { model.detailProgress } && visible("Refreshing conversation…") }
+            await("tail pull refresh", 1_500) { reads.get() > beforePull && main { model.detailProgress } && visible("Checking latest activity…") }
             check(visible("No messages yet.") && !visible("Loading conversation…"))
             pulled.countDown(); gate.set(null)
             await("tail pull refresh complete") { main { !model.detailBusy } }

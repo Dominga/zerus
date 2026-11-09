@@ -703,7 +703,10 @@ fn start_with_badge(
                                     registered = owner;
                                     register_at = None;
                                 }
-                                Ok(None) => register_at = None,
+                                Ok(None) => {
+                                    report_hostless();
+                                    register_at = None;
+                                }
                                 Err(_) => {
                                     register_at = Some(Instant::now() + Duration::from_secs(5))
                                 }
@@ -737,7 +740,10 @@ fn start_with_badge(
                                     register_at = None;
                                 }
                             }
-                            Err(zbus::fdo::Error::NameHasNoOwner(_)) => register_at = None,
+                            Err(zbus::fdo::Error::NameHasNoOwner(_)) => {
+                                report_hostless();
+                                register_at = None;
+                            }
                             Err(_) => {}
                         }
                     }
@@ -779,6 +785,23 @@ fn start_with_badge(
         stopped,
         badge,
     })
+}
+/// Whether this start already said that no tray host listens.
+static HOSTLESS_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// The line a start without a StatusNotifierWatcher writes to its journal,
+/// once (zerus-5wmh.13.15): the app keeps running without an icon, the icon
+/// appears when a host starts, and the applications menu opens the window.
+/// Qt exited instead, and its unit's RestartPreventExitStatus=4 kept it down.
+fn hostless_line(reported: &AtomicBool) -> Option<&'static str> {
+    (!reported.swap(true, Ordering::Relaxed))
+        .then_some("zerus-client: no tray host; open Zerus from the applications menu")
+}
+
+fn report_hostless() {
+    if let Some(line) = hostless_line(&HOSTLESS_REPORTED) {
+        eprintln!("{line}");
+    }
 }
 #[derive(Default)]
 struct Running {
@@ -893,15 +916,9 @@ fn offer_native(
     native: &Native,
     face: Face,
     tooltip: String,
-    mut entries: Vec<Entry>,
+    entries: Vec<Entry>,
     badge: Option<String>,
 ) {
-    if let Some(index) = entries
-        .iter()
-        .position(|entry| matches!(entry, Entry::Quit))
-    {
-        entries.insert(index, Entry::Refresh);
-    }
     let (changed, revision) = {
         let mut tray = lock(&native.tray);
         if tray.badge_stopped && native.badge.is_none() {
@@ -1078,6 +1095,21 @@ fn render(face: &Face, size: i32, foreground: Rgb) -> Result<Icon, Box<dyn std::
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_start_without_a_tray_host_says_so_once() {
+        let reported = AtomicBool::new(false);
+        assert_eq!(
+            hostless_line(&reported),
+            Some("zerus-client: no tray host; open Zerus from the applications menu")
+        );
+        assert_eq!(
+            hostless_line(&reported),
+            None,
+            "no repeats while the start runs"
+        );
+        assert_eq!(hostless_line(&reported), None);
+    }
+
     use super::*;
     use std::sync::mpsc;
 
@@ -1384,12 +1416,14 @@ mod tests {
     }
 
     /// The owner's 0.48.0 menu: Open Zerus, a computer's line, an update's
-    /// restart and Quit; no session rows and no "Open in".
+    /// restart, Refresh and Quit (the core composes Refresh on every platform,
+    /// zerus-5wmh.13.15); no session rows and no "Open in".
     fn entries(line: &str) -> Vec<Entry> {
         vec![
             Entry::Open,
             Entry::Label(zerus_client_core::text::Text::verbatim(line)),
             Entry::Restart,
+            Entry::Refresh,
             Entry::Quit,
         ]
     }
@@ -1446,7 +1480,8 @@ mod tests {
         update(&mut tray, "R&&D_name: unreachable", 1);
         let shown: &str = (&tray.root.children[1].props["label"]).try_into().unwrap();
         assert_eq!(shown, "R&D__name: unreachable");
-        assert_eq!(tray.root.children.len(), 4);
+        // Open, the line, Restart, Refresh and Quit.
+        assert_eq!(tray.root.children.len(), 5);
         assert!(
             tray.root
                 .children

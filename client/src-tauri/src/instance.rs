@@ -442,6 +442,49 @@ pub enum ServiceState {
 pub struct Service {
     pub state: ServiceState,
     pub pid: i64,
+    /// systemd's InvocationID of the unit's current run, when it has one.
+    pub invocation: Option<u128>,
+}
+
+/// The login service's systemd unit on Linux (`tray/packaging/hgs-tray.service`).
+pub const SYSTEMD_UNIT: &str = "hgs-tray.service";
+
+/// A systemd invocation ID: 32 hex digits, as `INVOCATION_ID` and
+/// `systemctl show` print it (dashes, if any, are ignored).
+pub fn invocation_id(text: &str) -> Option<u128> {
+    let digits: String = text.trim().chars().filter(|c| *c != '-').collect();
+    (digits.len() == 32 && digits.chars().all(|c| c.is_ascii_hexdigit()))
+        .then(|| u128::from_str_radix(&digits, 16).ok())
+        .flatten()
+        .filter(|id| *id != 0)
+}
+
+/// `systemctl --user show --property=ActiveState,MainPID,InvocationID`, as
+/// Qt's `SingleInstance::systemdService` reads it (`SingleInstance.cpp:48-71`).
+#[cfg(any(target_os = "linux", test))]
+pub fn systemd_service(properties: &str) -> Service {
+    let (mut active, mut pid, mut invocation) = ("", 0_i64, None);
+    for line in properties.lines() {
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        match name.trim() {
+            "ActiveState" => active = value.trim(),
+            "MainPID" => pid = value.trim().parse().unwrap_or(0),
+            "InvocationID" => invocation = invocation_id(value),
+            _ => {}
+        }
+    }
+    let state = match active {
+        "active" | "reloading" | "refreshing" => ServiceState::Running,
+        "activating" | "deactivating" => ServiceState::Starting,
+        _ => return Service::default(),
+    };
+    Service {
+        state,
+        pid: pid.max(0),
+        invocation,
+    }
 }
 
 /// `launchctl print gui/<uid>/<label>`: only the job's own properties, one
@@ -475,13 +518,405 @@ pub fn launchd_service(description: &str) -> Service {
     Service {
         state,
         pid: pid.max(0),
+        invocation: None,
     }
 }
 
 /// A start that finds no instance leaves the socket to a service another
-/// process runs or is about to run (`SingleInstance::waitsForService`).
-pub fn waits_for_service(service: &Service, own_pid: i64) -> bool {
-    service.state != ServiceState::Absent && service.pid != own_pid
+/// process runs or is about to run (`SingleInstance::waitsForService`). The
+/// unit's own run never waits on itself: its main process, or any process of
+/// that run (a wrapper's child) by its `INVOCATION_ID`.
+pub fn waits_for_service(service: &Service, own_pid: i64, own_invocation: Option<u128>) -> bool {
+    service.state != ServiceState::Absent
+        && service.pid != own_pid
+        && !(own_invocation.is_some() && service.invocation == own_invocation)
+}
+
+/// The service this start belongs to: launchd's job on macOS, the systemd
+/// user unit on Linux; none for a build that is not the switch (no label).
+pub fn platform_service(
+    label: Option<&str>,
+    launchd: impl FnOnce(&str) -> Service,
+    systemd: impl FnOnce(&str) -> Service,
+) -> Service {
+    match label {
+        Some(label) if cfg!(target_os = "macos") => launchd(label),
+        Some(_) if cfg!(target_os = "linux") => systemd(SYSTEMD_UNIT),
+        _ => Service::default(),
+    }
+}
+
+/// The standard output of `command` when it exits successfully within
+/// `limit`; otherwise None, with the child killed and reaped. Its standard
+/// input is /dev/null, its error output is dropped, at most 64 KiB is read
+/// and, on Linux, it inherits no descriptor beyond those three.
+#[cfg(target_os = "linux")]
+pub fn bounded_read(program: &str, args: &[&str], limit: Duration) -> Option<String> {
+    bounded_read_with(program, args, limit, |_| {}, children_auto_reaped)
+}
+
+/// Whether a SIGCHLD disposition reaps children without a wait: ignored, or
+/// SA_NOCLDWAIT (zerus-5zo1o).
+#[cfg(target_os = "linux")]
+fn auto_reaps(handler: libc::sighandler_t, flags: libc::c_int) -> bool {
+    handler == libc::SIG_IGN || flags & libc::SA_NOCLDWAIT != 0
+}
+
+/// Whether this process's children are reaped without a wait. A bounded read
+/// refuses then: once the kernel reaped its child, the child's PID may name
+/// another process, which must never be signalled.
+#[cfg(target_os = "linux")]
+fn children_auto_reaped() -> bool {
+    // SAFETY: a null new action only reads the current disposition into a
+    // zeroed, properly sized sigaction.
+    let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+    if unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), &mut current) } != 0 {
+        return true;
+    }
+    auto_reaps(current.sa_sigaction, current.sa_flags)
+}
+
+/// What [`settle`] does to a child, so tests can script it.
+#[cfg(target_os = "linux")]
+trait Owned {
+    fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>>;
+    fn kill(&mut self) -> io::Result<()>;
+    fn wait(&mut self) -> io::Result<std::process::ExitStatus>;
+}
+
+/// A bounded read's child, held by a pidfd from the moment it starts. It is
+/// waited for and signalled only through that descriptor, never by its
+/// numeric PID: whatever SIGCHLD policy or other reaper retires it, a
+/// cleanup reaches that process or nothing, never one that reused its PID,
+/// and no wait collects another child by PID (zerus-5zo1o).
+#[cfg(target_os = "linux")]
+struct Helper {
+    pidfd: std::os::fd::OwnedFd,
+}
+
+/// glibc's `pidfd_spawnp` (2.39) and `posix_spawn_file_actions_addclosefrom_np`
+/// (2.34), looked up when used, so an older glibc still loads the app; the read
+/// then waits for nothing.
+#[cfg(target_os = "linux")]
+type PidfdSpawnp = unsafe extern "C" fn(
+    *mut libc::c_int,
+    *const libc::c_char,
+    *const libc::posix_spawn_file_actions_t,
+    *const libc::posix_spawnattr_t,
+    *const *mut libc::c_char,
+    *const *mut libc::c_char,
+) -> libc::c_int;
+#[cfg(target_os = "linux")]
+type AddClosefrom =
+    unsafe extern "C" fn(*mut libc::posix_spawn_file_actions_t, libc::c_int) -> libc::c_int;
+#[cfg(target_os = "linux")]
+type PidfdGetpid = unsafe extern "C" fn(libc::c_int) -> libc::pid_t;
+
+#[cfg(target_os = "linux")]
+fn glibc<T: Copy>(name: &std::ffi::CStr) -> Option<T> {
+    // SAFETY: dlsym only looks the name up; the caller names the matching type.
+    let found = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) };
+    (!found.is_null()).then(|| unsafe { std::mem::transmute_copy::<*mut libc::c_void, T>(&found) })
+}
+
+/// Starts `program` with `args` and returns it held by a pidfd that the
+/// kernel created with the child (`pidfd_spawnp`, CLONE_PIDFD): the
+/// descriptor names that child from its first instant, whatever reaps it
+/// later, and no number is ever looked up again (zerus-5zo1o). Its stdin and
+/// stderr are /dev/null, its stdout is the returned pipe, and it inherits no
+/// other descriptor. None when that cannot be had, with no child left.
+#[cfg(target_os = "linux")]
+fn spawn_held(program: &str, args: &[&str]) -> Option<(Helper, std::os::fd::OwnedFd)> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    let spawn: PidfdSpawnp = glibc(c"pidfd_spawnp")?;
+    let close_from: AddClosefrom = glibc(c"posix_spawn_file_actions_addclosefrom_np")?;
+    let argv: Vec<CString> = std::iter::once(program)
+        .chain(args.iter().copied())
+        .map(|word| CString::new(word).ok())
+        .collect::<Option<_>>()?;
+    // The environment as it is now: the child's own copy.
+    let envp: Vec<CString> = std::env::vars_os()
+        .filter_map(|(name, value)| {
+            let mut pair = name.as_bytes().to_vec();
+            pair.push(b'=');
+            pair.extend_from_slice(value.as_bytes());
+            CString::new(pair).ok()
+        })
+        .collect();
+    let argv_ptrs: Vec<*mut libc::c_char> = argv
+        .iter()
+        .map(|a| a.as_ptr() as *mut _)
+        .chain([std::ptr::null_mut()])
+        .collect();
+    let envp_ptrs: Vec<*mut libc::c_char> = envp
+        .iter()
+        .map(|e| e.as_ptr() as *mut _)
+        .chain([std::ptr::null_mut()])
+        .collect();
+    let mut ends = [0; 2];
+    // SAFETY: pipe2 fills two new descriptors, owned below.
+    if unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return None;
+    }
+    // SAFETY: fresh descriptors that nothing else owns.
+    let (read, write) = unsafe { (OwnedFd::from_raw_fd(ends[0]), OwnedFd::from_raw_fd(ends[1])) };
+    // SAFETY: the actions and attributes are initialised before use and
+    // destroyed after the spawn; every pointer outlives the call.
+    unsafe {
+        let mut actions: libc::posix_spawn_file_actions_t = std::mem::zeroed();
+        let mut attr: libc::posix_spawnattr_t = std::mem::zeroed();
+        if libc::posix_spawn_file_actions_init(&mut actions) != 0 {
+            return None;
+        }
+        if libc::posix_spawnattr_init(&mut attr) != 0 {
+            libc::posix_spawn_file_actions_destroy(&mut actions);
+            return None;
+        }
+        // As std spawns: an empty signal mask and SIGPIPE at its default.
+        let mut empty: libc::sigset_t = std::mem::zeroed();
+        let mut pipe: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut empty);
+        libc::sigemptyset(&mut pipe);
+        libc::sigaddset(&mut pipe, libc::SIGPIPE);
+        let prepared = libc::posix_spawn_file_actions_addopen(
+            &mut actions,
+            0,
+            c"/dev/null".as_ptr(),
+            libc::O_RDONLY,
+            0,
+        ) == 0
+            && libc::posix_spawn_file_actions_adddup2(&mut actions, write.as_raw_fd(), 1) == 0
+            && libc::posix_spawn_file_actions_addopen(
+                &mut actions,
+                2,
+                c"/dev/null".as_ptr(),
+                libc::O_WRONLY,
+                0,
+            ) == 0
+            && close_from(&mut actions, 3) == 0
+            && libc::posix_spawnattr_setsigmask(&mut attr, &empty) == 0
+            && libc::posix_spawnattr_setsigdefault(&mut attr, &pipe) == 0
+            && libc::posix_spawnattr_setflags(
+                &mut attr,
+                (libc::POSIX_SPAWN_SETSIGMASK | libc::POSIX_SPAWN_SETSIGDEF) as libc::c_short,
+            ) == 0;
+        let mut pidfd = -1;
+        let started = prepared
+            && spawn(
+                &mut pidfd,
+                argv[0].as_ptr(),
+                &actions,
+                &attr,
+                argv_ptrs.as_ptr(),
+                envp_ptrs.as_ptr(),
+            ) == 0;
+        libc::posix_spawn_file_actions_destroy(&mut actions);
+        libc::posix_spawnattr_destroy(&mut attr);
+        if !started || pidfd < 0 {
+            return None;
+        }
+        drop(write);
+        Some((
+            Helper {
+                pidfd: OwnedFd::from_raw_fd(pidfd),
+            },
+            read,
+        ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Helper {
+    /// The child's PID, for tests and reports only: never waited for or signalled.
+    fn pid(&self) -> Option<u32> {
+        use std::os::fd::AsRawFd;
+        let getpid: PidfdGetpid = glibc(c"pidfd_getpid")?;
+        // SAFETY: pidfd_getpid reads this helper's own pidfd.
+        let pid = unsafe { getpid(self.pidfd.as_raw_fd()) };
+        u32::try_from(pid).ok().filter(|pid| *pid > 0)
+    }
+
+    fn wait_id(&self, options: libc::c_int) -> io::Result<Option<std::process::ExitStatus>> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::ExitStatusExt;
+        // SAFETY: waitid on this helper's pidfd into a zeroed siginfo.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let id = self.pidfd.as_raw_fd() as libc::id_t;
+        if unsafe { libc::waitid(libc::P_PIDFD, id, &mut info, options) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: waitid filled a SIGCHLD siginfo (or left it zeroed).
+        let (pid, status) = unsafe { (info.si_pid(), info.si_status()) };
+        if pid == 0 {
+            return Ok(None);
+        }
+        Ok(Some(std::process::ExitStatus::from_raw(
+            match info.si_code {
+                libc::CLD_EXITED => (status & 0xff) << 8,
+                libc::CLD_DUMPED => (status & 0x7f) | 0x80,
+                _ => status & 0x7f,
+            },
+        )))
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Owned for Helper {
+    fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
+        self.wait_id(libc::WEXITED | libc::WNOHANG)
+    }
+    fn kill(&mut self) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+        // SAFETY: pidfd_send_signal on this helper's pidfd, no siginfo.
+        let sent = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                self.pidfd.as_raw_fd(),
+                libc::SIGKILL,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        };
+        if sent == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+    /// Reaps it after the signal, for at most a second.
+    fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match self.try_wait()? {
+                Some(status) => return Ok(status),
+                None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+                None => return Err(io::ErrorKind::TimedOut.into()),
+            }
+        }
+    }
+}
+
+/// The most a bounded read takes from its child's output.
+#[cfg(target_os = "linux")]
+const READ_CAP: usize = 64 << 10;
+
+/// The child's whole output when it exits successfully and its output ends,
+/// both by `deadline`; otherwise None. `out` does not block, so no reader
+/// outlives the call, even while another process holds the pipe open
+/// (zerus-fp1m7): the pipe is simply closed. Only a child that `try_wait`
+/// has just reported running is signalled, then waited for: no wait has
+/// collected it, so its PID is still its own. Once waiting fails (the kernel
+/// reaped it, for example) nothing is signalled (zerus-5zo1o).
+#[cfg(target_os = "linux")]
+fn drain(
+    child: &mut impl Owned,
+    out: &mut impl Read,
+    deadline: Instant,
+    pause: Duration,
+) -> Option<Vec<u8>> {
+    let (mut text, mut ended, mut exited) = (Vec::new(), false, None);
+    let mut chunk = [0_u8; 4096];
+    loop {
+        while !ended {
+            match out.read(&mut chunk) {
+                Ok(0) => ended = true,
+                Ok(read) if text.len() + read <= READ_CAP => text.extend_from_slice(&chunk[..read]),
+                Ok(_) => {
+                    // Too much: stop the child as at the deadline.
+                    if exited.is_none() && matches!(child.try_wait(), Ok(None)) {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                    return None;
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(_) => ended = true,
+            }
+        }
+        if exited.is_none() {
+            match child.try_wait() {
+                Ok(Some(status)) => exited = Some(status),
+                Ok(None) => {}
+                Err(_) => return None,
+            }
+        }
+        match exited {
+            Some(status) if ended => return status.success().then_some(text),
+            _ if Instant::now() >= deadline => {
+                if exited.is_none() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                return None;
+            }
+            _ => std::thread::sleep(pause),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn bounded_read_with(
+    program: &str,
+    args: &[&str],
+    limit: Duration,
+    spawned: impl FnOnce(u32),
+    auto_reaped: impl FnOnce() -> bool,
+) -> Option<String> {
+    use std::os::fd::AsRawFd;
+    if auto_reaped() {
+        return None;
+    }
+    let deadline = Instant::now() + limit;
+    // Every wait and signal goes through the pidfd the child was born with.
+    let (mut helper, out) = spawn_held(program, args)?;
+    if let Some(pid) = helper.pid() {
+        spawned(pid);
+    }
+    // SAFETY: F_GETFL and F_SETFL on this call's own pipe descriptor.
+    let nonblocking = unsafe {
+        let flags = libc::fcntl(out.as_raw_fd(), libc::F_GETFL);
+        flags >= 0 && libc::fcntl(out.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) == 0
+    };
+    let text = if nonblocking {
+        drain(
+            &mut helper,
+            &mut File::from(out),
+            deadline,
+            Duration::from_millis(10),
+        )
+    } else {
+        // No pipe to read: end the child now, as at the deadline.
+        drain(
+            &mut helper,
+            &mut io::empty(),
+            Instant::now(),
+            Duration::ZERO,
+        )
+        .and(None)
+    }?;
+    Some(String::from_utf8_lossy(&text).into_owned())
+}
+
+/// `systemctl --user show` for `unit`, read-only and bounded at 2 s like
+/// `SingleInstance::currentService`; a missing systemctl, or a system that
+/// is not systemd, reads as no service at once.
+#[cfg(target_os = "linux")]
+fn systemd_now(unit: &str) -> Service {
+    bounded_read(
+        "systemctl",
+        &[
+            "--user",
+            "show",
+            "--property=ActiveState,MainPID,InvocationID",
+            unit,
+        ],
+        Duration::from_secs(2),
+    )
+    .map(|text| systemd_service(&text))
+    .unwrap_or_default()
 }
 
 /// `launchctl print`, bounded at 2 s like `SingleInstance::currentService`.
@@ -538,6 +973,10 @@ pub trait Start {
     fn unlock(&mut self);
     fn forward(&mut self, activation: Activation) -> bool;
     fn service(&mut self) -> Service;
+    /// This process's systemd invocation (`INVOCATION_ID`), when it has one.
+    fn own_invocation(&self) -> Option<u128> {
+        None
+    }
     fn claim(&mut self) -> io::Result<()>;
     fn pause(&mut self, pause: Duration);
     fn elapsed(&self) -> Duration;
@@ -575,7 +1014,7 @@ pub fn start(
             return Outcome::Forwarded;
         }
         let service = effects.service();
-        if waits_for_service(&service, own_pid) {
+        if waits_for_service(&service, own_pid, effects.own_invocation()) {
             if effects.elapsed() < timing.service_wait {
                 if !wait_reported {
                     wait_reported = true;
@@ -679,11 +1118,17 @@ impl Start for UnixStart<'_> {
     }
 
     fn service(&mut self) -> Service {
-        if cfg!(target_os = "macos") {
-            self.label.map(launchd_now).unwrap_or_default()
-        } else {
-            Service::default()
-        }
+        #[cfg(target_os = "linux")]
+        let systemd = systemd_now;
+        #[cfg(not(target_os = "linux"))]
+        let systemd = |_: &str| Service::default();
+        platform_service(self.label, launchd_now, systemd)
+    }
+
+    fn own_invocation(&self) -> Option<u128> {
+        std::env::var("INVOCATION_ID")
+            .ok()
+            .and_then(|id| invocation_id(&id))
     }
 
     fn claim(&mut self) -> io::Result<()> {
@@ -1136,6 +1581,7 @@ mod tests {
             computer: "peer.example".into(),
             run: "original-run".into(),
             conversation: "original-conversation".into(),
+            startup_question: None,
         });
         assert_eq!(Activation::parse(&value.line()), Some(value));
         assert!(Activation::parse(br#"target {"computer":"peer","run":"r","conversation":"c","activation_token":"injected"}"#).is_none());
@@ -1150,6 +1596,7 @@ mod tests {
             computer: "peer.example".into(),
             run: "r".repeat(1024),
             conversation: "c".repeat(1024),
+            startup_question: None,
         };
         let value = Activation::Navigation(target);
         assert!(forward(&paths.socket, value.clone()));
@@ -1323,14 +1770,16 @@ mod tests {
             launchd_service(&text("running", "4242")),
             Service {
                 state: ServiceState::Running,
-                pid: 4242
+                pid: 4242,
+                invocation: None,
             }
         );
         assert_eq!(
             launchd_service(&text("spawn scheduled", "")),
             Service {
                 state: ServiceState::Starting,
-                pid: 0
+                pid: 0,
+                invocation: None,
             }
         );
         assert_eq!(
@@ -1343,35 +1792,406 @@ mod tests {
 
     #[test]
     fn only_another_service_process_keeps_the_socket() {
-        assert!(!waits_for_service(&Service::default(), 100));
+        assert!(!waits_for_service(&Service::default(), 100, None));
         assert!(!waits_for_service(
             &Service {
                 state: ServiceState::Running,
-                pid: 100
+                pid: 100,
+                invocation: None,
             },
-            100
+            100,
+            None
         ));
         assert!(waits_for_service(
             &Service {
                 state: ServiceState::Running,
-                pid: 200
+                pid: 200,
+                invocation: None,
             },
-            100
+            100,
+            None
         ));
         assert!(waits_for_service(
             &Service {
                 state: ServiceState::Starting,
-                pid: 0
+                pid: 0,
+                invocation: None,
             },
-            100
+            100,
+            None
         ));
         assert!(waits_for_service(
             &Service {
                 state: ServiceState::Starting,
-                pid: 200
+                pid: 200,
+                invocation: None,
             },
-            100
+            100,
+            None
         ));
+    }
+
+    #[test]
+    fn systemctl_show_reads_qts_states_and_the_run() {
+        let show = |active: &str, pid: &str, id: &str| {
+            systemd_service(&format!(
+                "ActiveState={active}\nMainPID={pid}\nInvocationID={id}\n"
+            ))
+        };
+        let id = "0123456789abcdef0123456789abcdef";
+        let run = invocation_id(id);
+        assert!(run.is_some());
+        for active in ["active", "reloading", "refreshing"] {
+            assert_eq!(
+                show(active, "4242", id),
+                Service {
+                    state: ServiceState::Running,
+                    pid: 4242,
+                    invocation: run,
+                },
+                "{active}"
+            );
+        }
+        for active in ["activating", "deactivating"] {
+            assert_eq!(
+                show(active, "0", "").state,
+                ServiceState::Starting,
+                "{active}"
+            );
+            assert_eq!(show(active, "0", "").pid, 0);
+            assert_eq!(show(active, "0", "").invocation, None);
+        }
+        for active in ["inactive", "failed", "", "maintenance"] {
+            assert_eq!(show(active, "4242", id), Service::default(), "{active}");
+        }
+        assert_eq!(systemd_service(""), Service::default());
+        assert_eq!(show("active", "-5", "nonsense").pid, 0);
+        assert_eq!(show("active", "1", "nonsense").invocation, None);
+        assert_eq!(invocation_id("01234567-89ab-cdef-0123-456789abcdef"), run);
+        assert_eq!(invocation_id(&"0".repeat(32)), None);
+        assert_eq!(invocation_id("0123"), None);
+    }
+
+    #[test]
+    fn the_units_own_run_never_waits_on_itself() {
+        let unit = |pid: i64, invocation: Option<u128>| Service {
+            state: ServiceState::Running,
+            pid,
+            invocation,
+        };
+        // ExecStart through a wrapper: MainPID is the wrapper, the run is ours.
+        assert!(!waits_for_service(&unit(200, Some(7)), 100, Some(7)));
+        assert!(
+            waits_for_service(&unit(200, Some(7)), 100, Some(8)),
+            "another run"
+        );
+        assert!(
+            waits_for_service(&unit(200, Some(7)), 100, None),
+            "a launch from the menu"
+        );
+        assert!(waits_for_service(&unit(200, None), 100, None));
+        assert!(
+            !waits_for_service(&unit(100, Some(7)), 100, None),
+            "the main process"
+        );
+    }
+
+    #[test]
+    fn only_the_switch_asks_its_platforms_service() {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let running = Service {
+            state: ServiceState::Running,
+            pid: 9,
+            invocation: None,
+        };
+        let launchd = |label: &str| {
+            asked.borrow_mut().push(format!("launchd {label}"));
+            running
+        };
+        let systemd = |unit: &str| {
+            asked.borrow_mut().push(format!("systemd {unit}"));
+            running
+        };
+        assert_eq!(platform_service(None, launchd, systemd), Service::default());
+        assert!(
+            asked.borrow().is_empty(),
+            "a build that is not the switch asks nothing"
+        );
+        let found = platform_service(Some("com.hgdev.hgs-tray"), launchd, systemd);
+        let expected: Vec<String> = if cfg!(target_os = "macos") {
+            vec!["launchd com.hgdev.hgs-tray".into()]
+        } else if cfg!(target_os = "linux") {
+            vec!["systemd hgs-tray.service".into()]
+        } else {
+            vec![]
+        };
+        assert_eq!(found == running, !expected.is_empty());
+        assert_eq!(*asked.borrow(), expected);
+    }
+
+    #[cfg(target_os = "linux")]
+    /// A scripted child for `settle`.
+    struct Scripted {
+        waits: VecDeque<io::Result<Option<std::process::ExitStatus>>>,
+        signalled: usize,
+        reaped: usize,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Owned for Scripted {
+        fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
+            self.waits.pop_front().unwrap_or(Ok(None))
+        }
+        fn kill(&mut self) -> io::Result<()> {
+            self.signalled += 1;
+            Ok(())
+        }
+        fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
+            self.reaped += 1;
+            Ok(std::os::unix::process::ExitStatusExt::from_raw(9))
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    /// A pipe that answers from a script, then would block (or ends).
+    struct Pipe {
+        reads: VecDeque<io::Result<Vec<u8>>>,
+        ends: bool,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Read for Pipe {
+        fn read(&mut self, into: &mut [u8]) -> io::Result<usize> {
+            match self.reads.pop_front() {
+                Some(Ok(bytes)) => {
+                    into[..bytes.len()].copy_from_slice(&bytes);
+                    Ok(bytes.len())
+                }
+                Some(Err(error)) => Err(error),
+                None if self.ends => Ok(0),
+                None => Err(io::ErrorKind::WouldBlock.into()),
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_child_whose_wait_was_lost_is_never_signalled() {
+        let exited = |code: i32| -> io::Result<Option<std::process::ExitStatus>> {
+            Ok(Some(std::os::unix::process::ExitStatusExt::from_raw(code)))
+        };
+        let script = |waits: Vec<io::Result<Option<std::process::ExitStatus>>>| Scripted {
+            waits: waits.into(),
+            signalled: 0,
+            reaped: 0,
+        };
+        let pipe = |reads: Vec<&[u8]>, ends: bool| Pipe {
+            reads: reads.into_iter().map(|bytes| Ok(bytes.to_vec())).collect(),
+            ends,
+        };
+        let later = Instant::now() + Duration::from_secs(60);
+        // The kernel already reaped it (SIGCHLD ignored): ECHILD, and its old PID is not ours.
+        let mut lost = script(vec![Err(io::Error::from_raw_os_error(libc::ECHILD))]);
+        assert_eq!(
+            drain(&mut lost, &mut pipe(vec![], false), later, Duration::ZERO),
+            None
+        );
+        assert_eq!((lost.signalled, lost.reaped), (0, 0));
+        let mut lost_later = script(vec![
+            Ok(None),
+            Ok(None),
+            Err(io::Error::from_raw_os_error(libc::ECHILD)),
+        ]);
+        assert_eq!(
+            drain(
+                &mut lost_later,
+                &mut pipe(vec![], false),
+                later,
+                Duration::ZERO
+            ),
+            None
+        );
+        assert_eq!(lost_later.signalled, 0);
+        // Still running at the deadline: signalled once, then waited for.
+        let mut hung = script(vec![Ok(None)]);
+        assert_eq!(
+            drain(
+                &mut hung,
+                &mut pipe(vec![], false),
+                Instant::now(),
+                Duration::ZERO
+            ),
+            None
+        );
+        assert_eq!((hung.signalled, hung.reaped), (1, 1));
+        // Exited, and its output ended: the whole answer.
+        let mut quick = script(vec![Ok(None), exited(0)]);
+        let answer = drain(
+            &mut quick,
+            &mut pipe(vec![b"ActiveState=", b"active\n"], true),
+            later,
+            Duration::ZERO,
+        );
+        assert_eq!(answer.as_deref(), Some(&b"ActiveState=active\n"[..]));
+        assert_eq!((quick.signalled, quick.reaped), (0, 0));
+        // Exited, but another process keeps its output open: no answer by the
+        // deadline, nothing signalled and nothing left reading (zerus-fp1m7).
+        let mut held = script(vec![exited(0)]);
+        let soon = Instant::now() + Duration::from_millis(30);
+        assert_eq!(
+            drain(
+                &mut held,
+                &mut pipe(vec![b"ActiveState=active\n"], false),
+                soon,
+                Duration::from_millis(5)
+            ),
+            None
+        );
+        assert_eq!((held.signalled, held.reaped), (0, 0));
+        // A failed show answers nothing.
+        let mut failed = script(vec![exited(3 << 8)]);
+        assert_eq!(
+            drain(
+                &mut failed,
+                &mut pipe(vec![b"partial"], true),
+                later,
+                Duration::ZERO
+            ),
+            None
+        );
+        // More than the cap: the running child is stopped.
+        let mut chatty = script(vec![Ok(None), Ok(None)]);
+        let flood = vec![b'x'; 4096];
+        let mut big = Pipe {
+            reads: (0..20).map(|_| Ok(flood.clone())).collect(),
+            ends: false,
+        };
+        assert_eq!(drain(&mut chatty, &mut big, later, Duration::ZERO), None);
+        assert_eq!((chatty.signalled, chatty.reaped), (1, 1));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_read_returns_while_another_process_holds_the_pipe() {
+        // A background child keeps the pipe open after the shell exits.
+        let begun = Instant::now();
+        let script = "(sleep 3) & printf 'ActiveState=active\\n'";
+        assert_eq!(
+            bounded_read("/bin/sh", &["-c", script], Duration::from_millis(200)),
+            None
+        );
+        assert!(
+            begun.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            begun.elapsed()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_auto_reaping_sigchld_policy_refuses_the_read_before_any_child() {
+        assert!(auto_reaps(libc::SIG_IGN, 0));
+        assert!(auto_reaps(libc::SIG_DFL, libc::SA_NOCLDWAIT));
+        assert!(!auto_reaps(libc::SIG_DFL, 0));
+        assert!(!auto_reaps(libc::SIG_DFL, libc::SA_RESTART));
+        let read = bounded_read_with(
+            "/bin/sh",
+            &["-c", "printf answered"],
+            Duration::from_secs(5),
+            |_| panic!("no child under SIG_IGN"),
+            || true,
+        );
+        assert_eq!(read, None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_child_is_held_by_the_pidfd_it_was_born_with() {
+        // Reaped through its pidfd: a signal then reaches nothing at all.
+        let (mut helper, _out) = spawn_held("/bin/sh", &["-c", "exit 0"]).expect("pidfd_spawnp");
+        assert!(helper.pid().is_some());
+        assert!(helper.wait().unwrap().success());
+        assert_eq!(helper.kill().unwrap_err().raw_os_error(), Some(libc::ESRCH));
+        // Exit codes and signals read as std reports them.
+        let (mut failing, _out) = spawn_held("/bin/sh", &["-c", "exit 3"]).unwrap();
+        assert_eq!(failing.wait().unwrap().code(), Some(3));
+        let (mut hung, _out) = spawn_held("/bin/sh", &["-c", "exec sleep 30"]).unwrap();
+        hung.kill().unwrap();
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(hung.wait().unwrap().signal(), Some(libc::SIGKILL));
+        // A program that cannot start leaves no child and no handle.
+        assert!(spawn_held("/nonexistent/systemctl", &["--user"]).is_none());
+        // Only stdin, stdout and stderr reach the child.
+        let (mut listing, out) = spawn_held("/bin/sh", &["-c", "ls /proc/self/fd"]).unwrap();
+        assert!(listing.wait().unwrap().success());
+        let mut text = String::new();
+        File::from(out).read_to_string(&mut text).unwrap();
+        let open: Vec<&str> = text.split_whitespace().collect();
+        // ls itself opens one directory descriptor to list it.
+        assert!(
+            open.len() <= 4 && ["0", "1", "2"].iter().all(|fd| open.contains(fd)),
+            "{open:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_child_reaped_elsewhere_is_never_signalled() {
+        // Reaped by another waiter by its number (as an auto-reaping policy or
+        // another reaper would): waiting through the pidfd reports the loss and
+        // the deadline path signals nothing.
+        let (mut helper, _out) = spawn_held("/bin/sh", &["-c", "exit 0"]).unwrap();
+        let pid = helper.pid().unwrap() as libc::pid_t;
+        // SAFETY: waitpid on this test's own child.
+        assert_eq!(unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) }, pid);
+        assert!(helper.try_wait().is_err());
+        assert_eq!(helper.kill().unwrap_err().raw_os_error(), Some(libc::ESRCH));
+        assert_eq!(
+            drain(
+                &mut helper,
+                &mut io::empty(),
+                Instant::now(),
+                Duration::ZERO
+            ),
+            None
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_bounded_read_answers_kills_or_refuses() {
+        let sh = |script: &str| bounded_read("/bin/sh", &["-c", script], Duration::from_secs(5));
+        assert_eq!(
+            sh("printf 'ActiveState=active\\n'").as_deref(),
+            Some("ActiveState=active\n")
+        );
+        assert_eq!(sh("printf partial; exit 3"), None, "a failed show");
+        assert_eq!(
+            bounded_read("/nonexistent/systemctl", &[], Duration::from_secs(5)),
+            None,
+            "no systemctl"
+        );
+        let begun = Instant::now();
+        let mut pid = 0;
+        let read = bounded_read_with(
+            "/bin/sh",
+            &["-c", "exec sleep 30"],
+            Duration::from_millis(200),
+            |id| pid = id,
+            || false,
+        );
+        assert_eq!(read, None);
+        assert!(
+            begun.elapsed() < Duration::from_secs(5),
+            "the bound ends a hung show"
+        );
+        // Killed and reaped: not even a zombie keeps its PID.
+        // SAFETY: signal 0 only checks that the process exists.
+        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        assert_eq!(
+            (alive, io::Error::last_os_error().raw_os_error()),
+            (-1, Some(libc::ESRCH))
+        );
     }
 
     /// Scripted effects for `start`.
@@ -1380,6 +2200,7 @@ mod tests {
         lock_error: Option<String>,
         forwards: VecDeque<bool>,
         services: VecDeque<Service>,
+        invocation: Option<u128>,
         claim_error: Option<String>,
         elapsed: Duration,
         locked: bool,
@@ -1411,6 +2232,9 @@ mod tests {
         fn service(&mut self) -> Service {
             self.services.pop_front().unwrap_or_default()
         }
+        fn own_invocation(&self) -> Option<u128> {
+            self.invocation
+        }
         fn claim(&mut self) -> io::Result<()> {
             self.log.push("claim".into());
             match &self.claim_error {
@@ -1430,6 +2254,30 @@ mod tests {
     }
 
     #[test]
+    fn the_units_own_start_through_a_wrapper_claims_at_once() {
+        let mut script = Script {
+            services: [Service {
+                state: ServiceState::Running,
+                pid: 500,
+                invocation: Some(7),
+            }]
+            .into(),
+            invocation: Some(7),
+            ..Script::default()
+        };
+        assert_eq!(
+            start(&mut script, Activation::Show, 100, &fast()),
+            Outcome::Claimed
+        );
+        assert_eq!(script.elapsed, Duration::ZERO, "no wait on its own socket");
+        assert!(
+            !script.log.iter().any(|line| line.starts_with("report")),
+            "{:?}",
+            script.log
+        );
+    }
+
+    #[test]
     fn a_start_waits_for_the_starting_service_then_forwards() {
         let mut script = Script {
             forwards: [false, false, true].into(),
@@ -1437,10 +2285,12 @@ mod tests {
                 Service {
                     state: ServiceState::Starting,
                     pid: 0,
+                    invocation: None,
                 },
                 Service {
                     state: ServiceState::Running,
                     pid: 500,
+                    invocation: None,
                 },
             ]
             .into(),
@@ -1484,6 +2334,7 @@ mod tests {
             services: [Service {
                 state: ServiceState::Running,
                 pid: 100,
+                invocation: None,
             }]
             .into(),
             ..Script::default()
@@ -1505,6 +2356,7 @@ mod tests {
                 Service {
                     state: ServiceState::Running,
                     pid: 500,
+                    invocation: None,
                 },
                 100,
             )
@@ -1530,6 +2382,7 @@ mod tests {
             services: [Service {
                 state: ServiceState::Starting,
                 pid: 0,
+                invocation: None,
             }]
             .into(),
             forwards: [false, true].into(),
@@ -1666,13 +2519,16 @@ mod tests {
     fn a_crashed_instance_socket_is_claimed() {
         let dir = scratch("crashed");
         let paths = paths("zerus-test", &dir, &dir);
-        {
-            // A child forked meanwhile would keep the listener open until it execs.
-            let _tree = crate::PROCESS_TREE
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            drop(UnixListener::bind(&paths.socket).unwrap());
-        }
+        // Bound but never listening, so the file refuses connections as a
+        // crashed instance's does. A listener would not: a child that another
+        // test forks meanwhile, with or without `PROCESS_TREE`, keeps a copy
+        // listening until it execs (zerus-cqbmw).
+        let socket =
+            socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None).unwrap();
+        socket
+            .bind(&socket2::SockAddr::unix(&paths.socket).unwrap())
+            .unwrap();
+        drop(socket);
         assert!(paths.socket.exists(), "a socket file nobody listens on");
         let Claim::Claimed(claimed) =
             claim_at(&paths, None, Activation::Show, &LockInfo::own(), &fast())
@@ -1730,24 +2586,62 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn a_linux_holder_with_a_deleted_binary_runs_and_an_unreadable_one_is_gone() {
-        let dir = scratch("deleted");
+    fn check_deleted_holder(
+        fixture: &str,
+        start: impl FnOnce(&Path) -> std::process::Child,
+        mut before_exec: impl FnMut(&mut std::process::Child),
+    ) {
+        use std::os::unix::fs::MetadataExt;
+        struct Owned(std::process::Child);
+        impl Drop for Owned {
+            fn drop(&mut self) {
+                if self.0.try_wait().unwrap().is_none() {
+                    self.0.kill().unwrap();
+                }
+                self.0.wait().unwrap();
+            }
+        }
+        let dir = scratch(fixture);
         let holder = dir.join("zci-holder");
-        let mut child = {
-            // No other test forks while the copy is open for writing (ETXTBSY).
-            let _tree = crate::PROCESS_TREE
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            fs::copy("/bin/sleep", &holder).unwrap();
-            Command::new(&holder)
-                .arg("30")
-                .stdin(Stdio::null())
-                .spawn()
-                .unwrap()
-        };
+        // Shared, as every test that starts children holds it (`lib.rs`).
+        let _tree = crate::PROCESS_TREE
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // `cp` writes the copy, so this process never holds it open for
+        // writing. A child that another test forks meanwhile, with or without
+        // `PROCESS_TREE`, would keep such a descriptor until it execs, and
+        // starting the copy then fails with ETXTBSY (zerus-cqbmw).
+        let copied = Command::new("cp")
+            .arg("/bin/sleep")
+            .arg(&holder)
+            .stdin(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(copied.success(), "cp /bin/sleep: {copied}");
+        let mut child = Owned(start(&holder));
+        let expected = fs::metadata(&holder).unwrap();
+        let until = Instant::now() + Duration::from_secs(3);
+        // Spawn completion is not the fixture's native executable observation.
+        // Keep the file until this original Child actually runs its object.
+        loop {
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "holder exited before exec"
+            );
+            if fs::metadata(format!("/proc/{}/exe", child.0.id()))
+                .is_ok_and(|seen| (seen.dev(), seen.ino()) == (expected.dev(), expected.ino()))
+            {
+                break;
+            }
+            before_exec(&mut child.0);
+            assert!(
+                Instant::now() < until,
+                "original holder executable was not observed"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
         fs::remove_file(&holder).unwrap();
-        let pid = i64::from(child.id());
+        let pid = i64::from(child.0.id());
         let name = process_name(pid);
         let own = LockInfo::own();
         let info = LockInfo {
@@ -1756,22 +2650,91 @@ mod tests {
             host: own.host.clone(),
         };
         let stale = is_stale(Some(&info), Duration::from_secs(1), &own.host, process_name);
-        let _ = child.kill();
-        let _ = child.wait();
+        let _ = child.0.kill();
+        let _ = child.0.wait();
         assert_eq!(
             name,
             Some(Some("zci-holder".to_owned())),
             "the deleted binary keeps its name"
         );
         assert!(!stale, "its holder still runs");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_linux_holder_with_a_deleted_binary_runs_and_an_unreadable_one_is_gone() {
+        check_deleted_holder(
+            "deleted",
+            |holder| {
+                Command::new(holder)
+                    .arg("30")
+                    .stdin(Stdio::null())
+                    .spawn()
+                    .unwrap()
+            },
+            |_| {},
+        );
         // SAFETY: geteuid cannot fail.
         if unsafe { libc::geteuid() } != 0 {
+            let _tree = crate::PROCESS_TREE
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // PID 1 can be our own readable namespace init in local CI. Use
+            // an original live, non-dumpable child for the permission refusal.
+            let mut unreadable = Command::new("python3")
+                .args([
+                    "-I",
+                    "-c",
+                    "import ctypes,os,time; assert ctypes.CDLL(None).prctl(4,0,0,0,0)==0; os.write(1,b'ready'); time.sleep(30)",
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut ready = [0; 5];
+            let started = unreadable.stdout.take().unwrap().read_exact(&mut ready);
+            let before = unreadable.try_wait();
+            let link = fs::read_link(format!("/proc/{}/exe", unreadable.id()));
+            let observed = process_name(i64::from(unreadable.id()));
+            let after = unreadable.try_wait();
+            let _ = unreadable.kill();
+            unreadable.wait().unwrap();
+            started.unwrap();
+            assert_eq!(&ready, b"ready");
+            assert!(before.unwrap().is_none() && after.unwrap().is_none());
+            assert_eq!(link.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
             assert_eq!(
-                process_name(1),
-                None,
-                "init's executable link is unreadable here"
+                observed, None,
+                "the original live child's executable link is unreadable"
             );
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn deleted_holder_waits_for_the_original_exec_before_unlinking() {
+        let mut released = false;
+        check_deleted_holder(
+            "exec-gate",
+            |holder| {
+                Command::new("/bin/sh")
+                    .args(["-c", "read -r gate || exit 71; exec \"$1\" 30", "fixture"])
+                    .arg(holder)
+                    .stdin(Stdio::piped())
+                    .spawn()
+                    .unwrap()
+            },
+            |child| {
+                if !released {
+                    child.stdin.take().unwrap().write_all(b"go\n").unwrap();
+                    released = true;
+                }
+            },
+        );
+        assert!(
+            released,
+            "the original was observed before its fixture exec"
+        );
     }
 
     /// A PID whose process has exited and been reaped.

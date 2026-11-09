@@ -15,8 +15,13 @@ use std::{
 };
 
 mod shim;
+// Read-only Windows inspection primitives. The guarded cleanup sampler is
+// still closed until its object matching and owned-worker integration land.
+#[cfg(any(windows, test))]
+#[allow(dead_code)]
+mod windows_membership;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-mod worktree_membership;
+pub(crate) mod worktree_membership;
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
@@ -252,7 +257,8 @@ pub struct SshChild {
 }
 /// The output of a successful ssh command, without its error text.
 pub fn ssh_capture(args: &[String]) -> Option<String> {
-    let out = ssh_output(ssh().args(args).stderr(Stdio::null())).ok()?;
+    let remote = args.last()?;
+    let out = ssh_output(crate::ssh_bytes::command(remote).ok()?.args(args).stderr(Stdio::null())).ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())

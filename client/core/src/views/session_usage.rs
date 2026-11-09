@@ -124,7 +124,11 @@ impl SessionUsageState {
                 .is_some_and(|data| text(data, "status") == "unavailable");
         slot.failed = failed;
         if let Some(data) = reply.filter(|_| matches) {
-            if !failed || slot.data.is_none() {
+            let changed = slot
+                .data
+                .as_ref()
+                .is_some_and(|old| super::usage::changed_claude_account(old, &data));
+            if !failed || slot.data.is_none() || changed {
                 slot.data = Some(data);
             }
         } else if slot.data.is_none() {
@@ -170,6 +174,27 @@ pub fn online(fleet: &[FleetEntry], host: &ComputerId) -> bool {
 mod tests {
     use super::*;
     use crate::views::accounts::AccountsState;
+
+    #[test]
+    fn a_changed_claude_identity_discards_the_prior_accounts_footer_values() {
+        let mut state = SessionUsageState::default();
+        let mut slots = AccountsState::default();
+        let target = target("run-1");
+        state.follow(Some(target.clone()));
+        state.finish(&target, Some(json!({"provider":"claude","auth_status":"signed_in","status":"ok",
+            "identity":{"email":"alpha@example.test"},"windows":[{"id":"five_hour","used_percent":20}]})), &mut slots);
+        state.finish(
+            &target,
+            Some(
+                json!({"provider":"claude","auth_status":"signed_in","status":"unavailable",
+            "identity":{"email":"beta@example.test"},"windows":[]}),
+            ),
+            &mut slots,
+        );
+        let view = state.view(true);
+        assert_eq!(view.identity.email, "beta@example.test");
+        assert!(view.refresh_error && view.windows.is_empty());
+    }
 
     fn target(run: &str) -> SessionUsageRef {
         SessionUsageRef {

@@ -417,7 +417,7 @@ impl Store {
             let text = if field == "prompt" {
                 journal::user_prompt(&record).as_str().unwrap_or("")
             } else {
-                string(&record, field)
+                journal::last_message(&record)
             };
             if !text.is_empty() {
                 let event =

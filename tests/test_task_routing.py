@@ -25,6 +25,8 @@ root = pathlib.Path(os.environ['ROUTING_ROOT'])
 alias = sys.argv[-2]
 if (root / ('offline-' + alias)).exists():
     print('ssh: connect to host ' + alias + ': Connection timed out', file=sys.stderr); sys.exit(255)
+if sys.argv[-1] == 'echo "hgs-remote-v2|%OS%|%SystemRoot%|$env:OS|$env:SystemRoot"':
+    print('hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot'); sys.exit(0)
 node = root / alias
 env = dict(os.environ, HOME=str(node / 'profile'), HGS_CONFIG_DIR=str(node / 'config'),
            HGS_STATE_DIR=str(node / 'state'), TASK_FIXTURE=str(node))
@@ -166,6 +168,10 @@ class TaskRouting(unittest.TestCase):
         self.assertEqual((there["stage"], there["session"]["host"]), ("active", ""))
         entry = next(e for e in there["log"] if e["kind"] == "sent")
         self.assertEqual(entry["actor"]["kind"], "person")
+        # C3 activation: b has not seen a's replica yet, so its bootstrap
+        # gate is positively open: the legacy route, no floor, no attempt.
+        execution = there["execution"]
+        self.assertEqual((execution["attempts"], execution["current"]["legacy"]), (0, True), execution)
         calls = (self.root / "calls").read_text()
         self.assertIn("b task send " + task["uuid"] + " --project project-1", calls)
 

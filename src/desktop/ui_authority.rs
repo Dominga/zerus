@@ -39,6 +39,12 @@ const ANCESTORS: usize = 32;
 const WAIT: Duration = Duration::from_secs(2);
 const ACTIVATION_PROOF_INTERVAL: Duration = Duration::from_millis(500);
 
+// New closed own-helper entry only. Not selected-CLI equivalence, a service
+// reference, or an independent native permission; caller wiring is separate.
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+mod program_helper_image;
+
 pub(super) struct Scope {
     location: Location,
     frontend_images: Vec<PathBuf>,
@@ -156,13 +162,23 @@ impl Scope {
     }
 }
 
+// Distinct private freshness cases. Own-helper observations cannot construct
+// a service-reference Peer or claim equivalence to the startup service image.
+#[cfg(target_os = "linux")]
+enum LinuxFreshness {
+    Service(std::sync::Arc<linux_image::Peer>),
+    Own {
+        image: program_helper_image::OwnImage,
+        until: Instant,
+    },
+}
 #[derive(Clone)]
 struct Process {
     pid: u32,
     identity: platform::ProcessIdentity,
     executable: String,
     #[cfg(target_os = "linux")]
-    sealed_image: Option<std::sync::Arc<linux_image::Peer>>,
+    linux_freshness: Option<std::sync::Arc<LinuxFreshness>>,
     #[cfg(windows)]
     original: Option<std::sync::Arc<Original>>,
 }
@@ -199,7 +215,7 @@ impl Process {
             identity,
             executable,
             #[cfg(target_os = "linux")]
-            sealed_image: None,
+            linux_freshness: None,
         })
     }
     #[cfg(windows)]
@@ -211,7 +227,15 @@ impl Process {
     #[cfg(not(windows))]
     fn current(&self) -> bool {
         #[cfg(target_os = "linux")]
-        if let Some(image) = &self.sealed_image {
+        if let Some(LinuxFreshness::Own {image, until}) = self.linux_freshness.as_deref() {
+            return self.pid == std::process::id()
+                && platform::process_identity(self.pid).as_ref() == Some(&self.identity)
+                && image.check(*until).is_ok()
+                && platform::process_identity(self.pid).as_ref() == Some(&self.identity)
+                && Instant::now() < *until;
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(LinuxFreshness::Service(image)) = self.linux_freshness.as_deref() {
             // Exec retains PID/birth and can retain the SAME memfd display name.
             // Reopen the kernel object at EVERY original freshness boundary.
             return platform::process_identity(self.pid).as_ref() == Some(&self.identity)
@@ -289,6 +313,342 @@ struct Metadata {
     application: String,
 }
 pub(super) struct Validated(Request, Freshness, Metadata);
+
+/// One new closed helper's initial proof, not a generic executing actor kind.
+/// The worker must reserve the SAME original UUID durably before consuming it.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)]
+pub(crate) struct ProgramStopAdmission(Validated);
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+enum ProgramLife {
+    Native(Box<ProgramOriginal>),
+    #[cfg(test)]
+    Fixture,
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct ProgramOriginal {
+    caller: Process,
+    frontend: Process,
+    source: super::ownership::programs::Current,
+}
+/// The original one-shot permission after proof consumption. It cannot be
+/// reconstructed from a report or renewed by another cache/serial/child.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)]
+pub(crate) struct ProgramStopPermit<'original> {
+    intent: zerus_client_core::worktree_programs::invocation::Intent,
+    life: ProgramLife,
+    until: Instant,
+    reservation: &'original crate::state::ProgramStopClaim,
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)]
+impl ProgramStopAdmission {
+    pub(crate) fn consume<'original>(
+        self,
+        expected: &zerus_client_core::worktree_programs::invocation::Intent,
+        until: Instant,
+        location: &Location,
+        reservation: &'original crate::state::ProgramStopClaim,
+    ) -> Result<ProgramStopPermit<'original>> {
+        reservation.current().map_err(anyhow::Error::msg)?;
+        ensure!(
+            reservation.input() == expected.input.as_ref(),
+            "original program-stop reservation changed"
+        );
+        self.0.check()?;
+        ensure!(
+            until > Instant::now()
+                && until.saturating_duration_since(Instant::now())
+                    <= Duration::from_millis(
+                        zerus_client_core::worktree_programs::custody::PHASE_MILLIS
+                    ),
+            "program-stop operation expired"
+        );
+        let Validated(request, freshness, metadata) = self.0;
+        let Request::WorktreeProgramStop { intent } = request else {
+            anyhow::bail!("expected program-stop proof")
+        };
+        ensure!(
+            intent.as_ref() == expected,
+            "original program-stop input changed"
+        );
+        let life = match freshness {
+            Freshness::Native {
+                caller,
+                frontend,
+                until: proof_until,
+            } => {
+                ensure!(
+                    location.configuration == intent.input.manifest.configuration,
+                    "program-stop configuration changed"
+                );
+                let origin = metadata
+                    .ownership
+                    .context("original program-stop frontend origin missing")?;
+                let source = super::ownership::programs::Current::capture(
+                    location,
+                    &intent.input.source,
+                    origin,
+                    proof_until,
+                )?;
+                ensure!(
+                    Instant::now() < proof_until
+                        && caller.pid == std::process::id()
+                        && caller.current()
+                        && frontend.current()
+                        && Instant::now() < proof_until,
+                    "original program-stop proof expired"
+                );
+                #[cfg(target_os = "linux")]
+                ensure!(
+                    matches!(
+                        caller.linux_freshness.as_deref(),
+                        Some(LinuxFreshness::Own { .. })
+                    ),
+                    "own-helper freshness missing"
+                );
+                ProgramLife::Native(Box::new(ProgramOriginal {
+                    caller,
+                    frontend,
+                    source,
+                }))
+            }
+            #[cfg(test)]
+            Freshness::Fixture => ProgramLife::Fixture,
+        };
+        // Original proof is consumed here. This operation bound was supplied
+        // by the already-running original job, not a replacement proof TTL.
+        reservation.spend().map_err(anyhow::Error::msg)?;
+        Ok(ProgramStopPermit {
+            intent: *intent,
+            life,
+            until,
+            reservation,
+        })
+    }
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)]
+impl ProgramStopPermit<'_> {
+    pub(crate) fn intent(&self) -> &zerus_client_core::worktree_programs::invocation::Intent {
+        &self.intent
+    }
+    /// Current original native objects only, not another authentication or
+    /// consent. Root independently checks current ownership/Grant, checkout,
+    /// original process pin/membership and cancellation before EACH signal.
+    pub(crate) fn current(&self) -> Result<()> {
+        self.reservation.current().map_err(anyhow::Error::msg)?;
+        ensure!(
+            Instant::now() < self.until,
+            "original program-stop operation expired"
+        );
+        match &self.life {
+            ProgramLife::Native(original) => {
+                let ProgramOriginal {
+                    caller,
+                    frontend,
+                    source,
+                } = original.as_ref();
+                source.check(self.until)?;
+                ensure!(
+                    caller.pid == std::process::id() && frontend.current(),
+                    "original program-stop source changed"
+                );
+                #[cfg(target_os = "linux")]
+                {
+                    let Some(LinuxFreshness::Own {
+                        image,
+                        until: _original_proof_until,
+                    }) = caller.linux_freshness.as_deref()
+                    else {
+                        anyhow::bail!("own helper missing")
+                    };
+                    ensure!(
+                        platform::process_identity(caller.pid).as_ref() == Some(&caller.identity),
+                        "original helper changed"
+                    );
+                    image.check(self.until)?;
+                    ensure!(
+                        platform::process_identity(caller.pid).as_ref() == Some(&caller.identity),
+                        "original helper changed"
+                    );
+                }
+                #[cfg(target_os = "macos")]
+                ensure!(caller.current(), "original helper changed");
+                check_ancestry(caller.pid, self.until)?;
+                ensure!(frontend.current(), "original native frontend changed");
+            }
+            #[cfg(test)]
+            ProgramLife::Fixture => (),
+        }
+        ensure!(
+            Instant::now() < self.until,
+            "original program-stop operation expired"
+        );
+        Ok(())
+    }
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)] // Only the new private final-cleanup command consumes this.
+pub(crate) struct ProgramCleanupAdmission(Validated);
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)]
+pub(crate) struct ProgramCleanupPermit<'original> {
+    intent: zerus_client_core::worktree_programs::cleanup::Intent,
+    life: ProgramLife,
+    until: Instant,
+    reservation: &'original crate::state::ProgramRemovalClaim,
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)]
+impl ProgramCleanupAdmission {
+    pub(crate) fn consume<'original>(
+        self,
+        expected: &zerus_client_core::worktree_programs::cleanup::Intent,
+        until: Instant,
+        location: &Location,
+        reservation: &'original crate::state::ProgramRemovalClaim,
+    ) -> Result<ProgramCleanupPermit<'original>> {
+        reservation.current().map_err(anyhow::Error::msg)?;
+        ensure!(
+            reservation.input() == expected.input.as_ref(),
+            "original program-cleanup reservation changed"
+        );
+        self.0.check()?;
+        ensure!(
+            until > Instant::now()
+                && until.saturating_duration_since(Instant::now())
+                    <= Duration::from_millis(
+                        zerus_client_core::worktree_programs::custody::PHASE_MILLIS
+                    ),
+            "program-cleanup operation expired"
+        );
+        let Validated(request, freshness, metadata) = self.0;
+        let Request::WorktreeProgramCleanup { intent } = request else {
+            anyhow::bail!("expected program-cleanup proof")
+        };
+        ensure!(
+            intent.as_ref() == expected,
+            "original program-cleanup input changed"
+        );
+        let life = match freshness {
+            Freshness::Native {
+                caller,
+                frontend,
+                until: proof_until,
+            } => {
+                ensure!(
+                    location.configuration == intent.input.stop.manifest.configuration,
+                    "program-cleanup configuration changed"
+                );
+                let origin = metadata
+                    .ownership
+                    .context("original program-cleanup frontend origin missing")?;
+                let source = super::ownership::programs::Current::capture(
+                    location,
+                    &intent.input.stop.source,
+                    origin,
+                    proof_until,
+                )?;
+                ensure!(
+                    Instant::now() < proof_until
+                        && caller.pid == std::process::id()
+                        && caller.current()
+                        && frontend.current()
+                        && Instant::now() < proof_until,
+                    "original program-cleanup proof expired"
+                );
+                #[cfg(target_os = "linux")]
+                ensure!(
+                    matches!(
+                        caller.linux_freshness.as_deref(),
+                        Some(LinuxFreshness::Own { .. })
+                    ),
+                    "own-helper freshness missing"
+                );
+                ProgramLife::Native(Box::new(ProgramOriginal {
+                    caller,
+                    frontend,
+                    source,
+                }))
+            }
+            #[cfg(test)]
+            Freshness::Fixture => ProgramLife::Fixture,
+        };
+        // Original proof is consumed here. This operation bound was supplied
+        // by the already-running original job, not a replacement proof TTL.
+        reservation.spend().map_err(anyhow::Error::msg)?;
+        Ok(ProgramCleanupPermit {
+            intent: *intent,
+            life,
+            until,
+            reservation,
+        })
+    }
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)]
+impl ProgramCleanupPermit<'_> {
+    pub(crate) fn intent(&self) -> &zerus_client_core::worktree_programs::cleanup::Intent {
+        &self.intent
+    }
+    /// Current original native objects only, not another authentication or
+    /// consent. Root independently checks current ownership/Grant, checkout,
+    /// original process pin/membership and cancellation before EACH signal.
+    pub(crate) fn current(&self) -> Result<()> {
+        self.reservation.current().map_err(anyhow::Error::msg)?;
+        ensure!(
+            Instant::now() < self.until,
+            "original program-cleanup operation expired"
+        );
+        match &self.life {
+            ProgramLife::Native(original) => {
+                let ProgramOriginal {
+                    caller,
+                    frontend,
+                    source,
+                } = original.as_ref();
+                source.check(self.until)?;
+                ensure!(
+                    caller.pid == std::process::id() && frontend.current(),
+                    "original program-cleanup source changed"
+                );
+                #[cfg(target_os = "linux")]
+                {
+                    let Some(LinuxFreshness::Own {
+                        image,
+                        until: _original_proof_until,
+                    }) = caller.linux_freshness.as_deref()
+                    else {
+                        anyhow::bail!("own helper missing")
+                    };
+                    ensure!(
+                        platform::process_identity(caller.pid).as_ref() == Some(&caller.identity),
+                        "original helper changed"
+                    );
+                    image.check(self.until)?;
+                    ensure!(
+                        platform::process_identity(caller.pid).as_ref() == Some(&caller.identity),
+                        "original helper changed"
+                    );
+                }
+                #[cfg(target_os = "macos")]
+                ensure!(caller.current(), "original helper changed");
+                check_ancestry(caller.pid, self.until)?;
+                ensure!(frontend.current(), "original native frontend changed");
+            }
+            #[cfg(test)]
+            ProgramLife::Fixture => (),
+        }
+        ensure!(
+            Instant::now() < self.until,
+            "original program-cleanup operation expired"
+        );
+        Ok(())
+    }
+}
+
 enum Freshness {
     Native {
         caller: Process,
@@ -353,8 +713,11 @@ impl Validated {
                     | Request::DeferredSend { .. }
                     | Request::DeferredAnswer { .. }
                     | Request::CompactToSend { .. }
+                    | Request::SessionResume { .. }
                     | Request::TaskStartReconcile { .. }
                     | Request::TerminationOutcome { .. }
+                    | Request::WorktreeProgramStop { .. }
+            | Request::WorktreeProgramCleanup { .. }
             ),
             "native controls require their typed boundary"
         );
@@ -391,6 +754,25 @@ impl Validated {
         };
         Ok(*intent)
     }
+    /// The connection a deferred-input request (send, answer, compact-to-send
+    /// or session resume) was made for, read
+    /// before its admission. It grants and consumes nothing: the actor still
+    /// consumes this permit after BEGIN IMMEDIATE. A refusal before that
+    /// transaction reads it only to tell this epoch's own request from
+    /// another connection's, which it never answers not admitted
+    /// (zerus-tlb9q).
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn deferred_input_scope(
+        &self,
+    ) -> Option<&zerus_client_core::desktop::creation_clone::Scope> {
+        match &self.0 {
+            Request::DeferredSend { intent } => Some(&intent.scope),
+            Request::DeferredAnswer { intent } => Some(&intent.scope),
+            Request::CompactToSend { intent } => Some(&intent.scope),
+            Request::SessionResume { intent } => Some(&intent.scope),
+            _ => None,
+        }
+    }
     /// Only the deferred answer actor calls this, after BEGIN IMMEDIATE.
     /// Cached native Service mode was bound to this exact original request
     /// during admission.
@@ -410,6 +792,17 @@ impl Validated {
         self.check()?;
         let Request::CompactToSend { intent } = self.0 else {
             anyhow::bail!("not a compact-to-send");
+        };
+        Ok(*intent)
+    }
+    /// Only the session resume actor calls this, after BEGIN IMMEDIATE.
+    /// Cached native Service mode was bound to this exact original request
+    /// during admission.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn session_resume(self) -> Result<zerus_client_core::desktop::session_resume::Intent> {
+        self.check()?;
+        let Request::SessionResume { intent } = self.0 else {
+            anyhow::bail!("not a session resume");
         };
         Ok(*intent)
     }
@@ -790,6 +1183,21 @@ impl Validated {
     }
 }
 impl Authorized {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[allow(dead_code)]
+    pub(super) fn into_program_stop(self, order: &mut Order) -> Result<ProgramStopAdmission> {
+        ensure!(
+            matches!(self.envelope.request, Request::WorktreeProgramStop { .. }),
+            "expected closed program-stop proof"
+        );
+        Ok(ProgramStopAdmission(self.into_request(order)?))
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[allow(dead_code)]
+    pub(super) fn into_program_cleanup(self, order: &mut Order) -> Result<ProgramCleanupAdmission> {
+        ensure!(matches!(self.envelope.request, Request::WorktreeProgramCleanup { .. }), "expected closed program-cleanup proof");
+        Ok(ProgramCleanupAdmission(self.into_request(order)?))
+    }
     pub fn operation(&self) -> &'static str {
         self.envelope.request.operation()
     }
@@ -851,6 +1259,8 @@ pub(super) fn authenticate(location: &Scope, peer_pid: u32, value: &Value) -> Re
     let envelope: Envelope =
         serde_json::from_value(value.clone()).context("invalid frontend envelope")?;
     ensure!(envelope.valid(), "invalid frontend envelope");
+    ensure!(!matches!(envelope.request,Request::WorktreeProgramStop {..} | Request::WorktreeProgramCleanup {..}),
+        "program-stop requires its closed original helper entry");
     let until = Instant::now() + WAIT;
     let caller = Process::read(peer_pid)?;
     #[cfg(target_os = "linux")]
@@ -863,13 +1273,13 @@ pub(super) fn authenticate(location: &Scope, peer_pid: u32, value: &Value) -> Re
         {
             // Only this old image predicate gains an immutable equivalence
             // branch. All native child/argv/config/ancestry checks remain below.
-            caller.sealed_image = Some(
+            caller.linux_freshness = Some(std::sync::Arc::new(LinuxFreshness::Service(
                 location
                     .sealed_reference
                     .as_ref()
                     .context("sealed service relay unavailable")?
                     .observe(&caller, until)?,
-            );
+            )));
             ensure!(caller.current(), "sealed frontend relay changed");
         }
         caller
@@ -892,6 +1302,123 @@ pub(super) fn authenticate(location: &Scope, peer_pid: u32, value: &Value) -> Re
         }),
         "unexpected frontend relay"
     );
+    authenticate_caller(location,peer_pid,envelope,caller,until)
+}
+
+/// Fixed own-helper entry only. The self object supplies freshness, not
+/// selected-CLI authentication: the original native parent's image gate and
+/// registration plus the common canonical probe/validate remain mandatory.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)] // Wired only by the new closed stdio owner, never the generic actor.
+pub(super) fn authenticate_program_stop(location: &Scope, value: &Value) -> Result<Authorized> {
+    let envelope: Envelope =
+        serde_json::from_value(value.clone()).context("invalid program-stop envelope")?;
+    ensure!(
+        envelope.valid() && matches!(envelope.request, Request::WorktreeProgramStop { .. }),
+        "expected closed program-stop request"
+    );
+    let until = Instant::now() + WAIT;
+    let pid = std::process::id();
+    #[allow(unused_mut)]
+    let mut caller = Process::read(pid)?;
+    #[cfg(target_os = "linux")]
+    {
+        caller.linux_freshness = Some(std::sync::Arc::new(LinuxFreshness::Own {
+            image:program_helper_image::OwnImage::capture(until)?,
+            until,
+        }));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let own = platform::describe(pid).context("original helper image unavailable")?;
+        let selected = platform::file_identity(Path::new(&own.executable))
+            .context("original helper image unavailable")?;
+        ensure!(
+            platform::file_identity(Path::new(&caller.executable)) == Some(selected),
+            "original helper image changed"
+        );
+    }
+    let argv = caller.arguments()?;
+    let args = argv.get(1..).context("original helper arguments missing")?;
+    #[cfg(target_os = "macos")]
+    let args = if args
+        .first()
+        .is_some_and(|arg| arg == zerus_client_core::run::rendezvous::ARG)
+    {
+        &args[1..]
+    } else {
+        args
+    };
+    ensure!(
+        args == ["worktrees", "program-stop", "--json"],
+        "unexpected program-stop helper command"
+    );
+    ensure!(
+        caller.current() && Instant::now() < until,
+        "original helper expired"
+    );
+    authenticate_caller(location, pid, envelope, caller, until)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)]
+pub(super) fn authenticate_program_cleanup(location: &Scope, value: &Value) -> Result<Authorized> {
+    let envelope: Envelope =
+        serde_json::from_value(value.clone()).context("invalid program-cleanup envelope")?;
+    ensure!(
+        envelope.valid() && matches!(envelope.request, Request::WorktreeProgramCleanup { .. }),
+        "expected closed program-cleanup request"
+    );
+    let until = Instant::now() + WAIT;
+    let pid = std::process::id();
+    #[allow(unused_mut)]
+    let mut caller = Process::read(pid)?;
+    #[cfg(target_os = "linux")]
+    {
+        caller.linux_freshness = Some(std::sync::Arc::new(LinuxFreshness::Own {
+            image:program_helper_image::OwnImage::capture_cleanup(until)?,
+            until,
+        }));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let own = platform::describe(pid).context("original helper image unavailable")?;
+        let selected = platform::file_identity(Path::new(&own.executable))
+            .context("original helper image unavailable")?;
+        ensure!(
+            platform::file_identity(Path::new(&caller.executable)) == Some(selected),
+            "original helper image changed"
+        );
+    }
+    let argv = caller.arguments()?;
+    let args = argv.get(1..).context("original helper arguments missing")?;
+    #[cfg(target_os = "macos")]
+    let args = if args
+        .first()
+        .is_some_and(|arg| arg == zerus_client_core::run::rendezvous::ARG)
+    {
+        &args[1..]
+    } else {
+        args
+    };
+    ensure!(
+        args == ["worktrees", "program-cleanup", "--json"],
+        "unexpected program-cleanup helper command"
+    );
+    ensure!(
+        caller.current() && Instant::now() < until,
+        "original helper expired"
+    );
+    authenticate_caller(location, pid, envelope, caller, until)
+}
+
+fn authenticate_caller(
+    location: &Scope,
+    peer_pid: u32,
+    envelope: Envelope,
+    caller: Process,
+    until: Instant,
+) -> Result<Authorized> {
     let Canonical {
         pid: frontend_pid,
         reply,
@@ -948,8 +1475,13 @@ pub(super) fn authenticate(location: &Scope, peer_pid: u32, value: &Value) -> Re
         Instant::now() < until && caller.current() && frontend.current(),
         "frontend changed during authentication"
     );
-    let ownership_origin = if matches!(envelope.request,
-        Request::DesktopOwnership { .. } | Request::DesktopOwnershipObserve { .. }) {
+    let ownership_origin = if matches!(
+        envelope.request,
+        Request::DesktopOwnership { .. }
+            | Request::DesktopOwnershipObserve { .. }
+            | Request::WorktreeProgramStop { .. }
+            | Request::WorktreeProgramCleanup { .. }
+    ) {
         Some(super::ownership::Origin::capture(
             Path::new(&frontend.executable),
             reply.hello.build.clone(),
@@ -971,7 +1503,6 @@ pub(super) fn authenticate(location: &Scope, peer_pid: u32, value: &Value) -> Re
         windows: Some(Box::new(windows)),
     })
 }
-
 fn validate(
     envelope: &Envelope,
     caller: &Process,
@@ -1016,6 +1547,16 @@ fn validate(
             && reply.request.fingerprint == envelope.request.fingerprint(),
         "original frontend child/request does not match"
     );
+    if let Request::WorktreeProgramStop {intent} = &envelope.request {
+        ensure!(reply.request.ownership_mode==Some(intent.input.source.mode())
+            && intent.input.manifest.configuration==configuration,
+            "program-stop native mode/configuration changed");
+    }
+    if let Request::WorktreeProgramCleanup {intent} = &envelope.request {
+        ensure!(reply.request.ownership_mode==Some(intent.input.stop.source.mode())
+            && intent.input.stop.manifest.configuration==configuration,
+            "program-cleanup native mode/configuration changed");
+    }
     if let Request::DesktopOwnership { action, .. } = &envelope.request {
         ensure!(
             reply.request.ownership_mode == Some(action.mode()),
@@ -1109,6 +1650,14 @@ fn validate(
             "compact-to-send does not match the native service frontend"
         );
     }
+    if let Request::SessionResume { intent } = &envelope.request {
+        ensure!(
+            reply.request.ownership_mode
+                == Some(zerus_client_core::desktop::ownership::Mode::Service)
+                && intent.scope.configuration == configuration,
+            "session resume does not match the native service frontend"
+        );
+    }
     if let Request::TaskStartReconcile { intent } = &envelope.request {
         ensure!(
             reply.request.ownership_mode
@@ -1184,6 +1733,8 @@ fn dev_number(version: &str) -> Option<u64> {
 // string allowlist that can silently reject an otherwise authenticated read.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum OrderedOperation {
+    WorktreeProgramStop,
+    WorktreeProgramCleanup,
     TerminationOutcome,
     CacheMaintenance,
     CreationClone,
@@ -1194,6 +1745,7 @@ enum OrderedOperation {
     DeferredSend,
     DeferredAnswer,
     CompactToSend,
+    SessionResume,
     TaskStartReconcile,
     ActivationWait,
     AutomaticApprovals,
@@ -1210,6 +1762,8 @@ impl From<&Request> for OrderedOperation {
         match request {
             Request::CacheMaintenance { .. } => Self::CacheMaintenance,
             Request::TerminationOutcome { .. } => Self::TerminationOutcome,
+            Request::WorktreeProgramStop { .. } => Self::WorktreeProgramStop,
+            Request::WorktreeProgramCleanup { .. } => Self::WorktreeProgramCleanup,
             Request::CreationClone { .. } => Self::CreationClone,
             Request::CreationWorktree { .. } => Self::CreationWorktree,
             Request::CreationLaunch { .. } => Self::CreationLaunch,
@@ -1218,6 +1772,7 @@ impl From<&Request> for OrderedOperation {
             Request::DeferredSend { .. } => Self::DeferredSend,
             Request::DeferredAnswer { .. } => Self::DeferredAnswer,
             Request::CompactToSend { .. } => Self::CompactToSend,
+            Request::SessionResume { .. } => Self::SessionResume,
             Request::TaskStartReconcile { .. } => Self::TaskStartReconcile,
             Request::ActivationWait { .. } => Self::ActivationWait,
             Request::AutomaticApprovals { .. } => Self::AutomaticApprovals,
@@ -1494,6 +2049,297 @@ mod tests {
     fn id(n: usize) -> String {
         format!("00000000-0000-4000-8000-{n:012x}")
     }
+    fn program_stop_intent() -> zerus_client_core::worktree_programs::invocation::Intent {
+        use zerus_client_core::{
+            termination_cleanup::Capture,
+            worktree_programs::{self as p, stop},
+            Target,
+        };
+        let capture = Capture {
+            target: Target {
+                computer: String::new(),
+                name: "codex/example/original".into(),
+                run_id: id(2),
+                conversation_id: id(3),
+            },
+            machine: id(4),
+            root: "/srv/example/work".into(),
+            common_dir: "/srv/example/main/.git".into(),
+            owner_id: id(5),
+        };
+        let original = String::from_utf8(capture.invocation(&id(6)).unwrap().stdin.unwrap()).unwrap();
+        let input = stop::Input {
+            request_id: id(7),
+            confirmation_id: id(8),
+            source: stop::Source::Service { epoch: id(9) },
+            manifest: p::Manifest {
+                abi: p::ABI.into(),
+                id: id(10),
+                capture,
+                configuration: "a".repeat(64),
+                boot: id(11),
+                checkout: p::DirectoryId {
+                    device: 1,
+                    inode: 2,
+                    mount: "fixture-object".into(),
+                },
+                issued: 1000,
+                expires: 1300,
+                programs: vec![],
+            },
+            original,
+            archive_id: id(12),
+            stop: stop::Kind::Normal,
+        };
+        let intent = p::invocation::Intent {
+            input: Box::new(input),
+            pipeline: id(13),
+            socket: "/tmp/example/pins".into(),
+            holder: p::custody::NativeChild {
+                pid: 50,
+                parent: 51,
+                birth: "original-holder".into(),
+                audit: None,
+            },
+        };
+        assert!(intent.valid());
+        intent
+    }
+    #[test]
+    fn program_stop_data_is_isolated_from_generic_routes_and_binds_native_mode_and_scope() {
+        let (mut envelope, caller, frontend, mut reply) = fixture();
+        envelope.request = Request::WorktreeProgramStop {
+            intent: Box::new(program_stop_intent()),
+        };
+        reply.request.request_id = envelope.request.id().into();
+        reply.request.fingerprint = envelope.request.fingerprint();
+        reply.request.ownership_mode = Some(zerus_client_core::desktop::ownership::Mode::Service);
+        validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).unwrap();
+        assert_eq!(
+            OrderedOperation::from(&envelope.request),
+            OrderedOperation::WorktreeProgramStop
+        );
+        assert_ne!(
+            OrderedOperation::WorktreeProgramStop,
+            OrderedOperation::TerminationOutcome
+        );
+        assert!(
+            Validated::fixture(&serde_json::to_value(&envelope.request).unwrap())
+                .into_request()
+                .is_err()
+        );
+        let location = Scope {
+            location: Location {
+                root: "/fixture".into(),
+                configuration: "a".repeat(64),
+            },
+            frontend_images: Vec::new(),
+            portable: None,
+            #[cfg(target_os = "linux")]
+            sealed_reference: None,
+        };
+        let error = authenticate(
+            &location,
+            u32::MAX,
+            &serde_json::to_value(&envelope).unwrap(),
+        )
+        .err()
+        .expect("generic route refuses before PID lookup");
+        assert!(error.to_string().contains("closed original helper"));
+        for field in [
+            "attempt",
+            "serial",
+            "child_pid",
+            "child_birth",
+            "request_id",
+            "fingerprint",
+        ] {
+            let mut changed = Reply {
+                hello: reply.hello.clone(),
+                request: reply.request.clone(),
+            };
+            match field {
+                "attempt" => changed.request.attempt = id(99),
+                "serial" => changed.request.serial = 0,
+                "child_pid" => changed.request.child_pid = caller.pid + 1,
+                "child_birth" => changed.request.child_birth = "different".into(),
+                "request_id" => changed.request.request_id = id(99),
+                _ => changed.request.fingerprint = "b".repeat(64),
+            }
+            assert!(
+                validate(&envelope, &caller, &frontend, &changed, &"a".repeat(64)).is_err(),
+                "{field}"
+            );
+        }
+        reply.request.ownership_mode = Some(zerus_client_core::desktop::ownership::Mode::Native);
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        let Request::WorktreeProgramStop { intent } = &mut envelope.request else {
+            unreachable!()
+        };
+        intent.input.source = zerus_client_core::worktree_programs::stop::Source::Native {
+            request_id: id(20),
+            journal: None,
+            revision: 0,
+        };
+        reply.request.fingerprint = envelope.request.fingerprint();
+        validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).unwrap();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"b".repeat(64)).is_err());
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn final_cleanup_requires_its_own_exact_original_child_proof_and_reservation() {
+        use zerus_client_core::worktree_programs::cleanup;
+        let original = program_stop_intent();
+        let intent = cleanup::Intent {
+            input: Box::new(cleanup::Input { request_id: id(100), stop: original.input.clone() }),
+            pipeline: original.pipeline.clone(), holder: original.holder.clone(), socket: original.socket.clone(),
+        };
+        assert!(intent.valid());
+        let (_state, reservation) = crate::state::ProgramRemovalClaim::fixture(*intent.input.clone());
+        let request = Request::WorktreeProgramCleanup { intent: Box::new(intent.clone()) };
+        let admission = || ProgramCleanupAdmission(Validated::fixture(&serde_json::to_value(&request).unwrap()));
+        let until = Instant::now() + Duration::from_secs(10);
+        let location = Location { root: "/fixture".into(), configuration: "a".repeat(64) };
+        assert!(Validated::fixture(&serde_json::to_value(&request).unwrap()).into_request().is_err());
+        let generic_scope = Scope { location: Location { root: location.root.clone(), configuration: location.configuration.clone() },
+            frontend_images: Vec::new(), portable: None, #[cfg(target_os = "linux")] sealed_reference: None };
+        assert!(authenticate(&generic_scope, std::process::id(), &serde_json::to_value(Envelope {
+            abi: zerus_client_core::desktop::ui_requests::ABI.into(), attempt: id(101), request: request.clone(),
+        }).unwrap()).is_err());
+        for change in 0..4 {
+            let mut changed = intent.clone();
+            match change { 0 => changed.input.request_id = id(102), 1 => changed.input.stop.source = zerus_client_core::worktree_programs::stop::Source::Service { epoch: id(102) },
+                2 => changed.pipeline = id(102), _ => changed.holder.birth = "replacement".into() }
+            assert!(admission().consume(&changed, until, &location, &reservation).is_err());
+        }
+        let wrong = ProgramCleanupAdmission(Validated::fixture(&serde_json::to_value(Request::WorktreeProgramStop { intent: Box::new(original) }).unwrap()));
+        assert!(wrong.consume(&intent, until, &location, &reservation).is_err());
+        let expired = ProgramCleanupPermit { intent: intent.clone(), life: ProgramLife::Fixture, until: Instant::now(), reservation: &reservation };
+        assert!(expired.current().is_err());
+        let permit = admission().consume(&intent, until, &location, &reservation).unwrap();
+        permit.current().unwrap();
+        assert!(admission().consume(&intent, until, &location, &reservation).is_err(), "a new proof cannot renew/reuse this consumed original");
+        drop(permit);
+        // Synthetic proof/data only, not native auth, consent or deletion.
+    }
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn original_program_stop_proof_is_consumed_for_one_exact_bounded_operation() {
+        // This isolates the typed admission with synthetic native evidence.
+        // It is not a canonical frontend or selected-image positive.
+        let mut intent = program_stop_intent();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        intent.input.manifest.issued = now;
+        intent.input.manifest.expires = now + 300;
+        let (state, reservation) = crate::state::ProgramStopClaim::fixture((*intent.input).clone());
+        let request = Request::WorktreeProgramStop {
+            intent: Box::new(intent.clone()),
+        };
+        let admission =
+            || ProgramStopAdmission(Validated::fixture(&serde_json::to_value(&request).unwrap()));
+        let until = Instant::now() + Duration::from_secs(10);
+        let location = Location {
+            root: "/fixture".into(),
+            configuration: "a".repeat(64),
+        };
+        for change in 0..5 {
+            let mut wrong = intent.clone();
+            match change {
+                0 => wrong.input.request_id = id(99),
+                1 => wrong.input.confirmation_id = id(99),
+                2 => {
+                    wrong.input.source =
+                        zerus_client_core::worktree_programs::stop::Source::Service { epoch: id(99) }
+                }
+                3 => wrong.pipeline = id(99),
+                _ => wrong.holder.birth = "another-original".into(),
+            }
+            assert!(admission()
+                .consume(&wrong, until, &location, &reservation)
+                .is_err());
+        }
+        assert!(admission()
+            .consume(&intent, Instant::now(), &location, &reservation)
+            .is_err());
+        assert!(admission()
+            .consume(
+                &intent,
+                Instant::now() + Duration::from_secs(16),
+                &location,
+                &reservation
+            )
+            .is_err());
+        let mut changed = intent.clone();
+        changed.input.source =
+            zerus_client_core::worktree_programs::stop::Source::Service { epoch: id(99) };
+        let changed_request = Request::WorktreeProgramStop {
+            intent: Box::new(changed.clone()),
+        };
+        let changed_admission = ProgramStopAdmission(Validated::fixture(
+            &serde_json::to_value(changed_request).unwrap(),
+        ));
+        let error = changed_admission
+            .consume(&changed, until, &location, &reservation)
+            .err()
+            .expect("fresh proof cannot rebind an old reservation");
+        assert!(error.to_string().contains("reservation changed"));
+        let denied = ProgramStopAdmission(Validated::fixture(
+            &serde_json::to_value(Request::AutomaticApprovals {
+                request_id: id(99),
+                enabled: false,
+                categories: None,
+            })
+            .unwrap(),
+        ));
+        assert!(denied
+            .consume(&intent, until, &location, &reservation)
+            .is_err());
+        let expired = ProgramStopPermit {
+            intent: intent.clone(),
+            life: ProgramLife::Fixture,
+            until: Instant::now(),
+            reservation: &reservation,
+        };
+        assert!(expired.current().is_err());
+        // Once admission has moved into a permit there is no Validated/cache
+        // left to reconsume. Expiry can never be cleared by a status lookup.
+        let mut native = live_authorized(request.clone(), 1)
+            .into_program_stop(&mut Order::default())
+            .unwrap();
+        if let Freshness::Native { until, .. } = &mut native.0 .1 {
+            *until = Instant::now();
+        }
+        assert!(
+            native
+                .consume(&intent, until, &location, &reservation)
+                .is_err(),
+            "expired native proof must refuse even with a future operation bound"
+        );
+        let permit = admission()
+            .consume(&intent, until, &location, &reservation)
+            .unwrap();
+        assert_eq!(permit.intent(), &intent);
+        permit.current().unwrap();
+        let duplicate = admission()
+            .consume(&intent, until, &location, &reservation)
+            .err()
+            .expect("the original claim cannot be consumed twice");
+        assert!(duplicate.to_string().contains("already consumed"));
+        std::fs::remove_file(
+            state
+                .path()
+                .join("worktree-program-stops")
+                .join(format!("{}.original.json", intent.input.request_id)),
+        )
+        .unwrap();
+        assert!(
+            permit.current().is_err(),
+            "losing the original reservation closes the live permit too"
+        );
+    }
     fn fixture() -> (Envelope, Process, Process, Reply) {
         let envelope = Envelope {
             abi: ABI.into(),
@@ -1501,6 +2347,7 @@ mod tests {
             request: Request::AutomaticApprovals {
                 request_id: id(2),
                 enabled: true,
+                categories: None,
             },
         };
         let frontend = Process {
@@ -1513,7 +2360,7 @@ mod tests {
             },
             executable: "/opt/example/zerus-client".into(),
             #[cfg(target_os = "linux")]
-            sealed_image: None,
+            linux_freshness: None,
             #[cfg(windows)]
             original: None,
         };
@@ -1527,7 +2374,7 @@ mod tests {
             },
             executable: "/opt/example/hgs".into(),
             #[cfg(target_os = "linux")]
-            sealed_image: None,
+            linux_freshness: None,
             #[cfg(windows)]
             original: None,
         };
@@ -2012,6 +2859,86 @@ mod tests {
             .into_request()
             .is_err());
         if let Request::CompactToSend { intent } = &mut envelope.request {
+            intent.scope.configuration = "b".repeat(64);
+        }
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+    }
+
+    /// A valid session resume, built as the client builds it.
+    fn session_resume_intent(
+        configuration: String,
+        epoch: String,
+    ) -> zerus_client_core::desktop::session_resume::Intent {
+        use zerus_client_core::{
+            desktop::session_resume::{Intent, Scope},
+            operation_recovery::deferred_input as checkpoint,
+        };
+        let reserved = checkpoint::Checkpoint::reserve_session_resume(checkpoint::Intent {
+            kind: checkpoint::Kind::ResumeToSend,
+            draft_revision: 1,
+            message_sha256: checkpoint::message_sha256("after resume", std::iter::empty()),
+            run_id: "run-1".into(),
+            conversation_id: "conversation-1".into(),
+            question: None,
+            start: Some(checkpoint::Start::Resume),
+            retry_of: None,
+            consent: true,
+        })
+        .unwrap();
+        let resume = serde_json::json!({"request_id": reserved.request_id, "action": "resume",
+            "expected_run_id": "run-1", "expected_conversation_id": "conversation-1"});
+        let original = serde_json::json!({"request_id": reserved.send_request_id,
+            "text": "after resume", "attachments": [], "expected_run_id": "run-1",
+            "expected_conversation_id": "conversation-1"});
+        Intent {
+            scope: Scope {
+                configuration,
+                service_epoch: epoch,
+            },
+            session: "claude/private-resume".into(),
+            request_id: reserved.request_id.clone(),
+            send_request_id: reserved.send_request_id.clone().unwrap(),
+            checkpoint: serde_json::to_string(&reserved).unwrap(),
+            resume: resume.to_string(),
+            original: original.to_string(),
+        }
+    }
+
+    #[test]
+    fn session_resume_has_its_own_lane_and_never_passes_the_generic_boundary() {
+        use zerus_client_core::desktop::ownership::Mode;
+        let (mut envelope, caller, frontend, mut reply) = fixture();
+        let intent = session_resume_intent("a".repeat(64), id(92));
+        envelope.request = Request::SessionResume {
+            intent: Box::new(intent.clone()),
+        };
+        assert_eq!(
+            OrderedOperation::from(&envelope.request),
+            OrderedOperation::SessionResume
+        );
+        for other in [
+            OrderedOperation::CompactToSend,
+            OrderedOperation::DeferredSend,
+            OrderedOperation::DeferredAnswer,
+            OrderedOperation::TaskMessage,
+            OrderedOperation::CreationLaunch,
+        ] {
+            assert_ne!(OrderedOperation::SessionResume, other);
+        }
+        assert_eq!(envelope.request.id(), intent.request_id);
+        reply.request.request_id = intent.request_id.clone();
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Native);
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Service);
+        validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).unwrap();
+        // Only its own typed actor accessor may consume it.
+        assert!(Validated::fixture(&serde_json::json!(envelope.request))
+            .into_request()
+            .is_err());
+        if let Request::SessionResume { intent } = &mut envelope.request {
             intent.scope.configuration = "b".repeat(64);
         }
         reply.request.fingerprint = envelope.request.fingerprint();
@@ -2535,6 +3462,7 @@ mod tests {
             Request::AutomaticApprovals {
                 request_id: id(107),
                 enabled: false,
+                categories: None,
             },
             7,
         )

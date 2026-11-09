@@ -60,6 +60,8 @@ admission for unattended operations.
 Owner: `zerus-5wmh.66.8.1` (G6). Basis: the
 [retirement inventory](superpowers/specs/2026-10-29-qt-retirement-inventory.md),
 especially its responsibility tables, migration contract and G1–G7 gates.
+The [Qt parity checklist](qt-parity-checklist.md) records which user-facing Qt
+capabilities Zerus Next has, with a bead for each gap.
 **Historical scheduling (2026-11-02; superseded by the 2026-11-05 execution
 decision above):** installed acceptance uses the owner's
 **main accounts and existing canonical install route**, with no separate test

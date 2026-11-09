@@ -1,11 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
 import { createAccountManagement } from "./accountManagement";
-import type { AccountEditKind, AccountEditView, AccountEditValues } from "../bridge";
+import type { AccountEditKind, AccountEditResult, AccountEditView, AccountEditValues } from "../bridge";
 
 const origin = {} as HTMLElement;
 function setup() {
   const open=vi.fn(async (_account:string,_profile:string,kind:AccountEditKind):Promise<AccountEditView>=>({handle:"native-snapshot",kind,label:"Example",machine:"studio",provider:"codex"}));
-  const apply=vi.fn(async (_handle:string,_values:AccountEditValues)=>({notices:["Account name updated."],errors:[] as string[]}));
+  const apply=vi.fn(async (_handle:string,_values:AccountEditValues):Promise<AccountEditResult>=>({notices:[{source:"Account name updated."}],errors:[] as string[]}));
   const close=vi.fn(async (_handle:string)=>{}), notice=vi.fn();
   return { open,apply,close,notice, state:createAccountManagement({open,apply,close,notice}) };
 }
@@ -26,6 +26,22 @@ describe("captured account catalog actions",()=>{
     const t=setup();t.open.mockImplementation(async (_a,_p,kind)=>({handle:"model",kind,label:"Example",machine:"studio",provider:"codex",models:{models:[],defaults:{model:"old",effort:"high"},provider_defaults:{model:"",effort:""},effort_supported:true}}));
     await t.state.open("model","group","peer",origin);await t.state.confirm({model:"old",effort:"high"});expect(t.apply).not.toHaveBeenCalled();
     await t.state.open("model","group","peer",origin);await t.state.confirm({model:"new",effort:"low"});await t.state.confirm({model:"new",effort:"low"});expect(t.apply).toHaveBeenCalledExactlyOnceWith("model",{model:"new",effort:"low"});
+  });
+  it("saves an unchanged value when the account's computers differ, and skips an unchanged scope (zerus-f0uz8)",async()=>{
+    const t=setup();
+    t.open.mockImplementation(async (_a,_p,kind)=>({handle:kind,kind,label:"Example",machine:"studio",provider:"codex",permission_mode:"bypass",differs:true,per_computer:false,machines:["studio","laptop"],
+      models:{models:[],defaults:{model:"old",effort:"high"},provider_defaults:{model:"",effort:""},effort_supported:true}}));
+    await t.state.open("permissions","group","peer",origin);await t.state.confirm({mode:"bypass"});
+    await t.state.open("model","group","peer",origin);await t.state.confirm({model:"old",effort:"high"});
+    expect(t.apply.mock.calls).toEqual([["permissions",{mode:"bypass"}],["model",{model:"old",effort:"high"}]]);
+    await t.state.open("scope","group","peer",origin);await t.state.confirm({mode:"account"});expect(t.apply).toHaveBeenCalledTimes(2);
+    await t.state.open("scope","group","peer",origin);await t.state.confirm({mode:"computer"});expect(t.apply).toHaveBeenLastCalledWith("scope",{mode:"computer"});
+  });
+  it("translates the native notices, computer names verbatim (zerus-0y2yx)",async()=>{
+    const t=setup();
+    t.apply.mockResolvedValueOnce({notices:[{source:"Model defaults saved for new sessions on %1.",args:[{kind:"text",value:{source:"%1 and %2",args:[{kind:"verbatim",value:"arch"},{kind:"verbatim",value:"mac"}]}}]}],errors:[]});
+    await t.state.open("rename","group","profile",origin);await t.state.confirm("Another");
+    expect(t.state.notice()).toBe("Model defaults saved for new sessions on arch and mac.");
   });
   it("applies the captured handle once and never retargets by the later selection",async()=>{
     const t=setup();await t.state.open("rename","account-group","studio-profile",origin);
@@ -52,7 +68,7 @@ describe("captured account catalog actions",()=>{
     const t=setup();t.apply.mockRejectedValueOnce(new Error("Delivery uncertain"));
     await t.state.open("remove","group","profile",origin);await t.state.confirm();await t.state.confirm();
     expect(t.apply).toHaveBeenCalledTimes(1);expect(t.notice).toHaveBeenCalledWith(true,"Error: Delivery uncertain");expect(t.state.busy()).toBe(false);
-    t.apply.mockResolvedValueOnce({notices:["Account name updated."],errors:["studio: Accounts changed"]});
+    t.apply.mockResolvedValueOnce({notices:[{source:"Account name updated."}],errors:["studio: Accounts changed"]});
     await t.state.open("rename","group","profile",origin);await t.state.confirm("Another");
     expect(t.notice).toHaveBeenCalledWith(true,"studio: Accounts changed");
   });

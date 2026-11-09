@@ -1,4 +1,5 @@
 import { createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
+import { steadyTitle } from "../lib/steady-title";
 import { AgentBadge } from "./SessionCard";
 import { Icon } from "../lib/icons";
 import { ChipPopover } from "./ChipPopover";
@@ -13,7 +14,7 @@ import { text } from "../../store/settings";
 import { composer } from "../../store/composer";
 import { computerOffline } from "../../store/catalog";
 import { followedFor } from "../../store/actions";
-import { accountTooltip, exhausted, usageChipView, usageLoading, windowsAt } from "../lib/usage";
+import { accountTooltip, exhausted, rateLimitNotice, usageRetryWaiting, usageChipView, usageLoading, windowsAt } from "../lib/usage";
 import { recoveryInspection, recoveryUsageNotice } from "./recovery-ui";
 import { footerUsageSummary } from "./session-usage-ui";
 import type { Session } from "./types";
@@ -47,15 +48,20 @@ export function AccountUsageChip(props: { session: Session }) {
     setOpen(false);
     requestAccountSwitch(props.session.key);
   };
+  // The account tooltip holds still under the pointer (zerus-5ryrx).
+  const accountTip = steadyTitle(() => accountTooltip(u(), now()));
+  const refreshTip = steadyTitle(() => (usageRetryWaiting(u(), now()) ? rateLimitNotice(u(), now(), true)
+    : u().refreshing ? tr("Updating account usage…") : tr("Refresh usage")));
   return (
     <Show when={props.session.tracked && !props.session.archiveId}>
       <span class="session-usage-strip">
-        <button ref={chip} type="button" class="sb-usage account-usage" title={accountTooltip(u(), now())} aria-label={`${tr("Account usage")}\n${exhausted(u(), now())}\n${accountTooltip(u(), now())}`} aria-haspopup="menu" aria-expanded={open()} onClick={() => setOpen(!open())}>
+        <button ref={chip} type="button" class="sb-usage account-usage" title={accountTip.title()} onPointerEnter={accountTip.enter} onPointerLeave={accountTip.leave} aria-label={`${tr("Account usage")}\n${exhausted(u(), now())}\n${accountTooltip(u(), now())}`} aria-haspopup="menu" aria-expanded={open()} onClick={() => setOpen(!open())}>
           <Show when={u().provider}><AgentBadge agent={props.session.agent} /></Show>
           <UsageMeters windows={windowsAt(u().windows, now())} loading={usageLoading(u())} summary={footerUsageSummary(u())} indicator={text("workspace/usageIndicator") as UsageIndicator} />
+          <Show when={rateLimitNotice(u(), now())}><span class="dim">{rateLimitNotice(u(), now())}</span></Show>
         </button>
-        <button type="button" class="icon-btn small usage-refresh" disabled={!online() || u().refreshing} aria-label={tr("Refresh usage")}
-          title={u().refreshing ? tr("Updating account usage…") : tr("Refresh usage")} onClick={() => void refreshSessionUsage(true)}>
+        <button type="button" class="icon-btn small usage-refresh" disabled={!online() || u().refreshing || usageRetryWaiting(u(), now())} aria-label={tr("Refresh usage")}
+          title={refreshTip.title()} onPointerEnter={refreshTip.enter} onPointerLeave={refreshTip.leave} onClick={() => void refreshSessionUsage(true)}>
           <Show when={!u().refreshing} fallback={<span class="su-spin"><Icon name="refresh-cw" size={12} /></span>}><Icon name="refresh-cw" size={12} /></Show>
         </button>
         <ChipPopover open={open()} anchor={chip} label={tr("Account usage")} keyboard={false} class="usage-limit-pop" onClose={(focus) => { setOpen(false); if (focus) chip.focus(); }}>

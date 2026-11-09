@@ -1,13 +1,13 @@
 import { captureEnd, type EndReference } from "./endActionBusy";
 import { batch as together, createSignal } from "solid-js";
 import { catalog as appCatalog, computerFresh, computerOffline, type CatalogState } from "./catalog";
-import { dismiss as appDismiss, notify as appNotify, perform as appPerform, performComputer as appPerformComputer, updating as appUpdating, type Notice } from "./actions";
+import { dismiss as appDismiss, notify as appNotify, pendingNotifications as appPendingNotifications, perform as appPerform, performComputer as appPerformComputer, setMute as appSetMute, updating as appUpdating, type Notice } from "./actions";
 import { markNeedsAttention as appMarkNeedsAttention, markRead as appMarkRead } from "./marks";
 import { compactRows, needsAttention, setCompactRows } from "./ui";
-import { archiveNameOccupied, liveNameIndex, nameKey, snapshotOf, type ActionRow } from "../ui/sessions/actions-ui";
+import { archiveNameOccupied, liveNameIndex, nameKey, notificationsState, snapshotOf, type ActionRow } from "../ui/sessions/actions-ui";
 import {
-  changedText, confirmationCopy, markSummary, progressText, restoreLimitText, sameInstance, selectionApplies, selectionCall,
-  selectionSnapshot, summaryText, SHOWN_ERRORS, type BatchConfirmation, type SelectionAction, type SelectionRow, type WriteAction,
+  changedText, confirmationCopy, markSummary, muteSummary, muteUnavailableText, progressText, restoreLimitText, sameInstance, selectionApplies, selectionCall,
+  selectionSnapshot, summaryText, SHOWN_ERRORS, type BatchConfirmation, type MuteOutcome, type SelectionAction, type SelectionRow, type WriteAction,
 } from "../ui/sessions/selection";
 import type { Session } from "../ui/sessions/types";
 import type { Action, Outcome } from "../types";
@@ -63,6 +63,10 @@ export interface BatchDeps {
   attention(s: SelectionRow): boolean;
   markRead(row: ActionRow): boolean;
   markNeedsAttention(row: ActionRow): boolean;
+  /** Whether the row's shared notification setting can change now (`notificationsState`). */
+  notifications(s: SelectionRow): boolean;
+  /** One guarded Mute or Unmute write with the row's own revision (store/actions.ts `setMute`). */
+  setMute(row: ActionRow, muted: boolean): Promise<MuteOutcome>;
   /** The Forget or Terminate confirmation: true only for its confirm button. */
   confirm(copy: BatchConfirmation): Promise<boolean>;
   archive(): ArchiveCalls | undefined;
@@ -91,6 +95,7 @@ export function createBatch(deps: BatchDeps) {
     return selectionApplies(s, a, {
       online, updating, compact: deps.compact.get(s.key), attention: deps.attention(s),
       occupied: a === "resume" && s.state === "archived" && occupied(),
+      notifications: (a === "mute" || a === "unmute") && deps.notifications(s),
     });
   }
 
@@ -137,6 +142,41 @@ export function createBatch(deps: BatchDeps) {
     if (a === "forget" || a === "terminate") {
       const copy = confirmationCopy(a, targets, rows.length, options.clearArchive ? { paged: !!options.paged } : undefined);
       if (!(await deps.confirm(copy)) || running()) return;
+    }
+    if (a === "mute" || a === "unmute") {
+      // zerus-qhtxf: one row at a time through the guarded Mute path, each with
+      // its own revision; rows already in that state are skipped (even when
+      // their setting cannot change now), and rows that cannot change now or
+      // changed meanwhile are refused with their reason.
+      const muted = a === "mute";
+      const unavailable = rows.filter((r) => !!r.muted !== muted && !deps.notifications(r));
+      const skipped = rows.length - unavailable.length - targets.length;
+      setRunning(true);
+      let changed = 0, refused = unavailable.length;
+      const errors = unavailable.map(muteUnavailableText);
+      let progress: number | undefined;
+      try {
+        for (const [at, original] of targets.entries()) {
+          if (at > 0 && at % 64 === 0) await new Promise((r) => setTimeout(r, 0));
+          try {
+            const live = current(original);
+            if (!live || !sameInstance(live, original) || !appliesNow(live)) { refused++; errors.push(changedText(original)); continue; }
+            if (progress !== undefined) deps.dismiss(progress);
+            progress = deps.notify("info", progressText(a, changed + refused - unavailable.length + 1, targets.length));
+            const out = await deps.setMute(original, muted);
+            if (out.outcome === "changed") changed++;
+            else { refused++; errors.push(`${original.machine} / ${original.name}: ${out.detail || changedText(original)}`); }
+          } catch (error) {
+            refused++; errors.push(`${original.machine} / ${original.name}: ${errorText(error)}`);
+          }
+        }
+      } finally {
+        setRunning(false);
+      }
+      if (progress !== undefined) deps.dismiss(progress);
+      const summary = muteSummary(a, changed, skipped, refused, errors);
+      deps.notify(summary.failed ? "error" : "info", summary.text, summary.failed);
+      return;
     }
     if (a === "mark_read" || a === "review_later") {
       let changed = 0;
@@ -228,6 +268,8 @@ const app = createBatch({
   attention: (s) => needsAttention(s as Session, computerFresh(s.computer)),
   markRead: appMarkRead,
   markNeedsAttention: appMarkNeedsAttention,
+  notifications: (s) => !!notificationsState(s, !computerOffline(s.computer), appPendingNotifications(s.computer, s.conversationId))?.enabled,
+  setMute: appSetMute,
   // Without the dialog nothing destructive runs.
   confirm: (copy) => (confirmer ? confirmer(copy) : Promise.resolve(false)),
   archive: () => archiveCalls,

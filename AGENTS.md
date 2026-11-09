@@ -39,6 +39,15 @@ Zerus product tasks received through `hgs task` are separate from Beads engineer
 tracking. For a direct request already being worked on, agents use `hgs task add
 --start` or `hgs task start REF`; plain add queues work for later. Reports by the
 exact pinned agent move its unsent queued task to In review as well.
+Use exactly one acknowledgement command supplied by the original task prompt.
+After task-control activation, pinned `begin-attempt REF --attempt UUID` replaces
+plain `start` for managed work; plain start never binds a managed native turn.
+For managed work, use the report-attempt command pinned in the original task
+prompt or start acknowledgement, never a newer attempt ID from a lookup. An
+explicit legacy start prints the ordinary report command and creates no UUID.
+A history-only report succeeded as a history write but did not move the task;
+do not retry a duplicate or infer the latest attempt. Older managed prompts
+without the pinned command need the person's acceptance or a new resend.
 Use `bd remember --key <key> "<decision>"` for concise, shareable project memory.
 Do not create separate TODO or MEMORY files. Read current source before carrying
 forward a historical limitation.
@@ -113,6 +122,13 @@ replaced ownership, unknown local data, source changes, other session references
 and unconfirmed process use require fresh manual review, except for the explicit
 permission-denial rule below. Background maintenance continues to preserve all
 ignored data. Uncertain removals are never replayed.
+An explicit manual review may also remove a registered linked worktree that
+Zerus did not create, after a separate destructive confirmation showing its
+native-selected path, computer, kept branch and reviewed local data. Fresh
+session/process/file checks and matching discard consents still apply. Never
+remove the primary checkout or a plain folder, fabricate launch ownership, use
+this exception automatically or replay an unknown result. Preserve branches and
+archive identities; an unowned checkout may need manual recreation for Restore.
 Termination cleanup runs in the background after its original confirmation.
 Show removed, kept and unknown outcomes with explicit review actions. Only a
 verified refusal before deletion may be checked for a new removal; never replay
@@ -129,10 +145,15 @@ stops on refusal.
 Owner decisions of 2026-11-05 apply only to explicit Terminate with Remove
 working folder: Zerus may stop every program proven by its cwd or open files to
 use that session's verified generated worktree, including editors and terminals
-the person opened there. A complete bounded native manifest lists those programs
-before native confirmation and binds the original checkout object, ownership
-nonce, session/run/archive identity, selected CLI and configuration. Renderer
-PIDs or paths grant no authority. Before each signal, recheck the process
+the person opened there. A complete bounded native manifest binds the original
+checkout object, ownership nonce, session/run/archive identity, selected CLI and
+configuration. Before confirmation, show a collapsed count and expandable list
+of other programs. A separate native presentation companion may omit only the
+exact record-bound agent and supervisor with verified native PID/birth and
+parent correlation; uncertainty leaves rows visible. Never filter the manifest,
+execution bindings, held sources or Stop/Force/cleanup inputs. Force shows its
+complete freshly checked survivor list expanded. Renderer PIDs or paths grant
+no authority. Before each signal, recheck the process
 birth/pin and actual membership in that same checkout; new or changed members
 require fresh review. Never signal the executing custodian or an ancestor or
 resource needed to verify and settle the action.
@@ -141,8 +162,8 @@ For this explicit Remove choice, processes whose cwd/open-file membership cannot
 be inspected because of EACCES or EPERM are ignored for the removal decision:
 do not list or signal them, and they do not keep the folder. Apply this rule
 from the actual inspection result, never from executable names or an allowlist
-of system programs. Proven occupants remain listed and must be stopped first. This
-exception grants no signal authority and does not relax checkout ownership,
+of system programs. Proven occupants remain in the full manifest and must be
+stopped first. This exception grants no signal authority and does not relax checkout ownership,
 process identity, confirmation, custody or unknown-removal protections.
 
 Normal stop is bounded and distinguishes confirmed exit, known surviving
@@ -237,6 +258,8 @@ Shared candidate tests may run once in a same-SHA qualification job when final
 sealing requires its successful result. Do not start a second full matrix for a
 SHA already under full verification; check the resolved source and wait, or select
 missing platforms. A PR run does not replace the release's own required gate.
+Keep the iOS marketing version for ordinary Dev uploads; change it only when a new
+App Store/marketing version is actually needed, never just to publish another build.
 iOS TestFlight Dev uploads follow successful Nightly verification, using the exact
 source's main CI sequence. Manual checks remain available. Public
 standard GitHub runners are free; do not introduce paid larger runners or raise

@@ -741,6 +741,24 @@ mod live {
             }
         }
 
+        pub fn git_rows(
+            &self,
+            rows: Vec<zerus_client_core::git::RowInterest>,
+        ) -> Result<(), String> {
+            let _admission = self.admit()?;
+            match self
+                .source
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+            {
+                Some(Source::Service(service)) => service.git_rows(rows),
+                Some(Source::Fleet(fleet)) => fleet.git_rows(&rows).map_err(|e| e.to_string()),
+                Some(Source::Replay(_)) => Ok(()),
+                None => Err("not started".into()),
+            }
+        }
+
         /// Follows a session's processes (`Fleet::follow_processes`); the
         /// session's catalog key must be the target's. A replay serves the
         /// fixture's processes state.
@@ -888,6 +906,25 @@ mod live {
 
 #[cfg(not(feature = "live"))]
 const NO_LIVE: &str = "this build has no live data source (cargo feature `live` is off)";
+
+#[cfg(feature = "live")]
+#[tauri::command]
+pub async fn git_rows(
+    state: State<'_, AppState>,
+    rows: Vec<zerus_client_core::git::RowInterest>,
+) -> Result<(), String> {
+    if rows.len() > zerus_client_core::git::VISIBLE_FOLDERS || rows.iter().any(|r| !r.valid()) {
+        return Err("Invalid visible Git rows.".into());
+    }
+    let live = Arc::clone(&state.live);
+    blocking(move || live.git_rows(rows)).await
+}
+#[cfg(not(feature = "live"))]
+#[tauri::command]
+pub fn git_rows(rows: Vec<Value>) -> Result<(), String> {
+    let _ = rows;
+    Err(NO_LIVE.into())
+}
 
 /// Runs blocking work on the blocking pool, off the main thread.
 #[cfg(feature = "live")]

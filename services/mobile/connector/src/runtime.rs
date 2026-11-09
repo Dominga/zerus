@@ -65,6 +65,8 @@ pub fn log(level: &str, message: &str) {
     let _ = writeln!(std::io::stderr(), "{level}: {message}");
 }
 
+pub const TASK_EXCHANGE_UNAVAILABLE: &str = "Configured hgs lacks mobile task exchange and digests; phone task sync is unavailable. Point connector.json hgs_path at the maintained hgs, or update the pinned CLI.";
+
 /// A one-shot flag that tasks can wait for.
 #[derive(Default)]
 pub struct Event {
@@ -103,6 +105,8 @@ pub struct State {
     pub attention: HashMap<(String, String, String), Value>,
     pub attention_cursor: usize,
     pub project_cache: Option<Value>,
+    /// Bounded native-only exact ID presence, never a relay schema extension.
+    pub project_memberships: projects::PrimaryMemberships,
     pub project_next_poll: f64,
     pub capabilities_next_poll: f64,
     /// The latest listing's `desktop_presence`, sent beside the snapshot.
@@ -158,6 +162,7 @@ pub struct Connector<N: Native> {
     /// A peer context's gateway capabilities: its calls pass the gateway's
     /// own mobile peer entry point first.
     gateway_flags: Option<Rc<Cell<Flags>>>,
+    task_exchange_warning_logged: Cell<bool>,
     pub state: RefCell<State>,
     pub snapshot_ready: Event,
     /// The first capability probe has finished (`fleet.probe_complete`).
@@ -174,6 +179,9 @@ pub struct Connector<N: Native> {
 }
 
 tokio::task_local! {
+    /// One immutable current-session route for one claimed request. It never
+    /// propagates into another task or supplies native execution authority.
+    pub(crate) static SESSION_LABEL_SELECTION: Option<crate::session_selector::Selection>;
     /// `LOCAL_MACHINE_GUARD`: while a request routed to this computer runs,
     /// its native calls go through the guarded local entry point.
     static LOCAL_MACHINE: String;
@@ -210,6 +218,7 @@ impl<N: Native + 'static> Connector<N> {
             settings,
             flags: Rc::new(Cell::new(Flags::default().for_native_platform())),
             gateway_flags: None,
+            task_exchange_warning_logged: Cell::new(false),
             state: RefCell::new(State::fresh()),
             snapshot_ready: Event::default(),
             probed: Event::default(),
@@ -234,6 +243,7 @@ impl<N: Native + 'static> Connector<N> {
             },
             flags: Rc::new(Cell::new(Flags::default())),
             gateway_flags: Some(Rc::clone(&self.flags)),
+            task_exchange_warning_logged: Cell::new(false),
             state: RefCell::new(State::fresh()),
             snapshot_ready: Event::default(),
             probed: Event::default(),
@@ -315,6 +325,16 @@ impl<N: Native + 'static> Connector<N> {
     }
 
     async fn native_call(&self, mut call: Call) -> NativeResult {
+        if let Some(selected) = SESSION_LABEL_SELECTION
+            .try_with(Clone::clone)
+            .ok()
+            .flatten()
+        {
+            if let Some(argv) = crate::session_selector::auxiliary_argv(&call.argv, &selected) {
+                call.argv = argv;
+                call = call.selecting(selected);
+            }
+        }
         if self.peer {
             return self.native.call(call).await;
         }
@@ -333,6 +353,49 @@ impl<N: Native + 'static> Connector<N> {
                 .splice(0..0, ["--expect-machine".to_owned(), machine]);
         }
         self.native.call(call).await
+    }
+
+    /// A fresh request can route its auxiliary reads only through the same
+    /// native path that advertises complete label support. No renderer ID or
+    /// label lookup supplies this hint; a missing/ambiguous run stays absent.
+    pub(crate) fn labels_selection(
+        &self,
+        session: &str,
+        payload: Option<&Value>,
+    ) -> Option<crate::session_selector::Selection> {
+        let payload = payload?;
+        if payload.get("archive_id").is_some() || session.is_empty() {
+            return None;
+        }
+        let flags = self.flags.get();
+        let through_peer = self.peer || LOCAL_MACHINE.try_with(|_| ()).is_ok();
+        if !flags.session_labels
+            || !flags.session_selector
+            || (through_peer && !flags.peer_session_id)
+            || self.gateway_flags.as_ref().is_some_and(|f| {
+                let f = f.get();
+                !f.session_labels || !f.peer_session_id
+            })
+        {
+            return None;
+        }
+        let run = payload
+            .get("expected_run_id")
+            .or_else(|| payload.get("run_id"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())?;
+        if payload
+            .get("expected_run_id")
+            .zip(payload.get("run_id"))
+            .is_some_and(|(a, b)| a != b)
+        {
+            return None;
+        }
+        let id = self.state.borrow().session_ids.get(run)?.clone();
+        Some(crate::session_selector::Selection {
+            name: session.into(),
+            id,
+        })
     }
 
     /// The session a phone mutation also selects by ID (zerus-ucck P1c-2b):
@@ -410,13 +473,20 @@ impl<N: Native + 'static> Connector<N> {
         }
         let mut flags = self.flags.get();
         flags.history_projection = false;
+        flags.session_labels = false;
         self.flags.set(flags);
         if let Ok(Output::Text(help)) = self
             .native(Call::new(["--help"]).timeout(PROBE_TIMEOUT).text())
             .await
         {
-            self.flags
-                .set(Flags::from_help(&help).for_native_platform());
+            let flags = Flags::from_help(&help).for_native_platform();
+            if !self.peer
+                && !flags.task_exchange
+                && !self.task_exchange_warning_logged.replace(true)
+            {
+                log("WARNING", TASK_EXCHANGE_UNAVAILABLE);
+            }
+            self.flags.set(flags);
         }
         self.probed.set();
     }
@@ -532,7 +602,10 @@ impl<N: Native + 'static> Connector<N> {
         }
         let mut projects =
             projects.unwrap_or_else(|| projects::unavailable(&self.settings.binding));
-        projects::apply_memberships(&mut sessions, &projects);
+        self.state
+            .borrow()
+            .project_memberships
+            .apply(&mut sessions, &projects);
         if paged {
             // Archive membership is applied to explicit pages; thousands of
             // IDs do not belong in every live-session heartbeat.
@@ -651,8 +724,12 @@ impl<N: Native + 'static> Connector<N> {
         };
         let timeout = self.settings.default_timeout.min(1.0);
         let inspections = selected.iter().map(|key| async move {
-            let detail = self
-                .native(Call::new(["inspect", key.0.as_str()]).timeout(timeout))
+            let selection = self.labels_selection(&key.0, Some(&json!({"expected_run_id":key.1})));
+            let detail = SESSION_LABEL_SELECTION
+                .scope(
+                    selection,
+                    self.native(Call::new(["inspect", key.0.as_str()]).timeout(timeout)),
+                )
                 .await;
             (key, detail)
         });
@@ -703,8 +780,23 @@ impl<N: Native + 'static> Connector<N> {
                 .await
                 .ok()
                 .and_then(|native| {
-                    projects::normalize(&native.json(), &snapshot, &self.settings.binding).ok()
+                    let raw = native.json();
+                    if self.flags.get().session_labels
+                        && raw.get("session_id_memberships").is_none()
+                    {
+                        return None;
+                    }
+                    let primary = projects::PrimaryMemberships::read(&raw).ok()?;
+                    let mut catalog = if primary.available() {
+                        projects::normalize(&raw, &snapshot, &self.settings.binding).ok()?
+                    } else {
+                        projects::unavailable(&self.settings.binding)
+                    };
+                    primary.project(&mut catalog);
+                    Some((catalog, primary))
                 });
+            let primary = fresh.as_ref().map(|(_, primary)| primary.clone());
+            let mut fresh = fresh.take().map(|(catalog, _)| catalog);
             // Each project's phone-view digest; a failed read leaves them out.
             let digests = |catalog: &&mut Value| {
                 self.flags.get().task_exchange && catalog["available"] == json!(true)
@@ -716,6 +808,11 @@ impl<N: Native + 'static> Connector<N> {
                 }
             }
             let mut state = self.state.borrow_mut();
+            if let Some(primary) = primary {
+                state.project_memberships = primary;
+            } else if self.flags.get().session_labels {
+                state.project_memberships = projects::PrimaryMemberships::Unavailable;
+            }
             let cache = match fresh {
                 Some(fresh) => fresh,
                 None => {
@@ -1409,6 +1506,84 @@ mod encrypted_machine_tests {
             })
             .await
             .expect("The one queued account refresh must finish");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn label_reads_need_every_cli_marker_and_one_unambiguous_original_run() {
+        use crate::session_selector::{LABELS_MARKER, PEER_MARKER, SELECTOR_MARKER};
+        let f = Fixture::new();
+        let name = "codex/example/labels";
+        let id = "11111111-1111-4111-8111-111111111111";
+        f.connector
+            .state
+            .borrow_mut()
+            .session_ids
+            .insert("run".into(), id.into());
+        let payload = json!({"expected_run_id":"run"});
+        let flags = |markers: &[&str]| crate::capabilities::Flags::from_help(&markers.join("\n"));
+        let all = [LABELS_MARKER, SELECTOR_MARKER, PEER_MARKER];
+        for (markers, expected) in [(&all[..], true), (&all[..2], false), (&all[1..], false)] {
+            f.connector.flags.set(flags(markers));
+            let selection = Connector::<NativeFixture>::guarded(MACHINE.into(), async {
+                f.connector.labels_selection(name, Some(&payload))
+            })
+            .await;
+            assert_eq!(selection.is_some(), expected, "{markers:?}");
+        }
+        f.connector.flags.set(flags(&all[..2]));
+        assert_eq!(
+            f.connector
+                .labels_selection(name, Some(&payload))
+                .unwrap()
+                .id,
+            id
+        );
+        assert!(f
+            .connector
+            .labels_selection(
+                name,
+                Some(&json!({"expected_run_id":"run","run_id":"other"}))
+            )
+            .is_none());
+        assert!(f
+            .connector
+            .labels_selection(
+                name,
+                Some(&json!({"expected_run_id":"run","archive_id":"old"}))
+            )
+            .is_none());
+        assert!(f
+            .connector
+            .labels_selection(name, Some(&json!({"expected_run_id":"unlisted"})))
+            .is_none());
+        let fleet = f.connector.fleet.as_ref().unwrap();
+        let peer = f.connector.peer_context(
+            MACHINE,
+            crate::fleet::PeerNative {
+                gateway: fleet.gateway.clone(),
+                routes: fleet.routes.clone(),
+                slots: fleet.slots.clone(),
+                identity: "peer".into(),
+                machine: MACHINE.into(),
+                default_timeout: 1.0,
+            },
+        );
+        peer.state
+            .borrow_mut()
+            .session_ids
+            .insert("run".into(), id.into());
+        for (gateway, own, expected) in [
+            (&all[..], &all[..], true),
+            (&all[1..], &all[..], false),
+            (&all[..], &all[..2], false),
+        ] {
+            f.connector.flags.set(flags(gateway));
+            peer.flags.set(flags(own));
+            assert_eq!(
+                peer.labels_selection(name, Some(&payload)).is_some(),
+                expected
+            );
         }
     }
 

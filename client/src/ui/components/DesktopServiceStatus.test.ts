@@ -62,7 +62,7 @@ describe("passive service", () => {
     const list = read("../sessions/SessionList.tsx").match(/function ListPlaceholder\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
     expect(list.indexOf("<Show when={!servicePausedEmpty()}")).toBeGreaterThan(-1);
     expect(list.indexOf("<Show when={!servicePausedEmpty()}")).toBeLessThan(list.indexOf("skel-card"));
-    expect(read("../../App.tsx")).toContain('fallback={<Show when={!servicePaused(desktopService.state()) && !firstChoicePending(desktopService.state())}><span>{props.mode() === "starting" ? tr("Starting…") : tr("Connecting…")}</span></Show>}');
+    expect(read("./MachinesStatus.tsx")).toContain('fallback={<Show when={!servicePaused(desktopService.state()) && !firstChoicePending(desktopService.state())}><span>{props.mode() === "starting" ? tr("Starting…") : tr("Connecting…")}</span></Show>}');
   });
 });
 
@@ -212,7 +212,7 @@ describe("Windows first background choice in flight", () => {
 });
 
 describe("service status in the footer", () => {
-  it("keeps the healthy indicator compact and offers no Retry", () => {
+  it("keeps healthy details available to About and offers no Retry", () => {
     expect(serviceStatus(undefined)).toBeUndefined();
     expect(serviceStatus(healthy())).toMatchObject({ healthy: true, retry: false, review: false, ownership: undefined, label: "Background service", details: "Background service connected" });
   });

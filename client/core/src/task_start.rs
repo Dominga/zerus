@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 pub mod capture;
+pub mod refusal;
 
 pub const UNCERTAIN: &str =
     "the previous start of this task may already have reached its executor.";
@@ -202,7 +203,7 @@ fn outcome(
     reply
         .get("state")
         .and_then(Value::as_str)
-        .filter(|s| matches!(*s, "submitted" | "uncertain" | "refused"))
+        .filter(|s| matches!(*s, "submitted" | "uncertain" | "refused" | "cutting_over"))
         .map(str::to_owned)
         .ok_or_else(|| "The start outcome could not be read. Recovery data was kept.".into())
 }
@@ -280,11 +281,39 @@ pub fn start(
     assignment: &Assignment,
     selection: &Selection,
     id: &str,
+    run: impl FnMut(&TaskCall) -> Result<Map<String, Value>, String>,
+) -> Result<View, String> {
+    start_inner(
+        store,
+        project,
+        task,
+        stage_at,
+        assignment,
+        selection,
+        id,
+        zerus_desktop_read_policy::task_controls::TASK_CONTROLS,
+        run,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_inner(
+    store: &Path,
+    project: &str,
+    task: &str,
+    stage_at: i64,
+    assignment: &Assignment,
+    selection: &Selection,
+    id: &str,
+    controls: bool,
     mut run: impl FnMut(&TaskCall) -> Result<Map<String, Value>, String>,
 ) -> Result<View, String> {
     let previous = load(store, project, task)?;
     if previous.as_ref().is_some_and(pending) {
         return open(store, project, task, None);
+    }
+    if controls && previous.as_ref().is_some_and(|record| record["id"] == id) {
+        return Err("This Start identity was already used. Prepare a fresh request.".into());
     }
     let plan = prepare(project, task, stage_at, assignment, selection, id, &mut run)?;
     let delivery = call("start-deliver", project, task, &plan, false);
@@ -319,24 +348,56 @@ pub fn start(
     // Use that SAME call, never reserialize the plan after its checkpoint.
     let result = run(&delivery);
     drop(delivery);
+    let result = result.and_then(|reply| {
+        // Absence of the proof is unknown too. An explicitly scoped refusal
+        // cannot release this original merely by omitting the proof field.
+        // Only an absent mode field retains the ordinary unscoped A4 path.
+        let scoped_refusal = reply.get("state") == Some(&json!("refused"))
+            && record["intent"]["plan"]
+                .get("acknowledgement_mode")
+                .is_some();
+        if controls
+            && (reply.contains_key("refusal") || scoped_refusal)
+            && (reply.get("state") != Some(&json!("refused"))
+                || reply
+                    .get("refusal")
+                    .is_none_or(|proof| !refusal::matches(proof, id, &record["intent"]["plan"])))
+        {
+            return Err(RELEASE_FAILED.into());
+        }
+        Ok(reply)
+    });
     let (state, error) = match result {
         Ok(reply) => match outcome(&reply, project, task, id) {
-            Ok(state) => (
-                state,
-                reply
-                    .get("error")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned(),
-            ),
+            Ok(state) => {
+                let proven = controls
+                    && state == "refused"
+                    && reply.get("refusal").is_some_and(|proof| {
+                        refusal::matches(proof, id, &record["intent"]["plan"])
+                    });
+                (
+                    state,
+                    if proven {
+                        refusal::VISIBLE.into()
+                    } else {
+                        reply
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned()
+                    },
+                )
+            }
             Err(error) => ("uncertain".into(), error),
         },
         Err(error) => ("uncertain".into(), error),
     };
     let mut settled = record.clone();
+    // A refused or cutting-over start reserved nothing and sent nothing
+    // (A4): released, with its reason. Only "submitted" is a started task.
     settled["phase"] = json!(match state.as_str() {
         "submitted" => "started",
-        "refused" => "released",
+        "refused" | "cutting_over" => "released",
         _ => "review",
     });
     settled["error"] = json!(error.chars().take(ERROR_CHARS).collect::<String>());
@@ -352,6 +413,27 @@ pub fn release(
     task: &str,
     id: &str,
     snapshot: &str,
+    run: impl FnMut(&TaskCall) -> Result<Map<String, Value>, String>,
+) -> Result<View, String> {
+    release_inner(
+        store,
+        project,
+        task,
+        id,
+        snapshot,
+        zerus_desktop_read_policy::task_controls::TASK_CONTROLS,
+        run,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn release_inner(
+    store: &Path,
+    project: &str,
+    task: &str,
+    id: &str,
+    snapshot: &str,
+    controls: bool,
     mut run: impl FnMut(&TaskCall) -> Result<Map<String, Value>, String>,
 ) -> Result<View, String> {
     let record = load(store, project, task)?.ok_or(RELEASE_FAILED)?;
@@ -366,10 +448,28 @@ pub fn release(
         true,
     ))?;
     let state = outcome(&reply, project, task, id)?;
-    if state == "refused" {
+    // A recovery read never cuts over; if one says so, nothing is released.
+    let refusal = controls
+        && state == "refused"
+        && reply
+            .get("refusal")
+            .is_some_and(|proof| refusal::matches(proof, id, &record["intent"]["plan"]));
+    let scoped = matches!(
+        record["intent"]["plan"]["acknowledgement_mode"].as_str(),
+        Some("managed" | "legacy")
+    );
+    if controls && (reply.contains_key("refusal") && !refusal || scoped && state == "uncertain") {
+        // In particular, an unqualified Windows namespace returns Unknown,
+        // never a proof or a release of this scoped Start.
+        return Err(RELEASE_FAILED.into());
+    }
+    if state == "cutting_over" || state == "refused" && !refusal {
         return Err(RELEASE_FAILED.into());
     }
     let mut settled = record.clone();
+    if refusal {
+        settled["error"] = json!(refusal::VISIBLE);
+    }
     settled["phase"] = json!(if state == "submitted" {
         "started"
     } else {
@@ -378,7 +478,9 @@ pub fn release(
     checkpoint(store, project, task, &record, &settled)?;
     let mut view = open(store, project, task, None)?;
     view.outcome = Some(
-        if state == "submitted" {
+        if refusal {
+            "refused"
+        } else if state == "submitted" {
             "submitted"
         } else {
             "released"
@@ -477,6 +579,411 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    fn lost_scoped_start(store: &Path) -> View {
+        start_inner(
+            store,
+            "example",
+            TASK,
+            123,
+            &assignment(),
+            &selection(),
+            FIRST,
+            true,
+            |call| match call.args[0].as_str() {
+                "get" => Ok(document()),
+                "start-plan" => {
+                    let mut reply = plan(call);
+                    reply.get_mut("plan").unwrap()["acknowledgement_mode"] = json!("managed");
+                    Ok(reply)
+                }
+                "start-deliver" => Err("Original reply lost".into()),
+                _ => panic!("Unexpected call"),
+            },
+        )
+        .unwrap()
+    }
+    fn refusal_reply(record: &Value) -> Map<String, Value> {
+        let mut reply = delivered(FIRST, "refused");
+        reply.insert(
+            "refusal".into(),
+            json!({"schema":1,"request_id":FIRST,
+            "plan_digest":refusal::plan_digest(&record["intent"]["plan"]).unwrap(),
+            "reason":"acknowledgement_mode_changed"}),
+        );
+        reply
+    }
+
+    #[test]
+    fn the_initial_proof_is_visible_only_when_complete_and_bound_to_the_saved_plan() {
+        for valid in [true, false] {
+            let s = Scratch::new();
+            let result = start_inner(
+                &s.0,
+                "example",
+                TASK,
+                123,
+                &assignment(),
+                &selection(),
+                FIRST,
+                true,
+                |call| match call.args[0].as_str() {
+                    "get" => Ok(document()),
+                    "start-plan" => {
+                        let mut reply = plan(call);
+                        reply.get_mut("plan").unwrap()["acknowledgement_mode"] = json!("managed");
+                        Ok(reply)
+                    }
+                    "start-deliver" => {
+                        let saved = load(&s.0, "example", TASK).unwrap().unwrap();
+                        let mut reply = refusal_reply(&saved);
+                        if !valid {
+                            reply.get_mut("refusal").unwrap()["extra"] = json!(true);
+                        }
+                        Ok(reply)
+                    }
+                    _ => panic!("Unexpected call"),
+                },
+            )
+            .unwrap();
+            assert_eq!(result.pending, !valid);
+            assert_eq!(
+                result.outcome.as_deref(),
+                Some(if valid { "refused" } else { "uncertain" })
+            );
+            if valid {
+                assert_eq!(result.error, refusal::VISIBLE);
+            } else {
+                assert_eq!(result.phase, "review");
+            }
+        }
+    }
+
+    #[test]
+    fn review_missing_initial_mode_proof_keeps_original_pending() {
+        for mode in [
+            json!("managed"),
+            json!("legacy"),
+            Value::Null,
+            json!("future"),
+        ] {
+            let s = Scratch::new();
+            let mut original = Value::Null;
+            let result = start_inner(
+                &s.0,
+                "example",
+                TASK,
+                123,
+                &assignment(),
+                &selection(),
+                FIRST,
+                true,
+                |call| match call.args[0].as_str() {
+                    "get" => Ok(document()),
+                    "start-plan" => {
+                        let mut reply = plan(call);
+                        reply.get_mut("plan").unwrap()["acknowledgement_mode"] = mode.clone();
+                        Ok(reply)
+                    }
+                    "start-deliver" => {
+                        original = serde_json::from_str(&call.input).unwrap();
+                        let mut reply = delivered(FIRST, "refused");
+                        reply.insert("error".into(), json!(refusal::VISIBLE));
+                        assert!(!reply.contains_key("refusal"));
+                        Ok(reply)
+                    }
+                    _ => panic!("Unexpected call"),
+                },
+            )
+            .unwrap();
+            assert!(
+                result.pending,
+                "Missing {mode} refusal proof released original Start: phase={} outcome={:?}",
+                result.phase, result.outcome
+            );
+            assert_eq!(
+                (
+                    result.id.as_str(),
+                    result.phase.as_str(),
+                    result.outcome.as_deref()
+                ),
+                (FIRST, "review", Some("uncertain"))
+            );
+            let retained = load(&s.0, "example", TASK).unwrap().unwrap();
+            assert_eq!(retained["intent"]["plan"], original);
+            assert_eq!(retained["intent"]["retained_input"], original.to_string());
+            let reopened = open(&s.0, "example", TASK, None).unwrap();
+            assert!(reopened.pending);
+            let blocked = start_inner(
+                &s.0,
+                "example",
+                TASK,
+                123,
+                &assignment(),
+                &selection(),
+                SECOND,
+                true,
+                |_| panic!("An unproven original never prepares or sends again"),
+            )
+            .unwrap();
+            assert_eq!(blocked.id, FIRST);
+            assert!(blocked.pending);
+        }
+    }
+
+    #[test]
+    fn ordinary_initial_a4_refusals_keep_their_existing_outcomes() {
+        for (controls, scoped, state) in [
+            (false, true, "refused"),
+            (true, false, "refused"),
+            (true, true, "cutting_over"),
+        ] {
+            let s = Scratch::new();
+            let result = start_inner(
+                &s.0,
+                "example",
+                TASK,
+                123,
+                &assignment(),
+                &selection(),
+                FIRST,
+                controls,
+                |call| match call.args[0].as_str() {
+                    "get" => Ok(document()),
+                    "start-plan" => {
+                        let mut reply = plan(call);
+                        if scoped {
+                            reply.get_mut("plan").unwrap()["acknowledgement_mode"] =
+                                json!("managed");
+                        }
+                        Ok(reply)
+                    }
+                    "start-deliver" => Ok(delivered(FIRST, state)),
+                    _ => panic!("Unexpected call"),
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                (
+                    result.phase.as_str(),
+                    result.pending,
+                    result.outcome.as_deref()
+                ),
+                ("released", false, Some(state))
+            );
+            assert_eq!(result.error, "provider result");
+        }
+    }
+
+    #[test]
+    fn a_lost_refusal_reply_recovers_from_the_frozen_plan_and_only_a_fresh_id_can_start() {
+        let s = Scratch::new();
+        let lost = lost_scoped_start(&s.0);
+        assert!(lost.pending);
+        // Reopen, as after a GUI restart; only the original disk entry matters.
+        let reopened = open(&s.0, "example", TASK, None).unwrap();
+        let record = load(&s.0, "example", TASK).unwrap().unwrap();
+        let reply = refusal_reply(&record);
+        let released = release_inner(
+            &s.0,
+            "example",
+            TASK,
+            FIRST,
+            &reopened.snapshot,
+            true,
+            |call| {
+                assert!(call.args.iter().any(|s| s == "--recover-only"));
+                assert_eq!(
+                    serde_json::from_str::<Value>(&call.input).unwrap(),
+                    record["intent"]["plan"]
+                );
+                Ok(reply.clone())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                released.id.as_str(),
+                released.phase.as_str(),
+                released.pending,
+                released.outcome.as_deref()
+            ),
+            (FIRST, "released", false, Some("refused"))
+        );
+        assert_eq!(released.error, refusal::VISIBLE);
+        let reopened = open(&s.0, "example", TASK, None).unwrap();
+        assert!(!reopened.pending);
+        assert_eq!(reopened.error, refusal::VISIBLE);
+        // A retained proof is not an instruction to reuse/re-enter that UUID.
+        assert!(start_inner(
+            &s.0,
+            "example",
+            TASK,
+            123,
+            &assignment(),
+            &selection(),
+            FIRST,
+            true,
+            |_| panic!("The used ID never prepares or delivers again")
+        )
+        .is_err());
+        let next = start_inner(
+            &s.0,
+            "example",
+            TASK,
+            123,
+            &assignment(),
+            &selection(),
+            SECOND,
+            true,
+            |call| match call.args[0].as_str() {
+                "get" => Ok(document()),
+                "start-plan" => {
+                    let mut reply = plan(call);
+                    reply.get_mut("plan").unwrap()["acknowledgement_mode"] = json!("managed");
+                    Ok(reply)
+                }
+                "start-deliver" => {
+                    let sent: Value = serde_json::from_str(&call.input).unwrap();
+                    assert_eq!(sent["id"], SECOND);
+                    assert_ne!(sent["id"], FIRST);
+                    Ok(delivered(SECOND, "submitted"))
+                }
+                _ => panic!("Unexpected call"),
+            },
+        )
+        .unwrap();
+        assert_eq!((next.id.as_str(), next.phase.as_str()), (SECOND, "started"));
+        assert!(release_inner(
+            &s.0,
+            "example",
+            TASK,
+            FIRST,
+            &reopened.snapshot,
+            true,
+            |_| panic!("The old identity cannot release its replacement")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_closed_proof_must_match_this_outbox_plan_and_every_malformed_reply_stays_pending() {
+        let s = Scratch::new();
+        let lost = lost_scoped_start(&s.0);
+        let record = load(&s.0, "example", TASK).unwrap().unwrap();
+        let original = record.to_string();
+        let valid = refusal_reply(&record);
+        let proof = &valid["refusal"];
+        let mut cases = vec![Value::Null, json!({}), json!([])];
+        for key in ["schema", "request_id", "plan_digest", "reason"] {
+            let mut missing = proof.clone();
+            missing.as_object_mut().unwrap().remove(key);
+            cases.push(missing);
+        }
+        for (key, value) in [
+            ("schema", json!(2)),
+            ("schema", json!(1.0)),
+            ("schema", json!("1")),
+            ("request_id", json!(SECOND)),
+            ("plan_digest", json!("0".repeat(64))),
+            ("reason", json!("something_else")),
+            ("reason", json!({"acknowledgement_mode_changed":null})),
+            ("extra", json!(true)),
+        ] {
+            let mut changed = proof.clone();
+            changed[key] = value;
+            cases.push(changed);
+        }
+        // A valid digest of ANOTHER plan is not evidence for our retained one.
+        for key in ["text", "expected_run_id", "expected_conversation_id"] {
+            let mut other = record["intent"]["plan"].clone();
+            other["request"][key] = json!("Different retained guard/body");
+            let mut changed = proof.clone();
+            changed["plan_digest"] = json!(refusal::plan_digest(&other).unwrap());
+            cases.push(changed);
+        }
+        let mut other = record["intent"]["plan"].clone();
+        other["stage_at"] = json!(124);
+        let mut changed = proof.clone();
+        changed["plan_digest"] = json!(refusal::plan_digest(&other).unwrap());
+        cases.push(changed);
+        for changed in cases {
+            let mut reply = valid.clone();
+            reply.insert("refusal".into(), changed);
+            assert!(
+                release_inner(&s.0, "example", TASK, FIRST, &lost.snapshot, true, |_| Ok(
+                    reply.clone()
+                ))
+                .is_err()
+            );
+            assert_eq!(
+                load(&s.0, "example", TASK).unwrap().unwrap().to_string(),
+                original
+            );
+            assert!(open(&s.0, "example", TASK, None).unwrap().pending);
+        }
+        // A proof that is correct for another durable outbox still cannot
+        // release this entry, even when both retained request IDs are equal.
+        let other = Scratch::new();
+        lost_scoped_start(&other.0);
+        let before = load(&other.0, "example", TASK).unwrap().unwrap();
+        let mut after = before.clone();
+        after["intent"]["plan"]["request"]["text"] = json!("Another durable original");
+        after["intent"]["retained_input"] = json!(after["intent"]["plan"].to_string());
+        checkpoint(&other.0, "example", TASK, &before, &after).unwrap();
+        let other_record = load(&other.0, "example", TASK).unwrap().unwrap();
+        assert!(
+            release_inner(&s.0, "example", TASK, FIRST, &lost.snapshot, true, |_| Ok(
+                refusal_reply(&other_record)
+            ))
+            .is_err()
+        );
+        // Windows' unqualified publication (or any Unknown) emits no proof;
+        // no recovery may quietly release this scoped Start on that answer.
+        for state in ["uncertain", "submitted"] {
+            let mut reply = valid.clone();
+            reply["state"] = json!(state);
+            assert!(
+                release_inner(&s.0, "example", TASK, FIRST, &lost.snapshot, true, |_| Ok(
+                    reply.clone()
+                ))
+                .is_err()
+            );
+        }
+        assert!(
+            release_inner(&s.0, "example", TASK, FIRST, &lost.snapshot, true, |_| Ok(
+                delivered(FIRST, "uncertain")
+            ))
+            .is_err()
+        );
+        assert_eq!(
+            load(&s.0, "example", TASK).unwrap().unwrap().to_string(),
+            original
+        );
+        // Even a correct proof is ignored by the single closed compile-time gate.
+        assert!(
+            release(&s.0, "example", TASK, FIRST, &lost.snapshot, |_| Ok(
+                valid.clone()
+            ))
+            .is_err()
+        );
+        assert_eq!(
+            load(&s.0, "example", TASK).unwrap().unwrap().to_string(),
+            original
+        );
+        // Nor can a proof create its own missing outbox entry.
+        let absent = Scratch::new();
+        assert!(release_inner(
+            &absent.0,
+            "example",
+            TASK,
+            FIRST,
+            &lost.snapshot,
+            true,
+            |_| panic!("No outbox entry, no CLI recovery call")
+        )
+        .is_err());
     }
 
     fn start_with_text(
@@ -589,6 +1096,43 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(after["intent"]["retained_input"] == before["intent"]["retained_input"]);
+    }
+
+    #[test]
+    fn a_refused_or_cutting_over_start_is_released_with_its_reason() {
+        // Nothing was reserved or sent (A4): the start is released with the
+        // executor's reason, and another start is allowed. Only "submitted"
+        // starts the task; "uncertain" stays for review.
+        for state in ["refused", "cutting_over"] {
+            let s = Scratch::new();
+            let view = attempt(&s.0, FIRST, state);
+            assert!(!view.pending, "{state}");
+            assert_eq!(
+                (
+                    view.phase.as_str(),
+                    view.outcome.as_deref(),
+                    view.error.as_str()
+                ),
+                ("released", Some(state), "provider result")
+            );
+            let next = attempt(&s.0, SECOND, "submitted");
+            assert_eq!((next.id.as_str(), next.phase.as_str()), (SECOND, "started"));
+        }
+        let s = Scratch::new();
+        let unknown = attempt(&s.0, FIRST, "uncertain");
+        assert_eq!((unknown.pending, unknown.phase.as_str()), (true, "review"));
+        // A recovery read that claims a cutover releases nothing.
+        assert_eq!(
+            release(&s.0, "example", TASK, FIRST, &unknown.snapshot, |_| {
+                Ok(delivered(FIRST, "cutting_over"))
+            })
+            .err()
+            .as_deref(),
+            Some(RELEASE_FAILED)
+        );
+        assert!(outbox::pending(&root(&s.0), "example", TASK)
+            .unwrap()
+            .is_some());
     }
 
     #[test]

@@ -1707,6 +1707,22 @@ pub(super) fn reconcile(record:Value)->Value {
         assert!(native_read_request(&screen.replace("Allow this read outside the working directories?","Do you want to proceed?")).is_none());
     }
 
+    /// Real captured panels: the card's header carries the hook's tool name,
+    /// which names the automatic-approval category (zerus-sz42x).
+    #[test] fn automatic_approval_categories_read_the_hook_tool_name() {
+        use zerus_client_core::approvals::automatic::{categories,once,Category};
+        for (tool,input,screen,expected) in [
+            ("Bash",json!({"command":"printf hi > out.txt","description":"Write \"hi\" into out.txt without a trailing newline"}),BASH,Category::Shell),
+            ("Read",json!({"file_path":PATH}),OUTSIDE,Category::Read),
+            ("WebFetch",json!({"url":"https://example.com","prompt":"title?"}),FETCH,Category::Web),
+            ("Write",json!({"file_path":"/work/project/new.txt","content":"x"}),WRITE,Category::Edit),
+        ] {
+            let card=card(&record(tool,input),screen);
+            assert!(once("claude",&card).is_some(),"{tool}");
+            assert_eq!(categories::tool("claude",&card).category,expected,"{tool}");
+        }
+    }
+
     #[test] fn mismatched_or_unreadable_panels_stay_visible_for_terminal() {
         let other=card(&record("Read",json!({"file_path":"/home/user/other.png"})),OUTSIDE);
         assert_eq!(other["can_answer"],false);assert!(options(&other).is_empty());

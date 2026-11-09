@@ -276,7 +276,7 @@ pub(super) fn ensure_manifest() -> Result<()> {
 pub(super) fn repair() {
     // Without `sessions/` nothing is in the ID layout: nothing to prove, and
     // resolution then writes nothing.
-    if root().join("sessions").is_dir() && manifest().is_none() {
+    if id_directories().iter().any(|(dir, _)| dir.is_dir()) && manifest().is_none() {
         if let Ok(Some(_guard)) = storage::writer_until(Instant::now()) {
             let _ = ensure_manifest();
         }
@@ -286,40 +286,55 @@ pub(super) fn repair() {
 /// Every live or saved session in `sessions/`, read within the bounds and
 /// `deadline`; an error when they cannot cover it, or when a record there
 /// cannot be read.
+/// All three fixed namespaces share the same scan count and deadline.
+fn id_directories() -> Vec<(PathBuf, Option<provider_binding::Provider>)> {
+    use provider_binding::Provider;
+    vec![(root().join("sessions"), None), (Provider::DeepSeek.directory(), Some(Provider::DeepSeek)),
+        (Provider::OpenCode.directory(), Some(Provider::OpenCode))]
+}
 fn enumerate(deadline: Instant) -> Result<Vec<(String, Value)>> {
-    let dir = root().join("sessions");
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error.to_string()),
-    };
     let late = || "the sessions in the ID layout could not all be read in time; choose one with --session-id".to_owned();
     let mut found = Vec::new();
-    for (count, entry) in entries.enumerate() {
-        if count >= SCAN_RECORDS || Instant::now() >= deadline {
-            return Err(late());
-        }
-        let entry = entry.map_err(|error| error.to_string())?;
-        let Some(id) = entry
-            .path()
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .filter(|id| session_id::canonical(id))
-            .map(str::to_owned)
-        else {
-            continue;
+    let mut count = 0;
+    for (dir, provider) in id_directories() {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.to_string()),
         };
-        let record = storage::read_id(&id).map_err(|error| {
-            format!("a session in the ID layout could not be read ({error}); choose one with --session-id")
-        })?;
-        if string(&record, "archive_id").is_empty() && record["rename_shadow"] != true {
-            found.push((id, record));
+        for entry in entries {
+            if count >= SCAN_RECORDS || Instant::now() >= deadline { return Err(late()); }
+            count += 1;
+            let path = entry.map_err(|error| error.to_string())?.path();
+            if path.extension().is_none_or(|s| s != "json") { continue; }
+            let Some(id) = path.file_stem().and_then(|s| s.to_str()).filter(|id| session_id::canonical(id)) else { continue; };
+            let record = match provider { Some(provider) => provider.read_id(id), None => storage::read_id(id) }
+                .map_err(|error| format!("a session in the ID layout could not be read ({error}); choose one with --session-id"))?;
+            if string(&record, "archive_id").is_empty() && record["rename_shadow"] != true { found.push((id.to_owned(), record)); }
         }
     }
-    if Instant::now() >= deadline {
-        return Err(late());
-    }
+    if Instant::now() >= deadline { return Err(late()); }
     Ok(found)
+}
+
+/// Native provider routes are fixed namespaces, never a fallback to a label.
+pub(super) fn read_id_for_label(label: &str, id: &str) -> Result<Value> {
+    match provider_binding::Provider::named(label) {
+        Some(provider) => provider.read_id(id),
+        None => storage::read_id(id),
+    }
+}
+pub(super) fn id_path_for_label(label: &str, id: &str) -> Option<PathBuf> {
+    match provider_binding::Provider::named(label) {
+        Some(provider) => provider.id_path(id),
+        None => storage::id_record_path(id),
+    }
+}
+pub(super) fn first_path(label: &str) -> PathBuf {
+    provider_binding::Provider::named(label).map_or_else(|| storage::label_record_path(label), |provider| provider.label_path(label))
+}
+pub(super) fn read_first(label: &str) -> Result<Value> {
+    provider_binding::Provider::named(label).map_or_else(|| storage::read_label(label), |provider| provider.read_label(label))
 }
 
 /// Whether `record`, read from the ID layout, is the live or saved session
@@ -353,7 +368,7 @@ fn scan(label: &str) -> Result<Vec<String>> {
 /// FIFO included, is never taken as absent: the set cannot be proven
 /// complete, so it is an error (#1437 review).
 fn verified(id: &str, label: &str) -> Result<Option<Value>> {
-    let Some(path) = storage::id_record_path(id) else {
+    let Some(path) = id_path_for_label(label, id) else {
         return Ok(None);
     };
     match std::fs::symlink_metadata(&path) {
@@ -361,7 +376,7 @@ fn verified(id: &str, label: &str) -> Result<Option<Value>> {
         Err(error) => return Err(format!("{label}: {error}")),
         Ok(_) => {}
     }
-    let record = storage::read_id(id).map_err(|error| {
+    let record = read_id_for_label(label, id).map_err(|error| {
         format!("{label}: a session that may share this label could not be read ({error}); choose one with --session-id")
     })?;
     Ok(holds(&record, id, label).then_some(record))
@@ -389,9 +404,37 @@ pub(super) fn candidates(label: &str) -> Result<Candidates> {
         }
     }
     Ok(Candidates {
-        first: storage::label_record_path(label).is_file(),
+        first: match std::fs::symlink_metadata(first_path(label)) {
+            Ok(_) => true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error.to_string()),
+        },
         by_id,
     })
+}
+
+/// Terminal launch exclusion is one namespace, not every native provider's
+/// binding under that label. Provider launch reconciliation must be able to
+/// find its own pending binding. The same complete index/scan still proves the
+/// candidate set; only exact root-session paths establish a terminal holder.
+pub(super) fn terminal_taken(label: &str) -> Result<bool> {
+    match std::fs::symlink_metadata(storage::label_record_path(label)) {
+        Ok(_) => return Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {},
+        Err(error) => return Err(error.to_string()),
+    }
+    let ids = match listed(label) { Some(ids) => ids, None => scan(label)? };
+    for id in ids {
+        let path = storage::id_record_path(&id).ok_or("Invalid terminal session ID")?;
+        match std::fs::symlink_metadata(path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.to_string()),
+            Ok(_) => {},
+        }
+        let record = storage::read_id(&id)?;
+        if holds(&record,&id,label) { return Ok(true); }
+    }
+    Ok(false)
 }
 
 /// The ID layout end to end (zerus-ucck P3a). Sessions in the ID layout are
@@ -835,10 +878,10 @@ mod tests {
     /// #1437 review (desktop-u G1): each control runs in its own child with a
     /// private state root, and a child that outlives the scan's promised
     /// bound by far fails instead of hanging the suite.
-    fn control(case: &str) {
+    fn control(case: &str) -> String {
         let state = tempfile::tempdir().unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "state::labels::tests::control_fixture", "--ignored", "--test-threads=1"])
+            .args(["--exact", "state::labels::tests::control_fixture", "--ignored", "--nocapture", "--test-threads=1"])
             .env("HGS_STATE_DIR", state.path().join("sessions-root"))
             .env("TMUX_TMPDIR", state.path().join("tmux"))
             .env("ZERUS_ID_LAYOUT_CONTROL", case)
@@ -866,6 +909,7 @@ mod tests {
             "{case}: {stdout}{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        stdout.into_owned()
     }
 
     #[test]
@@ -896,7 +940,30 @@ mod tests {
     /// cut of a rename in place, an archive and a forget.
     #[test]
     fn the_label_index_stays_a_superset_at_every_crash_cut() {
-        control("cuts");
+        // Each crash cut gets the same bounded-child watchdog as one scan;
+        // the complete durability matrix is not a single scan's workload.
+        for op in ["rename", "archive", "forget"] {
+            let mut completed = false;
+            for writes in 0..64 {
+                let case = format!("cuts/{op}/{writes}");
+                let stdout = control(&case);
+                let prefix = format!("ZERUS_LABEL_CUT {case} ");
+                let outcomes: Vec<_> = stdout
+                    .lines()
+                    .filter_map(|line| line.strip_prefix(&prefix))
+                    .collect();
+                match outcomes.as_slice() {
+                    ["complete"] => {
+                        assert!(writes >= 2, "{op} completed after only {writes} writes");
+                        completed = true;
+                        break;
+                    }
+                    ["interrupted"] => {}
+                    _ => panic!("{case}: missing or ambiguous child outcome: {stdout}"),
+                }
+            }
+            assert!(completed, "{op} never completed within 64 crash cuts");
+        }
     }
 
     /// zerus-ucck P3c: while the ambiguity of a label is deferred to the
@@ -1082,39 +1149,35 @@ mod tests {
                 assert!(storage::label_taken(label));
                 assert!(started.elapsed() < SCAN_TIME);
             }
-            // Stop after each write of the operation, as if it crashed there.
-            "cuts" => {
-                let base = root();
-                for op in ["rename", "archive", "forget"] {
-                    let mut writes = 0;
-                    loop {
-                        std::env::set_var("HGS_STATE_DIR", base.join(format!("{op}-{writes}")));
-                        std::fs::create_dir_all(root()).unwrap();
-                        let mut first = record(label, "run-first");
-                        storage::write(&mut first).unwrap();
-                        let (_, id) = by_id(label, "run-twin");
-                        session_id::select(label, &id);
-                        storage::cut::arm(writes);
-                        let result = match op {
-                            "rename" => rename::dispatch(
-                                &[label.to_owned(), "claude/example/moved".to_owned()],
-                                false,
-                            )
-                            .map(drop),
-                            "archive" => archive::save(&storage::read_id(&id).unwrap()).map(drop),
-                            _ => storage::remove_record(&storage::read_id(&id).unwrap()),
-                        };
-                        storage::cut::disarm();
-                        session_id::clear();
-                        superset_holds(&format!("{op} cut after {writes} writes"));
-                        if result.is_ok() {
-                            break;
-                        }
-                        writes += 1;
-                        assert!(writes < 64, "{op} never completed");
-                    }
-                    assert!(writes >= 2, "{op} completed after only {writes} writes");
-                }
+            // One fresh process/store per cut; the parent exhausts each
+            // operation's write budgets through its first successful result.
+            case if case.starts_with("cuts/") => {
+                let mut fields = case.split('/');
+                assert_eq!(fields.next(), Some("cuts"));
+                let op = fields.next().unwrap();
+                let writes: usize = fields.next().unwrap().parse().unwrap();
+                assert!(fields.next().is_none() && writes < 64);
+                assert!(matches!(op, "rename" | "archive" | "forget"));
+                session_id::select(label, &id);
+                storage::cut::arm(writes);
+                let result = match op {
+                    "rename" => rename::dispatch(
+                        &[label.to_owned(), "claude/example/moved".to_owned()],
+                        false,
+                    )
+                    .map(drop),
+                    "archive" => archive::save(&storage::read_id(&id).unwrap()).map(drop),
+                    _ => storage::remove_record(&storage::read_id(&id).unwrap()),
+                };
+                storage::cut::disarm();
+                session_id::clear();
+                superset_holds(&format!("{op} cut after {writes} writes"));
+                let outcome = if result.is_ok() {
+                    "complete"
+                } else {
+                    "interrupted"
+                };
+                println!("\nZERUS_LABEL_CUT {case} {outcome}");
             }
             "terminal-move" => {
                 struct Moves(bool);

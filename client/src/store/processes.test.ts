@@ -3,7 +3,7 @@ import ru from "../i18n.ru.json";
 import { createRoot, createSignal } from "solid-js";
 import { createStore } from "solid-js/store";
 import {
-  createOutputFollow, createProcesses, groupItem, nextSelection, processesTab, processTarget, runningCommandsEntry,
+  createOutputFollow, createProcesses, groupItem, nextSelection, processesTab, processTarget, processViewKey, recordedProcess, runningCommandsEntry,
   summaryText, trackFollow, trackShown, visibleRows, type TreeKey,
 } from "./processes";
 import type { ProcessesView, ProcessRow, ProcessTarget } from "../types";
@@ -130,6 +130,50 @@ describe("the Processes store", () => {
     h.advance(1001);
     h.store.apply(view({ selected: ["p3"], current: "p3" }));
     expect(h.menus).toEqual([]);
+  });
+});
+
+describe("View process from Activity (ActivityView.cpp:1129-1134, zerus-5wmh.13.8.1)", () => {
+  const id = (c: string) => c.repeat(32);
+  const ids = view({ groups: [
+    { group: "live", title: "Live processes", rows: [row(id("a"))] },
+    { group: "finished", title: "Finished", rows: [row(id("b"))] },
+  ] });
+  const key = "host\nname";
+
+  it("names the view as the hub does: host, name, archive, run, conversation and host generation", () => {
+    const target = { computer: "local", key: "k", name: "codex/api", run_id: "r1", conversation_id: "c1", archive_id: null,
+      machine: "m", online: true, live: true, generation: "g1" } as ProcessTarget;
+    expect(processViewKey(target)).toBe("local\ncodex/api\n\nr1\nc1\ng1");
+    expect(processViewKey({ ...target, archive_id: "a1", generation: null })).toBe("local\ncodex/api\na1\nr1\nc1\n");
+  });
+
+  it("links only a 32-hex process id the current session's own view lists", () => {
+    expect(recordedProcess(ids, id("a"), key)).toBe(true);
+    expect(recordedProcess(ids, id("b"), key)).toBe(true);
+    expect(recordedProcess(ids, id("c"), key)).toBe(false);
+    expect(recordedProcess(undefined, id("a"), key)).toBe(false);
+    expect(recordedProcess(view(), "p1", key)).toBe(false);
+    expect(recordedProcess(view({ groups: [{ group: "live", title: "", rows: [row(id("A"))] }] }), id("A"), key)).toBe(false);
+    expect(recordedProcess(ids, 7, key)).toBe(false);
+    // review-win-c on #1804 (zerus-u81tf): another session's view still shown, or no current session, never links.
+    expect(recordedProcess(ids, id("a"), "host\nother")).toBe(false);
+    expect(recordedProcess(ids, id("a"), undefined)).toBe(false);
+  });
+
+  it("selects the process alone in the current session's view and opens its collapsed group", () => {
+    const h = harness();
+    expect(h.store.reveal(id("b"), key)).toBe(false);
+    h.store.apply(ids);
+    expect(h.store.reveal(id("b"), "host\nother")).toBe(false);
+    expect(h.calls).toEqual([]);
+    expect(h.store.collapsed().finished).toBe(true);
+    expect(h.store.reveal(id("b"), key)).toBe(true);
+    expect(h.store.collapsed().finished).toBe(false);
+    expect(h.calls).toEqual([select(key, [id("b")], id("b"))]);
+    expect(h.store.focus()?.id).toBe(id("b"));
+    expect(h.store.reveal(id("c"), key)).toBe(false);
+    expect(h.calls).toHaveLength(1);
   });
 });
 

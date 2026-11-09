@@ -12,6 +12,7 @@ use zerus_client_core::{
 use zerus_desktop_ledger as ledger;
 use zerus_watch_protocol::{Body, CatalogItem, Delta, Frame, Hello, Snapshot};
 mod retention_tests;
+mod startup_tests;
 fn id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
@@ -1617,4 +1618,27 @@ fn foreground_ttl_expires_at_the_logical_deadline_without_sleeping() {
     f.advance(FOCUS_TTL);
     f.delta(row());
     assert_single_reply(&mut f, "reply-1", 4);
+}
+#[test]
+fn a_supervised_childs_reply_and_question_raise_nothing_until_the_parent_is_gone() {
+    // zerus-sa9qn.3: the service projects rows through the same core tracker.
+    let parent = json!({"schema":1,"machine":"11111111-1111-4111-8111-111111111111","host":"arch",
+        "session_id":"22222222-2222-4222-8222-222222222222","name":"claude/example/lead",
+        "conversation_id":"c","run_id":"r","source":"launch","at":1,"state":"live"});
+    let mut quiet = row();
+    quiet["parent"] = parent;
+    quiet["human_request"] = json!(false);
+    assert!(project(&quiet).candidates.iter().all(|c| c.consumed));
+    let mut asking = quiet.clone();
+    asking["phase"] = json!("input");
+    asking["activity"] = json!("waiting");
+    asking["attention_id"] = json!("question-1");
+    assert!(project(&asking).candidates.iter().all(|c| c.consumed));
+    let mut orphaned = asking.clone();
+    orphaned["parent"]["state"] = json!("saved");
+    assert!(project(&orphaned).candidates.iter().any(|c| !c.consumed));
+    let mut approval = asking.clone();
+    approval["phase"] = json!("approval");
+    approval["human_request"] = json!(true);
+    assert!(project(&approval).candidates.iter().any(|c| !c.consumed));
 }

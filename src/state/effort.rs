@@ -9,6 +9,11 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
+// Dormant ID-input facade. Existing picker controllers do not call it.
+#[cfg(unix)]
+#[allow(dead_code)]
+mod picker_scope;
+
 const MAX_TAIL: u64 = 8 * 1024 * 1024;
 const LEVELS: &[&str] = &[
     "off", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "on",
@@ -2216,6 +2221,7 @@ pub(super) fn dispatch_settings(args: &[String]) -> Result<i32> {
     // share the label.
     expect(name, &request.expected_run_id, &request.expected_conversation_id)?;
     let mut record = read(name)?;
+    terminating::check_mutation(&record)?;
     if string(&record, "run_id") != request.expected_run_id
         || string(&record, "conversation_id") != request.expected_conversation_id
     {
@@ -2319,6 +2325,7 @@ pub(super) fn pending_applies(record: &Value) -> bool {
 }
 
 pub(super) fn apply_pending(name: &str, record: Value) -> Result<Value> {
+    terminating::check_mutation(&record)?;
     if !pending_applies(&record) {
         return Ok(record);
     }

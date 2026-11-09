@@ -216,7 +216,17 @@
       <translation>Завершите вход %1 в терминале на %2, эта страница обновится автоматически.</translation>
     </message>
     <message>
-      <location filename="../src/AccountsPage.cpp" line="448" />
+      <location filename="../src/AccountsPage.cpp" line="320" />
+      <source>OpenCode started on %1.</source>
+      <translation type="unfinished" />
+    </message>
+    <message>
+      <location filename="../src/AccountsPage.cpp" line="327" />
+      <source>Model defaults saved for new sessions on %1.</source>
+      <translation>Модель по умолчанию сохранена для новых сессий на %1.</translation>
+    </message>
+    <message>
+      <location filename="../src/AccountsPage.cpp" line="327" />
       <source>Default account saved for new sessions on %1.</source>
       <translation>Учетная запись по умолчанию сохранена для новых сессий на %1.</translation>
     </message>
@@ -277,7 +287,12 @@
       <translation>Обновление аккаунтов… осталось %1</translation>
     </message>
     <message>
-      <location filename="../src/AccountsPage.cpp" line="568" />
+      <location filename="../src/AccountsPage.cpp" line="446" />
+      <source>%1, %2</source>
+      <translation>%1, %2</translation>
+    </message>
+    <message>
+      <location filename="../src/AccountsPage.cpp" line="446" />
       <source>1 account</source>
       <translation>1 учётная запись</translation>
     </message>

@@ -26,6 +26,17 @@ class UnreadPresentationTest {
         val memory = ConversationAnchor("event:new",17,false)
         assertEquals(memory,UnreadPresentation.opening(memory,SavedConversationViewport("old",10),"new",keys).anchor)
     }
+    @Test fun followingSavedTailDoesNotRestoreAnOldOrMissingMessageAnchor() {
+        for(id in listOf("old","missing")) {
+            val saved=SavedConversationViewport(id,30,"old-cursor","epoch",following=true)
+            val opening=UnreadPresentation.opening(null,saved,"",keys)
+            assertNull(opening.anchor)
+            assertFalse(opening.unavailableSaved)
+            assertEquals("history:unread",UnreadPresentation.opening(null,saved,"new",keys).anchor!!.itemKey)
+        }
+        val deliberate=ConversationAnchor("event:old",7,false)
+        assertEquals(deliberate,UnreadPresentation.opening(deliberate,SavedConversationViewport("new",0,following=true),"",keys).anchor)
+    }
     @Test fun missingSavedPositionIsExplicitAndNeverFallsToTail() {
         val withUnread = UnreadPresentation.opening(null,SavedConversationViewport("missing",10),"new",keys)
         assertTrue(withUnread.unavailableSaved)

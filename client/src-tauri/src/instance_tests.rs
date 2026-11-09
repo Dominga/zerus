@@ -130,7 +130,9 @@ fn launch_fixture() {
 
 #[test]
 fn two_tmpdirs_homes_and_configs_handoff_before_second_gui_effects() {
-    let _process = crate::PROCESS_TREE.read().unwrap();
+    let _process = crate::PROCESS_TREE
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = private_root();
     let mut owner = launch(&root, "first");
     wait_for(&root.join("first.ready"), &mut owner);
@@ -155,7 +157,9 @@ fn two_tmpdirs_homes_and_configs_handoff_before_second_gui_effects() {
 
 #[test]
 fn a_crash_releases_kernel_exclusion_and_replaces_only_the_stale_socket() {
-    let _process = crate::PROCESS_TREE.read().unwrap();
+    let _process = crate::PROCESS_TREE
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = private_root();
     let mut owner = launch(&root, "crashed");
     wait_for(&root.join("crashed.ready"), &mut owner);
@@ -249,7 +253,9 @@ fn log_path(root: &Path, scope: &str) -> PathBuf {
 
 #[test]
 fn normal_process_quit_relaunches_immediately_and_after_twenty_seconds() {
-    let _process = crate::PROCESS_TREE.read().unwrap();
+    let _process = crate::PROCESS_TREE
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = private_root();
     for (index, delay) in [Duration::ZERO, Duration::from_secs(20)]
         .into_iter()
@@ -279,7 +285,9 @@ fn normal_process_quit_relaunches_immediately_and_after_twenty_seconds() {
 
 #[test]
 fn a_normal_quit_finishing_during_the_handoff_wait_is_reacquired() {
-    let _process = crate::PROCESS_TREE.read().unwrap();
+    let _process = crate::PROCESS_TREE
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = private_root();
     let mut owner = launch_with_quit_hold(&root, "exiting", true);
     wait_for(&root.join("exiting.ready"), &mut owner);
@@ -306,7 +314,9 @@ fn a_normal_quit_finishing_during_the_handoff_wait_is_reacquired() {
 
 #[test]
 fn every_guard_disposition_is_written_to_the_private_gui_log() {
-    let _process = crate::PROCESS_TREE.read().unwrap();
+    let _process = crate::PROCESS_TREE
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = private_root();
     let directory = root.join("canonical");
     let guard = canonical::acquire(&directory).unwrap().unwrap();

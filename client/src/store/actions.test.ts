@@ -1157,3 +1157,21 @@ describe("task 247 session dialogs", () => {
     });
   });
 });
+
+
+describe("copy session ID from a row", () => {
+  it("copies the ID of an unselected row", async () => {
+    const a = setup(rowOut({ session_id: "session-1" }), () => true, () => ({ key: "another-session" }));
+    const shown = snapshotOf(session({ session_id: "session-1" }));
+    expect((await a.copySessionId(shown)).outcome).toBe("done");
+    expect(mocked.copyText).toHaveBeenCalledWith("conv-1");
+  });
+  it.each(["missing", "run", "conversation", "gone"])("refuses %s identity rather than copying a name or replacement", async (kind) => {
+    const a = setup(rowOut({ session_id: "session-1" }));
+    const shown = snapshotOf(session({ conversation_id: kind === "missing" ? undefined : "conv-1" }));
+    if (kind === "gone") a.applyBatch(batchOf({ removes: [{ computer: "", key: "run:a" }] }));
+    else if (kind !== "missing") a.applyBatch(batchOf({ upserts: [rowOut({ run_id: kind === "run" ? "run-2" : "run-1", conversation_id: kind === "conversation" ? "conv-2" : "conv-1" })] }));
+    expect((await a.copySessionId(shown)).outcome).toBe("failed");
+    expect(mocked.copyText).not.toHaveBeenCalled();
+  });
+});

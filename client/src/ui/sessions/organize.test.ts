@@ -37,6 +37,10 @@ const mocked = vi.mocked(organization);
 const A = rowId("", "run:1"), B = rowId("", "run:2"), C = rowId("", "run:3");
 // Every row's own `project` is the folder's; only the assignments place it.
 applyBatch({ ...emptyBatch(), upserts: [rowOut("", 1), rowOut("", 2), rowOut("", 3)] });
+// Identified sessions on one computer, which drag to nest accepts (zerus-sa9qn.9).
+const identity = (i: number) => ({ session_id: `00000000-0000-4000-8000-00000000000${i}`, run_id: `run-${i}`, conversation_id: `conv-${i}` });
+applyBatch({ ...emptyBatch(), upserts: [rowOut("", 7, identity(7)), rowOut("", 8, identity(8)), rowOut("peer", 9, identity(9))] });
+const N7 = rowId("", "run:7"), N8 = rowId("", "run:8"), N9 = rowId("peer", "run:9");
 
 const header = (project: string): Row =>
   ({ type: "header", id: `h:${project}`, project, name: project, color: null, palette: 0, collapsed: false, total: 0, attention: 0, unread: 0, working: 0 });
@@ -147,4 +151,44 @@ it("drops loaded archive rows before archive identities and ignores an archive r
   delete state.archived[a.key];
   applyDrop({ kind: "session", id: a.key }, { group: "beta" });
   expect(mocked.moveToProject).not.toHaveBeenCalled();
+});
+
+describe("drag to nest (zerus-sa9qn.9)", () => {
+  const { rows, offsets, heights } = layout([header("alpha"), card(N7), card(N8), card(N9)]);
+  const dragging = { kind: "session" as const, id: N7 };
+
+  it("frames an identified card on the same computer when the pointer is over its middle", () => {
+    // N8 spans 134..228: its middle band (about 162..200) nests, the rest still reorders.
+    expect(placement(rows, offsets, heights, N8, 181, dragging)).toMatchObject({ nest: N8, box: { top: 138, height: 84 } });
+    expect(placement(rows, offsets, heights, N8, 140, dragging)).toMatchObject({ before: N8 });
+    expect(placement(rows, offsets, heights, N8, 220, dragging).nest).toBeUndefined();
+  });
+
+  it("never nests onto itself, another computer or an unidentified session", () => {
+    expect(placement(rows, offsets, heights, N7, 87, dragging).nest).toBeUndefined();
+    expect(placement(rows, offsets, heights, N9, 275, dragging).nest).toBeUndefined();
+    const plain = layout([header("alpha"), card(A), card(C)]);
+    expect(placement(plain.rows, plain.offsets, plain.heights, C, 181, { kind: "session", id: A }).nest).toBeUndefined();
+  });
+});
+
+describe("the card a Shift key extends the range to (SessionList.cpp:589-602)", () => {
+  const keys = ["a", "b", "c"];
+  it("steps from the range's far end, else from the open conversation", async () => {
+    const { rangeTarget } = await import("./organize");
+    expect(rangeTarget(keys, "b", "a", "ArrowDown")).toBe(2);
+    expect(rangeTarget(keys, "b", "a", "ArrowUp")).toBe(0);
+    expect(rangeTarget(keys, undefined, "b", "ArrowDown")).toBe(2);
+    expect(rangeTarget(keys, "gone", "a", "ArrowDown"), "a far end no longer listed").toBe(1);
+  });
+  it("goes to the first or last card for Home and End, and nowhere past either end", async () => {
+    const { rangeTarget } = await import("./organize");
+    expect(rangeTarget(keys, "b", "b", "Home")).toBe(0);
+    expect(rangeTarget(keys, "b", "b", "End")).toBe(2);
+    expect(rangeTarget(keys, "c", "c", "ArrowDown")).toBeUndefined();
+    expect(rangeTarget(keys, "a", "a", "ArrowUp")).toBeUndefined();
+    expect(rangeTarget(keys, undefined, undefined, "ArrowDown"), "nothing open: the first card").toBe(0);
+    expect(rangeTarget(keys, undefined, undefined, "ArrowUp"), "nothing open: the last card").toBe(2);
+    expect(rangeTarget([], "a", "a", "End")).toBeUndefined();
+  });
 });

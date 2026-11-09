@@ -15,7 +15,7 @@ export type ActionRow = Pick<Session,
   | "archiveId" | "attention" | "unread" | "sharedRead" | "allowed" | "archiveReason" | "terminateReason" | "forgetReason" | "phase"
   | "runId" | "conversationId" | "replyId" | "attentionSignature" | "created" | "fingerprint" | "sessionId"
   | "cwdPath" | "terminalSupported" | "terminalReported" | "terminalAttachSupported" | "terminalAttachReported"
-  | "muted" | "sharedNotifications" | "notificationRevision" | "notificationConflict">;
+  | "muted" | "sharedNotifications" | "notificationRevision" | "notificationConflict" | "gitWorktree">;
 
 /** A plain copy of the action fields, as they were when a menu or dialog opened. */
 export function snapshotOf(s: ActionRow): ActionRow {
@@ -24,11 +24,12 @@ export function snapshotOf(s: ActionRow): ActionRow {
     resumable: s.resumable, activity: s.activity, processState: s.processState, archiveId: s.archiveId, attention: s.attention,
     unread: s.unread, sharedRead: s.sharedRead, allowed: s.allowed, archiveReason: s.archiveReason, terminateReason: s.terminateReason, forgetReason: s.forgetReason,
     phase: s.phase, runId: s.runId, conversationId: s.conversationId, replyId: s.replyId, attentionSignature: s.attentionSignature,
-    created: s.created, fingerprint: s.fingerprint,
+    created: s.created, fingerprint: s.fingerprint, sessionId: s.sessionId,
     cwdPath: s.cwdPath, terminalSupported: s.terminalSupported, terminalReported: s.terminalReported,
     terminalAttachSupported: s.terminalAttachSupported, terminalAttachReported: s.terminalAttachReported,
     muted: s.muted, sharedNotifications: s.sharedNotifications, notificationRevision: s.notificationRevision,
     notificationConflict: s.notificationConflict,
+    gitWorktree: s.gitWorktree,
   };
 }
 
@@ -134,8 +135,12 @@ export function menuState(s: ActionRow, online: boolean, updating: boolean, deta
   const archived = s.state === "archived";
   const running = s.state === "running";
   const idle = s.activity === "idle" || !!details?.auth_required;
-  const canPause = running && s.resumable && idle && s.processState !== "exited"
-    && (!details || details.expected_id === "" || details.resume_message_can_send);
+  // An unconfirmed fresh run has no resumable history yet. Only an explicit
+  // native Pause capability may offer its existing exact-process stop path.
+  const firstTurnPause = !s.conversationId && !details?.conversation_id
+    && (details?.allowed_actions != null ? details.allowed_actions.includes("pause") : s.allowed?.split(" ").includes("pause") === true);
+  const canPause = running && s.processState !== "exited" && (firstTurnPause
+    || (s.resumable && idle && (!details || details.expected_id === "" || details.resume_message_can_send)));
   // Restore (Qt canChange 5302-5304). The client's right-click selects the row
   // first, so its context menu is Qt's selected-row case, which reuses the
   // header's m_changeAction (5360): neither reads allowed(restore) (3897-3898).
@@ -322,6 +327,22 @@ export function terminal(s: Pick<ActionRow, "cmd" | "terminalSupported" | "termi
   return s.terminalSupported;
 }
 
+/**
+ * Whether a saved session's agent gives a terminal once it runs again: the
+ * CLI reports `terminal_supported` only for a live pane, never for a paused
+ * or stopped row (zerus-5o1ns). The native DeepSeek adapters have none,
+ * OpenCode attaches by its own capability, and every other agent does; the
+ * resumed row's own `terminal` check runs before anything opens.
+ */
+export function terminalAfterResume(s: Pick<ActionRow, "cmd" | "terminalAttachSupported" | "terminalAttachReported">, details?: Details): boolean {
+  if (s.cmd === "dsh" || s.cmd === "deepseek") return false;
+  if (s.cmd === "opencode") {
+    if (typeof details?.terminal_attach_supported === "boolean") return details.terminal_attach_supported;
+    return s.terminalAttachReported && s.terminalAttachSupported;
+  }
+  return true;
+}
+
 /** The selected child identity, when its conversation has been inspected. */
 export interface ChildIdentity { id: string; conversationId?: string; cwd?: string }
 
@@ -410,7 +431,7 @@ export function forgetOpening(menuRow: ActionRow, live: ActionRow, details?: Det
   return { row, bound: { binding, run: details ? details.run_id : row.runId ?? "", conversation: details ? details.conversation_id : row.conversationId ?? "" } };
 }
 
-export type DialogKind = "rename" | "terminate" | "fresh" | "forget" | "batch" | "fork";
+export type DialogKind = "rename" | "terminate" | "fresh" | "forget" | "batch" | "fork" | "resume_terminal";
 /** What a forget dialog named: whether it forgets an OpenCode binding, and the run and conversation then in view. */
 export interface ForgetScope { binding: boolean; run: string; conversation: string }
 export type DialogOpen =
@@ -418,7 +439,9 @@ export type DialogOpen =
   | { kind: "rename" | "terminate" | "fresh"; row: ActionRow }
   | { kind: "forget"; row: ActionRow; bound: ForgetScope }
   /** A selection's Forget or Terminate: `answer` gets true for the confirm button, false otherwise. */
-  | { kind: "batch"; copy: BatchConfirmation; answer: (confirmed: boolean) => void };
+  | { kind: "batch"; copy: BatchConfirmation; answer: (confirmed: boolean) => void }
+  /** Resume and open terminal (store/sessionTerminal.ts): `answer` gets true for the confirm button, false otherwise. */
+  | { kind: "resume_terminal"; row: ActionRow; answer: (confirmed: boolean) => void };
 export type DialogState = DialogOpen | undefined;
 export type DialogEvent = ({ type: "open" } & DialogOpen) | { type: "close" };
 
@@ -426,6 +449,7 @@ export type DialogEvent = ({ type: "open" } & DialogOpen) | { type: "close" };
 export function dialogReducer(_state: DialogState, event: DialogEvent): DialogState {
   if (event.type !== "open") return undefined;
   if (event.kind === "batch") return { kind: "batch", copy: event.copy, answer: event.answer };
+  if (event.kind === "resume_terminal") return { kind: "resume_terminal", row: event.row, answer: event.answer };
   if (event.kind === "fork") return { kind: "fork", row: event.row, details: event.details };
   return event.kind === "forget" ? { kind: "forget", row: event.row, bound: event.bound } : { kind: event.kind, row: event.row };
 }

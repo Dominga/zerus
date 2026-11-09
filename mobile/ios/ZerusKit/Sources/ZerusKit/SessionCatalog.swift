@@ -63,7 +63,8 @@ public struct SessionListPresentation: Sendable {
     public static func prepare(sessions: [Session], machines: [Machine], projects: [ProjectSummary], selectedMachines: Set<MachineKey>,
                                query: String, project: ProjectKey?, filter: SessionFilter, drafts: [Draft],
                                archiveRange: ArchiveRange = ArchiveRange(),
-                               readAllCandidate: (Session, Bool) -> Bool = { _, _ in false }) -> SessionListPresentation {
+                               readAllCandidate: (Session, Bool) -> Bool = { _, _ in false },
+                               teams: TeamCollapse = TeamCollapse()) -> SessionListPresentation {
         let scoped = SessionFilters.scoped(sessions, machines, selectedMachines, query, project: project)
         let drafted = SessionFilters.draftedSessions(sessions, drafts)
         let online = Set(machines.filter(\.online).map(\.key))
@@ -74,7 +75,15 @@ public struct SessionListPresentation: Sendable {
             return at >= Double(archiveRange.from) && at < Double(archiveRange.until)
         }
         var result = SessionListPresentation()
-        result.groups = SessionFilters.grouped(visible, projects)
+        // Child sessions nest under a parent listed in the same project group (zerus-sa9qn.5).
+        let uuids = Dictionary(machines.map { ($0.key, $0.machineId) }) { first, _ in first }
+        let uuid = { (row: Session) in uuids[row.target.machineKey] }
+        let parentKey = ChildSessions.parentIndex(sessions, machine: uuid)
+        result.groups = SessionFilters.grouped(visible, projects).map { group in
+            SessionGroup(key: group.key, name: group.name, color: group.color, sessions: group.sessions,
+                         cards: ChildSessions.nest(group.sessions, parentKey: parentKey, online: { online.contains($0.target.machineKey) },
+                                                   collapsed: { teams.collapsed($0, machine: uuid($0)) }))
+        }
         result.counts = SessionFilters.counts(scoped, machines, drafts: drafted)
         result.machineCounts = SessionFilters.machineCounts(sessions, machines, filter, drafts: drafted, project: project)
         result.readAllTargets = filter == .archive ? [] : scoped.filter { readAllCandidate($0, online.contains($0.target.machineKey)) }.map(\.target)

@@ -94,7 +94,14 @@ function projectPreference(key: string, value: unknown): boolean | undefined {
   const id = key.slice(prefix.length);
   return id && new TextEncoder().encode(id).length <= 256 && !/[\u0000-\u001f\u007f-\u009f]/u.test(id) && typeof value === "boolean" ? value : undefined;
 }
-const typed = (key: string, value: unknown) => sameType(key, value) ?? shortcut(key, value) ?? machinePreference(key, value) ?? projectPreference(key, value);
+/** Account marks (zerus-sa9qn.1, .13): a color, emoji or hidden flag per URI-encoded profile token, as the core accepts them. */
+function accountPreference(key: string, value: unknown): string | boolean | undefined {
+  const match = /^accounts\/(color|mark|hide)\/([^/\\\u0000-\u001f\u007f]+)$/u.exec(key);
+  if (!match || new TextEncoder().encode(match[2]).length > 512) return undefined;
+  if (match[1] === "hide") return typeof value === "boolean" ? value : undefined;
+  return typeof value === "string" ? value : undefined;
+}
+const typed = (key: string, value: unknown) => sameType(key, value) ?? shortcut(key, value) ?? machinePreference(key, value) ?? projectPreference(key, value) ?? accountPreference(key, value);
 
 function typedObject(raw: Record<string, unknown>, keys?: readonly string[]): Settings {
   const values: Settings = {};

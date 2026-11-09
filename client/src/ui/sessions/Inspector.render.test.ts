@@ -134,7 +134,7 @@ describe("the side panel (task 206)", () => {
     const text = plain(html);
     // Environment: the session ID with its copy button, machine, folder, branch, model and effort, last event.
     for (const row of ["Environment", "5f0c2a1e-7d3b-4c8e-9a61-2b7e4d9c0f13", "workstation", "/work/orbit", "feat/checkout-v2", "gpt-5.5 high", "27 Oct 01:40"]) expect(text).toContain(row);
-    expect(html).toContain('aria-label="Copy session ID"');
+    expect(html).toContain('aria-label="Copy Session ID: 5f0c2a1e-7d3b-4c8e-9a61-2b7e4d9c0f13"');
     // Context: Qt's used share of the window, the tokens and what is left.
     for (const row of ["36% used", "72k/200k", "128k left in the window", "Clear session…"]) expect(text).toContain(row);
     // Team: the card, its chips, Phase and Phases bars, accepted, Open Team, Members and the foot line.
@@ -170,6 +170,11 @@ describe("the side panel (task 206)", () => {
       const text = plain(render());
       expect(text).toContain("Writer");
       expect(text).not.toContain("Reader");
+      if (skin === tabs) {
+        // The tabs' Plan & agents list is upstream's bounded one: "Finished: N", unfolded by its own button.
+        expect(text).toContain("Finished: 2");
+        continue;
+      }
       expect(text).toContain("2 finished");
       expect(text).toContain("show");
       // Opened for this session: every child, running first, and the way back.

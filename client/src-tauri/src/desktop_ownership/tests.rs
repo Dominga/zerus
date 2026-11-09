@@ -1300,6 +1300,44 @@ mod native {
     }
 
     #[test]
+    fn program_source_keeps_the_actual_native_connection_and_refuses_legacy_origin() {
+        if crate::test_context::native() {
+            return;
+        }
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        let f = Fixture::new(Mode::Native, json!({}));
+        let ready =
+            native_takeover(f.root.join("hgs"), f.owner.responder.clone().unwrap()).unwrap();
+        let before = f.calls("frontend-request").len();
+        let source = ready.program_source().unwrap();
+        assert!(Arc::ptr_eq(&source.connection().unwrap(), &ready.helper));
+        assert_eq!(
+            source.configuration(),
+            ready._receipt.as_ref().unwrap().configuration
+        );
+        assert_eq!(
+            source.original_ownership(),
+            ready._receipt.as_ref().unwrap()
+        );
+        assert!(source.environment().current());
+        assert!(source.route_current());
+        assert_eq!(
+            f.calls("frontend-request").len(),
+            before,
+            "source capture does not submit another native action"
+        );
+        let old = Fixture::new(Mode::Native, json!({"ownership_abi":false}));
+        let legacy =
+            native_takeover(old.root.join("hgs"), old.owner.responder.clone().unwrap()).unwrap();
+        assert!(matches!(
+            legacy.program_source(),
+            Err("worktree_programs_native_origin_unavailable")
+        ));
+        assert!(old.calls("ownership-status").is_empty());
+        assert!(old.calls("frontend-request").is_empty());
+    }
+
+    #[test]
     fn never_service_native_start_consumes_only_its_original_authenticated_noop_reply() {
         #[cfg(unix)]
         if crate::test_context::non_agent() {

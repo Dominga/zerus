@@ -27,7 +27,7 @@ import { createActions } from "./actions";
 import { createBatch, type BatchDeps, type ArchiveCalls } from "./batch";
 import { needsAttention } from "./ui";
 import { snapshotOf } from "../ui/sessions/actions-ui";
-import type { BatchConfirmation, SelectionRow } from "../ui/sessions/selection";
+import type { BatchConfirmation, MuteOutcome, SelectionRow } from "../ui/sessions/selection";
 import type { Session } from "../ui/sessions/types";
 import { emptyBatch, type Batch, type Outcome, type RowOut, type ViewRow } from "../types";
 
@@ -49,7 +49,7 @@ function deferredCalls() {
   return { answer: async (o: Outcome) => { pending.shift()!(o); await flush(); }, waiting: () => pending.length };
 }
 
-function setup(rows: RowOut[], options: { online?: (computer: string) => boolean; confirm?: boolean; archive?: ArchiveCalls; scans?: { n: number }; delay?: BatchDeps["delay"] } = {}) {
+function setup(rows: RowOut[], options: { online?: (computer: string) => boolean; confirm?: boolean; archive?: ArchiveCalls; scans?: { n: number }; delay?: BatchDeps["delay"]; silent?: string[] } = {}) {
   const online = options.online ?? (() => true);
   const catalog = createCatalog();
   catalog.applyBatch(batchOf({ upserts: rows }));
@@ -61,6 +61,10 @@ function setup(rows: RowOut[], options: { online?: (computer: string) => boolean
   const confirm = vi.fn(async (_copy: BatchConfirmation) => options.confirm ?? true);
   const markRead = vi.fn((_row: unknown) => true);
   const markNeedsAttention = vi.fn((_row: unknown) => true);
+  // Mute and Unmute (zerus-qhtxf): every listed row can change unless the test says otherwise; each write answers when the test says.
+  const mutes: { name: string; muted: boolean; resolve: (o: MuteOutcome) => void }[] = [];
+  const setMute = vi.fn((row: { name: string }, muted: boolean) => new Promise<MuteOutcome>((resolve) => { mutes.push({ name: row.name, muted, resolve }); }));
+  const notifications = vi.fn((s: { name: string }) => !(options.silent ?? []).includes(s.name));
   const b = createBatch({
     catalog: { rows: listedRows },
     online,
@@ -73,12 +77,14 @@ function setup(rows: RowOut[], options: { online?: (computer: string) => boolean
     attention: (s) => needsAttention(s as Session, online(s.computer)),
     markRead,
     markNeedsAttention,
+    notifications,
+    setMute,
     confirm,
     archive: () => options.archive,
   });
   /** The listed rows, as the selection hands them over. */
   const listed = (...tags: string[]): SelectionRow[] => tags.map((t) => catalog.catalog.rows[`\nrun:${t}`]!);
-  return { ...catalog, ...actions, ...b, compact, confirm, markRead, markNeedsAttention, listed, texts: () => actions.notices().map((n) => n.text) };
+  return { ...catalog, ...actions, ...b, compact, confirm, markRead, markNeedsAttention, setMute, mutes, listed, texts: () => actions.notices().map((n) => n.text) };
 }
 
 beforeEach(() => {
@@ -580,7 +586,7 @@ describe("row presentation", () => {
     });
   });
 
-  it("Move to project waits for project organisation", async () => {
+  it("never runs Move to project as a host write: it goes through the organization's Move dialog (zerus-5wmh.18.1)", async () => {
     await createRoot(async (dispose) => {
       const a = setup([rowOut("a")]);
       expect(a.applies(a.listed("a")[0], "move", false, true)).toBe(true);
@@ -641,5 +647,76 @@ describe("one grace period per selection", () => {
     const a = setup([], { archive: calls, delay });
     await a.run("forget", [one], { clearArchive: true });
     expect(delay).not.toHaveBeenCalled(); expect(forget).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Mute or Unmute for the selection (zerus-qhtxf)", () => {
+  it("mutes the unmuted rows one at a time and reports changed, already muted and refused", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup([rowOut("a"), rowOut("b", { muted: true }), rowOut("c"), rowOut("d")], { silent: ["claude/p/d"] });
+      const run = a.run("mute", a.listed("a", "b", "c", "d"));
+      await flush();
+      expect(a.running()).toBe(true);
+      expect(a.mutes.map((m) => [m.name, m.muted])).toEqual([["claude/p/a", true]]);
+      expect(a.texts()).toEqual(["Mute notifications: 1 / 2…"]);
+      a.mutes[0].resolve({ outcome: "changed" });
+      await flush();
+      expect(a.mutes.map((m) => m.name)).toEqual(["claude/p/a", "claude/p/c"]);
+      a.mutes[1].resolve({ outcome: "changed" });
+      await run;
+      expect(a.running()).toBe(false);
+      expect(a.texts()).toEqual(["Mute notifications: 2 changed, 1 already muted, 1 refused.\nbox / claude/p/d: notifications cannot change for this session now"]);
+      expect(a.notices().at(-1)?.tone).toBe("error");
+      dispose();
+    });
+  });
+
+  it("counts a row already muted as already muted even when its setting cannot change now (zerus-qhtxf.1)", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup([rowOut("a"), rowOut("b", { muted: true }), rowOut("c")], { silent: ["claude/p/b", "claude/p/c"] });
+      const run = a.run("mute", a.listed("a", "b", "c"));
+      await flush(); a.mutes[0].resolve({ outcome: "changed" });
+      await run;
+      expect(a.mutes.map((m) => m.name)).toEqual(["claude/p/a"]);
+      expect(a.texts()).toEqual(["Mute notifications: 1 changed, 1 already muted, 1 refused.\nbox / claude/p/c: notifications cannot change for this session now"]);
+      dispose();
+    });
+  });
+
+  it("unmutes every row of an all-muted selection", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup([rowOut("a", { muted: true }), rowOut("b", { muted: true })]);
+      const run = a.run("unmute", a.listed("a", "b"));
+      await flush(); a.mutes[0].resolve({ outcome: "changed" });
+      await flush(); a.mutes[1].resolve({ outcome: "changed" });
+      await run;
+      expect(a.mutes.map((m) => [m.name, m.muted])).toEqual([["claude/p/a", false], ["claude/p/b", false]]);
+      expect(a.texts()).toEqual(["Unmute notifications: 2 changed, 0 already unmuted, 0 refused."]);
+      expect(a.notices().at(-1)?.tone).toBe("info");
+      dispose();
+    });
+  });
+
+  it("reports a row whose shared setting changed meanwhile as refused with its reason, and keeps going", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup([rowOut("a"), rowOut("b")]);
+      const run = a.run("mute", a.listed("a", "b"));
+      await flush(); a.mutes[0].resolve({ outcome: "refused", detail: "The shared notification setting changed while this request was pending. Refresh the session." });
+      await flush(); a.mutes[1].resolve({ outcome: "changed" });
+      await run;
+      expect(a.texts()).toEqual(["Mute notifications: 1 changed, 0 already muted, 1 refused.\nbox / claude/p/a: The shared notification setting changed while this request was pending. Refresh the session."]);
+      expect(a.notices().at(-1)?.sticky).toBe(true);
+      dispose();
+    });
+  });
+
+  it("does nothing while another batch runs, or when no row needs the change", async () => {
+    await createRoot(async (dispose) => {
+      const a = setup([rowOut("a", { muted: true })]);
+      await a.run("mute", a.listed("a"));
+      expect(a.setMute).not.toHaveBeenCalled();
+      expect(a.texts()).toEqual([]);
+      dispose();
+    });
   });
 });

@@ -1,0 +1,359 @@
+{
+  "schema": 1,
+  "about": "Supervised child attention (zerus-sa9qn.3, spec docs/superpowers/specs/2026-11-07-account-labels-child-sessions-design.md section 2). Each row is an hgs ls --json session row; quiet is whether its attention is its parent's. Shared by the desktop core, Android (mobile/android ChildSessionsTest) and iOS (ZerusKit ChildSessionsTests).",
+  "cases": [
+    {
+      "name": "A child of a live parent with a new reply is quiet",
+      "row": {
+        "name": "codex/p/reply",
+        "run_id": "run-reply",
+        "conversation_id": "conv-reply",
+        "tracked": true,
+        "activity": "idle",
+        "phase": "idle",
+        "parent": {
+          "schema": 1,
+          "machine": "11111111-1111-4111-8111-111111111111",
+          "host": "arch",
+          "session_id": "22222222-2222-4222-8222-222222222222",
+          "name": "claude/p/lead",
+          "conversation_id": "c",
+          "run_id": "r",
+          "source": "launch",
+          "at": 1,
+          "state": "live"
+        },
+        "human_request": false,
+        "unread": true
+      },
+      "quiet": true
+    },
+    {
+      "name": "A child of a live parent asking a question is quiet",
+      "row": {
+        "name": "codex/p/ask",
+        "run_id": "run-ask",
+        "conversation_id": "conv-ask",
+        "tracked": true,
+        "activity": "waiting",
+        "phase": "input",
+        "parent": {
+          "schema": 1,
+          "machine": "11111111-1111-4111-8111-111111111111",
+          "host": "arch",
+          "session_id": "22222222-2222-4222-8222-222222222222",
+          "name": "claude/p/lead",
+          "conversation_id": "c",
+          "run_id": "r",
+          "source": "launch",
+          "at": 1,
+          "state": "live"
+        },
+        "human_request": false
+      },
+      "quiet": true
+    },
+    {
+      "name": "A child of a live parent with a provider error is quiet",
+      "row": {
+        "name": "codex/p/error",
+        "run_id": "run-error",
+        "conversation_id": "conv-error",
+        "tracked": true,
+        "activity": "waiting",
+        "phase": "error",
+        "parent": {
+          "schema": 1,
+          "machine": "11111111-1111-4111-8111-111111111111",
+          "host": "arch",
+          "session_id": "22222222-2222-4222-8222-222222222222",
+          "name": "claude/p/lead",
+          "conversation_id": "c",
+          "run_id": "r",
+          "source": "launch",
+          "at": 1,
+          "state": "live"
+        },
+        "human_request": false,
+        "provider_error": {
+          "error_kind": "quota"
+        }
+      },
+      "quiet": true
+    },
+    {
+      "name": "A tool or permission approval is the person's",
+      "row": {
+        "name": "codex/p/approve",
+        "run_id": "run-approve",
+        "conversation_id": "conv-approve",
+        "tracked": true,
+        "activity": "waiting",
+        "phase": "approval",
+        "parent": {
+          "schema": 1,
+          "machine": "11111111-1111-4111-8111-111111111111",
+          "host": "arch",
+          "session_id": "22222222-2222-4222-8222-222222222222",
+          "name": "claude/p/lead",
+          "conversation_id": "c",
+          "run_id": "r",
+          "source": "launch",
+          "at": 1,
+          "state": "live"
+        },
+        "human_request": true
+      },
+      "quiet": false
+    },
+    {
+      "name": "A folder trust prompt is the person's",
+      "row": {
+        "name": "codex/p/trust",
+        "run_id": "run-trust",
+        "conversation_id": "conv-trust",
+        "tracked": true,
+        "activity": "waiting",
+        "phase": "input",
+        "parent": {
+          "schema": 1,
+          "machine": "11111111-1111-4111-8111-111111111111",
+          "host": "arch",
+          "session_id": "22222222-2222-4222-8222-222222222222",
+          "name": "claude/p/lead",
+          "conversation_id": "c",
+          "run_id": "r",
+          "source": "launch",
+          "at": 1,
+          "state": "live"
+        },
+        "human_request": true
+      },
+      "quiet": false
+    },
+    {
+      "name": "A saved parent leaves its child ordinary",
+      "row": {
+        "name": "codex/p/saved",
+        "run_id": "run-saved",
+        "conversation_id": "conv-saved",
+        "tracked": true,
+        "activity": "waiting",
+        "phase": "input",
+        "parent": {
+          "schema": 1,
+          "machine": "11111111-1111-4111-8111-111111111111",
+          "host": "arch",
+          "session_id": "22222222-2222-4222-8222-222222222222",
+          "name": "claude/p/lead",
+          "conversation_id": "c",
+          "run_id": "r",
+          "source": "launch",
+          "at": 1,
+          "state": "saved"
+        },
+        "human_request": false
+      },
+      "quiet": false
+    },
+    {
+      "name": "An archived parent leaves its child ordinary",
+      "row": {
+        "name": "codex/p/archived",
+        "run_id": "run-archived",
+        "conversation_id": "conv-archived",
+        "tracked": true,
+        "activity": "waiting",
+        "phase": "input",
+        "parent": {
+          "schema": 1,
+          "machine": "11111111-1111-4111-8111-111111111111",
+          "host": "arch",
+          "session_id": "22222222-2222-4222-8222-222222222222",
+          "name": "claude/p/lead",
+          "conversation_id": "c",
+          "run_id": "r",
+          "source": "launch",
+          "at": 1,
+          "state": "archived"
+        },
+        "human_request": false
+      },
+      "quiet": false
+    },
+    {
+      "name": "A parent this computer does not list leaves its child ordinary",
+      "row": {
+        "name": "codex/p/missing",
+        "run_id": "run-missing",
+        "conversation_id": "conv-missing",
+        "tracked": true,
+        "activity": "waiting",
+        "phase": "input",
+        "parent": {
+          "schema": 1,
+          "machine": "11111111-1111-4111-8111-111111111111",
+          "host": "arch",
+          "session_id": "22222222-2222-4222-8222-222222222222",
+          "name": "claude/p/lead",
+          "conversation_id": "c",
+          "run_id": "r",
+          "source": "launch",
+          "at": 1,
+          "state": "missing"
+        },
+        "human_request": false
+      },
+      "quiet": false
+    },
+    {
+      "name": "A session without a parent is ordinary",
+      "row": {
+        "name": "codex/p/plain",
+        "run_id": "run-plain",
+        "conversation_id": "conv-plain",
+        "tracked": true,
+        "activity": "waiting",
+        "phase": "input"
+      },
+      "quiet": false
+    },
+    {
+      "name": "A live parent without a reported human_request keeps attention (an older or unknown host)",
+      "row": {
+        "name": "codex/p/old",
+        "run_id": "run-old",
+        "conversation_id": "conv-old",
+        "tracked": true,
+        "activity": "waiting",
+        "phase": "input",
+        "parent": {
+          "schema": 1,
+          "machine": "11111111-1111-4111-8111-111111111111",
+          "host": "arch",
+          "session_id": "22222222-2222-4222-8222-222222222222",
+          "name": "claude/p/lead",
+          "conversation_id": "c",
+          "run_id": "r",
+          "source": "launch",
+          "at": 1,
+          "state": "live"
+        }
+      },
+      "quiet": false
+    },
+    {
+      "name": "An approval from a host that does not classify requests keeps attention (zerus-b5oin)",
+      "row": {
+        "name": "codex/p/approval-unclassified",
+        "run_id": "run-ask",
+        "conversation_id": "conv-ask",
+        "tracked": true,
+        "activity": "waiting",
+        "phase": "approval",
+        "parent": {
+          "schema": 1,
+          "machine": "11111111-1111-4111-8111-111111111111",
+          "host": "arch",
+          "session_id": "22222222-2222-4222-8222-222222222222",
+          "name": "claude/p/lead",
+          "conversation_id": "c",
+          "run_id": "r",
+          "source": "launch",
+          "at": 1,
+          "state": "live"
+        }
+      },
+      "quiet": false
+    },
+    {
+      "name": "An approval is the person's even if the host classified it otherwise",
+      "row": {
+        "name": "codex/p/approval-misclassified",
+        "run_id": "run-ask",
+        "conversation_id": "conv-ask",
+        "tracked": true,
+        "activity": "waiting",
+        "phase": "approval",
+        "parent": {
+          "schema": 1,
+          "machine": "11111111-1111-4111-8111-111111111111",
+          "host": "arch",
+          "session_id": "22222222-2222-4222-8222-222222222222",
+          "name": "claude/p/lead",
+          "conversation_id": "c",
+          "run_id": "r",
+          "source": "launch",
+          "at": 1,
+          "state": "live"
+        },
+        "human_request": false
+      },
+      "quiet": false
+    },
+    {
+      "name": "A native subagent's tool approval is the person's (zerus-dn4ia)",
+      "row": {
+        "name": "codex/p/child-approval",
+        "run_id": "run-ask",
+        "conversation_id": "conv-ask",
+        "tracked": true,
+        "activity": "busy",
+        "phase": "tool",
+        "parent": {
+          "schema": 1,
+          "machine": "11111111-1111-4111-8111-111111111111",
+          "host": "arch",
+          "session_id": "22222222-2222-4222-8222-222222222222",
+          "name": "claude/p/lead",
+          "conversation_id": "c",
+          "run_id": "r",
+          "source": "launch",
+          "at": 1,
+          "state": "live"
+        },
+        "human_request": false,
+        "subagents": {
+          "kid": {
+            "name": "Reviewer",
+            "state": "working",
+            "display_state": "approval"
+          }
+        }
+      },
+      "quiet": false
+    },
+    {
+      "name": "A native subagent's question is the parent's",
+      "row": {
+        "name": "codex/p/child-input",
+        "run_id": "run-ask",
+        "conversation_id": "conv-ask",
+        "tracked": true,
+        "activity": "busy",
+        "phase": "tool",
+        "parent": {
+          "schema": 1,
+          "machine": "11111111-1111-4111-8111-111111111111",
+          "host": "arch",
+          "session_id": "22222222-2222-4222-8222-222222222222",
+          "name": "claude/p/lead",
+          "conversation_id": "c",
+          "run_id": "r",
+          "source": "launch",
+          "at": 1,
+          "state": "live"
+        },
+        "human_request": false,
+        "subagents": {
+          "kid": {
+            "name": "Reviewer",
+            "state": "working",
+            "display_state": "input"
+          }
+        }
+      },
+      "quiet": true
+    }
+  ]
+}

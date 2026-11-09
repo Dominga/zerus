@@ -180,11 +180,25 @@ impl TaskCall {
     }
 
     /// One page of a stage: `task list --stage S --limit N [--after CURSOR]`.
-    pub fn list_page(project: &str, stage: &str, limit: usize, after: Option<&str>) -> TaskCall {
+    /// `scope` is `(host, session ID)` of one session's view; an empty host
+    /// is this computer.
+    pub fn list_page(
+        project: &str,
+        stage: &str,
+        limit: usize,
+        after: Option<&str>,
+        scope: Option<(&str, &str)>,
+    ) -> TaskCall {
         let mut args = words(&["list", "--stage", stage, "--limit"]);
         args.push(limit.to_string());
         if let Some(after) = after {
             args.extend(["--after".to_owned(), after.to_owned()]);
+        }
+        if let Some((host, session_id)) = scope {
+            args.extend(["--session".to_owned(), session_id.to_owned()]);
+            if !host.is_empty() {
+                args.extend(["--host".to_owned(), host.to_owned()]);
+            }
         }
         TaskCall::new(with_project(args, project), "")
     }
@@ -487,6 +501,39 @@ pub fn message_delivered(reply: &Map<String, Value>, task: &str, id: &str) -> Re
     }
 }
 
+/// What a managed reopen's reply says of its own attempt (A4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reopen {
+    /// The attempt's own receipt shows that the change request was submitted.
+    Submitted,
+    /// Its input was refused before it was admitted: nothing was sent, and
+    /// the text stays in the task as a note.
+    Refused,
+    /// It may have reached the executor. It is never sent again.
+    Uncertain,
+}
+
+/// The attempt a message reply names (`hgs task message` reopening a task
+/// with execution attempts), `None` for a reply without one: a send, a queue,
+/// a note or a legacy reopen. Only its own `submitted` state is a sent
+/// change request; any other or unreadable state stays uncertain, and an
+/// attempt of another request is an identity mismatch.
+pub fn reopen_attempt(reply: &Map<String, Value>, id: &str) -> Result<Option<Reopen>, String> {
+    let Some(attempt) = reply.get("attempt") else {
+        return Ok(None);
+    };
+    if attempt["id"].as_str() != Some(id) {
+        return Err(
+            "The message reply did not match its original identity. Recovery data was kept.".into(),
+        );
+    }
+    Ok(Some(match attempt["state"].as_str() {
+        Some("submitted") => Reopen::Submitted,
+        Some("refused") => Reopen::Refused,
+        _ => Reopen::Uncertain,
+    }))
+}
+
 /// A reserved message: its record `{id, intent}`, whether it recovers an
 /// earlier attempt, and whether that attempt's intent differs from this one.
 #[derive(Clone, Debug, PartialEq)]
@@ -688,6 +735,16 @@ pub mod outbox {
     /// The pending record only when its exact reservation marker agrees.
     /// Missing, mismatched or future evidence stays intact and authorizes no
     /// recovery call. This read never reserves, releases or submits anything.
+    ///
+    /// A reservation marker without its record is a completed release
+    /// (zerus-7e1sa, coordinator decision of 2026-11-08): the record is always
+    /// written and synced before its marker, so a lone marker can only follow
+    /// a durable removal, such as a release interrupted before its marker
+    /// went, or an external deletion. It is no pending record and never
+    /// authorizes sending the old message again; [`reserve`] clears it.
+    /// While a handoff marker also remains, the desktop service received the
+    /// record and its review decides: that evidence stays refused until an
+    /// explicit [`release`] of the original clears it.
     pub fn pending(root: &Path, project: &str, task: &str) -> Result<Option<Value>, String> {
         let file = path(root, project, task);
         let marker = marker(&file);
@@ -701,10 +758,13 @@ pub mod outbox {
             _ => Err(unavailable()),
         };
         let (has_record, has_marker) = (exists(&file)?, exists(&marker)?);
-        if !has_record && !has_marker {
+        if !has_record {
+            if has_marker && exists(&handoff(&file))? {
+                return Err(unavailable());
+            }
             return Ok(None);
         }
-        if !has_record || !has_marker {
+        if !has_marker {
             return Err(unavailable());
         }
         let record = read(&file)?;
@@ -830,7 +890,7 @@ pub mod outbox {
                 );
             }
         }
-        let reserved = if file.exists() || marker(&file).exists() {
+        let reserved = if file.exists() {
             let record = read(&file)?;
             let different_intent = record["intent"] != *intent;
             Reserved {
@@ -839,11 +899,30 @@ pub mod outbox {
                 different_intent,
             }
         } else {
-            // Without a record or reservation marker, a handoff marker is
-            // what a completed release left: its record is already gone.
-            remove(&handoff(&file)).map_err(|_| {
-                "Could not update message recovery state. Nothing was submitted.".to_owned()
-            })?;
+            // Without a record, a reservation or handoff marker is what a
+            // completed release left (see [`pending`]). Both go durably
+            // before the new record is written, so a crash in between never
+            // pairs the new record with the old identity. The old message is
+            // not sent again: the new one has its own new ID.
+            let lone = fs::symlink_metadata(marker(&file)).is_ok();
+            if lone && fs::symlink_metadata(handoff(&file)).is_ok() {
+                // Handed to the desktop service: its review decides.
+                return Err(
+                    "The original message recovery snapshot is unavailable. This check sent nothing."
+                        .into(),
+                );
+            }
+            remove(&marker(&file))
+                .and_then(|()| remove(&handoff(&file)))
+                .map_err(|_| {
+                    "Could not update message recovery state. Nothing was submitted.".to_owned()
+                })?;
+            if lone {
+                sync_parent(&file)?;
+                eprintln!(
+                    "zerus-client-core: task outbox: cleared a reservation marker left by an interrupted release; its message is not sent again"
+                );
+            }
             let mut record = json!({"id": new_id, "intent": intent});
             if let Some(input) = input {
                 if input == super::message_input(intent) {
@@ -1590,12 +1669,22 @@ mod outbox_tests {
         );
         std::fs::write(&marker, ID).unwrap();
         std::fs::remove_file(&file).unwrap();
-        assert!(outbox::pending(&root.0, "example", "task").is_err());
+        // zerus-7e1sa, coordinator decision of 2026-11-08: the record is
+        // written and synced before its marker, so a lone marker can only
+        // follow a durable removal (an interrupted release) or an external
+        // deletion. It is a completed release: no pending record, and the
+        // marker is kept until the next reservation clears it. This read
+        // still changes nothing.
+        assert_eq!(outbox::pending(&root.0, "example", "task").unwrap(), None);
+        assert!(marker.exists());
         std::fs::write(
             &file,
             serde_json::json!({"id":ID,"intent":intent,"schema":2}).to_string(),
         )
         .unwrap();
+        assert!(outbox::pending(&root.0, "example", "task").is_err());
+        // A record without its marker is never a completed release.
+        std::fs::remove_file(&marker).unwrap();
         assert!(outbox::pending(&root.0, "example", "task").is_err());
     }
 
@@ -1896,6 +1985,54 @@ mod outbox_tests {
     }
 
     #[test]
+    fn only_a_reopens_own_submitted_attempt_is_a_sent_change_request() {
+        let reply = |attempt: Option<Value>| {
+            let mut reply = json!({"task": {"uuid": "t-1"}, "message": {"request_id": ID}});
+            if let Some(attempt) = attempt {
+                reply["attempt"] = attempt;
+            }
+            reply.as_object().unwrap().clone()
+        };
+        assert_eq!(reopen_attempt(&reply(None), ID), Ok(None));
+        let state = |state: Value| {
+            reopen_attempt(
+                &reply(Some(json!({"id": ID, "state": state, "error": ""}))),
+                ID,
+            )
+        };
+        assert_eq!(state(json!("submitted")), Ok(Some(Reopen::Submitted)));
+        assert_eq!(state(json!("refused")), Ok(Some(Reopen::Refused)));
+        for unclear in [
+            json!("uncertain"),
+            json!("cutting_over"),
+            json!("Submitted"),
+            json!(null),
+            json!(1),
+        ] {
+            assert_eq!(
+                state(unclear.clone()),
+                Ok(Some(Reopen::Uncertain)),
+                "{unclear}"
+            );
+        }
+        assert_eq!(
+            reopen_attempt(&reply(Some(json!({"id": ID}))), ID),
+            Ok(Some(Reopen::Uncertain))
+        );
+        for other in [
+            json!({"id": OTHER, "state": "submitted"}),
+            json!({"state": "submitted"}),
+            json!(null),
+            json!("submitted"),
+        ] {
+            assert!(
+                reopen_attempt(&reply(Some(other.clone())), ID).is_err(),
+                "{other}"
+            );
+        }
+    }
+
+    #[test]
     fn a_message_is_reserved_recovered_and_released() {
         let root = scratch("cycle");
         let intent = message_intent("hello", &[], "comment", "none");
@@ -1967,20 +2104,92 @@ mod outbox_tests {
         let intent = message_intent("hello", &[], "comment", "none");
         outbox::reserve(&root.0, "alpha", "t-1", &intent, ID).unwrap();
         let file = outbox::path(&root.0, "alpha", "t-1");
-        // The marker remains when the record is lost: nothing is sent again.
+        // zerus-7e1sa (coordinator decision of 2026-11-08): a lost record
+        // with its marker left is a completed release. The old message is
+        // never sent again; a new submission gets its own new identity.
         std::fs::remove_file(&file).unwrap();
-        assert_eq!(
-            outbox::reserve(&root.0, "alpha", "t-1", &intent, OTHER),
-            Err(
-                "The original message recovery snapshot is unavailable. This check sent nothing."
-                    .into()
-            )
-        );
+        let fresh = outbox::reserve(&root.0, "alpha", "t-1", &intent, OTHER).unwrap();
+        assert!(!fresh.recovering);
+        assert_eq!(fresh.record["id"], OTHER);
+        // A damaged record with its marker still sends nothing.
         std::fs::write(&file, r#"{"id":"not a uuid","intent":{}}"#).unwrap();
         assert_eq!(
-            outbox::reserve(&root.0, "alpha", "t-1", &intent, OTHER),
+            outbox::reserve(&root.0, "alpha", "t-1", &intent, ID),
             Err("The message recovery snapshot is invalid. Nothing was submitted.".into())
         );
+    }
+
+    /// zerus-7e1sa: `release` removes the record and syncs, then removes the
+    /// reservation marker. A crash between the two left a lone marker that
+    /// refused every later Submit, Check and reviewed release of the task.
+    #[test]
+    fn a_release_interrupted_after_the_record_went_never_blocks_or_replays() {
+        let root = scratch("interrupted-release");
+        let intent = message_intent("first", &[], "comment", "none");
+        let first = outbox::reserve(&root.0, "alpha", "t-1", &intent, ID).unwrap();
+        assert!(!first.recovering);
+        let file = outbox::path(&root.0, "alpha", "t-1");
+        let marker = file.with_extension("marker");
+        let handoff = file.with_extension("service");
+        // The release's first durable step only: record gone, marker kept.
+        std::fs::remove_file(&file).unwrap();
+        assert!(marker.exists() && !handoff.exists());
+        // Check: nothing pending, nothing to recover or send.
+        assert_eq!(outbox::pending(&root.0, "alpha", "t-1"), Ok(None));
+        // Submit: a new message with its own identity, never the old one.
+        let next = message_intent("second", &[], "comment", "none");
+        let reserved = outbox::reserve(&root.0, "alpha", "t-1", &next, OTHER).unwrap();
+        assert!(!reserved.recovering && !reserved.different_intent);
+        assert_eq!(reserved.record["id"], OTHER);
+        assert_eq!(reserved.record["intent"], next);
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), OTHER);
+        // The submission names only the new identity; nothing is recovered.
+        let call = message_call("alpha", "t-1", &reserved.record, reserved.recovering).unwrap();
+        assert!(call.args.iter().any(|arg| arg == OTHER));
+        assert!(!call
+            .args
+            .iter()
+            .any(|arg| arg == ID || arg == "--recover-only"));
+        let pending = outbox::pending(&root.0, "alpha", "t-1").unwrap().unwrap();
+        assert_eq!(
+            (pending["id"].clone(), pending["intent"].clone()),
+            (json!(OTHER), next.clone())
+        );
+        // A reviewed release and a delivered release work on the new record.
+        assert_eq!(
+            outbox::release(&root.0, "alpha", "t-1", ID),
+            Err("The pending message changed; refresh this task.".into())
+        );
+        assert_eq!(
+            outbox::release_if_unchanged(&root.0, "alpha", "t-1", &pending),
+            Ok(true)
+        );
+        assert_eq!(outbox::pending(&root.0, "alpha", "t-1"), Ok(None));
+        assert!(!marker.exists());
+    }
+
+    /// zerus-7e1sa: a record handed to the desktop service is evidence for the
+    /// service's review. Without the record, its reservation and handoff
+    /// markers stay refused (no fresh Submit or Start beside an original the
+    /// service may still hold) until an explicit release of that original.
+    #[test]
+    fn a_handed_off_record_without_its_file_stays_for_the_service_review() {
+        let root = scratch("handed-off-lone");
+        let intent = message_intent("first", &[], "comment", "none");
+        let record = outbox::reserve(&root.0, "alpha", "t-1", &intent, ID)
+            .unwrap()
+            .record;
+        outbox::hand_off(&root.0, "alpha", "t-1", &record).unwrap();
+        let file = outbox::path(&root.0, "alpha", "t-1");
+        std::fs::remove_file(&file).unwrap();
+        assert!(outbox::pending(&root.0, "alpha", "t-1").is_err());
+        assert!(outbox::reserve(&root.0, "alpha", "t-1", &intent, OTHER).is_err());
+        assert!(file.with_extension("marker").exists() && file.with_extension("service").exists());
+        // The settled original's explicit release clears both markers.
+        assert_eq!(outbox::release(&root.0, "alpha", "t-1", ID), Ok(()));
+        assert_eq!(outbox::pending(&root.0, "alpha", "t-1"), Ok(None));
+        let fresh = outbox::reserve(&root.0, "alpha", "t-1", &intent, OTHER).unwrap();
+        assert!(!fresh.recovering && fresh.record["id"] == OTHER);
     }
 
     #[test]

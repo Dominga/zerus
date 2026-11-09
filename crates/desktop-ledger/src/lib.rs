@@ -2,9 +2,11 @@
 //! approval authority, clock or frontend lives here. Read intent is in `reads`. The actor
 //! must verify current delegation and lease freshness before calling `reserve`.
 //! A returned existing reservation never authorizes another delivery.
+pub mod diagnostics;
 pub mod native;
 pub mod operations;
 pub mod reads;
+pub mod task_controls;
 
 use anyhow::{ensure, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
@@ -32,7 +34,7 @@ pub fn migrate(tx: &Transaction<'_>) -> Result<()> {
         intent_id TEXT NOT NULL REFERENCES desktop_intents(id), revision INTEGER NOT NULL,
         epoch TEXT NOT NULL, service_epoch TEXT NOT NULL, adapter TEXT NOT NULL, lease TEXT NOT NULL,
         retry_of TEXT, state TEXT NOT NULL CHECK(state IN('reserved','delivered','refused','unknown')),
-        receipt TEXT);
+        receipt TEXT, recorded_at INTEGER CHECK(recorded_at>=0));
         CREATE INDEX desktop_attempt_identity ON desktop_attempts(intent_id,revision,seq DESC);
         CREATE INDEX desktop_attempt_edge ON desktop_attempts(intent_id,seq DESC);
         CREATE INDEX desktop_attempt_state ON desktop_attempts(state,seq);
@@ -89,6 +91,13 @@ pub enum Target {
         run: String,
         conversation: String,
     },
+    /// A mandatory native question before the first conversation exists.
+    /// It cannot borrow a name, host epoch or synthetic conversation ID.
+    StartupQuestion {
+        computer: String,
+        run: String,
+        question: String,
+    },
     Device {
         configuration: String,
     },
@@ -132,6 +141,21 @@ impl Identity {
                 ensure!(
                     matches!(self.kind, Kind::Badge | Kind::Presence),
                     "invalid device effect kind"
+                );
+            }
+            Target::StartupQuestion {
+                computer,
+                run,
+                question,
+            } => {
+                if !computer.is_empty() {
+                    text(computer, 255)?;
+                }
+                text(run, 1024)?;
+                text(question, 1024)?;
+                ensure!(
+                    matches!(self.kind, Kind::Post | Kind::Withdrawal),
+                    "invalid startup question effect kind"
                 );
             }
         }
@@ -574,6 +598,30 @@ pub fn finish(
     outcome: State,
     receipt: &Value,
 ) -> Result<()> {
+    finish_with_time(db, request, outcome, receipt, None)
+}
+
+/// Record the actor's wall-clock receipt-publication time (Unix milliseconds).
+/// This is diagnostic data, never a deadline or delivery-currentness proof.
+/// Duplicate settlement preserves the first recorded time.
+pub fn finish_recorded(
+    db: &mut Connection,
+    request: &Reserve,
+    outcome: State,
+    receipt: &Value,
+    recorded_at: i64,
+) -> Result<()> {
+    ensure!(recorded_at >= 0, "invalid receipt recording time");
+    finish_with_time(db, request, outcome, receipt, Some(recorded_at))
+}
+
+fn finish_with_time(
+    db: &mut Connection,
+    request: &Reserve,
+    outcome: State,
+    receipt: &Value,
+    recorded_at: Option<i64>,
+) -> Result<()> {
     ensure!(outcome != State::Reserved, "invalid terminal receipt state");
     let fingerprint = hash(json(request, 4096)?.as_bytes());
     let receipt = json(receipt, RECEIPT_BYTES)?;
@@ -595,14 +643,14 @@ pub fn finish(
         return Ok(());
     }
     tx.execute(
-        "UPDATE desktop_attempts SET state=?2,receipt=?3 WHERE request_id=?1",
-        params![request.request_id, outcome.name(), receipt],
+        "UPDATE desktop_attempts SET state=?2,receipt=?3,recorded_at=?4 WHERE request_id=?1",
+        params![request.request_id, outcome.name(), receipt, recorded_at],
     )?;
     tx.commit()?;
     Ok(())
 }
 
-/// Counts use four transactionally maintained rows, not a journal scan.
+/// Counts use four maintained rows; diagnostics read at most two indexed rows.
 pub fn status(db: &Connection) -> Result<Value> {
     let (revoked, reason): (bool, String) = db.query_row(
         "SELECT revoked,reason FROM desktop_writer WHERE id=1",
@@ -624,7 +672,12 @@ pub fn status(db: &Connection) -> Result<Value> {
         counts.insert(state, Value::from(count));
     }
     ensure!(counts.len() == 4, "incomplete ledger counters");
-    Ok(serde_json::json!({"revoked":revoked,"reason":reason,"attempts":counts}))
+    let recent = diagnostics::recent(db).unwrap_or_else(
+        |_| serde_json::json!({"available":false,"error":"attempt_diagnostics_unavailable"}),
+    );
+    Ok(
+        serde_json::json!({"revoked":revoked,"reason":reason,"attempts":counts,"recent_failures":recent}),
+    )
 }
 pub fn page(db: &Connection, before: i64, limit: usize) -> Result<Vec<Attempt>> {
     ensure!(

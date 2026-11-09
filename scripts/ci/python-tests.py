@@ -26,6 +26,7 @@ TIMEOUT = 600
 # share a class fixture.
 CHUNK = 12
 WORKTREE_MODULES = frozenset({"test_worktrees", "test_worktree_lifecycle", "test_worktree_maintenance"})
+LINUX_WORKTREE_MODULES = WORKTREE_MODULES | {"test_worktree_program_execution"}
 
 # The classes unittest discovery would load from the module, by their names in
 # it, with their tests and whether they share a class fixture.
@@ -74,7 +75,7 @@ def run(job):
     command = [sys.executable, "-m", "unittest", "-v", *names]
     # A host's other jobs can deliberately hide process metadata. Cleanup must
     # then retain checkouts; positive deletion fixtures need their own inventory.
-    if sys.platform == "linux" and job.split(".")[0] in WORKTREE_MODULES:
+    if sys.platform == "linux" and job.split(".")[0] in LINUX_WORKTREE_MODULES:
         command = [sys.executable, str(Path(__file__).with_name("worktree-tests.py")), *names]
     if sys.platform == "darwin" and os.environ.get("GITHUB_ACTIONS") == "true" and job in WORKTREE_MODULES:
         command = [sys.executable, str(Path(__file__).with_name("macos-worktree-tests.py")),

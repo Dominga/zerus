@@ -7,7 +7,7 @@ describe("shortcut help", () => {
 
   it("includes every command and the fixed rows in Qt's order", () => {
     const rows = shortcutHelpRows();
-    expect(rows[0]).toMatchObject({ group: "Navigation", title: "Go to Overview", chord: "Ctrl+1" });
+    expect(rows[0]).toMatchObject({ group: "Navigation", title: "Go to Overview", chord: "Ctrl+1 ✓" });
     expect(rows.at(-1)).toEqual({ group: "Fixed keys", title: "Reorder projects in the Projects dialog", chord: "Alt+Up, Alt+Down" });
     expect(rows.filter((row) => row.group === "Fixed keys")).toHaveLength(12);
   });
@@ -23,6 +23,15 @@ describe("shortcut help", () => {
     const sequence = parseSequence("Ctrl+Alt+J")!;
     setKeys("go.anywhere", [sequence]);
     expect(shortcutHelpRows().find((row) => row.title === "Go to…")?.chord).toBe(nativeText(sequence));
+  });
+
+  it("marks the chords that still reach Zerus while Terminal has focus, as Settings does", () => {
+    const chord = (title: string, on: "linux" | "macos") => shortcutHelpRows(on).find((row) => row.title === title)?.chord;
+    expect(chord("Next tab", "linux")).toBe("Ctrl+Tab ✓");
+    expect(chord("Next session", "linux")).toBe("Alt+Down, Ctrl+PgDown ✓");
+    expect(chord("Go to…", "linux")).toBe("Ctrl+K");
+    expect(chord("Send message", "linux")).toBe("Ctrl+Return");
+    expect(chord("Go to…", "macos")).toBe("⌘K ✓");
   });
 
   it("uses platform-specific terminal copy and paste", () => {

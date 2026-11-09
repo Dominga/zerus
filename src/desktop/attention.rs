@@ -22,6 +22,15 @@ const ROWS_PER_TURN: usize = 4;
 const EFFECTS_PER_TURN: usize = 8;
 const FOCUS_TTL: Duration = Duration::from_secs(5);
 pub(super) const SCHEMA: i64 = 20;
+pub(super) const STARTUP_SCHEMA: i64 = 32;
+pub(super) fn migrate_startup(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "CREATE INDEX desktop_attention_catalog_run ON desktop_catalog_rows(generation,
+        CASE WHEN json_valid(json) THEN json_extract(json,'$.cmd') END,
+        CASE WHEN json_valid(json) THEN json_extract(json,'$.run_id') END);",
+    )?;
+    Ok(())
+}
 pub(super) fn migrate_retention(tx: &rusqlite::Transaction<'_>) -> Result<()> {
     retention::migrate(tx)
 }
@@ -332,8 +341,14 @@ impl Runtime {
                 // Missing genuine identities are ineligible, without a name,
                 // generation or epoch fallback. They do not poison other rows.
                 let view = zerus_client_core::view::row(&value);
-                if view.run_id.as_deref().is_none_or(str::is_empty)
-                    || view.conversation_id.as_deref().is_none_or(str::is_empty)
+                if value
+                    .get("conversation_id")
+                    .is_some_and(|value| !value.is_null() && !value.is_string())
+                    || !identity::source(
+                        &scope.source.computer,
+                        view.run_id.as_deref().unwrap_or(""),
+                        view.conversation_id.as_deref().unwrap_or(""),
+                    )
                 {
                     continue;
                 }
@@ -351,7 +366,8 @@ impl Runtime {
                     &store.db,
                     computer,
                     &view.notify.cmd,
-                    view.conversation_id.as_deref().unwrap(),
+                    view.conversation_id.as_deref().unwrap_or(""),
+                    view.run_id.as_deref().unwrap(),
                 )?;
                 if current_key.as_deref().is_some_and(|key| key != row.key) {
                     let history = projection::project(
@@ -377,12 +393,20 @@ impl Runtime {
                 {
                     continue;
                 }
-                let previous = state::previous(&store.db, &session)?;
+                let mut previous = state::previous(&store.db, &session)?;
                 // A retained delta can be superseded before this actor turn.
                 // Consume it as historical data, never post from it. The next
                 // delta carries the current edge; no cached row is permission.
                 let actual: Option<String>=store.db.query_row("SELECT r.json FROM desktop_catalog_rows r JOIN desktop_catalog_sources s ON s.visible=r.generation WHERE s.computer=?1 AND r.key=?2 AND length(CAST(r.json AS BLOB))<=?3",params![computer,row.key,catalog::PAGE_BYTES as i64],|r|r.get(0)).optional()?;
                 let stale = actual.as_deref() != Some(raw.as_str());
+                if !stale
+                    && view
+                        .conversation_id
+                        .as_deref()
+                        .is_some_and(|c| !c.is_empty())
+                {
+                    state::handover_startup(&mut store.db, computer, &view, &mut previous)?;
+                }
                 let projection = projection::project(
                     computer,
                     &label,
@@ -600,7 +624,8 @@ impl Runtime {
                     .get("conversation_id")
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                if state::current_key(&store.db, &edge.computer, cmd, conversation)?.as_deref()
+                let run = value.get("run_id").and_then(Value::as_str).unwrap_or("");
+                if state::current_key(&store.db, &edge.computer, cmd, conversation, run)?.as_deref()
                     != Some(&edge.key)
                 {
                     continue;

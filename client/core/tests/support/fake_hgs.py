@@ -47,6 +47,16 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MARKER = "Event stream ABI: watch-v1"
+PROCESS_RECEIPT_ID = f"{os.getpid()}-{time.monotonic_ns()}"
+
+
+def receipt(event, host):
+    # A receipt belongs to this original fake process, before shared logging.
+    # A missing journal row does not mean its stdin never reached EOF.
+    path = os.path.join(HERE, f"{event}-{PROCESS_RECEIPT_ID}.json")
+    with open(path, "x", encoding="utf-8") as handle:
+        json.dump({"schema": 1, "event": event, "host": host,
+                   "pid": os.getpid(), "at": time.time()}, handle)
 
 
 def log(entry):
@@ -119,6 +129,7 @@ def serve(host, writer, until_file=None):
         log({"host": host, "exit": 0})
         sys.stdout.flush()
         os._exit(0)
+    receipt("serve-ready", host)
     for line in sys.stdin:
         try:
             control = json.loads(line)
@@ -132,6 +143,13 @@ def serve(host, writer, until_file=None):
                           "cursor": 1})
         elif control.get("op") == "ping":
             writer.frame({"t": "pong", "id": control.get("id")})
+        elif control.get("op") == "subscribe" and control.get("topic") == "git":
+            path = control.get("path")
+            writer.frame({"t": "state", "topic": "git", "key": path, "rev": 1,
+                          "value": {"state": "ok", "root": path, "branch": "fixture",
+                                    "changed_files": 3, "ahead": 2, "behind": 1,
+                                    "remote_state": "verified", "remote_age_seconds": 0}})
+    receipt("stdin-eof", host)
     log({"host": host, "eof": True})
     return 0
 

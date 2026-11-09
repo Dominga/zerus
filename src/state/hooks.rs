@@ -1384,6 +1384,10 @@ fn track(name: String, token: String, mut event: Value, output: &mut impl std::i
     if !matches(&record, panes_of(&panes, &record)) {
         return Ok(0);
     }
+    if !terminating::completion_hook(&record, kind) {
+        eprintln!("hgs is terminating this session; no new work or binding was admitted");
+        return Ok(2);
+    }
     if let Some(scoped) = external_agents::route(&mut record, &event) {
         if scoped["hgs_retired_external_hook"] == true { return Ok(0); }
         processes::observe(&mut record, &scoped);
@@ -1552,7 +1556,9 @@ fn track(name: String, token: String, mut event: Value, output: &mut impl std::i
     telemetry::observe(&mut record, &event);
     tasks::observe(&mut record, &event);
     processes::observe(&mut record, &event);
+    keep_warm::observe(&mut record, &mut event, now());
     journal::update_activity(&mut record, &event);
+    keep_warm::settle(&mut record, &event, now());
     if resumed_clear_end {
         // The real main hook ended this requested clear, not its supervised
         // process. Keep the exact deferred-start fence, never fabricate Ready.

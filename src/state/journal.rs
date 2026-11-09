@@ -185,8 +185,19 @@ pub(super) fn mark_system_prompt(record: &Value, event: &mut Value, prompt: &str
 }
 
 /// The person's latest request. Older records may hold background work.
+/// The last reply the session shows, which a keep-warm ping does not replace.
+pub(super) fn last_message(record: &Value) -> &str {
+    if record["keep_warm_quiet"].is_object() {
+        return string(&record["keep_warm_quiet"], "last_message");
+    }
+    string(record, "last_message")
+}
+
 pub(super) fn user_prompt(record: &Value) -> &Value {
     static NONE: Value = Value::Null;
+    if record["keep_warm_quiet"].is_object() {
+        return &record["keep_warm_quiet"]["prompt"];
+    }
     if system_prompt(string(record, "prompt")).is_some() { &NONE } else { &record["prompt"] }
 }
 
@@ -335,6 +346,13 @@ pub(super) fn log_event(record: &Value, event: &Value) -> Result<()> {
     }
     if let Some(origin) = turn_origin(record, event) {
         data["turn_origin"] = json!(origin);
+    }
+    // A keep-warm ping is not the person's message, and its turn is no reply.
+    if let Some(mark) = event["keep_warm"].as_str() {
+        data["turn_origin"] = json!("keep_warm");
+        if mark == "prompt" {
+            data["origin"] = json!("keep_warm");
+        }
     }
     if let Some(id) = kimi_turn_id(record, event) {
         data["kimi_turn_id"] = json!(id);
@@ -551,6 +569,7 @@ fn latest_reply_of(record: &Value, recurring_schedules: Option<u64>) -> Result<V
         .query_row(
             "SELECT seq, payload FROM events WHERE name = ? AND conversation = ?
          AND json_extract(payload, '$.type') = 'Stop' AND json_extract(payload, '$.agent_id') = ''
+         AND COALESCE(json_extract(payload, '$.turn_origin'), '') != 'keep_warm'
          ORDER BY seq DESC LIMIT 1",
             params![journal_name(record), conversation],
             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -663,6 +682,10 @@ fn kimi_reply(db: &Connection, record: &Value, skip_scheduled: bool) -> Result<O
     let mut stop: Option<(i64, Value)> = None;
     for row in rows {
         let (seq, kind, origin, payload) = row.map_err(|e| e.to_string())?;
+        // Keep-warm ping turns are never replies, nor the person's prompts.
+        if origin.as_deref() == Some("keep_warm") {
+            continue;
+        }
         match (kind.as_deref(), stop.take()) {
             (Some("AgentMessage"), pending) => stop = pending,
             (Some("Stop"), None) => {
@@ -706,6 +729,9 @@ fn observed_summary(record: &Value, live_pane: bool) -> Value {
     }
     if !string(record, "session_id").is_empty() {
         output["session_id"] = record["session_id"].clone();
+    }
+    if let Some(parent) = parent_link::listed(record) {
+        output["parent"] = parent;
     }
     let last_tool = record["active_tools"]
         .as_object()
@@ -795,6 +821,7 @@ fn observed_summary(record: &Value, live_pane: bool) -> Value {
         }
     }
     recovery::enrich(record, &mut output);
+    keep_warm::visible(&mut output, record);
     output
 }
 
@@ -1266,6 +1293,7 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     if !user_prompt(&record).is_null() {
         output["prompt"] = record["prompt"].clone();
     }
+    keep_warm::visible(&mut output, &record);
     output["tracked"] = json!(true);
     if archive_id.is_some() {
         output["state"] = json!("archived");
@@ -1423,6 +1451,12 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     phases.mark("waits");
     notifications::enrich(&mut output, notifications::load().as_ref(), journal_name);
     phases.mark("notifications");
+    if archive_id.is_none() {
+        keep_warm::enrich(&mut output, keep_warm::load().as_ref(), &record);
+        let usage = output["session_usage"].clone();
+        keep_warm::describe(&mut output, &record, &usage);
+    }
+    phases.mark("keep_warm");
     // U30: after the notification preferences, which say whether it is muted.
     session_state::decorate(std::slice::from_mut(&mut output));
     phases.mark("session_state");
@@ -1840,9 +1874,18 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
                 );
                 // Keep native type/code evidence when the rolling-window text
                 // would otherwise erase a permanent refusal during projection.
-                if provider_errors::rolling_rate_limit(&detail(event)) {
-                    failure["native_error_type"] = json!(clipped(&event["error_type"], 1200));
-                    failure["native_error_code"] = json!(clipped(&event["error"], 1200));
+                if provider_errors::rolling_rate_limit(&detail(event))
+                    || (string(record, "agent") == "kimi"
+                        && string(event, "error_type") == provider_errors::KIMI_RATE_LIMIT_TYPE) {
+                    for (source, target) in [("error_type", "native_error_type"), ("error", "native_error_code")] {
+                        failure[target] = match event.get(source) {
+                            None => json!(""),
+                            Some(value @ Value::String(_)) => json!(clipped(value, 1200)),
+                            // Closed, bounded invalid-evidence marker. Do not
+                            // erase objects/numbers/arrays into an absent code.
+                            Some(_) => Value::Null,
+                        };
+                    }
                 }
                 let category = provider_errors::native_kind(&failure).unwrap_or_else(|| provider_errors::category(&format!(
                     "{} {} {}",
@@ -1852,6 +1895,10 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
                 )));
                 if category != "provider" || provider_errors::native_kind(&failure).is_some() {
                     failure["error_kind"] = json!(category);
+                }
+                if provider_errors::rolling_rate_error(&failure)
+                    && ["", "provider", "quota", "rate_limit"].contains(&string(&failure, "error_kind")) {
+                    failure["error_kind"] = json!("rate_limit");
                 }
                 // Keep a provider deadline separate from the chosen backoff.
                 for (key,scale) in [("retry_after",1.0),("retry_after_seconds",1.0),("retry_after_ms",0.001)] {
@@ -2805,6 +2852,24 @@ mod attention_regressions {
         record["turn_started"] = json!(123.0);
         update_activity(&mut record, &json!({"hook_event_name":"UserPromptQueued"}));
         assert!(record["turn_started"].as_f64().unwrap() > 123.0);
+    }
+    #[test]
+    fn kimi_stop_failure_preserves_typed_window_evidence_without_fabricating_a_status() {
+        let message = "You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends.";
+        let event = json!({"hook_event_name":"StopFailure","error_type":"APIProviderRateLimitError","error_message":message});
+        for (agent, expected) in [("kimi", "rate_limit"), ("claude", "quota")] {
+            let mut record = json!({"agent":agent,"run_id":"original","active_tools":{},"subagents":{}});
+            update_activity(&mut record, &event);
+            let failure = &record["provider_error"];
+            assert_eq!(failure["error_kind"], expected);
+            assert_eq!(failure["detail"], message);
+            if agent == "kimi" {
+                assert_eq!(failure["native_error_type"], "APIProviderRateLimitError");
+                let mut output = json!({});
+                provider_errors::apply(&mut output, failure);
+                assert_eq!(output["provider_error"], *failure);
+            } else { assert!(failure.get("native_error_type").is_none()); }
+        }
     }
     #[test]
     fn provider_failure_survives_heartbeat_and_children_but_clears_on_new_work() {

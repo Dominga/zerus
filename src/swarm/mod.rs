@@ -9,6 +9,8 @@ mod infer_project;
 pub(crate) use infer_project::{directory_project, infer_new_session, inherit_fork_project};
 mod session_project;
 mod session_ids;
+mod session_memberships;
+pub(crate) mod session_labels;
 #[cfg(unix)]
 pub(crate) use session_project::validate_payload as validate_session_project;
 mod model;
@@ -30,10 +32,65 @@ use store::LockedStore;
 #[cfg(unix)]
 pub(crate) use catalog::MOBILE_DELIVERY;
 pub(crate) use replica::{exchange_project as exchange_tasks, replicate};
-pub(crate) use replica::PROTOCOL as REPLICA_PROTOCOL;
+pub(crate) use replica_members::open_reason as cutover_open;
 #[cfg(test)]
 pub(crate) use replica_members::Incomplete;
 pub(crate) use replica_members::Member as ReplicaMember;
+
+/// Why a bounded read found nothing to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unread {
+    Missing,
+    /// A link, FIFO, device, socket or folder: refused, never opened to wait.
+    NotRegular,
+    Oversized,
+    Unreadable,
+}
+
+/// At most `cap` bytes of the regular file at `path`, without waiting
+/// (#1471 review): these reads run under the catalog and project locks
+/// against the caller's own deadline. Anything but a regular file at the
+/// path is refused before it is opened. A swap after that check still cannot
+/// follow, block or overrun: the open never follows a final link and never
+/// waits for a FIFO's writer (`O_NOFOLLOW | O_NONBLOCK`; Windows opens a
+/// reparse point itself), and the opened handle must be a regular file
+/// within the cap.
+pub(crate) fn read_regular(
+    path: &std::path::Path,
+    cap: u64,
+) -> std::result::Result<Vec<u8>, Unread> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.is_file() => return Err(Unread::NotRegular),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(Unread::Missing),
+        Err(_) => return Err(Unread::Unreadable),
+    }
+    read_opened(path, cap)
+}
+
+/// `read_regular` past its check: the open and the handle's own checks.
+fn read_opened(path: &std::path::Path, cap: u64) -> std::result::Result<Vec<u8>, Unread> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    let file = match crate::platform::no_follow(&mut options).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(Unread::Missing),
+        Err(_) => return Err(Unread::Unreadable),
+    };
+    let metadata = file.metadata().map_err(|_| Unread::Unreadable)?;
+    if !metadata.is_file() {
+        return Err(Unread::NotRegular);
+    }
+    // One byte past the cap tells an oversized file, even one still growing.
+    let mut bytes = Vec::new();
+    file.take(cap + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Unread::Unreadable)?;
+    if bytes.len() as u64 > cap {
+        return Err(Unread::Oversized);
+    }
+    Ok(bytes)
+}
 
 /// A verified member that receives the projects' tasks (its hgs speaks the
 /// replica protocol), with what this computer last learned of its replica.
@@ -220,7 +277,28 @@ pub(crate) fn identity_and_projects_until(
 /// The live catalog project (ID, name) that this computer's session `name`
 /// belongs to, if any.
 pub(crate) fn session_project(config: &Config, name: &str) -> Result<Option<(String, String)>> {
-    let snapshot = LockedStore::load(config)?.snapshot(config);
+    session_project_in(&LockedStore::load(config)?.snapshot(config), config, name)
+}
+
+/// `session_project`, waiting for the catalog no later than `deadline`
+/// (#1519 review: an attempt's whole entry counts against its budget).
+/// None when it is busy past it.
+pub(crate) fn session_project_until(
+    config: &Config,
+    name: &str,
+    deadline: std::time::Instant,
+) -> Result<Option<Option<(String, String)>>> {
+    let Some(store) = LockedStore::load_until(config, deadline)? else {
+        return Ok(None);
+    };
+    session_project_in(&store.snapshot(config), config, name).map(Some)
+}
+
+fn session_project_in(
+    snapshot: &Value,
+    config: &Config,
+    name: &str,
+) -> Result<Option<(String, String)>> {
     // The snapshot names this computer's sessions "<this host>\n<session>".
     let member = format!("{}\n{name}", config.host());
     Ok(snapshot["organization"]["projects"]
@@ -292,6 +370,18 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
     let worker = matches!(action, "get" | "preference" | "exchange" | "join" | "sync")
         .then(|| service::supervise(config));
     match action {
+        "session-labels-context" => {
+            ensure!(args == ["session-labels-context", "--json"], "usage: hgs swarm session-labels-context --json");
+            Ok(serde_json::to_value(session_labels::context(config)?)?)
+        }
+        "session-labels-gate" => {
+            ensure!(args == ["session-labels-gate", "--json"], "usage: hgs swarm session-labels-gate --json");
+            Ok(json!({"schema":1,"ready":session_labels::cached(config)}))
+        }
+        "session-labels" => {
+            ensure!(args == ["session-labels", "--json"] || args == ["session-labels"], "usage: hgs swarm session-labels --json");
+            session_labels::observe(config, std::time::Instant::now() + std::time::Duration::from_secs(2))
+        }
         "session-project" | "assign-session" => {
             ensure!(args.len() == 2 && args[1] == "--json", "usage: hgs swarm {action} --json");
             Ok(session_project::execute(config, input()?, action == "assign-session"))

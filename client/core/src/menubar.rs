@@ -587,7 +587,49 @@ impl Desk {
                 c.rows
                     .values()
                     .filter(|row| {
-                        !row.muted && (row.notify.review_later || (current && needs_attention(row)))
+                        !row.muted
+                            && (row.notify.review_later
+                                || (!row.quiet && current && needs_attention(row)))
+                    })
+                    .count()
+            })
+            .sum()
+    }
+
+    /// Active sessions, the list's Active filter (`store/attention.ts`
+    /// `isActive`): working or Background, Scheduled or Waiting on a current
+    /// computer, or needing attention (Review later anywhere, a request or a
+    /// subagent that asks only on a current computer). Drafts live in the window, which the tray does
+    /// not see. The tray shows this instead of every listed session (owner
+    /// 2026-11-07).
+    pub fn active(&self) -> usize {
+        self.computers
+            .iter()
+            .filter(|(_, c)| c.listed)
+            .map(|(id, c)| {
+                let current = if id.is_local() {
+                    !matches!(c.status, ComputerStatus::Reconnecting { .. })
+                } else {
+                    c.fresh()
+                };
+                c.rows
+                    .values()
+                    .filter(|row| {
+                        // An acknowledged request shows the row's status without
+                        // it, as the list's `ackStatus` does (store/marks.ts).
+                        let status = if row.notify.acknowledged {
+                            row.acknowledged_status.as_str()
+                        } else {
+                            row.status.as_str()
+                        };
+                        row.state != "archived"
+                            && (row.notify.review_later
+                                || (current
+                                    && (matches!(
+                                        status,
+                                        "working" | "background" | "scheduled" | "waiting"
+                                    ) || needs_attention(row)
+                                        || (row.child_attention && !row.notify.acknowledged))))
                     })
                     .count()
             })
@@ -604,7 +646,7 @@ impl Desk {
         if self.error().is_some() {
             return Face::error();
         }
-        Face::counts(self.total(), self.attention(), self.stale())
+        Face::counts(self.active(), self.attention(), self.stale())
     }
 
     /// The Dock badge: the exact attention count, none at zero or while the
@@ -657,7 +699,7 @@ impl Desk {
     }
 
     /// The menu: Open Zerus, an update's entries, one line per computer (how
-    /// many sessions it has, or its state) and Quit. It lists no sessions:
+    /// many sessions it has, or its state), Refresh and Quit. It lists no sessions:
     /// with their numbers a row each stopped being useful (the owner, 0.48.0),
     /// and nothing builds or refreshes such rows.
     pub fn menu(&self) -> Vec<Entry> {
@@ -699,6 +741,8 @@ impl Desk {
                 push_sessions(&mut menu, alias.as_str(), computer);
             }
         }
+        // Qt's Refresh before Quit, on every platform (`TrayMenu.cpp:241-242`);
+        // the fork's Open log leads them.
         menu.extend([Entry::Separator, Entry::OpenLog, Entry::Refresh, Entry::Quit]);
         menu
     }
@@ -951,6 +995,79 @@ mod tests {
     }
 
     #[test]
+    fn the_face_counts_active_sessions_not_every_listed_one() {
+        let mut desk = Desk::default();
+        let with = |name: &str, status: &str| ViewRow {
+            status: status.to_owned(),
+            ..row(name, "running")
+        };
+        listed(
+            &mut desk,
+            "",
+            vec![
+                ("w", with("claude/p/working", "working")),
+                ("b", with("claude/p/background", "background")),
+                ("s", with("claude/p/scheduled", "scheduled")),
+                ("t", with("claude/p/waiting", "waiting")),
+                ("a", asking("claude/p/asking")),
+                ("r", with("claude/p/ready", "ready")),
+                ("p", with("claude/p/paused", "paused")),
+                (
+                    "x",
+                    ViewRow {
+                        status: "working".into(),
+                        ..row("claude/p/old", "archived")
+                    },
+                ),
+                (
+                    "c",
+                    ViewRow {
+                        child_attention: true,
+                        ..with("claude/p/child-asks", "ready")
+                    },
+                ),
+            ],
+        );
+        assert_eq!(desk.total(), 8, "every listed session, archived excluded");
+        assert_eq!(
+            desk.active(),
+            6,
+            "working, background, scheduled, waiting, the request and the asking subagent"
+        );
+        assert_eq!(
+            desk.face().total,
+            "6",
+            "the icon's upper number is the active count"
+        );
+        // An acknowledged subagent question: an idle parent leaves Active, a busy one stays.
+        let acked = |name: &str, after: &str| ViewRow {
+            child_attention: true,
+            status: "attention".into(),
+            acknowledged_status: after.into(),
+            ..acknowledged(name)
+        };
+        listed(
+            &mut desk,
+            "",
+            vec![
+                ("i", acked("claude/p/idle-acked", "ready")),
+                ("k", acked("claude/p/busy-acked", "working")),
+            ],
+        );
+        assert_eq!(
+            desk.active(),
+            1,
+            "only the busy acknowledged parent stays active"
+        );
+        status(&mut desk, "", ComputerStatus::Reconnecting { attempt: 1 });
+        assert_eq!(
+            desk.face().total,
+            "?",
+            "unknown while this computer reconnects"
+        );
+    }
+
+    #[test]
     fn counts_follow_qt_total_and_attention() {
         let mut desk = Desk::default();
         let acknowledged = acknowledged("claude/p/acknowledged");
@@ -976,7 +1093,10 @@ mod tests {
         assert_eq!(
             desk.face(),
             Face {
-                total: "4".into(),
+                // The icon shows the active sessions: the request, the unread
+                // reply and the muted request (listed under Active, not counted
+                // as attention); acknowledged and archived ones are not.
+                total: "3".into(),
                 attention: "2".into(),
                 highlighted: true,
                 dot: false

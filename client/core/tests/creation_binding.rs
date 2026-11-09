@@ -2,7 +2,7 @@
 //! HgsClient.cpp:184, 279 and SessionsWindow.cpp:3020-3070.
 use serde_json::json;
 use std::time::Duration;
-use zerus_client_core::creation::{binding_invocation, binding_listing};
+use zerus_client_core::creation::{binding_invocation, binding_listing, SUPERVISOR_REPORT_MISSING};
 use zerus_client_core::{ComputerId, Exit};
 
 fn reply(value: serde_json::Value) -> Exit {
@@ -64,6 +64,22 @@ fn ended_launches_are_bounded_and_keep_nullable_exit_codes() {
     assert_eq!(listing.ended_launches[0].code, None);
     assert_eq!(listing.ended_launches[31].code, Some(7));
     assert_eq!(listing.ended_launches[31].output, "retained output");
+}
+
+#[test]
+fn a_missing_supervisor_report_is_separate_from_native_exit_and_output() {
+    let listing = binding_listing(reply(json!({"ok":true,"sessions":[],"ended_launches":[
+        {"launch_id":"original","code":null,"output":"","diagnostic_code":SUPERVISOR_REPORT_MISSING},
+        {"launch_id":"other","code":2,"output":"native error","diagnostic_code":"foreign"}
+    ]}))).unwrap();
+    assert_eq!(
+        listing.ended_launches[0].diagnostic_code,
+        SUPERVISOR_REPORT_MISSING
+    );
+    assert_eq!(listing.ended_launches[0].code, None);
+    assert_eq!(listing.ended_launches[0].output, "");
+    assert_eq!(listing.ended_launches[1].diagnostic_code, "");
+    assert_eq!(listing.ended_launches[1].code, Some(2));
 }
 
 #[test]

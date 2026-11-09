@@ -279,7 +279,15 @@ pub fn agent_command(argv: &[String]) -> io::Result<Command> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "not found on PATH"))?;
     let (program, prefix) = resolve_program(&path)?;
     let mut command = Command::new(program);
-    command.args(prefix).args(arguments);
+    command.env_remove(crate::project_launcher::DATA_ENV);
+    if let Some((words, data)) = crate::project_launcher::windows_command(argv)? {
+        if !prefix.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "a PowerShell project launcher needs a native PowerShell program"));
+        }
+        command.args(words).env(crate::project_launcher::DATA_ENV, data);
+    } else {
+        command.args(prefix).args(arguments);
+    }
     Ok(command)
 }
 /// What runs for the program file `path`, and the arguments before the caller's.

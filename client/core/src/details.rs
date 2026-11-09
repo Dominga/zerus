@@ -402,6 +402,19 @@ mod tests {
         for id in ["", "../child", "child\\other", "child\n"] {
             assert!(subagent_identity_invocation(&t, None, id).is_none());
         }
+        // A parent without an identity is refused, so the child says it is unavailable.
+        for parent in [
+            Target {
+                run_id: String::new(),
+                ..t.clone()
+            },
+            Target {
+                conversation_id: String::new(),
+                ..t.clone()
+            },
+        ] {
+            assert!(subagent_identity_invocation(&parent, None, "child").is_none());
+        }
         let receipt = serde_json::json!({"name":t.name,"run_id":"r1","parent_conversation_id":"parent","agent_id":"child","conversation_id":"child-conversation"});
         let exit = |v: &Value| Exit::Code {
             code: 0,

@@ -923,6 +923,7 @@ mod tests {
                 Request::AutomaticApprovals {
                     request_id: control["request_id"].as_str().unwrap().into(),
                     enabled: mode == "enable",
+                    categories: None,
                 }
             };
             let registration = responder
@@ -1026,6 +1027,7 @@ mod tests {
             let request = Request::AutomaticApprovals {
                 request_id: uuid::Uuid::new_v4().to_string(),
                 enabled: false,
+                categories: None,
             };
             let registration = responder
                 .prepare_ui_request(attempt.clone(), request.clone())
@@ -1412,6 +1414,7 @@ mod tests {
             computer: "c".repeat(255),
             run: "r".repeat(1024),
             conversation: "v".repeat(1024),
+            startup_question: None,
         };
         let navigation = Activation::Navigation(target);
         assert!(navigation.line().len() > LINE);

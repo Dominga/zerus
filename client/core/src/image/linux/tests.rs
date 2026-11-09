@@ -38,6 +38,65 @@ fn command(pin: &Pin) -> Command {
 }
 
 #[test]
+fn original_native_child_observation_binds_the_snapshot_and_keeps_input_private() {
+    let f = Fixture::new();
+    let path = f.0.join("cat");
+    std::fs::copy("/bin/cat", &path).unwrap();
+    let pin = Pin::open(&path).unwrap();
+    let mut cmd = command(&pin);
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    let identity = pin.observe_original_child(&mut child).unwrap();
+    assert_eq!(identity.pid(), child.id());
+    assert_eq!(identity.parent(), std::process::id());
+    assert!(!identity.birth().is_empty());
+    assert!(child.stdin.is_some());
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"original input\n")
+        .unwrap();
+    assert_eq!(
+        child.wait_with_output().unwrap().stdout,
+        b"original input\n"
+    );
+
+    // Same bytes in another sealed object do not identify the original image.
+    let different = Pin::open(&path).unwrap();
+    let mut wrong_cmd = command(&different);
+    wrong_cmd.stdin(std::process::Stdio::piped());
+    let mut wrong = wrong_cmd.spawn().unwrap();
+    assert!(pin.observe_original_child(&mut wrong).is_err());
+    assert!(wrong.stdin.is_none());
+    assert!(wrong.wait().unwrap().success());
+}
+
+#[test]
+fn script_extracted_input_or_a_reaped_child_cannot_supply_native_custody_identity() {
+    let f = Fixture::new();
+    let pin = Pin::open(&f.script()).unwrap();
+    let mut cmd = command(&pin);
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null());
+    let mut child = cmd.spawn().unwrap();
+    assert!(pin.observe_original_child(&mut child).is_err());
+    assert!(child.stdin.is_none());
+    child.wait().unwrap();
+    let path = f.0.join("cat");
+    std::fs::copy("/bin/cat", &path).unwrap();
+    let pin = Pin::open(&path).unwrap();
+    let mut cmd = command(&pin);
+    cmd.stdin(std::process::Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    drop(child.stdin.take());
+    assert!(pin.observe_original_child(&mut child).is_err());
+    child.wait().unwrap();
+    assert!(pin.observe_original_child(&mut child).is_err());
+}
+
+#[test]
 fn snapshot_has_every_seal_and_cannot_be_written_resized_or_unsealed() {
     let f = Fixture::new();
     let pin = Pin::open(&f.script()).unwrap();

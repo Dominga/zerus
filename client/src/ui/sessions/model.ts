@@ -8,9 +8,10 @@ import { archiveMachineChoices, archiveProjectChoices } from "./archive-filters"
 import { defaultProject, grouping, groups } from "../../store/organization";
 import { teams } from "../../store/teams";
 import { stateFilter, matchesFilter, listedByFilter, search,machineFilter, projectFilter, accountFilter, folderFilter, expandedChildren, compactRows, selected, selectedKey, subagentOpen, teamsCollapsed } from "../../store/ui";
+import { teamCollapsed } from "../../store/teamCollapse";
 import { compileScopes, scopeCounts } from "./scope-filters";
 import { withCreations } from "../../store/creations";
-import { isWorking, needsAttention } from "../../store/attention";
+import { countedAttention, isWorking, quietAttention } from "../../store/attention";
 import { followedFor } from "../../store/actions";
 import { flag } from "../../store/settings";
 import { compactSessionRows, hideEmptyProjects } from "./session-prefs";
@@ -19,13 +20,13 @@ import type { Session } from "./types";
 
 // Flattened list model. Heights match tray/src/SessionCardDelegate.h
 // sizeHint: group header 40, card 104 (Qt's normal density) or 94 with
-// "Compact session rows" (SettingsPage.h:232), native child 64, collapsed row
-// 40. Fixed heights per row type let the virtualizer place rows without
-// measuring the DOM.
+// "Compact session rows" (SettingsPage.h:232), native child 40 (a compact row),
+// collapsed row 40. Fixed heights per row type let the virtualizer place rows
+// without measuring the DOM.
 
 export const NORMAL_CARD_HEIGHT = 104;
 export const COMPACT_CARD_HEIGHT = 94;
-export const ROW_HEIGHT = { header: 40, card: NORMAL_CARD_HEIGHT, child: 64, collapsedRow: 40 } as const;
+export const ROW_HEIGHT = { header: 40, card: NORMAL_CARD_HEIGHT, child: 40, collapsedRow: 40, collapsedTeam: 62 } as const;
 
 /** Qt's "Compact session rows": 94 px cards, else 104 (SessionCardDelegate.h:85). */
 export const cardHeight = () => (compactSessionRows() ? COMPACT_CARD_HEIGHT : NORMAL_CARD_HEIGHT);
@@ -35,9 +36,10 @@ export function rowHeight(row: Row, strip = false): number {
   if (row.type === "header") return ROW_HEIGHT.header;
   if (row.type === "child") return ROW_HEIGHT.child;
   if (row.type === "creation") return cardHeight();
-  if (row.compactRow && !strip) return ROW_HEIGHT.collapsedRow;
+  // A compact parent takes a second line with its child sessions' summary.
+  if (row.compactRow && !strip) return row.team ? ROW_HEIGHT.collapsedTeam : ROW_HEIGHT.collapsedRow;
   // The lead's card carries Qt's 26 px team strip below its footer.
-  return cardHeight() + (row.team ? 26 : 0);
+  return cardHeight() + (row.teamSummary ? 26 : 0);
 }
 
 export function sessionMatchesSearch(s: Session, q: string): boolean {
@@ -90,13 +92,39 @@ export function listedSessionIgnoringCollapse(id: string): boolean {
     && compileScopes(scopes())(s, groups[id]?.group ?? defaultProject());
 }
 
-export const listRows = createMemo<Row[]>(() => {
-  if (stateFilter() === "archived") return archiveRows();
+/**
+ * Each listed row by its computer's machine UUID and durable session ID, and
+ * by conversation for a parent an older hgs listed without one (spec 1.4).
+ * Rebuilt with the catalog in one pass; names never match.
+ */
+export function parentIndex(rows: Iterable<Session>, machineOf: (computer: string) => string | undefined) {
+  const bySession = new Map<string, string>(), byConversation = new Map<string, Session>();
+  for (const s of rows) {
+    const machine = machineOf(s.computer);
+    if (!machine) continue;
+    if (s.sessionId) bySession.set(`${machine}\n${s.sessionId}`, s.key);
+    if (s.conversationId) byConversation.set(`${machine}\n${s.conversationId}`, s);
+  }
+  return (s: Session): string | undefined => {
+    const p = s.parent;
+    if (!p) return undefined;
+    const found = p.session_id ? bySession.get(`${p.machine}\n${p.session_id}`) : undefined;
+    if (found) return found;
+    const old = p.conversation_id ? byConversation.get(`${p.machine}\n${p.conversation_id}`) : undefined;
+    // An identified link only falls back to a parent row that lists no session ID.
+    return old && (!p.session_id || !old.sessionId) ? old.key : undefined;
+  };
+}
+/** A listed row's parent key: set only when its parent row is listed too (a child session). */
+export const parentKeyOf = createMemo(() => parentIndex(orderedRows(), (computer) => machineCards[computer]?.machine_id));
+
+/** The live list's inputs: the filters, grouping and row state the list reads. */
+function listScope() {
   const f = stateFilter();
   const q = search().trim();
   const hosts = machineFilter();
   const visible = (s: Session) => matchesLiveFilters(s, f, hosts, q);
-  const scope = {
+  return {
     grouping: grouping(), members: membersByGroup(), visible, online, projects: projectFilter(),
     expanded: (k: string) => !!expandedChildren[k], compact: (k: string) => !!compactRows[k], filter: f, hosts, query: q,
     accounts: accountFilter(), folder: folderFilter(),
@@ -110,11 +138,30 @@ export const listRows = createMemo<Row[]>(() => {
     roster: (s: Session) => rosterFor(s, s.key === selectedKey() ? followedFor(s.key).value : undefined),
     childDraft: (s: Session, child: { id: string }) => hasDraftKey(`${s.computer}\n${s.name}\n${s.conversationId ?? ""}\n${child.id}`),
     teamOf: (s: Session) => teams.teamOf(s),
-    teamCollapsed: (id: string) => teamsCollapsed(id),
+    teamFolded: (id: string) => teamsCollapsed(id),
+    parentKey: parentKeyOf(), teamCollapsed,
   };
+}
+
+export const listRows = createMemo<Row[]>(() => {
+  if (stateFilter() === "archived") return archiveRows();
+  const scope = listScope();
   const out = groupRows(scope);
   return withCreations(out, scope);
 });
+
+/**
+ * The live list's rows with every project and parent team open: the logical
+ * order that attention navigation searches, including the sessions a
+ * collapsed project or team hides, each child still under its parent
+ * (window-commands.ts). Computed on demand, never kept.
+ */
+export function rowsAllOpen(): Row[] {
+  if (stateFilter() === "archived") return [];
+  const scope = listScope();
+  const grouping = { ...scope.grouping, headers: scope.grouping.headers.map((header) => ({ ...header, collapsed: false })) };
+  return groupRows({ ...scope, grouping, teamCollapsed: () => false, teamFolded: () => false });
+}
 
 /** The list footer's counts of the cards shown (SessionsWindowRows.cpp:468-474). */
 export function summarize(rows: readonly Row[], up: (s: Session) => boolean) {
@@ -124,7 +171,7 @@ export function summarize(rows: readonly Row[], up: (s: Session) => boolean) {
     shown++;
     const s = r.session;
     if (isWorking(s, up(s))) working++;
-    if (!s.muted && needsAttention(s, up(s))) attention++;
+    if (countedAttention(s, up(s))) attention++;
   }
   return { shown, working, attention };
 }
@@ -137,7 +184,7 @@ export const filterCounts = createMemo(() => {
     if (!scoped()(s, projectOf(s))) continue;
     all++;
     if (matchesFilter(s, "active")) active++;
-    if (matchesFilter(s, "attention") && !s.muted) attention++;
+    if (matchesFilter(s, "attention") && (!quietAttention(s) || (!s.muted && !!s.reviewLater))) attention++;
     if (isWorking(s, online(s))) working++;
     if (s.status === "paused") paused++;
   }

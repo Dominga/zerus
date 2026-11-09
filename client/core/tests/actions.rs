@@ -524,8 +524,13 @@ fn an_archive_page_through_the_fake_is_checked_and_typed() {
             "sessions": [{"name": "claude/sample-project/review", "state": "archived",
                 "archive_id": id, "archived_at": at}]})
     };
+    // The bounded-pages probe (zerus-080n8) runs first. Its help lists no
+    // marker, so the page stays exact (zerus-k19x6).
     let config = |at: f64| {
-        serde_json::json!({"reply": {"exit": 1}, "replies": [{"match": ["archives", "--json"], "exit": 0, "stdout": page(at)}]}).to_string()
+        serde_json::json!({"reply": {"exit": 1}, "replies": [
+            {"match": ["--help"], "exit": 0, "stdout_text": ""},
+            {"match": ["archives", "--json"], "exit": 0, "stdout": page(at)}]})
+        .to_string()
     };
     let fake = Fake::new(&config(1500.0));
     let studio = ComputerId::from("studio");
@@ -538,11 +543,13 @@ fn an_archive_page_through_the_fake_is_checked_and_typed() {
         ("after-1", 1, Some(0))
     );
     let log = fake.log();
+    assert_eq!(log.len(), 2);
+    assert_eq!(log[0]["argv"], serde_json::json!(["--help"]));
     assert_eq!(
-        log[0]["argv"],
+        log[1]["argv"],
         serde_json::json!(["@studio", "archives", "--json"])
     );
-    let sent: Value = serde_json::from_str(log[0]["stdin"].as_str().unwrap()).unwrap();
+    let sent: Value = serde_json::from_str(log[1]["stdin"].as_str().unwrap()).unwrap();
     assert_eq!(
         sent,
         serde_json::json!({"from": 1000, "until": 2000, "limit": 50, "cursor": "", "query": ""})
@@ -578,7 +585,11 @@ fn a_cancelled_archive_page_ends_its_child_promptly() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use zerus_client_core::reads::{archive_page_cancellable, ReadError};
     use zerus_client_core::ComputerId;
-    let config = serde_json::json!({"reply": {"exit": 0, "sleep": 30, "stdout": {}}}).to_string();
+    // The bounded-pages probe (zerus-080n8) answers at once, so the time
+    // measured is the cancelled archive read's own (zerus-k19x6).
+    let config = serde_json::json!({"reply": {"exit": 0, "sleep": 30, "stdout": {}},
+        "replies": [{"match": ["--help"], "exit": 0, "stdout_text": ""}]})
+    .to_string();
     let fake = Fake::new(&config);
     let cancel = AtomicBool::new(false);
     let started = std::time::Instant::now();

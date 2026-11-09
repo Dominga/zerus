@@ -21,6 +21,11 @@ const RECEIPTS: i64 = 4096;
 const RECORD_BYTES: usize = 8192;
 
 pub(super) mod observation;
+// Current ownership DATA for the one original program-stop helper. This is
+// independent of (and cannot construct) its consumed native stop permission.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)]
+pub(super) mod programs;
 
 /// Captured from the authenticated canonical process and cached native Build,
 /// never decoded from a request. Serialization is private store data only.
@@ -860,9 +865,9 @@ pub(super) fn offline_frontend(
         return Ok(serde_json::to_value(&absent.receipt)?);
     }
     location.prepare()?;
-    let _owner = location.lock()?;
+    let owner = location.lock()?;
     let epoch = uuid::Uuid::new_v4().to_string();
-    let mut store = Store::open(location, &epoch)?;
+    let mut store = Store::open_owned(location, &epoch, &owner)?;
     // Native mode is checked before this path can create increasing authority.
     // Consume/recheck the original two-second permit immediately before commit.
     // Existing custody must be confirmed by its original recovery, not assumed

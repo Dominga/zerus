@@ -1,8 +1,9 @@
 import { batch, createSignal } from "solid-js";
-import { followTasks, readTaskPage } from "../bridge";
+import { followTasks, readTaskPage, type TaskScope } from "../bridge";
 import type { TasksOut } from "../types";
 import { STAGES, TASK_LIMIT, object, taskItem, text, type Stage, type Task } from "../ui/screens/tasks-ui";
 import { tr } from "../i18n";
+import { createSessionView } from "./sessionTasks";
 
 /** Rows of each stage the board follows (the core's window) and asks for per further page. */
 export const WINDOW = 50;
@@ -14,7 +15,7 @@ export const ADOPTED = 16;
 const MAX_REREAD_PAGES = 64;
 
 export type Page = { tasks: unknown[]; page: { next: unknown } };
-type ReadPage = (project: string, stage: Stage, limit: number, after: string | null) => Promise<unknown>;
+type ReadPage = (project: string, stage: Stage, limit: number, after: string | null, scope?: TaskScope) => Promise<unknown>;
 
 const none = <T,>(value: T) => Object.fromEntries(STAGES.map((s) => [s, value])) as Record<Stage, T>;
 
@@ -32,6 +33,8 @@ export function createTasks(follow: (project: string | null) => Promise<void>, r
   const [error, setError] = createSignal("");
   const [truncated, setTruncated] = createSignal(false);
   const [damaged, setDamaged] = createSignal(0);
+  /** Only the first five kept entries from the server's bounded damaged page. */
+  const [keptDamaged, setKeptDamaged] = createSignal<{ uuid: string; error: string }[]>([]);
   const [windowed, setWindowed] = createSignal(false);
   const [totals, setTotals] = createSignal(none(0));
   /** The published rows of each stage: `total` and `remaining` track them through this signal. */
@@ -44,6 +47,8 @@ export function createTasks(follow: (project: string | null) => Promise<void>, r
   /** A whole list, published in the order the server sent it. */
   let whole: Task[] | null = null;
   let sent = Promise.resolve(), generation = 0;
+  /** Only this session: hgs's own pages of one session's view. */
+  const session = createSessionView((p, s, limit, after, scope) => readPage(p, s, limit, after, scope), WINDOW, PAGE_LIMIT, MAX_REREAD_PAGES);
 
   /** The stages in board order, each task once, To do numbered by its position. */
   const publish = () => {
@@ -95,9 +100,9 @@ export function createTasks(follow: (project: string | null) => Promise<void>, r
   }
 
   return {
-    project, tasks, loaded, error, truncated, damaged, windowed, loading, pageError,
-    /** A task by UUID: a loaded row, else one read on its own. */
-    find: (uuid: string) => tasks().find((t) => t.uuid === uuid) ?? adopted().get(uuid),
+    project, tasks, loaded, error, truncated, damaged, keptDamaged, windowed, loading, pageError, session,
+    /** A task by UUID: a loaded row, else a row of the session view, else one read on its own. */
+    find: (uuid: string) => tasks().find((t) => t.uuid === uuid) ?? session.find(uuid) ?? adopted().get(uuid),
     /**
      * Keeps a task read on its own for the write guards; the oldest goes
      * first. Later windows do not refresh it: the guards compare it with an
@@ -114,10 +119,12 @@ export function createTasks(follow: (project: string | null) => Promise<void>, r
     remaining: (stage: Stage) => windowed() ? Math.max(0, totals()[stage] - shown()[stage]) : 0,
     follow(nextProject: string | undefined) {
       if (nextProject === project()) return;
+      setKeptDamaged([]);
       const mine = ++generation;
       setProject(nextProject); setTasks([]); setShown(none(0)); setLoaded(false); setError(""); setTruncated(false); setDamaged(0);
       setWindowed(false); setTotals(none(0)); setLoading(none(false)); setPageError(""); setAdopted(new Map());
       rows = none([]); next = none(null); extent = none(0); whole = null;
+      session.show(undefined, undefined, []);
       sent = sent.then(() => follow(nextProject ?? null)).catch((e) => { if (mine === generation) { setError(String(e)); setLoaded(true); } });
     },
     /** The next page of `stage`; one read at a time per stage. */
@@ -145,6 +152,9 @@ export function createTasks(follow: (project: string | null) => Promise<void>, r
         const p = object(update.payload);
         if (update.kind === "list") {
           if (text(object(p.project).id) !== project() || !Array.isArray(p.tasks)) continue;
+          setKeptDamaged((Array.isArray(p.damaged) ? p.damaged : []).slice(0, 20)
+            .map(object).filter((row) => row.kept === true && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(text(row.uuid)))
+            .slice(0, 5).map((row) => ({ uuid: text(row.uuid), error: text(row.error).slice(0, 512) })));
           const summary = object(p.window), stages = object(object(summary.window).stages);
           if (Object.keys(stages).length) {
             // A window: each stage's first rows; extended stages keep their
@@ -176,6 +186,7 @@ export function createTasks(follow: (project: string | null) => Promise<void>, r
             setDamaged(Array.isArray(p.damaged) ? p.damaged.length : 0);
           }
           publish(); setError(""); setLoaded(true);
+          session.changed();
         } else if (update.kind === "failed") { setError(text(p.message) || tr("Tasks could not be read.")); setLoaded(true); }
         else if (update.kind === "ended") { setError(tr("The task subscription ended. Reopen Tasks to reconnect.")); setLoaded(true); }
       }

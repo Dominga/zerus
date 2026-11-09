@@ -1,6 +1,6 @@
 [package]
 name = "hgs"
-version = "1.57.2"
+version = "1.58.0"
 edition = "2021"
 rust-version = "1.99"
 description = "Persistent local and remote agent sessions for Zerus"
@@ -48,6 +48,10 @@ zerus-desktop-catalog = { path = "crates/desktop-catalog" }
 zerus-presence-sampler = { path = "crates/presence-sampler" }
 zerus-content-search = { path = "crates/content-search" }
 zerus-client-core = { path = "client/core", default-features = false }
+
+[dev-dependencies]
+# Documents an older replica leaves, for the task index's tests.
+zerus-replica = { path = "crates/replica", features = ["test-support"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 async-io = "2.6"
@@ -99,6 +103,9 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock"] }
 
 [profile.release]
 strip = true

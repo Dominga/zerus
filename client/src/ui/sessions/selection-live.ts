@@ -9,11 +9,12 @@ import { clearMulti } from "./organize";
 import type { Row } from "./model";
 import type { Session } from "./types";
 import { MACHINES_WAITING, machineEntries } from "./machine-batch";
-import { countable, selectionMenu, visibleSelected, type MoveState } from "./selection-ui";
+import { anyUnmuted, countable, selectionMenu, visibleSelected } from "./selection-ui";
 import { selectionSnapshot, type SelectionAction, type SelectionRow } from "./selection";
 import { liveNameIndex } from "./actions-ui";
-import { grouping } from "../../store/organization";
+import { openMoveSelection } from "./org-dialogs";
 import { editEntry } from "./organization-ui";
+import { STARTING, grouping } from "../../store/organization";
 
 // The live (store-bound) halves of the selection bar and the batch menu; the
 // pure models are in selection-ui.ts, machine-batch.ts and archive-entries.ts.
@@ -28,25 +29,17 @@ export const selectionCount = (rows: SelectionRow[]) => {
   return (a: SelectionAction) =>
     rows.filter((s) => countable(s, a, a === "move" || applies(s, a, !computerOffline(s.computer), updating(s.computer, s.name), index))).length;
 };
-/** Move to project is available while the project organization is editable (Qt's editEntry). */
-export const moveState = (): MoveState => {
-  const e = editEntry(grouping());
-  return { enabled: e.enabled, reason: e.reason };
-};
-/** Move to project opens its dialog for the selected rows that still exist; the other actions are the batch queue's. */
-export const runSelection = (rows: SelectionRow[], a: SelectionAction) => {
-  if (a === "move") {
-    const live = rows.map((r) => catalog.rows[r.key]).filter((s): s is Session => !!s);
-    // The dialogs are a component module: they load with the first Move to project.
-    if (live.length) void import("./OrganizationDialogs").then((dialogs) => dialogs.openMoveDialog(live));
-    return;
-  }
+/** Why Move to project cannot take the selection now: the organization's reason, if any (zerus-5wmh.18.1). */
+export const moveRefusal = (): string | undefined => { const e = editEntry(grouping()); return e.enabled ? undefined : e.reason ?? tr(STARTING); };
+/** A selection action on the listed rows: Move opens the organization's Move dialog, the rest run as one batch. */
+export const runSelection = (rows: readonly Session[], a: SelectionAction) => {
+  if (a === "move") { openMoveSelection(rows); return; }
   void run(a, rows.map(selectionSnapshot));
 };
 /** The context menu of a row inside a multi-selection (Qt populateSelectionMenu). */
 export const selectionContextMenu = (listed: readonly Row[]): MenuEntry[] => {
-  const rows = selectedRows(listed).map(selectionSnapshot);
-  return selectionMenu(selectionCount(rows), rows.length, running(), (a) => runSelection(rows, a), clearMulti, moveState());
+  const sessions = selectedRows(listed), rows = sessions.map(selectionSnapshot);
+  return selectionMenu(selectionCount(rows), rows.length, running(), (a) => runSelection(sessions, a), clearMulti, anyUnmuted(rows), moveRefusal());
 };
 
 /** Pause all and Resume all per computer (Qt's populateBatchActions): this computer first, then the peers. */

@@ -378,7 +378,14 @@ fn a_generated_worktree_is_created_once_under_a_saved_id_then_verified() {
             host: String::new(),
             action: "status".into(),
             request_id: worktree.clone(),
-            expected_machine: MACHINE.into()
+            expected_machine: MACHINE.into(),
+            fingerprint: zerus_client_core::desktop::creation_worktree::Plan::from_operation(
+                &id,
+                &driver.op(&id)
+            )
+            .unwrap()
+            .request_fingerprint()
+            .unwrap(),
         }
     );
     driver.answer(
@@ -456,6 +463,87 @@ fn a_lost_worktree_is_read_again_and_never_recreated() {
         "Worktree recovered. Continue setup to start the session."
     );
     assert!(can_resume(&driver.op(&id)));
+}
+
+#[test]
+fn an_exact_admission_refusal_shows_failed_but_preserves_the_unsettled_original_id() {
+    let mut driver = Driver::loaded();
+    let id = driver.submit(plan(&auto_choices()));
+    driver.flush();
+    let (flight, _) = driver.call();
+    driver.answer(flight, identity("/srv/repo"));
+    let (flight, _) = driver.call();
+    driver.answer(flight, ok(catalog("/srv/repo")));
+    driver.flush();
+    let (flight, _) = driver.call();
+    let request = driver.op(&id)["worktree_id"].clone();
+    driver.answer(
+        flight,
+        Answer {
+            ok: false,
+            data: json!({"status":"refused","request_id":request}),
+            error: "Worktree admission refused: original result needs review.".into(),
+        },
+    );
+    assert_eq!(driver.state(&id), "failed");
+    assert_eq!(driver.op(&id)["worktree_id"], request);
+    assert!(driver.op(&id)["error"]
+        .as_str()
+        .unwrap()
+        .contains("admission refused"));
+    assert!(!can_resume(&driver.op(&id)));
+    assert!(
+        driver.creations.can_edit(&id),
+        "only a separate reviewed creation, never an original resume"
+    );
+    assert!(driver.creations.resume(&id).is_empty());
+}
+
+#[test]
+fn a_generic_service_error_after_possible_admission_keeps_unknown_and_its_original_id() {
+    use zerus_client_core::desktop::creation_worktree as wire;
+    let mut driver = Driver::loaded();
+    let id = driver.submit(plan(&auto_choices()));
+    driver.flush();
+    let (flight, _) = driver.call();
+    driver.answer(flight, identity("/srv/repo"));
+    let (flight, _) = driver.call();
+    driver.answer(flight, ok(catalog("/srv/repo")));
+    driver.flush();
+    let (flight, _) = driver.call();
+    let operation = driver.op(&id);
+    let request = operation["worktree_id"].as_str().unwrap();
+    let intent = wire::Intent {
+        scope: wire::Scope {
+            configuration: "a".repeat(64),
+            service_epoch: self::id(600),
+        },
+        creation_id: id.clone(),
+        worktree_request_id: request.into(),
+        revision: operation["revision"].as_u64().unwrap(),
+        original: creation::effect_checkpoint(&operation).unwrap(),
+    };
+    let reply = wire::Admission {
+        abi: wire::ABI.into(),
+        request_id: request.into(),
+        scope: intent.scope.clone(),
+        accepted: false,
+        durable: false,
+        code: "creation_worktree_unavailable".into(),
+        receipt: None,
+    };
+    // The SAME mapping the native reader uses, including its retained reason.
+    driver.answer(flight, reply.refusal_answer(&intent).unwrap());
+    assert_eq!(driver.state(&id), "unknown");
+    assert_eq!(driver.op(&id)["worktree_id"], request);
+    assert!(driver.op(&id)["error"]
+        .as_str()
+        .unwrap()
+        .contains("could not confirm"));
+    assert!(!driver.creations.can_edit(&id));
+    assert!(!can_resume(&driver.op(&id)));
+    assert!(driver.creations.resume(&id).is_empty());
+    assert!(driver.launches.is_empty());
 }
 
 #[test]
@@ -934,6 +1022,55 @@ fn diagnostics_redact_credentials() {
 }
 
 #[test]
+fn explicit_destinations_ignore_matching_folder_and_swarm_inference() {
+    use zerus_client_core::launch::{Form, INBOX, INBOX_PREVIEW};
+    let projects = vec![
+        Project {
+            id: INBOX.into(),
+            name: "General".into(),
+            folders: vec![],
+        },
+        Project {
+            id: "zerus".into(),
+            name: "Zerus".into(),
+            folders: vec![ProjectFolder {
+                machine: String::new(),
+                path: "/home/example".into(),
+            }],
+        },
+        Project {
+            id: "other".into(),
+            name: "Other".into(),
+            folders: vec![],
+        },
+    ];
+    for evidence in [
+        json!({"path":"/home/example"}),
+        json!({"path":"/home/example","project_inference":{"schema":1,"swarm_id":"S","project_id":"zerus"}}),
+    ] {
+        for (group, implicit, expected, name) in [
+            (INBOX, false, INBOX, "General"),
+            ("other", false, "other", "Other"),
+            (INBOX, true, "zerus", "Zerus"),
+        ] {
+            let mut plan = json!({"group":group,"implicit_inbox":implicit,"swarm":"S","host":""});
+            assert_eq!(
+                place(&mut plan, &evidence, &projects).unwrap().group,
+                expected
+            );
+            assert_eq!(plan["group_name"], name);
+            let shown = zerus_client_core::launch::shown(&Form {
+                path: "/home/example".into(),
+                implicit_inbox: implicit,
+                ..Form::default()
+            });
+            let preview = shown.preview.map(|text| text.english()).unwrap_or_default();
+            assert_eq!(preview == INBOX_PREVIEW, implicit);
+        }
+    }
+}
+
+#[test]
 fn repository_addresses_without_secrets_are_kept() {
     for (url, safe) in [
         ("git@example.com:r.git", true),
@@ -1258,4 +1395,75 @@ fn task_creation_keeps_its_reserved_launch_id_and_refuses_duplicate_admission() 
         .submit_reserved(plan(&choices()), &reserved);
     assert!(result.is_err() && effects.is_empty());
     assert_eq!(driver.writes.len(), before);
+}
+
+#[test]
+fn a_known_failed_launch_keeps_its_identity_but_allows_a_separate_edit() {
+    let mut driver = Driver::loaded();
+    let id = driver.submit(plan(&choices()));
+    driver.flush();
+    let (flight, _) = driver.call();
+    driver.answer(flight, identity("/srv/repo"));
+    driver.flush();
+    assert_eq!(driver.launches.len(), 1);
+    let original = driver.op(&id)["launch_id"].clone();
+    let effects = driver.creations.launch_failed(
+        original.as_str().unwrap(),
+        "This session already has an account.",
+    );
+    driver.take(effects);
+    driver.flush();
+    assert_eq!(driver.state(&id), "failed");
+    assert!(driver.creations.can_edit(&id));
+    assert!(!can_resume(&driver.op(&id)));
+    assert_eq!(driver.op(&id)["launch_id"], original);
+    assert_eq!(driver.op(&id)["launch_dispatched"], true);
+    let effects = driver.creations.resume(&id);
+    driver.take(effects);
+    driver.flush();
+    assert_eq!(
+        driver.launches.len(),
+        1,
+        "never dispatch the failed original twice"
+    );
+    let mut restarted = Driver::new();
+    let effects = restarted
+        .creations
+        .load(Journal::Bytes(driver.journal.clone()));
+    restarted.take(effects);
+    restarted.flush();
+    assert!(restarted.creations.can_edit(&id));
+    assert!(!can_resume(&restarted.op(&id)));
+    assert!(restarted.launches.is_empty());
+    // The restarted fixture's synthetic ID generator starts again at one;
+    // the live fixture models production's fresh UUID generator.
+    let replacement = driver.submit(plan(&choices()));
+    assert_ne!(replacement, id, "an edit creates a separate identity");
+}
+
+#[test]
+fn an_unknown_or_foreign_launch_result_cannot_enable_edit_or_replay() {
+    let mut driver = Driver::loaded();
+    let id = driver.submit(plan(&choices()));
+    driver.flush();
+    let (flight, _) = driver.call();
+    driver.answer(flight, identity("/srv/repo"));
+    driver.flush();
+    let effects = driver
+        .creations
+        .launch_finished(&id, Err("Unknown original".into()));
+    driver.take(effects);
+    driver.flush();
+    let effects = driver
+        .creations
+        .launch_failed(&self::id(900), "another original");
+    driver.take(effects);
+    driver.flush();
+    assert_eq!(driver.state(&id), "unknown");
+    assert!(!driver.creations.can_edit(&id));
+    assert!(!can_resume(&driver.op(&id)));
+    let effects = driver.creations.resume(&id);
+    driver.take(effects);
+    driver.flush();
+    assert_eq!(driver.launches.len(), 1);
 }

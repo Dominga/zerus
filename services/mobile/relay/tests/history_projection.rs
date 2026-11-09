@@ -143,11 +143,10 @@ async fn projection_retention_fixture() {
     tokio::time::sleep(Duration::from_millis(1250)).await;
     f.store.maintain(false).await.unwrap();
     for body in &reads {
-        assert!(f
-            .store
+        f.store
             .receipt(&f.phone, s(body, "request_id"))
             .await
-            .is_ok());
+            .expect("terminal projection read must remain available inside one-hour retention");
     }
     for body in &reads {
         age(&f, body, 3601.0).await;

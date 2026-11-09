@@ -54,11 +54,30 @@ It refuses unsafe existing entries without changing their ACLs. A changed relay
 or credential gets a new receipt directory; old receipts remain untouched.
 Keep credentials and `--check` reports private.
 
-Start is explicit after each Windows login. Closing the GUI leaves the connector
-running. **Stop connector** stops claiming, completes its in-flight native call
-and journals the outcome; reload status to confirm it has stopped before saving
-changes. It never kills the independent ConPTY session host or native agents.
-There is no automatic login task or Windows service registration in this slice.
+The first **Start connector** arms automatic start for that workspace, and so
+does a connector Zerus finds running. From then on, each time Zerus starts it
+starts the connector once: at login if **Settings → About → Start Zerus at
+login** is on or a Startup shortcut opens Zerus, otherwise when you open Zerus.
+An upgrade never starts a connector nobody started, and a different workspace
+starts nothing until its own connector has run. **Settings → Mobile connection**
+shows the current state. Automatic start uses only the
+`zerus-mobile-connector.exe` packaged beside `hgs-tray.exe`, runs windowless, and
+makes one attempt per Zerus start: a failure is shown there, with no retry or
+watchdog. A connector that exits later stays stopped until the next Zerus start
+or Start connector. Legacy API v1 configurations still start by hand.
+
+Closing the GUI leaves the connector running. **Stop connector** stops claiming,
+completes its in-flight native call and journals the outcome; reload status to
+confirm it has stopped before saving changes. It never kills the independent
+ConPTY session host or native agents. Stop also disarms automatic start, so the
+connector stays stopped across Zerus restarts and logins until you choose Start
+connector again. There is no Windows service or scheduled task for the connector.
+
+Zerus stops only a connector it can prove it started. A connector launched by
+hand or by another tool is refused, and so is one started by an earlier Zerus
+version until its next start. Settings says that nothing changed, and automatic
+start stays as it was. A service or watchdog that deliberately runs the full
+supported Start can still restart the connector after a Stop.
 
 Supported scope is existing local Codex, Claude and Kimi sessions and their
 native inspection, history, messages, questions, Terminal and allowed session
@@ -472,6 +491,33 @@ receipt before preparing another attempt.
 Upgrade the connector's `hgs` executable together with the connector when using
 new native operations. A private executable path in `connector.json` can keep
 the mobile connector on a reviewed build without replacing the desktop CLI.
+That explicit `hgs_path` takes precedence over `PATH`. Ordinary desktop/CLI
+updates do not refresh a separate copy such as
+`~/.local/share/zerus-mobile/bin/hgs`. If that copy predates
+`hgs task exchange|digests --json`, the connector omits phone task exchange and
+project task digests even when the ordinary installed CLI supports them.
+
+To correct this configuration, with the gateway owner's approval:
+
+1. Drain phone actions and stop **only the connector** using its protected
+   service. Keep native agents, tmux and DeepSeek hosts running.
+2. Verify the maintained CLI's help advertises
+   `hgs task exchange|digests --json` and `hgs task digests --json` succeeds.
+   A source install normally maintains `~/.local/bin/hgs`; choose the actual
+   maintained executable on this computer.
+3. Privately edit only `hgs_path` in the connector's existing configuration to
+   that executable's absolute path. Alternatively remove `hgs_path` to use the
+   service's `PATH`, after verifying that it selects the maintained CLI.
+   Preserve every other field, file permissions, credential, relay identity
+   and receipt directory. Do not copy, clear or reinitialize the journal.
+4. Run the connector's read-only `--check` against that configuration, then
+   start only the connector. Verify its next mobile catalog advertises
+   `task_exchange`, project rows contain `tasks_digest`, and a paired phone can
+   exchange tasks. A green desktop build alone is not this acceptance check.
+
+The runtime keeps explicit custom pins: it never silently substitutes another
+CLI. A successful help probe without task exchange logs one warning per local
+connector process; failed probes and old peer CLIs do not produce that warning.
 Before restarting a connector, wait for its active mutation attempts to finish.
 Restart only the connector service, once it is [protected](#protect-running-agents);
 leave native agents, tmux and owning DeepSeek hosts running. Older resident

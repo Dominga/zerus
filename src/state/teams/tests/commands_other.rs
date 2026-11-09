@@ -1164,7 +1164,9 @@ fn every_stdin_json_reader_drops_a_bom() {
     // Streams and framed protocols that never parse JSON from stdin.
     let streams = ["peer_channel.rs", "screen/mod.rs", "platform/windows.rs", "cli.rs", "desktop/feed/io.rs",
         // A length-framed request between Zerus's own processes, not typed JSON.
-        "desktop/windows_registration/native.rs"];
+        "desktop/windows_registration/native.rs",
+        // Its test child reads length-framed binary requests from stdin.
+        "platform/worktree_membership/objects/loan/peer/tests.rs"];
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = vec![root.clone()];
     let mut missing = Vec::new();
@@ -1201,9 +1203,9 @@ fn every_stdin_json_reader_drops_a_bom() {
     }
     assert!(readers >= 25, "only {readers} readers found");
     assert!(missing.is_empty(), "stdin JSON readers that keep a BOM: {missing:?}");
-    // `send` strips it inside submit, before its digest.
+    // `send` strips it inside submit_core (every origin goes through it), before its digest.
     let input = std::fs::read_to_string(root.join("state/input.rs")).unwrap();
-    let submit = input.find("pub(super) fn submit(").unwrap();
+    let submit = input.find("fn submit_core(").unwrap();
     assert!(input[submit..submit + 400].contains("without_bom(input)"));
 }
 

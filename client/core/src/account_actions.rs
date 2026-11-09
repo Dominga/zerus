@@ -22,6 +22,12 @@ pub enum Kind {
     Remove,
     Permissions,
     Model,
+    /// Share the permission mode across the account's computers, or keep it
+    /// per computer (zerus-f0uz8): `mode` is `account` or `computer`.
+    Scope,
+    /// The account's color and emoji, kept on each of its computers
+    /// (zerus-sa9qn.6): `color` and `emoji`, empty to clear.
+    Mark,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -30,6 +36,34 @@ pub struct Values {
     pub mode: String,
     pub model: String,
     pub effort: String,
+    /// For a shared permission change: the scope the member must still have
+    /// (`account`), checked by its hgs under the catalog lock (zerus-f0uz8).
+    pub expect_scope: String,
+    /// A mark's `#rrggbb` color and emoji; empty clears them.
+    pub color: String,
+    pub emoji: String,
+    /// Set only what the computer has no value for: a desktop moving its own
+    /// marks to the computer never replaces the computer's (zerus-sa9qn.6).
+    pub if_unset: bool,
+}
+
+/// A mark color: empty or `#rrggbb`.
+pub fn mark_color(value: &str) -> bool {
+    value.is_empty()
+        || (value.len() == 7
+            && value.starts_with('#')
+            && value[1..]
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+}
+
+/// A mark emoji as hgs keeps it: empty, or short, not plain ASCII and
+/// without control or space characters. The webview checks for one emoji.
+pub fn mark_emoji(value: &str) -> bool {
+    value.is_empty()
+        || (value.encode_utf16().count() <= 32
+            && !value.is_ascii()
+            && !value.chars().any(|c| c.is_control() || c.is_whitespace()))
 }
 
 /// Native-only evidence captured when the action opens, never read from a
@@ -138,6 +172,8 @@ impl Binding {
             Kind::Remove => "rm",
             Kind::Permissions => "permissions",
             Kind::Model => "model-defaults",
+            Kind::Scope => "permission-scope",
+            Kind::Mark => "mark",
         };
         if kind == Kind::Default && matches!(self.provider.as_str(), "dsh" | "opencode") {
             return Err("This account has no default selection.".into());
@@ -156,13 +192,49 @@ impl Binding {
         if kind == Kind::Permissions {
             // Task 68: a native selection too, as its compact `native:` map;
             // the captured catalog checks its controls before this is built.
+            // `default` returns to the Zerus default (T-6hcfnu).
             if self.provider == "opencode"
-                || !(["provider", "bypass"].contains(&values.mode.as_str())
+                || !(["provider", "bypass", "default"].contains(&values.mode.as_str())
                     || permissions::decode_native(&values.mode).is_some_and(|map| !map.is_empty()))
             {
                 return Err("Choose provider or bypass permission mode.".into());
             }
             call.args.extend(["--mode".into(), values.mode.clone()]);
+            if !values.expect_scope.is_empty() {
+                call.args
+                    .extend(["--expect-scope".into(), values.expect_scope.clone()]);
+            }
+        }
+        if kind == Kind::Scope {
+            if self.provider == "opencode"
+                || !["account", "computer"].contains(&values.mode.as_str())
+            {
+                return Err("Choose shared or per-computer permissions.".into());
+            }
+            call.args.extend(["--scope".into(), values.mode.clone()]);
+        }
+        if kind == Kind::Mark {
+            let color = values.color.trim().to_ascii_lowercase();
+            let emoji = values.emoji.trim();
+            if !mark_color(&color) || !mark_emoji(emoji) {
+                return Err("Choose a color as #RRGGBB and one emoji.".into());
+            }
+            let or_none = |value: &str| {
+                if value.is_empty() {
+                    "none".to_owned()
+                } else {
+                    value.to_owned()
+                }
+            };
+            call.args.extend([
+                "--color".into(),
+                or_none(&color),
+                "--emoji".into(),
+                or_none(emoji),
+            ]);
+            if values.if_unset {
+                call.args.push("--if-unset".into());
+            }
         }
         if kind == Kind::Model {
             if !["codex", "claude", "kimi"].contains(&self.provider.as_str())
@@ -289,7 +361,7 @@ mod tests {
             .edit_values(Kind::Permissions, &values(native))
             .unwrap();
         assert!(call.args.windows(2).any(|a| a == ["--mode", native]));
-        for mode in ["bypass", "provider"] {
+        for mode in ["bypass", "provider", "default"] {
             assert!(binding()
                 .edit_values(Kind::Permissions, &values(mode))
                 .is_ok());
@@ -301,6 +373,76 @@ mod tests {
                     .is_err(),
                 "{mode}"
             );
+        }
+    }
+    #[test]
+    fn a_scope_edit_names_shared_or_per_computer_only() {
+        let scope = |mode: &str| {
+            binding().edit_values(
+                Kind::Scope,
+                &Values {
+                    mode: mode.into(),
+                    ..Default::default()
+                },
+            )
+        };
+        let args = scope("computer").unwrap().args;
+        assert_eq!(
+            &args[3..],
+            [
+                "account",
+                "permission-scope",
+                "work",
+                "--revision",
+                "r1",
+                "--scope",
+                "computer"
+            ]
+        );
+        assert!(scope("account").is_ok());
+        for bad in ["", "everywhere", "bypass"] {
+            assert!(scope(bad).is_err(), "{bad}");
+        }
+    }
+    #[test]
+    fn a_mark_edit_names_both_fields_and_clears_empty_ones() {
+        let mark = |color: &str, emoji: &str, if_unset: bool| {
+            binding().edit_values(
+                Kind::Mark,
+                &Values {
+                    color: color.into(),
+                    emoji: emoji.into(),
+                    if_unset,
+                    ..Default::default()
+                },
+            )
+        };
+        assert_eq!(
+            &mark(" #2B97FF ", "🦊", false).unwrap().args[3..],
+            [
+                "account",
+                "mark",
+                "work",
+                "--revision",
+                "r1",
+                "--color",
+                "#2b97ff",
+                "--emoji",
+                "🦊"
+            ]
+        );
+        assert_eq!(
+            &mark("", "", true).unwrap().args[8..],
+            ["--color", "none", "--emoji", "none", "--if-unset"]
+        );
+        for (color, emoji) in [
+            ("red", ""),
+            ("#2b97f", ""),
+            ("", "A"),
+            ("", "🦊 🦊"),
+            ("", "--color"),
+        ] {
+            assert!(mark(color, emoji, false).is_err(), "{color} {emoji}");
         }
     }
 }

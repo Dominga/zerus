@@ -20,6 +20,8 @@ client/src/i18n.ru.json merge=i18n
 # They and the recorded screen data are embedded with include_str!, so checkouts
 # keep their bytes exactly (no CRLF conversion on Windows).
 tests/fixtures/*.txt -text -whitespace
+# Reviewed reverse-projection patches pin raw bytes, including context whitespace.
+tests/fixtures/*.patch -text -whitespace
 # SessionStart serialization has a byte-exact UTF-8/LF contract on every host.
 tests/fixtures/session-start-context.json -text
 src/state/data/*.txt -text -whitespace

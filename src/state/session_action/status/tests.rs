@@ -492,3 +492,48 @@ fn a_terminal_refusal_never_acquires_a_controlling_terminal() {
         "private terminal-refusal child failed"
     );
 }
+
+/// zerus-5wmh.66.4.9: a service that read the receipt bytes itself from its
+/// held store gets exactly what the path observation gives for the same
+/// bytes, by the same rule; an absence is `unavailable`, never a retry.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_held_read_projects_exactly_as_the_path_observation() {
+    let f = Fixture::new();
+    let mut r = request();
+    r.action = "resume".into();
+    let original = serde_json::to_vec(&r).unwrap();
+    let hash = request_hash(&r, NAME);
+    let mut resumed = receipt(&r, NAME, &hash, "completed");
+    resumed["result_target"] = json!({"name":NAME,"run_id":"run-2",
+        "conversation_id":r.expected_conversation_id});
+    for value in [
+        receipt(&r, NAME, &hash, "claimed"),
+        receipt(&r, NAME, &hash, "failed"),
+        receipt(&r, NAME, &hash, "uncertain"),
+        resumed,
+    ] {
+        f.write(&value);
+        let bytes = fs::read(f.path()).unwrap();
+        let held = observe_held(NAME, &original, Some(&bytes)).unwrap();
+        assert_eq!(held, observe_original(&f.root, NAME, &original).unwrap());
+    }
+    fs::remove_file(f.path()).unwrap();
+    assert_eq!(
+        observe_held(NAME, &original, None).unwrap(),
+        observe_original(&f.root, NAME, &original).unwrap()
+    );
+    assert_eq!(
+        observe_held(NAME, &original, None).unwrap()["status"],
+        "unavailable"
+    );
+    // Another request's receipt, an oversized one, or an original that is
+    // not a valid request never projects.
+    let mut other = request();
+    other.action = "resume".into();
+    other.expected_run_id = "run-9".into();
+    let foreign = receipt(&other, NAME, &request_hash(&other, NAME), "failed");
+    assert!(observe_held(NAME, &original, Some(foreign.to_string().as_bytes())).is_err());
+    assert!(observe_held(NAME, &original, Some(&vec![b' '; LIMIT as usize + 1])).is_err());
+    assert!(observe_held(NAME, b"{}", None).is_err());
+}

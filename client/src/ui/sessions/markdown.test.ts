@@ -77,6 +77,24 @@ describe("Activity Markdown inlines", () => {
     expect(linkKind("ssh://host")).toBeUndefined();
   });
 
+  it("links inline code that is exactly one bare web address, styled as code (MarkdownHtml.cpp:299-311)", () => {
+    const code = (text: string): Inline => ({ kind: "code", text });
+    const web = (href: string, text: string): Inline => ({ kind: "external", href, children: [code(text)] });
+    expect(parse("Open `https://example.com/docs?a=1` or `www.example.com`.")).toEqual([p(
+      t("Open "), web("https://example.com/docs?a=1", "https://example.com/docs?a=1"), t(" or "),
+      web("http://www.example.com", "www.example.com"), t("."),
+    )]);
+    // Only a whole address: anything around it, or another kind of text, stays code.
+    for (const text of ["https://example.com.", "see https://example.com", "https://exa mple.com", "www.", "npm test",
+      "file:///tmp/a", "/tmp/a.txt", "[a](https://example.com)", "<https://example.com>", "mailto:person@example.com"]) {
+      expect(parse(`\`${text}\``)).toEqual([p(code(text))]);
+    }
+    // Inside a link it stays that link's text.
+    expect(parse("[`https://a.example`](https://b.example)")).toEqual([p(
+      { kind: "external", href: "https://b.example", children: [code("https://a.example")] },
+    )]);
+  });
+
   it("never loads an image: it becomes a link to its target", () => {
     expect(parse("![chart](https://example.com/c.png) ![](/tmp/local.png)")).toEqual([p(
       { kind: "external", href: "https://example.com/c.png", children: [t("chart")] }, t(" "),

@@ -161,7 +161,9 @@ relay suite; and native wire/storage/HTTP tests in Android and ZerusKit. Source
 changes and test builds do not migrate a live gateway or publish a release.
 
 Desktop Stop admission is advertised as `Workspace stop ABI: service-preflight-v1`
-in connector help and `capabilities.workspace_stop` in `--check --json`. Before
+in connector help and `capabilities.workspace_stop` in `--check --json`, only on
+Linux and Windows. macOS advertises neither, so its client disables Stop and a
+running workspace change, says why and sends no such request. Before
 writing a generation-bound Stop marker, Linux verifies the saved managed unit,
 its effective `KillMode=process` policy, unchanged definition, exact MainPID,
 connector image, journal lock and generation. Extra processes or delegated
@@ -170,3 +172,26 @@ and no active service; unreadable supervision refuses. Platforms without a
 verified installer service admission refuse Stop. Clients must require the ABI
 marker before offering Stop or a running workspace change; there is no legacy
 Stop fallback. Installing a new connector on a live gateway remains explicit.
+
+Windows has no installer service, so its admission is the provenance of the
+original Start. `--workspace start` holds its lifecycle lock, launches the child
+and records a private receipt with the child's PID, kernel creation time and image
+from its own process handle, plus the exact revision, configuration, state folder
+and node. The running connector publishes its PID and creation time in the same
+control record as its generation, while it holds the journal lock. Stop requires
+the receipt, that control record and the live process to agree, holds a read-only
+handle to the process, and rechecks the control record, configuration, journal lock
+and process immediately before writing the marker. Missing, older or changed
+evidence refuses, so a bare `--config` launch, a copied `--admit-revision` flag, a
+reused PID and a connector started by an earlier version all stay running. There's
+no scan, signal or kill. A manager that deliberately runs the full supported Start
+can still restart the connector, and this doesn't claim to prevent that.
+
+A client disarms autostart and saves that before it sends Stop, so a crash can't
+bring the connector back. A refused admission writes no marker and answers with
+the closed `stop-refused-before-effect` result, exit status 1, naming the call's
+generation and revision. Only that result restores the choice the Stop replaced,
+and only while that same disarm is still the current decision. With no earlier
+choice it stays unarmed, because a refusal never grants automatic start. A timeout, a
+malformed reply, any other error, or a Stop already in effect for the generation
+leaves it disarmed, with no automatic status call, retry or rearm.

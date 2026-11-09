@@ -248,6 +248,20 @@ with `patch -p1` from the source root.
   `client/scripts/menu-smoke.py --paint-column 100`. 2.54.2 already contains
   the change (`patch --dry-run` reports 0005 as previously applied), so a
   2.54.2 build omits it.
+- [0006](../../../client/patches/0006-GTK3-commit-resized-configures-with-their-paint.patch)
+  keeps a size-changing Wayland configure acknowledgement with the resized
+  paint. After thaw, the previous frame's after-paint can otherwise commit the
+  old geometry before the new layout runs. KWin consumes that acknowledgement,
+  then centers the later geometry change as a spontaneous resize: maximize can
+  straddle outputs and restore can move the normal window. State-only
+  configures still request their after-paint commit. Apply this to GTK after
+  0003 and 0004; it changes neither Tauri geometry persistence nor X11 behavior.
+  `client/scripts/test-wayland-maximize.py` checks the actual production resize
+  fixture in a private, actively compositing KWin VirtualBackend, with two
+  outputs and a private bus and home. It verifies the selected GDK mapping,
+  maximized output bounds and the exact restored normal rectangle. Its optional
+  uncorrected GDK control must reproduce the failure. It never uses the owner's
+  display or installed GUI.
 - WebKit patches 0001 and 0002 apply with `git apply --check` to WebKit main
   commit `6740c3a3f01a5a450fa7698037385790dfa3aa87` and to the verified 2.54.1
   source, and to the verified 2.54.2 source without offset or fuzz. Main has
@@ -283,10 +297,27 @@ cd "$SOURCES" && git clone --depth 1 --branch 3.24.52 https://gitlab.gnome.org/G
 cd gtk-3.24.52
 patch -p1 < "$ZERUS/client/patches/0003-GTK3-arm-Wayland-frame-callback-before-GL-swap.patch"
 patch -p1 < "$ZERUS/client/patches/0004-GDK-complete-paint-before-thaw.patch"
+patch -p1 < "$ZERUS/client/patches/0006-GTK3-commit-resized-configures-with-their-paint.patch"
 meson setup "$BUILD/gtk" -Dbuildtype=release -Dprefix="$PREFIX/gtk" -Dlibdir=lib \
   -Dx11_backend=true -Dwayland_backend=true -Dbroadway_backend=false -Dintrospection=false \
   -Ddemos=false -Dexamples=false -Dtests=false -Dinstalled_tests=false -Dgtk_doc=false -Dman=false
 meson compile -C "$BUILD/gtk" && meson install -C "$BUILD/gtk"
+```
+
+To check maximize/restore without using the owner's display, build the existing
+isolated fixture and use the selected private libraries below. `CONTROL` is an
+otherwise equivalent GTK prefix without 0006; omit its argument when no control
+is available. The control must fail at least one geometry check, while the
+corrected library must pass both. The output directory must be fresh.
+
+```sh
+CARGO_TARGET_DIR="$BUILD/client" cargo build --locked \
+  --manifest-path "$ZERUS/client/src-tauri/Cargo.toml" \
+  --example resize_fixture --features tauri/custom-protocol
+python3 "$ZERUS/client/scripts/test-wayland-maximize.py" \
+  --fixture "$BUILD/client/debug/examples/resize_fixture" \
+  --webkit-prefix "$PREFIX" --lib-dir "$PREFIX/gtk/lib" \
+  --control-lib-dir "$CONTROL/gtk/lib" --output "$BUILD/maximize-check"
 ```
 
 The result has `lib/`, `libexec/webkit2gtk-4.1/` and the `gtk/` override that

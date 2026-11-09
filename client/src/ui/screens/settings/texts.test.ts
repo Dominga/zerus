@@ -463,6 +463,8 @@ describe("Settings texts", () => {
     const sessionsWindow = fs.readFileSync(new URL("tray/src/SessionsWindow.cpp", repo), "utf8");
     const inserted = [...sessionsWindow.matchAll(/addSection\(tr\("([^"]+)"\)/g)].map((match) => match[1]);
     qtOrder.splice(qtOrder.indexOf("Voice input"), 0, ...inserted);
+    // Task #397: the fork's Memory page comes after Teams, before Model servers.
+    qtOrder.splice(qtOrder.indexOf("Model servers"), 0, "Memory");
     expect(labels).toEqual(qtOrder);
   });
 });

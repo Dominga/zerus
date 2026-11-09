@@ -283,9 +283,13 @@ fn failed_fixture(
     row.receipt.worktree = Some(result);
     tx.execute("UPDATE desktop_creation_worktrees SET receipt=?1,phase='failed',drained=1 WHERE worktree_id=?2",
         rusqlite::params![serde_json::to_string(&row.receipt).unwrap(),original.plan.worktree_request_id]).unwrap();
+    // This synthetic physical drain mirrors live reservation accounting; it
+    // is not a second release when a later request retires the scheduling slot.
     tx.execute(
-        "UPDATE desktop_creation_worktree_budget SET active=active-1 WHERE id=1",
-        [],
+        "UPDATE desktop_creation_worktree_budget SET rows=rows-1,
+         bytes=bytes-(SELECT length(CAST(source AS BLOB))+length(CAST(plan AS BLOB))+24576+8192+4096+1024
+                      FROM desktop_creation_worktrees WHERE worktree_id=?1),active=active-1 WHERE id=1",
+        [&original.plan.worktree_request_id],
     )
     .unwrap();
     tx.commit().unwrap();
@@ -1631,5 +1635,474 @@ mod actor {
         f.until("step protocol drain", |f| f.row(&original).receipt.drained);
         assert_eq!(f.row(&original).next_step, 1);
         assert_eq!(f.row(&original).receipt.phase, Phase::Unknown);
+    }
+}
+/// Reservation accounting controls use only synthetic originals and private Store fixtures.
+/// They are ledger/Store tests, not native-agent qualification.
+mod reservation_budget {
+    use super::*;
+    pub(super) fn budget(db: &rusqlite::Connection) -> (i64, i64, i64) {
+        db.query_row(
+            "SELECT rows,bytes,active FROM desktop_creation_worktree_budget WHERE id=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+    }
+    fn key(v: &Verified) -> &str {
+        &v.plan.worktree_request_id
+    }
+    fn admitted(store: &mut Store, v: &Verified, writer: &str) -> ledger::Row {
+        let tx = store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let row = ledger::admit(&tx, v, writer, 1).unwrap();
+        tx.commit().unwrap();
+        row
+    }
+    fn retired(store: &mut Store, row: &ledger::Row) {
+        let tx = store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        ledger::retire(&tx, row).unwrap();
+        tx.commit().unwrap();
+    }
+    fn original_charge(db: &rusqlite::Connection, id: &str) -> i64 {
+        db.query_row("SELECT length(CAST(source AS BLOB))+length(CAST(plan AS BLOB))+37888 FROM desktop_creation_worktrees WHERE worktree_id=?1",[id],|r|r.get(0)).unwrap()
+    }
+    pub(super) fn retained(db: &rusqlite::Connection) -> Vec<String> {
+        let columns: Vec<String> = db
+            .prepare("PRAGMA table_info(desktop_creation_worktrees)")
+            .unwrap()
+            .query_map([], |r| r.get(1))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        db.prepare(&format!(
+            "SELECT json_array({}) FROM desktop_creation_worktrees ORDER BY worktree_id",
+            columns
+                .iter()
+                .map(|column| format!("typeof({column}),hex(CAST({column} AS BLOB))"))
+                .collect::<Vec<_>>()
+                .join(",")
+        ))
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+    }
+    /// Exact old cumulative charging formula, with complete valid retained originals.
+    fn legacy(store: &mut Store, configuration: &str, epoch: &str) -> Vec<Verified> {
+        let writer = uuid::Uuid::new_v4().to_string();
+        let mut originals = Vec::new();
+        let mut bytes = 0_i64;
+        loop {
+            let mut v = original(configuration, epoch);
+            // Raw whitespace is retained and charged, not re-serialized away.
+            v.intent.original = format!(" \n{}  ", v.intent.original);
+            let v = v.intent.verify().unwrap();
+            let charge =
+                v.intent.original.len() + serde_json::to_string(&v.plan).unwrap().len() + 37888;
+            if bytes + i64::try_from(charge).unwrap() > 16 << 20 {
+                assert!((16 << 20) - bytes < i64::try_from(charge).unwrap());
+                break;
+            }
+            let row = admitted(store, &v, &writer);
+            bytes += original_charge(&store.db, key(&v));
+            retired(store, &row);
+            originals.push(v);
+            assert!(originals.len() <= 4096);
+        }
+        assert!(!originals.is_empty());
+        store
+            .db
+            .execute(
+                "UPDATE desktop_creation_worktree_budget SET rows=?1,bytes=?2,active=0 WHERE id=1",
+                rusqlite::params![originals.len() as i64, bytes],
+            )
+            .unwrap();
+        originals
+    }
+    #[test]
+    fn exact_legacy_conversion_keeps_every_original_and_duplicate() {
+        let (_temp, location, mut store, epoch) = fixture();
+        let old = legacy(&mut store, &location.configuration, &epoch);
+        let before = retained(&store.db);
+        let mut v = original(&location.configuration, &epoch);
+        v.intent.original = format!(" \n{}  ", v.intent.original);
+        let v = v.intent.verify().unwrap();
+        let tx = store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        assert!(ledger::admit(&tx, &v, &uuid::Uuid::new_v4().to_string(), 1).is_err());
+        drop(tx);
+        ledger::startup(&mut store.db).unwrap();
+        assert_eq!(budget(&store.db), (0, 0, 0));
+        assert_eq!(retained(&store.db), before);
+        for v in [&old[0], old.last().unwrap()] {
+            let kept = ledger::load(&store.db, key(v)).unwrap().unwrap().receipt;
+            assert_eq!(admitted(&mut store, v, &epoch).receipt, kept);
+            assert_eq!(budget(&store.db), (0, 0, 0));
+        }
+        let row = admitted(&mut store, &v, &epoch);
+        assert_eq!(
+            budget(&store.db),
+            (1, original_charge(&store.db, key(&v)), 1)
+        );
+        retired(&mut store, &row);
+        ledger::startup(&mut store.db).unwrap();
+        assert_eq!(budget(&store.db), (0, 0, 0));
+    }
+    #[test]
+    fn over_4096_distinct_cycles_retain_history_without_live_charge_or_replay() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let (_temp, location, mut store, epoch) = fixture();
+        let mut first = None;
+        for _ in 0..4097 {
+            let v = original(&location.configuration, &epoch);
+            let row = admitted(&mut store, &v, &epoch);
+            retired(&mut store, &row);
+            assert_eq!(budget(&store.db), (0, 0, 0));
+            if first.is_none() {
+                first = Some((
+                    v.intent.clone().verify().unwrap(),
+                    ledger::load(&store.db, key(&v)).unwrap().unwrap().receipt,
+                ));
+            }
+        }
+        let (v, receipt) = first.unwrap();
+        assert_eq!(admitted(&mut store, &v, &epoch).receipt, receipt);
+        assert_eq!(budget(&store.db), (0, 0, 0));
+        let steps = Arc::new(AtomicUsize::new(0));
+        let counted = steps.clone();
+        store.db.progress_handler(
+            1,
+            Some(move || counted.fetch_add(1, Ordering::Relaxed) > 2000),
+        );
+        ledger::startup(&mut store.db).unwrap();
+        store.db.progress_handler(0, None::<fn() -> bool>);
+        assert!(
+            steps.load(Ordering::Relaxed) < 2000,
+            "matching live accounting must not inspect history"
+        );
+        assert_eq!(
+            ledger::load(&store.db, key(&v)).unwrap().unwrap().receipt,
+            receipt
+        );
+        let status = store.operation_status();
+        let leaf = &status["kinds"]["creation_worktree"];
+        assert_eq!(leaf["history_complete"], false);
+        assert!(leaf["rows"].is_null() && leaf["unsettled"].is_null());
+        assert!(status["unsettled"].is_null());
+        assert_eq!(leaf["undrained"], 0);
+        assert_eq!(leaf["original_custody"], 0);
+    }
+    #[test]
+    fn thirty_two_real_reservations_refuse_the_next_without_forged_byte_capacity() {
+        let (_temp, location, mut store, epoch) = fixture();
+        let mut originals = Vec::new();
+        for _ in 0..32 {
+            let v = original(&location.configuration, &epoch);
+            admitted(&mut store, &v, &epoch);
+            originals.push(v);
+        }
+        let before = retained(&store.db);
+        let charged = budget(&store.db);
+        assert_eq!((charged.0, charged.2), (32, 32));
+        assert!(charged.1 < 16 << 20);
+        let v = original(&location.configuration, &epoch);
+        let tx = store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        assert!(ledger::admit(&tx, &v, &epoch, 2).is_err());
+        drop(tx);
+        assert_eq!(budget(&store.db), charged);
+        assert_eq!(retained(&store.db), before);
+        let row = ledger::load(&store.db, key(&originals[0]))
+            .unwrap()
+            .unwrap();
+        let charge = original_charge(&store.db, key(&originals[0]));
+        retired(&mut store, &row);
+        assert_eq!(budget(&store.db), (31, charged.1 - charge, 31));
+        admitted(&mut store, &v, &epoch);
+        assert_eq!(budget(&store.db).2, 32);
+    }
+    #[test]
+    fn legacy_corruption_or_write_and_commit_failures_never_repair_a_prefix() {
+        for failure in ["counter", "receipt", "drained", "write", "commit"] {
+            let (_temp, location, mut store, epoch) = fixture();
+            legacy(&mut store, &location.configuration, &epoch);
+            match failure {
+                "counter"=>{store.db.execute("UPDATE desktop_creation_worktree_budget SET bytes=bytes-1",[]).unwrap();},
+                "receipt"=>{store.db.execute("UPDATE desktop_creation_worktrees SET receipt='{}' WHERE worktree_id=(SELECT worktree_id FROM desktop_creation_worktrees LIMIT 1)",[]).unwrap();},
+                "drained"=>{store.db.execute_batch("PRAGMA ignore_check_constraints=ON; UPDATE desktop_creation_worktrees SET drained=2 WHERE worktree_id=(SELECT worktree_id FROM desktop_creation_worktrees LIMIT 1);").unwrap();},
+                "write"=>store.db.execute_batch("CREATE TEMP TRIGGER fail_budget BEFORE UPDATE ON desktop_creation_worktree_budget BEGIN SELECT RAISE(ABORT,'refused'); END;").unwrap(),
+                "commit"=>store.db.execute_batch("PRAGMA foreign_keys=ON;CREATE TABLE budget_parent(id INTEGER PRIMARY KEY);CREATE TABLE budget_child(id INTEGER REFERENCES budget_parent(id) DEFERRABLE INITIALLY DEFERRED);CREATE TEMP TRIGGER fail_budget_commit AFTER UPDATE ON desktop_creation_worktree_budget BEGIN INSERT INTO budget_child VALUES(1); END;").unwrap(),
+                _=>unreachable!(),
+            }
+            let before = retained(&store.db);
+            let old = budget(&store.db);
+            assert!(ledger::startup(&mut store.db).is_err(), "{failure}");
+            assert_eq!(budget(&store.db), old, "{failure}");
+            assert_eq!(retained(&store.db), before, "{failure}");
+        }
+    }
+    #[test]
+    fn receipt_and_budget_credit_roll_back_together_and_never_credit_twice() {
+        for failure in ["write", "commit"] {
+            let (_temp, location, mut store, epoch) = fixture();
+            let v = original(&location.configuration, &epoch);
+            let row = admitted(&mut store, &v, &epoch);
+            let before = retained(&store.db);
+            let old = budget(&store.db);
+            if failure == "write" {
+                store.db.execute_batch("CREATE TEMP TRIGGER fail_budget BEFORE UPDATE ON desktop_creation_worktree_budget BEGIN SELECT RAISE(ABORT,'refused'); END;").unwrap();
+            } else {
+                store.db.execute_batch("PRAGMA foreign_keys=ON;CREATE TABLE budget_parent(id INTEGER PRIMARY KEY);CREATE TABLE budget_child(id INTEGER REFERENCES budget_parent(id) DEFERRABLE INITIALLY DEFERRED);CREATE TEMP TRIGGER fail_budget AFTER UPDATE ON desktop_creation_worktree_budget BEGIN INSERT INTO budget_child VALUES(1); END;").unwrap();
+            }
+            let tx = store
+                .db
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            let result = ledger::retire(&tx, &row);
+            if result.is_ok() {
+                assert!(tx.commit().is_err());
+            } else {
+                drop(tx);
+            }
+            assert_eq!(retained(&store.db), before);
+            assert_eq!(budget(&store.db), old);
+            store.db.execute_batch("DROP TRIGGER fail_budget;").unwrap();
+            retired(&mut store, &row);
+            assert_eq!(budget(&store.db), (0, 0, 0));
+            let after = retained(&store.db);
+            let tx = store
+                .db
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            assert!(ledger::retire(&tx, &row).is_err());
+            drop(tx);
+            assert_eq!(retained(&store.db), after);
+            assert_eq!(budget(&store.db), (0, 0, 0));
+        }
+    }
+
+    #[test]
+    fn malformed_live_counter_is_unavailable_and_never_an_extra_reservation() {
+        let (_temp, location, mut store, epoch) = fixture();
+        store
+            .db
+            .execute(
+                "UPDATE desktop_creation_worktree_budget SET rows=1,bytes=1,active=1 WHERE id=1",
+                [],
+            )
+            .unwrap();
+        assert!(ledger::undrained(&store.db).is_err());
+        assert!(ledger::startup(&mut store.db).is_err());
+        let v = original(&location.configuration, &epoch);
+        let tx = store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        assert!(ledger::admit(&tx, &v, &epoch, 1).is_err());
+        drop(tx);
+        assert_eq!(budget(&store.db), (1, 1, 1));
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn held_original_custody_keeps_the_entire_charge_until_its_exact_release() {
+        let (_temp, location, mut store, epoch) = fixture();
+        let v = original(&location.configuration, &epoch);
+        let (record, held) = running(&mut store, &location, &v, &epoch);
+        let before = budget(&store.db);
+        assert_eq!((before.0, before.2), (1, 1));
+        assert!(matches!(
+            crate::desktop::custody::probe(&location, &record),
+            crate::desktop::custody::Observation::Held
+        ));
+        let row = ledger::load(&store.db, key(&v)).unwrap().unwrap();
+        retired(&mut store, &row);
+        assert_eq!(
+            budget(&store.db),
+            before,
+            "retiring an original is not its physical release"
+        );
+        let row = ledger::load(&store.db, key(&v)).unwrap().unwrap();
+        assert!(!row.receipt.drained);
+        drop(held);
+        let observed = crate::desktop::custody::probe(&location, &record);
+        assert!(matches!(
+            observed,
+            crate::desktop::custody::Observation::Released { .. }
+        ));
+        let tx = store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        ledger::drained(tx, row, observed).unwrap();
+        assert_eq!(budget(&store.db), (0, 0, 0));
+        let saved = retained(&store.db);
+        ledger::startup(&mut store.db).unwrap();
+        assert_eq!(retained(&store.db), saved);
+        assert_eq!(budget(&store.db), (0, 0, 0));
+    }
+    #[test]
+    fn a_thirty_third_valid_row_is_corruption_not_unbounded_roster_work() {
+        let (_temp, location, mut store, epoch) = fixture();
+        for _ in 0..32 {
+            let v = original(&location.configuration, &epoch);
+            admitted(&mut store, &v, &epoch);
+        }
+        let old = budget(&store.db);
+        let v = original(&location.configuration, &epoch);
+        let (_other_temp, _other_location, mut other, _other_epoch) = fixture();
+        admitted(&mut other, &v, &epoch);
+        let columns: usize = other
+            .db
+            .prepare("SELECT * FROM desktop_creation_worktrees")
+            .unwrap()
+            .column_count();
+        let values: Vec<rusqlite::types::Value> = other
+            .db
+            .query_row("SELECT * FROM desktop_creation_worktrees", [], |r| {
+                (0..columns).map(|i| r.get(i)).collect()
+            })
+            .unwrap();
+        let sql = format!(
+            "INSERT INTO desktop_creation_worktrees VALUES({})",
+            vec!["?"; columns].join(",")
+        );
+        store
+            .db
+            .execute(&sql, rusqlite::params_from_iter(values))
+            .unwrap();
+        assert!(ledger::charged_ids(&store.db).is_err());
+        assert!(ledger::undrained(&store.db).is_err());
+        assert!(ledger::startup(&mut store.db).is_err());
+        assert_eq!(budget(&store.db), old);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn running(
+        store: &mut Store,
+        location: &Location,
+        v: &Verified,
+        epoch: &str,
+    ) -> (
+        zerus_desktop_ledger::operations::custody::Record,
+        std::sync::Arc<zerus_client_core::run::custody::InheritedLock>,
+    ) {
+        use zerus_desktop_ledger::operations::{custody::Record, Ticket};
+        let row = admitted(store, v, epoch);
+        let ticket = Ticket {
+            operation_id: v.binding.operation_id().unwrap(),
+            attempt_id: uuid::Uuid::new_v4().to_string(),
+            revision: row.receipt.revision + 1,
+            admission_id: key(v).into(),
+            binding_sha256: v.binding.fingerprint().unwrap(),
+            writer_epoch: epoch.into(),
+            service_epoch: epoch.into(),
+            lease: uuid::Uuid::new_v4().to_string(),
+        };
+        let (prepared, held) = crate::desktop::custody::prepare(location, &ticket).unwrap();
+        let record = Record {
+            prepared,
+            helper: None,
+        };
+        let tx = store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        ledger::reserve(&tx, &row, &ticket, &record).unwrap();
+        tx.commit().unwrap();
+        (record, held)
+    }
+
+    /// Corrupt stored bytes are copied into a fresh private database without
+    /// bypassing/changing any production trigger or touching a live original.
+    #[test]
+    fn bounded_raw_columns_reject_nul_suffixes_types_and_unicode_overflow() {
+        for (column, cap) in [
+            ("source", 32768_usize),
+            ("plan", 16384_usize),
+            ("receipt", 24576_usize),
+            ("fingerprint", 64_usize),
+            ("writer_epoch", 36_usize),
+            ("creation_id", 36_usize),
+        ] {
+            for mode in ["nul", "oversize", "unicode", "blob"] {
+                let (_temp, location, mut store, epoch) = fixture();
+                let v = original(&location.configuration, &epoch);
+                let row = admitted(&mut store, &v, &epoch);
+                retired(&mut store, &row);
+                let charge = original_charge(&store.db, key(&v));
+                let columns: Vec<String> = store
+                    .db
+                    .prepare("PRAGMA table_info(desktop_creation_worktrees)")
+                    .unwrap()
+                    .query_map([], |r| r.get(1))
+                    .unwrap()
+                    .collect::<rusqlite::Result<_>>()
+                    .unwrap();
+                let mut values: Vec<rusqlite::types::Value> = store
+                    .db
+                    .query_row("SELECT * FROM desktop_creation_worktrees", [], |r| {
+                        (0..columns.len()).map(|i| r.get(i)).collect()
+                    })
+                    .unwrap();
+                let index = columns.iter().position(|c| c == column).unwrap();
+                let rusqlite::types::Value::Text(prefix) = values[index].clone() else {
+                    panic!("fixture text")
+                };
+                values[index] = match mode {
+                    "nul" => rusqlite::types::Value::Text(format!("{prefix}\0discarded suffix")),
+                    "oversize" => {
+                        rusqlite::types::Value::Text(format!("{prefix}{}", " ".repeat(cap + 1)))
+                    }
+                    "unicode" => rusqlite::types::Value::Text(format!(
+                        "{prefix}{}",
+                        "例".repeat(cap / 3 + 1)
+                    )),
+                    "blob" => rusqlite::types::Value::Blob(prefix.into_bytes()),
+                    _ => unreachable!(),
+                };
+                let (_copy_temp, _copy_location, mut copy, _copy_epoch) = fixture();
+                copy.db
+                    .execute_batch("PRAGMA ignore_check_constraints=ON;")
+                    .unwrap();
+                let sql = format!(
+                    "INSERT INTO desktop_creation_worktrees VALUES({})",
+                    vec!["?"; columns.len()].join(",")
+                );
+                copy.db
+                    .execute(&sql, rusqlite::params_from_iter(values))
+                    .unwrap();
+                // Prefix-priced cumulative counters must never be normalized into
+                // live zero by accepting a truncated original. This is corruption.
+                copy.db.execute("UPDATE desktop_creation_worktree_budget SET rows=1,bytes=?1,active=0 WHERE id=1",[charge]).unwrap();
+                let before = retained(&copy.db);
+                let before_budget = budget(&copy.db);
+                assert!(ledger::load(&copy.db, key(&v)).is_err(), "{column}/{mode}");
+                assert!(ledger::startup(&mut copy.db).is_err(), "{column}/{mode}");
+                let fresh = original(&location.configuration, &epoch);
+                let tx = copy
+                    .db
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .unwrap();
+                assert!(ledger::admit(&tx, &fresh, &epoch, 2).is_err());
+                drop(tx);
+                assert_eq!(retained(&copy.db), before, "{column}/{mode}");
+                assert_eq!(budget(&copy.db), before_budget, "{column}/{mode}");
+            }
+        }
     }
 }

@@ -5,7 +5,7 @@ import { Icon } from "../lib/icons";
 import { MachineTile } from "../components/MachineTile";
 import { MachineLabel } from "../components/MachineLabel";
 import { Actions, Spinner, Status } from "../components/Status";
-import { AccountMarkCircle, AgentBadge, ProviderGlyph } from "../sessions/SessionCard";
+import { AccountMarkCircle, AgentBadge } from "../sessions/SessionCard";
 import { accountAppearance, accountMark } from "../../store/accountMarks";
 import { settings } from "../../store/settings";
 import { ResizeHandle } from "../sessions/SessionList";
@@ -58,8 +58,8 @@ function AccountRow(props: { a: Account; now: number }) {
   };
   return (
     <button class="acct-row" classList={{ on: on() }} aria-current={on()} title={props.a.members.map((m) => `${m.machine}${tags().has(m.key) ? ` ${tags().get(m.key)}` : ""}: ${trText(m.permission_label)}`).join("\n")} onClick={pick}>
-      {/* The session card's 34 px leading column, holding the provider tile. */}
-      <span class="acct-av"><span class="acct-ptile" style={{ "--agent": `var(--z-agent-${agentKind(props.a.provider)})` }}><ProviderGlyph agent={agentKind(props.a.provider)} size={18} /></span></span>
+      {/* Preview the same account color and mark as the detail without opening it. */}
+      <span class="acct-av"><AccountMarkCircle mark={accountMark(props.a, settings)} size={34} /></span>
       <span class="acct-l1">
         <b class="ell grow">{props.a.label}</b>
         <AgentBadge agent={agentKind(props.a.provider)} />

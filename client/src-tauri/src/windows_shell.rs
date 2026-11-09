@@ -110,6 +110,26 @@ pub fn restart_arguments(args: &[String]) -> Vec<String> {
     out
 }
 
+/// What a click on the latest tray balloon opens: the update alert opens
+/// Updates, as on macOS and Linux (zerus-5wmh.13.14.1); an attention notice
+/// goes to the desk, which opens its session.
+#[cfg(any(feature = "live", test))]
+#[derive(Debug, PartialEq, Eq)]
+pub enum BalloonClick {
+    Updates,
+    Desk(String),
+    Nothing,
+}
+
+#[cfg(any(feature = "live", test))]
+pub fn balloon_click(token: Option<String>) -> BalloonClick {
+    match token {
+        Some(token) if zerus_client_core::updates::is_update_token(&token) => BalloonClick::Updates,
+        Some(token) => BalloonClick::Desk(token),
+        None => BalloonClick::Nothing,
+    }
+}
+
 /// Windows tray clicks do not identify a message; Qt also routes only the latest.
 #[cfg(any(feature = "live", test))]
 #[derive(Default)]
@@ -205,6 +225,23 @@ pub fn versioned_tooltip<const N: usize>(title: &str, body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_balloon_click_opens_updates_for_the_update_alert_and_the_session_otherwise() {
+        assert_eq!(
+            balloon_click(Some("zerus-update:v1:stable:42".into())),
+            BalloonClick::Updates
+        );
+        assert_eq!(
+            balloon_click(Some("zerus-update:v2:dev:7".into())),
+            BalloonClick::Updates
+        );
+        assert_eq!(
+            balloon_click(Some("attention:computer:run:key".into())),
+            BalloonClick::Desk("attention:computer:run:key".into())
+        );
+        assert_eq!(balloon_click(None), BalloonClick::Nothing);
+    }
     use serde_json::json;
     #[cfg(windows)]
     #[test]

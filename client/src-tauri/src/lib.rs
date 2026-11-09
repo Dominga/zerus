@@ -8,6 +8,8 @@
 mod action_delay;
 #[cfg(feature = "live")]
 mod actions;
+#[cfg(all(any(windows, test), feature = "live"))]
+mod active_app;
 #[cfg(feature = "live")]
 mod analytics;
 #[cfg(feature = "live")]
@@ -1253,6 +1255,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                         Box::new(move || desk::Attention::load(path, || None)) as desk::LoadAttention
                     });
                     desk::start(app.handle(), &pump, attention);
+                    // An active Zerus shows no attention banners (zerus-5wmh.13.14.1).
+                    active_app::start(app.handle());
                     // The service posts the toast and grants foreground; this GUI only routes the click.
                     if desktop_service::mode() {
                         if let Some(sender) = desk::sender(app.handle()) {

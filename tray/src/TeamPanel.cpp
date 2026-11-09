@@ -57,6 +57,7 @@ TeamPanel::TeamPanel(TeamController *controller, QWidget *parent) : QWidget(pare
     m_stack = new QStackedWidget;
     m_stack->addWidget(m_scroll);
     m_card = new TeamTaskCard;
+    m_card->setController(m_controller);
     m_stack->addWidget(m_card);
     m_designer = new TeamDesignerPanel(m_controller);
     m_designer->confirm = [this](const QString &name, const QString &title, const QString &text, const QString &action) { return confirm(name, title, text, action); };
@@ -1018,6 +1019,9 @@ QWidget *TeamPanel::problemActions(const Team &team, const Member &member, const
         cancel->setToolTip(tr("Nothing arrived: the task returns to Pending"));
     } else if (status.kind == "no_report" && task && attempt) {
         add(tr("Remind"), "teamRemind", true, [this, t = team, member, id = task->id] { remind(t, member, id); });
+        // Task #362: the lead, or the member's sub-lead, takes a member's last
+        // reply as its report too; the member's own card keeps the action for
+        // the owner.
         add(tr("Use last reply as report"), "teamUseLastReply", false, [this, id = task->id, attemptId = attempt->id] {
             act("use-last-reply", {{"task", id}, {"attempt", attemptId}});
         });

@@ -1,6 +1,7 @@
 """WhiteWh fork, task #65 (owner, 2026-11-06): the fork's Windows zip ships the
-Tauri app as hgs-tray.exe with the fork's identity and feed, and keeps the Qt
-GUI for one release as qt/zerus-qt.exe, a fallback started by hand."""
+Tauri app as hgs-tray.exe with the fork's identity and feed. Task #388 (owner,
+2026-11-08, "forget Qt"): it carries no Qt at all; the one-release Qt fallback
+(qt/zerus-qt.exe) is retired, and its build runs no Qt step."""
 import os
 from pathlib import Path
 import subprocess
@@ -23,37 +24,28 @@ class ForkInspectTests(unittest.TestCase):
         self.directory = Path(self.temporary.name)
         use_pin(self, pinned())
         self.files = {name: PAIR.get(name, b"x") for name in portable.NEXT_REQUIRED}
-        self.fallback = {f"qt/{name}": b"Qt" for name in portable.QT_FALLBACK_REQUIRED}
-        self.files.update(self.fallback)
-        self.files["qt/licenses/qt/LGPL-3.0-only.txt"] = b"LGPL"
         self.info = manifest(desktop="tauri", webview2_runtime="evergreen", mobile_connector_bundled=True,
-                             fork={"repository": "WhiteWh/zerus", "build": 41, "feed": FEED},
-                             qt_fallback={"executable": "qt/zerus-qt.exe", "qt_version": "6.10.3"})
+                             fork={"repository": "WhiteWh/zerus", "build": 41, "feed": FEED})
         del self.info["qt_version"]
 
-    def test_a_declared_qt_fallback_in_its_folder_is_accepted(self):
+    def test_a_fork_zip_without_qt_is_accepted(self):
         self.assertEqual(portable.inspect(bundle(self.directory / "ok.zip", self.files, self.info)), self.info)
 
-    def test_qt_files_stay_in_the_declared_fallback_folder(self):
-        undeclared = {key: value for key, value in self.info.items() if key != "qt_fallback"}
-        with self.assertRaisesRegex(ValueError, "must not contain Qt"):
-            portable.inspect(bundle(self.directory / "undeclared.zip", self.files, undeclared))
+    def test_the_retired_qt_fallback_is_refused(self):
+        # Task #388: neither the declaration nor a qt/ folder of the old fallback.
+        fallback = {f"qt/{name}": b"Qt" for name in ["zerus-qt.exe", "Qt6Core.dll", "platforms/qwindows.dll"]}
+        declared = {**self.info, "qt_fallback": {"executable": "qt/zerus-qt.exe", "qt_version": "6.10.3"}}
+        for files, info in [({**self.files, **fallback}, declared), (self.files, declared),
+                            ({**self.files, "qt/readme.txt": b"x"}, self.info)]:
+            extra = sorted(set(files) - set(self.files))
+            with self.subTest(extra=extra, declared="qt_fallback" in info):
+                with self.assertRaisesRegex(ValueError, "no Qt fallback"):
+                    portable.inspect(bundle(self.directory / "fallback.zip", files, info))
+
+    def test_qt_files_are_refused_anywhere(self):
         for name in ["Qt6Core.dll", "platforms/qwindows.dll", "licenses/qt/LGPL-3.0-only.txt", "other/Qt6Gui.dll"]:
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, "must not contain Qt"):
                 portable.inspect(bundle(self.directory / "outside.zip", {**self.files, name: b"Qt"}, self.info))
-
-    def test_the_fallback_is_complete_and_never_a_second_desktop_or_cli(self):
-        for name in self.fallback:
-            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "Qt fallback lacks"):
-                files = {key: value for key, value in self.files.items() if key != name}
-                portable.inspect(bundle(self.directory / "missing.zip", files, self.info))
-        for name in ["qt/hgs.exe", "qt/hgs-tray.exe"]:
-            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "only zerus-qt.exe"):
-                portable.inspect(bundle(self.directory / "second.zip", {**self.files, name: b"x"}, self.info))
-        for declaration in [{"executable": "zerus-qt.exe", "qt_version": "6.10.3"},
-                            {"executable": "qt/zerus-qt.exe", "qt_version": "six"}, "qt/zerus-qt.exe"]:
-            with self.subTest(declaration=declaration), self.assertRaisesRegex(ValueError, "Qt fallback declaration"):
-                portable.inspect(bundle(self.directory / "bad.zip", self.files, {**self.info, "qt_fallback": declaration}))
 
 
 class ForkPackageTests(unittest.TestCase):
@@ -83,7 +75,9 @@ class ForkPackageTests(unittest.TestCase):
         self.assertIn("WhiteWh fork", readme)
         self.assertIn("41;", readme)
         self.assertIn(FEED, readme)
-        self.assertIn("This zip has no Qt fallback.", readme)
+        self.assertIn("ships only the Tauri desktop", readme)
+        with zipfile.ZipFile(output) as archive:
+            self.assertFalse(any("/qt/" in name for name in archive.namelist()))
         self.assertNotRegex(readme, r"@[A-Z_]+@")
         self.assertIn("\r\n", readme)
         # An experimental build has neither a number nor a feed.
@@ -101,9 +95,14 @@ class ForkPackageTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(words, result.stderr)
                 self.assertFalse(output.exists())
-        result = self.fork(self.directory / "plain.zip", "--qt-fallback", self.directory / "hgs-tray.exe")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("belongs to a fork zip", result.stderr)
+
+    def test_the_packager_takes_no_qt_options(self):
+        # Task #388: the Qt fallback options are gone, so a caller cannot add one.
+        for option in ["--qt-fallback", "--qt-root", "--windeployqt"]:
+            with self.subTest(option=option):
+                result = self.fork(self.directory / "qt.zip", "--fork", option, self.directory / "hgs-tray.exe")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("unrecognized arguments", result.stderr)
 
 
 class ForkWorkflowTests(unittest.TestCase):
@@ -119,21 +118,27 @@ class ForkWorkflowTests(unittest.TestCase):
         package = self.step("name: Portable zip from the tested executables")
         for part in ["package-windows.py --fork", "--lore target/lore/release/lore.exe", "--gui target/windows-next/release/hgs-tray.exe",
                      "--mobile-relay services/mobile/relay/target/release/zerus-relay.exe",
-                     "--qt-fallback .ci-build/gui/hgs-tray.exe", '--qt-root "$QT_ROOT_DIR"',
                      "--frontend-licenses artifacts/windows-frontend-licenses",
                      "check-windows-portable.py artifacts/zerus-windows-x86_64.zip --run --selftest"]:
             self.assertIn(part, package)
         self.assertNotIn("package-windows-qt.py", self.text)
+        self.assertNotIn("--qt-fallback", self.text)
         self.assertIn("ZERUS_FORK_BUILD: ${{ !startsWith(github.ref, 'refs/tags/whitewh-exp-') && github.run_number || '' }}", self.text)
         self.assertIn("ZERUS_FORK_FEED_URL:", self.text)
         # The prerequisites and the tests come before the zip.
         zip_step = self.index("name: Portable zip from the tested executables")
         for words in ["name: Install the locked Zerus Next frontend", "name: Frontend runtime license notices",
-                      "name: WebView2 Evergreen prerequisite", "name: Desktop build", "name: Offscreen Qt suites",
+                      "name: WebView2 Evergreen prerequisite",
                       "name: Fork update channel and the Qt-to-Tauri handoff",
                       "name: Build the Tauri Windows desktop with the fork channel"]:
             self.assertLess(self.index(words), zip_step, words)
         self.assertLess(zip_step, self.index("name: Update feed"))
+
+    def test_the_fork_builds_and_tests_no_qt(self):
+        # Task #388: no Qt install, cache, ccache, CMake build or offscreen suites.
+        for words in ["install-qt-windows.py", "QT_ROOT_DIR", "gui.sh", "ccache", "Offscreen Qt suites",
+                      "name: Desktop build", "windeployqt"]:
+            self.assertNotIn(words, self.text)
 
 
 class LocalLegForkIdentityTests(unittest.TestCase):
@@ -172,14 +177,59 @@ class LocalLegForkIdentityTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(words, result.stderr)
 
-    def test_the_ctest_leg_uses_two_workers(self):
-        # Task 213: four suites fail under four workers and pass alone.
-        text = (ROOT / "scripts/release-candidate.py").read_text(encoding="utf-8")
-        self.assertIn('"--parallel", os.environ.get("ZERUS_TEST_JOBS", "2")', text)
-        self.assertNotIn('"--parallel", "4"', text)
-        self.assertNotIn('ZERUS_TEST_JOBS", "4"', text)
-        self.assertIn("--fork-build", text)
-        self.assertIn("--fork-feed", text)
+    def test_the_local_leg_has_no_qt(self):
+        # Task #388: no Qt fallback in the package and no --qt-root.
+        result = self.dry("--fork-build", "41", "--fork-feed", FEED)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("--qt-fallback", result.stdout)
+        self.assertNotIn("--qt-root", result.stdout)
+        self.assertIn("check-windows-portable.py artifacts/zerus-windows-x86_64.zip --run --selftest", result.stdout)
+        refused = self.dry("--qt-root", "C:/Qt")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("unrecognized arguments", refused.stderr)
+
+
+class ReleaseCandidateTests(unittest.TestCase):
+    """Task #388: the release candidate runs no Qt configure, build or ctest and
+    records each step's seconds with its result."""
+
+    def setUp(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("release_candidate_388", ROOT / "scripts/release-candidate.py")
+        self.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.module)
+
+    def test_the_local_steps_run_no_qt(self):
+        commands = []
+
+        def run(command, env=None, timings=None, step=""):
+            commands.append(command)
+            timings[step] = 1
+
+        self.module.run = run
+        timings = {}
+        self.module.local_steps("a" * 40, "41", FEED, timings)
+        text = " ".join(" ".join(map(str, command)) for command in commands)
+        for words in ["cmake", "ctest", "gui.sh", "tray", "Qt", "QT_"]:
+            self.assertNotIn(words, text)
+        self.assertIn("release-candidate-local.py --commit " + "a" * 40 + f" --fork-build 41 --fork-feed {FEED}", text)
+        self.assertEqual(sorted(timings), ["fork_handoff_tests", "fork_update_tests", "hgs_release_build",
+                                           "machine_dependent_scan", "tauri_package_selftest"])
+        self.assertFalse(hasattr(self.module, "qt_windows"))
+
+    def test_qt_only_is_gone(self):
+        result = subprocess.run([sys.executable, "scripts/release-candidate.py", "--qt-only"], cwd=ROOT,
+                                capture_output=True, text=True, timeout=60)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unrecognized arguments", result.stderr)
+
+    def test_a_step_records_its_seconds(self):
+        timings = {}
+        self.module.run([sys.executable, "-c", "pass"], timings=timings, step="noop")
+        self.assertIsInstance(timings["noop"], int)
+        with self.assertRaises(SystemExit):
+            self.module.run([sys.executable, "-c", "raise SystemExit(3)"], timings=timings, step="failed")
+        self.assertIn("failed", timings)
 
 
 if __name__ == "__main__":

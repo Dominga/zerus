@@ -330,7 +330,7 @@ fn class(error: &Value) -> &'static str {
     }
     let native_detail = provider_errors::native_detail(error);
     if ["", "provider", "quota", "rate_limit"].contains(&string(error, "error_kind"))
-        && provider_errors::rolling_rate_limit(&native_detail) {
+        && provider_errors::rolling_rate_error(error) {
         return "rate_limit";
     }
     let text = format!(
@@ -449,6 +449,10 @@ pub(super) fn cancel_for_input(record: &Value) -> Result<()> {
 fn active(job: &Value) -> bool {
     ["waiting", "dispatching", "retrying"].contains(&string(job, "state"))
 }
+/// Whether an automatic recovery episode owns this session's next input.
+pub(super) fn job_active(record: &Value) -> bool {
+    active(&load_job(&owner(record)))
+}
 /// The agent works again after a provider failure while the continuation it
 /// accepted is still its latest input: that turn went on rather than stopped.
 fn working_on_continuation(job: &Value, s: &Value) -> bool {
@@ -554,6 +558,11 @@ fn schedule(job: &mut Value, s: &Value, time: f64) {
 // Pure transition function; wall clock is supplied so tests can exercise long
 // backoff sequences, restarts, and interleaved user activity without sleeping.
 fn advance(mut job: Value, s: &Value, p: &Policy, time: f64) -> Value {
+    // A failed keep-warm ping is not the person's work: never continue it,
+    // whatever earlier, finished episode the session keeps.
+    if s["phase"] == "error" && keep_warm::ping_was_last_prompt(s) && !active(&job) {
+        return Value::Null;
+    }
     let error = &s["provider_error"];
     let fid = failure_id(s);
     let user_at = seconds(s, "recovery_user_at");
@@ -715,6 +724,7 @@ pub(super) fn enrich(record: &Value, output: &mut Value) {
         "recovery_user_text",
         "recovery_success_at",
         "recovery_cancel_at",
+        "keep_warm_prompt_at",
     ] {
         if let Some(v) = record.get(key) {
             output[key] = v.clone();
@@ -791,6 +801,10 @@ pub(super) fn observe() -> Result<Vec<Value>> {
     Ok(snapshots)
 }
 fn tick() -> Result<()> {
+    #[cfg(unix)]
+    let Some(_round) = storage::job_round::try_acquire(storage::job_round::Kind::Recovery)? else {
+        return Ok(());
+    };
     crate::analytics::maintenance(&root());
     let mut sends = Vec::new();
     // Native inspection can wait on an agent. Never hold the global write lock
@@ -801,6 +815,8 @@ fn tick() -> Result<()> {
     let mut dismisses = Vec::new();
     {
         let _guard = lock(None)?;
+        #[cfg(unix)]
+        _round.verify()?;
         let p = policy()?;
         let heartbeat = root().join("recovery/heartbeat.json");
         let last = read_json(&heartbeat).unwrap_or(Value::Null);
@@ -873,9 +889,13 @@ fn tick() -> Result<()> {
         }
     }
     for s in dismisses {
+        #[cfg(unix)]
+        _round.verify()?;
         let _ = dsh::dismiss_recovery(&s);
     }
     for (s, mut job) in sends {
+        #[cfg(unix)]
+        _round.verify()?;
         let result = if s["agent"] == "dsh" {
             dsh::recover(&s, string(&job, "request_id"))
         } else {
@@ -888,6 +908,8 @@ fn tick() -> Result<()> {
             )
         };
         let _guard = lock(None)?;
+        #[cfg(unix)]
+        _round.verify()?;
         let key = owner(&s);
         let current = load_job(&key);
         if current["id"] != job["id"] || current["state"] != "dispatching" {
@@ -986,12 +1008,20 @@ fn worker() -> Result<i32> {
     };
     recover_interrupted_jobs()?;
     super::worktree_maintenance::worker();
+    // Keep-warm rounds run beside recovery, whatever its policy says.
+    let mut keep_warm_at: Option<std::time::Instant> = None;
     loop {
         if replaced() || owner.yields() {
             return Ok(0);
         }
         if let Err(e) = tick() {
             eprintln!("hgs recovery: {e}");
+        }
+        if keep_warm_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(15)) {
+            keep_warm_at = Some(std::time::Instant::now());
+            if let Err(e) = keep_warm::tick() {
+                eprintln!("hgs keep-warm: {e}");
+            }
         }
         std::thread::sleep(Duration::from_secs(2));
     }
@@ -1002,12 +1032,12 @@ fn worker() -> Result<i32> {
 /// from hgs.exe's job would outlive the GUI and keep the GUI's hgs.exe from
 /// being replaced.
 #[cfg(windows)]
-fn ensure_worker() -> Result<()> {
+pub(super) fn ensure_worker() -> Result<()> {
     crate::self_exec::ensure().map_err(|e| e.to_string())?;
     backend::host::HOST.supervise_recovery()
 }
 #[cfg(not(windows))]
-fn ensure_worker() -> Result<()> {
+pub(super) fn ensure_worker() -> Result<()> {
     let executable = crate::self_exec::current().map_err(|e| e.to_string())?;
     // Policy refresh must not race the installed supervisor with a detached
     // executor. Starting an active unit preserves its PID and current delivery.
@@ -1036,6 +1066,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         Some("worker") if args.len() == 1 => return worker(),
         Some("tick") if args.len() == 1 => {
             tick()?;
+            keep_warm::tick()?;
             return Ok(0);
         }
         Some("get") if args.len() == 1 => {
@@ -1380,6 +1411,25 @@ mod tests {
         }
     }
     #[test]
+    fn a_verified_keep_warm_ping_failure_never_starts_recovery() {
+        let mut earlier = snapshot("claude");
+        earlier["provider_error"]["at"] = json!(3.0);
+        earlier["recovery_user_at"] = json!(2.0);
+        let mut old = advance(Value::Null, &earlier, &on(), 3.5);
+        assert_eq!(old["state"], "waiting");
+        stop(&mut old, "succeeded", "Agent completed the turn");
+        old["completed_at"] = json!(4.0);
+        let mut ping = snapshot("claude");
+        ping["recovery_user_text"] = json!(keep_warm::TEXT);
+        ping["keep_warm_prompt_at"] = ping["recovery_user_at"].clone();
+        assert!(advance(Value::Null, &ping, &on(), 11.0).is_null());
+        assert!(advance(old.clone(), &ping, &on(), 11.0).is_null(), "a completed earlier episode must not let a ping failure in");
+        // The same text typed by the person is the person's turn.
+        let mut typed = ping.clone();
+        typed["keep_warm_prompt_at"] = json!(1.0);
+        assert_eq!(advance(old, &typed, &on(), 11.0)["state"], "waiting");
+    }
+    #[test]
     fn independent_sequences_keep_class_budgets_and_repeat_last_delay() {
         for values in [vec![0],vec![1,0,2],vec![1,-1,3],vec![-2],vec![]] {assert!(validate_delays(&values).is_err());}
         assert_eq!(next_delay(&[json!(15),json!(30),json!(0)],42),Some(30.0));
@@ -1446,6 +1496,48 @@ mod tests {
             advance(Value::Null, &s, &on(), 11.0)["action"],
             "retry_request"
         );
+    }
+    #[test]
+    fn projected_non_string_kimi_evidence_never_admits_recovery() {
+        let window = "You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends.";
+        for detail in [window.to_owned(), format!("429 {window}")] {
+            for code in [json!({"code":"insufficient_quota","message":"billing account exhausted"}),
+                json!(401), json!(["provider_policy"]), Value::Null, json!(false)] {
+                let mut s = snapshot("kimi");
+                journal::update_activity(&mut s, &json!({"hook_event_name":"StopFailure",
+                    "error_type":"APIProviderRateLimitError","error_message":detail,"error":code}));
+                let failure = s["provider_error"].clone();
+                assert!(failure.get("native_error_code").is_some_and(Value::is_null));
+                provider_errors::apply(&mut s, &failure);
+                assert_eq!(s["provider_error"]["native_error_code"], Value::Null);
+                assert_eq!(s["provider_error"]["detail"], detail);
+                assert!(!provider_errors::rolling_rate_error(&s["provider_error"]));
+                assert_eq!(class(&s["provider_error"]), "manual");
+                assert!(advance(Value::Null, &s, &on(), 11.0).is_null());
+            }
+        }
+    }
+    #[test]
+    fn typed_kimi_window_requires_native_evidence_and_the_existing_enabled_policy() {
+        let mut s = snapshot("kimi");
+        s["provider_error"] = json!({"source":"provider_hook","message_id":"original-failure","at":10.0,
+            "error_kind":"quota","native_error_type":"APIProviderRateLimitError",
+            "detail":"You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends."});
+        assert_eq!(class(&s["provider_error"]), "rate_limit");
+        let before = s.clone();
+        let job = advance(Value::Null, &s, &on(), 11.0);
+        assert_eq!(job["state"], "waiting");
+        assert_eq!(job["class"], "rate_limit");
+        assert_eq!(s, before);
+        assert_eq!(advance(job.clone(), &s, &on(), 12.0), job);
+        let mut disabled = on(); disabled.rate_limit = false;
+        assert!(advance(Value::Null, &s, &disabled, 11.0).is_null());
+        for (key, value) in [("native_error_type", ""), ("native_error_code", "quota"),
+            ("native_error_code", "authentication"), ("error_kind", "provider_policy")] {
+            let mut changed = s.clone(); changed["provider_error"][key] = json!(value);
+            assert_eq!(class(&changed["provider_error"]), "manual");
+            assert!(advance(Value::Null, &changed, &on(), 11.0).is_null());
+        }
     }
     #[test]
     fn kimi_rolling_window_uses_existing_rate_schedule_without_inventing_a_reset() {

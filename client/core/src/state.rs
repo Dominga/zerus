@@ -145,6 +145,7 @@ fn merge_provider_message(state: &mut Map<String, Value>, message: Value) -> boo
 /// The state of one computer's stream, kept across its restarts.
 #[derive(Debug, Default)]
 pub struct CatalogState {
+    git: crate::GitState,
     hello: Option<Hello>,
     rows: BTreeMap<String, ViewRow>,
     staged: Option<BTreeMap<String, ViewRow>>,
@@ -173,6 +174,30 @@ impl CatalogState {
     pub fn apply(&mut self, computer: &ComputerId, frame: &Frame) -> Vec<Change> {
         let mut changes = Vec::new();
         match &frame.body {
+            Body::State(state) if state.topic == topic::GIT => {
+                changes.extend(
+                    self.git
+                        .state(computer, &state.key, &state.value, state.rev),
+                );
+            }
+            Body::Gap(gap) if gap.topic == topic::GIT => {
+                for path in self
+                    .git
+                    .keys()
+                    .filter(|p| gap.key.as_ref().is_none_or(|k| *p == k))
+                {
+                    changes.extend(self.git.unavailable(computer, path, "git_gap"));
+                }
+            }
+            Body::Error(error) if error.topic.as_deref() == Some(topic::GIT) && !error.fatal => {
+                for path in self
+                    .git
+                    .keys()
+                    .filter(|p| error.key.as_ref().is_none_or(|k| *p == k))
+                {
+                    changes.extend(self.git.unavailable(computer, path, &error.code));
+                }
+            }
             Body::Hello(hello) => {
                 self.hello = Some(hello.clone());
                 self.begin();
@@ -796,6 +821,10 @@ impl CatalogState {
 
     pub fn processes_mut(&mut self) -> &mut ProcessesState {
         &mut self.processes
+    }
+
+    pub fn git_mut(&mut self) -> &mut crate::GitState {
+        &mut self.git
     }
 
     /// The processes limit of the latest `hello`; None when it lacks the topic.

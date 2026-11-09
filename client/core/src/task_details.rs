@@ -403,6 +403,7 @@ pub fn present(
                 "delivery",
                 "attachments",
                 "stale",
+                "attempt",
             ]
             .contains(&key.as_str())
         });
@@ -410,6 +411,10 @@ pub fn present(
         entry["attachments"] = files(&entry["attachments"], id.as_deref())?;
         if let Some(delivery) = entry["delivery"].as_object_mut() {
             delivery.retain(|key, _| ["mode", "state", "error"].contains(&key.as_str()));
+        }
+        // The attempt an entry's request names: its origin and phase (A4).
+        if let Some(attempt) = entry.get_mut("attempt").and_then(Value::as_object_mut) {
+            attempt.retain(|key, _| ["origin", "phase"].contains(&key.as_str()));
         }
     }
     Ok(detail)
@@ -627,12 +632,15 @@ mod tests {
         let raw = json!({"uuid":ID,"attachments":[{"data_base64":"secret"}],"unknown":"discard",
             "log":[{"kind":"message","text":"Comment","attachments":[{"data_base64":"other"}],
                 "delivery":{"mode":"send","state":"uncertain","error":"Check receipt","prompt":"native prompt"}},
-                {"kind":"report","text":"Late","stale":"other_executor","considered":2}]});
+                {"kind":"report","text":"Late","stale":"other_executor","considered":2},
+                {"kind":"message","text":"Please change it","delivery":{"mode":"note","state":"note"},
+                    "attempt":{"origin":"reopen","phase":"submitted","executor":"private"}}]});
         let mut entries = Vec::new();
         let raw = {
             let mut raw = raw;
             raw["log"][0]["id"] = json!("scope:entry-1");
             raw["log"][1]["id"] = json!("scope:entry-2");
+            raw["log"][2]["id"] = json!("scope:entry-3");
             raw
         };
         let view = present(raw, |_, entry| {
@@ -645,9 +653,16 @@ mod tests {
             [
                 None,
                 Some("scope:entry-1".to_owned()),
-                Some("scope:entry-2".to_owned())
+                Some("scope:entry-2".to_owned()),
+                Some("scope:entry-3".to_owned())
             ]
         );
+        // A reopen's note keeps its attempt's origin and phase, nothing else.
+        assert_eq!(
+            view["log"][2]["attempt"],
+            json!({"origin":"reopen","phase":"submitted"})
+        );
+        assert!(view["log"][0].get("attempt").is_none());
         assert_eq!(view["log"][0]["id"], "scope:entry-1");
         // A stale report keeps its reason; the considered revision is not shown.
         assert_eq!(view["log"][1]["stale"], "other_executor");

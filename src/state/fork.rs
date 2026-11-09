@@ -65,7 +65,7 @@ fn fork_argv(record: &Value, new_id: Option<&str>) -> Result<Vec<String>> {
         new_id.unwrap_or_else(|| string(record, "conversation_id")),
     )?;
     match agent {
-        "codex" => argv[1] = "fork".into(),
+        "codex" => { let program = crate::project_launcher::program_words(&argv); argv[program] = "fork".into(); },
         "claude" => argv.push("--fork-session".into()),
         "kimi" => {}
         _ => return Err("this provider does not support session forks".into()),
@@ -111,6 +111,8 @@ fn kimi_fork(record: &Value) -> Result<String> {
     for key in [
         "HGS_SESSION",
         "HGS_SESSION_ID",
+        launch_identity::DECLARATION,
+        "HGS_RESUME_SESSION_ID",
         "HGS_RUN_ID",
         "HGS_AGENT",
         "HGS_REQUESTED_ID",
@@ -200,12 +202,21 @@ pub(super) fn start_scoped(
     if archive_id.is_none() && dsh::exists(name) {
         return dsh::fork(name, tag, expected_run, expected_conversation, dry, scope);
     }
+    // Read-only capability I/O stays outside the shared state writer. The
+    // resulting mode is frozen for the original operation below.
+    let executable = runner_executable()?;
+    let helper = if dry {
+        None
+    } else {
+        Some(launch_identity::helper::Observed::probe(&executable))
+    };
     let _guard = lock(None)?;
     let record = if let Some(id) = archive_id {
         archive::read_archive(name, id)?
     } else {
         read(name)?
     };
+    terminating::check_mutation(&record)?;
     if let Some(scope)=scope {scope.check(&record)?;}
     if expected_run.is_some_and(|id| id != string(&record, "run_id"))
         || expected_conversation.is_some_and(|id| id != string(&record, "conversation_id"))
@@ -238,6 +249,13 @@ pub(super) fn start_scoped(
         occupied.insert(string(&record, "name").into());
     }
     let target = choose_name(name, tag, &occupied)?;
+    // Allocate before either the native Kimi fork or terminal spawn. The
+    // launch environment carries this exact identity into its own bootstrap.
+    let allocation=launch_identity::Allocation::fresh();
+    let count = match &helper {
+        Some(helper) => helper.count(allocation.session(), allocation.run(), 0)?,
+        None => "0".into(),
+    };
     let agent = string(&record, "agent");
     // Check the saved recipe before the only operation that can create history.
     fork_argv(&record, None)?;
@@ -252,10 +270,11 @@ pub(super) fn start_scoped(
         None
     };
     let argv = fork_argv(&record, new_id.as_deref())?;
-    let executable = runner_executable()?;
     let hint_environment = crate::config::agent_hint_environment(agent);
-    let launch = supervisor_command(&record, &executable, argv, &hint_environment);
-    let new_run=uuid::Uuid::new_v4().to_string();
+    let launch = storage::supervisor_command_with_count(
+        &record, &executable, argv, &hint_environment, &count,
+    );
+    let new_run=allocation.run().to_owned();
     let lineage = journal::fork_lineage(&record);
     let mut environment = BTreeMap::from([
         ("HGS_SESSION", target.clone()),
@@ -268,6 +287,7 @@ pub(super) fn start_scoped(
         ),
         ("HGS_EXECUTABLE", executable),
         ("HGS_RUN_ID", new_run.clone()),
+        ("HGS_RESUME_SESSION_ID", String::new()),
         ("HGS_EXPECTED_ID", String::new()),
         ("HGS_REQUESTED_ID", new_id.clone().unwrap_or_default()),
         ("HGS_ARCHIVE_ID", String::new()),
@@ -288,12 +308,18 @@ pub(super) fn start_scoped(
             journal::fork_lineage_labels(&record, &lineage),
         ),
         (agent_hint::FORK_REVISION_ENV, agent_hint::fork_revision(&record)),
+        // A fork an agent runs is also that agent's child (zerus-sa9qn.2).
+        (parent_link::ENV, parent_link::launcher_value()),
         ("HGS_TRACKING", "1".into()),
         (
             "HGS_CLIENT",
             nonempty_env("HGS_CLIENT").unwrap_or_else(|| "local".into()),
         ),
     ]);
+    environment.extend(helper.as_ref().map_or_else(
+        || allocation.environment(),
+        |helper| helper.environment(&allocation),
+    ));
     for key in ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME"] {
         environment.insert(key, String::new());
     }
@@ -345,6 +371,15 @@ pub(super) fn start_scoped(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn powershell_codex_fork_replaces_the_agent_selector_only() {
+        let prefix = [r"C:\PowerShell\pwsh.exe", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", r"C:\p\run_codex.ps1"].map(str::to_owned).to_vec();
+        let base = [prefix.clone(), vec!["resume".into(), "old".into(), "--model".into(), "model-name".into(), "original prompt".into()]].concat();
+        let record = json!({"agent":"codex","base":base,"conversation_id":"parent"});
+        let fork = fork_argv(&record, None).unwrap();
+        assert_eq!(&fork[..7], prefix.as_slice());
+        assert_eq!(&fork[7..], ["fork", "parent", "--model", "model-name"]);
+    }
     #[test]
     fn live_forks_wait_for_the_ready_state_the_listing_reports() {
         let mut stale = telemetry::stale_hook_child();

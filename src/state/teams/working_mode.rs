@@ -33,6 +33,10 @@ const BRANCH_TEMPLATE: &str = "task/{id}";
 const BIG_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// One of these makes the repository binary-heavy on its own.
 const BINARY_BYTES: u64 = 512 * 1024 * 1024;
+/// A code repository with tests and mostly source files flips to one shared
+/// folder only above this floor of binaries (task 336): design previews and
+/// fixtures never decide it.
+const HUGE_BINARY_BYTES: u64 = 1024 * 1024 * 1024;
 /// A binary share at or above this is a binary repository.
 const BINARY_SHARE: f64 = 0.2;
 /// An asset this large is a large asset, and the tracked files are its LFS
@@ -52,6 +56,8 @@ pub(crate) struct ProjectProfile {
     pub files: u64,
     pub bytes: u64,
     pub binary_files: u64,
+    /// The files that are not binary: a code repository's source files.
+    pub source_files: u64,
     pub binary_bytes: u64,
     pub large_assets: u64,
     /// Git LFS is configured for the repository (`.gitattributes` or `.git/lfs`).
@@ -77,15 +83,28 @@ impl ProjectProfile {
         }
     }
 
-    /// A repository too heavy to clone per member: big, binary, in LFS, full of
-    /// large assets, or a game project with engine assets.
+    /// Task 336 (owner, 2026-11-08): a code repository whose tests run and whose
+    /// files are mostly source files. Its binary share is design previews and
+    /// fixtures, so the share alone never sets the mode.
+    pub(crate) fn code_first(&self) -> bool {
+        self.suites > 0 && self.source_files > self.binary_files
+    }
+
+    /// A repository too heavy to clone per member: a game project with engine
+    /// assets, LFS, or a binary repository. A code repository with tests and
+    /// mostly source files stays light until its binaries are far above the
+    /// size floor (task 336).
     pub(crate) fn heavy(&self) -> bool {
+        if self.lfs || !self.engine.is_empty() {
+            return true;
+        }
+        if self.code_first() {
+            return self.bytes >= BIG_BYTES || self.binary_bytes >= HUGE_BINARY_BYTES;
+        }
         self.bytes >= BIG_BYTES
             || self.binary_bytes >= BINARY_BYTES
             || self.binary_share() >= BINARY_SHARE
-            || self.lfs
             || self.large_assets >= LARGE_ASSETS
-            || !self.engine.is_empty()
     }
 
     pub(crate) fn mib(bytes: u64) -> u64 {
@@ -116,10 +135,13 @@ impl Proposal {
             "reasons": self.reasons,
             "settings": self.settings,
             "pipeline": self.pipeline,
+            // Task 336: the owner's Keep compares this fingerprint.
+            "fingerprint": fingerprint(&self.profile),
             "profile": {
                 "files": self.profile.files,
                 "bytes": self.profile.bytes,
                 "binary_files": self.profile.binary_files,
+                "source_files": self.profile.source_files,
                 "binary_bytes": self.profile.binary_bytes,
                 "binary_share": (self.profile.binary_share() * 100.0).round() / 100.0,
                 "large_assets": self.profile.large_assets,
@@ -161,6 +183,11 @@ fn git(folder: &Path, args: &[&str]) -> Option<String> {
 /// repository of its own (a folder inside another repository is that
 /// repository's work, not a project Zerus profiles here).
 pub(crate) fn profile(folder: &Path) -> Option<ProjectProfile> {
+    // Task #393: a team with no folder is no project; a blank path would start
+    // `git -C "" rev-parse --show-toplevel` in the process's own folder.
+    if folder.as_os_str().is_empty() || folder.to_str().is_some_and(|path| path.trim().is_empty()) {
+        return None;
+    }
     // A team's folder is the repository's root (a checkout or a worktree); a
     // plain subfolder of a repository is not a project of its own.
     let top = git(folder, &["rev-parse", "--show-toplevel"])?;
@@ -194,6 +221,8 @@ pub(crate) fn profile(folder: &Path) -> Option<ProjectProfile> {
         if binary_path(path) {
             profile.binary_files += 1;
             profile.binary_bytes = profile.binary_bytes.saturating_add(size);
+        } else {
+            profile.source_files += 1;
         }
         if size >= LARGE_ASSET {
             profile.large_assets += 1;
@@ -259,6 +288,15 @@ fn select(profile: &ProjectProfile) -> (String, String, Vec<String>, String) {
         ));
     } else {
         reasons.push("no test subsystem: there is no review -> tests pipeline to run".to_owned());
+    }
+    if profile.code_first() {
+        reasons.push(format!(
+            "{} source files of {} tracked: source files are the majority, and {} binary files are {}% of the bytes (below the size floor, so the share alone does not decide)",
+            profile.source_files,
+            profile.files,
+            profile.binary_files,
+            (profile.binary_share() * 100.0).round() as u64
+        ));
     }
     if profile.heavy() {
         reasons.push("one shared folder keeps the assets in place: no clone per member, no branch merges".to_owned());
@@ -358,11 +396,59 @@ pub(crate) fn wrong_settings(team: &Team, preset: &str) -> Vec<String> {
     wrong
 }
 
+/// Task 336: what the owner's Keep compares: the material fields of a profile
+/// change. Only a change of these makes the block come back.
+pub(crate) fn fingerprint(profile: &ProjectProfile) -> String {
+    format!(
+        "{}:{}:{}:{}:{}:{}:{}:{}:{}",
+        profile.files,
+        profile.bytes,
+        profile.source_files,
+        profile.binary_files,
+        profile.binary_bytes,
+        profile.large_assets,
+        profile.suites,
+        u8::from(profile.lfs),
+        u8::from(profile.merge_queue),
+    )
+}
+
+/// Task 336 (owner, 2026-11-08): the owner keeps the team's settings for the
+/// project's profile as it is now; nothing is written to the settings.
+pub(crate) fn keep(team: &mut Team, at: f64) -> anyhow::Result<Value> {
+    let proposal = propose(Path::new(team.folder.trim()))
+        .ok_or_else(|| anyhow::anyhow!("The working mode needs a Git repository to profile: {}", team.folder))?;
+    let kept = json!({
+        "preset": proposal.preset,
+        "fingerprint": fingerprint(&proposal.profile),
+        "at": at,
+    });
+    team.mode_kept = Some(kept.clone());
+    Ok(kept)
+}
+
+/// Task 336: the owner's Keep, if any.
+pub(crate) fn kept(team: &Team) -> Option<&Value> {
+    team.mode_kept.as_ref().filter(|kept| !kept["preset"].as_str().unwrap_or_default().is_empty())
+}
+
+/// Task 336: whether the owner kept this exact preset for this exact profile.
+fn kept_here(team: &Team, preset: &str, fingerprint: &str) -> bool {
+    kept(team).is_some_and(|kept| {
+        kept["preset"].as_str() == Some(preset) && kept["fingerprint"].as_str() == Some(fingerprint)
+    })
+}
+
 /// The disagreement from the team's cached proposal, without reading the
-/// project: the preset and what the settings miss of it.
+/// project: the preset and what the settings miss of it. The owner's Keep
+/// silences it until the profile changes.
 pub(crate) fn cached_disagreement(team: &Team) -> Option<(String, Vec<String>)> {
-    let preset = team.mode_proposal.as_ref()?.get("preset")?.as_str()?.to_owned();
+    let cached = team.mode_proposal.as_ref()?;
+    let preset = cached.get("preset")?.as_str()?.to_owned();
     if preset.is_empty() {
+        return None;
+    }
+    if kept_here(team, &preset, cached.get("fingerprint").and_then(Value::as_str).unwrap_or_default()) {
         return None;
     }
     let wrong = wrong_settings(team, &preset);
@@ -370,12 +456,16 @@ pub(crate) fn cached_disagreement(team: &Team) -> Option<(String, Vec<String>)> 
 }
 
 /// What a team's settings miss of its project's preset, with the proposal; None
-/// when they agree or the project cannot be profiled. Reads the project.
+/// when they agree, the project cannot be profiled, or the owner kept this
+/// preset for this profile. Reads the project.
 pub(crate) fn disagreement(team: &Team) -> Option<(Proposal, Vec<String>)> {
     if team.folder.trim().is_empty() || matches!(team.status, TeamStatus::Done | TeamStatus::Archived) {
         return None;
     }
     let proposal = propose(Path::new(team.folder.trim()))?;
+    if kept_here(team, &proposal.preset, &fingerprint(&proposal.profile)) {
+        return None;
+    }
     let wrong = wrong_settings(team, &proposal.preset);
     (!wrong.is_empty()).then_some((proposal, wrong))
 }

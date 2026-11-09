@@ -33,11 +33,8 @@ use std::fs;
 use std::io::Read;
 use std::time::{Duration, Instant};
 
-fn bindings() -> PathBuf {
-    root().join("opencode/bindings")
-}
 fn binding_path(name: &str) -> PathBuf {
-    bindings().join(format!("{:x}.json", Sha256::digest(name.as_bytes())))
+    PROVIDER.label_path(name)
 }
 thread_local! {
     /// Whether this thread holds opencode/bindings.lock. Code running under
@@ -82,45 +79,15 @@ fn try_bindings_at(path: &Path, wait: Duration) -> Option<Bindings> {
     BINDINGS_HELD.with(|held| held.set(true));
     Some(Bindings(Some(guard), std::marker::PhantomData))
 }
-pub(crate) fn exists(name: &str) -> bool {
-    binding_path(name).is_file()
-}
-/// Valid OpenCode bindings, read without contacting a service.
-pub(super) fn binding_records() -> Vec<Value> {
-    let Ok(files) = fs::read_dir(bindings()) else { return Vec::new(); };
-    files.flatten().take(5000).filter_map(|file| {
-        let record: Value = serde_json::from_slice(&fs::read(file.path()).ok()?).ok()?;
-        (record["backend"] == "opencode" && binding_path(string(&record, "name")) == file.path()).then_some(record)
-    }).collect()
-}
-pub(super) fn binding(name: &str) -> Result<Value> {
-    let bytes = fs::read(binding_path(name)).map_err(|e| e.to_string())?;
-    if bytes.len() > 1_048_576 {
-        return Err("Invalid OpenCode binding".into());
-    }
-    let record: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    if record["name"] != name
-        || record["backend"] != "opencode"
-        || !native_id(string(&record, "conversation_id"), "ses_")
-    {
-        return Err("Invalid OpenCode binding".into());
-    }
-    session_id::verify(&record)?;
-    Ok(record)
-}
+const PROVIDER: provider_binding::Provider = provider_binding::Provider::OpenCode;
+pub(crate) fn exists(name: &str) -> bool { PROVIDER.exists(name) }
+pub(super) fn binding(name: &str) -> Result<Value> { PROVIDER.read(name) }
+pub(super) fn read_id(id: &str) -> Result<Value> { PROVIDER.read_id(id) }
+pub(super) fn save(record: &mut Value) -> Result<()> { PROVIDER.save(record) }
+pub(super) fn binding_records() -> Vec<Value> { PROVIDER.records() }
 pub(super) fn native_id(id: &str, prefix: &str) -> bool {
-    id.starts_with(prefix)
-        && id.len() <= 128
-        && id
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
-}
-/// Saves the binding, keeping its durable session ID on the caller's record.
-pub(super) fn save(record: &mut Value) -> Result<()> {
-    ensure_session_id(record);
-    atomic(&binding_path(string(record, "name")), &record.to_string())?;
-    session_index::note(record, session_index::Kind::OpenCode);
-    Ok(())
+    id.starts_with(prefix) && id.len() <= 128
+        && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
 }
 pub(crate) fn config_home() -> PathBuf {
     nonempty_env("OPENCODE_CONFIG_DIR")
@@ -436,7 +403,8 @@ pub(crate) fn launch(
     if mode != "provider" {
         return Err("OpenCode uses its native permission configuration; select Provider settings for this account".into());
     }
-    let present = exists(name);
+    let existing = PROVIDER.existing_for_launch(name)?;
+    let present = existing.is_some();
     if present && new_only {
         return Err("This OpenCode session name already exists".into());
     }
@@ -450,8 +418,7 @@ pub(crate) fn launch(
         Some(cwd)
     };
     let service = service::ensure_started()?;
-    if present {
-        let mut record = binding(name)?;
+    if let Some(mut record) = existing {
         if resumes_pending(&record) {
             return resume_pending(&service, record);
         }
@@ -533,7 +500,7 @@ fn finish_creation(service: &service::Service, mut record: Value, first: bool) -
             save(&mut record)
         }
         Err(Refusal::Definite(reason)) => {
-            let _ = fs::remove_file(binding_path(string(&record, "name")));
+            let _ = PROVIDER.remove(&record);
             Err(reason)
         }
         Err(Refusal::Other(reason)) => Err(reason),
@@ -1040,16 +1007,7 @@ pub(crate) fn own_state(name: &str) -> Result<Value> {
 pub(crate) fn snapshots() -> Result<Vec<Value>> {
     // Task 234: where the OpenCode rows of a listing spend their time.
     let mut phases = super::slow_calls::Phases::start();
-    let Ok(entries) = fs::read_dir(bindings()) else {
-        return Ok(Vec::new());
-    };
-    let records: Vec<Value> = entries
-        .flatten()
-        .take(5000)
-        .filter_map(|entry| fs::read(entry.path()).ok())
-        .filter_map(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .filter(|record| record["backend"] == "opencode")
-        .collect();
+    let records = binding_records();
     if records.is_empty() {
         return Ok(Vec::new());
     }
@@ -2026,25 +1984,31 @@ fn action_in<N: Native>(
         if new != old && storage.rename_marks.is_none() {
             return Err("OpenCode rename requires the ordered shared read-mark writer".into());
         }
+        PROVIDER.prepare_label(record, new)?;
+        let by_id = storage::in_id_layout(record);
         return rename_with(
             record,
             new,
             scope,
             connect,
-            save,
+            |record| {
+                if by_id { recovery::rename_job_in_place(record, string(record, "name"))?; }
+                save(record)
+            },
             |old, new| {
+                if by_id { return Ok(()); }
                 storage
                     .rename_marks
                     .ok_or("Missing shared read-mark writer")?
                     .transfer(old, new)
             },
-            |old| archive::remove_synced(&binding_path(old)),
+            |old| if by_id { Ok(()) } else { archive::remove_synced(&binding_path(old)) },
         );
     } else if let Some(scope) = scope {
         scope.changing();
     }
     if action == "forget" {
-        archive::remove_synced(&binding_path(&old))?;
+        PROVIDER.remove(record)?;
         history::forget(record);
         return Ok(());
     }

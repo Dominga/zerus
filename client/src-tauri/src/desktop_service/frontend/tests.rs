@@ -8,7 +8,28 @@ fn approval(enabled: bool) -> Request {
     Request::AutomaticApprovals {
         request_id: uuid::Uuid::new_v4().to_string(),
         enabled,
+        categories: None,
     }
+}
+#[test]
+fn a_category_change_refused_for_a_changed_switch_settles_as_definite() {
+    // Review of PR #1698: the service refuses it before any policy write.
+    let request = Request::AutomaticApprovals {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        enabled: true,
+        categories: Some(vec!["read".into()]),
+    };
+    let refusal = json!({"request_id":request.id(),"accepted":false,"durable":false,"code":"approval_policy_changed"});
+    let (settled, complete) = checked(&request, refusal.clone(), false).unwrap();
+    assert!(complete);
+    assert_eq!(
+        (settled["pending"].clone(), settled["op"].clone()),
+        (json!(false), json!("automatic_approvals"))
+    );
+    // A store failure may straddle the commit and stays unknown.
+    let mut store = refusal;
+    store["code"] = json!("delivery_store_refused");
+    assert!(checked(&request, store, false).is_none());
 }
 #[test]
 fn ownership_is_not_admitted_through_the_generic_policy_command_or_receipt_parser() {
@@ -526,11 +547,11 @@ pub(crate) mod native {
             .await;
             assert!(!service.snapshot().component_ready("approvals"));
             let enable = service
-                .automatic_approvals(uuid::Uuid::new_v4().to_string(), true)
+                .automatic_approvals(uuid::Uuid::new_v4().to_string(), true, None)
                 .await
                 .unwrap();
             let disable = service
-                .automatic_approvals(uuid::Uuid::new_v4().to_string(), false)
+                .automatic_approvals(uuid::Uuid::new_v4().to_string(), false, None)
                 .await
                 .unwrap();
             service.join().await.unwrap();
@@ -739,7 +760,10 @@ pub(crate) mod native {
                         .await
                         .unwrap()
                 } else {
-                    service.automatic_approvals(id.clone(), true).await.unwrap()
+                    service
+                        .automatic_approvals(id.clone(), true, None)
+                        .await
+                        .unwrap()
                 };
                 if not_applied {
                     let operation = if is_maintenance {
@@ -770,7 +794,10 @@ pub(crate) mod native {
                     let cached = if is_maintenance {
                         service.frontend_result(operation).await
                     } else {
-                        service.automatic_approvals(id.clone(), true).await.unwrap()
+                        service
+                            .automatic_approvals(id.clone(), true, None)
+                            .await
+                            .unwrap()
                     };
                     assert_eq!(cached, absent);
                     std::fs::write(fixture.0.join("service-back"), []).unwrap();
@@ -789,7 +816,7 @@ pub(crate) mod native {
                             .unwrap()
                     } else {
                         service
-                            .automatic_approvals(next_id.clone(), false)
+                            .automatic_approvals(next_id.clone(), false, None)
                             .await
                             .unwrap()
                     };
@@ -878,7 +905,7 @@ pub(crate) mod native {
                             .unwrap()
                     } else {
                         service
-                            .automatic_approvals(uuid::Uuid::new_v4().to_string(), false)
+                            .automatic_approvals(uuid::Uuid::new_v4().to_string(), false, None)
                             .await
                             .unwrap()
                     };
@@ -889,7 +916,10 @@ pub(crate) mod native {
                             .frontend_result(Operation::MaintenanceConfigure)
                             .await
                     } else {
-                        service.automatic_approvals(id.clone(), true).await.unwrap()
+                        service
+                            .automatic_approvals(id.clone(), true, None)
+                            .await
+                            .unwrap()
                     };
                     assert_eq!(result["request_id"], id);
                     assert_eq!(result["durable"], true);

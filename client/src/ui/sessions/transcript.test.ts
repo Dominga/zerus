@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildTranscript, localFileAvailable, mergeLocal, createTranscriptProjection } from "./transcript";
+import { buildTranscript, createActivityProjections, localFileAvailable, mergeLocal, createTranscriptProjection, toolPreview, TOOL_PREVIEW_SCAN } from "./transcript";
 import type { ActivityEvent, EventAttachment, LocalMessage } from "../../types";
 import type { ActivityItem, MediaMessage } from "./types";
 import { cardTarget, rowScope } from "./attachment-card";
@@ -8,6 +8,38 @@ const local = (status: "sending" | "error" | "sent", uncertain = false, extra: P
   id: `l-${status}-${uncertain}`, text: "hello", status, attachments: [], run_id: "r", conversation_id: "c",
   submitted_at: 1_793_000_000, error: status === "error" ? "hgs: refused" : "", uncertain, message_id: null, submitted_text: null, source: null, voice: null,
   ...extra,
+});
+
+describe("OpenCode inbox messages (ActivityView.cpp:1036-1038, 1072-1087; zerus-5wmh.13.6)", () => {
+  const row = (delivery: string, message_id = "msg_queued01"): ActivityEvent =>
+    ({ type: "UserPromptSubmit", at: 10, detail: "later", source: "opencode_native", message_id, delivery_state: delivery });
+  const summary = { run_id: "run-1", conversation_id: "conv-1", allowed_actions: ["rename", "forget", "remove_queued"] };
+
+  it("a queued message is stamped Queued and offers nothing", () => {
+    const [item] = buildTranscript([row("queued")], summary) as ActivityItem[];
+    expect(item).toMatchObject({ kind: "user", receipt: "Queued",
+      inbox: { state: "queued", messageId: "msg_queued01", run: "run-1", conversation: "conv-1", removable: false } });
+  });
+
+  it("a message not delivered after Stop is stamped and removable only while the session offers it", () => {
+    const [item] = buildTranscript([row("not_delivered")], summary) as ActivityItem[];
+    expect(item).toMatchObject({ receipt: "Not delivered",
+      inbox: { state: "not_delivered", messageId: "msg_queued01", run: "run-1", conversation: "conv-1", removable: true } });
+    const [unoffered] = buildTranscript([row("not_delivered")], { ...summary, allowed_actions: ["rename", "forget"] }) as ActivityItem[];
+    expect(unoffered.inbox?.removable).toBe(false);
+    const [unknown] = buildTranscript([row("not_delivered")]) as ActivityItem[];
+    expect(unknown.inbox?.removable).toBe(false);
+    const [nameless] = buildTranscript([row("not_delivered", "")], summary) as ActivityItem[];
+    expect(nameless.inbox?.removable).toBe(false);
+  });
+
+  it("an ordinary prompt keeps Sent and Queued at this time, and no stamp carries a separator dot", () => {
+    const items = buildTranscript([{ seq: 1, type: "UserPromptSubmit", at: 10, detail: "sent" },
+      { seq: 2, type: "UserPromptQueued", at: 11, detail: "waits" }, row("not_delivered")], summary) as ActivityItem[];
+    expect(items.map((i) => i.receipt)).toEqual(["Sent", "Queued at this time", "Not delivered"]);
+    expect(items.slice(0, 2).every((i) => i.inbox === undefined)).toBe(true);
+    expect(items.every((i) => !i.receipt?.includes("\u00b7"))).toBe(true);
+  });
 });
 
 describe("local message rows (ActivityView.cpp:665-720, 1053-1068)", () => {
@@ -117,6 +149,59 @@ describe("local-to-recorded display identity", () => {
     expect(projection.build([],{},[]).map(item=>item.id)).toEqual([`local-${row.id}`]);
     expect(projection.build([event(8)],{},[]).map(item=>item.id)).toEqual([`local-${row.id}`]);
     projection.reset();expect(projection.build([event(8)],{},[]).map(item=>item.id)).toEqual(["s8"]);
+  });
+  describe("across a child visit (zerus-isrzi)", () => {
+    const ids = (items: readonly { id: string }[]) => items.map((item) => item.id);
+    const row = local("sent", false, { id: "sent-one" });
+    /** A parent showing `row` after Rust dropped it, still before its journal event. */
+    const inHandoff = () => {
+      const build = createActivityProjections();
+      build(false, "parent", [], {}, [row]);
+      expect(ids(build(false, "parent", [], {}, []))).toEqual(["local-sent-one"]);
+      return build;
+    };
+    it("keeps the parent's receipt through a visit, then binds it to its journal event", () => {
+      const build = inHandoff();
+      expect(build(true, "parent/child", [], {}, [])).toEqual([]);
+      expect(ids(build(false, "parent", [], {}, []))).toEqual(["local-sent-one"]);
+      expect(ids(build(false, "parent", [event(8)], {}, []))).toEqual(["local-sent-one"]);
+    });
+    it("keeps it through several children", () => {
+      const build = inHandoff();
+      build(true, "parent/one", [], {}, []); build(true, "parent/two", [], {}, []);
+      expect(ids(build(false, "parent", [], {}, []))).toEqual(["local-sent-one"]);
+    });
+    it("shows a child's receipt in no other child and not in its parent", () => {
+      const build = createActivityProjections();
+      build(true, "parent/one", [], {}, [row]);
+      expect(ids(build(true, "parent/one", [], {}, []))).toEqual(["local-sent-one"]);
+      expect(build(true, "parent/two", [], {}, [])).toEqual([]);
+      expect(build(true, "parent/one", [], {}, [])).toEqual([]);
+      build(true, "parent/one", [], {}, [row]);
+      expect(build(false, "parent", [], {}, [])).toEqual([]);
+    });
+    it("retains nothing of a session once another is shown", () => {
+      const build = inHandoff();
+      build(true, "parent/child", [], {}, [local("sent", false, { id: "child-one" })]);
+      expect(build(false, "other", [], {}, [])).toEqual([]);
+      expect(build(false, "parent", [], {}, [])).toEqual([]);
+      expect(build(true, "parent/child", [], {}, [])).toEqual([]);
+    });
+    it("keeps its receipt when another session's child opens and that session is never shown", () => {
+      const build = inHandoff();
+      expect(build(true, "other/child", [], {}, [])).toEqual([]);
+      expect(ids(build(false, "parent", [], {}, []))).toEqual(["local-sent-one"]);
+    });
+    it("stays within the projection's bound of 50 receipts", () => {
+      const build = createActivityProjections();
+      const many = Array.from({ length: 60 }, (_, i) => local("sent", false, { id: `sent-${i}`, text: `message ${i}` }));
+      build(false, "parent", [], {}, many);
+      build(true, "parent/child", [], {}, []);
+      const kept = ids(build(false, "parent", [], {}, []));
+      expect(kept).toHaveLength(50);
+      expect(kept).toContain("local-sent-59");
+      expect(kept).not.toContain("local-sent-9");
+    });
   });
   it("never makes two distinct equal-text sends adopt one event or swap already bound keys", () => {
     const projection=createTranscriptProjection(),one=local("sent",false,{id:"one"}),two=local("sent",false,{id:"two",submitted_at:1_793_000_002});
@@ -296,5 +381,89 @@ describe("inherited fork history", () => {
   it("a fork with only inherited rows so far ends on them, marked", () => {
     const items = buildTranscript([ev(1, "UserPromptSubmit", "request", "codex/p/root"), ev(2, "Stop", "reply", "codex/p/root")]) as ActivityItem[];
     expect(items.map((i) => [i.kind, !!i.inherited])).toEqual([["context", false], ["user", true], ["agent", true]]);
+  });
+});
+
+describe("keep-warm ping turns", () => {
+  const PING = "[Zerus keep-warm] Reply with exactly OK and do nothing else.";
+  const row = (seq: number, type: string, detail: string, extra: Partial<ActivityEvent> = {}): ActivityEvent => ({ seq, type, at: 1_793_000_000 + seq, detail, agent_id: "", ...extra });
+
+  it("folds the ping, its reply and its Stop into one dim row", () => {
+    const items = buildTranscript([
+      row(1, "UserPromptSubmit", "Fix the tests"), row(2, "Stop", "Done."),
+      row(3, "UserPromptSubmit", PING, { origin: "keep_warm", turn_origin: "keep_warm" }),
+      // The provider's own copy of the reply carries no mark.
+      { seq: 0, type: "AgentMessage", at: 1_793_000_003.5, detail: "OK", source: "provider" },
+      row(4, "Stop", "OK", { turn_origin: "keep_warm" }),
+      row(5, "UserPromptSubmit", "Next task"), row(6, "Stop", "Done again."),
+    ]) as ActivityItem[];
+    expect(items.map((i) => [i.kind, i.title ?? i.body])).toEqual([
+      ["user", "Fix the tests"], ["agent", "Done."], ["warm", "Cache kept warm"], ["user", "Next task"], ["agent", "Done again."],
+    ]);
+    expect(items[2].lines).toEqual([PING, "OK"]);
+  });
+
+  it("a running ping and a stray tagged row stay out of the person's messages", () => {
+    const running = buildTranscript([row(1, "Stop", "Done."), row(2, "UserPromptSubmit", PING, { origin: "keep_warm", turn_origin: "keep_warm" })]) as ActivityItem[];
+    expect(running.map((i) => i.kind)).toEqual(["agent", "warm"]);
+    const stray = buildTranscript([row(1, "Stop", "OK", { turn_origin: "keep_warm" }), row(2, "UserPromptSubmit", "Hello")]) as ActivityItem[];
+    expect(stray.map((i) => i.kind)).toEqual(["user"]);
+  });
+});
+
+describe("tool rows (ActivityView.cpp:1105-1140, zerus-5wmh.13.8.1)", () => {
+  // The preview as it was: the whole text flattened, then cut.
+  const before = (text: string) => {
+    const flat = text.replace(/\s+/g, " ").trim();
+    return flat.length > 110 ? `${flat.slice(0, 109)}…` : flat;
+  };
+  const big = "line of output\n".repeat(400_000);
+
+  it("an expanded row carries each event's whole output, and the collapsed row keeps its preview", () => {
+    const process = "a".repeat(32);
+    const items = buildTranscript([
+      { seq: 1, type: "PreToolUse", tool: "Bash", at: 10, detail: "npm test", process_id: process },
+      { seq: 2, type: "PostToolUse", tool: "Bash", at: 11, detail: big },
+    ]) as ActivityItem[];
+    expect(items).toHaveLength(1);
+    const [row] = items;
+    expect(row).toMatchObject({ kind: "tools", body: "Bash" });
+    expect(row.events!.map((e) => [e.label, e.size, e.process])).toEqual([
+      ["Tool started / Bash", 8, process], ["Tool finished / Bash", big.length, undefined],
+    ]);
+    expect(row.events![1].detail()).toBe(big);
+    // What Activity serializes to see a row change stays small.
+    expect(JSON.stringify(row).length).toBeLessThan(1000);
+  });
+
+  it("a single event keeps its 110-character preview", () => {
+    const [row] = buildTranscript([{ seq: 1, type: "PostToolUse", tool: "Read", at: 10, detail: big }]) as ActivityItem[];
+    expect(row).toMatchObject({ kind: "tool", title: "Tool finished / Read", body: before(big) });
+    expect(row.events![0].detail()).toBe(big);
+  });
+
+  it("the preview reads only as far as it shows, with the same text as before", () => {
+    const texts = [
+      "", "   ", "short", "  lead and trail  ", "a\n\tb\r\nc", "x".repeat(109), "x".repeat(110), "x".repeat(111),
+      `${" ".repeat(5000)}${"word ".repeat(100)}`, `${"y".repeat(108)}  \n  z`, `${"y".repeat(109)} z`,
+      "\u00a0nbsp\u2028line\u2029para\ufeffbom\u3000ideo", `${"😀".repeat(60)}`, big,
+    ];
+    for (const text of texts) expect(toolPreview(text)).toBe(before(text));
+    expect(toolPreview(undefined)).toBe("");
+  });
+
+  it("reads at most a bounded start of a whitespace-heavy output, and says when it stopped there (zerus-1nsc6)", () => {
+    const spaces = " ".repeat(5_000_000);
+    // Whitespace before, as, or after the preview: the preview reads only TOOL_PREVIEW_SCAN characters.
+    expect(toolPreview(`${spaces}abcd`)).toBe("…");
+    expect(toolPreview(spaces)).toBe("…");
+    expect(toolPreview(`${"x".repeat(110)}${spaces}`)).toBe(`${"x".repeat(109)}…`);
+    expect(toolPreview(`${"x".repeat(50)}${spaces}tail`)).toBe(`${"x".repeat(50)}…`);
+    // Within the bound, the preview is the one it always was.
+    expect(toolPreview(`${" ".repeat(TOOL_PREVIEW_SCAN - 10)}abcd`)).toBe("abcd");
+    expect(toolPreview(" ".repeat(TOOL_PREVIEW_SCAN))).toBe("");
+    const started = performance.now();
+    for (let i = 0; i < 100; i++) toolPreview(`${spaces}${i}`);
+    expect(performance.now() - started).toBeLessThan(2000);
   });
 });

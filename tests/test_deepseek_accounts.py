@@ -15,7 +15,7 @@ HGS = Path(os.environ.get('HGS_TEST_BIN', 'target/debug/hgs')).resolve()
 @unittest.skipUnless(shutil.which('dsh') and HGS.exists(), 'official dsh and hgs required')
 class DeepSeekAccounts(unittest.TestCase):
     def test_private_key_write_restore_identity_and_remote_destination(self):
-        with tempfile.TemporaryDirectory(prefix='hgs-key-', dir='/tmp') as directory:
+        with tempfile.TemporaryDirectory(prefix='hgs-key-', dir=os.environ.get('ZERUS_TEST_SHORT_TMPDIR', '/tmp')) as directory:
             root = Path(directory)
             def environment(name):
                 home = root / name
@@ -56,6 +56,8 @@ class DeepSeekAccounts(unittest.TestCase):
                 shim = Path(local['HOME']) / '.local/bin'; shim.mkdir(parents=True)
                 ssh = shim / 'ssh'
                 ssh.write_text('#!/usr/bin/env python3\nimport json,os,pathlib,shlex,sys\n'
+                    + 'if sys.argv[-1] == ' + repr('echo "hgs-remote-v2|%OS%|%SystemRoot%|$env:OS|$env:SystemRoot"') + ':\n'
+                    + '    print("hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot"); sys.exit(0)\n'
                     + 'pathlib.Path(' + repr(str(root / 'ssh-args.json')) + ').write_text(json.dumps(sys.argv[1:]))\n'
                     + 'args=shlex.split(sys.argv[-1])[1:]\n'
                     + 'os.execve(' + repr(str(HGS)) + ', [' + repr(str(HGS)) + ']+args, ' + repr(remote) + ')\n')

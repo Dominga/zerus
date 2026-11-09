@@ -12,6 +12,7 @@
   dialog.shortcut-help { width: min(580px, calc(100vw - 32px)); height: min(640px, calc(100vh - 32px)); }
   .shortcut-help-filter { width: 100%; margin-bottom: 8px; }
   .shortcut-help-list { max-height: 480px; overflow-y: auto; }
+  .shortcut-help-terminal { margin: 10px 0 0; }
   .sc-group { margin: 6px 0 12px; }
   .sc-group .kv { grid-template-columns: 1fr auto; }
 }

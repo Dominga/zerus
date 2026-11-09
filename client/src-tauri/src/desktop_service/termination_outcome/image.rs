@@ -161,6 +161,34 @@ impl Image {
             Err(ChildFailure::Observation)
         }
     }
+    /// Original host-local custody correlation, not a stop permit. Unlike the
+    /// ordinary script-capable runner, this requires the actual native kernel
+    /// image/identity used by the later loan protocol.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) fn observe_custody_child(
+        &self,
+        child: &mut Child,
+    ) -> Result<zerus_client_core::worktree_programs::custody::NativeChild, ChildFailure> {
+        #[cfg(target_os = "linux")]
+        let identity = self
+            .pin
+            .observe_original_child(child)
+            .map_err(|_| ChildFailure::Observation)?;
+        #[cfg(target_os = "macos")]
+        let identity = self
+            .routing
+            .observe_original_helper_identity(child)
+            .map_err(ChildFailure::Native)?;
+        Ok(zerus_client_core::worktree_programs::custody::NativeChild {
+            pid: identity.pid(),
+            parent: identity.parent(),
+            birth: identity.birth().into(),
+            #[cfg(target_os = "linux")]
+            audit: None,
+            #[cfg(target_os = "macos")]
+            audit: Some(*identity.audit_token()),
+        })
+    }
 }
 
 /// Routing freshness is DATA. Even a nominally current route cannot replace

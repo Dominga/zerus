@@ -6,6 +6,7 @@ import { inspectorOpen, inspectorTab, inspectorWidth, inspectorClosed, setInspec
 import { followedFor, detailsFor, copyIdentity, copy, notify } from "../../store/actions";
 import { ironRuleCounts } from "../../store/ironRuleCounts";
 import { newSessionFromWorktree } from "./newsession-view";
+import { KeepWarmRow } from "./KeepWarmRow";
 import { catalogStatus, catalogRoots } from "./worktree-dialogs";
 import { openWorktreeReview, worktreeReviewDialog } from "../../store/worktreeCleanup";
 import { computerOffline, orderedRows } from "../../store/catalog";
@@ -33,9 +34,8 @@ import { of, sameKey, native } from "./paths";
 import type { BoundRow } from "./scope-filters";
 import type { Session } from "./types";
 import { IronRulesPanel } from "./IronRulesPanel";
-import { KeepWarmRow } from "./KeepWarmRow";
 import { captionText, childStatus } from "./SessionCard";
-import { currentChildren, finishedFoldId, foldedChildren, workingChildren } from "./subagents";
+import { currentChildren, finishedFoldId, foldedChildren, splitSubagents, workingChildren } from "./subagents";
 import { tr, trNoop } from "../../i18n";
 import { accountsPage } from "../../store/accounts";
 import { openFilterAccounts } from "../../store/accountFilters";
@@ -65,8 +65,54 @@ function Card(props: { id: string; title: JSX.Element; aside?: JSX.Element; clas
     <Show when={props.aside}><span class="icard-aside">{props.aside}</span></Show>
   </header><Show when={open()}><div class="icard-body" id={`icard-${props.id}`}>{props.children}</div></Show></section>;
 }
-function Row(props: { icon: string; label?: string; mono?: boolean; title?: string; tail?: JSX.Element; children: JSX.Element }) {
-  return <div class="irow" title={props.title}><span class="irow-ico"><Icon name={props.icon} size={16} /></span><span class="irow-val ell" classList={{ mono: props.mono }}>{props.children}</span>{props.tail}<Show when={props.label}><span class="irow-label">{props.label}</span></Show></div>;
+/**
+ * A value row. With `copy` the whole row is a button: hover highlights it, the
+ * copy mark shows at its right end, and a click copies that text (owner 2026-11-07).
+ */
+function Row(props: { icon: string; label?: string; mono?: boolean; title?: string; tail?: JSX.Element; copy?: string; onCopy?: () => void; copyName?: string; children: JSX.Element }) {
+  const body = () => <><span class="irow-ico"><Icon name={props.icon} size={16} /></span><span class="irow-val ell" classList={{ mono: props.mono }}>{props.children}</span>{props.tail}<Show when={props.label}><span class="irow-label">{props.label}</span></Show></>;
+  return <Show when={props.copy} fallback={<div class="irow" title={props.title}>{body()}</div>}>{(text) =>
+    <button type="button" class="irow copyable" title={copyTip(props.title)} aria-label={props.copyName ?? (props.label ? tr("Copy %1: %2", props.label, text()) : tr("Copy"))} onClick={() => (props.onCopy ? props.onCopy() : void copyValue(text()))}>{body()}<CopyMark /></button>}</Show>;
+}
+const copyTip = (title?: string) => (title ? `${title}\n${tr("Click to copy")}` : tr("Click to copy"));
+const CopyMark = () => <span class="copy-mark" aria-hidden="true"><Icon name="copy" size={13} /></span>;
+// copy() reports a failure itself; confirm only success.
+const copyValue = (text: string) => copy(text).then((out) => { if (out.outcome === "done") notify("info", tr("Copied")); });
+/** Finished subagents shown per step once unfolded (zerus-5ffek). */
+const FINISHED_PAGE = 50;
+const sameIds = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((id, i) => id === b[i]);
+/**
+ * A session's subagents (owner, 2026-11-08, T-ug5hxx): the working ones stay
+ * in view and the rest fold behind their count, unfolding in steps, so a
+ * session with many subagents renders and scrolls a bounded list. Rows follow
+ * stable IDs (splitSubagents).
+ */
+function Subagents(props: { session: Session | undefined; online: boolean }) {
+  const children = () => props.session?.subagents ?? [];
+  const current = () => !!props.session && currentChildren(props.session, props.online);
+  const byId = createMemo(() => new Map(children().map((child) => [child.id, child])));
+  const split = createMemo(() => splitSubagents(children(), current(), subagentOpen()),
+    undefined, { equals: (a, b) => sameIds(a.active, b.active) && sameIds(a.finished, b.finished) });
+  // Folded again for each session.
+  const [unfolded, setUnfolded] = createSignal(0);
+  createEffect(on(() => props.session?.key, () => setUnfolded(0)));
+  const finished = createMemo(() => split().finished.slice(0, unfolded()), undefined, { equals: sameIds });
+  const row = (id: string) => <Show when={byId().get(id)}>{(child) =>
+    <Row icon="circle" label={childStatus(child(), current()).caption} title={child().summary}><button class="link" onClick={() => { setSubagentOpen(id); setDetailTab("activity"); }}>{child().name} →</button><span class="dim"> {child().summary}</span></Row>}</Show>;
+  return <Show when={children().length} fallback={<div class="hint">{tr("No subagent activity has been reported yet.")}</div>}>
+    <div class="isub">
+      <For each={split().active} fallback={<div class="hint">{tr("No subagent is working now.")}</div>}>{row}</For>
+      <Show when={split().finished.length}>
+        <button type="button" class="isub-more" aria-expanded={unfolded() > 0} onClick={() => setUnfolded(unfolded() ? 0 : FINISHED_PAGE)}>
+          <Icon name={unfolded() ? "chevron-down" : "chevron-right"} size={12} />{tr("Finished: %1", split().finished.length)}
+        </button>
+        <For each={finished()}>{row}</For>
+        <Show when={unfolded() && unfolded() < split().finished.length}>
+          <button type="button" class="isub-more" onClick={() => setUnfolded(unfolded() + FINISHED_PAGE)}>{tr("Show %1 more", Math.min(FINISHED_PAGE, split().finished.length - unfolded()))}</button>
+        </Show>
+      </Show>
+    </div>
+  </Show>;
 }
 /** Task 262: the session's subagents, finished ones folded into "N finished, show" as in Qt; the fold is remembered per session. */
 function SubagentRows(props: { session: Session; online: boolean; summaries?: boolean; empty?: JSX.Element }) {
@@ -95,7 +141,7 @@ function PlanAgents() {
     <Show when={goal().objective}><Card id="plan-goal" title={tr("Goal")} aside={<span class="muted">{goal().status === "active" ? tr("Pursuing goal") : goal().status}</span>}><p class="icard-text">{goal().objective}</p><Show when={goal().completion}><div class="hint">{tr("Reported by the agent. Completion: %1", goal().completion!)}</div></Show></Card></Show>
     <Show when={plan().length}><Card id="plan-tasks" title={tr("Tasks")} aside={<span class="dim">{tr("%1 of %2 completed (last recorded)", plan().filter((p) => p.status === "completed").length, plan().length)}</span>}><For each={plan()}>{(p) => <Row icon={p.status === "completed" ? "check" : "circle-dot"} label={p.status === "completed" ? tr("Done") : p.status === "in_progress" ? tr("In progress") : tr("To do")}>{p.title}</Row>}</For></Card></Show>
     <Card id="plan-agents" title={tr("Subagents")} aside={<span class="dim">{tr("%1 active / %2 total", s() ? workingChildren(s()!, online()) : 0, s()?.subagents?.length ?? 0)}</span>}>
-      <Show when={s()} fallback={<div class="hint">{tr("No subagent activity has been reported yet.")}</div>}>{(row) => <SubagentRows session={row()} online={online()} summaries empty={<div class="hint">{tr("No subagent activity has been reported yet.")}</div>} />}</Show>
+      <Subagents session={s()} online={online()} />
     </Card>
   </div>;
 }
@@ -230,19 +276,27 @@ function useDetails() {
     if (a) return plan ? tr("%1 (%2)", a.label || tr("Unnamed account"), plan) : a.label || tr("Unnamed account");
     return bound().accountId || bound().accountHome || (SHELLS.has(s().cmd) ? tr("No account (shell)") : tr("Account not recorded"));
   };
+  // The account as the row names it, without the plan suffix: its sign-in email when known, else its
+  // label, else the recorded ID or home. A shell or an unrecorded account has nothing to copy.
+  const accountCopy = () => {
+    const a = account().account;
+    return a?.usage.identity.email || a?.label || bound().accountId || bound().accountHome || undefined;
+  };
   const home = () => bound().accountHome || account().profile?.home || "";
   const profileId = () => bound().accountId || account().profile?.id || "";
-  return { s, details, identity, value, rows, usage, context, clear, account, accountText, home, profileId };
+  return { s, details, identity, value, rows, usage, context, clear, account, accountText, accountCopy, home, profileId };
 }
 function Details() {
-  const { s, details, identity, value, rows, usage, context, clear, account, accountText, home, profileId } = useDetails();
-  return <div class="insp-body"><Card id="details-id" title={tr(identity().title)}><Row icon="key-round" mono title={tr(identity().title)} tail={<button class="icon-btn small" aria-label={tr(identity().caption)} title={tr(identity().caption)} disabled={!identity().value} onClick={() => void copyIdentity(snapshotOf(s()), details())}><Icon name="copy" size={13} /></button>}><span class="selectable">{value(identity().value)}</span></Row></Card>
-    <Card id="details-session" title={tr("Session")}><Row icon="message-square" label={tr("name")} mono title={s().name}>{s().name}</Row><Row icon="monitor" label={tr("machine")}>{s().machine}</Row><Row icon="folder" label={tr("directory")} mono title={s().cwdPath}>{value(s().cwdPath)}</Row><Row icon="git-branch" label={tr("branch")}>{value(s().branch)}</Row><Row icon="layers" label={tr("project")}>{grouping().headers.find((p) => p.id === groupOf(s().key))?.name ?? tr("Not reported")}</Row><Row icon="clock" label={tr("last event")}>{s().updatedAt ? eventTimeOf(new Date(s().updatedAt! * 1000)) : tr("Not reported")}</Row><KeepWarmRow session={s()} main={!subagentOpen()} /><div class="hint">{tr("Activity stays on %1. Closing this window does not stop your agent.", s().machine)}</div></Card>
+  const { s, details, identity, value, rows, usage, context, clear, account, accountText, accountCopy, home, profileId } = useDetails();
+  return <div class="insp-body"><Card id="details-id" title={tr(identity().title)}><Row icon="key-round" mono title={tr(identity().title)} copy={identity().value || undefined} copyName={tr("Copy %1: %2", tr(identity().title), identity().value)} onCopy={() => void copyIdentity(snapshotOf(s()), details())}>{value(identity().value)}</Row></Card>
+    <Card id="details-session" title={tr("Session")}><Row icon="message-square" label={tr("name")} mono title={s().name} copy={s().name}>{s().name}</Row><Row icon="monitor" label={tr("machine")} copy={s().machine}>{s().machine}</Row><Row icon="folder" label={tr("directory")} mono title={s().cwdPath} copy={s().cwdPath}>{value(s().cwdPath)}</Row><Row icon="git-branch" label={tr("branch")} copy={s().branch}>{value(s().branch)}</Row><Row icon="layers" label={tr("project")} copy={grouping().headers.find((p) => p.id === groupOf(s().key))?.name}>{grouping().headers.find((p) => p.id === groupOf(s().key))?.name ?? tr("Not reported")}</Row><Row icon="clock" label={tr("last event")}>{s().updatedAt ? eventTimeOf(new Date(s().updatedAt! * 1000)) : tr("Not reported")}</Row><Show when={s().state !== "archived"}><KeepWarmRow session={s()} inspected={raw()} online={!computerOffline(s().computer)} /></Show></Card>
     <IronRulesCard session={s()} />
     <ChangesCard session={s()} id="changes" />
-    <Card id="details-account" title={tr("Account")}><Row icon="user-round-cog" label={tr("account")} title={profileId() ? tr("Profile %1", profileId()) : undefined} tail={<Show when={account().tag}><span class="acct-pid tabular" title={tr("Profile %1", profileId())}>{account().tag}</span></Show>}>{accountText()}</Row><Row icon="hard-drive" label={tr("agent home")} mono title={home() || undefined}>{value(homeShort(home()))}</Row><Row icon="sparkles" label={tr("model")}>{value(s().model)} {s().effort}</Row></Card>
+    <Card id="details-account" title={tr("Account")}><Row icon="user-round-cog" label={tr("account")} title={profileId() ? tr("Profile %1", profileId()) : undefined} copy={accountCopy()} tail={<Show when={account().tag}><span class="acct-pid tabular" title={tr("Profile %1", profileId())}>{account().tag}</span></Show>}>{accountText()}</Row><Row icon="hard-drive" label={tr("agent home")} mono title={home() || undefined} copy={home() || undefined}>{value(homeShort(home()))}</Row><Row icon="sparkles" label={tr("model")} copy={s().model || undefined}>{value(s().model)} {s().effort}</Row></Card>
     <Card id="details-lead" title={tr("Session lead")}><SessionLeadPanel /></Card>
-    <Card id="details-usage" title={tr("Session usage")}><Show when={rows().length} fallback={<div class="hint">{tr("No native usage reported for this conversation yet.")}</div>}><table class="usage"><tbody><For each={rows()}>{([label, val]) => <tr><td>{label}</td><td class="tabular">{val}</td></tr>}</For></tbody></table><Show when={usage().costNote}><div class="hint">{usage().costNote}</div></Show><div class="hint">{usage().footer}</div></Show></Card>
+    <Card id="details-usage" title={tr("Session usage")}><Show when={rows().length} fallback={<div class="hint">{tr("No native usage reported for this conversation yet.")}</div>}><table class="usage"><tbody><For each={rows()}>{([label, val]) => <Show when={val !== tr("Not reported")} fallback={<tr><td>{label}</td><td class="tabular">{val}</td></tr>}>
+      <tr class="copyable" tabindex="0" role="button" title={tr("Click to copy")} aria-label={tr("Copy %1: %2", label, val)} onClick={() => void copyValue(val)}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); void copyValue(val); } }}><td>{label}</td><td class="tabular"><span class="u-val">{val}<CopyMark /></span></td></tr></Show>}</For></tbody></table><Show when={usage().costNote}><div class="hint">{usage().costNote}</div></Show><div class="hint">{usage().footer}</div></Show></Card>
     <Show when={flag("extensions/socraticode") === true && !!s().cwdPath}><Card id="details-socraticode" title={tr("SocratiCode")}><SocratiCodePanel /></Card></Show>
     <Show when={!subagentOpen()}><div class="insp-foot"><span class="muted" title={context()?.tooltip}>{tr("Context: %1", context()?.text || tr("Not reported"))}</span><span class="grow" /><button class="btn small" title={clear()?.reason || undefined} disabled={!clear()?.enabled} onClick={() => composer.openClear()}>{clear()?.running ? tr("Clearing…") : tr("Clear session…")}</button></div></Show>
   </div>;
@@ -336,19 +390,19 @@ function SideTeamCard() {
 
 /** Task 206: the Compact skins' side panel, Qt's InspectorCards: one scroll of collapsible sections. */
 function Sections() {
-  const { s, details, identity, value, rows, usage, context, clear, accountText, home } = useDetails();
+  const { s, details, identity, value, rows, usage, context, clear, accountText, accountCopy, home } = useDetails();
   const plan = createMemo(() => sessionPlan(raw())), goal = createMemo(() => sessionGoal(raw()));
   const online = () => !computerOffline(s().computer);
   const window = createMemo(() => contextUsage(raw()));
   return <div class="insp-body insp-sections">
     <Card id="sec-environment" title={tr("Environment")}>
-      <Row icon="key-round" mono title={tr(identity().title)} tail={<button class="icon-btn small" aria-label={tr(identity().caption)} title={tr(identity().caption)} disabled={!identity().value} onClick={() => void copyIdentity(snapshotOf(s()), details())}><Icon name="copy" size={13} /></button>}><span class="selectable">{value(identity().value)}</span></Row>
-      <Row icon="monitor" label={tr("machine")}>{s().machine}</Row>
-      <Row icon="folder" label={tr("directory")} mono title={s().cwdPath}>{value(s().cwdPath)}</Row>
-      <Row icon="git-branch" label={tr("branch")}>{value(s().branch)}</Row>
-      <Row icon="sparkles" label={tr("model")}>{value(s().model)} {s().effort}</Row>
+      <Row icon="key-round" mono title={tr(identity().title)} copy={identity().value || undefined} copyName={tr("Copy %1: %2", tr(identity().title), identity().value)} onCopy={() => void copyIdentity(snapshotOf(s()), details())}>{value(identity().value)}</Row>
+      <Row icon="monitor" label={tr("machine")} copy={s().machine}>{s().machine}</Row>
+      <Row icon="folder" label={tr("directory")} mono title={s().cwdPath} copy={s().cwdPath}>{value(s().cwdPath)}</Row>
+      <Row icon="git-branch" label={tr("branch")} copy={s().branch}>{value(s().branch)}</Row>
+      <Row icon="sparkles" label={tr("model")} copy={s().model || undefined}>{value(s().model)} {s().effort}</Row>
       <Row icon="clock" label={tr("last event")}>{s().updatedAt ? eventTimeOf(new Date(s().updatedAt! * 1000)) : tr("Not reported")}</Row>
-      <KeepWarmRow session={s()} main={!subagentOpen()} />
+      <Show when={s().state !== "archived"}><KeepWarmRow session={s()} inspected={raw()} online={online()} /></Show>
     </Card>
     <Card id="sec-context" title={tr("Context")} aside={<Show when={window() && window()!.percent >= 0}><span class="dim tabular">{tr("%1%", window()!.percent)}</span></Show>}>
       <Show when={window()} fallback={<div class="hint">{tr("Context: %1", context()?.text || tr("Not reported"))}</div>}>{(w) => <>
@@ -356,8 +410,8 @@ function Sections() {
       </>}</Show>
       {/* Qt: "128k left in the window" with Clear session beside it, then the account and the session's usage. */}
       <div class="side-actions"><span class="hint grow">{window()?.limit ? tr("%1 left in the window", compactCount(Math.max(0, window()!.limit - window()!.used))) : ""}</span><Show when={!subagentOpen()}><button class="btn small" title={clear()?.reason || undefined} disabled={!clear()?.enabled} onClick={() => composer.openClear()}>{clear()?.running ? tr("Clearing…") : tr("Clear session…")}</button></Show></div>
-      <Row icon="user-round-cog" label={tr("account")}>{accountText()}</Row>
-      <Row icon="hard-drive" label={tr("agent home")} mono title={home() || undefined}>{value(homeShort(home()))}</Row>
+      <Row icon="user-round-cog" label={tr("account")} copy={accountCopy()}>{accountText()}</Row>
+      <Row icon="hard-drive" label={tr("agent home")} mono title={home() || undefined} copy={home() || undefined}>{value(homeShort(home()))}</Row>
       <Show when={rows().length}><table class="usage"><tbody><For each={rows()}>{([label, val]) => <tr><td>{label}</td><td class="tabular">{val}</td></tr>}</For></tbody></table><Show when={usage().costNote}><div class="hint">{usage().costNote}</div></Show></Show>
     </Card>
     <Show when={selectedTeam()}><Card id="sec-team" title={tr("Team")}><SideTeamCard /></Card></Show>
@@ -403,7 +457,8 @@ export function Inspector(props: { available: number }) {
   };
   return <Show when={inspectorOpen()}><aside ref={panel} class="inspector" classList={{ floating: geometry().floating }} style={{ width: `${geometry().width}px` }} aria-label={tr("Side panel")}>
     <div class="insp-resize" tabindex="0" role="separator" aria-orientation="vertical" aria-label={tr("Side panel width")} aria-valuemin={240} aria-valuemax={900} aria-valuenow={inspectorWidth()} onPointerDown={resize} onDblClick={() => setInspectorWidth(400)} onKeyDown={(e) => { if (["ArrowLeft", "ArrowRight", "Home"].includes(e.key)) { e.preventDefault(); setInspectorWidth(e.key === "Home" ? 400 : inspectorWidth() + (e.key === "ArrowLeft" ? 20 : -20)); } }}><i /></div>
-    <Show when={sections()}><div class="insp-tabs insp-head"><b class="insp-title">{tr("Session")}</b><span class="grow" /><button class="icon-btn small" aria-label={tr("Collapse side panel")} data-tip={inspectorHint(tr("Collapse side panel"))} data-tip-pos="left" onClick={close}><Icon name="panel-right-close" size={14} /></button></div>
+    {/* Task 354: the Compact panel has no 'Session' caption and no outer frame; the only thing above its sections is the collapse button. */}
+    <Show when={sections()}><div class="insp-head"><span class="grow" /><button class="icon-btn small" aria-label={tr("Collapse side panel")} data-tip={inspectorHint(tr("Collapse side panel"))} data-tip-pos="left" onClick={close}><Icon name="panel-right-close" size={14} /></button></div>
       <div class="insp-scroll sections"><Show when={selected()} fallback={<div class="insp-body"><div class="hint">{tr("No session selected")}</div></div>}><Sections /></Show></div></Show>
     <Show when={!sections()}><div class="insp-tabs tabs" role="tablist" aria-label={tr("Side panel tabs")}><For each={INSPECTOR_TABS}>{(tab) => <button class="tab" role="tab" classList={{ on: inspectorTab() === tab }} title={tr(LABEL[tab])} aria-selected={inspectorTab() === tab} tabindex={inspectorTab() === tab ? 0 : -1} onClick={() => setInspectorTab(tab)} onKeyDown={(e) => { const i = INSPECTOR_TABS.indexOf(tab), next = e.key === "ArrowRight" ? (i + 1) % 4 : e.key === "ArrowLeft" ? (i + 3) % 4 : e.key === "Home" ? 0 : e.key === "End" ? 3 : -1; if (next >= 0) { e.preventDefault(); setInspectorTab(INSPECTOR_TABS[next]); panel.querySelectorAll<HTMLButtonElement>(".insp-tabs .tab")[next]?.focus(); } }}><span class="tab-label">{tr(LABEL[tab])}</span>{tab === "tasks" ? <TaskTabBadge /> : null}</button>}</For><span class="grow" /><button class="icon-btn small" aria-label={tr("Collapse side panel")} data-tip={inspectorHint(tr("Collapse side panel"))} data-tip-pos="left" onClick={close}><Icon name="panel-right-close" size={14} /></button></div>
     <div class="insp-scroll" classList={{ tasks: inspectorTab() === "tasks" }}><Switch><Match when={inspectorTab() === "plan"}><PlanAgents /></Match><Match when={inspectorTab() === "details" && selected()}><Details /></Match><Match when={inspectorTab() === "worktrees"}><Worktrees /></Match><Match when={inspectorTab() === "tasks"}><Suspense><TasksPanel /></Suspense></Match></Switch></div></Show>

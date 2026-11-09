@@ -1,8 +1,8 @@
-import { createMemo, createSignal } from "solid-js";
+import { batch, createMemo, createSignal, untrack } from "solid-js";
 import { createStore } from "solid-js/store";
 import { catalog, computerFresh, orderedRows } from "./catalog";
 import { documentVisibility } from "./visibility";
-import { isActive, isWorking, needsAttention } from "./attention";
+import { countedAttention, isActive, isWorking, needsAttention } from "./attention";
 import { settings, settingsReady, setSetting, num } from "./settings";
 import { createRowDensity, ROW_DENSITY_KEY } from "./rowDensity";
 import { collapseTeams } from "./collapsed-teams";
@@ -30,7 +30,17 @@ const params = new URLSearchParams(typeof location === "undefined" ? "" : locati
 const PAGES: Page[] = ["dashboard", "sessions", "projects", "machines", "accounts", "settings", "waiting"];
 // `?page=settings` opens a screen (headless screenshots), as in the mockup.
 export const [page, setPage] = createSignal<Page>(PAGES.find((p) => p === params.get("page")) ?? "sessions");
-export const [selectedKey, setSelectedKey] = createSignal<string | undefined>();
+const [selectedKey, setSelectedKeyRaw] = createSignal<string | undefined>();
+export { selectedKey };
+/** Task View belongs to an explicit task navigation, not the next session. */
+export function setSelectedKey(value?: string | ((previous: string | undefined) => string | undefined)) {
+  return batch(() => {
+    const previous = untrack(selectedKey);
+    const next = setSelectedKeyRaw((current) => typeof value === "function" ? value(current) : value);
+    if (next !== previous && untrack(detailTab) === "taskview") setDetailTab("activity");
+    return next;
+  });
+}
 export const [stateFilter, setStateFilterRaw] = createSignal<StateFilter>("all");
 /** Qt clears an exact-folder scope when All sessions is chosen. */
 export function setStateFilter(filter: StateFilter) { if (filter === "all") setFolderFilter(undefined); return setStateFilterRaw(filter); }
@@ -44,6 +54,22 @@ export const [multi, setMulti] = createStore<Record<string, boolean>>({});
 export const [peek, setPeek] = createSignal(false);
 export type DetailTab = "activity" | "terminal" | "native" | "processes" | "taskview" | "team" | "newteam";
 export const [detailTab, setDetailTab] = createSignal<DetailTab>("activity");
+const [latestRequests, setLatestRequests] = createSignal(0);
+/**
+ * Enter on a session row (Qt's jumpToLatestActivity): the Activity tab at its
+ * latest message. The mounted Activity takes the request, or the next to mount
+ * (ui/sessions/Activity.tsx), so the list never loads the transcript itself.
+ */
+export function showLatestActivity() { setDetailTab("activity"); setLatestRequests((n) => n + 1); }
+export { latestRequests };
+let latestTaken = 0;
+/** Activity's side, read in an effect: true once per request (several pending ones jump once). */
+export function takeLatestRequest(): boolean {
+  const n = latestRequests();
+  if (n <= latestTaken) return false;
+  latestTaken = n;
+  return true;
+}
 export const [subagentOpen, setSubagentOpen] = createSignal<string | undefined>();
 export const [search, setSearch] = createSignal(params.get("q") ?? "");
 export const [expandedChildren, setExpandedChildren] = createStore<Record<string, boolean>>({});
@@ -206,7 +232,7 @@ export const counts = createMemo(() => {
     all++;
     const up = online(s);
     if (isActive(s, up)) active++;
-    if (needsAttention(s, up) && !s.muted) attention++;
+    if (countedAttention(s, up)) attention++;
     if (isWorking(s, up)) working++;
     if (s.status === "paused") paused++;
   }

@@ -23,8 +23,10 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('update_installed', ROOT / 'tray/update-installed.py')
 updater = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(updater)
-# The real one, for the cases that fail it from inside.
+# The real ones, for the cases that fail them from inside.
 BUILD_INFO = updater.build_info
+GUI_PIDS = updater.gui_pids
+QUIT_GUI = updater.quit_gui
 
 TEST_ID = 'com.example.zerus-switch-test'
 DEFAULTS = '''#!{python}
@@ -275,6 +277,86 @@ class Switch(Fixture):
         self.assertIn(f'defaults import com.hgdev.hgs-tray {updater.SETTINGS_SNAPSHOT}', problems[1])
 
 
+class GuiProcesses(unittest.TestCase):
+    """The desktop service's `--desktop-notification-host` child runs the
+    installed executable, but it is never a GUI copy (zerus-ov867)."""
+
+    def test_macos_leaves_out_the_notification_host_by_its_exact_argument(self):
+        installed = Path('/Users/example/Applications/hgs-tray.app')
+        target = f'{installed}/Contents/MacOS/hgs-tray'
+        listing = '\n'.join([f'12206 {installed}/Contents/MacOS/hgs', f'12214 {target}', f'73018 {target}',
+                             f'73019 {target}', f'73020 {target}', f'500 /Users/example/Other.app/Contents/MacOS/hgs-tray'])
+        arguments = {'12214': target, '73018': f'{target} --desktop-notification-host',
+                     # Not the exact argument: the binary would start a GUI.
+                     '73019': f'{target} --desktop-notification-hosts'}
+        def ps(args, **kwargs):
+            if args == ['ps', '-x', '-o', 'pid=,comm=']:
+                return listing
+            self.assertEqual(args[:4], ['ps', '-o', 'args=', '-p'])
+            if args[4] not in arguments:
+                # It exited after the listing.
+                raise subprocess.CalledProcessError(1, args)
+            return arguments[args[4]]
+        with mock.patch.multiple(updater, MAC=True, run=ps):
+            self.assertEqual(updater.gui_pids(installed), [12214, 73019])
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'reads /proc')
+    def test_linux_leaves_out_a_notification_host_process(self):
+        root = Path(tempfile.mkdtemp(prefix='zts-pids-')).resolve()
+        self.addCleanup(shutil.rmtree, root, True)
+        gui = root / 'hgs-tray'
+        gui.write_text(f'#!{sys.executable}\nimport time\ntime.sleep(60)\n')
+        gui.chmod(0o755)
+        started = {}
+        for name, args in {'gui': [], 'host': ['--desktop-notification-host']}.items():
+            process = subprocess.Popen([gui, *args], stdin=subprocess.DEVNULL)
+            self.addCleanup(process.wait)
+            self.addCleanup(process.kill)
+            started[name] = process.pid
+        with mock.patch.object(updater, 'MAC', False):
+            self.assertEqual(updater.gui_pids(gui), [started['gui']])
+
+
+class QuitGui(Fixture):
+    """How the running GUI is asked to quit on macOS (zerus-ov867): the quit
+    event names the bundle ID, which the service's notification host shares."""
+
+    def setUp(self):
+        super().setUp()
+        self.installed = self.root / 'Applications/hgs-tray.app'
+        self.asked = []
+        def run(args, **kwargs):
+            self.asked.append(('event', args[0]))
+            return ''
+        stubs = {'MAC': True, 'run': run, 'gui_pids': lambda installed: [],
+                 'alive': lambda pid: not self.asked}
+        for name, value in stubs.items():
+            patcher = mock.patch.object(updater, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def quit(self, image):
+        with mock.patch.object(updater, 'running_image_matches', image), \
+                mock.patch.object(updater.os, 'kill', lambda pid, number: self.asked.append((pid, number))):
+            updater.quit_gui(12214, self.installed)
+        return self.asked
+
+    def test_the_installed_client_gets_sigterm_at_its_own_pid(self):
+        shutil.copytree(self.bundle('client-1', 'tauri'), self.installed)
+        self.assertEqual(self.quit(lambda pid, installed: pid == 12214), [(12214, updater.signal.SIGTERM)])
+
+    def test_any_other_image_keeps_the_quit_event(self):
+        def lsof_failed(pid, installed):
+            raise subprocess.CalledProcessError(1, ['lsof'])
+        for kind, image in (('tauri', lambda pid, installed: False), ('tauri', lsof_failed),
+                            ('qt', lambda pid, installed: True)):
+            with self.subTest(kind=kind, image=image):
+                shutil.rmtree(self.installed, ignore_errors=True)
+                shutil.copytree(self.bundle(kind, kind), self.installed)
+                self.asked.clear()
+                self.assertEqual(self.quit(image), [('event', 'osascript')])
+
+
 class SlotAndRestore(Fixture):
     def setUp(self):
         super().setUp()
@@ -448,6 +530,45 @@ class UpdateFlow(Flow):
             self.assertEqual(updater.update(self.bundle('client-2', 'tauri'), self.installed), 0)
         self.assertEqual(self.events, [('desktop-ready', 'client-2')])
         self.assertFalse(self.running, 'the source installer owns the later first GUI load')
+
+    def test_the_service_notification_host_never_counts_as_a_second_gui(self):
+        # zerus-ov867: GUI 100 and the desktop service's host, both from the installed image.
+        self.install('client-1', 'tauri', self.installed)
+        target = str(updater.executable(self.installed))
+        def ps(args, **kwargs):
+            if args == ['ps', '-x', '-o', 'pid=,comm=']:
+                listed = [f'{self.pid} {target}'] if self.running else []
+                return '\n'.join(listed + [f'12206 {self.installed}/Contents/MacOS/hgs', f'73018 {target}'])
+            if args[:4] == ['ps', '-o', 'args=', '-p']:
+                return target + ' --desktop-notification-host' * (args[4] == '73018')
+            return ''
+        with mock.patch.multiple(updater, gui_pids=GUI_PIDS, run=ps):
+            self.assertEqual(updater.update(self.bundle('client-2', 'tauri'), self.installed), 0)
+        self.assertEqual(self.events, ['quit', ('start', 'client-2')])
+        self.assertTrue(self.running, 'the new GUI keeps running')
+        self.assertEqual((self.variant(self.installed), self.variant(self.slot)), ('client-2', 'client-1'))
+
+    def test_a_failed_quit_event_reports_its_reason_and_replaces_nothing(self):
+        self.install('client-1', 'tauri', self.installed)
+        reason = 'execution error: a synthetic osascript failure (-1)'
+        command = ['osascript', '-e', f'ignoring application responses\ntell application id "{updater.LABEL}" to quit\nend ignoring']
+        failure = subprocess.CalledProcessError(1, command, output='', stderr=reason + '\n')
+        def run(args, **kwargs):
+            if args[0] == 'osascript':
+                self.assertEqual(args, command)
+                raise failure
+            return ''
+        errors = io.StringIO()
+        argv = ['update-installed.py', str(self.bundle('client-2', 'tauri')), str(self.installed)]
+        with mock.patch.multiple(updater, run=run, quit_gui=QUIT_GUI, running_image_matches=lambda pid, installed: False), \
+                mock.patch.object(sys, 'argv', argv), mock.patch.object(sys, 'stderr', errors):
+            self.assertEqual(updater.main(), 1)
+        self.assertEqual(errors.getvalue(),
+                         f'hgs-tray update failed: {str(failure).removesuffix(".")}: {reason}\n')
+        self.assertEqual(self.variant(self.installed), 'client-1')
+        self.assertFalse(self.slot.exists())
+        self.assertEqual(self.events, [])
+        self.assertTrue(self.running)
 
     def test_stopped_pair_refresh_failure_cannot_report_success_or_start_gui(self):
         self.running = False

@@ -6,6 +6,7 @@ mod answer_channel;
 mod agent_hint;
 mod archive;
 pub(crate) mod archive_catalog;
+mod archive_references;
 mod claude_trust;
 mod claude_permission;
 mod claude_resume;
@@ -38,8 +39,15 @@ mod command_guard;
 pub(crate) mod hook_health;
 mod input;
 mod input_hold;
+pub(crate) use input::task_refusal;
+pub(crate) use input::{Lookup as ReceiptLookup, Submission};
+// The session resume actor's readiness rule (zerus-5wmh.66.4.9), on its
+// platforms only.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use input::{resumed_readiness, Readiness as ResumedReadiness};
 mod input_queue;
 mod journal;
+mod keep_warm;
 mod kimi_cache_hint;
 mod kimi_messages;
 mod kimi_approval;
@@ -65,6 +73,7 @@ pub(crate) use labels::prove as prove_label_index;
 #[cfg(unix)]
 pub(crate) use storage::is_id_layout_record;
 mod provider_messages;
+mod provider_binding;
 mod processes;
 mod services;
 mod prompt_suggestion;
@@ -79,6 +88,7 @@ mod codex_goal_resume;
 mod codex_rate_limit;
 mod read_marks;
 mod notifications;
+pub(crate) mod parent_link;
 mod recipes;
 mod rename;
 mod resume_input;
@@ -99,6 +109,7 @@ mod session_upload;
 mod session_state;
 pub(crate) mod slow_calls;
 mod switch_account;
+mod switch_provider;
 mod builds;
 pub(crate) mod build_cache_server;
 pub(crate) mod build_dirs;
@@ -109,10 +120,16 @@ mod tasks;
 // WhiteWh fork: agent teams.
 pub(crate) mod teams;
 pub(crate) mod iron_rules;
+pub(crate) mod task_controls;
 mod telemetry;
 mod terminate;
+mod terminating;
 mod untracked_shell;
 mod session_action;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) use session_action::fixture_receipt as lifecycle_fixture_receipt;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use session_action::observe_held as observe_held_lifecycle_receipt;
 pub(crate) use session_action::{
     observe_original as observe_lifecycle_receipt, status_machine as lifecycle_receipt_machine,
 };
@@ -126,6 +143,7 @@ mod workspace;
 mod git_status;
 pub(crate) mod repositories;
 mod launch_observation;
+pub(crate) mod launch_identity;
 /// Evidence about original launch `launch` under this process's own state
 /// root (`HGS_STATE_DIR` or its default), read within `deadline`. A root that
 /// cannot be resolved without creating it is Unknown.
@@ -144,12 +162,16 @@ mod worktree_requests;
 // The creation worktree actor's only entry into the owned effect.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use {
-    worktree_requests::{create_owned as create_worktree_owned, original_receipt as worktree_request_receipt},
+    worktree_requests::{create_owned as create_worktree_owned, original_receipt as worktree_request_receipt, ReceiptRoot as WorktreeReceiptRoot},
     worktrees::{Control as WorktreeControl, Step as WorktreeStep},
 };
 mod worktree_cleanup;
 mod worktree_caches;
 mod worktree_inspection;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod worktree_programs;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use worktree_programs::{ProgramRemovalClaim, ProgramStopClaim};
 mod worktree_lifecycle;
 mod worktree_lock;
 mod worktree_maintenance;
@@ -215,6 +237,12 @@ pub(crate) fn with_test_state_root<T>(root: &Path, run: impl FnOnce() -> T) -> T
 /// the default below the home directory), not yet created or canonical.
 #[cfg(windows)]
 pub(crate) fn host_state_root() -> PathBuf {
+    storage::root()
+}
+
+/// Task #349: the state root the private journal writes under, a test's own
+/// state root included (the same folder every state-derived store uses).
+pub(crate) fn state_root() -> PathBuf {
     storage::root()
 }
 
@@ -522,6 +550,7 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
     let marks = read_marks::load();
     let notification_preferences = notifications::load();
     phases.mark("marks");
+    let keep_warm_settings = keep_warm::load();
     let sessions = box_value
         .get_mut("sessions")
         .and_then(Value::as_array_mut)
@@ -565,7 +594,7 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
             .extend(telemetry::unavailable().as_object().unwrap().clone());
     }
     // Bounds question indexing for the whole listing.
-    let shared = Shared { marks: &marks, preferences: notification_preferences.as_ref(), budget: read_marks::question_budget() };
+    let shared = Shared { marks: &marks, preferences: notification_preferences.as_ref(), keep_warm: keep_warm_settings.as_ref(), budget: read_marks::question_budget() };
     let mut process_work = processes::WorkSample::default();
     // Task 234: the rows loop's parts, summed over its rows.
     let (mut live_ms, mut probe_ms, mut saved_ms, mut saved_rows) = (0u64, 0u64, 0u64, 0u64);
@@ -615,6 +644,7 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
         );
         read_marks::enrich_listing(&mut session, &marks, journal::journal_name(&record), Ok(Some(Vec::new())));
         notifications::enrich(&mut session, notification_preferences.as_ref(), journal::journal_name(&record));
+        keep_warm::enrich(&mut session, keep_warm_settings.as_ref(), &record);
         sessions.push(session);
         saved_ms += ms(at);
         saved_rows += 1;
@@ -656,6 +686,7 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
 struct Shared<'a> {
     marks: &'a Value,
     preferences: Option<&'a notifications::Store>,
+    keep_warm: Option<&'a keep_warm::Store>,
     /// Bounds question indexing for the whole listing.
     budget: std::time::Instant,
 }
@@ -697,10 +728,16 @@ fn live_row(session: &mut Value, record: Value, shared: &Shared, process_work: &
         .ok_or("invalid session")?
         .extend(summary.as_object().ok_or("invalid summary")?.clone());
     let questions = read_marks::pending_questions(&record, session, true, shared.budget);
+    if session.get("parent").is_some() {
+        let pending = questions.as_ref().ok().and_then(|questions| questions.as_deref());
+        session["human_request"] = json!(parent_link::human_request(session, pending));
+    }
     read_marks::enrich_listing(session, shared.marks, journal::journal_name(&record), questions);
     phases.mark("questions");
     notifications::enrich(session, shared.preferences, journal::journal_name(&record));
     phases.mark("notifications");
+    keep_warm::enrich(session, shared.keep_warm, &record);
+    phases.mark("keep_warm");
     if phases.total_ms() >= 100 {
         phases.finish_at("ls-row", &string(session, "name"), 100);
     }
@@ -748,6 +785,9 @@ fn finish_rows(sessions: &mut [Value], marks: &Value, names: &BTreeMap<String, S
     phases.mark("workspace");
     waits::decorate(sessions);
     phases.mark("waits");
+    parent_link::decorate(sessions);
+    crate::accounts::marks::decorate(sessions);
+    phases.mark("parents");
     // U30: after the waits, which name a coordination reason.
     session_state::decorate(sessions);
     phases.mark("session_state");
@@ -974,6 +1014,22 @@ pub(crate) fn prepare_task_reply(session: &zerus_replica::SessionKey, dispatch: 
 pub(crate) fn submit_task_reply(name: &str, request: &Value) -> Result<Value> {
     input::submit(name, request.to_string().as_bytes(), None)
 }
+/// `submit_task_reply` for an attempt's input: an exact submitted receipt,
+/// a live witness that the payload was never offered, or unknown.
+pub(crate) fn submit_task_reply_witnessed(name: &str, request: &Value) -> input::Submission {
+    input::submit_witnessed(name, request.to_string().as_bytes())
+}
+pub(crate) fn task_reply_receipt_bound(
+    name: &str,
+    request_id: &str,
+    digest: &str,
+) -> Result<ReceiptLookup> {
+    input::task_reply_receipt_bound(name, request_id, digest)
+}
+/// The receipt store's answer for `request`, typed (#1519 R2).
+pub(crate) fn task_reply_lookup(name: &str, request: &Value) -> Result<ReceiptLookup> {
+    input::task_reply_lookup(name, request)
+}
 pub(crate) fn task_reply_receipt(name: &str, request: &Value) -> Result<Option<Value>> {
     input::task_reply_receipt(name, request)
 }
@@ -1018,6 +1074,28 @@ impl Unresolved {
 /// its text and its `--json` value, with exit status 5. A candidate set that
 /// cannot be proven complete is refused the same way, never settled on the
 /// label's first holder.
+/// `hgs send <session> --observe --json` for the CLI's own first
+/// disposition (`cli::observe_gate`, zerus-5wmh.66.4.10.1).
+pub(crate) fn observe_send(name: &str) -> Result<i32> {
+    input::observe_dispatch(name)
+}
+
+/// [`resolve_label`] for the send's effect-free observation: the same
+/// candidates and the same deferral to the request's identities as a send
+/// (`LabelGuard::Request`), without the index repair, which may write.
+pub(super) fn resolve_label_unrepaired(name: &str) -> Result<()> {
+    let candidates = labels::candidates(name)?;
+    match (candidates.first, candidates.by_id.as_slice()) {
+        (_, []) => {}
+        (false, [only]) => session_id::select(name, string(only, "session_id")),
+        _ => {
+            let report = ambiguity_report(name, &candidates);
+            session_id::defer(name, report.0, report.1);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn resolve_label(name: &str, guard: LabelGuard) -> std::result::Result<(), Unresolved> {
     labels::repair();
     let candidates = labels::candidates(name)
@@ -1103,7 +1181,7 @@ fn select_among(
     let candidates = labels::candidates(name).map_err(|error| (error, report.1.clone()))?;
     let mut records = Vec::new();
     if candidates.first {
-        records.push(storage::read_label(name).map_err(|error| (error, report.1.clone()))?);
+        records.push(labels::read_first(name).map_err(|error| (error, report.1.clone()))?);
     }
     records.extend(candidates.by_id);
     let chosen: Vec<&Value> = records
@@ -1136,7 +1214,7 @@ fn ambiguity_report(name: &str, candidates: &labels::Candidates) -> (String, Val
     };
     let mut listed: Vec<Value> = Vec::new();
     if candidates.first {
-        if let Ok(record) = storage::read_label(name) {
+        if let Ok(record) = labels::read_first(name) {
             listed.push(json!({"session_id":record["session_id"],"run_id":record["run_id"],
                 "conversation_id":record["conversation_id"],"state":state(&record),
                 "cwd":record["cwd"],"created":record["created"]}));
@@ -1366,6 +1444,7 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     }
     if command == "read" { return read_marks::dispatch(args); }
     if command == "notifications" { return notifications::dispatch(args); }
+    if command == "keep-warm" { return keep_warm::dispatch(args); }
     if command == "history" { return conversation_history::dispatch(args); }
     if command == "history-projection" { return conversation_history::projection_dispatch(args); }
     if command == "terminal" { return terminal::dispatch(args); }
@@ -1374,6 +1453,18 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     if command == "clear-context" { return clear_context::dispatch(args); }
     if command == "interrupt" { return interrupt::dispatch(args); }
     if command == "processes" { return processes::dispatch(args); }
+    if command == "parent" { return parent_link::dispatch(args); }
+    // The send's effect-free observation is taken only by the CLI's own
+    // first disposition (`cli::observe_gate`), never here: a send carrying
+    // --observe by another route (the private `__state` ABI, a caller of
+    // this dispatch) refuses before provider routing, whose own sends would
+    // ignore the flag (zerus-5wmh.66.4.10.1).
+    if command == "send" && args.iter().any(|arg| arg == "--observe") {
+        return Err(
+            "hgs send --observe is taken only as `hgs send <codex session> --observe --json`"
+                .into(),
+        );
+    }
     if args.first().is_some_and(|name| opencode::exists(name)) { return opencode::dispatch(command,args); }
     if args.first().is_some_and(|name| dsh::exists(name)) {
         return dsh::dispatch(command, args);
@@ -1561,6 +1652,11 @@ mod control_console_tests {
             return;
         }
         assert_eq!(dispatch(&["list".into()]).unwrap_err(), UNSUPPORTED);
+        // A send carrying --observe refuses at admission here, before any
+        // provider routing (zerus-be8zv).
+        for refusal in observe_refusals() {
+            assert_eq!(refusal, UNSUPPORTED);
+        }
         assert_eq!(
             merge_snapshot(json!({"sessions":[]})).unwrap_err(),
             UNSUPPORTED
@@ -1590,6 +1686,11 @@ mod control_console_tests {
         std::fs::create_dir_all(&state).unwrap();
         assert_eq!(hook(), Ok(0));
         assert_eq!(session_operations(), Ok(()));
+        // Admitted, a send carrying --observe meets dispatch's own refusal,
+        // still before provider routing (zerus-5wmh.66.4.10.1, zerus-be8zv).
+        for refusal in observe_refusals() {
+            assert!(refusal.contains("is taken only as"), "{refusal}");
+        }
         assert_eq!(local_sessions().unwrap_err(), UNSUPPORTED);
         assert_eq!(
             merge_snapshot(json!({"sessions":[]})).unwrap_err(),
@@ -1612,6 +1713,18 @@ mod control_console_tests {
         let layout = crate::host::staging::Layout::current().unwrap();
         assert!(crate::host::staging::enable(&layout.marker).unwrap());
         assert_eq!(local_sessions(), Ok(()));
+        for refusal in observe_refusals() {
+            assert!(refusal.contains("is taken only as"), "{refusal}");
+        }
+    }
+
+    /// `dispatch`'s refusal of each send carrying --observe that its unit
+    /// test covers on Unix (`input::OBSERVE_SENDS`, zerus-be8zv).
+    fn observe_refusals() -> Vec<String> {
+        input::OBSERVE_SENDS
+            .into_iter()
+            .map(|send| dispatch(&send.map(str::to_owned)).unwrap_err())
+            .collect()
     }
 
     #[test]

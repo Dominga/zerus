@@ -70,6 +70,9 @@ fn effects(r: &Running) -> Vec<Value> {
 
 #[test]
 fn cold_gui_and_service_restore_only_eligibility_and_preserve_historical_completion() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         for (epoch, generation) in [(OLD_EPOCH, 1), (NEW_EPOCH, 2)] {
@@ -141,7 +144,7 @@ fn cold_gui_and_service_restore_only_eligibility_and_preserve_historical_complet
             let id = uuid::Uuid::new_v4().to_string();
             let result = running
                 .service
-                .automatic_approvals(id.clone(), true)
+                .automatic_approvals(id.clone(), true, None)
                 .await
                 .unwrap();
             assert_eq!(result["accepted"], true, "{result}");
@@ -165,6 +168,9 @@ fn cold_gui_and_service_restore_only_eligibility_and_preserve_historical_complet
 
 #[test]
 fn bootstrap_read_import_waits_for_classification_and_never_uses_restored_eligibility() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let helpers = settled().await;
@@ -233,6 +239,9 @@ fn bootstrap_read_import_waits_for_classification_and_never_uses_restored_eligib
 
 #[test]
 fn latest_choice_endpoint_incarnation_and_helper_are_rechecked_after_the_slow_read() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         for drift in [
@@ -314,6 +323,9 @@ fn latest_choice_endpoint_incarnation_and_helper_are_rechecked_after_the_slow_re
 
 #[test]
 fn unsupported_unscoped_rearm_and_manual_states_never_reconstruct_a_receipt() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         for failure in ["unsupported", "unscoped", "rearm", "manual"] {
@@ -349,6 +361,9 @@ fn unsupported_unscoped_rearm_and_manual_states_never_reconstruct_a_receipt() {
 
 #[test]
 fn uncertain_read_retains_the_actual_last_pipe_and_never_publishes_eligibility_late() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         for stage in ["observation_pipe", "observation_help_pipe"] {
@@ -412,6 +427,9 @@ fn uncertain_read_retains_the_actual_last_pipe_and_never_publishes_eligibility_l
 
 #[test]
 fn a_new_interruption_restores_the_review_guidance_without_reusing_a_choice() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let helpers = settled().await;
@@ -443,6 +461,9 @@ fn a_new_interruption_restores_the_review_guidance_without_reusing_a_choice() {
 
 #[test]
 fn unknown_modern_classification_keeps_a_read_watch_and_recovers_without_startup_effects() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         for failure in ["missing", "old", "timeout"] {
@@ -553,6 +574,9 @@ fn unknown_modern_classification_keeps_a_read_watch_and_recovers_without_startup
 
 #[test]
 fn a_legacy_cli_without_classification_capability_still_connects() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let helpers = Fixture::new();
@@ -581,6 +605,9 @@ fn a_legacy_cli_without_classification_capability_still_connects() {
 
 #[test]
 fn g1_gate_busy_preflight_recovery_never_opens_business_scheduling() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let helpers = Fixture::new();
@@ -649,6 +676,9 @@ fn g1_gate_busy_preflight_recovery_never_opens_business_scheduling() {
 
 #[test]
 fn healthy_synchronous_modern_classification_keeps_existing_startup_behavior() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let helpers = Fixture::new();

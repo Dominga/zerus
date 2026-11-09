@@ -26,7 +26,9 @@ pub(crate) fn check_choices(models: &[ModelChoice]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn valid_name(value: &str) -> bool {
+/// Task #6: a model id or an effort word is well formed; a member's own `model`
+/// and `effort` take the same bound as a list's entry.
+pub(crate) fn valid_name(value: &str) -> bool {
     !value.trim().is_empty() && value.chars().count() <= 120 && !value.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 

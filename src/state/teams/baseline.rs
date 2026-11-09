@@ -95,6 +95,7 @@ fn ahead(team: &Team, task: &Task, historical: bool) -> Vec<u32> {
 }
 
 /// The baseline of `id`, planned (and memoized) after those it follows.
+#[expect(clippy::too_many_arguments, reason = "Keep the recursive schedule inputs and traversal state explicit")]
 fn plan_of(
     team: &Team,
     history: &History,

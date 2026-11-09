@@ -1,6 +1,7 @@
 //! Workspace enrollment through the existing connector, never a second writer.
 use super::{
-    read_status, valid_relay, workspace_request, Workspace, WORKSPACE_UNCONFIRMED as UNKNOWN,
+    read_status, valid_relay, workspace_request, workspace_stop, Failure, Workspace,
+    WORKSPACE_UNCONFIRMED as UNKNOWN,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -214,7 +215,7 @@ pub fn enroll(
     target: &Target,
     request: &Request,
     computer: &str,
-) -> Result<Answer, String> {
+) -> Result<Answer, Failure> {
     request.validate()?;
     if !target.can_enroll() {
         return Err(CHANGED.into());
@@ -223,12 +224,7 @@ pub fn enroll(
     let mut expected = target.clone();
     if target.changing() && target.encrypted && target.running {
         let generation = target.generation.as_deref().ok_or(CHANGED)?;
-        let stopped = workspace_request(
-            connector,
-            config,
-            "stop",
-            &json!({"expected_revision":target.config_revision,"generation":generation}),
-        )?;
+        let stopped = workspace_stop(connector, config, &target.config_revision, generation)?;
         if stopped["state"] == "stopping"
             && stopped["running"] == true
             && stopped["generation"] == generation
@@ -280,6 +276,7 @@ pub fn enroll(
         value,
         Some(request.relay.trim().trim_end_matches('/')),
     )
+    .map_err(Failure::from)
 }
 pub fn check(
     connector: &Path,

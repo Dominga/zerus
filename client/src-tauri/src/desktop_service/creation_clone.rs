@@ -44,46 +44,65 @@ pub(super) struct Read {
     routing: Arc<relay::Connection>,
     image: Arc<Image>,
 }
+// Closed local diagnostics only: no paths, prompts, envelopes or proof material.
+fn read_refused(code: &'static str) -> String {
+    eprintln!("zerus-client: creation_read_refused code={code}");
+    creation::READ_FAILED.into()
+}
 impl Read {
     pub(super) fn new(service: Option<Arc<Service>>) -> Result<Arc<Self>, String> {
-        let service = service.ok_or(creation::READ_FAILED)?;
+        let service = service.ok_or_else(|| read_refused("no_selected_service"))?;
         let shared = &service.shared;
         let snapshot = service.snapshot();
-        if !shared.allowed || !snapshot.connected || shared.stopped.load(Ordering::Acquire) {
-            return Err(creation::READ_FAILED.into());
+        if !shared.allowed {
+            return Err(read_refused("not_allowed"));
+        }
+        if !snapshot.connected {
+            return Err(read_refused("not_connected"));
+        }
+        if shared.stopped.load(Ordering::Acquire) {
+            return Err(read_refused("stopped"));
         }
         let configuration = shared
             .configuration
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
-            .ok_or(creation::READ_FAILED)?;
+            .ok_or_else(|| read_refused("missing_configuration"))?;
         let cancel = shared
             .cancellation
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
-            .ok_or(creation::READ_FAILED)?;
+            .ok_or_else(|| read_refused("missing_cancellation"))?;
         let routing = shared
             .relay
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
-            .ok_or(creation::READ_FAILED)?;
-        let image = Arc::new(Image::capture(routing.executable()?).ok_or(creation::READ_FAILED)?);
+            .ok_or_else(|| read_refused("missing_relay"))?;
+        let helper = routing.executable().map_err(|error| {
+            eprintln!("zerus-client: creation_read_refused code=helper_route");
+            error.to_owned()
+        })?;
+        let image = Arc::new(Image::capture(helper).ok_or_else(|| read_refused("helper_image"))?);
         let value = Arc::new(Self {
             service,
             scope: wire::Scope {
                 configuration,
-                service_epoch: snapshot.epoch.ok_or(creation::READ_FAILED)?,
+                service_epoch: snapshot
+                    .epoch
+                    .ok_or_else(|| read_refused("missing_epoch"))?,
             },
-            generation: snapshot.generation.ok_or(creation::READ_FAILED)?,
+            generation: snapshot
+                .generation
+                .ok_or_else(|| read_refused("missing_generation"))?,
             cancel,
             routing,
             image,
         });
         if !value.current() {
-            return Err(creation::READ_FAILED.into());
+            return Err(read_refused("selection_changed"));
         }
         Ok(value)
     }
@@ -122,14 +141,19 @@ impl Read {
         extra: Option<zerus_client_core::desktop::drain::Charge>,
     ) -> Result<Vec<u8>, String> {
         if !self.current() {
-            return Err(creation::READ_FAILED.into());
+            return Err(read_refused("exchange_selection_changed"));
         }
         let rpc = self
             .service
             .shared
             .rpc
             .admit(Role::Fleet)
-            .map_err(|_| creation::READ_FAILED)?;
+            .map_err(|error| {
+                eprintln!(
+                    "zerus-client: creation_read_refused code=rpc_admission refusal={error:?}"
+                );
+                creation::READ_FAILED
+            })?;
         let registration = match request {
             Some(request) => Some(
                 self.service
@@ -155,7 +179,7 @@ impl Read {
         }
         let helper = self.routing.executable()?;
         if !self.image.current(helper) {
-            return Err(creation::READ_FAILED.into());
+            return Err(read_refused("exchange_image_changed"));
         }
         let args = if help {
             vec!["--help".into()]
@@ -197,12 +221,16 @@ impl Read {
             },
             held,
         )
-        .map_err(|_| creation::READ_FAILED)?;
+        .map_err(|error| {
+            // OwnedError is a closed body-free enum; never print helper stderr.
+            eprintln!("zerus-client: creation_read_refused code=helper_exchange refusal={error:?}");
+            creation::READ_FAILED
+        })?;
         if !self.current()
             || !self.image.current(self.routing.executable()?)
             || result.len() > if help { 64 << 10 } else { wire::REPLY_BYTES }
         {
-            return Err(creation::READ_FAILED.into());
+            return Err(read_refused("exchange_result_changed_or_oversize"));
         }
         Ok(result)
     }
@@ -277,7 +305,8 @@ pub(crate) fn call(
                 revision: operation["revision"]
                     .as_u64()
                     .ok_or(creation::READ_FAILED)?,
-                original: serde_json::to_string(operation).map_err(|_| creation::READ_FAILED)?,
+                original: creation::effect_checkpoint(operation)
+                    .map_err(|_| creation::READ_FAILED)?,
             };
             intent.clone().verify().map_err(|_| creation::READ_FAILED)?;
             sent.set(true);

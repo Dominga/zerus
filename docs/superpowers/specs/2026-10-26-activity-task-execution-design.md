@@ -359,6 +359,10 @@ choice of where a queued clarification will go.
 
 ## Explicit queues and parallel work
 
+The approved [task-control delivery plan](2026-11-08-task-controls-design.md)
+lands Pause/Resume/Stop records and wiring inactive. They activate together with
+the executor queue, preserving current dispatch behavior until that step.
+
 Default: one foreground implementation execution per executor. Six tasks
 assigned to a session appear as **one current, five next**, not six Running
 cards. Zerus holds the task queue and dispatches its next item when permitted;

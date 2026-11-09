@@ -107,9 +107,10 @@ pub(super) fn resume_argv(agent: &str, argv: &[String], sid: &str) -> Result<Vec
         "kimi" => &["-y", "--yolo", "--auto", "--plan"],
         _ => &[],
     };
-    let executable = argv.first().ok_or("saved agent executable is missing")?;
-    let mut result = vec![
-        executable.clone(),
+    argv.first().ok_or("saved agent executable is missing")?;
+    let program = crate::project_launcher::program_words(argv);
+    let mut result = argv[..program].to_vec();
+    result.extend([
         match agent {
             "codex" => "resume",
             "claude" => "--resume",
@@ -117,8 +118,8 @@ pub(super) fn resume_argv(agent: &str, argv: &[String], sid: &str) -> Result<Vec
         }
         .into(),
         sid.into(),
-    ];
-    let mut index = 1;
+    ]);
+    let mut index = program;
     while index < argv.len() {
         let argument = &argv[index];
         let key = argument.split('=').next().unwrap_or(argument);
@@ -189,7 +190,8 @@ pub(super) fn resume_argv(agent: &str, argv: &[String], sid: &str) -> Result<Vec
 /// original prompt; without its selector it starts a new conversation.
 pub(super) fn fresh_argv(agent: &str, argv: &[String]) -> Result<Vec<String>> {
     let mut argv = resume_argv(agent, argv, "-")?;
-    argv.drain(1..3);
+    let program = crate::project_launcher::program_words(&argv);
+    argv.drain(program..program + 2);
     Ok(argv)
 }
 
@@ -257,6 +259,21 @@ mod tests {
     use super::*;
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
+    }
+    #[test]
+    fn powershell_wrappers_keep_the_prefix_across_resume_and_fresh() {
+        let prefix = strings(&[r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", r"C:\project\run_codex.ps1"]);
+        for agent in ["codex", "claude", "kimi"] {
+            let mut base = prefix.clone();
+            base.extend(strings(&["--model", "model-name", "prompt must not replay"]));
+            let resume = resume_argv(agent, &base, "same-id").unwrap();
+            assert_eq!(&resume[..7], prefix.as_slice());
+            assert_eq!(resume[8], "same-id");
+            assert_eq!(&resume[9..], ["--model", "model-name"]);
+            assert_eq!(fresh_argv(agent, &resume).unwrap(), [prefix.clone(), strings(&["--model", "model-name"])].concat());
+        }
+        let mut bad = prefix;bad.push("--unreviewed-option".into());
+        assert!(resume_argv("codex", &bad, "id").is_err());
     }
     #[test]
     fn fresh_launches_keep_options_without_conversation_or_prompt() {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { KNOWN_LIMIT, PrivateStoreNotices, type NoticesPort } from "./privateStoreNotices";
+import { KNOWN_LIMIT, PrivateStoreNotices, groupedBody, type NoticesPort } from "./privateStoreNotices";
 
 const store = (path: string, reason = "not private", fix = "restore the ACL") => ({ path, reason, fix });
 
@@ -57,5 +57,38 @@ describe("private-store notices", () => {
     await Promise.resolve(); await Promise.resolve();
     expect(broken.ready()).toBe(true);
     expect(broken.observe("", "", true, [store("/x")])).toHaveLength(1);
+  });
+});
+
+describe("private-store notices are once per path and grouped (task #383)", () => {
+  it("does not raise a path again when only its reason changes", () => {
+    const notices = new PrivateStoreNotices(() => undefined);
+    expect(notices.observe("", "this computer", true, [store("C:\\state")])).toHaveLength(1);
+    expect(notices.observe("", "this computer", true, [store("C:\\state", "owned by another user")])).toHaveLength(0);
+    expect(notices.knownKeys()).toEqual(["\nC:\\state\nowned by another user"]);
+  });
+
+  it("raises the stores new in one look as one notice on one line", () => {
+    const seen: { title: string; body: string }[] = [];
+    const notices = new PrivateStoreNotices((notice) => seen.push(notice));
+    const many = ["C:\\a", "C:\\b", "C:\\c", "C:\\d", "C:\\e"].map((path) => store(path, "not private", `icacls ${path}`));
+    const raised = notices.observe("", "msi", true, many);
+    expect(raised).toHaveLength(1);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].title).toBe("Zerus: 5 private stores are refused");
+    expect(seen[0].body.split("\n")[0]).toBe("msi: C:\\a, C:\\b, C:\\c and 2 more");
+    expect(seen[0].body).toContain("Fix: icacls C:\\a");
+    // Each one is known: the next look raises nothing.
+    expect(notices.observe("", "msi", true, many)).toHaveLength(0);
+    expect(notices.knownKeys()).toHaveLength(5);
+    // A single new store keeps its own notice with its own fix.
+    const one = notices.observe("", "msi", true, [...many, store("C:\\f", "not private", "icacls C:\\f")]);
+    expect(one).toHaveLength(1);
+    expect(one[0].title).toBe("Zerus: a private store is refused");
+    expect(one[0].body).toContain("Fix: icacls C:\\f");
+  });
+
+  it("lists up to three paths and counts the rest", () => {
+    expect(groupedBody("studio", [store("/a"), store("/b")]).split("\n")[0]).toBe("studio: /a, /b");
   });
 });

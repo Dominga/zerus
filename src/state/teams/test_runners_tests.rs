@@ -184,7 +184,7 @@ fn the_tick_sends_a_suite_of_another_class_to_its_runner_and_runs_the_rest_here(
     let places = Places { host: vec!["windows".into()], runners: linux(), remote: &fake };
     let load = || crate::state::teams::test_queue::Load { cpu_free: 8, ram_free_mb: 8000, gpu_free: true, at_night: false };
     let (records, read) =
-        tick(&store, dir.path(), "t", &Default::default(), &Default::default(), 12, 0.0, 100.0, load, &Policy::default(), &places).unwrap();
+        tick(&store, dir.path(), "t", &Default::default(), &Default::default(), 12, 0.0, 100.0, load, &Policy::default(), &places, None).unwrap();
     assert!(read);
     let mut where_ran: Vec<(String, String)> = records.iter().map(|record| (record.suite.clone() + ":" + &record.id, record.runner.clone())).collect();
     where_ran.sort();

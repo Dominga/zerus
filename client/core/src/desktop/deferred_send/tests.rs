@@ -708,3 +708,62 @@ fn a_plan_needs_a_run() {
     assert!(!plan.valid());
     assert_eq!(plan.fingerprint(), None);
 }
+
+/// zerus-tlb9q: only the exact closed refusal of this intent is not
+/// admitted; another request, scope, ABI, outcome, code or any receipt is
+/// not, and the client settles nothing from it.
+#[test]
+fn only_the_exact_refusal_of_this_intent_is_not_admitted() {
+    let intent = intent();
+    let verified = intent.clone().verify().unwrap();
+    let exact = || Admission {
+        abi: ABI.into(),
+        request_id: intent.request_id.clone(),
+        scope: intent.scope.clone(),
+        accepted: false,
+        durable: false,
+        code: NOT_ADMITTED.into(),
+        receipt: None,
+    };
+    assert!(exact().not_admitted(&intent));
+    let decoded: Admission =
+        serde_json::from_value(serde_json::to_value(exact()).unwrap()).unwrap();
+    assert!(decoded.not_admitted(&intent), "the exact wire form");
+    type Change<'a> = Box<dyn Fn(&mut Admission) + 'a>;
+    let cases: Vec<(&str, Change<'_>)> = vec![
+        ("abi", Box::new(|a| a.abi = "other".into())),
+        (
+            "request",
+            Box::new(|a| a.request_id = "00000000-0000-4000-8000-0000000000ff".into()),
+        ),
+        (
+            "epoch",
+            Box::new(|a| a.scope.service_epoch = "00000000-0000-4000-8000-0000000000fe".into()),
+        ),
+        (
+            "configuration",
+            Box::new(|a| a.scope.configuration = "b".repeat(64)),
+        ),
+        ("accepted", Box::new(|a| a.accepted = true)),
+        ("durable", Box::new(|a| a.durable = true)),
+        (
+            "unavailable",
+            Box::new(|a| a.code = "deferred_send_unavailable".into()),
+        ),
+        ("not started", Box::new(|a| a.code = NOT_STARTED.into())),
+        (
+            "another kind",
+            Box::new(|a| a.code = "session_resume_not_admitted".into()),
+        ),
+        ("no code", Box::new(|a| a.code.clear())),
+        (
+            "receipt",
+            Box::new(|a| a.receipt = Some(receipt(&verified, Phase::Unknown, false, "", None))),
+        ),
+    ];
+    for (name, change) in cases {
+        let mut admission = exact();
+        change(&mut admission);
+        assert!(!admission.not_admitted(&intent), "{name}");
+    }
+}

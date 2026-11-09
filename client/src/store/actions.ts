@@ -9,6 +9,7 @@ import { bus as appBus, createNoticeBus, sessionNoticeKey, type NoticeBus } from
 import { copyState, sessionIdentity, detailsFromInspection, MUTE_PENDING, STATE_CHANGED, forgetsBindingOnly, notificationsStillAllowed, snapshotOf, terminates, type ActionRow, type ChildIdentity, type ForgetScope, type PendingNotifications } from "../ui/sessions/actions-ui";
 import type { Action, Details, Outcome, Target } from "../types";
 import type { Session } from "../ui/sessions/types";
+import type { MuteOutcome } from "../ui/sessions/selection";
 import { tr, trNoop } from "../i18n";
 import { resumeTeamToo } from "./resumeTeam";
 import { resumeBehind } from "./resumeBehind";
@@ -55,7 +56,7 @@ export function targetOf(s: Pick<ActionRow, "computer" | "name" | "runId" | "con
 export interface Selection { key?: string; subagent?: string }
 
 export interface PerformOptions { quiet?: boolean; cleanupId?: string; delay?: EndReference; skipDelay?: boolean; noticeKey?: string }
-export type EndDriver = (row: ActionRow, action: Action, execute: (reference: EndReference, key: string) => Promise<Outcome>, current: () => boolean, remove: boolean) => Promise<Outcome | undefined>;
+export type EndDriver = (row: ActionRow, action: Action, execute: (reference: EndReference, key: string) => Promise<Outcome>, current: () => boolean, remove: boolean, cleanupId?: string) => Promise<Outcome | undefined>;
 
 export function createActions(
   catalog: Pick<CatalogState, "rows">,
@@ -154,7 +155,7 @@ export function createActions(
     }
     if (delayEnd && isEndAction(action) && !options.delay && !options.skipDelay) {
       const captured = snapshotOf(row);
-      const out = await delayEnd(captured, action, (delay, noticeKey) => perform(captured, action, { ...options, delay, noticeKey }), () => sameEnd(captured, catalog.rows[captured.key]), !!options.cleanupId);
+      const out = await delayEnd(captured, action, (delay, noticeKey) => perform(captured, action, { ...options, delay, noticeKey }), () => sameEnd(captured, catalog.rows[captured.key]), !!options.cleanupId, options.cleanupId);
       return out ?? failed(tr("Action cancelled."));
     }
     if (!options.delay && action.kind !== "interrupt" && updating(target.computer, target.name)) return failed("busy");
@@ -276,24 +277,39 @@ export function createActions(
    * is no longer the same run, conversation and `created` is dropped.
    */
   async function toggleMute(row: ActionRow): Promise<void> {
+    const out = await setMute(row, !row.muted);
+    if (out.outcome === "refused" && !out.silent) notify("error", out.detail, true);
+  }
+
+  /**
+   * One guarded Mute or Unmute write of `row` (toggleMute, and the selection's
+   * Mute or Unmute, zerus-qhtxf): the live row must still be the one shown,
+   * with the same shared setting, and the write carries its own revision. A
+   * refusal before the call is silent for the row menu, which only shows what
+   * still applies; a selection reports it.
+   */
+  async function setMute(row: ActionRow, muted: boolean): Promise<MuteOutcome> {
+    const unavailable = { outcome: "refused" as const, detail: tr(MUTE_CHANGED), silent: true };
     const live = stillListed(row);
-    if (!live) return;
+    if (!live) return { outcome: "refused", detail: tr(GONE), silent: true };
     const original = snapshotOf(live);
-    if (!notificationsStillAllowed(original, row, online(live.computer), untrack(() => pendingNotifications(live.computer, live.conversationId)))) return;
+    if (!notificationsStillAllowed(original, row, online(live.computer), untrack(() => pendingNotifications(live.computer, live.conversationId)))) return unavailable;
+    if (!!original.muted === muted) return unavailable;
     // The row's revision, or a higher confirmed override's (an Unmute before the next listing).
     const expected = notificationMarks.notificationRevisionOf(original);
-    if (expected === undefined) return;
+    if (expected === undefined) return unavailable;
     const target: Target = { computer: original.computer, name: original.name, run_id: original.runId ?? "", conversation_id: original.conversationId ?? "" };
     const entry = { id: nextChange++, computer: original.computer, conversation: original.conversationId ?? "" };
     setChanging((all) => [...all, entry]);
     let preferences: Record<string, unknown> | undefined;
     let detail = "";
-    try { preferences = await bridge.setNotifications(target, !original.muted, expected); } catch (error) { detail = errorText(error); if (detail === "busy") detail = MUTE_PENDING; } finally {
+    try { preferences = await bridge.setNotifications(target, muted, expected); } catch (error) { detail = errorText(error); if (detail === "busy") detail = MUTE_PENDING; } finally {
       setChanging((all) => all.filter((p) => p.id !== entry.id));
     }
-    if (!notificationMarks.currentNotificationRow(original)) return;
-    if (!preferences) { notify("error", detail, true); return; }
-    if (!notificationMarks.applyNotifications(original, preferences)) notify("error", tr(MUTE_CHANGED), true);
+    if (!notificationMarks.currentNotificationRow(original)) return { outcome: "refused", detail: tr(GONE), silent: true };
+    if (!preferences) return { outcome: "refused", detail };
+    if (!notificationMarks.applyNotifications(original, preferences)) return { outcome: "refused", detail: tr(MUTE_CHANGED) };
+    return { outcome: "changed" };
   }
 
   // Details: the followed session's Activity state value when it names the
@@ -376,6 +392,14 @@ export function createActions(
     return live ? copy(live.name) : failed(tr(GONE));
   }
 
+  /** The native conversation ID shown as Session ID in the header and Details. */
+  async function copySessionId(row: ActionRow): Promise<Outcome> {
+    const live = stillListed(row);
+    if (!live) return failed(tr(GONE));
+    if (!row.conversationId || live.runId !== row.runId) return failed(tr(CHANGED));
+    return copy(row.conversationId);
+  }
+
   /** The header copies the selected conversation, run or child ID and names it. */
   async function copyIdentity(row: ActionRow, details?: Details, child?: ChildIdentity): Promise<Outcome> {
     const live = current(row);
@@ -430,7 +454,7 @@ export function createActions(
     return out;
   }
 
-  return { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyIdentity, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices: list, dismiss, notify, clearNotice };
+  return { perform, performComputer, end, forget, toggleMute, setMute, stillListed, pendingNotifications, copy, copyName, copySessionId, copyIdentity, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices: list, dismiss, notify, clearNotice };
 }
 
 type FollowSource = { target(): { id: string } | undefined; summary(): Record<string, unknown> | undefined; loaded(): boolean; ended(): boolean; error(): unknown };
@@ -470,8 +494,12 @@ export function bindArchivedRows(lookup: (key: string) => Session | undefined) {
 const app = createActions(withArchived(appCatalog, (key) => archivedRow(key) ?? searchRow(key)), (computer) => !computerOffline(computer), () => selection(), appMarks, appBus,
   (out, row) => { void import("./cleanupNotices").then((m) => m.reportCleanup(out, row)).catch(() => {
     appBus.notify("warn", tr("Working folder kept for review."), false, sessionNoticeKey(row.computer, row.name), tr("Session archived"));
-  }); }, async (row, action, execute, current, remove) => {
+  }); }, async (row, action, execute, current, remove, cleanupId) => {
     const { endActions } = await import("./endActions");
-    return endActions.schedule([captureEnd(row, action)], ([ref], key) => execute(ref, key), { current, remove });
+    try {
+      return await endActions.schedule([captureEnd(row, action)], ([ref], key) => execute(ref, key), { current, remove, cleanupId });
+    } finally {
+      if (cleanupId) await bridge.terminationCleanupCancel(cleanupId).catch(() => {});
+    }
   });
-export const { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyIdentity, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices, dismiss, notify, clearNotice } = app;
+export const { perform, performComputer, end, forget, toggleMute, setMute, stillListed, pendingNotifications, copy, copyName, copySessionId, copyIdentity, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices, dismiss, notify, clearNotice } = app;

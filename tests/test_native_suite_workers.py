@@ -141,6 +141,16 @@ class NativeSuiteWorkers(unittest.TestCase):
             self.remember_worker_root()
         return status, stdout, json.loads(self.log.with_suffix('.workers.json').read_text()), processes
 
+    def test_explicit_short_parent_never_falls_back_and_keeps_socket_bound(self):
+        selected = self.root / ('selected-' + 'x' * 100)
+        selected.mkdir(mode=0o700)
+        self.env['ZERUS_TEST_SHORT_TMPDIR'] = str(selected)
+        status, _, record, processes = self.simulate()
+        self.assertEqual(Path(record['root']).parent, selected)
+        self.assertNotEqual(status, 0)
+        self.assertEqual(processes, [])
+        self.assertIn('socket bound', ' '.join(record.get('problems', [])) + str(record))
+
     def test_partition_keeps_whole_suite_order_and_duplicate_occurrences(self):
         inventory = [['duplicate.clear', 'first'], ['middle'], ['duplicate.clear'], ['tail']]
         assignments = workers.partition(inventory)
@@ -156,7 +166,7 @@ class NativeSuiteWorkers(unittest.TestCase):
 
     def test_private_environment_precedes_imports_and_does_not_redirect_case_claude_config(self):
         # Match run_suites' short root even when macOS supplies a long TMPDIR.
-        private = tempfile.TemporaryDirectory(prefix='nwenv-', dir='/tmp')
+        private = tempfile.TemporaryDirectory(prefix='nwenv-', dir=os.environ.get('ZERUS_TEST_SHORT_TMPDIR', '/tmp'))
         self.addCleanup(private.cleanup)
         base = Path(private.name).resolve()
         envs = []

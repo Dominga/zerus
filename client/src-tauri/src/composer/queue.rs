@@ -841,7 +841,7 @@ mod tests {
                         true,
                     ))
                 }),
-                facts: Arc::new(|_, _| None),
+                facts: Arc::new(|_, _, _| None),
                 reconnect: Arc::new(|_| {}),
                 inspect: Arc::new(|_, _, _| Err("timed out".into())),
                 dispatch: Arc::new(move |target, action, id| {

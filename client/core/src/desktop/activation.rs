@@ -30,14 +30,30 @@ pub struct Target {
     pub computer: String,
     pub run: String,
     pub conversation: String,
+    /// Exact mandatory question in the original run, before SessionStart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_question: Option<String>,
 }
 impl Target {
     pub fn valid(&self) -> bool {
         self.computer.len() <= 255
             && !self.computer.chars().any(char::is_control)
-            && [&self.run, &self.conversation]
-                .iter()
-                .all(|v| !v.is_empty() && v.len() <= 1024 && !v.chars().any(char::is_control))
+            && !self.run.is_empty()
+            && self.run.len() <= 1024
+            && !self.run.chars().any(char::is_control)
+            && match &self.startup_question {
+                Some(question) => {
+                    self.conversation.is_empty()
+                        && !question.is_empty()
+                        && question.len() <= 1024
+                        && !question.chars().any(char::is_control)
+                }
+                None => {
+                    !self.conversation.is_empty()
+                        && self.conversation.len() <= 1024
+                        && !self.conversation.chars().any(char::is_control)
+                }
+            }
     }
 }
 pub fn encode_navigation(target: &Target) -> Option<String> {
@@ -80,6 +96,9 @@ impl Open {
                         == Some(self.target.run.as_str())
                     && t.get("conversation")
                         .is_none_or(|v| v.as_str() == Some(self.target.conversation.as_str()))
+                    && t.get("startup_question")
+                        .and_then(serde_json::Value::as_str)
+                        == self.target.startup_question.as_deref()
             })
             && self
                 .platform_context
@@ -121,11 +140,47 @@ impl Reply {
 mod tests {
     use super::*;
     #[test]
+    fn startup_navigation_is_run_and_question_scoped_without_a_conversation_fallback() {
+        let mut target = Target {
+            computer: String::new(),
+            run: "run".into(),
+            conversation: String::new(),
+            startup_question: Some("codex-trust:one".into()),
+        };
+        assert_eq!(
+            decode_navigation(&encode_navigation(&target).unwrap()),
+            Some(target.clone())
+        );
+        let id = "11111111-1111-4111-8111-111111111111";
+        let token = crate::attention::encode_token(
+            serde_json::json!({"host":"","name":"fixture",
+            "run":"run","conversation":"","startup_question":"codex-trust:one","notice":"notice"})
+            .as_object()
+            .unwrap(),
+        );
+        let mut open = Open {
+            activation_id: id.into(),
+            post_request_id: id.into(),
+            target: target.clone(),
+            token,
+            platform_context: None,
+        };
+        assert!(open.valid());
+        open.target.startup_question = Some("different".into());
+        assert!(!open.valid());
+        target.startup_question = None;
+        assert!(!target.valid(), "run alone is not a notification target");
+        target.startup_question = Some("codex-trust:one".into());
+        target.conversation = "new-conversation".into();
+        assert!(!target.valid(), "SessionStart retires the startup target");
+    }
+    #[test]
     fn navigation_is_bounded_closed_target_data_without_callback_context() {
         let target = Target {
             computer: "peer.example".into(),
             run: "original-run".into(),
             conversation: "original-conversation".into(),
+            startup_question: None,
         };
         let encoded = encode_navigation(&target).unwrap();
         assert_eq!(decode_navigation(&encoded), Some(target));
@@ -156,6 +211,7 @@ mod tests {
                     computer: "peer.example".into(),
                     run: "run".into(),
                     conversation: "conversation".into(),
+                    startup_question: None,
                 },
                 token,
                 platform_context: Some(PlatformContext::Wayland {

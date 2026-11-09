@@ -37,6 +37,12 @@ pub const SUBMITTED: &str = "submitted";
 /// The closed code of a child the operation's own ledger proves never
 /// crossed its durable reservation: nothing of it ran.
 pub const NOT_STARTED: &str = "compact_to_send_not_started";
+/// The service refused the compact-to-send before its ledger admission, with its
+/// ledger proving no row for the request, and sealed the request for its
+/// epoch, so no copy of it ever admits (zerus-tlb9q). The one refusal that
+/// settles as never started; every other refusal leaves only the read-only
+/// lookup.
+pub const NOT_ADMITTED: &str = "compact_to_send_not_admitted";
 /// The largest CLI receipt read.
 pub const RECEIPT_BYTES: usize = 256 << 10;
 /// The CLI receipt says `in_progress`: the input may have reached the
@@ -385,6 +391,18 @@ pub struct Admission {
     pub receipt: Option<Receipt>,
 }
 impl Admission {
+    /// Whether this is exactly the closed [`NOT_ADMITTED`] refusal of
+    /// `intent`: this kind's ABI, the same request and scope, refused, not
+    /// durable, with no receipt. Any other refusal or reply is not.
+    pub fn not_admitted(&self, intent: &Intent) -> bool {
+        self.abi == ABI
+            && self.request_id == intent.request_id
+            && self.scope == intent.scope
+            && !self.accepted
+            && !self.durable
+            && self.code == NOT_ADMITTED
+            && self.receipt.is_none()
+    }
     pub fn matches(&self, intent: &Intent) -> bool {
         self.abi == ABI
             && self.request_id == intent.request_id

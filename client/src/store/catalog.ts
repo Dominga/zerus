@@ -7,10 +7,12 @@ import type { AgentKind, Session, Status } from "../ui/sessions/types";
 import { marks as appMarks, type RowMarks } from "./marks";
 import { connectionOf } from "./overview";
 import { childRows } from "../ui/sessions/subagents";
+import { keepWarmOf } from "../ui/sessions/keep-warm";
 import { draftKey, nameDraftKey } from "./draftKeys";
 import { tr } from "../i18n";
 import { settings } from "./settings";
 import { sessionNoticeMode } from "../ui/sessions/leadNotices";
+import { createGitProjection } from "./git";
 
 /** Task 244: a lead's reply to a turn only the team's pastes opened is not
  * unread unless the lead's mode for team notices is Full (no mark, count or
@@ -132,7 +134,10 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     cwd: text(v.folder),
     branch: optional(v.branch),
     worktree: optional(v.worktree),
+    gitWorktree: typeof v.git_worktree === "boolean" ? v.git_worktree : undefined,
     git: undefined,
+    gitMetadataState: optional(v.git_metadata_state),
+    gitDetached: v.git_detached === true,
     status,
     caption,
     phase: phase || undefined,
@@ -162,6 +167,8 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     runId: optional(v.run_id),
     launchId: optional(v.launch_id),
     sessionId: optional(v.session_id),
+    parent: v.parent ?? undefined,
+    quiet: !!v.quiet,
     conversationId: optional(v.conversation_id),
     compactKeys: v.compact_keys,
     cmd: text(v.agent),
@@ -215,6 +222,7 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     readAttentionSignature: optional(v.read_attention_signature),
     sharedNotifications: !!v.shared_notifications,
     notificationRevision: typeof v.notification_revision === "number" ? v.notification_revision : undefined,
+    keepWarm: keepWarmOf(v.keep_warm),
   };
   // Task 252: the folder's git status once the list asked for it (store/gitStatus.ts).
   base.git = gitFor(base, computerFresh(computer));
@@ -232,6 +240,11 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
   // per batch: whole-catalog aggregates track this instead of each field of
   // every row (zerus-5wmh.66.50).
   const [revision, setRevision] = createSignal(0);
+  const git = createGitProjection({
+    row: (id) => catalog.rows[id],
+    online: (computer) => catalog.computers[computer]?.status === "live",
+    patch: (id, value) => { if (catalog.rows[id]) setCatalog("rows", id, "git", value); },
+  });
   const changed = () => setRevision((n) => n + 1);
   // A marks change applies the overlay again to the rows it touched, in place.
   // The marks only read the rows, so they scan the plain objects (no proxy reads).
@@ -291,6 +304,8 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
   };
 
   const put = (id: string, next: Session, fresh: string[], delta = true) => {
+    // The streamed projection wins for the rows it follows; the others keep task 252's folder answer from toSession.
+    next.git = git.project(next) ?? next.git;
     next.draft = drafted(next);
     if (delta && !catalog.rows[id] && !next.archiveId && next.state !== "archived") {
       const identity = nameKey(next), previous = currentNames.get(identity);
@@ -416,6 +431,7 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
         for (const listener of replacedListeners) listener(from, to);
       }
       for (const next of upserted) inheritReplaced(next);
+      git.apply(b.git ?? []);
       if (b.computers.length || b.replaces.length || b.removes.length || b.upserts.length) changed();
     });
   }
@@ -461,12 +477,13 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
     return unwrap(catalog).computers;
   };
 
-  /** Task 252: maps the rows of one folder again after its git status arrived (or aged). */
+  /** Task 252: maps the rows of one folder again after its git status arrived (or aged).
+   * A row the streamed projection (store/git.ts) owns keeps that projection's value. */
   const refreshGit = (computer: ComputerId, path?: string) => {
     let touched = false;
     for (const id of catalog.order) {
       const row = catalog.rows[id];
-      if (!row || row.computer !== computer || (path !== undefined && gitPath(row) !== path)) continue;
+      if (!row || row.computer !== computer || row.git?.streamed || (path !== undefined && gitPath(row) !== path)) continue;
       const git = gitFor(row, computerFresh(computer));
       if (JSON.stringify(git) === JSON.stringify(row.git)) continue;
       setCatalog("rows", id, "git", git);
@@ -474,11 +491,11 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
     }
     if (touched) changed();
   };
-  return { catalog, applyBatch, onReplaced, setDraftKeys, hasDraftKey: (key: string) => drafts.has(key), revision, plainRows, plainComputers, refreshGit };
+  return { catalog, applyBatch, onReplaced, setDraftKeys, hasDraftKey: (key: string) => drafts.has(key), revision, plainRows, plainComputers, refreshGit, gitInterests: git.interests };
 }
 
 /** The app's catalog. Tests build their own with `createCatalog`. */
-export const { catalog, applyBatch, onReplaced, setDraftKeys, hasDraftKey, plainRows, plainComputers, refreshGit } = createCatalog(appMarks, applyMachines);
+export const { catalog, applyBatch, onReplaced, setDraftKeys, hasDraftKey, plainRows, plainComputers, refreshGit, gitInterests } = createCatalog(appMarks, applyMachines);
 
 /** Rows in display order. */
 export const orderedRows = () => catalog.order.map((id) => catalog.rows[id]).filter(Boolean);

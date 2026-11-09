@@ -52,6 +52,8 @@ const RECENT_ENTRIES: usize = 2000;
 /// A removed or forgotten entry is kept this long for the Disk view.
 const KEEP_REMOVED: f64 = 30.0 * 86400.0;
 const GB: u64 = 1024 * 1024 * 1024;
+/// Task #364: a run's temporary folder is reported from this size up.
+const TMP_FLOOR: u64 = 256 * 1024 * 1024;
 
 /// The owner's policy for this computer.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -64,6 +66,10 @@ pub(crate) struct Policy {
     pub free_gb: u64,
     #[serde(default = "ten")]
     pub free_percent: u32,
+    /// Task #364: the owner's limit for one team's build folders (GB); the lead
+    /// hears once when a team passes it.
+    #[serde(default = "hundred")]
+    pub team_limit_gb: u64,
 }
 fn on() -> bool {
     true
@@ -77,9 +83,12 @@ fn fifty() -> u64 {
 fn ten() -> u32 {
     10
 }
+fn hundred() -> u64 {
+    100
+}
 impl Default for Policy {
     fn default() -> Self {
-        Self { enabled: true, unused_days: 7, free_gb: 50, free_percent: 10 }
+        Self { enabled: true, unused_days: 7, free_gb: 50, free_percent: 10, team_limit_gb: 100 }
     }
 }
 
@@ -603,6 +612,8 @@ pub(crate) fn remove(entry: &Entry, now: f64, dry: bool) -> Removal {
 pub(crate) struct TeamFacts {
     /// Teams by id: (name, finished, removed member ids).
     pub teams: std::collections::BTreeMap<String, (String, bool, Vec<String>)>,
+    /// Task #364: the finished task ids of each team.
+    pub tasks: std::collections::BTreeMap<String, std::collections::BTreeSet<u32>>,
     pub known: bool,
 }
 
@@ -615,6 +626,8 @@ fn team_facts() -> TeamFacts {
     for team in teams {
         let finished = matches!(team.status, TeamStatus::Done | TeamStatus::Stopped | TeamStatus::Archived);
         let removed = team.members.iter().filter(|member| member.state == MemberState::Removed).map(|member| member.id.clone()).collect();
+        let tasks = team.tasks.iter().filter(|task| task.status.finished()).map(|task| task.id).collect();
+        facts.tasks.insert(team.id.clone(), tasks);
         facts.teams.insert(team.id.clone(), (team.name.clone(), finished, removed));
     }
     facts
@@ -652,12 +665,30 @@ fn outcome(entry: &Entry, reason: &str, removal: &Removal) -> Value {
 pub(crate) fn clean(scope: &str, dry: bool, only: &[String], now: f64) -> anyhow::Result<Vec<Value>> {
     let registry = read_registry();
     let facts = team_facts();
+    // Task #364: one team's cleanup of the targets of its finished tasks.
+    let team_scope = scope.strip_prefix("team:").map(str::to_owned);
     let mut chosen: Vec<(Entry, String)> = Vec::new();
     for entry in registry.entries.iter().filter(|entry| entry.state == "kept" && entry.owned) {
         if !only.is_empty() && !only.iter().any(|path| same(Path::new(path), Path::new(&entry.path))) {
             continue;
         }
         if !Path::new(&entry.path).exists() {
+            continue;
+        }
+        if let Some(team) = &team_scope {
+            if entry.team != *team {
+                continue;
+            }
+            let finished = facts.teams.get(team).is_some_and(|(_, done, _)| *done);
+            let task_done = entry.task > 0 && facts.tasks.get(team).is_some_and(|ids| ids.contains(&entry.task));
+            let reason = if finished {
+                "its team is finished"
+            } else if task_done {
+                "its task is finished"
+            } else {
+                continue;
+            };
+            chosen.push((entry.clone(), reason.into()));
             continue;
         }
         if scope == "all" {
@@ -925,6 +956,106 @@ pub(crate) fn gigabytes(bytes: u64) -> String {
     format!("{:.1} GB", bytes as f64 / GB as f64)
 }
 
+/// Task #364: the team's recorded build folders and the owner's limit for one
+/// team, when they pass it; the lead hears once.
+pub(crate) fn team_over(team: &str) -> Option<(u64, u64)> {
+    let registry = read_registry();
+    let limit = registry.policy.team_limit_gb.saturating_mul(GB);
+    let bytes: u64 = registry.entries.iter().filter(|entry| entry.state == "kept" && entry.team == team).filter_map(|entry| entry.size).sum();
+    (limit > 0 && bytes > limit).then_some((bytes, limit))
+}
+
+/// Tests: give the registered folder a measured size and set the owner's limit.
+#[cfg(test)]
+pub(crate) fn test_measure(path: &Path, bytes: u64, limit_gb: u64) -> anyhow::Result<()> {
+    locked(|registry| {
+        registry.policy.team_limit_gb = limit_gb;
+        if let Some(entry) = registry.entries.iter_mut().find(|entry| same(Path::new(&entry.path), path)) {
+            entry.size = Some(bytes);
+            entry.size_complete = true;
+        }
+        Ok(())
+    })
+}
+
+/// Task #364: what a member made for an attempt and left in place: extra build
+/// folders its runs named, worktrees it added, and its run temporary folders
+/// over a floor. `since` is when the attempt was handed out.
+pub(crate) fn report_leftovers(team: &str, member: &str, since: f64, folder: &str) -> Value {
+    let registry = read_registry();
+    let mut folders: Vec<Value> = Vec::new();
+    for entry in registry.entries.iter().filter(|entry| entry.state != "removed" && entry.team == team && entry.member == member) {
+        if entry.registered_at >= since || entry.last_used >= since {
+            folders.push(json!({"kind":entry.kind,"path":entry.path,"bytes":entry.size.unwrap_or(0),"why":"an extra build folder you set"}));
+        }
+    }
+    if !folder.is_empty() {
+        if let Some(list) = super::teams::dispatcher::git_at(folder, &["worktree", "list", "--porcelain"]) {
+            for path in list.lines().filter_map(|line| line.strip_prefix("worktree ")) {
+                if same(Path::new(path), Path::new(folder)) || !Path::new(path).exists() || !created_after(Path::new(path), since) {
+                    continue;
+                }
+                folders.push(json!({"kind":"worktree","path":path,"bytes":0,"why":"a worktree you added"}));
+            }
+        }
+        let tmp = Path::new(folder).join(".zerus-team").join("tmp");
+        if let Ok(entries) = fs::read_dir(&tmp) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let bytes = folder_bytes(&path, 2_000);
+                if bytes >= TMP_FLOOR {
+                    folders.push(json!({"kind":"tmp","path":path.to_string_lossy(),"bytes":bytes,"why":"temporary files of your runs"}));
+                }
+            }
+        }
+    }
+    let text = if folders.is_empty() {
+        String::new()
+    } else {
+        let listed: Vec<String> = folders.iter().map(|folder| format!("{} ({})", folder["why"].as_str().unwrap_or_default(), folder["path"].as_str().unwrap_or_default())).collect();
+        format!(
+            "You left {} still here: {}. Remove them, or say in your report why they stay; keep only your checkout's target and what the next task needs.",
+            if folders.len() == 1 { "one folder".to_owned() } else { format!("{} folders", folders.len()) },
+            listed.join("; ")
+        )
+    };
+    json!({"folders":folders,"text":text})
+}
+
+/// Whether the folder's own write is not older than `since`.
+fn created_after(path: &Path, since: f64) -> bool {
+    fs::metadata(path)
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|age| age.as_secs_f64() >= since)
+        .unwrap_or(false)
+}
+
+/// A bounded folder size in bytes.
+fn folder_bytes(path: &Path, budget: u64) -> u64 {
+    let (mut seen, mut total) = (0u64, 0u64);
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(at) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&at) else { continue };
+        for entry in entries.flatten() {
+            seen += 1;
+            if seen > budget {
+                return total;
+            }
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => stack.push(entry.path()),
+                Ok(kind) if kind.is_file() => total += entry.metadata().map(|meta| meta.len()).unwrap_or(0),
+                _ => {}
+            }
+        }
+    }
+    total
+}
+
 /// `hgs team disk --json`: `{"action":"list"}` (what Zerus holds, per team and
 /// folder, the drives and the policy), `{"action":"clean","scope":"policy"|"all",
 /// "dry_run":true|false,"paths":[...],"by":"human"}`, `{"action":"policy",
@@ -953,6 +1084,8 @@ pub(crate) fn command(input: &Value) -> anyhow::Result<Value> {
             }
             let scope = match input["scope"].as_str().unwrap_or("policy") {
                 "all" => "all",
+                // Task #364: one team's finished-task targets.
+                other if other.starts_with("team:") && other.len() > "team:".len() => other,
                 _ => "policy",
             };
             let only: Vec<String> = input["paths"].as_array().into_iter().flatten().filter_map(|path| path.as_str().map(str::to_owned)).collect();
@@ -964,6 +1097,7 @@ pub(crate) fn command(input: &Value) -> anyhow::Result<Value> {
             crate::state::owner_request(input, "the build folder policy").map_err(anyhow::Error::msg)?;
             let policy: Policy = serde_json::from_value(input["policy"].clone()).map_err(|error| anyhow::anyhow!("Invalid policy: {error}"))?;
             anyhow::ensure!(policy.unused_days <= 365 && policy.free_gb <= 10_000 && policy.free_percent <= 90, "unused_days is 0 to 365, free_gb 0 to 10000, free_percent 0 to 90");
+            anyhow::ensure!(policy.team_limit_gb <= 100_000, "team_limit_gb is 0 to 100000");
             locked(|registry| {
                 registry.policy = policy.clone();
                 Ok(())

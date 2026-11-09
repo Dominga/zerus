@@ -11,11 +11,12 @@ import { TeamActions } from "./actions";
 import { TextDialog } from "./TeamActions";
 import { SwapMemberDialog } from "./SwapMemberDialog";
 import { roleStyle } from "./roles";
-import { memberProgress, unreadBadge, type MemberStatus } from "./team-model";
+import { memberProgress, memberStateColor, unreadBadge, type MemberStatus } from "./team-model";
 import { answerRow, newestAnswers, permissionSummary } from "./permissionAnswers";
 import { now } from "../../store/ui";
 import { accountLabel, limitText, memberMenu, memberAccount, moveAffected, reportsOf, scaleRoom, waitingForTask, type MemberMenuId } from "./members";
 import type { ComputerId, TeamMemberView, TeamPulseView, TeamView } from "../../types";
+import { TextInput } from "../lib/TextField";
 
 // Task 199 (owner, 2026-11-07: Tauri parity with Qt): a member's card in the
 // side column as Qt's TeamWorkspace::members draws it, and its menu
@@ -77,6 +78,9 @@ export function MemberCard(props: {
   const own = createMemo(() => memberProgress(props.team, props.member));
   const reports = () => reportsOf(props.team, props.member.id).length;
   const [tasksOpen, setTasksOpen] = createSignal(false);
+  // Task #347: the card shows a header and one status line; the account, pulse,
+  // marks, tasks and unread wait behind this fold (a request stays in full).
+  const [detailsOpen, setDetailsOpen] = createSignal(false);
   // Task 315 (Qt U17): the answered permissions fold to one line and open to the newest five.
   const [answersOpen, setAnswersOpen] = createSignal(false);
   const answers = () => props.member.permission_answers ?? [];
@@ -119,9 +123,23 @@ export function MemberCard(props: {
     }
   };
   const assignable = () => props.team.tasks.filter((task) => !["accepted", "rejected", "cancelled", "done"].includes(task.status) && task.assignee !== props.member.id);
+  // Task 355 (owner, 2026-11-08): the row shows its state as a word and its
+  // task number beside it, so a queued task is not read as work; the row of
+  // the session being looked at says "you".
+  const taskNumber = () => props.status.task || props.member.queue[0] || 0;
+  const taskTitle = () => props.team.tasks.find((task) => task.id === taskNumber())?.title ?? "";
+  const detail = () => {
+    if (props.member.error) return props.member.error;
+    if (taskTitle() && ["working", "sent", "submitted", "in_review", "in_test"].includes(props.status.kind)) return taskTitle();
+    return props.status.text === props.status.short ? "" : props.status.text;
+  };
+  const isYou = () => {
+    const row = memberRow(props.computer, props.member);
+    return !!row && row.key === selected()?.key;
+  };
   const stop = (event: Event) => event.stopPropagation();
   return (
-    <div class="team-member team-member-card" data-member={props.member.id} data-kind={props.status.kind} role="button" tabindex="0"
+    <div class="team-member team-member-card" data-member={props.member.id} data-kind={props.status.kind} data-state-color={memberStateColor(props.status.kind)} role="button" tabindex="0"
       classList={{ problem: props.status.problem, [`tone-${props.status.tone}`]: true, lead: props.member.lead, focused: props.focused, sub: !!props.member.sub, planned: props.status.kind === "not_created" }}
       style={{ "margin-left": `${Math.max(0, props.depth - 1) * 14}px` }}
       title={props.focused ? tr("Show every member") : tr("Show only %1's tasks", role())}
@@ -130,6 +148,7 @@ export function MemberCard(props: {
       <div class="team-member-main">
         <div class="team-member-line">
           <span class="role-badge ell" style={roleStyle(props.member.role, props.member.lead)}>{role()}</span>
+          <Show when={isYou()}><span class="team-you" data-you>{tr("you")}</span></Show>
           <Show when={props.member.sub}>
             <button type="button" class="team-sublead" data-action="member-fold" aria-expanded={!props.folded} title={tr("Show or hide its reports")}
               onClick={(event) => { stop(event); props.onFold(); }}>
@@ -138,45 +157,61 @@ export function MemberCard(props: {
             </button>
           </Show>
           <Show when={props.member.question}><span class="team-q" title={tr("A question waits in its session")}>?1</span></Show>
-          <Show when={unreadBadge(props.member)}>{(badge) => (
-            <span class="team-unread mono" classList={{ urgent: badge().urgent }} title={badge().tip}>{badge().text}</span>
-          )}</Show>
           <span class="dim ell team-model">{props.member.model || props.member.agent}</span>
-          <Show when={props.team.status !== "draft"}>
-            <span class="dim ell team-account" data-account={memberAccount(props.member)}
-              title={props.member.session && props.member.session_account != null ? tr("Its session runs on %1", accountLabel(props.member)) : tr("Account: %1", accountLabel(props.member))}>
-              {accountLabel(props.member)}
-            </span>
-          </Show>
           <span class="grow" />
-          <span class="mono dim" title={tr("%1 of %2 tasks accepted", own().accepted, own().total)}>{own().accepted}/{own().total}</span>
+          <span class="mono dim team-member-progress" title={tr("%1 of %2 tasks accepted", own().accepted, own().total)}>{own().accepted}/{own().total}</span>
+          <button type="button" class="icon-btn team-member-details" data-action="member-details" aria-expanded={detailsOpen()}
+            aria-label={tr("Member details")} title={tr("Member details")}
+            onClick={(event) => { stop(event); setDetailsOpen(!detailsOpen()); }}>
+            <Icon name={detailsOpen() ? "chevron-down" : "chevron-right"} size={12} />
+          </button>
           <button type="button" class="icon-btn team-member-more" data-action="member-more" aria-label={tr("Member actions")} title={tr("Member actions")}
             aria-haspopup="menu" disabled={read().busy}
             onClick={(event) => { stop(event); const box = event.currentTarget.getBoundingClientRect(); if (menu()) setMenu(undefined); else open(box.left - 220, box.bottom + 4); }}>
             <Icon name="ellipsis" size={14} />
           </button>
         </div>
-        <Show when={props.focused}><div class="team-member-focus">{tr("Only its tasks are shown, click the card for all")}</div></Show>
-        <Show when={props.member.pulse}>{(pulse) => (
-          <div class="team-member-pulse" classList={{ blocked: !!pulse().blocked }} title={pulseText(pulse())}>
-            <For each={pulseLines(pulse())}>{(line) => <span class="ell">{line}</span>}</For>
+        <Show when={detailsOpen()}>
+          <Show when={props.focused}><div class="team-member-focus">{tr("Only its tasks are shown, click the card for all")}</div></Show>
+          <Show when={props.member.pulse}>{(pulse) => (
+            <div class="team-member-pulse" classList={{ blocked: !!pulse().blocked }} title={pulseText(pulse())}>
+              <For each={pulseLines(pulse())}>{(line) => <span class="ell">{line}</span>}</For>
+            </div>
+          )}</Show>
+          <div class="team-member-line sub">
+            <Show when={unreadBadge(props.member)}>{(badge) => (
+              <span class="team-unread mono" classList={{ urgent: badge().urgent }} title={badge().tip}>{badge().text}</span>
+            )}</Show>
+            <Show when={props.team.status !== "draft"}>
+              <span class="dim ell team-account" data-account={memberAccount(props.member)}
+                title={props.member.session && props.member.session_account != null ? tr("Its session runs on %1", accountLabel(props.member)) : tr("Account: %1", accountLabel(props.member))}>
+                {accountLabel(props.member)}
+              </span>
+            </Show>
           </div>
-        )}</Show>
+          <Show when={waitingForTask(props.team, props.member)}>
+            <div class="team-member-line sub" onClick={stop}>
+              <button type="button" class="btn ghost small" data-action="member-assign"
+                onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); open(box.left, box.bottom + 4, true); }}>{tr("Assign task…")}</button>
+              <button type="button" class="btn ghost small" data-action="member-ask-lead"
+                onClick={() => toComposer(props.computer, props.team.members.find((found) => found.lead), tr("I added %1 to the team. Plan a task for it and reassign it with hgs team reassign.", role()))}>
+                {tr("Ask lead to plan for it")}</button>
+            </div>
+          </Show>
+        </Show>
         <Show when={waitingForTask(props.team, props.member)} fallback={
           <div class="team-member-line sub">
-            <span class={`team-status tone-${props.status.tone}`} title={props.status.text}><Icon name={props.status.icon} size={12} />{props.status.short}</span>
-            <span class="ell team-member-text" title={props.member.error || props.status.text}>{props.member.error || props.status.text}</span>
+            <span class={`team-status tone-${props.status.tone}`} title={props.status.text} data-state={props.status.kind}><Icon name={props.status.icon} size={12} />{props.status.short}</span>
+            <Show when={taskNumber() > 0}><span class="mono dim team-member-task" data-task-number={taskNumber()}>#{taskNumber()}</span></Show>
+            <Show when={detail()}><span class="ell team-member-text" title={props.member.error || props.status.text}>{detail()}</span></Show>
           </div>
         }>
-          <div class="team-member-line sub" onClick={stop}>
-            <span class="dim">{tr("Waiting for a task")}</span>
-            <button type="button" class="btn ghost small" data-action="member-assign"
-              onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); open(box.left, box.bottom + 4, true); }}>{tr("Assign task…")}</button>
-            <button type="button" class="btn ghost small" data-action="member-ask-lead"
-              onClick={() => toComposer(props.computer, props.team.members.find((found) => found.lead), tr("I added %1 to the team. Plan a task for it and reassign it with hgs team reassign.", role()))}>
-              {tr("Ask lead to plan for it")}</button>
+          <div class="team-member-line sub">
+            <span class="team-status" title={tr("Waiting for a task")} data-state="waiting"><Icon name="hourglass" size={12} />{tr("Waiting")}</span>
+            <span class="ell team-member-text">{tr("Waiting for a task")}</span>
           </div>
         </Show>
+        <Show when={detailsOpen()}>
         <Show when={props.member.draining || props.member.limited || props.member.host_shared || (props.member.services?.length ?? 0) > 0 || props.member.budget}>
           <div class="team-member-marks">
             <Show when={props.member.draining}>
@@ -242,6 +277,7 @@ export function MemberCard(props: {
             </div>
           </Show>
         </Show>
+        </Show>
         <Show when={permission() && (permission()!.command || permission()!.tool || permission()!.subagent_confirmation)}>
           <div class="team-member-permission" data-member={props.member.id} onClick={stop}>
             <div class="team-member-line">
@@ -251,7 +287,7 @@ export function MemberCard(props: {
             <Show when={permission()!.command}><code class="team-permission-command">{permission()!.command}</code></Show>
             <Show when={permission()!.reason}><div class="dim">{tr("Agent: %1", permission()!.reason!)}</div></Show>
             <div class="team-member-line">
-              <input class="field grow" placeholder={tr("Why deny? The member receives this")} value={denyReason()} onInput={(event) => setDenyReason(event.currentTarget.value)}
+              <TextInput class="field grow" placeholder={tr("Why deny? The member receives this")} value={denyReason()} onInput={(event) => setDenyReason(event.currentTarget.value)}
                 disabled={!answerable()} data-field="deny-reason" />
               <button type="button" class="btn small danger" data-action="permission-deny" disabled={!answerable() || read().busy}
                 title={answerable() ? undefined : tr("This hgs sends no answer ids for the question; answer it in the session.")}
@@ -336,7 +372,7 @@ function ScaleDialog(props: { role: string; member: TeamMemberView; room: number
       <div class="dlg-head"><h2>{tr("Add more %1", props.role)}</h2></div>
       <div class="dlg-body">
         <p class="team-confirm-text">{tr("How many more %1 members, each on %2?", props.role, agent)}</p>
-        <input class="field" type="number" min={1} max={props.room} value={count()} data-field="scale-count"
+        <TextInput class="field" type="number" min={1} max={props.room} value={count()} data-field="scale-count"
           onInput={(event) => setCount(Math.max(1, Math.min(props.room, Number(event.currentTarget.value) || 1)))} />
       </div>
       <div class="dlg-foot"><span class="spacer" />
@@ -360,7 +396,7 @@ function MoveAccountDialog(props: { team: TeamView; member: TeamMemberView; clos
       <div class="dlg-body">
         <p class="team-confirm-text">{tr("Moves every %1 member on %2 to another account: %3.", props.member.agent, accountLabel(props.member), affected.join(", "))}</p>
         <label class="dim">{tr("To account")}</label>
-        <input class="field" value={to()} placeholder={tr("Account id")} onInput={(event) => setTo(event.currentTarget.value)} data-field="move-to" />
+        <TextInput class="field" value={to()} placeholder={tr("Account id")} onInput={(event) => setTo(event.currentTarget.value)} data-field="move-to" />
       </div>
       <div class="dlg-foot"><span class="spacer" />
         <button type="button" class="btn" onClick={props.close}>{tr("Cancel")}</button>
@@ -392,19 +428,19 @@ export function AddMemberDialog(props: { close: () => void; submit: (member: Rec
       <div class="dlg-body">
         <p class="team-confirm-text">{tr("Add a member; it starts with the first task it gets")}</p>
         <label class="dim">{tr("Role")}</label>
-        <input class="field" value={role()} onInput={(event) => setRole(event.currentTarget.value)} data-field="member-role" />
+        <TextInput class="field" value={role()} onInput={(event) => setRole(event.currentTarget.value)} data-field="member-role" />
         <label class="dim">{tr("Agent")}</label>
         <select class="field" value={agent()} onChange={(event) => setAgent(event.currentTarget.value)} data-field="member-agent">
           <For each={AGENTS}>{(name) => <option value={name}>{name}</option>}</For>
         </select>
         <label class="dim">{tr("Model")}</label>
-        <input class="field" value={model()} onInput={(event) => setModel(event.currentTarget.value)} />
+        <TextInput class="field" value={model()} onInput={(event) => setModel(event.currentTarget.value)} />
         <label class="dim">{tr("Effort")}</label>
         <select class="field" value={effort()} onChange={(event) => setEffort(event.currentTarget.value)}>
           <For each={EFFORTS}>{(level) => <option value={level}>{level || tr("its effort")}</option>}</For>
         </select>
         <label class="dim">{tr("Account")}</label>
-        <input class="field" value={account()} placeholder={tr("Default account")} onInput={(event) => setAccount(event.currentTarget.value)} />
+        <TextInput class="field" value={account()} placeholder={tr("Default account")} onInput={(event) => setAccount(event.currentTarget.value)} />
       </div>
       <div class="dlg-foot"><span class="spacer" />
         <button type="button" class="btn" onClick={props.close}>{tr("Cancel")}</button>

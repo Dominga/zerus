@@ -7,8 +7,15 @@ use sha2::{Digest, Sha256};
 use std::cell::{Cell, RefCell};
 
 mod status;
+// Dormant original-claim resource support. Production freshness minting and
+// all producer/adapter wiring remain deliberately unavailable.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)]
+mod writer_claim;
 pub(super) use status::dispatch as status_dispatch;
 pub(crate) use status::machine as status_machine;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use status::observe_held;
 pub(crate) use status::observe_original;
 
 const INPUT_LIMIT: usize = 8192;
@@ -54,6 +61,7 @@ impl Scope {
     }
     pub(super) fn check(&self, record: &Value) -> Result<()> {
         self.check_base(record)?;
+        terminating::check_mutation(record)?;
         if record["archive_id"].as_str().filter(|s| !s.is_empty()) != self.archive.as_deref() {
             return Err("Archive identity changed; select the exact saved archive".into());
         }
@@ -112,6 +120,7 @@ impl Scope {
 /// `resumed` is the summary's single verification of a pending resume.
 pub(super) fn summary(record: &Value, live_pane: bool, resumed: &Option<Result<()>>) -> Value {
     let archived = !string(record, "archive_id").is_empty();
+    let terminating = terminating::pending(record);
     let changing = record.get("pausing").is_some() || record["resume_pending"] == true;
     let confirmed = !string(record, "conversation_id").is_empty();
     let recipe = record["base"].is_array() && (Path::new(string(record, "launch_dir")).is_dir() || super::worktree_lifecycle::restorable(record));
@@ -120,7 +129,7 @@ pub(super) fn summary(record: &Value, live_pane: bool, resumed: &Option<Result<(
     let decisions = [
         (
             "pause",
-            !archived && live_pane && !changing && confirmed
+            !archived && live_pane && !changing && (confirmed || lifecycle::unconfirmed_fresh(record))
                 && lifecycle::pausable(record, || {
                     resume_input::idle_checked(record, resumed.as_ref().is_some_and(Result::is_ok))
                 }),
@@ -145,12 +154,12 @@ pub(super) fn summary(record: &Value, live_pane: bool, resumed: &Option<Result<(
     let mut allowed = Vec::new();
     let mut reasons = serde_json::Map::new();
     for (action, enabled) in decisions {
-        if enabled {
+        if enabled && !terminating {
             allowed.push(action);
         } else {
             reasons.insert(
                 action.into(),
-                json!(match action {
+                json!(if terminating { terminating::WAIT } else { match action {
                     "pause" => "Wait for a confirmed idle live session before pausing",
                     "resume" =>
                         "Resume requires a saved session and available native launch recipe",
@@ -161,7 +170,7 @@ pub(super) fn summary(record: &Value, live_pane: bool, resumed: &Option<Result<(
                     "forget" =>
                         "Wait for the active pause or restore before forgetting this session",
                     _ => "Wait for the active pause or restore before renaming",
-                }),
+                }}),
             );
         }
     }
@@ -442,6 +451,25 @@ fn decode_request(bytes: &[u8], name: &str) -> Result<Request> {
 fn request_input(args: &[String], command: &str) -> Result<Request> {
     let bytes = input_bytes(args, command)?;
     decode_request(&bytes, &args[0])
+}
+
+/// The exact action receipt `hgs session-action` writes for the original
+/// stdin `original` of `name` with `status` (and, when completed, the
+/// resumed `run` as its result target), for other modules' fixtures.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn fixture_receipt(
+    name: &str,
+    original: &[u8],
+    status: &str,
+    run: Option<&str>,
+) -> Value {
+    let request = decode_request(original, name).unwrap();
+    let mut value = receipt(&request, name, &request_hash(&request, name), status);
+    if let Some(run) = run {
+        value["result_target"] = json!({"name":name,"run_id":run,
+            "conversation_id":request.expected_conversation_id});
+    }
+    value
 }
 
 fn request_hash(request: &Request, name: &str) -> String {

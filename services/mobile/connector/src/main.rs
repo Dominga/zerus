@@ -42,7 +42,9 @@ fn main() -> ExitCode {
         return match result {
             Ok(value) => {
                 println!("{value}");
-                ExitCode::SUCCESS
+                ExitCode::from(zerus_mobile_connector::workspace_lifecycle::reply_exit(
+                    &value,
+                ))
             }
             Err(error) => {
                 println!("{}", serde_json::json!({"ok":false,"error":error}));

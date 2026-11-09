@@ -362,6 +362,11 @@ fn refusals(streams: &[(&'static str, Stream); 3], reads_input: bool) -> Vec<Str
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
+    // The fixed discovery command has no stdin/operation; model a POSIX peer.
+    // It is separate from the operation stream/log contracts below.
+    if args.last().map(String::as_str) == Some(r#"echo "hgs-remote-v2|%OS%|%SystemRoot%|$env:OS|$env:SystemRoot""#) {
+        println!("hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot"); exit(0);
+    }
     let streams = streams();
     if let Some(path) = variable("FAKE_SSH_STREAMS") {
         let fields: Vec<String> = streams

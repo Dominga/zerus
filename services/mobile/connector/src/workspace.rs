@@ -114,8 +114,21 @@ fn fail(message: &'static str) -> ConnectorError {
 fn cc<T>(result: crypto::Result<T>) -> Result<T> {
     result.map_err(|_| fail("Workspace authentication failed; private content was not accepted"))
 }
+const IN_USE: &str = "Private workspace state is unavailable or in use";
 fn io<T>(result: std::io::Result<T>) -> Result<T> {
-    result.map_err(|_| fail("Private workspace state is unavailable or in use"))
+    result.map_err(|_| fail(IN_USE))
+}
+/// A running connector holds this lock across each relay call, so with a slow relay a
+/// roster read that refused at once would say "in use" nearly every time. It is the one
+/// call here that waits, within one bound. Anything else still refuses at once.
+fn lock_for_roster(private_dir: &Path) -> Result<Store> {
+    let deadline = std::time::Instant::now() + crate::admission::ALLOWANCE;
+    io(crate::admission::acquire(
+        || Store::try_lock(private_dir, true),
+        || deadline.saturating_duration_since(std::time::Instant::now()),
+        std::thread::sleep,
+    ))?
+    .ok_or_else(|| fail(IN_USE))
 }
 fn parse<T: serde::de::DeserializeOwned>(value: &Value) -> Result<T> {
     serde_json::from_value(value.clone()).map_err(|_| fail("Invalid workspace protocol response"))
@@ -705,7 +718,11 @@ pub async fn manage(
     if action == "stop" {
         return crate::workspace_lifecycle::manage_stop(config_path, &input).await;
     }
-    let store = io(Store::lock(&private_dir, true))?;
+    let store = if action == "list-devices" {
+        lock_for_roster(&private_dir)?
+    } else {
+        io(Store::lock(&private_dir, true))?
+    };
     // Another manager may have changed the config while this process was
     // waiting for the private-state lock. Never act on that earlier binding.
     if workspace_cli::read_config(config_path)?.1 != revision {
@@ -1657,6 +1674,86 @@ mod tests {
             destination
         );
     }
+    /// An active workspace whose relay address refuses at once, with nothing listening.
+    fn active(dir: &Path) -> (PathBuf, PathBuf, String) {
+        let config = dir.join("connector.json");
+        let private = private_directory(&config).unwrap();
+        let mut profile = ready(&config, String::new()).profile.unwrap();
+        profile.server_url = "http://127.0.0.1:9".into();
+        let store = Store::lock(&private, true).unwrap();
+        save(&store, ACTIVE, &profile).unwrap();
+        drop(store);
+        let revision = workspace_cli::replace_config(
+            &config,
+            "",
+            &json!({"server_url":profile.server_url,"state_dir":profile.state_dir,"encrypted_workspace":{"version":1,"state_dir":private}}),
+        )
+        .unwrap();
+        (config, private, revision)
+    }
+
+    // zerus-cz3t0: a running connector holds this lock across each relay call.
+    #[tokio::test]
+    async fn a_roster_read_waits_out_a_brief_holder_of_the_private_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, private, revision) = active(dir.path());
+        let holder = Store::lock(&private, false).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(holder);
+        });
+        let error = manage(
+            "list-devices",
+            &config,
+            json!({"expected_revision":revision}),
+            true,
+        )
+        .await
+        .err()
+        .unwrap();
+        release.join().unwrap();
+        assert_eq!(
+            error.message(),
+            "Workspace relay is unavailable; the exact pending operation is retained"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_holder_that_stays_is_still_reported_and_nothing_that_changes_state_waits() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, private, revision) = active(dir.path());
+        let _holder = Store::lock(&private, false).unwrap();
+        let started = std::time::Instant::now();
+        let refused = manage(
+            "revoke-device",
+            &config,
+            json!({"expected_revision":revision,"device_id":"other"}),
+            true,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(refused.message(), IN_USE);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        let started = std::time::Instant::now();
+        let roster = manage(
+            "list-devices",
+            &config,
+            json!({"expected_revision":revision}),
+            true,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(roster.message(), IN_USE);
+        let waited = started.elapsed();
+        assert!(waited >= crate::admission::ALLOWANCE, "{waited:?}");
+        assert!(
+            waited < crate::admission::ALLOWANCE + std::time::Duration::from_secs(2),
+            "{waited:?}"
+        );
+    }
+
     #[tokio::test]
     async fn committed_profile_before_config_resumes_without_new_identity() {
         let dir = tempfile::tempdir().unwrap();

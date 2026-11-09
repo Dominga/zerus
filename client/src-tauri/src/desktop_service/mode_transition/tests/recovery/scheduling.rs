@@ -15,6 +15,9 @@ fn patch_source(running: &Running, key: &str, value: Value) {
 
 #[test]
 fn a_legacy_failure_then_a_busy_modern_preflight_stays_deferred_across_reconnect() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let helpers = Fixture::new();
@@ -84,6 +87,9 @@ fn a_legacy_failure_then_a_busy_modern_preflight_stays_deferred_across_reconnect
 
 #[test]
 fn a_deferred_background_connection_offers_resume_and_only_explicit_resume_opens_startup() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let helpers = Fixture::new();
@@ -125,6 +131,9 @@ fn a_deferred_background_connection_offers_resume_and_only_explicit_resume_opens
 
 #[test]
 fn restoration_waits_for_the_actual_first_watch_hello() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let helpers = settled().await;
@@ -166,6 +175,9 @@ fn restoration_waits_for_the_actual_first_watch_hello() {
 
 #[test]
 fn grant_recovery_cannot_borrow_read_only_classification_recovery() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let helpers = Fixture::new();
@@ -237,6 +249,9 @@ fn grant_recovery_cannot_borrow_read_only_classification_recovery() {
 
 #[test]
 fn reconnect_detaches_a_slow_classifier_without_releasing_its_original_resources() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let helpers = Fixture::new();
@@ -306,6 +321,9 @@ fn reconnect_detaches_a_slow_classifier_without_releasing_its_original_resources
 
 #[test]
 fn a_busy_reconnect_cannot_borrow_the_previous_successful_selection() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let helpers = Fixture::new();

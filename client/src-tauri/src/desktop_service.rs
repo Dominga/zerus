@@ -65,6 +65,11 @@ pub(crate) mod deferred_answer;
 /// Only Linux and macOS route it; Windows keeps every Send direct.
 #[cfg_attr(windows, allow(dead_code))]
 pub(crate) mod deferred_send;
+/// The composer's "Resume and send" handed to the service
+/// (zerus-5wmh.66.4.9, slice 3). Only Linux and macOS route it; Windows
+/// keeps it direct.
+#[cfg_attr(windows, allow(dead_code))]
+pub(crate) mod session_resume;
 #[allow(dead_code)]
 pub(crate) mod task_message;
 // Only Linux advertises the review; elsewhere its probe refuses.
@@ -334,9 +339,17 @@ impl CatalogDelivery {
             );
         }
         match self.value {
-            CatalogValue::Row(change) => {
+            CatalogValue::Row(mut change) => {
+                if let Change::Upsert { row, .. } = change.as_mut() {
+                    row.catalog_source = Some((
+                        self.epoch.clone(),
+                        self.source.incarnation,
+                        self.source.generation,
+                    ));
+                }
                 observe(&change);
                 pump.push(*change);
+                shared.details_changed.notify_one();
             }
             CatalogValue::Removal { key, listed } => {
                 // The serial drain's mirror holds exactly the rows delivered
@@ -352,6 +365,7 @@ impl CatalogDelivery {
                 };
                 observe(&change);
                 pump.push(change);
+                shared.details_changed.notify_one();
             }
             CatalogValue::Finish {
                 through,
@@ -396,6 +410,7 @@ impl CatalogDelivery {
                 observe(&change);
                 pump.push(change);
                 let _ = done.send(());
+                shared.details_changed.notify_one();
             }
         }
     }
@@ -2741,11 +2756,13 @@ pub async fn desktop_service_automatic_approvals(
     source: tauri::State<'_, crate::commands::AppState>,
     request_id: String,
     enabled: bool,
+    categories: Option<Vec<String>>,
 ) -> Result<Value, String> {
     frontend::approval_command(
         source.desktop_service().filter(|_| mode()),
         request_id,
         enabled,
+        categories,
     )
     .await
 }

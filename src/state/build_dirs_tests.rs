@@ -252,3 +252,60 @@ fn the_disk_view_names_each_folders_drive_and_whether_it_is_busy() {
         assert!(listing["teams"][0]["folders"][0].get("busy").is_none(), "{listing}");
     });
 }
+
+/// Task #364: a report's note lists a leftover worktree and an extra target the
+/// member made during the attempt.
+#[test]
+fn a_report_note_lists_a_leftover_worktree_and_an_extra_target() {
+    let state = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(state.path(), || {
+        let since = now() - 60.0;
+        let repo = work.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str], at: &Path| {
+            let status = std::process::Command::new("git")
+                .args(["-c", "user.name=Zerus Test", "-c", "user.email=test@example.com"])
+                .args(args)
+                .current_dir(at)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"], &repo);
+        git(&["commit", "-q", "--allow-empty", "-m", "start"], &repo);
+        let wt = work.path().join("wt");
+        git(&["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "team/x/dev"], &repo);
+        let target = work.path().join("extra-target");
+        cargo_target(&target);
+        note(Use { path: target.clone(), kind: "cargo_target", origin: "hgs_run", team: "t1".into(), team_name: "T".into(),
+            member: "dev".into(), ..Default::default() }).unwrap();
+        let found = report_leftovers("t1", "dev", since, repo.to_str().unwrap());
+        let paths: Vec<&str> = found["folders"].as_array().unwrap().iter().filter_map(|folder| folder["path"].as_str()).collect();
+        assert!(paths.iter().any(|path| path.ends_with("wt")), "{found}");
+        assert!(paths.iter().any(|path| path.ends_with("extra-target")), "{found}");
+        let text = found["text"].as_str().unwrap();
+        assert!(text.contains("Remove them") && text.contains("worktree you added") && text.contains("extra build folder"), "{text}");
+    });
+}
+
+/// Task #364: one team's total passes the owner's limit once, not per folder.
+#[test]
+fn a_team_over_the_size_limit_is_told_once() {
+    let state = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(state.path(), || {
+        let target = work.path().join("target");
+        cargo_target(&target);
+        note(Use { path: target.clone(), kind: "cargo_target", origin: "team_run", team: "t1".into(), ..Default::default() }).unwrap();
+        assert_eq!(team_over("t1"), None);
+        test_measure(&target, 200 * GB, 100).unwrap();
+        assert_eq!(team_over("t1"), Some((200 * GB, 100 * GB)));
+        // The same answer while nothing changes: the caller makes one item.
+        assert_eq!(team_over("t1"), Some((200 * GB, 100 * GB)));
+        // Another team is unaffected.
+        assert_eq!(team_over("t2"), None);
+    });
+}

@@ -22,7 +22,9 @@ export async function contentSearchSmoke(allowed: boolean) {
     await until(() => !!catalog.rows["\nrun:run-review-1"], "replay catalog did not arrive");
     setPage("sessions"); setStateFilter("all"); setSearch("needle");
     await until(() => searchItems().filter((item) => item.found).length === 2 && !contentSearch.busy(), "live and archive contents did not arrive");
-    require(new Set(searchItems().map((item) => item.session.key)).size === searchItems().length, "a session appeared more than once");
+    // One row per matching message (zerus-5wmh.13.17.1): rows are unique, and a session has at most one metadata row.
+    require(new Set(searchItems().map((item) => item.id)).size === searchItems().length, "a row appeared more than once");
+    require(searchItems().filter((item) => !item.found).every((item, _, metadata) => metadata.filter((other) => other.session.key === item.session.key).length === 1), "a session had two metadata rows");
     // A partial host names its reason (task 77): no index, an index still building or unreadable sessions.
     require(searchStatus().includes("Limited history searched") && /: (contents unavailable|content index|history unavailable in)/.test(searchStatus()), "partial coverage was hidden");
     await until(() => document.querySelectorAll(".content-search-row mark").length >= 2, "excerpts were not highlighted");

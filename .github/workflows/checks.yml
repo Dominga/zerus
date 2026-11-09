@@ -27,6 +27,10 @@ on:
         description: Installer release version (empty uses the ZIP product version)
         type: string
         default: ''
+      retain_membership_probe:
+        description: Opt-in test-only artifact for private Windows membership qualification
+        type: boolean
+        default: false
       run_ios:
         type: boolean
         default: false
@@ -951,7 +955,8 @@ jobs:
     needs: source
     if: needs.source.outputs.run_linux == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    # Regular runs take 27-30 minutes; the keyless agent checks need headroom.
+    timeout-minutes: 50
     env:
       CARGO_TERM_COLOR: always
       HOMEBREW_NO_AUTO_UPDATE: 1
@@ -1253,6 +1258,46 @@ jobs:
               raise SystemExit('The selected macOS CLI producer, integration/release and native jobs must all succeed.')
           PY
 
+  # Root CLI Clippy for macOS, all targets, check only (zerus-3ldf4,
+  # zerus-8evem). The macOS CLI jobs build and test the root hgs but never
+  # lint it, so macOS-only unused items reached main unseen (zerus-snrs7). It
+  # restores the CLI producer's cache and never saves one; it publishes and
+  # admits nothing.
+  clippy-macos:
+    name: macOS CLI Clippy (check only)
+    needs: source
+    if: needs.source.outputs.run_macos == 'true'
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.source.outputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install 1.99.1 --profile minimal --component clippy
+      - name: Rust cache identity
+        id: rust
+        run: |
+          echo "rustc=$(rustc +1.99.1 -Vv | git hash-object --stdin | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+      - name: Restore the CLI cache (never saved here)
+        id: rust-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}debug
+          restore-keys: |
+            cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}complete
+            cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}
+            cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
+      - name: Root CLI Clippy for macOS, all targets
+        run: cargo +1.99.1 clippy --locked --all-targets -- -D warnings
+
   # Compiler caches use one entry per saving run and restore the newest by
   # prefix. A save follows a successful build that compiled something, keeping
   # only the entries this build used. Cache directories stay outside the
@@ -1284,7 +1329,7 @@ jobs:
       # desktop build, so it has a cache family of its own.
       - name: Arch packaging dependencies and unprivileged builder
         run: |
-          pacman -Syu --noconfirm --needed base-devel git rust nodejs npm webkit2gtk-4.1 gtk3 alsa-lib gstreamer gst-plugins-base-libs libappindicator dbus gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav tmux openssh python ccache namcap desktop-file-utils
+          pacman -Syu --noconfirm --needed base-devel git rust nodejs npm webkit2gtk-4.1 gtk3 alsa-lib gstreamer gst-plugins-base-libs libappindicator dbus gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav tmux openssh python ccache namcap desktop-file-utils xorg-server-xvfb
           grep -qx 'BUILDENV=(!distcc color !ccache check !sign)' /etc/makepkg.conf ||
             { echo 'The default makepkg BUILDENV changed; review the ccache drop-in.' >&2; exit 1; }
           echo 'BUILDENV=(!distcc color ccache check !sign)' > /etc/makepkg.conf.d/ccache.conf
@@ -1395,7 +1440,7 @@ jobs:
           persist-credentials: false
       # One exact interpreter for every Python step; the runner image's default
       # changes with the image.
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.13.15'
       - run: rustup toolchain install stable --profile minimal && rustup default stable && rustup toolchain install 1.99.1 --profile minimal --component clippy
@@ -1414,6 +1459,37 @@ jobs:
             target
           key: windows-cli-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock', 'crates/lore-bin/Cargo.lock', 'client/core/Cargo.lock', 'client/media/Cargo.lock', 'client/src-tauri/Cargo.lock') }}
           restore-keys: windows-cli-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
+      - name: Build opted-in Windows membership qualification fixture
+        if: inputs.retain_membership_probe
+        env:
+          QUALIFICATION_SOURCE: ${{ needs.source.outputs.commit }}
+        run: |
+          mkdir -p artifacts/test-results
+          python scripts/ci/outside-job.py --custody-only --timeout 1800 \
+            --log artifacts/test-results/membership-build.log -- python scripts/ci/windows-membership-artifact.py
+      - name: Retain opted-in Windows membership qualification fixture
+        if: inputs.retain_membership_probe
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: membership-qualification-windows-release-${{ needs.source.outputs.commit }}
+          path: artifacts/membership-qualification-windows
+          if-no-files-found: error
+          retention-days: 1
+      - name: Compare opted-in hosted Windows membership phases
+        if: inputs.retain_membership_probe
+        env:
+          QUALIFICATION_SOURCE: ${{ needs.source.outputs.commit }}
+        run: |
+          python scripts/ci/outside-job.py --custody-only --timeout 660 \
+            --log artifacts/test-results/membership-hosted.log -- python scripts/ci/windows-membership-hosted.py
+      - name: Retain opted-in hosted membership timing data
+        if: ${{ always() && inputs.retain_membership_probe }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: membership-hosted-timing-windows-${{ needs.source.outputs.commit }}
+          path: artifacts/membership-hosted-timing
+          if-no-files-found: warn
+          retention-days: 1
       - name: Root unit tests and pinned lints
         run: |
           mkdir -p artifacts/test-results
@@ -1464,7 +1540,7 @@ jobs:
           persist-credentials: false
       # One exact interpreter for every Python step; the runner image's default
       # changes with the image.
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.13.15'
       - run: rustup toolchain install stable --profile minimal && rustup default stable && rustup toolchain install 1.99.1 --profile minimal --component clippy
@@ -1503,6 +1579,15 @@ jobs:
           python -m unittest discover -s tests -p test_outside_job.py -v </dev/null 2>&1 | tee artifacts/test-results/outside-job.log
           python -m unittest discover -s tests -p test_windows_client.py -v </dev/null 2>&1 | tee artifacts/test-results/windows-client.log
           python -m unittest discover -s tests -p test_repositories.py -v </dev/null 2>&1 | tee artifacts/test-results/windows-repositories.log
+      - name: Native Windows bootstrap and framed transport
+        timeout-minutes: 6
+        run: |
+          HGS_TEST_FAKE_AGENT=$(cygpath -w "$PWD/target/debug/examples/fake_agent.exe")
+          export HGS_TEST_FAKE_AGENT
+          cd tests
+          python ../scripts/ci/outside-job.py --custody-only --timeout 300 \
+            --log ../artifacts/test-results/windows-native-transport.log -- \
+            python -m unittest -v test_windows_bootstrap test_remote_windows.WindowsNativeTransport </dev/null
       # Microsoft's ConPTY pair (spec D6) from the NuGet package pinned in
       # packaging/windows/conpty.json: the package's SHA-256 is checked before it
       # is opened, then each of the two files'. Nothing from it runs here; the
@@ -1655,7 +1740,7 @@ jobs:
         with:
           ref: ${{ needs.source.outputs.commit }}
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.13.15'
       - run: rustup toolchain install stable --profile minimal && rustup default stable
@@ -1710,7 +1795,7 @@ jobs:
   gate:
     name: Suite results
     if: always() && (github.event.repository.private == false || github.event_name == 'workflow_dispatch')
-    needs: [source, quick, client-frontend, relay, connector, connector-macos, ios, android, client-native-linux, client-native-macos-core, client-native-macos-tauri, client-native-windows, cli, cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, arch-package, windows-tests, windows-desktop, windows-host]
+    needs: [source, quick, client-frontend, relay, connector, connector-macos, ios, android, client-native-linux, client-native-macos-core, client-native-macos-tauri, client-native-windows, cli, cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, clippy-macos, arch-package, windows-tests, windows-desktop, windows-host]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -1741,6 +1826,7 @@ jobs:
               'cli-macos-core': json.loads(os.environ['RUN_MACOS']),
               'cli-macos-native': json.loads(os.environ['RUN_MACOS']),
               'cli-macos': json.loads(os.environ['RUN_MACOS']),
+              'clippy-macos': json.loads(os.environ['RUN_MACOS']),
               'arch-package': json.loads(os.environ['RUN_ARCH']),
               'connector-macos': json.loads(os.environ['RUN_MACOS']),
               'ios': json.loads(os.environ['RUN_IOS']),

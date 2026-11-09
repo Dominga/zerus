@@ -11,6 +11,7 @@ use std::{
 use objc2::rc::autoreleasepool;
 
 mod original_child;
+pub use original_child::OriginalChildIdentity;
 mod service;
 pub use service::{select_for_service, ChildObservation, ServiceSelection};
 
@@ -74,6 +75,14 @@ impl Selection {
         child: &mut std::process::Child,
     ) -> Result<(), Refusal> {
         original_child::observe(child, &self.original.service, || {
+            same_generation(&self.original, &snapshot()?)
+        })
+    }
+    pub(crate) fn observe_original_helper_identity(
+        &self,
+        child: &mut std::process::Child,
+    ) -> Result<OriginalChildIdentity, Refusal> {
+        original_child::observe_identity(child, &self.original.service, || {
             same_generation(&self.original, &snapshot()?)
         })
     }
@@ -332,6 +341,52 @@ impl Drop for Cf {
         unsafe { CFRelease(self.ptr()) }
     }
 }
+/// Read-only capability optimization: compare a candidate with the ACTUAL
+/// running code, not a reopened path standing in for it. This grants no app
+/// installation, peer, service, custody or execution authority. Callers must
+/// already know which capability their own code implements; any unavailable
+/// signature simply disables the optimization.
+pub fn same_running_code_for_capability(path: &Path) -> bool {
+    if !path.is_absolute() || path.as_os_str().as_encoded_bytes().len() > PATH_BYTES {
+        return false;
+    }
+    autoreleasepool(|_| {
+        (|| -> Result<bool, Refusal> {
+            let own = self_code()?;
+            live_valid(&own, std::ptr::null())?;
+            let own_hash = info_unique(&information(own.ptr())?)?;
+            let bytes = path.as_os_str().as_encoded_bytes();
+            // SAFETY: bounded absolute path; checked retained Copy objects.
+            let url = unsafe {
+                Cf::checked(
+                    0,
+                    CFURLCreateFromFileSystemRepresentation(
+                        std::ptr::null(),
+                        bytes.as_ptr(),
+                        bytes.len() as isize,
+                        0,
+                    ),
+                    CFURLGetTypeID(),
+                )
+            }?;
+            let mut out = std::ptr::null_mut();
+            let code = unsafe {
+                Cf::checked(
+                    SecStaticCodeCreateWithPath(url.ptr(), 0, &mut out),
+                    out,
+                    SecStaticCodeGetTypeID(),
+                )
+            }?;
+            // Capability DATA only: read the code-directory identifier without
+            // page-hashing the static executable or validating app resources.
+            // Actual exec keeps the kernel's page validation and the required
+            // parser boundary. Native admission uses its separate full checks.
+            Ok(info_unique(&information(code.ptr())?)? == own_hash)
+        })()
+        .unwrap_or(false)
+    })
+}
+
 fn self_code() -> Result<Cf, Refusal> {
     let mut out = std::ptr::null_mut();
     // SAFETY: default flags and initialized owned Copy out pointer.

@@ -1,11 +1,14 @@
 //! Named, per-machine native agent profiles. The catalog contains labels, never credentials.
 mod inspection;
+mod claude_usage;
 mod model_defaults;
 mod claude;
 mod claude_settings;
 mod mcp_servers;
 mod permission_catalog;
 mod permission_status;
+mod permission_scope;
+pub(crate) mod marks;
 mod install;
 mod deepseek;
 mod local_model;
@@ -477,11 +480,15 @@ fn list(config: &Config) -> Result<Value> {
     for row in &mut rows {
         let provider = row["provider"].as_str().unwrap_or("").to_owned();
         row["is_default"] = json!(row["id"].as_str() == Some(catalog.defaults.get(&provider).map(String::as_str).unwrap_or(&format!("native-{provider}"))));
-        let mode = catalog.permission_modes.get(row["id"].as_str().unwrap_or("")).map(String::as_str).unwrap_or("provider");
-        permission_status::describe(config, row, mode, &mut catalogs);
+        let explicit = catalog.permission_modes.get(row["id"].as_str().unwrap_or("")).map(String::as_str);
+        // `zerus`: the person chose it; `default`: the Zerus default (T-6hcfnu).
+        row["permission_mode_source"] = json!(if explicit.is_some() { "zerus" } else { "default" });
+        permission_status::describe(config, row, explicit.unwrap_or(default_permission_mode(&provider)), &mut catalogs);
         row["permission_modes"] = json!(permission_modes(&provider));
         model_defaults::describe(row, &catalog);
     }
+    permission_scope::describe(config, &mut rows);
+    marks::describe(config, &mut rows);
     // The connector forwards at most 128 KiB of accounts; this row keeps within 32 KiB.
     #[cfg(unix)]
     for row in rows.iter_mut().filter(|r| r["id"] == "native-opencode" && r["model_options"].is_array()) {
@@ -493,7 +500,7 @@ fn list(config: &Config) -> Result<Value> {
             .contains(r["id"].as_str().unwrap_or(""))
     });
     Ok(
-        json!({"host":config.host(),"profiles":visible,"removed_profiles":removed,"defaults":catalog.defaults,"revision":revision(&bytes),"setup_revision":true,"copy_revision":true}),
+        json!({"host":config.host(),"profiles":visible,"removed_profiles":removed,"defaults":catalog.defaults,"revision":revision(&bytes),"setup_revision":true,"copy_revision":true,"permission_scope_supported":true,"marks_supported":true}),
     )
 }
 pub const AUTH_ENV: &[&str] = &[
@@ -519,12 +526,21 @@ pub const AUTH_ENV: &[&str] = &[
     "CLAUDE_CODE_USE_VERTEX",
     "CLAUDE_CODE_USE_FOUNDRY",
 ];
+/// The permission mode of an account without an explicit choice (owner,
+/// 2026-11-07, T-6hcfnu): bypass for Claude, Codex and Kimi. OpenCode and
+/// DeepSeek keep their native configuration: OpenCode refuses a Zerus mode,
+/// and DeepSeek's bypass needs its own confirmed setup.
+pub fn default_permission_mode(provider: &str) -> &'static str {
+    if matches!(provider, "claude" | "codex" | "kimi") { "bypass" } else { "provider" }
+}
+
 /// Called before state lookup: a resumed/forked record still retains its original native home.
+/// An explicit choice (`provider` or `bypass`) always wins over the default.
 pub fn permission_mode(config: &Config, account: &str, provider: &str) -> Result<String> {
     let id = if account.is_empty() {format!("native-{provider}")} else {account.into()};
     let (profile,_,_) = lookup(config,&id)?;
     if profile.provider != provider { return Err(Error::new(1,"The account belongs to another provider.")); }
-    Ok(decode(&read(config)?)?.permission_modes.get(&id).cloned().unwrap_or_else(||"provider".into()))
+    Ok(decode(&read(config)?)?.permission_modes.get(&id).cloned().unwrap_or_else(||default_permission_mode(provider).into()))
 }
 
 /// Modes Zerus can set for a provider's account or a single launch; `provider`
@@ -644,6 +660,72 @@ pub(crate) fn switch_target(config: &Config, id: &str, provider: &str) -> Result
         ));
     }
     Ok((profile.label, home))
+}
+
+/// Task 352: the agent an account id belongs to on this computer.
+pub(crate) fn provider_of(config: &Config, id: &str) -> Result<String> {
+    Ok(lookup(config, id)?.0.provider)
+}
+
+/// Task 352: an account of another agent a session may move to: the agent is
+/// installed here and, for Claude, Codex and Kimi, the account is signed in.
+/// DeepSeek and OpenCode run on their native configuration. Returns the
+/// agent, the label and the account folder.
+pub(crate) fn move_target(config: &Config, id: &str) -> Result<(String, String, PathBuf)> {
+    let (profile, home, native) = lookup(config, id)?;
+    let provider = profile.provider.clone();
+    if !["claude", "codex", "kimi", "dsh", "opencode"].contains(&provider.as_str()) {
+        return Err(Error::new(1, format!("Account '{id}' belongs to an agent Zerus cannot start ({provider}).")));
+    }
+    if !agent_installed(&provider) {
+        return Err(Error::new(
+            1,
+            format!("{} is not installed on {}; install it in Accounts before moving a session to it.", agent_name(&provider), config.host()),
+        ));
+    }
+    if ["claude", "codex", "kimi"].contains(&provider.as_str()) {
+        if !native && !home.is_dir() {
+            return Err(Error::new(1, format!("Account '{id}' has no profile folder on this computer; log in to it first.")));
+        }
+        if !signed_in(&home, &provider, native) {
+            return Err(Error::new(
+                1,
+                format!("Account '{id}' is not signed in on {}; log in to it before moving a session.", config.host()),
+            ));
+        }
+    }
+    Ok((provider, profile.label, home))
+}
+
+/// An agent's name as the owner reads it.
+pub(crate) fn agent_name(provider: &str) -> &'static str {
+    match provider {
+        "claude" => "Claude Code",
+        "codex" => "Codex",
+        "kimi" => "Kimi",
+        "dsh" => "DeepSeek",
+        "opencode" => "OpenCode",
+        _ => "This agent",
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests name the agents installed on their computer.
+    static TEST_INSTALLED: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_installed(agents: Option<&[&str]>) {
+    TEST_INSTALLED.with(|cell| *cell.borrow_mut() = agents.map(|agents| agents.iter().map(|agent| (*agent).to_owned()).collect()));
+}
+
+fn agent_installed(provider: &str) -> bool {
+    #[cfg(test)]
+    if let Some(agents) = TEST_INSTALLED.with(|cell| cell.borrow().clone()) {
+        return agents.iter().any(|agent| agent == provider);
+    }
+    platform::available(provider)
 }
 
 /// Whether the account has a sign-in to run with: a credential file, a keychain
@@ -899,17 +981,21 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             if !dry {save(config,&catalog)?;}println!("{}",list(config)?);
         },
         "permissions"=>{
-            let mode=arg(args,"--mode").ok_or_else(||Error::new(1,"Choose provider, bypass or a native permission selection."))?;
+            let mode=arg(args,"--mode").ok_or_else(||Error::new(1,"Choose provider, bypass, default or a native permission selection."))?;
             // Probe and validate outside the account lock. The lock is taken
             // only for the revision-checked write below.
             let bytes=read(config)?;check_revision(&bytes,args)?;let original=bytes.clone();let snapshot=decode(&bytes)?;
             if !native_id(id) && !snapshot.profiles.contains_key(id) {return Err(Error::new(1,"Account profile does not exist."));}
             if id=="native-opencode" && mode!="provider" {return Err(Error::new(1,"OpenCode permissions are managed in its native configuration"));}
             let provider=if native_id(id) {id.trim_start_matches("native-").to_owned()} else {snapshot.profiles[id].provider.clone()};
-            validate_permission_mode(&provider,mode)?;
             let home=if native_id(id) {native_home(config,&provider)} else {profile_home(config,id)};
-            permission_catalog::validate_for_account(config,&provider,&home,mode)?;
-            let normalized=normalize_permission_mode(mode)?;
+            // `default` returns to the Zerus default; every other mode is checked
+            // against the provider's fresh options before it is stored.
+            let normalized=if mode=="default" {"default".to_owned()} else {
+                validate_permission_mode(&provider,mode)?;
+                permission_catalog::validate_for_account(config,&provider,&home,mode)?;
+                normalize_permission_mode(mode)?
+            };
             let _lock=locked(config)?;let bytes=read(config)?;check_revision(&bytes,args)?;
             if bytes != original {return Err(Error::new(1,"Account catalog changed while its permission options were checked; retry."));}
             let mut catalog=decode(&bytes)?;
@@ -918,10 +1004,19 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             if current_provider != provider {return Err(Error::new(1,"Account changed while its permission options were checked; retry."));}
             let current_home=if native_id(id) {native_home(config,&current_provider)} else {profile_home(config,id)};
             if current_home != home {return Err(Error::new(1,"Account changed while its permission options were checked; retry."));}
-            if normalized=="provider" {catalog.permission_modes.remove(id);}
+            // A shared change names the scope it saw; a computer that keeps
+            // its permissions per computer since then refuses it (zerus-f0uz8).
+            if let Some(expected)=arg(args,"--expect-scope") {
+                if !permission_scope::is(config,id,expected) {return Err(Error::new(1,"Permissions on this account changed between shared and per computer. Refresh before saving."));}
+            }
+            // Both choices are kept: an explicit provider mode must stay when
+            // the default is bypass (T-6hcfnu); `default` returns to it.
+            if normalized=="default" {catalog.permission_modes.remove(id);}
             else {catalog.permission_modes.insert(id.into(),normalized);}
             if !dry {save(config,&catalog)?;}println!("{}",list(config)?);
         },
+        "permission-scope"=>{println!("{}",permission_scope::set(config,args,dry)?);},
+        "mark"=>{println!("{}",marks::set(config,args,dry)?);},
         "rename"=>{
             let label=arg(args,"--label").ok_or_else(||Error::new(1,"Account name is required."))?.trim();validate_label(label)?;
             let _lock=locked(config)?;let bytes=read(config)?;check_revision(&bytes,args)?;let mut catalog=decode(&bytes)?;
@@ -1040,7 +1135,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             }
             return Ok(code);
         },
-        _=>return Err(Error::new(1,"usage: hgs account ls | add ID --provider codex|claude|kimi --label NAME [--ollama MODEL [--endpoint URL] [--context TOKENS] [--prepare COMMAND]] | ollama-models [--endpoint URL] | rm ID | login ID | favorite native-opencode --model PROVIDER/MODEL --favorite on|off --request-id UUID | models native-opencode [--location DIR]")),
+        _=>return Err(Error::new(1,"usage: hgs account ls | add ID --provider codex|claude|kimi --label NAME [--ollama MODEL [--endpoint URL] [--context TOKENS] [--prepare COMMAND]] | ollama-models [--endpoint URL] | rm ID | login ID | permission-scope ID --scope account|computer | mark ID --color #RRGGBB|none --emoji EMOJI|none | favorite native-opencode --model PROVIDER/MODEL --favorite on|off --request-id UUID | models native-opencode [--location DIR]")),
     }
     Ok(0)
 }
@@ -1267,7 +1362,8 @@ fn transport(
                 "Account transfer requires a configured, enabled machine.",
             ));
         }
-        command = platform::ssh();
+        let remote = crate::remote_shell::hgs(config, host, args)?;
+        command = crate::ssh_bytes::command(&remote)?;
         command.args([
             "-o",
             "BatchMode=yes",
@@ -1283,7 +1379,7 @@ fn transport(
         command
             .args(crate::machines::ssh_options(config, host))
             .arg(host)
-            .arg(crate::windows_peer::hgs(config, host, args)?);
+            .arg(remote);
     }
     command.stdin(Stdio::null()).stderr(Stdio::null());
     let ssh = platform::spawn_ssh(
@@ -1428,23 +1524,50 @@ fn copy_account(config: &Config, args: &[String], dry: bool) -> Result<Value> {
 
 /// Account selection is reapplied after shell startup on resume/fork as on initial launch.
 #[cfg(unix)]
-pub fn run_script(account: &str, provider: &str, home: &str, extra: &[String]) -> String {
+pub fn run_script(
+    shell: &str,
+    account: &str,
+    provider: &str,
+    home: &str,
+    extra: &[String],
+) -> String {
     let mut environment = run_environment(account, provider, home);
     environment.extend_from_slice(extra);
-    supervisor_script(&environment)
+    supervisor_script(shell, &environment)
+}
+
+/// Known login-shell argument contracts only. Other shells still launch agents
+/// through POSIX sh using the inherited environment and its login profile;
+/// their own rc files are not interpreted as another language.
+#[cfg(unix)]
+pub fn supervisor_shell(shell: &str) -> (&str, &'static str) {
+    match Path::new(shell).file_name().and_then(|name| name.to_str()) {
+        Some("sh" | "bash" | "dash" | "ash" | "ksh" | "ksh93" | "zsh" | "fish") => (shell, "-lic"),
+        _ => ("/bin/sh", "-lc"),
+    }
 }
 
 /// Explicit assignments follow login-shell startup, ahead of the unchanged
 /// supervisor and native arguments. The empty hint exclusion list is explicit.
 #[cfg(unix)]
-pub fn supervisor_script(environment: &[String]) -> String {
+pub fn supervisor_script(shell: &str, environment: &[String]) -> String {
+    let fish = Path::new(shell)
+        .file_name()
+        .is_some_and(|name| name == "fish");
+    let arguments = if fish {
+        "\"$argv[1]\" --run $argv[2..-1]"
+    } else {
+        "\"$0\" --run \"$@\""
+    };
     if environment.is_empty() {
-        return "exec \"$0\" --run \"$@\"".into();
+        return format!("exec {arguments}");
     }
-    format!(
-        "exec env {} \"$0\" --run \"$@\"",
+    let assignments = if fish {
+        platform::remote_join(environment)
+    } else {
         platform::join(environment)
-    )
+    };
+    format!("exec env {assignments} {arguments}")
 }
 
 /// The account variables a resumed or forked session's supervisor starts with
@@ -1485,10 +1608,31 @@ mod permission_tests {
 
     #[cfg(unix)]
     #[test]
+    fn login_shell_syntax_is_explicit_and_unknown_shells_use_posix_instead() {
+        for shell in ["/bin/bash", "/bin/sh", "/bin/zsh", "/bin/fish"] {
+            assert_eq!(supervisor_shell(shell), (shell, "-lic"));
+        }
+        for shell in [
+            "/bin/nu",
+            "/bin/xonsh",
+            "/bin/tcsh",
+            "/private/custom-shell",
+        ] {
+            assert_eq!(supervisor_shell(shell), ("/bin/sh", "-lc"));
+        }
+        let fish = supervisor_script("/bin/fish", &["HGS_AGENT_HINT_OFF=quoted ' value;".into()]);
+        assert!(fish.contains("\"$argv[1]\" --run $argv[2..-1]"));
+        assert!(!fish.contains("$0") && !fish.contains("$@"));
+        let words = shell_words::split(&fish).unwrap();
+        assert_eq!(words[2], "HGS_AGENT_HINT_OFF=quoted ' value;");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn agent_hint_effective_values_follow_shell_startup_without_config_redirect_or_argv_change() {
         let hint = vec!["HGS_AGENT_HINT=1".into(), "HGS_AGENT_HINT_OFF=".into()];
         let script = run_script(
-            "work-account",
+            "/bin/bash", "work-account",
             "claude",
             "/private/profile with space",
             &hint,
@@ -1500,9 +1644,9 @@ mod permission_tests {
         assert!(words.contains(&"HGS_ACCOUNT_ID=work-account".into()));
         assert_eq!(&words[words.len() - 5..words.len() - 3], hint.as_slice());
         assert!(!words.iter().any(|word| word.starts_with("HGS_CONFIG_DIR=")));
-        assert_eq!(supervisor_script(&[]), "exec \"$0\" --run \"$@\"");
+        assert_eq!(supervisor_script("/bin/bash", &[]), "exec \"$0\" --run \"$@\"");
         assert_eq!(
-            shell_words::split(&run_script("", "codex", "", &hint)).unwrap(),
+            shell_words::split(&run_script("/bin/bash", "", "codex", "", &hint)).unwrap(),
             [
                 "exec",
                 "env",
@@ -1517,7 +1661,7 @@ mod permission_tests {
             "HGS_AGENT_HINT=1".into(),
             "HGS_AGENT_HINT_OFF=work 'quoted' $(not-executed)".into(),
         ];
-        let words = shell_words::split(&supervisor_script(&quoted)).unwrap();
+        let words = shell_words::split(&supervisor_script("/bin/bash", &quoted)).unwrap();
         assert_eq!(&words[2..4], quoted.as_slice());
     }
     #[test]

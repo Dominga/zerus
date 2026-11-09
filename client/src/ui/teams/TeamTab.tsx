@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, type JSX } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount, type JSX } from "solid-js";
 import { tr } from "../../i18n";
 import { AgentGlyph, Icon } from "../lib/icons";
 import { agentKind, computerOffline } from "../../store/catalog";
@@ -8,6 +8,8 @@ import { SHARE, SIDE, dragShare, dragSide, teamLayout, type TeamLayout } from ".
 import { selected, setDetailTab, setPage, setSelectedKey, subagentOpen, toast } from "../../store/ui";
 import { teamAction, teamBuilds, teamTests, teamTimeline, teamsProfile } from "../../bridge";
 import { AddMemberDialog, MemberCard, toComposer } from "./MemberCard";
+import { TeamBar } from "./team-bar";
+import { openRow } from "./openRow";
 import { focusedTasks, memberTree } from "./members";
 import { sideLists, type SideTarget } from "./sideLists";
 import { TeamActions as TeamActionsModel } from "./actions";
@@ -27,13 +29,17 @@ import { duration, memberProgress, memberStatus, progress, shownMembers, stateLa
 import { roleStyle } from "./roles";
 import { TeamProposals } from "./ProposalCards";
 import { ledTeamOf, leadsTeam } from "./leadTeam";
-import { TeamReports } from "./TeamReports";
+import { ArchivedTaskReport, TeamReports } from "./TeamReports";
+import { WorkingModeRow } from "./WorkingModeRow";
+import { closeWorkingMode, markWorkingModeKept, workingModeShown } from "../../store/workingMode";
 import { WaitingBanner } from "./Waiting";
-import { Blockers, PhaseActions, TaskActions, TeamBarActions, TeamBarChips, TeamModeControl, TeamQuestions, createPlanEditing } from "./TeamActions";
+import { Blockers, PhaseActions, TaskActions, TeamQuestions, createPlanEditing } from "./TeamActions";
+import { noReportReply } from "./noReport";
 import { TeamActions as TeamActionModel } from "./actions";
 import { composer } from "../../store/composer";
 import type { ComputerId, TeamCall, TeamMemberView, TeamTaskView, TeamView } from "../../types";
 import type { Session } from "../sessions/types";
+import { TextArea } from "../lib/TextField";
 
 // The Team tab (Qt's TeamWorkspace, design D3, HANDOFF §14): the team bar and
 // its strips, the canvas, and a side column split between the members and the
@@ -92,6 +98,9 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [catalogOpen, setCatalogOpen] = createSignal(false);
   const [tests, setTests] = createSignal<TeamTestsView | null>(null);
+  const [reportTask, setReportTask] = createSignal<number | null>(null);
+  const reportTeam = createMemo(() => props.team.id);
+  createEffect(() => { props.computer; reportTeam(); setReportTask(null); });
   const graph = () => teams.graph(props.computer, props.team.id);
   const profile = () => teams.profile(props.computer, props.team.id);
   // Task 196: the phase header's actions (PhaseActions) replace the plan's
@@ -174,24 +183,19 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
         onSettings={() => setSettingsOpen(true)}
         onCatalog={() => setCatalogOpen(true)} />
       <WaitingBanner />
-      <TeamReports computer={props.computer} team={props.team} />
-      <Show when={props.team.working_mode?.disagreeing?.length ? props.team.working_mode.disagreeing : undefined}>
-        {(wrong) => (
-          <section class="team-working-mode" data-working-mode={props.team.working_mode!.preset}>
-            <b>{tr("Working mode: the project suggests %1", props.team.working_mode!.proposal?.title || props.team.working_mode!.proposal?.preset || props.team.working_mode!.preset)}</b>
-            <p>{tr("This team's settings differ: %1", wrong().join(", "))}</p>
-            <Show when={props.team.working_mode!.proposal?.reasons?.length}>
-              <ul><For each={props.team.working_mode!.proposal!.reasons}>{(reason) => <li>{reason}</li>}</For></ul>
-            </Show>
-            <button type="button" class="btn small" data-working-mode-switch
-              onClick={() => void new TeamActionModel(windowPort, () => ({ computer: props.computer, team: props.team }))
-                .proposeWorkingMode(props.team.working_mode!.proposal?.preset || props.team.working_mode!.preset,
-                  props.team.working_mode!.proposal?.title || "")}>
-              {tr("Propose the switch")}
-            </button>
-            <TeamProposals computer={props.computer} team={props.team} />
-          </section>
-        )}
+      <TeamReports computer={props.computer} team={props.team} onOpenReport={setReportTask} />
+      <Show when={reportTask()}>{(task) => <ArchivedTaskReport computer={props.computer} team={reportTeam()} task={task()} onClose={() => setReportTask(null)} />}</Show>
+      <Show when={workingModeShown(props.team)}>
+        <WorkingModeRow preset={props.team.working_mode!.preset}
+          title={props.team.working_mode!.proposal?.title || props.team.working_mode!.proposal?.preset || props.team.working_mode!.preset}
+          reasons={props.team.working_mode!.proposal?.reasons ?? []}
+          disagreeing={props.team.working_mode!.disagreeing ?? []}
+          onKeep={() => void new TeamActionModel(windowPort, () => ({ computer: props.computer, team: props.team }))
+            .keepWorkingMode().then((outcome) => { if (outcome && outcome !== "cancelled") markWorkingModeKept(props.team); })}
+          onPropose={() => void new TeamActionModel(windowPort, () => ({ computer: props.computer, team: props.team }))
+            .proposeWorkingMode(props.team.working_mode!.proposal?.preset || props.team.working_mode!.preset,
+              props.team.working_mode!.proposal?.title || "")}
+          onClose={() => closeWorkingMode(props.team)} />
       </Show>
       <Show when={props.failure}><div class="team-strip danger" role="status"><Icon name="circle-alert" size={14} /><span class="ell">{props.failure}</span></div></Show>
       <Show when={state() === "stuck"}>
@@ -244,10 +248,13 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
                 onLoadProfile={() => { void teamsProfile(props.computer); }}
                 loadTimeline={(phase) => teamTimeline(props.computer, props.team.id, phase)}
                 onLoadTests={loadTests}
+                onOpenReport={setReportTask}
                 taskActions={(id) => {
                   const task = props.team.tasks.find((candidate) => candidate.id === id);
-                  return task ? <TaskActions computer={props.computer} team={props.team} task={task} /> : <></>;
+                  return task && !task.archived ? <TaskActions computer={props.computer} team={props.team} task={task} /> : <></>;
                 }}
+                noReportReply={(id) => noReportReply(teams.inbox(props.computer, props.team.id)?.items ?? [], id)}
+                onUseLastReply={(task) => void new TeamActionModel(windowPort, () => ({ computer: props.computer, team: props.team })).useLastReply(task)}
                 phaseActions={(n) => <PhaseActions computer={props.computer} team={props.team} phase={n} owner={props.owner} />}
                 editing={plan.editing()}
                 problems={planProblems()}
@@ -281,71 +288,6 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
         <TeamCatalogEditor onOpenDesigner={() => { setCatalogOpen(false); setPage("designer"); }} />
       </Show>
     </>
-  );
-}
-
-/**
- * Task 40: Send back's message reaches the coordinator through its composer
- * (the Tauri client sends a session message only from a composer): the
- * coordinator becomes the selected session, keeps the Team tab, and the
- * message waits in its composer for the owner's Send.
- */
-function toCoordinator(computer: ComputerId, team: TeamView, text: string) {
-  // A draft already typed stays; the message follows it (MemberCard toComposer).
-  toComposer(computer, team.members.find((member) => member.lead), text);
-}
-
-function TeamBar(props: {
-  computer: ComputerId;
-  team: TeamView;
-  state: string;
-  problemTasks: ReadonlySet<number>;
-  onPhase: (phase: number) => void;
-  onSettings: () => void;
-  onCatalog: () => void;
-}) {
-  const [finishOpen, setFinishOpen] = createSignal(false);
-  // U59: the owner's planning mode for the approval (none: as the lead planned).
-  const [freeMode, setFreeMode] = createSignal(false);
-  const counts = createMemo(() => progress(props.team, props.problemTasks));
-  const [now, setNow] = createSignal(Date.now() / 1000);
-  const clock = setInterval(() => setNow(Date.now() / 1000), 60_000);
-  onCleanup(() => clearInterval(clock));
-  const share = (n: number) => (counts().total ? `${(n / counts().total) * 100}%` : "0%");
-  return (
-    <header class="team-bar">
-      <Icon name="users" size={16} />
-      <b class="team-name ell" title={props.team.goal || props.team.name}>{props.team.name}</b>
-      <span class={`team-badge tone-${stateTone(props.state)}`} data-state={props.state}>{stateLabel(props.state)}</span>
-      <TeamModeControl computer={props.computer} team={props.team} />
-      <div class="team-progress" role="img" aria-label={tr("%1 of %2 tasks accepted", counts().accepted, counts().total)}
-        title={tr("%1 of %2 tasks accepted", counts().accepted, counts().total)}>
-        <i class="seg accepted" style={{ width: share(counts().accepted) }} />
-        <i class="seg submitted" style={{ width: share(counts().submitted) }} />
-        <i class="seg active" style={{ width: share(counts().active) }} />
-        <i class="seg problem" style={{ width: share(counts().problems) }} />
-      </div>
-      <span class="mono team-count">{counts().accepted}/{counts().total}</span>
-      <button type="button" class="btn ghost small" onClick={props.onSettings}>{tr("Team settings")}</button>
-      <button type="button" class="btn ghost small" onClick={props.onCatalog}>{tr("Catalog")}</button>
-      <Show when={props.team.created > 0}><span class="dim team-age" title={tr("Since the team was created")}>{duration(now() - props.team.created)}</span></Show>
-      <span class="grow" />
-      <TeamBarChips team={props.team} onPhase={props.onPhase} onFinish={() => setFinishOpen(true)} onLead={() => {
-        // Task 95: the lead's session shows what it waits on.
-        const lead = props.team.members.find((member) => member.lead);
-        if (lead) openRow(memberRow(props.computer, lead));
-      }} />
-      <Show when={props.state === "planning"}><span class="team-note">{tr("The plan waits for your approval")}</span></Show>
-      <Show when={props.state === "done"}><span class="team-note done"><Icon name="check" size={13} />{tr("All tasks are decided")}</span></Show>
-      <Show when={props.team.status === "planning"}>
-        <label class="team-proposal-option" title={tr("One open phase that takes tasks as they come until you close it")}>
-          <input type="checkbox" checked={freeMode()} onChange={(event) => setFreeMode(event.currentTarget.checked)} />{tr("Free planning")}
-        </label>
-      </Show>
-      <TeamBarActions computer={props.computer} team={props.team} planMode={freeMode() ? "free" : ""}
-        sendToCoordinator={(text) => toCoordinator(props.computer, props.team, sendBackMessage(text))}
-        finishOpen={finishOpen} setFinishOpen={setFinishOpen} />
-    </header>
   );
 }
 
@@ -440,6 +382,8 @@ function SideColumn(props: {
 }) {
   const members = createMemo(() => shownMembers(props.team));
   const lead = createMemo(() => props.team.members.find((member) => member.lead));
+  // Task #347: the Members header explains the card colours on hover.
+  const memberLegend = () => tr("State colours: working, building and running tests are blue; waiting for its own job, for the lead or for a person is amber; needs your answer, blocked or failed is red; idle or done is grey; paused or offline is muted and hatched.");
   // Spec 5.6: the members as a tree; a folded sub-lead hides its reports.
   const [folded, setFolded] = createSignal<Set<string>>(new Set());
   const tree = createMemo(() => {
@@ -456,7 +400,7 @@ function SideColumn(props: {
       <SideLists team={props.team} onGo={props.onGo} />
       <TeamQuestions computer={props.computer} team={props.team} />
       <section class="team-members" style={{ height: `${teamLayout.membersShare()}%` }} aria-label={tr("Members")}>
-        <div class="team-section-head"><b>{tr("Members")}</b><span class="dim mono">{members().length}</span>
+        <div class="team-section-head" title={memberLegend()}><b>{tr("Members")}</b><span class="dim mono">{members().length}</span>
           <span class="grow" />
           <Show when={canAdd()}>
             <button type="button" class="btn ghost small" data-action="add-member" title={tr("Add a member; it starts with the first task it gets")} onClick={() => setAdding(true)}>{tr("+ Member")}</button>
@@ -479,12 +423,6 @@ function SideColumn(props: {
       <Coordinator computer={props.computer} team={props.team} lead={lead()} status={lead() ? props.statuses.get(lead()!.id) : undefined} />
     </div>
   );
-}
-
-function openRow(row: Session | undefined) {
-  if (!row) return;
-  setSelectedKey(row.key);
-  setDetailTab("activity");
 }
 
 /**
@@ -552,7 +490,7 @@ export function LeadConversation(props: { computer: ComputerId; lead?: Pick<Team
       {props.children}
       <Show when={own()} fallback={
         <div class="cmp-col team-coordinator-draft">
-          <textarea class="field" rows={2} data-coordinator-draft aria-label={props.label} placeholder={props.placeholder} value={text()}
+          <TextArea class="field" rows={2} data-coordinator-draft aria-label={props.label} placeholder={props.placeholder} value={text()}
             onInput={(event) => setText(event.currentTarget.value)}
             onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); carry(); } }} />
           <button class="btn small primary" data-coordinator-send onClick={carry}>{props.send}</button>

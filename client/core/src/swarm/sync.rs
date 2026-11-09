@@ -1335,6 +1335,176 @@ mod tests {
         );
     }
 
+    const R2: &str = "workstation\ncodex/aurora/orders";
+    const R3: &str = "workstation\nkimi/notes/plan";
+
+    /// `swarm get` with three sessions, each in its project with its heads.
+    fn selection_state(digest: &str, places: [(&str, &str, &str); 3]) -> Value {
+        let mut value = state(digest, "ungrouped", &["op-0"]);
+        let mut versions = Map::new();
+        versions.insert(alpha_name(), json!(["op-a1"]));
+        for project in value["organization"]["projects"].as_array_mut().unwrap() {
+            project["sessions"] = json!([]);
+        }
+        for (member, project, head) in places {
+            let session = member.split_once('\n').unwrap().1;
+            versions.insert(
+                json!({"kind": "session", "machine": "m-1", "session": session}).to_string(),
+                json!([head]),
+            );
+            let list = value["organization"]["projects"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|p| p["id"] == project)
+                .unwrap();
+            list["sessions"].as_array_mut().unwrap().push(json!(member));
+        }
+        value["versions"] = Value::Object(versions);
+        value
+    }
+
+    #[test]
+    fn a_selection_moves_in_one_apply_from_one_observed_state_and_a_second_writer_never_changes_it()
+    {
+        // zerus-5wmh.18.1: Move to project for a selection is one intent.
+        let mut sync = Controller::default();
+        let seen = selection_state(
+            "d1",
+            [
+                (R, "alpha", "op-1"),
+                (R2, "alpha", "op-2"),
+                (R3, "ungrouped", "op-3"),
+            ],
+        );
+        assert!(sync.observe(observation(seen.clone()), 0));
+        let ticket = sync
+            .edit(
+                &Intent::Move {
+                    members: vec![R.into(), R2.into(), R3.into()],
+                    project: "beta".into(),
+                    before: None,
+                },
+                0,
+            )
+            .unwrap();
+        let sent = input(sync.due(120));
+        assert_eq!(
+            sent["base"],
+            crate::swarm::edit::shared(&seen["organization"])
+        );
+        assert_eq!(
+            sent["versions"], seen["versions"],
+            "base and versions from the one observed state"
+        );
+        let placed = crate::swarm::members(&sent["desired"]);
+        assert_eq!(
+            [&placed[R], &placed[R2], &placed[R3]],
+            ["beta", "beta", "beta"]
+        );
+        assert!(
+            matches!(sync.due(10_000), Due::Nothing),
+            "one apply for the whole selection"
+        );
+        // Another writer moves R2 to the Inbox while the apply runs: what was sent stays as it was.
+        let other = selection_state(
+            "d2",
+            [
+                (R, "alpha", "op-1"),
+                (R2, "ungrouped", "op-9"),
+                (R3, "ungrouped", "op-3"),
+            ],
+        );
+        assert!(!sync.observe(observation(other), 200), "an apply runs");
+        // hgs writes each member with its own observed heads: R2 is a conflict for review, R and R3 land.
+        let mut answer = selection_state(
+            "d3",
+            [
+                (R, "beta", "op-4"),
+                (R2, "beta", "op-5"),
+                (R3, "beta", "op-6"),
+            ],
+        );
+        let r2 = json!({"kind": "session", "machine": "m-1", "session": "codex/aurora/orders"})
+            .to_string();
+        answer["conflicts"] =
+            json!([{"key": r2, "field": {"kind": "session"}, "selected": "op-5", "variants": []}]);
+        // The reply names every member it wrote; R2's is the one with a concurrent head.
+        let r3 =
+            json!({"kind": "session", "machine": "m-1", "session": "kimi/notes/plan"}).to_string();
+        let mut wrote = answer.clone();
+        wrote["written"] = json!({review(): ["op-4"], r2.clone(): ["op-5"], r3: ["op-6"]});
+        let exit = Exit::Code {
+            code: 0,
+            stdout: serde_json::to_vec(&wrote).unwrap(),
+            stderr: String::new(),
+        };
+        assert_eq!(
+            sync.finish(exit, 300),
+            [(ticket, EditOutcome::Done { conflicts: 1 })]
+        );
+        assert_eq!(sync.view().conflicts, 1);
+        // The next edit starts from the adopted reply, never from the base the second writer superseded.
+        assert!(sync.observe(observation(answer.clone()), 400));
+        sync.edit(&to("alpha"), 500).unwrap();
+        let next = input(sync.due(620));
+        assert_eq!(
+            next["base"],
+            crate::swarm::edit::shared(&answer["organization"])
+        );
+        assert_eq!(next["versions"], answer["versions"]);
+    }
+
+    #[test]
+    fn a_selection_move_pending_at_exit_is_restored_and_waits_for_the_first_state() {
+        // zerus-5wmh.18.1: a failed batch move stays in the draft with its base, desired state and versions.
+        let mut sync = Controller::default();
+        let seen = selection_state(
+            "d1",
+            [
+                (R, "alpha", "op-1"),
+                (R2, "alpha", "op-2"),
+                (R3, "alpha", "op-3"),
+            ],
+        );
+        assert!(sync.observe(observation(seen.clone()), 0));
+        sync.edit(
+            &Intent::Move {
+                members: vec![R.into(), R2.into(), R3.into()],
+                project: "beta".into(),
+                before: None,
+            },
+            0,
+        )
+        .unwrap();
+        let sent = input(sync.due(120));
+        let failed = Exit::Code {
+            code: 1,
+            stdout: Vec::new(),
+            stderr: "busy".into(),
+        };
+        let _ = sync.finish(failed, 200);
+        let draft = written(&mut sync).expect("the pending move is written");
+        let DraftWrite::Save(saved) = draft else {
+            panic!("a saved draft")
+        };
+        let mut restarted = Controller::default();
+        restarted.restore(serde_json::from_slice(&saved).unwrap());
+        assert!(
+            matches!(restarted.due(10_000), Due::Nothing),
+            "nothing before the first state"
+        );
+        assert!(
+            !restarted.observe(observation(seen), 20_000),
+            "not adopted under the draft"
+        );
+        let resent = input(restarted.due(20_000 + FLUSH_MS));
+        assert_eq!(
+            (&resent["base"], &resent["desired"], &resent["versions"]),
+            (&sent["base"], &sent["desired"], &sent["versions"])
+        );
+    }
+
     #[test]
     fn an_edit_that_changes_nothing_shared_sends_nothing() {
         let mut sync = ready();

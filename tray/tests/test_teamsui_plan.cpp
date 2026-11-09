@@ -2310,7 +2310,7 @@ void TestTeamsUiPlan::spawnedFromHasItsOwnLinkAndLegend()
     TeamPanel panel(&controller);
     TeamWorkspace workspace(&controller, &panel);
     workspace.setLive(prototypeLive);
-    workspace.resize(1200, 800);
+    workspace.resize(2000, 800);
     workspace.show();
     controller.refresh();
     panel.showTeam("team-1");

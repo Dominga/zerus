@@ -137,6 +137,7 @@ export function summaryText(u: Usage) {
   if (u.status === "configured") return u.provider === "opencode" ? tr("Configured") : tr("API key");
   if (u.status === "signed_out") return tr("Sign in required");
   if (u.status === "expired") return tr("Sign-in expired");
+  if (u.status === "rate_limited") return tr("Rate limited");
   if (u.status === "unavailable" || u.refresh_error || u.offline) return tr("limits n/a");
   return tr("Unavailable");
 }
@@ -145,6 +146,7 @@ export function summaryText(u: Usage) {
 export function stateText(u: Usage) {
   const s = u.status;
   if (!s || s === "loading") return tr("Loading account details…");
+  if (s === "rate_limited") return tr("Usage refresh is rate limited. Previous limits remain visible; sign-in is unchanged.");
   if (s === "configured" && u.provider === "opencode") return tr("OpenCode uses its native provider configuration. Usage is not available here.");
   if (s === "configured") return tr("API key configured. Usage is available in the DeepSeek console.");
   if (u.offline || s === "offline") return tr("Machine is offline. Showing the last available account data.");
@@ -162,6 +164,23 @@ export const dayTime = (seconds: number, withSeconds = false) => dayTimeOf(new D
 
 /** Qt's "HH:mm" in local time. */
 export const clock = (seconds: number) => clockOf(new Date(seconds * 1000));
+
+export const usageRetryWaiting = (u: Usage, now: number) => u.status === "rate_limited" && (u.retry_at ?? 0) > now;
+
+/**
+ * Shown beside retained meters in both the footer and account views. A
+ * tooltip names clock times instead of ages and countdowns, so it never
+ * changes while it shows (zerus-5ryrx, zerus-f5gta).
+ */
+export function rateLimitNotice(u: Usage, now: number, tooltip = false) {
+  if (u.status !== "rate_limited") return "";
+  const age = u.checked_at === null ? tr("No saved limits, rate limited")
+    : tooltip ? tr("Limits from %1, rate limited", clock(u.checked_at))
+    : tr("Limits %1 min ago, rate limited", Math.max(0, Math.floor((now - u.checked_at) / 60)));
+  const retry = !usageRetryWaiting(u, now) ? tr("Refresh to check limits.")
+    : tooltip ? tr("Retry at %1", clock(u.retry_at!)) : tr("Retry in %1 s", Math.ceil(u.retry_at! - now));
+  return `${age}. ${retry}`;
+}
 
 /** AccountUsage::tooltip (AccountUsage.h:197-219). */
 export function accountTooltip(u: Usage, now: number) {
@@ -185,6 +204,7 @@ export function accountTooltip(u: Usage, now: number) {
   if (u.refreshing) lines.push(tr("Updating… Previous values remain visible."));
   else if (u.refresh_error) lines.push(tr("Update failed. Showing the last available values."));
   if (u.offline) lines.push(tr("Machine is offline."));
+  if (u.status === "rate_limited") lines.push(rateLimitNotice(u, now, true));
   if (!u.windows.length && !u.balances.length) lines.push(stateText(u));
   lines.push(tr("Updates every 5 minutes. Open account details."));
   return lines.join("\n");
@@ -218,7 +238,7 @@ export function exhausted(u: Usage, now: number) {
       : tr("%1 limit reached. Reset time is unavailable", period(w)));
   }
   const text = lines.join("\n");
-  return text && (u.offline || u.refresh_error) ? tr("Last reported usage: %1. Refresh to check current limits.", text) : text;
+  return text && (u.offline || u.refresh_error || u.status === "rate_limited") ? tr("Last reported usage: %1. Refresh to check current limits.", text) : text;
 }
 
 export interface ExhaustedSummary { label: string; shortLabel: string; remaining: string }
@@ -248,3 +268,43 @@ export function usageChipPercent(u: Usage, now: number): number | undefined {
   return highest === undefined ? undefined : Math.round(highest);
 }
 
+/**
+ * Task #351: what the composer's usage chip draws. Claude and Codex get the
+ * account's windows (the two bars, the weekly percent and the days to its
+ * reset); a DeepSeek (dsh) session gets its balance, or says why it is unknown.
+ */
+export interface UsageChipView {
+  kind: "windows" | "balance";
+  /** The current windows, in the provider's order; the meters draw two. */
+  windows: UsageWindow[];
+  /** The weekly window (10080 minutes), else the longest one reported. */
+  weekly?: UsageWindow;
+  /** The weekly used share, rounded. */
+  percent?: number;
+  /** The days and hours until the weekly reset ("3d 4h"). */
+  reset?: string;
+  /** The DeepSeek balance, as the provider words it. */
+  balance?: string;
+  /** Why there is no balance. */
+  reason?: string;
+  /** The chip's one line. */
+  label: string;
+}
+
+export function usageChipView(u: Usage, now: number, agent = ""): UsageChipView {
+  const provider = (u.provider || agent).toLowerCase();
+  if (provider === "dsh" || provider === "deepseek") {
+    const b = u.balances[0];
+    if (b) return { kind: "balance", windows: [], balance: `${b.balance} ${b.currency}`, label: tr("Balance %1", `${b.balance} ${b.currency}`) };
+    return { kind: "balance", windows: [], reason: stateText(u), label: tr("Balance unknown") };
+  }
+  const windows = windowsAt(u.windows, now).filter(current);
+  // The weekly window is the 7-day one; failing that, the longest reported.
+  const weekly = windows.find((w) => w.minutes === 10080)
+    ?? windows.reduce<UsageWindow | undefined>((longest, w) => (!longest || (w.minutes ?? 0) > (longest.minutes ?? 0) ? w : longest), undefined);
+  const percent = weekly ? Math.round(weekly.used) : undefined;
+  const reset = weekly && weekly.resetsIn !== null ? remaining(weekly.resetsIn) : undefined;
+  const label = percent === undefined ? tr("Usage available")
+    : reset ? tr("Usage %1%, resets in %2", percent, reset) : tr("Usage %1%", percent);
+  return { kind: "windows", windows, weekly, percent, reset, label };
+}

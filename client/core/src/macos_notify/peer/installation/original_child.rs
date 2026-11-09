@@ -12,6 +12,29 @@ const TASK_AUDIT_TOKEN: u32 = 15;
 const AUDIT_COUNT: u32 = 8;
 const _: () = assert!(std::mem::size_of::<AuditToken>() == AUDIT_COUNT as usize * 4);
 
+/// Point-in-time correlation from the SAME checked unreaped Child. No Clone,
+/// serde, caller-input constructor, task right or effect permission is exported.
+pub struct OriginalChildIdentity {
+    pid: u32,
+    parent: u32,
+    birth: String,
+    audit: [u32; 8],
+}
+impl OriginalChildIdentity {
+    pub fn parent(&self) -> u32 {
+        self.parent
+    }
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+    pub fn birth(&self) -> &str {
+        &self.birth
+    }
+    pub fn audit_token(&self) -> &[u32; 8] {
+        &self.audit
+    }
+}
+
 unsafe extern "C" {
     // <mach/mach_init.h>: mach_task_self() expands to this libSystem value.
     static mach_task_self_: u32;
@@ -84,6 +107,14 @@ pub(super) fn observe(
     expected: &Signature,
     revalidate: impl FnMut() -> Result<(), Refusal>,
 ) -> Result<(), Refusal> {
+    observe_identity(child, expected, revalidate).map(|_| ())
+}
+
+pub(super) fn observe_identity(
+    child: &mut Child,
+    expected: &Signature,
+    revalidate: impl FnMut() -> Result<(), Refusal>,
+) -> Result<OriginalChildIdentity, Refusal> {
     let result = autoreleasepool(|_| check(child, expected, revalidate));
     if result.is_err() {
         drop(child.stdin.take());
@@ -95,7 +126,7 @@ fn check(
     child: &mut Child,
     expected: &Signature,
     mut revalidate: impl FnMut() -> Result<(), Refusal>,
-) -> Result<(), Refusal> {
+) -> Result<OriginalChildIdentity, Refusal> {
     // An already extracted input cannot be closed on refusal; refuse it before
     // doing any native observation. The actual input must remain in Child.
     if child.stdin.is_none() {
@@ -122,7 +153,12 @@ fn check(
     if task.audit(child)? != token || birth(child)? != before {
         return Err(Refusal::Child);
     }
-    Ok(())
+    Ok(OriginalChildIdentity {
+        pid: child.id(),
+        parent: before.parent(),
+        birth: before.binding(),
+        audit: token.values,
+    })
 }
 
 fn verify(token: &AuditToken, expected: &Signature) -> Result<(), Refusal> {

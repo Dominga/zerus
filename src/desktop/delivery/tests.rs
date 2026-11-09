@@ -309,7 +309,7 @@ fn request_types_cross_operation_ids_and_failed_commit_refuse() {
         false
     );
     let request = id();
-    assert!(state::set_policy(&mut f.store.db, &request, false).is_ok());
+    assert!(state::set_policy(&mut f.store.db, &request, false, None).is_ok());
     assert!(state::enqueue(&mut f.store.db, &request, &mark(), now()).is_err());
     f.active();
     f.store.db.execute_batch("CREATE TRIGGER fail_policy BEFORE INSERT ON desktop_delivery_requests BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
@@ -428,7 +428,7 @@ fn degraded_runtime_returns_original_receipt_without_reapplying_old_enable() {
 #[test]
 fn passive_disable_requires_typed_authentication_and_an_actual_store_commit() {
     let mut f = Fixture::new(quiet());
-    state::set_policy(&mut f.store.db, &id(), true).unwrap();
+    state::set_policy(&mut f.store.db, &id(), true, None).unwrap();
     let passive = f.passive_projection();
     assert_eq!(passive["automatic_approvals"], true);
     assert_eq!(
@@ -469,6 +469,89 @@ fn passive_disable_requires_typed_authentication_and_an_actual_store_commit() {
         f.runtime.request(&mut f.store, &request(false))["code"],
         "frontend_authentication_required"
     );
+}
+
+fn category_request(enabled: bool, ids: &[&str]) -> Value {
+    json!({"op":"automatic_approvals","request_id":id(),"enabled":enabled,"categories":ids})
+}
+const DEFAULT_IDS: [&str; 7] = ["read", "edit", "shell", "web", "mcp", "agents", "other"];
+
+#[test]
+fn categories_default_to_all_but_paid_and_change_only_through_exact_receipts() {
+    let mut f = Fixture::new(quiet());
+    let policy = state::policy(&f.store.db).unwrap();
+    assert_eq!(policy.categories.ids(), DEFAULT_IDS);
+    assert!(!policy.enabled);
+    // An older leaf's policy row gains the same default; the leaf is idempotent.
+    f.store.db.execute_batch("ALTER TABLE desktop_delivery_policy DROP COLUMN categories;").unwrap();
+    assert!(state::policy(&f.store.db).is_err());
+    migrate_categories(&f.store.db).unwrap();
+    migrate_categories(&f.store.db).unwrap();
+    assert_eq!(state::policy(&f.store.db).unwrap().categories.ids(), DEFAULT_IDS);
+    f.active();
+    assert_eq!(f.enabled(true)["accepted"], true);
+    // Widening while on needs ready workers, which the active fixture has.
+    let mut all = DEFAULT_IDS.to_vec();
+    all.push("paid");
+    let request = category_request(true, &all);
+    let receipt = f.native_policy(&request);
+    assert_eq!((receipt["accepted"].clone(), receipt["categories"].clone()), (json!(true), json!(all)));
+    assert_eq!(f.native_policy(&request), receipt);
+    let policy = state::policy(&f.store.db).unwrap();
+    assert!(policy.enabled && policy.categories.contains(policy::Category::Paid));
+    let mut projected = json!({});
+    f.runtime.decorate(&mut projected);
+    assert_eq!(projected["automatic_approval_categories"], json!(all));
+    // The same request ID with another set is another intent.
+    let mut changed = request.clone();
+    changed["categories"] = json!(["read"]);
+    assert_eq!(f.native_policy(&changed)["accepted"], false);
+    // A category change never turns the switch on or off.
+    assert_eq!(f.native_policy(&category_request(false, &["read"]))["code"], "approval_policy_changed");
+    assert!(state::policy(&f.store.db).unwrap().enabled);
+    // Unknown or repeated IDs are refused before any write.
+    for ids in [vec!["read", "read"], vec!["browser"]] {
+        assert_eq!(f.native_policy(&category_request(true, &ids))["accepted"], false);
+    }
+    assert_eq!(state::policy(&f.store.db).unwrap().categories.ids().len(), 8);
+    // Turning the switch off keeps the categories.
+    assert_eq!(f.enabled(false)["accepted"], true);
+    assert_eq!(state::policy(&f.store.db).unwrap().categories.ids().len(), 8);
+}
+
+#[test]
+fn passive_category_changes_may_only_reduce_what_is_approved() {
+    let mut f = Fixture::new(quiet());
+    state::set_policy(&mut f.store.db, &id(), true, None).unwrap();
+    let apply = |store: &mut Store, request: &Value| {
+        passive_frontend_request(store, crate::desktop::ui_authority::Validated::fixture(request))
+    };
+    let mut all = DEFAULT_IDS.to_vec();
+    all.push("paid");
+    // Adding Paid usage while approvals are on needs the background workers.
+    assert_eq!(apply(&mut f.store, &category_request(true, &all))["code"], "desktop_background_unavailable");
+    assert!(!state::policy(&f.store.db).unwrap().categories.contains(policy::Category::Paid));
+    // Removing Shell commands reaches the store without them.
+    let narrower: Vec<&str> = DEFAULT_IDS.iter().copied().filter(|id| *id != "shell").collect();
+    let receipt = apply(&mut f.store, &category_request(true, &narrower));
+    assert_eq!(receipt["durable"], true);
+    assert_eq!(state::policy(&f.store.db).unwrap().categories.ids(), narrower);
+    let passive = f.passive_projection();
+    assert_eq!(passive["automatic_approval_categories"], json!(narrower));
+    let mut client =
+        zerus_client_core::desktop::service::State::new(f.location.configuration.clone()).unwrap();
+    client.status(&passive).unwrap();
+    assert_eq!(client.snapshot().automatic_approval_categories, Some(narrower.iter().map(|s| s.to_string()).collect()));
+    // A malformed stored set fails closed, yet never blocks turning off.
+    f.store.db.execute("UPDATE desktop_delivery_policy SET categories='[\"browser\"]'", []).unwrap();
+    assert!(state::policy(&f.store.db).is_err());
+    assert_eq!(apply(&mut f.store, &category_request(true, &["read"]))["accepted"], false);
+    assert_eq!(apply(&mut f.store, &json!({"op":"automatic_approvals","request_id":id(),"enabled":false}))["durable"], true);
+    f.store.db.execute("UPDATE desktop_delivery_policy SET categories='[\"read\"]', enabled=1", []).unwrap();
+    // While approvals are off, any category change approves nothing now.
+    assert_eq!(apply(&mut f.store, &json!({"op":"automatic_approvals","request_id":id(),"enabled":false}))["durable"], true);
+    assert_eq!(apply(&mut f.store, &category_request(false, &all))["durable"], true);
+    assert_eq!(apply(&mut f.store, &json!({"op":"automatic_approvals","request_id":id(),"enabled":true}))["accepted"], false);
 }
 
 #[test]
@@ -690,6 +773,84 @@ fn approval_reservation_precedes_answer_and_unknown_never_replays_after_restart(
     f.tick_until(|r| r.jobs.is_empty());
     assert_eq!(answers.load(Ordering::SeqCst), 1);
     assert_eq!(f.journal_status().as_deref(), Some("unknown"));
+}
+
+#[test]
+fn paid_requests_stay_manual_and_others_record_their_categories() {
+    // The service admits the default categories: all except paid usage.
+    // Case 3 turns Paid usage on, which admits the paid search.
+    for (case, header) in ["WebSearch", "Bash", "Bash", "WebSearch"].into_iter().enumerate() {
+        let run: Runner = Arc::new(move |inv, _, _, _| {
+            if inv.args.iter().any(|a| a == "inspect") {
+                let mut q = question();
+                q["questions"][0]["header"] = json!(header);
+                let Exit::Code { stdout, .. } = inspected(q) else { unreachable!() };
+                let mut details: Value = serde_json::from_slice(&stdout).unwrap();
+                if case == 2 {
+                    details["cache_hint"] = json!({"status":"cold"});
+                }
+                return Exit::Code { code: 0, stderr: String::new(), stdout: serde_json::to_vec(&details).unwrap() };
+            }
+            assert!(case == 1 || case == 3, "a paid request was answered");
+            Exit::TimedOut
+        });
+        let mut f = Fixture::new(run);
+        f.active();
+        f.enabled(true);
+        if case == 3 {
+            let mut all = DEFAULT_IDS.to_vec();
+            all.push("paid");
+            assert_eq!(f.native_policy(&category_request(true, &all))["accepted"], true);
+        }
+        f.source(row(), true);
+        f.scan();
+        f.tick_until(|r| r.jobs.is_empty());
+        if case == 1 || case == 3 {
+            let saved: String = f.runtime.journal.as_ref().unwrap()
+                .query_row("SELECT question FROM attempts", [], |r| r.get(0)).unwrap();
+            let saved: Value = serde_json::from_str(&saved).unwrap();
+            assert_eq!(saved["categories"], if case == 1 { json!(["shell"]) } else { json!(["paid"]) });
+        } else {
+            assert!(f.runtime.journal.is_none(), "{header} case {case}");
+        }
+    }
+}
+
+#[test]
+fn a_cache_that_expires_after_inspection_is_not_reserved_without_paid_usage() {
+    // Review of PR #1694: the actor rechecks at the current time, not with
+    // the categories the inspection computed. The same flow reserves when
+    // the cache stays warm (control) and not once it has expired.
+    for (ttl, wait) in [(60.0, 0), (2.0, 2100)] {
+        let run: Runner = Arc::new(move |inv, _, _, _| {
+            if !inv.args.iter().any(|a| a == "inspect") {
+                assert_eq!(ttl, 60.0, "an expired request was answered");
+                return Exit::TimedOut;
+            }
+            let mut q = question();
+            q["questions"][0]["header"] = json!("Bash");
+            let Exit::Code { stdout, .. } = inspected(q) else { unreachable!() };
+            let mut details: Value = serde_json::from_slice(&stdout).unwrap();
+            let expiry = policy::now().floor() + ttl;
+            details["session_usage"] = json!({"prompt_cache":{"status":"warm","expires_at":expiry}});
+            Exit::Code { code: 0, stderr: String::new(), stdout: serde_json::to_vec(&details).unwrap() }
+        });
+        let mut f = Fixture::new(run);
+        f.active();
+        f.enabled(true);
+        f.source(row(), true);
+        f.scan();
+        // Let the inspection select the warm request, then let it expire
+        // before the actor collects the result.
+        let end = Instant::now() + Duration::from_secs(5);
+        while !f.runtime.jobs.iter().all(|job| job.thread.as_ref().is_some_and(|t| t.is_finished())) {
+            assert!(Instant::now() < end);
+            thread::sleep(Duration::from_millis(2));
+        }
+        thread::sleep(Duration::from_millis(wait));
+        f.tick_until(|r| r.jobs.is_empty());
+        assert_eq!(f.runtime.journal.is_some(), wait == 0, "ttl {ttl}");
+    }
 }
 
 #[test]

@@ -34,7 +34,7 @@ const input = (expanded: boolean, teamOf: ListInput["teamOf"], collapsed = false
     expanded: () => expanded,
     compact: () => false,
     teamOf,
-    teamCollapsed: () => collapsed,
+    teamFolded: () => collapsed,
   } as unknown as ListInput;
 };
 
@@ -46,9 +46,9 @@ describe("a team's rows", () => {
     const rows = groupRows(input(true, (s) => (s.name === lead.name || s.name === member.name ? summary : undefined)));
     const cards = rows.filter((r) => r.type === "card");
     expect(cards.map((r) => r.session.name)).toEqual([lead.name, member.name]);
-    expect(cards[0]).toMatchObject({ depth: 0, team: summary });
+    expect(cards[0]).toMatchObject({ teamSummary: summary });
     expect(cards[1]).toMatchObject({ depth: 1, teamFirst: true, teamLast: true });
-    expect(cards[1].team).toBeUndefined();
+    expect(cards[1].teamSummary).toBeUndefined();
   });
 
   it("hides members while the lead is collapsed, so they are never duplicated", () => {

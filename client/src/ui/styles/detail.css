@@ -2,6 +2,7 @@
 @layer components {
   .sessions-page { display: flex; flex: 1; min-width: 0; min-height: 0; gap: 0; }
   .detail { position: relative; flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; margin: 8px; background: var(--z-color-surface); border: 1px solid var(--z-color-divider); border-radius: 12px; overflow: hidden; }
+  .detail-frame { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
   /* Qt's file drop overlay (SessionFileDrop.h:33-34): a dashed panel over the session with what a drop does. */
   .drop-overlay { position: absolute; inset: 0; z-index: 30; display: grid; place-items: center; pointer-events: none; border-radius: 10px;
     background: light-dark(rgba(237, 249, 243, 0.92), rgba(24, 45, 39, 0.9)); border: 2px dashed light-dark(#167357, #8bdfc0); }
@@ -28,6 +29,10 @@
   .dh-chip { display: inline-flex; align-items: center; gap: 4px; flex: 0 1 auto; min-width: 0; height: 18px; color: var(--z-color-muted); }
   .dh-chip svg { flex: none; opacity: .85; }
   .dh-model { flex: 0 1 260px; text-align: right; }
+  /* Keep cache warm mark (zerus-yacns): the agent badge's 18 px, so the chip row never grows; it never wraps or shrinks. */
+  .dh-warm { flex: none; display: inline-flex; align-items: center; gap: 3px; height: 18px; padding: 0 5px; border-radius: 4px; color: var(--z-color-muted); white-space: nowrap; font-variant-numeric: tabular-nums; transition: background var(--z-motion-fast); }
+  .dh-warm svg { flex: none; color: var(--z-color-accent); }
+  .dh-warm:hover { background: var(--z-color-hover); color: var(--z-color-text); }
   .account-usage { border: 0; background: transparent; }
   .usage-refresh { width: 22px; height: 22px; color: var(--z-color-muted); }
   .usage-refresh .su-spin { display: inline-flex; color: var(--z-color-accent); }
@@ -83,6 +88,10 @@
   .act-virtual-spacer { overflow-anchor: none; }
   .act-virtual-row { position: relative; width: 100%; }
   .act-col [id^="item-"] { scroll-margin-top: 10px; }
+  /* An unbroken run (a JSON line, a long URL) wraps inside its card. Not anywhere:
+     that also shrinks min-content, squeezing header labels and table columns.
+     Code blocks are white-space: pre, so they keep their own horizontal scroller. */
+  .act-msg, .act-thinking, .act-tools, .act-notice { overflow-wrap: break-word; }
   .act-msg { border-radius: var(--z-radius-lg); padding: 9px 14px 11px; background: var(--z-color-tile); border-left: 3px solid var(--z-color-border); animation: rise var(--z-motion-slow) var(--ease) both; }
   .act-msg.k-user { background: var(--z-color-bubble); border-left-color: var(--z-color-accent-muted); white-space: pre-wrap; }
   /* Task 208, as Qt: the model's reply is plain text on the page, no card and no bar;
@@ -147,12 +156,15 @@
   .act-stamp.failed { color: color-mix(in srgb, var(--z-color-warn) 78%, var(--z-color-text)); }
   .act-error { margin-top: 6px; font-size: var(--fs-sm); color: color-mix(in srgb, var(--z-color-warn) 78%, var(--z-color-text)); white-space: pre-wrap; }
   .act-local-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; white-space: normal; }
+  .act-inbox-hint { margin-top: 6px; font-size: var(--fs-sm); color: var(--z-color-text-muted, inherit); white-space: pre-wrap; }
   .att-chip.unavailable { color: var(--z-color-dim); }
   .act-copy { opacity: 0; transition: opacity var(--z-motion-fast); }
   .act-msg:hover .act-copy { opacity: 1; }
   .act-body { line-height: 1.5; color: var(--z-color-text); }
   .act-body code { font-family: var(--z-font-mono); font-size: .9em; padding: 1px 5px; border-radius: 4px; background: var(--z-color-code-bg); }
   .act-body a { color: var(--z-color-accent); text-decoration: none; }
+  /* An address quoted as code links in the accent colour (MarkdownHtml.cpp:299-311). */
+  .act-body a code { color: inherit; }
   /* Message tables use the mockup proc-table's type, header and divider tokens. */
   .act-table-wrap { max-width: 100%; overflow-x: auto; margin: 8px 0; }
   .act-table { width: 100%; min-width: calc(var(--fs-sm) * var(--table-columns) * 9); border-collapse: collapse; font-size: var(--fs-sm); }
@@ -193,7 +205,17 @@
   .act-tools.open .chev { rotate: 90deg; }
   .act-tools-head .act-time { margin-left: auto; }
   .act-tool-cmd { padding: 4px 0 0 18px; color: var(--z-color-muted); font-size: var(--fs-xs); }
-  .act-tool-lines { padding: 6px 0 2px 18px; color: var(--z-color-text-3); font-size: var(--fs-xs); display: grid; gap: 2px; animation: fadeIn var(--z-motion-base) both; }
+  .act-tool-lines { padding: 6px 0 2px 18px; color: var(--z-color-text-3); font-size: var(--fs-xs); display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; animation: fadeIn var(--z-motion-base) both; }
+  /* Each event of an expanded tool row and its output (ActivityView.cpp:1122-1140, zerus-5wmh.13.8.1). */
+  .act-tool-events { padding: 4px 0 2px 18px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; animation: fadeIn var(--z-motion-base) both; }
+  .act-tool-event { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; justify-items: start; }
+  .act-tool-event-head { display: flex; align-items: baseline; gap: 8px; color: var(--z-color-muted); font-size: var(--fs-xs); }
+  .act-tool-detail { justify-self: stretch; margin: 0; padding: 7px 9px; border-radius: var(--z-radius-md); background: var(--z-color-code-bg); color: var(--z-color-text-2); font-size: var(--fs-xs); line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .act-tool-more { display: flex; align-items: baseline; gap: 8px; font-size: var(--fs-xs); }
+  .act-tool-process, .act-tool-more .link { font-size: var(--fs-xs); }
+  /* An empty Activity's guidance (ActivityView.cpp:1145-1150). */
+  .act-empty { padding: 18px 2px 6px; font-size: var(--fs-sm); }
+  .act-empty p { margin-top: 4px; }
   .act-live { display: flex; align-items: center; gap: 8px; padding: 6px 2px; font-size: var(--fs-sm); color: var(--z-color-muted); }
   .act-live b { font-weight: 500; color: var(--z-color-text); }
   .act-live-time { flex: none; color: var(--z-color-dim); }
@@ -202,10 +224,12 @@
   .typing i:nth-child(2) { animation-delay: .15s; } .typing i:nth-child(3) { animation-delay: .3s; }
   .act-thinking { padding: 2px 14px 4px; border-left: 2px solid var(--z-color-divider); color: var(--z-color-dim); font-size: var(--fs-sm); }
   .act-thinking p { margin-top: 2px; font-style: italic; }
+  /* Thinking as Markdown keeps its dim italic text (ActivityView.cpp:942-947). */
+  .act-thinking-body.act-body { margin-top: 2px; color: inherit; font-style: italic; }
   .act-notice { padding: 8px 12px; border-radius: var(--z-radius-lg); background: var(--z-color-violet-bg); border-left: 3px solid var(--z-color-violet); font-size: var(--fs-sm); display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
   .act-notice .row { width: 100%; }
   .act-notice svg { color: var(--z-color-violet); }
-  .act-notice-body { color: var(--z-color-text-2); animation: fadeIn var(--z-motion-base) both; }
+  .act-notice-body { max-width: 100%; color: var(--z-color-text-2); animation: fadeIn var(--z-motion-base) both; }
   /* Voice and round-video messages (VoicePlayerImage.h geometry). */
   .act-msg.media { white-space: normal; }
   .act-msg.media header { margin-bottom: 0; }
@@ -262,7 +286,12 @@
   :root[data-appearance="light"] .vm-time { background: color-mix(in srgb, var(--z-color-entity-ink-base) 52%, transparent); }
   .vm-text { margin-top: 6px; white-space: pre-wrap; line-height: 1.5; color: var(--z-color-text); animation: fadeIn var(--z-motion-base) both; }
   .vm-error { margin-top: 6px; color: var(--z-color-warn); }
-  .subagent-bar { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-radius: var(--z-radius-lg); background: var(--z-color-tile); font-size: var(--fs-sm); }
+  /* A subagent's history keeps its way back on top while scrolling, floating like the goal pill
+     (owner 2026-11-07); the main goal pill hides meanwhile (SessionDetail). */
+  .subagent-bar { position: sticky; top: 8px; z-index: 2; display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 4px 10px;
+    border-radius: 10px; border: 1px solid var(--z-color-border); background: var(--z-color-raised); font-size: var(--fs-sm);
+    box-shadow: 0 6px 18px -8px rgba(0, 0, 0, .45); }
+  :root[data-appearance="light"] .subagent-bar { box-shadow: 0 6px 18px -10px rgba(20, 30, 40, .25); }
   .queued { padding: 8px 12px; border-radius: var(--z-radius-lg); border: 1px dashed var(--z-color-border); font-size: var(--fs-sm); display: grid; gap: 4px; }
 
   .question-card { border: 1px solid color-mix(in srgb, var(--z-color-accent-muted) 60%, transparent); border-radius: var(--z-radius-xl); padding: 12px 14px; background: color-mix(in srgb, var(--z-color-accent-bg) 60%, var(--z-color-surface)); display: flex; flex-direction: column; gap: 10px; animation: rise var(--z-motion-slow) var(--ease) both; }
@@ -366,6 +395,10 @@
   .file-ref-row { display: flex; align-items: center; gap: 8px; }
   .file-ref-row .field { flex: 1 1 auto; min-width: 0; }
   .cmp-attach { width: 32px; height: 32px; }
+  /* Reference an existing file (FileReferenceDialog.tsx): the path field and Browse… in one row. */
+  .file-reference-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+  .file-reference-row .field { flex: 1; min-width: 0; }
+  .file-reference .dlg-detail.error { color: var(--z-color-danger); }
   .cmp-status { font-size: var(--fs-xs); color: var(--z-color-dim); }
   .cmp-model { gap: 4px; max-width: 330px; font-size: var(--fs-xs); }
   /* The status line's colours (MessageComposer updateControls 1224-1226): an
@@ -377,6 +410,12 @@
   /* Cancel send: a borderless link-like button (SessionsWindow.cpp:961). */
   .tchip.link { background: transparent; padding: 0 6px; }
   .tchip.link:hover { text-decoration: underline; }
+  /* Task #351: the composer's usage chip carries the two meters the status bar
+     used to draw, with the weekly percent and its reset beside them. */
+  .tchip.usage-chip { padding: 0 9px 0 7px; }
+  .tchip.usage-chip .usage-meters { height: 22px; color: inherit; }
+  .tchip.usage-chip .um-text, .tchip.usage-chip .um-summary, .tchip.usage-chip .um-countdown { color: inherit; }
+  .usage-balance { font-variant-numeric: tabular-nums; }
   /* Compacting context: a 48×5 indeterminate bar before its caption (ActivityView.cpp 1269-1279). */
   .cmp-progress { position: relative; flex: none; width: 48px; height: 5px; border-radius: 3px; overflow: hidden; background: color-mix(in srgb, currentColor 20%, transparent); }
   .cmp-progress::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 40%; border-radius: 3px; background: currentColor; animation: cmp-progress 1.4s ease-in-out infinite; }
@@ -395,6 +434,8 @@
   .recovery-history-dialog { width: min(560px, calc(100vw - 32px)); }
   .recovery-history-dialog .dlg-body { display: flex; min-height: 0; }
   .recovery-history { width: 100%; height: 240px; resize: none; padding: 10px; border: 1px solid var(--z-color-border); border-radius: var(--z-radius-md); background: var(--z-color-field); color: var(--z-color-text-2); font: 12px/1.45 var(--z-font-mono); white-space: pre-wrap; }
+  .cmp-history-hint { margin: 0; padding: 0 12px 4px; color: var(--z-color-muted); font-size: var(--fs-xs); }
+
   /* A disabled Send shows the status at the field for 5 s (Qt's QToolTip there). */
   .cmp-hint { position: absolute; z-index: 2; left: 12px; bottom: 46px; max-width: calc(100% - 24px); padding: 4px 8px; border-radius: var(--z-radius-sm);
     border: 1px solid var(--z-color-border); background: var(--z-color-raised); box-shadow: var(--z-shadow-popover); color: var(--z-color-text);
@@ -402,10 +443,11 @@
 
   /* Inspector: a pane-colored panel of grouped, collapsible cards. It slides
      in from the right and fades (~200 ms); while leaving it is taken out of
-     the flow so Activity reflows once, then only transform/opacity move. */
+     the flow so Activity reflows once, then only transform/opacity move.
+     Task 354: the panel has no outer frame; inspector.css owns these rules. */
   .inspector { --insp-motion: calc((var(--z-motion-base) + var(--z-motion-slow)) / 2);
     position: relative; width: 400px; min-width: 240px; flex: 0 1 auto; display: flex; flex-direction: column; margin: 0 8px 8px 0;
-    border: 1px solid var(--z-color-divider); border-radius: var(--z-radius-dialog); background: var(--z-color-pane); overflow: hidden;
+    border-radius: var(--z-radius-dialog); background: var(--z-color-pane); overflow: hidden;
     animation: insp-in var(--insp-motion) var(--ease) both; }
   .inspector.leaving { position: absolute; z-index: 2; top: 0; right: 0; bottom: 8px; pointer-events: none; animation: insp-out var(--insp-motion) var(--ease) both; }
   :root[data-skin] .app:has(.layout-right) .inspector { margin-left: 0; }
@@ -443,6 +485,22 @@
   .irow-val.mono { font-size: .94em; }
   .irow-label { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--z-color-dim); }
   .irow .icon-btn.small { flex: none; margin-right: -4px; }
+  /* A copyable row highlights on hover or keyboard focus and shows its copy mark (owner 2026-11-07).
+     The mark takes no space, so labels and numbers stay aligned with plain rows: in a Details
+     row it replaces the label at the right end; in Session usage it sits just left of the number. */
+  .copy-mark { position: absolute; display: grid; place-items: center; color: var(--z-color-muted); opacity: 0; pointer-events: none; transition: opacity .12s; }
+  .copyable { cursor: pointer; }
+  .copyable:hover .copy-mark, .copyable:focus-visible .copy-mark { opacity: 1; }
+  button.irow.copyable { position: relative; }
+  button.irow.copyable .copy-mark { top: 0; bottom: 0; right: 6px; }
+  button.irow.copyable .irow-label { transition: opacity .12s; }
+  button.irow.copyable:hover .irow-label, button.irow.copyable:focus-visible .irow-label { opacity: 0; }
+  .usage .u-val { position: relative; }
+  .usage .u-val .copy-mark { top: 0; bottom: 0; right: calc(100% + 6px); }
+  .usage tr.copyable td { transition: background var(--z-motion-fast); }
+  .usage tr.copyable:hover td, .usage tr.copyable:focus-visible td { background: var(--z-color-hover); }
+  .usage tr.copyable:focus-visible { outline: none; }
+  .usage tr.copyable:focus-visible td { box-shadow: inset 0 1px 0 var(--z-color-accent), inset 0 -1px 0 var(--z-color-accent); }
   .irow.done .irow-ico { color: var(--z-color-accent); }
   .irow.doing .irow-ico { color: var(--z-color-warn); }
   .irow.agent.working .irow-label { color: var(--z-color-status-working); }
@@ -473,8 +531,18 @@
   /* Terminal, processes, native */
   .term-tab, .proc-tab, .native-tab { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .term-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; font-size: var(--fs-xs); color: var(--z-color-muted); }
+  .term-image-paste { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 10px 8px; font-size: var(--fs-sm); }
   .term-host { flex: 1; min-height: 0; margin: 0 10px 10px; padding: 8px; border-radius: var(--z-radius-lg); background: var(--z-color-terminal-bg); border: 1px solid var(--z-color-divider); }
   .term-host .xterm { height: 100%; }
+  /* Task 360: a team-notice turn folded to one row over the xterm buffer. */
+  .term-fold { padding: 0; }
+  .term-fold-btn { display: flex; align-items: center; gap: 6px; width: 100%; height: 100%; padding: 0 6px;
+    border: 0; border-left: 2px solid var(--z-color-accent); background: var(--z-color-terminal-bg);
+    color: var(--z-color-terminal-fg); font: inherit; text-align: left; cursor: pointer; white-space: nowrap; overflow: hidden; }
+  .term-fold-btn:hover { background: var(--z-color-hover); }
+  .term-fold-chev { color: var(--z-color-muted); font-size: 1.1em; }
+  .term-fold-label { overflow: hidden; text-overflow: ellipsis; opacity: .85; }
+  .term-notice-mode { display: flex; align-items: center; gap: 6px; margin-left: 8px; }
   .proc-summary { display: flex; align-items: center; gap: 8px; padding: 8px 12px; font-size: var(--fs-sm); color: var(--z-color-muted); }
   .proc-table { width: calc(100% - 24px); margin: 0 12px; border-collapse: collapse; font-size: var(--fs-sm); table-layout: fixed; }
   .proc-table th { text-align: left; font-weight: 600; color: var(--z-color-label); font-size: var(--fs-xs); padding: 4px 8px; border-bottom: 1px solid var(--z-color-divider); }
@@ -540,10 +608,11 @@
   .confirm-body p { line-height: 1.5; }
 
   /* Status bar */
-  .statusbar .conn-ok { display: inline-flex; align-items: center; }
   .chip-accent { height: 20px; padding: 0 8px; border-radius: 10px; border: 1px solid var(--z-color-accent-muted); color: var(--z-color-accent); font-size: var(--fs-2xs); }
   .chip-accent.warn-chip { border-color: color-mix(in srgb, var(--z-color-warn) 60%, transparent); color: var(--z-color-warn); }
-  .statusbar .usage { color: var(--z-color-muted); font-size: var(--fs-xs); }
+  .bg-tasks-chip { flex: none; display: inline-flex; align-items: center; gap: 4px; }
+  .menu.bg-tasks { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 4px 12px; width: max-content; max-width: min(560px, calc(100vw - 16px)); max-height: min(320px, 60vh); overflow-y: auto; padding: 6px 6px 6px 10px; }
+  .bg-task { display: contents; }
   .screen-placeholder { margin: auto; color: var(--z-color-dim); }
 }
 

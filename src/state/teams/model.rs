@@ -3,6 +3,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Task #7: a zero After-a-task threshold stays out of the stored JSON.
+fn u32_is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TeamStatus {
@@ -109,8 +114,37 @@ pub(crate) struct TeamMemory {
     pub workspace: String,
 }
 
+/// Independent owner opt-ins. Older teams keep both checks off.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PhaseChecks {
+    #[serde(default)]
+    pub critical_path_target: bool,
+    #[serde(default)]
+    pub unresolved_prerequisites: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(untagged, deny_unknown_fields)]
+pub(crate) enum Prerequisite {
+    Task { task: u32 },
+    Commit { commit: String },
+    Branch { branch: String },
+}
+
+/// Saved only on mutations, never computed by a GUI refresh.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct PhaseCheckResult {
+    pub known_hours: Option<f64>,
+    pub missing_estimates: usize,
+    pub target_exceeded: bool,
+    pub unresolved: Vec<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Settings {
+    #[serde(default)]
+    pub phase_checks: PhaseChecks,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub iron_rules: Vec<String>,
     /// Task 126: the team's memory; None is plain memory.
@@ -387,6 +421,7 @@ fn default_phase() -> u32 {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            phase_checks: PhaseChecks::default(),
             iron_rules: Vec::new(),
             memory: None,
             all_hard: false,
@@ -579,6 +614,20 @@ pub(crate) struct Member {
     /// inherits the role's setting; "none" overrides it with none.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub context_before_task: String,
+    /// Task #7: what a free member does with its context after a task, before
+    /// its next one: empty keeps today's behaviour (U46 only), "compact" or
+    /// "clear" runs the action only when the criterion below says the context
+    /// is spent. Applies to the lead as to any member.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub after_task: String,
+    /// Task #7: the criterion the policy checks: "percent" of the context
+    /// window, or "tokens" used.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub after_task_on: String,
+    /// Task #7: the threshold for that criterion: 1-100 percent, or a token
+    /// count; zero when the member keeps its context.
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub after_task_at: u32,
     /// U46: the member already got the feed note that its agent has no native
     /// context action; it is written once per member.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -653,6 +702,15 @@ pub(crate) struct Member {
     /// The role's instructions from the catalog, given with every task.
     #[serde(default)]
     pub prompt: String,
+    /// Task #6: the start prompt changed while the member ran. The dispatcher
+    /// sends it as the message that replaces its earlier instructions and
+    /// clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_change: Option<PromptChange>,
+    /// Task #6: the model and effort its running session must still switch to.
+    /// The dispatcher switches before the member's next task and clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_switch: Option<ModelSwitch>,
     /// DeepSeek takes its model and effort after it starts; once tried, the
     /// dispatcher does not try again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -845,6 +903,48 @@ pub(crate) struct ModelChoice {
     pub model: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub effort: String,
+}
+
+/// Task #6: the model and effort a running member's session must still switch
+/// to. `members_update` records it; the dispatcher switches before the member's
+/// next task and clears it. The values the session ran before are kept, so a
+/// refused switch puts the member's model back where its session is.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct ModelSwitch {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub effort: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub from_model: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub from_effort: String,
+}
+
+/// Task #6: a member's start prompt changed while it ran. The dispatcher sends
+/// it as the message that replaces its earlier instructions, after the clear
+/// the owner asked for. `sent_at` is recorded before the message leaves, so a
+/// crash during the send leaves it uncertain instead of sending it again.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct PromptChange {
+    /// Clear the member's context before the message.
+    #[serde(default)]
+    pub clear_context: bool,
+    /// The clear it started, while its confirmation is pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clear: Option<PromptClear>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_at: Option<f64>,
+}
+
+/// Task #6: a clear started before a changed start prompt, recorded so a later
+/// tick - or a restarted worker - reads the same request instead of running it
+/// again.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct PromptClear {
+    pub request_id: String,
+    pub run_id: String,
+    pub conversation_id: String,
+    pub started_at: f64,
 }
 
 /// Spec 0: what a ready task waits for that Zerus could not do on its own (a
@@ -1090,6 +1190,15 @@ pub(crate) struct MergeRange {
     pub merged: String,
 }
 
+/// Task #370: an accepted task the lead marked landed by a named commit on
+/// the integration line (its work arrived as a cherry-pick).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Landed {
+    pub commit: String,
+    pub by: String,
+    pub at: f64,
+}
+
 /// U62 (#760): an accepted report in the merge queue: the commit its author
 /// reported, and, while its tests run, the lead branch before and after.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -1151,6 +1260,14 @@ pub(crate) struct MergeEntry {
     /// Task #267: the files the landing conflicted in.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conflict_files: Vec<String>,
+    /// Task #370: the accepted commit carries a commit of a rejected attempt;
+    /// the landing waits for a cherry-pick of the task's own commit.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocked: bool,
+    /// Task #370: land by cherry-picking the accepted commit, never merging
+    /// its branch.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cherry_pick: bool,
 }
 
 /// U62 (#760): one merge the queue kept, with the range it tested.
@@ -2027,6 +2144,10 @@ pub(crate) struct Attempt {
     /// work (its runs and repeated checks), at most every five minutes.
     #[serde(default, skip_serializing_if = "is_zero_f64")]
     pub wait_checked_at: f64,
+    /// Task #413: the member's folder HEAD when a repeated check was last
+    /// seen; the check is a wait loop only while that state stands.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub wait_head: String,
     /// Task 156: the decisions this attempt's member was told of while it worked.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decisions_told: Vec<String>,
@@ -2140,6 +2261,9 @@ pub(crate) struct Baseline {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Task {
+    /// Full history is in team_task_archive; these summaries remain in the plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<ArchivedTask>,
     pub id: u32,
     /// The phase of the plan: the approved initial plan is 1, `extend`
     /// appends later phases.
@@ -2175,6 +2299,8 @@ pub(crate) struct Task {
     /// task does not need their cancelled work, so the inbox notice clears.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kept_cancelled: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<Prerequisite>,
     /// Task #60 (owner, 2026-11-06): the task this one was added for (a missed
     /// item or a bug it produced), in the same team. Unlike `deps` it never
     /// blocks or gates: the task is placed at least in its origin's layer and
@@ -2228,6 +2354,10 @@ pub(crate) struct Task {
     /// its affected tests on the merged commit; the task stays undecided.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge: Option<MergeEntry>,
+    /// Task #370: the lead marked this accepted task landed by a named line
+    /// commit (a cherry-pick of its work); journaled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landed: Option<Landed>,
     /// At most one open range per task; repeated returns widen it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub untested_merge: Option<MergeRange>,
@@ -2293,6 +2423,15 @@ pub(crate) struct Task {
     /// they move to the attempt that hands it out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prepare: Vec<PrepareStep>,
+}
+
+/// Frozen display metadata, computed before the task history leaves the live record.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct ArchivedTask {
+    pub accepted_at: Option<f64>,
+    pub started_at: Option<f64>,
+    pub merge_commit: String,
+    pub timing: serde_json::Value,
 }
 
 /// One tick's index of each member's in-progress tasks, built once rather
@@ -2868,6 +3007,12 @@ pub(crate) struct LorePending {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Phase {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_hours: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<PhaseCheckResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<ArchivedPhase>,
     pub n: u32,
     /// Task #229: a plan phase (the default) or a Minor phase the lead opened
     /// for a set of Minor follow-ups; a Minor phase may run in free mode.
@@ -2936,6 +3081,43 @@ pub(crate) struct Phase {
     pub awaiting_since: Option<f64>,
 }
 
+/// Constant-size totals survive eviction of archived phase headers.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct ArchiveTotals {
+    pub phases: usize,
+    pub tasks: usize,
+    pub accepted: usize,
+    pub rejected: usize,
+    pub cancelled: usize,
+}
+
+impl ArchiveTotals {
+    pub(crate) fn add(&mut self, phase: &ArchivedPhase) {
+        self.phases += 1;
+        self.tasks += phase.tasks;
+        self.accepted += phase.accepted;
+        self.rejected += phase.rejected;
+        self.cancelled += phase.cancelled;
+    }
+    pub(crate) fn remove(&mut self, phase: &ArchivedPhase) {
+        self.phases -= 1;
+        self.tasks -= phase.tasks;
+        self.accepted -= phase.accepted;
+        self.rejected -= phase.rejected;
+        self.cancelled -= phase.cancelled;
+    }
+}
+
+/// Closed phase header; task ids and histories are paged from the archive.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct ArchivedPhase {
+    pub tasks: usize,
+    pub accepted: usize,
+    pub rejected: usize,
+    pub cancelled: usize,
+    pub closed_at: Option<f64>,
+}
+
 impl Phase {
     /// The display and approval order; a team stored before the field keeps
     /// its phase numbers as the order (F10).
@@ -2950,6 +3132,14 @@ impl Phase {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Team {
+    /// Highest archived task id; evicting stubs never frees an archived id.
+    #[serde(default)]
+    pub last_archived_task: u32,
+    #[serde(default)]
+    pub archive_totals: ArchiveTotals,
+    /// Read-through dependency metadata; never grows the persisted live record.
+    #[serde(skip)]
+    pub archive_deps: std::collections::BTreeMap<u32, Task>,
     pub id: String,
     pub name: String,
     #[serde(default)]
@@ -3012,6 +3202,11 @@ pub(crate) struct Team {
     /// queue tested; a phase integration checks only what came after it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub merge_tested: String,
+    /// Task 377 (owner, 2026-11-08): the line's branch by name, recorded
+    /// when the integration folder was granted. The folder's current
+    /// checkout is never the line.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub line_branch: String,
     /// U62 (#760): the newest merged commit each suite ran on. A suite this
     /// computer cannot run keeps its own range open without holding the tested
     /// point of the suites that did run. Bounded.
@@ -3078,6 +3273,11 @@ pub(crate) struct Team {
     /// {"preset":""} means "checked, no repository to profile".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode_proposal: Option<serde_json::Value>,
+    /// Task 336 (owner, 2026-11-08): the owner kept the team's settings for the
+    /// project's profile ({preset, fingerprint, at}); the working-mode block
+    /// stays away until the profile changes materially.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_kept: Option<serde_json::Value>,
     /// Task 271 (owner, 2026-11-08): the lead playbook (the working-mode preset
     /// and the rules a-(i), src/state/teams/playbook.rs), stored with the
     /// team and carried in its lore by the lead brief.
@@ -3092,9 +3292,11 @@ pub(crate) struct Team {
     #[serde(default)]
     pub members: Vec<Member>,
     #[serde(default)]
+    #[serde(serialize_with = "serialize_tasks")]
     pub tasks: Vec<Task>,
     /// Phases added by `extend`; the approved initial plan (phase 1) has none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(serialize_with = "serialize_phases")]
     pub phases: Vec<Phase>,
     /// Permissions a plan widens beyond the role's default (B5): the owner
     /// confirms them before the plan can be approved.
@@ -3446,7 +3648,7 @@ impl Team {
         self.members.iter().find(|member| member.id == id)
     }
     pub(crate) fn task(&self, id: u32) -> Option<&Task> {
-        self.tasks.iter().find(|task| task.id == id)
+        self.tasks.iter().find(|task| task.id == id).or_else(|| self.archive_deps.get(&id))
     }
     pub(crate) fn task_mut(&mut self, id: u32) -> Option<&mut Task> {
         self.tasks.iter_mut().find(|task| task.id == id)
@@ -3542,6 +3744,40 @@ impl Team {
             .filter(|m| m.id != self.lead && m.state != MemberState::Removed && self.reviewer_of(&m.id) == member)
             .collect()
     }
+}
+
+/// Archived rows have a deliberately small wire representation.
+pub(crate) fn task_stub(task: &Task) -> serde_json::Value {
+    let mut stub = serde_json::json!({"id":task.id,"phase":task.phase,"title":task.title,"assignee":task.assignee,
+        "status":task.status,"archived":task.archived});
+    if let Some(origin) = task.origin { stub["origin"] = serde_json::json!(origin); }
+    stub
+}
+
+pub(crate) fn phase_stub(phase: &Phase) -> serde_json::Value {
+    serde_json::json!({"n":phase.n,"order":phase.order,"title":phase.title,
+        "state":phase.state,"acceptance":phase.acceptance,"decided_at":phase.decided_at,"archived":phase.archived})
+}
+
+fn serialize_phases<S: serde::Serializer>(phases: &[Phase], serializer: S) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeSeq;
+    let mut seq = serializer.serialize_seq(Some(phases.len()))?;
+    for phase in phases {
+        if phase.archived.is_some() {
+            seq.serialize_element(&phase_stub(phase))?;
+        } else { seq.serialize_element(phase)?; }
+    }
+    seq.end()
+}
+
+fn serialize_tasks<S: serde::Serializer>(tasks: &[Task], serializer: S) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeSeq;
+    let mut seq = serializer.serialize_seq(Some(tasks.len()))?;
+    for task in tasks {
+        if task.archived.is_some() { seq.serialize_element(&task_stub(task))?; }
+        else { seq.serialize_element(task)?; }
+    }
+    seq.end()
 }
 
 /// An estimate source of "none" is the default and is not stored.

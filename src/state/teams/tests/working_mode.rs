@@ -333,3 +333,140 @@ fn an_unknown_mode_is_refused_at_create() {
     );
     assert!(refused.is_err(), "{:?}", refused.map(|(team, _)| team.settings));
 }
+
+// --- task 336: a code repository with tests keeps the branch pipeline, and the
+// --- owner may keep the team's settings.
+
+/// A code repository with tests whose binaries are design previews: more source
+/// files than binary ones, and a binary share far above 20%.
+fn preview_binary_repository() -> tempfile::TempDir {
+    let mut files: Vec<(String, Vec<u8>)> = (0..12)
+        .map(|index| (format!("src/module{index}.rs"), format!("fn module{index}() {{}}\n").into_bytes()))
+        .collect();
+    for index in 0..8 {
+        files.push((format!("design/preview{index}.png"), vec![0u8; 1024 * 1024]));
+    }
+    files.push((".zerus/tests.toml".into(), tests_config(true, true)));
+    let refs: Vec<(&str, &[u8])> = files.iter().map(|(path, content)| (path.as_str(), content.as_slice())).collect();
+    repo(&refs)
+}
+
+/// The same with more binaries than sources: a binary repository.
+fn binary_majority_repository() -> tempfile::TempDir {
+    let mut files: Vec<(String, Vec<u8>)> = (0..3)
+        .map(|index| (format!("src/module{index}.rs"), format!("fn module{index}() {{}}\n").into_bytes()))
+        .collect();
+    for index in 0..9 {
+        files.push((format!("design/preview{index}.png"), vec![0u8; 1024 * 1024]));
+    }
+    files.push((".zerus/tests.toml".into(), tests_config(true, true)));
+    let refs: Vec<(&str, &[u8])> = files.iter().map(|(path, content)| (path.as_str(), content.as_slice())).collect();
+    repo(&refs)
+}
+
+#[test]
+fn a_code_repository_with_tests_and_preview_binaries_stays_branch_pipeline() {
+    let dir = preview_binary_repository();
+    let proposal = propose(dir.path()).expect("a profile");
+    assert_eq!(proposal.preset, BRANCH_PIPELINE, "{proposal:?}");
+    assert!(proposal.profile.code_first(), "{:?}", proposal.profile);
+    assert!(proposal.profile.binary_share() > 0.9, "{:?}", proposal.profile);
+    let reasons = proposal.reasons.join("\n");
+    assert!(reasons.contains("source files are the majority"), "{reasons}");
+    assert!(!reasons.contains("one shared folder keeps"), "{reasons}");
+}
+
+#[test]
+fn more_binaries_than_sources_still_propose_one_shared_folder() {
+    let dir = binary_majority_repository();
+    let proposal = propose(dir.path()).expect("a profile");
+    assert_eq!(proposal.preset, SHARED_FOLDER, "{proposal:?}");
+    assert!(!proposal.profile.code_first(), "{:?}", proposal.profile);
+}
+
+#[test]
+fn only_huge_binaries_flip_a_code_repository_that_has_tests() {
+    let code = |bytes: u64, binary_bytes: u64, binary_files: u64| ProjectProfile {
+        files: 5000,
+        bytes,
+        source_files: 4000,
+        binary_files,
+        binary_bytes,
+        suites: 3,
+        ..Default::default()
+    };
+    // Design previews and fixtures: 90% of a small tree, still code first.
+    assert!(!code(100 * 1024 * 1024, 90 * 1024 * 1024, 100).heavy());
+    // Above the floor: one gibibyte of binaries, or two of tracked bytes.
+    assert!(code(1300 * 1024 * 1024, 1200 * 1024 * 1024, 200).heavy());
+    assert!(code(2500 * 1024 * 1024, 200 * 1024 * 1024, 200).heavy());
+    // Engine assets and LFS keep the shared folder whatever the tests say.
+    let mut engine = code(100 * 1024 * 1024, 90 * 1024 * 1024, 100);
+    engine.engine = vec!["a .uproject".into()];
+    assert!(engine.heavy());
+    let mut lfs = code(100 * 1024 * 1024, 90 * 1024 * 1024, 100);
+    lfs.lfs = true;
+    assert!(lfs.heavy());
+    // No tests: the old binary rules still apply.
+    let mut untested = code(100 * 1024 * 1024, 90 * 1024 * 1024, 100);
+    untested.suites = 0;
+    assert!(untested.heavy());
+}
+
+#[test]
+fn the_keep_choice_hides_the_block_until_the_profile_changes() {
+    let dir = binary_majority_repository();
+    let mut team = Team {
+        id: "t336".into(),
+        name: "Keep".into(),
+        lead: "lead".into(),
+        folder: dir.path().display().to_string(),
+        status: TeamStatus::Running,
+        settings: Settings {
+            branch_per_task: Some(BranchPerTask { template: "task/{id}".into() }),
+            base_branch: "main".into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    assert!(disagreement(&team).is_some(), "the shared folder differs from the branch settings");
+    // The owner keeps the team's settings: the block leaves.
+    let at = 1_800_000_000.0;
+    let record = keep(&mut team, at).expect("a keep");
+    assert_eq!(record["preset"], SHARED_FOLDER);
+    assert!(disagreement(&team).is_none(), "{:?}", disagreement(&team));
+    assert!(kept(&team).is_some());
+    // A material profile change brings it back.
+    team.mode_kept = Some(json!({"preset":SHARED_FOLDER,"fingerprint":"an older profile","at":at}));
+    assert!(disagreement(&team).is_some(), "the profile changed: the block returns");
+    // Another preset's keep does not hide it either.
+    team.mode_kept = Some(json!({"preset":BRANCH_PIPELINE,"fingerprint":"whatever","at":at}));
+    assert!(disagreement(&team).is_some());
+}
+
+#[test]
+fn the_cached_proposal_honors_the_keep() {
+    let dir = binary_majority_repository();
+    let proposal = propose(dir.path()).expect("a profile");
+    let fingerprint = fingerprint(&proposal.profile);
+    let mut team = Team {
+        id: "t336c".into(),
+        name: "Keep".into(),
+        lead: "lead".into(),
+        folder: dir.path().display().to_string(),
+        status: TeamStatus::Running,
+        settings: Settings {
+            branch_per_task: Some(BranchPerTask { template: "task/{id}".into() }),
+            base_branch: "main".into(),
+            ..Default::default()
+        },
+        mode_proposal: Some(proposal.value()),
+        ..Default::default()
+    };
+    assert!(cached_disagreement(&team).is_some());
+    team.mode_kept = Some(json!({"preset":SHARED_FOLDER,"fingerprint":fingerprint,"at":1.0}));
+    assert!(cached_disagreement(&team).is_none());
+    // The cached profile changed: the block returns.
+    team.mode_kept = Some(json!({"preset":SHARED_FOLDER,"fingerprint":"older","at":1.0}));
+    assert!(cached_disagreement(&team).is_some());
+}

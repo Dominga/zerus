@@ -58,8 +58,21 @@ pub(crate) fn write_failed(path: &Path, kind: Private, error: &dyn std::fmt::Dis
 
 /// The stores refused now (path, kind, reason, fix, source, at); empty when
 /// none. Reads only the small current set.
+/// Task #383: a refusal whose path no longer exists (a test's temporary
+/// file, a removed folder) is dropped here and never shown again; a path that
+/// cannot be read for another reason stays.
 pub(crate) fn refused() -> Vec<Value> {
-    stores()
+    let stores = stores();
+    let (kept, vanished): (Vec<Value>, Vec<Value>) = stores.into_iter().partition(|store| !vanished(store));
+    if !vanished.is_empty() {
+        save(&kept);
+    }
+    kept
+}
+
+fn vanished(store: &Value) -> bool {
+    let Some(path) = store["path"].as_str().filter(|path| !path.is_empty()) else { return true };
+    matches!(fs::symlink_metadata(path), Err(error) if error.kind() == io::ErrorKind::NotFound)
 }
 
 /// The known stores of this computer, checked and repaired at a host's start

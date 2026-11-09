@@ -276,6 +276,13 @@ fn the_list_summary_carries_task_phases_and_phase_records() {
     assert_eq!(value["phases"][0]["n"], 2);
     assert_eq!(value["phases"][0]["tasks"][0], 2);
     assert!(value["phases"][0].get("changes").is_none());
+    team.phases[0].archived = Some(super::super::model::ArchivedPhase { tasks: 50, accepted: 50, ..Default::default() });
+    team.archive_totals.add(team.phases[0].archived.as_ref().unwrap());
+    team.tasks[1].status = TaskStatus::Accepted;
+    team.tasks[1].archived = Some(Default::default());
+    let archived = super::summary(&team, true);
+    assert_eq!(archived["accepted"], 50);
+    assert_eq!(archived["phases"][0]["archived"]["tasks"], 50);
 }
 
 #[test]

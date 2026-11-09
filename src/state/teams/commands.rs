@@ -10,15 +10,17 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|spawn|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|brief|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|phase-mode|lead-changes|revert-lead-change|seen-lead-changes|seen|keep|integrate-build|full-tests|test|run|templates|safe-action|reports-to|sub-lead|deferred|answer-deferred|defer-session|disk|test-config --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|spawn|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|archive-phases|status|inbox|brief|keep-working-mode|forget-working-mode|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|land|landed|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|phase-mode|lead-changes|revert-lead-change|seen-lead-changes|seen|keep|integrate-build|full-tests|test|run|templates|safe-action|reports-to|sub-lead|deferred|answer-deferred|defer-session|disk|test-config --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "move-task", "add-to-phase", "spawn", "approve-phase", "discard-phase", "return-to-draft", "reject-phase", "undo-reject-phase",
     // U63 (owner, 2026-10-31): a phase's pause and the owner's acceptance.
     "pause-phase", "unpause-phase", "phase-acceptance", "accept-phase", "send-back-phase",
     "rework-phase", "reports-to", "sub-lead", "finish", "approve", "commit", "discard", "pause", "resume", "stop",
-    "archive", "report", "ask", "reply", "hold", "release", "accept", "reject", "skip-stage", "send-back", "reassign", "take-over", "cancel",
+    "archive", "archive-phases", "report", "ask", "reply", "hold", "release", "accept", "reject", "skip-stage", "send-back", "reassign", "take-over", "cancel",
     "retry", "check", "expect", "swap-member", "use-last-reply", "relaunch", "add-member", "scale", "drain", "pause-member", "resume-member", "remove-member", "settings", "finding",
+    // Task #370: queue a landing again, or mark a cherry-picked one landed.
+    "land", "landed",
     "draft", "propose", "close-phase", "integrate-build", "start-ahead", "full-tests",
     // Task #58: the owner switches one phase between free and standard planning.
     "phase-mode",
@@ -30,7 +32,15 @@ const MUTATIONS: &[&str] = &[
     "park", "unpark",
     // Task 162: the owner reverts the lead's plan change or marks the digest seen.
     "revert-lead-change", "seen-lead-changes", "seen", "keep",
+    // Task 336: the owner keeps the team's working-mode settings; the block leaves.
+    "keep-working-mode", "forget-working-mode",
 ];
+
+/// Task #346: whether an operation changes a team, so a scratch lead's call for
+/// its own scratch team can be named in scope.
+pub(crate) fn is_mutation(op: &str) -> bool {
+    MUTATIONS.contains(&op)
+}
 
 /// Task 162: the operations the lead once did on the owner's typed word and
 /// that have a card now: the typed word is no longer taken for them.
@@ -646,6 +656,222 @@ pub(crate) fn strip_stage_facts(value: &mut Value) {
     }
 }
 
+/// Task #393 (owner, 2026-11-08): the polled status stays bounded. Report text
+/// is clipped, the test-function lists are dropped (their counts stay), an
+/// attempt carries its last run instead of every run's arguments, and only the
+/// newest lead changes and proposals are listed. The full record of one task is
+/// `hgs team status --task N`; the full lead changes are `hgs team
+/// lead-changes`, and a proposal's stored form is what the card shows.
+pub(crate) fn bound_status(value: &mut Value, team: &Team) {
+    const REPORT_TEXT: usize = 300;
+    const TASK_TEXT: usize = 400;
+    const RUN_TAIL: usize = 200;
+    const PAGE: usize = 20;
+    const STAGE_SPANS: usize = 5;
+    fn clip(text: &str, limit: usize) -> String {
+        if text.chars().count() <= limit {
+            text.to_owned()
+        } else {
+            let mut cut: String = text.chars().take(limit).collect();
+            cut.push_str("... (clipped; hgs team status --task N has the full record)");
+            cut
+        }
+    }
+    let by_id: std::collections::HashMap<u32, &super::model::Task> = team.tasks.iter().map(|task| (task.id, task)).collect();
+    if let Some(tasks) = value["tasks"].as_array_mut() {
+        for value in tasks {
+            // The cancelled tasks may be filtered out of the view, so the task
+            // is found by its id, never by position.
+            let Some(task) = value["id"].as_u64().and_then(|id| u32::try_from(id).ok()).and_then(|id| by_id.get(&id).copied()) else {
+                continue;
+            };
+            // A finished task is a stub in the polled status: its reports and
+            // runs are in `hgs team status --task N`, and its landing in the
+            // lead changes.
+            if task.status.finished() && task.archived.is_none() {
+                *value = super::model::task_stub(task);
+                continue;
+            }
+            for field in ["description", "criteria", "decision_reason"] {
+                if let Some(text) = value[field].as_str() {
+                    let clipped = clip(text, TASK_TEXT);
+                    value[field] = json!(clipped);
+                }
+            }
+            // The stage spans stay, in a bounded form: the newest few, each its
+            // kind, round, state and whether it runs (the times and the member
+            // are in `hgs team status --task N`).
+            if let Some(spans) = value.get_mut("stage_spans").and_then(|spans| spans.as_array_mut()) {
+                let first = spans.len().saturating_sub(STAGE_SPANS);
+                *spans = spans
+                    .split_off(first)
+                    .into_iter()
+                    .map(|span| json!({"kind":span["kind"],"round":span["round"],"state":span["state"],"running":span["running"]}))
+                    .collect();
+            }
+            if let Some(object) = value.as_object_mut() {
+                object.remove("baseline");
+                object.remove("output");
+                object.remove("prepare");
+            }
+            let Some(attempts) = value.get_mut("attempts").and_then(|attempts| attempts.as_array_mut()) else { continue };
+            for attempt in attempts {
+                if let Some(report) = attempt.get_mut("report").and_then(|report| report.as_object_mut()) {
+                    if let Some(text) = report.get("text").and_then(|text| text.as_str()) {
+                        let clipped = clip(text, REPORT_TEXT);
+                        report.insert("text".into(), json!(clipped));
+                    }
+                    if let Some(tests) = report.get_mut("tests").and_then(|tests| tests.as_object_mut()) {
+                        for bucket in ["functions_added", "functions_removed"] {
+                            if let Some(bucket) = tests.get_mut(bucket).and_then(|bucket| bucket.as_object_mut()) {
+                                bucket.remove("names");
+                            }
+                        }
+                    }
+                }
+                if let Some(runs) = attempt.get_mut("runs").and_then(|runs| runs.as_array_mut()) {
+                    let total = runs.len();
+                    if let Some(last) = runs.last() {
+                        let mut brief = serde_json::Map::new();
+                        for key in ["template", "at", "exit", "ms", "timed_out"] {
+                            if let Some(field) = last.get(key) {
+                                brief.insert(key.into(), field.clone());
+                            }
+                        }
+                        if let Some(tail) = last.get("tail").and_then(|tail| tail.as_str()) {
+                            brief.insert("tail".into(), json!(clip(tail, RUN_TAIL)));
+                        }
+                        *runs = vec![Value::Object(brief)];
+                    }
+                    attempt["runs_total"] = json!(total);
+                }
+            }
+        }
+    }
+    // Task #393: a polled member row keeps the newest jobs, services and queue
+    // entries with their counts; the cards read the rest on demand.
+    if let Some(members) = value.get_mut("members").and_then(|list| list.as_array_mut()) {
+        for member in members.iter_mut() {
+            if let Some(object) = member.as_object_mut() {
+                for (field, count) in [("jobs", "jobs_total"), ("services", "services_total"), ("queue", "queue_total")] {
+                    if let Some(list) = object.get_mut(field).and_then(|list| list.as_array_mut()) {
+                        let total = list.len();
+                        if total > 3 {
+                            list.truncate(3);
+                        }
+                        object.insert(count.into(), json!(total));
+                    }
+                }
+            }
+        }
+    }
+
+    // The rows the line added since: a member's recent permission answers and
+    // its asked-question digests are the audit's, its start prompt is clipped,
+    // a handoff keeps its newest few with a clipped text, and the plan's
+    // findings keep their first twenty. The counts stay; the full records are
+    // `hgs team status --task N`, the member's card and the feed.
+    if let Some(members) = value.get_mut("members").and_then(|list| list.as_array_mut()) {
+        for member in members.iter_mut() {
+            let Some(object) = member.as_object_mut() else { continue };
+            for (field, count, keep) in [("permission_answers", "permission_answers_total", 3), ("asked", "asked_total", 0)] {
+                if let Some(list) = object.get_mut(field).and_then(|list| list.as_array_mut()) {
+                    let total = list.len();
+                    list.truncate(keep);
+                    if field == "permission_answers" {
+                        for answer in list.iter_mut() {
+                            for key in ["command", "reason"] {
+                                if let Some(text) = answer[key].as_str() {
+                                    let clipped = clip(text, 160);
+                                    answer[key] = json!(clipped);
+                                }
+                            }
+                        }
+                    }
+                    object.insert(count.into(), json!(total));
+                }
+            }
+            if let Some(prompt) = object.get("prompt").and_then(|prompt| prompt.as_str()) {
+                let clipped = clip(prompt, 300);
+                object.insert("prompt".into(), json!(clipped));
+            }
+        }
+    }
+    if let Some(handoffs) = value.get_mut("handoffs").and_then(|list| list.as_array_mut()) {
+        let total = handoffs.len();
+        if total > 5 {
+            handoffs.drain(..total - 5);
+        }
+        for handoff in handoffs.iter_mut() {
+            if let Some(text) = handoff["text"].as_str() {
+                let clipped = clip(text, 300);
+                handoff["text"] = json!(clipped);
+            }
+        }
+        if total > 5 {
+            value["handoffs_total"] = json!(total);
+        }
+    }
+    if let Some(validation) = value.get_mut("validation").and_then(|validation| validation.as_object_mut()) {
+        for field in ["errors", "warnings"] {
+            if let Some(list) = validation.get_mut(field).and_then(|list| list.as_array_mut()) {
+                let total = list.len();
+                if total > 20 {
+                    list.truncate(20);
+                    validation.insert(format!("{field}_total"), json!(total));
+                }
+            }
+        }
+    }
+    // Task #393: a phase's change history is the plan's archive, not a polled
+    // row; the phases keep their state, tasks and notes.
+    if let Some(phases) = value.get_mut("phases").and_then(|list| list.as_array_mut()) {
+        for phase in phases.iter_mut() {
+            if let Some(object) = phase.as_object_mut() {
+                object.remove("changes");
+            }
+        }
+    }
+    // The owner's cards are the open proposals; a decided one is in the history.
+    let proposal_total = value.get_mut("proposals").and_then(|list| list.as_array_mut()).map(|proposals| {
+        let total = proposals.len();
+        proposals.retain(|proposal| proposal["state"] == "open");
+        if proposals.len() > PAGE {
+            proposals.truncate(PAGE);
+        }
+        total
+    });
+    if let Some(total) = proposal_total.filter(|total| *total > 0) {
+        value["proposals_total"] = json!(total);
+    }
+    // Task #393: a lead change's before/after phase snapshots are the plan's
+    // history, not a polled row; the newest twenty keep their summary alone.
+    if let Some(changes) = value.get_mut("lead_changes").and_then(|list| list.as_array_mut()) {
+        for change in changes.iter_mut() {
+            if let Some(object) = change.as_object_mut() {
+                object.remove("phases_before");
+                object.remove("phases_after");
+                object.remove("tasks_before");
+                object.remove("tasks_after");
+                object.remove("added");
+                object.remove("removed");
+                object.remove("changed");
+            }
+            if let Some(summary) = change.get("summary").and_then(|summary| summary.as_str()) {
+                let clipped = clip(summary, 300);
+                change["summary"] = json!(clipped);
+            }
+        }
+    }
+    if let Some(changes) = value.get_mut("lead_changes").and_then(|list| list.as_array_mut()) {
+        let count = changes.len();
+        changes.truncate(PAGE);
+        if count > 0 {
+            value["lead_changes_total"] = json!(count);
+        }
+    }
+}
+
 /// The team with its live members when the caller listed sessions (F7).
 #[cfg(test)]
 pub(super) fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::Seen]>) -> Value {
@@ -760,6 +986,11 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
         let ready: BTreeSet<u32> = plan::ready(team).into_iter().collect();
         let now = super::super::now();
         for (task, value) in team.tasks.iter().zip(tasks) {
+            if let Some(archived) = &task.archived {
+                *value = super::model::task_stub(task);
+                value["timing"] = archived.timing.clone();
+                continue;
+            }
             // U37: the task's working time and its waits, one number for every
             // client.
             value["timing"] = super::timing::timing(team, task, now);
@@ -1169,7 +1400,13 @@ pub(crate) fn summary_for_test(team: &Team) -> Value {
 }
 
 fn summary(team: &Team, include_cancelled: bool) -> Value {
-    let count = |status: TaskStatus| team.tasks.iter().filter(|task| task.status == status).count();
+    let count = |status: TaskStatus| {
+        let live = team.tasks.iter().filter(|task| task.archived.is_none() && task.status == status).count();
+        live + match status {
+            TaskStatus::Accepted => team.archive_totals.accepted, TaskStatus::Rejected => team.archive_totals.rejected,
+            TaskStatus::Cancelled => team.archive_totals.cancelled, _ => 0,
+        }
+    };
     // U58: the dashboard hides cancelled tasks and the phases whose tasks are
     // all cancelled, unless it asks for them.
     let cancelled: BTreeSet<u32> = team
@@ -1221,7 +1458,7 @@ fn summary(team: &Team, include_cancelled: bool) -> Value {
         .filter(|p| include_cancelled || !cancelled.contains(&p.n))
         .map(|p| json!({"n":p.n,"order":p.order,"title":p.title,"barrier":p.barrier,
             "state":if cancelled.contains(&p.n) { json!("cancelled") } else { json!(p.state) },"tasks":p.tasks,
-            "note":p.note,"rejection":p.rejection,
+            "note":p.note,"rejection":p.rejection,"archived":p.archived,
             // U63: the phase's pause and who accepts it.
             "pause":p.pause,"acceptance":p.acceptance,
             // Task #58: the mode the phase plans in.
@@ -2039,7 +2276,10 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
         Ok(Value::Null)
     })?;
     let member = team.proposals[at]["member"].clone();
-    let change = team.proposals[at]["change"].clone();
+    let mut change = team.proposals[at]["change"].clone();
+    if kind == "approve-phase" {
+        change["input"]["approve_anyway"] = json!(input["approve_anyway"].as_bool() == Some(true));
+    }
     let goal = team.proposals[at]["goal"].as_str().unwrap_or_default().to_owned();
     // N3: the change runs under one request id stored with the proposal, so an
     // interrupted or retried decision replays it instead of applying it twice.
@@ -2606,6 +2846,17 @@ fn scratch_creator() -> anyhow::Result<Option<(Team, Member)>> {
 }
 
 fn create(input: &Value) -> anyhow::Result<Value> {
+    create_inner(input, None)
+}
+
+/// Task #346: the team worker applies a sandboxed member's scratch-team create
+/// with the member and its team already proven, so no caller identity is read
+/// here; the profile and the owner's standing rule are checked again.
+pub(crate) fn create_for_member(parent: &Team, member: &Member, input: &Value) -> anyhow::Result<Value> {
+    create_inner(input, Some((parent.clone(), member.clone())))
+}
+
+fn create_inner(input: &Value, scratch: Option<(Team, Member)>) -> anyhow::Result<Value> {
     let request = text(input, "request_id");
     ensure!(canonical_uuid(request), "A canonical request_id is required");
     // A replay returns the first receipt; a parent link is repaired first
@@ -2623,7 +2874,14 @@ fn create(input: &Value) -> anyhow::Result<Value> {
     // its session, inside the team's scratch root; every other create keeps
     // the sub-team or the lead/owner path below. A sub-team create (a parent
     // object) is never a scratch team.
-    let scratch = if input["parent"].is_object() { None } else { scratch_creator()? };
+    let scratch = if input["parent"].is_object() {
+        None
+    } else {
+        match scratch {
+            Some(found) => Some(found),
+            None => scratch_creator()?,
+        }
+    };
     let parent_link = if scratch.is_none() { parent_create(input, &mut filled)? } else { None };
     if let Some((parent, member)) = &scratch {
         filled = super::scratch::prepare(parent, member, input)?;
@@ -2785,6 +3043,32 @@ fn create(input: &Value) -> anyhow::Result<Value> {
     Ok(receipt)
 }
 
+/// Task #346 (owner, 2026-11-08): the worker applies the queued team call of a
+/// sandboxed member: the create of its scratch team, or an operation for the
+/// scratch team it leads. The member, its profile and the owner's standing rule
+/// are checked again on the current records, so a revoked right or rule refuses
+/// the queued call instead of applying it.
+pub(crate) fn apply_team_outbox(store: &mut Store, parent: &Team, member: &Member, request: &Value) -> anyhow::Result<Value> {
+    let op = request["command"].as_str().unwrap_or_default();
+    let input = &request["input"];
+    anyhow::ensure!(!op.is_empty() && (is_mutation(op) || op == "create"), "Unknown queued team call {op}");
+    if op == "create" {
+        super::sandbox_scope::scratch_create(parent, member, input)
+            .context("The queued scratch-team create is outside the member's own scope")?;
+        return create_for_member(parent, member, input);
+    }
+    let target = request["target"].as_str().unwrap_or_default();
+    let child = store.load(target)?.context("Unknown team")?;
+    super::sandbox_scope::scratch_child(parent, member, &child, op)
+        .context("The queued team call is outside the member's own scratch scope")?;
+    let request_id = request["request_id"].as_str().unwrap_or_default();
+    let actor = Actor::Member(member.id.clone());
+    let value = store.mutate(Some((request_id, input)), &child.id, None, |team, events| {
+        ops::apply(team, op, input, &actor, &BTreeSet::new(), events)
+    })?;
+    Ok(value)
+}
+
 /// The lead (or you) answers a member's question or permission request in the
 /// member's session, by its exact id and hash.
 /// Whether a native option label is the deny answer (B2). The permission
@@ -2832,11 +3116,62 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
         .find(|card| card["question_id"] == question.as_str() && card["question_hash"] == hash.as_str())
         .cloned()
         .context("This question changed or is no longer pending")?;
+    let selected: Vec<&str> = input["answers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|answer| answer["selected_option_ids"].as_array().into_iter().flatten())
+        .filter_map(|id| id.as_str())
+        .collect();
+    let deny = card["questions"].as_array().into_iter().flatten().any(|item| {
+        item["options"].as_array().into_iter().flatten().any(|option| {
+            option["id"].as_str().is_some_and(|id| selected.contains(&id))
+                && option["label"].as_str().is_some_and(denies)
+        })
+    });
+    let tool = card["questions"]
+        .as_array()
+        .and_then(|items| items.first())
+        .and_then(|item| item["header"].as_str())
+        .or_else(|| card["tool"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    // Task #349 (owner, 2026-11-08): the approval journal is the one place for
+    // an approval not given by the owner in person. A lead's answer is written
+    // there, with its source, before it is delivered; a failed delivery settles
+    // the same entry. The owner's own answer needs no journal.
+    let journal_root = crate::approval_log::root();
+    let journal = if matches!(&by, Actor::Human) {
+        None
+    } else {
+        let lead_name = if parent_authority {
+            parent.as_ref().and_then(|parent| parent.member(&parent.lead)).and_then(|lead| lead.session.as_ref())
+        } else {
+            team.member(&team.lead).and_then(|lead| lead.session.as_ref())
+        }.map(|lead| lead.name.clone()).unwrap_or_else(|| "lead".to_owned());
+        let labels: Vec<String> = card["questions"].as_array().into_iter().flatten()
+            .flat_map(|item| item["options"].as_array().into_iter().flatten())
+            .filter(|option| option["id"].as_str().is_some_and(|id| selected.contains(&id)))
+            .filter_map(|option| option["label"].as_str().map(str::to_owned))
+            .collect();
+        let answer_text = format!("{}: {}", if deny { "deny" } else { "allow" },
+            if labels.is_empty() { selected.join(", ") } else { labels.join(", ") });
+        let entry = json!({"host": if session.host.is_empty() { "local" } else { session.host.as_str() },
+            "session": session.name,"source":format!("team lead {lead_name}"),"team":team.id,"member":member_id,
+            "question":card["questions"][0]["question"],"command":card["command"],"answer":answer_text,"status":"answered"});
+        match crate::approval_log::note(&journal_root, &entry) {
+            Ok(id) => Some(id),
+            Err(error) => bail!("The approval journal could not record this answer; nothing was sent: {error}"),
+        }
+    };
     let request = json!({"request_id":uuid::Uuid::new_v4().to_string(),"expected_run_id":session.run_id,
         "expected_conversation_id":session.conversation_id,"question_id":question,"expected_question_hash":hash,"answers":input["answers"]});
     let output = super::dispatcher::hgs(&session.host, &["answer", &session.name, "--json"], Some(&request), std::time::Duration::from_secs(120))?;
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        if let Some(id) = journal {
+            let _ = crate::approval_log::settle(&journal_root, id, "failed", &error);
+        }
         // The owner, 2026-11-05: Kimi refuses an answer from outside its
         // Terminal while another of its requests waits; the lead then had a
         // request it could never answer. It goes to the owner at once.
@@ -2862,28 +3197,11 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
         }
         bail!("{error}");
     }
+    if let Some(id) = journal {
+        let _ = crate::approval_log::settle(&journal_root, id, "approved", "");
+    }
     // B2: a denied permission's text reaches the member as one message, and
     // B1: the lead's or owner's answer is recorded with its reason.
-    let selected: Vec<&str> = input["answers"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .flat_map(|answer| answer["selected_option_ids"].as_array().into_iter().flatten())
-        .filter_map(|id| id.as_str())
-        .collect();
-    let deny = card["questions"].as_array().into_iter().flatten().any(|item| {
-        item["options"].as_array().into_iter().flatten().any(|option| {
-            option["id"].as_str().is_some_and(|id| selected.contains(&id))
-                && option["label"].as_str().is_some_and(denies)
-        })
-    });
-    let tool = card["questions"]
-        .as_array()
-        .and_then(|items| items.first())
-        .and_then(|item| item["header"].as_str())
-        .or_else(|| card["tool"].as_str())
-        .unwrap_or_default()
-        .to_owned();
     let reason = text(input, "text").trim().to_owned();
     // N5: the answer is recorded even when the denial message cannot be sent.
     let denial_error = if deny && !reason.is_empty() {
@@ -3390,7 +3708,7 @@ fn test_command(input: &Value) -> anyhow::Result<Value> {
             if reused.is_none() && action == "force" {
                 let queued = database.queued(&team_id)?;
                 let chosen = test_queue::schedule(&queued, &classes, &load);
-                records = test_queue::run_due(&database, &project, &chosen, now, &policy)?;
+                records = test_queue::run_due(&database, &project, &chosen, now, &policy, team.settings.tests.as_ref())?;
             }
             let estimate = super::test_results::full_estimate(&project, &loaded.config);
             if !records.is_empty() || size.is_some() {
@@ -3424,6 +3742,16 @@ fn test_command(input: &Value) -> anyhow::Result<Value> {
             store.mutate(None, &team_id, None, |team, _| super::test_results::settle(team, action, input, super::super::now()))
         }
         "results" => {
+            // Task 374: the card names a record: read that one, with its log
+            // and excerpt (the card itself never carries them).
+            let record = text(input, "record");
+            if !record.is_empty() {
+                let found = database.record_by_id(&record)?;
+                return match found {
+                    Some(record) => Ok(json!({"status":"record","record":record})),
+                    None => anyhow::bail!("Unknown test record {record}"),
+                };
+            }
             let limit = input["limit"].as_u64().map_or(20, |n| n as usize);
             let before = input["before"].as_f64();
             // #719: a task's drawer reads its own runs; the profiler its window.
@@ -4275,19 +4603,67 @@ fn queue_write(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
     let Actor::Member(member_id) = actor(&team, op, input)? else {
         bail!("Only a member queues this request; a sandbox does not block the lead");
     };
-    let request_id = text(input, "request_id").to_owned();
     let member = team.member(&member_id).context("Unknown member")?;
     let folder = member_outbox_folder(&team, member)?;
-    let request = json!({"op":op, "request_id":request_id, "team":team.id, "member":member_id,
+    let request = json!({"op":op, "request_id":text(input, "request_id"), "team":team.id, "member":member_id,
         "attempt":text(input, "attempt"), "input":input});
+    queue_request(&folder, request, wait)
+}
+
+/// Task #346 (owner, 2026-11-08): a sandboxed member's own-scope team call - a
+/// scratch team's create under the owner's standing rule, or an operation for
+/// the scratch team it leads - waits in its folder exactly as a report does;
+/// the worker applies it with the same identity, profile and rule checks. None
+/// when the call is outside that scope: the caller keeps the sandbox's own
+/// error, so the member asks the lead.
+fn queue_team_call(op: &str, input: &Value, wait: bool) -> anyhow::Result<Option<Value>> {
+    let store = Store::open(false)?;
+    let (parent, member, target) = if op == "create" {
+        let Some((parent, member)) = scratch_creator()? else { return Ok(None) };
+        if super::sandbox_scope::scratch_create(&parent, &member, input).is_none() {
+            return Ok(None);
+        }
+        (parent, member, String::new())
+    } else {
+        let id = text(input, "team");
+        let Some(child) = store.load(id)?.filter(|child| child.scratch_parent.is_some()) else { return Ok(None) };
+        let link = child.scratch_parent.clone().expect("checked");
+        let Some(parent) = store.load(&link.team)? else { return Ok(None) };
+        let Some(member) = parent.member(&link.member).cloned() else { return Ok(None) };
+        // The caller the CLI proved must be that member; another member's tool
+        // never queues here.
+        let Ok(Actor::Member(caller)) = actor(&child, op, input) else { return Ok(None) };
+        if caller != member.id || super::sandbox_scope::scratch_child(&parent, &member, &child, op).is_none() {
+            return Ok(None);
+        }
+        (parent, member, child.id.clone())
+    };
+    let folder = member_outbox_folder(&parent, &member)?;
+    let request = json!({"op":"team", "request_id":text(input, "request_id"), "team":parent.id, "member":member.id,
+        "attempt":text(input, "attempt"), "command":op, "target":target, "input":input});
+    queue_request(&folder, request, wait).map(Some)
+}
+
+/// A refused store write: queue the call when it is the member's own work, else
+/// keep the sandbox's error so only requests outside the scope ask the lead.
+fn queue_or_blocked(error: anyhow::Error, op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
+    match queue_team_call(op, input, wait) {
+        Ok(Some(value)) => Ok(value),
+        _ => Err(super::store::write_error(error)),
+    }
+}
+
+/// The queued request's own file and answer, shared by a report and a team call.
+fn queue_request(folder: &std::path::Path, request: Value, wait: bool) -> anyhow::Result<Value> {
+    let request_id = request["request_id"].as_str().unwrap_or_default().to_owned();
     // U42: a request already applied answers its outcome, and one still queued
-    // answers its state (or waits, with `--wait`); a different request under the
-    // same id is refused, so a placeholder can never replace the whole text that
-    // was queued first.
-    if let Some(result) = super::outbox::result(&folder, &request_id) {
+    // answers its state (or waits, with `--wait`); a different request under
+    // the same id is refused, so a placeholder can never replace the whole text
+    // that was queued first.
+    if let Some(result) = super::outbox::result(folder, &request_id) {
         return Ok(result);
     }
-    let existing = super::outbox::request(&folder, &request_id);
+    let existing = super::outbox::request(folder, &request_id);
     if let Some(queued) = &existing {
         ensure!(
             queued["op"] == request["op"] && queued["input"] == request["input"],
@@ -4295,10 +4671,10 @@ fn queue_write(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         );
     }
     let path = match &existing {
-        Some(_) => super::outbox::request_path(&folder, &request_id),
-        None => super::outbox::push(&folder, &request)?,
+        Some(_) => super::outbox::request_path(folder, &request_id),
+        None => super::outbox::push(folder, &request)?,
     };
-    let result = super::outbox::result_path(&folder, &request_id);
+    let result = super::outbox::result_path(folder, &request_id);
     // Task #275: the caller is told where the outcome is and that a refusal or
     // failure also comes as a team message, not only to a file nobody reads.
     let delivery = format!(
@@ -4317,7 +4693,7 @@ fn queue_write(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
     if !wait {
         return Ok(queued);
     }
-    Ok(super::outbox::wait(&folder, &request_id, 30.0).unwrap_or_else(|| json!({
+    Ok(super::outbox::wait(folder, &request_id, 30.0).unwrap_or_else(|| json!({
         "status":"queued", "request_id":request_id, "path":path.to_string_lossy(), "result":result.to_string_lossy(),
         "delivery": delivery,
         "note":"The team worker has not applied it in 30 s; it stays queued in the member's folder and the worker will apply it. Its result stays at the path in `result`, and a refusal or failure also reaches you as a team message."
@@ -4631,6 +5007,19 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
     }
 }
 
+/// Task 353 (owner, 2026-11-08): the agents of the standing rule a scratch team
+/// was created under, when this team is such a scratch team; None for a normal
+/// team (its lead stays carded).
+fn scratch_roster_agents(store: &Store, team: &Team) -> anyhow::Result<Option<Vec<String>>> {
+    let (Some(link), false) = (&team.scratch_parent, team.scratch_rule.is_empty()) else {
+        return Ok(None);
+    };
+    let Some(parent) = store.load(&link.team)? else {
+        return Ok(None);
+    };
+    Ok(super::scratch::standing(&parent).map(|rule| rule.agents))
+}
+
 /// U26: fills the verified roster word for a lead caller, or refuses. The
 /// verifier is a parameter so a test can use a fixture events database.
 fn check_roster_word(
@@ -4639,10 +5028,31 @@ fn check_roster_word(
     input: &Value,
     filled: &mut Value,
     caller: &Actor,
+    rule_agents: Option<&[String]>,
     verify: impl Fn(&Team, &Value, &super::owner_word::WordRule, f64) -> anyhow::Result<super::model::OwnerWord>,
 ) -> anyhow::Result<()> {
     if !matches!(caller, Actor::Member(id) if *id == team.lead) {
         return Ok(());
+    }
+    // Task 353 (owner, 2026-11-08): a scratch team created under the standing
+    // rule already runs without the owner's per-plan approval; its lead
+    // relaunches, adds and removes its own members within the rule's agents
+    // without a card. Anything outside the rule, and every normal team, still
+    // asks: the flag below stands for the verified word the card would give.
+    if let Some(agents) = rule_agents {
+        let inside = match op {
+            "relaunch" | "remove-member" => team
+                .member(text(filled, "member"))
+                .is_some_and(|member| agents.iter().any(|agent| *agent == member.agent)),
+            "add-member" => agents.iter().any(|agent| *agent == text(&filled["member"], "agent")),
+            _ => false,
+        };
+        if inside {
+            if let Some(object) = filled.as_object_mut() {
+                object.insert("roster_word".into(), Value::Bool(true));
+            }
+            return Ok(());
+        }
     }
     let rule = roster_word_rule(team, op, filled);
     if !rule.needed() {
@@ -5397,7 +5807,12 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         return test_config(input);
     }
     match op {
-        "create" => create(input),
+        // Task #346: a sandboxed member's scratch-team create waits in its own
+        // folder when the store refuses the write; anything else keeps the error.
+        "create" => match create(input) {
+            Err(error) if read_only(&error) => queue_or_blocked(error, "create", input, wait),
+            result => result,
+        },
         // Task 159: the owner's scratch-team rule, and its list and revoke.
         "scratch-rule" => scratch_rule(input),
         "scratch-rules" => scratch_rules(input),
@@ -5480,6 +5895,19 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         }
         "status" => {
             let store = Store::open(false)?;
+            if input["archived_phases"].as_bool() == Some(true) {
+                let cursor = input["cursor"].as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(0);
+                return store.archived_phases(text(input,"team"), cursor, input["limit"].as_i64().unwrap_or(PAGE));
+            }
+            if let Some(phase) = input.get("archived_phase") {
+                let phase = phase.as_u64().and_then(|n| u32::try_from(n).ok()).context("A phase number is required")?;
+                let cursor = input["cursor"].as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(0);
+                return store.archived_tasks(text(input,"team"), phase, cursor, input["limit"].as_i64().unwrap_or(PAGE));
+            }
+            if let Some(task) = input.get("task") {
+                let task = task.as_u64().and_then(|task| u32::try_from(task).ok()).filter(|task| *task > 0).context("A positive task id is required")?;
+                return store.task(text(input, "team"), task);
+            }
             let mut team = store.load(text(input, "team"))?.context("Unknown team")?;
             // Task 128 (docs/lore.md 5): the plain memory digest, at most 6 KiB.
             if input["digest"] == true {
@@ -5515,11 +5943,16 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             // Task 270 (owner, 2026-11-08): the project's working mode: the
             // preset the team follows, the cached proposal with its reasons, and
             // what the settings still miss of it (no Git read on a poll).
+            // Task #406: the worker's tick: the phase running now, the last
+            // tick and the slowest recent one (bounded).
+            value["worker_tick"] = super::tick_clock::status();
             let disagreeing = super::working_mode::cached_disagreement(&team).map(|(_, wrong)| wrong);
             value["working_mode"] = json!({
                 "preset": team.working_mode,
                 "proposal": team.mode_proposal,
                 "disagreeing": disagreeing,
+                // Task 336: the owner's Keep, {preset, fingerprint, at}.
+                "kept": team.mode_kept,
             });
             // D2: the findings page takes a before cursor.
             value["findings"] = findings_page(&team, input["before"].as_u64());
@@ -5563,6 +5996,9 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             if team.settings.build_broker {
                 value["build_states"] = super::broker::builds_view(&team, now())["members"].clone();
             }
+            // Task #393: the polled status is bounded; `status --task N` above
+            // answers with the task's full record.
+            bound_status(&mut value, &team);
             Ok(value)
         }
         "inbox" => inbox_command(input),
@@ -5631,6 +6067,9 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 Err(error) if queues_instead(op) && read_only(&error) => {
                     return queue_write(op, input, wait)
                 }
+                // Task #346: a call for the member's own scratch team queues too;
+                // a call outside that scope keeps the sandbox's error.
+                Err(error) if read_only(&error) => return queue_or_blocked(error, op, input, wait),
                 // U20: a write the sandbox blocked says what to do, not a bare
                 // SQLite error.
                 Err(error) => return Err(super::store::write_error(error)),
@@ -5815,7 +6254,8 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             if matches!(op, "add-member" | "scale" | "drain" | "swap-member" | "remove-member" | "relaunch" | "settings") {
                 let team = store.load(team_id)?.context("Unknown team")?;
                 let caller = actor(&team, op, &filled)?;
-                check_roster_word(&team, op, input, &mut filled, &caller, |team, input, rule, now| {
+                let rule_agents = scratch_roster_agents(&store, &team)?;
+                check_roster_word(&team, op, input, &mut filled, &caller, rule_agents.as_deref(), |team, input, rule, now| {
                     super::owner_word::verify_roster(team, input, rule, now)
                 })?;
             }
@@ -5844,8 +6284,9 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 && text(&filled, "action") == "discard"
                 && store.receipt(request, input)?.is_some();
             // Task 287: a report's git reads run before the store's lock and are
-            // served inside it.
-            let reporting = if op == "report" && !parent_lead { store.load(team_id).ok().flatten() } else { None };
+            // served inside it; task #362: a lead's use-last-reply reads the
+            // member's folder the same way.
+            let reporting = if matches!(op, "report" | "use-last-reply") && !parent_lead { store.load(team_id).ok().flatten() } else { None };
             let prefetch = || {
                 if let Some(team) = reporting.as_ref() {
                     if let Ok(caller) = actor(team, op, &filled) {
@@ -5869,8 +6310,26 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 Err(error) if queues_instead(op) && read_only(&error) => {
                     return queue_write(op, input, wait)
                 }
+                // Task #346: a call for the member's own scratch team queues too;
+                // a call outside that scope keeps the sandbox's error.
+                Err(error) if read_only(&error) => return queue_or_blocked(error, op, input, wait),
                 Err(error) => return Err(super::store::write_error(error)),
             };
+            // Task #364: a member's report names the folders it made for the
+            // attempt and left in place, asking it to remove them or say why.
+            if matches!(op, "report" | "use-last-reply") && receipt["status"] == "submitted" {
+                if let Ok(Some(team)) = store.load(team_id) {
+                    let attempt = text(&filled, "attempt");
+                    let found = team.tasks.iter().flat_map(|task| &task.attempts).find(|found| found.id == attempt).map(|found| (found.member.clone(), found.sent_at));
+                    if let Some((member, since)) = found.filter(|(member, _)| !member.is_empty()) {
+                        let folder = team.member(&member).and_then(|found| super::dispatcher::member_folder_path(&team, found).ok()).unwrap_or_default();
+                        let note = crate::state::build_dirs::report_leftovers(&team.id, &member, since, &folder);
+                        if note["folders"].as_array().is_some_and(|folders| !folders.is_empty()) {
+                            receipt["leftovers"] = note;
+                        }
+                    }
+                }
+            }
             // N7: discarding a draft stops the lead's session when the owner
             // asked for it (spec 3); a failure leaves the discard done and names
             // it in the answer.
@@ -6113,6 +6572,10 @@ mod commands_tools;
 mod commands_scratch;
 
 #[cfg(test)]
+#[path = "tests/commands_sandbox.rs"]
+mod commands_sandbox;
+
+#[cfg(test)]
 #[path = "tests/commands_waiting.rs"]
 mod commands_waiting;
 #[cfg(test)]
@@ -6122,6 +6585,10 @@ mod inbox_notices;
 #[cfg(test)]
 #[path = "tests/commands_standing_rules.rs"]
 mod commands_standing_rules;
+
+#[cfg(test)]
+#[path = "tests/commands_bounded.rs"]
+mod commands_bounded;
 
 
 

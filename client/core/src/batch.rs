@@ -60,6 +60,15 @@ pub struct ActivityOut {
     pub payload: Value,
 }
 
+/// One bounded Git folder update. A failure replaces any preceding state.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct GitOut {
+    pub computer: ComputerId,
+    pub key: String,
+    pub kind: String,
+    pub payload: Value,
+}
+
 /// The latest change of a followed session's processes. `kind` and `payload`:
 /// `state` carries `{value, rev}` (`value` is `{processes, process_work}` as
 /// `hgs inspect` reports them; `rev` orders one stream's states), `failed`
@@ -130,6 +139,8 @@ pub struct MachineOut {
 /// left out when empty.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Batch {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub git: Vec<GitOut>,
     pub upserts: Vec<RowOut>,
     pub removes: Vec<KeyOut>,
     pub replaces: Vec<ReplaceOut>,
@@ -167,6 +178,7 @@ pub struct Batch {
 impl Batch {
     pub fn is_empty(&self) -> bool {
         self.upserts.is_empty()
+            && self.git.is_empty()
             && self.removes.is_empty()
             && self.replaces.is_empty()
             && self.computers.is_empty()
@@ -213,6 +225,7 @@ type SessionKey = (ComputerId, String);
 /// [`PENDING_EVENTS`] per followed session.
 #[derive(Debug, Default)]
 pub struct Coalescer {
+    git: BTreeMap<SessionKey, crate::GitUpdate>,
     posters: crate::video_posters::Posters,
     computers: BTreeMap<ComputerId, ComputerStatus>,
     machines: BTreeMap<ComputerId, MachineMeta>,
@@ -247,6 +260,27 @@ impl Coalescer {
 
     pub fn push(&mut self, change: Change) {
         match change {
+            Change::Git {
+                computer,
+                key,
+                update,
+            } => {
+                if self.git.len() >= crate::git::FOLDERS * 2
+                    && !self.git.contains_key(&(computer.clone(), key.clone()))
+                {
+                    self.git.clear();
+                    // One fixed display invalidation, ordered before named
+                    // folders; rapid viewport churn cannot retain old clean
+                    // states or grow the pending batch indefinitely.
+                    self.git.insert(
+                        (ComputerId::local(), String::new()),
+                        crate::GitUpdate::Unavailable {
+                            code: "git_batch_overflow".into(),
+                        },
+                    );
+                }
+                self.git.insert((computer, key), update);
+            }
             Change::Upsert { computer, key, row } => match self.replaces.get_mut(&computer) {
                 Some(rows) => {
                     rows.insert(key, row);
@@ -359,6 +393,20 @@ impl Coalescer {
 
     pub fn take(&mut self) -> Batch {
         let mut batch = Batch::default();
+        for ((computer, key), update) in std::mem::take(&mut self.git) {
+            let (kind, payload) = match update {
+                crate::GitUpdate::State { value, rev } => {
+                    ("state", json!({"value":value,"rev":rev}))
+                }
+                crate::GitUpdate::Unavailable { code } => ("unavailable", json!({"code":code})),
+            };
+            batch.git.push(GitOut {
+                computer,
+                key,
+                kind: kind.into(),
+                payload,
+            });
+        }
         for (computer, status) in std::mem::take(&mut self.computers) {
             batch.computers.push(ComputerOut {
                 computer,
@@ -507,6 +555,7 @@ impl Coalescer {
                 })
                 .sum();
         self.computers.len()
+            + self.git.len()
             + self.machines.len()
             + replaced
             + self.rows.len()
@@ -519,6 +568,7 @@ impl Coalescer {
 
     pub fn is_empty(&self) -> bool {
         self.computers.is_empty()
+            && self.git.is_empty()
             && self.machines.is_empty()
             && self.replaces.is_empty()
             && self.rows.is_empty()

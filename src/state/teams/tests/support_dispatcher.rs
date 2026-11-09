@@ -108,6 +108,45 @@ pub(crate) fn with_context(team: &mut Team, member: &str, setting: &str) {
     found.context_before_task = setting.into();
 }
 
+/// Task #7: a member with an After-a-task policy and its measured context.
+pub(crate) fn with_after_task(team: &mut Team, member: &str, mode: &str, on: &str, at: u32) {
+    let found = team.members.iter_mut().find(|found| found.id == member).unwrap();
+    found.after_task = mode.into();
+    found.after_task_on = on.into();
+    found.after_task_at = at;
+}
+
+/// Task #7: a session record's native context usage, as hgs measures it.
+pub(crate) fn with_usage(name: &str, used: u64, limit: u64) {
+    crate::state::storage::atomic(
+        &crate::state::storage::record_path(name),
+        &json!({"version":1,"agent":"codex","name":name,"run_id":"r1","conversation_id":"c1",
+            "context":{"used":used,"limit":limit}}).to_string(),
+    )
+    .unwrap();
+}
+
+/// Task #7: a session record that is free (idle, live, able to take a message)
+/// with the context usage it reports.
+pub(crate) fn free_record(name: &str, used: u64, limit: u64) {
+    crate::state::storage::atomic(
+        &crate::state::storage::record_path(name),
+        &json!({"version":1,"agent":"claude","name":name,"run_id":"r0","conversation_id":"c1",
+            "state":"running","process_state":"running","activity":"idle","phase":"idle",
+            "context":{"used":used,"limit":limit}}).to_string(),
+    )
+    .unwrap();
+}
+
+/// Task #7: a session record busy in a turn.
+pub(crate) fn busy_record(name: &str) {
+    crate::state::storage::atomic(
+        &crate::state::storage::record_path(name),
+        &json!({"version":1,"agent":"claude","name":name,"run_id":"r0","conversation_id":"c1",
+            "state":"running","process_state":"running","activity":"busy","phase":"working"}).to_string(),
+    )
+    .unwrap();
+}
 /// U46: one dispatcher tick for a waiting hand-out, as the worker runs it.
 pub(crate) fn prepare_tick(store: &mut Store, team_id: &str) -> bool {
     let team = store.load(team_id).unwrap().unwrap();

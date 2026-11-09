@@ -2,6 +2,7 @@ import { For, Show, createEffect, createSignal, onCleanup, onMount, type JSX } f
 import { tr } from "../../../i18n";
 import { useModel, windowPort } from "../../teams/ProposalCards";
 import { DiskModel, decisionsLine, driveLine, folderKind, folderState, lastUse, size, type DiskPolicy } from "./disk-model";
+import { TextInput } from "../../lib/TextField";
 
 /** Task 109: the open section reads again this often, measuring a few folders each time. */
 export const DISK_LIVE_MS = 10_000;
@@ -27,10 +28,10 @@ export function DiskSection(): JSX.Element {
     setPolicy({ ...now });
   });
   const field = (key: keyof DiskPolicy, value: number | boolean) => setPolicy((now) => (now ? { ...now, [key]: value } : now));
-  const number = (key: "unused_days" | "free_gb" | "free_percent", label: string, max: number) => (
+  const number = (key: "unused_days" | "free_gb" | "free_percent" | "team_limit_gb", label: string, max: number) => (
     <label class="set-field">
       <span>{label}</span>
-      <input class="field" type="number" min={0} max={max} value={policy()?.[key] ?? 0} disabled={read().busy}
+      <TextInput class="field" type="number" min={0} max={max} value={policy()?.[key] ?? 0} disabled={read().busy}
         onInput={(event) => field(key, Math.max(0, Math.min(max, Number(event.currentTarget.value) || 0)))} />
     </label>
   );
@@ -47,6 +48,7 @@ export function DiskSection(): JSX.Element {
           {number("unused_days", tr("Remove a folder unused for (days, 0: never)"), 365)}
           {number("free_gb", tr("Keep this much free on its drive (GB)"), 10000)}
           {number("free_percent", tr("or this share of the drive (%)"), 90)}
+          {number("team_limit_gb", tr("Tell the lead when one team's build folders pass (GB)"), 100000)}
           <div class="set-actions">
             <button type="button" class="btn small" disabled={read().busy} onClick={() => void model.savePolicy(current())}>{tr("Save policy")}</button>
           </div>
@@ -82,6 +84,11 @@ export function DiskSection(): JSX.Element {
           <For each={view().teams} fallback={<p class="dim">{tr("Zerus has recorded no build folder on this computer yet")}</p>}>{(team) => (
             <div class="set-group" data-disk-team={team.team}>
               <b>{team.team_name || tr("Sessions")}</b> <span class="dim">{size(team.bytes)}</span>
+              <div class="set-actions">
+                <button type="button" class="btn ghost small" disabled={read().busy} data-disk-clean-team={team.team}
+                  title={tr("Remove the targets of this team's finished tasks; Zerus asks first and keeps a folder in use")}
+                  onClick={() => void model.clean(false, `team:${team.team}`)}>{tr("Clean finished tasks…")}</button>
+              </div>
               <For each={team.folders}>{(folder) => (
                 <div class="disk-row" data-state={folder.state} data-kind={folderKind(folder)}>
                   <code class="ell" title={folder.path}>{folder.path}</code>

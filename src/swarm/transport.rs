@@ -43,6 +43,13 @@ pub struct Exchange {
     /// The twins the requester has; present when it takes them in return.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub known_twins: Option<BTreeSet<String>>,
+    /// Primary ID operations are never sent to a peer that has not advertised
+    /// this independent capability. Unlike twins, malformed primary data fails
+    /// the whole exchange; no partial projection can become primary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id_memberships: Option<Vec<Operation>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_id_memberships: Option<BTreeSet<String>>,
 }
 
 pub fn remote(config: &Config, alias: &str, action: &str, input: Option<&Value>) -> Result<Value> {
@@ -66,10 +73,11 @@ pub fn remote_until(
 }
 
 #[cfg(test)]
+pub(crate) use crate::remote_shell::TEST_SSH;
+
+#[cfg(test)]
 thread_local! {
-    /// The program a test runs in place of ssh, and delays a test puts after
-    /// the spawn and after a successful wait (review-n's seams on #1452).
-    pub(crate) static TEST_SSH: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
+    /// Delays after spawn and successful wait (review-n's seams on #1452).
     pub(crate) static AFTER_SPAWN: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
     pub(crate) static AFTER_WAIT: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
 }
@@ -117,42 +125,53 @@ fn run_within(
         !alias.starts_with('-') && !alias.chars().any(char::is_whitespace),
         "invalid connection alias"
     );
+    let label_attempt = (words == ["swarm", "hello"])
+        .then(|| super::session_labels::begin_peer(config, alias, deadline))
+        .flatten();
     let bytes = serde_json::to_vec(&input.unwrap_or(&json!({})))?;
     ensure!(
         bytes.len() as u64 <= MAX_BYTES,
         "swarm exchange is too large"
     );
     let wsl = crate::wsl::profile(config, alias);
+    // WhiteWh fork: a WSL profile runs its own transport; any other peer goes
+    // through the command syntax its login shell reads (remote_shell).
+    let remote = if wsl.is_some() {
+        None
+    } else {
+        Some(crate::remote_shell::hgs_within(config, alias, words, deadline)?)
+    };
     let mut command = if let Some(profile) = wsl {
         crate::wsl::command(profile, &words.iter().map(|word| word.to_string()).collect::<Vec<_>>())?
     } else {
+        let remote = remote.as_deref().unwrap_or_default();
         #[cfg(test)]
         let ssh = TEST_SSH
             .with(|program| program.borrow().clone())
             .map(std::process::Command::new)
-            .unwrap_or_else(platform::ssh);
+            .map(Ok)
+            .unwrap_or_else(|| crate::ssh_bytes::command(remote))?;
         #[cfg(not(test))]
-        let ssh = platform::ssh();
+        let ssh = crate::ssh_bytes::command(remote)?;
         ssh
     };
-    if wsl.is_none() { command
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=5",
-            "-o",
-            "ServerAliveInterval=5",
-            "-o",
-            "ServerAliveCountMax=2",
-        ])
-        .args(crate::machines::ssh_options(config, alias))
-        .arg(alias)
-        .arg(
-            crate::windows_peer::hgs(config, alias, &words.iter().map(|word| word.to_string()).collect::<Vec<_>>())
-                .map_err(|e| anyhow::anyhow!(e.message.clone()))?,
-        );
+    if let Some(remote) = remote {
+        command
+            .args([
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "ServerAliveInterval=5",
+                "-o",
+                "ServerAliveCountMax=2",
+            ])
+            .args(crate::machines::ssh_options(config, alias))
+            .arg(alias)
+            .arg(remote);
     }
+    ensure!(Instant::now() < deadline, "connection to {alias} timed out before start");
     let ssh = platform::spawn_ssh(&mut command, true, true, true).context("start swarm connection")?;
     #[cfg(test)]
     thread::sleep(AFTER_SPAWN.with(|delay| delay.get()));
@@ -218,8 +237,10 @@ fn run_within(
         "remote catalog is too large"
     );
     let answer = serde_json::from_slice(&output)
-        .context("remote HGS does not provide a valid swarm response; update HGS on that machine")?;
+        .context("remote HGS does not provide a valid swarm response; update HGS on that machine",
+    )?;
     ensure!(!expired(), "connection to {alias} timed out");
+    super::session_labels::finish_peer(config, label_attempt, &answer);
     Ok(answer)
 }
 
@@ -228,6 +249,17 @@ pub fn hello(config: &Config, inventory: bool) -> Result<Value> {
     store.save()?;
     let mut result = json!({"schema":1,"node_id":store.data.node_id,"swarm_id":store.data.catalog.swarm_id,"digest":store.data.catalog.digest(),"initialized":store.data.imported,"kinds":catalog::advertised(),
         "twins":store.data.twins.digest()});
+    if let Some(primary) = &store.data.id_memberships {
+        result["id_memberships"] = json!(primary.digest());
+        if inventory {
+            result["known_id_memberships"] = json!(primary.known());
+        }
+    } else {
+        result["kinds"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|k| k != super::session_memberships::CAPABILITY);
+    }
     if inventory {
         result["known"] = json!(store.data.catalog.operations.keys().collect::<Vec<_>>());
         result["known_twins"] = json!(store.data.twins.known());
@@ -253,6 +285,9 @@ pub fn hello(config: &Config, inventory: bool) -> Result<Value> {
     if inventory {
         return Ok(result);
     }
+    // Business/fence hello never waits for a connector. Configured slots
+    // require the separate bounded background capability observation.
+    result["session_labels"] = super::session_labels::observe_absent(config).unwrap_or(Value::Null);
     match replica::hello(config) {
         Ok(mut replica) => {
             replica["peers"] = json!(peers);
@@ -281,6 +316,39 @@ pub fn exchange(config: &Config, request: Exchange) -> Result<Value> {
     if let Some(twins) = request.twins {
         store.data.twins.merge(&request.swarm_id, parsed(&twins))?;
     }
+    let primary_capable = request
+        .kinds
+        .as_ref()
+        .is_some_and(|kinds| kinds.contains(super::session_memberships::CAPABILITY));
+    ensure!(
+        primary_capable
+            || (request.id_memberships.is_none() && request.known_id_memberships.is_none()),
+        "ID membership capability was not negotiated"
+    );
+    if let Some(operations) = request.id_memberships {
+        store
+            .data
+            .id_memberships
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("ID memberships unavailable"))?
+            .merge(&store.data.catalog, &request.swarm_id, operations)?;
+    }
+    // Incoming compatible twins are promoted too, before any later label move.
+    if let Some(primary) = &mut store.data.id_memberships {
+        primary.migrate(&store.data.catalog, &store.data.twins)?;
+    }
+    let id_memberships = request
+        .known_id_memberships
+        .as_ref()
+        .map(|known| {
+            store
+                .data
+                .id_memberships
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("ID memberships unavailable"))
+                .map(|p| p.missing(known))
+        })
+        .transpose()?;
     let twins = request
         .known_twins
         .as_ref()
@@ -299,6 +367,9 @@ pub fn exchange(config: &Config, request: Exchange) -> Result<Value> {
     let mut response = json!({"schema":1,"node_id":store.data.node_id,"swarm_id":store.data.catalog.swarm_id,"operations":missing});
     if let Some(twins) = twins {
         response["twins"] = json!(twins);
+    }
+    if let Some(primary) = id_memberships {
+        response["id_memberships"] = json!(primary);
     }
     Ok(response)
 }
@@ -319,12 +390,17 @@ pub fn sync_peer(config: &Config, alias: &str) -> Result<()> {
         peer.last_sync = now();
         peer.error.clear();
     }
-    local.save()
+    local.save()?;
+    drop(local);
+    let _ =
+        super::session_labels::refresh_peer(config, alias, Instant::now() + Duration::from_secs(2));
+    Ok(())
 }
 
 /// The member's verified hello and the catalog exchange after it; a failure
 /// says whether the member answered as another computer.
-fn catalog_sync(config: &Config, alias: &str) -> std::result::Result<Value, (Incomplete, anyhow::Error)> {
+fn catalog_sync(config: &Config, alias: &str,
+) -> std::result::Result<Value, (Incomplete, anyhow::Error)> {
     let unreachable = |error: anyhow::Error| (Incomplete::Unreachable, error);
     let identity = remote(config, alias, "hello", None).map_err(unreachable)?;
     let local = LockedStore::load(config).map_err(unreachable)?;
@@ -342,7 +418,8 @@ fn catalog_sync(config: &Config, alias: &str) -> std::result::Result<Value, (Inc
     catalog_exchange(config, alias, identity, local).map_err(unreachable)
 }
 
-fn catalog_exchange(config: &Config, alias: &str, identity: Value, mut local: LockedStore) -> Result<Value> {
+fn catalog_exchange(config: &Config, alias: &str, identity: Value, mut local: LockedStore,
+) -> Result<Value> {
     ensure!(
         identity["swarm_id"] == local.data.catalog.swarm_id,
         "{alias} belongs to a different swarm"
@@ -365,6 +442,10 @@ fn catalog_exchange(config: &Config, alias: &str, identity: Value, mut local: Lo
     }
     // Whether this member reads session memberships by ID (zerus-ucck
     // P2c-1); only such a member exchanges them.
+    let primary = local.data.id_memberships.is_some()
+        && peer_kinds
+            .as_ref()
+            .is_some_and(|kinds| kinds.contains(super::session_memberships::CAPABILITY));
     let twins = peer_kinds
         .as_ref()
         .is_some_and(|kinds| kinds.contains(catalog::SESSION_ID_KIND));
@@ -377,6 +458,12 @@ fn catalog_exchange(config: &Config, alias: &str, identity: Value, mut local: Lo
     local.save()?;
     if identity["digest"] != local.data.catalog.digest()
         || (twins && identity["twins"] != local.data.twins.digest())
+        || (primary
+            && local
+                .data
+                .id_memberships
+                .as_ref()
+                .is_some_and(|p| identity["id_memberships"] != p.digest()))
     {
         drop(local);
         let inventory = remote(config, alias, "inventory", None)?;
@@ -405,7 +492,13 @@ fn catalog_exchange(config: &Config, alias: &str, identity: Value, mut local: Lo
                 })
                 .cloned()
                 .collect(),
-            kinds: peer_kinds.as_ref().map(|_| catalog::kinds()),
+            kinds: peer_kinds.as_ref().map(|_| {
+                let mut kinds = catalog::kinds();
+                if primary {
+                    kinds.insert(super::session_memberships::CAPABILITY.into());
+                }
+                kinds
+            }),
             twins: twins.then(|| {
                 let known: BTreeSet<String> =
                     serde_json::from_value(inventory["known_twins"].clone()).unwrap_or_default();
@@ -418,6 +511,17 @@ fn catalog_exchange(config: &Config, alias: &str, identity: Value, mut local: Lo
                     .collect()
             }),
             known_twins: twins.then(|| local.data.twins.known()),
+            id_memberships: if primary {
+                // Unlike derived twins, an invalid primary inventory is not
+                // read as empty. It is a failed exchange.
+                let known: BTreeSet<String> =
+                    serde_json::from_value(inventory["known_id_memberships"].clone())?;
+                Some(local.data.id_memberships.as_ref().unwrap().missing(&known))
+            } else {
+                None
+            },
+            known_id_memberships: primary
+                .then(|| local.data.id_memberships.as_ref().unwrap().known()),
         };
         let node = peer.node.clone();
         drop(local);
@@ -440,9 +544,25 @@ fn catalog_exchange(config: &Config, alias: &str, identity: Value, mut local: Lo
         local
             .data
             .catalog
-            .merge(swarm, serde_json::from_value(response["operations"].clone())?)?;
+            .merge(swarm, serde_json::from_value(response["operations"].clone())?,
+        )?;
         if let Some(received) = response["twins"].as_array().filter(|_| twins) {
             local.data.twins.merge(swarm, parsed(received))?;
+        }
+        if primary {
+            local
+                .data
+                .id_memberships
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("ID memberships unavailable"))?
+                .merge(
+                    &local.data.catalog,
+                    swarm,
+                    serde_json::from_value(response["id_memberships"].clone())?,
+                )?;
+        }
+        if let Some(primary) = &mut local.data.id_memberships {
+            primary.migrate(&local.data.catalog, &local.data.twins)?;
         }
         local.save()?;
     } else {
@@ -473,6 +593,7 @@ pub fn sync(config: &Config) -> Result<Value> {
             }
         }
     }
+    let _ = super::session_labels::refresh_local(config, Instant::now() + Duration::from_secs(2));
     Ok(json!(result))
 }
 
@@ -565,6 +686,10 @@ pub fn join(config: &Config, alias: &str, request: Join) -> Result<Value> {
             );
         }
         local.backup("before-join")?;
+        ensure!(
+            local.data.id_memberships.is_some(),
+            "ID memberships unavailable; cannot change swarms"
+        );
         local.data.catalog = catalog;
         let mut existing = local.data.catalog.values();
         for (mut key, mut value) in old {
@@ -617,9 +742,13 @@ pub fn join(config: &Config, alias: &str, request: Join) -> Result<Value> {
             // local project. Distinct concrete choices retain the explicit
             // preview's keep-peer policy; without it they remain causal heads.
             if request.prefer_peer_memberships && matches!(key, Key::Session { .. })
-                && existing.get(&key).is_some_and(|peer| peer.as_str()
-                    .is_some_and(|id| (id != "ungrouped" || value == "ungrouped")
-                        && existing.get(&Key::project(id, "alive")) == Some(&json!(true))))
+                && existing.get(&key).is_some_and(|peer| {
+                    peer.as_str()
+                    .is_some_and(|id| {
+                        (id != "ungrouped" || value == "ungrouped")
+                        && existing.get(&Key::project(id, "alive")) == Some(&json!(true))
+                    })
+                })
             {
                 continue;
             }
@@ -634,6 +763,14 @@ pub fn join(config: &Config, alias: &str, request: Join) -> Result<Value> {
             &catalog.swarm_id,
             catalog.operations.into_values().collect(),
         )?;
+    }
+    if !same {
+        local
+            .data
+            .id_memberships
+            .as_mut()
+            .unwrap()
+            .rehome(&local.data.catalog, &request.project_map)?;
     }
     local.data.bind(alias, &request.node_id)?;
     local.data.peers.insert(
@@ -680,8 +817,7 @@ pub fn worker() -> Result<()> {
     if let Err(error) = service::record(&config) {
         eprintln!("hgs swarm: record the worker version: {error:#}");
     }
-    let mut schedule: BTreeMap<String, (u64, u64)> = BTreeMap::new();
-    let mut last_digest = String::new();
+    let mut schedule = Schedule::default();
     loop {
         // An upgrade replaced this program: exit so that the service manager
         // starts the new version. Catalog errors never end the loop.
@@ -692,41 +828,206 @@ pub fn worker() -> Result<()> {
         match Config::load()
             .map_err(anyhow::Error::from)
             .and_then(|config| {
-                let mut store = LockedStore::load(&config)?;
-                store.save()?;
-                let catalog = store.data.catalog.digest();
-                let peers: Vec<_> = store.data.peers.keys().cloned().collect();
-                drop(store);
-                // A local change to the catalog or to any task syncs at once.
-                let digest = catalog + &replica::fingerprint(&config).unwrap_or_default();
-                let changed = digest != last_digest;
-                for alias in peers {
-                    let (due, failures) = schedule.get(&alias).copied().unwrap_or_default();
-                    if now() < due && !(changed && failures == 0) {
-                        continue;
-                    }
-                    match sync_peer(&config, &alias) {
-                        Ok(()) => {
-                            schedule.insert(alias, (now() + 30, 0));
-                        }
-                        Err(error) => {
-                            let mut store = LockedStore::load(&config)?;
-                            if let Some(peer) = store.data.peers.get_mut(&alias) {
-                                peer.error = format!("{error:#}");
-                            }
-                            store.save()?;
-                            let failures = (failures + 1).min(5);
-                            schedule
-                                .insert(alias, (now() + (15 * (1 << failures)).min(300), failures));
-                        }
-                    }
+                schedule.round(&mut Live(&config))?;
+                if super::session_labels::due_local(&config) {
+                    let _ = super::session_labels::refresh_local(
+                        &config,
+                        Instant::now() + Duration::from_secs(2),
+                    );
                 }
-                last_digest = LockedStore::load(&config)?.data.catalog.digest() + &replica::fingerprint(&config).unwrap_or_default();
                 Ok(())
             }) {
             Ok(()) => {}
             Err(error) => eprintln!("hgs swarm: {error:#}"),
         }
         thread::sleep(Duration::from_secs(3));
+    }
+}
+
+/// When the worker contacts each member.
+#[derive(Default)]
+struct Schedule {
+    /// Per member alias: when its periodic sync is due, and its consecutive
+    /// failures.
+    members: BTreeMap<String, (u64, u64)>,
+    /// The local change digest read at the start of the last complete round.
+    last_digest: String,
+}
+
+/// What a worker round reads and does: this computer and its members in the
+/// worker, a fake in tests.
+trait Members {
+    /// The local change digest (the catalog and the tasks of every project)
+    /// and the aliases of the members.
+    fn local(&mut self) -> Result<(String, Vec<String>)>;
+    fn now(&self) -> u64;
+    fn sync(&mut self, alias: &str) -> Result<()>;
+    /// Records that the sync with `alias` failed.
+    fn failed(&mut self, alias: &str, error: &anyhow::Error) -> Result<()>;
+}
+
+impl Schedule {
+    /// One round: syncs each member that is due and, after a local change to
+    /// the catalog or to any task, at once each member that is not backing off.
+    fn round(&mut self, members: &mut impl Members) -> Result<()> {
+        let (digest, aliases) = members.local()?;
+        let changed = digest != self.last_digest;
+        for alias in aliases {
+            let (due, failures) = self.members.get(&alias).copied().unwrap_or_default();
+            if members.now() < due && !(changed && failures == 0) {
+                continue;
+            }
+            match members.sync(&alias) {
+                Ok(()) => {
+                    self.members.insert(alias, (members.now() + 30, 0));
+                }
+                Err(error) => {
+                    members.failed(&alias, &error)?;
+                    let failures = (failures + 1).min(5);
+                    self.members.insert(
+                        alias,
+                        (members.now() + (15 * (1 << failures)).min(300), failures),
+                    );
+                }
+            }
+        }
+        // The digest read at the START of this round, never one read after
+        // it: a change made while the round ran, by a person or by the round's
+        // own imports, then differs and syncs on the next round instead of
+        // waiting for the periodic one (zerus-jrvnr). An import costs at most
+        // one round that finds nothing new.
+        self.last_digest = digest;
+        Ok(())
+    }
+}
+
+/// This computer and its members, as the worker syncs them.
+struct Live<'a>(&'a Config);
+
+impl Members for Live<'_> {
+    fn local(&mut self) -> Result<(String, Vec<String>)> {
+        let mut store = LockedStore::load(self.0)?;
+        store.save()?;
+        let catalog = store.data.catalog.digest();
+        let aliases = store.data.peers.keys().cloned().collect();
+        drop(store);
+        let digest = catalog + &replica::fingerprint(self.0).unwrap_or_default();
+        Ok((digest, aliases))
+    }
+    fn now(&self) -> u64 {
+        now()
+    }
+    fn sync(&mut self, alias: &str) -> Result<()> {
+        sync_peer(self.0, alias)
+    }
+    fn failed(&mut self, alias: &str, error: &anyhow::Error) -> Result<()> {
+        let mut store = LockedStore::load(self.0)?;
+        if let Some(peer) = store.data.peers.get_mut(alias) {
+            peer.error = format!("{error:#}");
+        }
+        store.save()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Members whose syncs, and a person, change the local digest.
+    #[derive(Default)]
+    struct Fake {
+        /// The local change digest.
+        digest: u64,
+        clock: u64,
+        /// Each sync, by round.
+        synced: Vec<Vec<String>>,
+        /// Called during each sync with the round number and the alias.
+        during: Option<fn(&mut Fake, usize, &str)>,
+        failing: BTreeSet<String>,
+    }
+
+    impl Members for Fake {
+        fn local(&mut self) -> Result<(String, Vec<String>)> {
+            Ok((self.digest.to_string(), vec!["b".into(), "c".into()]))
+        }
+        fn now(&self) -> u64 {
+            self.clock
+        }
+        fn sync(&mut self, alias: &str) -> Result<()> {
+            self.synced.last_mut().unwrap().push(alias.into());
+            if let Some(during) = self.during {
+                during(self, self.synced.len(), alias);
+            }
+            ensure!(!self.failing.contains(alias), "{alias} is unreachable");
+            Ok(())
+        }
+        fn failed(&mut self, _: &str, _: &anyhow::Error) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Fake {
+        fn round(&mut self, schedule: &mut Schedule) {
+            self.synced.push(Vec::new());
+            schedule.round(self).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_change_made_while_a_round_runs_syncs_on_the_next_round_once() {
+        let mut fake = Fake {
+            during: Some(|fake, round, alias| {
+                // A person adds a task while the first round talks to b, and
+                // the periodic fourth round imports from c.
+                if (round, alias) == (1, "b") || (round, alias) == (4, "c") {
+                    fake.digest += 1;
+                }
+            }),
+            ..Fake::default()
+        };
+        let mut schedule = Schedule::default();
+        for round in 1..=6 {
+            if round == 4 {
+                fake.clock += 30;
+            }
+            fake.round(&mut schedule);
+        }
+        // Each change syncs every member on the next round, which finds
+        // nothing new; the round after it is quiet again.
+        assert_eq!(
+            fake.synced,
+            [
+                vec!["b", "c"],
+                vec!["b", "c"],
+                vec![],
+                vec!["b", "c"],
+                vec!["b", "c"],
+                vec![]
+            ],
+            "a change made during a round waited for the periodic sync"
+        );
+    }
+
+    #[test]
+    fn without_a_change_only_due_members_sync_and_a_failing_one_backs_off() {
+        let mut fake = Fake {
+            failing: ["c".to_owned()].into(),
+            ..Fake::default()
+        };
+        let mut schedule = Schedule::default();
+        fake.round(&mut schedule);
+        fake.round(&mut schedule);
+        fake.clock += 30;
+        fake.round(&mut schedule);
+        // A local change syncs b at once; c waits for its backoff.
+        fake.digest += 1;
+        fake.round(&mut schedule);
+        fake.clock += 30;
+        fake.round(&mut schedule);
+        assert_eq!(
+            fake.synced,
+            [vec!["b", "c"], vec![], vec!["b", "c"], vec!["b"], vec!["b"]]
+        );
+        assert_eq!(schedule.members["c"].1, 2);
     }
 }

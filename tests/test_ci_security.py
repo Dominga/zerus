@@ -322,7 +322,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         # Line endings are fixed before checking out the exact tested commit.
         self.assertLess(windows.index("core.autocrlf false"), windows.index("actions/checkout@"))
         self.assertIn("ref: ${{ needs.source.outputs.commit }}\n          persist-credentials: false", windows)
-        self.assertIn("uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0", windows)
+        self.assertIn("uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0", windows)
         self.assertNotIn("install-qt", windows)
         self.assertNotIn("windeployqt", windows)
         self.assertNotIn("gui.sh", windows)
@@ -464,14 +464,14 @@ class WorkflowSecurityTests(unittest.TestCase):
     def test_checks_gate_requires_exactly_the_selected_suites(self):
         gate = job((ROOT / ".github/workflows/checks.yml").read_text(), "gate")
         self.assertIn("needs: [source, quick, client-frontend, relay, connector, connector-macos, ios, android, client-native-linux, client-native-macos-core, client-native-macos-tauri, client-native-windows, cli, "
-                      "cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, arch-package, windows-tests, windows-desktop, windows-host]", gate)
+                      "cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, clippy-macos, arch-package, windows-tests, windows-desktop, windows-host]", gate)
         self.assertIn("RUN_WINDOWS: ${{ needs.source.outputs.run_windows == 'true' }}", gate)
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
         base = {"source": "success", "quick": "success", "client-frontend": "success", "relay": "success", "connector": "success",
                 "android": "success", "client-native-linux": "success", "client-native-macos-core": "success",
                 "client-native-macos-tauri": "success", "cli": "success", "cli-macos-debug": "success", "cli-macos-core": "success",
-                "cli-macos-native": "success", "cli-macos": "success", "arch": "success", "arch-package": "success",
+                "cli-macos-native": "success", "cli-macos": "success", "clippy-macos": "success", "arch": "success", "arch-package": "success",
                 "mac-desktop": "success", "connector-macos": "success", "ios": "success"}
         # All Windows jobs are selected together, and each must pass on its own.
         windows = ("client-native-windows", "windows-tests", "windows-desktop", "windows-host")
@@ -506,6 +506,9 @@ class WorkflowSecurityTests(unittest.TestCase):
             ({**base, "client-native-linux": "failure"}, "true", False),
             ({**base, "client-native-macos-core": "failure"}, "true", False),
             ({**base, "client-native-macos-tauri": "failure"}, "true", False),
+            ({**base, "clippy-macos": "failure"}, "true", False),
+            ({**base, "clippy-macos": "skipped"}, "true", False),
+            ({**base, "clippy-macos": "cancelled"}, "true", False),
             ({**base, "arch-package": "failure"}, "true", False), ({**base, "arch-package": "skipped"}, "true", False),
             ({**base, "arch-package": "cancelled"}, "true", False), (arch_skipped, "false", True),
             ({**arch_skipped, "arch-package": "success"}, "false", False),
@@ -682,7 +685,11 @@ class WorkflowSecurityTests(unittest.TestCase):
                 self.assertNotIn("--parallel", text)
                 # The published recipes keep their check() and never use ccache.
                 self.assertIn("\ncheck() {\n", text)
+                self.assertIn("checkdepends=('xorg-server-xvfb')", text)
                 self.assertNotIn("ccache", text)
+        self.assertIn("xorg-server-xvfb", job(checks, "arch-package"))
+        self.assertIn("\tcheckdepends = xorg-server-xvfb\n",
+                      (ROOT / "packaging/aur/zerus-git/.SRCINFO").read_text())
         # Dev explicitly builds a usable package without the regression check().
         # The normal script and distributed recipes retain their full checks.
         dev_package = (ROOT / '.github/workflows/dev-arch.yml').read_text()
@@ -818,7 +825,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
         names = ("source", "quick", "client-frontend", "relay", "connector", "connector-macos", "ios", "android", "client-native-linux", "client-native-macos-core", "client-native-macos-tauri", "client-native-windows",
-                 "cli", "cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos", "arch-package",
+                 "cli", "cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos", "clippy-macos", "arch-package",
                  "windows-tests", "windows-desktop", "windows-host")
         for run_macos, smoke_result, success in [("true", "success", True), ("true", "failure", False),
                                                  ("true", "skipped", False), ("false", "skipped", True),
@@ -829,7 +836,7 @@ class WorkflowSecurityTests(unittest.TestCase):
                 results["client-native-macos-tauri"] = "skipped"
                 results["mac-desktop"] = "skipped"
                 results["ios"] = "skipped"
-                for name in ("cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos"):
+                for name in ("cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos", "clippy-macos"):
                     results[name] = "skipped"
             results["connector-macos"] = smoke_result
             environment = {"RESULTS": json.dumps({name: {"result": value} for name, value in results.items()}),
@@ -862,7 +869,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
         names = ("source", "quick", "client-frontend", "relay", "connector", "connector-macos", "ios", "android", "client-native-linux", "client-native-macos-core", "client-native-macos-tauri", "client-native-windows",
-                 "cli", "cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos", "arch-package",
+                 "cli", "cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos", "clippy-macos", "arch-package",
                  "windows-tests", "windows-desktop", "windows-host")
         for run_ios, ios_result, success in [("true", "success", True), ("true", "failure", False),
                                                ("true", "skipped", False), ("true", "cancelled", False),
@@ -934,7 +941,8 @@ class WorkflowSecurityTests(unittest.TestCase):
                          {"actions/cache/restore", "actions/cache/save"})
         names = re.findall(r"(?m)^  ([a-z][\w-]*):\n", checks.split("\njobs:\n", 1)[1])
         # Restore-only consumers never save: two jobs saving one key would race.
-        read_only = {"windows-tests": {"rust-cache"}, "windows-host": {"rust-cache"}, "client-native-macos-core": {"rust-cache"}}
+        read_only = {"windows-tests": {"rust-cache"}, "windows-host": {"rust-cache"}, "client-native-macos-core": {"rust-cache"},
+                     "clippy-macos": {"rust-cache"}}
         saves = 0
         for name in names:
             restores, saved = {}, []
@@ -1952,6 +1960,241 @@ class WindowsInstallerPublicationWorkflow(unittest.TestCase):
             self.assertIn('--windows-installer artifacts/windows/installer/zerus-windows-x86_64-setup.exe', assembly)
             self.assertIn('--windows-installer-info artifacts/windows/installer/windows-installer-info.json', assembly)
             self.assertNotIn('secrets.', assembly)
+
+
+
+class Null(SimpleNamespace):
+    """A GitHub context object: a missing property reads as null."""
+
+    def __getattr__(self, name):
+        return None
+
+
+def github_expression(text, github, inputs=None, variables=None):
+    """Evaluate the GitHub expression operators these workflows use."""
+    def fmt(pattern, *args):
+        return re.sub(r"\{(\d+)\}", lambda match: str(args[int(match[1])]), pattern)
+    python = text.replace("&&", " and ").replace("||", " or ")
+    python = re.sub(r"!(?!=)", "not ", python)
+    python = re.sub(r"\bfalse\b", "False", re.sub(r"\btrue\b", "True", python))
+    python = python.replace("format(", "fmt(")
+    return eval(python, {"__builtins__": {}}, {
+        "fmt": fmt, "github": github, "inputs": inputs or Null(), "vars": variables or Null()})
+
+
+def rendered(value, github, **context):
+    """A workflow value: a whole expression, a template with expressions, or a literal."""
+    whole = re.fullmatch(r"\$\{\{ (.*) \}\}", value)
+    if whole:
+        return github_expression(whole[1], github, **context)
+    if value in ("true", "false"):
+        return value == "true"
+    return re.sub(r"\$\{\{ (.*?) \}\}", lambda match: str(github_expression(match[1], github, **context)), value)
+
+
+class PullRequestRunCancellationTests(unittest.TestCase):
+    """Superseded and closed pull requests stop holding runners (zerus-b8zze)."""
+
+    WORKFLOWS = ROOT / ".github/workflows"
+
+    def pull_request_workflows(self):
+        found = {}
+        for path in sorted(self.WORKFLOWS.glob("*.yml")):
+            text = path.read_text()
+            on = re.search(r"(?ms)^on:\n(.*?)^\S", text)[1]
+            if re.search(r"(?m)^  pull_request:", on):
+                found[path.name] = text
+        return found
+
+    def concurrency(self, text):
+        match = re.search(r"(?m)^concurrency:\n  group: (.*)\n(?:  #.*\n)*  cancel-in-progress: (.*)$", text)
+        self.assertIsNotNone(match, "a workflow-level concurrency group")
+        return match[1], match[2]
+
+    @staticmethod
+    def event(name, number=7, sha="a" * 40, action="synchronize", label=None, run_id=4242, workflow="Workflow"):
+        pull = Null(number=number, head=Null(sha=sha), labels=[])
+        payload = Null(action=action, pull_request=pull if name == "pull_request" else None,
+                       label=Null(name=label) if label else None, repository=Null(private=False))
+        ref = f"refs/pull/{number}/merge" if name == "pull_request" else "refs/heads/main"
+        return Null(event_name=name, event=payload, ref=ref, run_id=run_id, repository="ufna/zerus",
+                    workflow=workflow, sha=sha)
+
+    def test_every_pull_request_workflow_cancels_its_own_older_runs(self):
+        workflows = self.pull_request_workflows()
+        # The guard covers every PR workflow, the close handler included.
+        self.assertTrue({"ci.yml", "kimi-native.yml", "kimi-approvals.yml", "agent-hint.yml", "android-approval-ui.yml",
+                         "android-project-ui.yml", "ios-approval-ui.yml", "pr-closed.yml"} <= set(workflows))
+        groups = {}
+        for name, text in workflows.items():
+            group, cancel = self.concurrency(text)
+            context = {"variables": Null(DEV_UPDATES_ENABLED="true")}
+            for action in ("opened", "synchronize", "reopened", "closed"):
+                if name == "pr-closed.yml" and action != "closed":
+                    continue
+                with self.subTest(workflow=name, action=action):
+                    first = self.event("pull_request", 7, "a" * 40, action, workflow=name)
+                    newer = self.event("pull_request", 7, "b" * 40, action, run_id=4343, workflow=name)
+                    other = self.event("pull_request", 8, "a" * 40, action, workflow=name)
+                    # One group per PR: a new head joins it and an older run is cancelled.
+                    self.assertEqual(rendered(group, first, **context), rendered(group, newer, **context))
+                    self.assertNotEqual(rendered(group, first, **context), rendered(group, other, **context))
+                    self.assertIs(rendered(cancel, newer, **context), True)
+            groups[name] = rendered(group, self.event("pull_request", 7, workflow=name), variables=Null())
+        # Workflows never share a PR's group, so one cannot cancel another's run.
+        self.assertEqual(len(set(groups.values())), len(groups), groups)
+
+    def test_manual_and_main_runs_keep_their_concurrency(self):
+        expected = {
+            "kimi-native.yml": "kimi-native-refs/heads/main",
+            "kimi-approvals.yml": "kimi-approvals-refs/heads/main",
+            "agent-hint.yml": "agent-hint-run-4242",
+            "android-approval-ui.yml": "android-approval-ui-run-4242",
+            "android-project-ui.yml": "android-project-ui-run-4242",
+            "ios-approval-ui.yml": "ios-approval-ui-run-4242",
+        }
+        manual = {name for name, text in self.pull_request_workflows().items()
+                  if re.search(r"(?m)^  workflow_dispatch:", text)}
+        # ci.yml keeps its own PR/manual and Dev main rules (tested above).
+        self.assertEqual(manual - {"ci.yml"}, set(expected))
+        for name, value in expected.items():
+            group, cancel = self.concurrency((self.WORKFLOWS / name).read_text())
+            dispatch = self.event("workflow_dispatch", workflow=name)
+            with self.subTest(workflow=name):
+                # Kimi keeps its per-ref noncancelling group; the others stay independent per run.
+                self.assertEqual(rendered(group, dispatch), value)
+                self.assertIs(rendered(cancel, dispatch), False)
+
+    def test_another_label_neither_cancels_nor_repeats_an_opted_in_hint_run(self):
+        text = (self.WORKFLOWS / "agent-hint.yml").read_text()
+        group, cancel = self.concurrency(text)
+        condition = field(job(text, "native"), "if")
+        opt_in = "contains(github.event.pull_request.labels.*.name, 'native-agent-hint')"
+        self.assertIn(opt_in, condition)
+        per_pr = rendered(group, self.event("pull_request", action="synchronize"))
+        for action, label, opted, cancels, runs in [
+            ("synchronize", None, True, True, True),
+            ("labeled", "native-agent-hint", True, True, True),
+            ("labeled", "documentation", True, False, False),
+            ("labeled", "documentation", False, False, False),
+            ("opened", None, False, True, False),
+        ]:
+            with self.subTest(action=action, label=label, opted=opted):
+                github = self.event("pull_request", action=action, label=label)
+                self.assertIs(rendered(cancel, github), cancels)
+                self.assertEqual(bool(github_expression(condition.replace(opt_in, str(opted)), github)), runs)
+                # A newer run replaces a pending one in its group even without
+                # cancellation: another label's run stays out of the PR's group,
+                # so a new head's run waiting there is never displaced (zerus-b8zze.1).
+                self.assertEqual(rendered(group, github) == per_pr, cancels)
+        self.assertEqual(rendered(group, self.event("pull_request", action="labeled", label="documentation")),
+                         "agent-hint-run-4242")
+        dispatch = self.event("workflow_dispatch")
+        self.assertIs(rendered(cancel, dispatch), False)
+        self.assertTrue(github_expression(condition.replace(opt_in, "False"), dispatch))
+
+    def test_the_close_handler_has_only_an_actions_token_and_its_inline_script(self):
+        text = (self.WORKFLOWS / "pr-closed.yml").read_text()
+        self.assertIn("on:\n  pull_request:\n    branches: [main]\n    types: [closed]\n\n", text)
+        self.assertNotIn("pull_request_target", text)
+        self.assertNotIn("paths", text)
+        self.assertIn("\npermissions: {}\n", text)
+        handler = job(text, "cancel")
+        self.assertEqual(field(handler, "if"), "github.repository == 'ufna/zerus'")
+        self.assertEqual(field(handler, "cache-mode"), "none")
+        self.assertLessEqual(int(field(handler, "timeout-minutes")), 10)
+        self.assertIn("    permissions:\n      actions: write\n    steps:\n", handler)
+        self.assertEqual(re.findall(r"(?m)^\s+(\w[\w-]*): (?:read|write)$", text), ["actions"])
+        # No checkout, action or secret: only the trusted inline script holds the token.
+        self.assertNotRegex(text, r"(?m)^\s*(?:- )?uses:")
+        self.assertNotRegex(text, r"actions/checkout|git (?:clone|fetch|checkout)")
+        self.assertNotIn("secrets.", text)
+        self.assertEqual(len(steps(handler)), 1)
+        self.assertIn("GH_TOKEN: ${{ github.token }}", handler)
+        # Event values reach the script only through its environment.
+        script = handler.split("        run: |\n", 1)[1]
+        self.assertNotIn("${{", script)
+
+    def test_the_close_handler_cancels_only_this_prs_earlier_active_runs(self):
+        namespace = {}
+        handler = job((self.WORKFLOWS / "pr-closed.yml").read_text(), "cancel")
+        exec(compile(inline_python(handler), "workflow-pr-closed", "exec"), namespace)
+        closed = namespace["when"]("2026-11-08T12:00:00Z")
+
+        def run(number, event="pull_request", status="queued", branch="feature", repository="ufna/zerus",
+                linked=(7,), created="2026-11-08T11:00:00Z"):
+            return {"id": number, "event": event, "status": status, "head_branch": branch,
+                    "head_repository": {"full_name": repository}, "created_at": created,
+                    "pull_requests": [{"number": value} for value in linked]}
+
+        runs = [
+            run(1), run(2, status="in_progress"), run(3, status="waiting"), run(4, linked=()),
+            run(5, status="completed"), run(6, event="push"), run(7, branch="other"),
+            run(8, repository="fork/zerus"), run(9, linked=(8,)), run(10, linked=(7, 8)),
+            run(11, created="2026-11-08T12:00:01Z"), run(12, status="in_progress"), run(13, event="pull_request_target"),
+        ]
+        self.assertEqual(namespace["doomed"](runs, 7, "feature", "ufna/zerus", 12, closed), [1, 2, 3, 4, 10])
+        self.assertEqual(namespace["doomed"]([], 7, "feature", "ufna/zerus", 12, closed), [])
+        self.assertEqual(namespace["ACTIVE"], ("queued", "in_progress", "waiting", "pending", "requested"))
+
+    def test_runs_that_ignore_the_cancel_are_force_cancelled_after_a_minute(self):
+        namespace = {}
+        handler = job((self.WORKFLOWS / "pr-closed.yml").read_text(), "cancel")
+        script = inline_python(handler)
+        exec(compile(script, "workflow-pr-closed", "exec"), namespace)
+        closed = namespace["when"]("2026-11-08T12:00:00Z")
+
+        def sweep(call, sleep):
+            with patch("sys.stdout", new_callable=io.StringIO):
+                namespace["sweep"](call, sleep, 7, "feature", "ufna/zerus", 12, closed)
+
+        def run(number, status="queued", linked=(7,), attempt=1):
+            return {"id": number, "event": "pull_request", "status": status, "head_branch": "feature",
+                    "head_repository": {"full_name": "ufna/zerus"}, "created_at": "2026-11-08T11:00:00Z",
+                    "pull_requests": [{"number": value} for value in linked], "run_attempt": attempt}
+
+        def harness(first, second, failures=()):
+            """A fake gh api: two listings around the one wait, and every POST."""
+            calls, waits = [], []
+            def call(*args):
+                if args[:2] == ("-X", "GET"):
+                    listed = second if waits else first
+                    status = next(arg.split("=", 1)[1] for arg in args if arg.startswith("status="))
+                    return 0, json.dumps({"workflow_runs": [entry for entry in listed if entry["status"] == status]}), ""
+                calls.append(args[2].rsplit("/", 2)[1:])
+                return next(((1, "", error) for path, error in failures if args[2].endswith(path)), (0, "", ""))
+            return call, waits.append, calls, waits
+
+        # 1 ignores the cancel; 2 honours it; 3 is another PR's; 4 is first
+        # listed after the wait; 12 is this workflow's own run.
+        before = [run(1), run(2, "in_progress"), run(3, linked=(8,)), run(12, "in_progress")]
+        after = [run(1), run(3, linked=(8,)), run(4), run(12, "in_progress")]
+        call, sleep, calls, waits = harness(before, after)
+        sweep(call, sleep)
+        self.assertEqual(waits, [60])
+        self.assertEqual(calls, [["1", "cancel"], ["2", "cancel"], ["1", "force-cancel"], ["4", "cancel"]])
+        # A re-run keeps its ID with a new attempt: attempt 2 of run 5, started
+        # during the wait after attempt 1 honoured its cancel, gets an ordinary
+        # cancel, never a force-cancel (zerus-b8zze.2.1).
+        call, sleep, calls, waits = harness([run(1), run(5)], [run(1), run(5, attempt=2)])
+        sweep(call, sleep)
+        self.assertEqual(calls, [["1", "cancel"], ["5", "cancel"], ["1", "force-cancel"], ["5", "cancel"]])
+        # Nothing to cancel: no wait and no second listing.
+        call, sleep, calls, waits = harness([run(3, linked=(8,))], [])
+        sweep(call, sleep)
+        self.assertEqual((calls, waits), ([], []))
+        # HTTP 409 means the run had finished; any other failure fails the job.
+        call, sleep, calls, waits = harness([run(1)], [run(1)], [("1/force-cancel", "gh: Conflict (HTTP 409)")])
+        sweep(call, sleep)
+        call, sleep, calls, waits = harness([run(1)], [run(1)], [("1/force-cancel", "gh: Server Error (HTTP 500)")])
+        with self.assertRaises(SystemExit):
+            sweep(call, sleep)
+        self.assertEqual(calls, [["1", "cancel"], ["1", "force-cancel"]])
+        # The only POST is a run's cancel or force-cancel.
+        self.assertEqual(re.findall(r"'-X', '(\w+)', f?'([^']*)'", script),
+                         [("GET", "repos/ufna/zerus/actions/runs"),
+                          ("POST", "repos/ufna/zerus/actions/runs/{run_id}/{endpoint}")])
+        self.assertEqual(re.findall(r"stop\(call, .*'([\w-]+)'\)", script), ["cancel", "force-cancel", "cancel"])
 
 
 if __name__ == "__main__":

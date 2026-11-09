@@ -6,6 +6,7 @@ import { teamConfirm } from "../../store/teamConfirm";
 import { MAX_LENGTH, MAX_RULES, createIronRules, rulesHint, type RulesContext } from "../../store/ironRules";
 import { Icon } from "../lib/icons";
 import "../styles/ironrules.css";
+import { TextInput } from "../lib/TextField";
 
 // Task 68: Qt's IronRulesPanel, in the session's Details and on Projects.
 // Numbered rules, each removable (confirmed, Cancel focused); a new one is
@@ -51,7 +52,7 @@ export function IronRulesPanel(props: { context: RulesContext; onCount?: (count:
           )}</For>
         </ol>
         <form class="row iron-add" onSubmit={(event) => { event.preventDefault(); void add(); }}>
-          <input class="field grow" type="text" value={field()} maxLength={MAX_LENGTH} placeholder={tr("Add a rule…")} aria-label={tr("New iron rule")}
+          <TextInput class="field grow" type="text" value={field()} maxLength={MAX_LENGTH} placeholder={tr("Add a rule…")} aria-label={tr("New iron rule")}
             disabled={!rules.editable() || rules.rules().length >= MAX_RULES} onInput={(event) => setField(event.currentTarget.value)} />
           <button type="submit" class="btn small" disabled={!rules.canAdd(field())}>{tr("Add")}</button>
         </form>

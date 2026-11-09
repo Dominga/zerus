@@ -47,6 +47,7 @@ pub mod entry;
 mod exit_flush;
 #[cfg(feature = "live")]
 mod external_open;
+mod file_reference;
 #[cfg(feature = "live")]
 mod files;
 // WhiteWh fork, task #63: the fork's update channel.
@@ -62,6 +63,8 @@ mod instance;
 mod keep_warm;
 #[doc(hidden)]
 pub mod lifecycle;
+#[cfg(target_os = "linux")]
+mod linux_accessibility;
 #[cfg(feature = "live")]
 mod login_item;
 #[cfg(target_os = "macos")]
@@ -189,7 +192,13 @@ mod speech_settings;
 mod startup_error;
 #[cfg(feature = "live")]
 mod second_start;
+mod applog;
 mod startup_log;
+// Its text needs the interface catalog, so its portable tests need `live` too.
+#[cfg(all(feature = "live", any(windows, test)))]
+mod startup_note;
+#[cfg(feature = "live")]
+mod task_copy_review;
 #[cfg(feature = "live")]
 mod task_details;
 #[cfg(feature = "live")]
@@ -317,6 +326,8 @@ mod test_context;
 /// exited before anything runs it. An existing entry is removed first, so a
 /// fixture symlink to a checked-in script is never written through.
 #[cfg(all(test, unix))]
+// On macOS only `live` tests use it; the replay build has none (zerus-tn54u).
+#[cfg_attr(not(feature = "live"), allow(dead_code))]
 pub(crate) fn write_executable(path: &std::path::Path, contents: impl AsRef<[u8]>) {
     use std::os::unix::fs::PermissionsExt;
     let name = path.file_name().expect("executable name").to_string_lossy();
@@ -373,6 +384,12 @@ pub struct Startup {
 /// `--build-info`. It then takes the single-instance socket, or hands the
 /// activation to the running instance and returns, and runs the app.
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    if let Some(status) =
+        linux_accessibility::probe_entry(&std::env::args_os().skip(1).collect::<Vec<_>>())
+    {
+        std::process::exit(status);
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let options = match cli::parse(&args) {
         Ok(cli::Command::Run(options)) => options,
@@ -435,6 +452,8 @@ pub fn run() {
         }
     };
     startup_log::begin();
+    #[cfg(target_os = "linux")]
+    linux_accessibility::prepare();
     startup_log::record("entered", "gui_entry", None);
     startup_log::install_panic_hook();
     let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
@@ -924,7 +943,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 }));
                 app.manage(analytics::start(app.handle()));
                 app.manage(worktree_policy::start(app.handle()));
-                app.manage(mobile::start(app.handle()));
+                app.manage(mobile::start(app.handle(), &dir));
                 // A replay never touches the real read or attention marks.
                 let actions = actions::Actions::new(dir.join(actions::marks_file(replay)));
                 if desktop_service::mode() {
@@ -1136,8 +1155,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                         facts: {
                             let actions = app.state::<actions::Actions>().inner().clone();
                             let pump = app.state::<commands::AppState>().pump();
-                            std::sync::Arc::new(move |computer: &str, name: &str| {
-                                actions.session_write(computer, name, || {
+                            std::sync::Arc::new(move |computer: &str, name: &str, run: &str| {
+                                actions.session_write_for_run(computer, name, run, || {
                                     (pump.row_named(computer, name), pump.online(computer))
                                 })
                             })
@@ -1264,6 +1283,31 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                         check: std::sync::Arc::new(move |plan| {
                             let service = checking.state::<commands::AppState>().desktop_service();
                             desktop_service::compact_to_send::check(service, plan)
+                        }),
+                    });
+                    // "Resume and send" of a local Claude or Kimi session the
+                    // service takes whole (session_resume), the same way;
+                    // every other start stays direct.
+                    let (resuming, checking) = (app.handle().clone(), app.handle().clone());
+                    composers.set_resume(composer::ResumeRoute {
+                        offer: std::sync::Arc::new(
+                            move |session, checkpoint, resume, stdin, handing| {
+                                let service =
+                                    resuming.state::<commands::AppState>().desktop_service();
+                                desktop_service::session_resume::call(
+                                    service,
+                                    session,
+                                    checkpoint,
+                                    resume,
+                                    stdin,
+                                    handing,
+                                    &std::sync::atomic::AtomicBool::new(false),
+                                )
+                            },
+                        ),
+                        check: std::sync::Arc::new(move |plan| {
+                            let service = checking.state::<commands::AppState>().desktop_service();
+                            desktop_service::session_resume::check(service, plan)
                         }),
                     });
                     // Question answers the service takes (deferred_answer),
@@ -1806,6 +1850,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         sandbox_folder_grant,
         commands::fleet_refresh,
         commands::next_batch,
+        commands::git_rows,
         commands::follow,
         commands::unfollow,
         commands::metrics,
@@ -1856,10 +1901,10 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         settings::skins::user_skins_load,
         settings::skins::user_skin_import,
         settings::skins::user_skins_open,
+        applog::log_write,
+        applog::log_latest,
+        applog::log_open,
         settings::settings_get,
-        settings::qt_upgrade_notice,
-        settings::qt_upgrade_notice_ack,
-        settings::settings_qt_preferences,
         settings::settings_legacy_projects,
         settings::settings_set,
         desk::desk_take_pending,
@@ -1932,10 +1977,13 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         action_delay::action_delay_wait,
         action_delay::action_delay_cancel,
         actions::set_notifications,
+        actions::set_keep_warm,
+        actions::set_parent,
         actions::inspect_session,
         actions::inspect_subagent_identity,
         session_folders::session_folder_status,
         session_folders::session_folder_open,
+        session_folders::session_terminal_open,
         actions::inspect_subagent_activity,
         commands::tasks_follow,
         teams::teams_follow,
@@ -1949,6 +1997,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         teams::team_timeline,
         teams::team_action,
         teams::team_read,
+        teams::team_task_read,
         teams::team_role_models,
         teams::iron_rules,
         teams::project_memory,
@@ -2008,6 +2057,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         task_forms::task_form_submit,
         task_forms::task_form_cancel,
         task_details::task_attachment_open,
+        task_copy_review::task_copy_review,
         actions::pending_read_marks,
         actions::queue_read_marks,
         actions::attention_marks,
@@ -2020,6 +2070,13 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::reset_archive_pages,
         clipboard::copy_text,
         clipboard::copy_verbatim,
+        clipboard::paste_text,
+        clipboard::clipboard_files,
+        file_reference::file_reference_check,
+        file_reference::file_reference_pick,
+        file_reference::file_reference_remote_support,
+        file_reference::file_reference_check_remote,
+        file_reference::file_reference_cancel,
         organization::move_to_project,
         organization::create_project,
         organization::rename_project,
@@ -2066,11 +2123,13 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         screens::session_usage,
         screens::accounts_view,
         screens::session_switch_account,
+        screens::session_switch_preview,
         sandbox_check,
         screens::account_edits::account_edit_open,
         screens::account_edits::account_edit_apply,
         screens::account_edits::account_edit_close,
         screens::account_edits::account_permission_check,
+        screens::account_edits::account_mark_migrate,
         screens::account_edits::setup::account_setup_open,
         screens::account_edits::setup::account_setup_apply,
         screens::account_edits::setup::account_setup_close,
@@ -2152,9 +2211,16 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         termination_cleanup::termination_cleanup_offer,
         termination_cleanup::termination_cleanup_cancel,
         termination_cleanup::termination_cleanup_confirm,
+        termination_cleanup::termination_program_force_offer,
+        termination_cleanup::termination_program_force_confirm,
+        termination_cleanup::termination_program_force_cancel,
         termination_cleanup::termination_cleanup_check,
         termination_cleanup::termination_cleanup_remove,
         termination_cleanup::termination_cleanup_keep,
+        termination_cleanup::termination_cleanup_dismiss,
+        termination_cleanup::manual::termination_cleanup_manual_offer,
+        termination_cleanup::manual::termination_cleanup_manual_confirm,
+        termination_cleanup::manual::termination_cleanup_manual_cancel,
         termination_cleanup::termination_cleanup_restore,
         worktree_cleanup::worktree_cleanup_open,
         worktree_cleanup::reminder::worktree_cleanup_reminder,
@@ -2185,11 +2251,13 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::send::send_answer,
         composer::send::local_retry,
         composer::send::local_delete,
+        composer::inbox::inbox_remove,
         composer::send::local_inspect,
         composer::send::send_cancel,
         composer::send::send_interrupted,
         composer::held::held_cancel,
         composer::held::terminal_draft_submit,
+        composer::send::send_interrupt_failed,
         composer::send::clear_context,
         composer::questions::question_edit,
         composer::questions::question_page,
@@ -2214,6 +2282,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         updates::updates_fix_login_item,
         fork_updates::fork_updates_check,
         fork_updates::fork_updates_confirm,
+        login_item::login_entry_view,
+        login_item::login_entry_set,
         #[cfg(feature = "media")]
         voice::voice_open,
         #[cfg(feature = "media")]
@@ -2248,6 +2318,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         sandbox_folder_grant,
         commands::fleet_refresh,
         commands::next_batch,
+        commands::git_rows,
         commands::follow,
         commands::unfollow,
         commands::tasks_follow,
@@ -2267,6 +2338,13 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         window_theme::window_theme,
         clipboard::copy_text,
         clipboard::copy_verbatim,
+        clipboard::paste_text,
+        clipboard::clipboard_files,
+        file_reference::file_reference_check,
+        file_reference::file_reference_pick,
+        file_reference::file_reference_remote_support,
+        file_reference::file_reference_check_remote,
+        file_reference::file_reference_cancel,
         desk_take_pending,
     ]
 }
@@ -2373,8 +2451,7 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         builder = builder.data_directory(webview_data);
     }
     let window = builder.build().map_err(|error| {
-        tauri::Error::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        tauri::Error::Io(std::io::Error::other(
             format!("WebView2 window creation: {error}"),
         ))
     })?;
@@ -2470,7 +2547,7 @@ mod tests {
                 notify: Arc::new(|| {}),
                 clock: Arc::new(|| 1_793_000_100.0),
                 rows: Arc::new(|_, _, _| None),
-                facts: Arc::new(|_, _| None),
+                facts: Arc::new(|_, _, _| None),
                 reconnect: std::sync::Arc::new(|_| {}),
                 inspect: Arc::new(|_, _, _| Err("timed out".into())),
                 dispatch: Arc::new(|_, _, _| Err("no call in these tests".into())),

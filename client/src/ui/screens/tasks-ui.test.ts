@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { toSession } from "../../store/catalog";
-import { STAGES, RECENT_DONE, assignmentLabel, boardRows, belongsTo, taskItem, taskSessions, projectTask, sessionIdentity, sessionLabel, taskPageOffset } from "./tasks-ui";
+import { STAGES, RECENT_DONE, assignmentLabel, boardRows, boardTask, belongsTo, keepsSessionFilter, taskItem, taskSessions, projectTask, sessionIdentity, sessionLabel, taskPageOffset } from "./tasks-ui";
 
 const session = (extra = {}) => toSession("mac", "run:r1", { name: "codex/sample-project/new-name", run_id: "r1", launch_id: "launch-1", ...extra });
 const task = (extra = {}) => taskItem({ uuid: "task-1", stage: "todo", text: "First line\nDescription", target: { host: "mac", session: "codex/sample-project/old-name", session_id: "launch_id:launch-1" }, ...extra });
@@ -42,5 +42,29 @@ describe("Qt task board projection", () => {
     const rows = [task({ uuid: "old", stage: "done", stage_at: now - RECENT_DONE - 1 }), task({ uuid: "edge", stage: "done", stage_at: now - RECENT_DONE }), task({ uuid: "new", stage: "done", stage_at: now })];
     expect(boardRows(rows, "done", undefined, now).map((t) => t.uuid)).toEqual(["edge", "new"]);
     expect(boardRows(rows, "done", undefined, now, true).map((t) => t.uuid)).toEqual(["old"]);
+  });
+
+  it("finds a board card in the loaded window or in the session's own view (zerus-u68na)", () => {
+    const loaded = taskItem({ uuid: "a", stage: "todo" }), viewed = taskItem({ uuid: "b", stage: "todo" });
+    const view = Object.fromEntries(STAGES.map((s) => [s, s === "todo" ? [viewed] : []])) as Record<(typeof STAGES)[number], typeof viewed[]>;
+    expect(boardTask([loaded], view, "b")).toBe(viewed);
+    expect(boardTask([loaded], view, "a")).toBe(loaded);
+    expect(boardTask([loaded], undefined, "b")).toBeUndefined();
+    expect(boardTask([loaded], view, undefined)).toBeUndefined();
+  });
+
+  it("keeps Only this session on for a revealed task the session owns while its stage still loads (zerus-60v37)", () => {
+    const empty = Object.fromEntries(STAGES.map((s) => [s, []])) as unknown as Record<(typeof STAGES)[number], ReturnType<typeof task>[]>;
+    const anyone = task({ uuid: "any", target: { kind: "any" } });
+    const withAnyone = { ...empty, todo: [anyone] };
+    // Its own task, before the view's read of To do arrived.
+    expect(keepsSessionFilter(task(), session(), empty)).toBe(true);
+    // A task for any session the view shows.
+    expect(keepsSessionFilter(anyone, session(), withAnyone)).toBe(true);
+    // Another session's task leaves the filter.
+    expect(keepsSessionFilter(task({ target: { host: "mac", session: "codex/other", session_id: "launch_id:other" } }), session(), withAnyone)).toBe(false);
+    // Without the view, membership alone decides, as before.
+    expect(keepsSessionFilter(task(), session(), undefined)).toBe(true);
+    expect(keepsSessionFilter(anyone, session(), undefined)).toBe(false);
   });
 });

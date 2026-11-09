@@ -1,7 +1,11 @@
 import importlib.util
 import json
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("generate_i18n_catalog", HERE / "generate-i18n-catalog.py")
@@ -38,6 +42,27 @@ class GeneratedCatalog(unittest.TestCase):
         self.assertTrue(entries)
         self.assertEqual(list(entries), sorted(entries))
         self.assertTrue(all(catalog[source] == value for source, value in entries.items()))
+
+    def test_update_sorts_new_supplement_entries_and_check_never_writes(self):
+        with TemporaryDirectory(prefix=".catalog-test-", dir=HERE) as scratch:
+            source, destination = Path(scratch) / "supplement.json", Path(scratch) / "catalog.json"
+            entries = {"Zerus supplement Zeta": "Зета", "Zerus supplement Alpha": "Альфа"}
+            original = json.dumps(entries, ensure_ascii=False, indent=2) + "\n"
+            source.write_text(original, encoding="utf-8")
+            with patch.object(generator, "SUPPLEMENT", source), patch.object(generator, "DESTINATION", destination), redirect_stdout(StringIO()):
+                expected = generator.generate()
+                destination.write_text(expected, encoding="utf-8")
+                with patch("sys.argv", ["generate-i18n-catalog.py", "--check"]), self.assertRaises(SystemExit):
+                    generator.main()
+                self.assertEqual(source.read_text(encoding="utf-8"), original)
+                with patch("sys.argv", ["generate-i18n-catalog.py"]):
+                    generator.main()
+                actual = json.loads(source.read_text(encoding="utf-8"))
+                self.assertEqual(actual, entries)
+                self.assertEqual(list(actual), sorted(entries))
+                self.assertEqual(destination.read_text(encoding="utf-8"), expected)
+                with patch("sys.argv", ["generate-i18n-catalog.py", "--check"]):
+                    generator.main()
 
 
 if __name__ == "__main__":

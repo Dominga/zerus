@@ -85,14 +85,17 @@ def generate() -> str:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--check", action="store_true", help="fail unless the checked-in catalog is current")
+    parser.add_argument("--check", action="store_true", help="fail unless the catalog is current and the supplement is sorted")
     args = parser.parse_args()
     generated = generate()
+    supplement_text = json.dumps(json.loads(SUPPLEMENT.read_text(encoding="utf-8")), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     if args.check:
-        if not DESTINATION.exists() or DESTINATION.read_text(encoding="utf-8") != generated:
-            raise SystemExit(f"Run {Path(__file__).relative_to(ROOT)} to refresh {DESTINATION.relative_to(ROOT)}")
+        if (not DESTINATION.exists() or DESTINATION.read_text(encoding="utf-8") != generated
+                or SUPPLEMENT.read_text(encoding="utf-8") != supplement_text):
+            raise SystemExit(f"Run {Path(__file__).relative_to(ROOT)} to sort the supplement and refresh the catalog")
         print(f"Next Russian catalog is current: {DESTINATION.relative_to(ROOT)}")
     else:
+        SUPPLEMENT.write_text(supplement_text, encoding="utf-8")
         DESTINATION.write_text(generated, encoding="utf-8")
         print(f"Wrote {DESTINATION.relative_to(ROOT)}")
 

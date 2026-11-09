@@ -28,7 +28,9 @@ pub fn version(config: &Config, target: &str, args: &[String]) -> Result<i32> {
         return Err(Error::new(1, "usage: hgs [@host] version"));
     }
     // Every hgs answers --version without side effects.
-    let output = ssh(config, target, &crate::windows_peer::hgs(config, target, &["--version".into()])?)?;
+    let command = crate::remote_shell::hgs(config, target, &["--version"])
+        .map_err(|e| Error::new(3, format!("{target} unreachable: {}", e.message)))?;
+    let output = ssh(config, target, &command)?;
     if !output.status.success() {
         return Err(Error::new(3, format!("{target} unreachable: {}", detail(&output))));
     }
@@ -167,7 +169,7 @@ fn ssh(config: &Config, peer: &str, command: &str) -> Result<std::process::Outpu
         return Err(Error::new(1, "invalid SSH host alias"));
     }
     platform::ssh_output(
-        platform::ssh()
+        crate::ssh_bytes::command(command)?
             .args(crate::machines::ssh_options(config, peer))
             .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=3", peer, command])
             .stdin(Stdio::null())
@@ -185,7 +187,17 @@ fn detail(output: &std::process::Output) -> String {
 fn peer(config: &Config, peer: &str) -> Value {
     let response = if let Some(profile) = crate::wsl::profile(config, peer) {
         crate::wsl::capture(profile, &["status".into(), "--local".into(), "--json".into()], 2 * 1024 * 1024, 10)
-    } else { ssh(config, peer, &platform::remote_sh(PEER_COMMAND)) };
+    } else {
+        let command = (|| -> Result<String> {
+            if crate::remote_shell::windows(config, peer)? {
+                let words = if crate::remote_shell::supports(config, peer, &[("hgs [@host] status", false)])? {
+                    vec!["status", "--local", "--json"]
+                } else { vec!["ls", "--local", "--json"] };
+                crate::remote_shell::windows_command(config, peer, &words)
+            } else { Ok(platform::remote_sh(PEER_COMMAND)) }
+        })();
+        command.and_then(|command| ssh(config, peer, &command))
+    };
     let output = match response {
         Ok(output) => output,
         Err(error) => return json!({"host":peer,"ok":false,"error":"offline","detail":error.message}),

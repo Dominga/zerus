@@ -1,16 +1,18 @@
-import { For, Index, Show, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Index, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { steadyTitle } from "../lib/steady-title";
 import { useNow } from "../../store/latest";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { Icon } from "../lib/icons";
 import { MachineTile } from "../components/MachineTile";
 import { UsageMeters } from "../components/UsageMeter";
 import { AgentBadge, MachineBadge, SessionCard } from "../sessions/SessionCard";
+import { parentKeyOf } from "../sessions/model";
 import type { Session } from "../sessions/types";
 import type { Account } from "../../types";
 import { agentKind, catalog, plainComputers, plainRows } from "../../store/catalog";
 import { machineCards, requestMachine } from "../../store/machines";
 import { accountsPage, loadAccounts, setAccountMachine, setRequestedProfile } from "../../store/accounts";
-import { createOverview, overviewStats, type MachineCardModel, type OverviewStats } from "../../store/overview";
+import { createOverview, mainSessions, overviewStats, type MachineCardModel, type OverviewStats } from "../../store/overview";
 import { setMachineFilter, setPage, setProjectFilter, setAccountFilter, setFolderFilter, setSelectedKey, setStateFilter, type StateFilter } from "../../store/ui";
 import { flag, num, setSetting } from "../../store/settings";
 import { accountTooltip, clock, summaryText, usageLoading, windowsAt } from "../lib/usage";
@@ -86,13 +88,15 @@ function AccountCard(props: { a: Account; now: number }) {
   // An agent that is not installed reads as unavailable (DashboardPage.cpp:262).
   const usage = () => (props.a.installed ? props.a.usage : { ...props.a.usage, status: "unavailable" });
   const hosts = () => props.a.members.filter((m, i, all) => all.findIndex((x) => x.host === m.host) === i);
+  // The usage tooltip holds still under the pointer (zerus-5ryrx).
+  const tip = steadyTitle(() => accountTooltip(usage(), props.now));
   const open = () => {
     setRequestedProfile(props.a.members[0]?.key);
     setAccountMachine("*");
     setPage("accounts");
   };
   return (
-    <button class="ov-acard box" data-tone={accountTone(props.a, props.now)} title={accountTooltip(usage(), props.now)} onClick={open}>
+    <button class="ov-acard box" data-tone={accountTone(props.a, props.now)} title={tip.title()} onPointerEnter={tip.enter} onPointerLeave={tip.leave} onClick={open}>
       <span class="ov-al1">
         <b class="ell">{props.a.label}</b>
         <span class="grow" />
@@ -103,7 +107,7 @@ function AccountCard(props: { a: Account; now: number }) {
         <span class="ell muted">{accountIdentity(props.a)}</span>
         <span class="grow" />
         <span class="ov-ausage tabular">
-          <UsageMeters windows={windowsAt(usage().windows, props.now)} loading={usageLoading(usage())} compact summary={summaryText(usage())} />
+          <UsageMeters windows={windowsAt(usage().windows, props.now)} loading={usageLoading(usage())} compact resetFrom={0} summary={summaryText(usage())} />
           <Show when={usage().seeded && usage().checked_at !== null}><span class="dim">Checked {clock(usage().checked_at!)}</span></Show>
         </span>
       </span>
@@ -167,6 +171,8 @@ const clampWidth = (width: number) => Math.round(Math.max(OVERVIEW.min, Math.min
 const [dragWidth, setDragWidth] = createSignal<number | undefined>();
 const overviewWidth = () => dragWidth() ?? clampWidth(num("client/overviewWidth"));
 const overviewFullWidth = () => flag("client/overviewFullWidth");
+/** Attention & in progress lists main sessions only unless the person asks for sub-sessions too (owner 2026-11-07). */
+const withSubSessions = () => flag("client/overviewSubSessions");
 /** Stores a width once, and only when it differs from the stored one. */
 function storeOverviewWidth(width: number) {
   setDragWidth(undefined);
@@ -220,6 +226,7 @@ export function OverviewScreen() {
   // Plain rows for the tiles and the live order, one dependency per batch;
   // each live card renders its store row (zerus-5wmh.66.50).
   const ov = createOverview(plainRows, plainComputers, () => machineCards, overviewStats, (s) => catalog.rows[s.key] ?? s);
+  const live = createMemo(() => (withSubSessions() ? ov.live() : mainSessions(ov.live(), parentKeyOf())));
   // Ages, resets and pace re-render every 15 s while shown (DashboardPage.cpp:322); nothing else runs on a timer.
   const now = useNow(15_000);
   const view = accountsPage;
@@ -262,6 +269,10 @@ export function OverviewScreen() {
 
         <div class="ov-h row">
           <h2 class="section-title">{tr("Attention & in progress")}</h2>
+          <div class="ov-seg" role="group" aria-label={tr("Sessions to show")}>
+            <button type="button" classList={{ on: !withSubSessions() }} aria-pressed={!withSubSessions()} onClick={() => void setSetting("client/overviewSubSessions", false)}>{tr("Main only")}</button>
+            <button type="button" classList={{ on: withSubSessions() }} aria-pressed={withSubSessions()} onClick={() => void setSetting("client/overviewSubSessions", true)}>{tr("With sub-sessions")}</button>
+          </div>
           <span class="grow" />
           <button class="su-link" onClick={() => go("all")}>{tr("All sessions")} <Icon name="arrow-right" size={12} /></button>
         </div>
@@ -270,8 +281,8 @@ export function OverviewScreen() {
             <span>{ov.stats().offline === 1 ? tr("1 session is on an offline or stale machine. Its last known status is shown on the machine cards.") : tr("%1 sessions are on offline or stale machines. Their last known status is shown on the machine cards.", ov.stats().offline)}</span>
           </div>
         </Show>
-        <Show when={ov.live().length} fallback={<p class="ov-empty">{tr("No sessions are working, need attention or have drafts.")}</p>}>
-          <LiveSessions rows={ov.live()} scroller={() => scroller} />
+        <Show when={live().length} fallback={<p class="ov-empty">{tr("No sessions are working, need attention or have drafts.")}</p>}>
+          <LiveSessions rows={live()} scroller={() => scroller} />
         </Show>
       </div>
     </div>

@@ -3,6 +3,8 @@
 use super::*;
 mod diagnostic;
 mod image;
+#[allow(dead_code)] // Consumed only by the new, separately confirmed program pipeline.
+pub(crate) mod programs;
 use diagnostic::{Phase, Reason, Trace};
 use image::Image;
 use serde::Deserialize;
@@ -658,12 +660,10 @@ impl Context {
             request_id: None,
         };
         let invocation = helper_invocation(&invocation);
-        let result = run::run_owned_observed(
-            self.image.executable(),
-            &invocation,
-            &[],
-            &self.cancel,
-            move |command| {
+        // Keep all existing image/context/original-registration checks in
+        // their same guarded spawn, before either runner releases any input.
+        let spawn =
+            move |command: &mut std::process::Command| -> std::io::Result<std::process::Child> {
                 environment.apply(command);
                 let mut child = original.spawn(command)?;
                 let refused = original.rejected.load(Ordering::Acquire)
@@ -685,7 +685,49 @@ impl Context {
                     tests::observe_refused_child(&mut child);
                 }
                 Ok(child)
-            },
+            };
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let result = {
+            let rejected = self.rejected.clone();
+            let current = self.clone();
+            run::run_owned_joined_observed(
+                self.image.executable(),
+                &invocation,
+                &[],
+                &self.cancel,
+                run::JoinedSpawn {
+                    spawn: move |command: &mut std::process::Command| {
+                        let child = spawn(command)?;
+                        Ok(if rejected.load(Ordering::Acquire) {
+                            run::GuardedChild::Withheld(child)
+                        } else {
+                            run::GuardedChild::Ready(child)
+                        })
+                    },
+                    before_input: move |_: &mut std::process::Child, _| {
+                        #[cfg(all(test, target_os = "linux"))]
+                        tests::before_rpc_input();
+                        // THIS admitted call owns busy until physical drain.
+                        // Recheck freshness, not admission for a second call.
+                        let valid = current.current();
+                        if !valid {
+                            current.trace.fail(Reason::ContextAfterBinding);
+                            current.rejected.store(true, Ordering::Release);
+                        }
+                        valid
+                    },
+                },
+                resources,
+                |error, _| self.trace.owned(error),
+            )
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let result = run::run_owned_observed(
+            self.image.executable(),
+            &invocation,
+            &[],
+            &self.cancel,
+            spawn,
             resources,
             |error, _| self.trace.owned(error),
         );

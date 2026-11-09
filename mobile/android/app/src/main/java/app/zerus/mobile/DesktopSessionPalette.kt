@@ -6,13 +6,32 @@ data class DesktopSessionBadge(val caption: String, val kind: DesktopBadgeKind, 
 
 /** Native predicates and precedence from SessionCardDelegate.h; colors from SessionStatusBadge.h. */
 object DesktopSessionPalette {
+    private fun attention(session: Session, online: Boolean): Boolean { val raw = session.raw
+        return raw.optBoolean("review_later") || raw.optBoolean("mobile_review_later") || online && !raw.optBoolean("attention_acknowledged") &&
+            (SessionFilters.needsAction(session) || childAttention(session, online)) }
+    /** The badge kind before a mute or a supervising parent grays it. */
+    fun nativeKind(session: Session, online: Boolean): DesktopBadgeKind {
+        val attention = attention(session, online)
+        val working = SessionFilters.working(session, online)
+        val unread = SessionFilters.visibleUnreadReply(session, online)
+        return when {
+            attention -> if (detailKind(session, online) == DetailKind.Error) DesktopBadgeKind.Error else DesktopBadgeKind.Attention
+            working -> if (SessionFilters.backgroundIdle(session)) DesktopBadgeKind.Background else DesktopBadgeKind.Working
+            unread -> DesktopBadgeKind.Unread
+            online && SessionFilters.waitingIdle(session) -> DesktopBadgeKind.Waiting
+            SessionFilters.scheduled(session, online) -> DesktopBadgeKind.Scheduled
+            online && SessionFilters.state(session) == "paused" && !SessionFilters.archived(session) -> DesktopBadgeKind.Paused
+            else -> DesktopBadgeKind.Neutral
+        }
+    }
     fun badge(session: Session, online: Boolean): DesktopSessionBadge {
         val raw = session.raw
         // U30: a host that reports session_state speaks the seven-state contract; the words and the
         // precedence come from it (SessionState.kt), and the older hosts keep the derivation below.
         if (SessionStateContract.hasHostState(raw) || !online) {
             val status = SessionStateContract.status(raw, online)
-            val muted = SessionNotificationPreferences.muted(session)
+            // Muted on any device, or quiet under a live parent, grays a request as on the desktop.
+            val muted = ChildSessions.silenced(session)
             // A device-local reminder keeps its attention color when the host
             // is offline or reports a calm state, as on the desktop.
             val reviewLater = !SessionFilters.archived(session) &&
@@ -25,21 +44,17 @@ object DesktopSessionPalette {
             return DesktopSessionBadge(status.caption, kind, false)
         }
         val state = SessionFilters.status(session, online)
-        val attention = raw.optBoolean("review_later") || raw.optBoolean("mobile_review_later") || online && !raw.optBoolean("attention_acknowledged") &&
-            (SessionFilters.needsAction(session) || childAttention(session, online))
+        val attention = attention(session, online)
         val working = SessionFilters.working(session, online)
         val unread = SessionFilters.visibleUnreadReply(session, online)
-        val nativeKind = when {
-            attention -> if (detailKind(session, online) == DetailKind.Error) DesktopBadgeKind.Error else DesktopBadgeKind.Attention
-            working -> if (SessionFilters.backgroundIdle(session)) DesktopBadgeKind.Background else DesktopBadgeKind.Working
-            unread -> DesktopBadgeKind.Unread
-            online && SessionFilters.waitingIdle(session) -> DesktopBadgeKind.Waiting
-            SessionFilters.scheduled(session, online) -> DesktopBadgeKind.Scheduled
-            online && SessionFilters.state(session) == "paused" && !SessionFilters.archived(session) -> DesktopBadgeKind.Paused
-            else -> DesktopBadgeKind.Neutral
-        }
+        val nativeKind = nativeKind(session, online)
+        // Muted, or quiet under a live parent (spec 2.1): requests and replies gray instead of amber.
+        // A quiet child's error is its parent's to handle, gray too; an explicitly muted error stays
+        // red (desktop badgeKind, zerus-nlck0).
         val muted = SessionNotificationPreferences.muted(session)
-        val kind = if(muted && nativeKind in setOf(DesktopBadgeKind.Attention,DesktopBadgeKind.Unread)) DesktopBadgeKind.Neutral else nativeKind
+        val quiet = ChildSessions.quiet(raw)
+        val kind = if ((muted || quiet) && nativeKind in setOf(DesktopBadgeKind.Attention,DesktopBadgeKind.Unread) ||
+            quiet && !muted && nativeKind == DesktopBadgeKind.Error) DesktopBadgeKind.Neutral else nativeKind
         val caption = when {
             working -> if (raw.string("phase") == "compacting") "Compacting" else if (SessionFilters.backgroundIdle(session)) "Background" else "Working"
             kind == DesktopBadgeKind.Waiting -> SessionFilters.waitingLabel(session,includeProducer=false,compact=true)

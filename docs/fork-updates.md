@@ -10,46 +10,36 @@ manual dispatch, only in `WhiteWh/zerus`. On a standard `windows-2025` runner it
 
 1. runs the Rust tests and builds the release `hgs.exe`, the mobile connector
    and the relay;
-2. builds the Qt GUI with the pinned Qt 6.10.3 and runs its offscreen suites,
-   only for the Qt fallback below;
-3. runs the Tauri desktop's fork update tests and the Qt-to-Tauri handoff
+2. runs the Tauri desktop's fork update tests and the Qt-to-Tauri handoff
    (`client/core/tests/fork_handoff.rs`), then builds the Tauri desktop as
    upstream does (`npm ci`, `tauri build --no-bundle` with
    `tauri.windows.switch.conf.json` and the `video` feature) as `hgs-tray.exe`;
-4. packages the zip with `scripts/package-windows.py --fork` (the fork
-   identity, the relay, the fork README section and the Qt fallback) and
+3. packages the zip with `scripts/package-windows.py --fork` (the fork
+   identity, the relay and the fork README section) and
    self-tests it (`scripts/check-windows-portable.py --run --selftest`, which
    also checks that `hgs-tray.exe --build-info` embeds the fork build and feed
    `build-info.json` names);
-5. publishes release `whitewh-<run number>` with `zerus-windows-x86_64.zip` and
+4. publishes release `whitewh-<run number>` with `zerus-windows-x86_64.zip` and
    `zerus-fork-feed.json`, marked as the latest release.
 
 The zip's `build-info.json` says `"desktop": "tauri"` and names the fork:
 `"fork": {"repository": "WhiteWh/zerus", "build": 42, "feed": "<feed URL>"}`
 (`build` null and `feed` empty for an experimental build).
 
-### The Qt fallback (one release)
+### No Qt (task #388)
 
-For one release the zip also keeps the Qt GUI as `qt\zerus-qt.exe`, with its
-own Qt runtime, MSVC runtime and Qt notices in `qt\`, declared in
-`build-info.json` as `"qt_fallback": {"executable": "qt/zerus-qt.exe",
-"qt_version": "6.10.3"}` (task #65, owner 2026-11-06). It is never the default:
-`hgs-tray.exe` is the Tauri app, and the portable check refuses Qt files
-anywhere else, an undeclared `qt\` folder, and a second `hgs.exe` or
-`hgs-tray.exe` in it. The owner starts it by hand if the Tauri desktop does not
-work: quit Zerus first, then run `qt\zerus-qt.exe`. It uses the build's own
-`hgs.exe` one folder up (`AppConfig::resolveHgsPath`), so the same accounts,
-sessions and agents. It never updates itself (its folder has no
-`build-info.json`), and the settings and drafts the Tauri app imported on its
-first start do not flow back from it. The zip's README says the same. The next
-release drops it: remove `--qt-fallback` and the Qt steps from
-`fork-windows.yml`.
+Only the Tauri desktop is supported (owner, 2026-11-08). The fork's build runs
+no Qt configure, build or ctest step and the zip carries no Qt: no Qt runtime,
+no `qt\` folder and no `"qt_fallback"` in `build-info.json`. The one-release
+fallback `qt\zerus-qt.exe` of task #65 (fork builds up to 164) is retired, and
+the portable check refuses it. Upstream's Qt sources stay in the tree,
+untouched, so upstream merges stay simple; the Qt-to-Tauri handoff test still
+runs, because an installed Qt build still updates to the Tauri zip.
 
 A local dry run uses the workflow's own commands from a clean checkout (the
 Tauri `--build-info` check refuses a dirty source): the release builds, `npm run
 tauri -- build ...` with `ZERUS_FORK_BUILD` and `ZERUS_FORK_FEED_URL` set,
-`scripts/package-windows.py --fork ... --qt-fallback .ci-build/gui/hgs-tray.exe`
-and `scripts/check-windows-portable.py <zip> --run --selftest`. Never push
+`scripts/package-windows.py --fork ...` and `scripts/check-windows-portable.py <zip> --run --selftest`. Never push
 `whitewh/main` for it: a push publishes.
 
 A failing step publishes nothing. The run number is embedded in `hgs-tray.exe` as

@@ -706,8 +706,9 @@ fn a_branch_per_task_lands_two_tasks_as_squash_without_the_first_ones_commits() 
             }
             stage_report(&mut store, n);
             run_stage(&mut store);
-            let team = store.load(STAGE_TEAM).unwrap().unwrap();
-            let task = team.task(n).unwrap();
+            // The completed phase may now have only live stubs. Read its full
+            // decision and pipeline record through the bounded task API.
+            let task: Task = serde_json::from_value(store.task(STAGE_TEAM, n).unwrap()).unwrap();
             assert_eq!((task.status, task.decided_by), (TaskStatus::Accepted, Some(Decider::Zerus)), "{:?}", task.pipeline_run);
         }
         // Both landed on main as one squash each, linear.

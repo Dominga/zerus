@@ -13,6 +13,30 @@ export type ComputerId = string;
  * not live), `caption` the Qt status text without clock parts. Unknown values
  * are null; times are seconds since the Unix epoch.
  */
+/**
+ * A session's Keep cache warm state as its computer reports it. The listing
+ * carries the first seven fields; the Details read and a confirmed change add
+ * the rest (docs/reference.md, Keep cache warm).
+ */
+export interface KeepWarmState {
+  enabled: boolean;
+  /** Seconds since the epoch on the agent's computer; null is Always. */
+  until: number | null;
+  revision: number;
+  /** off, waiting, warming, cold, uncertain, stopped, paused or unsupported. */
+  state: string;
+  next_at: number | null;
+  reason: string;
+  /** A keep-warm ping is running now. */
+  turn_active: boolean;
+  supported?: boolean;
+  reason_code?: string;
+  ttl_seconds?: number | null;
+  ttl_source?: string;
+  interval_seconds?: number | null;
+  cache_expires_at?: number | null;
+}
+
 export interface ViewRow {
   conversation_state?: string;
   /** This device's retained pre-cutover queue, not host acknowledgement. */
@@ -42,6 +66,8 @@ export interface ViewRow {
   /** The row's notification preferences pass Qt's validation, and their revision. */
   shared_notifications?: boolean;
   notification_revision?: number | null;
+  /** The host's Keep cache warm state (`hgs keep-warm`), when it reports one. */
+  keep_warm?: KeepWarmState | null;
   /** `created`, in whole seconds (it keys a conversation-less attention mark). */
   created?: number;
   /** Exact/fallback Qt row-density hashes with this computer's configured identity. */
@@ -120,8 +146,15 @@ export interface ViewRow {
   cwd_canonical?: string;
   /** The checkout's root, "" outside Git (the worktree picker's session counts). */
   git_root?: string;
+  git_metadata_state?: string;
+  git_detached?: boolean;
   /** Verified linked checkout name; absent for main or unknown checkouts. */
   worktree?: string | null;
+  /** The session that launched or adopted this one (core `ParentLink`). */
+  parent?: ParentLinkOut | null;
+  git_worktree?: boolean;
+  /** A supervised child: its requests draw no attention (core `quiet`). */
+  quiet?: boolean;
   terminal_supported?: boolean;
   terminal_reported?: boolean;
   terminal_attach_supported?: boolean;
@@ -129,6 +162,10 @@ export interface ViewRow {
   bulk_lifecycle_supported?: boolean;
 }
 
+/** A child's parent as its computer lists it; `state` is live, saved, archived or missing. */
+export interface ParentLinkOut { machine: string; session_id: string; name: string; conversation_id: string; run_id: string; state: string;
+  /** When the link was recorded, Unix seconds; 0 when unknown. */
+  at?: number }
 export interface RowOut { computer: ComputerId; key: string; row: ViewRow }
 export interface KeyOut { computer: ComputerId; key: string; reason?: string | null }
 export interface ReplaceOut { computer: ComputerId; rows: RowOut[] }
@@ -237,12 +274,16 @@ export interface DesktopService {
   epoch: string | null;
   generation: number | null;
   background: Record<string, { ready: boolean; code: string }>;
+  /** Configured connection presentation only, never source or action authority. */
+  fleet_computers?: null | { id: string; status: string; attempt: number }[];
   attention_counts: null | {
     epoch: string; scope: "shared_host_state"; display_only: true; authority: false; local_marks_included: false;
     aggregate: { complete: boolean; total: number | null; attention: number | null; known_total: number; known_attention: number };
     computers: { computer: string; complete: boolean; online: boolean; total: number | null; attention: number | null }[];
   };
   automatic_approvals: boolean | null;
+  /** The approval categories the service's committed policy keeps on; absent from an older service. */
+  automatic_approval_categories?: string[] | null;
   /** Held task message copies a person may review; display only, never a release. */
   task_message_inputs?: null | { review: number; full: boolean };
   details_available: boolean;
@@ -258,6 +299,7 @@ export interface DesktopService {
 }
 
 export interface Batch {
+  git?: GitOut[];
   desktop_service?: DesktopService;
   upserts: RowOut[];
   removes: KeyOut[];
@@ -282,6 +324,13 @@ export interface Batch {
   teams?: TeamsOut[];
   /** Task 235: computers whose rows came from the last list on disk (saved at, epoch seconds), or null once their live listing replaced them. */
   stale?: Record<string, number | null>;
+}
+
+export interface GitOut {
+  computer: ComputerId;
+  key: string;
+  kind: "state" | "unavailable";
+  payload: { value?: Record<string, unknown>; rev?: number; code?: string };
 }
 
 /** A row of the Processes tab (processes.rs `RowView`). */
@@ -337,7 +386,7 @@ export const emptyBatch = (): Batch => ({ upserts: [], removes: [], replaces: []
 
 /** A batch with nothing to apply. A composer view or a draft key set is content: Rust sends each once. */
 export const isEmptyBatch = (b: Batch) =>
-  !b.upserts.length && !b.removes.length && !b.replaces.length && !b.computers.length && !b.machines?.length && !b.activity.length
+  !b.git?.length && !b.upserts.length && !b.removes.length && !b.replaces.length && !b.computers.length && !b.machines?.length && !b.activity.length
   && !b.desktop_service && !b.tasks?.length && !b.groups?.length && !b.grouping && !b.processes_view && !b.composer && !b.draft_keys && !b.composer_events?.length && !b.teams?.length;
 
 /** One Activity event as `inspect` returns it; unknown fields are kept. */
@@ -350,10 +399,14 @@ export interface ActivityEvent {
   tool?: string;
   agent_id?: string;
   origin?: string;
+  /** `keep_warm` for every event of a keep-warm ping turn. */
+  turn_origin?: string;
   report?: string;
   sender?: string;
   activity_key?: string;
   message_id?: string;
+  /** OpenCode's inbox: a waiting message is `queued`, and after Stop it stays `not_delivered` until it is sent or removed. */
+  delivery_state?: string;
   attachments?: EventAttachment[];
   voice?: Record<string, unknown>;
   /** Codex's question replies of a user event, parsed in Rust (R7's annotate_replies). */
@@ -491,6 +544,8 @@ export interface Usage {
   label: string;
   auth_status: string;
   checked_at: number | null;
+  /** Provider cooldown; older peers may omit it. */
+  retry_at?: number | null;
   /** The values come from the cached account status until inspect answers. */
   seeded: boolean;
   identity: Identity;
@@ -517,11 +572,21 @@ export interface Profile {
   permission_source?: "provider" | "zerus";
   permission_catalog?: unknown; permission_current?: unknown;
   model_supported: boolean; model_text: Text;
+  /** The mode is the Zerus default (bypass for Claude, Codex and Kimi), not a choice (T-6hcfnu). */
+  permission_default?: boolean;
+  /** This computer's model and effort defaults, empty for provider settings (zerus-f0uz8). */
+  model?: string; effort?: string;
+  /** `account` (shared), `computer`, or empty when this computer keeps no scope. */
+  permission_scope?: string;
+  /** The account's color and emoji as this computer keeps them, empty when unset; `marks_supported` is false for an older hgs (zerus-sa9qn.6). */
+  mark_color?: string; mark_emoji?: string; marks_supported?: boolean;
   usage: Usage; opencode: OpenCodeInfo | null;
 }
 export interface Account {
   key: string; label: string; provider: string; installed: boolean; machines: string[]; members: Profile[];
   usage: Usage; permission: Text; identity_lines: Text[]; identity_note: Text | null;
+  /** zerus-f0uz8: permissions kept per computer; members' model or permission settings differ. */
+  permissions_per_computer?: boolean; model_differs?: boolean; permission_differs?: boolean;
 }
 export interface AccountHost { computer: ComputerId; name: string; label: string; online: boolean }
 export interface BindingEvidence { host: ComputerId; provider: string; id: string; home: string; group: string }
@@ -749,6 +814,8 @@ export interface CreationCard {
   caption: string; error: string;
   /** Seconds since the Unix epoch. */
   created: number;
+  /** Last recorded state change in desktop-clock Unix seconds; absent on older hosts. */
+  updated?: number;
   /** The destination project's id. */
   group: string;
   /** "" for this computer, else the alias. */
@@ -759,6 +826,9 @@ export interface CreationCard {
   /** The folder the agent starts in. */
   target: string;
   show_pending: boolean; launch_dispatched: boolean; stop_requested: boolean; worktree_receipts: boolean;
+  /** Metadata-only stop: the original UUID and its unknown past remain retained. */
+  worktree_fenced?: boolean;
+  worktree_pending?: boolean;
   can_resume: boolean; can_edit: boolean;
   /** The exact bound session's full name, empty until bound or on an older host. */
   bound_session: string;
@@ -804,7 +874,17 @@ export interface ArchivePage {
   next_cursor: string;
   previous_cursor: string | null;
   total: number;
+  /** The host counted only up to a cap (zerus-080n8): the total shows as "N+". */
+  total_capped?: boolean;
   position: number | null;
+  /** zerus-080n8: the position is a lower bound. */
+  position_capped?: boolean;
+  /** zerus-080n8: the host's scan stopped at its budget before a full page; it continues. */
+  partial?: boolean;
+  /** zerus-080n8: rows the host looked at for this page. */
+  searched?: number;
+  /** zerus-5czy6: a bounded page; an exact one (an older host too) is not. */
+  bounded?: boolean;
 }
 
 /** One read of an archived session's recorded Activity (`archived_activity`, `hgs inspect --archive`). */
@@ -848,6 +928,9 @@ export interface LocalMessage {
 }
 /** The native queue (core input_queue::QueueView), kept separate from local messages. */
 export interface QueueView { id: string; text: string; hint: string; can_send_now: boolean; enabled: boolean; label: string; run_id?: string; conversation_id?: string }
+/** What one Remove of a not-delivered OpenCode message came to (src-tauri composer/inbox.rs). */
+export type InboxRemoveReply = { outcome: "removed" | "changed" | "busy" } | { outcome: "failed" | "uncertain"; detail: string };
+
 /** A held message: the request of its local row, its exact text and its file names. */
 export interface HeldMessageView { request_id: string; text: string; attachments: string[] }
 /** U35: a message hgs holds until the agent takes the previous one (src-tauri composer/held.rs). */
@@ -859,6 +942,8 @@ export interface ComposerView {
   attachments: AttachmentView[]; removed: string | null; attaching: boolean; sending: boolean; recording?: boolean; waiting: string | null; uncertain: boolean;
   /** The desktop service still sends this draft's message: no Allow retry, and its status is not an error. */
   delivery_pending?: boolean;
+  /** Advisory only: matching text in loaded history is never receipt evidence. */
+  history_text_match?: boolean;
   status: string; status_error: boolean; can_send: boolean; send_label: Text; available: boolean; unavailable_reason: string; block_reason: string | null;
   attachments_available: boolean; attachments_reason: string; session_status: string; session_status_error: boolean; session_blocks_input: boolean;
   /** The open session's last read failed (Qt's m_inspectError). */
@@ -876,6 +961,11 @@ export interface ComposerView {
   /** False while a required card stands in for the editor and the action row (Qt's setInputVisible). */
   input_visible: boolean;
   queue: QueueView | null;
+  /** The not-delivered OpenCode message of this session whose removal runs, and whether any removal runs (no other Remove can be clicked). */
+  inbox_removing?: string | null;
+  inbox_busy?: boolean;
+  /** The interrupted prompt Rust offers an empty field (zerus-5wmh.13.4): taken once, only while this field is still empty and nothing typed is on its way. */
+  offer?: { id: number; text: string } | null;
 }
 
 // The question card (src-tauri composer/questions.rs, core questions.rs).
@@ -1162,6 +1252,7 @@ export interface TeamLaneView {
 }
 
 export interface TeamTaskView {
+  archived?: boolean;
   id: number; title: string; status: string; assignee: string; phase: number; deps: { task: number; hard: boolean }[];
   estimate_minutes: number; attempts: number;
   /** The newest attempt's state (`delivering`, `delivered`, `unconfirmed`, `reported`...), empty without one. */
@@ -1203,6 +1294,11 @@ export type TeamPlanChange =
   | { edit: "link"; dependency: number; task: number; add: boolean; soft?: boolean }
   | { edit: "task"; task: Record<string, unknown> }
   | { edit: "remove_task"; task: number };
+
+/** One task read on demand; only the newest available report crosses IPC. */
+export interface TeamTaskDetailView {
+  task: TeamTaskView; report: string; report_truncated: boolean;
+}
 
 /** A task's pipeline run (core PipelineRunView). */
 export interface TeamPipelineRun {
@@ -1284,6 +1380,7 @@ export interface TeamTestsView {
 }
 
 export interface TeamPhaseView {
+  archived?: boolean;
   n: number; title: string; state: string; status: string; done: number; total: number; barrier: boolean; auto: boolean;
   acceptance: string; paused: boolean; health: string;
   /** Task #58: the mode the phase plans in, "standard" or "free"; "" from an older hgs. */
@@ -1306,10 +1403,17 @@ export interface TeamFindingItem {
 export interface TeamFindingsPage { items: TeamFindingItem[]; next_cursor?: string }
 
 export interface TeamView {
+  archived_phases_not_shown?: number;
   id: string; name: string; status: string; project: string; folder: string; goal: string; plan_mode: string; lead: string;
   revision: number; created: number; updated: number; waiting_for_lead: boolean; pending_phase: number | null;
   /** Task #308: the team's working mode, the proposal and what its settings miss. */
-  working_mode?: { preset: string; proposal?: { preset: string; title: string; reasons: string[]; settings?: Record<string, unknown> } | null; disagreeing?: string[] };
+  working_mode?: {
+    preset: string;
+    proposal?: { preset: string; title: string; reasons: string[]; settings?: Record<string, unknown>; fingerprint?: string } | null;
+    disagreeing?: string[];
+    /** Task #337: the preset and profile the owner kept, until the profile changes. */
+    kept?: { preset: string; fingerprint: string; at: number } | null;
+  };
   /** F7: the team a next goal came from, and the one it led to. */
   previous?: string; next?: string;
   /** Task #58: the phase that takes tasks as they come, and whether hgs sends each phase's mode. */
@@ -1416,8 +1520,8 @@ export type TeamAction =
   /** Task 88: the team's test configuration for its Tests settings: read it, or check a candidate override; neither writes. */
   | { kind: "test_config"; action: "get" | "check"; tests?: Record<string, unknown> | null }
   /** Task 108: the build folders Zerus holds: the Disk view, a dry run or Clean now, the policy, forget a reviewed folder. */
-  | { kind: "disk"; action: "list" | "clean" | "policy" | "forget"; scope?: "policy" | "all"; dry_run?: boolean;
-      policy?: { enabled: boolean; unused_days: number; free_gb: number; free_percent: number }; paths?: string[]; path?: string; refresh?: boolean; measure?: boolean }
+  | { kind: "disk"; action: "list" | "clean" | "policy" | "forget"; scope?: string; dry_run?: boolean;
+      policy?: { enabled: boolean; unused_days: number; free_gb: number; free_percent: number; team_limit_gb?: number }; paths?: string[]; path?: string; refresh?: boolean; measure?: boolean }
   | { kind: "release"; task: number }
   | { kind: "retry"; task: number }
   | { kind: "finish"; summary: string }
@@ -1437,6 +1541,8 @@ export type TeamAction =
   | { kind: "waiting_restore"; id: string }
   /** Task #308: proposes a working mode; its card allows the switch. */
   | { kind: "propose_working_mode"; preset: string; reason?: string }
+  /** Task #337: the owner keeps the team's settings for the project's profile. */
+  | { kind: "keep_working_mode" }
   /** Task #218: a member moves to another agent/account/model or to an existing session. */
   | { kind: "swap-member"; member: string; agent?: string; model?: string; effort?: string; account?: string; session?: TeamSessionView }
   | { kind: "take_over"; task: number }

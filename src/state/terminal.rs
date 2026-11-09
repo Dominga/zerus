@@ -112,47 +112,7 @@ fn validate(request: &Request) -> Result<()> {
     }
 }
 
-#[cfg(test)]
-mod own_paste_tests {
-    use super::*;
 
-    fn record() -> Value {
-        json!({"name":"claude/p/merger","run_id":"r1","conversation_id":"c1",
-            "unsent_paste":{"request_id":"00000000-0000-4000-8000-000000000017","draft_hash":"a".repeat(64),"run_id":"r1","conversation_id":"c1","at":10.0}})
-    }
-
-    /// The composer as a fake terminal shows it: the draft and its hash.
-    #[test]
-    fn only_the_exact_paste_zerus_left_is_its_own() {
-        let pasted = "[Pasted text #17 +62 lines]";
-        assert_eq!(own_paste(&record(), Some(pasted), &"a".repeat(64)).unwrap(), "00000000-0000-4000-8000-000000000017");
-        // Anything the person typed changes the draft and its hash.
-        assert_eq!(own_paste(&record(), Some("[Pasted text #17 +62 lines] and more"), &"b".repeat(64)).unwrap_err(), NOT_OWN_PASTE);
-        // An empty composer, or no draft Zerus can read (a dialog), is not one.
-        assert!(own_paste(&record(), None, &"a".repeat(64)).is_err());
-        assert!(own_paste(&record(), Some("  "), &"a".repeat(64)).is_err());
-        // Another conversation or run, or no recorded paste, never matches.
-        let mut other = record();
-        other["conversation_id"] = json!("c2");
-        assert!(own_paste(&other, Some(pasted), &"a".repeat(64)).is_err());
-        let mut gone = record();
-        gone.as_object_mut().unwrap().remove("unsent_paste");
-        assert!(own_paste(&gone, Some(pasted), &"a".repeat(64)).is_err());
-    }
-
-    #[test]
-    fn the_action_takes_no_text_key_or_hash() {
-        let request = |extra: Value| -> Request {
-            let mut value = json!({"request_id":"6e337ab4-7843-4ee1-ab22-8d664827421a","action":"submit_own_paste",
-                "expected_run_id":"r1","expected_conversation_id":"c1"});
-            value.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
-            serde_json::from_value(value).unwrap()
-        };
-        assert!(validate(&request(json!({}))).is_ok());
-        assert!(validate(&request(json!({"draft_hash":"a".repeat(64)}))).is_err());
-        assert!(validate(&request(json!({"text":"x","enter":true}))).is_err());
-    }
-}
 fn checked(name: &str, request: &Request) -> Result<Value> {
     // zerus-ucck P3c: the request's identities select among sessions that
     // share the label.
@@ -560,4 +520,46 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     answer.as_object_mut().unwrap().remove("request_hash");
     println!("{answer}");
     Ok(0)
+}
+
+#[cfg(test)]
+mod own_paste_tests {
+    use super::*;
+
+    fn record() -> Value {
+        json!({"name":"claude/p/merger","run_id":"r1","conversation_id":"c1",
+            "unsent_paste":{"request_id":"00000000-0000-4000-8000-000000000017","draft_hash":"a".repeat(64),"run_id":"r1","conversation_id":"c1","at":10.0}})
+    }
+
+    /// The composer as a fake terminal shows it: the draft and its hash.
+    #[test]
+    fn only_the_exact_paste_zerus_left_is_its_own() {
+        let pasted = "[Pasted text #17 +62 lines]";
+        assert_eq!(own_paste(&record(), Some(pasted), &"a".repeat(64)).unwrap(), "00000000-0000-4000-8000-000000000017");
+        // Anything the person typed changes the draft and its hash.
+        assert_eq!(own_paste(&record(), Some("[Pasted text #17 +62 lines] and more"), &"b".repeat(64)).unwrap_err(), NOT_OWN_PASTE);
+        // An empty composer, or no draft Zerus can read (a dialog), is not one.
+        assert!(own_paste(&record(), None, &"a".repeat(64)).is_err());
+        assert!(own_paste(&record(), Some("  "), &"a".repeat(64)).is_err());
+        // Another conversation or run, or no recorded paste, never matches.
+        let mut other = record();
+        other["conversation_id"] = json!("c2");
+        assert!(own_paste(&other, Some(pasted), &"a".repeat(64)).is_err());
+        let mut gone = record();
+        gone.as_object_mut().unwrap().remove("unsent_paste");
+        assert!(own_paste(&gone, Some(pasted), &"a".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn the_action_takes_no_text_key_or_hash() {
+        let request = |extra: Value| -> Request {
+            let mut value = json!({"request_id":"6e337ab4-7843-4ee1-ab22-8d664827421a","action":"submit_own_paste",
+                "expected_run_id":"r1","expected_conversation_id":"c1"});
+            value.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            serde_json::from_value(value).unwrap()
+        };
+        assert!(validate(&request(json!({}))).is_ok());
+        assert!(validate(&request(json!({"draft_hash":"a".repeat(64)}))).is_err());
+        assert!(validate(&request(json!({"text":"x","enter":true}))).is_err());
+    }
 }

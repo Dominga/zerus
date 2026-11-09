@@ -1,3 +1,4 @@
+import { TextInput } from "../lib/TextField";
 import { Index, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack } from "solid-js";
 import { tr } from "../../i18n";
 import { trText } from "../../text";
@@ -191,7 +192,7 @@ function AnswerLine(props: { id: string; onKey: (e: KeyboardEvent) => void }) {
   let input!: HTMLInputElement;
   onEpoch(() => { const value = t()?.value ?? ""; if (input && input.value !== value) input.value = value; });
   return (
-    <input ref={input} class="qcard-text" type="text" placeholder={t() ? trText(t()!.placeholder) : undefined} aria-label={t() ? trText(t()!.accessible_name) : undefined} maxLength={t()?.max_units}
+    <TextInput ref={input} class="qcard-text" type="text" placeholder={t() ? trText(t()!.placeholder) : undefined} aria-label={t() ? trText(t()!.accessible_name) : undefined} maxLength={t()?.max_units}
       disabled={!t()?.enabled} value={untrack(() => t()?.value ?? "")}
       onInput={(e) => {
         const el = e.currentTarget;

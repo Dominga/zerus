@@ -8,6 +8,25 @@ use std::{
     time::Duration,
 };
 
+// A parallel fixture's fork may retain a CLOEXEC lock description until exec.
+// Busy refuses before any write. Retry only that refusal, never an offer or an
+// uncertain publication; keep every other result and one fixed wait bound.
+// Shared by every journal fixture (zerus-p1l5z).
+#[track_caller]
+pub(super) fn retry_busy<T>(
+    mut operation: impl FnMut() -> Result<T, journal::Error>,
+) -> Result<T, journal::Error> {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    loop {
+        match operation() {
+            Err(journal::Error::Busy) if std::time::Instant::now() < until => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            result => return result,
+        }
+    }
+}
+
 pub(super) struct Fixture {
     pub(super) base: PathBuf,
     pub(super) store: PathBuf,

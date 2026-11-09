@@ -29,6 +29,12 @@ thread_local! {
     static AFTER_OBSERVATION: std::cell::RefCell<Option<RefusedObserver>> = const { std::cell::RefCell::new(None) };
     static AFTER_BINDING: std::cell::RefCell<Option<RefusedObserver>> = const { std::cell::RefCell::new(None) };
     static AFTER_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_RPC_INPUT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+pub(super) fn before_rpc_input() {
+    if let Some(hook) = BEFORE_RPC_INPUT.with_borrow_mut(Option::take) {
+        hook();
+    }
 }
 pub(super) fn after_capture() {
     if let Some(hook) = AFTER_CAPTURE.with_borrow_mut(Option::take) {
@@ -58,6 +64,9 @@ pub(super) fn observe_refused_child(child: &mut std::process::Child) {
 
 #[test]
 fn accounted_read_cannot_release_input_if_scope_changes_during_observation() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         for change_configuration in [false, true] {
@@ -143,7 +152,7 @@ fn accounted_read_cannot_release_input_if_scope_changes_during_observation() {
     });
 }
 
-fn fixture(config: Value) -> Fixture {
+pub(super) fn fixture(config: Value) -> Fixture {
     let f = Fixture::new(config);
     std::fs::remove_file(f.0.join("hgs")).unwrap();
     std::fs::write(
@@ -168,7 +177,7 @@ fn fixture(config: Value) -> Fixture {
     .unwrap();
     f
 }
-fn capture() -> Capture {
+pub(super) fn capture() -> Capture {
     Capture {
         target: Target {
             computer: String::new(),
@@ -182,7 +191,7 @@ fn capture() -> Capture {
         owner_id: "original-owner".into(),
     }
 }
-async fn connected(f: &Fixture) -> (Arc<Service>, CacheServer) {
+pub(super) async fn connected(f: &Fixture) -> (Arc<Service>, CacheServer) {
     let responder = responder();
     assert!(responder
         .configure_ownership_mode_once(zerus_client_core::desktop::ownership::Mode::Service));
@@ -246,6 +255,9 @@ fn confirm(service: Arc<Service>, pending: Arc<Pending>) -> Confirmation {
 }
 #[test]
 fn the_offer_selection_cannot_be_replaced_before_confirmation() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         for change in ["image", "connection", "cancel"] {
@@ -292,8 +304,7 @@ fn the_offer_selection_cannot_be_replaced_before_confirmation() {
 }
 #[test]
 fn one_original_is_retained_before_the_same_scoped_native_call() {
-    #[cfg(unix)]
-    if crate::test_context::non_agent() {
+    if crate::test_context::desktop_fixture() {
         return;
     }
     let _process = crate::PROCESS_TREE.read().unwrap();
@@ -340,10 +351,154 @@ fn one_original_is_retained_before_the_same_scoped_native_call() {
         }
     });
 }
+
+#[test]
+fn program_continuation_keeps_the_same_native_origin_and_claim_after_exact_done() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        let actions = actions(&f);
+        let key = crate::actions::Lane::key(&capture().target, &Action::Terminate);
+        let hold = actions.begin(key.clone(), &Action::Terminate).unwrap();
+        let mut controller = confirm(service.clone(), Arc::new(Pending::default()))
+            .bind(Arc::new(hold))
+            .unwrap();
+        let invocation = controller.invocation().clone();
+        let image = controller.context.image.clone();
+        let connection = controller.context.routing.clone();
+        controller.retain().unwrap();
+        controller.begin_dispatch(&invocation).unwrap();
+        let (outcome, source) = controller.run_retaining_source(
+            &invocation,
+            std::time::Instant::now() + Duration::from_secs(60),
+        );
+        assert!(matches!(outcome, Outcome::Done { .. }));
+        let mut source = source.expect("exact original Done preserves custody, not permission");
+        assert!(Arc::ptr_eq(&source.context.image, &image));
+        assert!(Arc::ptr_eq(&source.context.routing, &connection));
+        assert!(same_invocation(source.invocation(), &invocation));
+        assert_eq!(source.capture(), &capture());
+        assert_eq!(source.archive(), "11111111-2222-4333-8444-555555555555");
+        assert!(source.current());
+        eventually("original native Terminate physically joined", || {
+            source.original_call_joined()
+        })
+        .await;
+        assert!(
+            actions.begin(key.clone(), &Action::Terminate).is_none(),
+            "pipeline retains the actual Actions claim after its first helper joins"
+        );
+        assert!(source.context.current());
+        source.expire();
+        assert!(
+            !source.current(),
+            "physical join does not renew the ORIGINAL holder deadline"
+        );
+        drop(source);
+        assert!(actions.begin(key, &Action::Terminate).is_some());
+        assert_eq!(effects(&calls(&f)).len(), 1);
+        service.join().await.unwrap();
+    });
+}
+
+#[test]
+fn program_continuation_does_not_treat_a_done_reply_as_physical_pipe_settlement() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    struct Release(PathBuf);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let _ = std::fs::write(self.0.join("termination-release"), b"release");
+        }
+    }
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({"termination_effect_completed_pipe":true}));
+        let _release = Release(f.0.clone());
+        let (service, _cache) = connected(&f).await;
+        let actions = actions(&f);
+        let key = crate::actions::Lane::key(&capture().target, &Action::Terminate);
+        let hold = actions.begin(key.clone(), &Action::Terminate).unwrap();
+        let mut controller = confirm(service.clone(), Arc::new(Pending::default()))
+            .bind(Arc::new(hold))
+            .unwrap();
+        let invocation = controller.invocation().clone();
+        controller.retain().unwrap();
+        controller.begin_dispatch(&invocation).unwrap();
+        let (outcome, source) = controller.run_retaining_source(
+            &invocation,
+            std::time::Instant::now() + Duration::from_secs(60),
+        );
+        assert!(matches!(outcome, Outcome::Done { .. }), "{outcome:?}");
+        let source = source.unwrap();
+        assert!(
+            !source.original_call_joined(),
+            "exit and parsed Done cannot settle an original output reader"
+        );
+        assert!(actions.begin(key.clone(), &Action::Terminate).is_none());
+        std::fs::write(f.0.join("termination-release"), b"release").unwrap();
+        eventually("actual original output reader EOF", || {
+            source.original_call_joined()
+        })
+        .await;
+        assert!(
+            actions.begin(key.clone(), &Action::Terminate).is_none(),
+            "readonly pipeline origin stays charged independently"
+        );
+        drop(source);
+        assert!(actions.begin(key, &Action::Terminate).is_some());
+        assert_eq!(effects(&calls(&f)).len(), 1);
+        service.join().await.unwrap();
+    });
+}
+
+#[test]
+fn program_continuation_never_reconstructs_an_origin_from_unknown_or_removed_outcomes() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        for config in [
+            json!({"termination_effect_lost":true}),
+            json!({"termination_effect_cleanup":"unknown"}),
+            json!({"termination_effect_cleanup":"removed"}),
+        ] {
+            let f = fixture(config);
+            let (service, _cache) = connected(&f).await;
+            let pending = Arc::new(Pending::default());
+            let mut controller = confirm(service.clone(), pending.clone())
+                .bind(Arc::new(()))
+                .unwrap();
+            let invocation = controller.invocation().clone();
+            controller.retain().unwrap();
+            controller.begin_dispatch(&invocation).unwrap();
+            let (_outcome, source) = controller.run_retaining_source(
+                &invocation,
+                std::time::Instant::now() + Duration::from_secs(60),
+            );
+            assert!(source.is_none());
+            assert!(Confirmation::new(
+                uuid::Uuid::new_v4().to_string(),
+                capture(),
+                selected(service.clone()),
+                pending
+            )
+            .is_err());
+            assert_eq!(effects(&calls(&f)).len(), 1);
+            service.join().await.unwrap();
+        }
+    });
+}
+
 #[test]
 fn corrupted_epoch_scope_or_changed_capture_never_dispatches_or_reoffers() {
-    #[cfg(unix)]
-    if crate::test_context::non_agent() {
+    if crate::test_context::desktop_fixture() {
         return;
     }
     let _process = crate::PROCESS_TREE.read().unwrap();
@@ -386,8 +541,7 @@ fn corrupted_epoch_scope_or_changed_capture_never_dispatches_or_reoffers() {
 }
 #[test]
 fn native_effect_loss_consumes_the_one_shot_and_keeps_original_correlation() {
-    #[cfg(unix)]
-    if crate::test_context::non_agent() {
+    if crate::test_context::desktop_fixture() {
         return;
     }
     let _process = crate::PROCESS_TREE.read().unwrap();
@@ -430,8 +584,7 @@ impl Drop for Release {
 }
 #[test]
 fn retained_pipe_keeps_the_original_actions_claim_and_refuses_native_effect() {
-    #[cfg(unix)]
-    if crate::test_context::non_agent() {
+    if crate::test_context::desktop_fixture() {
         return;
     }
     let _process = crate::PROCESS_TREE.read().unwrap();
@@ -476,8 +629,7 @@ fn retained_pipe_keeps_the_original_actions_claim_and_refuses_native_effect() {
 
 #[test]
 fn missing_unknown_corrupt_or_foreign_original_lookup_never_replays_or_dispatches() {
-    #[cfg(unix)]
-    if crate::test_context::non_agent() {
+    if crate::test_context::desktop_fixture() {
         return;
     }
     let _process = crate::PROCESS_TREE.read().unwrap();
@@ -520,8 +672,7 @@ fn missing_unknown_corrupt_or_foreign_original_lookup_never_replays_or_dispatche
 }
 #[test]
 fn the_live_dispatch_transition_is_one_way_even_without_a_native_spawn() {
-    #[cfg(unix)]
-    if crate::test_context::non_agent() {
+    if crate::test_context::desktop_fixture() {
         return;
     }
     let _process = crate::PROCESS_TREE.read().unwrap();
@@ -553,6 +704,9 @@ fn the_live_dispatch_transition_is_one_way_even_without_a_native_spawn() {
 
 #[test]
 fn a_new_legacy_helper_is_probed_before_any_new_subcommand() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         for broken in ["missing", "substring", "frontend", "utf8"] {
@@ -609,8 +763,7 @@ fn a_new_legacy_helper_is_probed_before_any_new_subcommand() {
 
 #[test]
 fn refused_or_expired_original_binding_withholds_input_and_keeps_real_custody() {
-    #[cfg(unix)]
-    if crate::test_context::non_agent() {
+    if crate::test_context::desktop_fixture() {
         return;
     }
     let _process = crate::PROCESS_TREE.read().unwrap();
@@ -731,8 +884,7 @@ fn refused_or_expired_original_binding_withholds_input_and_keeps_real_custody() 
 
 #[test]
 fn scope_drift_during_observation_or_binding_withholds_input_until_real_custody_settles() {
-    #[cfg(unix)]
-    if crate::test_context::non_agent() {
+    if crate::test_context::desktop_fixture() {
         return;
     }
     let _process = crate::PROCESS_TREE.read().unwrap();
@@ -875,8 +1027,7 @@ fn scope_drift_during_observation_or_binding_withholds_input_until_real_custody_
 
 #[test]
 fn an_oversized_native_receipt_is_bounded_and_never_restores_dispatch() {
-    #[cfg(unix)]
-    if crate::test_context::non_agent() {
+    if crate::test_context::desktop_fixture() {
         return;
     }
     let _process = crate::PROCESS_TREE.read().unwrap();
@@ -920,8 +1071,7 @@ fn an_oversized_native_receipt_is_bounded_and_never_restores_dispatch() {
 
 #[test]
 fn overflow_keeps_original_dispatch_and_claim_until_the_actual_pipe_ends() {
-    #[cfg(unix)]
-    if crate::test_context::non_agent() {
+    if crate::test_context::desktop_fixture() {
         return;
     }
     let _process = crate::PROCESS_TREE.read().unwrap();
@@ -968,8 +1118,7 @@ fn overflow_keeps_original_dispatch_and_claim_until_the_actual_pipe_ends() {
 
 #[test]
 fn an_in_place_rewrite_after_the_last_spawn_check_cannot_replace_native_code() {
-    #[cfg(unix)]
-    if crate::test_context::non_agent() {
+    if crate::test_context::desktop_fixture() {
         return;
     }
     let _process = crate::PROCESS_TREE.read().unwrap();
@@ -1013,6 +1162,9 @@ fn an_in_place_rewrite_after_the_last_spawn_check_cannot_replace_native_code() {
 
 #[test]
 fn read_only_offer_diagnostics_pin_real_refusal_stages_without_effects_or_child_text() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         for (case, expected) in [
@@ -1074,6 +1226,9 @@ fn read_only_offer_diagnostics_pin_real_refusal_stages_without_effects_or_child_
 
 #[test]
 fn disconnected_offer_context_is_diagnostic_without_spawning_a_native_effect() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let f = fixture(json!({}));
@@ -1098,6 +1253,9 @@ fn disconnected_offer_context_is_diagnostic_without_spawning_a_native_effect() {
 
 #[test]
 fn offer_physical_finish_diagnostic_keeps_the_original_rpc_charge_until_real_release() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let f = fixture(json!({}));
@@ -1124,6 +1282,41 @@ fn offer_physical_finish_diagnostic_keeps_the_original_rpc_charge_until_real_rel
     });
 }
 
+#[test]
+fn rpc_scope_drift_after_pipe_setup_is_sticky_and_cannot_readmit_the_context() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        let context = Context::new_supported(service.clone(), Arc::new(())).unwrap();
+        let checked = context.clone();
+        BEFORE_RPC_INPUT.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || {
+                *checked.service.shared.configuration.lock().unwrap() = Some("b".repeat(64));
+            }));
+        });
+        assert!(context.rpc(vec!["--help".into()], None, None).is_err());
+        assert!(context.rejected.load(Ordering::Acquire));
+        assert!(!context.busy.load(Ordering::Acquire));
+        *service.shared.configuration.lock().unwrap() = Some("a".repeat(64));
+        let called = Arc::new(AtomicBool::new(false));
+        let spawned = called.clone();
+        AFTER_BINDING.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move |_| spawned.store(true, Ordering::Release)));
+        });
+        assert!(context.rpc(vec!["--help".into()], None, None).is_err());
+        AFTER_BINDING.with_borrow_mut(|hook| {
+            hook.take();
+        });
+        assert!(!called.load(Ordering::Acquire));
+        assert!(effects(&calls(&f)).is_empty());
+        service.join().await.unwrap();
+    });
+}
+
 pub(super) fn rendezvous_enabled() -> bool {
     RENDEZVOUS.get()
 }
@@ -1142,6 +1335,9 @@ impl Drop for Rendezvous {
 
 #[test]
 fn mac_transport_prefix_covers_rpc_reads_and_exact_native_invocation() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let f = fixture(json!({}));
@@ -1190,6 +1386,9 @@ fn mac_transport_prefix_covers_rpc_reads_and_exact_native_invocation() {
 
 #[test]
 fn mac_transport_refusal_during_observation_releases_no_prefix_or_private_input() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let f = fixture(json!({}));

@@ -640,10 +640,12 @@ impl<'a> Watch<'a> {
             }
             updates.push((index, row));
         }
+        let mut updated = BTreeSet::new();
         for (index, row) in updates {
-            self.digests[index] = catalog::row_digest(&row);
             self.rows[index].1 = row;
+            updated.insert(index);
         }
+        catalog::redecorate(&mut self.rows, &mut self.digests, &updated);
         self.pending = true;
         Ok(true)
     }

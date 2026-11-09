@@ -138,6 +138,8 @@ def validate_nightly(directory, commit=None, run_id=None, run_number=None):
             "Nightly recipe must use its immutable URL and checksum.")
     dependencies = {f"{name}>={value}" for name, value in floors.items()} | {
         "tmux>=3.7", "openssh", "python", "curl", "procps-ng", "hicolor-icon-theme", "bash", "tar"}
+    if binary_library_names(floors) == BINARY_LIBRARIES:
+        dependencies |= {"gst-plugins-base", "gst-plugins-good", "gst-plugins-bad", "gst-plugins-ugly", "gst-libav"}
     require(set(data.get("depends", [])) == dependencies,
             "Nightly dependencies omit or change runtime/build-library requirements.")
     require(set(data.get("conflicts", [])) == {"zerus", "zerus-git", "zerus-ade-bin"} and

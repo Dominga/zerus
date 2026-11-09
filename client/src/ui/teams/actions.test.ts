@@ -265,6 +265,14 @@ describe("task card", () => {
     expect(f.asked.at(-1)).toMatchObject({ name: "teamWorkingModeConfirm" });
   });
 
+  it("Task #337: keeps the team's settings without a confirmation", async () => {
+    const f = fake();
+    await actionsOf(f, team()).keepWorkingMode();
+    expect(f.sent.at(-1)?.action).toEqual({ kind: "keep_working_mode" });
+    // Nothing about the team changes: no owner dialog comes first.
+    expect(f.asked).toHaveLength(0);
+  });
+
   it("Task #296: finds the next team's lead once its list arrives", () => {
     const list = { teams: [{ id: "t9", members: [
       { id: "dev", role: "Backend", agent: "codex", state: "active", computer: "", lead: false, session: { host: "", name: "codex/x/dev", run_id: "r", conversation_id: "c" } },
@@ -568,5 +576,22 @@ describe("Task 225: the dialogs Qt kept and Tauri lost", () => {
     const f = fake();
     await actionsOf(f, team()).createSubteam("Cart fixes", 4);
     expect(f.sent.at(-1)?.action).toEqual({ kind: "create", name: "Cart fixes", parent: { team: "t1", task: 4 } });
+  });
+});
+
+describe("Task #415: a No report task", () => {
+  it("turns the attempt's last reply into the report without a dialog", async () => {
+    const f = fake();
+    const t = task({ id: 5, status: "in_progress", attempts: 1, no_report: true, attempt_id: "a7" });
+    await actionsOf(f, team({ tasks: [t] })).useLastReply(t);
+    expect(f.sent.at(-1)?.action).toEqual({ kind: "use_last_reply", task: 5, attempt: "a7" });
+    expect(f.asked).toHaveLength(0);
+  });
+
+  it("sends nothing when the task has no attempt", async () => {
+    const f = fake();
+    const t = task({ id: 5, no_report: true });
+    expect(await actionsOf(f, team()).useLastReply(t)).toBe("failed");
+    expect(f.sent).toHaveLength(0);
   });
 });

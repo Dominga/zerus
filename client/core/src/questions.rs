@@ -1195,8 +1195,7 @@ pub fn skip_answers(question: &Question) -> Vec<AnswerItem> {
 pub fn decision(question: &Question, allow: bool) -> Option<Vec<AnswerItem>> {
     let item = question.items.first().filter(|_| question.approval)?;
     let option = if question.subagents {
-        let label = if allow { "yes" } else { "no" };
-        item.options.iter().find(|option| option.label.to_lowercase() == label)?.id.clone()
+        subagent_option(item, allow)?
     } else {
         if allow { "allow" } else { "deny" }.to_owned()
     };
@@ -1205,6 +1204,41 @@ pub fn decision(question: &Question, allow: bool) -> Option<Vec<AnswerItem>> {
         selected_option_ids: vec![option],
         text: String::new(),
     }])
+}
+
+/// Task #396: a subagent card's one-time Yes (`allow`) or No. The hook card
+/// names them exactly; Claude's own chooser, read from the terminal, may word
+/// them longer ("Yes, allow all", "No, and tell Claude what to do
+/// differently"), so the first one-time option that starts with the word
+/// counts, never a broader one ("Yes, and don't ask again").
+fn subagent_option(item: &Item, allow: bool) -> Option<String> {
+    let word = if allow { "yes" } else { "no" };
+    let plain = |option: &&Choice| option.label.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    item.options
+        .iter()
+        .find(|option| plain(option) == word)
+        .or_else(|| {
+            item.options.iter().find(|option| {
+                let label = plain(option);
+                !option.broader
+                    && label
+                        .strip_prefix(word)
+                        .is_some_and(|rest| rest.is_empty() || rest.starts_with([',', ' ', '.']))
+            })
+        })
+        .map(|option| option.id.clone())
+}
+
+/// Task #396: a subagent card Allow all and Deny can answer: the agent takes
+/// answers here and its choices include a one-time Yes and No.
+pub fn subagent_answerable(question: &Question) -> bool {
+    question.approval
+        && question.subagents
+        && question.can_answer
+        && question
+            .items
+            .first()
+            .is_some_and(|item| subagent_option(item, true).is_some() && subagent_option(item, false).is_some())
 }
 
 /// A subagent card's option that allows every subagent and stops asking: a
@@ -1415,14 +1449,19 @@ fn multi_mode(item: &Item) -> Text {
 /// The card for `question` with `draft` (`rebuild` and `updateControls`).
 pub fn card(question: &Question, draft: &AnswerDraft, ctx: &CardContext) -> CardView {
     let locked = draft.locked() || ctx.in_flight || ctx.loading;
-    let read_only = question.read_only();
+    // Task #396: a subagent card shows its calls, never the agent's option
+    // list, so it is answered by Allow all and Deny alone. One whose choices
+    // Zerus cannot read (no terminal, a clipped chooser, no one-time Yes and
+    // No) is Terminal's: Open Terminal is its main action and it has no Submit.
+    let subagents_unreadable = question.approval && question.subagents && !subagent_answerable(question);
+    let read_only = question.read_only() || subagents_unreadable;
     let literal = question.literal();
     let listed = question.listed();
-    let supported = question.can_answer;
+    let supported = question.can_answer && !subagents_unreadable;
     let (_, complete) = answers(question, draft);
     let last = question.items.len().saturating_sub(1);
     let page = draft.page.min(last);
-    let choices = question.approval && question.approval_choices;
+    let choices = question.approval && question.approval_choices && !question.subagents;
     let broader = if choices {
         broader(question, draft)
     } else {
@@ -1605,6 +1644,11 @@ pub fn card(question: &Question, draft: &AnswerDraft, ctx: &CardContext) -> Card
     };
     if notice.is_none() && !ctx.available {
         notice = stored(&ctx.unavailable_reason);
+    }
+    if notice.is_none() && subagents_unreadable {
+        notice = Some(crate::text!(
+            "Zerus cannot read this request's choices; answer it in the terminal."
+        ));
     }
     if notice.is_none() && !supported {
         notice = stored(&question.unavailable_reason);

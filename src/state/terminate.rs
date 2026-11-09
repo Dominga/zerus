@@ -15,6 +15,7 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
     let original = {
         let _guard = lock(None)?;
         let record = read(name)?;
+        terminating::check_mutation(&record)?;
         if let Some(scope)=scope {scope.check(&record)?;}
         if expected_run.is_some_and(|run| run != string(&record, "run_id")) {
             return Err("session changed before termination; refresh and try again".into());

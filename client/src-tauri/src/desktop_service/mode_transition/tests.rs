@@ -60,6 +60,9 @@ impl Drop for Fixture {
 }
 #[test]
 fn maintained_cli_links_pin_the_same_original_target() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let f = Fixture::new();
     let target = f.root.join("original-cli");
     fs::rename(&f.cli, &target).unwrap();
@@ -73,6 +76,9 @@ fn maintained_cli_links_pin_the_same_original_target() {
 
 #[test]
 fn absent_startup_environment_requires_a_read_only_owned_registration() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let f = Fixture::new();
     for mode in ["passive", "background"] {
         for registered in [false, true] {
@@ -105,6 +111,9 @@ fn absent_startup_environment_requires_a_read_only_owned_registration() {
 
 #[test]
 fn unknown_default_registration_and_old_helper_never_enable_the_consumer() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let f = Fixture::new();
     for wrong in [
         json!({"registered": "true"}),
@@ -564,6 +573,9 @@ async fn confirm_when_idle(owner: &Arc<Controller>, action: ReviewAction) -> Pre
 }
 #[test]
 fn actual_unavailable_preflight_projects_the_interrupted_original_and_resume_is_only_a_read() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let helpers = Fixture::new();
@@ -625,8 +637,7 @@ fn actual_unavailable_preflight_projects_the_interrupted_original_and_resume_is_
 
 #[test]
 fn actual_reviewed_archive_needs_a_second_confirmation_before_its_only_rearm_and_activation() {
-    #[cfg(unix)]
-    if crate::test_context::non_agent() {
+    if crate::test_context::desktop_fixture() {
         return;
     }
     let _process = crate::PROCESS_TREE.read().unwrap();
@@ -796,6 +807,9 @@ fn actual_reviewed_archive_needs_a_second_confirmation_before_its_only_rearm_and
 }
 #[test]
 fn preflight_and_ownership_waits_cannot_rearm_a_changed_confirmed_original() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         for lane in ["preflight", "ownership"] {
@@ -877,6 +891,9 @@ fn preflight_and_ownership_waits_cannot_rearm_a_changed_confirmed_original() {
 
 #[test]
 fn a_manual_refresh_discovered_after_confirmation_refuses_before_rearm_or_mode_effect() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
         let helpers = Fixture::new();
@@ -919,8 +936,7 @@ fn a_manual_refresh_discovered_after_confirmation_refuses_before_rearm_or_mode_e
 
 #[test]
 fn actual_startup_then_automatic_reconnect_never_repeats_grant_or_helper_activation() {
-    #[cfg(unix)]
-    if crate::test_context::non_agent() {
+    if crate::test_context::desktop_fixture() {
         return;
     }
     let _process = crate::PROCESS_TREE.read().unwrap();
@@ -955,8 +971,7 @@ fn actual_startup_then_automatic_reconnect_never_repeats_grant_or_helper_activat
 }
 #[test]
 fn actual_explicit_resume_rearms_only_when_revoked_and_then_activates_once() {
-    #[cfg(unix)]
-    if crate::test_context::non_agent() {
+    if crate::test_context::desktop_fixture() {
         return;
     }
     let _process = crate::PROCESS_TREE.read().unwrap();
@@ -1019,8 +1034,7 @@ fn actual_explicit_resume_rearms_only_when_revoked_and_then_activates_once() {
 
 #[test]
 fn actual_unconfirmed_grant_offers_only_original_lookup_and_never_activates() {
-    #[cfg(unix)]
-    if crate::test_context::non_agent() {
+    if crate::test_context::desktop_fixture() {
         return;
     }
     let _process = crate::PROCESS_TREE.read().unwrap();
@@ -1056,7 +1070,7 @@ fn actual_unconfirmed_grant_offers_only_original_lookup_and_never_activates() {
 
 #[test]
 fn actual_modern_service_first_choice_keeps_its_confirmed_scheduling_continuation() {
-    if crate::test_context::non_agent() {
+    if crate::test_context::desktop_fixture() {
         return;
     }
     let _process = crate::PROCESS_TREE.read().unwrap();

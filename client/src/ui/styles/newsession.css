@@ -77,6 +77,7 @@
   .ns-usage.tone-critical { color: var(--z-list-usage-critical); }
   .ns-meters { display: block; margin-left: -4px; height: 22px; overflow: hidden; }
   .ns-acc-status { margin-top: 6px; }
+  .ns-perm { margin-top: 6px; font-size: var(--fs-sm); }
   .ns-status { font-size: var(--fs-sm); color: var(--z-color-text-2); min-width: 0; }
 
   /* OpenCode. */
@@ -142,4 +143,114 @@
   .ocm-foot { display: flex; align-items: flex-start; gap: 8px; }
   .ocm-foot .btn.on { background: var(--z-color-segment-on); color: var(--z-color-accent); }
   .ocm-notice { flex: 1; min-width: 0; font-size: var(--fs-xs); color: var(--z-color-muted); overflow-wrap: anywhere; }
+
+  /* Task #368: the fork's dense New session view ('B - Dense, labels left'),
+     Qt's NewSessionDialog buildDenseLayout: a 520px frame, one 50 | field | 30 |
+     148 grid with the captions on the left, the agent rail with its limits and
+     the design's menus. Skin tokens only, so light and dark follow the skin. */
+  dialog.ns-dlg.nsd-dlg { width: min(520px, calc(100vw - 32px)); min-width: min(520px, calc(100vw - 32px)); border-radius: 10px; }
+  .nsd-form { display: block; }
+  .nsd { display: flex; flex-direction: column; min-height: 0; }
+  /* The frame keeps its title for screen readers: the header holds the name. */
+  .nsd-title { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .nsd-header { display: flex; align-items: center; gap: 6px; height: 52px; padding: 0 8px 0 16px; }
+  .nsd-rule { flex: none; height: 1px; background: var(--z-color-border); }
+  .nsd-cap { width: 50px; flex: none; font-size: 12px; line-height: 1.2; color: var(--z-color-label); letter-spacing: .01em; }
+  .nsd-cap.nsd-top { align-self: start; padding-top: 8px; }
+  .nsd-name {
+    flex: 1 1 auto; min-width: 0; height: 32px; padding: 0 8px; border: 1px solid transparent; border-bottom-color: var(--z-color-border);
+    border-radius: 4px; background: transparent; color: var(--z-color-text); font-size: 15px; font-weight: 600;
+  }
+  .nsd-name:focus { outline: none; border-bottom-color: var(--z-color-accent); }
+  .nsd-name:disabled { opacity: .6; }
+  .nsd-close { flex: none; display: grid; place-items: center; width: 32px; height: 32px; border: 0; border-radius: 6px; background: transparent; color: var(--z-color-muted); }
+  .nsd-close:hover:not(:disabled) { background: var(--z-color-hover); color: var(--z-color-text); }
+  .nsd-close:disabled { opacity: .4; }
+  .nsd-grid { display: grid; grid-template-columns: 50px minmax(0, 1fr) 30px 148px; align-items: center; gap: 10px 6px; padding: 16px; }
+  .nsd-grid > .nsd-wide, .nsd-grid > .nsd-agents { grid-column: 2 / -1; }
+  .nsd-reserved { visibility: hidden; }
+  .nsd-reserved-field { display: block; height: 30px; }
+  .nsd-right { grid-column: 4; min-width: 0; position: relative; }
+  .nsd-icon { display: grid; place-items: center; width: 30px; height: 30px; border: 0; border-radius: 6px; background: transparent; color: var(--z-color-muted); }
+  .nsd-icon:hover:not(:disabled) { background: var(--z-color-hover); color: var(--z-color-text); }
+  .nsd-icon:disabled { opacity: .4; }
+
+  /* The fields: a 28px dense control on the field token. */
+  .nsd .field, .nsd .ns-choice-btn { height: 28px; min-height: 28px; padding: 0 8px; border: 1px solid var(--z-color-border); border-radius: 6px; background: var(--z-color-field); color: var(--z-color-text); font-size: 13px; }
+  .nsd .ns-choice-btn:focus-visible, .nsd .field:focus-visible { outline: none; border-color: var(--z-color-accent); }
+  .nsd .field:disabled, .nsd .ns-choice-btn:disabled { opacity: .55; }
+  .nsd-path { font-family: var(--z-font-mono, ui-monospace, monospace); font-size: 12px; color: var(--z-color-text-2); }
+  .nsd .ns-choice-list { padding: 4px; border-radius: 6px; }
+  .nsd .ns-choice-list.nsd-menu { min-width: 160px; }
+  .nsd .ns-choice-list li { padding: 5px 8px; border-radius: 4px; font-size: 13px; }
+  .nsd .ns-choice-list li[aria-disabled="true"] { opacity: .55; }
+  .nsd-menu-header { padding: 5px 8px; font-size: 11px; color: var(--z-color-label); }
+  .nsd-check { flex: none; color: var(--z-color-accent); }
+  .nsd-row-main { display: flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0; }
+  .nsd-row-why { flex: 1 1 100%; padding-left: 2px; font-size: 11px; line-height: 1.3; color: var(--z-color-muted); white-space: normal; }
+  .nsd .ns-choice-list li:has(.nsd-row-why) { flex-wrap: wrap; }
+  .nsd-action { display: flex; align-items: center; gap: 7px; padding: 5px 8px; border-radius: 4px; font-size: 13px; color: var(--z-color-text); cursor: default; }
+  .nsd-action:hover { background: var(--z-color-hover); }
+  .nsd-action[aria-disabled="true"] { color: var(--z-color-dim); }
+  .nsd-action-icon { flex: none; color: var(--z-color-muted); }
+
+  /* The worktree segment of the folder row. */
+  .nsd-seg { display: flex; align-items: center; gap: 2px; height: 30px; padding: 2px; border: 1px solid var(--z-color-border); border-radius: 6px; background: var(--z-color-field); }
+  .nsd-segbtn { flex: 1 1 0; min-width: 0; height: 24px; padding: 0 6px; border: 0; border-radius: 4px; background: transparent; color: var(--z-color-muted); font-size: 12px; }
+  .nsd-segbtn:hover:not(:disabled) { color: var(--z-color-text); }
+  .nsd-segbtn.on { background: var(--z-color-segment-on); color: var(--z-color-accent); font-weight: 600; }
+  .nsd-segbtn:disabled { opacity: .45; }
+  .nsd-seg-more { flex: none; display: grid; place-items: center; width: 24px; height: 24px; border: 0; border-radius: 4px; background: transparent; color: var(--z-color-muted); }
+  .nsd-seg-more:hover { background: var(--z-color-hover); color: var(--z-color-text); }
+  .menu.nsd-menu { position: absolute; top: calc(100% + 4px); right: 0; left: auto; z-index: 25; min-width: 190px; padding: 4px; border: 1px solid var(--z-color-border); border-radius: 6px; background: var(--z-color-field); color: var(--z-color-text); box-shadow: var(--z-shadow-popover); }
+  .menu.nsd-menu .menu-item { display: flex; align-items: center; gap: 6px; width: 100%; padding: 5px 8px; border-radius: 4px; font-size: 13px; text-align: left; }
+  .menu.nsd-menu .menu-item:hover:not([aria-disabled="true"]) { background: var(--z-color-hover); }
+  .menu.nsd-menu .menu-item[aria-disabled="true"] { color: var(--z-color-dim); }
+
+  /* The agent rail: one bordered field of 34px tiles, then the line under it. */
+  .nsd-agents { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .nsd-rail { display: flex; align-items: stretch; padding: 2px; border: 1px solid var(--z-color-border); border-radius: 8px; background: var(--z-color-field); }
+  .nsd-tile { display: flex; align-items: center; justify-content: center; gap: 4px; flex: 1 1 0; min-width: 0; height: 34px; padding: 0 5px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--z-color-text); }
+  .nsd-tile.narrow { flex: 0 0 38px; }
+  .nsd-tile.on { border-color: var(--z-color-accent); background: var(--z-color-row-selected); }
+  .nsd-tile:hover:not(.on):not(:disabled) { background: var(--z-color-hover); }
+  .nsd-tile:disabled { cursor: default; }
+  .nsd-tile.dim .nsd-logo { opacity: .45; }
+  .nsd-logo { display: grid; place-items: center; flex: none; width: 20px; height: 20px; }
+  .nsd-count { display: inline-flex; flex-direction: column; gap: 3px; font-family: var(--z-font-mono, ui-monospace, monospace); font-size: 9px; font-weight: 500; line-height: 1; color: var(--z-color-text-2); white-space: nowrap; }
+  .nsd-dots { display: inline-flex; gap: 2px; }
+  .nsd-dots i { width: 4px; height: 4px; border-radius: 50%; background: var(--z-color-border); }
+  .nsd-meters { display: inline-flex; flex-direction: column; gap: 1px; font-family: var(--z-font-mono, ui-monospace, monospace); font-size: 8px; line-height: 1; color: var(--z-color-text-3); }
+  .nsd-meter { display: inline-flex; align-items: center; gap: 2px; }
+  .nsd-bar { display: block; width: 12px; height: 2px; background: var(--z-color-border); }
+  .nsd-bar b { display: block; height: 2px; }
+  .nsd-reset { font-family: var(--z-font-mono, ui-monospace, monospace); font-size: 8px; line-height: 1; color: var(--z-color-text-3); }
+  .nsd-lines { display: inline-flex; flex-direction: column; gap: 1px; font-family: var(--z-font-mono, ui-monospace, monospace); font-size: 8px; line-height: 1.1; }
+  .nsd-lines .danger { color: var(--z-color-danger) !important; }
+  .nsd-info-row { display: flex; align-items: center; gap: 8px; min-height: 20px; }
+  .nsd-info { display: flex; align-items: baseline; gap: 6px; flex: 1 1 auto; min-width: 0; font-size: 12px; color: var(--z-color-text-2); }
+  .nsd-info b { flex: none; font-weight: 600; }
+  .nsd-info.warn b { color: var(--z-color-warn); }
+  .nsd-info.danger b { color: var(--z-color-danger); }
+  .nsd-info-details { font-size: 11px; color: var(--z-color-text-3); }
+  .nsd-refresh { display: inline-flex; align-items: center; gap: 3px; flex: none; height: 20px; padding: 0 4px; border: 0; border-radius: 4px; background: transparent; color: var(--z-color-label); font-size: 10px; }
+  .nsd-refresh:hover:not(:disabled) { background: var(--z-color-hover); color: var(--z-color-text-2); }
+  .nsd-chip { display: inline-flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0; height: 20px; padding: 0 6px; border: 1px solid var(--z-color-border); border-radius: 4px; background: var(--z-color-field); color: var(--z-color-text); font-size: 11px; }
+  .nsd-chip.on { border-color: var(--z-color-accent); }
+  .nsd-chip-email { font-family: var(--z-font-mono, ui-monospace, monospace); font-size: 10px; color: var(--z-color-text); }
+  .nsd-chip-absent { font-size: 10px; color: var(--z-color-warn); }
+  .nsd-chip-chevron { flex: none; color: var(--z-color-label); }
+  .nsd-acc-list { margin: 0; padding: 4px; max-height: 220px; overflow: auto; border: 1px solid var(--z-color-border); border-radius: 6px; background: var(--z-color-raised); }
+  .nsd-acc-list li { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 4px; font-size: 12px; cursor: default; }
+  .nsd-acc-list li:hover { background: var(--z-color-hover); }
+  .nsd-acc-list li.on { background: var(--z-color-row-selected); }
+  .nsd-acc-email { flex: 1 1 auto; min-width: 0; font-family: var(--z-font-mono, ui-monospace, monospace); font-size: 10px; }
+  .nsd-model { display: flex; align-items: center; justify-content: space-between; gap: 6px; width: 100%; text-align: left; cursor: pointer; }
+  .nsd-model:disabled { opacity: .55; }
+  .nsd-effort { width: 100%; }
+  .nsd-service { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .nsd-problem { font-size: 12px; color: var(--z-color-text-2); white-space: pre-line; overflow-wrap: anywhere; }
+  .nsd-footer { display: flex; align-items: center; gap: 8px; height: 52px; padding: 0 16px; }
+  .nsd-terminal { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--z-color-text-2); }
+  .nsd-start { min-width: 120px; }
 }

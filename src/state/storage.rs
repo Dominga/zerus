@@ -4,6 +4,20 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 
+// Dormant physical exclusion for a future legacy-to-ID storage move.
+#[cfg(unix)]
+#[allow(dead_code)]
+pub(super) mod native_domain;
+
+// Finite worker exclusion shared with a future owner-key transaction.
+#[cfg(unix)]
+pub(super) mod job_round;
+
+// Dormant original-record/job transaction; no constructor calls this yet.
+#[cfg(unix)]
+#[allow(dead_code)]
+pub(super) mod owner_transfer;
+
 pub(super) fn root() -> PathBuf {
     #[cfg(test)]
     if let Some(root) = TEST_ROOT.with(|root| root.borrow().clone()) {
@@ -204,6 +218,38 @@ pub(super) fn writer_until(deadline: std::time::Instant) -> Result<Option<Guard>
     Ok(Some(guard))
 }
 
+/// Inactive run-gate support: recover ONLY under the normal writer's original
+/// pinned file. No installed caller uses this entry. Do not call the path-based
+/// writer first: its recovery would run before a replaced lock was detected.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)]
+pub(super) fn recover_run_writer(
+    guard: &Guard,
+    original: crate::platform::FileIdentity,
+    until: std::time::Instant,
+) -> Result<()> {
+    let refused = "Original session state writer changed";
+    if std::time::Instant::now() >= until {
+        return Err(refused.into());
+    }
+    let file = crate::platform::no_follow(OpenOptions::new().read(true).write(true))
+        .open(root().join(".lock"))
+        .map_err(|_| refused)?;
+    if !crate::platform::verify_private_file(&file).map_err(|_| refused)?
+        || crate::platform::FileIdentity::of(&file).map_err(|_| refused)? != original
+        || guard.identity().map_err(|_| refused)? != original
+    {
+        return Err(refused.into());
+    }
+    rename::recover_locked()?;
+    rename::sync_legacy_locked()?;
+    worktree_lock::recover_locked();
+    if std::time::Instant::now() >= until {
+        return Err(refused.into());
+    }
+    Ok(())
+}
+
 /// An owner-only lock file, never written. Windows locks a byte range only
 /// through a handle with read or write access, which append-only lacks.
 pub(super) fn lock_file(path: &Path) -> Result<fs::File> {
@@ -297,13 +343,11 @@ pub(super) fn label_key(name: &str) -> String {
     format!("{:x}", Sha256::digest(name.as_bytes()))
 }
 
-/// Whether a live or saved session holds `name`, at its label's path or in
-/// the ID layout. A candidate set that cannot be proven complete counts as
-/// taken, so a uniqueness check fails closed and never makes a second holder.
+/// Whether a live or saved terminal session holds `name`, at its label path
+/// or in the root ID layout. Native providers use this to exclude terminals,
+/// not their own pending bindings. Unknown completeness still counts as taken.
 pub(super) fn label_taken(name: &str) -> bool {
-    labels::candidates(name).map_or(true, |candidates| {
-        candidates.first || !candidates.by_id.is_empty()
-    })
+    labels::terminal_taken(name).unwrap_or(true)
 }
 
 /// The fixed path of the session the command selected in the ID layout under
@@ -350,19 +394,46 @@ fn record_bytes(path: &Path, limit: Option<u64>) -> io::Result<Vec<u8>> {
     let Some(limit) = limit.or(in_sessions(path).then_some(ID_RECORD_BYTES)) else {
         return fs::read(path);
     };
+    bounded_bytes(
+        path,
+        limit,
+        "Selected session is not a regular record",
+        if retiring {
+            "Selected session record exceeds retirement bound"
+        } else {
+            "Session record exceeds its bound"
+        },
+    )
+}
+
+/// A binding file's bytes for a scan that decides whether a folder is still
+/// in use (zerus-lr1l2): never a final link, never waiting on a FIFO, a
+/// regular file only, at most the ID layout's record bound. Anything else is
+/// an error, so the caller keeps what it protects for review.
+pub(super) fn binding_bytes(path: &Path) -> io::Result<Vec<u8>> {
+    bounded_bytes(
+        path,
+        ID_RECORD_BYTES,
+        "Session binding is not a regular file",
+        "Session binding exceeds its bound",
+    )
+}
+
+fn bounded_bytes(
+    path: &Path,
+    limit: u64,
+    irregular: &'static str,
+    too_large: &'static str,
+) -> io::Result<Vec<u8>> {
     use std::io::Read;
     let file = crate::platform::no_follow(OpenOptions::new().read(true)).open(path)?;
     if !file.metadata()?.is_file() {
-        return Err(io::Error::other("Selected session is not a regular record"));
+        return Err(io::Error::other(irregular));
     }
     let mut bytes = Vec::new();
     file.take(limit + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > limit {
-        return Err(io::Error::other(if retiring {
-            "Selected session record exceeds retirement bound"
-        } else {
-            "Session record exceeds its bound"
-        }));
+        return Err(io::Error::other(too_large));
     }
     Ok(bytes)
 }
@@ -378,6 +449,12 @@ fn not_found(name: &str, error: io::Error) -> String {
 /// The record at the label's own path, never steered by a selection.
 pub(super) fn read_label(name: &str) -> Result<Value> {
     read_at(&label_record_path(name), name, None)
+}
+
+/// [`read_label`] bounded: a regular file only, never a final link and never
+/// waiting on a FIFO.
+pub(super) fn read_label_bounded(name: &str, bytes: u64) -> Result<Value> {
+    read_at(&label_record_path(name), name, Some(bytes))
 }
 
 fn read_limit(name: &str, limit: Option<u64>) -> Result<Value> {
@@ -505,11 +582,99 @@ pub(super) fn write(record: &mut Value) -> Result<()> {
     rename::mirror_legacy(record)
 }
 
+#[cfg(all(test, unix))]
+thread_local! {
+    pub(super) static BEFORE_NEW_ID: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Dormant P3e primitive: publish a NEW, preallocated identity, never move or
+/// recreate a prior one. Caller retains the actual Root writer. Terminal IDs
+/// create and retain their Fresh input lock/kind before record publication.
+/// No production writer calls this until the complete fleet floor is enabled.
+/// An error is not a no-effect witness and must never re-mint a native request.
+#[allow(dead_code)]
+pub(super) fn publish_new_id(_writer: &Guard, record: &mut Value) -> Result<()> {
+    use super::provider_binding::Provider;
+    use super::repositories::directory::Directory;
+    let id = string(record,"session_id");
+    let name = string(record,"name");
+    if !is_id_layout_record(record,id) || name.is_empty() || name.len() > 2048 {
+        return Err("A new ID record needs its original canonical session identity".into());
+    }
+    let provider = Provider::named(name);
+    let (namespace,kind,limit) = match provider {
+        Some(Provider::DeepSeek) if record["backend"] == "dsh"
+            && string(record,"conversation_id").starts_with("session-")
+            && string(record,"conversation_id").len() <= 2048 =>
+                (Some("dsh"),session_index::Kind::DeepSeekId,1<<20),
+        Some(Provider::OpenCode) if record["backend"] == "opencode"
+            && opencode::native_id(string(record,"conversation_id"),"ses_") =>
+                (Some("opencode"),session_index::Kind::OpenCodeId,1<<20),
+        None if record["version"] == 1 && AGENTS.contains(&string(record,"agent"))
+            && name.starts_with(&format!("{}/",string(record,"agent"))) =>
+                (None,session_index::Kind::IdRecord,ID_RECORD_BYTES),
+        _ => return Err("The new session's native namespace and identity disagree".into()),
+    };
+    let references = worktree_cleanup::bindings()?;
+    if references.iter().any(|r| r.session_id == id) {
+        return Err("This session identity is already published; it cannot be created again".into());
+    }
+    let state = Directory::open(&absolute_root()?)?;
+    let parent = namespace.map(|name| state.ensure_child(name)).transpose()?;
+    let directory = parent.as_ref().unwrap_or(&state).ensure_child("sessions")?;
+    let label_directory = state.ensure_child("labels")?;
+    let mut published = record.clone();
+    if !published["worktree_owner"].is_null() {
+        published["worktree_protection"] = published["worktree_owner"]["id"].clone();
+    }
+    published["updated"] = json!(now());
+    processes::compact(&mut published);
+    let bytes = format!("{published}\n");
+    if bytes.len() as u64 > limit {return Err("The new session record exceeds its bound".into());}
+    // A protective Git veto is durable before either the superset or record.
+    // Keep its actual repository/directory/lock resources through publication.
+    let protection = worktree_lock::Protection::acquire(&published)?;
+    #[cfg(unix)]
+    let fresh_input = if namespace.is_none() {
+        Some(native_domain::Fresh::create_under(_writer, &published, std::time::Instant::now() + std::time::Duration::from_secs(5))?)
+    } else { None };
+    #[cfg(not(unix))]
+    if namespace.is_none() { return Err("Fresh ID native input is unverified on this computer".into()); }
+    labels::add(name,id)?;
+    if !labels::listed_in(&state.path,name).is_some_and(|ids| ids.iter().any(|i| i == id)) {
+        return Err("The original label index did not retain the new identity".into());
+    }
+    #[cfg(all(test, unix))]
+    if let Some(hook) = BEFORE_NEW_ID.with(|hook| hook.borrow_mut().take()) {hook();}
+    state.verify()?; directory.verify()?; label_directory.verify()?;
+    if crate::platform::canonical(root()).map_err(|e| e.to_string())? != state.path {
+        return Err("The selected state root changed before ID publication".into());
+    }
+    if let Some(protection) = &protection {protection.verify()?;}
+    #[cfg(unix)]
+    if let Some(input) = &fresh_input {input.verify()?;}
+    cut_write()?;
+    directory.write_new(&format!("{id}.json"),bytes.as_bytes())?;
+    crate::platform::sync_dir(&directory.path).map_err(|e| e.to_string())?;
+    state.verify()?; directory.verify()?; label_directory.verify()?;
+    if crate::platform::canonical(root()).map_err(|e| e.to_string())? != state.path {
+        return Err("The selected state root changed after ID publication".into());
+    }
+    if let Some(protection) = &protection {protection.verify()?;}
+    #[cfg(unix)]
+    if let Some(input) = &fresh_input {input.verify()?;}
+    session_index::note(&published,kind);
+    *record = published;
+    Ok(())
+}
+
 /// Every saved live/archive record write also migrates legacy command text.
 pub(super) fn atomic_record(path: &Path, record: &mut Value) -> Result<()> {
     ensure_session_id(record);
     processes::compact(record);
-    atomic(path, &format!("{record}\n"))
+    atomic(path, &format!("{record}\n"))?;
+    super::archive_references::note(path, record);
+    Ok(())
 }
 
 /// Names are mutable; provider hooks and already-running supervisors retain
@@ -715,29 +880,40 @@ pub(super) fn panes_of<'a>(snapshot: &'a Snapshot, record: &Value) -> Option<&'a
     snapshot.get(terminal_name(record))
 }
 
-/// Whether `record`'s own terminal holds this session (#1445 review): its
-/// pane and run match the record, or a launch of this same label (its
-/// `HGS_SESSION`) holds it, such as the session's own resume still starting.
-/// A terminal under that name that another session's launch started, or that
-/// hgs never started, never makes the session live. An environment that
-/// cannot be read is an error, never absence.
+/// The original pane/run proves liveness first. A still-starting launch
+/// instead identifies its durable session through the terminal's environment.
+/// An unreadable environment is never evidence that the launch is absent.
 pub(super) fn terminal_live(snapshot: &Snapshot, record: &Value) -> Result<bool> {
     if matches(record, panes_of(snapshot, record)) {
         return Ok(true);
     }
-    launched_as(snapshot, terminal_name(record), string(record, "name"))
+    launched_as(snapshot, terminal_name(record), record)
 }
 
-/// Whether the live terminal `terminal` was started by a launch of the label
-/// `label`; false when it is not live or another launch, or none, started it.
-pub(super) fn launched_as(snapshot: &Snapshot, terminal: &str, label: &str) -> Result<bool> {
+pub(super) fn launched_as(snapshot: &Snapshot, terminal: &str, record: &Value) -> Result<bool> {
     if !snapshot.contains_key(terminal) {
         return Ok(false);
     }
-    let launched = backend::current().session_variable(terminal, "HGS_SESSION").map_err(|error| {
-        format!("{error}; it may be this session's own launch, so nothing was changed")
-    })?;
-    Ok(launched.as_deref() == Some(label))
+    launch_identity(record, |key| backend::current().session_variable(terminal, key))
+        .map_err(|error| format!("{error}; it may be this session's own launch, so nothing was changed"))
+}
+
+fn launch_identity(record: &Value, mut variable: impl FnMut(&str) -> Result<Option<String>>) -> Result<bool> {
+    // New launches/resumes carry their own ID. The rollback floor already
+    // carries HGS_RESUME_SESSION_ID when it resumes an ID-layout session.
+    for key in ["HGS_SESSION_ID", "HGS_RESUME_SESSION_ID"] {
+        // Older launchers explicitly clear the unused marker. Only a
+        // nonempty value declares identity; malformed declarations still refuse.
+        if let Some(id) = variable(key)?.filter(|id| !id.is_empty()) {
+            if !session_id::canonical(&id) || uuid::Uuid::parse_str(&id).is_ok_and(|id| id.is_nil()) {
+                return Err("the terminal's launch session ID is invalid".into());
+            }
+            return Ok(id == string(record, "session_id"));
+        }
+    }
+    // Only the legacy first holder can have been launched without either
+    // marker. A label-only launch cannot establish an ID twin's liveness.
+    Ok(!in_id_layout(record) && variable("HGS_SESSION")?.as_deref() == Some(string(record, "name")))
 }
 
 pub(super) fn matches(record: &Value, panes: Option<&Vec<Pane>>) -> bool {
@@ -814,6 +990,16 @@ pub(super) fn supervisor_command(
     argv: Vec<String>,
     hint_environment: &[String],
 ) -> Vec<String> {
+    supervisor_command_with_count(record, executable, argv, hint_environment, "0")
+}
+
+pub(super) fn supervisor_command_with_count(
+    record: &Value,
+    executable: &str,
+    argv: Vec<String>,
+    hint_environment: &[String],
+    count: &str,
+) -> Vec<String> {
     #[cfg(unix)]
     let mut launch = {
         let shell = if string(record, "shell").is_empty() {
@@ -821,23 +1007,25 @@ pub(super) fn supervisor_command(
         } else {
             string(record, "shell")
         };
+        let (shell, flags) = crate::accounts::supervisor_shell(shell);
         vec![
             shell.into(),
-            "-lic".into(),
+            flags.into(),
             crate::accounts::run_script(
+                shell,
                 string(record, "account_id"),
                 string(record, "agent"),
                 string(record, "agent_home"),
                 hint_environment,
             ),
             executable.into(),
-            "0".into(),
+            count.into(),
         ]
     };
     #[cfg(windows)]
     let mut launch = {
         let _ = (record, hint_environment);
-        vec![executable.into(), "--run".into(), "0".into()]
+        vec![executable.into(), "--run".into(), count.into()]
     };
     launch.extend(argv);
     launch
@@ -893,13 +1081,13 @@ mod agent_hint_tests {
                 ],
             ),
         ] {
-            let record = json!({"agent":agent,"account_id":"work-account","agent_home":"/private/profile","shell":"/private/login-shell"});
+            let record = json!({"agent":agent,"account_id":"work-account","agent_home":"/private/profile","shell":"/bin/bash"});
             let native = argv.into_iter().map(str::to_owned).collect::<Vec<_>>();
             let command = supervisor_command(&record, "/stable/hgs", native.clone(), &hint);
             assert_eq!(&command[command.len() - native.len()..], native.as_slice());
             #[cfg(unix)]
             {
-                assert_eq!(&command[..2], &["/private/login-shell", "-lic"]);
+                assert_eq!(&command[..2], &["/bin/bash", "-lic"]);
                 let script = shell_words::split(&command[2]).unwrap();
                 assert!(script.contains(&"HGS_AGENT_HINT=1".into()));
                 assert!(script.contains(&"HGS_AGENT_HINT_OFF=".into()));
@@ -917,6 +1105,53 @@ mod agent_hint_tests {
 #[cfg(test)]
 mod session_id_tests {
     use super::*;
+
+    #[test]
+    fn a_launch_identity_never_borrows_another_twin_s_label() {
+        let one = "11111111-1111-4111-8111-111111111111";
+        let two = "22222222-2222-4222-8222-222222222222";
+        let record = json!({"name":"codex/example/shared","session_id":one,"layout":"id"});
+        let env = |id: Option<&str>, resume: Option<&str>, label: Option<&str>| {
+            let fields = [("HGS_SESSION_ID",id),("HGS_RESUME_SESSION_ID",resume),("HGS_SESSION",label)];
+            launch_identity(&record, |key| Ok(fields.iter().find(|(k,_)|*k==key).unwrap().1.map(str::to_owned)))
+        };
+        assert_eq!(env(Some(one),None,Some("codex/example/old-label")),Ok(true));
+        assert_eq!(env(Some(two),None,Some("codex/example/shared")),Ok(false));
+        assert_eq!(env(None,Some(one),Some("codex/example/shared")),Ok(true));
+        assert_eq!(env(None,Some(two),Some("codex/example/shared")),Ok(false));
+        assert_eq!(env(None,None,Some("codex/example/shared")),Ok(false));
+        assert!(env(Some("damaged"),Some(one),Some("codex/example/shared")).is_err());
+        assert!(env(Some("00000000-0000-0000-0000-000000000000"),None,None).is_err());
+        let mut legacy = record.clone(); legacy.as_object_mut().unwrap().remove("layout");
+        assert_eq!(launch_identity(&legacy, |key|Ok((key=="HGS_SESSION").then(||"codex/example/shared".into()))),Ok(true));
+        assert!(launch_identity(&record, |_|Err("unreadable".into())).is_err());
+    }
+
+    #[test]
+    fn empty_launch_markers_keep_only_the_legacy_liveness_fallback() {
+        let id = "11111111-1111-4111-8111-111111111111";
+        let legacy = json!({"name":"codex/example/shared","session_id":id});
+        let mut by_id = legacy.clone(); by_id["layout"] = json!("id");
+        let mut old = legacy.clone(); old.as_object_mut().unwrap().remove("session_id");
+        let check = |record: &Value, primary: Option<&str>, resume: Option<&str>| {
+            launch_identity(record, |key| Ok(match key {
+                "HGS_SESSION_ID" => primary.map(str::to_owned),
+                "HGS_RESUME_SESSION_ID" => resume.map(str::to_owned),
+                "HGS_SESSION" => Some("codex/example/shared".into()),
+                _ => unreachable!(),
+            }))
+        };
+        for record in [&legacy, &old] {
+            assert_eq!(check(record,None,Some("")),Ok(true));
+            assert_eq!(check(record,Some(""),Some("")),Ok(true));
+        }
+        assert_eq!(check(&by_id,Some(""),Some("")),Ok(false));
+        assert_eq!(check(&by_id,Some(""),Some(id)),Ok(true));
+        assert!(check(&legacy,Some(" "),Some(id)).is_err());
+        assert!(check(&legacy,Some(""),Some("damaged")).is_err());
+        assert!(launch_identity(&legacy, |_|Err("unavailable".into())).is_err());
+    }
+
     /// zerus-ucck P1, #1317 R5: every write of this hgs keeps a session's ID,
     /// an older writer's strip leads to one new ID, and no two records ever
     /// share one. The fixture runs in a child process with a private state

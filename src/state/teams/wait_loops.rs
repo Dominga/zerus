@@ -208,8 +208,27 @@ pub(crate) fn repeated_check(events: &[Value], since: f64) -> Option<(String, us
 /// A command that only reads: a version, a status, a listing, a CI run.
 fn read_only(command: &str) -> bool {
     let command = lower(command);
+    // Task #413 (owner, 2026-11-09): a command that changes the repository is
+    // work, never a poll, whatever read-only words it also carries. merger2's
+    // 'git merge --ff-only ...; git log -1; git branch --show-current' matched
+    // 'git log' and was parked as a wait loop although each run merged the next
+    // task and fast-forwarded the line.
+    if any(&command, &[
+        " merge", "rebase", "cherry-pick", " reset", "checkout", " switch", " worktree", " pull", " push",
+        "revert", "git apply", "git am", "stash",
+    ]) {
+        return false;
+    }
     any(&command, &["--version", "-v ", "--build-info", " status", " ls", "inspect", "gh run", "actions/runs", "git log", "git fetch", "curl ", "hgs team current", "hgs team inbox"])
         && !any(&command, &["install", " build", " test", "commit", "push", " rm ", "del "])
+}
+
+/// Task #413: a repeated read-only check is a wait loop only while the state it
+/// reads has not changed. The member's folder HEAD is the state Zerus can name
+/// (the merger's fast-forward moves it on every run); a first observation is
+/// never enough, and a moved HEAD is work.
+pub(crate) fn unchanged_state(head: &str, previous: &str) -> bool {
+    !head.is_empty() && !previous.is_empty() && head == previous
 }
 
 /// The condition a wait most likely means, with what it is: a CI run when

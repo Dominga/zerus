@@ -143,17 +143,24 @@ pub(super) fn done(config: &Config) -> Result<Value> {
         task_uuid(&cursor.uuid)?;
     }
     let (id, _) = project(config, &request.project)?;
-    let store = ProjectStore::open_within(&config.state.join("replica"), &id, PROJECT_WAIT)
+    let store = ProjectStore::open_within(&super::replica_root(config).map_err(fail)?, &id, PROJECT_WAIT)
         .map_err(fail)?
         .ok_or_else(|| fail("the project's tasks are busy; try again"))?;
-    let page = store
-        .done_page(
-            request.before.map(|cursor| (cursor.at, cursor.uuid)),
-            request.limit,
-            now() - RECENT_MS,
-            request.session.as_ref(),
-        )
-        .map_err(fail)?;
+    let before = request.before.map(|cursor| (cursor.at, cursor.uuid));
+    // From the task index while it may answer (zerus-cg5h.23); else every
+    // task is read, as before.
+    let indexed = super::index::Index::open(&store).and_then(|mut index| match index.done_entries() {
+        Ok(entries) => entries,
+        Err(failure) => {
+            index.discard(&failure);
+            None
+        }
+    });
+    let page = match indexed {
+        Some(entries) => store.done_page_of(entries, before, request.limit, now() - RECENT_MS, request.session.as_ref()),
+        None => store.done_page(before, request.limit, now() - RECENT_MS, request.session.as_ref()),
+    }
+    .map_err(fail)?;
     Ok(json!({"schema": 1, "tasks": page.tasks,
               "next": page.next.map(|(at, uuid)| json!({"at": at, "uuid": uuid})),
               "total": page.total, "recent": page.recent, "damaged": page.damaged}))

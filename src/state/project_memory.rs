@@ -577,14 +577,92 @@ pub(crate) fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
         "get" => get(string(input, "project")),
         "set" => set(input),
         "move" => move_store(input),
-        _ => bail!("Project config operations are get, set and move"),
+        "find" => find(input),
+        _ => bail!("Project config operations are get, set, move and find"),
     }
 }
 
-/// `hgs project config get|set|move --json` (JSON stdin).
+/// The store a hit came from as the reader names it: the project's own records
+/// or the team whose workspace holds them (task #397).
+pub(crate) fn find_store_label(relative: &str) -> String {
+    let relative = relative.trim().trim_start_matches("./");
+    if relative.is_empty() || relative == "." {
+        return "project".into();
+    }
+    if let Some(rest) = relative.strip_prefix("teams/") {
+        let short = rest.split('/').next().unwrap_or(rest);
+        return format!("team {}", team_name(short).unwrap_or_else(|| short.to_owned()));
+    }
+    relative.to_owned()
+}
+
+/// The name of the team whose id starts with `short`, when this computer knows
+/// it; a store moved from another computer keeps the short id.
+fn team_name(short: &str) -> Option<String> {
+    let store = crate::state::teams::store::Store::open(false).ok()?;
+    store.teams(true, 1000).ok()?.into_iter().find(|team| team.id.starts_with(short)).map(|team| team.name)
+}
+
+/// Task #397: lore's own search of the project's store and its team sub-stores
+/// (`find --stores all`), each hit named with the store that holds it, and
+/// lore's notes: the model fetch says there what it is doing. Reads only.
+pub(crate) fn find(input: &Value) -> anyhow::Result<Value> {
+    let id = string(input, "project");
+    check_project(id)?;
+    let query = string(input, "query").trim().to_owned();
+    ensure!(!query.is_empty(), "Name what to find, as the query field of the JSON on stdin");
+    ensure!(query.chars().count() <= 500 && !query.chars().any(char::is_control), "The query is too long or contains control characters");
+    let entry = entry(id)?;
+    ensure!(entry.enabled, "RustCodeLore is off for this project: turn it on in the project's Memory settings");
+    let store = entry.store_path(id);
+    ensure!(store.join("lore.toml").is_file(), "The project's store has no lore.toml yet: {}", store.display());
+    let limit = input["limit"].as_u64().unwrap_or(5).clamp(1, 20) as usize;
+    let (value, notes) = lore_find(&store, &query, limit)?;
+    let mut results = Vec::new();
+    for hit in value["results"].as_array().into_iter().flatten().take(limit) {
+        let mut hit = hit.clone();
+        hit["store"] = Value::String(find_store_label(hit["store"].as_str().unwrap_or(".")));
+        results.push(hit);
+    }
+    Ok(json!({"project": id, "query": query, "store": store.display().to_string(), "results": results, "notes": notes}))
+}
+
+/// `lore find QUERY --stores all` in a store: its answer and its progress notes
+/// (the model download reports there). The store's git never takes the caller's
+/// identity or repository.
+fn lore_find(store: &Path, query: &str, limit: usize) -> anyhow::Result<(Value, Vec<String>)> {
+    let bin = crate::state::teams::lore_sync::lore_bin()
+        .ok_or_else(|| anyhow::anyhow!("The lore binary was not found (HGS_LORE, beside hgs, PATH)"))?;
+    let mut command = std::process::Command::new(bin);
+    command.arg("-C").arg(store).args(["--json", "find", query, "--stores", "all", "-n", &limit.to_string()]);
+    command.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    for name in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"] {
+        command.env_remove(name);
+    }
+    let output = command.output().map_err(|error| anyhow::anyhow!("lore did not start: {error}"))?;
+    let notes: Vec<String> = String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(20)
+        .map(|line| line.chars().take(500).collect())
+        .collect();
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap_or(Value::Null);
+    if output.status.success() && value["results"].is_array() {
+        return Ok((value, notes));
+    }
+    let reason = value["error"]
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| notes.first().cloned())
+        .unwrap_or_else(|| "lore refused the search".into());
+    bail!("{reason}")
+}
+
+/// `hgs project config get|set|move|find --json` (JSON stdin).
 pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     if args.len() != 2 || args[1] != "--json" {
-        return Err(format!("usage: hgs project config get|set|move --json (JSON stdin), {MARKER}"));
+        return Err(format!("usage: hgs project config get|set|move|find --json (JSON stdin), {MARKER}"));
     }
     let result = run(&args[0], &stdin_json()?).map_err(|error| format!("{error:#}"))?;
     println!("{result}");

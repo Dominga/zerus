@@ -9,8 +9,9 @@ use std::path::PathBuf;
 pub const USAGE: &str =
     "usage: zerus-mobile-connector [-h] --config CONFIG [--allow-insecure-localhost] [--check [--json]] [--version]";
 
-pub const HELP: &str =
-    "Outbound-only Zerus mobile connector. Native hgs owns agent identity and input validation.
+macro_rules! help_text {
+    () => {
+        "Outbound-only Zerus mobile connector. Native hgs owns agent identity and input validation.
 
 options:
   -h, --help                  show this help message and exit
@@ -18,9 +19,16 @@ options:
   --allow-insecure-localhost  allow plain HTTP to a loopback relay (development)
   --check                     report on the configuration and journal read-only, then exit
   --json                      with --check, print the report as JSON
-  --version                   print the version and exit
-
-Workspace stop ABI: service-preflight-v1";
+  --version                   print the version and exit"
+    };
+}
+/// Clients offer a running Stop from the ABI line alone, so it appears only where
+/// the connector can admit one (`workspace_lifecycle::manage_stop`).
+pub const HELP: &str = if cfg!(any(target_os = "linux", windows)) {
+    concat!(help_text!(), "\n\nWorkspace stop ABI: service-preflight-v1")
+} else {
+    help_text!()
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {

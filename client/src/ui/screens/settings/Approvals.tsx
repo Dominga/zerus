@@ -1,5 +1,6 @@
+import { TextInput } from "../../lib/TextField";
 import { desktopService, serviceApprovalIntent } from "../../../store/desktopService";
-import { Show, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { inTauri } from "../../../bridge";
 import { flag, text, setSetting } from "../../../store/settings";
@@ -7,7 +8,8 @@ import { bus } from "../../../store/notices";
 import ApprovalsConfirm from "./ApprovalsConfirm";
 import { APPROVALS_KEY, APPROVALS_WARNING, APPROVALS_HINT, createApprovalOptIn } from "./approval-opt-in";
 import { Icon } from "../../lib/icons";
-import { Actions, Group, SectionHead, Status, Table, Switch } from "./ui";
+import { Actions, Group, SectionHead, Status, Table, Switch, ToggleRow } from "./ui";
+import { APPROVAL_CATEGORIES, CATEGORIES_HINT, SERVICE_CATEGORIES_UNKNOWN, categoryLabels, type ApprovalCategory } from "./approval-categories";
 import { PLACEHOLDER, createJournal, type JournalState, type Page } from "./approvals-journal";
 import { tr, trNoop } from "../../../i18n";
 import { canToggleServiceApproval } from "./approval-readiness";
@@ -38,6 +40,25 @@ export function ApprovalsSection() {
     if (inTauri() && desktopService.enabled()) void serviceApprovalIntent.check().catch(() => {});
   });
   onCleanup(() => clearTimeout(debounce));
+  // Categories: per-computer settings in this window, or the background
+  // service's committed policy, changed only through its authenticated route.
+  const [categoryBusy, setCategoryBusy] = createSignal(false);
+  const serviceCategories = () => desktopService.state()?.automatic_approval_categories ?? undefined;
+  const serviceSwitch = () => desktopService.state()?.automatic_approvals;
+  const categoryOn = (category: ApprovalCategory) => desktopService.enabled()
+    ? serviceCategories()?.includes(category.id) ?? category.on : flag(category.key);
+  const categoriesLocked = () => desktopService.enabled() && (!serviceCategories() || typeof serviceSwitch() !== "boolean"
+    || !!serviceApprovalIntent.pending() || categoryBusy() || optIn.busy());
+  const failed = (error: unknown) => bus.notify("error", String(error), true);
+  const changeCategory = (category: ApprovalCategory, on: boolean) => {
+    if (!desktopService.enabled()) { void setSetting(category.key, on).catch(failed); return; }
+    const current = serviceCategories();
+    const enabled = serviceSwitch();
+    if (!current || typeof enabled !== "boolean" || categoriesLocked()) return;
+    const next = APPROVAL_CATEGORIES.filter((c) => c.id === category.id ? on : current.includes(c.id)).map((c) => c.id);
+    setCategoryBusy(true);
+    void serviceApprovalIntent.submitCategories(enabled, next).catch(failed).finally(() => setCategoryBusy(false));
+  };
   const page = () => state().page;
   const loading = () => state().loading;
 
@@ -61,11 +82,19 @@ export function ApprovalsSection() {
       </Group>
       <Show when={optIn.origin()} keyed>{(origin) => <ApprovalsConfirm origin={origin} actions={optIn} />}</Show>
 
+      <Group title={trNoop("Categories")} hint={CATEGORIES_HINT} class="appr-categories">
+        <For each={APPROVAL_CATEGORIES}>{(category) => (
+          <ToggleRow label={category.label} hint={category.hint} checked={categoryOn(category)}
+            disabled={categoriesLocked()} onChange={(on) => changeCategory(category, on)} />
+        )}</For>
+        <Show when={desktopService.enabled() && !serviceCategories()}><p class="set-group-hint">{tr(SERVICE_CATEGORIES_UNKNOWN)}</p></Show>
+      </Group>
+
       <Group title={trNoop("Approval journal")}>
         <Actions>
-          <input class="field grow" placeholder={tr("Exact computer name (optional)")} aria-label={tr("Exact computer name (optional)")}
+          <TextInput class="field grow" placeholder={tr("Exact computer name (optional)")} aria-label={tr("Exact computer name (optional)")}
             value={host()} onInput={(e) => { setHost(e.currentTarget.value); edited(); }} />
-          <input class="field grow" placeholder={tr("Exact session name (optional)")} aria-label={tr("Exact session name (optional)")}
+          <TextInput class="field grow" placeholder={tr("Exact session name (optional)")} aria-label={tr("Exact session name (optional)")}
             value={session()} onInput={(e) => { setSession(e.currentTarget.value); edited(); }} />
           <button type="button" class="btn" onClick={firstPage}><Icon name="refresh-cw" size={13} />{tr("Refresh")}</button>
         </Actions>
@@ -78,6 +107,7 @@ export function ApprovalsSection() {
               { key: "computer", label: "Computer", render: (e) => <span title={e.host}>{e.host}</span> },
               { key: "session", label: "Session", render: (e) => <span title={e.session}>{e.session}</span> },
               { key: "question", label: "Question", class: "ell-cell", render: (e) => <span title={e.prompt}>{e.prompt}</span> },
+              { key: "category", label: trNoop("Category"), render: (e) => { const names = categoryLabels(e.categories).map((label) => tr(label)).join(", "); return <span title={names}>{names}</span>; } },
               { key: "result", label: "Result", render: (e) => <span title={e.result}>{e.result}</span> },
             ]} />
           <aside class="an-detail appr-detail">

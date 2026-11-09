@@ -1,3 +1,4 @@
+import { TextInput } from "../../lib/TextField";
 import { For, Show, createEffect, createSignal, on as observe, onCleanup, onMount } from "solid-js";
 import { createStore, reconcile, unwrap } from "solid-js/store";
 import { invoke } from "@tauri-apps/api/core";
@@ -145,7 +146,7 @@ export function RecoverySection() {
           </Show>
           <label class="rec-delays" classList={{ disabled: !delaysOn() }}>
             <span class="set-label">{tr("Retry after (seconds)")}</span>
-            <input class="field mono grow" placeholder="15, 30, 60, 300, -1" value={form.delays[r.id] ?? ""} disabled={!delaysOn()}
+            <TextInput class="field mono grow" placeholder="15, 30, 60, 300, -1" value={form.delays[r.id] ?? ""} disabled={!delaysOn()}
               onInput={(e) => { const text = e.currentTarget.value; edit(() => setForm("delays", r.id, text)); }} />
           </label>
         </div>

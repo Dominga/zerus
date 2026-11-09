@@ -315,6 +315,27 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             });
         }
     }
+    // Task #364: one notice when the team's build folders pass the owner's
+    // limit; it stays while they do and is never repeated per folder.
+    if active {
+        if let Some((bytes, limit)) = crate::state::build_dirs::team_over(&team.id) {
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "build_folders",
+                key: format!("build_folders:{}", team.id),
+                task: None,
+                member: String::new(),
+                since: crate::state::now(),
+                summary: summary(&format!(
+                    "The team's build folders hold {} (over your {} limit); Clean removes the finished tasks' targets",
+                    crate::state::build_dirs::gigabytes(bytes),
+                    crate::state::build_dirs::gigabytes(limit)
+                )),
+                command: format!("{} | hgs team disk --json", json!({"action":"list","by":"human"})),
+                detail: "Settings > Build folders shows each team's folders; Clean… removes the targets of its finished tasks after your confirmation.".into(),
+            });
+        }
+    }
     // Task 259 (owner, 2026-11-08): no idle member while ready work waits.
     // Zerus moves a ready task with free outputs to an idle member itself; the
     // one case it leaves to the lead is a task an explicit assignment keeps
@@ -2777,6 +2798,34 @@ mod told_tests {
         // Both leave the open list: the report is forgotten, the decision kept.
         mark_told(&mut told, &[], &Default::default());
         assert_eq!(told, vec!["proposal:p1".to_owned()]);
+    }
+
+    /// Task #364: the lead hears once when a team's build folders pass the
+    /// owner's limit.
+    #[test]
+    fn the_build_folders_notice_is_one_item_while_a_team_is_over_the_limit() {
+        let state = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(state.path(), || {
+            use crate::state::teams::ops;
+            let (mut team, _) = ops::create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+            ops::apply(&mut team, "plan", &json!({"members":[{"id":"dev","role":"Backend","agent":"codex"}],"tasks":[{"id":1,"title":"A","assignee":"dev"}]}), &ops::Actor::Human, &std::collections::BTreeSet::new(), &mut Vec::new()).unwrap();
+            ops::apply(&mut team, "approve", &json!({}), &ops::Actor::Human, &std::collections::BTreeSet::new(), &mut Vec::new()).unwrap();
+            team.status = crate::state::teams::model::TeamStatus::Running;
+            let target = work.path().join("target");
+            std::fs::create_dir_all(&target).unwrap();
+            crate::state::build_dirs::note(crate::state::build_dirs::Use {
+                path: target.clone(), kind: "cargo_target", origin: "team_run", team: team.id.clone(), ..Default::default()
+            })
+            .unwrap();
+            assert!(!items(&team).iter().any(|item| item.kind == "build_folders"));
+            crate::state::build_dirs::test_measure(&target, 200 * 1024 * 1024 * 1024, 100).unwrap();
+            let found: Vec<Item> = items(&team).into_iter().filter(|item| item.kind == "build_folders").collect();
+            assert_eq!(found.len(), 1, "{found:?}");
+            assert!(found[0].summary.contains("over your 100.0 GB limit"), "{}", found[0].summary);
+            // Still one on the next read: the notice fires once while it holds.
+            assert_eq!(items(&team).iter().filter(|item| item.kind == "build_folders").count(), 1);
+        });
     }
 }
 

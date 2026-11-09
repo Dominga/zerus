@@ -6056,6 +6056,21 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 Err(error) if read_only(&error) => return queue_or_blocked(error, op, input, wait),
                 Err(error) => return Err(super::store::write_error(error)),
             };
+            // Task #364: a member's report names the folders it made for the
+            // attempt and left in place, asking it to remove them or say why.
+            if matches!(op, "report" | "use-last-reply") && receipt["status"] == "submitted" {
+                if let Ok(Some(team)) = store.load(team_id) {
+                    let attempt = text(&filled, "attempt");
+                    let found = team.tasks.iter().flat_map(|task| &task.attempts).find(|found| found.id == attempt).map(|found| (found.member.clone(), found.sent_at));
+                    if let Some((member, since)) = found.filter(|(member, _)| !member.is_empty()) {
+                        let folder = team.member(&member).and_then(|found| super::dispatcher::member_folder_path(&team, found).ok()).unwrap_or_default();
+                        let note = crate::state::build_dirs::report_leftovers(&team.id, &member, since, &folder);
+                        if note["folders"].as_array().is_some_and(|folders| !folders.is_empty()) {
+                            receipt["leftovers"] = note;
+                        }
+                    }
+                }
+            }
             // N7: discarding a draft stops the lead's session when the owner
             // asked for it (spec 3); a failure leaves the discard done and names
             // it in the answer.

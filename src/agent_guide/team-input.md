@@ -2,6 +2,8 @@ Send team requests that are accepted the first time (hgs guide team-input)
 
 Every hgs team OPERATION --json reads one JSON object on stdin. PowerShell has
 no <<<: save it and use --json-file PATH.
+In a sandbox call hgs team directly, one command per call with --json-file PATH: your
+own calls and your scratch team's queue in your folder; a script still asks.
 
 A member has one shape in plan, add-member and a draft:
   {"id":"dev","role":"Backend","agent":"claude","account":"work",

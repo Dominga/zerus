@@ -1514,8 +1514,8 @@ export type TeamAction =
   /** Task 88: the team's test configuration for its Tests settings: read it, or check a candidate override; neither writes. */
   | { kind: "test_config"; action: "get" | "check"; tests?: Record<string, unknown> | null }
   /** Task 108: the build folders Zerus holds: the Disk view, a dry run or Clean now, the policy, forget a reviewed folder. */
-  | { kind: "disk"; action: "list" | "clean" | "policy" | "forget"; scope?: "policy" | "all"; dry_run?: boolean;
-      policy?: { enabled: boolean; unused_days: number; free_gb: number; free_percent: number }; paths?: string[]; path?: string; refresh?: boolean; measure?: boolean }
+  | { kind: "disk"; action: "list" | "clean" | "policy" | "forget"; scope?: string; dry_run?: boolean;
+      policy?: { enabled: boolean; unused_days: number; free_gb: number; free_percent: number; team_limit_gb?: number }; paths?: string[]; path?: string; refresh?: boolean; measure?: boolean }
   | { kind: "release"; task: number }
   | { kind: "retry"; task: number }
   | { kind: "finish"; summary: string }

@@ -45,6 +45,15 @@ fn marker(dir: &Path) -> Result<Option<Pending>> {
     Ok(Some(marker))
 }
 
+pub(super) fn adoption_pending(directory: &Path) -> Result<Option<(String, Vec<u8>)>> {
+    let Some(pending) = marker(directory)? else {
+        return Ok(None);
+    };
+    let bytes = super::read_regular(&directory.join(PENDING), MARKER_BYTES)
+        .map_err(|reason| anyhow::anyhow!("pending GUI import unavailable: {reason:?}"))?;
+    Ok(Some((pending.node_id, bytes)))
+}
+
 /// The first snapshot may initialize only when Qt's store is definitely absent.
 /// After initialization, neither a Qt probe nor the catalog lock is needed.
 pub(super) fn read_snapshot(config: &Config) -> Result<Value> {

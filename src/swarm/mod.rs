@@ -1,9 +1,11 @@
 //! Shared metadata only. Transport credentials and per-device presentation stay
 //! local; the swarm-wide phone delivery choice is shared. Writes use one
 //! locked, atomically replaced store; initialized snapshots read it lock-free.
+mod adoption;
 mod bootstrap;
 mod catalog;
 pub(crate) mod fence;
+pub(crate) mod drive_footprint;
 mod launch_project;
 mod infer_project;
 pub(crate) use infer_project::{directory_project, infer_new_session, inherit_fork_project};
@@ -354,7 +356,16 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> cli::Result<i32>
             println!("{}", value);
             Ok(0)
         }
-        Err(error) => Err(cli::Error::new(1, format!("{error:#}"))),
+        Err(error) => {
+            let adoption = matches!(args.first().map(String::as_str), Some("adopt" | "adoption-preview" | "adoption-status"));
+            let message = format!("{error:#}");
+            let message = if adoption {
+                message.chars().take(2048).collect()
+            } else {
+                message
+            };
+            Err(cli::Error::new(1, message))
+        }
     }
 }
 
@@ -369,6 +380,30 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
     let worker = matches!(action, "get" | "preference" | "exchange" | "join" | "sync")
         .then(|| service::supervise(config));
     match action {
+        "adoption-preview" => {
+            ensure!(args.len() == 2 && args[1] == "--json" || args.len() == 3 && args[2] == "--json", "usage: hgs swarm adoption-preview [PEER] --json");
+            if args.len() == 3 {
+                adoption::preview_remote(config, alias()?)
+            } else {
+                adoption::preview_destination(config, input()?)
+            }
+        }
+        "adopt" => {
+            ensure!(args == ["adopt"] || args == ["adopt", "--json"] || args.len() == 3 && args[2] == "--json", "usage: hgs swarm adopt [PEER] --json");
+            if args.len() == 3 {
+                adoption::adopt_source(config, alias()?, input()?)
+            } else {
+                adoption::adopt_destination(config, input()?)
+            }
+        }
+        "adoption-status" => {
+            ensure!(args.len() == 2 && args[1] == "--json" || args.len() == 3 && args[2] == "--json", "usage: hgs swarm adoption-status [PEER] --json");
+            if args.len() == 3 {
+                adoption::status_remote(config, alias()?, input()?)
+            } else {
+                adoption::status_destination(config, input()?)
+            }
+        }
         "session-labels-context" => {
             ensure!(args == ["session-labels-context", "--json"], "usage: hgs swarm session-labels-context --json");
             Ok(serde_json::to_value(session_labels::context(config)?)?)

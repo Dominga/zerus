@@ -25,6 +25,8 @@ elif args == ["machine", "ls"]:
     action = "machines"
 elif len(args) == 3 and args[0] == "swarm" and args[1] in ("preview", "join"):
     action = args[1]
+elif len(args) == 4 and args[0] == "swarm" and args[1] in ("adoption-preview", "adopt", "adoption-status") and args[3] == "--json":
+    action = args[1]
 elif len(args) == 2 and args[0] == "swarm" and args[1] in ("get", "apply", "sync", "resolve"):
     action = args[1]
 else:
@@ -57,6 +59,9 @@ while not os.path.exists(sys.argv[1]) and time.monotonic() < deadline:
                      stdin=subprocess.DEVNULL,
                      env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": here, "TMPDIR": here})
 if reply.get("stdout") is not None:
-    sys.stdout.write(json.dumps(reply["stdout"]))
+    output = dict(reply["stdout"])
+    for key in reply.get("echo", []):
+        output[key] = json.loads(data or "{}")[key]
+    sys.stdout.write(json.dumps(output))
 sys.stderr.write(reply.get("stderr", ""))
 sys.exit(reply.get("exit", 0))

@@ -2,6 +2,10 @@
 use super::*;
 use std::fs::{File, OpenOptions};
 
+#[cfg(windows)]
+#[path = "directory/windows_publication.rs"]
+mod windows_publication;
+
 pub(crate) struct Directory {
     pub path: PathBuf,
     file: File,
@@ -532,22 +536,7 @@ impl Directory {
     }
 
     fn publish_file(&self, name: &str, bytes: &[u8], replace: bool) -> Result<File> {
-        use std::io::Write;
-        if name.is_empty() || name.contains(['/', '\\', ':']) || name == "." || name == ".." {
-            return Err("Invalid file name".into());
-        }
-        self.verify()?;
-        let mut file = tempfile::Builder::new().prefix(".hgs-new-")
-            .tempfile_in(&self.path).map_err(|e| e.to_string())?;
-        file.write_all(bytes).map_err(|e| e.to_string())?;
-        file.as_file().sync_all().map_err(|e| e.to_string())?;
-        let file = if replace {
-            crate::platform::persist(file, self.path.join(name))
-        } else {
-            file.persist_noclobber(self.path.join(name))
-        }.map_err(|e| e.error.to_string())?;
-        self.verify()?;
-        Ok(file)
+        windows_publication::publish(self, name, bytes, replace)
     }
 
     pub fn open(path: &Path) -> Result<Self> {

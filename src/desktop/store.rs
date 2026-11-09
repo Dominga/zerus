@@ -357,6 +357,9 @@ impl Store {
             .transpose()?;
         startup.reobserve()?;
         if let (Some(original), startup::Mode::Migrate(version)) = (&original, startup.mode()) {
+            #[cfg(windows)]
+            original.prepare(Some(version)).context("preserve desktop rollback backup before schema 35; keep the backup for review and see docs/desktop-schema-35-rollback.md")?;
+            #[cfg(not(windows))]
             original
                 .prepare(Some(version))
                 .context("preserve desktop rollback backup before schema 35")?;

@@ -120,6 +120,8 @@ impl<'a> Original<'a> {
         let mut wal = Input::open(&self.root, WAL)?;
         no_journal(&self.root)?;
         let database = db.copy(&self.root, &backup, &mut budget)?;
+        #[cfg(all(test, windows))]
+        crash_backup("database");
         let wal_digest = wal
             .as_mut()
             .map(|v| v.copy(&self.root, &backup, &mut budget))
@@ -154,6 +156,8 @@ impl<'a> Original<'a> {
             bytes.len() <= META_LIMIT as usize,
             "desktop backup manifest too large"
         );
+        #[cfg(all(test, windows))]
+        crash_backup("manifest");
         backup
             .write_new(MANIFEST, &bytes)
             .map_err(anyhow::Error::msg)?;
@@ -473,6 +477,15 @@ impl Input {
 
 #[cfg(test)]
 thread_local! { static INTERRUPT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+#[cfg(all(test, windows))]
+thread_local! { static BACKUP_CRASH: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) }; }
+#[cfg(all(test, windows))]
+fn crash_backup(phase: &'static str) {
+    if BACKUP_CRASH.with(std::cell::Cell::get) == Some(phase) {
+        // The exact owned fixture child exits without running Rust destructors.
+        std::process::exit(88);
+    }
+}
 #[cfg(test)]
 type CopyHook = Box<dyn FnOnce()>;
 #[cfg(test)]

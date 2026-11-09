@@ -560,7 +560,7 @@ impl Directory {
             let file = OpenOptions::new()
                 .read(true)
                 .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-                .share_mode(FILE_SHARE_READ)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
                 .open(ancestor)
                 .map_err(|e| format!("Cannot pin clone directory: {e}"))?;
             let meta = file.metadata().map_err(|e| e.to_string())?;
@@ -616,7 +616,7 @@ impl Directory {
                 &mut status,
                 std::ptr::null(),
                 FILE_ATTRIBUTE_NORMAL,
-                FILE_SHARE_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
                 FILE_CREATE,
                 FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
                 std::ptr::null(),

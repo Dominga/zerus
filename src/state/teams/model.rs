@@ -2708,6 +2708,31 @@ pub(crate) struct LeadChange {
     pub reverted_at: Option<f64>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reverted_by: String,
+    /// Task #4 (team ede724c4): the ids of `tasks_before`, kept in the team's
+    /// head while the snapshots live in `team_lead_changes` (read on demand).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed: Vec<u32>,
+    /// The numbers of `phases_before`, as `changed` is for the tasks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phases_changed: Vec<u32>,
+}
+
+impl LeadChange {
+    /// The tasks it changed: from the snapshots when they are loaded, else
+    /// from the ids the head keeps.
+    pub(crate) fn changed_tasks(&self) -> Vec<u32> {
+        if self.tasks_before.is_empty() { self.changed.clone() } else { self.tasks_before.iter().map(|task| task.id).collect() }
+    }
+
+    /// The phases it changed, as `changed_tasks` is for the tasks.
+    pub(crate) fn changed_phases(&self) -> Vec<u32> {
+        if self.phases_before.is_empty() { self.phases_changed.clone() } else { self.phases_before.iter().map(|phase| phase.n).collect() }
+    }
+
+    /// Whether it changed tasks or phases whose snapshots are not loaded.
+    pub(crate) fn history_missing(&self) -> bool {
+        (self.tasks_before.is_empty() && !self.changed.is_empty()) || (self.phases_before.is_empty() && !self.phases_changed.is_empty())
+    }
 }
 
 /// Task 162: at most this many lead changes are kept (the oldest seen or

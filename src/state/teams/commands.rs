@@ -856,6 +856,7 @@ pub(crate) fn bound_status(value: &mut Value, team: &Team) {
                 object.remove("added");
                 object.remove("removed");
                 object.remove("changed");
+                object.remove("phases_changed");
             }
             if let Some(summary) = change.get("summary").and_then(|summary| summary.as_str()) {
                 let clipped = clip(summary, 300);
@@ -4526,17 +4527,24 @@ fn adopt_existing_sessions(store: &Store, request: &str, input: &Value, op: &str
     let swapped = op == "swap-member"
         && matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused)
         && filled["session"].is_object();
+    // Task #11 (team ede724c4): the request's optional fields are read with
+    // `get_mut`, never `filled["..."]` on a mutable value: serde_json's IndexMut
+    // inserts a missing key as null, and a draft update that never named its
+    // members was refused for the `"members": null` this added.
     if planned {
-        if let Some(members) = filled["members"].as_array_mut() {
+        if let Some(members) = filled.get_mut("members").and_then(Value::as_array_mut) {
             adopt_members(store, &team, members)?;
         }
     } else if drafted {
         // The lead keeps its own session; the others are checked.
-        for member in filled["set"]["members"].as_array_mut().into_iter().flatten().filter(|member| member["id"] != team.lead.as_str()) {
+        let members = filled.get_mut("set").and_then(|set| set.get_mut("members")).and_then(Value::as_array_mut);
+        for member in members.into_iter().flatten().filter(|member| member["id"] != team.lead.as_str()) {
             adopt_members(store, &team, std::slice::from_mut(member))?;
         }
     } else if joined {
-        adopt_members(store, &team, std::slice::from_mut(&mut filled["member"]))?;
+        if let Some(member) = filled.get_mut("member") {
+            adopt_members(store, &team, std::slice::from_mut(member))?;
+        }
     } else if swapped {
         // H6: the session named for the swap is adopted under the same checks
         // as a new member's existing session.

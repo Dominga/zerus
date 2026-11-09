@@ -1406,7 +1406,7 @@ fn task_466_a_claude_bypass_permissions_warning_is_answerable_from_its_card() {
     // Answering "Yes, I accept" sends its option id; hgs turns it into the
     // chooser's second row and one Enter through the guarded native path.
     let mut draft = AnswerDraft::default();
-    draft.answers.insert("bypass".into(), ItemAnswer {
+    draft.answers.insert("bypass".into(), q::ItemAnswer {
         options: ["bypass_1".to_string()].into_iter().collect(), text: String::new(), other: false,
     });
     let (sent, complete) = answers(&shown, &draft);

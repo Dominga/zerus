@@ -358,6 +358,11 @@ pub struct ParentLink {
     pub name: String,
     pub conversation_id: String,
     pub run_id: String,
+    /// How the link arose: `launch`, `adopt` or `manual` (`forwarded` for
+    /// another computer's claim). A launch alone means only "started by", not
+    /// a dependence, and the list does not nest it (task 467); a record
+    /// without one keeps the old nesting.
+    pub source: String,
     pub state: String,
     /// When the link was recorded (launch or adoption), Unix seconds; 0 unknown.
     pub at: i64,
@@ -379,6 +384,7 @@ impl ParentLink {
             name: field("name"),
             conversation_id: field("conversation_id"),
             run_id: field("run_id"),
+            source: field("source"),
             state: field("state"),
             at: link
                 .get("at")
@@ -1629,6 +1635,12 @@ mod tests {
             (machine, session, "claude/p/lead")
         );
         assert!(parent.live());
+        // Task 467: the list tells a plain launch from a dependence by it.
+        assert_eq!(parent.source, "launch");
+        assert_eq!(
+            serde_json::to_value(&listed).unwrap()["parent"]["source"],
+            "launch"
+        );
         assert_eq!(
             serde_json::to_value(&listed).unwrap()["parent"]["state"],
             "live"
@@ -1650,6 +1662,15 @@ mod tests {
                 .parent
                 .is_some(),
             "conversation fallback"
+        );
+        // A record older than the source keeps an empty one, never a launch.
+        assert_eq!(
+            row(&json!({"name":"codex/p/kid","parent":json!({
+                "machine":machine,"session_id":session,"name":"claude/p/lead",
+                "conversation_id":"c","run_id":"r","state":"live","at":1})}))
+            .parent
+            .map(|parent| parent.source),
+            Some(String::new())
         );
         for (key, value) in [
             ("machine", json!("arch")),

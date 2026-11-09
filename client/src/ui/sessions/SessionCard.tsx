@@ -659,7 +659,10 @@ export function SessionCard(props: {
       <div class="sc-l1">
         {/* Supervision and Mute are independent: the arrow before the name,
             the crossed bell right after it (owner, 2026-11-08). */}
-        <Show when={s().parent?.state === "live"}><SupervisedMark session={s()} /></Show>
+        {/* Task 467: the arrow claims the parent above handles this session's
+            requests. A session another one merely launched keeps its card and
+            says "from PARENT" instead (fromParent). */}
+        <Show when={s().parent?.state === "live" && !props.fromParent}><SupervisedMark session={s()} /></Show>
         <span class="sc-title ell" style={titleReserve(s().title, 72)} title={s().name}>{s().title}</span>
         <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
         <StatusBadge kind={kind()} caption={statusCaption(s())} heat={state().shown.heat} title={state().kind ? state().shown.tooltip : undefined} />
@@ -832,7 +835,9 @@ export function compactDescription(s: Session): string {
   return [s.title, s.name !== s.title ? s.name : "", statusCaption(s, false), AGENT_LABEL[s.agent]].filter(Boolean).join("\n");
 }
 
-export function CompactCard(props: { session: Session; selected: boolean; onExpand: () => void; team?: Team; onToggleTeam?: () => void }) {
+export function CompactCard(props: { session: Session; selected: boolean; onExpand: () => void; team?: Team; onToggleTeam?: () => void;
+  /** A session another one started: it keeps its own row, so no supervised arrow (task 467). */
+  fromParent?: { name: string; key?: string } }) {
   const s = () => props.session;
   // Tooltips hold still under the pointer (zerus-5ryrx).
   const described = steadyTitle(() => compactDescription(s()));
@@ -843,7 +848,7 @@ export function CompactCard(props: { session: Session; selected: boolean; onExpa
       <div class="cc-line">
       <span class="cc-tile"><AgentTile agent={s().agent} size={22} /></span>
       <Show when={sessionMark(s())}>{(m) => <span class="cc-mark" title={markTooltip(s(), m())}><AccountMarkCircle mark={m()} size={14} /></span>}</Show>
-      <Show when={s().parent?.state === "live"}><SupervisedMark session={s()} /></Show>
+      <Show when={s().parent?.state === "live" && !props.fromParent}><SupervisedMark session={s()} /></Show>
       <span class="sc-title ell" style={titleReserve(s().title, 60)} title={described.title()} onPointerEnter={described.enter} onPointerLeave={described.leave}>{s().title}</span>
       <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
       <StatusBadge kind={badgeKind(s())} caption={statusCaption(s())} />

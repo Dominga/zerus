@@ -6,7 +6,7 @@ import { Icon } from "../lib/icons";
 import { MachineTile } from "../components/MachineTile";
 import { UsageMeters } from "../components/UsageMeter";
 import { AgentBadge, MachineBadge, SessionCard } from "../sessions/SessionCard";
-import { parentKeyOf } from "../sessions/model";
+import { nestKeyOf } from "../sessions/model";
 import type { Session } from "../sessions/types";
 import type { Account } from "../../types";
 import { agentKind, catalog, plainComputers, plainRows } from "../../store/catalog";
@@ -226,7 +226,7 @@ export function OverviewScreen() {
   // Plain rows for the tiles and the live order, one dependency per batch;
   // each live card renders its store row (zerus-5wmh.66.50).
   const ov = createOverview(plainRows, plainComputers, () => machineCards, overviewStats, (s) => catalog.rows[s.key] ?? s);
-  const live = createMemo(() => (withSubSessions() ? ov.live() : mainSessions(ov.live(), parentKeyOf())));
+  const live = createMemo(() => (withSubSessions() ? ov.live() : mainSessions(ov.live(), nestKeyOf())));
   // Ages, resets and pace re-render every 15 s while shown (DashboardPage.cpp:322); nothing else runs on a timer.
   const now = useNow(15_000);
   const view = accountsPage;

@@ -56,6 +56,11 @@ export interface ListInput {
   childDraft?: (parent: Session, child: Subagent) => boolean;
   /** The listed row key of a session's parent session, when the catalog has it. */
   parentKey?: (s: Session) => string | undefined;
+  /**
+   * The parent a child really depends on (task 467): only such a link nests.
+   * Absent, every resolved `parentKey` nests (an older list).
+   */
+  nestKey?: (s: Session) => string | undefined;
   /** A parent whose child sessions are collapsed. */
   teamCollapsed?: (key: string) => boolean;
   /** The Teams team a row belongs to, when its computer's team list is loaded. */
@@ -149,17 +154,20 @@ export function groupRows(input: ListInput): Row[] {
       }
   };
   // One project group's visible cards in rank order, child sessions nested
-  // under a parent shown in the same list. Nesting never hides a row: a loop
+  // under a parent shown in the same list. Only a real dependence nests
+  // (`nestKey`, task 467): a session another one merely launched keeps its
+  // card and only names who started it. Nesting never hides a row: a loop
   // or a parent elsewhere leaves the card at top level. A Teams member
   // listed under its lead is not a card of its own.
   const cards = (members: readonly Session[]) => {
     scope = members;
     const list = members.filter((s) => !nested(members, s.key));
     const parentOf = new Map<string, string>();
-    if (input.parentKey) {
+    const nests = input.nestKey ?? input.parentKey;
+    if (nests) {
       const shown = new Set(list.map((s) => s.key));
       for (const s of list) {
-        const parent = input.parentKey(s);
+        const parent = nests(s);
         if (parent && parent !== s.key && shown.has(parent)) parentOf.set(s.key, parent);
       }
     }

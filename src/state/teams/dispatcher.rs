@@ -6707,11 +6707,17 @@ pub(crate) fn prepare_integration_base(team: &Team, task_id: u32, member_id: &st
     if same_path(&folder, &team.integration_folder()) || same_path(&folder, &team.folder) {
         return None;
     }
+    // Task #382 (owner, 2026-11-08): the base step never moves the branch the
+    // member's committed work sits on. The task gets its own branch from the
+    // integration head, `team/<team8>/<member>-<task>`; an existing one is
+    // checked out (a returned hand-out continues it) and the old branch stays
+    // where it is, with every commit it holds still reachable from it.
+    let branch = format!("team/{}/{}-{}", &team.id[..8.min(team.id.len())], tag(member_id), task_id);
     let step = |from: &str, result: &str, reason: String| PrepareStep {
         step: "base".into(),
         member: String::new(),
         from: from.to_owned(),
-        to: String::new(),
+        to: branch.clone(),
         at: now(),
         result: result.into(),
         reason,
@@ -6750,10 +6756,48 @@ pub(crate) fn prepare_integration_base(team: &Team, task_id: u32, member_id: &st
         }
     }
     let head = super::merge_queue::integration_head(team).unwrap_or_default();
-    match git_bounded(&folder, &["checkout", "-B", &current, &base]) {
-        Ok(_) => Some(step(&current, "done", format!("{} starts from the integration head {base} ({})", if changes.is_empty() { "the folder" } else { "the committed work stays on the old branch; the folder" }, head.chars().take(9).collect::<String>()))),
-        Err((true, error)) => Some(step(&current, "uncertain", error)),
-        Err((false, error)) => Some(step(&current, "refused", error)),
+    // Task #382 (owner, 2026-11-08): never `checkout -B` the branch the folder
+    // is on - that reset the member's branch to the line and orphaned the
+    // commits it had just reported. The task's own branch starts from the
+    // integration head (or is checked out when it exists); the branch the
+    // folder leaves keeps every commit it holds.
+    if branch == current {
+        return Some(step(
+            &current,
+            "skipped",
+            format!("the folder is on this task's branch {branch} already; it is never reset, and the commits it holds stay on it"),
+        ));
+    }
+    if super::templates::check_branch(&branch).is_err() {
+        return Some(step(&current, "refused", format!("{branch} is not a valid branch name")));
+    }
+    let exists = git_bounded(&folder, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_ok();
+    let (moved, how) = if exists {
+        // A branch this task left behind (an interrupted hand-out): continue
+        // it. It is never moved, and the folder keeps its old branch too.
+        (
+            git_bounded(&folder, &["checkout", &branch]),
+            format!("task branch {branch} is checked out; the folder's branch {current} keeps its commits"),
+        )
+    } else {
+        (
+            git_bounded(&folder, &["checkout", "-b", &branch, &base]),
+            format!(
+                "{branch} starts from the integration head {base} ({}), and {current} keeps its commits",
+                head.chars().take(9).collect::<String>()
+            ),
+        )
+    };
+    match moved {
+        Ok(_) => {}
+        Err((true, error)) => return Some(step(&current, "uncertain", error)),
+        Err((false, error)) => return Some(step(&current, "refused", error)),
+    }
+    // Confirmed before the hand-out: the folder is on the new task branch now.
+    match git_bounded(&folder, &["rev-parse", "--abbrev-ref", "HEAD"]) {
+        Ok(now_on) if now_on == branch => Some(step(&current, "done", how)),
+        Ok(now_on) => Some(step(&current, "uncertain", format!("the folder is on {now_on}, not {branch}"))),
+        Err((_, error)) => Some(step(&current, "uncertain", format!("the folder's branch was not read again: {error}"))),
     }
 }
 
@@ -12102,6 +12146,10 @@ mod dispatcher_restart;
 #[cfg(test)]
 #[path = "tests/dispatcher_git_cache.rs"]
 mod dispatcher_git_cache;
+
+#[cfg(test)]
+#[path = "tests/dispatcher_base.rs"]
+mod dispatcher_base;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_approval.rs"]

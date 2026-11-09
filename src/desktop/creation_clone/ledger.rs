@@ -11,6 +11,7 @@ use zerus_desktop_ledger::operations::{custody::Record, Ticket};
 const ROWS: i64 = 4096;
 const BYTES: i64 = 16 << 20;
 const ACTIVE: i64 = 32;
+const SOURCE_BYTES: usize = wire::SOURCE_BYTES;
 const PLAN_BYTES: usize = 16 << 10;
 const CUSTODY_BYTES: usize = 8 << 10;
 
@@ -45,6 +46,7 @@ pub(super) fn migrate(tx: &Transaction<'_>) -> Result<()> {
 }
 
 pub(super) struct Row {
+    charge: i64,
     pub verified: Verified,
     pub receipt: Receipt,
     pub writer_epoch: String,
@@ -76,12 +78,12 @@ pub(super) fn load(db: &Connection, id: &str) -> Result<Option<Row>> {
         String,
         String,
         String,
-        bool,
+        i64,
         Option<String>,
         Option<String>,
         usize,
     );
-    let saved:Option<Saved> = db.query_row("SELECT substr(source,1,32769),substr(plan,1,16385),substr(receipt,1,24577),substr(fingerprint,1,65),substr(writer_epoch,1,37),phase,drained,substr(ticket,1,4097),substr(custody,1,8193),next_step FROM desktop_creation_clones WHERE clone_id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?,r.get(9)?))).optional()?;
+    let saved:Option<Saved> = db.query_row("SELECT CASE typeof(source) WHEN 'text' THEN CAST(substr(CAST(source AS BLOB),1,32769) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END,CASE typeof(plan) WHEN 'text' THEN CAST(substr(CAST(plan AS BLOB),1,16385) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END,CASE typeof(receipt) WHEN 'text' THEN CAST(substr(CAST(receipt AS BLOB),1,24577) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END,CASE typeof(fingerprint) WHEN 'text' THEN CAST(substr(CAST(fingerprint AS BLOB),1,65) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END,CASE typeof(writer_epoch) WHEN 'text' THEN CAST(substr(CAST(writer_epoch AS BLOB),1,37) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END,CASE typeof(phase) WHEN 'text' THEN CAST(substr(CAST(phase AS BLOB),1,11) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END,drained,CASE typeof(ticket) WHEN 'text' THEN CAST(substr(CAST(ticket AS BLOB),1,4097) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END,CASE typeof(custody) WHEN 'text' THEN CAST(substr(CAST(custody AS BLOB),1,8193) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END,next_step FROM desktop_creation_clones WHERE clone_id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?,r.get(9)?))).optional()?;
     let Some((
         source,
         plan,
@@ -97,6 +99,17 @@ pub(super) fn load(db: &Connection, id: &str) -> Result<Option<Row>> {
     else {
         return Ok(None);
     };
+    let charge = charge(&source, &plan)?;
+    ensure!(
+        matches!(drained, 0 | 1)
+            && receipt.len() <= wire::REPLY_BYTES
+            && ticket.as_ref().is_none_or(|value| value.len() <= 4096)
+            && custody
+                .as_ref()
+                .is_none_or(|value| value.len() <= CUSTODY_BYTES),
+        "creation clone saved bounds changed"
+    );
+    let drained = drained == 1;
     let receipt: Receipt = serde_json::from_str(&receipt)?;
     ensure!(
         receipt.valid()
@@ -105,6 +118,15 @@ pub(super) fn load(db: &Connection, id: &str) -> Result<Option<Row>> {
             && word(receipt.phase) == phase
             && receipt.drained == drained,
         "creation receipt changed"
+    );
+    let identity: String = db.query_row(
+        "SELECT CASE typeof(creation_id) WHEN 'text' THEN CAST(substr(CAST(creation_id AS BLOB),1,37) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END FROM desktop_creation_clones WHERE clone_id=?1",
+        [id],
+        |r| r.get(0),
+    )?;
+    ensure!(
+        identity == receipt.binding.creation_id,
+        "creation clone original identity changed"
     );
     let intent = Intent {
         scope: wire::Scope {
@@ -150,7 +172,9 @@ pub(super) fn load(db: &Connection, id: &str) -> Result<Option<Row>> {
             "creation reservation changed"
         );
     }
+    ensure!(next_step <= 4, "creation clone step exceeds bound");
     Ok(Some(Row {
+        charge,
         verified,
         receipt,
         writer_epoch,
@@ -158,6 +182,188 @@ pub(super) fn load(db: &Connection, id: &str) -> Result<Option<Row>> {
         custody,
         next_step,
     }))
+}
+
+/// Exact stored original strings plus the unchanged maximum result/custody allowance.
+fn charge(source: &str, plan: &str) -> Result<i64> {
+    ensure!(
+        source.len() <= SOURCE_BYTES && plan.len() <= PLAN_BYTES,
+        "creation clone original exceeds its bound"
+    );
+    [
+        source.len(),
+        plan.len(),
+        wire::REPLY_BYTES,
+        CUSTODY_BYTES,
+        4096,
+        1024,
+    ]
+    .into_iter()
+    .try_fold(0_i64, |sum, size| {
+        sum.checked_add(i64::try_from(size).ok()?)
+            .filter(|sum| *sum <= BYTES)
+    })
+    .context("creation clone reservation exceeds its bound")
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Budget {
+    rows: i64,
+    bytes: i64,
+    active: i64,
+}
+impl Budget {
+    fn bounded(self) -> bool {
+        (0..=ROWS).contains(&self.rows)
+            && (0..=BYTES).contains(&self.bytes)
+            && (0..=ACTIVE).contains(&self.active)
+    }
+    fn read(db: &Connection) -> Result<Self> {
+        let mut query = db.prepare_cached(
+            "SELECT id,rows,bytes,active FROM desktop_creation_clone_budget LIMIT 2",
+        )?;
+        let entries = query
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    Self {
+                        rows: r.get(1)?,
+                        bytes: r.get(2)?,
+                        active: r.get(3)?,
+                    },
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        ensure!(
+            entries.len() == 1 && entries[0].0 == 1 && entries[0].1.bounded(),
+            "creation clone budget changed"
+        );
+        Ok(entries[0].1)
+    }
+    fn reserve(self, charge: i64) -> Option<Self> {
+        let next = Self {
+            rows: self.rows.checked_add(1)?,
+            bytes: self.bytes.checked_add(charge)?,
+            active: self.active.checked_add(1)?,
+        };
+        next.bounded().then_some(next)
+    }
+    fn release(self, charge: i64) -> Result<Self> {
+        let next = Self {
+            rows: self
+                .rows
+                .checked_sub(1)
+                .context("creation clone row budget underflow")?,
+            bytes: self
+                .bytes
+                .checked_sub(charge)
+                .context("creation clone byte budget underflow")?,
+            active: self
+                .active
+                .checked_sub(1)
+                .context("creation clone active budget underflow")?,
+        };
+        ensure!(next.bounded(), "creation clone budget underflow");
+        Ok(next)
+    }
+    fn store(self, tx: &Transaction<'_>, old: Self) -> Result<()> {
+        ensure!(
+            self.bounded()
+                && tx.execute(
+                    "UPDATE desktop_creation_clone_budget SET rows=?1,bytes=?2,active=?3
+             WHERE id=1 AND rows=?4 AND bytes=?5 AND active=?6",
+                    params![
+                        self.rows,
+                        self.bytes,
+                        self.active,
+                        old.rows,
+                        old.bytes,
+                        old.active
+                    ]
+                )? == 1,
+            "creation clone budget conflict"
+        );
+        Ok(())
+    }
+}
+
+/// The pending index supplies at most 33 originals, without sorting or
+/// scanning historical IDs. Every outstanding charge is checked from its row.
+fn outstanding(db: &Connection) -> Result<(Budget, u64)> {
+    let mut budget = Budget::default();
+    let mut custody = 0;
+    for id in charged_ids(db)? {
+        let row = load(db, &id)?.context("creation clone outstanding original disappeared")?;
+        ensure!(
+            !row.receipt.drained,
+            "creation clone outstanding state changed"
+        );
+        budget = budget
+            .reserve(row.charge)
+            .context("creation clone outstanding budget exceeds bound")?;
+        custody += u64::from(row.custody.is_some());
+    }
+    Ok((budget, custody))
+}
+fn live_budget(db: &Connection) -> Result<Budget> {
+    let saved = Budget::read(db)?;
+    let (actual, _) = outstanding(db)?;
+    ensure!(saved == actual, "creation clone reservation budget changed");
+    Ok(saved)
+}
+
+/// Only owned Store startup calls this, in its original IMMEDIATE transaction.
+/// Matching live accounting never touches historical rows. A legacy conversion
+/// needs complete, bounded, validated coverage and the exact old formula; no
+/// receipt or original is changed, deleted or made executable by the conversion.
+fn reconcile(tx: &Transaction<'_>) -> Result<()> {
+    let saved = Budget::read(tx)?;
+    let (actual, _) = outstanding(tx)?;
+    if saved == actual {
+        return Ok(());
+    }
+    ensure!(
+        saved.active == actual.active && saved.rows >= actual.rows && saved.bytes >= actual.bytes,
+        "creation clone legacy budget changed"
+    );
+    let mut legacy = Budget::default();
+    let mut after: Option<String> = None;
+    loop {
+        const PAGE: usize = 64;
+        let ids: Vec<String> = if let Some(after) = &after {
+            tx.prepare_cached("SELECT CASE typeof(clone_id) WHEN 'text' THEN CAST(substr(CAST(clone_id AS BLOB),1,37) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END FROM desktop_creation_clones WHERE clone_id>?1 ORDER BY clone_id LIMIT 64")?
+                .query_map([after], |r| r.get(0))?.collect::<std::result::Result<_,_>>()?
+        } else {
+            // Include a malformed NULL/empty first ID: never skip it as a cursor.
+            tx.prepare_cached("SELECT CASE typeof(clone_id) WHEN 'text' THEN CAST(substr(CAST(clone_id AS BLOB),1,37) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END FROM desktop_creation_clones ORDER BY clone_id LIMIT 64")?
+                .query_map([], |r| r.get(0))?.collect::<std::result::Result<_,_>>()?
+        };
+        for id in &ids {
+            let row = load(tx, id)?.context("creation clone legacy original disappeared")?;
+            legacy.rows = legacy
+                .rows
+                .checked_add(1)
+                .context("creation clone history row overflow")?;
+            legacy.bytes = legacy
+                .bytes
+                .checked_add(row.charge)
+                .context("creation clone history byte overflow")?;
+            legacy.active = legacy
+                .active
+                .checked_add(i64::from(!row.receipt.drained))
+                .context("creation clone history active overflow")?;
+            ensure!(
+                legacy.bounded(),
+                "creation clone legacy coverage exceeds bound"
+            );
+        }
+        if ids.len() < PAGE {
+            break;
+        }
+        after = ids.last().cloned();
+    }
+    ensure!(legacy == saved, "creation clone legacy accounting mismatch");
+    actual.store(tx, saved)
 }
 
 /// Called in the same IMMEDIATE transaction as the final opaque native permit
@@ -191,15 +397,12 @@ pub(super) fn admit(
     let encoded_receipt = encoded(&receipt, wire::REPLY_BYTES)?;
     // Reserve space for the largest later result and exact custody in advance;
     // no completed ID is evicted to make room for another effect.
-    let charge = i64::try_from(
-        verified.intent.original.len()
-            + plan.len()
-            + wire::REPLY_BYTES
-            + CUSTODY_BYTES
-            + 4096
-            + 1024,
-    )?;
-    ensure!(tx.execute("UPDATE desktop_creation_clone_budget SET rows=rows+1,bytes=bytes+?1,active=active+1 WHERE id=1 AND rows<?2 AND bytes<=?3-?1 AND active<?4",params![charge,ROWS,BYTES,ACTIVE])? == 1,"creation capacity unavailable");
+    let charge = charge(&verified.intent.original, &plan)?;
+    let budget = live_budget(tx)?;
+    budget
+        .reserve(charge)
+        .context("creation clone capacity unavailable")?
+        .store(tx, budget)?;
     tx.execute("INSERT INTO desktop_creation_clones(clone_id,creation_id,fingerprint,source,plan,receipt,writer_epoch,phase,drained,created) VALUES(?1,?2,?3,?4,?5,?6,?7,'queued',0,?8)",params![id,verified.binding.creation_id,verified.binding.fingerprint().context("invalid clone binding")?,verified.intent.original,plan,encoded_receipt,writer_epoch,at])?;
     load(tx, id)?.context("creation admission missing")
 }
@@ -210,65 +413,68 @@ pub(super) fn pending(db: &Connection) -> Result<Option<Row>> {
         .transpose()
 }
 pub(super) fn undrained(db: &Connection) -> Result<u64> {
-    let count: u64 = db.query_row(
-        "SELECT active FROM desktop_creation_clone_budget WHERE id=1",
-        [],
-        |r| r.get(0),
-    )?;
-    let actual: u64 = db.query_row(
-        "SELECT count(*) FROM desktop_creation_clones WHERE drained=0",
-        [],
-        |r| r.get(0),
-    )?;
+    let saved = Budget::read(db)?;
+    let (actual, _) = outstanding(db)?;
+    // Read-only legacy probes do not repair cumulative rows/bytes.
     ensure!(
-        count == actual && count <= ACTIVE as u64,
-        "creation resource budget changed"
+        saved.active == actual.active,
+        "creation clone resource budget changed"
     );
-    Ok(count)
+    Ok(u64::try_from(actual.active)?)
 }
 pub(super) fn summary(db: &Connection) -> Result<serde_json::Value> {
-    let undrained = undrained(db)?;
-    let (rows, unsettled, custody): (u64, u64, u64) = db.query_row(
-        "SELECT count(*),coalesce(sum(phase NOT IN ('cloned','failed')),0),coalesce(sum(drained=0 AND custody IS NOT NULL),0) FROM desktop_creation_clones",
-        [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+    let saved = Budget::read(db)?;
+    let (actual, custody) = outstanding(db)?;
     ensure!(
-        rows <= ROWS as u64 && custody <= undrained,
-        "creation summary bound changed"
+        saved.active == actual.active,
+        "creation clone resource budget changed"
     );
+    let mut query = db.prepare_cached("SELECT CASE typeof(phase) WHEN 'text' THEN CAST(substr(CAST(phase AS BLOB),1,10) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END,drained FROM desktop_creation_clones ORDER BY clone_id LIMIT 4097")?;
+    let mut rows = query.query([])?;
+    let mut count = 0_u64;
+    let mut unsettled = 0_u64;
+    while let Some(row) = rows.next()? {
+        count += 1;
+        if count > ROWS as u64 {
+            break;
+        }
+        let phase: String = row.get(0)?;
+        let drained: i64 = row.get(1)?;
+        ensure!(
+            matches!(
+                phase.as_str(),
+                "queued" | "running" | "unknown" | "failed" | "cloned" | "reserved"
+            ) && matches!(drained, 0 | 1),
+            "creation clone history metadata changed"
+        );
+        unsettled += u64::from(!matches!(phase.as_str(), "cloned" | "failed"));
+    }
+    let complete = count <= ROWS as u64;
     Ok(
-        serde_json::json!({"profile":wire::PROFILE,"rows":rows,"unsettled":unsettled,"undrained":undrained,
-        "original_custody":custody,"display_only":true,"authority":false}),
+        serde_json::json!({"profile":wire::PROFILE,"rows":complete.then_some(count),"unsettled":complete.then_some(unsettled),"history_complete":complete,"undrained":actual.active,"original_custody":custody,"display_only":true,"authority":false}),
     )
 }
 pub(super) fn charged_ids(db: &Connection) -> Result<Vec<String>> {
-    let mut query = db.prepare(
-        "SELECT clone_id FROM desktop_creation_clones WHERE drained=0 ORDER BY clone_id LIMIT 33",
-    )?;
-    let rows = query.query_map([], |r| r.get(0))?;
-    let ids: Vec<String> = rows.collect::<std::result::Result<_, _>>()?;
+    let mut query = db.prepare_cached("SELECT CASE typeof(clone_id) WHEN 'text' THEN CAST(substr(CAST(clone_id AS BLOB),1,37) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END FROM desktop_creation_clones INDEXED BY desktop_creation_clones_pending WHERE drained=0 ORDER BY phase,created,clone_id LIMIT 33")?;
+    let ids = query
+        .query_map([], |r| r.get(0))?
+        .collect::<std::result::Result<Vec<String>, _>>()?;
     ensure!(
         ids.len() <= ACTIVE as usize,
-        "creation active bound changed"
+        "creation clone active bound changed"
     );
     Ok(ids)
 }
 
 pub(super) fn custody_pending(db: &Connection, after: &str) -> Result<Option<Row>> {
-    let id:Option<String>=db.query_row("SELECT clone_id FROM desktop_creation_clones WHERE drained=0 AND custody IS NOT NULL AND clone_id>?1 ORDER BY clone_id LIMIT 1",[after],|r|r.get(0)).optional()?;
+    let id:Option<String>=db.query_row("SELECT CASE typeof(clone_id) WHEN 'text' THEN CAST(substr(CAST(clone_id AS BLOB),1,37) AS TEXT) WHEN 'null' THEN NULL ELSE x'' END FROM desktop_creation_clones INDEXED BY desktop_creation_clones_custody WHERE drained=0 AND custody IS NOT NULL AND clone_id>?1 ORDER BY clone_id LIMIT 1",[after],|r|r.get(0)).optional()?;
     id.map(|id| load(db, &id)?.context("creation disappeared"))
         .transpose()
 }
 pub(super) fn startup(db: &mut Connection) -> Result<()> {
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let ids: Vec<String> = {
-        let mut query=tx.prepare("SELECT clone_id FROM desktop_creation_clones WHERE drained=0 ORDER BY clone_id LIMIT 33")?;
-        let rows = query.query_map([], |r| r.get(0))?;
-        rows.collect::<std::result::Result<_, _>>()?
-    };
-    ensure!(
-        ids.len() <= ACTIVE as usize,
-        "creation active bound changed"
-    );
+    reconcile(&tx)?;
+    let ids = charged_ids(&tx)?;
     for id in ids {
         let row = load(&tx, &id)?.context("creation disappeared")?;
         if row.receipt.phase != Phase::Unknown {
@@ -295,7 +501,8 @@ pub(super) fn advance(tx: &Transaction<'_>, row: &Row, step: usize) -> Result<()
 
 fn state(tx: &Transaction<'_>, old: &Row, next: &Receipt) -> Result<()> {
     ensure!(
-        next.valid()
+        !old.receipt.drained
+            && next.valid()
             && next.binding == old.receipt.binding
             && next.admission_epoch == old.receipt.admission_epoch
             && next.revision
@@ -306,15 +513,14 @@ fn state(tx: &Transaction<'_>, old: &Row, next: &Receipt) -> Result<()> {
                     .context("creation revision exhausted")?,
         "creation state changed"
     );
+    let budget = live_budget(tx)?;
+    let released = next
+        .drained
+        .then(|| budget.release(old.charge))
+        .transpose()?;
     ensure!(tx.execute("UPDATE desktop_creation_clones SET receipt=?1,phase=?2,drained=?3 WHERE clone_id=?4 AND fingerprint=?5 AND receipt=?6",params![encoded(next,wire::REPLY_BYTES)?,word(next.phase),next.drained,next.binding.clone_request_id,next.binding.fingerprint().context("invalid clone binding")?,encoded(&old.receipt,wire::REPLY_BYTES)?])? == 1,"creation state conflict");
-    if next.drained && !old.receipt.drained {
-        ensure!(
-            tx.execute(
-                "UPDATE desktop_creation_clone_budget SET active=active-1 WHERE id=1 AND active>0",
-                []
-            )? == 1,
-            "creation budget changed"
-        );
+    if let Some(released) = released {
+        released.store(tx, budget)?;
     }
     Ok(())
 }

@@ -6355,6 +6355,23 @@ unknown-result handling.
 Ordinary refreshes preserve the selected mode. Generic approval policy requests
 remain refused; ownership and each effect require their own authenticated grants.
 
+Operation-ledger rows and bytes reserve outstanding original work, not every
+historical receipt. The first durable physical drain returns that original's
+reservation exactly once, including an Unknown result. Its outcome, UUID,
+source, custody records and lookup history remain retained; returned capacity
+never grants replay. A two-child operation keeps its full reservation between
+children. Task-message staging inputs retain their separate charge until their
+existing exact removal/review rules release it; creation scheduling slots keep
+their separate predecessor protections.
+
+Owned startup may convert earlier cumulative accounting only after complete,
+bounded validation of its exact original charge formula and active roster.
+Corrupt, mismatched or incompletely covered accounting refuses admission; it is
+never reset or approximated. Status covers at most 4096 historical metadata rows
+plus one overflow sentinel. A larger history reports `history_complete:false`
+and null historical `rows`/`unsettled`, with null propagated to the aggregate.
+The bounded outstanding roster and physical custody remain checked separately.
+
 Background mode also owns one presence sampler/writer outside the actor. It
 samples every two seconds and uses the existing `desktop-presence.json` format.
 It writes on a 30-second heartbeat, a lock change or a return from at least

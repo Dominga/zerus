@@ -74,6 +74,18 @@ function ordered(map: Map<string, ActivityEvent>): ActivityEvent[] {
   return list;
 }
 
+/**
+ * Task #437 (owner, 2026-11-09): a keep-warm turn never shows in Activity,
+ * history, a notification, an unread reply or a last-message preview. The host
+ * marks it (`turn_origin`/`origin`); a history written before the marks keeps
+ * the ping's envelope in the detail.
+ */
+export function keepWarmEvent(event: ActivityEvent): boolean {
+  const e = event as { turn_origin?: unknown; origin?: unknown; detail?: unknown };
+  if (e.turn_origin === "keep_warm" || e.origin === "cache_keepalive" || e.origin === "keep_warm") return true;
+  return typeof e.detail === "string" && e.detail.startsWith("<zerus-cache-keepalive>");
+}
+
 export function createActivity(port: ActivityPort) {
   const [target, setTarget] = createSignal<FollowTarget | undefined>();
   const [events, setEvents] = createSignal<readonly ActivityEvent[]>([]);
@@ -276,7 +288,11 @@ export function createActivity(port: ActivityPort) {
         switch (out.kind) {
           case "events": {
             const { events: list } = payloadEvents(out.payload);
-            for (const e of list) { byKey.set(eventKey(e), e); resuming?.incoming.set(eventKey(e), e); }
+            for (const e of list) {
+              if (keepWarmEvent(e)) continue;
+              byKey.set(eventKey(e), e);
+              resuming?.incoming.set(eventKey(e), e);
+            }
             if (resuming) { resuming.page = true; settleResume(); }
             changed = true;
             older = true;
@@ -284,7 +300,8 @@ export function createActivity(port: ActivityPort) {
             break;
           }
           case "replace": {
-            const { events: list } = payloadEvents(out.payload);
+            const { events: all } = payloadEvents(out.payload);
+            const list = all.filter((e) => !keepWarmEvent(e));
             const incoming = new Map(list.map((e) => [eventKey(e), e]));
             if (resuming) {
               resuming.incoming = incoming;
@@ -301,6 +318,7 @@ export function createActivity(port: ActivityPort) {
           case "event": {
             const p = (out.payload ?? {}) as { id?: string; rev?: number; event?: ActivityEvent };
             if (!p.event || !p.id) break;
+            if (keepWarmEvent(p.event)) break;
             const rev = typeof p.rev === "number" ? p.rev : 0;
             if ((revs.get(p.id) ?? -1) >= rev) break;
             revs.set(p.id, rev);

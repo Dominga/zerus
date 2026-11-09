@@ -567,4 +567,32 @@ describe("a follow that never answers (zerus-bz54l)", () => {
       store.follow(undefined);
     } finally { vi.useRealTimers(); }
   });
+
+  // Task #437 (owner, 2026-11-09): the keep-warm ping, its "ok" reply and its
+  // notification never render as Activity; a history written before the marks
+  // is read by the ping's envelope in the detail.
+  it("never shows a keep-warm ping, its reply or its notification", () => {
+    const { store } = setup();
+    store.follow({ ...target, conversationId: "conversation" });
+    store.applyActivity([out("events", { events: [
+      ev(10, "UserPromptSubmit", { detail: "Fix it" }),
+      ev(11, "Stop", { detail: "Fixed" }),
+      ev(12, "UserPromptSubmit", { origin: "cache_keepalive", turn_origin: "keep_warm", detail: "Cache warmed" }),
+      ev(13, "AgentMessage", { turn_origin: "keep_warm", detail: "ok" }),
+      ev(14, "Notification", { turn_origin: "keep_warm", detail: "Agent notification" }),
+      ev(15, "UserPromptSubmit", { detail: "<zerus-cache-keepalive>Reply with just: ok</zerus-cache-keepalive>" }),
+      ev(16, "AgentMessage", { detail: "an old keep-warm reply" }),
+    ], cursor: 16 })]);
+    expect(store.events().map((e) => e.seq)).toEqual([10, 11, 16]);
+    // A replaced window filters the same way, and a single event never inserts
+    // one.
+    store.applyActivity([out("replace", { events: [
+      ev(20, "Stop", { turn_origin: "keep_warm", detail: "ok" }),
+      ev(21, "AgentMessage", { detail: "Kept" }),
+    ], cursor: 21 })]);
+    expect(store.events().map((e) => e.seq)).toEqual([21]);
+    store.applyActivity([out("event", { id: "i22", rev: 1, event: ev(22, "AgentMessage", { turn_origin: "keep_warm", detail: "ok" }) })]);
+    expect(store.events().map((e) => e.seq)).toEqual([21]);
+    store.follow(undefined);
+  });
 });

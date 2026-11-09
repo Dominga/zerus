@@ -21,14 +21,19 @@ struct ReviewDialogs: ViewModifier {
             }
             .alert("Review delivery", isPresented: present($reviewOutgoing), presenting: reviewOutgoing) { message in
                 let flight = model.receiptFlights.contains("outgoing:\(message.requestId)")
-                Button("Prepare again") { model.prepareOutgoing(message) }.disabled(flight)
+                if message.status == "failed" {
+                    Button("Prepare again") { model.prepareOutgoing(message) }.disabled(flight)
+                }
                 Button("Check receipt") { Task { await model.checkOutgoing(message) } }.disabled(flight)
+                if message.status == "uncertain" && !message.deliveryDismissed {
+                    Button("Dismiss warning on this phone") { Task { await model.dismissOutgoing(message) } }
+                }
                 Button("Cancel", role: .cancel) {}
             } message: { message in
                 Text((message.status == "uncertain"
-                      ? "This message may already have reached \(message.target.session). Check its receipt and conversation before preparing another send."
+                      ? "This message may already have reached \(message.target.session). \(message.deliveryDismissed ? OutgoingRecoveryPolicies.dismissedExplanation : OutgoingRecoveryPolicies.explanation) Your current composition stays unchanged."
                       : "This message was not accepted. Review it before trying again.") +
-                     "\n\n\(message.text)\n\nYour current composition is kept in Saved drafts. Preparing again does not send the message.")
+                     "\n\n\(message.text)" + (message.status == "failed" ? "\n\nYour current composition is kept in Saved drafts. Preparing again does not send the message." : ""))
             }
             .alert("Discard saved draft?", isPresented: present($discard), presenting: discard) { draft in
                 Button("Discard", role: .destructive) { model.discard(draft) }

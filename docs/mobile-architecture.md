@@ -927,6 +927,19 @@ Receipt updates and delayed writes must preserve
 newer composition. Only unsent drafts and unresolved deliveries appear in Drafts;
 successful delivery status belongs to the message in its conversation.
 
+An unconfirmed outgoing message initially blocks another send to the same
+conversation. Dismiss warning explicitly saves a device-local choice to allow a
+new message while preserving the original request, unknown outcome, attachments
+and receipt lookup. It neither cancels nor reposts the original message, and it
+does not replace the current composition. This choice survives restart; a later
+exact receipt can still confirm the original. An active send cannot be dismissed.
+Prepare again is available only for a confirmed failed message.
+
+Android bounds ordinary send preparation and receipt acquisition to 45 seconds.
+Saving an acquired result finishes outside that transport deadline, so a slow
+accepted write cannot turn a confirmed delivery back into an unknown outcome.
+A timed-out manual receipt check reports that the original remains recoverable.
+
 The multiline composer keeps one editor state for text, selection and IME
 composition across polling, expansion and sending. Sending brings the new local
 message into view. Incoming updates follow the tail only while the user is

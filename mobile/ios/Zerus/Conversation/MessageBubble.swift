@@ -175,11 +175,19 @@ struct MessageBubble: View {
         let flight = app.conversation.receiptFlights.contains("outgoing:\(message.requestId)")
         return VStack(alignment: .leading, spacing: 4) {
             if !message.error.isEmpty { Text(message.error).font(.footnote).foregroundStyle(Theme.amber) }
+            if message.status == "uncertain" {
+                Text(message.deliveryDismissed ? OutgoingRecoveryPolicies.dismissedExplanation : OutgoingRecoveryPolicies.explanation)
+                    .font(.caption).foregroundStyle(Theme.muted)
+            }
             HStack {
                 if message.status == "uncertain" {
                     Button("Check delivery") { Task { await app.conversation.checkOutgoing(message) } }.disabled(flight)
                 }
                 Button("Review") { onReviewOutgoing(message) }.disabled(flight)
+                if message.status == "uncertain" && !message.deliveryDismissed {
+                    Button("Dismiss warning") { Task { await app.conversation.dismissOutgoing(message) } }
+                        .accessibilityHint(OutgoingRecoveryPolicies.explanation)
+                }
             }
             .buttonStyle(.borderless)
             .font(.footnote.weight(.semibold))

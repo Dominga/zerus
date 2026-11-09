@@ -161,6 +161,11 @@ fn git(folder: &Path, args: &[&str]) -> Option<String> {
 /// repository of its own (a folder inside another repository is that
 /// repository's work, not a project Zerus profiles here).
 pub(crate) fn profile(folder: &Path) -> Option<ProjectProfile> {
+    // Task #393: a team with no folder is no project; a blank path would start
+    // `git -C "" rev-parse --show-toplevel` in the process's own folder.
+    if folder.as_os_str().is_empty() || folder.to_str().is_some_and(|path| path.trim().is_empty()) {
+        return None;
+    }
     // A team's folder is the repository's root (a checkout or a worktree); a
     // plain subfolder of a repository is not a project of its own.
     let top = git(folder, &["rev-parse", "--show-toplevel"])?;

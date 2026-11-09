@@ -322,11 +322,37 @@ fn commit(mut write: Write<'_>) -> anyhow::Result<()> {
             // transaction does nothing more.
             Ok(()) => {
                 write.hold.outcome = "commit";
+                // Task #393: a write that leaves a big log behind checkpoints
+                // it into the store and truncates the file, so the next read
+                // opens a small WAL instead of a 64 MB one.
+                checkpoint_large_wal(&write.transaction);
                 return Ok(());
             }
             Err(error) if busy(&error) && Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
             Err(error) => return Err(busy_error(error)),
         }
+    }
+}
+
+/// Task #393 (owner, 2026-11-08): after a large write the WAL is checkpointed
+/// and, when the file is big, truncated. A reader may hold the log: PASSIVE
+/// copies what it can, and TRUNCATE only resets the file when no reader stands
+/// in the way (a busy outcome leaves it for a later write).
+fn checkpoint_large_wal(db: &Connection) {
+    const LARGE: u64 = 8 * 1024 * 1024;
+    let Ok(path) = db.query_row("SELECT file FROM pragma_database_list WHERE name='main'", [], |row| row.get::<_, String>(0)) else {
+        return;
+    };
+    if path.is_empty() {
+        return;
+    }
+    let wal = std::path::PathBuf::from(format!("{path}-wal"));
+    if !std::fs::metadata(&wal).map(|meta| meta.len() >= LARGE).unwrap_or(false) {
+        return;
+    }
+    let _ = db.execute_batch("PRAGMA wal_checkpoint(PASSIVE);");
+    if std::fs::metadata(&wal).map(|meta| meta.len() >= LARGE).unwrap_or(false) {
+        let _ = db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
     }
 }
 
@@ -724,13 +750,16 @@ impl Store {
 
     /// Task 133: the latest pulse of each member, newest first, unexpired.
     pub(crate) fn latest_pulses(&self, team: &str, now: f64) -> Vec<super::pulses::Pulse> {
-        self.pulse_rows(
-            "SELECT id,team,member,task,done,next,blocked,at,source FROM working_pulses AS p WHERE team=?1
-                AND (expires IS NULL OR expires>?2)
-                AND at=(SELECT MAX(at) FROM working_pulses AS q WHERE q.team=p.team AND q.member=p.member AND (q.expires IS NULL OR q.expires>?2))
-                ORDER BY at DESC LIMIT 200",
+        // Task #393 (owner, 2026-11-08): one ordered scan, newest first, then
+        // the newest row of each member. The correlated subquery read the table
+        // once per member and made a status wait seconds on a large store.
+        let rows = self.pulse_rows(
+            "SELECT id,team,member,task,done,next,blocked,at,source FROM working_pulses
+                WHERE team=?1 AND (expires IS NULL OR expires>?2) ORDER BY at DESC LIMIT 2000",
             &[&team, &now],
-        )
+        );
+        let mut seen = std::collections::HashSet::new();
+        rows.into_iter().filter(|pulse| seen.insert(pulse.member.clone())).collect()
     }
 
     /// Task 133: a team's pulses, newest first, of one member or all.
@@ -1989,6 +2018,27 @@ mod tests {
             store.create(&format!("11111111-1111-4111-8111-{index:012}"), &json!({"n":index}), team, vec![]).unwrap();
         }
         store
+    }
+
+    /// Task #393 (owner, 2026-11-08): a large write checkpoints the log into
+    /// the store and truncates it, so the next read opens a small WAL.
+    #[test]
+    fn a_large_write_checkpoints_and_truncates_the_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("teams.sqlite3");
+        let mut store = Store::open_journal(&path, true, Journal::Wal).unwrap();
+        let team = Team {
+            id: "big".into(),
+            name: "Big".into(),
+            lead: "lead".into(),
+            goal: "g".repeat(12 * 1024 * 1024),
+            status: TeamStatus::Running,
+            ..Default::default()
+        };
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, Vec::new()).unwrap();
+        let wal = std::path::PathBuf::from(format!("{}-wal", path.display()));
+        let size = std::fs::metadata(&wal).map(|meta| meta.len()).unwrap_or(0);
+        assert!(size < 1024 * 1024, "the log is {size} bytes after a large write");
     }
 
     /// Task 105 (ui1, 2026-11-06): `hgs team list` waited behind a writer and

@@ -77,6 +77,21 @@ pub(crate) fn landing(team: &Team) -> Value {
     let head = integration_head(team).unwrap_or_default();
     let mut landed = Vec::new();
     let mut unlanded = Vec::new();
+    // Task #393: the line's commits in one read. A status or an inbox over
+    // hundreds of accepted tasks names each task's commit and checks it
+    // against this set, instead of starting Git once per task.
+    let line_commits: Option<std::collections::HashSet<String>> = if folder.is_empty() {
+        None
+    } else {
+        super::dispatcher::git_at(folder, &["rev-list", "HEAD"])
+            .map(|text| text.lines().map(str::to_owned).collect())
+    };
+    let on_the_line = |commit: &str| -> bool {
+        match &line_commits {
+            Some(set) => set.contains(commit),
+            None => !commit.is_empty() && ancestry(folder, commit) == Ancestry::Yes,
+        }
+    };
     for task in team.tasks.iter().filter(|task| task.status == TaskStatus::Accepted || task.merge.is_some()) {
         let commit = task
             .attempts
@@ -86,12 +101,19 @@ pub(crate) fn landing(team: &Team) -> Value {
             .map(|attempt| attempt.folder_head.clone())
             .unwrap_or_default();
         let merged = task.merge.as_ref().map(|entry| entry.merged.clone()).unwrap_or_default();
-        // The landed commit is the merge the queue kept, or (a task accepted
-        // before the queue, or outside it) its own commit once it is on the line.
-        let on_line = if !merged.is_empty() {
-            !folder.is_empty() && ancestry(folder, &merged) == Ancestry::Yes
+        // Task #393: a landing the queue recorded is on the line already (its
+        // merged commit is what the queue kept); the finished task is skipped
+        // instead of read from Git again. The landed commit is the merge the
+        // queue kept, or (a task accepted before the queue, or outside it) its
+        // own commit once it is on the line.
+        let recorded = !merged.is_empty()
+            && task.merge.as_ref().is_some_and(|entry| matches!(entry.state.as_str(), "landed" | "merged" | "accepted"));
+        let on_line = if recorded {
+            true
+        } else if !merged.is_empty() {
+            on_the_line(&merged)
         } else {
-            !commit.is_empty() && !folder.is_empty() && ancestry(folder, &commit) == Ancestry::Yes
+            on_the_line(&commit)
         };
         if on_line {
             landed.push(json!({"task":task.id,"commit":if merged.is_empty() { commit.clone() } else { merged.clone() }}));
@@ -269,6 +291,10 @@ fn git(folder: &str, args: &[&str]) -> super::templates::Outcome {
 
 /// A git read: its stdout alone (warnings on stderr say nothing), or None.
 fn git_text(folder: &str, args: &[&str]) -> Option<String> {
+    // Task #393: a blank folder is no repository; no `git -C ""`.
+    if folder.trim().is_empty() {
+        return None;
+    }
     let hooks = format!("core.hooksPath={}", if cfg!(windows) { "NUL" } else { "/dev/null" });
     let output = Command::new("git")
         .arg("-C")
@@ -764,7 +790,37 @@ enum Ancestry {
 }
 
 fn ancestry(folder: &str, commit: &str) -> Ancestry {
-    ancestry_at(folder, commit, "HEAD")
+    // Task #393: the answers a process already read, per (folder, commit,
+    // HEAD): a status or an inbox asks the same line for every accepted task,
+    // and the worker's next tick asks again while HEAD stands.
+    if folder.trim().is_empty() || commit.is_empty() {
+        return Ancestry::Unknown;
+    }
+    let key = (folder.to_owned(), commit.to_owned(), super::dispatcher::head_key(folder));
+    if let Ok(cache) = ancestry_cache().lock() {
+        if let Some(answer) = cache.get(&key) {
+            return *answer;
+        }
+    }
+    let answer = ancestry_at(folder, commit, "HEAD");
+    // Unknown is not remembered: a transient failure is no answer.
+    if answer != Ancestry::Unknown {
+        if let Ok(mut cache) = ancestry_cache().lock() {
+            if cache.len() > 4096 {
+                cache.clear();
+            }
+            cache.insert(key, answer);
+        }
+    }
+    answer
+}
+
+type AncestryKey = (String, String, String);
+
+fn ancestry_cache() -> &'static std::sync::Mutex<std::collections::HashMap<AncestryKey, Ancestry>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<AncestryKey, Ancestry>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
 fn ancestry_at(folder: &str, commit: &str, head: &str) -> Ancestry {

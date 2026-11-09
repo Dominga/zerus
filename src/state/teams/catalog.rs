@@ -267,6 +267,7 @@ pub(crate) fn default_planning_rules() -> String {
         "(22) Offer a phase split above 25 tasks.",
         "(23) No starved notices before a phase is approved; idleness only when the lead can act.",
         "(24) The roster and member limit change only on the owner's explicit word (U26); otherwise the lead proposes.",
+        "(25) Above about 8 members or 20 open tasks keep two reviewers and two mergers and a sub-lead whose members report to it, and give tasks a review pipeline (\"docs\": review, auto; \"code\": review, test, lead) so the lead decides only returned work.",
     ]
     .join("\n")
 }

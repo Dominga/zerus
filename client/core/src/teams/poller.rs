@@ -2,7 +2,7 @@
 //! the UI thread, one at a time, and hands every update to the client as a
 //! [`Change::Teams`]. Following, Load older, spans and the profile wake it.
 //! Dropping the poller stops it after the read in flight.
-use super::model::{TeamsFollow, TeamsModel, TeamsUpdate};
+use super::model::{Sent, TeamsFollow, TeamsModel, TeamsUpdate};
 use super::read::TeamRead;
 use crate::reads::ReadError;
 use crate::{Change, ComputerId};
@@ -133,11 +133,12 @@ impl Drop for TeamsPoller {
     }
 }
 
-fn change(computer: &ComputerId, key: String, update: TeamsUpdate) -> Change {
+fn change(computer: &ComputerId, sent: Sent) -> Change {
     Change::Teams {
         computer: computer.clone(),
-        key,
-        update,
+        key: sent.key,
+        update: sent.update,
+        payload: sent.payload,
     }
 }
 
@@ -166,7 +167,7 @@ fn run(shared: &Shared, computer: &ComputerId, runner: &Runner, emit: &Emit) {
             }
         };
         for (key, update) in outbox {
-            emit(change(computer, key, update));
+            emit(change(computer, Sent::new(key, update)));
         }
         let Some(read) = read else { continue };
         let reply = runner(&read);
@@ -175,10 +176,10 @@ fn run(shared: &Shared, computer: &ComputerId, runner: &Runner, emit: &Emit) {
             if state.stop {
                 return;
             }
-            state.model.apply(&read, reply, Instant::now())
+            state.model.apply_sent(&read, reply, Instant::now())
         };
-        for (key, update) in updates {
-            emit(change(computer, key, update));
+        for sent in updates {
+            emit(change(computer, sent));
         }
     }
 }

@@ -421,6 +421,28 @@ export function WaitingPage() {
   );
 }
 
+/** The banner's head and rows (task 429): folded, the head names its first item;
+ * expanded, the head is only the title and the count of the rows below, so no
+ * item is drawn twice and the count always equals those rows. */
+export function WaitingBannerView(props: { items: readonly TeamWaitingItem[]; total?: number; open: boolean; onToggle: () => void; onOpenList: () => void }) {
+  const rows = () => props.open ? props.items.slice(0, BANNER_ROWS) : props.items;
+  return <>
+    <div class="team-waiting-banner-head">
+      <Icon name="bell" size={14} />
+      <b>{tr("%1 wait for you", rows().length)}</b>
+      {/* Task 304 (hgs #286): the lead-changes digest has its own row; the header does not repeat it.
+          Task 429: the head names that item only while the list is folded. */}
+      <Show when={!props.open}><span class="dim ell">{bannerHeadItem(props.items)?.title ?? ""}</span></Show>
+      <span class="grow" />
+      <button class="btn small ghost" onClick={props.onToggle}>{props.open ? tr("Hide") : tr("Show all")}</button>
+    </div>
+    <Show when={props.open}>
+      <For each={rows()}>{(item) => <Row item={item} compact />}</For>
+      <button class="btn small ghost" onClick={props.onOpenList}>{tr("Open the waiting list (%1)", props.total ?? props.items.length)}</button>
+    </Show>
+  </>;
+}
+
 /** The Team tab's banner: one item is one line; several fold into a count that opens to the newest rows. */
 export function WaitingBanner() {
   onCleanup(showWaiting());
@@ -431,18 +453,7 @@ export function WaitingBanner() {
     <Show when={items().length > 0}>
       <div class="team-waiting-banner" role="region" aria-label={tr("Waiting for you")}>
         <Show when={items().length > 1} fallback={<Row item={items()[0]} compact />}>
-          <div class="team-waiting-banner-head">
-            <Icon name="bell" size={14} />
-            <b>{tr("%1 wait for you", items().length)}</b>
-            {/* Task 304 (hgs #286): the lead-changes digest has its own row; the header does not repeat it. */}
-            <span class="dim ell">{bannerHeadItem(items())?.title ?? ""}</span>
-            <span class="grow" />
-            <button class="btn small ghost" onClick={() => setOpen(!open())}>{open() ? tr("Hide") : tr("Show all")}</button>
-          </div>
-          <Show when={open()}>
-            <For each={items().slice(0, BANNER_ROWS)}>{(item) => <Row item={item} compact />}</For>
-            <button class="btn small ghost" onClick={() => setPage("waiting")}>{tr("Open the waiting list (%1)", waiting()?.total ?? items().length)}</button>
-          </Show>
+          <WaitingBannerView items={items()} total={waiting()?.total} open={open()} onToggle={() => setOpen(!open())} onOpenList={() => setPage("waiting")} />
         </Show>
       </div>
     </Show>

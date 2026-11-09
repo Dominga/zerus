@@ -20,6 +20,8 @@ const clean = (value: string | null | undefined): string =>
 
 export function createAppLog(port: AppLogPort, everyMs = LOG_REFRESH_MS) {
   const [latest, setLatest] = createSignal("");
+  /** Task 424: the level of the recorded line; an error draws it in a muted red. */
+  const [level, setLevel] = createSignal("notice");
   let timer: ReturnType<typeof setInterval> | undefined;
   /** Keeps the last line when the read answers nothing (no log yet). */
   const show = (line: string | null | undefined) => {
@@ -34,6 +36,7 @@ export function createAppLog(port: AppLogPort, everyMs = LOG_REFRESH_MS) {
     const line = clean(text);
     if (!line) return;
     setLatest(line);
+    setLevel(level);
     void port.write(level, line).catch(() => { /* the log is not a feature gate */ });
   };
   const open = () => { void port.open().catch(() => { /* the system viewer is best-effort */ }); };
@@ -46,7 +49,7 @@ export function createAppLog(port: AppLogPort, everyMs = LOG_REFRESH_MS) {
     if (timer !== undefined) clearInterval(timer);
     timer = undefined;
   };
-  return { latest, record, open, refresh, start, stop };
+  return { latest, level, record, open, refresh, start, stop };
 }
 
 export const appLog = createAppLog({ latest: logLatest, write: logWrite, open: openLogFile });

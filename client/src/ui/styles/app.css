@@ -20,10 +20,15 @@
     background: var(--z-color-field, var(--z-color-page)); border: 1px solid var(--z-color-divider); color: var(--z-color-muted); font-size: 12px; text-align: left; }
   .tb-search:hover { border-color: var(--z-color-muted); }
   .tb-search-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* Task 409: the client log's last line beside the search; a click opens the log. */
+  /* Task 409: the client log's last line beside the search; a click opens the log.
+     Task 424: it sits in the skin's faintest readable grey (the dim token, and the
+     icon inherits it), brightens to the normal text colour only on hover or focus,
+     and an error line is a muted red instead of the grey. */
   .tb-log { flex: 0 1 auto; min-width: 0; max-width: 360px; height: 28px; display: flex; align-items: center; gap: 6px; padding: 0 8px; border-radius: 7px;
-    color: var(--z-color-muted); font-size: 11.5px; text-align: left; }
-  .tb-log:hover { background: var(--z-color-hover); color: var(--z-color-text); }
+    color: var(--z-color-dim); font-size: 11.5px; text-align: left; }
+  .tb-log:hover, .tb-log:focus-visible { background: var(--z-color-hover); color: var(--z-color-text); }
+  .tb-log.tb-log-error { color: color-mix(in srgb, var(--z-color-danger) 60%, var(--z-color-dim)); }
+  .tb-log.tb-log-error:hover, .tb-log.tb-log-error:focus-visible { color: var(--z-color-danger); }
   .tb-log-text { min-width: 0; }
   .tb-status { gap: 6px; }
   .titlebar .desktop-service-status { max-width: 190px; height: 20px; }

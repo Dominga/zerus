@@ -173,6 +173,18 @@ describe("the dense New session view (task #368)", () => {
     expect(html).toContain("ns-body");
   });
 
+  it("restores the Source switch and the permission line in the dense layout (task #433)", () => {
+    const value = prepare("dense");
+    const account = value.accounts[value.account];
+    (account as unknown as { profile?: unknown }).profile = { permission_label: { source: "account", text: "Ask" }, permission_default: false, permission_hint: "From the account" };
+    const html = plain(renderDialog());
+    expect(html).toContain('data-source="folder"');
+    expect(html).toContain('data-source="repository"');
+    expect(html).toContain('data-perm');
+    expect(html).toContain("Permissions: Ask");
+    expect(html).toContain("Change it on the Accounts screen.");
+  });
+
   it("opens a dense menu with its header, a check at the choice, an unavailable row with its reason and the view's action", () => {
     prepare("dense");
     const html = plain(renderMenu());

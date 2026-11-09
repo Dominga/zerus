@@ -11,6 +11,8 @@ const fixture = vi.hoisted(() => ({
   write: (_state: NewSessionState | undefined) => {},
   refresh: () => {},
 }));
+// Task #433: this file covers the classic layout; the skin now defaults to the dense view.
+vi.mock("../../skin/runtime", () => ({ skin: () => ({ layout: { "new-session": "classic" }, appearance: "dark" }) }));
 vi.mock("../../store/newSession", async () => {
   const { createSignal } = await import("solid-js");
   const [state, setState] = createSignal<NewSessionState>();

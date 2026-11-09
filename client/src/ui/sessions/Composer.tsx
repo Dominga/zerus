@@ -39,11 +39,11 @@ import type { ReferenceTarget } from "./FileReferenceDialog";
 import { sameDraft, styleOfPlatform, withReference, type DraftBinding } from "./file-reference";
 
 // The message composer (Qt MessageComposer, 300-366), after the mockup's
-// structure: an edge grip, the 34 px toolbar, the editor (76-720 px) and the
+// structure: a top-edge grip, the 34 px toolbar, the editor (76-720 px) and the
 // action row. The toolbar keeps Qt's slots (ComposerToolbar.h, Slot): the
 // leading zone holds Attachments, the voice slot (Task 13), Mark as read,
-// Latest, the compaction indicator and Cancel send; the grip fills the space
-// between; the trailing zone holds Recovery, Usage, Cache and Context. The action
+// Latest, the compaction indicator and Cancel send; a plain spacer keeps the
+// trailing zone right; it holds Recovery, Usage, Cache and Context. The action
 // row holds Attach, Reference file, the status line, Refresh, Allow retry,
 // the model button, Stop and Send (364). The store (store/composer.ts) owns
 // the text and the locks; Rust owns the draft, the attachments and the send.
@@ -75,13 +75,13 @@ const CANCEL_LOCKED = () => tr("The desktop service is finishing this send; it c
 const ATTACH = () => tr("Attach files, paste an image, or drop files onto this session");
 
 /**
- * ComposerResizeHandle: the free space between the leading and trailing chips
- * is the drag area with the grip centred in it; the "edge" variant is an
- * invisible strip along the top border. Drag up to grow the field,
- * double-click or Home to reset, Up and Down resize by 20 px. The field never
- * grows past the room above it: Activity keeps at least 120 px.
+ * ComposerResizeHandle (task 422): the height drag lives on the composer's top
+ * border only - an invisible 6 px strip with a thin grip centred on the border
+ * line, shown on hover, focus and drag. Drag up to grow the field, double-click
+ * or Home to reset, Up and Down resize by 20 px (the handle is focusable). The
+ * field never grows past the room above it: Activity keeps at least 120 px.
  */
-function ResizeHandle(props: { edge?: boolean; hidden?: boolean }) {
+export function ResizeHandle(props: { hidden?: boolean }) {
   const [dragging, setDragging] = createSignal(false);
   const limit = (el: HTMLElement) => {
     const pane = el.closest(".activity-wrap")?.getBoundingClientRect();
@@ -111,10 +111,10 @@ function ResizeHandle(props: { edge?: boolean; hidden?: boolean }) {
     e.preventDefault();
   };
   return (
-    <div class="cmp-resize" classList={{ dragging: dragging(), edge: props.edge, gap: !props.edge }} hidden={props.hidden} tabindex={props.edge ? -1 : 0} role="separator" aria-orientation="horizontal"
+    <div class="cmp-resize edge" classList={{ dragging: dragging() }} hidden={props.hidden} tabindex={0} role="separator" aria-orientation="horizontal"
       aria-label={tr("Message field height")} aria-valuemin={EDITOR.min} aria-valuemax={EDITOR.max} aria-valuenow={editorHeight()}
       onPointerDown={down} onDblClick={resetEditorHeight} onKeyDown={key}>
-      <Show when={!props.edge}><i class="cmp-grip" /></Show>
+      <i class="cmp-grip" />
     </div>
   );
 }
@@ -285,7 +285,7 @@ export function Composer() {
   const input = () => v()?.input_visible !== false;
   return (
     <div class="composer" ref={root} data-shortcut-context="composer" classList={{ blocked: !!v()?.session_blocks_input }}>
-      <ResizeHandle edge hidden={!input()} />
+      <ResizeHandle hidden={!input()} />
       <div class="cmp-toolbar">
         <AttachmentsChip compact={compact()} />
         <VoiceToolbar voice={voice} compact={compact()} />
@@ -311,8 +311,7 @@ export function Composer() {
         <Show when={!child() && v()?.cancel_send}>
           <button type="button" class="tchip link" disabled={v()?.cancel_locked} title={v()?.cancel_locked ? CANCEL_LOCKED() : CANCEL_SEND()} onClick={() => { void composer.cancelSend(); editor.focus(); }}>{tr("Cancel send")}</button>
         </Show>
-        <ResizeHandle hidden={!input()} />
-        <Show when={!input()}><span class="grow" /></Show>
+        <span class="grow" />
         <Show when={!child()}>
           <RecoveryChip session={s()} compact={compact()} />
           <UsageLimitChip session={s()} compact={compact()} />

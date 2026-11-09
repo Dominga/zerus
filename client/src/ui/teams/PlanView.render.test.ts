@@ -21,6 +21,9 @@ const actions = "\0plan-render-actions";
 const skin = "\0plan-render-skin";
 let server: ViteDevServer | undefined;
 let render: (props: Record<string, unknown>) => string;
+type Hover = { enter(id: number): number | null; leave(current: number | null, id: number): number | null; focus(current: number | null, id: number, keyboard: boolean): number | null };
+let planHover: Hover;
+let clearsSelection: (target: { closest(selector: string): unknown } | null) => boolean;
 
 const NOW = 1_800_000_000;
 
@@ -102,6 +105,7 @@ beforeAll(async () => {
         if (id === entry) return `import {createComponent} from 'solid-js';
           import {renderToString} from 'solid-js/web';
           import {PlanView} from '/src/ui/teams/PlanView.tsx';
+          export {planHover, clearsSelection} from '/src/ui/teams/PlanView.tsx';
           export const render = (props) => renderToString(() => createComponent(PlanView, props));`;
         return undefined;
       },
@@ -109,6 +113,8 @@ beforeAll(async () => {
   });
   const module = await server.ssrLoadModule(entry);
   render = module.render;
+  planHover = module.planHover;
+  clearsSelection = module.clearsSelection;
 });
 
 afterAll(async () => { await server?.close(); });
@@ -405,3 +411,57 @@ describe("the plan's Graph, Board and Layers (task 197)", () => {
   });
 });
 
+
+// Task 428 (owner, 2026-11-09): "the cursor is here, and the last chosen one stayed".
+describe("the plan board's hover and selection (task 428)", () => {
+  it("lights a card only while the pointer is over it or the keyboard focuses it", () => {
+    let hover = planHover.enter(4);
+    expect(hover).toBe(4);
+    // The pointer moves to empty space: the card's own leave ends it.
+    hover = planHover.leave(hover, 4);
+    expect(hover).toBeNull();
+    // Entering another card before the first one's leave arrives never loses the new one.
+    hover = planHover.enter(2);
+    hover = planHover.leave(planHover.enter(5), 2);
+    expect(hover).toBe(5);
+    // A click's focus does not light a card; keyboard focus does, and blur ends it.
+    expect(planHover.focus(null, 3, false)).toBeNull();
+    expect(planHover.focus(null, 3, true)).toBe(3);
+    expect(planHover.leave(3, 3)).toBeNull();
+  });
+
+  it("marks only the selected card and nothing as hovered on a fresh board", () => {
+    const { team, graph } = fixture();
+    const html = render({ team, graph, problems, now, openTask: { task: 2 } });
+    const card = (id: number) => html.match(new RegExp(`<button[^>]*data-task="${id}"[^>]*>`))?.[0] ?? "";
+    expect(card(2)).toContain("pt-card-selected");
+    expect(card(2)).toContain('aria-pressed="true"');
+    for (const id of [1, 3, 4, 5]) {
+      expect(card(id), `#${id}`).not.toContain("pt-card-selected");
+      expect(card(id)).toContain('aria-pressed="false"');
+    }
+    expect(html).not.toContain("pt-card-on");
+    expect(html).not.toMatch(/data-lit="(lit|dim)"/);
+    // Nothing chosen: no card is marked.
+    expect(render({ team, graph, problems, now })).not.toContain("pt-card-selected");
+  });
+
+  it("clears the selection on a click on empty board space, never on a card, header or control", () => {
+    const at = (inside: string[]) => ({ closest: (selector: string) => (inside.some((part) => selector.split(", ").includes(part)) ? {} : null) });
+    expect(clearsSelection(at([]))).toBe(true);
+    for (const inside of [".pt-card", ".pt-phase", "button", ".pt-detail", "input"]) expect(clearsSelection(at([inside])), inside).toBe(false);
+    expect(clearsSelection(null)).toBe(false);
+  });
+
+  it("styles the selection apart from the hover, and shows a focus ring only for the keyboard", async () => {
+    const fs = await import(/* @vite-ignore */ ["node", "fs"].join(":")) as { readFileSync(path: URL, encoding: "utf8"): string };
+    const css = fs.readFileSync(new URL("../styles/plan.css", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+    expect(css).toMatch(/\.pt-card\.pt-card-selected \{[^}]*border-color: var\(--z-color-accent\)/);
+    expect(css).toMatch(/\.pt-card:focus \{ outline: none; \}/);
+    expect(css).toMatch(/\.pt-card:focus-visible \{ outline: 2px solid/);
+    const source = fs.readFileSync(new URL("./PlanView.tsx", import.meta.url), "utf8");
+    // The card ends its own hover when the pointer leaves it, and the window's blur ends any.
+    expect(source).toContain("onPointerLeave={() => setHover(planHover.leave(hover(), task.id))}");
+    expect(source).toContain('window.addEventListener("blur", clear)');
+  });
+});

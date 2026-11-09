@@ -152,6 +152,22 @@ function PhaseScroll(props: { key: string; class: string; children: JSX.Element;
   );
 }
 
+/**
+ * Task 428: a card's hover follows the pointer. It lights a card while the
+ * pointer is over it (or while the keyboard focuses it) and ends when the
+ * pointer leaves that card, the board or the window; a click's focus never
+ * keeps it. The selection is separate (pt-card-selected).
+ */
+export const planHover = {
+  enter: (id: number): number | null => id,
+  leave: (current: number | null, id: number): number | null => (current === id ? null : current),
+  focus: (current: number | null, id: number, keyboard: boolean): number | null => (keyboard ? id : current),
+};
+
+/** Task 428: a click on the board's empty space (not a card, a header or a control) clears the selection. */
+export const clearsSelection = (target: Element | null) =>
+  !!target && !target.closest(".pt-card, .pt-phase, .pt-free-accepted, .pt-detail, button, a, input, select, textarea, [role='button']");
+
 export function PlanView(props: PlanViewProps): JSX.Element {
   const now = () => props.now?.() ?? Date.now() / 1000;
   const [mode, setMode] = createSignal<PlanMode>(props.initialMode ?? "graph");
@@ -188,6 +204,13 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     new Set(props.team.phases.filter((phase) => phase.status === "done").map((phase) => phase.n)),
   );
   const [hover, setHover] = createSignal<number | null>(null);
+  // Task 428: leaving the window ends the hover too.
+  onMount(() => {
+    const clear = () => setHover(null);
+    window.addEventListener("blur", clear);
+    document.documentElement.addEventListener("pointerleave", clear);
+    onCleanup(() => { window.removeEventListener("blur", clear); document.documentElement.removeEventListener("pointerleave", clear); });
+  });
   // Task 342: the tests open a task on mount; otherwise a click selects it.
   const [selected, setSelected] = createSignal<number | null>(props.openTask?.task ?? null);
   createEffect(() => {
@@ -435,6 +458,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     if (!matchesTask(task)) classes.push("pt-card-off");
     if (problem) classes.push("pt-card-problem");
     if (task.status === "draft") classes.push("pt-card-draft");
+    if (selected() === task.id) classes.push("pt-card-selected");
     const stages = stageChips(task.pipeline_run);
     return (
       <button
@@ -445,9 +469,11 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         data-task={task.id}
         data-lit={litNow ? (litNow.has(task.id) ? "lit" : "dim") : "none"}
         aria-label={tr("Task %1: %2", task.id, task.title)}
-        onPointerEnter={() => setHover(task.id)}
-        onFocus={() => setHover(task.id)}
-        onBlur={() => setHover(null)}
+        aria-pressed={selected() === task.id}
+        onPointerEnter={() => setHover(planHover.enter(task.id))}
+        onPointerLeave={() => setHover(planHover.leave(hover(), task.id))}
+        onFocus={(event) => setHover(planHover.focus(hover(), task.id, event.currentTarget.matches(":focus-visible")))}
+        onBlur={() => setHover(planHover.leave(hover(), task.id))}
         onClick={() => (props.editing?.editTask ? props.editing.editTask(task.id) : open(task.id))}
       >
         <Show when={props.editing?.canLink(task.id) || (props.editing && task.status !== "cancelled" && props.editing.editTask)}>
@@ -864,7 +890,8 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           and Profile and Tests have no phase headers, as in Qt. */}
       <Show when={mode() === "graph"}>
         <div class="pt-plan-body">
-          <div class="pt-plan-scroll" ref={scroller} onPointerLeave={() => setHover(null)}>
+          <div class="pt-plan-scroll" ref={scroller} onPointerLeave={() => setHover(null)}
+            onClick={(event) => { if (clearsSelection(event.target as Element)) setSelected(null); }}>
             <div class="pt-plan-canvas" style={{ height: `${Math.max(virtualizer.getTotalSize(), ...windowed().map((item) => item.start + phaseHeight(phases()[item.index])))}px` }}>
               <For each={windowed()}>
                 {(item) => {

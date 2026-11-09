@@ -198,3 +198,41 @@ fn a_canonical_windows_path_is_compared_without_its_verbatim_prefix() {
     assert_eq!(plain(Path::new(r"\\?\UNC\server\share\x")).as_ref(), Path::new(r"\\?\UNC\server\share\x"));
     assert_eq!(plain(Path::new("/home/a/x")).as_ref(), Path::new("/home/a/x"));
 }
+
+/// Task #383: a refusal whose path is gone - a test's temporary file, a
+/// removed folder - drops out at the next read and is never shown again.
+#[test]
+fn a_refusal_whose_path_vanished_drops_out() {
+    with_root(|root| {
+        let gone = root.join("tmp-test").join("read-marks.json");
+        let kept = root.join("kept.json");
+        fs::write(&kept, b"{}").unwrap();
+        write_failed(&gone, Private::File, &"it is not private");
+        write_failed(&kept, Private::File, &"it is not private");
+        let paths = |stores: Vec<Value>| stores.iter().map(|store| store["path"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        assert_eq!(paths(refused()), vec![kept.display().to_string()]);
+        // The current set no longer holds it either.
+        assert_eq!(paths(stores()), vec![kept.display().to_string()]);
+        fs::remove_file(&kept).unwrap();
+        assert!(refused().is_empty());
+        assert!(!current_path().exists(), "an empty set leaves no file");
+    });
+}
+
+/// Task #383: tests never write the person's private-store list. A test that
+/// sets no state folder of its own records in the test process's folder
+/// (storage::test_default_root), and the person's file is left as it was.
+#[test]
+fn a_test_never_writes_the_persons_private_store_list() {
+    let person = crate::state::watch_source::state_root();
+    let home = platform::home().unwrap_or_default();
+    let real = home.join(".local/state/hgs/sessions");
+    assert_ne!(person, real, "a test's state folder is never the person's");
+    assert!(!person.starts_with(&real));
+    let before = fs::read(real.join(CURRENT)).ok();
+    let probe = std::env::temp_dir().join(format!("zerus-383-{}", std::process::id())).join("read-marks.json");
+    write_failed(&probe, Private::File, &"it is not private");
+    assert_eq!(fs::read(real.join(CURRENT)).ok(), before, "the person's list is untouched");
+    // The refusal went to the test's own list, where the vanished path drops out.
+    assert!(refused().iter().all(|store| store["path"] != probe.display().to_string()));
+}

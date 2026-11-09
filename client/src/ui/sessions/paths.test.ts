@@ -58,6 +58,13 @@ describe("folder paths (paths.rs)", () => {
     }
   });
 
+  it("uses a selected computer's reported Windows style without widening the peer fallback", () => {
+    expect(paths.selectedStyle("windows", false, "posix")).toBe("windows");
+    expect(paths.selectedStyle(undefined, false, "windows")).toBe("posix");
+    expect(paths.selectedStyle(null, true, "windows")).toBe("windows");
+    expect(paths.selectedStyle("linux", true, "windows")).toBe("posix");
+  });
+
 });
 
 describe("New session's folder helpers (launch.rs)", () => {

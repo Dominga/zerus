@@ -234,6 +234,8 @@ pub fn hello(config: &Config, inventory: bool) -> Result<Value> {
     store.save()?;
     let mut result = json!({"schema":1,"node_id":store.data.node_id,"swarm_id":store.data.catalog.swarm_id,"digest":store.data.catalog.digest(),"initialized":store.data.imported,"kinds":catalog::advertised(),
         "twins":store.data.twins.digest()});
+    result["kinds"].as_array_mut().unwrap().push(json!(super::drive_folders::CAPABILITY));
+    result["drive_folders"] = serde_json::to_value(super::drive_folders::inventory_locked(&store)?)?;
     if let Some(primary) = &store.data.id_memberships {
         result["id_memberships"] = json!(primary.digest());
         if inventory {
@@ -359,7 +361,7 @@ pub fn exchange(config: &Config, request: Exchange) -> Result<Value> {
     Ok(response)
 }
 
-pub fn sync_peer(config: &Config, alias: &str) -> Result<()> {
+pub fn sync_peer(config: &Config, alias: &str) -> Result<Value> {
     // Information only: with no verified hello, or no catalog sync after
     // it, every project known here is incomplete for the member.
     let identity = match catalog_sync(config, alias) {
@@ -379,7 +381,7 @@ pub fn sync_peer(config: &Config, alias: &str) -> Result<()> {
     drop(local);
     let _ =
         super::session_labels::refresh_peer(config, alias, Instant::now() + Duration::from_secs(2));
-    Ok(())
+    Ok(identity)
 }
 
 /// The member's verified hello and the catalog exchange after it; a failure
@@ -400,7 +402,8 @@ fn catalog_sync(config: &Config, alias: &str,
             anyhow::anyhow!("the machine behind {alias} changed identity"),
         ));
     }
-    catalog_exchange(config, alias, identity, local).map_err(unreachable)
+    let identity = catalog_exchange(config, alias, identity, local).map_err(unreachable)?;
+    Ok(drive_sync_report(config, alias, identity))
 }
 
 fn catalog_exchange(config: &Config, alias: &str, identity: Value, mut local: LockedStore,
@@ -556,6 +559,108 @@ fn catalog_exchange(config: &Config, alias: &str, identity: Value, mut local: Lo
     Ok(identity)
 }
 
+fn drive_sync_report(config: &Config, alias: &str, mut identity: Value) -> Value {
+    let capable = serde_json::from_value::<BTreeSet<String>>(identity["kinds"].clone())
+        .is_ok_and(|kinds| kinds.contains(super::drive_folders::CAPABILITY));
+    identity["drive_sync"] = if !capable {
+        json!({"status":"not_advertised"})
+    } else {
+        match drive_sync(config, alias) {
+            Ok(report) => report,
+            Err(error) => json!({"status":"error","error":format!("{error:#}")}),
+        }
+    };
+    identity
+}
+
+fn drive_local(
+    config: &Config,
+    alias: &str,
+    node: &str,
+    swarm: &str,
+) -> Result<(LockedStore, super::drive_folders::DriveInventory)> {
+    let local = LockedStore::load_scoped(config)?;
+    ensure!(
+        local.data.peers.get(alias).is_some_and(|peer| peer.node == node)
+            && local.data.catalog.swarm_id == swarm,
+        "swarm connection changed during drive exchange"
+    );
+    let inventory = super::drive_folders::inventory_locked(&local)?;
+    ensure!(inventory.swarm_id == swarm, "local drive swarm changed");
+    Ok((local, inventory))
+}
+
+fn drive_sync(config: &Config, alias: &str) -> Result<Value> {
+    let (node, swarm) = {
+        let local = LockedStore::load_scoped(config)?;
+        let peer = local
+            .data
+            .peers
+            .get(alias)
+            .ok_or_else(|| anyhow::anyhow!("machine is not enrolled in this swarm"))?;
+        (peer.node.clone(), local.data.catalog.swarm_id.clone())
+    };
+    let (_, local) = drive_local(config, alias, &node, &swarm)?;
+    let mut remote: super::drive_folders::DriveInventory = serde_json::from_value(run(
+        config,
+        alias,
+        &["swarm", "drive-folders", "inventory", "--json"],
+        None,
+    )?)?;
+    ensure!(remote.node_id == node && remote.swarm_id == swarm, "drive peer changed during inventory");
+    ensure!(remote.status != "unavailable", "remote drive graph is unavailable");
+    ensure!(local.status != "unavailable", "local drive graph is unavailable");
+    if local.status == "uninitialized" && remote.status == "uninitialized" {
+        return Ok(json!({"status":"uninitialized"}));
+    }
+    for round in 0..=(super::drive_folders::MAX_OPERATIONS / super::drive_folders::MAX_BATCH + 1) {
+        let (locked, local) = drive_local(config, alias, &node, &swarm)?;
+        ensure!(remote.node_id == node && remote.swarm_id == swarm, "drive peer changed during exchange");
+        ensure!(local.status != "unavailable" && remote.status != "unavailable", "drive graph is unavailable");
+        let initialize_remote = local.status == "ready" && remote.status == "uninitialized";
+        let initialize_local = local.status == "uninitialized" && remote.status == "ready";
+        let operations = super::drive_folders::missing_locked(&locked, &remote.known)?;
+        let request = super::drive_folders::ExchangeRequest {
+            source: local.clone(),
+            kinds: BTreeSet::from([super::drive_folders::CAPABILITY.to_owned()]),
+            operations,
+            initialize: initialize_remote,
+        };
+        ensure!(
+            serde_json::to_vec(&request)?.len() as u64 <= super::drive_folders::MAX_EXCHANGE_BYTES,
+            "drive exchange is too large"
+        );
+        let before = (local.known.clone(), remote.known.clone());
+        drop(locked);
+        let response: super::drive_folders::ExchangeResponse = serde_json::from_value(run(
+            config,
+            alias,
+            &["swarm", "drive-folders", "exchange", "--json"],
+            Some(&serde_json::to_value(request)?),
+        )?)?;
+        let next_remote = response.source.clone();
+        let (locked, _) = drive_local(config, alias, &node, &swarm)?;
+        let next_local = super::drive_folders::accept_exchange(&locked, &node, response, initialize_local)?;
+        drop(locked);
+        remote = next_remote;
+        if next_local.known == remote.known {
+            if next_local.status == "uninitialized" && remote.status == "uninitialized" {
+                return Ok(json!({"status":"uninitialized"}));
+            }
+            ensure!(
+                next_local.status == "ready" && remote.status == "ready" && next_local.digest == remote.digest,
+                "drive frontier did not reconcile"
+            );
+            return Ok(json!({"status":"ready","operations":next_local.known.len(),"digest":next_local.digest}));
+        }
+        ensure!(before != (next_local.known.clone(), remote.known.clone()), "drive exchange made no progress");
+        if round == super::drive_folders::MAX_OPERATIONS / super::drive_folders::MAX_BATCH + 1 {
+            anyhow::bail!("drive exchange exceeded its bounded rounds");
+        }
+    }
+    unreachable!("drive exchange round always returns or refuses")
+}
+
 pub fn sync(config: &Config) -> Result<Value> {
     let mut local = LockedStore::load(config)?;
     local.save()?;
@@ -564,8 +669,8 @@ pub fn sync(config: &Config) -> Result<Value> {
     let mut result = BTreeMap::new();
     for alias in peers {
         match sync_peer(config, &alias) {
-            Ok(()) => {
-                result.insert(alias, json!({"ok":true}));
+            Ok(identity) => {
+                result.insert(alias, json!({"ok":true,"catalog":{"status":"ready"},"drive_folders":identity["drive_sync"]}));
             }
             Err(error) => {
                 let message = format!("{error:#}");
@@ -658,6 +763,7 @@ pub fn join(config: &Config, alias: &str, request: Join) -> Result<Value> {
         same || local.data.peers.is_empty(),
         "already enrolled in another swarm; merging entire swarms needs a separate migration"
     );
+    super::drive_folders::allow_join(&local, same)?;
     // Normalize existing session identities before the initial membership merge.
     local.data.bind(alias, &request.node_id)?;
     if !same {
@@ -903,7 +1009,7 @@ impl Members for Live<'_> {
         now()
     }
     fn sync(&mut self, alias: &str) -> Result<()> {
-        sync_peer(self.0, alias)
+        sync_peer(self.0, alias).map(|_| ())
     }
     fn failed(&mut self, alias: &str, error: &anyhow::Error) -> Result<()> {
         let mut store = LockedStore::load(self.0)?;

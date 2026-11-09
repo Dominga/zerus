@@ -1,9 +1,10 @@
 //! Folder paths in the form of the computer they belong to, ported from the
 //! Qt client's `MachinePlatform.h`.
 //!
-//! The local computer may be Windows; peers are POSIX, and the swarm catalog
-//! accepts nothing else. A [`Style`] argument rather than `cfg`, so both forms
-//! are tested on every platform. POSIX answers are exactly Qt's
+//! The local computer may be Windows. The legacy swarm catalog accepts only
+//! POSIX-shaped paths (including UNC); remote drive-absolute paths belong to the
+//! separate drive-folder component. A [`Style`] argument rather than `cfg`, so
+//! both forms are tested on every platform. POSIX answers are exactly Qt's
 //! (`QDir::cleanPath`, `==`, `section('/', -1)`); Windows stores Qt's form
 //! (`C:/work`, `//server/share/dir`), compares with either separator and
 //! ignoring case, and shows native separators.

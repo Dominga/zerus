@@ -2,13 +2,15 @@
 //! This computer's `organization` topic feeds the core's write controller
 //! (`swarm::sync::Controller`). The presented organization goes to the pump's
 //! grouping, which sends the webview each row's project and the headers.
-//! Edits run as one `hgs swarm apply` at a time on this module's thread,
+//! Legacy edits run as one `hgs swarm apply` at a time on this module's thread,
 //! which also saves the local layout. A failed apply stays pending in the
 //! controller, and this thread sends it again on the next tick: 5 s later, or
 //! when the topic's next state arrives (SwarmController.cpp:67-73, 96-101).
 //! Pending edits are kept in a draft file, written before their apply and
 //! removed once they settled; a restart loads it and sends it after the first
 //! state, as Qt does (SessionsWindow.cpp:2496, 1661; SwarmController.cpp:76-89).
+//! Drive folders use a separate controller and `drive-folders apply`; their
+//! unknown result is queried only by the original request UUID, never replayed.
 //! A draft file that cannot be used is never applied: it is moved aside
 //! before any new draft is written, and the list shows why until the first
 //! state. [`Organization::flush`] checkpoints the files as the app quits. The
@@ -45,15 +47,19 @@ use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use tauri::State;
 use zerus_client_core::reads::{Read, ReadError};
 use zerus_client_core::swarm::draft::{self, Draft, DraftWrite, Load};
+use zerus_client_core::swarm::drive_folders::{
+    DriveController, DriveObservation, DriveReply, DriveSetRequest,
+};
 use zerus_client_core::swarm::edit::Intent;
 use zerus_client_core::swarm::grouping::{by_name, SyncView};
 use zerus_client_core::swarm::runs;
 use zerus_client_core::swarm::sync::{Controller, Due, EditOutcome, Observation, Ticket, STOPPED};
 use zerus_client_core::swarm::{self, Folder};
+use zerus_client_core::Invocation;
 use zerus_client_core::{run_limited, Change, Exit, OrganizationSnapshot, OrganizationUpdate};
 
 use crate::actions::REPLAY_NEEDS_HGS;
@@ -118,11 +124,14 @@ pub fn run_seed_source(
 #[derive(Default)]
 struct Hub {
     sync: Controller,
+    drive: DriveController,
     source: Option<SnapshotSource>,
     waiting: HashMap<Ticket, SyncSender<EditOutcome>>,
     presented: Option<Presented>,
     /// The revision and status line Projects last received.
-    shown: Option<(u64, String, bool, Option<String>)>,
+    shown: Option<(u64, String, bool, Option<String>, u64)>,
+    drive_revision: u64,
+    drive_notice: Option<String>,
     /// Settled edits' answers, sent once the lock is released.
     answers: Vec<(SyncSender<EditOutcome>, EditOutcome)>,
     /// The Projects call, numbered, made once the lock is released.
@@ -202,6 +211,56 @@ struct Shared {
 /// worker thread runs while a clone is left.
 #[derive(Clone)]
 pub struct Organization(Arc<Shared>);
+
+#[derive(Debug)]
+pub(crate) enum DriveError {
+    Refused(String),
+    Unknown(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct DriveCardBinding {
+    computer: String,
+    host: String,
+    machine_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct DriveCardBindings {
+    source: Option<DriveCardBinding>,
+    destination: DriveCardBinding,
+}
+
+impl DriveCardBinding {
+    fn proof(
+        &self,
+        pump: &Pump,
+    ) -> Result<zerus_client_core::swarm::drive_folders::MachineProof, DriveError> {
+        folders::drive_proof(pump, &self.computer, &self.host, &self.machine_id)
+            .map_err(DriveError::Refused)
+    }
+}
+
+impl DriveCardBindings {
+    fn proofs(
+        &self,
+        pump: &Pump,
+    ) -> Result<
+        (
+            Option<zerus_client_core::swarm::drive_folders::MachineProof>,
+            zerus_client_core::swarm::drive_folders::MachineProof,
+        ),
+        DriveError,
+    > {
+        Ok((
+            self.source
+                .as_ref()
+                .map(|source| source.proof(pump))
+                .transpose()?,
+            self.destination.proof(pump)?,
+        ))
+    }
+}
 
 impl Organization {
     /// Only the production switch supplies a source. Recovery is queued by
@@ -403,7 +462,7 @@ impl Organization {
             allowed,
             layout,
             layout_writable,
-            draft: draft_path,
+            draft: draft_path.clone(),
             clock: Instant::now(),
             seed_started: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
@@ -415,6 +474,10 @@ impl Organization {
         }));
         {
             let mut hub = organization.lock();
+            hub.drive = DriveController::new(
+                draft_path.with_file_name("organization-drive-draft.json"),
+                allowed,
+            );
             // The last run's pending edits (Qt's start, SwarmController.cpp:76-89):
             // shown at once, sent after the first state.
             if let Some(draft) = saved.draft {
@@ -657,7 +720,11 @@ impl Organization {
 
     fn view(&self, hub: &Hub) -> SyncView {
         let mut view = hub.sync.view();
-        view.notice = hub.notice.clone();
+        view.notice = hub
+            .notice
+            .clone()
+            .or_else(|| hub.drive_notice.clone())
+            .or_else(|| hub.drive.status());
         if hub.legacy_read_blocked {
             view.reason = Some(legacy_projects::READ_BLOCKED.into());
             view.status = legacy_projects::READ_BLOCKED.into();
@@ -687,12 +754,17 @@ impl Organization {
             view.status.clone(),
             view.status_error,
             windows_node.clone(),
+            hub.drive_revision,
         );
         match hub.sync.presented() {
             Some((organization, membership)) => {
-                self.0
-                    .pump
-                    .present(organization, membership, hub.sync.revision(), view)
+                let merged = self.drive_organization(hub, organization);
+                self.0.pump.present(
+                    merged.as_ref().unwrap_or(organization),
+                    membership,
+                    hub.sync.revision().saturating_add(hub.drive_revision),
+                    view,
+                )
             }
             None => self.0.pump.set_sync(view),
         }
@@ -718,6 +790,14 @@ impl Organization {
                         Arc::new(shown)
                     },
                 )
+        });
+        let value = value.map(|value| {
+            let Some(organization) = self.drive_organization(hub, &value["organization"]) else {
+                return value;
+            };
+            let mut shown = (*value).clone();
+            shown["organization"] = organization;
+            Arc::new(shown)
         });
         let status = (shown.1.clone(), shown.2);
         hub.announcements += 1;
@@ -788,6 +868,67 @@ impl Organization {
         }
     }
 
+    fn drive_organization(&self, hub: &Hub, organization: &Value) -> Option<Value> {
+        let observation = hub.drive.observation()?;
+        if observation.status != "ready" || !observation.complete {
+            return None;
+        }
+        let main = hub.sync.observed_value()?;
+        if !observation.source_matches(
+            main["node_id"].as_str().unwrap_or_default(),
+            main["swarm_id"].as_str().unwrap_or_default(),
+        ) {
+            return None;
+        }
+        let machines = main["machines"].as_array()?;
+        let mut merged = organization.clone();
+        for (id, record) in &observation.records {
+            if observation.conflicts.contains(id) || observation.unavailable.contains(id) {
+                continue;
+            }
+            let Some(machine) = machines
+                .iter()
+                .find(|machine| machine["id"].as_str() == Some(record.machine.as_str()))
+            else {
+                continue;
+            };
+            let machine_name = machine["name"].as_str().unwrap_or_default();
+            let alias = machine["connection"].as_str().unwrap_or(machine_name);
+            if alias.is_empty() || machine_name.is_empty() {
+                continue;
+            }
+            let computer = zerus_client_core::ComputerId(alias.to_owned());
+            if computer.is_local() {
+                continue;
+            }
+            let current = self.0.pump.machine(&computer);
+            if current.as_ref().is_none_or(|current| {
+                current.machine_id.as_deref() != Some(record.machine.as_str())
+                    || current.host.as_deref() != Some(machine_name)
+                    || current.platform.as_deref() != Some("windows")
+                    || current.ok != Some(true)
+            }) {
+                continue;
+            }
+            let Some(project) = merged["projects"]
+                .as_array_mut()
+                .into_iter()
+                .flatten()
+                .find(|project| swarm::project_id(project) == record.project)
+            else {
+                continue;
+            };
+            if !project["folders"].is_array() {
+                project["folders"] = json!([]);
+            }
+            project["folders"].as_array_mut().unwrap().push(json!({
+                "id":id,"key":id,"machine":alias,"machine_id":record.machine,
+                "machine_name":machine_name,"path":record.path,"name":record.name
+            }));
+        }
+        Some(merged)
+    }
+
     /// A project's folders in the organization the list shows (Qt's
     /// `m_organization`, which New session copies, SessionsWindow.cpp:2923):
     /// at most [`swarm::FOLDERS`], read under the hub's lock without `hgs`.
@@ -797,7 +938,8 @@ impl Organization {
         hub.sync
             .presented()
             .and_then(|(organization, _)| {
-                swarm::projects(organization)
+                let merged = self.drive_organization(&hub, organization);
+                swarm::projects(merged.as_ref().unwrap_or(organization))
                     .iter()
                     .find(|listed| swarm::project_id(listed) == project)
                     .map(swarm::folders)
@@ -805,8 +947,8 @@ impl Organization {
             .unwrap_or_default()
     }
 
-    /// Creation placement reads the same presented model as the Sessions
-    /// list, including edits accepted but not yet synchronized.
+    /// Creation placement reads the legacy model. The capable drive projection
+    /// is available through project_folders, never as new launch authority.
     pub(crate) fn creation_projects(&self, local: &str) -> Vec<zerus_client_core::launch::Project> {
         let hub = self.lock();
         hub.sync
@@ -923,6 +1065,172 @@ impl Organization {
     /// from one a state replaced in between.
     fn submit_with(&self, intent: impl FnOnce(&Pump) -> Intent) -> EditOutcome {
         self.submit_checked(move |pump| Ok(intent(pump)))
+    }
+
+    fn drive_call(&self, invocation: Invocation) -> Result<Value, DriveError> {
+        match run_limited(&self.0.hgs, &invocation, &[], Read::Swarm.limit()) {
+            Ok(Exit::Code {
+                code: 0, stdout, ..
+            }) => serde_json::from_slice(&stdout)
+                .map_err(|error| DriveError::Unknown(error.to_string())),
+            Ok(Exit::Code { stderr, .. }) => Err(DriveError::Unknown(stderr)),
+            Ok(Exit::Abnormal { stderr }) => Err(DriveError::Unknown(stderr)),
+            Ok(Exit::TimedOut) => Err(DriveError::Unknown("drive request timed out".into())),
+            Ok(Exit::StartFailed(error)) => Err(DriveError::Unknown(error)),
+            Ok(Exit::WriteFailed) => Err(DriveError::Unknown(
+                "drive request could not be written".into(),
+            )),
+            Err(error) => Err(DriveError::Unknown(format!("{error:?}"))),
+        }
+    }
+
+    fn submit_drive(
+        &self,
+        cards: DriveCardBindings,
+        build: impl FnOnce(&Pump, &DriveObservation) -> Result<DriveSetRequest, DriveError>,
+    ) -> Result<Value, DriveError> {
+        if !self.0.allowed {
+            return Err(DriveError::Refused(REPLAY_NEEDS_HGS.into()));
+        }
+        let (generation, digest, node, swarm, refresh) = {
+            let hub = self.lock();
+            if hub.stopped {
+                return Err(DriveError::Unknown(STOPPED.into()));
+            }
+            let main = hub
+                .sync
+                .observed_value()
+                .ok_or_else(|| DriveError::Refused("Project sync is not ready.".into()))?;
+            let node = main["node_id"].as_str().unwrap_or_default().to_owned();
+            let swarm = main["swarm_id"].as_str().unwrap_or_default().to_owned();
+            let digest = main["digest"].as_str().unwrap_or_default().to_owned();
+            if node.is_empty() || swarm.is_empty() || digest.is_empty() {
+                return Err(DriveError::Refused("Project sync is not current.".into()));
+            }
+            (
+                hub.source_generation,
+                digest,
+                node,
+                swarm,
+                hub.drive.refresh(),
+            )
+        };
+        cards.proofs(&self.0.pump)?;
+        let value = self.drive_call(refresh)?;
+        let observation = DriveObservation::from_reply(&value).map_err(DriveError::Unknown)?;
+        let (invocation, request_id) = {
+            let mut hub = self.lock();
+            let current = hub.sync.observed_value();
+            if hub.stopped
+                || generation != hub.source_generation
+                || current.as_ref().is_none_or(|main| {
+                    main["digest"].as_str().unwrap_or_default() != digest
+                        || main["node_id"].as_str().unwrap_or_default() != node
+                        || main["swarm_id"].as_str().unwrap_or_default() != swarm
+                })
+                || !observation.source_matches(&node, &swarm)
+            {
+                return Err(DriveError::Refused(
+                    "The drive-folder source changed. Select it again.".into(),
+                ));
+            }
+            hub.drive
+                .observe(observation.clone())
+                .map_err(DriveError::Unknown)?;
+            let request = build(&self.0.pump, &observation)?;
+            let proofs = cards.proofs(&self.0.pump)?;
+            if request.source != proofs.0 || request.destination != proofs.1 {
+                return Err(DriveError::Refused(
+                    "The selected computer changed. Select it again.".into(),
+                ));
+            }
+            let submission = hub.drive.begin(request).map_err(DriveError::Refused)?;
+            (submission.invocation, submission.request.request_id)
+        };
+        let response = self
+            .drive_call(invocation)
+            .map_err(|error| format!("{error:?}"));
+        let reply = match self.lock().drive.acknowledge(response) {
+            Ok(reply) => reply,
+            Err(error) => return Err(DriveError::Unknown(error)),
+        };
+        let observation = match reply {
+            DriveReply::Ready(observation) => *observation,
+            DriveReply::Unknown(invocation) => {
+                let value = self.drive_call(invocation)?;
+                match self.lock().drive.acknowledge_status(value) {
+                    Ok(observation) => observation,
+                    Err(error) => return Err(DriveError::Unknown(error)),
+                }
+            }
+        };
+        let mut hub = self.lock();
+        hub.drive_revision = hub.drive_revision.saturating_add(1);
+        hub.drive_notice = None;
+        self.publish(&mut hub);
+        self.release(hub);
+        Ok(json!({"operation_id":request_id,"observation":observation}))
+    }
+
+    fn drive_pass(&self) -> bool {
+        let (invocation, generation, digest, node, swarm, pending) = {
+            let mut hub = self.lock();
+            if !self.0.allowed || hub.stopped || hub.sync.pending() || hub.sync.busy() {
+                return false;
+            }
+            let Some(main) = hub.sync.observed_value() else {
+                return false;
+            };
+            let node = main["node_id"].as_str().unwrap_or_default().to_owned();
+            let swarm = main["swarm_id"].as_str().unwrap_or_default().to_owned();
+            if node.is_empty() || swarm.is_empty() {
+                return false;
+            }
+            let digest = main["digest"].as_str().unwrap_or_default().to_owned();
+            let Some(invocation) = hub.drive.poll(Instant::now()) else {
+                return false;
+            };
+            (
+                invocation,
+                hub.source_generation,
+                digest,
+                node,
+                swarm,
+                hub.drive.pending(),
+            )
+        };
+        let result = self.drive_call(invocation);
+        let mut hub = self.lock();
+        if generation != hub.source_generation {
+            return true;
+        }
+        let current = hub.sync.observed_value();
+        if current.as_ref().is_none_or(|main| {
+            main["node_id"].as_str().unwrap_or_default() != node
+                || main["swarm_id"].as_str().unwrap_or_default() != swarm
+                || main["digest"].as_str().unwrap_or_default() != digest
+        }) {
+            return true;
+        }
+        let before = hub.drive.observation().cloned();
+        let outcome = match (pending, result) {
+            (true, Ok(value)) => hub.drive.acknowledge_status(value).map(|_| ()),
+            (false, Ok(value)) => DriveObservation::from_reply(&value)
+                .and_then(|observation| hub.drive.observe(observation)),
+            (_, Err(error)) => Err(format!("{error:?}")),
+        };
+        let notice = match outcome {
+            Ok(()) => None,
+            Err(error) => Some(format!("Drive folders are unavailable: {error}")),
+        };
+        let changed = hub.drive.observation() != before.as_ref() || hub.drive_notice != notice;
+        hub.drive_notice = notice;
+        if changed {
+            hub.drive_revision = hub.drive_revision.saturating_add(1);
+        }
+        self.publish(&mut hub);
+        self.release(hub);
+        true
     }
 
     fn submit_checked(&self, intent: impl FnOnce(&Pump) -> Result<Intent, String>) -> EditOutcome {
@@ -1070,6 +1378,9 @@ impl Organization {
             hub.shown = None;
             self.publish(&mut hub);
             self.release(hub);
+        }
+        if self.drive_pass() {
+            return;
         }
         self.runs_writer().request(false);
         let mut writer = self.writer();
@@ -1787,7 +2098,9 @@ pub fn set_project_collapsed(state: State<'_, Organization>, project: String, co
 
 #[cfg(all(test, unix))]
 mod tests {
+    mod drive_folders;
     mod legacy_projects;
+    mod remote_windows_folders;
     mod swarm_conflicts;
     mod swarm_dialog_cases;
     mod windows_folders;

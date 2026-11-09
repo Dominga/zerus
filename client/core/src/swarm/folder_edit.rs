@@ -107,11 +107,32 @@ pub(super) fn apply_windows(
 ) -> Result<(), String> {
     apply_style(org, project_id, change, Style::Windows)
 }
+pub(super) fn apply_set_style(
+    org: &mut Value,
+    project_id: &str,
+    change: &Change,
+    style: Style,
+    original_style: Style,
+) -> Result<(), String> {
+    if !matches!(change, Change::Set { .. }) {
+        return Err("Folder management is unavailable for this computer.".into());
+    }
+    apply_styles(org, project_id, change, style, original_style)
+}
 fn apply_style(
     org: &mut Value,
     project_id: &str,
     change: &Change,
     style: Style,
+) -> Result<(), String> {
+    apply_styles(org, project_id, change, style, style)
+}
+fn apply_styles(
+    org: &mut Value,
+    project_id: &str,
+    change: &Change,
+    style: Style,
+    original_style: Style,
 ) -> Result<(), String> {
     let at = project(org, project_id)?;
     let mut list = folders(org, at)?.to_vec();
@@ -136,7 +157,7 @@ fn apply_style(
             }
             let old = original.as_ref().map(|f| source(&list, f)).transpose()?;
             if let Some(f) = original {
-                supported(f, style)?;
+                supported(f, original_style)?;
             }
             let mut value = old
                 .map(|i| list[i].clone())

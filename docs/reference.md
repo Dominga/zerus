@@ -6921,6 +6921,51 @@ each `next` is the cursor of that stage's next page for `hgs task list --stage
 STAGE --limit N --after CURSOR`, or null when the stage has no more rows. A
 window that is not 1 to 200 is a non-fatal `bad_request`.
 
+#### Shared drive-folder component
+
+Remote Windows drive-absolute project links use `hgs swarm drive-folders
+get|apply|inventory|exchange --json` and the independent `drive_folders_v1`
+capability, not a new main-catalog key kind. `get --operation UUID --json` is the
+only result-reconciliation query. Ordinary get/watch/apply/export, closed legacy
+exchange envelopes, mobile/API v1, project inference and launch readers retain
+their POSIX/legacy contracts. A stored link grants no filesystem, worktree,
+account or session-launch authority.
+
+`drive-folders.json` and immutable `drive-folders-init.json` live beside
+`catalog.json`. The graph has at most 64 MiB, 100000 raw operations and 1024
+parents per operation; exchange is at most 8 MiB and 128 causally ordered
+operations per round, with complete parent closure in retained history plus the
+batch. A bounded native observation has at most 200 folders and includes only
+current records, raw-head frontiers and review states, never a growing renderer
+journal. Both files absent is UNINITIALIZED, not an empty authority. Only a
+validated first trusted Add or explicitly negotiated initial import creates the
+witness and then the graph. A partial, corrupt, foreign, nonregular, oversized or
+changed pair is UNAVAILABLE: its bytes remain, with no empty reset, automatic
+repair or assumed write result. Main and drive saves report independent
+outcomes; no two-file atomicity is claimed. Backups record both originals and
+hashes or explicit incompleteness.
+
+Operations are immutable `{id,actor,clock,folder_id,parents,value}` records with
+canonical nonnil UUIDs. A value is `{project,machine,path,name}` or a retained
+historical tombstone. Paths are canonical drive-absolute Windows paths, at most
+8192 bytes; project/name limits remain 128/320 bytes and controls are refused.
+Only fresh locally-known-unused UUID Add and same-kind live Edit are admitted.
+Edit retains project and ID and requires fresh native source and destination
+Windows cards. Remove, Transfer, clone, resurrection and cross-representation or
+cross-swarm rehome are outside this cut. Cross-swarm enrollment refuses a
+nonempty, initialized-empty or unavailable component before any membership
+mutation. Raw records received before their project/machine context remain
+unavailable rather than being discarded or shown as current.
+
+Complete local main+drive histories, including tombstones, prove known-unused
+IDs. They cannot prevent an unaware old/offline writer from creating a colliding
+legacy ID later. Such a collision preserves both histories and quarantines only
+that logical identity: no winner, erasure, cross-kind causal edge or
+whole-catalog failure. Unrelated legacy edits and other drive IDs continue.
+Absolute global exclusion is therefore not claimed.
+
+#### Drive-folder watch topic
+
 The `organization` topic follows the shared project catalog as `hgs swarm get`
 prints it: `{"op":"subscribe","topic":"organization"}`, one per stream. A
 worker thread reads the stored catalog without its lock, never saving it and
@@ -6945,6 +6990,20 @@ a non-fatal `organization_failed`. The topic reports `worker.current` but never
 supervises the worker; a client that sees `false` runs one `hgs swarm get`,
 which restarts an outdated worker as before. Writes, including the first
 `swarm initialize`, stay with `hgs swarm`.
+
+The separately negotiated `organization.drive_folders` topic follows the capable
+Windows drive-folder projection with `{"op":"subscribe","topic":"organization.drive_folders"}`.
+It never initializes, saves or repairs the catalog or either drive file. The
+`drive_folders` summary row carries the bounded source/store identity, status,
+operation query result and record/conflict IDs. `record:<id>` rows carry the
+current records, `version:<token>` rows their raw-head frontiers, and
+`conflict:<id>:<n>` rows at most 16 retained raw variants each. Unavailable and
+incomplete states are data, never an empty known frontier. The legacy
+`organization` topic, its file set and all legacy apply/export envelopes remain
+unchanged by this component. Drive reads run on their own bounded worker when
+either drive file changes, with the same cancellation, paging and resnapshot
+rules as the organization topic. A client without this topic keeps polling
+`hgs swarm drive-folders get --json` instead.
 
 The stream checks its sources every 250 ms. It stats the bindings, read marks,
 notification preferences, waits, launches, renames, name routes, the archive

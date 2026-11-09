@@ -83,6 +83,24 @@ impl Pool {
         Self { jobs }
     }
 
+    pub(super) fn spawn_drive(finished: impl Fn(Done) + Send + 'static) -> Self {
+        let (jobs, queue) = mpsc::sync_channel::<Job>(1);
+        std::thread::Builder::new()
+            .name("hgs-watch-drive-folders".into())
+            .spawn(move || {
+                let config = crate::config::Config::load().map_err(|error| error.to_string());
+                while let Ok(job) = queue.recv() {
+                    finished(read(job, || match &config {
+                        Ok(config) => crate::swarm::drive_folders::watch_snapshot(config)
+                            .map_err(|error| format!("{error:#}")),
+                        Err(error) => Err(error.clone()),
+                    }));
+                }
+            })
+            .expect("start the drive-folder worker");
+        Self { jobs }
+    }
+
     /// Reject without blocking the watch loop or losing the original token.
     pub(super) fn run(&self, job: Job) -> Result<(), mpsc::TrySendError<Job>> {
         self.jobs.try_send(job)
@@ -121,6 +139,36 @@ pub(super) fn rows(snapshot: &Value) -> BTreeMap<String, Value> {
     rows
 }
 
+/// The bounded capable drive projection, split into independently pageable rows.
+pub(super) fn drive_rows(snapshot: &Value) -> BTreeMap<String, Value> {
+    let mut rows = BTreeMap::new();
+    let mut summary = snapshot.clone();
+    if let Some(object) = summary.as_object_mut() {
+        object.remove("records");
+        object.remove("versions");
+        object.remove("conflicts");
+    }
+    let records = snapshot["records"].as_array().cloned().unwrap_or_default();
+    summary["records"] = json!(records.iter().map(|record| record["id"].clone()).collect::<Vec<_>>());
+    summary["conflicts"] = json!(snapshot["conflicts"].as_object().into_iter().flatten().map(|(id, _)| id.clone()).collect::<Vec<_>>());
+    rows.insert("drive_folders".into(), summary);
+    for record in records {
+        if let Some(id) = record["id"].as_str() {
+            rows.insert(format!("record:{id}"), record);
+        }
+    }
+    for (token, operations) in snapshot["versions"].as_object().into_iter().flatten() {
+        rows.insert(format!("version:{token}"), operations.clone());
+    }
+    for (id, variants) in snapshot["conflicts"].as_object().into_iter().flatten() {
+        let variants = variants.as_array().cloned().unwrap_or_default();
+        for (index, chunk) in variants.chunks(16).enumerate() {
+            rows.insert(format!("conflict:{id}:{index}"), json!({"operations":chunk}));
+        }
+    }
+    rows
+}
+
 /// What to send next.
 #[derive(Debug, PartialEq)]
 pub(super) enum Plan {
@@ -148,6 +196,7 @@ pub(super) struct Organization {
     /// The digests of the rows the client holds; None sends a snapshot.
     sent: Option<BTreeMap<String, Digest32>>,
     rev: i64,
+    drive: bool,
 }
 
 fn encoded(key: &str, row: &Value) -> usize {
@@ -170,7 +219,12 @@ impl Organization {
             current: None,
             sent: None,
             rev: 0,
+            drive: false,
         }
+    }
+
+    pub(super) fn new_drive() -> Self {
+        Self { drive: true, ..Self::new() }
     }
 
     fn job(&mut self, now: Instant, bootstrap: bool) -> Job {
@@ -245,7 +299,7 @@ impl Organization {
         }
         match done.value? {
             Ok(snapshot) => {
-                let rows = rows(&snapshot);
+                let rows = if self.drive { drive_rows(&snapshot) } else { rows(&snapshot) };
                 self.current = Some(rows.into_iter().map(|(key, row)| {
                     let digest = catalog::digest(&row);
                     (key, (row, digest))

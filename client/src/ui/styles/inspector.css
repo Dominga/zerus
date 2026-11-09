@@ -1,5 +1,5 @@
 @layer components {
-  .inspector { --insp-motion: calc((var(--z-motion-base) + var(--z-motion-slow)) / 2);
+  .inspector { --insp-row-ico: 16px; --insp-row-gap: 10px; --insp-motion: calc((var(--z-motion-base) + var(--z-motion-slow)) / 2);
     position: relative; width: 400px; min-width: 240px; flex: 0 1 auto; display: flex; flex-direction: column; margin: 0 8px 8px 0;
     border-radius: var(--z-radius-dialog); background: var(--z-color-pane); overflow: hidden;
     animation: insp-in var(--insp-motion) var(--ease) both; }
@@ -29,11 +29,11 @@
   .icard.closed .icard-chev { rotate: -90deg; }
   .icard-aside { flex: none; max-width: 60%; overflow: hidden; display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--fs-xs); white-space: nowrap; }
   .icard-body { display: flex; flex-direction: column; padding: 0 12px 10px; animation: fadeIn var(--z-motion-base) both; }
-  .icard-body > .hint { margin-top: 4px; }
-  .icard-text { margin: 2px 0 4px; line-height: 1.45; color: var(--z-color-text); }
+  .icard-body > .hint { margin-top: 4px; padding-left: calc(var(--insp-row-ico) + var(--insp-row-gap)); }
+  .icard-text { padding-left: calc(var(--insp-row-ico) + var(--insp-row-gap)); margin: 2px 0 4px; line-height: 1.45; color: var(--z-color-text); }
 
   .irow { display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 30px; color: var(--z-color-text-2); text-align: left; }
-  .irow-ico { flex: none; width: 16px; height: 16px; display: grid; place-items: center; color: var(--z-color-muted); }
+  .irow-ico { flex: none; width: var(--insp-row-ico); height: 16px; display: grid; place-items: center; color: var(--z-color-muted); }
   .irow-ico .state-dot { margin: 0; }
   .irow-val { flex: 1; min-width: 0; }
   /* Subagents (zerus-5ffek): each row is laid out on its own; the finished fold. */
@@ -112,11 +112,11 @@
   .side-progress { display: grid; grid-template-columns: minmax(64px, auto) 1fr auto; align-items: center; gap: 8px; font-size: var(--fs-xs); }
   .side-bar { height: 4px; border-radius: 2px; background: var(--z-color-divider); overflow: hidden; }
   .side-bar > i { display: block; height: 100%; border-radius: 2px; background: var(--z-color-accent); }
-  .side-members-head { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: var(--fs-xs); }
-  .side-member { display: flex; align-items: center; gap: 6px; min-width: 0; min-height: 24px; font-size: var(--fs-xs); }
+  .side-members-head { margin-top: 6px; font-size: var(--fs-xs); }
+  .side-member { display: flex; align-items: center; gap: 6px; min-width: 0; min-height: 24px; padding-left: calc(var(--insp-row-ico) + var(--insp-row-gap)); font-size: var(--fs-xs); }
   .side-member .role-badge { max-width: 45%; }
-  .side-actions { display: flex; align-items: center; gap: 8px; margin: 2px 0 4px; }
-  .side-finished { display: flex; align-items: center; gap: 6px; padding: 2px 0 2px 30px; font-size: var(--fs-xs); }
+  .side-actions { display: flex; align-items: center; gap: 8px; margin: 2px 0 4px; padding-left: calc(var(--insp-row-ico) + var(--insp-row-gap)); }
+  .side-finished { display: flex; align-items: center; gap: 6px; padding: 2px 0 2px calc(var(--insp-row-ico) + var(--insp-row-gap)); font-size: var(--fs-xs); }
   .side-tasks { height: 440px; display: flex; flex-direction: column; min-height: 0; }
   /* Qt parity (I3): the Changes card's files, each path elided in its middle (head shrinks, file name stays). */
   .chg-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 4px; }

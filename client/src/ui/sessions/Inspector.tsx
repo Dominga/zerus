@@ -379,7 +379,7 @@ function SideTeamCard() {
     </>}</Show>
     <button class="btn small primary" onClick={() => setDetailTab("team")}>{tr("Open Team")}</button>
     <Show when={members().length}>
-      <div class="side-members-head"><b>{tr("Members")}</b><span class="dim tabular">{members().length}</span></div>
+      <div class="irow side-members-head"><span class="irow-ico" /><b>{tr("Members")}</b><span class="grow" /><span class="irow-label tabular dim">{members().length}</span></div>
       <For each={members()}>{(member) => { const status = () => memberStatus(view()!, member); return <div class="side-member" data-member={member.id}>
         <span class="role-badge ell" style={roleStyle(member.role, member.lead)}>{member.role || member.id}</span><AgentBadge agent={agentKind(member.agent)} narrow /><span class="grow" /><span class={`dim ell tone-${status().tone}`} title={status().text}>{status().short || status().text}</span>
       </div>; }}</For>
@@ -420,7 +420,7 @@ function Sections() {
       <Row icon="terminal" label={tr("action")} mono title={s().summary}>{s().summary || tr("Not reported")}</Row>
       <Show when={goal().objective}><p class="icard-text">{goal().objective}</p></Show>
       <For each={plan()}>{(p) => <Row icon={p.status === "completed" ? "check" : "circle-dot"} label={p.status === "completed" ? tr("Done") : p.status === "in_progress" ? tr("In progress") : tr("To do")}>{p.title}</Row>}</For>
-      <div class="side-members-head"><b>{tr("Subagents")}</b><span class="dim tabular">{tr("%1 active / %2 total", workingChildren(s(), online()), s().subagents?.length ?? 0)}</span></div>
+      <div class="irow side-members-head"><span class="irow-ico" /><b>{tr("Subagents")}</b><span class="grow" /><span class="irow-label tabular dim">{tr("%1 active / %2 total", workingChildren(s(), online()), s().subagents?.length ?? 0)}</span></div>
       <SubagentRows session={s()} online={online()} />
       <SessionLeadPanel />
     </Card>

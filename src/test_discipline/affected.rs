@@ -517,8 +517,26 @@ fn team_steps(provider: &Provider, section: &ProviderMap, group: Option<&str>, i
     }
 }
 
+/// Task #349 follow-up (owner, 2026-11-09): a queue merge of the journal work
+/// selected 258 filters and about 200 skips - an 11 KB command line, which
+/// Windows refuses ("The command line is too long") before any test runs. An
+/// affected set that large is the whole suite in practice, so the run names no
+/// filters and no skips: the binary's own suite is the same safe superset, in
+/// a command that starts.
+const CARGO_ARGS_LIMIT: usize = 6000;
+
 /// A cargo run's filters, and the child modules to skip that were not chosen.
 fn cargo_filters(section: &ProviderMap, ids: &[String]) -> (Vec<String>, Vec<String>) {
+    let (filters, skips) = cargo_filters_exact(section, ids);
+    let length: usize = filters.iter().map(|filter| filter.len() + 1).sum::<usize>()
+        + skips.iter().map(|skip| skip.len() + 8).sum::<usize>();
+    if length > CARGO_ARGS_LIMIT {
+        return (Vec::new(), Vec::new());
+    }
+    (filters, skips)
+}
+
+fn cargo_filters_exact(section: &ProviderMap, ids: &[String]) -> (Vec<String>, Vec<String>) {
     let filters: BTreeSet<String> = ids.iter().filter_map(|id| section.targets.get(id)).flat_map(|target| target.run.iter().cloned()).collect();
     let skips: BTreeSet<String> = ids
         .iter()
@@ -871,6 +889,27 @@ affected = "all"
         // Both chosen: no skip.
         let both = select_files(&["src/state/teams/mod.rs", "src/state/teams/ops.rs"], &Hunks::new());
         assert_eq!(both.runs[0].command, "cargo test --manifest-path Cargo.toml --bin hgs -- cli:: state::teams:: state::teams::ops::");
+    }
+
+    /// Task #349 follow-up: an affected set large enough for an 11 KB command
+    /// line (the journal merge selected 258 filters and ~200 skips) runs the
+    /// whole binary instead, so Windows can start it.
+    #[test]
+    fn a_huge_affected_set_runs_the_whole_suite_instead_of_a_command_line_too_long() {
+        let mut section = ProviderMap::empty(Kind::Cargo);
+        let mut ids = Vec::new();
+        for n in 0..300 {
+            let id = format!("--bin hgs state::m{n}");
+            let run = format!("state::module_with_a_longer_name_{n}::");
+            section.targets.insert(id.clone(), target("--bin hgs", &[run.as_str()], 1));
+            ids.push(id);
+        }
+        let (filters, skips) = cargo_filters(&section, &ids);
+        assert!(filters.is_empty() && skips.is_empty(), "the whole suite, not a command that cannot start");
+        // A small set keeps its filters and skips.
+        let (filters, skips) = cargo_filters(&section, &ids[..2]);
+        assert_eq!(filters, vec!["state::module_with_a_longer_name_0::", "state::module_with_a_longer_name_1::"]);
+        assert!(skips.is_empty());
     }
 
     #[test]

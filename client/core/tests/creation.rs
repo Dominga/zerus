@@ -319,6 +319,150 @@ fn catalog(root: &str) -> Value {
            "worktrees": [{"path": root, "available": true, "branch": "work-1", "kind": "linked"}]})
 }
 
+fn created_waiting_for_catalog() -> (Driver, String, String, u64) {
+    let mut driver = Driver::loaded();
+    let id = driver.submit(plan(&auto_choices()));
+    driver.flush();
+    let (flight, _) = driver.call();
+    driver.answer(flight, identity("/srv/repo"));
+    let (flight, _) = driver.call();
+    driver.answer(flight, ok(catalog("/srv/repo")));
+    let worktree = driver.op(&id)["worktree_id"].as_str().unwrap().to_owned();
+    driver.flush();
+    let (flight, call) = driver.call();
+    assert!(matches!(call, Call::CreateWorktree { .. }));
+    driver.answer(
+        flight,
+        ok(json!({"request_id": worktree,
+        "path": "/srv/repo-work-1", "common_dir": "/srv/repo/.git",
+        "branch": "work-1", "status": "created"})),
+    );
+    driver.flush();
+    let (flight, _) = driver.call();
+    driver.answer(flight, identity("/srv/repo-work-1"));
+    let (flight, call) = driver.call();
+    assert!(matches!(call, Call::Catalog { ref path, .. } if path == "/srv/repo-work-1"));
+    (driver, id, worktree, flight)
+}
+
+#[test]
+fn post_create_catalog_failure_keeps_the_checkout_and_one_bounded_private_diagnostic() {
+    for answer in [
+        ok(
+            json!({"state":"timeout", "detail":"Catalog is being refreshed",
+            "stale":true, "partial":false, "sampled_at":900,
+            "body":"not retained", "worktrees":[{"body":"not retained"}]}),
+        ),
+        ok(
+            json!({"state":"ok", "common_dir":"/srv/repo/.git", "stale":true,
+            "detail":"Previous catalog", "partial":false, "sampled_at":900}),
+        ),
+        ok(
+            json!({"state":"x".repeat(100), "detail":format!("password=secret\n\t{}", "例".repeat(2000)),
+            "stale":"unknown", "partial":{}, "sampled_at":"unknown"}),
+        ),
+        fail("timed out"),
+    ] {
+        let (mut driver, id, worktree, flight) = created_waiting_for_catalog();
+        let before = driver.op(&id);
+        driver.answer(flight, answer);
+        driver.flush();
+        let op = driver.op(&id);
+        assert_eq!(op["state"], "failed");
+        assert!(op["error"].as_str().unwrap().contains("already created"));
+        assert!(!op["error"].as_str().unwrap().contains("Choose"));
+        for key in [
+            "worktree_id",
+            "target",
+            "destination",
+            "branch",
+            "worktree_common",
+            "launch_id",
+        ] {
+            assert_eq!(op[key], before[key], "{key}");
+        }
+        assert_eq!(op["worktree_id"], worktree);
+        assert_eq!(op["worktree_done"], true);
+        assert_ne!(op["launch_dispatched"], true);
+        assert!(driver.calls.is_empty() && driver.launches.is_empty());
+        let diagnostic = &op["last_catalog_failure"];
+        assert_eq!(diagnostic["stage"], "post_create_catalog");
+        assert_eq!(diagnostic.as_object().unwrap().len(), 6);
+        assert!(diagnostic["state"].as_str().unwrap().chars().count() <= 64);
+        assert!(diagnostic["detail"].as_str().unwrap().chars().count() <= 512);
+        assert!(!diagnostic["detail"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .any(char::is_control));
+        let encoded = diagnostic.to_string();
+        assert!(encoded.len() < 3072);
+        assert!(!encoded.contains("not retained") && !encoded.contains("secret"));
+        for key in ["stale", "partial"] {
+            assert!(diagnostic[key].is_boolean() || diagnostic[key].is_null());
+        }
+        assert!(diagnostic["sampled_at"].is_number() || diagnostic["sampled_at"].is_null());
+        let saved: Value = serde_json::from_slice(&driver.journal).unwrap();
+        assert_eq!(
+            saved["operations"][&id]["last_catalog_failure"],
+            *diagnostic
+        );
+    }
+}
+
+#[test]
+fn an_explicit_successful_continuation_preserves_the_last_catalog_failure() {
+    let (mut driver, id, worktree, flight) = created_waiting_for_catalog();
+    driver.answer(
+        flight,
+        ok(
+            json!({"state":"timeout", "detail":"Git operation cancelled or timed out",
+        "stale":true, "partial":false, "sampled_at":900}),
+        ),
+    );
+    driver.flush();
+    let diagnostic = driver.op(&id)["last_catalog_failure"].clone();
+    assert!(driver.calls.is_empty() && driver.launches.is_empty());
+    let effects = driver.creations.resume(&id);
+    driver.take(effects);
+    driver.flush();
+    let (flight, call) = driver.call();
+    assert!(matches!(call, Call::CreationDirectory { ref path, .. } if path == "/srv/repo-work-1"));
+    driver.answer(flight, identity("/srv/repo-work-1"));
+    let (flight, call) = driver.call();
+    assert!(matches!(call, Call::Catalog { ref path, .. } if path == "/srv/repo-work-1"));
+    driver.answer(flight, ok(catalog("/srv/repo-work-1")));
+    let (flight, call) = driver.call();
+    assert!(
+        matches!(call, Call::WorktreeReceipt { ref request_id, ref action, .. }
+        if request_id == &worktree && action == "status")
+    );
+    driver.answer(
+        flight,
+        ok(json!({"schema":1, "request_id":worktree, "status":"created"})),
+    );
+    driver.flush();
+    assert!(
+        driver.calls.is_empty(),
+        "no CreateWorktree was issued again"
+    );
+    assert_eq!(
+        driver.launches.len(),
+        1,
+        "only the explicit continuation can launch"
+    );
+    let effects = driver.creations.launch_finished(&id, Ok(()));
+    driver.take(effects);
+    let effects = driver.creations.complete(&id);
+    driver.take(effects);
+    driver.flush();
+    assert_eq!(driver.state(&id), "bound");
+    assert_eq!(driver.op(&id)["last_catalog_failure"], diagnostic);
+    let saved: Value = serde_json::from_slice(&driver.journal).unwrap();
+    assert_eq!(saved["operations"][&id]["last_catalog_failure"], diagnostic);
+    assert!(!can_resume(&driver.op(&id)));
+}
+
 #[test]
 fn a_generated_worktree_is_created_once_under_a_saved_id_then_verified() {
     let mut driver = Driver::loaded();

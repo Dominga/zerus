@@ -39,7 +39,36 @@ pub(super) enum ProgramJob {
         offer: Box<programs::ForceOffer>,
     },
 }
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct ProgramReservation {
+    pub revision: u64,
+    pub request_id: String,
+    pub binding: String,
+    pub capture: Capture,
+}
+
 impl ProgramJob {
+    pub(super) fn identity(&self) -> (String, String, Capture) {
+        match self {
+            Self::Stopped(stopped) => stopped.identity(),
+            Self::Force { offer, .. } => offer.identity(),
+        }
+    }
+
+    pub(super) fn matches(&self, reservation: &ProgramReservation) -> bool {
+        let (request_id, binding, capture) = self.identity();
+        reservation.request_id == request_id
+            && reservation.binding == binding
+            && reservation.capture == capture
+    }
+
+    pub(super) fn retirement(&self) -> run::Retirement {
+        match self {
+            Self::Stopped(stopped) => stopped.retirement(),
+            Self::Force { .. } => run::Retirement::Failed,
+        }
+    }
     fn remaining_millis(&self) -> u64 {
         match self {
             Self::Stopped(stopped) => stopped.remaining_millis(),
@@ -58,14 +87,11 @@ impl ProgramJob {
             Self::Force { offer, .. } => offer.current(),
         }
     }
-    fn close(&self) -> Result<(), String> {
-        match self {
-            Self::Stopped(stopped) => stopped.close(),
-            Self::Force { offer, .. } => offer.close(),
-        }
-    }
     pub(super) fn normal_refusal(&self) -> bool {
         matches!(self, Self::Stopped(stopped) if stopped.normal_refusal())
+    }
+    pub(super) fn reviewable_refusal(&self) -> bool {
+        matches!(self, Self::Stopped(stopped) if stopped.reviewable_refusal())
     }
     pub(super) fn can_force(&self) -> bool {
         matches!(self, Self::Stopped(stopped) if stopped.can_force())
@@ -127,6 +153,7 @@ pub(super) async fn confirm(
                 program_retirement: None,
                 source: Some(capture.target.clone()),
                 restore_supported: true,
+                reservation: None,
                 archive: Some(ArchiveIdentity {
                     version: 1,
                     archive_id: receipt["result_target"]["archive_id"]
@@ -192,7 +219,8 @@ fn publish(
     job.phase = "checking";
     let (detail, live) = match stopped {
         Ok(stopped) => {
-            if stopped.normal_refusal() {
+            if stopped.reviewable_refusal() {
+                job.cleanup = Cleanup::retained(std::mem::take(&mut job.cleanup.entries));
                 job.program_review_pending = false;
             }
             job.program_retirement = None;
@@ -234,36 +262,89 @@ fn watch_job(inner: &Arc<Inner>, app: AppHandle, id: String) {
         let Some(inner) = weak.upgrade() else {
             return;
         };
+        let (reservation, program) = {
+            let mut m = lock(&inner.model);
+            let Some(job) = m.jobs.iter_mut().find(|j| j.id == id) else {
+                return;
+            };
+            let Some(program) = &job.programs else {
+                if job.busy && job.reservation.is_some() && !job.dismissed {
+                    continue;
+                }
+                return;
+            };
+            if !job.busy && job.program_review_pending && job.reservation.is_some() {
+                return;
+            }
+            if program.current() {
+                // A finished control worker is observable failure data, never a
+                // physical-drain proof. Keep the original resources/expiry exactly
+                // as before; only disable presentation of a usable Force offer.
+                if program.holder_unavailable() && job.program_retirement.is_none() {
+                    job.program_retirement = Some(ProgramRetirement::HolderUnavailable);
+                    changed(&app, &mut m);
+                }
+                continue;
+            }
+            job.program_retirement
+                .get_or_insert(if program.remaining_millis() == 0 {
+                    ProgramRetirement::Expired
+                } else {
+                    ProgramRetirement::SourceUnavailable
+                });
+            job.busy = true;
+            let reservation = job.reservation.clone();
+            let program = job.programs.take().expect("retained program");
+            (reservation, program)
+        };
+        let retired = program.retirement();
         let mut m = lock(&inner.model);
         let Some(job) = m.jobs.iter_mut().find(|j| j.id == id) else {
             return;
         };
-        let Some(program) = &job.programs else {
+        if !job.busy
+            || job.programs.is_some()
+            || job.reservation != reservation
+            || reservation
+                .as_ref()
+                .is_some_and(|reservation| !program.matches(reservation))
+        {
             return;
-        };
-        if program.current() {
-            // A finished control worker is observable failure data, never a
-            // physical-drain proof. Keep the original resources/expiry exactly
-            // as before; only disable presentation of a usable Force offer.
-            if program.holder_unavailable() && job.program_retirement.is_none() {
-                job.program_retirement = Some(ProgramRetirement::HolderUnavailable);
+        }
+        match retired {
+            run::Retirement::Pending => {
+                job.programs = Some(program);
+                job.program_review_pending = true;
                 changed(&app, &mut m);
+                continue;
             }
-            continue;
+            run::Retirement::Failed => {
+                job.programs = Some(program);
+                job.busy = false;
+                job.program_review_pending = true;
+                changed(&app, &mut m);
+                return;
+            }
+            run::Retirement::Retired => {
+                if program.normal_refusal() {
+                    job.program_review_pending = false;
+                }
+                let step = job.cleanup.step();
+                let review = reservation.is_some();
+                job.programs = None;
+                job.reservation = None;
+                job.busy = review;
+                if review {
+                    job.manual_review = true;
+                }
+                changed(&app, &mut m);
+                drop(m);
+                if review {
+                    inner.drive(app, id, step, false);
+                }
+                return;
+            }
         }
-        job.program_retirement
-            .get_or_insert(if program.remaining_millis() == 0 {
-                ProgramRetirement::Expired
-            } else {
-                ProgramRetirement::SourceUnavailable
-            });
-        let program = job.programs.take();
-        changed(&app, &mut m);
-        drop(m);
-        if let Some(program) = program {
-            let _ = program.close();
-        }
-        return;
     });
 }
 

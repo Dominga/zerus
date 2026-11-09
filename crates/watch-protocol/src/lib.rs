@@ -67,6 +67,8 @@ pub mod topic {
     pub const TASKS: &str = "tasks";
     /// The shared project catalog as `hgs swarm get` shows it, as keyed rows.
     pub const ORGANIZATION: &str = "organization";
+    /// The separately persisted, capable-only Windows drive-folder projection.
+    pub const DRIVE_FOLDERS: &str = "organization.drive_folders";
 }
 
 /// Why a catalog key was removed. Clients treat an unknown reason as unknown.

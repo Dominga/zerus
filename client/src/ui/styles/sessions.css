@@ -210,6 +210,7 @@
   .sc-team .team-glyph { position: absolute; left: 6px; top: 4px; }
   .sc-team .chev { position: absolute; right: 5px; top: 7px; transition: rotate var(--z-motion-base) var(--ease); }
   .sc-team.open .chev { rotate: 180deg; }
+  .team-badge { flex: none; display: inline-flex; align-items: center; gap: 2px; }
   .sc-team .team-asking, .sc-team .team-needs { margin-left: 6px; padding: 0 4px; border-radius: 3px; font-weight: 600; }
   .sc-team .team-asking { color: var(--z-list-badge-muted); background: var(--z-list-chip); }
   .sc-team .team-needs { color: var(--z-list-tone-attention); background: color-mix(in srgb, var(--z-list-tone-attention) 16%, transparent); }

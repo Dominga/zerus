@@ -2,9 +2,9 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createComponent, Show, type Accessor } from "solid-js";
 import { render } from "solid-js/web";
-const native = vi.hoisted(() => ({ clear: vi.fn(), offer: vi.fn(), cancel: vi.fn(), confirm: vi.fn(), sync: vi.fn(), dismiss: vi.fn(), remove: vi.fn(), inspect: vi.fn(), restore: vi.fn(), manual: vi.fn(), manualCancel: vi.fn() }));
+const native = vi.hoisted(() => ({ clear: vi.fn(), offer: vi.fn(), cancel: vi.fn(), confirm: vi.fn(), sync: vi.fn(), dismiss: vi.fn(), remove: vi.fn(), inspect: vi.fn(), restore: vi.fn(), manual: vi.fn(), manualCancel: vi.fn(), check: vi.fn() }));
 vi.mock("../../bridge", () => ({ inTauri: () => false, terminationCleanupKeep: native.clear, terminationCleanupDismiss: native.dismiss, terminationCleanupRemove: native.remove, terminationCleanupInspect: native.inspect, terminationCleanupManualOffer: native.manual, terminationCleanupManualCancel: native.manualCancel,
-  terminationProgramForceOffer: native.offer, terminationProgramForceCancel: native.cancel, terminationProgramForceConfirm: native.confirm }));
+  terminationProgramForceOffer: native.offer, terminationProgramForceCancel: native.cancel, terminationProgramForceConfirm: native.confirm, terminationCleanupCheck: native.check }));
 const catalogState = vi.hoisted(() => ({ rows: {} as Record<string, { key: string; computer: string; name: string }> }));
 const navigation = vi.hoisted(() => ({ select: vi.fn(), tab: vi.fn(), page: vi.fn() }));
 vi.mock("../../store/catalog", () => ({ catalog: catalogState }));
@@ -202,4 +202,28 @@ it("opens manual removal only through the original native row handle",async()=>{
  const host=mount();review(host).click();button(host,"Remove anyway…").click();await flush();
  expect(native.manual).toHaveBeenCalledExactlyOnceWith("unowned-original");expect(host.textContent).toContain("/srv/example/hand-made");
  expect(button(host,"Remove working folder").disabled).toBe(true);button(host,"Cancel").click();await flush();expect(native.manualCancel).toHaveBeenCalledExactlyOnceWith("native-manual");
+});
+
+it("runs Check again once with no automatic Force or removal", async () => {
+ // Matches the native valid-refusal projection exercised by assert_real_refused_check.
+ const original = row({ can_check: true, can_force: false, reason: "The program list changed or could not be checked. Review the working folder again." });
+ applyCleanup({ ...emptyCleanup(), revision: ++revision, rows: [original], kept: 1 });
+ native.check.mockResolvedValue({ ...emptyCleanup(), revision: ++revision, rows: [original], kept: 1 });
+ const host = mount(); review(host).click();
+ button(host, "Check again").click(); await flush();
+ expect(native.check).toHaveBeenCalledExactlyOnceWith("original");
+ expect(native.offer).not.toHaveBeenCalled();
+ expect(native.remove).not.toHaveBeenCalled();
+ expect(native.confirm).not.toHaveBeenCalled();
+});
+
+it("keeps Check again disabled until the native row admits review", () => {
+ const original = row({ can_check: false, can_force: false });
+ applyCleanup({ ...emptyCleanup(), revision: ++revision, rows: [original], kept: 1 });
+ const host = mount(); review(host).click();
+ expect(button(host, "Check again").disabled).toBe(true);
+ button(host, "Check again").click();
+ expect(native.check).not.toHaveBeenCalled();
+ expect(native.offer).not.toHaveBeenCalled();
+ expect(native.remove).not.toHaveBeenCalled();
 });

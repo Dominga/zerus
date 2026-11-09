@@ -1808,7 +1808,7 @@ fn service_catalog_completion_populates_the_tray_like_the_gui_with_device_attent
                     .map(|text| text.english())
                     .collect::<Vec<_>>(),
                 [
-                    "1 needs attention, 2 sessions total",
+                    "1 active, 1 needs attention, 2 sessions total",
                     "1 here",
                     "1 on studio"
                 ]

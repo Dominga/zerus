@@ -5,7 +5,7 @@ import { render } from "solid-js/web";
 
 const fixture = vi.hoisted(() => ({
   canAttach: vi.fn(() => true), image: vi.fn(async (_file: Blob) => {}), send: vi.fn(),
-  paste: vi.fn(), input: vi.fn(), show: vi.fn(), hide: vi.fn(),
+  paste: vi.fn(), input: vi.fn(), show: vi.fn(), hide: vi.fn(), capture: vi.fn(), terminalImage: vi.fn(async (_png: Uint8Array) => {}), imageCurrent: true,
   copy: vi.fn(async (_text: string) => {}), clipboard: vi.fn(async () => "pasted from the menu"),
   selection: "", mouse: "none", keys: undefined as ((event: KeyboardEvent) => boolean) | undefined,
   generation: (): number => 7,
@@ -15,6 +15,7 @@ vi.mock("../../store/composer", () => ({ composer: { canAttach: fixture.canAttac
 vi.mock("../../store/terminal", () => ({
   screenShowsLatest: () => true,
   terminal: { paste: fixture.paste, input: fixture.input, show: fixture.show, hide: fixture.hide, generation: () => fixture.generation(),
+    captureImage: (screen: unknown) => { fixture.capture(screen); return { current: () => fixture.imageCurrent, paste: async (png: Uint8Array) => { if (fixture.imageCurrent) await fixture.terminalImage(png); } }; },
     connected: () => false, ready: () => false, texts: () => undefined, status: () => "Fixture terminal", resized() {} },
 }));
 // Only xterm's canvas/OS renderer is inert. The actual tab and capture listener run.
@@ -37,7 +38,7 @@ import { detailTab, menu, setDetailTab, setMenu } from "../../store/ui";
 let dispose: (() => void) | undefined, host: HTMLDivElement;
 const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
 beforeEach(async () => {
-  vi.clearAllMocks(); fixture.canAttach.mockReturnValue(true);
+  vi.clearAllMocks(); fixture.canAttach.mockReturnValue(true); fixture.imageCurrent = true;
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
   setDetailTab("terminal");
   host = document.createElement("div"); document.body.append(host);
@@ -56,46 +57,53 @@ function paste(data: Partial<DataTransfer>, target = host.querySelector(".term-h
   target.dispatchEvent(event);
   return event;
 }
-const image = () => new File(["synthetic image fixture"], "clipboard.png", { type: "image/png" });
+const png = () => Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 3]);
+const image = () => new File([png()], "clipboard.png", { type: "image/png" });
 
-it("pastes an image into the existing draft once and opens Activity without sending or terminal input", () => {
+it("keeps the exact event PNG in Terminal without touching the draft or sending Enter", async () => {
+  await mounted();
   const file = image(), getAsFile = vi.fn(() => file), bubbled = vi.fn();
   document.addEventListener("paste", bubbled, { once: true });
   try {
     const event = paste({ items: [{ kind: "file", type: file.type, getAsFile }] as unknown as DataTransferItemList,
       getData: () => "text alongside the screenshot must not be typed" });
+    await settle();
     expect(event.defaultPrevented).toBe(true);
     expect(getAsFile).toHaveBeenCalledTimes(1);
-    expect(fixture.image).toHaveBeenCalledExactlyOnceWith(file);
-    expect(detailTab()).toBe("activity");
-    expect(fixture.paste).not.toHaveBeenCalled(); expect(fixture.input).not.toHaveBeenCalled();
-    expect(fixture.send).not.toHaveBeenCalled(); expect(bubbled).not.toHaveBeenCalled();
+    expect(detailTab()).toBe("terminal");
+    expect(fixture.capture).toHaveBeenCalledExactlyOnceWith(fixture.show.mock.calls.at(-1)![0]);
+    expect(fixture.terminalImage).toHaveBeenCalledExactlyOnceWith(png());
+    expect(fixture.image).not.toHaveBeenCalled(); expect(fixture.paste).not.toHaveBeenCalled();
+    expect(fixture.input).not.toHaveBeenCalled(); expect(fixture.send).not.toHaveBeenCalled(); expect(bubbled).not.toHaveBeenCalled();
   } finally { document.removeEventListener("paste", bubbled); }
 });
 
-it("also recognizes an image exposed only as a clipboard file", () => {
-  const file = image();
-  paste({ files: [file] as unknown as FileList });
-  expect(fixture.image).toHaveBeenCalledExactlyOnceWith(file);
-  expect(detailTab()).toBe("activity"); expect(fixture.paste).not.toHaveBeenCalled();
+it("uses one image from files-only or mixed image clipboard data independently of composer readiness", async () => {
+  await mounted(); fixture.canAttach.mockReturnValue(false);
+  paste({ files: [image(), image()] as unknown as FileList, getData: () => "never this text" });
+  await settle();
+  expect(fixture.terminalImage).toHaveBeenCalledExactlyOnceWith(png());
+  expect(fixture.image).not.toHaveBeenCalled(); expect(fixture.paste).not.toHaveBeenCalled(); expect(detailTab()).toBe("terminal");
 });
 
-it("shows an actionable fallback if the composer cannot accept attachments", () => {
-  fixture.canAttach.mockReturnValue(false);
-  paste({ files: [image()] as unknown as FileList, getData: () => "do not paste this fallback text" });
-  expect(detailTab()).toBe("terminal");
-  expect(host.querySelector('[role="status"]')?.textContent).toContain("paste again when the message field is ready");
-  expect(fixture.image).not.toHaveBeenCalled(); expect(fixture.paste).not.toHaveBeenCalled();
-  const button = [...host.querySelectorAll("button")].find((button) => button.textContent === "Open Activity")!;
-  button.click(); expect(detailTab()).toBe("activity"); expect(fixture.send).not.toHaveBeenCalled();
-});
-
-it("reports image clipboard data that cannot be read, instead of pasting its accompanying text", () => {
+it("refuses unreadable advertised image data without text or an Activity fallback", async () => {
+  await mounted();
   paste({ items: [{ kind: "file", type: "image/png", getAsFile: () => null }] as unknown as DataTransferItemList, getData: () => "not image bytes" });
   expect(host.querySelector('[role="status"]')).not.toBeNull();
-  expect(fixture.image).not.toHaveBeenCalled(); expect(fixture.paste).not.toHaveBeenCalled();
+  expect(fixture.terminalImage).not.toHaveBeenCalled(); expect(fixture.image).not.toHaveBeenCalled(); expect(fixture.paste).not.toHaveBeenCalled();
+  expect(host.textContent).not.toContain("Open Activity");
   host.querySelector<HTMLButtonElement>('[aria-label="Dismiss"]')!.click();
   expect(host.querySelector('[role="status"]')).toBeNull();
+});
+
+it("does not revive a decoded image after its original lease was invalidated", async () => {
+  await mounted(); const file = image();
+  let complete!: (value: ArrayBuffer) => void;
+  vi.spyOn(file, "arrayBuffer").mockImplementation(() => new Promise((resolve) => { complete = resolve; }));
+  paste({ files: [file] as unknown as FileList });
+  fixture.imageCurrent = false;
+  complete(png().buffer); await settle();
+  expect(fixture.terminalImage).not.toHaveBeenCalled(); expect(fixture.image).not.toHaveBeenCalled();
 });
 
 it("keeps text-only paste on the original terminal path", () => {

@@ -337,6 +337,13 @@ impl Runtime {
                 self.exclusion.as_ref(),
             )?;
             let consent = Consent::admitted(verified, lease.clone())?;
+            if original.is_none() {
+                // A corrupt or incomplete budget is not a capacity proof.
+                proof = Proof::Unprovable;
+                let capacity = ledger::capacity(&tx, &consent.original)?;
+                proof = Proof::NoRow;
+                ensure!(capacity, "deferred send capacity unavailable");
+            }
             // From here on nothing proves the request was not admitted.
             proof = Proof::Admitting;
             let row = ledger::admit(

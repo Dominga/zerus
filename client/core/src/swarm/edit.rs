@@ -63,6 +63,18 @@ pub enum Intent {
         project: String,
         change: super::folder_edit::Change,
     },
+    /// A native Add/Edit Set with style verified from the selected computer and,
+    /// when present, independently from its original computer. Never deserialized.
+    FolderStyled {
+        project: String,
+        original: Option<super::Folder>,
+        id: String,
+        machine: String,
+        path: String,
+        name: String,
+        style: crate::paths::Style,
+        original_style: Option<crate::paths::Style>,
+    },
     /// Shared color only; vivid fill remains a device-local preference.
     Color { project: String, color: String },
     /// renameGroup (147-152).
@@ -221,6 +233,31 @@ pub fn apply(organization: &Value, intent: &Intent) -> Result<Value, String> {
         }
         Intent::Folder { project, change } => {
             super::folder_edit::apply(&mut next, project, change)?;
+        }
+        Intent::FolderStyled {
+            project,
+            original,
+            id,
+            machine,
+            path,
+            name,
+            style,
+            original_style,
+        } => {
+            let change = super::folder_edit::Change::Set {
+                original: original.clone(),
+                id: id.clone(),
+                machine: machine.clone(),
+                path: path.clone(),
+                name: name.clone(),
+            };
+            super::folder_edit::apply_set_style(
+                &mut next,
+                project,
+                &change,
+                *style,
+                original_style.unwrap_or(*style),
+            )?;
         }
         Intent::Color { project, color } => {
             if color.len() != 7
@@ -775,5 +812,36 @@ mod tests {
         assert_eq!(apply(&full, &intent), Err(TOO_MANY.to_owned()));
         let one_less = json!({"projects": full["projects"].as_array().unwrap()[1..].to_vec()});
         assert!(apply(&one_less, &intent).is_ok());
+    }
+
+    #[test]
+    fn folder_styled_uses_verified_styles_and_legacy_folder_stays_posix() {
+        let styled = |path: &str| Intent::FolderStyled {
+            project: "alpha".into(),
+            original: None,
+            id: "11111111-2222-4333-8444-555555555555".into(),
+            machine: "peer".into(),
+            path: path.into(),
+            name: String::new(),
+            style: crate::paths::Style::Windows,
+            original_style: None,
+        };
+        let next = apply(&org(), &styled("C:\\Work\\..\\Repo\\")).unwrap();
+        assert_eq!(next["projects"][0]["folders"][1]["path"], "C:/Repo");
+        assert_eq!(
+            apply(&next, &styled("c:/repo")),
+            Err(crate::swarm::folder_edit::DUPLICATE.into())
+        );
+        let legacy = Intent::Folder {
+            project: "alpha".into(),
+            change: crate::swarm::folder_edit::Change::Set {
+                original: None,
+                id: "11111111-2222-4333-8444-555555555555".into(),
+                machine: "peer".into(),
+                path: "D:/Other".into(),
+                name: String::new(),
+            },
+        };
+        assert!(apply(&org(), &legacy).is_err());
     }
 }

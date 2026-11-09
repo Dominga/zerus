@@ -3165,6 +3165,16 @@ preparation is revalidated before startup. A definitely ended startup can retry
 only startup with a new launch identity. **Edit choices** opens a reviewed new
 request while preserving the original attempt and resources.
 
+A failed repository verification after a successful worktree receipt keeps the
+already-created checkout, branch and original receipt. Its message distinguishes
+that read failure from creation failure. One bounded private
+`last_catalog_failure` records the read stage, sanitized state/detail and typed
+staleness, completeness and sample time (null means unavailable), and remains
+after later continuation. A catalog timeout does not establish repository
+corruption. **Continue setup** revalidates the retained checkout and can then
+start the session; it is not a read-only check and never repeats an unknown
+original effect.
+
 A matching service receipt with a fully drained, unsuccessful launch-command
 exit shows **Creation failed** and its reason. Its dispatched launch identity
 is kept: **Continue setup** never repeats it. **Edit choices** opens a separate,
@@ -5425,8 +5435,26 @@ would expand inside double quotes. Remote drops first copy files to the session 
 files, 10 MiB each and 20 MiB total. The copy is bound to the session's run and
 conversation. An untracked shell (`hgs sh -d`) has neither: its copy is bound to
 the live session's creation time and refused when a tracked run owns the session.
-Changing tab, session or connection during transfer cancels insertion.
+Changing tab, session or connection during transfer cancels insertion. Zerus
+Next on Linux and macOS frames the quoted paths as one literal terminal paste,
+so path characters are not individual native approval shortcuts. It still sends
+no Enter. Generic typing, text paste and Windows file-drop framing are unchanged.
 **Open externally** and **Copy connect command** retain access from other clients.
+
+In Zerus Next on Linux and macOS, an image-bearing browser paste event stays in
+the selected Terminal. On Arch with WebKitGTK, use **Shift+Insert** for an image
+on the clipboard; Ctrl+Shift+V retains the engine's text-paste behavior and
+Ctrl+V remains the native agent's key. Its captured image is normalized to PNG (at most 10 MiB
+before and after conversion, and 32 megapixels), then copied through the same
+run/conversation-bound staging command even for a local session. One quoted
+retained image-file path is inserted without Enter; the composer and Activity
+are unchanged. Accompanying text is not inserted. Unreadable image data, unknown
+identity, a changed/hidden/remounted terminal or an unconfirmed transfer inserts
+nothing and is never retried automatically. This inserts a file reference; it
+does not prove the native agent imported the image. Windows image-event staging
+and non-POSIX peer paths are unsupported. The quoted image path uses the same
+literal-paste framing as POSIX file drops. Existing text paste, native Ctrl+V
+keys and the text-only application Paste menu are unchanged.
 
 On Unix, **Terminate** can close an untracked Shell row after confirmation. The
 confirmation captures the tmux socket and server, session ID and creation time,
@@ -6345,6 +6373,23 @@ unknown-result handling.
 Ordinary refreshes preserve the selected mode. Generic approval policy requests
 remain refused; ownership and each effect require their own authenticated grants.
 
+Operation-ledger rows and bytes reserve outstanding original work, not every
+historical receipt. The first durable physical drain returns that original's
+reservation exactly once, including an Unknown result. Its outcome, UUID,
+source, custody records and lookup history remain retained; returned capacity
+never grants replay. A two-child operation keeps its full reservation between
+children. Task-message staging inputs retain their separate charge until their
+existing exact removal/review rules release it; creation scheduling slots keep
+their separate predecessor protections.
+
+Owned startup may convert earlier cumulative accounting only after complete,
+bounded validation of its exact original charge formula and active roster.
+Corrupt, mismatched or incompletely covered accounting refuses admission; it is
+never reset or approximated. Status covers at most 4096 historical metadata rows
+plus one overflow sentinel. A larger history reports `history_complete:false`
+and null historical `rows`/`unsettled`, with null propagated to the aggregate.
+The bounded outstanding roster and physical custody remain checked separately.
+
 Background mode also owns one presence sampler/writer outside the actor. It
 samples every two seconds and uses the existing `desktop-presence.json` format.
 It writes on a 30-second heartbeat, a lock change or a return from at least
@@ -6921,6 +6966,51 @@ each `next` is the cursor of that stage's next page for `hgs task list --stage
 STAGE --limit N --after CURSOR`, or null when the stage has no more rows. A
 window that is not 1 to 200 is a non-fatal `bad_request`.
 
+#### Shared drive-folder component
+
+Remote Windows drive-absolute project links use `hgs swarm drive-folders
+get|apply|inventory|exchange --json` and the independent `drive_folders_v1`
+capability, not a new main-catalog key kind. `get --operation UUID --json` is the
+only result-reconciliation query. Ordinary get/watch/apply/export, closed legacy
+exchange envelopes, mobile/API v1, project inference and launch readers retain
+their POSIX/legacy contracts. A stored link grants no filesystem, worktree,
+account or session-launch authority.
+
+`drive-folders.json` and immutable `drive-folders-init.json` live beside
+`catalog.json`. The graph has at most 64 MiB, 100000 raw operations and 1024
+parents per operation; exchange is at most 8 MiB and 128 causally ordered
+operations per round, with complete parent closure in retained history plus the
+batch. A bounded native observation has at most 200 folders and includes only
+current records, raw-head frontiers and review states, never a growing renderer
+journal. Both files absent is UNINITIALIZED, not an empty authority. Only a
+validated first trusted Add or explicitly negotiated initial import creates the
+witness and then the graph. A partial, corrupt, foreign, nonregular, oversized or
+changed pair is UNAVAILABLE: its bytes remain, with no empty reset, automatic
+repair or assumed write result. Main and drive saves report independent
+outcomes; no two-file atomicity is claimed. Backups record both originals and
+hashes or explicit incompleteness.
+
+Operations are immutable `{id,actor,clock,folder_id,parents,value}` records with
+canonical nonnil UUIDs. A value is `{project,machine,path,name}` or a retained
+historical tombstone. Paths are canonical drive-absolute Windows paths, at most
+8192 bytes; project/name limits remain 128/320 bytes and controls are refused.
+Only fresh locally-known-unused UUID Add and same-kind live Edit are admitted.
+Edit retains project and ID and requires fresh native source and destination
+Windows cards. Remove, Transfer, clone, resurrection and cross-representation or
+cross-swarm rehome are outside this cut. Cross-swarm enrollment refuses a
+nonempty, initialized-empty or unavailable component before any membership
+mutation. Raw records received before their project/machine context remain
+unavailable rather than being discarded or shown as current.
+
+Complete local main+drive histories, including tombstones, prove known-unused
+IDs. They cannot prevent an unaware old/offline writer from creating a colliding
+legacy ID later. Such a collision preserves both histories and quarantines only
+that logical identity: no winner, erasure, cross-kind causal edge or
+whole-catalog failure. Unrelated legacy edits and other drive IDs continue.
+Absolute global exclusion is therefore not claimed.
+
+#### Drive-folder watch topic
+
 The `organization` topic follows the shared project catalog as `hgs swarm get`
 prints it: `{"op":"subscribe","topic":"organization"}`, one per stream. A
 worker thread reads the stored catalog without its lock, never saving it and
@@ -6945,6 +7035,20 @@ a non-fatal `organization_failed`. The topic reports `worker.current` but never
 supervises the worker; a client that sees `false` runs one `hgs swarm get`,
 which restarts an outdated worker as before. Writes, including the first
 `swarm initialize`, stay with `hgs swarm`.
+
+The separately negotiated `organization.drive_folders` topic follows the capable
+Windows drive-folder projection with `{"op":"subscribe","topic":"organization.drive_folders"}`.
+It never initializes, saves or repairs the catalog or either drive file. The
+`drive_folders` summary row carries the bounded source/store identity, status,
+operation query result and record/conflict IDs. `record:<id>` rows carry the
+current records, `version:<token>` rows their raw-head frontiers, and
+`conflict:<id>:<n>` rows at most 16 retained raw variants each. Unavailable and
+incomplete states are data, never an empty known frontier. The legacy
+`organization` topic, its file set and all legacy apply/export envelopes remain
+unchanged by this component. Drive reads run on their own bounded worker when
+either drive file changes, with the same cancellation, paging and resnapshot
+rules as the organization topic. A client without this topic keeps polling
+`hgs swarm drive-folders get --json` instead.
 
 The stream checks its sources every 250 ms. It stats the bindings, read marks,
 notification preferences, waits, launches, renames, name routes, the archive

@@ -87,6 +87,7 @@ enum Input {
     Tasks(tasks::Done),
     /// An organization read finished on its worker.
     Organization(organization::Done),
+    DriveFolders(organization::Done),
     End,
 }
 
@@ -153,6 +154,7 @@ pub(crate) fn run(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             Ok(Input::Processes(done)) => watch.processes_done(done),
             Ok(Input::Tasks(done)) => watch.tasks_done(done),
             Ok(Input::Organization(done)) => watch.organization_done(done),
+            Ok(Input::DriveFolders(done)) => watch.drive_folders_done(done),
             Ok(Input::End) | Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(0),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
@@ -180,6 +182,7 @@ pub(crate) fn run(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         watch.flush_processes();
         watch.flush_tasks();
         watch.flush_organization();
+        watch.flush_drive_folders();
     }
 }
 
@@ -369,6 +372,8 @@ struct Watch<'a> {
     tasks_pool: Option<tasks::Pool>,
     organization: organization::Organization,
     organization_pool: Option<organization::Pool>,
+    drive_folders: organization::Organization,
+    drive_folders_pool: Option<organization::Pool>,
     writers: Writers,
     /// The file this stream started from (zerus-5wmh.66.2.46), the last
     /// replacement seen at its path, and when to look again.
@@ -422,6 +427,8 @@ impl<'a> Watch<'a> {
             tasks_pool: None,
             organization: organization::Organization::new(),
             organization_pool: None,
+            drive_folders: organization::Organization::new_drive(),
+            drive_folders_pool: None,
             writers: Writers::None,
             executable: crate::swarm::Executable::current(),
             replacement: None,
@@ -466,7 +473,7 @@ impl<'a> Watch<'a> {
             stream: uuid::Uuid::new_v4().to_string(),
             heartbeat_ms: protocol::HEARTBEAT_MS,
             max_frame_bytes: protocol::MAX_FRAME_BYTES,
-            topics: [topic::CATALOG, topic::CATALOG_META, topic::ACTIVITY, topic::GIT, topic::PROCESSES, topic::TASKS, topic::ORGANIZATION]
+            topics: [topic::CATALOG, topic::CATALOG_META, topic::ACTIVITY, topic::GIT, topic::PROCESSES, topic::TASKS, topic::ORGANIZATION, topic::DRIVE_FOLDERS]
                 .map(str::to_owned)
                 .to_vec(),
             limits: protocol::Limits::default(),
@@ -909,6 +916,9 @@ impl<'a> Watch<'a> {
         }
         if let Some(job) = self.organization.pulse(now, stamps::files) {
             self.run_organization(job);
+        }
+        if let Some(job) = self.drive_folders.pulse(now, stamps::files) {
+            self.run_drive_folders(job);
         }
     }
 
@@ -1491,6 +1501,71 @@ impl<'a> Watch<'a> {
         }
     }
 
+    fn subscribe_drive_folders(&mut self) {
+        let files = crate::swarm::drive_folders::watch_files(self.config);
+        let stamp = stamps::files(&files);
+        let job = self.drive_folders.subscribe(files, stamp, Instant::now());
+        self.run_drive_folders(job);
+    }
+
+    fn run_drive_folders(&mut self, job: organization::Job) {
+        let pool = self.drive_folders_pool.get_or_insert_with(|| {
+            let results = self.git_results.clone();
+            organization::Pool::spawn_drive(move |done| {
+                let _ = results.send(Input::DriveFolders(done));
+            })
+        });
+        match pool.run(job) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(job)) => self.drive_folders.defer(job, Instant::now()),
+            Err(mpsc::TrySendError::Disconnected(job)) => {
+                self.drive_folders_done(organization::Done { token: job.token, value: Some(Err("Drive-folder worker is unavailable".into())) });
+            }
+        }
+    }
+
+    fn drive_folders_done(&mut self, done: organization::Done) {
+        if let Some(error) = self.drive_folders.done(done) {
+            self.out.failure("drive_folders_failed", &error, Some(topic::DRIVE_FOLDERS), None);
+        }
+    }
+
+    fn flush_drive_folders(&mut self) {
+        if self.out.writer.backlog() > DEFER_BYTES {
+            return;
+        }
+        let Some(plan) = self.drive_folders.plan(PAGE_LIMIT) else { return };
+        let cursor = self.drive_folders.next_rev();
+        let item = |(key, row): (String, Value)| json!({"key": key, "row": row});
+        let delivered = match plan {
+            organization::Plan::Snapshot(pages) => {
+                let count = pages.len();
+                pages.into_iter().enumerate().all(|(page, rows)| {
+                    self.out.put(&Body::Snapshot(protocol::Snapshot {
+                        topic: topic::DRIVE_FOLDERS.into(),
+                        key: None,
+                        items: Some(rows.into_iter().map(item).collect()),
+                        value: None,
+                        page: page as u32,
+                        last: page + 1 == count,
+                        cursor,
+                    }))
+                })
+            }
+            organization::Plan::Delta { upsert, remove } => self.out.put(&Body::Delta(protocol::Delta {
+                topic: topic::DRIVE_FOLDERS.into(),
+                upsert: upsert.into_iter().map(|(key, row)| protocol::CatalogItem { key, row }).collect(),
+                remove: remove.into_iter().map(|key| protocol::Removal { key, reason: None }).collect(),
+                cursor,
+            })),
+        };
+        if delivered {
+            self.drive_folders.sent();
+        } else {
+            self.drive_folders.resend();
+        }
+    }
+
     // ---- Control -----------------------------------------------------------
 
     fn control(&mut self, text: &str) {
@@ -1520,6 +1595,8 @@ impl<'a> Watch<'a> {
                     }
                 } else if subscription.topic == topic::ORGANIZATION {
                     self.organization.unsubscribe();
+                } else if subscription.topic == topic::DRIVE_FOLDERS {
+                    self.drive_folders.unsubscribe();
                 } else if let Some(session) = subscription.session.as_ref().filter(|_| subscription.topic == topic::PROCESSES) {
                     self.processes.unsubscribe(&session.key());
                 } else if let Some(session) = subscription.session.filter(|_| subscription.topic == topic::ACTIVITY) {
@@ -1537,6 +1614,7 @@ impl<'a> Watch<'a> {
             topic::PROCESSES => return self.subscribe_processes(request.session, request.interval_ms, request.refresh == Some(true)),
             topic::TASKS => return self.subscribe_tasks(request.project.as_deref(), request.window),
             topic::ORGANIZATION => return self.subscribe_organization(),
+            topic::DRIVE_FOLDERS => return self.subscribe_drive_folders(),
             topic::ACTIVITY => {}
             other => {
                 self.out.error(
@@ -1763,6 +1841,7 @@ mod tests {
                 Input::Processes(done) => format!("<processes {}>", done.key),
                 Input::Tasks(done) => format!("<tasks {}>", done.key),
                 Input::Organization(_) => "<organization>".into(),
+                Input::DriveFolders(_) => "<drive_folders>".into(),
                 Input::End => "<end>".into(),
             })
             .collect()

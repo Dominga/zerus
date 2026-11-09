@@ -1,8 +1,11 @@
 //! Shared metadata only. Transport credentials and per-device presentation stay
-//! local; the swarm-wide phone delivery choice is shared. Writes use one
-//! locked, atomically replaced store; initialized snapshots read it lock-free.
+//! local; the swarm-wide phone delivery choice is shared. The legacy catalog is
+//! one locked, atomically replaced store; initialized snapshots read it lock-free.
+//! Drive folders use their own independently durable graph and initialization
+//! witness under that lock, never a claimed two-file transaction.
 mod bootstrap;
 mod catalog;
+pub(crate) mod drive_folders;
 pub(crate) mod fence;
 mod launch_project;
 mod infer_project;
@@ -401,6 +404,7 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
         "replica-relay" => fence::relay(config,serde_json::from_value(input()?)?),
         "replica-task" => fence::task(config,serde_json::from_value(input()?)?),
         "sync" => transport::sync(config),
+        "drive-folders" => drive_folders::dispatch(config, &args[1..]),
         "get" | "initialize" | "apply" | "export" | "resolve" | "disconnect" => {
             // Read stdin before taking the lock: slow clients cannot monopolize it.
             // `export --kinds` reads the kinds its requester parses.

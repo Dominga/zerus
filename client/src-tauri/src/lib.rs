@@ -1866,6 +1866,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         terminal::terminal_retarget,
         terminal::terminal_status,
         terminal::terminal_drop,
+        terminal::terminal_paste_image,
         terminal::terminal_shown,
         composer::composer_open,
         composer::composer_visibility,

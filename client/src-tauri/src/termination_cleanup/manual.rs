@@ -423,6 +423,8 @@ mod tests {
             restore_supported: false,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             programs: None,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            reservation: None,
         });
         m
     }

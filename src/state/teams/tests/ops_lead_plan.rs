@@ -117,3 +117,57 @@ fn the_lead_edits_an_accepted_phase_without_the_owners_word_only_while_the_goal_
         .to_string();
     assert!(error.contains("Only the lead or you extend"), "{error}");
 }
+
+/// Task #4 (team ede724c4): through the store, a lead change's snapshots live
+/// in `team_lead_changes`, not in the team's head; the team in memory keeps
+/// the ids; a revert reads the snapshots on demand and answers as before;
+/// another store reads the same team.
+#[test]
+fn a_stored_lead_changes_history_is_read_on_demand_by_a_revert() {
+    use super::super::store::Store;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("teams/teams.sqlite3");
+    let mut store = Store::open_at(&path, true).unwrap();
+    let mut team = running_team();
+    with_phase_two(&mut team);
+    store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+    let call = |store: &mut Store, op: &'static str, input: Value, actor: Actor| {
+        let request = uuid::Uuid::new_v4().to_string();
+        let stored = input.clone();
+        store.mutate(Some((&request, &stored)), "t", None, move |team, events| apply(team, op, &input, &actor, &BTreeSet::new(), events))
+    };
+    let head = |store: &Store| -> String { store.connection().query_row("SELECT payload FROM teams WHERE id='t'", [], |row| row.get(0)).unwrap() };
+    let rows = |store: &Store| -> i64 { store.connection().query_row("SELECT COUNT(*) FROM team_lead_changes WHERE team='t'", [], |row| row.get(0)).unwrap() };
+    call(&mut store, "move-task", json!({"task":2,"phase":2}), lead()).unwrap();
+    let text = head(&store);
+    assert!(!text.contains("tasks_before") && !text.contains("phases_before"), "{text}");
+    assert!(text.contains(r#""changed":[2]"#), "{text}");
+    assert_eq!(rows(&store), 1);
+    let loaded = store.load("t").unwrap().unwrap();
+    let change = &loaded.lead_changes[0];
+    assert!(change.tasks_before.is_empty() && change.history_missing());
+    assert_eq!((change.changed.clone(), change.summary.as_str()), (vec![2], "moved #2 Tests from phase 1 to 2"));
+    assert_eq!(super::super::lead_plan::list(&loaded, 50)["changes"][0]["changed"], json!([2]));
+    // A later change of the same task goes first, from the ids alone.
+    call(&mut store, "move-task", json!({"task":2,"phase":1}), lead()).unwrap();
+    let error = call(&mut store, "revert-lead-change", json!({"change":"lc1"}), Actor::Human).unwrap_err().to_string();
+    assert!(error.contains("Lead change lc2 changed the same work later"), "{error}");
+    call(&mut store, "revert-lead-change", json!({"change":"lc2"}), Actor::Human).unwrap();
+    assert_eq!(store.load("t").unwrap().unwrap().task(2).unwrap().phase, 2);
+    let reverted = call(&mut store, "revert-lead-change", json!({"change":"lc1"}), Actor::Human).unwrap();
+    assert_eq!((reverted["status"].as_str(), reverted["restored"].clone()), (Some("reverted"), json!([2])));
+    let team = store.load("t").unwrap().unwrap();
+    let task = team.task(2).unwrap();
+    assert_eq!((task.phase, task.status), (1, TaskStatus::Pending));
+    assert_eq!(team.phases.iter().find(|phase| phase.n == 2).unwrap().tasks, vec![3]);
+    assert!(team.lead_changes.iter().all(|change| change.reverted_at.is_some() && change.tasks_before.is_empty()));
+    assert!(!head(&store).contains("tasks_before"), "the revert leaves the snapshots in their rows");
+    assert_eq!(rows(&store), 2);
+    let other = Store::open_at(&path, false).unwrap().load("t").unwrap().unwrap();
+    assert_eq!(serde_json::to_value(&other).unwrap(), serde_json::to_value(&team).unwrap());
+    // A missing history never reverts half a change.
+    call(&mut store, "move-task", json!({"task":2,"phase":2}), lead()).unwrap();
+    store.connection().execute("DELETE FROM team_lead_changes WHERE team='t' AND id='lc3'", []).unwrap();
+    let error = call(&mut store, "revert-lead-change", json!({"change":"lc3"}), Actor::Human).unwrap_err().to_string();
+    assert!(error.contains("history could not be read"), "{error}");
+}

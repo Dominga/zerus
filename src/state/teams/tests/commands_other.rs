@@ -545,6 +545,58 @@ fn a_lead_changes_an_owner_edited_field_after_reading_the_draft() {
     });
 }
 
+/// Task #11 (team ede724c4, owner 2026-11-10): a draft update that does not
+/// name the members (only settings, only the plan mode, only the tasks) saves,
+/// for the owner and for the lead, and leaves the members as they were. The
+/// session adoption used to insert `"members": null` into the update.
+#[test]
+fn a_draft_update_without_members_saves_and_keeps_them() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let _worker = hold_worker_lock();
+        let mut store = Store::open(true).unwrap();
+        let mut team = running_team();
+        team.status = TeamStatus::Draft;
+        team.draft = Some(Draft { revision: 1, ..Default::default() });
+        let lead_id = team.lead.clone();
+        {
+            let lead = team.members.iter_mut().find(|member| member.id == lead_id).unwrap();
+            lead.session =
+                Some(SessionRef { name: "dsh/x/lead".into(), run_id: "r1".into(), conversation_id: "conv-lead".into(), ..Default::default() });
+        }
+        let id = team.id.clone();
+        let settings = serde_json::to_value(&team.settings).unwrap();
+        let tasks = json!([{"id":1,"title":"API","assignee":"dev"},{"id":2,"title":"Tests","assignee":"qa"}]);
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+        let members = || serde_json::to_value(&Store::open(false).unwrap().load(&id).unwrap().unwrap().members).unwrap();
+        let before = members();
+        let mut request = 0u32;
+        for lead in [false, true] {
+            if lead {
+                // The lead reads the draft first: the owner's edits above are
+                // marked until it does (N22).
+                super::set_test_caller_identities(Some((Some("conv-lead".into()), None, None)));
+                run("draft", &json!({"team":id,"action":"get","by":"human"}), false).unwrap();
+            }
+            for set in [json!({"settings":settings}), json!({"plan_mode":"free"}), json!({"tasks":tasks})] {
+                let caller = lead.then(|| "conv-lead".to_owned());
+                super::set_test_caller_identities(Some((caller, None, None)));
+                let revision = Store::open(false).unwrap().load(&id).unwrap().unwrap().draft.unwrap().revision;
+                request += 1;
+                let update = json!({"team":id,"action":"update","revision":revision,"by":"human","set":set,
+                    "request_id":format!("22222222-2222-4222-8222-{request:012}")});
+                let value = run("draft", &update, false).unwrap_or_else(|error| panic!("lead {lead}, {set}: {error:#}"));
+                assert_eq!(value["status"], "updated", "{value}");
+                assert_eq!(members(), before, "lead {lead}, {set}: the members stay");
+            }
+        }
+        super::set_test_caller_identities(None);
+        let saved = Store::open(false).unwrap().load(&id).unwrap().unwrap();
+        assert_eq!(saved.tasks.len(), 2);
+        assert_eq!(saved.plan_mode, PlanMode::Free, "the owner's plan mode");
+    });
+}
+
 /// F5/N6: a draft started with a new lead launches it in the team folder and
 /// gives it the draft brief, like a desktop team's lead.
 #[test]

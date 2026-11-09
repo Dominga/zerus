@@ -1125,11 +1125,14 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         // A question, a Zerus build or Background work is never stuck; the lead
         // is never stuck either (L1).
         if found.live {
-            // L3: phase and activity on change, the event time at most once a
-            // minute (status rounds to minutes anyway).
+            // L3: phase and activity on change, the event time alone at most
+            // every WATCH_EVENT_EVERY. Task #2 (team ede724c4): it was once a
+            // minute, one team revision per busy member per minute; stuck
+            // detection reads the listing's own time, so only the minutes
+            // status shows for a busy member use the stored one.
             let moved = match (member.seen_event_at, found.last_event_at) {
                 (None, None) => false,
-                (old, new) => new.is_none_or(|at| old.is_none_or(|old| (at - old).abs() >= 60.0)),
+                (old, new) => new.is_none_or(|at| old.is_none_or(|old| (at - old).abs() >= WATCH_EVENT_EVERY)),
             };
             if member.seen_phase != found.phase || member.seen_activity != found.activity || moved || member.seen_cold != found.cold {
                 steps.push(Step::Watch {
@@ -6025,6 +6028,10 @@ pub(crate) fn check_context(session: &SessionRef, request: &ContextRequest) -> C
     }
 }
 
+/// Task #2 (team ede724c4): how often a live member's last event time alone is
+/// written (seconds); a phase or activity change is written at once.
+const WATCH_EVENT_EVERY: f64 = 300.0;
+
 /// Task 209: how often an active member's native context is read (seconds),
 /// how often one that holds no open attempt is, and how many inspects one tick
 /// may run so a slow agent never holds the tick.
@@ -6034,13 +6041,23 @@ const CONTEXT_READS_PER_TICK: usize = 4;
 /// Task 209: a compaction that refused or stayed unconfirmed is tried again
 /// after this long, never on every tick.
 const CONTEXT_RETRY_SECS: f64 = 600.0;
+/// Task #2 (team ede724c4): a reading is written to the team only when it
+/// moves the figure status shows by this many points (or crosses the team's
+/// compaction threshold, or names another window). Each write raises the
+/// team revision, and every desktop that follows the team re-reads it.
+const CONTEXT_STEP: u8 = 2;
+/// Task #2 (team ede724c4): an unchanged reading is still written after this
+/// long, so the stored one stays fresh for a claim (`CLAIM_FRESH`, 600 s) and
+/// the shown value is never older than this plus one read interval.
+const CONTEXT_REFRESH: f64 = super::context::CLAIM_FRESH / 2.0;
 /// Task 209: how long a handoff brief waits for its first refused send.
 const HANDOFF_RETRY_SECS: f64 = 5.0;
 
 /// Task 209: a member's native context reading, from its session's own
 /// `hgs inspect` (the listing carries no meter). None when the agent reports
-/// none or the read failed; the last reading stays on the member then.
-fn read_context(member: &Member) -> Option<MemberContext> {
+/// none or the read failed; the last reading stays on the member then. `at`
+/// is the reading's time: the tick's own (task #2), or now.
+fn read_context(member: &Member, at: f64) -> Option<MemberContext> {
     let session = member.session.as_ref()?;
     let output = hgs(&session.host, &["inspect", &session.name, "--json"], None, Duration::from_secs(10)).ok()?;
     if !output.status.success() {
@@ -6048,18 +6065,59 @@ fn read_context(member: &Member) -> Option<MemberContext> {
     }
     let value: Value = serde_json::from_slice(&output.stdout).ok()?;
     let (used, limit) = super::context::reading(&value)?;
-    Some(MemberContext::of(used, limit, now()))
+    Some(MemberContext::of(used, limit, at))
+}
+
+/// Task #2 (team ede724c4): whether a new reading is worth a write over the
+/// stored one: the shown figure moved by `CONTEXT_STEP` points, the reading
+/// crossed the compaction `threshold`, the window changed, or the stored
+/// reading is `CONTEXT_REFRESH` old. A reading that only carries a new time
+/// is not.
+pub(crate) fn context_moved(stored: Option<&MemberContext>, new: &MemberContext, threshold: u8) -> bool {
+    let Some(stored) = stored else { return true };
+    stored.limit != new.limit
+        || stored.percent.abs_diff(new.percent) >= CONTEXT_STEP
+        || stored.reached(threshold) != new.reached(threshold)
+        || new.at - stored.at >= CONTEXT_REFRESH
 }
 
 /// Task 209: keeps the reading with the team, so status and the member card
-/// show the percentage without a read of their own.
-fn record_context(store: &mut Store, team_id: &str, member_id: &str, context: MemberContext) -> anyhow::Result<()> {
-    change(store, team_id, |team, _| {
+/// show the percentage without a read of their own. Task #2 (team ede724c4):
+/// only a reading that moved (`context_moved`, against `team` as read) is
+/// written; true when it was.
+fn record_context(store: &mut Store, team: &Team, member_id: &str, context: MemberContext) -> anyhow::Result<bool> {
+    let stored = team.member(member_id).and_then(|member| member.context);
+    if !context_moved(stored.as_ref(), &context, team.settings.context_compact_percent) {
+        return Ok(false);
+    }
+    change(store, &team.id, |team, _| {
         if let Some(found) = team.members.iter_mut().find(|member| member.id == member_id) {
             found.context = Some(context);
         }
         Ok(())
-    })
+    })?;
+    Ok(true)
+}
+
+/// Task #2 (team ede724c4): when the worker last read each member's context
+/// (team, member), written or not: the next read waits for the interval from
+/// whichever is newer, this or the stored reading's time, so a reading that
+/// was not written is not read again on every tick.
+static CONTEXT_READ_AT: std::sync::Mutex<std::collections::BTreeMap<(String, String), f64>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+fn context_read_at(team: &str, member: &str) -> Option<f64> {
+    CONTEXT_READ_AT.lock().ok()?.get(&(team.to_owned(), member.to_owned())).copied()
+}
+
+fn note_context_read(team: &str, member: &str, at: f64) {
+    if let Ok(mut reads) = CONTEXT_READ_AT.lock() {
+        // Bounded by the members the worker reads; a removed one is dropped
+        // when the map grows past what a busy machine has.
+        if reads.len() > 4096 {
+            reads.clear();
+        }
+        reads.insert((team.to_owned(), member.to_owned()), at);
+    }
 }
 
 /// Task 209: the task whose open attempt belongs to `member`, if any.
@@ -6173,7 +6231,8 @@ fn sample_contexts(store: &mut Store, teams: &[Team], seen: &[Seen], at: f64) {
             }
             let open = open_attempt_task(team, &member.id).is_some();
             let every = if open { CONTEXT_EVERY } else { CONTEXT_IDLE_EVERY };
-            if member.context.is_some_and(|context| at - context.at < every) {
+            let last = member.context.map(|context| context.at).into_iter().chain(context_read_at(&team.id, &member.id)).reduce(f64::max);
+            if last.is_some_and(|last| at - last < every) {
                 continue;
             }
             // A session the listing did not answer is not an idle one: its
@@ -6181,9 +6240,10 @@ fn sample_contexts(store: &mut Store, teams: &[Team], seen: &[Seen], at: f64) {
             if !seen.iter().any(|found| found.host == session.host && found.name == session.name) {
                 continue;
             }
-            let Some(context) = read_context(member) else { continue };
+            let Some(context) = read_context(member, at) else { continue };
             reads += 1;
-            if let Err(error) = record_context(store, &team.id, &member.id, context) {
+            note_context_read(&team.id, &member.id, at);
+            if let Err(error) = record_context(store, team, &member.id, context) {
                 eprintln!("hgs team worker: {}: context: {error}", team.name);
             }
         }
@@ -6469,8 +6529,8 @@ pub(crate) fn report_context_answer(store: &mut Store, team_id: &str, input: &Va
         return Ok(None);
     };
     let Some(member) = team.member(&attempt.member) else { return Ok(None) };
-    let Some(context) = read_context(member).or_else(|| member.context.filter(|context| context.fresh(now()))) else { return Ok(None) };
-    record_context(store, team_id, &member.id, context)?;
+    let Some(context) = read_context(member, now()).or_else(|| member.context.filter(|context| context.fresh(now()))) else { return Ok(None) };
+    record_context(store, &team, &member.id, context)?;
     let threshold = team.settings.context_compact_percent;
     if context.reached(threshold) {
         change(store, team_id, |team, events| {

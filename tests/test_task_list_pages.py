@@ -118,7 +118,7 @@ class TaskListPages(Fixture):
         variants = ["true", '"text"', "[1, 2]", "{}", "not json",
                     bound("id", other["id"]), bound("id", 7), bound("rank", "zzz")]
         for raw in variants:
-            db = sqlite3.connect(folder / "task-index-v1.sqlite3")
+            db = sqlite3.connect(folder / "task-index-v2.sqlite3")
             db.execute("UPDATE tasks SET row=? WHERE uuid=?", (raw, first["uuid"]))
             db.commit()
             db.close()
@@ -132,7 +132,7 @@ class TaskListPages(Fixture):
         good = self.page("todo", 10)
         project = good["project"]["id"]
         folder = self.state / "replica" / hashlib.sha256(project.encode()).hexdigest()
-        index = folder / "task-index-v1.sqlite3"
+        index = folder / "task-index-v2.sqlite3"
         self.assertTrue(index.exists())
         self.assertEqual(index.stat().st_mode & 0o777, 0o600)
         index.write_bytes(b"not a database")
@@ -147,6 +147,69 @@ class TaskListPages(Fixture):
         self.assertEqual(self.hgs("get", f"orchard/{short}")["task"]["uuid"], good["tasks"][0]["uuid"])
         refused = self.hgs("get", "orchard/T-zzzzzz", ok=False)
         self.assertIn("no task T-zzzzzz in this project", refused)
+
+    def test_a_session_reads_exactly_its_own_rows(self):
+        """`--session` pages one session's view by its identity (zerus-cg5h.26):
+        a task past the first page of its stage, the same name twice, cursors
+        that hold their place, and To do's unassigned tasks."""
+        import uuid
+        from test_tasks import agent_record
+        mine, twin = str(uuid.uuid4()), str(uuid.uuid4())
+        agent_record(self.state, self.env, "codex/api", "run-1", launch_id=mine)
+        first = self.add("Mine first", "--target", "codex/api")
+        # The same name, now another session: its tasks are never mine.
+        agent_record(self.state, self.env, "codex/api", "run-2", launch_id=twin)
+        theirs = [self.add(f"Twin {n}", "--target", "codex/api") for n in range(5)]
+        anyone = self.add("Any session")
+        parked = self.add("Twin later", "--backlog", "--target", "codex/api")
+        agent_record(self.state, self.env, "codex/api", "run-1", launch_id=mine)
+        last = self.add("Mine last", "--target", "codex/api")
+        self.hgs("move", last["ref"], "--after", theirs[-1]["ref"])
+        legacy = self.hgs("list", "--project", "orchard")["tasks"]
+        unfiltered = [self.page(stage, 2) for stage in ("todo", "backlog")]
+
+        def view(stage, limit, *args):
+            return self.page(stage, limit, "--session", "launch_id:" + mine, *args)
+        expected = [t for t in legacy if t["stage"] == "todo" and t["uuid"] in (first["uuid"], anyone["uuid"], last["uuid"])]
+        self.assertEqual([t["uuid"] for t in expected], [first["uuid"], last["uuid"], anyone["uuid"]])
+        # Mine last sits past the first unfiltered page.
+        self.assertNotIn(last["uuid"], [t["uuid"] for t in unfiltered[0]["tasks"]])
+        page = view("todo", 2)
+        self.assertEqual(page["tasks"], expected[:2])
+        self.assertEqual(page["session"], {"host": "", "session_id": "launch_id:" + mine})
+        self.assertEqual((page["page"]["position"], page["page"]["total"]), (0, 3))
+        self.assertEqual(page["counts"], {"review": 0, "active": 0, "todo": 3, "backlog": 0, "done": 0})
+        rest = view("todo", 2, "--after", page["page"]["next"])
+        self.assertEqual((rest["tasks"], rest["page"]["position"], rest["page"]["next"]), (expected[2:], 2, None))
+        self.assertEqual(view("todo", 2, "--before", rest["page"]["previous"])["tasks"], expected[:2])
+        self.assertEqual(view("backlog", 5)["tasks"], [])
+        # The twin's view holds its own tasks and the unassigned one, never mine.
+        twins = self.page("todo", 200, "--session", "launch_id:" + twin)["tasks"]
+        self.assertEqual({t["uuid"] for t in twins}, {t["uuid"] for t in theirs} | {anyone["uuid"]})
+        self.assertEqual([t["uuid"] for t in self.page("backlog", 5, "--session", "launch_id:" + twin)["tasks"]], [parked["uuid"]])
+        # A task that arrives before the cursor never shifts the page after it.
+        self.add("Mine at the top", "--target", "codex/api", "--position", "1")
+        again = view("todo", 2, "--after", page["page"]["next"])
+        self.assertEqual((again["tasks"], again["page"]["position"]), (expected[2:], 3))
+        # This computer's own name names this computer.
+        named = self.page("todo", 5, "--session", "launch_id:" + mine, "--host", "test")
+        self.assertEqual((named["tasks"], named["session"]["host"]), (view("todo", 5)["tasks"], "test"))
+        # Unfiltered pages are unchanged by the filter's existence.
+        self.assertNotIn("session", unfiltered[0])
+        self.assertEqual(self.page("backlog", 2)["tasks"], unfiltered[1]["tasks"])
+
+    def test_bad_session_filters_are_refused(self):
+        self.add("Task")
+        for args, message in [
+            (("--stage", "todo", "--session", "launch_id:x"), "--session needs --stage and --limit"),
+            (("--session", "launch_id:x"), "--session needs --stage and --limit"),
+            (("--stage", "todo", "--limit", "5", "--session", "codex/api"), "--session needs a session ID"),
+            (("--stage", "todo", "--limit", "5", "--session", ""), "--session needs a session ID"),
+            (("--stage", "todo", "--limit", "5", "--host", "test"), "--host needs --session"),
+            (("--stage", "todo", "--limit", "5", "--session", "launch_id:x", "--host", "orchard-mac"), "orchard-mac is not a verified computer"),
+        ]:
+            refused = self.hgs("list", "--project", "orchard", *args, ok=False)
+            self.assertIn(message, refused, args)
 
 
 if __name__ == "__main__":

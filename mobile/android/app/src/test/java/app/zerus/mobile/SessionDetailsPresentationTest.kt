@@ -60,6 +60,27 @@ class SessionDetailsPresentationTest {
             assertTrue(SessionDetailsPresentation.parse(raw,selected,false).processes.single().stale)
         }
     }
+    @Test fun keepWarmIsShownReadOnlyWithTheHostsReason() {
+        val now = 1_794_000_000.0
+        fun warm(vararg extra: Pair<String, Any?>) = JSONObject().put("keep_warm", JSONObject().put("enabled", true).put("until", now + 2 * 3600 + 14 * 60 + 5)
+            .put("revision", 2).put("state", "waiting").put("next_at", JSONObject.NULL).put("reason", "").put("turn_active", false).apply { extra.forEach { (k, v) -> put(k, v ?: JSONObject.NULL) } })
+        fun fields(raw: JSONObject) = SessionDetailsPresentation.parse(raw, target, true, now).fields.associate { it.label to it.value }
+        assertEquals("On, 2 h 14 m left", fields(warm())["Keep cache warm"])
+        assertEquals("On, always", fields(warm("until" to null))["Keep cache warm"])
+        assertEquals("Next ping in 10 m", fields(warm("next_at" to now + 600))["Keep-warm status"])
+        assertEquals("Warming the cache now", fields(warm("turn_active" to true))["Keep-warm status"])
+        val cold = "The cache went cold. Keeping it warm resumes after your next message."
+        assertEquals(cold, fields(warm("state" to "cold", "reason" to cold))["Keep-warm status"])
+        val off = fields(warm("enabled" to false, "state" to "off", "until" to null))
+        assertEquals("Off", off["Keep cache warm"])
+        assertFalse(off.containsKey("Keep-warm status"))
+        val reason = "DeepSeek keeps its context cache for hours without pings."
+        val unsupported = fields(warm("enabled" to false, "state" to "off", "supported" to false, "reason" to reason))
+        assertEquals(listOf("Off", reason), listOf(unsupported["Keep cache warm"], unsupported["Keep-warm status"]))
+        // An older computer reports nothing: no field rather than a guess.
+        assertFalse(fields(JSONObject()).containsKey("Keep cache warm"))
+    }
+
     @Test fun detailsExposeExactIdentityIncludingArchives() {
         val view = SessionDetailsPresentation.parse(null, target.copy(archiveId="archive-one"), false)
         assertEquals("conversation", view.fields.single { it.label == "Session ID" }.value)

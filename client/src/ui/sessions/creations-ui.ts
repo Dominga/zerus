@@ -1,5 +1,5 @@
 import type { MenuEntry, StateFilter } from "../../store/ui";
-import { headerAttention, isWorking } from "../../store/attention";
+import { countedHeaderAttention, isWorking, quietAttention } from "../../store/attention";
 import type { CreationCard, GroupingOut, HeaderOut } from "../../types";
 import type { ListInput, Row } from "./model";
 import type { Session } from "./types";
@@ -29,7 +29,7 @@ export const NO_PENDING = trNoop("No pending session creations");
 export const PROGRESS = trNoop("Session creation progress");
 export const BUTTON = {
   resume: trNoop("Continue setup"), check: trNoop("Check result"), stop: trNoop("Stop creating"), stopAfter: trNoop("Stop after preparation"),
-  edit: trNoop("Edit choices…"), hide: trNoop("Hide status"), back: trNoop("Return to filters"),
+  recreate: trNoop("Recreate…"), edit: trNoop("Edit choices…"), hide: trNoop("Hide status"), back: trNoop("Return to filters"),
   fix: trNoop("Fix folder rights"), fixing: trNoop("Fixing folder rights…"), elevated: trNoop("Waiting for the administrator prompt…"), fixed: trNoop("Folder rights fixed"),
 } as const;
 
@@ -122,8 +122,8 @@ export function panelButtons(c: CreationCard): PanelButtons {
   return {
     resume: c.can_resume,
     check: s === "unknown" || s === "recover" || s === "confirming",
-    stop: !c.launch_dispatched && s !== "stopped" && s !== "failed" && s !== "storage_error",
-    stopEnabled: !c.stop_requested,
+    stop: !c.launch_dispatched && s !== "stopped" && (s !== "failed" || c.worktree_pending === true) && s !== "storage_error",
+    stopEnabled: !c.stop_requested || s === "unknown" || s === "recover",
     stopText: s === "cloning" || (s === "worktree" && !c.worktree_receipts) ? BUTTON.stopAfter : BUTTON.stop,
     edit: c.can_edit,
   };
@@ -230,8 +230,8 @@ function headerRow(h: HeaderOut, all: readonly Session[], online: (s: Session) =
   let attention = 0, unread = 0, working = 0;
   for (const s of all) {
     const up = online(s);
-    if (!s.muted && headerAttention(s, up)) attention++;
-    if (!s.muted && s.unread) unread++;
+    if (countedHeaderAttention(s, up)) attention++;
+    if (!quietAttention(s) && s.unread) unread++;
     if (isWorking(s, up)) working++;
   }
   return { type: "header", id: `h:${h.id}`, project: h.id, name: h.name, color: h.color, palette: h.palette, collapsed: h.collapsed, total: 0, attention, unread, working };

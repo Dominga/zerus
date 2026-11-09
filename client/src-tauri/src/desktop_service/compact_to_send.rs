@@ -129,8 +129,9 @@ pub(crate) fn intent(
 ///
 /// `handing` runs with the verified plan right before the admission request
 /// is written, the last point at which nothing has reached the service; a
-/// `false` stops there. One refused before its request, or one that stops
-/// before its admission request is written, never ran: `Unsent`. Only a
+/// `false` stops there. One refused before its request, one that stops
+/// before its admission request is written, or one the service answers
+/// exactly not admitted never ran: `Unsent`. Only a
 /// completed probe without the kind, or a definite refusal of the original
 /// before any offer, routes it to the direct path.
 pub(crate) fn call(
@@ -192,8 +193,17 @@ pub(crate) fn call(
             )
             .ok()
             .and_then(|bytes| serde_json::from_slice::<wire::Admission>(&bytes).ok());
-        // Only an accepted admission of this exact original is a reply; a
-        // refusal, like a lost reply, leaves only the read-only lookup.
+        // The service's exact closed refusal of this original before its
+        // admission: its ledger proved no row and it sealed the request for
+        // its epoch, so nothing of it started and no copy of it ever admits
+        // (zerus-tlb9q). The draft stays; nothing is looked up or resent.
+        if admission.as_ref().is_some_and(|a| a.not_admitted(&intent)) {
+            return Ok(CompactAnswer::Settled(SendAnswer::Unsent(
+                NOT_STARTED.into(),
+            )));
+        }
+        // Only an accepted admission of this exact original is a reply; any
+        // other refusal, like a lost reply, leaves only the read-only lookup.
         if let Some(answer) = admission
             .as_ref()
             .filter(|a| a.matches(&intent))

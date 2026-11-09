@@ -34,8 +34,6 @@ jobs:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
       ZERUS_BUILD_JOBS: 4
-      CCACHE_DEPEND: 1
-      CCACHE_MAXSIZE: 500M
       EXPERIMENTAL: ${{ startsWith(github.ref, 'refs/tags/whitewh-exp-') }}
       # Embedded in hgs-tray (the Tauri app since task #63): the build the updater
       # compares and the feed it reads.
@@ -92,62 +90,8 @@ jobs:
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
       - name: Pinned ConPTY pair
         run: python scripts/fetch-conpty.py --output "$RUNNER_TEMP/conpty" </dev/null
-      # WhiteWh fork, task #65: the Qt GUI is built and its suites run once more
-      # only for the fallback the zip keeps for one release (qt/zerus-qt.exe).
-      - name: Restore Qt 6.10.3 for MSVC
-        id: qt-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/Qt
-          key: fork-windows-qt-6.10.3-win64_msvc2022_64-${{ hashFiles('packaging/windows/qt.json', 'scripts/install-qt-windows.py', 'scripts/qt_archives.py') }}
-      - name: Install the pinned Qt 6.10.3 for MSVC
-        if: steps.qt-cache.outputs.cache-hit != 'true'
-        run: python scripts/install-qt-windows.py --output "$RUNNER_TEMP/Qt" </dev/null
-      - name: Use Qt 6.10.3
-        run: |
-          python scripts/install-qt-windows.py --check "$RUNNER_TEMP/Qt" </dev/null
-          qt=$(cygpath -w "$RUNNER_TEMP/Qt/6.10.3/msvc2022_64")
-          test -f "$(cygpath -u "$qt")/bin/windeployqt.exe"
-          echo "QT_ROOT_DIR=$qt" >> "$GITHUB_ENV"
-      - name: Pinned ccache 4.14.1
-        run: |
-          cd "$(cygpath -u "$RUNNER_TEMP")"
-          curl -fsSLO https://github.com/ccache/ccache/releases/download/v4.14.1/ccache-4.14.1-windows-x86_64.zip
-          echo '6219f3865ca59aec41ee4b678df171d5d35855ecb2b6dbbbd20690b3a68af7b4  ccache-4.14.1-windows-x86_64.zip' | sha256sum --check --strict
-          python -m zipfile -e ccache-4.14.1-windows-x86_64.zip .
-          cygpath -w "$PWD/ccache-4.14.1-windows-x86_64" >> "$GITHUB_PATH"
-          echo "CCACHE_DIR=$(cygpath -w "$RUNNER_TEMP/ccache")" >> "$GITHUB_ENV"
-      - name: Restore ccache
-        id: ccache-restore
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/ccache
-          key: fork-windows-ccache-qt6.10.3-${{ github.run_id }}
-          restore-keys: fork-windows-ccache-qt6.10.3-
-      - name: Desktop build
-        run: bash scripts/ci/gui.sh build </dev/null
-      - name: Save ccache
-        if: ${{ !cancelled() }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/ccache
-          key: ${{ steps.ccache-restore.outputs.cache-primary-key }}
-      - name: Save Qt 6.10.3
-        if: steps.qt-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/Qt
-          key: ${{ steps.qt-cache.outputs.cache-primary-key }}
-      - name: Offscreen Qt suites
-        # .zerus/tests.toml [retries] flaky = 1: a failed suite runs once more;
-        # the log names every suite that needed it.
-        env:
-          ZERUS_QT_RETRY: "2"
-          # The Rust step built this CLI; do not depend on a debug build or Qt layout.
-          ZERUS_TEST_HGS: ${{ github.workspace }}/target/release/hgs.exe
-        run: |
-          test -f "$(cygpath -u "$ZERUS_TEST_HGS")"
-          bash scripts/ci/gui.sh test </dev/null
+      # WhiteWh fork, task #388 (owner, 2026-11-08): only the Tauri desktop is
+      # supported; the fork builds, tests and ships no Qt.
       # WhiteWh fork, task #63 (owner, 2026-11-06): the fork's Windows build runs
       # on the Tauri desktop, as upstream's Windows zip does. The installed Qt
       # build's updater installs this zip (its hgs-tray.exe is the Tauri app),
@@ -187,12 +131,11 @@ jobs:
       - name: Portable zip from the tested executables
         run: |
           # WhiteWh fork, task #65: the fork identity (ZERUS_FORK_BUILD and
-          # ZERUS_FORK_FEED_URL from the job env) and the Qt fallback.
+          # ZERUS_FORK_FEED_URL from the job env); no Qt fallback (task #388).
           python scripts/package-windows.py --fork --cli target/release/hgs.exe --lore target/lore/release/lore.exe \
             --gui target/windows-next/release/hgs-tray.exe \
             --connector services/mobile/connector/target/release/zerus-mobile-connector.exe \
             --mobile-relay services/mobile/relay/target/release/zerus-relay.exe \
-            --qt-fallback .ci-build/gui/hgs-tray.exe --qt-root "$QT_ROOT_DIR" \
             --frontend-licenses artifacts/windows-frontend-licenses \
             --conpty "$RUNNER_TEMP/conpty" --output artifacts/zerus-windows-x86_64.zip </dev/null 2>&1 | tee artifacts/test-results/package.log
           python scripts/check-windows-portable.py artifacts/zerus-windows-x86_64.zip --run --selftest \

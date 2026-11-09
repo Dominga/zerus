@@ -552,6 +552,13 @@ pub struct Provider {
     /// whole set without it for a full run. Empty is the kind's own.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub command: String,
+    /// Local merge-queue CTest preparation. Empty keeps the existing runner.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub configure: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub build: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub probe: String,
     /// The manifest, relative to `root`: cargo's Cargo.toml, msbuild's .sln or
     /// project file, unreal's .uproject.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -649,6 +656,9 @@ pub struct Loaded {
     /// The owner's override from the team settings applied.
     pub overridden: bool,
     pub config: TestsConfig,
+    /// Machine values never become part of the exported project configuration.
+    #[serde(skip)]
+    pub local: std::collections::BTreeMap<String, LocalProvider>,
 }
 
 impl Loaded {
@@ -661,6 +671,14 @@ impl Loaded {
 /// Reads the project's configuration under `root`, the owner's `overrides`
 /// (the team settings' `tests` object) over it.
 pub fn load(root: &Path, overrides: Option<&Value>) -> anyhow::Result<Loaded> {
+    let mut loaded = load_project(root, overrides)?;
+    loaded.local = local_providers(root, &loaded.config)?;
+    Ok(loaded)
+}
+
+/// A bad machine-only file must not disable an enabled merge queue. Its
+/// validation still refuses selection/execution, once an accept is queued.
+pub(crate) fn load_project(root: &Path, overrides: Option<&Value>) -> anyhow::Result<Loaded> {
     let path = root.join(FILE);
     let (source, mut value, read) = match std::fs::read_to_string(&path) {
         Ok(text) => (Source::File, parse_toml(&text).map_err(|error| anyhow::anyhow!("{}: {error}", path.display()))?, Some(path)),
@@ -677,7 +695,58 @@ pub fn load(root: &Path, overrides: Option<&Value>) -> anyhow::Result<Loaded> {
     }
     let config: TestsConfig = serde_json::from_value(value).map_err(|error| anyhow::anyhow!("Invalid test configuration: {error}"))?;
     validate(&config)?;
-    Ok(Loaded { source, path: read, overridden, config })
+    Ok(Loaded { source, path: read, overridden, config, local: Default::default() })
+}
+
+pub const LOCAL_FILE: &str = ".zerus/tests.local.toml";
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalProvider {
+    #[serde(default)]
+    pub vars: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalFile {
+    #[serde(default)]
+    provider: std::collections::BTreeMap<String, LocalProvider>,
+}
+
+fn local_providers(root: &Path, config: &TestsConfig) -> anyhow::Result<std::collections::BTreeMap<String, LocalProvider>> {
+    let path = root.join(LOCAL_FILE);
+    use std::io::Read;
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut text = String::new();
+    file.take(65537).read_to_string(&mut text)?;
+    anyhow::ensure!(text.len() <= 65536, "The local test configuration is at most 64 KiB");
+    let mut command = std::process::Command::new("git");
+    command.args(["--no-optional-locks", "-c", "core.fsmonitor=false", "-C"]).arg(root).args(["ls-files", "--error-unmatch", "--", LOCAL_FILE]);
+    for key in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_CONFIG_COUNT"] { command.env_remove(key); }
+    let (status, _, _) = crate::platform::run_bounded(&mut command, [4096, 4096],
+        std::time::Instant::now() + std::time::Duration::from_secs(10), &|| false)
+        .map_err(|error| anyhow::anyhow!("Cannot verify local test configuration is untracked: {error:?}"))?;
+    anyhow::ensure!(!status.success(), "The local test configuration {LOCAL_FILE} must not be tracked");
+    anyhow::ensure!(status.code() == Some(1), "Cannot verify local test configuration is untracked");
+    let local: LocalFile = serde_json::from_value(parse_toml(&text)?)
+        .map_err(|error| anyhow::anyhow!("Invalid local test configuration: {error}"))?;
+    for (name, values) in &local.provider {
+        anyhow::ensure!(config.providers.iter().any(|provider| provider.name == *name), "Unknown local test provider {name}");
+        anyhow::ensure!(values.vars.len() <= 64 && values.env.len() <= 64, "A local provider has at most 64 vars and env entries");
+        for (key, value) in values.vars.iter().chain(values.env.iter()) {
+            anyhow::ensure!(!key.is_empty() && key.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                && !value.contains('\0') && value.len() <= 8192, "Invalid local test configuration key {key}");
+        }
+        anyhow::ensure!(!values.vars.contains_key("build_dir") && !values.vars.contains_key("targets"), "Local vars cannot replace build_dir or targets");
+    }
+    Ok(local.provider)
 }
 
 /// The owner's override over the file: tables merge field by field, providers
@@ -753,6 +822,12 @@ fn validate(config: &TestsConfig) -> anyhow::Result<()> {
             provider.name,
             provider.resources
         );
+        if !provider.configure.is_empty() || !provider.build.is_empty() || !provider.probe.is_empty() {
+            anyhow::ensure!(provider.kind == Kind::Ctest && !provider.configure.trim().is_empty() && !provider.build.trim().is_empty(),
+                "Preparation for {} requires a ctest provider with configure and build commands", provider.name);
+            anyhow::ensure!([&provider.configure, &provider.build, &provider.probe].iter().all(|command| command.len() <= 16384),
+                "Preparation commands for {} are at most 16 KiB", provider.name);
+        }
         if let Some(results) = &provider.results {
             anyhow::ensure!(
                 crate::state::teams::run_results::Format::parse(&results.format).is_some(),

@@ -3,10 +3,17 @@
 use crate::{actions::Target, questions::AnswerItem, ViewRow};
 use serde_json::{json, Value};
 
+pub mod categories;
+pub use categories::{Category, Set};
+
 pub const ENABLED: &str = "automaticApprovals/enabled";
 pub const ERROR: &str = "automaticApprovals/error";
 pub const CANCELLED: &str =
     "Automatic approvals were disabled or the session changed before delivery.";
+/// A reserved request its categories no longer admit at delivery: a category
+/// was turned off, or its prompt cache expired and Paid usage is off.
+pub const CATEGORY_CANCELLED: &str =
+    "Its approval categories no longer allowed it at delivery, because a category was turned off or the prompt cache expired. No answer was sent.";
 pub const INVALID: &str =
     "The approval journal did not confirm a durable request. No answer was sent.";
 pub const MAX_QUESTION: usize = 120 * 1024;
@@ -161,7 +168,29 @@ pub fn once(provider: &str, question: &Value) -> Option<Vec<AnswerItem>> {
         text: String::new(),
     }])
 }
-pub fn question(target: &Candidate, details: &Value) -> Option<Value> {
+/// A pending question the enabled categories admit. The worker checks
+/// [`Selected::required`] again, at the time of each check, before the
+/// journal reservation and before delivery.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Selected {
+    pub question: Value,
+    /// The tool's category and any paid-tool requirement.
+    tool: Set,
+    /// The prompt cache as the selecting inspection reported it.
+    cache: Value,
+}
+impl Selected {
+    /// The categories the request needs at `now` (seconds since the epoch):
+    /// a warm cache from the inspection may have expired since.
+    pub fn required(&self, now: f64) -> Set {
+        categories::with_cache(self.tool, &self.cache, now)
+    }
+}
+/// The first verified one-time permission of this exact run and conversation
+/// whose required categories are all in `allowed`. A request kept manual is
+/// skipped; another pending request of the session may still qualify.
+/// `now` is seconds since the epoch, for the cold-cache rule.
+pub fn question(target: &Candidate, details: &Value, allowed: Set, now: f64) -> Option<Selected> {
     if details["runtime_state"] != "live"
         || details["process_state"] != "running"
         || details["run_id"] != target.target.run_id
@@ -179,13 +208,27 @@ pub fn question(target: &Candidate, details: &Value) -> Option<Value> {
             bytes: Vec::new(),
             limit: MAX_QUESTION,
         };
-        if once(&target.provider, question).is_some()
+        if once(&target.provider, question).is_none() {
+            continue;
+        }
+        let tool = categories::tool_requirement(&target.provider, question);
+        if allowed.permits(categories::with_cache(tool, details, now))
             && serde_json::to_writer(&mut bytes, question).is_ok()
         {
-            return Some(question.clone());
+            return Some(Selected {
+                question: question.clone(),
+                tool,
+                cache: categories::cache_witness(details),
+            });
         }
     }
     None
+}
+/// Seconds since the epoch, as the cold-cache rule reads time.
+pub fn now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |elapsed| elapsed.as_secs_f64())
 }
 pub struct Reservation {
     pub id: i64,

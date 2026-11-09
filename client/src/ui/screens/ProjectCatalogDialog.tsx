@@ -1,18 +1,10 @@
-import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
+import { Dropdown } from "../lib/Dropdown";
+import { TextInput } from "../lib/TextField";
+import { Show, createSignal, onCleanup, onMount } from "solid-js";
 import { Icon } from "../lib/icons";
 import { catalogName, type ProjectPrompt } from "./project-catalog";
 import { projectColor } from "./projects-ui";
 import { tr } from "../../i18n";
-
-// The mockup's RichSelect enhancement; WebKit's native fallback keeps the
-// same readable text and keyboard behavior.
-export function enhance(select: HTMLSelectElement) {
-  if (!CSS.supports("appearance", "base-select")) return;
-  const button = document.createElement("button");
-  button.type = "button";
-  button.append(document.createElement("selectedcontent"));
-  select.prepend(button);
-}
 
 /** setup-new-project / setup-delete-project, with the mockup's sizes and texts. */
 export default function ProjectCatalogDialog(props: {
@@ -50,15 +42,10 @@ export default function ProjectCatalogDialog(props: {
       </div>
       <div class="dlg-body">
         <Show when={prompt.kind === "delete" ? prompt : undefined} fallback={
-          <div class="form-row"><label for="np-name">{tr("Name")}</label><input id="np-name" class="field" maxLength={80} data-initial value={value()} onInput={(event) => setValue(event.currentTarget.value)} /></div>
+          <div class="form-row"><label for="np-name">{tr("Name")}</label><TextInput id="np-name" class="field" maxLength={80} data-initial value={value()} onInput={(event) => setValue(event.currentTarget.value)} /></div>
         }>{(p) => <>
           <p class="confirm-body">{p().text}</p>
-          <select ref={enhance} class="field su-rsel" aria-label={tr("Project that receives the sessions")} value={value()} onChange={(event) => setValue(event.currentTarget.value)}>
-            <For each={p().options}>{(option) => <option value={option.id} aria-label={`${option.name}${option.is_default ? " Default" : ""}`}>
-              <span class="su-rssw entity" style={{ "--entity": projectColor(option) }}><Icon name="folder" size={11} /></span>
-              <span class="su-rslabel">{option.name}</span><Show when={option.is_default}><span class="su-rsdetail">{tr("Default")}</span></Show>
-            </option>}</For>
-          </select>
+          <Dropdown class="field su-rsel" aria-label={tr("Project that receives the sessions")} value={value()} onChange={(value) => setValue(value)} options={[...((p().options) ?? []).map((option) => ({ value: option.id, label: () => <><span class="su-rssw entity" style={{ "--entity": projectColor(option) }}><Icon name="folder" size={11} /></span><span class="su-rslabel">{option.name}</span><Show when={option.is_default}><span class="su-rsdetail">{tr("Default")}</span></Show></>, textValue: `${option.name}${option.is_default ? " Default" : ""}` }))]} />
         </>}</Show>
       </div>
       <div class="dlg-foot"><span class="grow" />

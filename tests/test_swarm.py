@@ -17,6 +17,7 @@ REPO = Path(__file__).resolve().parents[1]
 HGS = Path(os.environ.get('HGS_TEST_BIN', REPO / 'target/debug/hgs')).resolve()
 SSH = '''#!/usr/bin/env python3
 import json, os, pathlib, shlex, subprocess, sys
+if sys.argv[-1].startswith('echo "hgs-remote-v2|'): print('hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot'); sys.exit(0)
 root = pathlib.Path(os.environ['SWARM_TEST_ROOT'])
 alias = sys.argv[-2]
 if (root / ('offline-' + alias)).exists():
@@ -34,6 +35,14 @@ if (root / ('spoil-' + alias)).exists() and args[1:2] == [json.loads((root / ('s
     output = json.loads(result.stdout)
     if 'value' in spoil: output[spoil['field']] = spoil['value']
     else: output.pop(spoil['field'], None)
+    print(json.dumps(output)); sys.exit(0)
+if (root / ('nolabels-' + alias)).exists() and args[1:2] in (['hello'], ['session-labels']):
+    result = subprocess.run([os.environ['SWARM_TEST_HGS'], *args], input=sys.stdin.read(), env=env, text=True, capture_output=True)
+    sys.stderr.write(result.stderr)
+    if result.returncode: sys.exit(result.returncode)
+    output = json.loads(result.stdout)
+    context = output.get('session_labels', output)
+    if isinstance(context, dict): context.get('context', {}).pop('labels_by_id', None)
     print(json.dumps(output)); sys.exit(0)
 if (root / ('linger-' + alias)).exists() and args[1:2] == ['hello']:
     # The answer comes at once, but a descendant keeps the pipe open.
@@ -73,14 +82,14 @@ if (root / ('nosessionid-' + alias)).exists():
     # kinds without "session_id", shows no twins and, as its exchange denies
     # unknown fields, refuses a request that carries them.
     request = sys.stdin.read()
-    if args[1:] == ['exchange'] and {'twins', 'known_twins'} & set(json.loads(request)):
+    if args[1:] == ['exchange'] and {'twins', 'known_twins', 'id_memberships', 'known_id_memberships'} & set(json.loads(request)):
         print('unknown field from a newer member', file=sys.stderr); sys.exit(1)
     result = subprocess.run([os.environ['SWARM_TEST_HGS'], *args], input=request, env=env, text=True, capture_output=True)
     sys.stderr.write(result.stderr)
     if result.returncode: sys.exit(result.returncode)
     output = json.loads(result.stdout)
-    if 'kinds' in output: output['kinds'] = [kind for kind in output['kinds'] if kind != 'session_id']
-    for field in ('twins', 'known_twins'): output.pop(field, None)
+    if 'kinds' in output: output['kinds'] = [kind for kind in output['kinds'] if kind not in ('session_id', 'session_id_memberships_v1')]
+    for field in ('twins', 'known_twins', 'id_memberships', 'known_id_memberships'): output.pop(field, None)
     print(json.dumps(output)); sys.exit(0)
 if not (root / ('old-' + alias)).exists():
     os.execve(os.environ['SWARM_TEST_HGS'], [os.environ['SWARM_TEST_HGS'], *args], env)
@@ -169,6 +178,50 @@ class Swarm(unittest.TestCase):
         self.assertEqual(len({s['digest'] for s in snapshots}), 1)
         return snapshots
 
+    def test_the_cli_observation_keeps_the_unfinished_native_writer_floor_off(self):
+        self.env['XDG_CONFIG_HOME'] = str(self.root / 'xdg')
+        (self.root / 'a/config').write_text('HGS_SELF="a"\nHGS_PEERS=""\n')
+        (self.root / 'a/machines.local.json').write_text('{"machines":{}}')
+        context = self.call('a', 'session-labels-context', '--json')
+        observation = self.call('a', 'session-labels', '--json')
+        self.assertIs(observation.get('native_continuity'), False)
+        self.assertEqual(observation['context'], context)
+        self.assertNotIn('native_continuity', context, 'connector Context stays unchanged')
+
+    def test_label_gate_needs_every_fresh_cli_and_actual_connector(self):
+        self.env['XDG_CONFIG_HOME'] = str(self.root / 'xdg')
+        # Only A and B join this swarm. C is not part of its declared roster.
+        (self.root / 'b/config').write_text('HGS_SELF="b"\nHGS_PEERS="a"\n')
+        gate = lambda: self.call('a', 'session-labels-gate', '--json')['ready']
+        self.assertFalse(gate())
+        self.join('a', 'b'); self.join('b', 'a')
+        for node in ('a', 'b', 'a', 'b', 'a'):
+            self.call(node, 'sync')
+        self.assertTrue(gate())
+        # A fresh hello from the foundation build invalidates the earlier
+        # positive, despite an unchanged package version and membership.
+        old = self.root / 'nolabels-b'; old.touch()
+        self.call('a', 'sync'); self.assertFalse(gate())
+        old.unlink(); self.call('a', 'sync'); self.assertTrue(gate())
+        offline = self.root / 'offline-b'; offline.touch()
+        self.call('a', 'sync'); self.assertFalse(gate())
+        offline.unlink(); self.call('a', 'sync'); self.assertTrue(gate())
+        # The canonical slot alone requires the RUNNING responder. An absent
+        # or old connector cannot be replaced by this new CLI's help marker.
+        connector = self.root / 'xdg/hgs/mobile/connector.json'
+        connector.parent.mkdir(parents=True, mode=0o700); connector.write_text('{}'); connector.chmod(0o600)
+        self.assertFalse(gate())
+        started = time.monotonic(); self.call('a', 'sync')
+        self.assertLess(time.monotonic() - started, 8)
+        self.assertFalse(gate())
+        connector.unlink()
+        # Scope restoration alone never resurrects an old positive.
+        self.assertFalse(gate())
+        self.call('a', 'sync'); self.assertTrue(gate())
+        # A configured machine which has never answered is also closed.
+        (self.root / 'a/config').write_text('HGS_SELF="a"\nHGS_PEERS="b c"\n')
+        self.assertFalse(gate())
+
     def test_third_node_transitive_sync_access_filter_and_private_configuration(self):
         self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')
         a, b, c = self.converge()
@@ -206,6 +259,45 @@ class Swarm(unittest.TestCase):
         self.assertEqual(a['conflicts'], [])
         self.assertEqual(next(p for p in c['organization']['projects'] if p['id'] == 'a')['name'], 'Resolved')
         self.assertEqual(a['digest'], self.converge()[0]['digest'])
+
+    def test_a_selection_move_from_a_stale_base_conflicts_only_on_the_member_another_writer_moved(self):
+        # zerus-5wmh.18.1: Move to project for a selection is one apply with
+        # every member. A second writer moves one of them between this
+        # writer's get and its apply; hgs writes each member with its own
+        # observed heads, so only that member becomes a conflict for review.
+        before = self.call('a', 'get'); desired = copy.deepcopy(before['organization'])
+        desired['projects'] += [dict(id=p, name=p.title(), color='#123456', folders=[], sessions=[]) for p in ('left', 'right', 'middle')]
+        self.patch('a', before, desired)
+        x, y, z = (f'a\ncodex/example/{n}' for n in ('x', 'y', 'z'))
+
+        def assignment(snapshot, sessions, project_id):
+            desired = copy.deepcopy(snapshot['organization'])
+            desired['session_assignments_explicit'] = True
+            for project in desired['projects']:
+                project['sessions'] = [s for s in project['sessions'] if s not in sessions]
+                if project['id'] == project_id:
+                    project['sessions'] += sessions
+            return desired
+
+        def members(snapshot, project_id):
+            return next(p for p in snapshot['organization']['projects'] if p['id'] == project_id)['sessions']
+
+        start = self.call('a', 'get')
+        self.patch('a', start, assignment(start, [x, y, z], 'left'))
+        seen = self.call('a', 'get')                       # this writer's get
+        other = self.call('a', 'get')                      # the second writer's get
+        self.patch('a', other, assignment(other, [x], 'right'))
+        result = self.patch('a', seen, assignment(seen, [x, y, z], 'middle'))
+        self.assertTrue(result['written'])
+        after = self.call('a', 'get')
+        self.assertEqual(len(after['conflicts']), 1, after['conflicts'])
+        conflict = after['conflicts'][0]
+        self.assertIn('codex/example/x', conflict['key'])
+        self.assertEqual(len(conflict['variants']), 2)
+        # y and z land in the chosen project; nothing else changed.
+        self.assertTrue({y, z} <= set(members(after, 'middle')), members(after, 'middle'))
+        self.assertEqual(members(after, 'left'), [])
+        self.assertEqual({p['id'] for p in after['organization']['projects']}, {p['id'] for p in seen['organization']['projects']})
 
     def test_join_does_not_merge_names_without_explicit_mapping(self):
         self.join('a', 'b')
@@ -727,8 +819,23 @@ class Swarm(unittest.TestCase):
         relayed = self.call('b', 'replica-relay', data=relay)
         self.assertEqual((relayed['to'], relayed['reply']['store'], relayed['reply']['loads']),
                          (hello['c']['node_id'], hello['c']['replica']['store'], True))
-        # The check closes before any exchange for a task that never cut over.
-        self.assertEqual(self.fence_check('a', task['id'])['closed'], {'node': None, 'reason': 'no_floor'})
+        # The check closes before any exchange for a task that never cut over,
+        # and reads, never writes, the task's certificate (C3e).
+        check = self.fence_check('a', task['id'])
+        self.assertEqual(check['closed'], {'node': None, 'reason': 'no_floor'})
+        self.assertEqual(check['certificate'], {'valid': False, 'reason': 'no_certificate'})
+        # review-win-c on #1471: a FIFO at the certificate's path or the
+        # member records' is refused, never waited on past the check's budget.
+        fence = self.root / 'a/state/replica' / hashlib.sha256(b'a').hexdigest() / 'fence'
+        fence.mkdir(exist_ok=True)
+        os.mkfifo(fence / f"{task['uuid']}.json")
+        members = self.root / 'a/swarm/replica-members.json'
+        members.unlink(missing_ok=True)
+        os.mkfifo(members)
+        started = time.monotonic()
+        check = self.fence_check('a', task['id'])
+        self.assertLess(time.monotonic() - started, 15)
+        self.assertEqual(check['certificate'], {'valid': False, 'reason': 'certificate_not_regular'})
 
     def test_a_relay_never_answers_after_its_budget(self):
         # review-n on #1452: an answer whose pipe a descendant keeps open past
@@ -914,6 +1021,81 @@ class Swarm(unittest.TestCase):
         self.assertTrue(self.call('b', 'sync')['c']['ok'])
         self.assertEqual(self.tasks('c'), ['Add rate limiting'])
         self.assertNotIn('tasks_outdated', self.call('b', 'get')['peers']['c'])
+
+    def test_primary_id_grouping_survives_a_label_change_and_a_peer_round_trip(self):
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c'); self.converge()
+        original = self.call('a', 'get')
+        machine, swarm = original['node_id'], original['swarm_id']
+        ids = [str(uuid.uuid4()), str(uuid.uuid4())]
+        state = self.root / 'a/state'
+        (state / 'sessions').mkdir(parents=True, exist_ok=True)
+        name = 'claude/example/shared'
+        # Name layout A and ID layout B coexist. The ID index only routes; the
+        # production reader still verifies the exact record/run/conversation.
+        for index, session in enumerate(ids):
+            record = dict(version=1, agent='claude', name=name, session_id=session,
+                          run_id=f'run-{index}', conversation_id=f'conversation-{index}', state='paused')
+            if index: record['layout'] = 'id'
+            filename = session if index else hashlib.sha256(name.encode()).hexdigest()
+            ((state / 'sessions' if index else state) / (filename + '.json')).write_text(json.dumps(record))
+            (state / 'ids').mkdir(exist_ok=True)
+            (state / 'ids' / (session + '.json')).write_text(json.dumps(dict(version=1, name=name, kind='id' if index else 'record')))
+        def project(session, index, selected=None):
+            request = dict(request_id=str(uuid.uuid4()), name=name, session_id=session,
+                expected_run_id=f'run-{index}', expected_conversation_id=f'conversation-{index}', expected_machine_id=machine)
+            if selected is None:
+                return self.call('a', 'session-project', '--json', data=request)
+            current = self.call('a', 'session-project', '--json', data=request)
+            self.assertEqual(current['status'], 'ok', current)
+            request.update(swarm_id=swarm, membership_token=current['membership_token'],
+                           catalog_epoch=current['catalog_epoch'], project_id=selected)
+            result = self.call('a', 'assign-session', '--json', data=request)
+            self.assertEqual(result['status'], 'assigned', result)
+            self.assertEqual(self.call('a', 'assign-session', '--json', data=request), result)
+        project(ids[0], 0, 'a'); project(ids[1], 1, 'b')
+        self.assertEqual(project(ids[0], 0)['current_project_id'], 'a')
+        self.assertEqual(project(ids[1], 1)['current_project_id'], 'b')
+        # A real saved-session rename uses only an isolated tmux socket.
+        # No server or native agent is started for this metadata fixture.
+        import shlex
+        tmux = shutil.which('tmux')
+        self.assertIsNotNone(tmux)
+        socket_dir = self.root / 'private-sockets'; socket_dir.mkdir(mode=0o700)
+        wrapper = self.root / 'bin/tmux'
+        wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(tmux) + ' -S ' + shlex.quote(str(socket_dir / 'test.sock')) + ' -f /dev/null "$@"\n')
+        wrapper.chmod(0o700)
+        env = dict(self.env, HGS_CONFIG_DIR=str(self.root / 'a'), HGS_STATE_DIR=str(state))
+        renamed = 'claude/example/renamed'
+        result = subprocess.run([str(HGS), 'rename', name, '--session-id', ids[1], renamed], env=env, text=True, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        name = renamed
+        self.assertEqual(project(ids[1], 1)['current_project_id'], 'b')
+        self.assertTrue(self.call('b', 'sync')['a']['ok'])
+        self.assertTrue(self.call('a', 'sync')['b']['ok'])
+        for node in 'ab':
+            records = self.call(node, 'get')['session_id_memberships']['records']
+            self.assertEqual({r['session_id']: r['project'] for r in records}, dict(zip(ids, ['a', 'b'])))
+            catalog = json.loads((self.root / node / 'swarm/catalog.json').read_text())
+            self.assertFalse(any(op['key']['session'] in ids for op in catalog['catalog']['operations'].values()
+                                 if op['key']['kind'] == 'session'))
+
+    def test_primary_id_operations_are_not_sent_to_an_old_peer(self):
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c'); self.converge()
+        original = self.call('a', 'get')
+        session = str(uuid.uuid4()); opid = str(uuid.uuid4())
+        graph = dict(schema=1, swarm_id=original['swarm_id'], operations={opid: dict(
+            id=opid, actor=original['node_id'], clock=1, parents=[],
+            key=dict(kind='session', machine=original['node_id'], session=session), value='a')})
+        path = self.root / 'a/swarm/session-id-memberships.json'; path.write_text(json.dumps(graph))
+        (self.root / 'nosessionid-b').touch()
+        before = self.call('a', 'get'); desired = copy.deepcopy(before['organization'])
+        desired['projects'][0]['name'] += ' update'
+        self.patch('a', before, desired)
+        self.assertTrue(self.call('a', 'sync')['b']['ok'])
+        self.assertEqual(self.call('b', 'get')['session_id_memberships']['records'], [])
+        (self.root / 'nosessionid-b').unlink()
+        self.assertTrue(self.call('a', 'sync')['b']['ok'])
+        self.assertEqual(self.call('b', 'get')['session_id_memberships']['records'][0]['session_id'], session)
 
     def test_membership_by_id_waits_for_every_member_to_list_the_kind(self):
         # zerus-ucck P2c-1: a desktop may read membership by ID only while

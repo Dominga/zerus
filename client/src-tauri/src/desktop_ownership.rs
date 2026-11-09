@@ -886,10 +886,96 @@ pub(crate) struct NativeReady {
     helper: Arc<relay::Connection>,
     // None only for a selected CLI's successful marker-absent legacy probe.
     _receipt: Option<Receipt>,
+    responder: Option<Arc<Responder>>,
 }
 impl NativeReady {
     pub(crate) fn helper(&self) -> Result<&Path, &'static str> {
         self.helper.executable()
+    }
+
+    /// Native-only source selection for explicit program cleanup. A successful
+    /// legacy path check is not the current native ownership origin required
+    /// by the new pipeline. This selection supplies no stop permission.
+    #[allow(dead_code)] // The new native pipeline consumes this opaque source.
+    pub(crate) fn program_source(&self) -> Result<NativeSource, &'static str> {
+        let original = self
+            ._receipt
+            .as_ref()
+            .filter(|receipt| receipt.native_ready())
+            .ok_or("worktree_programs_native_origin_unavailable")?;
+        if crate::desktop_service::mode() {
+            return Err("worktree_programs_native_origin_changed");
+        }
+        self.helper.executable()?;
+        let environment = zerus_client_core::run::FrozenEnvironment::capture()
+            .map_err(|_| "worktree_programs_native_environment_unavailable")?;
+        Ok(NativeSource {
+            helper: self.helper.clone(),
+            original: original.clone(),
+            environment,
+            responder: self
+                .responder
+                .clone()
+                .ok_or("worktree_programs_native_responder_unavailable")?,
+        })
+    }
+}
+
+/// Constructed only from the actual guarded Native startup/takeover result.
+/// Not serialized, not a cached mode flag and not a stop/Force permit.
+#[allow(dead_code)] // Consumed by the live program pipeline, never legacy dispatch.
+pub(crate) struct NativeSource {
+    helper: Arc<relay::Connection>,
+    original: Receipt,
+    environment: zerus_client_core::run::FrozenEnvironment,
+    responder: Arc<Responder>,
+}
+#[allow(dead_code)]
+impl NativeSource {
+    pub(crate) fn prepare_program_request(
+        &self,
+        request: zerus_client_core::desktop::ui_requests::Request,
+    ) -> Result<zerus_client_core::desktop::ui_requests::Registration, &'static str> {
+        use zerus_client_core::desktop::ui_requests::Request;
+        let input = match &request {
+            Request::WorktreeProgramStop { intent } => &intent.input,
+            Request::WorktreeProgramCleanup { intent } => &intent.input.stop,
+            _ => return Err("worktree_programs_native_request_invalid"),
+        };
+        if !self.route_current()
+            || input.manifest.configuration != self.original.configuration
+            || input.source
+                != (zerus_client_core::worktree_programs::stop::Source::Native {
+                    request_id: self.original.request_id.clone(),
+                    journal: self.original.journal.clone(),
+                    revision: self.original.revision,
+                })
+        {
+            return Err("worktree_programs_native_origin_changed");
+        }
+        self.responder
+            .prepare_ui_request(uuid::Uuid::new_v4().to_string(), request)
+            .map_err(|_| "worktree_programs_native_registration_refused")
+    }
+    pub(crate) fn route_current(&self) -> bool {
+        !crate::desktop_service::mode()
+            && self.original.native_ready()
+            && self.environment.current()
+            && self.helper.executable().is_ok()
+    }
+    pub(crate) fn configuration(&self) -> &str {
+        &self.original.configuration
+    }
+    pub(crate) fn connection(&self) -> Result<Arc<relay::Connection>, &'static str> {
+        self.route_current()
+            .then(|| self.helper.clone())
+            .ok_or("worktree_programs_native_origin_changed")
+    }
+    pub(crate) fn environment(&self) -> &zerus_client_core::run::FrozenEnvironment {
+        &self.environment
+    }
+    pub(crate) fn original_ownership(&self) -> &Receipt {
+        &self.original
     }
 }
 /// Called after canonical claim, before Bootstrap or notifier construction.
@@ -1046,6 +1132,7 @@ fn native_startup(owner: Arc<Controller>, deadline: Instant) -> Result<NativeRea
             return Ok(NativeReady {
                 helper,
                 _receipt: receipt,
+                responder: owner.responder.clone(),
             });
         }
         let refresh = {

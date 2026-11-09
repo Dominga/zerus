@@ -17,10 +17,10 @@ HGS = Path(os.environ.get("HGS_TEST_BIN", "target/debug/hgs")).resolve()
 class DeepSeekScopedActions(unittest.TestCase):
     def setUp(self):
         # macOS TMPDIR can exceed the Unix socket path limit; keep the private root short.
-        self.temp = tempfile.TemporaryDirectory(prefix="hgs-scoped-dsh-", dir="/tmp")
+        self.temp = tempfile.TemporaryDirectory(prefix="hgs-scoped-dsh-", dir=os.environ.get("ZERUS_TEST_SHORT_TMPDIR", "/tmp"))
         self.root = Path(self.temp.name)
         self.name = "dsh/example/session"
-        self.record = {"name": self.name, "backend": "dsh", "agent": "dsh", "run_id": "run", "conversation_id": "session-synthetic", "agent_home": str(self.root / "native"), "cwd": str(self.root)}
+        self.record = {"name": self.name, "backend": "dsh", "agent": "dsh", "session_id": str(uuid.uuid4()), "run_id": "run", "conversation_id": "session-synthetic", "agent_home": str(self.root / "native"), "cwd": str(self.root)}
         self.binding = self.root / "state/dsh/bindings" / (hashlib.sha256(self.name.encode()).hexdigest() + ".json")
         self.binding.parent.mkdir(parents=True)
         self.binding.write_text(json.dumps(self.record))
@@ -38,7 +38,9 @@ class DeepSeekScopedActions(unittest.TestCase):
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self.serve, daemon=True); self.thread.start()
         self.env = {k: v for k, v in os.environ.items() if not k.startswith("HGS_")}
-        self.env.update(HOME=str(self.root), HGS_STATE_DIR=str(self.root / "state"), HGS_CONFIG_DIR=str(self.root / "config"), HGS_SELF="fixture", HGS_PEERS="")
+        (self.root / "tmux").mkdir(mode=0o700)
+        self.env.pop("TMUX", None)
+        self.env.update(TMUX_TMPDIR=str(self.root / "tmux"), HOME=str(self.root), HGS_STATE_DIR=str(self.root / "state"), HGS_CONFIG_DIR=str(self.root / "config"), HGS_SELF="fixture", HGS_PEERS="")
 
     def tearDown(self):
         self.stop.set(); self.thread.join(timeout=2); self.server.close(); self.temp.cleanup()
@@ -56,7 +58,7 @@ class DeepSeekScopedActions(unittest.TestCase):
                 method = request["method"]
                 params = request["params"]
                 if method == "ping":
-                    value = {"generation": self.generation, "sessionActions": self.supported}
+                    value = {"generation": self.generation, "sessionActions": self.supported, "version": "0.2.1-rc.2", "protocol": 1}
                     if self.native:
                         value["nativeOperations"] = ["fork", "history-search", "schedules"]
                 elif method == "inspect":
@@ -242,12 +244,205 @@ class DeepSeekScopedActions(unittest.TestCase):
         self.assertNotEqual(refused.returncode, 0)
         self.assertIn("was not confirmed", refused.stderr)
         self.assertEqual(len([call for call in self.calls if call["method"] == "fork"]), 1)
-        self.assertFalse(list((self.root / "state/dsh/forks").glob("*.json")))
+        original = list((self.root / "state/dsh/forks").glob("*.json"))
+        self.assertEqual(len(original), 1)
+        retained = original[0].read_bytes()
         retried = self.hgs("fork", self.name, "-n", "copy", "-d")
-        self.assertEqual(retried.returncode, 0, retried.stderr)
-        forks = [call["params"] for call in self.calls if call["method"] == "fork"]
-        self.assertNotEqual(forks[0]["requestId"], forks[1]["requestId"])
-        self.assertEqual(forks[1]["generation"], "replacement-generation")
+        self.assertNotEqual(retried.returncode, 0, retried.stderr)
+        self.assertEqual(original[0].read_bytes(), retained)
+        self.assertEqual(len([call for call in self.calls if call["method"] == "fork"]), 1)
+
+    def ambiguous_launch(self, new, damaged=False):
+        self.binding.unlink()
+        folder = self.root / "state/dsh/sessions"
+        folder.mkdir()
+        for index in range(2):
+            sid = str(uuid.uuid4())
+            record = dict(self.record, layout="id", session_id=sid, conversation_id="session-original-" + str(index))
+            (folder / (sid + ".json")).write_text(json.dumps(record))
+        if damaged:
+            next(folder.glob("*.json")).write_text("{damaged")
+        before = {p.name: p.read_bytes() for p in folder.glob("*.json")}
+        workspace = self.root / "example"
+        workspace.mkdir()
+        self.env["DSH_HOME"] = self.record["agent_home"]
+        result = self.hgs("dsh", str(workspace), "-n", "session", "-d", *(["--new"] if new else []))
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.calls, [], "ambiguous/unreadable label reached the native host")
+        self.assertFalse(self.binding.exists(), "a third legacy binding was created")
+        self.assertEqual({p.name: p.read_bytes() for p in folder.glob("*.json")}, before)
+
+    def test_ordinary_launch_refuses_native_twins_before_host_contact(self):
+        self.ambiguous_launch(False)
+    def test_new_launch_refuses_native_twins_before_host_contact(self):
+        self.ambiguous_launch(True)
+    def test_ordinary_launch_refuses_unreadable_native_labels(self):
+        self.ambiguous_launch(False, damaged=True)
+    def test_new_launch_refuses_unreadable_native_labels(self):
+        self.ambiguous_launch(True, damaged=True)
+
+    def test_fork_cannot_treat_unreadable_target_coverage_as_a_free_label(self):
+        self.native = True
+        index = self.root / "state/ids"
+        index.mkdir()
+        (index / (self.record["session_id"] + ".json")).write_text(json.dumps(
+            dict(version=1, kind="dsh", name=self.name)))
+        folder = self.root / "state/dsh/sessions"
+        folder.mkdir()
+        bad = folder / (str(uuid.uuid4()) + ".json")
+        bad.write_text("{damaged")
+        original = self.binding.read_bytes()
+        refused = self.hgs("fork", self.name, "--session-id", self.record["session_id"], "-n", "copy", "-d")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertFalse([c for c in self.calls if c["method"] == "fork"])
+        self.assertEqual(self.binding.read_bytes(), original)
+        self.assertEqual(bad.read_text(), "{damaged")
+        self.assertFalse(list((self.root / "state/dsh/forks").glob("*.json")))
+
+    def test_an_old_binding_gets_a_stable_source_id_only_when_fork_is_admitted(self):
+        self.native = True
+        self.record.pop("session_id")
+        self.binding.write_text(json.dumps(self.record))
+        original = self.binding.read_bytes()
+        dry = self.hgs("fork", self.name, "-n", "copy", "--dry-run")
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        stale = self.hgs("fork", self.name, "-n", "copy", "-d", "--expected-run-id", "wrong-run")
+        self.assertNotEqual(stale.returncode, 0)
+        self.assertEqual(self.binding.read_bytes(), original)
+        self.assertEqual(self.calls, [])
+        self.fork_reply = False
+        for _ in range(2):
+            lost = self.hgs("fork", self.name, "-n", "copy", "-d")
+            self.assertIn("delivery uncertain", lost.stderr)
+        saved = json.loads(self.binding.read_text())
+        sid = saved.pop("session_id")
+        self.assertEqual(str(uuid.UUID(sid)), sid)
+        self.assertEqual(saved, self.record)
+        forks = [c["params"] for c in self.calls if c["method"] == "fork"]
+        self.assertEqual(len(forks), 2)
+        self.assertEqual(forks[0], forks[1])
+
+    def test_a_legacy_unknown_intent_is_migrated_not_erased_or_reminted(self):
+        self.native = True
+        self.fork_reply = False
+        pending = self.root / "state/dsh/forks"
+        pending.mkdir()
+        request = str(uuid.uuid4())
+        target = "dsh/example/copy"
+        old = pending / (hashlib.sha256((self.name + "\n" + target).encode()).hexdigest() + ".json")
+        old.write_text(json.dumps(dict(request_id=request, source=self.name,
+            source_conversation_id=self.record["conversation_id"], target=target, generation=self.generation)))
+        original = old.read_bytes()
+        renamed = self.hgs("rename", self.name, "dsh/example/other")
+        self.assertNotEqual(renamed.returncode, 0)
+        self.assertIn("original legacy fork", renamed.stderr)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(old.read_bytes(), original)
+        # The exact retry upgrades only the storage key and keeps the native ID.
+        retry = self.hgs("fork", self.name, "-n", "copy", "-d")
+        self.assertIn("delivery uncertain", retry.stderr)
+        self.assertFalse(old.exists())
+        [modern] = pending.glob("*.json")
+        self.assertEqual(json.loads(modern.read_bytes())["request_id"], request)
+        self.assertEqual([c["params"]["requestId"] for c in self.calls if c["method"] == "fork"], [request])
+        # A malformed original is never treated as an absent one.
+        modern.write_text("null")
+        bad = self.hgs("fork", self.name, "-n", "copy", "-d")
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertEqual(modern.read_text(), "null")
+        self.assertEqual(len([c for c in self.calls if c["method"] == "fork"]), 1)
+
+    def test_a_legacy_unknown_cannot_disappear_behind_a_new_suffix(self):
+        self.native = True
+        pending = self.root / "state/dsh/forks"
+        pending.mkdir()
+        target = "dsh/example/copy"
+        old = pending / (hashlib.sha256((self.name + "\n" + target).encode()).hexdigest() + ".json")
+        old.write_text(json.dumps(dict(request_id=str(uuid.uuid4()), source=self.name,
+            source_conversation_id=self.record["conversation_id"], target=target, generation=self.generation)))
+        original = old.read_bytes()
+        other = dict(self.record, name=target, conversation_id="session-other", session_id=str(uuid.uuid4()))
+        (self.binding.parent / (hashlib.sha256(target.encode()).hexdigest() + ".json")).write_text(json.dumps(other))
+        refused = self.hgs("fork", self.name, "-n", "copy", "-d")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("legacy fork", refused.stderr)
+        self.assertEqual(old.read_bytes(), original)
+        self.assertFalse([c for c in self.calls if c["method"] == "fork"])
+
+    def test_an_unknown_default_fork_retains_its_uuid_across_source_rename(self):
+        self.native = True
+        self.fork_reply = False
+        self.binding.unlink()
+        folder = self.root / "state/dsh/sessions"
+        folder.mkdir()
+        record = dict(self.record, layout="id", journal_name=self.record["session_id"])
+        path = folder / (record["session_id"] + ".json")
+        path.write_text(json.dumps(record))
+        lost = self.hgs("fork", self.name, "--session-id", record["session_id"], "-d")
+        self.assertIn("delivery uncertain", lost.stderr)
+        pending = list((self.root / "state/dsh/forks").glob("*.json"))
+        self.assertEqual(len(pending), 1)
+        original = pending[0].read_bytes()
+        new_name = "dsh/example/renamed"
+        renamed = self.hgs("session-action", self.name, "--session-id", record["session_id"], "--json", request={
+            "request_id": str(uuid.uuid4()), "action": "rename", "new_name": new_name,
+            "expected_run_id": record["run_id"], "expected_conversation_id": record["conversation_id"]})
+        self.assertEqual(renamed.returncode, 0, renamed.stderr)
+        self.assertEqual(json.loads(renamed.stdout)["status"], "completed", renamed.stdout)
+        self.assertEqual(json.loads(path.read_text())["name"], new_name)
+        repeated = self.hgs("fork", new_name, "--session-id", record["session_id"], "-d")
+        self.assertIn("delivery uncertain", repeated.stderr)
+        self.assertEqual(pending[0].read_bytes(), original)
+        forks = [c["params"] for c in self.calls if c["method"] == "fork"]
+        self.assertEqual(len(forks), 2)
+        self.assertEqual(forks[0], forks[1])
+
+    def test_label_twins_keep_distinct_unknown_forks_and_the_original_retry_uuid(self):
+        self.native = True
+        self.fork_reply = False
+        self.binding.unlink()
+        folder = self.root / "state/dsh/sessions"
+        folder.mkdir()
+        first = dict(self.record, layout="id", journal_name=self.record["session_id"])
+        second = dict(first, session_id=str(uuid.uuid4()), conversation_id="session-second", run_id="run-second")
+        for record in (first, second):
+            (folder / (record["session_id"] + ".json")).write_text(json.dumps(record))
+        def fork(record):
+            return self.hgs("fork", self.name, "--session-id", record["session_id"], "-n", "copy", "-d")
+        one, two = fork(first), fork(second)
+        for result in (one, two):
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("delivery uncertain", result.stderr)
+        pending = self.root / "state/dsh/forks"
+        original = {p: p.read_bytes() for p in pending.glob("*.json")}
+        self.assertEqual(len(original), 2)
+        self.assertEqual({json.loads(b)["source_session_id"] for b in original.values()},
+                         {first["session_id"], second["session_id"]})
+        calls = [c["params"] for c in self.calls if c["method"] == "fork"]
+        self.assertEqual([c["sessionId"] for c in calls], [first["conversation_id"], second["conversation_id"]])
+        self.assertNotEqual(calls[0]["requestId"], calls[1]["requestId"])
+        again = fork(first)
+        self.assertNotEqual(again.returncode, 0)
+        self.assertEqual({p: p.read_bytes() for p in pending.glob("*.json")}, original)
+        calls = [c["params"] for c in self.calls if c["method"] == "fork"]
+        self.assertEqual(calls[2], calls[0])
+        self.fork_reply = True
+        adopted = fork(first)
+        self.assertEqual(adopted.returncode, 0, adopted.stderr)
+        calls = [c["params"] for c in self.calls if c["method"] == "fork"]
+        self.assertEqual(calls[3], calls[0])
+        remaining = list(pending.glob("*.json"))
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0].read_bytes(), original[remaining[0]])
+        # The first adopted child now holds that label. The second unknown
+        # intent cannot silently allocate copy-2 and issue a new native UUID.
+        blocked = fork(second)
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn("original fork destination", blocked.stderr)
+        self.assertEqual(len([c for c in self.calls if c["method"] == "fork"]), 4)
+        self.assertEqual(remaining[0].read_bytes(), original[remaining[0]])
+        for record in (first, second):
+            self.assertEqual(json.loads((folder / (record["session_id"] + ".json")).read_text()), record)
 
 
 if __name__ == "__main__":

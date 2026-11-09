@@ -5981,6 +5981,7 @@ dependencies = [
 name = "zerus-client"
 version = "0.1.0"
 dependencies = [
+ "arboard",
  "async-io",
  "block2",
  "cc",
@@ -6005,6 +6006,7 @@ dependencies = [
  "tauri-plugin-clipboard-manager",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
+ "tempfile",
  "tokio",
  "unicode-casefold",
  "ureq",

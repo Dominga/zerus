@@ -10,8 +10,17 @@ export function historyAction(e: TaskEntry): string {
     : e.kind === "target" ? `changed the session: ${e.text}` : e.kind === "sent" ? `sent it to ${e.session}`
     : e.kind === "message_delivery" ? `message ${e.requestId} — ${e.delivery.state}` : e.text || e.kind);
 }
+/** Phases whose attempt's own receipt showed its input submitted. */
+const DELIVERED = new Set(["submitted", "running", "paused", "ready"]);
+/** A reopen's note: a change request whose delivery only its attempt shows (A4). */
+export const changeRequest = (e: TaskEntry) => e.kind === "message" && e.attempt?.origin === "reopen";
+function changeRequestText(phase: string): string {
+  return DELIVERED.has(phase) ? tr("Change request — submitted to executor") : phase === "not_started" ? tr("Change request — not sent")
+    : phase === "cancelled" ? tr("Change request — cancelled") : tr("Change request — delivery unconfirmed, never resent automatically");
+}
 export function deliveryText(e: TaskEntry, worker: string): string {
   const d = e.delivery;
+  if (changeRequest(e)) return changeRequestText(e.attempt!.phase);
   return e.kind === "comment" || d.state === "note" ? tr("Saved note — not sent") : d.state === "queued" ? tr("Waiting for Start")
     : d.state === "submitted" ? d.mode === "queue" ? tr("Included in Start request") : worker ? tr("Submitted to coordinator — child receipt unavailable") : tr("Submitted to executor")
     : d.state === "failed" ? tr("Saved in task — not sent") : tr("Saved in task — delivery unconfirmed");

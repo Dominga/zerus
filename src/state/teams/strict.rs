@@ -56,6 +56,7 @@ fn hint(what: &str, key: &str) -> &'static str {
         (_, "name") if what.contains("member") || what.contains("lead") || what.contains("Member") || what.contains("Lead") => " (a member is named by \"id\" and \"role\")",
         (_, "with" | "to" | "new") => " (name the new value directly: \"agent\", \"model\", \"effort\", \"account\" or \"prompt\")",
         (_, "models") => " (a list of {\"model\":\"...\",\"effort\":\"...\"} or \"model@effort\" strings)",
+        (_, "agent" | "account" | "computer") if what.contains("update") => " (agent, account and computer stay with Swap member)",
         _ => "",
     }
 }
@@ -132,6 +133,9 @@ fn failing_field<T: DeserializeOwned>(value: &Value, error: &str) -> Option<Stri
 
 pub(crate) const MEMBER_EXAMPLE: &str =
     r#"{"id":"dev","role":"Backend","agent":"claude","account":"work","model":"opus","effort":"medium"}"#;
+/// Task #6: a `members_update` entry; the fields it takes are listed by the
+/// refusal itself.
+pub(crate) const MEMBER_UPDATE_EXAMPLE: &str = r#"{"id":"dev","model":"opus","effort":"high"}"#;
 pub(crate) const LEAD_EXAMPLE: &str = r#"{"id":"lead","role":"Lead","agent":"claude","account":"work"}"#;
 pub(crate) const TASK_EXAMPLE: &str =
     r#"{"id":1,"title":"Build the page","description":"What to do and how to check it","assignee":"dev"}"#;

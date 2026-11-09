@@ -108,6 +108,14 @@ QList<TeamProposalCards::View> TeamProposalCards::viewsOf(const Teams::Team &tea
         view.reason = proposal.reason; view.at = proposal.at;
         view.what = Teams::proposalText(team, proposal);
         view.lines = Teams::proposalChanges(team, proposal);
+        if (proposal.kind == "approve-phase") {
+            const int phase = proposal.change.toObject().value("input").toObject().value("phase").toInt();
+            if (const auto *record = team.phase(phase); record && !record->checks.isEmpty()) {
+                const auto approval = Teams::phaseApproval(team, phase);
+                view.lines << approval.text;
+                view.approveAnyway = approval.input.value("approve_anyway").toBool();
+            }
+        }
         if (proposal.kind == "question") {
             const auto change = proposal.change.toObject();
             for (const auto &option : change.value("options").toArray()) view.options << option.toString();
@@ -254,7 +262,7 @@ QWidget *TeamProposalCards::cardFor(const View &view, bool gone)
         answers->addWidget(open);
     }
     auto *deny = button(tr("Deny"), "teamProposalDeny"); deny->setProperty("danger", true);
-    auto *allow = button(tr("Allow"), "teamProposalAllow", true);
+    auto *allow = button(view.approveAnyway ? tr("Approve anyway") : tr("Allow"), "teamProposalAllow", true);
     deny->setEnabled(!sending && decide); allow->setEnabled(!sending && decide);
     QObject::connect(deny, &QPushButton::clicked, this, [this, view] { answer(view, false); });
     QObject::connect(allow, &QPushButton::clicked, this, [this, view] { answer(view, true); });
@@ -404,6 +412,7 @@ void TeamProposalCards::answer(const View &view, bool allow)
         return;
     }
     QJsonObject input{{"team", m_team}, {"proposal", id}, {"accept", allow}, {"expected_hash", view.hash}};
+    if (allow && view.approveAnyway) input.insert("approve_anyway", true);
     const QString reason = m_reasons.value(id).trimmed();
     if (!allow && !reason.isEmpty()) input.insert("reason", reason);
     m_sending.insert(id); m_notices.remove(id);

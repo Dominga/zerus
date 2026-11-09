@@ -23,6 +23,8 @@ export function childInactive(child: Record<string, unknown>, countsComplete = f
 }
 
 const validId = (id: string) => id.length > 0 && id.length <= 160 && !/[/\\\u0000-\u001f\u007f]/.test(id);
+/** A child conversation ID search can match: at most 256 characters and no control character (C0, DEL or C1). */
+const validConversation = (id: string) => id.length > 0 && id.length <= 256 && !/\p{Cc}/u.test(id);
 
 /** Stable native-child rows, never the hook-profile fallback. */
 export function childRows(map: SubagentMap | undefined, countsComplete = false): Subagent[] {
@@ -32,8 +34,10 @@ export function childRows(map: SubagentMap | undefined, countsComplete = false):
       const state = raw === "working" ? "working" : ["approval", "input", "attention"].includes(raw) ? "attention" : raw === "error" ? "error" : raw === "paused" ? "paused" : raw === "ended" ? "ended" : raw === "unknown" ? "unknown" : "ready";
       const label = typeof child.label === "string" ? child.label : typeof child.name === "string" ? child.name : "";
       const detail = typeof child.detail === "string" ? child.detail : child.task;
+      const conversation = typeof child.conversation_id === "string" && validConversation(child.conversation_id) ? child.conversation_id : undefined;
       return {
         id,
+        conversationId: conversation,
         name: label || id,
         state,
         summary: simplified(detail),
@@ -71,4 +75,15 @@ export function rosterFor(row: Session, details?: Record<string, unknown>): Suba
     return childRows(inspected as SubagentMap, details?.subagent_counts_complete === true);
   }
   return row.subagents ?? [];
+}
+
+/**
+ * Plan & agents (owner, 2026-11-08, T-ug5hxx, zerus-5ffek): the IDs kept in
+ * view, the working ones and those waiting for an answer while the session is
+ * current, with the one open in Activity, and the IDs folded as finished.
+ */
+export function splitSubagents(children: readonly Subagent[], current: boolean, open?: string) {
+  const active: string[] = [], finished: string[] = [];
+  for (const child of children) ((current && (child.state === "working" || child.state === "attention")) || child.id === open ? active : finished).push(child.id);
+  return { active, finished };
 }

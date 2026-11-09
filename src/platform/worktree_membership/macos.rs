@@ -39,15 +39,15 @@ struct Snapshot {
 // https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/sys/proc_info.h
 #[repr(C)]
 struct FileInfo {
-    _flags: u32,
-    _status: u32,
+    flags: u32,
+    status: u32,
     _offset: i64,
     _kind: i32,
     _guard: u32,
 }
 #[repr(C)]
 struct VnodeFile {
-    _info: FileInfo,
+    info: FileInfo,
     vnode: libc::vnode_info_path,
 }
 const _: [(); 1200] = [(); size_of::<VnodeFile>()];
@@ -154,7 +154,11 @@ fn image(pid: u32) -> io::Result<PathBuf> {
     }
     path(&bytes)
 }
-fn files(pid: u32, deadline: Instant) -> io::Result<Files> {
+fn vnode_files(
+    pid: u32,
+    deadline: Instant,
+    mut visit: impl FnMut(i32, &VnodeFile) -> io::Result<()>,
+) -> io::Result<bool> {
     // A full buffer is ambiguous/truncated, never a complete roster.
     let mut fds: Vec<libc::proc_fdinfo> = (0..=MAX_FILES)
         .map(|_| unsafe { std::mem::zeroed() })
@@ -171,11 +175,10 @@ fn files(pid: u32, deadline: Instant) -> io::Result<Files> {
         )
     };
     let error = errno();
-    let mut result = Files::default();
+    let mut access_denied = false;
     if used < 0 || used == 0 && error.raw_os_error() != Some(0) {
         if denied(&error) {
-            result.denied = true;
-            return Ok(result);
+            return Ok(true);
         }
         return Err(failed(error));
     }
@@ -206,17 +209,226 @@ fn files(pid: u32, deadline: Instant) -> io::Result<Files> {
             )
         };
         if used == size_of::<VnodeFile>() as i32 {
-            result.push(vnode_path(&unsafe { value.assume_init() }.vnode)?)?;
+            visit(fd.proc_fd, &unsafe { value.assume_init() })?;
         } else {
             let error = failed(errno());
             match error.raw_os_error() {
                 Some(libc::EBADF | libc::ENOENT) => {} // This enumerated descriptor closed.
-                _ if denied(&error) => result.denied = true,
+                _ if denied(&error) => access_denied = true,
                 _ => return Err(error),
             }
         }
     }
-    Ok(result)
+    Ok(access_denied)
+}
+
+fn files(pid: u32, deadline: Instant) -> io::Result<Files> {
+    let mut files = Files::default();
+    files.denied = vnode_files(pid, deadline, |_, file| {
+        files.push(vnode_path(&file.vnode)?)
+    })?;
+    Ok(files)
+}
+
+fn vnode_object(value: &libc::vnode_info_path) -> objects::Object {
+    objects::Object {
+        device: u64::from(value.vip_vi.vi_stat.vst_dev),
+        inode: value.vip_vi.vi_stat.vst_ino,
+    }
+}
+
+pub(super) fn member(
+    pid: u32,
+    inventory: &objects::Inventory,
+    deadline: Instant,
+) -> io::Result<bool> {
+    member_with_holder(pid, inventory, None, deadline)
+}
+fn member_with_holder(
+    pid: u32,
+    inventory: &objects::Inventory,
+    root: Option<HolderRoot>,
+    deadline: Instant,
+) -> io::Result<bool> {
+    let mut found = false;
+    let mut skipped = false;
+    match info::<libc::proc_vnodepathinfo>(pid, libc::PROC_PIDVNODEPATHINFO) {
+        Ok(cwd) => found |= inventory.contains(vnode_object(&cwd.pvi_cdir)),
+        Err(e) if denied(&e) && root.is_none() => {}
+        Err(e) => return Err(e),
+    }
+    // Known native membership wins even when the cwd or another FD was denied.
+    let denied = vnode_files(pid, deadline, |number, file| {
+        let id = vnode_object(&file.vnode);
+        if root.is_some_and(|root| root.object == id && root.descriptor == number) && !skipped {
+            // XNU proc_info.h: fi_openflags FREAD=1/FWRITE=2,
+            // fi_status PROC_FP_CLEXEC=2. No pathname or PID exemption.
+            if file.info.flags & 3 != 1 || file.info.status & 2 == 0 {
+                return Err(limit());
+            }
+            skipped = true;
+        } else {
+            found |= inventory.contains(id);
+        }
+        Ok(())
+    })?;
+    if root.is_some() && (denied || !skipped) {
+        return Err(limit());
+    }
+    Ok(found)
+}
+
+fn ancestors(deadline: Instant) -> io::Result<std::collections::BTreeMap<u32, Identity>> {
+    let mut rows = std::collections::BTreeMap::new();
+    let mut pid = std::process::id();
+    while pid > 1 {
+        if rows.len() >= 128 || rows.contains_key(&pid) || Instant::now() >= deadline {
+            return Err(limit());
+        }
+        let current = snapshot(pid)?;
+        if current.zombie {
+            return Err(limit());
+        }
+        let parent = current.identity.parent;
+        rows.insert(pid, current.identity);
+        pid = parent;
+    }
+    Ok(rows)
+}
+
+/// Separate accounting for THIS helper's actual borrowed Scope object. This
+/// does not extend the original holder exception to any borrower or child.
+pub(super) fn own_clear(
+    scope: &objects::Scope,
+    inventory: &objects::Inventory,
+    deadline: Instant,
+) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let own = scope.own_root_descriptor().as_raw_fd();
+    let root = objects::Object {
+        device: scope.identity().device,
+        inode: scope.identity().inode,
+    };
+    let cwd = info::<libc::proc_vnodepathinfo>(std::process::id(), libc::PROC_PIDVNODEPATHINFO)?;
+    if inventory.contains(vnode_object(&cwd.pvi_cdir)) {
+        return Err(limit());
+    }
+    let mut seen = false;
+    let denied = vnode_files(std::process::id(), deadline, |number, file| {
+        let object = vnode_object(&file.vnode);
+        if number == own {
+            if seen || object != root || file.info.flags & 3 != 1 || file.info.status & 2 == 0 {
+                return Err(limit());
+            }
+            seen = true;
+        } else if inventory.contains(object) {
+            return Err(io::Error::other(
+                "this cleanup helper also uses the checkout",
+            ));
+        }
+        Ok(())
+    })?;
+    if denied || !seen {
+        return Err(limit());
+    }
+    scope.current(deadline)
+}
+
+pub(super) fn programs(
+    inventory: &objects::Inventory,
+    deadline: Instant,
+) -> io::Result<Vec<zerus_client_core::worktree_programs::Program>> {
+    programs_with_holder(inventory, None, deadline)
+}
+pub(super) fn programs_with_holder(
+    inventory: &objects::Inventory,
+    holder: Option<&Custody<'_>>,
+    deadline: Instant,
+) -> io::Result<Vec<zerus_client_core::worktree_programs::Program>> {
+    let uid = unsafe { libc::getuid() };
+    let invocation = ancestors(deadline)?;
+    let mut rows = Vec::new();
+    let mut pids = BTreeSet::new();
+    for kind in [4, 5] {
+        let mut buffer = vec![0i32; 32_768];
+        let size = (buffer.len() * size_of::<i32>()) as i32;
+        let used = unsafe { libc::proc_listpids(kind, uid, buffer.as_mut_ptr().cast(), size) };
+        if used <= 0 || used >= size || !(used as usize).is_multiple_of(size_of::<i32>()) {
+            return Err(limit());
+        }
+        pids.extend(
+            buffer
+                .into_iter()
+                .take(used as usize / size_of::<i32>())
+                .filter(|pid| *pid > 0),
+        );
+        if pids.len() >= 32_768 {
+            return Err(limit());
+        }
+    }
+    if !pids.contains(&(std::process::id() as i32)) {
+        return Err(limit());
+    }
+    for pid in pids.into_iter().map(|pid| pid as u32) {
+        // The observer deliberately holds the root FD, and is never a signal target.
+        if pid <= 1 || pid == std::process::id() {
+            continue;
+        }
+        if Instant::now() >= deadline {
+            return Err(limit());
+        }
+        let before = match snapshot(pid) {
+            Ok(value) => value,
+            Err(e) if e.raw_os_error() == Some(libc::ESRCH) => continue,
+            Err(e) => return Err(e),
+        };
+        if before.zombie || before.identity.uid != uid && before.identity.ruid != uid {
+            continue;
+        }
+        let root = holder.and_then(|h| h.root_for(pid));
+        let membership = member_with_holder(pid, inventory, root, deadline);
+        let after = match snapshot(pid) {
+            Ok(value) => value,
+            Err(e) if e.raw_os_error() == Some(libc::ESRCH) => continue,
+            Err(e) => return Err(e),
+        };
+        if after.zombie {
+            continue;
+        }
+        if before.identity != after.identity {
+            return Err(limit());
+        }
+        if !membership? {
+            continue;
+        }
+        if root.is_some() || invocation.get(&pid) == Some(&before.identity) {
+            return Err(io::Error::other(
+                "a program in the checkout is needed to settle this action",
+            ));
+        }
+        // The original PinnedProcess signal primitive uses this native birth
+        // spelling. Short/unique identity alone never substitutes for it.
+        let original = crate::platform::process_identity(pid).ok_or_else(limit)?;
+        if snapshot(pid)?.identity != before.identity {
+            return Err(limit());
+        }
+        let label = before.command;
+        if label.is_empty() || label.len() > 512 || label.chars().any(char::is_control) {
+            return Err(limit());
+        }
+        rows.push(zerus_client_core::worktree_programs::Program {
+            pid,
+            birth: original.birth,
+            label,
+        });
+        if rows.len() > zerus_client_core::worktree_programs::MAX_PROGRAMS {
+            return Err(limit());
+        }
+    }
+    if ancestors(deadline)? != invocation {
+        return Err(limit());
+    }
+    Ok(rows)
 }
 
 pub(in crate::platform) fn sample(deadline: Instant) -> Result<WorktreeProcesses, String> {
@@ -322,6 +534,48 @@ pub(in crate::platform) fn sample(deadline: Instant) -> Result<WorktreeProcesses
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_one_actual_close_on_exec_read_only_root_pin_is_excluded() {
+        use std::os::fd::AsRawFd;
+        let folder = tempfile::tempdir().unwrap();
+        let root = folder.path().canonicalize().unwrap();
+        let until = || Instant::now() + std::time::Duration::from_secs(3);
+        let scope = objects::Scope::open(&root, until()).unwrap();
+        let inventory = scope.inventory(until()).unwrap();
+        let id = objects::Object {
+            device: scope.identity().device,
+            inode: scope.identity().inode,
+        };
+        let file = std::fs::File::open(&root).unwrap();
+        drop(scope);
+        let id = HolderRoot {
+            object: id,
+            descriptor: file.as_raw_fd(),
+        };
+        assert!(!member_with_holder(std::process::id(), &inventory, Some(id), until()).unwrap());
+        let wrong = HolderRoot {
+            descriptor: file.as_raw_fd() + 1024,
+            ..id
+        };
+        assert!(
+            member_with_holder(std::process::id(), &inventory, Some(wrong), until()).is_err(),
+            "a different descriptor cannot identify the original read-only holder pin"
+        );
+        // Duplicating the deliberate pin does not exempt the process or both
+        // FDs. Actual BSD fi_openflags/PROC_FP_CLEXEC are read from the kernel.
+        let copy = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+        assert!(copy >= 0);
+        use std::os::fd::FromRawFd;
+        let copy = unsafe { std::fs::File::from_raw_fd(copy) };
+        assert!(member_with_holder(std::process::id(), &inventory, Some(id), until()).unwrap());
+        drop(copy);
+        assert_eq!(
+            unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFD, 0) },
+            0
+        );
+        assert!(member_with_holder(std::process::id(), &inventory, Some(id), until()).is_err());
+    }
 
     #[test]
     fn native_short_unique_identity_and_fd_path_find_the_same_held_original() {

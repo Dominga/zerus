@@ -708,6 +708,66 @@ mod tests {
     }
 
     #[test]
+    fn a_large_cached_catalog_does_not_fill_the_effect_checkpoint_or_change_its_plan() {
+        let original = checkpoint();
+        let expected = original.clone().verify().unwrap();
+        let mut value: Value = serde_json::from_str(&original.original).unwrap();
+        let worktrees: Vec<_> = (0..219)
+            .map(|n| {
+                json!({
+                    "path":format!("/srv/repos/{}/work-{n}", "x".repeat(160)),
+                    "branch":format!("work-{n}"),"available":true,
+                })
+            })
+            .collect();
+        value["catalog"] = json!({"common_dir":"/srv/repo/.git","state":"ok",
+            "worktrees":worktrees});
+        value["opaque_future"] = json!({"keep":"original fields remain bound"});
+        let saved = value.clone();
+        let mut intent = original.clone();
+        intent.original = serde_json::to_string(&value).unwrap();
+        assert!(intent.original.len() > SOURCE_BYTES);
+        assert!(
+            intent.clone().verify().is_err(),
+            "the old full-card input is refused"
+        );
+        intent.original = creation::effect_checkpoint(&value).unwrap();
+        assert!(intent.original.len() < SOURCE_BYTES);
+        let verified = intent.verify().unwrap();
+        assert!(verified.plan == expected.plan);
+        let projected: Value = serde_json::from_str(&verified.intent.original).unwrap();
+        let mut expected_checkpoint = saved.clone();
+        expected_checkpoint["catalog"]
+            .as_object_mut()
+            .unwrap()
+            .remove("worktrees");
+        assert_eq!(
+            projected, expected_checkpoint,
+            "all other original fields are retained"
+        );
+        assert!(projected["catalog"].get("worktrees").is_none());
+        assert_eq!(
+            projected["catalog"]["common_dir"],
+            saved["catalog"]["common_dir"]
+        );
+        assert_eq!(projected["opaque_future"], saved["opaque_future"]);
+        assert_eq!(value, saved, "the journal/recovery catalog was not mutated");
+        assert_eq!(
+            verified.binding.source_sha256,
+            hash(verified.intent.original.as_bytes())
+        );
+        assert_eq!(verified.binding.plan_sha256, expected.binding.plan_sha256);
+
+        // Only this cached list is omitted. Do not truncate other input to fit,
+        // raise a cap or let an oversized unknown field through the verifier.
+        value["opaque_future"] = json!("x".repeat(SOURCE_BYTES + 1));
+        let mut oversized = original;
+        oversized.original = creation::effect_checkpoint(&value).unwrap();
+        assert!(oversized.original.len() > SOURCE_BYTES);
+        assert!(oversized.verify().is_err());
+    }
+
+    #[test]
     fn accepts_the_real_reducers_durable_launch_checkpoint() {
         let intent = checkpoint();
         let original = intent.original.clone();

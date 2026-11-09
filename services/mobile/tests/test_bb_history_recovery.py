@@ -1,8 +1,9 @@
 """Black-box public history pages and recovery actions.
 
 A history read passes its scoped payload unchanged and keeps only a page of
-exactly this request, session, run and conversation; a head read follows
-local indexing briefly while it progresses, a cursor read never repeats. A
+exactly this request, session, run and conversation; a full-page head read
+follows local indexing briefly while it progresses, while metadata-only and
+cursor reads never repeat. A
 recovery action acts only on the exact waiting job, once. A computer whose
 hgs lacks either ABI runs neither. (H3's history page tests were merged into
 `HistoryTests`; `test_bb_inspection_bounds` covers history in inspections.)
@@ -30,6 +31,20 @@ def answered(value: dict, request: dict) -> dict:
 
 class HistoryTests(SessionCase):
     markers = ("history",)
+
+    async def test_a_metadata_only_head_yields_after_one_native_pass(self):
+        process = await self.launch()
+        first = page(indexing=True, head={"complete": False, "incoming_seq": None, "total_incoming": None},
+                     source_status={"progress": {"source_bytes": 1}})
+        self.hgs.script(self.rules({"argv": HISTORY, "stdout": first, "times": 1},
+                                   {"argv": HISTORY, "stdout": page()}))
+        request = self.envelope("history", {"limit": 1})
+        before = len(self.native_calls())
+        result = await self.submit(request, process)
+        self.assertEqual(result, {"state": "completed", "result": answered(first, request), "error": None})
+        [call] = self.native_calls()[before:]
+        self.assertEqual((call["argv"], json.loads(call["stdin"])), (HISTORY, request["payload"]))
+        await self.assert_replays(request, result, process)
 
     async def test_history_reads_pass_their_scoped_payload_unchanged(self):
         process = await self.launch()

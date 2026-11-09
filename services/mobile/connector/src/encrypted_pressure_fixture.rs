@@ -1,5 +1,17 @@
 // Synthetic tests only. Neither method is included in an installed connector.
 impl Journal {
+    // Filling the real cache uses the maintained counter. The full payload
+    // sum below still audits it before and after the pressure assertions.
+    pub(crate) fn pressure_fixture_result_bytes(&self) -> i64 {
+        self.db
+            .query_row(
+                "SELECT result_bytes FROM encrypted_usage WHERE id=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
     pub(crate) fn pressure_fixture_usage(&self) -> (i64, i64, i64) {
         self.db.query_row("SELECT identities,result_bytes,(SELECT coalesce(sum(length(result)),0) FROM encrypted_requests) FROM encrypted_usage WHERE id=1", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap()
     }

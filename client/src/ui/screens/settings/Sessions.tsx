@@ -3,10 +3,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { inTauri } from "../../../bridge";
 import { desktopService } from "../../../store/desktopService";
 import { bus } from "../../../store/notices";
-import { flag, setSetting } from "../../../store/settings";
+import { flag, setSetting, text } from "../../../store/settings";
 import { sessionUploadBlock, subagentsConfirm } from "../../../store/hgsSettings";
 import { motionReduced } from "../../motion";
-import { Group, SectionHead, ToggleRow } from "./ui";
+import { Group, Row, SectionHead, Select, ToggleRow } from "./ui";
 import { tr, trNoop } from "../../../i18n";
 import { createNotificationPreferences } from "./notification-preferences";
 
@@ -40,8 +40,17 @@ export function SessionsSection() {
         <ToggleRow label={trNoop("Hide projects without active sessions")} checked={flag("workspace/hideEmptyProjects")} onChange={toggle("workspace/hideEmptyProjects")} />
         <ToggleRow label={trNoop("Animate working sessions")} checked={flag("workspace/animateActivity")} onChange={toggle("workspace/animateActivity")}
           hint={motionReduced() ? tr("Reduce motion is on, so working sessions hold still.") : undefined} />
+        <ToggleRow label={trNoop("Show account labels on session cards")} checked={flag("sessions/showAccountMarks")} onChange={toggle("sessions/showAccountMarks")}
+          hint={trNoop("A colored circle with the account's first letter or emoji. One account can be hidden in its Color and mark settings on the Accounts screen.")} />
+        <Row label={trNoop("Account marks")} for="set-account-marks" disabled={!flag("sessions/showAccountMarks")}
+          hint={trNoop("Session cards mark each account with a colored circle. Choose the color and emoji on the Accounts screen.")}>
+          <Select id="set-account-marks" value={text("sessions/accountMarks")} disabled={!flag("sessions/showAccountMarks")} onChange={(value) => void setSetting("sessions/accountMarks", value)}
+            options={[{ value: "letter", label: trNoop("First letter") }, { value: "emoji", label: trNoop("Emoji when set") }]} />
+        </Row>
+        <ToggleRow label={trNoop("Start new child sessions as compact rows")} checked={flag("sessions/compactNewChildren")} onChange={toggle("sessions/compactNewChildren")}
+          hint={trNoop("A session that another session launches or adopts appears collapsed under its parent. Expanding a row keeps it expanded.")} />
         <ToggleRow label={trNoop("Show completed subagents")} checked={flag("workspace/showCompletedSubagents")} onChange={toggle("workspace/showCompletedSubagents")}
-          hint={trNoop("Include agents whose latest turn has finished in the session list and its counts. Plan & agents always shows all reported agents. Agents with unknown status remain visible.")} />
+          hint={trNoop("Include agents whose latest turn has finished in the session list and its counts. Agents with unknown status remain visible. Plan & agents keeps working agents in view and folds the others behind their count.")} />
         <ToggleRow label={trNoop("Notify about optional questions")} checked={notifications.checked()} onChange={(on)=>void notifications.change(on)}
           disabled={notifications.disabled()}
           hint={trNoop("Off by default. Shows a system notification once for each new optional question, which the agent keeps working without. It is withdrawn when the questions are answered or skipped, or the session is marked as read. Questions that need an answer always notify.")} />

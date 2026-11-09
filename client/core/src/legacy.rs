@@ -371,6 +371,40 @@ mod tests {
     }
 
     #[test]
+    fn raw_listing_startup_delay_does_not_restart_the_admission_gap() {
+        let admitted = Instant::now();
+        let mut schedule = Schedule::default();
+        let follows = Follows {
+            activity: &[],
+            processes: &[],
+        };
+        assert_eq!(schedule.due(admitted, &follows), [Read::Listing]);
+        schedule.refresh_listing_bounded(admitted);
+        assert!(schedule
+            .due(admitted + Duration::from_millis(999), &follows)
+            .is_empty());
+
+        // Startup/completion can take longer than the minimum admission gap.
+        // A pending refresh stays single-flight, then is due without a new gap.
+        let completed = admitted + Duration::from_millis(1500);
+        assert!(schedule.due(completed, &follows).is_empty());
+        schedule.done(&Read::Listing, completed);
+        assert_eq!(schedule.due(completed, &follows), [Read::Listing]);
+
+        // The next gap starts at that second admission, not its completion.
+        let refreshed = completed + Duration::from_millis(10);
+        schedule.done(&Read::Listing, refreshed);
+        schedule.refresh_listing_bounded(refreshed);
+        assert!(schedule
+            .due(completed + Duration::from_millis(999), &follows)
+            .is_empty());
+        assert_eq!(
+            schedule.due(completed + Duration::from_secs(1), &follows),
+            [Read::Listing]
+        );
+    }
+
+    #[test]
     fn an_offline_listing_retry_uses_the_existing_single_flight_slot() {
         let now = Instant::now();
         let mut schedule = Schedule::default();

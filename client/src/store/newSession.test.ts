@@ -282,6 +282,23 @@ describe("accounts (NewSessionDialog.cpp 865-1023)", () => {
 });
 
 describe("repository source (NewSessionDialog.cpp 590-639)", () => {
+  it("publishes the URL focus request with the source change, before any later edit or form answer", async () => {
+    const t = setup();
+    await t.open();
+    const original = t.state().focusUrl;
+    t.act.setSource(true);
+    expect(t.state().repository).toBe(true);
+    expect(t.state().focusUrl).toBe(original + 1);
+    t.act.setName("typed-name");
+    t.act.setSource(true);
+    await settle();
+    expect(t.state().focusUrl).toBe(original + 1);
+    t.act.setSource(false);
+    t.act.setSource(true);
+    expect(t.state().focusUrl).toBe(original + 2);
+    expect(t.world.creating()).toEqual([]);
+  });
+
   for (const host of ["", "mac"]) {
     for (const override of ["", "existing", "ungrouped"]) {
       it(`repositorySourceKeepsNewProjectIntent (${host || "local"}, ${override || "keep new"})`, async () => {
@@ -416,6 +433,29 @@ describe("repository source (NewSessionDialog.cpp 590-639)", () => {
 });
 
 describe("placement", () => {
+  it.each([
+    ["untouched default", undefined, "ungrouped", true],
+    ["explicit renamed Inbox", "ungrouped", "ungrouped", false],
+    ["explicit other project", "zerus", "zerus", false],
+  ] as const)("sends the same inference intent to preview and launch for %s", async (_label, choice, expected, implicit) => {
+    const t = setup((w) => {
+      w.swarm = "swarm-fixture";
+      w.projects = [project("ungrouped", "General", [], { is_default: true }),
+        project("zerus", "Zerus", [folder("home", "pc", "/home/example")])];
+    });
+    // The folder check resolves the displayed home folder to this path.
+    await t.open({ agent: "codex", path: "/home/example" });
+    t.act.setAuto(false);
+    if (choice) t.act.chooseProject(t.state().projects.findIndex((p) => p.id === choice));
+    await settle();
+    const preview = t.world.of("newSessionForm").at(-1)?.args[0] as NewSessionFormInput;
+    expect(preview.form.implicit_inbox).toBe(implicit);
+    expect(preview.project?.id).toBe(expected);
+    expect(t.state().form?.start_enabled).toBe(true);
+    await t.start();
+    expect(t.choices()).toMatchObject({ project: expected, implicit_inbox: implicit, path: "/home/example", auto_preferred: false });
+  });
+
   it("untouchedInboxUsesNativeFolderInferenceAndExplicitInboxWins", async () => {
     for (const explicit of [0, 1, 2]) {
       const t = setup((w) => { w.swarm = "swarm-fixture"; });

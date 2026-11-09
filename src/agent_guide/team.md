@@ -27,10 +27,12 @@ Windows: team-run too. Leading a team: hgs guide team-lead.
 Scratch teams (the QA right). With the operate profile (the QA right) you run live
 checks in your own scratch teams: hgs team create --json from your session with a
 folder inside the team's scratch root (its scratch_root, or <team folder>/.qa-scratch).
-You lead it, its plan needs no card, it uses the team's own agents, and its member
-count and tree budgets are capped by the parent. Outside the root, without the right,
-or before the owner granted the team's standing rule, the create is refused. Zerus
-stops it when the task you held when creating it is accepted, rejected or cancelled.
+You lead it, its plan needs no card, and the parent's caps apply. Outside the root,
+without the right, or before the owner granted the team's standing rule, the create
+is refused. Zerus stops it when the task you held when creating it is decided.
+In a sandbox call hgs team directly, one command per call with --json-file PATH: your
+own calls and your scratch team's queue in your folder; a script still asks.
 
 A performance run checks the machine first, and a comparison alternates the
 binaries in rounds (hgs guide team-tests).
+Tauri shows archive stubs; open a report to read that task only.

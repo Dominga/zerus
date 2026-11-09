@@ -124,6 +124,23 @@ describe("desk wiring", () => {
     expect(shown.setSelectedKey).toHaveBeenCalledWith("mac\nmanual");
   });
 
+  it("opens an exact pre-conversation run, but never a replacement or newly bound run", () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+    const target = { computer: "peer", key: "run:startup", attention: true, expected: { run: "r", conversation: "" } };
+    Object.assign(catalog.rows, { "peer\nrun:startup": { runId: "r", state: "running" } });
+    openSession(target);
+    expect(shown.setSelectedKey).toHaveBeenCalledExactlyOnceWith("peer\nrun:startup");
+    shown.setSelectedKey.mockClear();
+    Object.assign(catalog.rows["peer\nrun:startup"], { conversationId: "bound" });
+    openSession(target);
+    vi.advanceTimersByTime(16_000);
+    expect(shown.setSelectedKey).not.toHaveBeenCalled();
+    Object.assign(catalog.rows["peer\nrun:startup"], { conversationId: undefined, runId: "replacement" });
+    openSession(target);
+    vi.advanceTimersByTime(16_000);
+    expect(shown.setSelectedKey).not.toHaveBeenCalled();
+  });
+
   it("refuses an exact row delivered by a timer that ran after its original deadline", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
     const clock = vi.spyOn(performance, "now").mockReturnValue(0);

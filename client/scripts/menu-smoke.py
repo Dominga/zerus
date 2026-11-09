@@ -317,7 +317,7 @@ with tempfile.TemporaryDirectory(prefix="zerus-menu-") as scratch, ExitStack() a
 
         def inspect():
             try:
-                native = check_lists(report.get("accessibility_lists"), os.getpid(), report.get("accessibility_descriptions"))
+                native = check_lists(report.get("accessibility_lists"), os.getpid(), report.get("accessibility_descriptions"), report.get("accessibility_tree_items"))
                 report.update(native)
                 if native.get("accessibility_failure"):
                     report.setdefault("failures", []).append(native["accessibility_failure"])

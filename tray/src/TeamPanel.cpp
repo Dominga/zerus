@@ -57,6 +57,7 @@ TeamPanel::TeamPanel(TeamController *controller, QWidget *parent) : QWidget(pare
     m_stack = new QStackedWidget;
     m_stack->addWidget(m_scroll);
     m_card = new TeamTaskCard;
+    m_card->setController(m_controller);
     m_stack->addWidget(m_card);
     m_designer = new TeamDesignerPanel(m_controller);
     m_designer->confirm = [this](const QString &name, const QString &title, const QString &text, const QString &action) { return confirm(name, title, text, action); };

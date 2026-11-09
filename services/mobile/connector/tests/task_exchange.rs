@@ -27,6 +27,168 @@ const TASK: &str = "0b9d6c55-2f5e-4c39-9a51-0d6f3c2a7e11";
 const EXCHANGE: [&str; 3] = ["task", "exchange", "--json"];
 const DIGESTS: [&str; 3] = ["task", "digests", "--json"];
 
+fn cli_image(path: &std::path::Path, tasks: bool, digest: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let help = if tasks { MARKER } else { "Usage: hgs\n" }.replace('\'', "'\\''");
+    let commands = if tasks {
+        format!(
+            "'task digests --json') echo '{{\"schema\":1,\"projects\":{{\"project-1\":{{\"digest\":\"{digest}\"}}}}}}';;\n\
+             'task exchange --json') cat >/dev/null; echo '{{\"schema\":1,\"imported\":0,\"refused\":[],\"updates\":[],\"more\":false,\"digest\":\"{digest}\"}}';;"
+        )
+    } else {
+        String::new()
+    };
+    std::fs::write(
+        path,
+        format!("#!/bin/sh\ncase \"$*\" in\n--help) printf '%s' '{help}';;\n{commands}\n*) exit 2;;\nesac\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+fn configured_native(scratch: &Scratch, path: &std::path::Path) -> native::Process {
+    let (value, _) = zerus_mobile_connector::workspace_cli::read_config(path).unwrap();
+    let parsed = zerus_mobile_connector::config::parse(&value.to_string()).unwrap();
+    let config = zerus_mobile_connector::config::validate(
+        &parsed,
+        false,
+        &zerus_mobile_connector::config::Environment {
+            home: Some(scratch.path("home")),
+            cwd: scratch.root.clone(),
+        },
+    )
+    .unwrap();
+    native::Process::new(config.hgs_path, native::DEFAULT_TIMEOUT)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn maintained_cli_upgrades_keep_task_exchange_without_overriding_custom_pins() {
+    let scratch = Scratch::new("configured-cli");
+    let pinned = scratch.path("home/.local/share/zerus-mobile/bin/hgs");
+    let maintained = scratch.path("home/.local/bin/hgs");
+    cli_image(&pinned, false, "");
+    cli_image(&maintained, true, &"ab".repeat(32));
+    let original_pinned = std::fs::read(&pinned).unwrap();
+    let path = scratch.path("connector.json");
+    let original = json!({"server_url":"https://relay.example.test","node_token":"synthetic-node-token",
+        "hgs_path":pinned,"state_dir":scratch.path("receipts"),"extension":{"keep":true}});
+    let revision =
+        zerus_mobile_connector::workspace_cli::replace_config(&path, "", &original).unwrap();
+    let pinned_process = configured_native(&scratch, &path);
+    let help = pinned_process
+        .call(Call::new(["--help"]).text())
+        .await
+        .unwrap();
+    assert!(!Flags::from_help(help.json().as_str().unwrap()).task_exchange);
+    assert!(pinned_process.call(Call::new(DIGESTS)).await.is_err());
+
+    // The documented explicit repair changes only the executable selection.
+    // Runtime selection itself must never replace an intentionally pinned CLI.
+    let mut repaired = original.clone();
+    repaired["hgs_path"] = json!(maintained);
+    zerus_mobile_connector::workspace_cli::replace_config(&path, &revision, &repaired).unwrap();
+    let saved_bytes = std::fs::read(&path).unwrap();
+    let process = configured_native(&scratch, &path);
+    for (next_image, digest) in [(false, "ab".repeat(32)), (true, "cd".repeat(32))] {
+        if next_image {
+            let staged = maintained.with_extension("new");
+            cli_image(&staged, true, &digest);
+            std::fs::rename(staged, &maintained).unwrap();
+        }
+        let help = process.call(Call::new(["--help"]).text()).await.unwrap();
+        assert!(Flags::from_help(help.json().as_str().unwrap()).task_exchange);
+        assert_eq!(
+            process.call(Call::new(DIGESTS)).await.unwrap().json()["projects"]["project-1"]
+                ["digest"],
+            digest
+        );
+        assert_eq!(
+            process
+                .call(Call::new(EXCHANGE).payload(
+                    json!({"schema":1,"project":"project-1","inventory":{"project":{},"tasks":{}}})
+                ))
+                .await
+                .unwrap()
+                .json()["digest"],
+            digest
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), saved_bytes);
+        assert_eq!(std::fs::read(&pinned).unwrap(), original_pinned);
+        assert!(pinned_process.call(Call::new(DIGESTS)).await.is_err());
+    }
+    assert_eq!(
+        zerus_mobile_connector::workspace_cli::read_config(&path)
+            .unwrap()
+            .0,
+        repaired
+    );
+    assert!(
+        !scratch.path("receipts").exists(),
+        "selection must not open or reset the journal"
+    );
+}
+
+#[test]
+fn a_missing_task_exchange_warns_once_but_failed_or_supported_probes_do_not() {
+    const CHILD: &str = "ZERUS_TEST_CONFIGURED_CLI_WARNING";
+    if let Ok(mode) = std::env::var(CHILD) {
+        let scratch = Scratch::new("configured-cli-warning");
+        let cli = scratch.path("hgs");
+        cli_image(&cli, mode == "supported", &"ab".repeat(32));
+        if mode == "failed" {
+            std::fs::write(&cli, "#!/bin/sh\nexit 2\n").unwrap();
+        }
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let journal = Journal::open(&scratch.path("state"), "fixture-binding", EPOCH).unwrap();
+            let connector = Connector::new(
+                native::Process::new(cli.to_string_lossy().into_owned(), native::DEFAULT_TIMEOUT),
+                journal,
+                Settings {
+                    interval: 5.0,
+                    binding: "fixture-binding".into(),
+                    default_timeout: native::DEFAULT_TIMEOUT,
+                    clock_scale: 1.0,
+                },
+                Box::new(|| EPOCH),
+            );
+            for _ in 0..3 {
+                connector.state.borrow_mut().capabilities_next_poll = 0.0;
+                connector.probe_capabilities().await;
+                assert_eq!(connector.flags.get().task_exchange, mode == "supported");
+            }
+        });
+        return;
+    }
+    for (mode, warnings) in [("missing", 1), ("supported", 0), ("failed", 0)] {
+        let output = captured(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "a_missing_task_exchange_warns_once_but_failed_or_supported_probes_do_not",
+                    "--nocapture",
+                ])
+                .env(CHILD, mode),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr)
+                .matches(zerus_mobile_connector::runtime::TASK_EXCHANGE_UNAVAILABLE)
+                .count(),
+            warnings,
+            "{mode}"
+        );
+    }
+}
+
 #[derive(Default)]
 struct Scripted {
     answers: RefCell<HashMap<Vec<String>, Value>>,
@@ -193,6 +355,29 @@ async fn task_exchange_runs_hgs_with_its_payload() {
     );
     assert_eq!(harness.calls(&EXCHANGE), [Some(request())]);
     assert_eq!(harness.journal(), [json!([id, "completed"])]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_done_fetch_uses_the_existing_empty_version_and_keeps_validation_strict() {
+    let harness = Harness::new("task-done-fetch", true);
+    harness.answer(&EXCHANGE, answer());
+    let mut fetch = request();
+    fetch["inventory"]["tasks"][TASK] = json!({});
+    assert_eq!(
+        harness
+            .exchange("7d2c4e8a-1b3f-4a5c-9d6e-0f1a2b3c4d60", "", fetch.clone())
+            .await["state"],
+        "completed"
+    );
+    assert_eq!(harness.calls(&EXCHANGE), [Some(fetch.clone())]);
+    fetch["shallow"] = json!(true);
+    assert_eq!(
+        harness
+            .exchange("7d2c4e8a-1b3f-4a5c-9d6e-0f1a2b3c4d61", "", fetch)
+            .await["state"],
+        "failed"
+    );
+    assert_eq!(harness.calls(&EXCHANGE).len(), 1);
 }
 
 #[tokio::test(flavor = "current_thread")]

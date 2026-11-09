@@ -10,8 +10,11 @@ pub(super) fn fork_pending(record: &Value) -> bool {
         && record["startup_kind"] == "new"
         && uuid::Uuid::parse_str(string(record, "fork_parent_id")).is_ok()
         && record["base"].as_array().is_some_and(|args| {
-            args.get(1).is_some_and(|arg| arg == "fork")
-                && args.get(2) == record.get("fork_parent_id")
+            let words = args.iter().map(|arg| arg.as_str().map(str::to_owned)).collect::<Option<Vec<_>>>();
+            let Some(words) = words else { return false; };
+            let program = crate::project_launcher::program_words(&words);
+            args.get(program).is_some_and(|arg| arg == "fork")
+                && args.get(program + 1) == record.get("fork_parent_id")
         })
         && string(record, "conversation_id").is_empty()
         && string(record, "expected_id").is_empty()
@@ -47,7 +50,7 @@ fn fork_directory(record: &Value) -> Result<PathBuf> {
     let launch = Path::new(string(record, "launch_dir"));
     let mut cwd = launch.to_path_buf();
     let args = recipes::argv(record)?;
-    let mut index = 3;
+    let mut index = crate::project_launcher::program_words(&args) + 2;
     while index < args.len() && args[index] != "--" {
         let (key, value) = args[index]
             .split_once('=')
@@ -614,6 +617,16 @@ mod tests {
         assert!(found.is_ok(), "the conservative path does not refuse: {found:?}");
     }
 
+    #[test]
+    fn powershell_fork_selector_remains_bound_to_the_original_parent() {
+        let parent="c561923a-7958-40f7-a996-e6981ac19a62";
+        let prefix=[r"C:\PowerShell\pwsh.exe", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", r"C:\p\run_codex.ps1"].map(str::to_owned).to_vec();
+        let base=[prefix,vec!["fork".into(),parent.into()]].concat();
+        let mut record=json!({"agent":"codex","startup_kind":"new","fork_parent_id":parent,"base":base});
+        assert!(fork_pending(&record));
+        record["fork_parent_id"]=json!("82b251e5-36fa-44d2-b90d-41ea86f7b696");
+        assert!(!fork_pending(&record));
+    }
     #[test]
     fn only_a_resume_without_a_sent_message_or_archive_restore_may_clear_or_pause() {
         assert!(clearable(&resumed()));

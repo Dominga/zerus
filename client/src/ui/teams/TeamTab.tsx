@@ -27,7 +27,7 @@ import { duration, memberProgress, memberStatus, progress, shownMembers, stateLa
 import { roleStyle } from "./roles";
 import { TeamProposals } from "./ProposalCards";
 import { ledTeamOf, leadsTeam } from "./leadTeam";
-import { TeamReports } from "./TeamReports";
+import { ArchivedTaskReport, TeamReports } from "./TeamReports";
 import { WaitingBanner } from "./Waiting";
 import { Blockers, PhaseActions, TaskActions, TeamBarActions, TeamBarChips, TeamModeControl, TeamQuestions, createPlanEditing } from "./TeamActions";
 import { TeamActions as TeamActionModel } from "./actions";
@@ -92,6 +92,9 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [catalogOpen, setCatalogOpen] = createSignal(false);
   const [tests, setTests] = createSignal<TeamTestsView | null>(null);
+  const [reportTask, setReportTask] = createSignal<number | null>(null);
+  const reportTeam = createMemo(() => props.team.id);
+  createEffect(() => { props.computer; reportTeam(); setReportTask(null); });
   const graph = () => teams.graph(props.computer, props.team.id);
   const profile = () => teams.profile(props.computer, props.team.id);
   // Task 196: the phase header's actions (PhaseActions) replace the plan's
@@ -174,7 +177,8 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
         onSettings={() => setSettingsOpen(true)}
         onCatalog={() => setCatalogOpen(true)} />
       <WaitingBanner />
-      <TeamReports computer={props.computer} team={props.team} />
+      <TeamReports computer={props.computer} team={props.team} onOpenReport={setReportTask} />
+      <Show when={reportTask()}>{(task) => <ArchivedTaskReport computer={props.computer} team={reportTeam()} task={task()} onClose={() => setReportTask(null)} />}</Show>
       <Show when={props.team.working_mode?.disagreeing?.length ? props.team.working_mode.disagreeing : undefined}>
         {(wrong) => (
           <section class="team-working-mode" data-working-mode={props.team.working_mode!.preset}>
@@ -244,9 +248,10 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
                 onLoadProfile={() => { void teamsProfile(props.computer); }}
                 loadTimeline={(phase) => teamTimeline(props.computer, props.team.id, phase)}
                 onLoadTests={loadTests}
+                onOpenReport={setReportTask}
                 taskActions={(id) => {
                   const task = props.team.tasks.find((candidate) => candidate.id === id);
-                  return task ? <TaskActions computer={props.computer} team={props.team} task={task} /> : <></>;
+                  return task && !task.archived ? <TaskActions computer={props.computer} team={props.team} task={task} /> : <></>;
                 }}
                 phaseActions={(n) => <PhaseActions computer={props.computer} team={props.team} phase={n} owner={props.owner} />}
                 editing={plan.editing()}
@@ -440,6 +445,8 @@ function SideColumn(props: {
 }) {
   const members = createMemo(() => shownMembers(props.team));
   const lead = createMemo(() => props.team.members.find((member) => member.lead));
+  // Task #347: the Members header explains the card colours on hover.
+  const memberLegend = () => tr("State colours: working, building and running tests are blue; waiting for its own job, for the lead or for a person is amber; needs your answer, blocked or failed is red; idle or done is grey; paused or offline is muted and hatched.");
   // Spec 5.6: the members as a tree; a folded sub-lead hides its reports.
   const [folded, setFolded] = createSignal<Set<string>>(new Set());
   const tree = createMemo(() => {
@@ -456,7 +463,7 @@ function SideColumn(props: {
       <SideLists team={props.team} onGo={props.onGo} />
       <TeamQuestions computer={props.computer} team={props.team} />
       <section class="team-members" style={{ height: `${teamLayout.membersShare()}%` }} aria-label={tr("Members")}>
-        <div class="team-section-head"><b>{tr("Members")}</b><span class="dim mono">{members().length}</span>
+        <div class="team-section-head" title={memberLegend()}><b>{tr("Members")}</b><span class="dim mono">{members().length}</span>
           <span class="grow" />
           <Show when={canAdd()}>
             <button type="button" class="btn ghost small" data-action="add-member" title={tr("Add a member; it starts with the first task it gets")} onClick={() => setAdding(true)}>{tr("+ Member")}</button>

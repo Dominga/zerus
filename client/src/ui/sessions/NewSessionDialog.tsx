@@ -1,3 +1,5 @@
+import { Dropdown } from "../lib/Dropdown";
+import { TextInput } from "../lib/TextField";
 import { For, Match, Show, Switch, createEffect, createMemo, createSignal, on, onCleanup, type JSX } from "solid-js";
 import { trText } from "../../text";
 import * as bridge from "../../bridge";
@@ -91,7 +93,8 @@ function Choice(props: {
   const pick = (key: string | undefined) => {
     props.onOpen(false);
     button.focus();
-    if (key !== undefined && key !== props.selected) props.onPick(key);
+    // Committing the current item also records an explicit Destination choice.
+    if (key !== undefined) props.onPick(key);
   };
   const onKey = (e: KeyboardEvent) => {
     if (props.disabled) return;
@@ -111,7 +114,7 @@ function Choice(props: {
         e.preventDefault();
         if (props.open) { setActive(to(active())); return; }
         const next = to(props.selected);
-        if (next !== undefined && next !== props.selected) props.onPick(next);
+        if (next !== undefined) props.onPick(next);
       }
     }
   };
@@ -314,7 +317,10 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
 
   // The Git repository source focuses its URL field (606).
   let url: HTMLInputElement | undefined;
-  createEffect(on(() => s().focusUrl, () => queueMicrotask(() => url?.focus()), { defer: true }));
+  // Ordinary edits/form answers replace the whole state. Only a changed focus
+  // request may move focus; `on` alone does not compare the selected value.
+  const focusUrl = createMemo(() => s().focusUrl);
+  createEffect(on(focusUrl, () => queueMicrotask(() => url?.focus()), { defer: true }));
 
   const start = (e: Event) => {
     e.preventDefault();
@@ -358,7 +364,7 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
           <div class="form-row">
             <label for="ns-new-project" classList={{ "ns-reserved": !s().newProjectVisible }}>{tr("New project")}</label>
             <Show when={s().newProjectVisible} fallback={<span class="ns-reserved-field" />}>
-              <input id="ns-new-project" class="field" data-keys="text" maxLength={80} placeholder={tr("Project name")} value={s().newProjectName} disabled={!fields()}
+              <TextInput id="ns-new-project" class="field" data-keys="text" maxLength={80} placeholder={tr("Project name")} value={s().newProjectName} disabled={!fields()}
                 onInput={(e) => act.setNewProjectName(e.currentTarget.value)} />
             </Show>
           </div>
@@ -378,7 +384,7 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
           <>
             <div class="form-row">
               <label for="ns-url">{tr("Repository")}</label>
-              <input id="ns-url" ref={url} class="field mono" data-keys="text" maxLength={4096} placeholder="https://github.com/owner/repository.git"
+              <TextInput id="ns-url" ref={url} class="field mono" data-keys="text" maxLength={4096} placeholder="https://github.com/owner/repository.git"
                 title={tr("An SSH or HTTPS repository URL, on GitHub or another Git server.")} value={s().url} disabled={!fields() || !online()}
                 onInput={(e) => act.setUrl(e.currentTarget.value)} />
             </div>
@@ -386,7 +392,7 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
               <label for="ns-destination">{tr("Clone to")}</label>
               <div class="ns-src-detail">
                 <div class="row">
-                  <input id="ns-destination" class="field mono grow" data-keys="text" maxLength={8192} value={s().destination} disabled={!fields() || !online()}
+                  <TextInput id="ns-destination" class="field mono grow" data-keys="text" maxLength={8192} value={s().destination} disabled={!fields() || !online()}
                     title={tr("The complete new checkout path. Edit its folder name or choose a parent folder with Browse.")}
                     onInput={(e) => act.setDestination(e.currentTarget.value)} />
                   <button type="button" id="ns-browse-repository" class="btn" data-keys="button" disabled={!fields() || !online()} onClick={browseRepository}>{tr("Browse…")}</button>
@@ -473,6 +479,12 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
                 );
               }}</For>
             </ul>
+            {/* The effective permission mode of the account (owner, 2026-11-07, T-6hcfnu). */}
+            <Show when={s().accounts[s().account]?.profile?.permission_label.source ? s().accounts[s().account]?.profile : undefined}>{(p) => (
+              <div class="ns-perm dim" title={[trText(p().permission_hint), tr("Change it on the Accounts screen.")].filter(Boolean).join("\n")}>
+                {p().permission_default ? tr("Permissions: %1 (Zerus default)", trText(p().permission_label)) : tr("Permissions: %1", trText(p().permission_label))}
+              </div>
+            )}</Show>
             <div class="row ns-acc-status">
               <span class="grow ns-status">{s().accountStatus}</span>
               <button type="button" class="btn small" data-keys="button" aria-label={tr("Refresh accounts")} disabled={!s().refreshEnabled} onClick={() => act.refreshAccounts()}>
@@ -506,16 +518,14 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
         <Show when={s().effortVisible}>
           <div class="form-row">
             <label for="ns-effort">{tr("Effort")}</label>
-            <select id="ns-effort" class="field ns-effort" data-keys="select" aria-label={tr("Effort")} title={tr("Variants of the selected model. Default uses the model's own setting.")}
-              disabled={!fields()} value={s().effort} onChange={(e) => act.chooseEffort(e.currentTarget.value)}>
-              <For each={s().efforts}>{(effort) => <option value={effort.value} selected={effort.value === s().effort}>{effort.label}</option>}</For>
-            </select>
+            <Dropdown id="ns-effort" class="field ns-effort" data-keys="select" aria-label={tr("Effort")} title={tr("Variants of the selected model. Default uses the model's own setting.")}
+              disabled={!fields()} value={s().effort} onChange={(value) => act.chooseEffort(value)} options={[...((s().efforts) ?? []).map((effort) => ({ value: effort.value, label: effort.label }))]} />
           </div>
         </Show>
 
         <div class="form-row">
           <label for="ns-name">{tr("Session name")}</label>
-          <input id="ns-name" class="field mono" data-keys="text" value={s().name} disabled={!fields()} aria-invalid={!!form()?.name_problem}
+          <TextInput id="ns-name" class="field mono" data-keys="text" value={s().name} disabled={!fields()} aria-invalid={!!form()?.name_problem}
             aria-describedby={form()?.name_problem ? "ns-name-problem" : undefined} onInput={(e) => act.setName(e.currentTarget.value)} />
         </div>
         <Show when={form()?.name_problem}>

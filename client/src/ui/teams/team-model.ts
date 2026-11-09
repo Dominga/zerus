@@ -10,6 +10,19 @@ import type { TeamMemberView, TeamTaskView, TeamView } from "../../types";
 // colour, so a tone names the state the plan CSS tints.
 export type Tone = "neutral" | "active" | "assigned" | "done" | "review" | "cancelled" | "muted" | "dim" | "warn" | "danger" | "planning";
 
+/** Task #347: the member card's state colour family, as the owner's legend:
+ * working and building are blue, waiting is amber, needs answer/blocked/failed
+ * red, idle/done grey, paused/offline muted (the card adds the hatch). */
+export type MemberStateColor = "info" | "warn" | "danger" | "muted" | "dim";
+
+export function memberStateColor(kind: string): MemberStateColor {
+  if (["working", "sent", "submitted", "in_review", "in_test", "planning"].includes(kind)) return "info";
+  if (["stuck", "no_report", "input_blocked", "asking"].includes(kind)) return "warn";
+  if (["answer", "failed", "unconfirmed"].includes(kind)) return "danger";
+  if (["paused", "offline", "removed"].includes(kind)) return "muted";
+  return "dim";
+}
+
 /** What the session list says about a member's session (Qt's Teams::Live). */
 export interface MemberLive {
   /** Its computer does not answer, or the team saw it stopped. */

@@ -146,10 +146,12 @@ public struct NotificationCurrent: Hashable, Sendable {
     public var optional: [String]
     public var suppressed: Bool
     public var notificationPreference: SessionNotificationPreference?
+    /// A supervised child's attention is its parent's (ChildSessions.quiet).
+    public var quiet: Bool
 
     public init(slot: NotificationSlot, target: String, title: String, machine: String, kind: SessionAlertKind?, identity: String, idle: Bool,
                 online: Bool = true, live: Bool = true, conversation: String = "", optional: [String] = [], suppressed: Bool = false,
-                notificationPreference: SessionNotificationPreference? = nil) {
+                notificationPreference: SessionNotificationPreference? = nil, quiet: Bool = false) {
         self.slot = slot
         self.target = target
         self.title = title
@@ -163,6 +165,7 @@ public struct NotificationCurrent: Hashable, Sendable {
         self.optional = optional
         self.suppressed = suppressed
         self.notificationPreference = notificationPreference
+        self.quiet = quiet
     }
 }
 
@@ -398,6 +401,21 @@ public enum NotificationPolicy {
         for session in current where seenSlots.insert(session.slot.key).inserted {
             let key = session.slot.key
             let previous = old[key]
+            if session.quiet {
+                // A supervised child posts nothing (spec 2.1). Its request is not remembered, so once
+                // orphaned it is announced once (2.4); a completion seen meanwhile is not replayed.
+                var record = previous ?? NotificationRecord(slot: session.slot, target: session.target, observedAt: now)
+                record.target = session.target
+                record.observedAt = now
+                record.postedFingerprint = ""
+                record.postedKind = nil
+                record.candidateFingerprint = ""
+                record.candidateTarget = ""
+                record.candidateEventId = 0
+                record.candidateEventAt = 0
+                records.append(record)
+                continue
+            }
             if session.suppressed {
                 records.append(NotificationRecord(slot:session.slot,target:session.target,observedAt:now,
                     observedFingerprint:session.kind.map { fingerprint(JSON.array([.string(session.target),.string($0.rawValue),.string(session.identity)]).compact) } ?? "",
@@ -643,7 +661,8 @@ public enum NotificationCatalogParser {
                                                    live: SessionFilters.state(session) == "running" && value.string("process_state") != "exited",
                                                    conversation: session.target.conversation, optional: optional,
                                                    suppressed:SessionNotificationPreferences.suppressed(value,session.target,kind:kind,optional:optional),
-                                                   notificationPreference:SessionNotificationPreferences.parse(value,session.target)))
+                                                   notificationPreference:SessionNotificationPreferences.parse(value,session.target),
+                                                   quiet: ChildSessions.quiet(value)))
             }
         }
         return NotificationCatalog(sessions: current, identities: identities)

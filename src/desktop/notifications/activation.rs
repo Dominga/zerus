@@ -244,13 +244,18 @@ impl Router {
                 super::ledger::intent_id(&identity)? == binding.intent_id,
                 "activation identity changed"
             );
-            let Target::Session {
-                computer,
-                run,
-                conversation,
-            } = identity.target
-            else {
-                continue;
+            let (computer, run, conversation, startup_question) = match identity.target {
+                Target::Session {
+                    computer,
+                    run,
+                    conversation,
+                } => (computer, run, conversation, None),
+                Target::StartupQuestion {
+                    computer,
+                    run,
+                    question,
+                } => (computer, run, String::new(), Some(question)),
+                _ => continue,
             };
             if let Some(wait) = &self.waiting {
                 // No frame was offered yet. Keep a refused click under its
@@ -267,6 +272,7 @@ impl Router {
                     computer,
                     run,
                     conversation,
+                    startup_question,
                 },
                 token: pending.click.value.token,
                 platform_context: pending.click.value.platform_context,

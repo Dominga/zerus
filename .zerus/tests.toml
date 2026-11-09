@@ -14,6 +14,8 @@ ignore = [
     ".gitleaksignore", "packaging/rust-licenses/**", "**/licenses/**",
     # The configuration and its map: `hgs test map --check` answers for them.
     ".zerus/**",
+    # Owner, 2026-11-08: the Qt desktop is out of the supported set; its provider is disabled.
+    "tray/**",
 ]
 
 # The release full run is the fork CI's run of the candidate, on the owner's word.
@@ -195,6 +197,10 @@ command = "cargo test --locked --target-dir ../../target/lore {targets}"
 # test binary uses. The build folder is this checkout's; the owner may move it.
 [[provider]]
 name = "tray"
+# Owner, 2026-11-08: only the Tauri client is supported; no Qt builds or tests, so
+# the queue and the affected plans never select this provider. Remove the line to
+# bring the Qt suites back.
+disabled = true
 budget_lines = 86000
 kind = "ctest"
 build_dir = ".ci-build/gui"
@@ -216,6 +222,10 @@ elsewhere = [
     "tray/tests/test_nativeuiplugin.cpp",
 ]
 resources = "gui"
+# The installed queue runs ctest on a prebuilt folder without building the
+# merged commit, so on Windows the suite is recorded as not run here; the
+# fork's Windows CI runs only cargo tests. Remove once the queue builds it.
+platforms = ["linux", "macos"]
 
 # The Python suites: a test runs when a file it names or imports changes; the
 # integration tests that start target/debug/hgs run for every CLI change.
@@ -304,6 +314,9 @@ name = "relay"
 kind = "cargo"
 root = "services/mobile/relay"
 sources = ["services/mobile/relay/**", "services/mobile/vectors/**"]
+# Its test code uses Unix file modes without a platform guard, so the tests
+# do not build on Windows; the fork's Windows CI does not run them either.
+platforms = ["linux", "macos"]
 
 [[provider]]
 name = "connector"
@@ -337,6 +350,9 @@ kind = "unittest"
 root = "services/mobile/tests"
 sources = ["services/mobile/**"]
 tests = ["services/mobile/tests/test_*.py"]
+# The suite needs fcntl and an installed zerus_mobile package (CI installs it
+# on Ubuntu); it does not run on Windows.
+platforms = ["linux", "macos"]
 
 [[provider]]
 name = "speech"

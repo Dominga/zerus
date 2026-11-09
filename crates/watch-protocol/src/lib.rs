@@ -13,6 +13,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Data-only capability exchange with the actual mobile journal owner. This
+/// grants no native-operation, session, Stop or delivery authority.
+pub mod session_labels;
+
 /// The `v` of every frame.
 pub const VERSION: u32 = 1;
 /// The ABI name a client looks for before it starts the stream.

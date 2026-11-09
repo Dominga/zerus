@@ -1,7 +1,6 @@
 //! Fleet retirement with actual private helpers, never an upstream source.
 // The desktop starts the accounted Fleet only on Unix (src-tauri commands.rs);
 // Windows keeps `Fleet::start`, whose stream EOF is covered in tests/fleet.rs.
-#![cfg(unix)]
 mod common;
 use common::{catalog, eventually, hello, meta, status_of, FakeHgs, Seen};
 use serde_json::json;
@@ -51,6 +50,11 @@ fn accounted_local_and_peer_keep_frames_controls_and_eof() {
         ["peer"]
     );
     assert!(fleet.accounting_available());
+    for computer in ["", "peer"] {
+        eventually("original fake entered its input loop", || {
+            fake.serve_ready(computer)
+        });
+    }
     control.request_stop();
     assert!(!fleet.reconnect(&ComputerId::from("missing")));
     fleet.stop();
@@ -64,6 +68,128 @@ fn accounted_local_and_peer_keep_frames_controls_and_eof() {
         eventually("owned EOF", || fake.eofs(computer) == 1);
         assert_eq!(fake.runs(computer, &["watch", "--json"]).len(), 1);
     }
+}
+
+struct LogLock(std::fs::File);
+impl LogLock {
+    fn acquire(path: &std::path::Path) -> Self {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            #[cfg(unix)]
+            let locked = {
+                use std::os::fd::AsRawFd;
+                // SAFETY: this fixture owns the live file and locks only its log.
+                unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+            };
+            #[cfg(windows)]
+            let locked = {
+                use std::os::windows::io::AsRawHandle;
+                // SAFETY: the owned file handle stays live; byte zero matches
+                // the Python fixture's msvcrt lock, with no process operation.
+                unsafe {
+                    windows_sys::Win32::Storage::FileSystem::LockFile(
+                        file.as_raw_handle(),
+                        0,
+                        0,
+                        1,
+                        0,
+                    ) != 0
+                }
+            };
+            if locked {
+                return Self(file);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "private shared log lock did not settle"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+impl Drop for LogLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            // SAFETY: release the same lock while the original file is live.
+            assert_eq!(unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) }, 0);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            // SAFETY: release only byte zero of this still-owned file handle.
+            assert_ne!(
+                unsafe {
+                    windows_sys::Win32::Storage::FileSystem::UnlockFile(
+                        self.0.as_raw_handle(),
+                        0,
+                        0,
+                        1,
+                        0,
+                    )
+                },
+                0
+            );
+        }
+    }
+}
+
+#[test]
+fn owned_eof_is_observed_while_the_shared_log_stays_locked() {
+    let fake = FakeHgs::new(
+        "fleet-accounted-locked-log",
+        json!({
+            "":{"runs":[[{"lines":[hello("fixture"),catalog(&[]),meta(Some(&["peer"]))]},{"serve":true}]]},
+            "peer":{"runs":[[{"lines":[hello("peer"),catalog(&[])]},{"serve":true}]]}
+        }),
+    );
+    let gate = Gate::new(1).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let fleet = Fleet::start_accounted(
+        fake.path(),
+        tx,
+        timing(),
+        Arc::new(gate.admit(Role::Fleet).unwrap()),
+    );
+    let mut seen = Seen::new(rx);
+    for computer in ["", "peer"] {
+        seen.until("live", |c| {
+            status_of(c, &ComputerId::from(computer)) == Some(ComputerStatus::Live)
+        });
+        eventually("original fake ready", || fake.serve_ready(computer));
+    }
+    let _lock = LogLock::acquire(&fake.dir.join("log.lock"));
+    fleet.control().request_stop();
+    fleet.stop();
+    assert_eq!(
+        gate.close()
+            .wait_until(Instant::now() + Duration::from_secs(3)),
+        Observation::Idle
+    );
+    for computer in ["", "peer"] {
+        eventually("EOF before shared logging", || fake.eofs(computer) == 1);
+        assert_eq!(fake.runs(computer, &["watch", "--json"]).len(), 1);
+    }
+    let journal_eofs = fake
+        .log()
+        .iter()
+        .filter(|entry| entry.get("eof").is_some())
+        .count();
+    assert_eq!(
+        journal_eofs, 0,
+        "the fixture still owns the shared log lock"
+    );
+    println!(
+        "shared log held: original EOF local={} peer={}, journal EOF={journal_eofs}",
+        fake.eofs(""),
+        fake.eofs("peer")
+    );
 }
 
 #[cfg(unix)]

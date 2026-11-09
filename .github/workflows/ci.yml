@@ -40,6 +40,10 @@ on:
         description: Run Windows client and desktop tests and build the portable zip
         type: boolean
         default: true
+      retain_membership_probe:
+        description: Retain the exact Windows test executable for private read-only membership qualification
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       ref:
@@ -107,6 +111,7 @@ jobs:
       run_macos: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_macos }}
       run_windows: ${{ inputs.run_windows || false }}
       windows_installer_version: ${{ inputs.windows_installer_version || '' }}
+      retain_membership_probe: ${{ github.event_name == 'workflow_dispatch' && inputs.retain_membership_probe || false }}
       run_ios: ${{ inputs.run_ios || false }}
       filter_pr_platforms: ${{ github.event_name == 'pull_request' }}
       arch_check_in_source: ${{ inputs.release_rehearsal || false }}

@@ -73,6 +73,21 @@ class HistoryRecovery(unittest.IsolatedAsyncioTestCase):
         result={'request_id':request['request_id'],'name':request['session'],'run_id':p['expected_run_id'],'conversation_id':p['expected_conversation_id'],'events':[],'history_epoch':'epoch','head':{'complete':False},'indexing':True}
         with patch.object(self.c,'native',AsyncMock(return_value=result)) as native:
             self.assertEqual((await self.c.execute(request))['state'],'completed');self.assertEqual(native.await_count,1)
+    async def test_metadata_head_yields_after_one_native_pass_and_preserves_incomplete_evidence(self):
+        request=self.request(limit=1);p=request['payload']
+        base={'request_id':request['request_id'],'name':request['session'],'run_id':p['expected_run_id'],
+              'conversation_id':p['expected_conversation_id'],'events':[],'history_epoch':'epoch'}
+        first={**base,'head':{'complete':False,'incoming_seq':None,'total_incoming':None},'indexing':True,
+               'source_status':{'progress':{'source_bytes':1}}}
+        complete={**base,'head':{'complete':True,'incoming_seq':0,'total_incoming':0},'indexing':False}
+        with patch.object(self.c,'native',AsyncMock(side_effect=[first,complete])) as native:
+            result=await self.c.execute(request)
+            self.assertEqual(result['state'],'completed')
+            self.assertEqual(result['result'],first)
+            self.assertEqual(native.await_count,1,'A metadata probe must yield the serial native queue')
+            self.assertEqual(native.call_args.args[1],p)
+            self.assertEqual(await self.c.execute(request),result)
+            self.assertEqual(native.await_count,1,'A retained receipt must not repeat native indexing')
     async def test_native_recovery_uncertain_preserved(self):
         request=self.request('recovery_action',job_id=str(uuid.uuid4()),action='cancel');p=request['payload']
         fresh={'name':request['session'],'run_id':p['expected_run_id'],'conversation_id':p['expected_conversation_id'],'recovery':{'id':p['job_id'],'state':'waiting','identity':[p['expected_run_id'],p['expected_conversation_id'],None,None,None]}}

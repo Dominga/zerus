@@ -67,6 +67,10 @@ pub struct Store {
     /// parses (zerus-ucck P2c-1).
     #[serde(skip)]
     pub twins: super::session_ids::Twins,
+    /// Primary causal ID grouping; never serialized into catalog.json. None
+    /// means unavailable evidence, not an empty map or permission to rebuild.
+    #[serde(skip)]
+    pub(super) id_memberships: Option<super::session_memberships::Memberships>,
 }
 
 /// Keeps the members still enrolled with the same node and writes the list
@@ -132,7 +136,8 @@ fn flag_membership(
         })
         .map(|machine| machine["id"].clone())
         .collect();
-    snapshot["membership_by_id"] = json!({"ready": missing.is_empty(), "missing": missing});
+    let available = snapshot["session_id_memberships"]["available"] != false;
+    snapshot["membership_by_id"] = json!({"ready": missing.is_empty() && available, "missing": missing});
 }
 
 /// The files a catalog snapshot reads, for a reader that follows changes.
@@ -144,6 +149,7 @@ pub fn snapshot_files(config: &Config) -> Vec<PathBuf> {
         dir.join(REPLICA_OUTDATED),
         dir.join(SESSION_IDS),
         dir.join(super::session_ids::FILE),
+        dir.join(super::session_memberships::FILE),
     ]
 }
 
@@ -171,21 +177,31 @@ pub fn read_snapshot(config: &Config) -> Result<Value> {
             bindings: BTreeMap::new(),
             peers: BTreeMap::new(),
             twins: Default::default(),
+            id_memberships: None,
         }
     } else {
         serde_json::from_slice(&bytes).context("read swarm catalog")?
     };
     data.catalog.validate()?;
     data.twins = super::session_ids::read(&dir, &data.catalog.swarm_id);
+    data.id_memberships = super::session_memberships::Memberships::load(&dir, &data.catalog)
+        .and_then(|mut primary| {
+            primary.migrate(&data.catalog, &data.twins)?;
+            Ok(primary)
+        })
+        .ok();
     // As the loader binds this computer's own aliases, in memory only.
     for alias in &config.selves {
-        data.bindings.insert(alias.clone(), Binding { id: data.node_id.clone(), verified: true });
+        data.bindings.insert(alias.clone(), Binding { id: data.node_id.clone(), verified: true,
+            },
+        );
     }
     let members = |name: &str| -> BTreeMap<String, String> {
         serde_json::from_slice(&fs::read(dir.join(name)).unwrap_or_default()).unwrap_or_default()
     };
     let mut snapshot = data.snapshot(config);
-    flag_outdated(&mut snapshot, &data.peers, &members(OUTDATED), &members(REPLICA_OUTDATED));
+    flag_outdated(&mut snapshot, &data.peers, &members(OUTDATED), &members(REPLICA_OUTDATED),
+    );
     flag_membership(&mut snapshot, &data.peers, &members(SESSION_IDS));
     Ok(snapshot)
 }
@@ -201,6 +217,7 @@ pub struct LockedStore {
     pub session_ids: BTreeMap<String, String>,
     pub path: PathBuf,
     twins_original: Vec<u8>,
+    id_memberships_original: std::result::Result<Vec<u8>, super::Unread>,
     _lock: platform::FileLock,
     original: Vec<u8>,
     outdated_original: Vec<u8>,
@@ -322,6 +339,7 @@ impl LockedStore {
                 bindings: BTreeMap::new(),
                 peers: BTreeMap::new(),
                 twins: Default::default(),
+                id_memberships: None,
             }
         } else {
             serde_json::from_slice(&original)
@@ -331,6 +349,19 @@ impl LockedStore {
         let (twins, twins_original) = super::session_ids::Twins::load(&dir, &data.catalog.swarm_id);
         let mut data = data;
         data.twins = twins;
+        let id_memberships_original = super::read_regular(
+            &dir.join(super::session_memberships::FILE),
+            super::session_memberships::MAX_BYTES,
+        );
+        data.id_memberships = super::session_memberships::Memberships::from_read(
+            &data.catalog,
+            &id_memberships_original,
+        )
+        .and_then(|mut primary| {
+            primary.migrate(&data.catalog, &data.twins)?;
+            Ok(primary)
+        })
+        .ok();
         let outdated_original = if scoped {
             vec![]
         } else {
@@ -349,6 +380,7 @@ impl LockedStore {
         let mut loaded = Self {
             data,
             twins_original,
+            id_memberships_original,
             outdated: serde_json::from_slice(&outdated_original).unwrap_or_default(),
             replica_outdated: serde_json::from_slice(&replica_outdated_original).unwrap_or_default(),
             session_ids: serde_json::from_slice(&session_ids_original).unwrap_or_default(),
@@ -384,7 +416,8 @@ impl LockedStore {
     pub fn save(&mut self) -> Result<()> {
         self.save_catalog_only()?;
         let peers = &self.data.peers;
-        save_members(&self.path.with_file_name(OUTDATED), &mut self.outdated, peers, &mut self.outdated_original)?;
+        save_members(&self.path.with_file_name(OUTDATED), &mut self.outdated, peers, &mut self.outdated_original,
+        )?;
         save_members(
             &self.path.with_file_name(REPLICA_OUTDATED),
             &mut self.replica_outdated,
@@ -398,7 +431,8 @@ impl LockedStore {
             &mut self.session_ids_original,
         )?;
         // A member's replica record goes with its membership, at this save.
-        super::replica_members::prune(&self.path.with_file_name(super::replica_members::FILE), peers)
+        super::replica_members::prune(&self.path.with_file_name(super::replica_members::FILE), peers,
+        )
     }
     /// This computer's membership incarnation, `epoch:generation`: any
     /// enrolment, disconnection or change of a peer's node, even one undone
@@ -424,7 +458,8 @@ impl LockedStore {
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Membership>(&bytes).ok());
         let next = match current {
-            None => Membership { epoch: new_id(), generation: 1, peers: digest, catalog: hash },
+            None => Membership { epoch: new_id(), generation: 1, peers: digest, catalog: hash,
+            },
             Some(current) => {
                 let rises = current.peers != digest || (!saving && current.catalog != hash);
                 if !rises && current.catalog == hash {
@@ -435,11 +470,14 @@ impl LockedStore {
                     current
                         .generation
                         .checked_add(1)
-                        .ok_or_else(|| anyhow::anyhow!("the membership generation is exhausted; nothing was changed"))?
+                        .ok_or_else(|| {
+                        anyhow::anyhow!("the membership generation is exhausted; nothing was changed")
+                    })?
                 } else {
                     current.generation
                 };
-                Membership { epoch: current.epoch, generation, peers: digest, catalog: hash }
+                Membership { epoch: current.epoch, generation, peers: digest, catalog: hash,
+                }
             }
         };
         #[cfg(test)]
@@ -452,6 +490,28 @@ impl LockedStore {
     /// assignment must not prune peer metadata.
     pub fn save_catalog_only(&mut self) -> Result<()> {
         self.data.catalog.validate()?;
+        // Promotion was computed under this same catalog lock, before the
+        // caller changed a name. Publish primary data FIRST, so a changed
+        // compatibility name cannot hide another ID's original grouping.
+        if let Some(primary) = &mut self.data.id_memberships {
+            if primary.is_empty() { primary.rehome(&self.data.catalog, &BTreeMap::new())?; }
+            primary.view(&self.data.catalog)?;
+            let bytes = primary.bytes()?;
+            let path = self.path.with_file_name(super::session_memberships::FILE);
+            let current = super::read_regular(&path, super::session_memberships::MAX_BYTES);
+            ensure!(
+                current == self.id_memberships_original,
+                "ID membership file changed or became unavailable"
+            );
+            if current.as_ref().ok() != Some(&bytes) {
+                ensure!(
+                    current.is_ok() || matches!(current, Err(super::Unread::Missing)),
+                    "ID membership file unavailable"
+                );
+                replace(&path, &bytes)?;
+                self.id_memberships_original = Ok(bytes);
+            }
+        }
         let bytes = serde_json::to_vec(&self.data)?;
         if bytes != self.original {
             // The new membership generation is durable BEFORE the peer change
@@ -492,7 +552,8 @@ impl LockedStore {
     /// The catalog snapshot, naming members that need an hgs update.
     pub fn snapshot(&self, config: &Config) -> Value {
         let mut snapshot = self.data.snapshot(config);
-        flag_outdated(&mut snapshot, &self.data.peers, &self.outdated, &self.replica_outdated);
+        flag_outdated(&mut snapshot, &self.data.peers, &self.outdated, &self.replica_outdated,
+        );
         flag_membership(&mut snapshot, &self.data.peers, &self.session_ids);
         snapshot
     }
@@ -504,6 +565,9 @@ impl LockedStore {
             platform::private_open(OpenOptions::new().create_new(true).write(true)).open(&path)?;
         file.write_all(&serde_json::to_vec(&self.data)?)?;
         file.sync_all()?;
+        if let Some(primary) = &self.data.id_memberships {
+            replace(&path.with_extension("session-ids.json"), &primary.bytes()?)?;
+        }
         Ok(path)
     }
 }
@@ -583,10 +647,36 @@ mod tests {
             tab_colors: String::new(),
         };
         let mut store = LockedStore::load(&config).unwrap();
-        store.data.peers.insert("b".into(), Peer { node: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(), ..Peer::default() });
+        store.data.peers.insert("b".into(), Peer { node: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(), ..Peer::default() },
+        );
         store.save().unwrap();
         drop(store);
         (dir, config)
+    }
+
+    #[test]
+    fn primary_data_is_not_repaired_and_a_changed_file_is_never_overwritten() {
+        let (_dir,config)=membership_fixture();
+        let path=config.dir.join("swarm").join(super::super::session_memberships::FILE);
+        let original=fs::read(&path).unwrap();
+        fs::write(&path,b"damaged primary").unwrap();
+        let mut loaded=LockedStore::load_scoped(&config).unwrap();
+        assert!(loaded.data.id_memberships.is_none());
+        loaded.save_catalog_only().unwrap();
+        assert_eq!(fs::read(&path).unwrap(),b"damaged primary");
+        assert_eq!(loaded.snapshot(&config)["session_id_memberships"]["available"],false);
+        drop(loaded);
+        fs::write(&path,&original).unwrap();
+        let mut loaded=LockedStore::load_scoped(&config).unwrap();
+        fs::write(&path,b"replaced after load").unwrap();
+        assert!(loaded.save_catalog_only().is_err());
+        assert_eq!(fs::read(&path).unwrap(),b"replaced after load");
+        drop(loaded);
+        #[cfg(unix)] {
+            fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink(config.dir.join("missing"),&path).unwrap();
+            assert!(LockedStore::load_scoped(&config).unwrap().data.id_memberships.is_none());
+        }
     }
 
     fn membership_of(config: &Config) -> String {
@@ -638,7 +728,8 @@ mod tests {
         fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
         let mut store = LockedStore::load(&config).unwrap();
         assert_ne!(store.membership().unwrap(), original, "the read alone records the change");
-        store.data.peers.insert("b".into(), Peer { node: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(), ..Peer::default() });
+        store.data.peers.insert("b".into(), Peer { node: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(), ..Peer::default() },
+        );
         store.save().unwrap();
         drop(store);
         assert_ne!(membership_of(&config), original);
@@ -686,7 +777,8 @@ mod tests {
     #[test]
     fn membership_by_id_is_ready_only_when_every_machine_lists_the_kind() {
         let peer = |node: &str| Peer { node: node.into(), ..Peer::default() };
-        let peers = BTreeMap::from([("new".to_owned(), peer("node-new")), ("old".to_owned(), peer("node-old"))]);
+        let peers = BTreeMap::from([("new".to_owned(), peer("node-new")), ("old".to_owned(), peer("node-old")),
+        ]);
         let snapshot = |machines: Value| json!({"machines": machines});
         let local = json!({"id": "node-local", "connection": "here", "local": true});
         let new = json!({"id": "node-new", "connection": "new", "local": false});
@@ -731,9 +823,7 @@ mod tests {
             tab: false,
             tab_colors: String::new(),
         };
-        let organization = |work: &[&str]| {
-            json!({"projects": [{"id": "work", "name": "Work", "color": "#123456", "folders": [], "sessions": work}]})
-        };
+        let organization = |work: &[&str]| json!({"projects": [{"id": "work", "name": "Work", "color": "#123456", "folders": [], "sessions": work}]});
         let member = format!("local\n{LABEL}");
         let path = {
             let mut store = LockedStore::load(&config).unwrap();
@@ -741,7 +831,8 @@ mod tests {
             let versions = store.data.catalog.versions();
             store
                 .data
-                .apply(Patch { base: organization(&[]), desired: organization(&[&member]), versions })
+                .apply(Patch { base: organization(&[]), desired: organization(&[&member]), versions,
+                })
                 .unwrap();
             store.save().unwrap();
             store.path.clone()
@@ -760,7 +851,8 @@ mod tests {
         {
             let mut store = LockedStore::load(&config).unwrap();
             let node = store.data.node_id.clone();
-            let name = Key::Session { machine: node.clone(), session: LABEL.into() };
+            let name = Key::Session { machine: node.clone(), session: LABEL.into(),
+            };
             store.data.catalog.set(&node, name, Value::Null).unwrap();
             store.save().unwrap();
             assert!(!path.with_file_name(FILE).exists());
@@ -769,7 +861,8 @@ mod tests {
             desired["session_assignments_explicit"] = json!(true);
             store
                 .data
-                .apply(Patch { base: organization(&[]), desired, versions })
+                .apply(Patch { base: organization(&[]), desired, versions,
+                })
                 .unwrap();
             store.save().unwrap();
         }
@@ -777,6 +870,7 @@ mod tests {
         let mut store = LockedStore::load(&config).unwrap();
         assert_eq!(store.data.twins.entries.len(), 1);
         store.data.catalog = Catalog::default();
+        store.data.id_memberships = Some(super::super::session_memberships::Memberships::empty(&store.data.catalog));
         store.save().unwrap();
         assert!(!path.with_file_name(FILE).exists());
     }

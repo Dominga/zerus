@@ -14,6 +14,7 @@ use std::io::Write;
 use std::time::Duration;
 
 mod diagnostic;
+pub(crate) mod task_refusal;
 
 const MAX_TEXT: usize = 64 * 1024;
 const MAX_FILE: usize = 10 * 1024 * 1024;
@@ -270,6 +271,51 @@ pub(super) fn attention_message_summary(record: &Value, output: &mut Value, live
     output[format!("{prefix}_message_reason")] = json!(result.err().unwrap_or_default());
 }
 
+/// What a resumed session's record says about a send to it now
+/// (zerus-5wmh.66.4.9): the record gates of `hgs send` that change while a
+/// resumed Claude or Kimi agent starts, read without any effect (no terminal
+/// query, lock or write; its processes from /proc only). A continuation
+/// condition only: `hgs send` checks every gate again under its input lock,
+/// the panels shown only on the terminal included. A Codex resume pending its
+/// first message shows its readiness only on its terminal, so it is never
+/// ready here: the service asks `hgs send <session> --observe --json` for it
+/// (zerus-5wmh.66.4.10).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Readiness {
+    /// The record shows the agent takes a message now.
+    Ready,
+    /// Still starting, busy or not yet confirmed: read again.
+    Starting,
+    /// The resumed session failed, ends or left its conversation: no send.
+    Ended,
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn resumed_readiness(record: &Value) -> Readiness {
+    if terminating::check_mutation(record).is_err()
+        || !string(record, "error").is_empty()
+        || !string(record, "archive_id").is_empty()
+        || string(record, "conversation_id").is_empty()
+    {
+        return Readiness::Ended;
+    }
+    let unconfirmed = record["input_pending_at"]
+        .as_f64()
+        .is_some_and(|pending| record["last_event_at"].as_f64().unwrap_or(0.0) <= pending);
+    if resume_input::pending(record)
+        || !string(record, "expected_id").is_empty()
+        || string(record, "activity") != "idle"
+        || string(record, "phase") != "idle"
+        || unconfirmed
+        || settings_unconfirmed(record)
+        || pause_active(record)
+        || !process_alive(record)
+    {
+        return Readiness::Starting;
+    }
+    Readiness::Ready
+}
+
 fn checked_input(
     name: &str,
     run_id: &str,
@@ -280,6 +326,7 @@ fn checked_input(
     // share the label.
     expect(name, run_id, conversation_id)?;
     let record = read(name)?;
+    terminating::check_mutation(&record)?;
     if string(&record, "run_id") != run_id || string(&record, "conversation_id") != conversation_id
     {
         return Err("session identity changed; refresh before sending".into());
@@ -668,7 +715,7 @@ fn codex_shortcuts_footer(plain: &str) -> bool {
     tail.is_empty() || (tail.starts_with(' ') && codex_warning_footer(tail))
 }
 
-fn codex_footer_model(record: &Value) -> Option<&str> {
+pub(super) fn codex_footer_model(record: &Value) -> Option<&str> {
     if let Some(model) = record["model"].as_str().filter(|model| !model.is_empty()) {
         return Some(model);
     }
@@ -806,6 +853,7 @@ fn checked_send_terminal(record: &Value) -> Result<()> {
 }
 
 fn terminal_check(record: &Value, empty: bool, sending: bool) -> Result<()> {
+    terminating::check_mutation(record)?;
     let pane = string(record, "pane");
     if !pane
         .strip_prefix('%')
@@ -1054,6 +1102,74 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
+/// The observation's stdin: one exact run and conversation of the session
+/// (zerus-5wmh.66.4.10).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ObserveRequest {
+    expected_run_id: String,
+    #[serde(default)]
+    expected_conversation_id: String,
+}
+/// The observation's largest stdin.
+const MAX_OBSERVE_INPUT: u64 = 8 << 10;
+/// The longest refusal an observation reply carries, in characters.
+const MAX_OBSERVE_REASON: usize = 1024;
+
+/// `hgs send <session> --observe --json`: whether `hgs send` would take a
+/// message for this exact run and conversation now, by its own gates (the
+/// record, the exact live process, a pending resume's own verification and
+/// the empty native composer), read without any effect. It takes no input
+/// lock, types nothing (pending settings included), and writes no receipt,
+/// attachment, diagnostic capture, record, attention or read mark. A
+/// continuation condition only (zerus-5wmh.66.4.10): `hgs send` checks every
+/// gate again under its input lock before its first byte. Only a Codex
+/// session, whose readiness only its terminal shows, is observed; the CLI's
+/// first disposition (`cli::observe_gate`) is the only caller.
+pub(super) fn observe_dispatch(name: &str) -> Result<i32> {
+    if !zerus_client_core::desktop::session_resume::observed(name) || name.contains('@') {
+        return Err("hgs send --observe reads a local Codex session only".into());
+    }
+    let mut input = Vec::new();
+    io::stdin()
+        .take(MAX_OBSERVE_INPUT + 1)
+        .read_to_end(&mut input)
+        .map_err(|e| e.to_string())?;
+    if input.len() as u64 > MAX_OBSERVE_INPUT {
+        return Err("observation payload exceeds 8 KiB".into());
+    }
+    let request: ObserveRequest =
+        serde_json::from_slice(super::without_bom(&input)).map_err(|e| format!("invalid observation payload: {e}"))?;
+    if request.expected_run_id.is_empty()
+        || request.expected_run_id.len() > 128
+        || request.expected_conversation_id.len() > 128
+    {
+        return Err("expected_run_id is required; refresh the session first".into());
+    }
+    // Among sessions that share the label, the request's own identities
+    // select, as for a send, but read only: no index repair.
+    let (ready, reason) =
+        match super::resolve_label_unrepaired(name).and_then(|()| observe(name, &request)) {
+            Ok(()) => (true, String::new()),
+            Err(error) => (false, error.chars().take(MAX_OBSERVE_REASON).collect()),
+        };
+    println!("{}", json!({"ready": ready, "reason": reason}));
+    Ok(0)
+}
+
+/// The send's own gates before its lock, read only: the record and its
+/// process ([`checked_input`], which verifies a pending resume), then the
+/// empty composer without the send's diagnostic capture.
+fn observe(name: &str, request: &ObserveRequest) -> Result<()> {
+    let record = checked_input(
+        name,
+        &request.expected_run_id,
+        &request.expected_conversation_id,
+        true,
+    )?;
+    checked_terminal(&record, true)
+}
+
 /// Plain text for the session's current run and conversation (task prompts).
 pub(super) fn submit_task(session: &zerus_replica::SessionKey, text: &str, attachments: &[Value]) -> Result<Value> {
     let name = session.session.as_str();
@@ -1095,30 +1211,127 @@ pub(super) fn task_reply(session: &zerus_replica::SessionKey, dispatch: &str, id
 /// Recovery is read-only, even when no receipt exists. Absence after a crash
 /// does not authorize another terminal submission.
 pub(super) fn task_reply_receipt(name: &str, request: &Value) -> Result<Option<Value>> {
+    match task_reply_lookup(name, request)? {
+        Lookup::Absent => Ok(None),
+        Lookup::Found(receipt) => Ok(Some(receipt)),
+        Lookup::Other => Err("message receipt identity or content does not match".into()),
+    }
+}
+
+/// What the receipt store holds for a request, read only (#1519 R2). A
+/// receipt that cannot be read or parsed is an error: after a possible
+/// delivery it is unknown, never "nothing was sent".
+pub(crate) enum Lookup {
+    Absent,
+    /// This exact request's receipt (its digest and name).
+    Found(Value),
+    /// A readable receipt of other content or for another session under the
+    /// same ID: this request was not the one it records.
+    Other,
+}
+
+pub(super) fn task_reply_lookup(name: &str, request: &Value) -> Result<Lookup> {
     let parsed: Request = serde_json::from_value(request.clone()).map_err(|e| e.to_string())?;
-    uuid::Uuid::parse_str(&parsed.request_id).map_err(|_| "invalid message identity")?;
-    let path = absolute_root()?.join("input_receipts").join(format!("{}.json", parsed.request_id));
+    // The submission names its receipt by the canonical form of the ID.
+    let request_id = uuid::Uuid::parse_str(&parsed.request_id)
+        .map_err(|_| "invalid message identity")?
+        .to_string();
+    let digest = format!("{:x}", Sha256::digest(request.to_string().as_bytes()));
+    lookup(name, &request_id, &digest)
+}
+
+fn lookup(name: &str, request_id: &str, digest: &str) -> Result<Lookup> {
+    let path = absolute_root()?
+        .join("input_receipts")
+        .join(format!("{request_id}.json"));
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Lookup::Absent),
         Err(e) => return Err(e.to_string()),
     };
     let receipt: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    let digest = format!("{:x}", Sha256::digest(request.to_string().as_bytes()));
-    if string(&receipt, "digest") != digest || string(&receipt, "name") != name {
-        return Err("message receipt identity or content does not match".into());
+    // Only a receipt that decodes whole into the schema this writes can tell
+    // another request apart; anything else is unknown evidence (#1519 R3).
+    let stored: Stored = serde_json::from_value(receipt.clone())
+        .map_err(|e| format!("the receipt is malformed: {e}"))?;
+    let hex = |s: &str| {
+        s.len() == 64
+            && s.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    if stored.request_id != request_id
+        || stored.name.is_empty()
+        || !hex(&stored.digest)
+        || !matches!(stored.status.as_str(), "in_progress" | "submitted")
+    {
+        return Err("the receipt is malformed".into());
     }
-    Ok(Some(receipt))
+    let _ = (
+        &stored.run_id,
+        &stored.conversation_id,
+        stored.first_message,
+    );
+    if stored.digest != digest || stored.name != name {
+        return Ok(Lookup::Other);
+    }
+    Ok(Lookup::Found(receipt))
+}
+
+/// The fields every input receipt holds, as `submit_core` writes them.
+#[derive(Deserialize)]
+struct Stored {
+    request_id: String,
+    name: String,
+    run_id: String,
+    conversation_id: String,
+    first_message: bool,
+    digest: String,
+    status: String,
+}
+
+/// The receipt of request `request_id` to `name` whose exact bytes hashed to
+/// `digest`, read only: an attempt's retained delivery binding recovers it
+/// without the original request (C3 A3), typed as `task_reply_lookup`.
+pub(super) fn task_reply_receipt_bound(
+    name: &str,
+    request_id: &str,
+    digest: &str,
+) -> Result<Lookup> {
+    let request_id = uuid::Uuid::parse_str(request_id)
+        .map_err(|_| "invalid message identity")?
+        .to_string();
+    lookup(name, &request_id, digest)
 }
 
 pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Result<Value> {
-    // N34: a BOM is not part of the request or of its digest.
-    submit_with(name, crate::state::without_bom(input), recovery_id, false, false)
+    submit_with(name, input, recovery_id.map_or(Origin::Person, Origin::Recovery))
 }
 
 /// A held message, by its deliverer, through the same checks as any send.
 pub(super) fn submit_held(name: &str, input: &[u8]) -> Result<Value> {
-    submit_with(name, input, None, true, false)
+    submit_with(name, input, Origin::Held)
+}
+
+/// Who a submission comes from. Only the person's own input cancels automatic
+/// recovery; question answers and keep-warm pings never type pending settings.
+#[derive(Clone, Copy)]
+enum Origin<'a> {
+    Person,
+    Answer,
+    /// A queued message (U35), taken by its deliverer; it cancels recovery like the person's.
+    Held,
+    Recovery(&'a str),
+    KeepWarm(&'a str),
+}
+
+/// A keep-warm ping (`keep_warm::TEXT`) for ping `id`. Like a task reply it
+/// tells a refusal before any input from a possibly delivered ping.
+pub(super) fn submit_keep_warm(name: &str, input: &[u8], id: &str) -> Submission {
+    match submit_core(name, input, Origin::KeepWarm(id)) {
+        Ok(receipt) => Submission::Receipt(receipt),
+        Err(Failure::NotOffered(witness)) => Submission::NotOffered(*witness),
+        Err(Failure::Unknown(error)) => Submission::Unknown(error),
+    }
 }
 
 /// `submit` for a question's answer: it refuses, before any key, when pending
@@ -1126,90 +1339,243 @@ pub(super) fn submit_held(name: &str, input: &[u8]) -> Result<Value> {
 /// answer's own paste may reach the pane, so a refusal proves nothing was
 /// sent.
 pub(super) fn submit_answer(name: &str, input: &[u8]) -> Result<Value> {
-    submit_with(name, input, None, false, true)
+    submit_with(name, input, Origin::Answer)
 }
 
-fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, held: bool, answer: bool) -> Result<Value> {
+fn submit_with(name: &str, input: &[u8], origin: Origin) -> Result<Value> {
+    submit_core(name, input, origin).map_err(|failure| match failure {
+        Failure::NotOffered(witness) => witness.reason.clone(),
+        Failure::Unknown(error) => error,
+    })
+}
+
+/// A live, closed witness that ONE exact request's payload was never offered
+/// to its terminal (C3 activation; desktop-u's (a)). Only `submit_core` mints
+/// one, inside the exact submission that observed it: under the input lock no
+/// receipt existed for the request's ID in this receipt store, and the
+/// submission refused before any settings key was typed and before the
+/// payload's receipt marker was written. Its fields bind it to that request;
+/// nothing reconstructs one from text, an exit status or a missing file.
+#[derive(Debug)]
+pub(crate) struct NotOffered {
+    request_id: String,
+    name: String,
+    run_id: String,
+    conversation_id: String,
+    digest: String,
+    receipts: PathBuf,
+    pub(crate) reason: String,
+}
+
+impl NotOffered {
+    /// Whether this witness is for exactly this request, submitted to `name`
+    /// with this run, conversation and payload digest.
+    pub(crate) fn binds(
+        &self,
+        request_id: &str,
+        name: &str,
+        run_id: &str,
+        conversation_id: &str,
+        digest: &str,
+    ) -> bool {
+        self.request_id == request_id
+            && self.name == name
+            && self.run_id == run_id
+            && self.conversation_id == conversation_id
+            && self.digest == digest
+            && self
+                .receipts
+                .ends_with(format!("input_receipts/{request_id}.json"))
+    }
+}
+
+/// What one exact task submission came to.
+pub(crate) enum Submission {
+    /// The request's exact submitted receipt.
+    Receipt(Value),
+    /// Positively never offered (`NotOffered`).
+    NotOffered(NotOffered),
+    /// Anything else: the payload may have reached the terminal.
+    Unknown(String),
+}
+
+/// `submit` for a task reply that must tell a refusal before any input from
+/// one that may have delivered it.
+pub(super) fn submit_witnessed(name: &str, input: &[u8]) -> Submission {
+    match submit_core(name, input, Origin::Person) {
+        Ok(receipt) => Submission::Receipt(receipt),
+        Err(Failure::NotOffered(witness)) => Submission::NotOffered(*witness),
+        Err(Failure::Unknown(error)) => Submission::Unknown(error),
+    }
+}
+
+/// How a submission failed.
+enum Failure {
+    NotOffered(Box<NotOffered>),
+    Unknown(String),
+}
+
+/// What the receipt store already holds for a request ID, read under the
+/// input lock. Only a positively absent receipt lets a later refusal witness
+/// that nothing was offered; an existing one decides by itself.
+enum Existing {
+    Absent,
+    /// The exact submitted acknowledgement: replayed as is.
+    Submitted(Value),
+    /// Possibly delivered before (in progress), unreadable, corrupt, or
+    /// another payload under the same ID: never "not offered".
+    Unknown(String),
+}
+
+fn existing(receipt_path: &Path, digest: &str, name: &str, held: bool) -> Existing {
+    match fs::symlink_metadata(receipt_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Existing::Absent,
+        Err(error) => return Existing::Unknown(error.to_string()),
+        Ok(_) => {}
+    }
+    let receipt = match fs::read_to_string(receipt_path)
+        .map_err(|e| e.to_string())
+        .and_then(|contents| serde_json::from_str::<Value>(&contents).map_err(|e| e.to_string()))
+    {
+        Ok(receipt) => receipt,
+        Err(error) => return Existing::Unknown(error),
+    };
+    if string(&receipt, "digest") != digest || string(&receipt, "name") != name {
+        return Existing::Unknown("request ID was already used for different content".into());
+    }
+    match string(&receipt, "status") {
+        // Replay the exact durable acknowledgement. Reformatting parsed
+        // floats can round its subsecond timestamp differently.
+        "submitted" => Existing::Submitted(receipt),
+        // U35: a held message answers with its receipt until its deliverer takes it.
+        "queued" if held => Existing::Absent,
+        "cancelled" if held => Existing::Unknown(input_hold::CANCELLED.into()),
+        "queued" | "cancelled" | "failed" => Existing::Submitted(receipt),
+        _ => Existing::Unknown(
+            "delivery uncertain: this request may already be in Terminal; do not resend automatically"
+                .into(),
+        ),
+    }
+}
+
+/// A refusal before the receipt marker: a witness that nothing was offered,
+/// unless pending settings may already have been typed, which leaves it
+/// unknown (desktop-u's (a)).
+fn before_input(typed: bool, witness: NotOffered) -> Failure {
+    if typed {
+        Failure::Unknown(witness.reason)
+    } else {
+        Failure::NotOffered(Box::new(witness))
+    }
+}
+
+fn submit_core(
+    name: &str,
+    input: &[u8],
+    origin: Origin,
+) -> std::result::Result<Value, Failure> {
+    let unknown = Failure::Unknown;
     // N34: a BOM is not part of the request or of its digest.
     let input = crate::state::without_bom(input);
     let request: Request =
-        serde_json::from_slice(input).map_err(|e| format!("invalid send payload: {e}"))?;
-    let files = validate(&request)?;
+        serde_json::from_slice(input).map_err(|e| unknown(format!("invalid send payload: {e}")))?;
+    let files = validate(&request).map_err(unknown)?;
     let digest = format!("{:x}", Sha256::digest(input));
     let request_id = uuid::Uuid::parse_str(&request.request_id)
         .unwrap()
         .to_string();
-    let root = absolute_root()?;
+    let root = absolute_root().map_err(unknown)?;
     let receipt_path = root
         .join("input_receipts")
         .join(format!("{request_id}.json"));
-    let _guard = lock(None)?;
-    if receipt_path.exists() {
-        let contents = fs::read_to_string(&receipt_path).map_err(|e| e.to_string())?;
-        let receipt: Value = serde_json::from_str(&contents).map_err(|e| e.to_string())?;
-        if string(&receipt, "digest") != digest || string(&receipt, "name") != name {
-            return Err("request ID was already used for different content".into());
-        }
-        match string(&receipt, "status") {
-            // Replay the exact durable acknowledgement. Reformatting parsed
-            // floats can round its subsecond timestamp differently.
-            "submitted" => return Ok(receipt),
-            // U35: a held message answers with its receipt until its deliverer takes it.
-            "queued" if held => {}
-            "cancelled" if held => return Err(input_hold::CANCELLED.into()),
-            "queued" | "cancelled" | "failed" => return Ok(receipt),
-            _ => return Err("delivery uncertain: this request may already be in Terminal; do not resend automatically".into()),
-        }
+    let _guard = lock(None).map_err(unknown)?;
+    match existing(&receipt_path, &digest, name, matches!(origin, Origin::Held)) {
+        Existing::Absent => {}
+        Existing::Submitted(receipt) => return Ok(receipt),
+        Existing::Unknown(error) => return Err(unknown(error)),
     }
+    // From here no receipt existed for this ID. A refusal before any settings
+    // key and before the receipt marker witnesses that nothing was offered;
+    // once pending settings may have been typed, it is unknown.
+    let mut typed = false;
+    let refused = |typed: bool, reason: String| {
+        before_input(
+            typed,
+            NotOffered {
+                request_id: request_id.clone(),
+                name: name.to_owned(),
+                run_id: request.expected_run_id.clone(),
+                conversation_id: request.expected_conversation_id.clone(),
+                digest: digest.clone(),
+                receipts: receipt_path.clone(),
+                reason,
+            },
+        )
+    };
     // Task 121: a delivery whose Enter did not go leaves its own paste in the
     // composer (`unsent_paste`). Before this delivery pastes, that exact paste
     // is finished once, so a Zerus message never stays unsent there; a draft
     // the person changed, another run or another conversation is left alone.
-    finish_leftover(name, &request)?;
+    finish_leftover(name, &request).map_err(|e| refused(typed, e))?;
     // U35: an opted-in message waits behind held ones and while the previous
     // input is unconfirmed; every other refusal stays.
-    let opted = request.queue_when_unconfirmed && !held && recovery_id.is_none();
+    let opted = request.queue_when_unconfirmed
+        && !matches!(origin, Origin::Held | Origin::Recovery(_) | Origin::KeepWarm(_));
     let checked = if opted && !input_hold::items(name).is_empty() {
         Err(UNCONFIRMED.to_owned())
     } else {
         checked_record(name, &request)
     };
-    let checked = match checked {
+    let record = match checked {
         Err(error) if opted && error == UNCONFIRMED => {
-            let record = read(name)?;
+            let record = read(name).map_err(|e| refused(typed, e))?;
             if string(&record, "run_id") != request.expected_run_id
                 || string(&record, "conversation_id") != request.expected_conversation_id
             {
-                return Err("session identity changed; refresh before sending".into());
+                return Err(refused(typed, "session identity changed; refresh before sending".into()));
             }
-            return input_hold::hold(name, &request_id, &digest, input, &record, request.text.trim());
+            return input_hold::hold(name, &request_id, &digest, input, &record, request.text.trim()).map_err(unknown);
         }
-        checked => checked?,
+        checked => checked.map_err(|e| refused(typed, e))?,
     };
-    let record = checked;
-    if answer && effort::pending_applies(&record) {
-        return Err("model or effort settings would be typed first; answer this question in Terminal".into());
+    if matches!(origin, Origin::Answer) && effort::pending_applies(&record) {
+        return Err(refused(
+            typed,
+            "model or effort settings would be typed first; answer this question in Terminal"
+                .into(),
+        ));
     }
-    let mut record = effort::apply_pending(name, record)?;
-    if let Some(id) = recovery_id { recovery::check_submission(&record, id)?; }
-    checked_send_terminal(&record)?;
+    if matches!(origin, Origin::KeepWarm(_)) && effort::pending_applies(&record) {
+        return Err(refused(typed, "model or effort settings are pending; no keep-warm ping was typed".into()));
+    }
+    // Pending settings may be typed here, whatever this returns.
+    typed = effort::pending_applies(&record);
+    let mut record = effort::apply_pending(name, record).map_err(unknown)?;
+    match origin {
+        Origin::Recovery(id) => recovery::check_submission(&record, id).map_err(|e| refused(typed, e))?,
+        Origin::KeepWarm(id) => keep_warm::check_submission(&record, id).map_err(|e| refused(typed, e))?,
+        Origin::Person | Origin::Answer | Origin::Held => {}
+    }
+    checked_send_terminal(&record).map_err(|e| refused(typed, e))?;
     let attachments_root = root.join("attachments");
-    private_dir(&attachments_root)?;
+    private_dir(&attachments_root).map_err(|e| refused(typed, e))?;
     let attachments = tempfile::Builder::new()
         .prefix("message-")
         .tempdir_in(attachments_root)
-        .map_err(|e| e.to_string())?;
-    crate::platform::restrict_dir(attachments.path()).map_err(|e| e.to_string())?;
+        .map_err(|e| refused(typed, e.to_string()))?;
+    crate::platform::restrict_dir(attachments.path()).map_err(|e| refused(typed, e.to_string()))?;
     let mut paths = Vec::new();
     for (index, (attachment, bytes)) in request.attachments.iter().zip(files.iter()).enumerate() {
         let path = attachments
             .path()
             .join(safe_filename(&attachment.name, index));
-        let mut file = crate::platform::private_open(OpenOptions::new().create_new(true).write(true))
-            .open(&path)
-            .map_err(|e| e.to_string())?;
-        file.write_all(bytes).map_err(|e| e.to_string())?;
-        file.sync_all().map_err(|e| e.to_string())?;
+        let mut file =
+            crate::platform::private_open(OpenOptions::new().create_new(true).write(true))
+                .open(&path)
+                .map_err(|e| refused(typed, e.to_string()))?;
+        file.write_all(bytes)
+            .map_err(|e| refused(typed, e.to_string()))?;
+        file.sync_all().map_err(|e| refused(typed, e.to_string()))?;
         paths.push(
             json!({"name":attachment.name,"mime":attachment.mime,"path":path,"bytes":bytes.len(),"reference":attachment.reference}),
         );
@@ -1233,28 +1599,50 @@ fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, held: bool, 
     };
     let buffer = format!("hgs-input-{request_id}");
     let terminal = backend::current();
-    if !terminal.stage(&buffer, pasted.as_bytes(), backend::StageErrors::Read)? {
-        return Err("could not stage terminal input; nothing was submitted".into());
+    // A staging error may leave a buffer loaded: unknown, never a witness.
+    if !terminal
+        .stage(&buffer, pasted.as_bytes(), backend::StageErrors::Read)
+        .map_err(unknown)?
+    {
+        return Err(refused(
+            typed,
+            "could not stage terminal input; nothing was submitted".into(),
+        ));
     }
     let cleanup = || terminal.discard(&buffer);
     // Recheck immediately before the first input byte. All concurrent hgs writes
     // share this lock; a crash/exit can still race the PTY, so receipts are durable.
     if let Err(error) = checked_record(name, &request).and_then(|r| checked_send_terminal(&r)) {
         cleanup();
-        return Err(error);
+        return Err(refused(typed, error));
     }
-    if let Some(id) = recovery_id { recovery::check_submission(&read(name)?, id)?; }
+    let checked = match origin {
+        Origin::Recovery(id) => read(name).and_then(|record| recovery::check_submission(&record, id)),
+        Origin::KeepWarm(id) => read(name).and_then(|record| keep_warm::check_submission(&record, id)),
+        Origin::Person | Origin::Answer | Origin::Held => Ok(()),
+    };
+    if let Err(error) = checked {
+        cleanup();
+        return Err(refused(typed, error));
+    }
     let submitted_at = now();
-    if recovery_id.is_none() { recovery::cancel_for_input(&record)?; }
+    if matches!(origin, Origin::Person | Origin::Answer | Origin::Held) {
+        recovery::cancel_for_input(&record).map_err(unknown)?;
+    }
     let mut receipt = json!({"request_id":request_id,"name":name,"run_id":request.expected_run_id,
         "conversation_id":string(&record,"conversation_id"),"first_message":string(&record,"conversation_id").is_empty(),"digest":digest,"status":"in_progress",
         "submitted_at":submitted_at,"submitted_text":text,"text":request.text.trim(),"attachments":paths,"transport":"terminal"});
     if let Some(target) = session_graph::target_receipt(&record) {
         receipt["graph_target"] = target;
     }
+    if let Origin::KeepWarm(id) = origin {
+        receipt["origin"] = json!("keep_warm");
+        record["keep_warm_pending"] = json!({"request_id":request_id,"ping":id,"submitted_at":submitted_at});
+    }
+    // The marker may be published even when its write reports an error.
     if let Err(error) = atomic(&receipt_path, &receipt.to_string()) {
         cleanup();
-        return Err(error);
+        return Err(unknown(error));
     }
     // Preserve attachments after any possible input: the agent may read them later.
     let _ = attachments.keep();
@@ -1267,7 +1655,7 @@ fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, held: bool, 
     }
     if let Err(error) = write(&mut record) {
         cleanup();
-        return Err(error);
+        return Err(unknown(error));
     }
     let pane = string(&record, "pane");
     // Task 98: the composer's draft right after our own paste. When the Enter
@@ -1327,9 +1715,9 @@ fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, held: bool, 
             record_unsent_paste(name, &receipt_path, &mut receipt, &request_id, hash);
         }
         crate::analytics::adapters::delivery(&root, &record, &receipt, crate::analytics::adapters::Delivery::Uncertain);
-        return Err(format!(
+        return Err(unknown(format!(
             "delivery uncertain: {error}; inspect Terminal before retrying"
-        ));
+        )));
     }
     crate::analytics::adapters::delivery(&root, &record, &receipt, crate::analytics::adapters::Delivery::Submitted);
     Ok(receipt)
@@ -1424,9 +1812,196 @@ fn paste_shown(screen: &str, pasted: &str) -> bool {
     !shown.is_empty() && squeeze(screen).contains(&shown)
 }
 
+/// The sends carrying --observe that `state::dispatch` refuses before
+/// provider routing (zerus-5wmh.66.4.10.1): a DeepSeek, an OpenCode and a
+/// Codex session's, in either flag order. Shared with the Windows
+/// control-console probe, which admits them in an isolated profile
+/// (zerus-be8zv).
+#[cfg(test)]
+pub(crate) const OBSERVE_SENDS: [[&str; 4]; 4] = [
+    ["send", "dsh/example/session", "--observe", "--json"],
+    ["send", "opencode/example/session", "--observe", "--json"],
+    ["send", "codex/example/session", "--observe", "--json"],
+    ["send", "codex/example/session", "--json", "--observe"],
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// zerus-5wmh.66.4.10.1: a send carrying --observe that reaches the state
+    /// dispatch by any route but the CLI's first gate (`cli::observe_gate`)
+    /// refuses there, before the OpenCode and DeepSeek routing whose own
+    /// sends would ignore the flag. Unix always admits local sessions. On
+    /// Windows that depends on the profile, so `state`'s control-console
+    /// probe checks the same sends in an isolated one (zerus-be8zv).
+    #[cfg(unix)]
+    #[test]
+    fn a_send_with_observe_refuses_before_provider_routing() {
+        for args in OBSERVE_SENDS {
+            let args: Vec<String> = args.map(str::to_owned).into();
+            let refusal = crate::state::dispatch(&args).unwrap_err();
+            assert!(refusal.contains("is taken only as"), "{args:?}: {refusal}");
+        }
+    }
+
+    /// zerus-5wmh.66.4.9: a resumed session's record alone, never its
+    /// terminal, decides whether a deferred send may start; only a confirmed,
+    /// idle, live agent is ready, and a pending Codex resume never is.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_resumed_record_is_ready_only_when_confirmed_idle_and_alive() {
+        let pid = std::process::id();
+        let ready = json!({"name": "claude/resumed", "agent": "claude", "run_id": "run-2",
+            "conversation_id": "conversation-1", "expected_id": "", "activity": "idle",
+            "phase": "idle", "error": "", "pid": pid, "process_start": process_start(pid)});
+        assert_eq!(resumed_readiness(&ready), Readiness::Ready);
+        let with = |change: &dyn Fn(&mut Value)| {
+            let mut copy = ready.clone();
+            change(&mut copy);
+            resumed_readiness(&copy)
+        };
+        // Still starting: not yet confirmed, busy, unconfirmed input or
+        // settings, or no live agent process.
+        for (key, value) in [
+            ("expected_id", json!("conversation-1")),
+            ("activity", json!("busy")),
+            ("phase", json!("starting")),
+            ("activity", json!("unknown")),
+            ("input_pending_at", json!(5.0)),
+            ("settings_unconfirmed_at", json!(5.0)),
+            ("pid", json!(0)),
+            ("process_start", json!("other")),
+        ] {
+            assert_eq!(
+                with(&|r| r[key] = value.clone()),
+                Readiness::Starting,
+                "{key}"
+            );
+        }
+        // A confirmed later event clears an earlier pending input.
+        assert_eq!(
+            with(&|r| {
+                r["input_pending_at"] = json!(5.0);
+                r["last_event_at"] = json!(6.0);
+            }),
+            Readiness::Ready
+        );
+        // Ended: the supervisor failed, the session left its conversation,
+        // is archived or is being terminated.
+        assert_eq!(
+            with(&|r| r["error"] = json!("launch failed")),
+            Readiness::Ended
+        );
+        assert_eq!(
+            with(&|r| r["conversation_id"] = json!("")),
+            Readiness::Ended
+        );
+        assert_eq!(
+            with(&|r| r["archive_id"] = json!("00000000-0000-4000-8000-000000000001")),
+            Readiness::Ended
+        );
+        // A Codex resume pending its first message shows readiness only on
+        // its terminal: never ready from its record (zerus-5wmh.66.4.10).
+        let codex = with(&|r| {
+            r["agent"] = json!("codex");
+            r["run_identity_version"] = json!(1);
+            r["startup_kind"] = json!("resume");
+            r["supervisor"] = json!({"pid": pid, "start": process_start(pid)});
+            r["expected_id"] = json!("conversation-1");
+            r["activity"] = json!("unknown");
+            r["phase"] = json!("unknown");
+        });
+        assert_eq!(codex, Readiness::Starting);
+    }
+
+    /// desktop-u's (a): what the receipt store already holds decides by
+    /// itself. Only a positively absent receipt lets a later refusal witness
+    /// that nothing was offered; an in-progress, corrupt, unreadable or
+    /// mismatched one is unknown, and a submitted one is replayed.
+    #[test]
+    fn an_existing_receipt_decides_and_never_witnesses_no_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input_receipts").join("id.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        assert!(matches!(existing(&path, "d", "n", false), Existing::Absent));
+        let write = |receipt: Value| fs::write(&path, receipt.to_string()).unwrap();
+        write(json!({"digest": "d", "name": "n", "status": "submitted"}));
+        assert!(
+            matches!(existing(&path, "d", "n", false), Existing::Submitted(r) if r["status"] == "submitted")
+        );
+        for (receipt, digest, name) in [
+            (
+                json!({"digest": "d", "name": "n", "status": "in_progress"}),
+                "d",
+                "n",
+            ),
+            (
+                json!({"digest": "d", "name": "n", "status": "submitted"}),
+                "other",
+                "n",
+            ),
+            (
+                json!({"digest": "d", "name": "n", "status": "submitted"}),
+                "d",
+                "other",
+            ),
+        ] {
+            write(receipt);
+            assert!(matches!(
+                existing(&path, digest, name, false),
+                Existing::Unknown(_)
+            ));
+        }
+        fs::write(&path, b"{corrupt").unwrap();
+        assert!(matches!(existing(&path, "d", "n", false), Existing::Unknown(_)));
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(matches!(existing(&path, "d", "n", false), Existing::Unknown(_)));
+        // A store that cannot even be inspected is unknown, never absent.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::remove_dir(&path).unwrap();
+            let store = path.parent().unwrap();
+            fs::set_permissions(store, fs::Permissions::from_mode(0o000)).unwrap();
+            let inspected = existing(&path, "d", "n", false);
+            fs::set_permissions(store, fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(matches!(inspected, Existing::Unknown(_)));
+        }
+    }
+
+    /// A refusal before the marker is a witness only while no pending
+    /// setting may have been typed; after one may have, it is unknown.
+    #[test]
+    fn a_refusal_after_a_pending_setting_is_unknown() {
+        let witness = || NotOffered {
+            request_id: "id".into(),
+            name: "n".into(),
+            run_id: "r".into(),
+            conversation_id: "c".into(),
+            digest: "d".into(),
+            receipts: PathBuf::from("state/input_receipts/id.json"),
+            reason: "refused".into(),
+        };
+        assert!(
+            matches!(before_input(false, witness()), Failure::NotOffered(w) if w.binds("id", "n", "r", "c", "d"))
+        );
+        assert!(
+            matches!(before_input(true, witness()), Failure::Unknown(reason) if reason == "refused")
+        );
+        let bound = witness();
+        for (id, name, run, conversation, digest) in [
+            ("other", "n", "r", "c", "d"),
+            ("id", "other", "r", "c", "d"),
+            ("id", "n", "other", "c", "d"),
+            ("id", "n", "r", "other", "d"),
+            ("id", "n", "r", "c", "other"),
+        ] {
+            assert!(!bound.binds(id, name, run, conversation, digest));
+        }
+    }
+
     #[test]
     fn previous_input_is_confirmed_by_a_later_event_or_the_native_queue_panel() {
         // Any native event after the input confirms it (UserPromptSubmit,

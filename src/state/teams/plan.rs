@@ -735,6 +735,30 @@ fn health_of(team: &Team, scope: &[Task]) -> Health {
     if open.len() > 25 {
         health.warnings.push(format!("(22) {} tasks in one phase; offer a phase split above 25", open.len()));
     }
+    // Task #400 (owner, 2026-11-09): with many open tasks one reviewer and a
+    // plan that sends every report to the lead are the bottleneck; a big team
+    // keeps two reviewers, two mergers and a sub-lead, and its tasks carry a
+    // review pipeline.
+    let many = open.len() > 8;
+    if many {
+        let reviewers = team
+            .members
+            .iter()
+            .filter(|member| member.state != MemberState::Removed && member.role.to_lowercase().contains("review"))
+            .count();
+        if reviewers < 2 {
+            health.warnings.push(format!(
+                "(25) {} reviewer(s) serve {} open tasks; keep two reviewers and two mergers and a sub-lead whose members report to it",
+                reviewers,
+                open.len()
+            ));
+        }
+        if open.iter().all(|task| matches!(task.pipeline.as_str(), "" | "none" | "check")) {
+            health.warnings.push(
+                "(25) every open task uses 'check': each report waits for the lead; give tasks a 'docs' (review, auto) or 'code' (review, test, lead) pipeline".to_owned(),
+            );
+        }
+    }
     // U28 (9): lane weight, volume times the kind's cost (a desktop task ~3).
     let mut weights: BTreeMap<String, usize> = BTreeMap::new();
     for task in &open {
@@ -799,7 +823,7 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
     // order; a phase without a record keeps its number as the order.
     let mut numbers: BTreeSet<u32> = team.tasks.iter().map(|task| task.phase).collect();
     numbers.extend(team.phases.iter().filter(|phase| phase.state != PhaseState::Discarded).map(|phase| phase.n));
-    numbers.insert(1);
+    if team.archive_totals.phases == 0 { numbers.insert(1); }
     let mut phases: Vec<(u32, u32)> = numbers
         .into_iter()
         .map(|n| (n, team.phases.iter().find(|phase| phase.n == n).map_or(n, |phase| phase.order())))
@@ -814,7 +838,8 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
             let record = team.phases.iter().find(|phase| phase.n == n);
             let tasks: Vec<&Task> = team.tasks.iter().filter(|task| task.phase == n).collect();
             let open = tasks.iter().filter(|task| !task.status.finished()).count();
-            let done = tasks.len() - open;
+            let total = record.and_then(|phase| phase.archived.as_ref()).map_or(tasks.len(), |phase| phase.tasks);
+            let done = total - open;
             let blocked = record.is_some_and(|phase| phase.barrier)
                 && team.tasks.iter().any(|task| task.phase < n && !task.status.finished());
             // U63 (owner, 2026-10-31): a paused phase, and a phase behind one
@@ -884,7 +909,7 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
                 "status": status,
                 "state": state,
                 "done": done,
-                "total": tasks.len(),
+                "total": total,
                 "barrier": record.is_some_and(|phase| phase.barrier),
                 // U61: a draft that Auto accepts once its plan has no blocker.
                 "auto": record.is_some_and(|phase| phase.approval == super::model::Approval::Auto),
@@ -939,6 +964,9 @@ pub(crate) fn open_crits_all(team: &Team) -> Vec<(u32, u32)> {
 /// with its tasks unless the caller asks for cancelled work. A discarded phase
 /// keeps its own state, and a phase with no tasks is not cancelled.
 pub(crate) fn phase_cancelled(team: &Team, n: u32) -> bool {
+    if let Some(archived) = team.phases.iter().find(|phase| phase.n == n).and_then(|phase| phase.archived.as_ref()) {
+        return archived.tasks > 0 && archived.tasks == archived.cancelled;
+    }
     if team.phases.iter().find(|phase| phase.n == n).is_some_and(|phase| phase.state == PhaseState::Discarded) {
         return false;
     }
@@ -1340,6 +1368,105 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
     found
 }
 
+pub(crate) const PHASE_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static PHASE_CHECK_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static BEFORE_PREREQUISITE_GIT: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
+    pub(crate) static PHASE_CHECK_TIMEOUT_OVERRIDE: std::cell::Cell<Option<std::time::Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn prerequisite_git(folder: &std::path::Path, args: &[&str], overall: std::time::Instant)
+    -> Result<Vec<u8>, super::super::worktrees::GitError>
+{
+    let deadline = overall.min(std::time::Instant::now() + std::time::Duration::from_secs(5));
+    #[cfg(test)]
+    if let Some(delay) = BEFORE_PREREQUISITE_GIT.with(std::cell::Cell::get) {
+        delay();
+    }
+    super::super::worktrees::git(folder, args, deadline)
+}
+
+fn prerequisite_branch(folder: &std::path::Path, branch: &str, deadline: std::time::Instant) -> Result<String, String> {
+    // A tag with this name never satisfies a branch requirement.
+    for reference in [format!("refs/heads/{branch}"), format!("refs/remotes/{branch}")] {
+        match prerequisite_git(folder, &["show-ref", "--verify", "--quiet", &reference], deadline) {
+            Ok(_) => return Ok(reference),
+            Err(error) if error.code == Some(1) => {},
+            Err(error) => return Err(format!("cannot verify branch {branch}: {}", error.detail.chars().take(200).collect::<String>())),
+        }
+    }
+    Err(format!("branch {branch} does not exist"))
+}
+
+/// Evaluate the bounded plan already in memory. Each Git call gets five seconds,
+/// capped by the caller's overall deadline; repeated refs share cached results.
+pub(crate) fn phase_checks(team: &Team, phase: &Phase, deadline: std::time::Instant) -> super::model::PhaseCheckResult {
+    use super::model::{PhaseCheckResult, Prerequisite};
+    #[cfg(test)]
+    PHASE_CHECK_CALLS.with(|count| count.set(count.get().saturating_add(1)));
+    #[cfg(test)]
+    let deadline = PHASE_CHECK_TIMEOUT_OVERRIDE.with(|timeout| {
+        timeout.get().map_or(deadline, |timeout| std::time::Instant::now() + timeout)
+    });
+    let mut result = PhaseCheckResult::default();
+    let tasks: Vec<&Task> = team.tasks.iter().filter(|task| task.phase == phase.n).collect();
+    if team.settings.phase_checks.critical_path_target {
+        let path = super::profile::planned_path(&tasks, |task| task.estimate_minutes.unwrap_or(0.0) as u64);
+        let selected: Vec<&Task> = tasks.iter().copied().filter(|task| path.contains(&task.id)).collect();
+        let hours = selected.iter().filter_map(|task| task.estimate_minutes).sum::<f64>() / 60.0;
+        result.known_hours = Some(hours);
+        result.missing_estimates = selected.iter().filter(|task| task.estimate_minutes.is_none()).count();
+        result.target_exceeded = phase.target_hours.is_some_and(|target| hours > target);
+    }
+    if !team.settings.phase_checks.unresolved_prerequisites {
+        return result;
+    }
+    let order = |n| team.phases.iter().find(|p| p.n == n).map_or(n, Phase::order);
+    let mut git_results: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for task in tasks {
+        for requirement in &task.requires {
+            let reason = match requirement {
+                Prerequisite::Task { task: id } => match team.task(*id) {
+                    None => Some(format!("task #{id} does not exist")),
+                    Some(_) if *id == task.id => Some(format!("task #{id} requires itself")),
+                    Some(required) if required.phase == phase.n => None,
+                    Some(required) if order(required.phase) >= order(phase.n) => Some(format!("task #{id} belongs to a later phase")),
+                    Some(required) if required.status == TaskStatus::Accepted => None,
+                    Some(_) => Some(format!("task #{id} has not been accepted")),
+                },
+                Prerequisite::Commit { commit } | Prerequisite::Branch { branch: commit } => {
+                    let branch = matches!(requirement, Prerequisite::Branch { .. });
+                    let key = format!("{}:{commit}", if branch { "branch" } else { "commit" });
+                    git_results.entry(key).or_insert_with(|| {
+                        let folder = std::path::Path::new(&team.folder);
+                        let reference = if branch {
+                            match prerequisite_branch(folder, commit, deadline) {
+                                Ok(reference) => reference,
+                                Err(reason) => return Some(reason),
+                            }
+                        } else { commit.clone() };
+                        let base = if team.settings.base_branch.is_empty() { "HEAD" } else { &team.settings.base_branch };
+                        prerequisite_git(folder,
+                            &["merge-base", "--is-ancestor", &reference, base], deadline)
+                            .err().map(|error| if error.code == Some(1) {
+                                format!("{commit} is not an ancestor of {base}")
+                            } else {
+                                format!("cannot verify {commit}: {}", error.detail.chars().take(200).collect::<String>())
+                            })
+                    }).clone()
+                }
+            };
+            if let Some(reason) = reason {
+                result.unresolved.push(format!("Task #{}: {reason}", task.id));
+            }
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::model::{Dependency, Member, MemberState, Phase, Settings};
@@ -1407,6 +1534,29 @@ mod tests {
         assert!(health(&suites).warnings.iter().any(|w| w.starts_with("(18)")), "{:?}", health(&suites).warnings);
     }
 
+
+    /// Task #400 (owner, 2026-11-09): a big plan with one reviewer, or with
+    /// every report going through the lead, asks for two reviewers and a
+    /// review pipeline.
+    #[test]
+    fn a_big_plan_asks_for_a_second_reviewer_and_review_pipelines() {
+        let tasks: Vec<Task> = (1..=10).map(|id| task(id, &[], InProgress)).collect();
+        let mut big = team(tasks);
+        big.members.push(Member { id: "rev".into(), role: "Reviewer & Merger".into(), agent: "codex".into(), state: MemberState::Active, ..Default::default() });
+        let warnings = health(&big).warnings;
+        assert!(warnings.iter().any(|w| w.starts_with("(25)") && w.contains("reviewer")), "{warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("every open task uses 'check'")), "{warnings:?}");
+        // Two reviewers and a review pipeline: the notes go.
+        big.members.push(Member { id: "rev2".into(), role: "Reviewer".into(), agent: "codex".into(), state: MemberState::Active, ..Default::default() });
+        big.members.push(Member { id: "merger".into(), role: "Merger".into(), agent: "codex".into(), state: MemberState::Active, ..Default::default() });
+        for task in &mut big.tasks {
+            task.pipeline = "code".into();
+        }
+        assert!(!health(&big).warnings.iter().any(|w| w.starts_with("(25)")), "{:?}", health(&big).warnings);
+        // A small plan keeps no note.
+        let small = team((1..=3).map(|id| task(id, &[], InProgress)).collect());
+        assert!(!health(&small).warnings.iter().any(|w| w.starts_with("(25)")), "{:?}", health(&small).warnings);
+    }
 
     #[test]
     fn cycles_are_found_and_layers_ignore_their_back_edges() {

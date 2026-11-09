@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { toSession } from "../../store/catalog";
 import {
-  SELECTION_ACTIONS, changedText, confirmationCopy, forgetsBinding, markSummary, progressText, restoreLimitText, sameInstance,
+  MOVE_WAIT, SELECTION_ACTIONS, changedText, confirmationCopy, forgetsBinding, markSummary, progressText, restoreLimitText, sameInstance,
   selectionApplies, selectionCall, selectionOperation, selectionSnapshot, selectionText, summaryText, type ApplyContext, type SelectionAction,
 } from "./selection";
 import type { ViewRow } from "../../types";
@@ -16,11 +16,12 @@ const WRITES: SelectionAction[] = ["pause", "resume", "archive", "forget", "term
 
 describe("selection texts", () => {
   it("are Qt's selectionActionText in the bar's order", () => {
-    expect(SELECTION_ACTIONS).toEqual(["compact", "expand", "mark_read", "review_later", "pause", "resume", "archive", "move", "forget", "terminate"]);
+    expect(SELECTION_ACTIONS).toEqual(["compact", "expand", "mark_read", "review_later", "mute", "unmute", "pause", "resume", "archive", "move", "forget", "terminate"]);
     expect(SELECTION_ACTIONS.map(selectionText)).toEqual([
-      "Compact session rows", "Expand session rows", "Mark as read", "Mark needs attention", "Pause", "Resume / restore", "Move to archive",
+      "Compact session rows", "Expand session rows", "Mark as read", "Mark needs attention", "Mute notifications", "Unmute notifications", "Pause", "Resume / restore", "Move to archive",
       "Move to project", "Forget", "Terminate",
     ]);
+    expect(MOVE_WAIT).toBe("Wait for the current action to finish.");
   });
   it("words the queue's progress, refusals and summaries", () => {
     expect(progressText("pause", 2, 5)).toBe("Pause: 2 / 5…");
@@ -61,6 +62,17 @@ describe("selectionApplies", () => {
       expect(selectionApplies(row(extra), "compact", ctx({ compact: true }))).toBe(false);
       expect(selectionApplies(row(extra), "expand", ctx({ compact: true, online: false }))).toBe(true);
       expect(selectionApplies(row(extra), "expand", ctx())).toBe(false);
+    }
+  });
+  it("mutes an unmuted row and unmutes a muted one only where notifications can change (zerus-qhtxf)", () => {
+    const can = ctx({ notifications: true });
+    expect(selectionApplies(row(), "mute", can)).toBe(true);
+    expect(selectionApplies(row(), "unmute", can)).toBe(false);
+    expect(selectionApplies(row({ muted: true }), "mute", can)).toBe(false);
+    expect(selectionApplies(row({ muted: true }), "unmute", can)).toBe(true);
+    for (const a of ["mute", "unmute"] as const) {
+      expect(selectionApplies(row({ muted: a === "unmute" }), a, ctx({ notifications: false }))).toBe(false);
+      expect(selectionApplies(row({ muted: a === "unmute" }), a, ctx())).toBe(false);
     }
   });
   it("always applies Move", () => {

@@ -5,7 +5,7 @@ import { notify } from "./actions";
 import { suggestions } from "./suggestions";
 import { anyHidden, documentVisibility, type PageVisibility } from "./visibility";
 import type { Timers } from "./terminal";
-import type { Answer, ClearControl, ColdPrompt, ComposerView, Inspect, SendReply, SessionRef, StartQuestion } from "../types";
+import type { Answer, ClearControl, ColdPrompt, ComposerView, InboxRemoveReply, Inspect, SendReply, SessionRef, StartQuestion } from "../types";
 import { trNoop, tr } from "../i18n";
 
 // The open composer (Qt MessageComposer) over the Rust hub. The webview owns
@@ -63,7 +63,10 @@ export interface ComposerPort {
   undo(handle: number): Promise<void>;
   allowRetry(handle: number): Promise<void>;
   cancelSend(handle: number): Promise<void>;
-  interrupted(handle: number): Promise<void>;
+  /** Resolves to the Stop's number (0 for none) for a later refusal. */
+  interrupted(handle: number): Promise<number | void>;
+  /** That Stop's interrupt was refused: its prompt is not given back (zerus-5wmh.13.4, zerus-btmir). */
+  interruptFailed(stop: number): Promise<void>;
   clear(handle: number, run: string, conversation: string, dismiss: boolean, delay?: import("./endActionBusy").EndReference): Promise<SendReply>;
   refresh(handle: number): Promise<void>;
   /** Opens a draft attachment by its `zerus-file` path: null when it opened, else a notice; rejects with why not (Task 9). */
@@ -75,6 +78,8 @@ export interface ComposerPort {
   /** U35 Cancel on a held row, and Send it on the Terminal draft bar (src-tauri composer/held.rs): false when nothing started. */
   heldCancel?(handle: number, requestId: string): Promise<boolean>;
   draftSubmit?(handle: number): Promise<boolean>;
+  /** Remove of a not-delivered OpenCode message (src-tauri `inbox_remove`). */
+  inboxRemove(handle: number, run: string, conversation: string, messageId: string): Promise<InboxRemoveReply>;
 }
 
 /** Image decoding for pastes that are not PNG; tests pass their own. */
@@ -180,6 +185,8 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
   let rev = 0;
   let epoch = 0;
   let dirty = false;
+  /** The last draft offer this webview considered (`takeOffer`). */
+  let offered = 0;
   let timer: (() => void) | undefined;
   let hintTimer: (() => void) | undefined;
   /** The draft key of the session last opened; a view of another composer is an older answer. */
@@ -280,7 +287,24 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
         setError(undefined);
       }
       if (next.sending || next.waiting) setStarting(false);
+      takeOffer(next);
     });
+  }
+
+  /**
+   * Qt's offerDraft from Rust (zerus-5wmh.13.4): the interrupted prompt goes
+   * into this field once, only while it is still empty and nothing typed is
+   * on its way (zerus-c0xz8). It then reaches Rust as an ordinary edit, so
+   * the text the person typed meanwhile always wins.
+   */
+  function takeOffer(next: ComposerView) {
+    const offer = next.offer;
+    if (!offer || offer.id === offered) return;
+    offered = offer.id;
+    if (dirty || next.text_epoch !== epoch || text().trim() !== "" || next.attachments.length > 0 || operationLocked()) return;
+    setText(offer.text);
+    setSelection({ start: offer.text.length, end: offer.text.length });
+    changed();
   }
 
   /** A view from the batch envelope: only the composer last opened, and after any open under way. */
@@ -508,7 +532,15 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
      * selection collapses to the cursor and their references go there.
      */
     attachDropped: (paths: string[]) => exclusive((h) => { const at = selection().end; return port.attach(h, paths, at, at); }),
+    /**
+     * Pasted copied files (Qt's insertFromMimeData): attached in place of the
+     * selection the paste was accepted at, taken before the typing is saved,
+     * as the read-only field still lets a selection change (zerus-ptyzp).
+     */
+    attachPasted: (paths: string[]) => { const s = ordered(); return exclusive((h) => port.attach(h, paths, s.start, s.end)); },
+    /** A pasted image, in place of the selection at the paste (zerus-ptyzp). */
     async pasteImage(blob: Blob) {
+      const s = ordered();
       await exclusive(async (h) => {
         let png: Uint8Array;
         try {
@@ -519,7 +551,6 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
             png = await images.png(blob);
           }
         } catch { setError(tr(UNREADABLE)); return; }
-        const s = ordered();
         await port.pasteImage(h, png, s.start, s.end);
       });
     },
@@ -575,8 +606,14 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
       setError(undefined);
       await port.allowRetry(h).catch(() => {});
     },
-    /** Before a Stop interrupts: Rust cancels this composer's start or compaction (Qt 1187-1191). */
-    async interrupted() { const h = handle(); if (h !== undefined) await port.interrupted(h).catch(() => {}); },
+    /** Before a Stop interrupts: Rust cancels this composer's start or compaction (Qt 1187-1191) and numbers the Stop. */
+    async interrupted(): Promise<number> {
+      const h = handle();
+      if (h === undefined) return 0;
+      return (await port.interrupted(h).catch(() => 0)) || 0;
+    },
+    /** That Stop's interrupt did not go through: its prompt stays with its turn (Qt 1204), whichever composer is open by then. */
+    async interruptFailed(stop: number) { if (stop) await port.interruptFailed(stop).catch(() => {}); },
     /** The status line's Refresh (Qt's sessionRefreshRequested). */
     async refresh() { const h = handle(); if (h !== undefined && !operationLocked()) await port.refresh(h).catch(() => {}); },
     /**
@@ -621,6 +658,18 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
     },
     /** Delete on a failed local row (the view asked first). */
     async localDelete(id: string) { const h = handle(); if (h !== undefined) await port.localDelete(h, id).catch(() => {}); },
+    /**
+     * Remove of a not-delivered OpenCode message, confirmed for the composer,
+     * run and conversation its dialog opened under: Rust checks them and the
+     * message again and sends nothing when they changed. Never retried.
+     */
+    async inboxRemove(opened: number, run: string, conversation: string, messageId: string): Promise<InboxRemoveReply> {
+      try {
+        return await port.inboxRemove(opened, run, conversation, messageId);
+      } catch (e) {
+        return { outcome: "uncertain", detail: typeof e === "string" ? e : e instanceof Error ? e.message : String(e) };
+      }
+    },
     /** Check Terminal or Check native UI on a failed row: where it leads, or nothing once another composer opened. */
     async localInspect(id: string): Promise<Inspect | undefined> {
       const h = handle();
@@ -637,10 +686,11 @@ export type ComposerStore = ReturnType<typeof createComposer>;
 export const composer = createRoot(() => createComposer({
   open: bridge.composerOpen, edit: bridge.composerEdit, pick: bridge.composerPick, attach: (h, paths, start, end) => bridge.composerAttach(h, paths, start, end), pasteImage: bridge.composerPasteImage,
   send: bridge.sendMessage, push: (...args) => bridge.sendPush(...args), sendNow: (id) => bridge.queueSendNow(id), answer: bridge.sendAnswer, remove: bridge.composerRemove, undo: bridge.composerUndoRemove,
-  allowRetry: bridge.composerAllowRetry, cancelSend: bridge.sendCancel, interrupted: bridge.sendInterrupted, clear: bridge.clearContext,
+  allowRetry: bridge.composerAllowRetry, cancelSend: bridge.sendCancel, interrupted: bridge.sendInterrupted, interruptFailed: bridge.sendInterruptFailed, clear: bridge.clearContext,
   refresh: bridge.composerRefresh, openAttachment: (path) => bridge.attachmentOpenDraft(path), localRetry: bridge.localRetry, localDelete: bridge.localDelete, localInspect: bridge.localInspect,
   // Read at call time: a test's partial bridge mock need not define them.
   heldCancel: (...args) => bridge.heldCancel(...args), draftSubmit: (...args) => bridge.terminalDraftSubmit(...args),
+  inboxRemove: bridge.inboxRemove,
 }, realTimers, browserImages, appNotices, suggestions.dismiss, async (session, control, execute) => {
   const [{ endActions }, { catalog, rowId }, { captureEnd, sameEnd }] = await Promise.all([import("./endActions"), import("./catalog"), import("./endActionBusy")]);
   const row = session ? catalog.rows[rowId(session.computer, session.key)] : undefined;

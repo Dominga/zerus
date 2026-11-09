@@ -1,5 +1,4 @@
 import { DesktopServiceStatus } from "../../components/DesktopServiceStatus";
-import { MigrationReportDialog } from "../../components/MigrationReportDialog";
 import { Show, createSignal, onMount } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { inTauri } from "../../../bridge";
@@ -8,9 +7,13 @@ import { SectionHead } from "./ui";
 import { ServiceModeReview } from "./ServiceModeReview";
 import { ServiceRefresh } from "./ServiceRefresh";
 import { ServiceFirstChoice } from "./ServiceFirstChoice";
+import LoginEntrySetting from "./LoginEntrySetting";
 import { installedAppName } from "./about-version";
 import { appBuildInfo, refreshAppBuildInfo } from "../../../store/buildInfo";
 import { tr, trNoop } from "../../../i18n";
+import { lazyView } from "../../lazy-view";
+import { LazyBoundary } from "../../lazy-boundary";
+const MigrationReportDialog = lazyView(() => import("../../components/MigrationReportDialog"), (m) => m.MigrationReportDialog);
 
 // Settings > About (tray/src/SettingsPage.h:146-155): the installed Zerus
 // as UpdateController::installedVersion names it, the hgs CLI, checked
@@ -44,6 +47,7 @@ export function AboutSection() {
       <SectionHead title={trNoop("About")} />
       <p class="selectable">{zerus()}</p>
       <p class="selectable">{cli()}</p>
+      <LoginEntrySetting />
       <DesktopServiceStatus counts />
       <ServiceModeReview />
       <ServiceFirstChoice />
@@ -59,7 +63,7 @@ export function AboutSection() {
           <Icon name="github" size={16} />ufna/zerus
         </button>
       </div>
-      <Show when={reportOrigin()}>{(origin) => <MigrationReportDialog origin={origin()} close={() => setReportOrigin(undefined)} />}</Show>
+      <Show when={reportOrigin()}>{(origin) => <LazyBoundary floating><MigrationReportDialog origin={origin()} close={() => setReportOrigin(undefined)} /></LazyBoundary>}</Show>
     </>
   );
 }

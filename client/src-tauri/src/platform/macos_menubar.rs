@@ -207,7 +207,10 @@ pub fn menu_event(app: &AppHandle, id: &str) {
         }
         Some(MenuAction::Session { computer, key }) => crate::desk::menu_session(app, computer, key),
         Some(MenuAction::Quit) => crate::exit_flush::quit_with_flush(app, 0),
-        Some(MenuAction::Refresh) => {}
+        Some(MenuAction::Refresh) => {
+            // Each computer's stream reconnects now (`TrayAgent::refresh`).
+            app.state::<crate::commands::AppState>().refresh();
+        }
         None => {}
     }
 }

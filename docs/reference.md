@@ -191,7 +191,7 @@ the account profile that the calling session runs under is not passed on.
 
 ### Session references
 
-**Copy session reference** in the desktop session context menu copies a
+**Copy session reference** in the desktop session window's **Session actions** menu copies a
 `zerus://session?...` URI. Android offers the same action in the
 session toolbar and menu. It contains the stable computer UUID, a native machine
 name for routing, the session name and exact conversation identity; child and
@@ -254,7 +254,7 @@ icon immediately after the exact identifier. The desktop icon uses the same
 borderless style as header actions. The ID stays on one line whenever the pane
 has room. The icon copies the ID as plain text, as does the **Copy session ID**
 icon in the desktop session header, which copies without showing the ID;
-**Copy session reference** remains in the desktop session context menu and copies
+**Copy session reference** is in the desktop session window's **Session actions** menu and copies
 the portable URI. Successful text copies use the window's status confirmation
 without a system notification on Linux or macOS. Before that ID is reported,
 **Run ID** identifies the current
@@ -266,18 +266,40 @@ Machine, project and state filters still apply. Desktop ID results show the
 matched identifier and expose its complete value in the tooltip.
 
 The desktop session header keeps frequent actions as icons: open the session
-folder, open a shell there, **Copy session ID** and **Clear session**. Its **⋯**
-menu names the same actions (**Open folder**, **Open shell in session folder**,
-**Copy session ID** and **Clear session…**, each available exactly when its icon
-is) and also holds **Rename…**, **Fork session…**, **Copy connect command**
-(**Open externally** without clipboard mode, or the native DeepSeek UI), **Pause
-session** or **Resume session**, **Start fresh…**, **Move to archive** and
-**Terminate session…**. A stopped session hides the Clear session icon and offers
+folder, open a shell there, **Copy session ID** and **Clear session**. Its
+**Session actions** menu shares the same checked handlers. A stopped session
+hides the Clear session icon and offers
 **Start fresh…** in the menu; an archived session shows **Restore session** in its
 place. The session list context menu offers **Clear session…** for a live session
 where a stopped one offers **Start fresh…**. For a session that is not open, it
 becomes available once that session's own inspection confirms the conversation
 listed for it; choosing it opens the session and asks the same confirmation.
+
+### Session row and window menus
+
+A session row's right-click menu keeps Mark needs attention, Mute, Compact/Expand
+row, Open terminal, Copy connect command, Copy session ID, Clear, Rename,
+Move to project and Terminate. Paused and archived rows keep the corresponding
+available actions, such as Start fresh, Copy restore command and Forget.
+Multi-selection keeps its batch menu.
+
+Open terminal connects to the selected existing run in the external terminal
+configured for this computer, including connections to remote computers. It uses
+`hgs [@computer] a NAME --existing --run-id ID`, so a delayed terminal cannot
+resume a stopped agent or connect to a replacement run under the same name.
+An original live startup run can connect before its first native conversation
+binding, including while it waits for startup trust. This does not resume it or
+answer trust prompts. If its identity changes while the menu is open, reopen the
+menu to use the current row.
+Offline, paused, unidentified and unsupported adapters show a disabled reason;
+DeepSeek's Native UI remains in Session actions. Copy session ID copies the
+native conversation ID shown as Session ID in the header and Details, rather
+than its name or run ID. Rows without this identity show a disabled reason.
+
+The session window's top-right Session actions menu retains Expand all collapsed,
+Open folder, Open shell in session folder, Pause, Fork, Set parent (and Detach),
+Copy session name, Copy session reference and Copy folder path. Show running
+commands is there when available. Their existing checks and confirmations apply.
 
 Identifiers such as `zerus-ab12` are Beads task numbers, not session IDs. Desktop
 message search finds their public mentions; Android session search finds mentions
@@ -417,6 +439,40 @@ label, in `account_id` and `account_label`.
 
 A team member's account changes only through `hgs team swap-member`, on your
 word; `switch-account` refuses a member's session and names the team.
+
+#### Moving a session to another agent
+
+```sh
+hgs switch-account claude/sample-project/review --to native-dsh --preview
+hgs switch-account claude/sample-project/review --to native-dsh --request-id 3c9d2a71-5b8e-4f60-a1d4-9e2b7c6f0a18
+```
+
+An account of another agent (Claude, Codex, Kimi, DeepSeek or OpenCode) moves the
+session there; `--to` is `--account`, and `hgs session switch-account` is the
+same command. One agent cannot resume another's native conversation, so Zerus
+starts a new session of the target agent in the same folder (`<agent>/<project>/<tag>`,
+the old tag or the first free `tag-N`) and gives it a handoff as its first prompt
+(DeepSeek and OpenCode get it as their first message): what the session was
+about, its open Zerus tasks, the last turns and its attachments as `hgs
+attachment` references, bounded like a team brief. The full handoff is kept in
+`session_moves/<request-id>.md` under the state folder. The other agent's tool
+state, prompt cache and the permissions chosen for the session are not carried.
+
+`--preview` changes nothing and answers `kind` (`account` for the same agent,
+`move` for another), the new session's name, what carries over and does not,
+and `refusal`, empty when the move can run. A move is refused before anything
+changes when the target agent is not installed, a Claude, Codex or Kimi account
+is not signed in, the session is a team member's, it works or builds, a
+question or a held message waits, it has no confirmed conversation, or its
+folder is missing.
+
+The old session is then paused and stays readable; the new one starts with the
+chosen account. The receipt's status is `moved` once the new session shows its
+conversation, `uncertain` when it did not in time or the first message was not
+delivered (never retried), and `failed` when the start failed; the old session
+is then resumed (`relaunched`). A retry with the same request id returns the
+kept receipt. Both rows of `ls` and `inspect` name the other session:
+`moved_to` on the old one and `moved_from` on the new one.
 
 To move a team off an account, `swap-member` takes `from_account`,
 `to_account` and `provider` instead of a member: every member of that agent
@@ -880,6 +936,14 @@ while 0.155.1 lacks that required flag.
 
 New hooks call `hgs __state hook`. Existing trusted Python commands are retained:
 `hgs_state.py` forwards them to the Rust CLI, so keep Python for legacy hooks.
+Codex can request **Hooks need review** before both a new session and a saved
+conversation's resume or archive restore. Activity shows that exact native
+decision; messages remain blocked while it is open. Only the person's explicit
+choice trusts or skips hooks, and Codex persists that choice. A pending message
+receipt is never retried by recognizing or answering the card. Normal supervised
+startup preserves existing tracking definitions; an unchanged registration does
+not require trust again merely because the Zerus binary was updated. New or
+changed definitions can require a new native review.
 The CLI and session core are Rust; SQLite is bundled and requires a C compiler at
 build time. Existing session bindings and provider history remain compatible.
 
@@ -894,6 +958,144 @@ Late events from a previous run and child-agent events cannot rebind the parent.
 terminal, agent process and native conversation. `SessionEnd` alone does not prove
 process exit. A live process without verified activity shows **Status unknown**;
 **Agent exited** means the process ended while its tmux terminal still exists.
+
+### Child sessions
+
+A session that a live tracked agent launches, or forks, on the same computer is
+that agent's child. The launching `hgs` proves its caller by native process
+ancestry, exactly as `hgs self` does, and passes it to the new session as
+`HGS_PARENT`; it always sets the variable, empty when no live agent owns the
+launch, so an inherited or typed value never reaches the record. The new
+session's first record keeps it as `parent`: the parent's machine UUID and
+durable `session_id`, its name, conversation and run as hints, `source`
+(`launch`, `adopt`, `manual` or `forwarded`) and the time. A resume never adopts its launcher. Resume,
+Clear, fresh starts, rename, pause, archive and restore keep the link, as they
+keep `session_id`; an older `hgs` that rebuilds the record drops it. Claude,
+Codex and Kimi sessions carry links; DeepSeek and OpenCode sessions do not yet.
+A launch or fork on another computer (`hgs @peer claude …`, `hgs @peer fork …`)
+run by a proven agent passes that agent's link to the peer as
+`--parent-link`, hex-encoded JSON, only when the peer's `hgs --help` lists
+`launch-parent-v1`; an older peer launches without it. The peer accepts only a
+well-formed launch link naming another computer, records it with the
+`forwarded` source and uses it only when no local agent owns the launch. It
+cannot verify a parent on another computer, so its listing always shows a
+forwarded parent as `missing`, even when its IDs match a session there, and the
+child is never supervised. A cycle check stops at a forwarded parent.
+
+`hgs [@host] parent SESSION --json` reads JSON stdin with
+`expected_run_id`, `expected_conversation_id` and `action`: `read`, `adopt`,
+`set` or `clear`, plus optional `replace`. `set` names `parent` with the chosen
+session's `session_id` and, as the desktop listed them, its `name`,
+`conversation_id` and `run_id`; the host reads that session on its own computer
+the same bounded way, and refuses an archived, changed or missing parent, the
+session itself and a cycle. `hgs --help` lists `session-parent-v1`; a call to a
+peer without it is refused before it reaches the peer. `adopt` makes the calling agent, proven the
+same way, the session's parent. It refuses a caller that no live agent owns, a
+session adopting itself, archived sessions, a target that already leads the
+caller on this computer (a cycle), and a session with another parent unless
+`replace` is true. The cycle check follows at most eight of the caller's
+parents through the session ID index, reading each record bounded, as a
+regular file only, never following a final link or waiting on a FIFO; a
+longer chain or an unreadable parent is refused rather than assumed acyclic. Coordinators use it for workers they direct but did not
+launch. The answer names the link now in effect and the previous one. Links
+are presentation and attention routing only: they never authorize a send,
+answer, approval, stop or removal, and never change project membership.
+`hgs wait` dependencies, native subagents, names and folders never create one.
+
+On the desktop the session menu offers **Set parent…** (a searchable list of
+the computer's other Claude, Codex and Kimi sessions, never the session's own
+descendants) and, for a child, **Detach from PARENT…**. Dragging a session card
+onto the middle of another card on the same computer frames it and asks to
+make the dragged session its child; the upper and lower parts of a card still
+reorder. Every change is confirmed in a dialog, which names a parent it
+replaces, before the desktop calls `hgs parent`.
+
+`hgs ls --json` rows carry `parent` with `state` from the same listing: `live`
+(running, its agent not exited), `saved` (paused, stopped or exited),
+`archived`, or `missing` when this computer lists no such session (gone, or on
+another computer). Neither the listing nor the launch waits on the shared
+catalog: the link's machine identity is read once a caller is proven, without
+the catalog lock, and a launch without a readable identity records no parent.
+
+The desktop session list nests a child under its parent when both are shown in
+the same project group, 26 px per level up to three levels, with a connector
+from the parent above. The parent's footer shows **Team** with working and all
+child sessions and native subagents together, working of all (`2 of 5`); this
+one toggle shows or hides both (owner, 2026-11-07, zerus-sa9qn.16), and Left
+and Right do the same from the keyboard, Left then moving from a child to its
+parent. A native subagent row looks like a compact session row (the agent's
+tile, its parent's account mark, its name and status, the summary as its
+tooltip) and never expands; the expand button's place stays empty, so its
+status lines up with the rows around it (owner, 2026-11-08). This
+device remembers a collapsed parent across relaunches by its computer's machine
+UUID and session ID (`sessions/collapsedTeams`, at most 2048 parents, the oldest
+forgotten first), so a rename, resume or restart keeps the choice; a parent
+without those IDs keeps it for this window only. A child row's compact or full
+form is remembered like any row's. Nesting stops after eight levels; a deeper child starts at top
+level again. A child whose parent is not shown above it stays at top level with
+**from PARENT**, which opens the parent when it is listed. A parent is matched by
+its computer's machine UUID and session ID, or by conversation for a parent an
+older `hgs` listed without one; names never match. A loop never hides a card.
+Cards show a large agent tile at the left: the agent's mark from the owner's
+design prototype (Claude, Codex, DeepSeek, Kimi and the shell; OpenCode keeps
+its glyph) on a bordered tile, 34 px on cards and 22 px on compact rows. The
+tile uses the skin tokens `list.agent-tile` and `list.agent-tile-border`: the
+prototype's near-black tile with a thin outline in the dark skin, and a white
+tile with a firmer outline in the light skin, where it gives the colored marks
+their best contrast. The artwork loads lazily, outside the entry bundle; until it arrives the
+tile shows the provider glyph. A compact parent row takes a second line that
+sums up its child sessions: working of all, **Needs you**, **Asking** and
+**Errors** counts, with the same collapse toggle; childless compact rows stay
+one line. On rows narrower than about 340 px the counters show their numbers
+only and the toggle keeps its place; the toggle's label and the row's
+accessible description keep every count in words. Rows stay transparent and
+paint a surface only on hover and selection. A selected card uses the skin's
+green-tinted card surface and an accent border, as in the owner's prototype,
+with attention, unread, draft and error edges drawn on top; while the list has
+keyboard focus the selected card also gets an accent ring.
+
+Supervised children draw no attention for requests their parent can handle.
+A child is supervised when its own computer lists its parent as `live`; rows
+with a parent then also carry `human_request`, true while the child holds a
+request only the person can answer: a tool or permission approval, its own or
+a native subagent's, a folder or Codex hooks trust prompt, or signing in (an
+authentication failure or **Sign in required**). A supervised child is quiet
+only when its host reports `human_request: false` and the row itself shows no
+such approval or sign-in; a host that does not report it keeps every request
+visible. A quiet child behaves like a muted session: no system notification, no rail, tray, menu bar or project header
+count, and gray badges and edge, while its status, Activity, unread reply,
+questions and approvals stay as they are and it remains in the Active and
+Needs attention filters. Nothing is marked read. Review later, the person's
+own mark, still counts. A person-only request notifies as for any session.
+When the parent is paused, stopped, exited, archived, not listed on the
+child's computer (including a parent on another computer) or gone, the child
+is ordinary again: a pending request that waited quietly is announced once,
+while replies seen meanwhile are not replayed. A supervised child shows a dim
+arrow turning down and right before its title, meaning its parent above
+handles it (its tooltip and accessible name say which session supervises it;
+owner, 2026-11-07, zerus-sa9qn.16, replacing the crossed bell); the parent's **Team**
+toggle adds **Asking** (quiet requests waiting for it) and **Needs you**
+(person-only requests), which never raise the parent's own attention.
+`client/core/tests/fixtures/supervised-attention.json` lists the cases the
+desktop projects and Android and iOS check.
+
+Android (zerus-sa9qn.4) and iOS (zerus-sa9qn.5) apply the same contract, iOS
+in ZerusKit `ChildSessions` and the session card: child cards nest under a
+parent shown in the same project group, 16 dp per level up to three levels
+with a connector, and a child without a shown parent stays at top level with
+**from PARENT**. A parent's counter is the same single toggle for its shown
+subagents and child sessions (`2 of 5`, gray **Asking**, amber **Needs you**),
+expanded by default; the phone remembers a collapsed parent across relaunches
+by machine UUID and session ID, at most 2048 (iOS keeps them in its sealed
+`collapsed_teams` store). A quiet child gets the mute
+treatment on the phone: no system notification, gray badges and reply count,
+and the same arrow before its title; a request that waited quietly notifies
+once when the parent is gone, and a completion seen meanwhile is not replayed.
+Cards show the account mark (circle, letter and label) resolved by the row's
+computer and recorded `account_id` against that computer's account catalog,
+in the color that computer keeps for the account (the row's `account_mark`),
+else the label's default palette color. See
+`docs/superpowers/specs/2026-11-07-account-labels-child-sessions-design.md`.
 
 ### Rename, Saved and Archive
 
@@ -982,14 +1184,26 @@ printf '%s' '{"from":0,"until":253402300800,"limit":50,"cursor":"","query":""}' 
 `limit` is 1–50. All fields are optional. `query` is literal case-insensitive
 archive metadata search (names, IDs, provider, folder and title), at most 256
 characters; this is distinct from the desktop's global public-message search.
-The result contains `version:1`, `sessions`, `total`, `next_cursor`, the additive
-`previous_cursor` and zero-based `position`, and the echoed range/query. Pass either
-opaque cursor with the same range/query to move older or newer. Both directions
-use date/ID keysets; no offset scan or retained client cursor stack is required.
-Ordering uses `(archived_at, archive_id)` descending, avoiding offset duplicates
-when an earlier page changes. Newer completions appear after Refresh. Deleted or
-restored instances disappear; all actions still recheck exact native identity.
-Cursors belong to one computer/catalog and cannot be reused after rebuilding it.
+The result contains `version:1`, `sessions`, `total`, `next_cursor`, the
+additive `previous_cursor` and zero-based `position`, and the echoed
+range/query. A host that counts only up to a cap may add `total_capped: true`;
+the desktop then shows the total as "N+" and accepts a window that starts past
+it. `hgs archives --json --bounded` (help marker `archive-bounded-pages-v1`)
+asks for such bounded pages: the total and the position count at most 10,000
+matches (`total_capped`, `position_capped`), the empty query included, and each
+scan looks at most at 25,000 catalog rows in date order. A page whose scan
+reaches that budget before its limit of matches is `partial`: it may be short or
+empty, `searched` gives the rows it looked at, and its cursor continues from the
+last row it looked at, in either direction. Without `--bounded` a page is
+exactly as before; the desktop sends the flag only when its CLI lists the
+marker, and a peer whose CLI does not list it answers the exact page. Pass
+either opaque cursor with the same range/query to move older or newer. Both
+directions use date/ID keysets; no offset scan or retained client cursor stack
+is required. Ordering uses `(archived_at, archive_id)` descending, avoiding
+offset duplicates when an earlier page changes. Newer completions appear after
+Refresh. Deleted or restored instances disappear; all actions still recheck
+exact native identity. Cursors belong to one computer/catalog and cannot be
+reused after rebuilding it.
 
 A rebuildable `archive-catalog-v1.sqlite3` indexes metadata beside the durable
 state. Archive JSON files remain authoritative. Its first use indexes existing
@@ -1016,8 +1230,41 @@ the exact observed run even when its reusable session label later changes owner.
 
 ## Project wrappers
 
-An executable `run_COMMAND.sh` in the project folder runs inside the tmux session.
-Use it to prepare the environment and launch the native agent.
+On Linux and macOS an executable `run_COMMAND.sh` in the project folder runs
+inside the tmux session. On Windows `run_COMMAND.ps1` runs through the Windows
+session host, with the existing PowerShell selection: a canonical native
+`pwsh.exe`, then Windows PowerShell. A Store alias that cannot be
+resolved to a native executable is not selected. `--bare` bypasses the wrapper.
+Use the script to prepare the environment and launch the native agent.
+
+Unix keeps its existing `.sh` behavior and does not automatically select `.ps1`.
+A project can provide both platform-specific wrappers. No PowerShell dependency
+is introduced on Linux or macOS.
+
+The Windows wrapper runs with `-NoLogo`, `-NoProfile` and process-scoped
+`-ExecutionPolicy Bypass`. Zerus does not change machine policy or load a user
+profile. Saved recipes retain the wrapper and its arguments across resume,
+fork, recovery and Start fresh. At spawn, a fixed encoded bootstrap transfers
+the script path and argument array as data, then clears that private data before
+invoking the script. This avoids PowerShell `-File` splitting a literal argument
+such as `-name:value`; empty, quoted and Unicode strings reach `$args` intact.
+The wrapper remains responsible for forwarding those arguments to its agent and
+returning its exit code. A new Claude profile whose tracking-hook form is not
+known must first initialize native tracking with `--bare`, or explicitly run
+untracked with `HGS_TRACKING=0`. Zerus does not probe the PowerShell interpreter
+as Claude or invoke a project script a second time for its version.
+Windows PowerShell 5.1 has
+[native argument forwarding limitations](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_parsing?view=powershell-5.1)
+for empty strings and embedded quotes. [PowerShell 7.3+ improves native argument
+passing](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_parsing?view=powershell-7.6); its Windows mode still uses legacy rules for batch/npm shims. Prefer a
+native agent executable when forwarding complex arguments.
+
+PowerShell stays the supervised process while its native agent is a child.
+Existing native process/confirmation guards still apply. In particular, a
+Codex resume/fork may need its first message in Terminal until native startup
+confirms the conversation; a wrapper is not evidence of that confirmation.
+For a plain PowerShell shell on Windows use `hgs sh PROJECT --new -d`; this is
+already supported and is untracked, like an ordinary Unix shell session.
 
 ```sh
 hgs codex sample-project                 # run_codex.sh starts a new conversation
@@ -1051,9 +1298,12 @@ Spotlight and System Settings for the unchanged `hgs-tray.app` bundle.
 
 Settings → Mobile connection also lists and pairs [phones](#machines-and-accounts). Settings → Mobile connection → Phone notifications sets when the phone notifies: immediately, as soon as you are away from every Zerus computer, or after 5, 10, 15 or 30 minutes away. The choice is shared through the swarm catalog; computers this one synchronizes with directly whose hgs is too old to receive it are named there.
 
-The tray has two counters: all sessions and **Needs attention**. Attention includes
-input, approvals, errors and unread main-agent replies. An offline host retains
-its last total but adds no live attention requests; a dot marks incomplete data.
+The tray has two counters: **active** sessions (the session list's Active filter:
+working or Background, Scheduled or Waiting, or needing attention, a subagent
+that asks included) and **Needs attention**. Attention includes input, approvals,
+errors and unread main-agent replies. An offline host adds only its Review later
+sessions to either counter; a dot marks incomplete data. The tooltip keeps the
+total number of sessions.
 Linux application badges and the macOS Dock show the attention count, hiding zero.
 
 Zerus Next's tray menu (on Linux, macOS and Windows) has:
@@ -1244,7 +1494,17 @@ restores the full row. The row remains selectable and keeps its normal context a
 remembers the preference for that conversation across restarts. **Expand all
 collapsed** in the Sessions menu restores every compact row, including sessions
 hidden by the current filters. Row density never compacts the agent's context
-or changes its runtime state. A muted session keeps its mute icon in either size.
+or changes its runtime state. Settings > Sessions > **Start new child sessions
+as compact rows** (on by default) makes the row of a session that another
+session launches or adopts start compact. "New" means a parent link recorded
+after this desktop last looked: the device remembers, for each computer whose
+clock stamped the links, the latest link time it handled and the children
+handled in that second (`sessions/childRowsSeen`). A computer seen for the first
+time only records its current children, so existing rows never change, and a
+row the person expands afterwards stays expanded across restarts. Turned off,
+new child rows keep the full card. A muted session keeps its mute icon in either size, right after its name; a
+supervised child shows its arrow before the name whether muted or not
+(owner, 2026-11-08).
 The folder/branch line also shows native outline Git badges: a diff with the
 number of changed/new files, upload/download with outgoing/incoming commit counts,
 and a green cloud check for a clean checkout matching its verified upstream.
@@ -1540,6 +1800,15 @@ height. The height is a local preference shared by sessions and retained across
 restarts; smaller windows temporarily limit it so the conversation stays visible.
 With the handle focused, Up/Down resize it and Home restores the default.
 
+Settings and dialog selection fields use the same themed dropdown. The list
+uses Zerus menu colors in light and dark skins, marks the current value and
+scrolls within the window. Arrows skip disabled choices; Enter or Space opens
+the list and confirms a choice, Escape closes it without changing the value,
+and typing finds choices by prefix. Closed arrows change the value directly,
+as with the former native selection fields. Tab confirms the highlighted choice
+and continues to the next control. The popup returns focus to its trigger on
+selection or Escape, including inside modal dialogs.
+
 **Settings → Appearance → Activity width** keeps Activity readable in a wide or
 fullscreen window: the transcript, its queued input, questions and the message
 field share one centered column of at most 900 px by default (480–2400 px). The
@@ -1793,8 +2062,8 @@ arrows, Home, End, Backspace or Delete), and keys without Ctrl, Command or Alt.
 Function keys are not editing keys: F1, F2, F5 and F6 reach Zerus without a
 modifier. So Alt+↑/↓ switches sessions even while typing, and on Linux Ctrl+K
 opens Go to instead of deleting to the end of the line. A focused drop-down
-list keeps Alt+↑/↓ and F4 to open it, and the Projects dialog's list keeps
-Alt+↑/↓ to reorder projects.
+list keeps Alt+↑/↓ and F4 to open it, and the project list on the Projects page
+keeps Alt+↑/↓ to reorder projects.
 
 **Go to** (Ctrl+K) searches sessions (not archived), projects, accounts,
 machines, sections and commands by name; start the query with `>` to list only
@@ -1815,7 +2084,7 @@ confirmation. Changes apply at once and are stored on this device.
 Enter and Shift+Enter in the message field, Escape, Tab and Shift+Tab, Tab to take
 a suggestion, list navigation keys, Menu and Shift+F10, Ctrl/Command-click,
 Space and Escape during voice capture, Ctrl+Shift+C/V (⌘C/⌘V on macOS) and
-Shift+PgUp/PgDn in Terminal, and Alt+↑/↓ in the Projects dialog's list.
+Shift+PgUp/PgDn in Terminal, and Alt+↑/↓ in the project list on the Projects page.
 
 <a id="agent-teams"></a>
 
@@ -1987,6 +2256,53 @@ remove-member, relaunch and settings refuse it with the card to propose; for
 the lead's planning operations it is ignored. The owner's own add-to-phase
 keeps the warning and confirmation below.
 
+### Editing a member while the team runs
+
+`hgs team settings` with `members_update` changes one member per entry, and the
+operation takes only the fields it names: an unknown field is refused with its
+name, the fields it takes and an example, never dropped in silence. `agent`,
+`account` and `computer` stay with Swap member; `folder`, `directory` and `role`
+still need a member without a session.
+
+A member that runs takes its start `prompt`, `model`, `effort`, `permissions`,
+`permissions_profile`, `context_before_task`, `after_task`, `after_task_on`,
+`after_task_at`, `models` and `iron_rules` while the
+team runs. A model or effort change reaches its session before the member's next
+task (the same `hgs settings` switch U45 uses); an agent that cannot switch in
+place takes it at its next start, and a refused switch leaves the member on the
+model its session kept. A prompt change is sent once to the member as a message
+marked "replaces previous instructions", after the clear the owner asked for
+with `"clear_context_first": true` (off by default; the clear needs the agent's
+own clear action, so DeepSeek and OpenCode refuse it); an unanswered send is
+recorded uncertain and never replayed, and the next hand-out carries the new
+prompt as well. An edit made while a message is on its way stays for the next
+one. Permissions and the permissions profile are the mode the member's next
+start gets; its running session keeps its own. A swap to another session drops
+the changes still pending for the session it replaced. The owner's After a task
+policy (`after_task` empty keeps context, `compact` or `clear`, with
+`after_task_on` `percent`/`tokens` and `after_task_at`) reaches a free member's
+next hand-out only when its context passes the threshold; the lead's runs only
+while the lead is free.
+
+Only the owner changes a member while the team runs. The lead changes a member's
+`model` and `effort` directly; every other member field goes through the
+`{"kind":"settings","members_update":[...]}` card the owner allows. A permissions
+mode the member's agent does not have (Codex has no `auto`) is refused in `plan`,
+`add-member` and `members_update`, never accepted and left to fail when the
+member starts.
+
+In the Qt team workspace, a member's menu offers **Edit member** once its current
+settings have been read. The dialog starts with that member's prompt, model,
+effort, permissions/profile, per-task context action, **After a task** mode with
+its criterion and threshold, allowed models and iron rules. The threshold field
+takes 1-100 percent, or a token count when the criterion is tokens. Save sends
+only changed fields in one `members_update`; a refusal stays
+in the dialog and preserves the draft while the stored member stays unchanged.
+A changed prompt reveals **Clear context first**, unchecked by default (only a
+running member can clear). Permissions-profile widening requires the owner's
+explicit checkbox confirmation. Agent, account, computer and folder changes stay
+with **Swap member**.
+
 ### Tasks added to a running phase
 
 The owner's task joins a running phase on a warning and a confirmation. The
@@ -2078,6 +2394,92 @@ Git checkout, otherwise the changed files its report names. A `hold` preset
 (the default) holds the folder while the task is in its test stage, so the
 implementer's next task in that folder waits; a `checkout` preset tests a
 detached checkout of the attempt's commits instead and frees it.
+
+### Closed phase records and task reads
+
+The team store (`teams/teams.sqlite3`) archives a phase after all its tasks
+are accepted, rejected or cancelled and the phase is closed: a lead-accepted
+phase closes on its last task decision; an owner-accepted phase must reach
+`done`. A phase with an untested merge range or a queued/testing merge entry
+stays live until its integration checks close. The open phase of a free-mode team is retained until it closes.
+Full task records, including attempts, reports, runs and questions, move to
+`team_task_archive` in the same transaction as their replacement in the live
+record. Original phase records are retained in `team_phase_archive`.
+
+The 500-task limit counts live, unarchived tasks. The 100-phase limit counts
+unarchived phases. Historical work consumes neither limit. The live record
+keeps the most recent 1,000 archived task stubs, with id, phase, title,
+assignee, final status, acceptance time, merge commit, optional origin and frozen timing totals.
+This window bounds routine plan reads to hundreds of kilobytes of archived
+task metadata. A task stub leaves the live window when its phase header
+leaves, so no archived phase is presented as a recordless draft. The live record also keeps at most 200 archived phase headers,
+with counts, outcomes and closure time. Older headers and task lists are paged
+from the archive. Evicting a finished phase header also removes its planning-mode
+override; archived phase pages do not carry a planning mode. Constant-size archive totals preserve the team's historical
+counts. Both windows use descending numeric IDs, so their membership is stable
+across repeated reads. Task IDs remain unique
+when stubs leave the window. Dependencies outside the window resolve through
+the archive's `(team, task)` primary key; existing dependency outcome rules
+still apply. Follow-up origins use the same indexed resolution without restoring
+historical tasks into the live plan.
+
+Read one full task, live or archived, without returning the whole team:
+
+```sh
+printf '%s' '{"team":"ID","task":42}' | hgs team status --json
+```
+
+This response is the task object. The byte limit is 8 MiB per task; larger
+historical records remain intact and yield an explicit size-limit error.
+Normal `status --json` keeps its team view and never includes archived full
+histories or stubs outside the live window. Inbox report links name the
+per-task form.
+
+Read archived stubs for one phase with stable ascending task-ID pages (default
+and maximum 50 rows):
+
+```sh
+printf '%s' '{"team":"ID","archived_phase":3,"cursor":0,"limit":50}' | hgs team status --json
+```
+
+Read archived phase headers, including those outside the 200-header window,
+with `{"team":"ID","archived_phases":true,"cursor":0,"limit":50}` through the
+same status command. Its cursor is a phase number; task pages use task IDs.
+Both responses contain `items` and `next_cursor`; pass the latter as `cursor`.
+The `(team, phase)` primary key and `(team, phase, task)` index bound each page. New archived phases do not
+shift an older page. GUI clients can use these pages and per-task reads off
+the UI thread.
+
+The Tauri Teams plan, reports and Profile show archived task stubs and frozen
+working time from the status window. They retain its limit of 1,000 task stubs
+and 200 phase headers; older omitted phases are named with their count. Opening
+an archived report reads just that task on a blocking worker. The report panel
+shows loading, failure and retry states, discards late replies after selection
+changes, and retains only the selected report (up to 64 Ki characters, with an
+explicit truncation notice). It does not load archive history on refresh.
+
+Existing records migrate on their next successful mutation. To migrate one
+without changing its plan, the owner or lead sends `hgs team archive-phases
+--json` with `team` and a canonical `request_id`; retries are idempotent.
+The archive and live payload commit together or roll back together. The existing
+1 GiB (262144-page) store cap remains. If SQLite reports a full database,
+Zerus names `teams.sqlite3` and its cap, refuses the change and preserves the
+original readable record. Archive retention or export is a separate policy. Explicit
+edits of archived work restore only that phase, subject to the live 500-task
+limit and an 8 MiB phase-history read cap, and retain the original history.
+
+The Qt workspace and Profile offer **Archived phases**. This reads phase headers
+and task summaries in replaceable pages of 50 through the archive status reads
+above, including phases outside the live window. Each summary shows the title,
+final outcome, recorded work time and closure time. Double-clicking a task reads
+its full report through the per-task status read. CLI I/O and JSON decoding run
+on the process worker, with a 15-second local deadline and an 8 MiB output cap.
+Loading, refusal and retry remain visible; navigating away discards stale replies.
+The drawer retains only its selected full task, and the archive browser retains
+one phase page and one task page. A phase link seeks directly to that phase; it
+does not scan earlier history. Archived Profile scopes show recorded metadata
+instead of reconstructing timelines from compact stubs. The live Profile cache
+keeps at most six scopes, 1,000 task rows and 1,000 timelines per scope.
 
 ### Reports and interim reports
 
@@ -2267,6 +2669,45 @@ continues in standard mode. The feed records `plan_mode_proposed`,
 `plan_mode_switched`, `plan_mode_denied`, `phase_build_added`,
 `free_phase_close_pending`, `free_phase_closed` and `free_phase_build_failed`.
 
+### Phase checks before start
+
+Team settings has a **Phase checks before start** group. Each check is independent
+and off by default (`settings.phase_checks.critical_path_target` and
+`settings.phase_checks.unresolved_prerequisites`). With both off, approval keeps
+its existing behavior and cards show no extra check result.
+
+A phase may name an optional positive `target_hours`, in `extend`, a `plan` phase,
+or `edit-draft` (`null` clears it). With the target check enabled, its approval
+card shows the longest dependency path weighted by task estimates in minutes.
+Missing estimates are shown as a lower bound and a count, for example
+`>= 6.5 h, 2 tasks without an estimate`. Only a known sum above the target warns;
+this check never refuses approval. The profile keeps its existing count-based
+critical path and output.
+
+Tasks may name at most 32 prerequisites in `requires`, including through
+`edit-draft.tasks_update`:
+
+```json
+{"requires":[{"task":12},{"commit":"0123456789abcdef0123456789abcdef01234567"},{"branch":"feature/api"}]}
+```
+
+A same-phase task requirement resolves when that distinct task exists in the
+phase; it adds no dependency or ordering. An earlier-phase requirement resolves
+when its task is accepted. A missing task, self-reference or later-phase task
+is unresolved. Commit and branch requirements resolve only when Git verifies
+that reference is an ancestor of the configured base branch (the team folder's
+`HEAD` when no base is set). Unknown references, Git failures and timeouts remain
+unresolved, with their reasons. File-existence requirements are not supported.
+
+Draft mutations save `phases[].checks` for approval cards; reads and GUI refreshes
+never invoke Git. Each Git call has five seconds within a shared ten-second
+check deadline; approval rechecks the current plan and Git ancestry. With the prerequisite check enabled,
+unresolved requirements refuse ordinary `approve-phase`. The card offers
+**Approve anyway**, sending `approve_anyway:true`; the override only bypasses
+prerequisites, preserving the other approval guards. An owner proposal card sends
+the owner's explicit override through `decide-proposal`; a lead cannot preselect
+it in the proposal. Existing approve requests and receipts remain compatible.
+
 ### When a phase starts
 
 One phase-start model (task 158; owner, 2026-11-07). A task of any approved
@@ -2428,6 +2869,30 @@ task and tells the lead (`context_compact_failed` with reason `cold`); at the
 crashed attempt is not given back to a paused team, a paused phase, a paused or
 draining member or a held task, by the tick or by the sweep after an update; it
 waits, unconfirmed, and goes back on the first tick after the pause ends.
+
+The owner's **After a task** policy per member and for the lead (`after_task`
+empty keeps context, or `compact`/`clear`; `after_task_on` `percent` or
+`tokens`; `after_task_at` the threshold) runs the native action only when the
+free member's session record passes it (`context.used` against `context.limit`
+for percent, `context.used` for tokens), before its next hand-out. A configured
+policy replaces the role's every-task action; below the threshold the member
+keeps its context. A session on another computer, or one whose usage is not
+known, keeps its context. The lead's policy runs only while the lead is free:
+the lead's own task still reaches it without a message (C1), but its context
+action waits for a free lead. A mode the agent cannot run, a mode without a
+criterion, and a threshold outside 1-100 percent or above 10000000 tokens are
+refused by field, in a plan and in the owner's `members_update`.
+
+### When Zerus starts a member
+
+A member's session starts with its first task hand-out, after a swap, or for
+the lead of a planning or draft team with its brief. It also starts when the
+member has work that would otherwise never reach it: a sub-lead with untold
+items in its inbox (its sub-brief and inbox steps follow once the session takes
+a message), and the member a waiting stage would go to when no other candidate
+is available. A paused, draining or removed member is not started this way, and
+neither is one whose start is already in flight or whose last start failed: a
+failed start waits for `hgs team relaunch`.
 
 ### Stages Zerus runs itself: a command, a land, a branch per task
 
@@ -3707,13 +4172,31 @@ sessions, even if the original attachment file is gone. Storage is a private
 directory next to the desktop's Qt settings file (`<settings-file>.drafts`),
 outside P2P configuration sync.
 
+Pasting an image in Terminal uses the same draft attachment path and opens
+Activity so you can review it and send your message. It never sends automatically
+or writes image data to the terminal. If the message field is not ready to accept
+attachments, Terminal shows an Open Activity action and asks you to paste again
+when it is ready. Text-only terminal pastes keep their normal behavior.
+
+In Terminal, Ctrl+Shift+C (⌘C on macOS) copies the selection exactly as shown,
+and Ctrl+Shift+V or Shift+Insert (⌘V) pastes; Ctrl+C and Ctrl+V stay the agent's
+keys. Right-click opens **Copy selection** and **Paste**. While the agent reads
+the mouse, a right-click goes to the agent; hold Shift for the menu.
+
 Use **Reference an existing file** (the link button beside Attach, or its Files
 menu in a narrow column) when the file
 already exists on the agent's computer, including very large files. Locally,
-choose a file or enter its absolute path. For a remote session, enter an absolute
-path (including Windows drive or UNC paths) or `~/` path on the named remote
-computer; a file on your desktop is not uploaded
-or made accessible to that computer. Zerus inserts an editable, quoted path into
+choose a file or enter its absolute path (or a `~/` path); Zerus checks that it
+names an existing file. If that check cannot answer within a few seconds, for
+example on an unresponsive network mount, the dialog says so and offers Retry.
+For a remote session, enter an absolute path (including Windows drive or UNC
+paths on a Windows computer) or `~/` path on the named remote computer. When
+that computer's hgs has `path-info`, Insert asks it whether a file is there
+(one metadata read, no content) and refuses a folder or a missing path; if it
+does not answer in time, the dialog offers Retry, and closing the dialog ends
+the call. On a computer with an older hgs, only the path's form is checked, as
+the dialog then says. A file on your desktop is not uploaded or made accessible
+to that computer. Zerus inserts an editable, quoted path into
 the draft and saves it as ordinary message text. Review it and press Send when
 ready. This action does not read, copy or Base64-encode the file and has no file
 size limit. It refers to the existing file, whose contents may change; the agent
@@ -3726,6 +4209,13 @@ session error makes the message field read-only and muted while preserving its
 draft, focus and selection; informational notices leave editing available. When
 the composer is hidden, the same diagnostic uses the existing workspace footer.
 Other operation notices retain their priority there.
+
+An uncertain draft holding a deferred-input identity shows a quiet **This text
+may already have been delivered** hint when its exact text appears in the loaded
+history of that run and conversation. The hint is derived from the existing
+bounded history window and disappears when it no longer matches, including on
+edit or Allow retry. It changes no draft, checkpoint or uncertainty state: text
+equality is never request-ID receipt evidence and never clears or retries input.
 
 Reads from the selected remote machine show a yellow loading circle beside the
 session name only after two seconds. It remains visible while an actual read is
@@ -3756,6 +4246,55 @@ tool permissions qualify. Ordinary questions, startup trust, incomplete panels a
 persistent permission changes remain manual. Existing native identity and
 delivery guards still apply.
 
+Below the switch, **Categories** choose which of those requests are approved
+automatically; a request in a category that is off waits for the person. The
+categories apply only while the switch is on and are stored per computer as
+`automaticApprovals/category/<id>`, beside the switch. Every category except
+Paid usage is on by default, and an enabled switch from before categories
+keeps that default. A request's category comes only from the tool name in its
+verified native question: Claude's permission hook `tool_name` (the card's
+header), OpenCode 2's permission `action` (the card's `permission_action`) and
+the DeepSeek tool in Zerus's own `Allow <tool>?` approval. Matching is exact;
+commands, paths and other text are never parsed to choose a category.
+
+| Category (ID) | Claude | OpenCode 2 | DeepSeek |
+|---|---|---|---|
+| Read files and search (`read`) | Read, Glob, Grep, LS, LSP, NotebookRead | read, glob, grep, list, lsp | read, read_image, glob, grep, terminal_list, terminal_read, job_list, job_output |
+| Edit files (`edit`) | Edit, Write, MultiEdit, NotebookEdit, EnterWorktree | edit | edit, write, apply_patch, str_replace_editor |
+| Shell commands (`shell`) | Bash, PowerShell, Monitor | shell, execute | bash, pwsh, terminal_open, terminal_send, terminal_signal, terminal_close, job_kill |
+| Web pages (`web`) | WebFetch | webfetch | web_fetch |
+| MCP tools (`mcp`) | `mcp__<server>__<tool>`, ListMcpResourcesTool, ReadMcpResourceTool | none | `mcp__<server>__<tool>` |
+| Subagents and skills (`agents`) | Agent, Task, Skill, Workflow | subagent, skill | skill, subagent, workflow, spawn_teammate, send_message, interrupt_agent, wait_agent |
+| Other tools (`other`) | any other tool | any other action | any other tool |
+| Paid usage (`paid`) | WebSearch | websearch | web_search |
+
+Shell commands are one category: Zerus does not tell safe commands from
+destructive ones. OpenCode names MCP tools `<server>_<tool>` without a prefix,
+so any underscored OpenCode action (such as `external_directory`) is Other, as
+is a card from an older CLI without `permission_action`. Other tools also
+covers a tool name that cannot be read; it may include paid tools. Paid usage
+always wins: a paid tool, OpenCode's image generation
+(`experimental_image_generate`, Other by name) and any request while the
+prompt cache is cold, which the agent reports or whose estimated lifetime has
+ended, also need Paid usage, whatever else they match. Answering after the
+cache expired processes the whole conversation again; an unknown cache state
+is not treated as cold. Usage-limit, extra-usage and credit prompts are not
+one-time tool permissions and are never answered automatically. The worker
+checks the categories when it selects a request, again just before the
+journal reservation, which records them, and again before delivery. Each check
+uses the current time with the cache state of the selecting inspection, so a
+warm cache that expires meanwhile needs Paid usage too. A category turned off
+or a cache expired before delivery finishes the reserved attempt as cancelled
+without sending anything. With `ZERUS_CLIENT_DESKTOP_SERVICE=1` the background service owns the
+categories with the switch, in its durable policy (all except Paid usage for
+an existing policy). The page then changes them only through the service's
+authenticated route: a category change names the complete set and the
+switch's committed value, so it never turns approvals on or off. Like turning
+the switch off, a change that approves nothing more (removing a category, or
+any change while approvals are off) is accepted while the background workers
+are unavailable; adding a category while approvals are on needs them ready.
+Each change is an exact, idempotent receipt and cancels approvals in flight.
+
 Zerus Next uses its live event-stream catalog for the same bounded discovery;
 it does not add a peer poller. Its opt-in is device-local and is never seeded
 from Qt or imported by migration. Confirm it separately in Next. Cached,
@@ -3764,7 +4303,8 @@ freshly inspected, and its exact identities are checked again before the
 existing native Answer lane runs under the journal's original request UUID.
 
 The same Settings page contains this computer's private approval journal, naming
-the computer, session, time, question, selected answer and confirmed outcome.
+the computer, session, time, question, approval categories, selected answer and
+confirmed outcome.
 Each attempt is durably reserved before native input. Failed, cancelled and
 unconfirmed attempts remain visible; an unconfirmed delivery is never retried
 automatically, including after a restart. If the journal cannot be saved,
@@ -4505,9 +5045,14 @@ The expanded session tree hides children whose latest reported turn is finished
 or failed by default. Session and Overview cards then show only the active count, omitting
 an empty indicator when no active or uncertain children remain.
 **Settings → Sessions → Show completed subagents** restores completed rows and
-active/total card counts. The **Plan & agents** inspector always shows the full
-reported roster and its active/total counts, including completed turns.
-Unknown states, paused agents and input/approval requests remain visible.
+active/total card counts. Unknown states, paused agents and input/approval
+requests remain visible. The **Plan & agents** inspector counts the full
+reported roster (active/total) but keeps only working agents, those waiting for
+an answer and the one open in Activity in view; the others fold behind
+**Finished: N** and unfold 50 at a time, so a session with many subagents
+renders and scrolls a bounded list (owner, 2026-11-08, T-ug5hxx). Each session
+starts folded. `client/scripts/inspector-scroll-smoke.html` measures that
+scroll in WebKitGTK under a private Xvfb.
 An open child's Activity and draft stay in place when its turn finishes. A child's
 draft keeps its row visible after returning to main Activity. Finished turns are
 not proof that the agent's task or process has ended.
@@ -4642,6 +5187,136 @@ Incomplete, unreadable, ambiguous or exhausted verification keeps Send unavailab
 
 <a id="projects"></a>
 
+### Keep cache warm
+
+A session can keep its agent's provider prompt cache warm for 1 to 7 hours or
+always, so the next message after a pause reads the cached conversation instead
+of rebuilding it. It is off by default and lives with the session on the
+computer that runs the agent, so every desktop and phone sees the same setting.
+
+While it is on, the [recovery worker](#automatic-recovery) on that computer
+sends the idle agent one short message, exactly
+`[Zerus keep-warm] Reply with exactly OK and do nothing else.`, at 80% of the
+cache lifetime after the last turn ended: 48 minutes for a 1-hour cache and
+24 minutes for a 30-minute cache. The margin keeps pings ahead of Claude Code's
+own idle compaction at 90% of the TTL. A ping only extends a warm cache: when a
+window was missed (the computer slept, the agent stayed busy until expiry) or
+the cache is within 30 seconds of its estimated expiry, nothing is sent and
+keep-warm resumes after the next real turn. The cache clock belongs to the
+current conversation: after **Clear** the setting stays on, and the first ping
+waits for a finished turn of the new conversation. The deadline is on the agent
+computer's clock; at the deadline the worker turns the setting off. A rename,
+including a legacy-label rename, keeps the setting.
+
+| Agent | Lifetime used | Offered |
+|---|---|---|
+| Claude Code | the TTL its last request wrote in native usage: 1 hour on a subscription within its usage, 5 minutes on an API key or usage credits | 1 hour only |
+| Codex | OpenAI's 30-minute default for GPT-5.6 and later; Codex sends no TTL | GPT-5.6 and later |
+| Kimi Code | Kimi Code's own `estimated_cache_duration` (60 minutes for `kimi-for-coding`, 30 minutes for `k3` models), read from its home | models with at least 15 minutes |
+| DeepSeek, OpenCode | DeepSeek's disk cache lasts hours without pings; others report none | no |
+
+Shorter caches are not offered: a 5-minute cache would need about 15 pings an
+hour, each a cached read of the whole context, costing about as much as
+rebuilding the cache once. Claude Code's `CLAUDE_CODE_PROMPT_CACHE_TTL=1h` or
+`promptCacheTtl` setting requests the 1-hour cache on API-key accounts at a 2x
+write price. Each ping uses the account's usage: a cached read of the whole
+context plus about 40 new tokens, which stay in the conversation.
+
+A ping goes only to the exact verified, live agent process with the expected
+run and conversation when it is settled: no turn, tool or child is running, no
+live background or scheduled job, no automatic recovery episode, no unconfirmed
+or queued input, no pending launch message, question, approval, trust, resume,
+usage-limit or cache-expiry choice, no pending model or effort setting, an
+empty recognized composer, no terminal input in the last two minutes (a terminal
+that cannot report input times must have no attached client; unknown activity
+never admits a ping), and the session is not paused, archived or terminated.
+The last check before the first typed byte repeats these rules and the
+30-second cache margin, so a slow stage never types into a cold cache. It uses the
+guarded send path with its own origin and request ID, bound to the setting
+revision it was decided for (a change in between cancels it): a refusal before any input
+waits for the next round, and an unknown delivery is never sent again; keep-warm
+then waits for the next real turn. Rounds run every 15 seconds and never
+overlap, so two desktops or a manual `hgs recovery tick` cannot send two pings
+for one window.
+
+A ping is not the person's message. Its prompt is journaled with
+`origin: "keep_warm"` and every event of its turn with
+`turn_origin: "keep_warm"`. Its Stop is never the session's reply, so it adds no
+unread badge, notification or read-mark change; listings and search keep the
+previous prompt, last message and last event time. A message the person sends
+or queues while a ping is being typed or running makes that turn theirs; the
+ping's own prompt arriving later is then shown as ordinary text. A ping turn that
+fails, for example on a usage limit, never starts automatic recovery, even when
+an earlier finished recovery episode is kept: keep-warm stops
+until the next real turn, and the provider failure stays visible as usual.
+
+In the desktop app, **Details** shows **Keep cache warm** in the **Session**
+card of every live, paused or stopped session. Its switch (accessible name "Keep
+cache warm") turns it on for the chosen duration; while it is on, a slider picks
+1 to 7 hours or Always (its last position, shown as an infinity sign in a
+fixed-width value so the slider never moves; its accessible value is "Always")
+and the row shows the remaining time, such as **2 h 14 m left**, and what
+keep-warm is doing: the next ping, **Warming the cache now**, a cold cache or
+the host's reason. Its tooltip states the cache lifetime and its source, the
+ping interval, the pings per hour and that each ping is a cached read of the
+whole context. A change shows at once and the controls stay enabled and in place
+while the computer confirms it; a choice made meanwhile is sent next with the
+confirmed revision (the newest one wins), and a refusal returns the row to the
+confirmed state. The slider rounds the time left up to whole hours but ignores
+the first five minutes past an hour, so a fresh choice keeps its position
+although the host's clock may run slightly ahead. When the agent or account is
+not eligible the switch is disabled and the host's reason is shown under it; a
+computer whose `hgs` lacks `session-keep-warm-v1` shows an update hint. While it
+is on, the session header also shows it on its chip row beside the model: a bolt
+with the time left, such as **2 h 14 m**, or an infinity sign for Always, at the
+chip row's height so the header never grows. Its tooltip gives the same state
+and lines as the Details row, and a click opens **Details** at the control. It
+reads only the listing, the followed session's Details summary and a change
+confirmed in this window. While a ping runs, the session reads **Ready** with
+**Warming cache** and counts in neither Active nor Working. Activity folds the
+ping, its reply and its Stop into one dim **Cache kept warm** row that expands
+to show both.
+
+Android follows the same status rule: while a ping runs the session reads
+**Warming cache**, is neither Working nor Active, and holds no reply in progress,
+so an earlier unread reply keeps its badge. The shared session-filter contract
+(`mobile/android/app/src/test/resources/session-filter-contract.json`) pins this
+for desktop core, the desktop frontend and Android. The phone's session Details
+show **Keep cache warm** read only (Off, On always, or the remaining time) and
+one status line: the next ping, **Warming the cache now**, a cold cache or the
+computer's reason, including why an agent is not eligible. Changing the setting
+from the phone needs a relay operation and is not available yet.
+
+```sh
+hgs [@host] keep-warm SESSION --json
+```
+
+The request on standard input carries `expected_run_id`,
+`expected_conversation_id`, `expected_revision`, `enabled` and, when enabling,
+`hours` (1 to 7) or `always: true`. A stale identity, an older revision
+(`conflict`), more than 64 enabled sessions on one computer (`capacity`) or an
+ineligible agent (`unsupported`, with `reason`) are refused. Enabling starts the
+recovery worker as a policy change does. `hgs --help` lists
+`session-keep-warm-v1`; an older peer refuses the command.
+
+Listing rows carry `keep_warm: {enabled, until, revision, state, next_at,
+reason, turn_active}`; `until` is null for Always and `state` is `off`,
+`waiting`, `warming`, `cold`, `uncertain`, `stopped`, `paused` or
+`unsupported`. `inspect` and the command response add `supported`,
+`reason_code`, `ttl_seconds`, `ttl_source` (`native_usage`, `provider_default`,
+`kimi_config`, `kimi_table`), `interval_seconds` and `cache_expires_at`.
+The setting is `keep-warm.json` in the state directory, keyed only by session
+IDs or label keys; the worker's state of each session is under
+`recovery/keep-warm/`. Both are read as bounded regular files: a special file is
+refused without blocking, and a worker state that is unreadable or not one
+the worker writes holds keep-warm as uncertain until the next real turn. A
+legacy-label rename carries the worker state before the setting, stops when it
+cannot tell whether a state exists (permission denied is not absence), and
+repairs an interrupted move when the rename resumes. A session record that exists
+but cannot be read skips the round; only a session that is gone turns the
+setting off, and turning it off keeps an uncertain-delivery fence. See the
+[design note](superpowers/specs/2026-11-07-keep-cache-warm-design.md).
+
 ## Projects and P2P synchronization
 
 A project has a stable ID, name, color, folders on multiple computers and session
@@ -4660,7 +5335,7 @@ assignment, so another desktop can launch the session into its chosen project
 without racing an automatic Inbox assignment. Launching or explicitly moving a
 session publishes its project choice, including a deliberate move to Inbox.
 Update the desktops that observe sessions to receive this behavior; existing
-catalog assignments and unresolved conflicts remain available for review.
+catalog assignments and unresolved conflicts remain available for review. When ID grouping is available, it uses a separate bounded causal membership record for each computer and session ID. Explicit unassignment and conflicting project choices are records, not permission to fall back to a shared label. Distinct concurrent project choices stay reviewable; a later explicit choice consumes the observed heads. Only peers advertising `session_id_memberships_v1` exchange these records. Older builds preserve the separate file and keep their existing name/twin protocol, but cannot change ID grouping.
 
 Folder entries contain a machine, path and optional label. Browse works for local
 and remote folders, including ordinary non-Git directories. The desktop folder
@@ -4686,6 +5361,18 @@ It creates one directory and returns the canonical path plus the exact request
 identity as JSON. It never creates missing parents or repeats an uncertain
 operation. Local creation rejects `--dry-run`; remote dry runs only print the
 transport command.
+
+`hgs [@host] path-info --path <path>` answers whether a path exists on that
+computer, with one metadata read: no content is read and nothing changes. The
+path is absolute (a Windows drive or UNC path on Windows) or starts with `~/`
+for the home folder. The reply is one line of JSON, versioned and closed:
+`{"schema": 1, "exists": true, "kind": "file", "size": 1234}`, where `kind` is
+`file`, `directory` or `other` and `size` is given for a file only. A path that
+does not exist reads `exists: false`; one this account cannot inspect reads
+`exists: null`, with `kind` and `size` null. A relative path or one with control
+characters exits 1; a malformed call exits 2. A peer call runs only when the
+peer's `hgs --help` names the command, as an older hgs would read an unknown
+command as a session launch; the path's `~` reaches the peer's hgs as written.
 
 The desktop folder
 list starts in alphabetical name order, ignoring case; column headings change
@@ -4744,6 +5431,14 @@ clients](#json-and-external-clients)), and stays when the launch command
 reports afterwards; a hidden launch status ends silently but still shows a
 later launch error.
 Existing names and unrelated sessions are never repurposed.
+
+On Unix, agent launch and resume use explicit POSIX or fish argument syntax for
+known login shells. Other configured shell types use `/bin/sh -lc`, with the
+inherited environment and POSIX login profile; their own rc files are not loaded
+or interpreted as another language. tmux executes the argument vector directly,
+including on computers whose default shell is not POSIX. Account selection and
+agent hints are reapplied after shell startup.
+
 **Open terminal window** is off by default and remembered separately from the tray
 open mode; DeepSeek uses its embedded native interface.
 
@@ -4788,10 +5483,55 @@ operation a twin mirrors is still the selected label membership, so any later
 move by label, from any hgs or desktop, hides it. `swarm get` also reports
 `membership_by_id {ready, missing}`. It is ready when every machine of the
 catalog is this computer or a peer whose last sync listed the kind; any other
-machine fails closed. A desktop reads the ID form only when it is ready. The
-label form is still written and read everywhere else. `swarm export --kinds`
+machine fails closed. Desktops and the Rust mobile connector read the ID form
+only when it is ready. The connector keeps sessions with the same label separate
+by ID; a missing or invalid session ID never falls back to that label's project.
+With a legacy catalog, only unique labels receive label-based membership; twins
+stay unassigned rather than sharing a guessed project. The label form is still
+written for compatibility. `swarm export --kinds`
 takes the kinds its requester parses on stdin; without them it exports only
 the kinds hgs v0.47.0 parses.
+
+Primary project placement is stored separately in the bounded causal
+`swarm/session-id-memberships.json`, exchanged only with peers advertising
+`session_id_memberships_v1`. It preserves concurrent concrete placements for
+review; a concrete project beats concurrent default placement, and a later
+explicit Inbox/unassignment wins. Valid twins are migrated under the catalog
+lock without replacing an existing ID record. An exact primary null/conflict
+means unassigned; only an absent ID record allows name membership fallback.
+Unreadable primary data stays unavailable and is not repaired automatically.
+Older builds preserve this file but cannot edit its ID grouping.
+
+The `session-labels-v1` transition gate requires fresh positives from this
+computer, every configured peer and every catalog machine. An unaddressed,
+unknown or unreachable member keeps it closed. `hgs swarm session-labels-gate
+--json` reads the bounded ten-minute cache without starting a worker or making
+connections. Each hello retires the previous observation; ordinary hello never
+waits for a connector, and the existing sync worker performs that bounded query
+separately. The answering CLI must report both ID membership readiness and its
+complete ID routing capability; the earlier observation-only build cannot open
+the gate. Configuration, route, membership or connector changes invalidate the
+answer. The cache grants no native authority and never weakens exact selector,
+original receipt or no-replay checks.
+
+While the gate is open, `hgs reference`, `hgs self` and sender envelopes include
+the stored canonical session ID. Older parsers continue to receive the earlier
+reference form while it is closed. This capability leaf does not yet enable
+new duplicate-label writers.
+
+The session-label transition gate's supported connector inventory consists of
+the maintained installer's connector using the canonical mobile configuration
+(`core::mobile::config_path()`). On Linux its user unit is
+`zerus-mobile-connector.service`; other platforms include an equivalent only
+where their installer creates one. An existing configuration or installer unit
+requires a fresh positive capability reply from the actual running connector,
+bound to its generation, configuration and machine. An installed executable's
+help cannot substitute for that reply; an old or absent responder keeps the gate
+closed. With neither the canonical configuration nor an installer unit, the node
+has no supported connector. Hand-started connectors with custom configuration
+paths and legacy services outside the installer must be stopped or upgraded
+before labels repeat. They are not inferred from process names. Deploying a live
+connector remains an explicit owner-approved operation.
 
 On a computer without a Qt settings store, the first `hgs swarm get` or initial
 `organization` watch subscription may initialize an empty catalog. It derives
@@ -5026,12 +5766,39 @@ worktree helpers offer **Stop after preparation**. Files and branches are always
 kept. Once launch dispatch is reserved, check its result; use normal confirmed
 session termination after an actual session appears.
 
-**Check result** observes the original clone/worktree request or refreshes session
-evidence. An unknown outcome never permits another creation command. After a
+When a worktree admission is refused, the card shows that refusal and its
+reason rather than treating it as a transport failure. A fresh attempt may
+reuse the creation's scheduling slot only after its exact predecessor failed
+without effects and all original resources drained; the old receipt remains
+available under its original request ID.
+
+For an older missing worktree request, **Stop creating** can durably fence
+further starts while leaving the earlier outcome unknown. The card says both
+facts, retains the original request and destination for review, and never offers
+**Continue setup** for that UUID. **Recreate…** opens separately reviewed choices
+for a new creation and new request; **Hide status** dismisses the card without
+erasing its retained result. Missing, replaced or unverifiable receipt storage
+still refuses a fence. A fence alone never proves that an earlier worker,
+checkout or native resource has settled.
+
+**Check result** observes the original clone/worktree request, reads the original
+service launch receipt, or refreshes session evidence. An unknown outcome never
+permits another creation command. After a
 restart, unfinished cards require explicit **Continue setup**; recovered
 preparation is revalidated before startup. A definitely ended startup can retry
 only startup with a new launch identity. **Edit choices** opens a reviewed new
 request while preserving the original attempt and resources.
+
+A matching service receipt with a fully drained, unsuccessful launch-command
+exit shows **Creation failed** and its reason. Its dispatched launch identity
+is kept: **Continue setup** never repeats it. **Edit choices** opens a separate,
+reviewed creation with a new identity. Missing, unreadable, mismatched or Unknown
+receipts stay **Creation result unknown**, with **Check result** and **Hide status**.
+Failure and unknown-result notices close on the normal toast timer; their full
+details remain on the creation card. A failure first read after opening the
+window stays quiet only if its last recorded state change predates this window's
+start, even when the creation itself is much older. Older cards without that
+timestamp use their creation time.
 
 Only the exact native launch identity, computer, name and agent replace a card
 with a real session. Command success alone remains **Confirming session…**; a
@@ -5287,6 +6054,61 @@ known use, sessions and file protections still refuse removal. Generic backgroun
 maintenance remains conservative; retained results never reconstruct this
 original confirmation or retry an unknown removal.
 
+For a local Linux or macOS native confirmation, a selected CLI that supports
+`worktree-program-stop-v1` and `worktree-program-cleanup-v1` can also stop the
+programs proven to use that generated checkout. Before **Stop and remove folder**
+is confirmed, the dialog shows a count and warning for other programs, with an
+expandable list, including editors and terminals the person opened there. Only
+the selected session's own agent and wrapper can be omitted from this initial
+display, when their exact record binding, native birth identities and direct
+parent relationship remain verified across discovery; uncertain rows stay visible.
+This presentation never filters the complete native execution manifest. The
+separate Force confirmation always shows its complete freshly checked survivor
+list expanded. Only the original process identities are eligible: immediately before each signal, Zerus checks
+their native birth/pin and current cwd or open-file membership in the same held
+checkout. Newly discovered or replaced programs require fresh review. Programs
+needed to verify and settle the operation, and their protected ancestors, are
+never signalled. Pause, native Stop, manual cleanup and background maintenance
+retain their existing scope.
+
+These native helpers resolve the existing configured session-state root once
+at command configuration load, including aliases selected through `HGS_STATE_DIR`,
+`XDG_STATE_HOME`, or a symlinked home or `~/.local`. All phase reads use that
+same physical root. The configuration identity is unchanged; registrations and
+their original argv keep their existing spelling. Journal descendants and the
+checkout walk still refuse symlinks. A missing, unreadable or non-directory
+state root is refused with its configured path; inspection does not create it
+or choose a fallback profile.
+
+The original Terminate UUID and exact successful archive receipt precede a
+separate, durably reserved program-stop UUID. Normal stop sends TERM with a
+15-second phase bound and never escalates automatically. If process metadata
+is temporarily unavailable after signalling, read-only exit observation stays
+within that original phase; only a later exact native pin observation establishes
+exit. Uncertainty at the bound remains Unknown. If verified original programs
+survive, **Force stop…** opens a new native confirmation listing the
+currently surviving originals, with a new UUID. It becomes available only after
+the previous mutating helper, descendants, pipes and loans physically settle.
+Missing or uncertain outcomes cannot create a Force offer. The original selected
+CLI, configuration, environment, Actions claim and checkout/ancestor handles
+remain held across both confirmations, within one original five-minute custody
+bound. Neither a deadline nor a returned status proves drain.
+
+After a known Complete stop and actual mutation retirement, that same live
+Remove continuation may open one final cleanup phase, with its own UUID. It
+reuses the guarded cleanup engine: fresh file, ownership, session and known-use
+checks still apply; the branch and archive restore identity stay. Only the
+original read-only holder's one proven root descriptor is omitted from process
+use accounting. Another descriptor, cwd use or any other process still counts.
+The holder remains charged independently; it has no stop or deletion verb.
+Cleanup returns Removed, Kept or Unknown once. A lost or partial deletion stays
+Unknown, with original-ID status lookup only; a restart, reconnect or a new UUID
+cannot reconstruct the continuation or repeat it. The new fixed stdio helper
+commands accept only their current canonical native parent's original-child
+proof, never renderer, manual or background requests. If the selected route
+cannot support this pipeline, removal remains available through the existing
+separately guarded folder review rather than an alternate CLI selection.
+
 A checkout with uncommitted or untracked files can also have such access
 denials. Its review then offers both consents (`discardable_with_process_consent`
 beside the discard and process fingerprints, while `discardable` stays false for
@@ -5466,9 +6288,30 @@ of whether automatic provider-error recovery is enabled or the GUI is open. It
 imports at most 64 old ownership receipts and checks at most one queued worktree
 per 30-second round. An indexed private queue schedules retained worktrees for a
 later hourly check; it does not rescan project disks or journals. Archive metadata
-checks stream at most 5000 entries and 32 MiB within their deadline; incomplete
-coverage keeps automatic cleanup from removing the folder. Old removed receipts
-do not repopulate the queue once their Git metadata is gone.
+checks verify compact reference metadata against the complete native archive-file
+roster and exact file versions, at most 5000 entries and 32 MiB within their
+deadline. Ordinary archive catalog migration/reconciliation builds this metadata;
+archive writes, rewrites and removals maintain it. Its ordinary reconciliation
+stamp is separate from the search stamp, so an older CLI's search refresh cannot
+hide pending reference maintenance. Warm pages still use only these stamps.
+Missing, stale or corrupt coverage keeps the folder; cleanup never rebuilds it
+or interprets an omitted row as no reference.
+Before deletion, an indexed checkout query reads the relevant authoritative
+archive bodies within the same bounds and durably prepares Restore for every
+compatible reference, including older archives without an ownership field.
+Unrelated archive bodies and conversation journals do not consume this check's
+byte budget. Reference coverage is independent of search/label filtering, and an
+interrupted initial migration cannot publish complete coverage. Branch, head and
+ownership checks remain independent. Old removed receipts do not repopulate the
+queue once their Git metadata is gone.
+
+Reference reads bind a regular native catalog object before SQLite runs; its
+private read-only reader never reopens mutable paths or accesses SQLite sidecars.
+Unexpected sidecars or replacement refuse coverage within the original budget.
+Archive write hooks publish bounded per-ID native metadata updates without
+opening SQLite. Reads verify those updates against the current archive objects;
+ordinary catalog reconciliation absorbs them. Missing or corrupt updates never
+substitute for a stale base row.
 
 All automatic rules use fresh native checks under the repository/session locks.
 They preserve branches, changed/untracked files and **all ignored local data**,
@@ -5514,9 +6357,34 @@ Desktop **Terminate** also offers **Remove the unused worktree after stopping**,
 including for a selection of sessions. The choice is remembered on this desktop.
 The choice is bound to the checkout ownership recorded at that session's launch.
 A replacement checkout at the same path or branch is kept for manual review;
-older sessions without a launch ownership record also require review. Fresh
+older sessions without a launch ownership record also require review.
+For a retained **Not created by Zerus** linked worktree, **Remove anyway…**
+opens a separate explicit manual confirmation. It shows the native-selected path,
+computer, kept branch, size, changed/untracked counts and local data, and requires
+its matching discard consents. Fresh session and program checks still apply;
+known occupants must stop first (use the existing Force flow when offered).
+Unreadable program paths retain the existing five-minute manual acceptance.
+This action never removes the primary checkout or an ordinary folder, never
+makes an unowned folder eligible for automatic cleanup, and never retries an
+unknown removal. The branch and archive identities remain; recreating an unowned
+working folder for Restore remains an explicit manual step. Fresh
 removal fingerprints include the ownership nonce, so replacing a checkout after
 review cannot inherit its removal consent.
+
+On Linux and macOS, `worktrees programs --json` provides read-only native
+discovery for an original live session and its verified launch-owned checkout.
+Its closed stdin object contains `capture`; the bounded reply binds the exact
+capture, configuration, boot and checkout directory object to the complete list
+of observed program PIDs and native birth identities. This is data, never a stop
+permit. The command sends no signals and changes no cleanup or Force authority.
+It refuses an incomplete or changing census, changed ownership, ambiguous hard
+links, nested mounts, or a custodian using the checkout. The discovery budget is
+five seconds, 64 programs, 65,536 filesystem objects and 8 MiB of retained relative
+names; the wire reply is capped at 64 KiB and expires after five minutes. Actual
+permission denials are omitted only from this explicit-Remove discovery; a
+readable cwd or open file still establishes membership. The existing generic
+worktree review and background cleanup keep their conservative process policy.
+
 After the original confirmation closes, cleanup runs in the background only
 following exact successful termination. A compact workspace notice shows progress,
 then **Working folder removed**, **Working folder kept** with a short reason, or
@@ -5527,7 +6395,19 @@ background batches run sequentially. Closing the review does not cancel an
 accepted removal. The notice remains visible through the confirmed action and
 the actual folder-checking/removal phases. Result notices use the normal notice
 timeout; dismissing one does not discard the retained result. The status bar's
-working-folder entry still opens its review.
+working-folder entry still opens its review. While a folder is being checked,
+removed or restored, the status bar also shows **Background tasks** with a count.
+Its list names each folder and its current state, and offers the same review.
+It adds no cancel or retry, and goes away only when the work has really ended.
+A kept or unknown result stays on the working-folder entry while other folders run.
+Review groups results for the same folder and lists their original sessions.
+Blockers name the current sessions (with **Open session**) and programs with PIDs;
+full reasons remain readable. **Clear settled results** clears settled kept
+folders, including folders retained for another session or external program.
+**Dismiss** removes one folder from this review; unknown results must be dismissed
+individually and retain their native no-replay fence. Busy folders, live Force
+offers and unfinished program stops cannot be cleared or dismissed. Closing the
+review only closes it; it never clears results or releases an action.
 
 The original folder is checked on its owning computer. A verified Zerus-created,
 clean, integrated checkout can be removed with tool-declared generated caches
@@ -5573,14 +6453,17 @@ hgs task add --project orchard [--backlog] [--target codex/api|any [--host ALIAS
 hgs task add --project orchard --title "Task title" --request-id UUID < description.txt
 hgs task rename orchard/T-a1b2c3 < title.txt
 hgs task list --project orchard [--stage todo]
-hgs task list --project orchard --stage todo --limit 50 [--after CURSOR|--before CURSOR] [--if-revision REVISION]
+hgs task list --project orchard --stage todo --limit 50 [--after CURSOR|--before CURSOR] [--if-revision REVISION] [--session ID [--host ALIAS]]
 hgs task get orchard/T-a1b2c3
 hgs task get TASK_UUID --project orchard --history-limit 80 [--history-before CURSOR] [--attachments metadata]
 hgs task attachment TASK_UUID --project orchard --file 1 [--entry ENTRY_ID]
 hgs task send orchard/T-a1b2c3 [--session codex/api [--host ALIAS]]
 hgs task handoff orchard/T-a1b2c3 --session codex/worker [--host ALIAS]
 hgs task start orchard/T-a1b2c3
+hgs task begin-attempt orchard/T-a1b2c3 --attempt ORIGINAL_UUID [--json]
+hgs task control plan|execute|status --json
 hgs task report orchard/T-a1b2c3 [--progress|--ready] [--considered REV] < summary.txt
+hgs task report-attempt orchard/T-a1b2c3 --attempt 00000000-0000-4000-8000-000000000001 [--progress|--ready] [--considered REV] < summary.txt
 hgs task cancel orchard/T-a1b2c3 [--reason "Wrong approach"]
 hgs task stage orchard/T-a1b2c3 backlog|todo|done
 hgs task move orchard/T-a1b2c3 --top|--before REF|--after REF
@@ -5592,6 +6475,34 @@ hgs task worker orchard/T-a1b2c3 --subagent CHILD_ID --request-id SENT_REQUEST_I
 hgs task settings --project orchard [--set < settings.json]
 hgs task cutover --project orchard [--hold on|off [--confirm]]
 ```
+
+`begin-attempt` and `task control plan|execute|status` are currently inactive
+source interfaces (`zerus-cg5h.4.7`). Valid requests return exit 1,
+`code: task_controls_inactive` and `attempted: false`, before opening task or
+desktop stores. The `task-control-v1` help marker is absent while the gate is
+off. Existing prompts, send/handoff/reopen/direct-start/report behavior and
+plain `start` are unchanged. Native wiring and queue activation are later
+reviewed steps; a new CLI on disk does not qualify a resident adapter.
+
+The control interface takes strict schema-1 JSON on stdin, at most 16 KiB. Plan
+names the original task/attempt or, for Stop release, the exact executor and
+explicitly observed Stop IDs. Execute accepts the original plan, with exact
+task version, slot revision, caller scope, configuration/store/image and loaded
+adapter guards; these labels are data, not authority. The owning runtime must
+prove them again before any effect. Status names an original request UUID or
+uses an executor sequence cursor with a limit of 1–128. Unknown fields,
+duplicate fields/options, noncanonical IDs and oversized requests refuse.
+
+After activation, a fresh managed send/handoff/reopen supplies exactly one
+pinned `begin-attempt REF --attempt UUID` acknowledgement, replacing plain
+start. Feedback carries the existing report origin and requests no second
+acknowledgement. A semantic begin requires the immutable attempt to be current,
+delivered and owned by the exact executor; it cannot acknowledge a newer
+generation, clear a Pause or bind a native turn by itself. Legacy and direct
+start policy, structured report authority and considered revisions stay intact.
+The existing desktop Start plan is unchanged in this wire leaf; its final
+managed/legacy acknowledgement mode and startup-run reservation belong to the
+native-wiring check-in before activation.
 
 Plain `task get` retains the complete journal for existing clients. The optional
 `--history-limit` (1–80) returns only one chronological history page, the canonical
@@ -5657,8 +6568,45 @@ replica did nothing before it. A task can also take a floor before its first
 attempt: a cutover record that keeps schema 7 the same way, so a reader that
 does not know attempts or the floor refuses to write it, while every path that would start
 it without an attempt refuses it as cutting over. A floor this version cannot
-read still counts. This version reads attempts and guards reports against the
-current execution; recording attempts and floors comes later.
+read still counts. This version reads attempts, guards reports against the
+current execution, and records attempts and floors through the attempt writer
+(below).
+
+The attempt writer (zerus-cg5h.4 S2b.2 C3 activation) is how every native task
+input now begins: the desktop's Start (`start-plan`/`start-deliver`),
+`task send`, `task handoff` and a reopen (`task message --mode reopen`). It
+runs on the computer whose session executes the task, which holds the input's
+receipts, within one 15-second budget counted from the command's entry:
+1. The request is frozen first: ONE request ID and the exact native request.
+2. With no lock held, the fence admits it: the task's certificate with no
+   network; otherwise, for a task with no floor yet, its first floor, which
+   is written only when the project's bootstrap gate is positively satisfied
+   (every eligible direct member recorded current, with a complete exchange,
+   the phase known, and the hold off); then a fresh proof.
+3. In the fence's final admission, and only there, the frozen request is
+   checked again against the task as admitted (its prompt, attachments,
+   queued messages, requirement, target, executor and settings): any change
+   refuses it, and nothing is reserved. Otherwise its attempt is reserved
+   under that ID and saved.
+4. Only then, with every lock released, the input is submitted once. Its own
+   submitted receipt settles the attempt, and the settlement never overwrites
+   a later stage or assignment.
+
+The outcome is explicit: `submitted`; `refused` (the request changed, or the
+input was refused before anything was offered to the terminal, which settles
+the attempt as not admitted; a new action with a new ID may send it);
+`cutting_over` (the fence, the hold or unknown bootstrap evidence; nothing was
+reserved or sent); or `uncertain` (the input may have arrived; it is never sent
+again). Repeating a request ID, a restart or `--recover-only` only reads that
+request's receipt and never submits, even when no receipt exists. Only a task
+positively without floor or attempt, whose bootstrap gate is positively open
+(a member not yet known current, or the person's hold), keeps the legacy route,
+checked again there; a task that may hold a floor or attempt is never sent
+that way. A reopen of a managed task keeps the person's text as a discussion
+note bound to its attempt's ID, saved together with that attempt; the note is
+not queued feedback and is never delivered by itself, and only the receipt
+moves the task back to In progress. Feedback to a task In progress
+(`--mode send`) stays an ordinary message.
 
 Plain `task list` still returns every task for existing clients. With `--stage`
 and `--limit` (1–200) it returns one page of that stage in the same order and
@@ -5674,14 +6622,32 @@ page, and only an empty stage has no rows. `--if-revision` with the last
 `revision` answers `{"unchanged": true, "revision": ...}` without rows when
 nothing changed, after checking that page's rows against their files.
 
+`--session ID` (`launch_id:...` or `run_id:...`, with `--host` for a session on
+another computer) pages one session's view of the stage: the tasks its
+identity owns, the session of a task in progress, in review or done, or the
+target of a queued one (a sub-agent or new-session target counts for its
+parent), plus To do and Backlog tasks for any session. A session's name never
+matches: two sessions with the same name keep separate views. Rows, order,
+cursors and `revision` are those of the unfiltered stage; `position`, `total`
+and `counts` count the view, `damaged` stays the project's, and the reply adds
+`session` (`host`, `session_id`). A cursor names a row, so tasks added to the
+view before it never shift the page after it. The view reads two bounded
+ranges of the index (the owner's rows and the unassigned rows), never every
+row of the stage.
+
 Pages come from a local index of task headers in the project's replica folder
-(`task-index-v1.sqlite3`): a disposable cache, never replicated, rebuilt
+(`task-index-v2.sqlite3`): a disposable cache, never replicated, rebuilt
 silently from the task documents when it is missing, damaged or of another
-version, and never a reason for a read to fail. Each save notes the task in the
+version, and never a reason for a read to fail. An older hgs that shares the
+state folder keeps its own `task-index-v1.sqlite3`, which this one never
+opens, migrates or removes, so the two never rebuild each other's index. Each save notes the task in the
 project's change journal (`changes`, a bounded hint that is only ever replaced,
 never written through), so a read decodes only changed tasks. Every task
 file's stamp (length, modification time, inode) is also checked at least every
-30 seconds for writers without the journal. A row is suspect when it was read
+30 seconds for writers without the journal: one listing of the task folder
+gives the files to stamp (a file it does not list is missing, and a file
+written after it is found by the next check), and only a task whose stamps
+changed is read again. A row is suspect when it was read
 from files modified within the last 2 seconds, before the journal last became
 unknown, more than 10 minutes ago, or at a time after now (a clock set back).
 A page reads its suspect rows from their documents again before it returns
@@ -5689,35 +6655,74 @@ them, and each read of the index reads up to 256 others again, those read
 longest ago first, so every row, and with it every stage count, is read again
 within 10 minutes plus ceil(tasks / 256) reads. The index holds at most 256
 MiB whatever its page size; a larger one is built again. Short-ID lookups,
-list places and the agent start limit use the same index.
+list places and the agent start limit use the same index. Adding, moving and
+staging a task place it from the index too, without reading every task, while
+the index is certified current (no row change by another build pending under
+the repair epoch) and holds no damaged task: every task file's stamp is
+checked first, as the periodic full check does (so a task a writer without the
+journal added or moved is read again), and the two neighbouring tasks are read
+from their documents to confirm their stage and rank. Otherwise, or when the stage needs its ranks
+renumbered, the whole write reads the documents as before.
 
 Send pastes the task prompt into its session through the same input path as
 `hgs send`; the task becomes In progress, and Zerus does not
-check that the agent received it. The prompt asks the agent to report with
-`hgs task report`, which moves the task to In review. Cancel moves a task In
+check that the agent received it. A managed dispatch pins its exact
+`hgs task report-attempt REF --attempt UUID` command before the native request
+is hashed. Its result can move that execution to In review; an explicitly
+legacy execution uses ordinary `hgs task report`. Cancel moves a task In
 progress to In review and pastes the cancel message without stopping the turn;
 its reason is kept as a comment and never pasted. A task this computer already
 shows In progress is not sent again.
 
-`hgs task report` always adds the report to the history. A result (the default,
-or `--ready`) moves a task In progress to In review, with the report as its
-summary, only when the current execution's executor (`execution.current.executor`)
-or the person reports it; the person's result is an explicit action. A result
-from any other session, such as the previous executor after a handoff, is kept
-with `stale` naming why: `other_executor`, or `conflict` while two executions
-claim the task. `other_attempt` and `finished` are reserved for recorded
-attempts. `--progress` records an update as a `progress` entry and never moves
-the task; from outside the current execution it carries `stale` too.
-`--considered REV` records the requirement revision (from 1) that the report
-considered; nothing uses it yet. Outside In progress a report only adds to the
-history, as before, and a report by the task's pinned agent while it is To do or
-Backlog still starts it first. With `--json` the reply adds `moved_to_review`,
-`report` (`ready` or `progress`) and, for a stale report, `stale`. The desktop
-inspector labels progress entries and marks stale reports. The guard decides
-from this computer's copy of the task. `stale`, `considered` and the `progress`
-kind are additions to task schema 5 that older readers ignore: an older hgs
-elsewhere can still move a task on a stale report until it updates, and older
-views show a progress entry as its text. Run inside a session (`HGS_SESSION` and
+Both report commands add the report to history. For a managed execution an
+agent uses `hgs task report-attempt REF --attempt UUID`, with the UUID supplied
+by its original dispatch or start acknowledgement. The named immutable attempt
+must be current, its generation and verified executor must match, and the
+existing conflict, phase and unknown-delivery guards still apply. A result
+(default or `--ready`) can then move In progress to In review; `--progress`
+records progress without moving the task. The report retains its declared
+origin as optional `reported_attempt` log metadata. A stale origin records
+`stale: "other_attempt"` and creates no Ready/Progress fact for the current
+attempt. A different executor, a conflicting execution and unconfirmed delivery
+retain their existing guards. Explicit human reports retain their existing
+rules. `--considered REV` still only records the positive requirement revision;
+this change does not gate actionable-clarification acknowledgement.
+
+A plain report by a managed agent has no origin proof. It succeeds as a history
+write (exit 0) with `history_saved: true`, `outcome: "not_applied"` and
+`moved_to_review: false`. Text and JSON say that the task did not move and refer
+to the command in the original task prompt or a person's acceptance/resend.
+They do not supply the current attempt UUID or a newly retargeted command.
+Never replace an original UUID with one from a later task lookup or retry the
+history write as a duplicate. The new action is deliberate: older CLIs reject
+`report-attempt`, while older `report` parsers can ignore an unknown option.
+The CLI help marker `report-attempt-v1` lets coordinators check support.
+
+Direct `add --start`, `start REF` and an active task's start acknowledgement
+return `reporting`, `report_command` and, for an actual managed attempt,
+`report_attempt` in JSON. The text prints the same pinned command. A positively
+unfloored legacy direct start creates no attempt: it explicitly reports
+`reporting: "legacy"`, prints the ordinary command and invents no UUID.
+Creating managed attempts for every first direct start is separate work; this
+change activates no new C3 admission or floor path. Legacy plain reports keep
+the documented pinned-agent rule for never-sent queued work. A floor or a
+recorded attempt never authorizes an implicit legacy start.
+
+If managed history remains but the current execution falls back to legacy
+(for example, after its first managed handoff is refused), a successful start
+acknowledgement returns `reporting: "history_only"` and an explicit `report_hint`,
+without `report_command` or `report_attempt`. It creates no attempt UUID and
+explains that reports stay in history without moving the task. The person can
+accept the result or resend the task as a new attempt.
+
+This is an updated-writer boundary, with no task/exchange schema, event shape,
+C3 or floor change. Older writer binaries still apply their older unscoped
+policy. Prompts for attempts started before this change have no pinned command;
+explicit human acceptance or a resend creating a new attempt covers them.
+There is no silent upgrade or latest-attempt inference. Older readers may
+ignore the optional report metadata while retaining it in the Loro document.
+
+Run inside a session (`HGS_SESSION` and
 `HGS_RUN_ID`), `hgs task` acts as that session's agent: `add` files the task
 for that session, and the project settings can keep agents to their own
 session or limit how many tasks they start per hour. `settings --set` reads a
@@ -5735,7 +6740,8 @@ commands: `hgs task start-plan REF --project P --json` prepares an immutable
 native request without sending it, and `hgs task start-deliver REF --project P
 --json` delivers that exact plan. Preparation binds a fresh request UUID, the
 task's `stage_at` and target, and the selected host, session name, stable session
-ID, run ID and conversation ID. Delivery rechecks the task revision and executor
+ID, run ID and conversation ID. Delivery goes through the attempt writer: it
+rechecks the plan against the task and executor in the fence's final admission
 before entering the existing native input path. Peers without these commands
 refuse them; there is no fallback to an unguarded send.
 
@@ -5905,6 +6911,26 @@ while the mark remains, and removing the mark as well accepts the next copy
 sent, which may lack attempts. Any
 entry at the mark's path counts as a mark, even one that cannot be read.
 
+For an explicit local review, `hgs task review-copy --project P --uuid UUID
+--json` inspects only that exact kept damaged copy. It returns a fingerprint;
+`hgs task review-copy --project P --uuid UUID --confirm FINGERPRINT --json`
+confirms moving its `.loro` and `.updates` into a private sibling
+`<uuid>.review-<UUID>` directory and removing its `.managed` mark last. Only a
+person can confirm. A healthy copy, changed fingerprint, link, special file,
+missing store or unexpected project identity is refused. Missing task files are
+explicitly part of the review; a mark-only copy can be reviewed. The store lock
+wait is bounded to two seconds, and inspection reads at most 64 MiB across the
+three files with a five-second inspection budget. Other tasks are not read or
+changed. The next incoming copy uses the existing importer; review sends and
+starts nothing. The files moved aside remain available for manual examination.
+
+In desktop Tasks, the damaged-files notice shows at most five kept-copy review
+cards, with project, known title and a copyable exact UUID. **Review local copy…**
+opens a confirmation naming the possible loss of attempt history and unsent
+local edits; **Cancel** has default focus. The card retains moved, refused with
+reason, or unknown outcomes. Unknown is never automatically retried; inspect
+the files manually. **Dismiss** removes a moved outcome from the view only.
+
 What this recovery supports, alone or combined: running an older Zerus
 after a rollback (its importer may fold, append or rewrite the task files as
 it always did), a crash at any point, damaged or truncated files, and an
@@ -5923,7 +6949,12 @@ away from it. After restoring a replica root from a backup or copying it to
 another computer, delete its `store-id` file so a new one is created: other
 computers then see a changed store, and the cutover proof (which binds each
 member's verified computer and store) stays closed for it until a fresh,
-complete inventory with it.
+complete inventory with it. Zerus creates `store-id` only where nothing is
+(or an empty file an interrupted first creation left); one it cannot read
+without waiting, that is not a regular file, or that holds anything but one
+canonical identity is refused and kept, never replaced, until a person
+removes it. A project folder is listed only by its own `project-id`: a
+regular file holding the valid ID the folder is named after.
 
 The damaged entries of `task list` (and its pages) say what is known here,
 read only: `kept: true` with `kept_reason` (`marked` for a copy cut over
@@ -5992,14 +7023,14 @@ this cannot read keeps the member eligible and the cutover open as an
 unknown protocol. It grants nothing and dispatches
 nothing. `--hold on` sets the project's cutover hold, a replicated value that
 names who set it and when (concurrent changes: the last writer wins). While on,
-no task of the project takes a new floor or a first attempt, where those are
-written (they come with the attempt writer); it never lowers anything, and a
+no task of the project takes a new floor or a first attempt (the attempt
+writer refuses them as cutting over); it never lowers anything, and a
 task that never cut over keeps the legacy Start. Only a person sets or clears it,
 and clearing it takes `--hold off --confirm`. A hold that cannot be read is
 on. Times are in milliseconds.
 
 `task cutover --project P --task T --check` reads the task's writer universe
-for the fence that the attempt writer will need (zerus-cg5h.4 S2b.2 C3), within
+for the fence that the attempt writer uses (zerus-cg5h.4 S2b.2 C3), within
 one 15-second budget counted once from the command's entry. This computer's
 identity, the project's name and lock, every call (from its spawn to its
 parsed answer) and the result all count against it, and nothing is reported
@@ -6087,6 +7118,55 @@ Only then would a reservation run; the check runs none. Closed reasons add:
 `deadline`. It proves the schema barrier only: not exclusive delivery, not
 consent.
 
+A proof that passed its final admission can be kept as the task's
+certificate (C3e): `<project store>/fence/<task>.json`, inside the replica
+root, so a replaced root loses it. The record holds:
+- the proven version;
+- this computer's membership view (peers, catalog machines, membership
+  generation), store, root and configuration identity (the Location identity
+  of its state and configuration folders);
+- every node with the store it answered from;
+- a digest of all of it.
+
+A later operation reuses it with no network, in the same final admission
+(the catalog lock, the project lock, the store's admission). That admission
+reads everything the record binds again:
+- the record itself, for this task, project and swarm. It is read without
+  waiting: only a regular file of at most 1 MiB, never a link, FIFO, device
+  or folder (`certificate_not_regular`, `certificate_oversized`). It must be
+  exactly as written (its digest) and well-formed: a non-empty canonical
+  version, and every certified node a canonical identity other than this
+  computer's, with a canonical store;
+- the view, so any enrolment, disconnection or new catalog machine refuses;
+- the store, the root and the configuration identity, so another
+  configuration sharing this state never inherits it;
+- every direct member, from the swarm's member records, read the same way:
+  - a certified member must be recorded with the store it answered from;
+  - an uncertified member must be recorded with no replica;
+  - a member without a record of its current enrolment refuses
+    (`member_unobserved`), and so does a damaged record file
+    (`members_unreadable`). The records only refuse; their absence is never
+    taken as "nothing changed";
+  - a certified member must positively show replica protocol 1 and task
+    schema 7 or later: another protocol, an older schema or none refuses
+    (`member_downgraded`), so a direct member rolled back below the
+    floor-aware build stops the reuse at its next recorded hello;
+- the hold, for a first attempt;
+- the task: holding the certified version, with its floor and raw stored
+  schema.
+
+Anything changed refuses it with its reason, and the caller proves the
+fence afresh. Only the attempt writer writes a certificate, and never one
+that its reuse would refuse: inside the proof's final admission, under the
+catalog lock that every member record write takes, each direct member must
+already agree with the proof by the same rules, or nothing is written. So
+the writer first records each direct member's verified hello (the swarm's
+replica pass does). With that setup a fresh proof's certificate is reused at
+once and on every later attempt, until something it binds changes. `--check` reports
+`certificate` (`valid`, or the first `reason`) and never writes one. A
+certificate is a schema-barrier record only: never consent and never send
+authority.
+
 Cutover boundary (owner decision, 2026-11-05): once a project's tasks cut
 over, the rollback floor for every computer in that swarm is the first
 floor-aware build. That is the minimum managed-store, writer and importer
@@ -6104,14 +7184,46 @@ task that is not Done), which the connector adds to its heartbeat;
 `hgs task exchange --json` reads a phone's request on stdin, imports the
 phone's changes and answers a page of what the phone lacks, at most 512 KiB of
 updates, with a larger task in parts. A task the phone holds keeps coming to it
-after it becomes Done. A request may cover a range of task UUIDs, so a large
+after it becomes Done. Opening a missing Done task requests its UUID with an
+empty version and receives a Loro shallow snapshot at its current frontiers:
+all current fields, logical history, attachments, schema floor and execution
+facts, without the superseded CRDT edit operations. Live tasks, nonempty-version
+deltas and ordinary desktop replication keep their existing encoding; opening
+an already cached Done task does not rewrite it. The exchange remains schema 1,
+with the same required answer fields and existing bounded parts and hashes.
+Task-capable Android and iOS builds have used Loro 1.16.2 throughout; iOS
+0.1.0 (849) predates Tasks and never requests this operation.
+
+A change from another computer can depend on operations before a phone copy's
+shallow root. That merge is explicitly refused, keeping the local files. The
+phone makes at most one fresh empty-version fetch for that task per exchange.
+It replaces a healthy shallow copy only if the fresh state covers every
+operation in the latest saved local version, checked and saved under one store
+admission. Otherwise its unsent edits stay in place for a person's review;
+neither a refusal nor a failed fetch clears them. Later comments and a desktop
+reopen back to To do continue through the same exchange.
+
+A request may cover a range of task UUIDs, so a large
 inventory goes in parts; a refusal prints `{"schema": 1, "ok": false, "error":
-…}` with exit status 1. The phone's Send now and Cancel run on the session's
+…}` with exit status 1. Both read what the phone holds from the project's task
+index, which keeps each task's version and the project document's version, so
+a call reads again only what the change journal or the periodic full check
+finds changed, and neither rewrites the store's inventory cache; when the index
+cannot answer, they read the documents as before, with the same digest. The
+index reads a task as the inventory does: a task whose execution schema an
+older replica's merge lowered is repaired and saved first, so a phone receives
+the repair; an index whose rows a build without that rule read reads every
+row again once, and after such a build sharing the index stores rows, the
+index answers only once every row was read here again (in its bounded batches,
+whatever the clocks); until then both read the documents. The phone's Send now and Cancel run on the session's
 computer as `hgs task mobile-send --json` and `mobile-cancel --json`, which do
 what `send` and `cancel` do and answer only the task's stage (a refusal says
 `"uncertain": true` when the prompt was pasted but could not be recorded);
 `hgs task mobile-done --json` answers a page of at most 50 Done tasks, newest
-first, with how many there are and how many from the last 7 days. See
+first, with how many there are and how many from the last 7 days. It chooses
+the page from the task index while the index may place tasks (see the task
+index below) and reads only the page's tasks; otherwise it reads every task as
+before. See
 `services/mobile/relay/README.md`.
 
 The phone apps edit only tasks at schema 2 or below, and none of their edits
@@ -6221,6 +7333,15 @@ or revoke for another relay or workspace, and a code for another workspace is
 never shown. A revocation that fails or cannot be confirmed stays reported until
 **Refresh**; it is never retried automatically.
 
+For an encrypted workspace these commands run the mobile connector. The desktop
+runs them on its own computer with the exact connector its status probe uses,
+in `ZERUS_CLIENT_MOBILE_CONNECTOR_PATH`: on Windows the one packaged beside the
+app first, elsewhere the one beside the selected hgs, then beside the app, then
+on PATH. The CLI runs that program and never falls back from an empty, relative,
+missing or unusable selection to its own sibling or PATH. Without a selection
+the CLI keeps its order: the connector beside the running hgs, then PATH. The
+desktop never sends its local selection to another computer.
+
 On Windows, these phone-management commands pass a nonempty `CURL_CA_BUNDLE`
 path explicitly to curl's `--cacert`, so Schannel verifies the relay using that
 PEM CA bundle. If the variable is absent or empty, curl keeps its default
@@ -6246,8 +7367,14 @@ known session inventory; live-work filters still require current work evidence.
 ### Accounts
 
 In **Accounts → Model and effort…**, save the model and reasoning effort for new
-conversations with the selected account on that computer. Codex and Claude offer
-only models and effort levels from that account's native catalog. Open the agent
+conversations with the selected account. One account has one model and effort
+(owner, 2026-11-07, zerus-f0uz8): saving applies on every computer that has the
+account, the selected one first, and lists where it saved and where it failed,
+such as an offline computer. When the computers differ, the account shows
+**Differs between computers** with **Use everywhere**, which saves the selected
+computer's choice on all of them. Codex and Claude offer
+only models and effort levels from the selected computer's native catalog; each
+other computer checks the choice against its own catalog. Open the agent
 once and refresh Accounts if its catalog is empty. **Provider settings** removes
 the Zerus override; the dialog also shows readable native account defaults.
 Kimi supports a launch model choice; its effort remains controlled by Kimi's
@@ -6271,6 +7398,57 @@ carries `"source":"dsh-profile"`. New team's member rows offer these models, and
 a DeepSeek member's model is applied after its session starts, as
 `provider/model` or as a bare id (`deepseek-flash`) that one provider offers.
 
+Without a choice, a Claude, Codex or Kimi account bypasses permissions (owner,
+2026-11-07, T-6hcfnu): each provider's own bypass switch is added at launch
+(`--permission-mode bypassPermissions`,
+`--dangerously-bypass-approvals-and-sandbox`, `--auto`), unless the launch
+names its own mode after `--`. The account shows **Zerus default**, and New
+session shows the selected account's effective mode. **Change…** saves an
+explicit choice, **Bypass permissions** or **Provider settings** (the
+provider's own ask, plan or default mode), which always wins; `hgs account
+permissions ID --mode default` returns to the default. The CLI lists
+`permission_mode_source` (`default` or `zerus`). OpenCode and DeepSeek keep their
+native configuration. Choices saved before this default existed as provider
+settings were stored as no choice, so they now read as the default. Zerus's
+automatic tool approvals are a separate opt-in and stay off.
+
+OpenCode's Accounts permission line is a read-only account configuration summary.
+It reads `opencode.json` then `opencode.jsonc` in the native account's configuration
+directory (`OPENCODE_CONFIG_DIR`, otherwise `XDG_CONFIG_HOME/opencode` or
+`~/.config/opencode`), an absolute `OPENCODE_CONFIG` file, then the platform's
+system configuration directory. Reads are limited to 1 MiB per file and 4 MiB in
+total. JSONC comments/trailing commas and both current `permissions` arrays and
+legacy `permission` rules are recognized. Without rules, the line shows
+**Allow tools**, OpenCode's [native default](https://opencode.ai/docs/permissions/#defaults).
+Ordered exceptions show **Custom rules**. Unreadable, malformed, oversized,
+unexpanded agent/policy configuration and deployed macOS managed preferences stay
+**Unverified**. Project, agent and session rules can differ. This never writes
+OpenCode configuration or changes a launch or running session.
+
+The Zerus permission mode (**Permissions: … Change…**) is likewise shared by every
+computer with the account by default, with the same per-computer results and
+**Use everywhere** mark. **Keep per computer…** switches the account to
+per-computer permissions, for example bypass on one computer only: then
+**Change…** saves only on the selected computer, the row names it, and
+**Share across computers…** switches back. The account says which mode it is in.
+Each computer keeps the choice as `permission_scope` in its `account ls` rows
+(`account` or `computer`, from `account-scopes.json` beside `accounts.json`,
+which older hgs builds never read); any computer that keeps permissions per
+computer makes the whole account per computer, so a change never spreads by
+accident. `hgs [@host] account permission-scope ID --scope account|computer
+[--revision REV]` sets it on one computer; `account ls` reports
+`permission_scope_supported: true` where it is available. An unreadable scope
+record reads as per computer. The scope is outside the catalog revision, so a
+shared permission change checks it again when it is saved: if the account is
+now per computer, by the desktop's current view of every member or by a fresh
+read of any computer it writes, nothing is saved; each write also passes
+`--expect-scope account`, which that computer checks under its catalog lock.
+**Add to machine…** copies the selected computer's model and effort, and its
+permission mode while the account still shares it, to the new profile as
+explicit values, provider settings included, so a restored profile drops older
+overrides. A computer whose catalog refuses one names it in the result, and
+the account shows the difference.
+
 Accounts collects provider profiles from connected machines. Verified provider
 account ID, or email with organization, groups the same account across hosts;
 matching display names alone do not. Providers, organizations and conflicting
@@ -6289,6 +7467,67 @@ not mean the native account is signed out. Explicit native sign-in status takes
 precedence; older authentication problems are labelled **Last reported** when
 their report is stale or offline. Viewing accounts never refreshes Claude's
 credentials on Zerus's behalf.
+
+Claude usage refreshes share a cache on the account's owning computer. Account
+views and the selected session footer normally request usage every five minutes;
+their clocks, manual Refresh and requests from other GUI clients share a five-minute
+cache interval per account. Account-list reads (every 30 seconds in
+the desktop) use saved reports and never contact the usage endpoint. Arch and
+Mac clients viewing the same owning computer therefore share its cooldown.
+Verified native account UUIDs share a cache across profiles on that computer;
+otherwise the selected profile home and credential identity keep reports separate.
+Every Claude inspection first reads current native sign-in status, even during
+a cooldown. Cache keys bind that observed email, organization identity and plan,
+plus any stable credential account identifiers. Token values, expiry, scope and
+tier changes do not reset the same account's cooldown. A different account never
+inherits the prior account's windows or wait; an unconfirmed native identity
+cannot adopt a previous report. Cache and lock files must be private regular
+files; links and special files are refused without waiting for a writer.
+
+On HTTP 429, the last successful windows and their original sample time remain
+visible, labelled **rate limited** with their age and next retry time. Refresh
+also respects `Retry-After` (seconds or an HTTP date); an absent or unreadable
+header waits five minutes. A 429 uses a minimum 60-second cooldown even when the
+server requests less; it does not require waiting the healthy five-minute interval.
+No token refresh or agent message obtains these
+limits. The private cache keeps at most 256 account snapshots, four known Claude
+windows each and no tokens or request history. Active cooldowns are never evicted
+to admit another account. Only expired entries can be replaced at capacity.
+
+**Account marks.** Desktop session cards mark the session's recorded account
+with a colored circle holding the first letter or digit of the account's label:
+on collapsed rows before the title, and on expanded cards with the label in the
+footer. **Color and mark…**, beside **Rename…** in the account's details, chooses
+a color and an optional emoji. They are kept with the account on each of its
+computers (zerus-sa9qn.6), so every desktop and phone shows the same mark:
+`hgs [@host] account mark ID [--color #RRGGBB|none] [--emoji EMOJI|none]
+[--if-unset] [--revision REV]` saves them in `account-marks.json` beside
+`accounts.json` (64 KiB at most, private; a change that would exceed that
+changes nothing), which older `hgs` builds never read because they parse
+`accounts.json` strictly. `account ls` then reports
+`marks_supported: true` and each row's `mark` (`color` and `emoji`, null when
+unset); each `hgs ls` session row carries its recorded account's
+`account_mark` when one is set, which reaches phones with the listing. A
+malformed file shows no marks and refuses writes until it is repaired or
+removed; unknown fields of a newer `hgs` are kept. The desktop saves a mark on
+every reachable computer of the account. A computer with an older `hgs` keeps
+it as this desktop's preference for that member profile (`accounts/color/` and
+`accounts/mark/`), as before. Once, the desktop moves those preferences to the
+computers that keep marks with `--if-unset`, which fills only what a computer
+has no value for, then forgets its own: if two desktops disagree, the first one
+to move its value wins. A computer that is offline or busy is tried again on its
+own, after a minute and then less often, up to every 15 minutes. Without a choice the color is a stable palette slot
+derived from the label, so every desktop shows the same default. Settings > Sessions >
+**Account marks** shows emoji instead of letters for accounts that have one.
+**Show account labels on session cards** (on by default) turns the marks off on
+every card, and an account's **Color and mark…** dialog can keep its own mark
+off session cards (**Do not show this account's label on session cards**,
+stored per member profile as `accounts/hide/`; the account's details then say
+**Hidden on session cards**). Hiding is presentation only: labels, colors and
+account bindings stay as they are. A
+session without a recorded account binding, or whose profile is not in the loaded
+catalog, shows no mark. The session list reads each live computer's account
+catalog once, without profile inspects, to resolve labels.
 
 **Add account** creates a separate profile on the selected host and starts native
 sign-in. Default/native profiles retain existing authorization. Its agents use New
@@ -6341,6 +7580,16 @@ That check runs when the terminal command executes, before provider work. Calls
 without the option retain their existing behavior. Next uses the capability,
 exact computer identity and fresh catalog snapshot; unsupported or uncertain
 setup is never replayed.
+
+Signing in on another computer (`hgs @mac account login work`, or **Sign in** for
+an account there) runs that computer's native sign-in in a terminal here. Codex
+finishes its browser sign-in on the signing computer's `localhost:1455`, which a
+browser on this computer could not reach, so the SSH connection forwards this
+computer's port 1455 there (`-L 1455:localhost:1455`). Open the sign-in link
+Codex prints in a browser on this computer. The connection has its own SSH
+session, never a shared master, so the forward ends with the sign-in. If port 1455
+is already in use here, for example by another Codex sign-in, SSH only warns, and
+the browser cannot finish until that sign-in ends.
 
 `accounts.json` stores metadata and selected permission modes; authorization stays
 in the profile's own directory. Managed profiles clear inherited API tokens;
@@ -6651,6 +7900,26 @@ The official web host uses a separate `hgs` profile through `--patch`; sign-in a
 secrets stay in `DSH_HOME`. The web endpoint is loopback-only; remote access uses
 SSH. `~/.npm-global/bin` is discoverable from service and SSH launches.
 
+If the adapter endpoint disappears while the recorded original host is still
+alive, Zerus refuses another launch and leaves the original running. New
+launches record the kernel boot identity along with the native PID and birth,
+so an older boot cannot identify a reused PID and birth ticks as its live host.
+A dead original or a verified reused PID permits normal startup. Fresh legacy
+PID-file evidence still protects a live or unverifiable process.
+
+Before spawning, Zerus records the exact launching process and a preparation
+boundary. An ended launcher is recoverable on the same boot only before the
+possible-spawn boundary and with unchanged PID-file evidence. Once a host might
+have started, its missing PID file or ended launcher cannot authorize another
+start. The error directs you to the existing native UI; save any running work
+before restarting the computer if a possible start remains unconfirmed. A later
+boot retires that old attempt while retaining checks for newer legacy evidence.
+Known spawn refusal restores the previous identity proof; uncertain starts do
+not roll it back. Incomplete or older starting records without a boot/launcher
+identity remain unverifiable, rather than being assigned a synthetic identity.
+A healthy resident adapter reconnects without a restart or record rewrite.
+These checks never stop a host or reload its bridge.
+
 Reviewed adoption of `0.2.1-rc.5` (2026-10-29, `zerus-r7d4`): the rc.2-only
 startup gate rejected rc.5 before starting the host. Comparison of the official
 npm packages found the launcher's code, boot/profile handling, web listener,
@@ -6894,7 +8163,8 @@ UUID embedded in that text: it cannot distinguish identical text independently
 typed in Terminal. Zerus never uses transcript text alone to acknowledge delivery.
 
 An independent `hgs-recovery.service` / `com.hgdev.hgs-recovery` worker runs without
-GUI. Custom installs can run `hgs recovery worker`. Episodes and receipts live on
+GUI. Custom installs can run `hgs recovery worker`. The same worker runs
+[Keep cache warm](#keep-cache-warm) rounds, whatever the recovery policy says. Episodes and receipts live on
 the agent host under `sessions/recovery/`, guarded by policy revision and a single
 executor lock. CLI operations are `hgs [@host] recovery get|set|sync|action`, with
 JSON writes on stdin. Adapters register explicitly in `src/state/recovery.rs`.
@@ -6923,7 +8193,7 @@ beside Activity and Terminal, or Native UI for DeepSeek. When disabled, its list
 count and output are not polled; normal Activity, fleet and account updates continue.
 The small **Background** summary is part of ordinary fleet polling even
 when this tab is disabled. Full process history and output remain opt-in. A
-background session's context menu offers **Show running commands** when Processes
+background session's **Session actions** menu offers **Show running commands** when Processes
 is enabled.
 
 **Live shells / processes** shows verified shells and independent command trees.
@@ -7239,6 +8509,12 @@ HGS_TAB=1                    # enable terminal title updates
 HGS_TAB_COLORS="macbook=#80ff80"
 ```
 
+An unavailable peer does not make healthy computers unavailable. The desktop
+machine counter includes configured peers that have not connected, with their
+connection state in its tooltip. A running background service captures
+`HGS_PEERS` at startup; restart the background service after changing it.
+Existing agent sessions keep running.
+
 The CLI config is `~/.config/hgs/config`; `HGS_CONFIG_DIR` and `HGS_STATE_DIR` permit
 isolated setups. `HGS_SSH` names the OpenSSH client for every peer connection
 (dry runs still print `ssh`); without it `hgs` runs `ssh` from `PATH`, and on
@@ -7302,6 +8578,15 @@ The service belongs to `graphical-session.target`, restarts after crashes and
 does not loop on exit code 4 (system tray unavailable). Compare
 `systemctl --user status hgs-tray.service` and `journalctl --user -u
 hgs-tray.service` when startup fails.
+
+Zerus Next does not exit without a tray host: on a desktop without a
+StatusNotifierItem host (GNOME without an AppIndicator extension, for example)
+it keeps running without an icon, writes "no tray host; open Zerus from the
+applications menu" to its journal once, opens from the applications menu and
+shows its icon as soon as a host starts. Opening Zerus from the menu while the
+service is starting or restarting waits up to 30 s for the service's window
+instead of starting a second one; Zerus reads the unit's state with
+`systemctl --user show` and never changes it.
 
 The separate `hgs-desktop.service` uses the selected CLI's rendered registration
 and readiness contract. `zerus-setup --desktop-service` registers it for an AUR
@@ -7419,8 +8704,28 @@ Claude Code, Codex and Kimi sessions get hooks that name the stable CLI. `hgs a`
 needs a console such as Windows Terminal, not the pipes of the mintty Git Bash
 window, and detaches with `Ctrl+B d`.
 
-**Commands.** Commands for another machine (`hgs @host …`) work as on Linux; the
-remote command stays `~/.local/bin/hgs` with the same quoting as on Linux. Until local sessions
+**Windows as a remote computer.** A Linux, macOS or Windows client can use a
+Windows OpenSSH alias without changing its server-wide `DefaultShell`. Enable
+local sessions on that Windows account with `hgs session-host install`, then add
+the alias to Zerus's computers. PowerShell 5.1 and cmd are supported as SSH login
+shells. Discovery is read-only and cached per alias/connection settings within
+the calling CLI process; an unknown result refuses before sending an operation.
+The Windows route selects `%USERPROFILE%\.local\bin\hgs.exe`, uses fixed encoded
+PowerShell source and Windows-native argument quoting, and relays SSH stdin,
+stdout and stderr as raw bytes. Noninteractive input has bounded byte frames,
+an explicit EOF, and a two-second lease heartbeat. EOF closes the original
+helper's stdin. Connection loss or a fifteen-second lease expiry ends only that
+same original helper; native sessions remain with their session host. No remote
+operation is retried. JSON requests and watch controls stay on stdin. Required help
+capabilities, machine identities and session selectors still gate their commands;
+an old peer is never tried as an unknown agent command. The cmd transport limit
+is checked before dispatch; large request bodies belong on stdin. POSIX peers
+keep their existing `~/.local/bin/hgs` commands and quoting. `machine check`
+uses the Windows local-session marker instead of requiring tmux; POSIX source
+bootstrap is refused for Windows. Remote downloads also accept absolute drive
+paths such as `C:\work\report.txt` through SFTP.
+
+**Commands.** Commands for another machine (`hgs @host …`) work as on Linux. Until local sessions
 are enabled, `ls`, `machine`, `project`, `swarm`, `presence` and `session-host`
 work locally. `account ls` and `account default` without an ID print an empty
 catalog, and `account copy` works between two remote machines. Every other local
@@ -7638,6 +8943,17 @@ writes, and the team worker applies what it leaves there on its next tick
 (about three seconds):
 
 - `hgs team report`, `ask`, `commit` and `hgs team run` wait there as before.
+- `hgs team create` of its own scratch team under the owner's standing rule
+  (task #228), and its `hgs team` calls for a scratch team it leads (plan,
+  approve, relaunch and the other team operations), wait there the same way: the
+  worker applies them with the member's identity and checks its profile and the
+  rule again. A call outside that scope is not queued - it keeps the sandbox's
+  error, so the member asks the lead (task #346).
+- An approval request that escalates a sandbox for ONE
+  `hgs team <op> --json-file PATH` call in that scope is answered by Zerus once,
+  recorded in the lead's feed; another command, a wrapper, a pipe or a call
+  outside the scope still reaches the lead. A sandboxed member calls `hgs team`
+  directly, one command per call with `--json-file`, never wrapped in a script.
 - `hgs run` waits there too. The worker records the run as the member
   session's work, so the session is Building, and starts it at Low integrity
   with its temporary files in `<folder>/.zerus-team/tmp`: a member's run never
@@ -7657,8 +8973,9 @@ may write none of it, and may not read the owner's configuration
 (`~/.config/hgs`), which stays the owner's only. hgs recognizes such a process
 because the state belongs to another user and the configuration is unreadable.
 It then loads no configuration (no peers) and takes the same ways as a DeepSeek
-sandbox: team calls, `hgs run` and the reads above wait in the member's folder
-for the team worker. The member is the session its inherited `HGS_SESSION` and
+sandbox: the calls above (a scratch team's create and its operations included),
+`hgs run` and the reads above wait in the member's folder for the team worker.
+The member is the session its inherited `HGS_SESSION` and
 `HGS_RUN_ID` name; only the folder the request is written to proves it. A Codex
 member's `hgs run` runs in `codex sandbox` on its own folder, never above it:
 the command must start in that folder. Codex keeps `.git` read-only, so its
@@ -7883,6 +9200,12 @@ minutes without a confirmed conversation records how; a run that confirmed one
 leaves its record to carry the launch ID instead. These records live in
 `launches/` of the hgs state directory for a week, as long as the desktop keeps a
 launch placeholder. The key is omitted when no launch has ended.
+When there is no supervisor completion report, `diagnostic_code` is
+`launch_supervisor_report_missing`; the original started record also retains
+that diagnostic. This identifies missing evidence, often a failure before
+`hgs --run` during shell startup. It does not invent an agent exit code or
+terminal output: those fields remain null and empty when unknown. The desktop
+shows the missing-report explanation separately from captured output.
 
 A running Zerus desktop records input idle time and screen lock with
 `hgs presence set --json` (`{"idle_seconds": 12, "locked": false}` on stdin) every
@@ -7972,7 +9295,12 @@ eight conversations per session, and follow `hgs rename`.
 
 Private stores (read marks, the analytics store, the approval journal, the
 history index, voice storage and the Windows mobile configuration) are checked
-before use. A store that is this user's, lies in the hgs state or configuration
+before use. On Windows, each missing directory created for private storage gets
+a protected, inheritable DACL granting only the current user FullControl. New
+files inside it inherit that protection. Existing directories keep their ACLs,
+including a directory another process creates during the creation race; private
+directory creation does not silently repair them or relax the privacy check.
+A store that is this user's, lies in the hgs state or configuration
 folder and is only too open (another tool added a group to its ACL, or Unix mode
 bits wider than 0600/0700) is made private again in place: on Windows a
 protected DACL granting this user FullControl through a handle that never
@@ -8198,6 +9526,17 @@ Schema 2 adds the hgs-owned native-effect ledger. Schema 1 migrates
 transactionally after the configuration check. Its writer policy starts revoked
 and every process restart fences it again; manual revocation reasons survive.
 `effect_journal` reports policy, a reason code and four maintained attempt counts.
+Its `reason` describes writer revocation, not a native notification refusal.
+`recent_failures.refused` and `.unknown` show at most the latest attempt of each
+state by reservation sequence: `seq`, action `kind`, the closed receipt `code`
+and `recorded_at` (Unix milliseconds when the actor recorded the receipt).
+They expose no notification content or session identity. Schema 31 adds the
+optional recorded time; older and restart-recovered attempts retain a null time.
+Missing, corrupt or unrecognized receipt details have `details_available:false`
+and null fields; they do not reveal raw errors. A failed diagnostic read sets
+`recent_failures.available:false` without hiding the maintained counts.
+The two reads use the attempt-state index and bounded identity/receipt strings;
+status never scans history, retries an attempt or changes delivery permission.
 Recovery marks at most 256 prior-process reservations unknown at startup and per
 heartbeat. Neither reserved nor unknown work becomes a fresh delivery after a
 restart. Recovery failure reports a component error and pauses admissions while
@@ -8224,6 +9563,19 @@ reclamation requires proof that the owning conversation is absent from both its
 authoritative catalog and every restorable archive; that separate sweep is
 tracked in `zerus-n3qm`. Catalog absence or an offline source alone never proves
 that an edge cannot reappear.
+
+Mandatory startup questions can notify before SessionStart supplies a
+conversation. Their separate identity contains the exact run and native
+question ID; names, host leases and timestamps never substitute for either.
+They use the same focus, baseline, supervised-child and outbox rules as other
+attention. Answering withdraws the original notice. When the conversation
+binds, its startup notice is retired; the same still-visible question is consumed
+in the conversation scope rather than posted again. A different question is a
+new edge. Reconnects and upgrades preserve the original intent and unknown
+delivery is never replayed. Schema 32 adds the indexed run lookup needed for
+simultaneous sessions awaiting their first conversation. A startup click also
+requires that same run and question, and cannot follow a replaced run or a
+question that has already ended or acquired a conversation.
 
 Schema 3 adds the indexed revocation command journal. Before a maintained Qt
 rollback or Qt installation starts its GUI, the installer must obtain a settled
@@ -8626,6 +9978,19 @@ most 64 folders (`limits.git_subscriptions`); more fail with
 `too_many_subscriptions`, and a missing or relative path fails with
 `bad_request`.
 
+The desktop session list follows only its selected and visible rows (including
+the virtual list's small overscan), at most 48 row identities across computers.
+Native catalog rows supply the checkout paths; equal paths on different
+computers remain separate. In service mode these are Git demands on the
+original fleet/details lease, within its existing 64-demand budget and the
+original Hello's Git limit. Native mode uses its existing watch supervisors.
+Both retire old interests before replacements and fence a new subscription
+with the original Pong. Hidden rows retain no Git cache. Unsupported topics,
+failed reads and offline/replaced sources clear the display facts; there is no
+independent GUI Git/SSH poller or automatic retry of a refused route. Checkout
+freshness and remote verification age separately, and missing upstream/count
+evidence never paints a clean, verified checkout.
+
 The `processes` topic follows one session's processes, subscribed like Activity
 (`{"op":"subscribe","topic":"processes","session":{...}}`) and keyed by its
 catalog key. Its `state` value is `{processes, process_work}` exactly as
@@ -8726,7 +10091,10 @@ notification preferences, waits, launches, renames, name routes, the archive
 folder and the DeepSeek and OpenCode bindings, and holds a read-only connection
 to the Activity journal. A changed binding, or new journal rows of its session,
 derives only that session's row again, through the steps and under the lock of
-the listing. Any other change lists all rows again. Both wait 150 ms after a
+the listing; every row's parent state is then read again from all listed rows,
+so a derived child never reads its listed parent as missing and a parent's
+change reaches its children at once (zerus-sa9qn.16). Any other change lists
+all rows again. Both wait 150 ms after a
 change and start at most every 500 ms and at most once per four durations of
 the previous one. Every 5 s the stream probes what no file shows: tmux sessions
 that start, end, are renamed, attached or detached, exited agent processes,
@@ -9195,6 +10563,61 @@ file and unreal's `.uproject`), `widen` (`none`, `dependants`, `transitive`),
 `build_dir`,
 `resources`, `platforms`, `budget_minutes`, `budget_lines`, `reuse` (`auto`,
 `inputs`, `binary`, `never`), `disabled`.
+
+CTest providers may also declare optional `configure`, `build` and `probe`
+command strings. `configure` and `build` are required together when preparation
+is enabled; `probe` is optional. These stages run only in the **local merge
+queue**. Providers without preparation retain the existing behavior; remote
+runners are unchanged.
+
+The queue reads the provider from the merged checkout. It first runs `probe`,
+then runs `configure` only when the provider's `build_dir/CMakeCache.txt` is
+missing. It always runs `build` before CTest, including for an existing build
+folder. An incremental build therefore uses the merged sources instead of
+running old binaries. Probe, configuration, build, CTest and any retries share
+one existing suite deadline and bounded output capture. Configuration/build
+failures after a successful probe fail the suite and follow ordinary merge
+rollback, with a `build` flag and no flaky-test retry. A probe failure, missing probe executable or unresolved placeholder
+records `not_run` with a bounded `not run here: SUITE runs on ...; reason` message.
+It remains an untested range, never a pass or a green result eligible for reuse.
+
+Stage commands expand `{build_dir}` relative to the provider's `root`. In the
+build stage, `{targets}` means `--target` followed by the selected CMake target
+names. A whole-provider `(all)` selection expands it to nothing, so the default
+build includes a newly added test even if the previous map did not name it.
+That fallback may build other default targets too. CTest test names and CMake
+binary target names need not match: the existing map already records their
+relationship. The CTest command keeps its existing test-name selection.
+
+Named placeholders such as `{qt_prefix}`, `{cc}`, `{cxx}`, `{python}` and
+`{toolchain}` obtain their values only from the local file
+`.zerus/tests.local.toml`. The file is ignored by Git; if `git ls-files` finds it
+tracked, Zerus refuses it. Unknown providers, keys or malformed values are also
+refused. Its only provider tables are `vars` and `env`, for example:
+
+```toml
+[provider.tray.vars]
+python = "python3"
+toolchain = ""
+cc = "cc"
+cxx = "c++"
+qt_prefix = "/example/sdk/qt"
+
+[provider.tray.env]
+QT_QPA_PLATFORM = "offscreen"
+QT_QUICK_BACKEND = "software"
+```
+
+Use the local machine's actual SDK and compiler values. On Windows the local
+`toolchain` value can invoke `scripts/ci/msvc-env.py`. Local `env` entries replace
+the entire variable; they perform no expansion. Have the toolchain wrapper
+prepend the selected Qt kit's `bin` directory to `PATH` before invoking tools,
+or supply the complete `PATH` through local `env` for CTest. Local
+values cannot replace command strings or the reserved `build_dir`/`targets`
+placeholders. The local file is limited to 64 KiB, with at most 64 vars and 64
+environment entries per provider, and is excluded from exported project
+configuration. Commit portable recipes and placeholders, never machine paths.
+
 
 #### What the team enforces (U62)
 

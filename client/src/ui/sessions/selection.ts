@@ -8,16 +8,25 @@ import { trNoop, tr } from "../../i18n";
 // the runSelectionAction confirmation and the runNextSelectionAction calls and
 // notices. Pure: store/batch.ts runs it and the selection bar renders it.
 
-export type SelectionAction = "compact" | "expand" | "mark_read" | "review_later" | "pause" | "resume" | "archive" | "move" | "forget" | "terminate";
+export type SelectionAction = "compact" | "expand" | "mark_read" | "review_later" | "mute" | "unmute" | "pause" | "resume" | "archive" | "move" | "forget" | "terminate";
 /** The actions that write to a host, one session at a time. */
 export type WriteAction = Extract<SelectionAction, "pause" | "resume" | "archive" | "forget" | "terminate">;
 
 /** The bar's and the selection menu's order (SessionSelection.cpp 121-122). */
-export const SELECTION_ACTIONS: readonly SelectionAction[] = ["compact", "expand", "mark_read", "review_later", "pause", "resume", "archive", "move", "forget", "terminate"];
+export const SELECTION_ACTIONS: readonly SelectionAction[] = ["compact", "expand", "mark_read", "review_later", "mute", "unmute", "pause", "resume", "archive", "move", "forget", "terminate"];
+
+/**
+ * Move to project for a selection goes through the organization's Move dialog
+ * (zerus-5wmh.18.1); it waits while a lifecycle batch runs on the selection,
+ * which could change a row's identity under the move.
+ */
+export const MOVE_WAIT = trNoop("Wait for the current action to finish.");
 
 const TEXT: Record<SelectionAction, string> = {
   mark_read: trNoop("Mark as read"),
   review_later: trNoop("Mark needs attention"),
+  mute: trNoop("Mute notifications"),
+  unmute: trNoop("Unmute notifications"),
   compact: trNoop("Compact session rows"),
   expand: trNoop("Expand session rows"),
   pause: "Pause",
@@ -68,6 +77,8 @@ export interface ApplyContext {
   attention: boolean;
   /** A live row of the same computer has this archived row's name (Qt's archiveNameOccupied). */
   occupied: boolean;
+  /** The row's shared notification setting can change now (Mute and Unmute, `notificationsState`). */
+  notifications?: boolean;
 }
 
 /**
@@ -81,6 +92,9 @@ export function selectionApplies(s: ActionRow, a: SelectionAction, c: ApplyConte
     case "move": return true;
     case "mark_read": return s.state !== "archived" && c.attention;
     case "review_later": return s.state !== "archived" && !c.attention;
+    // zerus-qhtxf: one shared setting write per row that is not in that state yet.
+    case "mute": return !!c.notifications && !s.muted;
+    case "unmute": return !!c.notifications && !!s.muted;
   }
   if (!c.online || c.updating || !allowedOp(s, selectionOperation(s, a))) return false;
   switch (a) {
@@ -176,6 +190,21 @@ export function summaryText(a: SelectionAction, done: number, total: number, fai
     text += ` ${counts}; refresh before retrying.\n${errors.slice(0, SHOWN_ERRORS).join("\n")}`;
   }
   return { text, failed: failed + unknown > 0 };
+}
+
+/** What one Mute or Unmute write of a selected row did (`setMute`). */
+export type MuteOutcome = { outcome: "changed" } | { outcome: "refused"; detail: string; silent?: boolean };
+
+/** A selected row whose notifications cannot change now (offline, not shared, a conflict or a full queue). */
+export const muteUnavailableText = (s: Pick<ActionRow, "machine" | "name">) => tr("%1 / %2: notifications cannot change for this session now", s.machine, s.name);
+
+/** The Mute or Unmute end notice: sticky (and an error) when any row was refused. */
+export function muteSummary(a: "mute" | "unmute", changed: number, skipped: number, refused: number, errors: readonly string[]): { text: string; failed: boolean } {
+  let text = a === "mute"
+    ? tr("%1: %2 changed, %3 already muted, %4 refused.", selectionText(a), changed, skipped, refused)
+    : tr("%1: %2 changed, %3 already unmuted, %4 refused.", selectionText(a), changed, skipped, refused);
+  if (refused) text += `\n${errors.slice(0, SHOWN_ERRORS).join("\n")}`;
+  return { text, failed: refused > 0 };
 }
 
 /** Mark as read and Mark needs attention: sticky when not every target changed. */

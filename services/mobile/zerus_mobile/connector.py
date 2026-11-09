@@ -1259,11 +1259,12 @@ class Connector:
                 try: validate_projection_result(result, payload, session, request_id)
                 except ValueError as error: raise ConnectorError(str(error)) from None
             elif operation == "history":
-                # Head indexing makes bounded native progress locally rather
-                # than requiring one network roundtrip for each two-MiB chunk.
+                # Full pages advance bounded indexing locally. A one-row
+                # catalog probe yields after its first pass so it cannot hold
+                # the serial native queue while a visible conversation opens.
                 until=time.monotonic()+2
                 result=await self.native(["history",session,"--json"],payload,timeout=2)
-                if not {"before","after","around","around_incoming_seq"} & set(payload):
+                if payload.get("limit") != 1 and not {"before","after","around","around_incoming_seq"} & set(payload):
                     for _ in range(31):
                         if not isinstance(result,dict) or result.get("indexing") is not True: break
                         remaining=until-time.monotonic()

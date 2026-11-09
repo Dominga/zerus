@@ -50,7 +50,6 @@ const WINDOW_LAYER = [
 const SESSIONS = [
   "Compact session rows", "Expand the collapsed session list on hover", "Hide projects without active sessions", "Animate working sessions",
   "Show completed subagents",
-  "Include agents whose latest turn has finished in the session list and its counts. Plan & agents always shows all reported agents. Agents with unknown status remain visible.",
   "Notify about optional questions",
   "Off by default. Shows a system notification once for each new optional question, which the agent keeps working without. It is withdrawn when the questions are answered or skipped, or the session is marked as read. Questions that need an answer always notify.",
   "Ask before an agent starts subagents",

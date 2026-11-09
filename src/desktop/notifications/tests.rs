@@ -4,6 +4,43 @@ use crate::desktop::store::Location;
 fn id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
+
+#[test]
+fn startup_post_token_must_keep_the_exact_question_run_and_scope() {
+    let identity = Identity {
+        kind: Kind::Post,
+        target: Target::StartupQuestion {
+            computer: String::new(),
+            run: "run".into(),
+            question: "codex-trust:q".into(),
+        },
+        edge: "startup_question".into(),
+    };
+    let original = json!({"host":"","name":"fixture","run":"run","conversation":"",
+        "startup_question":"codex-trust:q","notice":"notice"});
+    let action = |target: &serde_json::Value| Action::Post {
+        token: attention::encode_token(target.as_object().unwrap()),
+        title: "Needs attention".into(),
+        body: String::new(),
+    };
+    assert!(check_identity(&identity, &action(&original)).is_ok());
+    for (field, value) in [
+        ("run", "replaced"),
+        ("startup_question", "different"),
+        ("conversation", "bound"),
+        ("host", "other"),
+    ] {
+        let mut changed = original.clone();
+        changed[field] = json!(value);
+        assert!(
+            check_identity(&identity, &action(&changed)).is_err(),
+            "{field}"
+        );
+    }
+    let mut missing = original;
+    missing.as_object_mut().unwrap().remove("startup_question");
+    assert!(check_identity(&identity, &action(&missing)).is_err());
+}
 struct Fixture {
     _temp: tempfile::TempDir,
     store: Store,
@@ -154,6 +191,99 @@ fn started_drop_is_unknown_and_unknown_attempt_never_replays() {
         Offered::Existing(_)
     ));
     assert!(f.host.try_next().is_err());
+}
+
+#[test]
+fn status_exposes_original_notification_refusals_without_content_or_another_send() {
+    let mut f = Fixture::new();
+    for (code, name) in [
+        (Refusal::PermissionDenied, "permission_denied"),
+        (Refusal::NotReady, "not_ready"),
+        (Refusal::Cancelled, "cancelled"),
+        (Refusal::GetterFailed, "getter_failed"),
+    ] {
+        let (request, dispatch) = f.queued();
+        let before = chrono::Utc::now().timestamp_millis();
+        dispatch.finish(Outcome::Refused { code });
+        f.outbox.poll(&mut f.store, Instant::now());
+        let after = chrono::Utc::now().timestamp_millis();
+        let status = f.store.effect_status();
+        let summary = &status["recent_failures"]["refused"];
+        assert_eq!(summary["kind"], "post");
+        assert_eq!(summary["code"], name);
+        assert_eq!(summary["details_available"], true);
+        assert!((before..=after).contains(&summary["recorded_at"].as_i64().unwrap()));
+        assert!(!status.to_string().contains("Needs attention"));
+        assert!(!status.to_string().contains("run-1"));
+        assert!(matches!(
+            f.outbox
+                .offer(&mut f.store, request, Instant::now())
+                .unwrap(),
+            Offered::Existing(_)
+        ));
+        assert!(f.host.try_next().is_err());
+    }
+}
+
+#[test]
+fn schema_thirty_one_preserves_prior_failure_receipts_and_marks_their_time_unavailable() {
+    let mut f = Fixture::new();
+    let (request, dispatch) = f.queued();
+    dispatch.finish(Outcome::Refused {
+        code: Refusal::PermissionDenied,
+    });
+    f.outbox.poll(&mut f.store, Instant::now());
+    let receipt: String = f
+        .store
+        .db
+        .query_row(
+            "SELECT receipt FROM desktop_attempts WHERE request_id=?1",
+            [&request.request_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let location = Location {
+        root: std::path::Path::new(f.store.db.path().unwrap())
+            .parent()
+            .unwrap()
+            .to_owned(),
+        configuration: "a".repeat(64),
+    };
+    // The later schema-34 session resume leaf is rewound too.
+    crate::desktop::session_resume::remove_fixture(&f.store.db);
+    f.store
+        .db
+        .execute_batch(
+            "DROP INDEX desktop_attention_catalog_run; ALTER TABLE desktop_attempts DROP COLUMN recorded_at; PRAGMA user_version=30",
+        )
+        .unwrap();
+    let Fixture { _temp, store, .. } = f;
+    drop(store);
+    let store = Store::open(&location, &id()).unwrap();
+    assert_eq!(
+        store
+            .db
+            .query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap(),
+        crate::desktop::store::SCHEMA
+    );
+    let summary = store.effect_status();
+    assert_eq!(
+        summary["recent_failures"]["refused"]["code"],
+        "permission_denied"
+    );
+    assert!(summary["recent_failures"]["refused"]["recorded_at"].is_null());
+    assert_eq!(
+        store
+            .db
+            .query_row::<String, _, _>(
+                "SELECT receipt FROM desktop_attempts WHERE request_id=?1",
+                [request.request_id],
+                |r| r.get(0)
+            )
+            .unwrap(),
+        receipt
+    );
 }
 #[test]
 fn resource_charge_outlives_completion_timeout_and_stops_new_admission() {

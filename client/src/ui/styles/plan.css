@@ -64,7 +64,6 @@
 .pt-chip-running { color: var(--z-color-accent); border-color: color-mix(in srgb, var(--z-color-accent) 40%, transparent); }
 .pt-chip-draft { color: var(--z-color-warn); border-color: color-mix(in srgb, var(--z-color-warn) 45%, transparent); border-style: dashed; }
 .pt-chip-auto, .pt-chip-barrier { color: var(--z-color-muted); }
-.pt-acceptance { color: var(--z-color-muted); font-size: var(--fs-2xs); overflow: hidden; text-overflow: ellipsis; max-width: 280px; }
 .pt-health { color: var(--z-color-warn); font-size: var(--fs-2xs); overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
 .pt-approval { color: var(--z-color-warn); font-size: var(--fs-2xs); }
 .pt-grow { flex: 1; min-width: 4px; }

@@ -37,6 +37,7 @@ pub(crate) mod pulses;
 pub(crate) mod shadow;
 pub(crate) mod rights;
 pub(crate) mod safe_actions;
+pub(crate) mod sandbox_scope;
 pub(crate) mod scratch;
 pub(crate) mod secrets;
 pub(crate) mod spans;

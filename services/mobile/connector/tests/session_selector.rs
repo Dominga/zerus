@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
+use std::rc::Rc;
 use zerus_mobile_connector::capabilities::Flags;
 use zerus_mobile_connector::execute::Outcome;
 use zerus_mobile_connector::fleet::PeerNative;
@@ -29,11 +30,15 @@ const MACHINE: &str = "00000000-0000-4000-8000-000000000031";
 struct Scripted {
     answers: RefCell<HashMap<Vec<String>, Result<Value, NativeError>>>,
     calls: RefCell<Vec<Call>>,
+    first_call: RefCell<Option<Box<dyn FnOnce()>>>,
 }
 
 impl Native for Scripted {
     async fn call(&self, call: Call) -> NativeResult {
         self.calls.borrow_mut().push(call.clone());
+        if let Some(action) = self.first_call.borrow_mut().take() {
+            action();
+        }
         match self.answers.borrow().get(&call.argv) {
             Some(Ok(answer)) => Ok(Output::Json(answer.clone())),
             Some(Err(error)) => Err(error.clone()),
@@ -447,4 +452,119 @@ async fn a_snapshot_indexes_the_listed_session_id_of_each_live_run() {
     );
     connector.snapshot().await.unwrap();
     assert!(connector.state.borrow().session_ids.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn duplicate_label_parent_and_child_reads_keep_the_original_listed_id_across_awaits() {
+    use zerus_mobile_connector::session_selector::LABELS_MARKER;
+    let harness = Harness::new(
+        "labels-read-boundary",
+        &[SELECTOR_MARKER, PEER_MARKER, LABELS_MARKER],
+        Some(ID),
+    );
+    let child = "helper";
+    harness.answer(&["inspect",SESSION,"--session-id",ID],Ok(json!({"name":SESSION,"run_id":RUN,"conversation_id":CONVERSATION,"agent":"codex","subagents":{"helper":{}}})));
+    harness.answer(&["inspect",SESSION,"--session-id",ID,"--agent",child,"--skip-processes"],Ok(json!({"name":SESSION,"run_id":RUN,"conversation_id":format!("{CONVERSATION}/{child}"),"parent_conversation_id":CONVERSATION,"agent_id":child,"agent":"codex"})));
+    let Harness {
+        connector,
+        _scratch,
+    } = harness;
+    let connector = Rc::new(connector);
+    let weak = Rc::downgrade(&connector);
+    *connector.native.first_call.borrow_mut() = Some(Box::new(move || {
+        weak.upgrade()
+            .unwrap()
+            .state
+            .borrow_mut()
+            .session_ids
+            .insert(RUN.into(), "22222222-2222-4222-8222-222222222222".into());
+    }));
+    let mut payload = identity();
+    payload["agent_id"] = json!(child);
+    let Outcome::Finished(receipt)=connector.execute(json!({"request_id":"d4318e5a-cd17-483e-9b01-98d8aa0c9382","operation":"inspect","session":SESSION,"payload":payload})).await.unwrap() else {panic!("read not executed");};
+    assert_eq!(receipt["state"], "completed", "{receipt}");
+    let calls = connector.native.calls.borrow();
+    assert_eq!(calls.len(), 2);
+    assert!(calls
+        .iter()
+        .all(|c| c.argv.get(3).map(String::as_str) == Some(ID)));
+    assert_eq!(
+        connector.state.borrow().session_ids[RUN],
+        "22222222-2222-4222-8222-222222222222"
+    );
+}
+
+#[test]
+fn auxiliary_routing_never_rewrites_an_archive_original_status_or_effect_plan() {
+    use zerus_mobile_connector::session_selector::auxiliary_argv;
+    let selected = Selection {
+        name: SESSION.into(),
+        id: ID.into(),
+    };
+    assert_eq!(
+        auxiliary_argv(&argv(&["inspect", SESSION]), &selected),
+        Some(argv(&["inspect", SESSION, "--session-id", ID]))
+    );
+    for command in [
+        "send",
+        "session-action",
+        "session-action-status",
+        "recovery",
+        "desktop",
+        "task",
+    ] {
+        assert!(
+            auxiliary_argv(&argv(&[command, SESSION, "--json"]), &selected).is_none(),
+            "{command}"
+        );
+    }
+    assert!(auxiliary_argv(
+        &argv(&["inspect", SESSION, "--archive", "archive"]),
+        &selected
+    )
+    .is_none());
+    assert!(auxiliary_argv(&argv(&["inspect", SESSION, "--session-id", ID]), &selected).is_none());
+    assert!(auxiliary_argv(&argv(&["inspect", "codex/other/session"]), &selected).is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn attention_reads_route_same_label_rows_through_their_own_native_ids() {
+    use zerus_mobile_connector::session_selector::LABELS_MARKER;
+    let h = Harness::new(
+        "labels-attention",
+        &[SELECTOR_MARKER, PEER_MARKER, LABELS_MARKER],
+        None,
+    );
+    h.connector.flags.set(Flags::from_help(
+        &[SELECTOR_MARKER, PEER_MARKER, LABELS_MARKER].join("\n"),
+    ));
+    h.connector.state.borrow_mut().capabilities_next_poll = 1_000_000.0;
+    let other = "22222222-2222-4222-8222-222222222222";
+    let rows:Vec<_>=[(RUN,CONVERSATION,ID),("second-run","second-conversation",other)].into_iter().map(|(run,conversation,id)|
+        json!({"name":SESSION,"run_id":run,"conversation_id":conversation,"session_id":id,"cmd":"codex","tracked":true,"runtime_state":"live","process_state":"running"})).collect();
+    h.answer(
+        &["ls", "--json", "--local"],
+        Ok(json!({"host":"fixture","sessions":rows})),
+    );
+    for (id, run, conversation) in [
+        (ID, RUN, CONVERSATION),
+        (other, "second-run", "second-conversation"),
+    ] {
+        h.answer(
+            &["inspect", SESSION, "--session-id", id],
+            Ok(json!({"name":SESSION,"run_id":run,"conversation_id":conversation,"questions":[]})),
+        );
+    }
+    let connector = Rc::new(h.connector);
+    connector.snapshot().await.unwrap();
+    let calls = connector.native.calls.borrow();
+    let ids: Vec<_> = calls
+        .iter()
+        .filter(|call| call.argv.first().map(String::as_str) == Some("inspect"))
+        .map(|call| call.argv[2..].to_vec())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![argv(&["--session-id", ID]), argv(&["--session-id", other])]
+    );
 }

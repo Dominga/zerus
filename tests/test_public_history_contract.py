@@ -245,6 +245,61 @@ class PublicHistoryContract(unittest.TestCase):
         self.assertLessEqual(len(body["events"]), payload.get("limit", 100))
         return body
 
+    def test_recent_inspection_does_not_wait_for_historical_index_or_shared_receipts(self):
+        """The initial mobile transcript can use inspect while older pages build.
+
+        The latest provider progress is after a large private tool result and
+        the latest journal prompt is before a long tool-only timeline. Neither
+        needs the public_history index or unrelated delivery classification.
+        """
+        self.write_source([self.message(0), self.large_tool_output(9 * 1024 * 1024),
+                           self.message(1, text="Newest native progress after large private output.",
+                                        message_id="newest-native-progress")])
+        self.journal([dict(type="UserPromptSubmit", agent_id="", at=1_700_000_002,
+                           detail="Newest person prompt before tool activity."),
+                      *[dict(type="PostToolUse", agent_id="", at=1_700_000_003 + index,
+                             detail="Private tool-only activity.") for index in range(150)]])
+        receipts = self.state / "input_receipts"
+        receipts.mkdir(mode=0o700)
+        for index in range(130):
+            path = receipts / f"unrelated-{index:03}.json"
+            path.write_text(json.dumps(dict(status="submitted", conversation_id="another-conversation",
+                                            agent_id="", attachments=[])), encoding="utf-8")
+            path.chmod(0o600)
+
+        def inspect():
+            result = subprocess.run([str(HGS), "inspect", self.name, "--skip-processes"],
+                                    text=True, capture_output=True, env=self.env, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            body = json.loads(result.stdout)
+            self.assertEqual((body["run_id"], body["conversation_id"]), (self.run, self.conversation))
+            self.assertIn("newest-native-progress", [row.get("message_id")
+                                                    for row in body["provider_messages"]])
+            self.assertIn("Newest person prompt before tool activity.",
+                          [row.get("detail") for row in body["message_events"]])
+            self.assertNotIn("PRIVATE TOOL RESULT", result.stdout)
+            self.assertLessEqual(len(body["provider_messages"]), 100)
+            self.assertLessEqual(len(body["message_events"]), 100)
+            return body
+
+        inspect()
+        self.assertFalse((self.state / "public_history").exists(),
+                         "A recent inspection must not create a historical index")
+        page = self.history()
+        self.assertFalse(page["head"]["complete"])
+        self.assertEqual(page["source_status"]["attachments"], "indexing")
+        progress = page["source_status"]["progress"]
+        self.assertLess(progress["source_bytes"], progress["known_source_bytes"])
+        self.assertLess(progress["receipt_files"], 130)
+        index = next((self.state / "public_history").glob("*.sqlite3"))
+        with closing(sqlite3.connect(index)) as db:
+            before = dict(db.execute("SELECT key,value FROM meta WHERE key LIKE 'offset:%'"))
+            classified = db.execute("SELECT count(*) FROM receipt_seen").fetchone()[0]
+        inspect()
+        with closing(sqlite3.connect(index)) as db:
+            self.assertEqual(dict(db.execute("SELECT key,value FROM meta WHERE key LIKE 'offset:%'")), before)
+            self.assertEqual(db.execute("SELECT count(*) FROM receipt_seen").fetchone()[0], classified)
+
     def complete(self, **updates):
         # Each call has bounded source/reconciliation work. Completion is
         # explicit; a page that happens to have 100 rows is not proof of it.

@@ -11,10 +11,13 @@ import whitewhLight from "./skins/whitewh-light.json";
 // The base skin must come first: it defines the token set others may override.
 export const skins: ResolvedSkin[] = resolveSkins([zerusDark, zerusLight, fjord, paper, whitewhDark, whitewhLight] as SkinFile[]);
 
-const sheet = document.createElement("style");
-sheet.id = "zerus-skins";
-sheet.textContent = skins.map(compileSkin).join("\n");
-document.head.prepend(sheet);
+// A module loaded without a document (a Node test importing a store that reads the skin) has no sheet to add.
+if (typeof document !== "undefined") {
+  const sheet = document.createElement("style");
+  sheet.id = "zerus-skins";
+  sheet.textContent = skins.map(compileSkin).join("\n");
+  document.head.prepend(sheet);
+}
 
 // Settings > Appearance: the Qt theme (workspace/theme: follow the system,
 // dark or light) picks one of two skins, one per appearance

@@ -303,3 +303,6 @@
   .tk-dot.k-gone { background: transparent; border: 1px dashed var(--z-color-dim); }
 
 @media (prefers-reduced-motion: reduce) { .tk-assign-sub { animation: none; } }
+/* At most five kept-copy cards from the existing bounded damaged page. */
+.tk-damaged-review{display:grid;gap:8px;margin:0 12px 8px;max-height:320px;overflow:auto}
+.tk-damaged-review .tk-card{display:grid;gap:6px;cursor:default}

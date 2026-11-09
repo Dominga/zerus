@@ -81,8 +81,11 @@ struct SessionsScreen: View {
                 let collapsed = model.collapsedProjects.contains(group.key.key) && model.sessionQuery.isEmpty
                 Section {
                     if !collapsed {
-                        ForEach(group.sessions) { session in
-                            SessionCard(session: session)
+                        ForEach(group.cards) { entry in
+                            // A child session sits under its parent, indented with a tree connector (spec 3.3).
+                            SessionCard(entry: entry)
+                                .padding(.leading, ChildTree.indent(entry.depth))
+                                .background(alignment: .leading) { if entry.depth > 0 { ChildTree(depth: entry.depth, last: entry.lastChild) } }
                                 .listRowInsets(EdgeInsets(top: 5, leading: 12, bottom: 5, trailing: 12))
                                 .listRowBackground(Color.clear)
                                 .listRowSeparator(.hidden)

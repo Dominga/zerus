@@ -546,9 +546,15 @@ public enum HistoryReadPaths {
     }
 
     /// A corrupt or incompatible saved page is a miss, never evidence for a live action.
-    public static func saved(isolation: isolated (any Actor)? = #isolation, _ cached: () async throws -> HistoryPage?) async throws -> HistoryPage? {
-        do { return try await cached() }
-        catch is CancellationError { throw CancellationError() }
+    public static func saved(isolation: isolated (any Actor)? = #isolation, current: () -> Bool = { true },
+                             _ cached: () async throws -> HistoryPage?) async throws -> HistoryPage? {
+        guard current() else { return nil }
+        do {
+            let page = try await cached()
+            // An explicit latest intent can supersede an asynchronous cache read
+            // without changing the selected conversation or its empty window.
+            return current() ? page : nil
+        } catch is CancellationError { throw CancellationError() }
         catch { return nil }
     }
 

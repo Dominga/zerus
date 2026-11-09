@@ -1,8 +1,10 @@
+import { TextInput } from "../lib/TextField";
 import { For, Show, createEffect, createMemo, createSignal, lazy, onCleanup, onMount, untrack } from "solid-js";
 import { Icon } from "../lib/icons";
 import { catalog, computerOffline } from "../../store/catalog";
-import { GONE, change, copyCommand, copyFolder, copyName, copyReference, end, forget, interrupting, notify, perform, stillListed, pendingNotifications, toggleMute, updating } from "../../store/actions";
+import { GONE, change, copyCommand, copyFolder, copyName, copySessionId, copyReference, end, forget, interrupting, notify, perform, stillListed, pendingNotifications, toggleMute, updating } from "../../store/actions";
 import { bindBatchConfirm, running } from "../../store/batch";
+import { bindResumeTerminalConfirm } from "../../store/sessionTerminal";
 import { cancelRestoreFollow, forgetArchived, refreshArchiveWhenDone, restoreSession } from "../../store/restores";
 import type { MenuEntry } from "../../store/ui";
 import type { Details, Outcome } from "../../types";
@@ -15,7 +17,8 @@ import { setSetting } from "../../store/settings";
 import { sessionForks } from "../../store/sessionForks";
 import { FORK_CHECKING, FORK_HINT } from "./fork-ui";
 import { tr } from "../../i18n";
-import { readCleanupOffer } from "./termination-offer";
+import { readCleanupOffer, type CleanupProgram } from "./termination-offer";
+import { TerminationPrograms } from "./TerminationPrograms";
 import { CleanupOfferNotice } from "./CleanupOfferNotice";
 import { captureUntrackedShell, untrackedShell, UNVERIFIED_SHELL } from "../../store/untrackedShell";
 import type { Action } from "../../types";
@@ -34,6 +37,13 @@ const [open, dispatch] = createSignal<ReturnType<typeof dialogReducer>>(undefine
 const send = (event: DialogEvent) => dispatch(dialogReducer(open(), event));
 const closeDialog = () => send({ type: "close" });
 
+// Resume and open terminal asks once here; any way out but the confirm button is a Cancel.
+bindResumeTerminalConfirm((row) => new Promise<boolean>((resolve) => {
+  let answered = false;
+  const answer = (confirmed: boolean) => { if (!answered) { answered = true; resolve(confirmed); } };
+  send({ type: "open", kind: "resume_terminal", row, answer });
+}));
+
 // A selection's Forget or Terminate asks here; any way out but the confirm button is a Cancel.
 bindBatchConfirm((copy) => new Promise<boolean>((resolve) => {
   let answered = false;
@@ -49,7 +59,7 @@ type Item = Extract<MenuEntry, { label: string }> & { action: () => void };
  * snapshot of the row as it is now, which the store checks against the
  * listed row when they run.
  */
-export function actionEntries(s: Session, details?: Details, options: { context?: boolean } = {}): { change: Item; stop: Item & { shown: boolean }; rename: Item; fork: Item; archive?: Item; end: Item } {
+export function actionEntries(s: Session, details?: Details, options: { context?: boolean } = {}): { change: Item; stop: Item & { shown: boolean; interrupt: () => Promise<Outcome | undefined> }; rename: Item; fork: Item; archive?: Item; end: Item } {
   const row = snapshotOf(s);
   const archived = row.state === "archived";
   const m = menuState(row, !computerOffline(s.computer), updating(s.computer, s.name), details, {
@@ -58,6 +68,8 @@ export function actionEntries(s: Session, details?: Details, options: { context?
     occupied: archived && archiveNameOccupied(row, catalog.rows),
   });
   const hint = (enabled: boolean, reason?: string) => (enabled || !reason ? undefined : tr(reason));
+  // The Stop's interrupt, whose outcome the composer reads (zerus-5wmh.13.4).
+  const interrupt = () => details ? perform(row, { kind: "interrupt", turn_started: details.turn_started }) : Promise.resolve(undefined);
   return {
     change: {
       label: tr(m.change.label), icon: archived || row.state !== "running" ? "play" : "pause", disabled: !m.change.enabled, hint: hint(m.change.enabled, m.change.reason),
@@ -65,7 +77,7 @@ export function actionEntries(s: Session, details?: Details, options: { context?
     },
     stop: {
       label: tr("Stop"), icon: "circle-stop", shown: m.stop.visible, disabled: !m.stop.enabled, hint: hint(m.stop.enabled, m.stop.reason),
-      action: () => { if (details) void perform(row, { kind: "interrupt", turn_started: details.turn_started }); },
+      interrupt, action: () => { void interrupt(); },
     },
     rename: { label: tr("Rename…"), icon: "pencil", disabled: !m.rename, action: () => send({ type: "open", kind: "rename", row }) },
     fork: forkEntry(s, details),
@@ -103,11 +115,12 @@ export function forkEntry(s: Session, details?: Details): Item {
  * only for the selected session, whose folder and run they prefer. They
  * show no hint when off, as Qt shows none.
  */
-export function copyEntries(s: Session, details?: Details): { command: Item; name: Item; reference: Item; folder: Item } {
+export function copyEntries(s: Session, details?: Details): { command: Item; id: Item; name: Item; reference: Item; folder: Item } {
   const row = snapshotOf(s);
   const c = copyState(row, !computerOffline(s.computer), details);
   return {
     command: { label: tr(c.command.label), icon: "link", disabled: !c.command.enabled, action: () => { void copyCommand(row); } },
+    id: { label: tr("Copy session ID"), icon: "copy", disabled: !row.conversationId, hint: row.conversationId ? undefined : tr("This session has no recorded conversation ID."), action: () => { void copySessionId(row); } },
     name: { label: tr("Copy session name"), icon: "copy", action: () => { void copyName(row); } },
     reference: { label: tr("Copy session reference"), icon: "link", disabled: !c.reference, action: () => { void copyReference(row, details); } },
     folder: { label: tr("Copy folder path"), icon: "copy", disabled: !c.folder.enabled, action: () => { void copyFolder(row, details); } },
@@ -185,7 +198,7 @@ function RenameDialog(props: { row: ActionRow; close: () => void }) {
       <div class="dlg-body">
         <div class="dlg-detail dlg-context">{props.row.machine} / {prefix.slice(0, -1)}</div>
         <label class="dlg-label" for="rename-tag">{tr("Session name")}</label>
-        <input id="rename-tag" data-initial class="dlg-input" placeholder={tr("e.g. release planning")} value={value()} onInput={(e) => setValue(e.currentTarget.value)} />
+        <TextInput id="rename-tag" data-initial class="dlg-input" placeholder={tr("e.g. release planning")} value={value()} onInput={(e) => setValue(e.currentTarget.value)} />
         <div class="dlg-detail ell" title={prefix + value()}>{prefix + value()}</div>
         <Show when={problem()}><div class="dlg-error">{problem()}</div></Show>
       </div>
@@ -205,6 +218,7 @@ export function TerminateDialog(props: { row: ActionRow; close: () => void }) {
   const [terminalError, setTerminalError] = createSignal("");
   const [offer, setOffer] = createSignal<string>();
   const [remove, setRemove] = createSignal(false);
+  const [programs, setPrograms] = createSignal<readonly CleanupProgram[]>([]);
   const [offerError, setOfferError] = createSignal("");
   let closed = false, consumed = false;
   onMount(() => {
@@ -214,18 +228,25 @@ export function TerminateDialog(props: { row: ActionRow; close: () => void }) {
       return;
     }
     const target = targetOf(props.row, "terminate");
-    if (copy.action !== "terminate" || !target) return;
+    if (copy.action !== "terminate" || !target || !target.conversation_id || props.row.gitWorktree === false) return;
     void readCleanupOffer(target, { offer: terminationCleanupOffer, cancel: terminationCleanupCancel }, () => !closed, (state) => {
       setOffer(state.offer?.id); setRemove(state.offer?.checked ?? false); setOfferError(state.error ?? "");
+      setPrograms(state.offer?.programs ?? []);
     });
   });
   onCleanup(() => { closed = true; const id = offer(); if (id && !consumed) void terminationCleanupCancel(id); });
-  const submit = () => {
+  const submit = async () => {
     if (shell && !terminal()) return;
     const id = remove() ? offer() : undefined;
-    consumed = !!id;
+    const released = !id ? offer() : undefined;
+    consumed = !!id || !!released;
     if (offer() && !remove()) void setSetting("workspace/removeWorktreeAfterTermination", false);
-    props.close(); void end(props.row, terminal() ?? copy.action, id);
+    props.close();
+    if (released) {
+      try { await terminationCleanupCancel(released); }
+      catch (error) { notify("error", String(error), true); return; }
+    }
+    void end(props.row, terminal() ?? copy.action, id);
   };
   return (
     <>
@@ -246,6 +267,7 @@ export function TerminateDialog(props: { row: ActionRow; close: () => void }) {
         } : undefined} /></Show>
         <Show when={offer()}>
           <label class="check" style={{ "margin-top": "10px" }}><input type="checkbox" checked={remove()} onChange={(e) => setRemove(e.currentTarget.checked)} /> {tr("Remove the working folder after stopping")}</label>
+          <Show when={remove()}><TerminationPrograms programs={programs()} /></Show>
           <p class="hint" style={{ "margin-top": "6px" }}>{tr("Removal runs in the background after exact successful termination, only for a verified generated worktree. Unknown local data keeps the folder for review. Computer: %1", props.row.machine)}</p>
         </Show>
       </div>
@@ -275,6 +297,25 @@ function ForgetDialog(props: { row: ActionRow; bound: ForgetScope; close: () => 
       <div class="dlg-foot">
         <span class="spacer" />
         <button type="button" class="btn solid-danger" onClick={() => { props.close(); void (archived ? forgetArchived(props.row) : forget(props.row, props.bound)); }}>{copy.confirm}</button>
+        <button type="button" class="btn primary" data-initial autofocus onClick={props.close}>{tr("Cancel")}</button>
+      </div>
+    </>
+  );
+}
+
+/** Resume and open terminal's one question (Qt's confirmLocalStart before `hgs a`, SessionsWindow.cpp:5469-5472). */
+function ResumeTerminalDialog(props: { row: ActionRow; answer: (confirmed: boolean) => void; close: () => void }) {
+  onCleanup(() => props.answer(false));
+  const confirm = () => { props.answer(true); props.close(); };
+  return (
+    <>
+      <div class="dlg-head"><Icon name="square-terminal" size={18} class="accent" /><h2 id="action-dlg-title">{tr("Resume and open terminal?")}</h2></div>
+      <div class="dlg-body"><div class="confirm-body" id="action-dlg-body" style={{ "white-space": "pre-line" }}>
+        {tr("Resume %1 on %2, then open its terminal.\n\nThe agent continues its saved conversation. The terminal opens once this same session reports running.", props.row.name, props.row.machine)}
+      </div></div>
+      <div class="dlg-foot">
+        <span class="spacer" />
+        <button type="button" class="btn" onClick={confirm}>{tr("Resume and open terminal")}</button>
         <button type="button" class="btn primary" data-initial autofocus onClick={props.close}>{tr("Cancel")}</button>
       </div>
     </>
@@ -356,7 +397,8 @@ export function ActionDialogs() {
       <Show when={open()} keyed>
         {(p) => (p.kind === "fork" ? <ForkDialog row={p.row} details={p.details} close={closeDialog} /> : p.kind === "rename" ? <RenameDialog row={p.row} close={closeDialog} />
           : p.kind === "fresh" ? <FreshDialog row={p.row} close={closeDialog} /> : p.kind === "forget" ? <ForgetDialog row={p.row} bound={p.bound} close={closeDialog} />
-          : p.kind === "batch" ? <BatchDialog copy={p.copy} answer={p.answer} close={closeDialog} /> : p.kind === "terminate" ? <TerminateDialog row={p.row} close={closeDialog} /> : null)}
+          : p.kind === "batch" ? <BatchDialog copy={p.copy} answer={p.answer} close={closeDialog} /> : p.kind === "terminate" ? <TerminateDialog row={p.row} close={closeDialog} />
+          : p.kind === "resume_terminal" ? <ResumeTerminalDialog row={p.row} answer={p.answer} close={closeDialog} /> : null)}
       </Show>
     </dialog>
   );

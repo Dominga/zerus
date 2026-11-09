@@ -92,6 +92,11 @@ fn a_page_holds_at_most_50_entries_and_names_each_outcome() {
     );
     assert_eq!((page.next, page.previous), (6, 0));
     assert_eq!(page.entries[0].at, 1_800_000_000_000);
+    assert!(page.entries[0].categories.is_empty());
+    let mut categorized = entry(5, "approved");
+    categorized["categories"] = json!(["paid", "future", "shell", 3]);
+    let page = super::page(json!({"entries": [categorized]}).as_object().unwrap()).unwrap();
+    assert_eq!(page.entries[0].categories, ["shell", "paid"]);
     let many: Vec<Value> = (0..51).map(|n| entry(n, "approved")).collect();
     assert_eq!(
         super::page(json!({"entries": many}).as_object().unwrap()).unwrap_err(),
@@ -111,6 +116,11 @@ fn a_detail_shows_the_question_and_the_answer_chosen() {
     );
     let bare = json!({"status": "failed", "detail": ""});
     assert_eq!(detail(bare.as_object().unwrap()), "Failed");
+    let categorized = json!({"status": "approved", "detail": "", "categories": ["shell", "paid"]});
+    assert_eq!(
+        detail(categorized.as_object().unwrap()),
+        "Approved once\n\nCategories: Shell commands, Paid usage"
+    );
 }
 
 /// A fake `hgs` logging its arguments and answering per case.

@@ -2033,7 +2033,7 @@ pub fn classify(action: &TeamAction, request_id: &str, exit: Exit) -> TeamOutcom
                 // The new draft's id is the receipt.
                 TeamAction::DraftStart { .. } => receipt["team"]
                     .as_str()
-                    .is_some_and(|id| super::read::valid_team(id)),
+                    .is_some_and(super::read::valid_team),
                 // The receipt names the proposal it decided (or its earlier
                 // decision, on a replay).
                 TeamAction::DecideProposal { proposal, .. } => receipt

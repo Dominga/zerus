@@ -340,6 +340,14 @@ pub(crate) trait TerminalBackend: Sync {
     fn attached_counts(&self) -> Result<Option<Vec<(String, String)>>> {
         Ok(None)
     }
+    /// When a client attached to terminal `name` last had input, in seconds
+    /// since the epoch: `Some(None)` with no client attached, None unknown.
+    /// A backend that cannot report input times knows only that a terminal
+    /// with no attached client has none; any attached client is unknown.
+    fn last_client_input(&self, name: &str) -> Option<Option<f64>> {
+        let counts = self.attached_counts().ok()??;
+        counts.iter().find(|(session, _)| session == name).filter(|(_, count)| count == "0").map(|_| None)
+    }
     fn panes(&self) -> Result<Vec<PaneRow>> {
         Err(UNSUPPORTED.into())
     }
@@ -613,6 +621,24 @@ mod tests {
             assert!(workspace::pane_cwds().is_empty());
             assert!(!current().session_exists("claude/p/a"));
         });
+    }
+
+    #[test]
+    fn without_input_times_only_an_unattached_terminal_counts_as_unused() {
+        struct Counted;
+        impl TerminalBackend for Counted {
+            fn attached_counts(&self) -> Result<Option<Vec<(String, String)>>> {
+                Ok(Some(vec![("claude/p/idle".into(), "0".into()), ("claude/p/watched".into(), "1".into()),
+                    ("claude/p/odd".into(), "?".into())]))
+            }
+        }
+        assert_eq!(Counted.last_client_input("claude/p/idle"), Some(None));
+        for name in ["claude/p/watched", "claude/p/odd", "claude/p/missing"] {
+            assert_eq!(Counted.last_client_input(name), None, "{name}");
+        }
+        struct Empty;
+        impl TerminalBackend for Empty {}
+        assert_eq!(Empty.last_client_input("claude/p/idle"), None);
     }
 }
 

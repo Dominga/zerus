@@ -16,6 +16,15 @@ const details = (extra: Partial<Details> = {}): Details => ({
 });
 
 describe("menuState change", () => {
+  it("offers Pause before the first turn only from an explicit native capability", () => {
+    const fresh = row({ conversation_id: null, resumable: false, activity: "unknown", phase: "unknown", allowed_actions: ["pause", "terminate"] });
+    expect(menuState(fresh, true, false).change).toMatchObject({ label: "Pause session", enabled: true });
+    expect(menuState(fresh, true, false, details({ conversation_id: "", allowed_actions: ["terminate"] })).change.enabled).toBe(false);
+    expect(menuState(row({ conversation_id: null, resumable: false, activity: "unknown" }), true, false).change.enabled).toBe(false);
+    expect(menuState(fresh, false, false).change.enabled).toBe(false);
+    expect(menuState(fresh, true, true).change.enabled).toBe(false);
+    expect(menuState({ ...fresh, processState: "exited" }, true, false).change.enabled).toBe(false);
+  });
   it("pauses an idle running claude", () => {
     expect(menuState(row(), true, false).change).toMatchObject({ label: "Pause session", enabled: true });
   });

@@ -114,6 +114,7 @@ class TaskDigestTests(RustOnly, BlackBoxCase):
         await self.until(lambda: self.digests() == ["ab" * 32, None], 20, "a heartbeat with the tasks digest",
                          process)
         self.assertIn("task_exchange", self.relay.heartbeats()[-1].body["snapshot"]["mobile_capabilities"]["operations"])
+        self.assertNotIn("Configured hgs lacks mobile task exchange", process.output())
 
     async def test_a_refusal_from_hgs_reaches_the_phone_as_its_text(self):
         busy = "the project's tasks are busy; try again"
@@ -133,6 +134,7 @@ class TaskDigestTests(RustOnly, BlackBoxCase):
         self.assertEqual(self.hgs.calls("task"), [])
         self.assertNotIn("task_exchange",
                          self.relay.heartbeats()[-1].body["snapshot"]["mobile_capabilities"]["operations"])
+        self.assertEqual(process.output().count("Configured hgs lacks mobile task exchange"), 1)
 
 
 if __name__ == "__main__":

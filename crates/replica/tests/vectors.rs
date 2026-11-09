@@ -297,8 +297,17 @@ fn task_schema6_attempts_loro_1_16() {
     // The stored document still accepts this build's edits under its rules.
     let mut task = merged("a", "b");
     let executor = task.view().unwrap().session.unwrap();
-    assert!(task
-        .record_report("Done.", &Actor::Agent(executor), 1_790_000_005_000)
-        .unwrap());
+    assert!(
+        task.report_attempt(
+            "00000000-0000-4000-8000-000000000004",
+            "Done.",
+            zerus_replica::execution::ReportKind::Ready,
+            None,
+            &Actor::Agent(executor),
+            1_790_000_005_000,
+        )
+        .unwrap()
+        .moves
+    );
     assert_eq!(task.view().unwrap().stage, Stage::Review);
 }

@@ -405,6 +405,7 @@ impl TeamsModel {
             TeamRead::List => "list".into(),
             TeamRead::Waiting { .. } => "waiting".into(),
             TeamRead::Status { team } => team_key("team", team),
+            TeamRead::Task { team, task } => team_key(&format!("task:{task}"), team),
             TeamRead::Inbox { team } => team_key("inbox", team),
             TeamRead::Events { team, .. } => team_key("feed", team),
             TeamRead::Spans { team, .. } => team_key("spans", team),
@@ -548,7 +549,7 @@ impl TeamsModel {
                 &mut out,
             ),
             // Asked once by the editor's Try it, never polled.
-            TeamRead::CatalogRoute { .. } => {}
+            TeamRead::CatalogRoute { .. } | TeamRead::Task { .. } => {}
             // Test pages are read on request by the Tests mode, not polled.
             TeamRead::TestQueue { .. } | TeamRead::TestResults { .. } => {}
             // Task 92: the Time view reads these on request, never polled.

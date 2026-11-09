@@ -3,9 +3,11 @@
 use sha2::{Digest, Sha256};
 use zerus_desktop_ledger::{Identity, Kind, Target};
 
+#[derive(Clone, Copy)]
 pub(super) enum Edge<'a> {
     Reply(&'a str),
     Attention(&'a str),
+    StartupQuestion(&'a str),
 }
 
 pub(super) struct Key {
@@ -16,13 +18,35 @@ pub(super) struct Key {
 fn valid(value: &str, cap: usize) -> bool {
     !value.is_empty() && value.len() <= cap && !value.chars().any(char::is_control)
 }
+pub(super) fn source(computer: &str, run: &str, conversation: &str) -> bool {
+    (computer.is_empty() || valid(computer, 255))
+        && valid(run, 1024)
+        && (conversation.is_empty() || valid(conversation, 1024))
+}
+pub(super) fn question(value: &str) -> bool {
+    valid(value, 1024)
+}
 
 impl Key {
     pub fn new(computer: &str, run: &str, conversation: &str, edge: Edge<'_>) -> Option<Self> {
-        if (!computer.is_empty() && !valid(computer, 255))
-            || !valid(run, 1024)
-            || !valid(conversation, 1024)
-        {
+        if !source(computer, run, conversation) {
+            return None;
+        }
+        if let Edge::StartupQuestion(question) = edge {
+            if !conversation.is_empty() || !valid(question, 1024) {
+                return None;
+            }
+            return Self::encode(Identity {
+                kind: Kind::Post,
+                target: Target::StartupQuestion {
+                    computer: computer.into(),
+                    run: run.into(),
+                    question: question.into(),
+                },
+                edge: "startup_question".into(),
+            });
+        }
+        if !valid(conversation, 1024) {
             return None;
         }
         let edge = match edge {
@@ -37,7 +61,7 @@ impl Key {
             }
             _ => return None,
         };
-        let identity = Identity {
+        Self::encode(Identity {
             kind: Kind::Post,
             target: Target::Session {
                 computer: computer.into(),
@@ -45,7 +69,9 @@ impl Key {
                 conversation: conversation.into(),
             },
             edge,
-        };
+        })
+    }
+    fn encode(identity: Identity) -> Option<Self> {
         // Exactly the ledger's canonical identity encoding; payload and host
         // session are deliberately absent. put_intent still validates it.
         let encoded = serde_json::to_vec(&identity).ok()?;

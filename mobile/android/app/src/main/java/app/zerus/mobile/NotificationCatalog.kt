@@ -51,7 +51,8 @@ object NotificationCatalogParser {
                     clean(SessionFilters.label(session).ifBlank { session.title }, "Session"), clean(machine.name, "Computer"), kind,
                     identity, value.string("activity") == "idle", machine.online,
                     SessionFilters.state(session) == "running" && value.string("process_state") != "exited",
-                    session.target.conversation, optional,SessionNotificationPreferences.suppressed(value,session.target,kind,optional),SessionNotificationPreferences.parse(value,session.target))
+                    session.target.conversation, optional,SessionNotificationPreferences.suppressed(value,session.target,kind,optional),SessionNotificationPreferences.parse(value,session.target),
+                    ChildSessions.quiet(value))
             }
         }
         return NotificationCatalog(current, identities)

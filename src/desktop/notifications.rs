@@ -546,7 +546,13 @@ impl Outbox {
                     let result = serde_json::to_value(receipt)
                         .map_err(anyhow::Error::from)
                         .and_then(|receipt| {
-                            ledger::finish(&mut store.db, &pending.request, state, &receipt)
+                            ledger::finish_recorded(
+                                &mut store.db,
+                                &pending.request,
+                                state,
+                                &receipt,
+                                chrono::Utc::now().timestamp_millis().max(0),
+                            )
                         });
                     if result.is_ok() {
                         pending.committed = true;
@@ -1093,13 +1099,18 @@ fn check_identity(identity: &Identity, action: &Action) -> Result<()> {
         ),
         "notification intent kind mismatch"
     );
-    let Target::Session {
-        computer,
-        run,
-        conversation,
-    } = &identity.target
-    else {
-        anyhow::bail!("notification target is not a session");
+    let (computer, run, conversation, question) = match &identity.target {
+        Target::Session {
+            computer,
+            run,
+            conversation,
+        } => (computer, run, conversation.as_str(), None),
+        Target::StartupQuestion {
+            computer,
+            run,
+            question,
+        } => (computer, run, "", Some(question.as_str())),
+        _ => anyhow::bail!("notification target is not a session"),
     };
     let target = attention::target(action.token()).context("invalid attention token")?;
     ensure!(
@@ -1107,7 +1118,8 @@ fn check_identity(identity: &Identity, action: &Action) -> Result<()> {
             && target.get("run").and_then(Value::as_str) == Some(run.as_str())
             && target
                 .get("conversation")
-                .is_none_or(|v| v.as_str() == Some(conversation.as_str())),
+                .is_none_or(|v| v.as_str() == Some(conversation))
+            && target.get("startup_question").and_then(Value::as_str) == question,
         "notification token identity mismatch"
     );
     Ok(())

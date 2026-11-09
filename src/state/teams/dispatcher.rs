@@ -223,6 +223,21 @@ pub(crate) struct SeenLimit {
     pub detail: String,
 }
 
+/// Task #7: whether a session record is idle and may take a message, the same
+/// test the listing's rows go through: live, activity idle, phase empty, idle
+/// or ready, no open optional questions, no auth wall and a send that works.
+fn record_free(record: &Value) -> bool {
+    let field = |key: &str| record[key].as_str().unwrap_or_default();
+    let live = field("process_state") != "exited"
+        && !matches!(field("state"), "paused" | "stopped" | "archived")
+        && (field("state") == "running" || field("process_state") == "running" || field("runtime_state") == "live");
+    live && field("activity") == "idle"
+        && matches!(field("phase"), "" | "idle" | "ready")
+        && record["optional_questions"]["count"].as_u64().unwrap_or(0) == 0
+        && record["auth_required"] != true
+        && record["send_available"] != false
+}
+
 /// Every session of this computer and its peers from one listing.
 pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
     let mut sessions = Vec::new();
@@ -240,13 +255,10 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 && (field("state") == "running" || field("process_state") == "running" || field("runtime_state") == "live");
             let activity = field("activity").to_owned();
             let idle = live && activity == "idle";
-            // An idle agent whose own jobs run in the background (Background:
-            // a watcher, an MCP server, a long check) still takes messages.
-            let free = idle
-                && matches!(field("phase"), "" | "idle" | "ready")
-                && record["optional_questions"]["count"].as_u64().unwrap_or(0) == 0
-                && record["auth_required"] != true
-                && record["send_available"] != false;
+            // Task #7: an idle agent whose own jobs run in the background
+            // (Background: a watcher, an MCP server, a long check) still takes
+            // messages; the lead's policy asks the same question of its record.
+            let free = record_free(record);
             // Background work is not a finished turn, whatever the activity
             // says: a long command, a watcher or a native job still runs (A2).
             // C12: its command and start let a declared budget tell the lead
@@ -558,6 +570,12 @@ pub(crate) enum Step {
     AllDecided,
     /// A DeepSeek member's model and effort, before its first message.
     Settings { member: String },
+    /// Task #6: a running member's model or effort changed: switch its session
+    /// before its next task.
+    ApplyModel { member: String },
+    /// Task #6: a running member's start prompt changed: send it as the message
+    /// that replaces its earlier instructions, after the clear it asked for.
+    ReplacePrompt { member: String },
     /// Gives a ready task to a free member with the assignee's role: the
     /// assignee is busy, or failed the task's last attempt.
     Rebalance { task: u32, from: String, to: String },
@@ -677,6 +695,17 @@ fn claim_outputs<'a>(claimed: &mut Vec<&'a Task>, task: &'a Task) {
 fn session_of<'a>(member: &Member, seen: &'a [Seen]) -> Option<&'a Seen> {
     let session = member.session.as_ref()?;
     seen.iter().find(|s| s.host == session.host && s.name == session.name)
+}
+
+/// Task #26: whether Zerus may start this member although no task is handed out
+/// to it: no session, no start in flight, and neither removed, paused, draining
+/// nor failed (a failed start waits for its relaunch).
+fn may_start(member: &Member) -> bool {
+    member.session.is_none()
+        && !matches!(member.state, MemberState::Removed | MemberState::Paused)
+        && !member.draining
+        && member.launch_id.is_empty()
+        && member.error.is_empty()
 }
 
 /// N7: whether this tick may decide anything from the member's session being
@@ -1522,6 +1551,18 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             steps.push(if lead_ready { Step::Inbox } else { Step::InboxWaits });
         }
     }
+    // Task #26: a sub-lead with reports to read and no session is started, so
+    // its brief and inbox reach it; the message steps below follow once it can
+    // take one. Only a running or paused team starts its members: a planning or
+    // draft team starts its lead alone.
+    if active {
+        for sub in team.members.iter().filter(|member| member.sub && may_start(member)) {
+            let untold = inbox::items_for(team, &sub.id).iter().any(|item| !sub.inbox.told.contains(&item.key));
+            if untold && launching.insert(sub.id.clone()) {
+                steps.push(Step::Launch { member: sub.id.clone() });
+            }
+        }
+    }
     // N10: a member that just became a sub-lead hears what that means once.
     for sub in team.members.iter().filter(|member| member.sub && member.sub_brief && member.state != MemberState::Removed) {
         if session_of(sub, seen).is_some_and(can_take_a_message) {
@@ -1605,6 +1646,35 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         busy.insert(task.assignee.as_str());
         if preparing.insert(task.assignee.as_str()) {
             steps.push(Step::PrepareContext { task: task.id, member: task.assignee.clone() });
+        }
+    }
+    // Task #6: the owner changed a member's model, effort or start prompt while
+    // it ran. The switch and the replacing message go out before the member's
+    // next task, so it takes no task in this tick; a member Zerus is already
+    // switching for a ready task (U45) keeps that claim, and a removed member is
+    // done. A model step left on a finished or waiting task claims nothing.
+    let ready_ids = plan::ready(team);
+    let claimed: BTreeSet<&str> = ready_ids
+        .iter()
+        .filter_map(|id| team.task(*id))
+        .filter(|task| task.waits.is_none() && super::models::applies(team, task))
+        .filter_map(super::models::pending)
+        .map(|step| step.member.as_str())
+        .collect();
+    for member in team.members.iter().filter(|member| member.model_switch.is_some() || member.prompt_change.is_some()) {
+        if member.state == MemberState::Removed
+            || claimed.contains(member.id.as_str())
+            || busy.contains(member.id.as_str())
+            || !session_of(member, seen).is_some_and(|found| found.live && found.free)
+        {
+            continue;
+        }
+        busy.insert(member.id.as_str());
+        if member.model_switch.is_some() {
+            steps.push(Step::ApplyModel { member: member.id.clone() });
+        }
+        if member.prompt_change.is_some() {
+            steps.push(Step::ReplacePrompt { member: member.id.clone() });
         }
     }
     // C7: a member idle without a ready task while tasks are open starves the
@@ -1787,6 +1857,15 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             if let Some(member) = candidates.iter().filter_map(|id| team.member(id)).find(|member| available(member, &busy, Some(task))) {
                 busy.insert(member.id.as_str());
                 steps.push(Step::StageOut { task, member: member.id.clone() });
+                continue;
+            }
+            // Task #26: no candidate is available and the member this stage
+            // would go to has no session: start it, so the stage is not left
+            // waiting for a member that never starts.
+            if let Some(member) = candidates.iter().filter_map(|id| team.member(id)).find(|member| may_start(member)) {
+                if launching.insert(member.id.clone()) {
+                    steps.push(Step::Launch { member: member.id.clone() });
+                }
             }
         }
     }
@@ -2563,6 +2642,7 @@ fn test_queue_tick(store: &mut Store, team_id: &str, now: f64) -> anyhow::Result
         super::test_queue::load_now,
         &policy,
         &places,
+        team.settings.tests.as_ref(),
     )?;
     if !read {
         return Ok(());
@@ -2668,12 +2748,12 @@ fn dependency_folder(team: &Team, member_id: &str, local_host: &str) -> String {
 /// `deps` order, each report bounded to 2,000 characters and 6,000 in total,
 /// and at most 20 header lines.
 fn dependencies_text(team: &Team, task: &Task, local_host: &str) -> String {
-    let listed: Vec<(&Task, &Attempt)> = task
-        .deps
-        .iter()
-        .filter_map(|dep| team.task(dep.task))
-        .filter_map(|found| dependency_attempt(found).map(|attempt| (found, attempt)))
-        .collect();
+    let listed: Vec<(&Task, Option<&Attempt>)> = task
+        .deps.iter().filter_map(|dep| team.task(dep.task))
+        .filter_map(|found| {
+            if found.archived.is_some() { Some((found, None)) }
+            else { dependency_attempt(found).map(|attempt| (found, Some(attempt))) }
+        }).collect();
     let mut text = String::new();
     let mut used = 0usize;
     for (index, (found, attempt)) in listed.iter().enumerate() {
@@ -2681,6 +2761,12 @@ fn dependencies_text(team: &Team, task: &Task, local_host: &str) -> String {
             text += &format!("[{} more dependencies omitted]\n", listed.len() - index);
             break;
         }
+        if found.archived.is_some() {
+            text += &format!("#{} {}: archived report: {} | hgs team status --json\n",
+                found.id, found.title, json!({"team":team.id,"task":found.id}));
+            continue;
+        }
+        let Some(attempt) = attempt else { continue };
         let Some(report) = attempt.report.as_ref() else { continue };
         let status = serde_json::to_value(found.status).ok().and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_default();
         text += &format!(
@@ -2702,8 +2788,8 @@ fn dependencies_text(team: &Team, task: &Task, local_host: &str) -> String {
         text += &report.text.chars().take(shown).collect::<String>();
         if shown < total {
             text += &format!(
-                "\n[cut: shown {shown} of {total} characters; full report: hgs team status --json, task #{}]\n",
-                found.id
+                "\n[cut: shown {shown} of {total} characters; full report: {} | hgs team status --json]\n",
+                json!({"team":team.id,"task":found.id})
             );
         } else {
             text.push('\n');
@@ -3580,14 +3666,14 @@ pub(crate) fn last_lines(screen: &str, count: usize) -> Vec<String> {
             match chars.peek() {
                 Some('[') => {
                     chars.next();
-                    while let Some(next) = chars.next() {
+                    for next in chars.by_ref() {
                         if ('@'..='~').contains(&next) {
                             break;
                         }
                     }
                 }
                 Some(']') => {
-                    while let Some(next) = chars.next() {
+                    for next in chars.by_ref() {
                         if next == '\u{7}' || next == '\\' {
                             break;
                         }
@@ -4896,6 +4982,27 @@ fn apply_settings(member: &Member) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// U45/Task #6: the `hgs settings` call that switches a running session's model
+/// and effort, for a task's hand-out and for a member's own change. `Ok` when
+/// the agent took it; `Err((refused, reason))`, where `refused` is false for a
+/// call that may have reached it.
+fn set_session_model(session: &SessionRef, model: &str, effort: &str) -> std::result::Result<(), (bool, String)> {
+    let mut input = json!({"request_id":uuid::Uuid::new_v4().to_string(),"expected_run_id":session.run_id,
+        "expected_conversation_id":session.conversation_id,"model":model});
+    if !effort.is_empty() {
+        input["effort"] = json!(effort);
+    }
+    match hgs(&session.host, &["settings", &session.name, "--json"], Some(&input), Duration::from_secs(120)) {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let line = stderr.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("the settings change was refused");
+            Err((true, line.chars().take(300).collect::<String>()))
+        }
+        Err(error) => Err((false, error.to_string().chars().take(300).collect())),
+    }
+}
+
 /// U45: switches a member's model and effort before it gets `task_id`. The
 /// step is recorded before the call, so a crash leaves it pending and then
 /// uncertain, never sent twice; the hand-out waits until the member's session
@@ -4912,32 +5019,58 @@ fn switch_model(store: &mut Store, team: &Team, task_id: u32, member_id: &str, f
         events.push(Event::new("model_switch", json!({"task":task_id,"member":role,"from":from,"to":to})));
         Ok(())
     })?;
-    let mut input = json!({"request_id":uuid::Uuid::new_v4().to_string(),"expected_run_id":session.run_id,
-        "expected_conversation_id":session.conversation_id,"model":model});
-    if !effort.is_empty() {
-        input["effort"] = json!(effort);
-    }
-    let outcome = match hgs(&session.host, &["settings", &session.name, "--json"], Some(&input), Duration::from_secs(120)) {
-        Ok(output) if output.status.success() => return Ok(()),
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let line = stderr.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("the settings change was refused");
-            ("refused", line.chars().take(300).collect::<String>())
-        }
-        Err(error) => ("uncertain", error.to_string().chars().take(300).collect()),
+    let (state, reason) = match set_session_model(&session, model, effort) {
+        Ok(()) => return Ok(()),
+        Err((refused, reason)) => (if refused { "refused" } else { "uncertain" }, reason),
     };
     change(store, &team.id, |team, events| {
         let (role, name) = (team.role_of(member_id), team.name_of(member_id));
         let task = team.task_mut(task_id).context("unknown task")?;
         if let Some(step) = task.prepare.iter_mut().rev().find(|step| step.step == "model" && step.result == "pending" && step.member == member_id) {
-            step.result = outcome.0.into();
-            step.reason = outcome.1.clone();
+            step.result = state.into();
+            step.reason = reason.clone();
         }
-        super::models::wait(task, "model", &format!("{name} could not switch to {to}: {}", outcome.1), now());
+        super::models::wait(task, "model", &format!("{name} could not switch to {to}: {reason}"), now());
         events.push(Event::new(
-            if outcome.0 == "refused" { "model_switch_refused" } else { "model_switch_uncertain" },
-            json!({"task":task_id,"member":role,"to":to,"reason":outcome.1}),
+            if state == "refused" { "model_switch_refused" } else { "model_switch_uncertain" },
+            json!({"task":task_id,"member":role,"to":to,"reason":reason}),
         ));
+        Ok(())
+    })
+}
+
+/// Task #6: switches a running member's session to the model and effort its
+/// settings change named, before its next task. The change is taken once: a
+/// refusal puts the member's model back where its session is, and a newer
+/// change that arrived while the call ran stays for the next tick.
+fn apply_model(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Result<()> {
+    let Some(wanted) = team.member(member_id).and_then(|member| member.model_switch.clone()) else { return Ok(()) };
+    let to = super::models::label(&wanted.model, &wanted.effort);
+    let outcome = match team.member(member_id).and_then(|member| member.session.as_ref()) {
+        Some(session) => set_session_model(session, &wanted.model, &wanted.effort),
+        None => Err((true, "the member has no session".to_owned())),
+    };
+    change(store, &team.id, |team, events| {
+        let role = team.role_of(member_id);
+        let Some(found) = team.members.iter_mut().find(|member| member.id == member_id) else { return Ok(()) };
+        // The hgs call may have taken up to two minutes; a change the owner made
+        // meanwhile is newer than this one and stays for the next tick.
+        if found.model_switch.as_ref() != Some(&wanted) {
+            return Ok(());
+        }
+        found.model_switch = None;
+        match &outcome {
+            Ok(()) => events.push(Event::new("model_switched", json!({"member":role,"to":to}))),
+            // A definite refusal leaves the session on the model it ran, so the
+            // member's model follows it back. An uncertain call may have reached
+            // the session: the new value stays and the feed says so.
+            Err((true, reason)) => {
+                found.model = wanted.from_model.clone();
+                found.effort = wanted.from_effort.clone();
+                events.push(Event::new("model_switch_failed", json!({"member":role,"to":to,"reason":reason})));
+            }
+            Err((false, reason)) => events.push(Event::new("model_switch_uncertain", json!({"member":role,"to":to,"reason":reason}))),
+        }
         Ok(())
     })
 }
@@ -5275,9 +5408,67 @@ pub(crate) fn context_before_task(team: &Team, member: &Member) -> String {
     }
 }
 
+/// Task #7: whether the member's measured context meets its After-a-task
+/// criterion: at least the threshold of tokens used, or of the context window.
+fn after_task_due(member: &Member, used: Option<f64>, limit: Option<f64>) -> bool {
+    let Some(used) = used.filter(|used| *used > 0.0) else { return false };
+    if member.after_task_at == 0 {
+        return false;
+    }
+    let at = f64::from(member.after_task_at);
+    match member.after_task_on.as_str() {
+        "tokens" => used >= at,
+        "percent" => limit.is_some_and(|limit| limit > 0.0 && used * 100.0 >= at * limit),
+        _ => false,
+    }
+}
+
+/// Task #7: the context action a member's After-a-task policy asks for now,
+/// empty when it keeps its context or the record's native usage is not past the
+/// threshold.
+fn after_task_action(member: &Member, record: &Value) -> String {
+    if !matches!(member.after_task.as_str(), "compact" | "clear") {
+        return String::new();
+    }
+    if after_task_due(member, record["context"]["used"].as_f64(), record["context"]["limit"].as_f64()) {
+        member.after_task.clone()
+    } else {
+        String::new()
+    }
+}
+
+/// Task #7: the context action before a member's next task. A configured
+/// After-a-task policy replaces U46's every-task action and runs only when its
+/// threshold says the context is spent; the empty default keeps today's path.
+/// The member is free (the planner's gate), so only the usage is measured; a
+/// remote session's usage lives on its own computer, so it keeps its context.
+pub(crate) fn context_action(team: &Team, member: &Member) -> String {
+    if member.after_task.is_empty() {
+        return context_before_task(team, member);
+    }
+    let Some(session) = member.session.as_ref().filter(|session| session.host.is_empty()) else { return String::new() };
+    let Ok(record) = crate::state::storage::read(&session.name) else { return String::new() };
+    after_task_action(member, &record)
+}
+
+/// Task #7: the lead's hand-out action. C1 still hands the lead its own task
+/// without a message while it is busy, but its After-a-task policy runs only
+/// while the lead's session is free.
+pub(crate) fn lead_context_action(team: &Team, lead: &Member) -> String {
+    if lead.after_task.is_empty() {
+        return context_before_task(team, lead);
+    }
+    let Some(session) = lead.session.as_ref().filter(|session| session.host.is_empty()) else { return String::new() };
+    let Ok(record) = crate::state::storage::read(&session.name) else { return String::new() };
+    if !record_free(&record) {
+        return String::new();
+    }
+    after_task_action(lead, &record)
+}
+
 /// U46: whether this agent has the native context action. DeepSeek compacts but
 /// has no native clear; OpenCode has neither yet.
-fn native_context(agent: &str, action: &str) -> bool {
+pub(crate) fn native_context(agent: &str, action: &str) -> bool {
     match action {
         "compact" => matches!(agent, "claude" | "codex" | "kimi" | "dsh"),
         "clear" => matches!(agent, "claude" | "codex" | "kimi"),
@@ -5285,7 +5476,7 @@ fn native_context(agent: &str, action: &str) -> bool {
     }
 }
 
-fn agent_label(agent: &str) -> &str {
+pub(crate) fn agent_label(agent: &str) -> &str {
     match agent {
         "claude" => "Claude",
         "codex" => "Codex",
@@ -5953,6 +6144,186 @@ struct Preparation {
     steps: Vec<PrepareStep>,
     conversation: Option<(String, String)>,
     resume: bool,
+}
+
+/// Task #6: what the clear before a changed start prompt leaves to its send.
+enum ClearAhead {
+    Done,
+    Waiting,
+    Failed(String),
+}
+
+/// Task #6: runs, or reads, the clear a changed start prompt asked for. A new
+/// conversation the clear names is kept on `session`, so the message that
+/// follows keeps the member.
+fn clear_ahead(store: &mut Store, team: &Team, member: &Member, session: &mut SessionRef, wanted: &PromptChange) -> anyhow::Result<ClearAhead> {
+    if !wanted.clear_context {
+        return Ok(ClearAhead::Done);
+    }
+    let Some(clear) = wanted.clear.clone() else {
+        return Ok(match run_context(member, session, "clear") {
+            ContextStart::Started(request) => {
+                change(store, &team.id, |team, _| {
+                    if let Some(found) = team.members.iter_mut().find(|found| found.id == member.id) {
+                        if let Some(prompt_change) = found.prompt_change.as_mut() {
+                            prompt_change.clear = Some(PromptClear {
+                                request_id: request.request_id,
+                                run_id: request.run_id,
+                                conversation_id: request.conversation,
+                                started_at: request.started_at,
+                            });
+                        }
+                    }
+                    Ok(())
+                })?;
+                ClearAhead::Waiting
+            }
+            ContextStart::Done { conversation, .. } => {
+                if let Some(new) = conversation {
+                    session.conversation_id = new;
+                }
+                ClearAhead::Done
+            }
+            ContextStart::Failed { step } => ClearAhead::Failed(step.reason),
+        });
+    };
+    let request = ContextRequest {
+        action: "clear".into(),
+        request_id: clear.request_id,
+        run_id: clear.run_id,
+        conversation: clear.conversation_id,
+        started_at: clear.started_at,
+    };
+    match check_context(session, &request) {
+        ContextCheck::Waiting => Ok(ClearAhead::Waiting),
+        ContextCheck::Done { conversation } => {
+            if let Some(new) = conversation {
+                session.conversation_id = new;
+            }
+            Ok(ClearAhead::Done)
+        }
+        ContextCheck::Refused(reason) | ContextCheck::Uncertain(reason) => Ok(ClearAhead::Failed(reason)),
+    }
+}
+
+/// Task #6: what the send of a changed start prompt did.
+enum PromptDone {
+    Replaced,
+    Failed(String),
+    Uncertain(String),
+}
+
+/// Task #6: whether `member` still holds the prompt change `wanted` describes:
+/// the same prompt and the same clear. A newer edit makes this send its own.
+fn same_prompt_change(member: &Member, wanted: &PromptChange, prompt: &str) -> bool {
+    member.prompt.trim() == prompt.trim()
+        && member.prompt_change.as_ref().is_some_and(|stored| stored.clear == wanted.clear && stored.clear_context == wanted.clear_context)
+}
+
+/// Task #6: sends a member's changed start prompt as the message that replaces
+/// its earlier instructions, after the clear the change asked for.
+fn replace_prompt(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Result<()> {
+    let Some(member) = team.member(member_id) else { return Ok(()) };
+    let Some(wanted) = member.prompt_change.clone() else { return Ok(()) };
+    let prompt = member.prompt.clone();
+    let text = replace_prompt_text(team, member);
+    // A send attempted by an earlier tick (a crash during it) is never replayed
+    // under a new id: the message may have arrived (U45's rule).
+    if wanted.sent_at.is_some() {
+        return finish_prompt_change(store, team, member_id, None, &wanted, &prompt, PromptDone::Uncertain("the send was interrupted; it was not replayed".into()));
+    }
+    let Some(mut session) = member.session.clone() else {
+        return finish_prompt_change(store, team, member_id, None, &wanted, &prompt, PromptDone::Failed("the member has no session".into()));
+    };
+    match clear_ahead(store, team, member, &mut session, &wanted)? {
+        ClearAhead::Waiting => return Ok(()),
+        ClearAhead::Failed(reason) => return finish_prompt_change(store, team, member_id, None, &wanted, &prompt, PromptDone::Failed(reason)),
+        ClearAhead::Done => {}
+    }
+    // The send is recorded before the message leaves, so a crash during it
+    // leaves it uncertain instead of sending it again. A newer edit that
+    // replaced the change meanwhile makes this send stale: nothing goes out and
+    // the next tick sends the current prompt.
+    let ours = std::cell::Cell::new(false);
+    change(store, &team.id, |team, _| {
+        if let Some(found) = team.members.iter_mut().find(|member| member.id == member_id) {
+            let same = same_prompt_change(found, &wanted, &prompt);
+            ours.set(same);
+            if let Some(stored) = found.session.as_mut().filter(|stored| stored.run_id == session.run_id) {
+                stored.conversation_id = session.conversation_id.clone();
+            }
+            if same {
+                if let Some(prompt_change) = found.prompt_change.as_mut() {
+                    prompt_change.sent_at = Some(now());
+                }
+            }
+        }
+        Ok(())
+    })?;
+    if !ours.get() {
+        return Ok(());
+    }
+    let done = match send(&session, &uuid::Uuid::new_v4().to_string(), &text) {
+        Sent::Delivered => PromptDone::Replaced,
+        // A refusal or an uncertain send is not repeated; the next hand-out
+        // carries the new prompt anyway, and the feed records what happened.
+        Sent::Refused(reason) => PromptDone::Failed(reason),
+        Sent::Uncertain(reason) => PromptDone::Uncertain(reason),
+    };
+    finish_prompt_change(store, team, member_id, Some(&session), &wanted, &prompt, done)
+}
+
+/// Task #6: the changed start prompt is done: the clear's new conversation is
+/// kept, this change leaves the member and its outcome reaches the feed. A newer
+/// prompt or clear that arrived while the send ran is not this change and stays
+/// for a later tick.
+fn finish_prompt_change(
+    store: &mut Store,
+    team: &Team,
+    member_id: &str,
+    session: Option<&SessionRef>,
+    wanted: &PromptChange,
+    prompt: &str,
+    done: PromptDone,
+) -> anyhow::Result<()> {
+    change(store, &team.id, |team, events| {
+        let role = team.role_of(member_id);
+        let Some(found) = team.members.iter_mut().find(|member| member.id == member_id) else { return Ok(()) };
+        if same_prompt_change(found, wanted, prompt) {
+            if let Some(session) = session {
+                if let Some(stored) = found.session.as_mut().filter(|stored| stored.run_id == session.run_id) {
+                    stored.conversation_id = session.conversation_id.clone();
+                }
+            }
+            found.prompt_change = None;
+        }
+        match done {
+            PromptDone::Replaced => events.push(Event::new("prompt_replaced", json!({"member":role}))),
+            PromptDone::Failed(reason) => events.push(Event::new("prompt_change_failed", json!({"member":role,"reason":reason}))),
+            PromptDone::Uncertain(reason) => events.push(Event::new("prompt_change_uncertain", json!({"member":role,"reason":reason}))),
+        }
+        Ok(())
+    })
+}
+
+/// Task #6: the message that gives a running member its new start prompt. It
+/// says the words replace the earlier instructions, so the member does not keep
+/// both.
+pub(crate) fn replace_prompt_text(team: &Team, member: &Member) -> String {
+    let prompt = member.prompt.trim();
+    let instructions = if prompt.is_empty() {
+        "Your start prompt is now empty: the instructions you were given before no longer apply.".to_owned()
+    } else {
+        format!("Your start prompt changed. These instructions replace the ones you were given before:\n\n{prompt}")
+    };
+    format!(
+        "[Zerus team \u{b7} from: Zerus \u{b7} replaces previous instructions]\n\
+         Team: {}. Your role: {}.\n\
+         {instructions}\n\n\
+         They apply from your next task on; do not follow the earlier instructions, and go on with the work you have.",
+        team.name,
+        team.role_of(&member.id)
+    )
 }
 
 
@@ -6629,7 +7000,8 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
     // U46: the role's or the member's own action; Task 209: else the collected
     // meter: at the team's threshold the task waits for a compact (or a fresh
     // conversation for an agent without one) before it is sent.
-    let own = context_before_task(&team, &member);
+    // Task #7: the owner's After a task policy replaces the role's every-task action.
+    let own = context_action(&team, &member);
     // Task 254: `cold`: only the member's cold prompt cache asks for the
     // action; its failure still hands the task out and tells the lead.
     let (action, cold) = if own.is_empty() { due_context(&team, &member) } else { (own, false) };
@@ -7983,17 +8355,30 @@ fn safe_match(team: &Team, member: &Member, pending: &PendingQuestion) -> Option
     if !pending.approval || member.id == team.lead || card["subagent_confirmation"] == true || card["can_answer"] == false {
         return None;
     }
-    let command = card["tool_input"]["command"].as_str().filter(|command| !command.trim().is_empty())?;
+    // Task #346: the command may come from the tool input (Claude, Codex) or the
+    // process a DeepSeek approval names; a patch's file list is no command.
+    let command = card["tool_input"]["command"]
+        .as_str()
+        .or_else(|| card["command"].as_str())
+        .filter(|command| !command.trim().is_empty())?
+        .to_owned();
     let answer = permission_answer(card).filter(|answer| answer["allow"].is_string())?;
     let tool = card["tool"].as_str().or_else(|| card["questions"][0]["header"].as_str()).unwrap_or_default();
     let folder = member_folder_path(team, member).ok()?;
-    if let Some(action) = safe_actions::find(team, member, tool, command, Path::new(&folder)) {
+    if let Some(action) = safe_actions::find(team, member, tool, &command, Path::new(&folder)) {
+        return Some((action, answer));
+    }
+    // Task #346 (owner, 2026-11-08): ONE `hgs team <op> --json-file PATH` call in
+    // the member's own scope - its own work, or its scratch team under the
+    // owner's standing rule - is Zerus's to allow once, recorded in the lead's
+    // feed; a compound script, a wrapper or another scope still asks.
+    if let Some(action) = super::sandbox_scope::match_call(team, member, &command) {
         return Some((action, answer));
     }
     // Task #232: the owner's scratch rule trusts its folder at launch, and the
     // team's own CLI is what a member runs there: Codex's approval of an hgs
     // command is the rule's to allow once, without the lead.
-    if card["source"] == crate::state::codex_approval::SOURCE && command_is_hgs(command) {
+    if card["source"] == crate::state::codex_approval::SOURCE && command_is_hgs(&command) {
         if let Some(rule) = scratch_rule_trusting(team, &folder, &member.agent) {
             return Some((
                 json!({"id":"scratch-hgs","reason":format!(
@@ -8038,7 +8423,12 @@ fn allow_safe(store: &mut Store, team: &Team, member_id: &str, pending: &Pending
         Err(error) => Err(error.to_string()),
     };
     let role = team.role_of(member_id);
-    let by = format!("safe action {}", action["id"].as_str().unwrap_or_default());
+    // Task #346: an action Zerus answers by itself names how (e.g. its own-scope
+    // team call); a recorded safe action keeps its `safe action <id>` line.
+    let by = action["answer_by"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("safe action {}", action["id"].as_str().unwrap_or_default()));
     change(store, &team.id, |team, events| {
         let found = team.members.iter_mut().find(|m| m.id == member_id).context("unknown member")?;
         let question = pending.question_id.as_str();
@@ -8157,7 +8547,9 @@ fn lead_hand_out(store: &mut Store, team_id: &str, task_id: u32) -> anyhow::Resu
     // context action keeps today's path.
     let team = store.load(team_id)?.with_context(|| format!("Unknown team {team_id}"))?;
     let lead = team.member(&team.lead).cloned().context("the team has no lead")?;
-    let action = context_before_task(&team, &lead);
+    // Task #7: a configured lead policy runs only while the lead is free; the
+    // default path keeps U46's every-hand-out action as today.
+    let action = lead_context_action(&team, &lead);
     if action.is_empty() {
         return lead_hand_out_now(store, team_id, task_id, Preparation::default());
     }
@@ -9614,6 +10006,8 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                 Ok(())
             })
         }
+        Step::ApplyModel { member } => apply_model(store, team, member),
+        Step::ReplacePrompt { member } => replace_prompt(store, team, member),
         Step::Adopt { member, session } => {
             let mut filing = None;
             change(store, &team.id, |team, events| {
@@ -9623,6 +10017,11 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                 found.session = Some(session.clone());
                 found.state = MemberState::Active;
                 if started {
+                    // Task #6: a new session takes the prompt and model it
+                    // starts with; a change recorded for the session it
+                    // replaced is done.
+                    found.prompt_change = None;
+                    found.model_switch = None;
                     let role = team.role_of(member);
                     events.push(Event::new("member_started", json!({"member":role,"session":session.name})));
                     // F1.1: the adopted session is filed into the team's project,
@@ -10915,12 +11314,21 @@ fn announce_outbox(store: &mut Store, team: &Team, member: &Member, folder: &Pat
 /// (`expect`) has no attempt; the folder itself proves the member.
 fn apply_outbox(store: &mut Store, team: &Team, member: &Member, request: &Value) -> anyhow::Result<Value> {
     let op = request["op"].as_str().unwrap_or_default();
-    anyhow::ensure!(matches!(op, "report" | "ask" | "commit" | "reply" | "expect" | "messages-read"), "Unknown outbox request {op}");
+    anyhow::ensure!(
+        matches!(op, "report" | "ask" | "commit" | "reply" | "expect" | "messages-read" | "team"),
+        "Unknown outbox request {op}"
+    );
     anyhow::ensure!(request["team"] == team.id.as_str(), "a request for another team");
     anyhow::ensure!(request["member"] == member.id.as_str(), "the folder belongs to {}", team.name_of(&member.id));
     // The member's own request, unchanged: a replay keys the same store receipt.
     let input = request["input"].clone();
     let request_id = request["request_id"].as_str().unwrap_or_default().to_owned();
+    // Task #346: a sandboxed member's own-scope team call (a scratch team's
+    // create, or an operation for the scratch team it leads) is applied with the
+    // member's identity and checked again against its profile and the rule.
+    if op == "team" {
+        return super::commands::apply_team_outbox(store, team, member, request);
+    }
     // A request applied before the worker removed its file replays its receipt,
     // even after the attempt closed (the store's own idempotence, U20).
     if let Some(receipt) = store.receipt(&request_id, &input)? {
@@ -11352,6 +11760,14 @@ mod dispatcher_drain;
 #[cfg(test)]
 #[path = "tests/dispatcher_context.rs"]
 mod dispatcher_context;
+
+#[cfg(test)]
+#[path = "tests/dispatcher_launch.rs"]
+mod dispatcher_launch;
+
+#[cfg(test)]
+#[path = "tests/dispatcher_live_edit.rs"]
+mod dispatcher_live_edit;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_lead.rs"]

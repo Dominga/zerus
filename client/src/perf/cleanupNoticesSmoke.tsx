@@ -3,6 +3,7 @@
 // runs in a private Xvfb. No CLI, agent, native termination or removal is invoked.
 import { render } from "solid-js/web";
 import { Toasts } from "../ui/components/Overlays";
+import { BackgroundTasksChip } from "../ui/screens/BackgroundTasks";
 import { CleanupChip } from "../ui/screens/CleanupChip";
 import { createEndActions } from "../store/endActions";
 import { bus, NOTICE_MS } from "../store/notices";
@@ -29,7 +30,7 @@ const sample = (phase: string) => phases.push({ phase, notices: bus.notices().ma
 const report = () => (window as unknown as { webkit: { messageHandlers: { result: { postMessage(text: string): void } } } }).webkit.messageHandlers.result.postMessage(JSON.stringify({ failures, phases, userAgent: navigator.userAgent }));
 async function run() {
   applySkin(skins[0]);
-  const dispose = render(() => <><Toasts /><CleanupChip /></>, document.getElementById("root")!);
+  const dispose = render(() => <><Toasts /><BackgroundTasksChip /><CleanupChip /></>, document.getElementById("root")!);
   let ready!: (value: boolean) => void, finished!: () => void, calls = 0;
   const actions = createEndActions({ begin: async () => {}, wait: () => new Promise((resolve) => { ready = resolve; }), cancel: async () => {} }, bus);
   const job = actions.schedule([{ target, action: { kind: "terminate" }, state: "running" }], () => {

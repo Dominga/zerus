@@ -7,6 +7,11 @@ license = "MIT"
 description = "Replicated Zerus documents on Loro: the task schema, its rules and storage"
 publish = false
 
+[features]
+# Helpers that other crates' tests use to build documents only an older
+# replica writes (never enabled outside tests).
+test-support = []
+
 [dependencies]
 base64 = "0.22"
 # The only crate in Zerus that imports Loro. Raise this pin deliberately: the

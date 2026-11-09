@@ -15,12 +15,12 @@ import { teams } from "./teams";
 import { createSubagentActivity } from "./subagentActivity";
 import { archive } from "./archive";
 import { applyGrouping } from "./organization";
-import { activityReadOnly } from "./activitySource";
+import { activityReadOnly, shellSession } from "./activitySource";
 import { compactRows, detailTab, page, selected, selectedKey, setCompactRows, setDetailTab, setReadSelectionKey, setSelectedKey, subagentOpen } from "./ui";
 import { startScreens } from "./screens";
-import { documentVisibility } from "./visibility";
+import { documentVisibility, pageHidden } from "./visibility";
 import { processes, trackFollow, trackShown } from "./processes";
-import type { Batch, ComposerEvent } from "../types";
+import type { Batch, ComposerEvent, ProcessTarget } from "../types";
 import { trText } from "../text";
 
 // Wires the stores together: batches go to the catalog, the grouping, the
@@ -66,7 +66,6 @@ bindSelection(() => ({ key: selectedKey(), subagent: subagentOpen() }));
 bindForkSession({
   busy: (row) => sessionModels.changing() || (composer.view()?.key === draftKey({ computer: row.computer, key: "", name: row.name, archive_id: null, session_id: row.archiveId ? null : row.sessionId ?? null })
     && (!!composer.view()?.sending || !!composer.view()?.waiting)),
-  terminal: () => { terminal.opened(); setDetailTab("terminal"); },
 });
 
 /** The selected child's own bounded, read-only inspection page. */
@@ -77,13 +76,14 @@ export const subagentActivity = createRoot(() => {
       target.archiveId,
       target.agentId,
     ),
-    showing: () => page() === "sessions" && !documentVisibility.hidden(),
+    showing: () => page() === "sessions" && !pageHidden(),
     online: (computer) => !computerOffline(computer),
   });
   createEffect(() => {
     const row = selected(), agentId = subagentOpen();
-    const target = row && agentId && row.runId && row.conversationId ? {
-      id: row.key, computer: row.computer, name: row.name, runId: row.runId, conversationId: row.conversationId,
+    // Without an identity the core refuses the read, so the child says it is unavailable.
+    const target = row && agentId ? {
+      id: row.key, computer: row.computer, name: row.name, runId: row.runId ?? "", conversationId: row.conversationId ?? "",
       archiveId: row.archiveId ?? null, agentId,
     } : undefined;
     untrack(() => store.follow(target));
@@ -138,7 +138,8 @@ createRoot(() => {
     // The first new-run frame may be its only state. Rust must bind the
     // composer's followed key before that frame can reach its observer.
     // Display/routing moves immediately; only the original subscribe waits.
-    activity.follow(s && !activityReadOnly(s.key) ? { id: s.key, computer: s.computer, key: s.catalogKey, name: s.name, runId: s.runId, conversationId: s.conversationId } : undefined, opened);
+    // A shell session records no activity: nothing to read (zerus-bz54l).
+    activity.follow(s && !activityReadOnly(s.key) && !shellSession(s) ? { id: s.key, computer: s.computer, key: s.catalogKey, name: s.name, runId: s.runId, conversationId: s.conversationId } : undefined, opened);
   }));
   // The detail tab that shows: behind Terminal a failed read waits Qt's
   // background interval (Settings > Processes), which Rust reads when told.
@@ -171,6 +172,9 @@ createRoot(() => {
 
 // The Processes tab follows the selected session while Settings > Processes
 // is on (Qt polls nothing while it is off); output reads and the busy
+/** The session the Processes tab follows, as last sent to the hub; null while it follows none. */
+const [processesTarget, setProcessesTarget] = createSignal<ProcessTarget | null>(null);
+export { processesTarget };
 // indicator run only while the tab shows in a shown window.
 const [windowHidden, setWindowHidden] = createSignal(windowVisibility.hidden());
 windowVisibility.onChange(() => setWindowHidden(windowVisibility.hidden()));
@@ -186,7 +190,7 @@ createRoot(() => {
         inspectFailed: activity.target()?.id === s.key && !!activity.error(),
       };
     },
-    follow: processesFollow,
+    follow: (target) => { setProcessesTarget(target); processesFollow(target); },
   });
   trackShown({ enabled, selected: () => !!selected(), page, tab: detailTab, hidden: windowHidden, shown: processesShown });
 });

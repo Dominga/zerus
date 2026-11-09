@@ -255,7 +255,7 @@ def run_suites(suites, env, timeout, scratch, log):
     """Exactly two interpreters; setup, discovery, execution and drain share one end."""
     end = time.monotonic() + timeout
     work_end = end - CLEANUP_SECONDS
-    root = Path(tempfile.mkdtemp(prefix='znw-', dir='/tmp')).resolve()
+    root = Path(tempfile.mkdtemp(prefix='znw-', dir=env.get('ZERUS_TEST_SHORT_TMPDIR', '/tmp'))).resolve()
     workers, inventory, assignments, problems = [], None, None, []
     record = dict(root=str(root), deadline=end, work_deadline=work_end, timeout=timeout,
                   cleanup_reserve=CLEANUP_SECONDS, suites=suites, workers=[], binaries={})

@@ -201,7 +201,7 @@ fn session_rules(session: &teams::model::SessionRef) -> anyhow::Result<Vec<Strin
         if !path.exists() {
             return Ok(Vec::new());
         }
-        return super::with_session_project_binding(&session.name, |record| {
+        return super::with_session_project_binding(&session.name, None, &session.run_id, &session.conversation_id, |record| {
             ensure!(
                 string(record, "run_id") == session.run_id
                     && string(record, "conversation_id") == session.conversation_id,
@@ -412,7 +412,7 @@ pub(crate) fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             }
             return Ok(value);
         }
-        let record = super::with_session_project_binding(name, |record| {
+        let record = super::with_session_project_binding(name, None, run, conversation, |record| {
             ensure!(
                 string(record, "run_id") == run
                     && string(record, "conversation_id") == conversation,

@@ -1,6 +1,9 @@
 //! Exact one-use enrollment intents; continuation only for a proven saved node.
 use super::*;
-use mobile::enrollment::{self as core, Answer, Mode, Request, Target};
+use mobile::{
+    enrollment::{self as core, Answer, Mode, Request, Target},
+    Failure,
+};
 use serde::Serialize;
 use std::{collections::VecDeque, sync::atomic::AtomicBool, time::Duration};
 const WAITING:&str="The connector is still finishing its current request. Your saved connection is kept; choose Continue connecting to check again.";
@@ -187,7 +190,7 @@ impl Inner {
         let pending = answer.workspace.pending.is_some();
         let stopped_target =
             (!pending && !answer.connected && answer.notice == core::DRAINING).then_some(target);
-        if self.page().workspace_answered(Ok(answer.workspace)) {
+        if self.answered(Ok(answer.workspace)) {
             self.phones();
         }
         (self.notify)();
@@ -210,6 +213,29 @@ impl Inner {
         self.page()
             .workspace_answered(Err(mobile::WORKSPACE_UNCONFIRMED.into()));
         (self.notify)();
+    }
+    /// The failure of one enrollment call. A change whose Stop was refused before
+    /// anything changed undoes its disarm, under the page's own refusal rule.
+    pub(super) fn enrollment_call_failed(
+        &self,
+        target: &Target,
+        failure: Failure,
+    ) -> Result<Reply, String> {
+        match failure {
+            Failure::StopRefused => {
+                self.page()
+                    .autostart_stop_refused(&target.node_id, target.generation.as_deref());
+                self.save_autostart();
+                self.page()
+                    .workspace_answered(Err(mobile::STOP_REFUSED.into()));
+                (self.notify)();
+                Err(mobile::STOP_REFUSED.into())
+            }
+            Failure::Other(error) => {
+                self.enrollment_failed();
+                Err(error)
+            }
+        }
     }
 }
 #[tauri::command(async)]
@@ -242,16 +268,16 @@ pub fn mobile_workspace_apply(mobile: State<'_, Mobile>, handle: String) -> Resu
     let (connector, config) = workspace_runtime();
     let result = match plan.intent {
         Intent::Enroll(request) => {
+            mobile.0.enrollment_disarm(&plan.target);
             core::enroll(&connector, &config, &plan.target, &request, &plan.computer)
         }
-        Intent::Check(local) => core::check(&connector, &config, &plan.target, local),
+        Intent::Check(local) => {
+            core::check(&connector, &config, &plan.target, local).map_err(Failure::from)
+        }
     };
     match result {
         Ok(answer) => mobile.0.enrollment_result(answer, until),
-        Err(error) => {
-            mobile.0.enrollment_failed();
-            Err(error)
-        }
+        Err(failure) => mobile.0.enrollment_call_failed(&plan.target, failure),
     }
 }
 #[tauri::command(async)]

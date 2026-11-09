@@ -322,6 +322,7 @@ pub(crate) fn lead_idle_text(team: &Team, stall: &LeadStall, now: f64) -> String
 /// The verdict of comparing the sources: the reconciled state, the
 /// disagreements in words and every source's view.
 pub(crate) struct Compared {
+    #[cfg(test)]
     pub state: String,
     pub disagree: Vec<String>,
     pub sources: Value,
@@ -378,6 +379,7 @@ pub(crate) fn compare(hooks: &Hooks, record: Option<&str>, screen: Option<(Scree
             disagree.push(format!("a request is recorded; the screen shows {}", shown(kind)));
         }
     }
+    #[cfg(test)]
     let state = if !disagree.is_empty() {
         "uncertain".to_owned()
     } else if said == "unknown" {

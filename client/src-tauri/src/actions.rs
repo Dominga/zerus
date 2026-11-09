@@ -24,7 +24,11 @@ use std::time::Duration;
 
 use tauri::State;
 mod local_read_capture;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod program_termination;
 mod read_barrier;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use program_termination::dispatch_program_termination;
 pub(crate) use read_barrier::{CapturedReads, FrozenReads};
 use zerus_client_core::actions::{
     change_notifications, classify, invocation, parse_reference, recovery_preflight,
@@ -41,9 +45,16 @@ use zerus_client_core::session_selector::{self, selected_invocation};
 use zerus_client_core::shell::{current_shell, open_command};
 use zerus_client_core::{default_hgs, run, Action, Batch, ComputerId, Outcome, Target, ViewRow};
 
-/// A session by computer id and session name, the action's lane and, for a
-/// message, the agent it goes to ("" for the session's own agent).
-type Key = (String, String, Lane, String);
+/// Original computer, name, lane, message agent and run. Both name and known
+/// run are excluded, so renaming never frees the same original claim.
+type Key = (String, String, Lane, String, String);
+type LockKey = (String, String, Lane, String);
+
+#[derive(Default)]
+struct Claimed {
+    names: HashSet<LockKey>,
+    runs: HashSet<LockKey>,
+}
 
 /// Hears that this device's marks changed: the menu bar's desk reads them
 /// again at once (`desk::marks_changed`), as Qt's window hands the tray its
@@ -76,6 +87,8 @@ pub enum Lane {
     Read,
     /// A shared notification change: Qt tracks these apart from `m_pending`.
     Notifications,
+    /// A Keep cache warm change.
+    KeepWarm,
     Send,
     Process,
     Queue,
@@ -110,6 +123,7 @@ impl Lane {
             target.name.clone(),
             Self::of(action),
             agent,
+            target.run_id.clone(),
         )
     }
 }
@@ -117,13 +131,15 @@ impl Lane {
 /// The sessions that have an action running.
 #[derive(Clone, Default)]
 pub struct InFlight {
-    keys: Arc<Mutex<HashSet<Key>>>,
+    keys: Arc<Mutex<Claimed>>,
 }
 
 /// Holds a session's claim; dropping it frees the session.
 pub struct Claim {
-    keys: Arc<Mutex<HashSet<Key>>>,
+    keys: Arc<Mutex<Claimed>>,
     key: Key,
+    name_key: LockKey,
+    run_key: Option<LockKey>,
     active: AtomicBool,
 }
 
@@ -131,9 +147,23 @@ impl InFlight {
     /// None while an action already runs for that session.
     pub fn claim(&self, key: Key) -> Option<Claim> {
         let mut keys = self.keys.lock().unwrap_or_else(PoisonError::into_inner);
-        keys.insert(key.clone()).then(|| Claim {
+        let name_key = (key.0.clone(), key.1.clone(), key.2, key.3.clone());
+        let run_key =
+            (!key.4.is_empty()).then(|| (key.0.clone(), key.4.clone(), key.2, key.3.clone()));
+        if keys.names.contains(&name_key)
+            || run_key.as_ref().is_some_and(|run| keys.runs.contains(run))
+        {
+            return None;
+        }
+        keys.names.insert(name_key.clone());
+        if let Some(run) = &run_key {
+            keys.runs.insert(run.clone());
+        }
+        Some(Claim {
             keys: Arc::clone(&self.keys),
             key,
+            name_key,
+            run_key,
             active: AtomicBool::new(false),
         })
     }
@@ -141,10 +171,11 @@ impl InFlight {
 
 impl Drop for Claim {
     fn drop(&mut self) {
-        self.keys
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&self.key);
+        let mut keys = self.keys.lock().unwrap_or_else(PoisonError::into_inner);
+        keys.names.remove(&self.name_key);
+        if let Some(run) = &self.run_key {
+            keys.runs.remove(run);
+        }
     }
 }
 
@@ -171,7 +202,11 @@ impl WriteKind {
 }
 
 /// The running writes by computer and session name ("" for a computer-wide one).
-type Writes = Arc<Mutex<HashMap<(String, String), WriteKind>>>;
+struct Write {
+    kind: WriteKind,
+    run_id: String,
+}
+type Writes = Arc<Mutex<HashMap<(String, String), Write>>>;
 
 /// Called whenever a write mark appears or goes (`Actions::on_writes`).
 pub type WritesHook = Arc<dyn Fn() + Send + Sync>;
@@ -203,6 +238,12 @@ pub(crate) struct Running {
     _write: Option<WriteMark>,
     _claim: Arc<Claim>,
 }
+impl Running {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn claim(&self) -> Arc<Claim> {
+        self._claim.clone()
+    }
+}
 
 impl Drop for Running {
     fn drop(&mut self) {
@@ -213,14 +254,10 @@ impl Drop for Running {
     }
 }
 
-/// Whether a call blocks messages while it runs: a write that sets Qt's
-/// window-wide `m_pending` (`SessionsWindow.h:554`; set at
-/// `SessionsWindow.cpp:2876, 2881, 4699, 4758, 5554, 5575, 5693, 5752, 5808,
-/// 5815`). A context reset and a compaction have their own per-session block
-/// (`m_clearKey`, `m_compacts`, 4668 and 4544): `begin` marks a reset as
-/// `WriteKind::Clear` for its own session, and compact-to-send keeps its
-/// own fact in the composer. A Terminal file drop (`m_terminalDropRequest`,
-/// 2657) blocks nothing, though all three share the write lane.
+/// Whether a call blocks its target's messages while it runs. A context
+/// reset has its own write kind, and compact-to-send keeps its own fact in
+/// the composer. A Terminal file drop blocks no messages, though all three
+/// share the target's write lane.
 fn blocks_messages(action: &Action) -> bool {
     Lane::of(action) == Lane::Write
         && !matches!(
@@ -248,9 +285,8 @@ pub struct Actions {
     writes: Writes,
     /// Wakes the composer when a write mark appears or goes.
     hook: Arc<OnceLock<WritesHook>>,
-    /// Computer, session name and the run each succeeded termination ended,
-    /// oldest first.
-    terminated: Arc<Mutex<VecDeque<(String, String, String)>>>,
+    /// Computer and exact run each succeeded termination ended, oldest first.
+    terminated: Arc<Mutex<VecDeque<(String, String)>>>,
     /// The change pump, set once before the source starts: the archive
     /// placement capture, and the listed rows explicit actions read their
     /// session ID from.
@@ -325,33 +361,32 @@ impl Actions {
         let _ = self.termination_pump.set(pump.downgrade());
     }
 
-    /// The running write as the send rules see it from the session
-    /// `(computer, name)`: its own Terminate or Kill is a termination
-    /// (`isTerminating`), and any other message-blocking write, of any
-    /// session or computer, is an update, since Qt's `m_pending` is one
-    /// window-wide flag (`messageBlockReason`, `SessionsWindow.cpp:4394`).
-    /// A context reset is the session's own (Qt keys it by `m_clearKey`) and
-    /// comes first, as `messageBlockReason` reads it first (4390); another
-    /// session's reset is no update anywhere.
+    /// Only the target's own write blocks its input. Pause all and Resume
+    /// all use an empty name and affect sessions on that computer only.
     pub fn write_kind(&self, computer: &str, name: &str) -> Option<WriteKind> {
         let writes = self.writes.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(own @ (WriteKind::Terminate | WriteKind::Clear | WriteKind::Settings)) =
-            writes.get(&(computer.to_owned(), name.to_owned()))
-        {
-            return Some(*own);
-        }
         writes
-            .values()
-            .any(|kind| !matches!(kind, WriteKind::Clear | WriteKind::Settings))
-            .then_some(WriteKind::Update)
+            .get(&(computer.to_owned(), name.to_owned()))
+            .map(|write| write.kind)
+            .or_else(|| {
+                writes
+                    .contains_key(&(computer.to_owned(), String::new()))
+                    .then_some(WriteKind::Update)
+            })
     }
 
-    fn mark_write(&self, computer: &str, name: &str, action: &Action) -> WriteMark {
+    fn mark_write(&self, computer: &str, name: &str, run_id: &str, action: &Action) -> WriteMark {
         let key = (computer.to_owned(), name.to_owned());
         self.writes
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(key.clone(), WriteKind::of(action));
+            .insert(
+                key.clone(),
+                Write {
+                    kind: WriteKind::of(action),
+                    run_id: run_id.to_owned(),
+                },
+            );
         if let Some(hook) = self.hook.get() {
             hook();
         }
@@ -379,6 +414,12 @@ impl Actions {
             .map(Arc::new)
     }
 
+    pub(crate) fn owns_end_claim(&self, claim: &Arc<Claim>, target: &Target) -> bool {
+        Arc::ptr_eq(&claim.keys, &self.flight.keys)
+            && claim.key == Lane::key(target, &Action::Terminate)
+            && claim.active.load(Ordering::Acquire)
+    }
+
     fn activate(&self, claim: Arc<Claim>, action: &Action) -> Option<Running> {
         if !Arc::ptr_eq(&claim.keys, &self.flight.keys) || claim.key.2 != Lane::of(action) {
             return None;
@@ -392,7 +433,7 @@ impl Actions {
         }
         let (computer, name) = (&claim.key.0, &claim.key.1);
         let marked = blocks_messages(action) || WriteKind::of(action) == WriteKind::Clear;
-        let write = marked.then(|| self.mark_write(computer, name, action));
+        let write = marked.then(|| self.mark_write(computer, name, &claim.key.4, action));
         Some(Running {
             _write: write,
             _claim: claim,
@@ -415,30 +456,39 @@ impl Actions {
             .terminated
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        terminated
-            .retain(|(computer, name, _)| computer != &target.computer || name != &target.name);
-        terminated.push_back((
-            target.computer.clone(),
-            target.name.clone(),
-            target.run_id.clone(),
-        ));
+        terminated.retain(|(computer, run)| computer != &target.computer || run != &target.run_id);
+        terminated.push_back((target.computer.clone(), target.run_id.clone()));
         while terminated.len() > TERMINATED {
             terminated.pop_front();
         }
     }
 
     /// The write the send rules see from the session: its own termination,
-    /// running or succeeded while its run still shows, else any running
-    /// write as an update (`write_kind`). `live` gives the computer's live
-    /// row of that name and whether the computer is online; it is asked
-    /// only while such a termination is kept. As in Qt, the row must be the
+    /// running or succeeded while its run still shows, else its running
+    /// write or its computer's batch update (`write_kind`). `live` gives the
+    /// computer's native row and online state. A known-run write also follows
+    /// that row across a rename; unrelated runs never inherit its block.
+    /// The row must be the
     /// run the termination ended (`isTerminating`, `SessionsWindow.cpp:3100-3104`),
     /// and only an online computer whose row no longer runs that run lets it
     /// go (`reconcileTerminations`).
+    #[cfg(test)]
     pub fn session_write(
         &self,
         computer: &str,
         name: &str,
+        live: impl FnOnce() -> (Option<ViewRow>, bool),
+    ) -> Option<WriteKind> {
+        self.session_write_for_run(computer, name, "", live)
+    }
+
+    /// `run_id` comes from the same native evidence as the pending input.
+    /// It keeps a rename guarded even while the catalog omits its run field.
+    pub fn session_write_for_run(
+        &self,
+        computer: &str,
+        name: &str,
+        run_id: &str,
         live: impl FnOnce() -> (Option<ViewRow>, bool),
     ) -> Option<WriteKind> {
         let running = self.write_kind(computer, name);
@@ -448,25 +498,55 @@ impl Actions {
         ) {
             return running;
         }
+        let has_running_run = self
+            .writes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .any(|((c, _), write)| c == computer && !write.run_id.is_empty());
+        let has_terminated = self
+            .terminated
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .any(|(c, _)| c == computer);
+        if !has_running_run && !has_terminated {
+            return running;
+        }
+        let (row, online) = live();
+        let observed_run = (!run_id.is_empty()).then_some(run_id).or_else(|| {
+            row.as_ref()
+                .and_then(|row| row.run_id.as_deref())
+                .filter(|run| !run.is_empty())
+        });
+        let running = observed_run
+            .and_then(|run| {
+                self.writes
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .iter()
+                    .find(|((c, _), write)| c == computer && write.run_id == run)
+                    .map(|(_, write)| write.kind)
+            })
+            .or(running);
+        // A name is only a label: a replacement or unidentified row cannot
+        // select (and therefore cannot retire) another run's completion.
         let Some(run) = self
             .terminated
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
-            .find(|(c, n, _)| c == computer && n == name)
-            .map(|(_, _, run)| run.clone())
+            .find(|(c, run)| c == computer && observed_run == Some(run.as_str()))
+            .map(|(_, run)| run.clone())
         else {
             return running;
         };
-        let (row, online) = live();
-        let same_run = row
-            .as_ref()
-            .filter(|row| row.run_id.as_deref() == Some(run.as_str()));
+        let same_run = row.as_ref().filter(|_| observed_run == Some(run.as_str()));
         if online && same_run.is_none_or(|row| row.state != "running") {
             self.terminated
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .retain(|(c, n, r)| c != computer || n != name || r != &run);
+                .retain(|(c, r)| c != computer || r != &run);
             return running;
         }
         same_run.map(|_| WriteKind::Terminate).or(running)
@@ -572,8 +652,13 @@ impl Actions {
 
     /// The session's lane, None while an action runs in it.
     pub(crate) fn claim_lane(&self, computer: &str, name: &str, lane: Lane) -> Option<Claim> {
-        self.flight
-            .claim((computer.to_owned(), name.to_owned(), lane, String::new()))
+        self.flight.claim((
+            computer.to_owned(),
+            name.to_owned(),
+            lane,
+            String::new(),
+            String::new(),
+        ))
     }
 
     /// A mark as `run_action` saves it, without `queue_read_marks`' cleanup.
@@ -1510,6 +1595,7 @@ async fn dispatch_reserved_original(
     let mut key = Lane::key(&target, &action);
     if matches!(action, Action::PauseAll { .. } | Action::ResumeAll { .. }) {
         key.1 = String::new();
+        key.4.clear();
     }
     // The claim, and for a session write its kind for the send rules
     // (`write_kind`), held until the call ends.
@@ -1747,6 +1833,53 @@ pub async fn set_notifications(
     Ok(confirmed)
 }
 
+/// Turns Keep cache warm on (1 to 7 hours or always) or off for a session and
+/// returns the host's confirmed `keep_warm`. One change per session at a time,
+/// in its own lane (`Err("busy")` otherwise); the core probes `hgs --help`.
+#[tauri::command]
+pub async fn set_keep_warm(
+    state: State<'_, Actions>,
+    target: Target,
+    choice: zerus_client_core::keep_warm::Choice,
+    expected_revision: i64,
+) -> Result<serde_json::Value, String> {
+    if blocked() {
+        return Err(REPLAY_NEEDS_HGS.into());
+    }
+    let Some(_claim) = state.claim_lane(&target.computer, &target.name, Lane::KeepWarm) else {
+        return Err("busy".into());
+    };
+    let hgs = default_hgs();
+    tauri::async_runtime::spawn_blocking(move || {
+        zerus_client_core::keep_warm::change(&hgs, &target, choice, expected_revision)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Sets or clears a session's parent link (zerus-sa9qn.9) after the person
+/// confirmed it. The host verifies the exact session, the chosen parent and
+/// cycles; the listing shows the result.
+#[tauri::command]
+pub async fn set_parent(
+    state: State<'_, Actions>,
+    target: Target,
+    change: zerus_client_core::parent_change::ParentChange,
+) -> Result<serde_json::Value, String> {
+    if blocked() {
+        return Err(REPLAY_NEEDS_HGS.into());
+    }
+    let Some(_claim) = state.claim_lane(&target.computer, &target.name, Lane::Write) else {
+        return Err("busy".into());
+    };
+    let hgs = default_hgs();
+    tauri::async_runtime::spawn_blocking(move || {
+        zerus_client_core::parent_change::change(&hgs, &target, &change)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 pub(crate) fn change_notifications_projected(
     hgs: &std::path::Path,
     target: &Target,
@@ -1916,7 +2049,17 @@ pub struct ArchivePageOut {
     pub next_cursor: String,
     pub previous_cursor: Option<String>,
     pub total: u64,
+    /// The host counted only up to a cap: the webview shows "N+" (zerus-5wmh.13.17 (4)).
+    pub total_capped: bool,
     pub position: Option<u64>,
+    /// The position is a lower bound (zerus-080n8).
+    pub position_capped: bool,
+    /// The host's scan stopped at its budget before a full page; it continues (zerus-080n8).
+    pub partial: bool,
+    /// Rows the host looked at for this page (zerus-080n8).
+    pub searched: u64,
+    /// A bounded page; an exact one, from an older host too, is not (zerus-5czy6).
+    pub bounded: bool,
 }
 
 struct ArchiveContext {
@@ -1951,7 +2094,12 @@ fn grouped_archive_page(
         next_cursor: page.next_cursor,
         previous_cursor: page.previous_cursor,
         total: page.total,
+        total_capped: page.total_capped,
         position: page.position,
+        position_capped: page.position_capped,
+        partial: page.partial,
+        searched: page.searched,
+        bounded: page.bounded,
     })
 }
 
@@ -2478,6 +2626,49 @@ mod tests {
     }
 
     #[test]
+    fn delayed_terminate_accepts_the_original_live_run_before_its_first_native_event() {
+        use serde_json::json;
+        use zerus_client_core::{end_action::Captured, Exit};
+        let actions = Actions::new(
+            std::env::temp_dir().join(format!("zerus-cold-end-{}.json", uuid::Uuid::new_v4())),
+        );
+        let mut target = review();
+        target.conversation_id.clear();
+        let plan = Captured {
+            target: target.clone(),
+            action: Action::Terminate,
+            state: "running".into(),
+        };
+        let claim = actions.reserve_end(&target).unwrap();
+        let source = target.clone();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let writes = calls.clone();
+        let (outcome, _) = tauri::async_runtime::block_on(dispatch_end_reserved_with(
+            &actions, target, Action::Terminate,
+            "11111111-1111-4111-8111-111111111111".into(),
+            move |_, inv| {
+                if inv.args.last().is_some_and(|arg| arg == "--help") {
+                    return Exit::Code { code: 0, stdout: b"guarded-create-v1".to_vec(), stderr: String::new() };
+                }
+                let value = if inv.args.iter().any(|arg| arg == "inspect") {
+                    json!({"name":source.name,"run_id":source.run_id,"conversation_id":null,"runtime_state":"live"})
+                } else {
+                    assert!(inv.args.iter().any(|arg| arg == "session-action"));
+                    writes.fetch_add(1, Ordering::Relaxed);
+                    let body: serde_json::Value = serde_json::from_slice(inv.stdin.as_deref().unwrap()).unwrap();
+                    assert_eq!(body["action"], "terminate");
+                    assert_eq!(body["expected_run_id"], source.run_id);
+                    assert_eq!(body["expected_conversation_id"], "");
+                    json!({"request_id":body["request_id"],"name":source.name,"run_id":source.run_id,"conversation_id":"","status":"completed","result_target":{"name":source.name,"run_id":source.run_id,"conversation_id":"","archive_id":"22222222-2222-4222-8222-222222222222"}})
+                };
+                Exit::Code { code: 0, stdout: serde_json::to_vec(&value).unwrap(), stderr: String::new() }
+            }, Some((plan, claim)), None,
+        )).unwrap();
+        assert!(matches!(outcome, Outcome::Done { .. }), "{outcome:?}");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
     fn cleanup_terminate_rechecks_after_claim_and_requires_the_exact_archive_receipt() {
         use serde_json::json;
         use zerus_client_core::{termination_cleanup::Capture, Exit};
@@ -2559,7 +2750,12 @@ mod tests {
             std::env::temp_dir().join(format!("zerus-kinds-{}.json", std::process::id())),
         );
         assert_eq!(actions.write_kind("", "claude/sample-project/review"), None);
-        let guard = actions.mark_write("", "claude/sample-project/review", &Action::Terminate);
+        let guard = actions.mark_write(
+            "",
+            "claude/sample-project/review",
+            "run-1",
+            &Action::Terminate,
+        );
         assert_eq!(
             actions.write_kind("", "claude/sample-project/review"),
             Some(WriteKind::Terminate)
@@ -2791,14 +2987,14 @@ mod tests {
     }
 
     #[test]
-    fn any_write_anywhere_is_an_update_and_only_ones_own_end_a_termination() {
+    fn writes_block_only_their_session_or_their_computers_batch() {
         let actions = Actions::new(std::env::temp_dir().join("zerus-global-test-marks.json"));
         let mine = || actions.write_kind("studio", "claude/sample-project/review");
-        // Another session's pause, as Qt's one `m_pending`.
+        // Another session's pause does not block this session.
         let pause = actions
             .begin(Lane::key(&other(), &Action::Pause), &Action::Pause)
             .unwrap();
-        assert_eq!(mine(), Some(WriteKind::Update));
+        assert_eq!(mine(), None);
         drop(pause);
         assert_eq!(mine(), None);
         // Another computer's rename.
@@ -2809,32 +3005,42 @@ mod tests {
             archive_id: None,
         };
         let renaming = actions.begin(Lane::key(&away, &rename), &rename).unwrap();
-        assert_eq!(mine(), Some(WriteKind::Update));
+        assert_eq!(mine(), None);
         drop(renaming);
-        // Another session's termination is an update here, its own there.
+        // A termination blocks only its own target.
         let ending = actions
             .begin(Lane::key(&other(), &Action::Terminate), &Action::Terminate)
             .unwrap();
-        assert_eq!(mine(), Some(WriteKind::Update));
+        assert_eq!(mine(), None);
         assert_eq!(
             actions.write_kind("studio", "claude/sample-project/other"),
             Some(WriteKind::Terminate)
         );
-        // Its own termination wins over another's update.
+        // Its own termination remains excluded.
         let killing = actions
             .begin(Lane::key(&review(), &Action::Kill), &Action::Kill)
             .unwrap();
         assert_eq!(mine(), Some(WriteKind::Terminate));
         drop((ending, killing));
         assert_eq!(mine(), None);
-        // Pause all of another computer.
-        let mut key = Lane::key(&away, &Action::PauseAll { count: 2 });
-        key.1 = String::new();
-        let all = actions.begin(key, &Action::PauseAll { count: 2 }).unwrap();
-        assert_eq!(mine(), Some(WriteKind::Update));
-        drop(all);
-        assert_eq!(mine(), None);
-        // A retained termination of its own wins over another's update.
+        // Computer-wide actions affect only their selected computer.
+        for action in [
+            Action::PauseAll { count: 2 },
+            Action::ResumeAll { count: 2 },
+        ] {
+            let mut key = Lane::key(&away, &action);
+            key.1 = String::new();
+            key.4.clear();
+            let all = actions.begin(key, &action).unwrap();
+            assert_eq!(mine(), None);
+            assert_eq!(
+                actions.write_kind("laptop", "another-session"),
+                Some(WriteKind::Update)
+            );
+            drop(all);
+            assert_eq!(mine(), None);
+        }
+        // A retained termination remains local to the terminated run.
         let done = Outcome::Done {
             receipt: serde_json::Value::Null,
             cleanup: None,
@@ -2843,14 +3049,227 @@ mod tests {
         let pause = actions
             .begin(Lane::key(&other(), &Action::Pause), &Action::Pause)
             .unwrap();
-        let seen =
-            |name: &str| actions.session_write("studio", name, || (live("running", "run-1"), true));
+        let seen = |name: &str| {
+            actions.session_write("studio", name, || {
+                (
+                    live(
+                        "running",
+                        if name.ends_with("/other") {
+                            "run-2"
+                        } else {
+                            "run-1"
+                        },
+                    ),
+                    true,
+                )
+            })
+        };
         assert_eq!(
             seen("claude/sample-project/review"),
             Some(WriteKind::Terminate)
         );
         assert_eq!(seen("claude/sample-project/other"), Some(WriteKind::Update));
         drop(pause);
+    }
+
+    #[test]
+    fn every_write_kind_preserves_other_sessions_and_same_target_exclusion() {
+        let actions = Actions::new(std::env::temp_dir().join("zerus-scoped-write-marks.json"));
+        for action in [
+            Action::Pause,
+            Action::Terminate,
+            Action::ClearContext {
+                dismiss_prompt: true,
+            },
+            Action::Settings {
+                model: "model-a".into(),
+                effort: "high".into(),
+                expected_pending_id: None,
+                without_terminal: false,
+            },
+        ] {
+            let target = review();
+            let key = Lane::key(&target, &action);
+            let held = actions.begin(key.clone(), &action).unwrap();
+            assert_eq!(
+                actions.write_kind(&target.computer, &target.name),
+                Some(WriteKind::of(&action))
+            );
+            assert_eq!(
+                actions.write_kind(&target.computer, "another-session"),
+                None
+            );
+            assert_eq!(actions.write_kind("another-computer", &target.name), None);
+            let mut renamed = target.clone();
+            renamed.name = "renamed-session".into();
+            assert_eq!(
+                actions.session_write(&renamed.computer, &renamed.name, || (
+                    live("running", &target.run_id),
+                    true
+                )),
+                Some(WriteKind::of(&action))
+            );
+            assert_eq!(
+                actions.session_write(&renamed.computer, &renamed.name, || (
+                    live("running", "another-run"),
+                    true
+                )),
+                None
+            );
+            assert!(
+                actions
+                    .begin(Lane::key(&renamed, &action), &action)
+                    .is_none(),
+                "the original run remains claimed after rename"
+            );
+            let mut replacement = target.clone();
+            replacement.run_id = "another-run".into();
+            assert!(
+                actions
+                    .begin(Lane::key(&replacement, &action), &action)
+                    .is_none(),
+                "the original name remains claimed too"
+            );
+            assert!(actions.begin(key.clone(), &action).is_none());
+            let other_key = (
+                "another-computer".into(),
+                target.name.clone(),
+                key.2,
+                key.3.clone(),
+                key.4.clone(),
+            );
+            assert!(actions.begin(other_key, &action).is_some());
+            drop(held);
+            assert!(actions.begin(key, &action).is_some());
+        }
+    }
+
+    #[test]
+    fn a_finished_termination_follows_only_its_original_run_after_rename() {
+        let actions = Actions::new(std::env::temp_dir().join("zerus-renamed-end-marks.json"));
+        let target = review();
+        actions.finished(
+            &target,
+            &Action::Terminate,
+            &Outcome::Done {
+                receipt: serde_json::Value::Null,
+                cleanup: None,
+            },
+        );
+        assert_eq!(
+            actions.session_write(&target.computer, "renamed-session", || (
+                live("running", &target.run_id),
+                true
+            )),
+            Some(WriteKind::Terminate)
+        );
+        assert_eq!(
+            actions.session_write(&target.computer, "other-session", || (
+                live("running", "another-run"),
+                true
+            )),
+            None
+        );
+        assert_eq!(
+            actions.session_write(&target.computer, "renamed-session", || (
+                live("stopped", &target.run_id),
+                true
+            )),
+            None
+        );
+        assert!(actions.terminated.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_reused_label_never_retires_the_renamed_runs_completion() {
+        let actions = Actions::new(std::env::temp_dir().join("zerus-reused-end-marks.json"));
+        let target = review();
+        let done = Outcome::Done {
+            receipt: serde_json::Value::Null,
+            cleanup: None,
+        };
+        actions.finished(&target, &Action::Terminate, &done);
+        let original = || {
+            actions.session_write_for_run(
+                &target.computer,
+                "renamed-session",
+                &target.run_id,
+                || {
+                    let mut row = live("running", &target.run_id).unwrap();
+                    row.name = "renamed-session".into();
+                    (Some(row), true)
+                },
+            )
+        };
+        assert_eq!(original(), Some(WriteKind::Terminate));
+        for online in [false, true] {
+            for state in ["running", "paused"] {
+                assert_eq!(
+                    actions.session_write_for_run(
+                        &target.computer,
+                        &target.name,
+                        "replacement-run",
+                        || (live(state, "replacement-run"), online),
+                    ),
+                    None
+                );
+                assert_eq!(original(), Some(WriteKind::Terminate));
+            }
+        }
+        let mut replacement = target.clone();
+        replacement.run_id = "replacement-run".into();
+        actions.finished(&replacement, &Action::Terminate, &done);
+        assert_eq!(original(), Some(WriteKind::Terminate));
+        assert_eq!(
+            actions.session_write_for_run(
+                &replacement.computer,
+                &replacement.name,
+                &replacement.run_id,
+                || (live("running", &replacement.run_id), true),
+            ),
+            Some(WriteKind::Terminate)
+        );
+        assert_eq!(
+            actions.session_write_for_run(
+                &replacement.computer,
+                &replacement.name,
+                &replacement.run_id,
+                || (live("stopped", &replacement.run_id), true),
+            ),
+            None
+        );
+        assert_eq!(original(), Some(WriteKind::Terminate));
+        assert_eq!(actions.terminated.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_label_without_run_evidence_never_retires_a_completion() {
+        let actions = Actions::new(std::env::temp_dir().join("zerus-unidentified-end-marks.json"));
+        let target = review();
+        actions.finished(
+            &target,
+            &Action::Terminate,
+            &Outcome::Done {
+                receipt: serde_json::Value::Null,
+                cleanup: None,
+            },
+        );
+        for row in [None, Some(ViewRow::default())] {
+            assert_eq!(
+                actions.session_write(&target.computer, &target.name, || (row, true)),
+                None
+            );
+            assert_eq!(actions.terminated.lock().unwrap().len(), 1);
+        }
+        assert_eq!(
+            actions.session_write_for_run(
+                &target.computer,
+                "renamed-session",
+                &target.run_id,
+                || { (live("running", &target.run_id), true) }
+            ),
+            Some(WriteKind::Terminate)
+        );
     }
 
     #[test]
@@ -3555,7 +3974,7 @@ mod tests {
         // Online, and the run no longer runs: it is let go for good.
         assert_eq!(write(live("paused", "run-1"), true), None);
         assert_eq!(write(live("running", "run-1"), true), None);
-        // Online, and no live row of that name at all: likewise.
+        // Absence retires the exact run only when the caller identifies it.
         actions.finished(&target, &Action::Kill, &done);
         assert_eq!(write(None, false), None, "offline: nothing to compare");
         assert_eq!(
@@ -3563,7 +3982,12 @@ mod tests {
             Some(WriteKind::Terminate),
             "still kept"
         );
-        assert_eq!(write(None, true), None);
+        assert_eq!(
+            actions.session_write_for_run(&target.computer, &target.name, &target.run_id, || {
+                (None, true)
+            }),
+            None
+        );
         assert_eq!(write(live("running", "run-1"), true), None);
         // Nothing kept: the row is never asked for.
         assert_eq!(
@@ -3608,6 +4032,7 @@ mod tests {
         for n in 0..TERMINATED + 6 {
             let mut target = review();
             target.name = format!("claude/sample-project/s-{n}");
+            target.run_id = format!("run-{n}");
             actions.finished(&target, &Action::Kill, &done);
         }
         let kept = actions.terminated.lock().unwrap().len();
@@ -3617,7 +4042,7 @@ mod tests {
             let row = ViewRow {
                 name: name.clone(),
                 state: "running".into(),
-                run_id: Some("run-1".into()),
+                run_id: Some(format!("run-{n}")),
                 ..ViewRow::default()
             };
             actions.session_write("studio", &name, || (Some(row), true))
@@ -3726,7 +4151,12 @@ mod tests {
             next_cursor: "older".into(),
             previous_cursor: Some("newer".into()),
             total: 12,
+            total_capped: true,
             position: Some(3),
+            position_capped: false,
+            partial: true,
+            searched: 25000,
+            bounded: true,
         }
     }
 
@@ -3763,6 +4193,22 @@ mod tests {
             "placement identities never enter the session-content mirror"
         );
         let json = serde_json::to_value(&page).unwrap();
+        // zerus-j5ic3: the capped flag reaches the webview with the page.
+        assert_eq!(
+            (json["total"].as_u64(), json["total_capped"].as_bool()),
+            (Some(12), Some(true))
+        );
+        // zerus-080n8: so do a bounded page's partial scan and capped position.
+        assert_eq!(
+            (
+                json["partial"].as_bool(),
+                json["searched"].as_u64(),
+                json["position_capped"].as_bool()
+            ),
+            (Some(true), Some(25000), Some(false))
+        );
+        // zerus-5czy6: and whether the page is bounded at all.
+        assert_eq!(json["bounded"].as_bool(), Some(true));
         assert_eq!(json["rows"][0]["name"], "codex/sample-project/review");
         assert_eq!(json["rows"][0]["group"], "alpha");
         assert_eq!(json["rows"][0]["rank"], page.rows[0].rank);
@@ -4419,6 +4865,7 @@ mod tests {
                 computer.to_owned(),
                 "claude/sample-project/review".to_owned(),
                 lane,
+                String::new(),
                 String::new(),
             )
         };

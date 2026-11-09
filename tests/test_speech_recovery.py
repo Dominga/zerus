@@ -41,7 +41,7 @@ class SpeechRecovery(unittest.TestCase):
                            and a["target"]["name"] == "voice_recovery_fixture")
 
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="zsr-", dir="/tmp")
+        self.temp = tempfile.TemporaryDirectory(prefix="zsr-", dir=os.environ.get("ZERUS_TEST_SHORT_TMPDIR", "/tmp"))
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.config = self.root / "config"

@@ -21,7 +21,7 @@ import { Icon } from "../lib/icons";
 import { Body } from "../sessions/Activity";
 import { messageTimeOf } from "../lib/dates";
 import { assignmentText, assignmentLabel, STAGE_LABEL, stageLabel, type Stage, type Task } from "./tasks-ui";
-import { deliveryError, deliveryText, historyAction } from "./task-history-ui";
+import { changeRequest, deliveryError, deliveryText, historyAction } from "./task-history-ui";
 import { tr } from "../../i18n";
 
 /** One file of a task, its reads in `taskFileCard`; a shown copy stays pinned in the cache. */
@@ -41,7 +41,7 @@ function TaskFiles(props: { files: Fetched[]; project: string; task: string }) {
 
 function JournalEntry(props: { entry: TaskEntry; discussion?: boolean; worker: string; project: string; task: string }) {
   const message = () => ["comment", "message", "report", "progress"].includes(props.entry.kind);
-  const label = () => props.entry.kind === "report" ? tr("Report") : props.entry.kind === "progress" ? tr("Progress") : !message() ? "" : !props.discussion ? tr("Comment") : props.entry.kind === "message" ? tr("Message") : tr("Note");
+  const label = () => props.entry.kind === "report" ? tr("Report") : props.entry.kind === "progress" ? tr("Progress") : !message() ? "" : !props.discussion ? tr("Comment") : changeRequest(props.entry) ? tr("Change request") : props.entry.kind === "message" ? tr("Message") : tr("Note");
   const date = () => { const d = new Date(props.entry.at); return props.entry.at > 0 && Number.isFinite(d.getTime()) ? d : undefined; };
   if (!message()) return <div class="tv-event"><i aria-hidden="true" /><span><b>{props.entry.actor}</b> <time>{date() && messageTimeOf(date()!)}</time> {historyAction(props.entry)}</span></div>;
   return <article class="act-msg tv-entry" classList={{ "k-user": props.entry.actor === "You", "k-agent": props.entry.actor !== "You" }}>

@@ -1,3 +1,5 @@
+import { Dropdown } from "../lib/Dropdown";
+import { TextInput } from "../lib/TextField";
 import { Index, Show, createEffect, createMemo, createSignal, lazy, on, type JSX } from "solid-js";
 import { Icon } from "../lib/icons";
 import { OS_NAME } from "../lib/os-icons";
@@ -12,6 +14,7 @@ import { machineEditor as editor, NEW_MACHINE } from "../../store/machineEditor"
 import { tr, trNoop } from "../../i18n";
 import type { MachineMeta, MachineRow } from "../../types";
 import { catalog } from "../../store/catalog";
+import { PeerConfigurationNotice } from "../components/MachinesStatus";
 import { machineCards, machinesPage, requestedMachine, resolveMachine, setRequestedMachine, testConnection, hostTest, testHost } from "../../store/machines";
 import { setAccountMachine } from "../../store/accounts";
 import { connectionOf, osOf } from "../../store/overview";
@@ -100,10 +103,8 @@ function Editor(props: { local: LocalState; peers: { row: MachineRow; state: Pee
           <button class="btn" disabled={!appearanceAvailable()} onClick={(event) => setColorEditor({ alias: name(), origin: event.currentTarget })}>
             <span class="mach-swatch" style={{ "--entity": appearance().color }} />{tr("Label color…")}
           </button>
-          <select class="field" aria-label={tr("Label style")} disabled={!appearanceAvailable()} value={appearance().vivid ? "bright" : "soft"}
-            onChange={(event) => void setSetting(`machines/vivid/${name()}`, event.currentTarget.value === "bright")}>
-            <option value="soft">{tr("Soft")}</option><option value="bright">{tr("Bright")}</option>
-          </select>
+          <Dropdown class="field" aria-label={tr("Label style")} disabled={!appearanceAvailable()} value={appearance().vivid ? "bright" : "soft"}
+            onChange={(value) => void setSetting(`machines/vivid/${name()}`, value === "bright")} options={[{ value: "soft", label: tr("Soft") }, { value: "bright", label: tr("Bright") }]} />
           <button class="btn ghost" disabled={!appearanceAvailable()} title={tr("Use the default color for this machine")} onClick={() => void setSetting(`machines/colors/${name()}`, null)}>{tr("Automatic")}</button>
         </div>
         <div class="row mach-preview">
@@ -125,7 +126,7 @@ function Editor(props: { local: LocalState; peers: { row: MachineRow; state: Pee
             </Show>
           )}</Show>
           <Field label={trNoop("Name / SSH alias")} id="mach-alias">
-            <input id="mach-alias" class="field" value={isLocal() ? props.local.name : draft().alias} placeholder={tr("e.g. studio-mac")} readOnly={!editor.isNew()} disabled={fieldsDisabled()} aria-invalid={editor.isNew() && !!draft().alias && (!editor.valid() || editor.duplicate())} onInput={(e) => editor.edit("alias", e.currentTarget.value)} />
+            <TextInput id="mach-alias" class="field" value={isLocal() ? props.local.name : draft().alias} placeholder={tr("e.g. studio-mac")} readOnly={!editor.isNew()} disabled={fieldsDisabled()} aria-invalid={editor.isNew() && !!draft().alias && (!editor.valid() || editor.duplicate())} onInput={(e) => editor.edit("alias", e.currentTarget.value)} />
             <Show when={editor.duplicate()}><span class="danger hint">{tr("This name already exists. Select the machine in the list to edit it.")}</span></Show>
           </Field>
           <Field label={trNoop("Connection type")} id="mach-transport">
@@ -137,28 +138,28 @@ function Editor(props: { local: LocalState; peers: { row: MachineRow; state: Pee
           </Field>
           <Show when={wsl()}>
             <Field label={trNoop("WSL distribution")} id="mach-wsl-distribution">
-              <input id="mach-wsl-distribution" class="field" value={draft().wsl?.distribution ?? ""} disabled={fieldsDisabled()} onInput={(e) => editor.editWsl("distribution", e.currentTarget.value)} />
+              <TextInput id="mach-wsl-distribution" class="field" value={draft().wsl?.distribution ?? ""} disabled={fieldsDisabled()} onInput={(e) => editor.editWsl("distribution", e.currentTarget.value)} />
             </Field>
             <Field label={trNoop("WSL user")} id="mach-wsl-user">
-              <input id="mach-wsl-user" class="field" value={draft().wsl?.user ?? ""} disabled={fieldsDisabled()} onInput={(e) => editor.editWsl("user", e.currentTarget.value)} />
+              <TextInput id="mach-wsl-user" class="field" value={draft().wsl?.user ?? ""} disabled={fieldsDisabled()} onInput={(e) => editor.editWsl("user", e.currentTarget.value)} />
             </Field>
             <Field label={trNoop("Linux HGS executable")} id="mach-wsl-hgs">
-              <input id="mach-wsl-hgs" class="field mono" placeholder={tr("Absolute Linux path to this fork's hgs")} value={draft().wsl?.hgs_path ?? ""} disabled={fieldsDisabled()} onInput={(e) => editor.editWsl("hgs_path", e.currentTarget.value)} />
+              <TextInput id="mach-wsl-hgs" class="field mono" placeholder={tr("Absolute Linux path to this fork's hgs")} value={draft().wsl?.hgs_path ?? ""} disabled={fieldsDisabled()} onInput={(e) => editor.editWsl("hgs_path", e.currentTarget.value)} />
             </Field>
           </Show>
           <Show when={!wsl()}>
             <Field label={trNoop("Hostname / IP")} id="mach-host">
-              <input id="mach-host" class="field" placeholder={hint().hostname} value={draft().hostname} disabled={fieldsDisabled()} onInput={(e) => editor.edit("hostname", e.currentTarget.value)} />
+              <TextInput id="mach-host" class="field" placeholder={hint().hostname} value={draft().hostname} disabled={fieldsDisabled()} onInput={(e) => editor.edit("hostname", e.currentTarget.value)} />
             </Field>
             <Field label={trNoop("SSH user")} id="mach-user">
-              <input id="mach-user" class="field" placeholder={hint().user} value={draft().user} disabled={fieldsDisabled()} onInput={(e) => editor.edit("user", e.currentTarget.value)} />
+              <TextInput id="mach-user" class="field" placeholder={hint().user} value={draft().user} disabled={fieldsDisabled()} onInput={(e) => editor.edit("user", e.currentTarget.value)} />
             </Field>
             <Field label={trNoop("Port")} id="mach-port">
-              <input id="mach-port" class="field tabular mach-port" placeholder={hint().port} type="number" min={0} max={65535} value={draft().port} disabled={fieldsDisabled()} onInput={(e) => editor.edit("port", e.currentTarget.value)} />
+              <TextInput id="mach-port" class="field tabular mach-port" placeholder={hint().port} type="number" min={0} max={65535} value={draft().port} disabled={fieldsDisabled()} onInput={(e) => editor.edit("port", e.currentTarget.value)} />
             </Field>
             <Field label={trNoop("Private key path")} id="mach-key">
               <div class="row">
-                <input id="mach-key" class="field mono grow" placeholder={hint().key} value={draft().identity_file} disabled={fieldsDisabled()} onInput={(e) => editor.edit("identity_file", e.currentTarget.value)} />
+                <TextInput id="mach-key" class="field mono grow" placeholder={hint().key} value={draft().identity_file} disabled={fieldsDisabled()} onInput={(e) => editor.edit("identity_file", e.currentTarget.value)} />
                 <button class="btn" disabled={fieldsDisabled()} title={tr("Choose SSH private key")} onClick={() => void editor.pickKey()}>{tr("Browse…")}</button>
               </div>
             </Field>
@@ -270,6 +271,7 @@ export function MachinesScreen() {
           <button class="btn primary" disabled={busy()} onClick={() => { editor.choose(NEW_MACHINE); if (editor.isNew() && !editor.prompt()) queueMicrotask(() => document.getElementById("mach-alias")?.focus()); }}><Icon name="plus" size={14} />{tr("Add machine")}</button>
         </header>
         <p class="muted mach-summary">{summary({ console: local().console, live: ["live", "polled"].includes(catalog.computers[""]?.status ?? "") }, peers().map((p) => p.state))}</p>
+        <PeerConfigurationNotice />
         <Show when={view().error}>{(error) => <Status kind="error"><Lines text={error()} /></Status>}</Show>
         <section class="mach-phones"><MachinesPhones /></section>
         <div class="mach-body">

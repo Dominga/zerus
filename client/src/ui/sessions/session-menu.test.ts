@@ -22,6 +22,7 @@ vi.mock("../../bridge", () => ({
   resetArchivePages: vi.fn(async () => {}),
   cancelArchivePages: vi.fn(async () => {}),
   runAction: vi.fn(),
+  setKeepWarm: vi.fn(async () => ({})),
   inspectSession: vi.fn(async () => null),
   pendingReadMarks: vi.fn(async () => []),
   attentionMarks: vi.fn(async () => ({ marks: {}, replies: {} })),
@@ -35,25 +36,26 @@ vi.mock("../../bridge", () => ({
   windowVisibility: { hidden: () => false, onChange: () => () => {} },
   composerOpen: vi.fn(async () => null), composerVisibility: vi.fn(async () => {}), composerEdit: vi.fn(async () => {}), composerPick: vi.fn(async () => {}), composerPasteImage: vi.fn(async () => {}),
   composerRemove: vi.fn(async () => {}), composerUndoRemove: vi.fn(async () => {}), composerAllowRetry: vi.fn(async () => {}), composerRefresh: vi.fn(async () => {}),
-  composerTab: vi.fn(async () => {}), sendMessage: vi.fn(), sendAnswer: vi.fn(), sendCancel: vi.fn(async () => {}), sendInterrupted: vi.fn(async () => {}), clearContext: vi.fn(),
-  localRetry: vi.fn(), localDelete: vi.fn(async () => {}), localInspect: vi.fn(async () => null),
+  composerTab: vi.fn(async () => {}), sendMessage: vi.fn(), sendAnswer: vi.fn(), sendCancel: vi.fn(async () => {}), sendInterrupted: vi.fn(async () => {}), sendInterruptFailed: vi.fn(async () => {}), clearContext: vi.fn(),
+  localRetry: vi.fn(), localDelete: vi.fn(async () => {}), localInspect: vi.fn(async () => null), inboxRemove: vi.fn(async () => ({ outcome: "removed" as const })),
   savedDrafts: vi.fn(), draftConflicts: vi.fn(), savedDraft: vi.fn(), draftRecover: vi.fn(), draftRestore: vi.fn(),
   composerClearControl: vi.fn(async () => null),
   sessionFolderStatus: vi.fn(async () => ({ folder: false, shell: false, folder_hint: "Unavailable" })),
-  sessionFolderOpen: vi.fn(async () => ""),
+  sessionFolderOpen: vi.fn(async () => ""), sessionTerminalOpen: vi.fn(async () => null),
   // Content search (store/contentSearch.ts) and the creation cards start with the list.
   inTauri: () => false,
   onCreations: vi.fn(async () => () => {}),
 }));
 
 import { sessionContextMenu, sessionMenu } from "./SessionList";
+import { expandedEntries } from "./session-extra-entries";
 import { archivedSession } from "../../store/archive";
 import { applyBatch, toSession } from "../../store/catalog";
 import { composer } from "../../store/composer";
-import { composerClearControl, composerOpen, copyText, inspectSession, runAction, sessionFolderOpen, sessionFolderStatus, sessionReference } from "../../bridge";
+import { composerClearControl, composerOpen, copyText, inspectSession, runAction, sessionFolderOpen, sessionFolderStatus, sessionReference, sessionTerminalOpen, setKeepWarm } from "../../bridge";
 import { detailTab, menu, visibleMenu, multi, peek, selectedKey, setDetailTab, setMenu, setMulti, setPeek, setSelectedKey, setStripMode, setSubagentOpen, subagentOpen, type MenuEntry } from "../../store/ui";
 import { clearMulti } from "./organize";
-import { setSetting, settings } from "../../store/settings";
+import { setSetting } from "../../store/settings";
 import { emptyBatch, type ComposerView, type ViewRow } from "../../types";
 
 const labels = (entries: MenuEntry[]) => entries.map((e) => ("separator" in e ? "---" : "heading" in e ? `# ${e.heading}` : e.label));
@@ -68,14 +70,11 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("the session menu (Qt showSessionMenu 5266-5382)", () => {
+describe("the owner's compact session row menu", () => {
   it("an archived row has no terminal entry and no Mute or Mark group, and no doubled separators", () => {
     const expected = [
-      "Compact session row", "Expand all collapsed", "---",
-      "Open folder", "Open shell in session folder", "Copy restore command", "---",
-      "Restore session", "Rename…", "Fork session…", "Move to project…", "---",
-      "Copy session name", "Copy session reference", "Copy folder path", "---",
-      "Forget archived session…",
+      "Compact session row", "---", "Copy restore command", "Copy session ID", "---",
+      "Rename…", "Move to project…", "---", "Forget archived session…",
     ];
     expect(labels(sessionMenu(archivedSession("", "Local", archived("codex"))))).toEqual(expected);
     expect(labels(sessionMenu(archivedSession("", "Local", archived("dsh"))))).toEqual(expected);
@@ -84,36 +83,36 @@ describe("the session menu (Qt showSessionMenu 5266-5382)", () => {
   it("a live row starts with Mark then Mute and keeps its terminal entry", () => {
     const live = toSession("", "run:run-live", { name: "codex/example/live", agent: "codex", state: "running", status: "ready", run_id: "run-live", conversation_id: "conv-live" });
     expect(labels(sessionMenu(live))).toEqual([
-      "Mark needs attention", "Mute", "Keep cache warm", "---",
-      "Compact session row", "Expand all collapsed", "---",
-      "Open terminal", "Open folder", "Open shell in session folder", "Copy connect command", "---",
-      "Pause session", "Clear session…", "Rename…", "Fork session…", "Move to project…", "---",
-      "Copy session name", "Copy session reference", "Copy folder path", "---",
-      "Terminate session…",
+      "Mark needs attention", "Mute", "Keep cache warm", "---", "Compact session row", "---",
+      "Open terminal", "Copy connect command", "Copy session ID", "---",
+      "Clear session…", "Rename…", "Move to project…", "---", "Terminate session…",
     ]);
   });
 
-  it("Keep cache warm is checked by the row's exact identity and toggles off or one hour", async () => {
-    const exact = "a".repeat(64), fallback = "b".repeat(64);
-    const row: ViewRow = { name: "codex/example/warm", agent: "codex", state: "running", status: "ready", run_id: "run-warm", conversation_id: "conv-warm", compact_keys: [exact, fallback] };
-    const entry = (s = toSession("", "run:run-warm", row)) => sessionMenu(s).find((e) => "label" in e && e.label === "Keep cache warm") as Extract<MenuEntry, { label: string }>;
-    await setSetting("workspace/cacheKeepWarm", "");
-    expect(entry()).toMatchObject({ checked: false, disabled: false, hint: "Send the idle agent a one-word service message before its prompt cache expires" });
-    // Turned on from the menu: one hour, under the exact identity (outside Tauri only kept).
-    entry().action?.();
-    await vi.waitFor(() => expect(JSON.parse(String(settings["workspace/cacheKeepWarm"]))).toEqual({ [exact]: 1 }));
-    expect(entry().checked).toBe(true);
-    // Hours set in Details stay until the menu turns it off.
-    await setSetting("workspace/cacheKeepWarm", JSON.stringify({ [exact]: 5, [fallback]: 3 }));
-    expect(entry().checked).toBe(true);
-    entry().action?.();
-    await vi.waitFor(() => expect(JSON.parse(String(settings["workspace/cacheKeepWarm"]))).toEqual({ [fallback]: 3 }));
-    expect(entry().checked).toBe(false);
-    // Only the exact identity counts, and a session without a conversation cannot keep warm.
-    await setSetting("workspace/cacheKeepWarm", JSON.stringify({ [fallback]: 3 }));
-    expect(entry().checked).toBe(false);
-    expect(entry(toSession("", "run:run-warm", { ...row, conversation_id: undefined })).disabled).toBe(true);
-    await setSetting("workspace/cacheKeepWarm", "");
+  it("Keep cache warm follows the host's state and toggles off or one hour with its revision", () => {
+    const host = (over: Record<string, unknown> = {}) => ({
+      enabled: false, until: null, revision: 3, state: "off", next_at: null, reason: "", turn_active: false,
+      supported: true, reason_code: "", ttl_seconds: 3600, ttl_source: "reported", interval_seconds: 3000, cache_expires_at: null, ...over,
+    }) as ViewRow["keep_warm"];
+    const row = (keep?: ViewRow["keep_warm"], extra: Partial<ViewRow> = {}): ViewRow => ({
+      name: "codex/example/warm", agent: "codex", state: "running", status: "ready", run_id: "run-warm", conversation_id: "conv-warm", ...(keep ? { keep_warm: keep } : {}), ...extra,
+    });
+    const entry = (raw: ViewRow) => sessionMenu(toSession("", "run:run-warm", raw)).find((e) => "label" in e && e.label === "Keep cache warm") as Extract<MenuEntry, { label: string }>;
+    const target = { computer: "", name: "codex/example/warm", run_id: "run-warm", conversation_id: "conv-warm" };
+    // A host that reports no keep-warm state has nothing to toggle.
+    expect(entry(row())).toMatchObject({ checked: false, disabled: true });
+    expect(entry(row(host()))).toMatchObject({ checked: false, disabled: false, hint: "Send the idle agent a one-word service message before its prompt cache expires" });
+    // Turned on from the menu: one hour, with the revision the listing reports.
+    entry(row(host())).action?.();
+    expect(setKeepWarm).toHaveBeenLastCalledWith(target, { kind: "hours", hours: 1 }, 3);
+    // While it is on, the menu turns it off; the hours set in Details stay until then.
+    const on = entry(row(host({ enabled: true, until: 4_000_000_000, state: "waiting", revision: 4 })));
+    expect(on.checked).toBe(true);
+    on.action?.();
+    expect(setKeepWarm).toHaveBeenLastCalledWith(target, { kind: "off" }, 4);
+    // An agent that cannot keep its cache warm cannot be turned on, and a session without a conversation cannot keep warm.
+    expect(entry(row(host({ supported: false, reason: "This agent reports no prompt cache that pings can keep warm." })))).toMatchObject({ disabled: true });
+    expect(entry(row(host(), { conversation_id: undefined })).disabled).toBe(true);
   });
 
   it("Clear session checks an unselected row and opens the same dialog for it", async () => {
@@ -151,7 +150,7 @@ describe("the session menu (Qt showSessionMenu 5266-5382)", () => {
 });
 
 function contextRows() {
-  const row = (tag: string): ViewRow => ({ name: `codex/context/${tag}`, agent: "codex", state: "running", status: "ready", run_id: `context-${tag}`, conversation_id: `conversation-${tag}`, cwd: `/tmp/context-${tag}` });
+  const row = (tag: string): ViewRow => ({ name: `codex/context/${tag}`, agent: "codex", state: "running", status: "ready", run_id: `context-${tag}`, conversation_id: `conversation-${tag}`, session_id: `session-${tag}`, cwd: `/tmp/context-${tag}` });
   const rows = ["open", "target", "other"].map((tag) => ({ computer: "", key: `run:context-${tag}`, row: row(tag) }));
   applyBatch({ ...emptyBatch(), computers: [{ computer: "", status: "live", attempt: 0 }], upserts: rows });
   return rows.map((r) => toSession(r.computer, r.key, r.row));
@@ -166,58 +165,39 @@ const menuItem = (label: string, items = menu()?.items ?? []) => {
 };
 
 describe("session context targeting", () => {
-  it("opens within the bound and adopts independent replies while inspection is stalled", async () => {
+  it("opens within the bound while capability inspection is stalled, without checking folders", async () => {
     vi.useFakeTimers();
     try {
-      const row: ViewRow = { name: "codex/context/slow", agent: "codex", state: "running", status: "ready", run_id: "slow-context", conversation_id: "slow-conversation", cwd: "/example/menu" };
-      applyBatch({ ...emptyBatch(), computers: [{ computer: "", status: "live", attempt: 0 }], upserts: [{ computer: "", key: "run:slow-context", row }] });
-      const target = toSession("", "run:slow-context", row);
-      let folder!: (value: Awaited<ReturnType<typeof sessionFolderStatus>>) => void;
-      let cleared!: (value: Awaited<ReturnType<typeof composerClearControl>>) => void;
-      vi.mocked(sessionFolderStatus).mockImplementationOnce(() => new Promise((resolve) => { folder = resolve; }));
-      vi.mocked(inspectSession).mockImplementationOnce(() => new Promise(() => {}));
-      vi.mocked(composerClearControl).mockImplementationOnce(() => new Promise((resolve) => { cleared = resolve; }));
+      const [, target] = contextRows();
+      let inspected!: (value: Awaited<ReturnType<typeof inspectSession>>) => void;
+      vi.mocked(inspectSession).mockImplementationOnce(() => new Promise((resolve) => { inspected = resolve; }));
       sessionContextMenu(contextEvent(), target);
-      await vi.advanceTimersByTimeAsync(179); expect(visibleMenu()).toBeUndefined();
-      await vi.advanceTimersByTimeAsync(1); expect(visibleMenu()?.sessionKey).toBe(target.key);
-      expect(menuItem("Open folder").disabled).toBe(true);
-      folder({ folder: true, shell: true, folder_hint: "" });
-      cleared({ enabled: true, dismiss: false, title: "Clear session?", text: "", confirm: "Clear session", run: row.run_id!, conversation: row.conversation_id!, cache_enabled: true, running: false, reason: "", cache_reason: "" });
-      await vi.advanceTimersByTimeAsync(0);
-      expect(visibleMenu()).toBe(menu());
-      expect(menuItem("Open folder").disabled).toBe(false);
-      expect(menuItem("Clear session…").disabled).toBe(false);
-      expect(menuItem("Fork session…").disabled).toBe(true);
+      expect(visibleMenu()).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(200);
+      expect(visibleMenu()?.sessionKey).toBe(target.key);
+      expect(menuItem("Open terminal").disabled).toBe(false);
+      expect(sessionFolderStatus).not.toHaveBeenCalled();
+      inspected(null);
     } finally { setMenu(undefined); vi.useRealTimers(); }
   });
 
-  it.each([false, true])("publishes the prepared snapshot when reads settle before the bound (failure=%s)", async (failure) => {
-    const tag = failure ? "final-failed" : "final-ready";
-    const row: ViewRow = { name: `codex/context/${tag}`, agent: "codex", state: "running", status: "ready", run_id: tag, conversation_id: `conversation-${tag}`, cwd: "/example/menu" };
+  it.each([false, true])("publishes the prepared clear snapshot when reads settle (failure=%s)", async (failure) => {
+    const tag = `prepared-${failure}`;
+    const row: ViewRow = { name: `codex/context/${tag}`, agent: "codex", state: "running", status: "ready", run_id: tag, conversation_id: `conversation-${tag}` };
     applyBatch({ ...emptyBatch(), computers: [{ computer: "", status: "live", attempt: 0 }], upserts: [{ computer: "", key: `run:${tag}`, row }] });
     const target = toSession("", `run:${tag}`, row);
-    let folder!: (value: Awaited<ReturnType<typeof sessionFolderStatus>>) => void;
     let inspected!: (value: Awaited<ReturnType<typeof inspectSession>>) => void;
     let cleared!: (value: Awaited<ReturnType<typeof composerClearControl>>) => void;
-    vi.mocked(sessionFolderStatus).mockImplementationOnce(() => new Promise((resolve) => { folder = resolve; }));
     vi.mocked(inspectSession).mockImplementationOnce(() => new Promise((resolve) => { inspected = resolve; }));
     vi.mocked(composerClearControl).mockImplementationOnce(() => new Promise((resolve) => { cleared = resolve; }));
     sessionContextMenu(contextEvent(), target);
-    const initial = menu();
-    expect(initial?.sessionKey).toBe(target.key); expect(visibleMenu()).toBeUndefined();
-    folder({ folder: !failure, shell: !failure, folder_hint: "" });
-    await Promise.resolve(); await Promise.resolve();
-    expect(menu()?.sessionKey).toBe(initial?.sessionKey); expect(visibleMenu()).toBeUndefined();
+    expect(visibleMenu()).toBeUndefined();
     inspected(null);
-    await Promise.resolve(); await Promise.resolve();
-    expect(menu()?.sessionKey).toBe(initial?.sessionKey); expect(visibleMenu()).toBeUndefined();
-    cleared(failure ? null : { enabled: true, dismiss: false, title: "Clear session?", text: "", confirm: "Clear session", run: tag, conversation: row.conversation_id!, cache_enabled: true, running: false, reason: "", cache_reason: "" });
+    cleared(failure ? null : { enabled: true, dismiss: false, title: "Clear session?", text: "", confirm: "Clear session", run: target.runId!, conversation: target.conversationId!, cache_enabled: true, running: false, reason: "", cache_reason: "" });
     await vi.waitFor(() => expect(visibleMenu()?.sessionKey).toBe(target.key));
-    const final = visibleMenu();
-    expect(menuItem("Open folder").disabled).toBe(failure);
     expect(menuItem("Clear session…").disabled).toBe(failure);
-    await Promise.resolve(); expect(visibleMenu()).toBe(final);
-    expect(composerClearControl).toHaveBeenCalledTimes(1); // A failed preparation is not retried while building the final entries.
+    expect(sessionFolderStatus).not.toHaveBeenCalled();
+    expect(composerClearControl).toHaveBeenCalledTimes(1);
   });
 
   it.each([false, true])("opening and closing a context menu preserves the conversation, draft and selection (strip=%s)", async (strip) => {
@@ -238,36 +218,30 @@ describe("session context targeting", () => {
     expect(selectedKey()).toBe(open.key); expect(composer.view()).toBe(draft);
   });
 
-  it("keeps menu actions bound to the context session while another conversation stays open", async () => {
+  it("copies the context session's ID and opens its external connection while another session stays open", async () => {
     const [open, target] = contextRows(); setSelectedKey(open.key);
-    vi.mocked(sessionFolderStatus).mockResolvedValueOnce({ folder: true, shell: true, folder_hint: "" });
-    vi.mocked(runAction).mockResolvedValueOnce({ outcome: "done", receipt: null, cleanup: null });
-    vi.mocked(sessionReference).mockResolvedValueOnce("zerus://session?name=context-target");
     sessionContextMenu(contextEvent(), target);
-    await vi.waitFor(() => expect(menuItem("Open folder").disabled).toBe(false));
-    const items = menu()!.items; setMenu(undefined); // MenuLayer closes before running an action.
-    menuItem("Copy session name", items).action?.();
-    expect(copyText).toHaveBeenCalledWith(target.name);
-    menuItem("Copy session reference", items).action?.();
-    const nativeTarget = { computer: target.computer, name: target.name, run_id: target.runId, conversation_id: target.conversationId };
-    expect(sessionReference).toHaveBeenCalledWith(nativeTarget, null);
-    menuItem("Open folder", items).action?.();
-    expect(sessionFolderOpen).toHaveBeenCalledWith({ target: nativeTarget, archive_id: null, agent_id: null, directory: target.cwdPath }, "folder");
-    menuItem("Pause session", items).action?.();
-    await vi.waitFor(() => expect(runAction).toHaveBeenCalledWith(nativeTarget, { kind: "pause" }));
+    await vi.waitFor(() => expect(visibleMenu()?.sessionKey).toBe(target.key));
+    const items = menu()!.items; setMenu(undefined);
+    menuItem("Copy session ID", items).action?.();
+    expect(copyText).toHaveBeenCalledWith(target.conversationId);
+    expect(copyText).not.toHaveBeenCalledWith(target.name);
+    expect(copyText).not.toHaveBeenCalledWith(target.runId);
+    menuItem("Open terminal", items).action?.();
+    expect(sessionTerminalOpen).toHaveBeenCalledWith({ computer: target.computer, name: target.name, run_id: target.runId, conversation_id: target.conversationId });
     expect(selectedKey()).toBe(open.key); expect(composerOpen).not.toHaveBeenCalled();
+    expect(sessionFolderStatus).not.toHaveBeenCalled();
   });
 
-  it("does not let an old folder result retarget a replacement or closed menu", async () => {
+  it("does not let a late inspection retarget a replacement or closed menu", async () => {
     const [open, target, other] = contextRows(); setSelectedKey(open.key);
-    let finish!: (value: { folder: boolean; shell: boolean; folder_hint: string }) => void;
-    vi.mocked(sessionFolderStatus).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    let finish!: (value: Awaited<ReturnType<typeof inspectSession>>) => void;
+    vi.mocked(inspectSession).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
     sessionContextMenu(contextEvent(), target);
     sessionContextMenu(contextEvent(), other);
-    finish({ folder: true, shell: true, folder_hint: "" });
+    finish(null);
     await Promise.resolve(); await Promise.resolve();
     expect(menu()?.sessionKey).toBe(other.key);
-    expect(menuItem("Open folder").disabled).toBe(true);
     setMenu(undefined); await Promise.resolve();
     expect(menu()).toBeUndefined(); expect(selectedKey()).toBe(open.key);
   });
@@ -277,8 +251,7 @@ describe("session context targeting", () => {
     setSelectedKey(open.key); setSubagentOpen("open-child");
     await setSetting("processes/enabled", true);
     try {
-      sessionContextMenu(contextEvent(), { ...target, phase: "idle", activity: "idle", backgroundJobs: 1 });
-      const item = menuItem("Show running commands");
+      const item = menuItem("Show running commands", expandedEntries({ ...target, phase: "idle", activity: "idle", backgroundJobs: 1 }));
       expect(item.disabled).toBe(false); expect(selectedKey()).toBe(open.key);
       setMenu(undefined); item.action?.();
       expect(selectedKey()).toBe(target.key); expect(subagentOpen()).toBeUndefined();
@@ -305,4 +278,67 @@ describe("session context targeting", () => {
     expect(multi[open.key]).toBe(true); expect(multi[target.key]).toBe(true);
     expect(selectedKey()).toBe(open.key); expect(sessionFolderStatus).not.toHaveBeenCalled();
   });
+});
+
+
+describe("external terminal availability", () => {
+  it.each([undefined, ""])("opens the original startup run before conversation binding (%j)", (conversation) => {
+    const raw: ViewRow = { name: "codex/context/startup", agent: "codex", state: "running", status: "starting", run_id: "startup-run", conversation_id: conversation, terminal_supported: true };
+    applyBatch({ ...emptyBatch(), computers: [{ computer: "peer", status: "live", attempt: 0 }], upserts: [{ computer: "peer", key: "run:startup-run", row: raw }] });
+    const target = toSession("peer", "run:startup-run", raw);
+    const item = menuItem("Open terminal", sessionMenu(target));
+    expect(item.disabled).toBe(false);
+    expect(sessionTerminalOpen).not.toHaveBeenCalled();
+    item.action?.();
+    expect(sessionTerminalOpen).toHaveBeenCalledExactlyOnceWith({ computer: "peer", name: raw.name, run_id: "startup-run", conversation_id: "" });
+  });
+  it.each(["run", "name", "created", "conversation", "removed"])("retains the startup row's click-time source guard (%s)", (change) => {
+    const raw: ViewRow = { name: "codex/context/startup", agent: "codex", state: "running", status: "starting", run_id: "startup-run", created: 100 };
+    applyBatch({ ...emptyBatch(), computers: [{ computer: "peer", status: "live", attempt: 0 }], upserts: [{ computer: "peer", key: "run:startup-run", row: raw }] });
+    const item = menuItem("Open terminal", sessionMenu(toSession("peer", "run:startup-run", raw)));
+    expect(item.disabled).toBe(false);
+    if (change === "removed") {
+      applyBatch({ ...emptyBatch(), removes: [{ computer: "peer", key: "run:startup-run" }] });
+    } else {
+      const row = { ...raw, ...({ run: { run_id: "replacement" }, name: { name: "codex/context/renamed" }, created: { created: 101 }, conversation: { conversation_id: "new-binding" } }[change]) };
+      applyBatch({ ...emptyBatch(), upserts: [{ computer: "peer", key: "run:startup-run", row }] });
+    }
+    item.action?.(); expect(sessionTerminalOpen).not.toHaveBeenCalled();
+  });
+  it.each([
+    [{ agent: "deepseek", terminal_supported: false }, "This native adapter does not provide Terminal."],
+    [{ run_id: "" }, "Refresh this session's identity before opening its terminal."],
+  ])("explains an unavailable row %j", (extra, reason) => {
+    const row = toSession("", "run:unavailable", { name: "codex/context/unavailable", agent: "codex", state: "running", status: "ready", run_id: "run-unavailable", conversation_id: "conversation-unavailable", ...extra } as ViewRow);
+    const item = menuItem("Open terminal", sessionMenu(row));
+    expect(item).toMatchObject({ disabled: true, hint: reason });
+    item.action?.(); expect(sessionTerminalOpen).not.toHaveBeenCalled();
+  });
+  it("offers Resume and open terminal for a saved row instead (zerus-5wmh.13.11.3)", () => {
+    const row = toSession("", "run:saved", { name: "codex/context/saved", agent: "codex", state: "paused", status: "ready", run_id: "run-saved", conversation_id: "conversation-saved" } as ViewRow);
+    const items = sessionMenu(row);
+    expect(() => menuItem("Open terminal", items)).toThrow();
+    expect(menuItem("Resume and open terminal", items)).toBeDefined();
+  });
+  it.each(["paused", "stopped"])("enables Resume and open terminal for a %s row, which the CLI reports without a live pane (zerus-5o1ns)", (state) => {
+    const row = toSession("", `run:saved-${state}`, { name: `codex/context/${state}`, agent: "codex", state, status: "ready", run_id: `run-${state}`,
+      conversation_id: `conversation-${state}`, session_id: `session-${state}`, tracked: true, resumable: true, terminal_supported: false } as ViewRow);
+    expect(row.terminalSupported).toBe(false);
+    expect(menuItem("Resume and open terminal", sessionMenu(row))).toMatchObject({ disabled: false });
+  });
+  it("does not open a replacement run after the menu opened", () => {
+    const [, target] = contextRows();
+    const item = menuItem("Open terminal", sessionMenu(target));
+    applyBatch({ ...emptyBatch(), upserts: [{ computer: "", key: target.catalogKey, row: { name: target.name, agent: "codex", state: "running", status: "ready", run_id: "replacement", conversation_id: target.conversationId } }] });
+    item.action?.(); expect(sessionTerminalOpen).not.toHaveBeenCalled();
+  });
+});
+
+
+it("does not open a row that went offline after the menu opened", () => {
+  const [, target] = contextRows();
+  const item = menuItem("Open terminal", sessionMenu(target));
+  applyBatch({ ...emptyBatch(), computers: [{ computer: "", status: "ended", attempt: 0 }] });
+  item.action?.(); expect(sessionTerminalOpen).not.toHaveBeenCalled();
+  expect(menuItem("Open terminal", sessionMenu(target))).toMatchObject({ disabled: true, hint: "Machine unavailable. Reconnect when it is online." });
 });

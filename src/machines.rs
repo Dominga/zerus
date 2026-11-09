@@ -369,6 +369,20 @@ fn resolve(config: &Config, alias: &str) -> Result<Value> {
 const PROBE: &str = r#"export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; printf '\n__HGS_MACHINE__\n'; printf 'os='; uname -s; printf 'arch='; uname -m; printf 'hgs='; if test -x "$HOME/.local/bin/hgs"; then "$HOME/.local/bin/hgs" --version 2>/dev/null; else printf '\n'; fi; printf 'tmux='; tmux -V 2>/dev/null || printf '\n'; printf 'cargo='; command -v cargo || true"#;
 fn check(config: &Config, alias: &str) -> Result<Value> {
     if let Some(profile) = crate::wsl::profile(config, alias) { return crate::wsl::check(profile, alias); }
+    if crate::remote_shell::windows(config, alias)? {
+        // WhiteWh fork: later commands (connect timeout, peer channel) read this.
+        let _ = crate::windows_peer::record(config, alias, true);
+        let version = crate::remote_shell::output(config, alias, &["--version"])?;
+        let listing = crate::remote_shell::output(config, alias, &["ls", "--local", "--json"])?;
+        let value: Value = serde_json::from_slice(&listing.stdout).unwrap_or(Value::Null);
+        let enabled = value["ok"] == true && value["sessions"].is_array()
+            && value.get("local_sessions").is_none_or(|v| v == true);
+        let hgs = String::from_utf8_lossy(&version.stdout).trim().to_owned();
+        let ready = version.status.success() && listing.status.success() && hgs.starts_with("hgs ") && enabled;
+        return Ok(json!({"alias":alias,"ok":ready,"ssh_ok":true,"platform":"windows","os":"Windows","arch":"unknown","hgs":hgs,
+            "local_sessions":enabled,"tmux":null,"cargo":null,
+            "error":if ready { "" } else { "Install Zerus and enable local sessions with hgs session-host install on that Windows account" }}));
+    }
     let out = platform::ssh_output(
         platform::ssh()
             .args(ssh_options(config, alias))
@@ -497,6 +511,9 @@ fn setup(
         return Err(Error::new(1, "This is a Windows computer: install Zerus there and enable local sessions in Machines, then choose Check."));
     }
     setup_revision(config, alias, expected)?;
+    if !dry && crate::remote_shell::windows(config, alias)? {
+        return Err(Error::new(2, "Install the Windows Zerus package and run hgs session-host install on that account; source bootstrap is for POSIX computers"));
+    }
     let root = source
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| Path::new(&config.home).join(".local/src/hgs"));

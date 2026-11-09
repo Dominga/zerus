@@ -214,7 +214,9 @@ pub async fn settings_set(
     key: String,
     value: Value,
 ) -> Result<Value, String> {
-    if crate::desktop_service::mode() && key == "automaticApprovals/enabled" {
+    if crate::desktop_service::mode()
+        && (key == "automaticApprovals/enabled" || key.starts_with("automaticApprovals/category/"))
+    {
         return Err(
             "Automatic approval settings must be changed through the background service.".into(),
         );

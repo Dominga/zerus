@@ -28,6 +28,7 @@ export interface PlanViewProps {
   graph: PlanGraph;
   /** Opens the task in the host's inspector; without it the plan shows its own card. */
   onOpenTask?: (id: number) => void;
+  onOpenReport?: (id: number) => void;
   onApprovePhase?: (n: number) => void;
   onDiscardPhase?: (n: number) => void;
   profile?: TeamProfileView | null;
@@ -348,12 +349,15 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         <Show when={collapsible}><Icon name={closed ? "chevron-right" : "chevron-down"} size={14} /></Show>
         <span class="pt-pn">{phase.phase.n}</span>
         <b class="pt-phase-title">{phase.phase.title || tr("Phase %1", phase.phase.n)}</b>
+        <Show when={phase.phase.archived}><span class="pt-badge">{tr("Archived")}</span></Show>
         <span class={`pt-chip pt-chip-${status.kind}`}>{statusLabel(status.kind)}</span>
         <Show when={phase.phase.kind === "minor"}><span class="pt-chip pt-chip-minor" data-phase-kind="minor">{tr("Minor")}</span></Show>
         <Show when={phase.phase.crit_gate}>{(gate) => <span class="pt-crit-gate" data-crit-gate title={gate()}>{short(gate(), 80)}</span>}</Show>
         <Show when={phase.phase.auto}><span class="pt-chip pt-chip-auto">{tr("Auto")}</span></Show>
         <Show when={phase.phase.barrier}><span class="pt-chip pt-chip-barrier">{tr("Barrier")}</span></Show>
-        <Show when={!closed && phase.phase.acceptance}><span class="pt-acceptance">{short(phase.phase.acceptance, 80)}</span></Show>
+        {/* Task 356: no acceptance label. The core's acceptance names who accepts the
+            phase (lead or owner), which Qt shows only in the phase menu
+            (Requires owner acceptance, checked), as this header's menu does. */}
         <For each={head.notes.filter((shown) => shown.id !== "health")}>{(shown) => (
           <span class={`pt-phase-note pt-phase-note-${shown.tone}`} data-note={shown.id} title={shown.tip || shown.text}>{short(shown.text, 80)}</span>
         )}</For>
@@ -676,6 +680,8 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         </div>
         <div class="pt-detail-meta">
           <span class="pt-chip">{taskState(task).text}</span>
+          <Show when={task.archived}><span class="pt-chip">{tr("Archived")}</span></Show>
+          <span class="pt-chip">{short(task.status || "pending", 24)}</span>
           <span class="pt-chip">{tr("Phase %1", phase?.phase.n ?? task.phase)}</span>
           <span class="pt-chip">{task.assignee || tr("Unassigned")}</span>
           <Show when={task.severity === "crit"}><span class="pt-chip pt-chip-crit" data-severity="crit">{tr("Crit")}{task.origin ? ` ${tr("from #%1", task.origin)}` : ""}</span></Show>
@@ -689,6 +695,9 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           </Show>
         </div>
         <Show when={problems().get(task.id)}>{(problem) => <p class="pt-detail-note pt-problem">{problem().text}</p>}</Show>
+        <Show when={task.archived}>
+          <button class="btn small" onClick={() => props.onOpenReport?.(task.id)}>{tr("Open archived report")}</button>
+        </Show>
         <Show when={taskHeat(heatProfile(), task.id)}>
           {(found) => (
             <div class="pt-detail-section pt-detail-heat">
@@ -824,6 +833,12 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           </button>
         </Show>
       </header>
+      <Show when={props.team.archived_phases_not_shown}>
+        <p class="pt-detail-note">{tr("%1 older archived phases are not shown here", props.team.archived_phases_not_shown ?? 0)}</p>
+      </Show>
+      <Show when={props.team.tasks.some((task) => task.archived)}>
+        <p class="pt-detail-note">{tr("Showing the status window of up to 1000 archived tasks and 200 archived phase headers")}</p>
+      </Show>
       <Show when={heatView()}>
         <HeatLegend profile={props.profile} />
       </Show>
@@ -906,7 +921,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
       <Show when={mode() === "profile"}>
         <div class="pm-profile-scroll">
           <ProfilePage team={props.team} profile={props.profile} loadTimeline={props.loadTimeline}
-            statusName={runStatusLabel} onOpen={open} />
+            statusName={runStatusLabel} onOpen={open} onOpenReport={props.onOpenReport} />
           {detail()}
         </div>
       </Show>

@@ -93,7 +93,8 @@ fn write_started(folder: &Path, id: &str, name: &str, at: f64) -> Result<()> {
         &started_path(folder, id),
         &format!(
             "{}\n",
-            json!({"launch_id": id, "name": name, "started_at": at})
+            json!({"launch_id": id, "name": name, "started_at": at,
+                "unreported_diagnostic": zerus_client_core::creation::SUPERVISOR_REPORT_MISSING})
         ),
     )
 }
@@ -369,7 +370,11 @@ impl Evidence {
         ended
             .into_iter()
             .map(|(id, launch)| {
-                json!({"launch_id": id, "name": launch.name, "code": launch.code, "output": launch.output})
+                let mut result = json!({"launch_id": id, "name": launch.name, "code": launch.code, "output": launch.output});
+                if !launch.reported {
+                    result["diagnostic_code"] = json!(zerus_client_core::creation::SUPERVISOR_REPORT_MISSING);
+                }
+                result
             })
             .collect()
     }
@@ -437,7 +442,8 @@ mod tests {
             ended(&[]),
             vec![
                 json!({"launch_id": THREE, "name": "", "code": 1, "output": ""}),
-                json!({"launch_id": TWO, "name": "sh/project/two", "code": null, "output": ""}),
+                json!({"launch_id": TWO, "name": "sh/project/two", "code": null, "output": "",
+                    "diagnostic_code": zerus_client_core::creation::SUPERVISOR_REPORT_MISSING}),
                 json!({"launch_id": ONE, "name": "claude/project/one", "code": 3,
                        "output": "cannot start"}),
             ]

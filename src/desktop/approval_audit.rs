@@ -295,10 +295,12 @@ fn list(
     .map(|(name, bytes)| bounded(name, bytes))
     .collect::<Vec<_>>()
     .join(",");
-    let mut sql = db.prepare(&format!("SELECT id,at,{columns} FROM attempts{index} WHERE id{operator}?1 AND id<=?2{filter} ORDER BY id {order} LIMIT {}",wire::PAGE+1))?;
+    let categories = crate::approval_log::CATEGORIES;
+    let mut sql = db.prepare(&format!("SELECT id,at,{columns},{categories} FROM attempts{index} WHERE id{operator}?1 AND id<=?2{filter} ORDER BY id {order} LIMIT {}",wire::PAGE+1))?;
     let mut entries = sql.query_map(values.as_slice(),|r| Ok(json!({"id":r.get::<_,i64>(0)?,"at":r.get::<_,i64>(1)?,
         "host":r.get::<_,String>(2)?,"session":r.get::<_,String>(3)?,"provider":r.get::<_,String>(4)?,
-        "prompt":r.get::<_,String>(5)?,"status":r.get::<_,String>(6)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        "prompt":r.get::<_,String>(5)?,"status":r.get::<_,String>(6)?,
+        "categories":crate::approval_log::saved_categories(r.get::<_,Option<String>>(7)?)})))?.collect::<rusqlite::Result<Vec<_>>>()?;
     let more = entries.len() > wire::PAGE;
     entries.truncate(wire::PAGE);
     if reverse {
@@ -340,7 +342,8 @@ fn detail(db: &Connection, id: i64) -> Result<Value> {
         "invalid saved approval"
     );
     Ok(
-        json!({"id":id,"question":saved["question"],"answers":saved["answers"],"status":status,"detail":detail}),
+        json!({"id":id,"question":saved["question"],"answers":saved["answers"],"status":status,"detail":detail,
+            "categories":crate::approval_log::categories(&saved["categories"])}),
     )
 }
 

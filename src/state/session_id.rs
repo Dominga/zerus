@@ -106,19 +106,26 @@ pub(crate) fn select(name: &str, id: &str) {
 /// record under `name` is then refused as changed, and no reader reaches the
 /// label's first holder or another candidate's route.
 pub(crate) fn select_guarded(name: &str, id: &str, run: &str, conversation: &str) {
+    select_guarded_route(name, id, run, conversation, in_id_layout_under(name, id));
+}
+
+/// Metadata-only index routing under the state/provider transaction. The index
+/// grants nothing: the caller must verify the actual path, layout, ID, label,
+/// run and conversation. A missing ID route never becomes the label holder.
+pub(super) fn select_guarded_route(name: &str, id: &str, run: &str, conversation: &str, id_layout: bool) {
     set(Selection {
         name: name.into(),
         session_id: id.into(),
         conversation: conversation.into(),
         run: run.into(),
-        id_layout: in_id_layout_under(name, id),
+        id_layout,
         label: "The expected session".into(),
     });
 }
 
 /// Whether `id` is, right now, the session in the ID layout under `name`.
 fn in_id_layout_under(name: &str, id: &str) -> bool {
-    canonical(id) && storage::read_id(id).is_ok_and(|record| string(&record, "name") == name)
+    canonical(id) && labels::read_id_for_label(name, id).is_ok_and(|record| string(&record, "name") == name)
 }
 
 /// Records a session reference's selection for the rest of this command: its
@@ -223,12 +230,12 @@ pub(crate) fn names_of(id: &str) -> Result<Vec<String>> {
         .chain(
             dsh::binding_records()
                 .into_iter()
-                .map(|record| (record, Kind::DeepSeek)),
+                .map(|record| { let kind = provider_binding::Provider::DeepSeek.kind(&record); (record, kind) }),
         )
         .chain(
             opencode::binding_records()
                 .into_iter()
-                .map(|record| (record, Kind::OpenCode)),
+                .map(|record| { let kind = provider_binding::Provider::OpenCode.kind(&record); (record, kind) }),
         )
         .filter(|(record, _)| {
             string(record, "session_id") == id && string(record, "archive_id").is_empty()

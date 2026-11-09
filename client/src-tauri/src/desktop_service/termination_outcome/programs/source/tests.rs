@@ -1,0 +1,310 @@
+//! Fake holder/actor replies, REAL child/pipe/resource lifetime. These controls
+//! establish no Root authentication, native confirmation, signal or removal.
+use super::*;
+use crate::desktop_service::{
+    termination_outcome::tests::{capture, connected, fixture},
+    tests::eventually,
+};
+use std::{
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    process::Command,
+};
+use zerus_client_core::{
+    worktree_programs::{stop, DirectoryId},
+    Action,
+};
+
+const OWNER: &str = r#"#!/usr/bin/python3
+import json,os,pathlib,sys
+root=pathlib.Path(__file__).parent
+args=sys.argv[1:]
+assert args.pop(0)=='--desktop-helper-rendezvous-v1'
+assert sys.stdin.buffer.readline()==b'HGS-ORIGINAL-CHILD-V1\n'
+if args==['--help']:
+    print('Worktree program custody ABI: worktree-program-custody-v1',flush=True);sys.exit(0)
+assert args[:1]==['--expect-machine'] and args[2:]==['worktrees','program-holder','--json']
+first=json.loads(sys.stdin.buffer.readline())
+manifest=json.loads((root/'program-manifest').read_text())
+print(json.dumps(dict(op='ready',abi='worktree-program-custody-v1',pipeline=first['pipeline'],manifest=manifest,
+    holder=dict(pid=os.getpid(),parent=os.getppid(),birth='fixture-data',audit=None),socket='/tmp/example/pins')),flush=True)
+while True:
+    frame=json.loads(sys.stdin.buffer.readline());op=frame['op']
+    with (root/'program-controls').open('a') as out:out.write(op+'\n')
+    if op=='arm':
+        # Return the precomputed Rust binding; wire integrity is not under test.
+        binding=json.loads((root/'program-binding').read_text())
+        print(json.dumps(dict(op='armed',binding=binding)),flush=True)
+    elif op=='joined':print(json.dumps(dict(op='retired',binding=frame['binding'])),flush=True)
+    elif op=='close':
+        print(json.dumps(dict(op='closed',pipeline=first['pipeline'])),flush=True);break
+    else:raise AssertionError(op)
+"#;
+const MUTATOR: &str = r#"#!/usr/bin/python3
+import os,pathlib,time
+root=pathlib.Path(__file__).parent
+if os.fork()==0:
+    if (root/'program-close-stdio').exists():
+        os.setsid()
+        for fd in (0,1,2):
+            null=os.open('/dev/null',os.O_RDWR);os.dup2(null,fd)
+            if null>2:os.close(null)
+    (root/'program-reader-started').write_text('started')
+    until=time.monotonic()+20
+    while not (root/'program-release').exists() and time.monotonic()<until:time.sleep(.005)
+    (root/'program-reader-ended').write_text('ended')
+    os._exit(0)
+print('parsed result, not a join',flush=True)
+"#;
+struct Release(PathBuf);
+impl Drop for Release {
+    fn drop(&mut self) {
+        let _ = fs::write(self.0.join("program-release"), b"release");
+        let until = Instant::now() + Duration::from_secs(5);
+        while self.0.join("program-reader-started").exists()
+            && !self.0.join("program-reader-ended").exists()
+            && Instant::now() < until
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+fn executable(path: &Path, text: &str) {
+    fs::write(path, text).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+}
+fn manifest() -> Manifest {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut capture = capture();
+    capture.owner_id = uuid::Uuid::new_v4().to_string();
+    Manifest {
+        abi: zerus_client_core::worktree_programs::ABI.into(),
+        id: uuid::Uuid::new_v4().to_string(),
+        capture,
+        configuration: "a".repeat(64),
+        boot: uuid::Uuid::new_v4().to_string(),
+        checkout: DirectoryId {
+            device: 1,
+            inode: 2,
+            mount: "fixture-object".into(),
+        },
+        issued: now,
+        expires: now + 300,
+        programs: Vec::new(),
+    }
+}
+
+#[test]
+fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        for closed_stdio in [false, true] {
+            let f = fixture(json!({}));
+            let (service, _cache) = connected(&f).await;
+            let actions = crate::actions::Actions::new(f.0.join("marks"));
+            let key = crate::actions::Lane::key(&capture().target, &Action::Terminate);
+            let hold = Arc::new(actions.begin(key.clone(), &Action::Terminate).unwrap());
+            let context = Context::new_supported(service.clone(), hold.clone()).unwrap();
+            let mut manifest = manifest();
+            manifest.programs = [
+                (10, "agent"),
+                (20, "hgs"),
+                (30, "hgs"),
+                (40, "agent descendant"),
+            ]
+            .into_iter()
+            .map(
+                |(pid, label)| zerus_client_core::worktree_programs::Program {
+                    pid,
+                    birth: format!("native-{pid}"),
+                    label: label.into(),
+                },
+            )
+            .collect();
+            let display = zerus_client_core::worktree_programs::presentation::Presentation::new(
+                &manifest,
+                zerus_client_core::worktree_programs::presentation::Identity {
+                    pid: 10,
+                    birth: "native-10".into(),
+                },
+                zerus_client_core::worktree_programs::presentation::Identity {
+                    pid: 20,
+                    birth: "native-20".into(),
+                },
+            );
+            let pipeline = uuid::Uuid::new_v4().to_string();
+            let input = stop::Input {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                confirmation_id: uuid::Uuid::new_v4().to_string(),
+                source: stop::Source::Service {
+                    epoch: context.scope.service_epoch.clone(),
+                },
+                original: serde_json::to_string(
+                    &json!({"request_id":uuid::Uuid::new_v4().to_string(),
+                "action":"terminate","expected_run_id":manifest.capture.target.run_id,
+                "expected_conversation_id":manifest.capture.target.conversation_id}),
+                )
+                .unwrap(),
+                manifest: manifest.clone(),
+                archive_id: uuid::Uuid::new_v4().to_string(),
+                stop: stop::Kind::Normal,
+            };
+            let binding = custody::Binding::for_input(&pipeline, &input);
+            fs::write(
+                f.0.join("program-manifest"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            fs::write(f.0.join("program-binding"), binding.bytes().unwrap()).unwrap();
+            executable(&f.0.join("holder"), OWNER);
+            executable(&f.0.join("mutator"), MUTATOR);
+            let mut owner = Owner::begin(
+                &f.0.join("holder"),
+                Control::Open {
+                    presentation: false,
+                    pipeline: pipeline.clone(),
+                    discovery: Discovery {
+                        capture: manifest.capture.clone(),
+                    },
+                },
+                manifest.configuration.clone(),
+                context.environment.clone(),
+                context.clone(),
+                Arc::new(Command::spawn),
+            )
+            .unwrap();
+            let not_after = owner.deadline();
+            let Reply::Ready { holder, socket, .. } = owner.ready().unwrap() else {
+                panic!("Ready")
+            };
+            owner
+                .arm(
+                    &input,
+                    NativeChild {
+                        pid: 99999,
+                        parent: std::process::id(),
+                        birth: "fixture-data".into(),
+                        audit: None,
+                    },
+                    Instant::now() + Duration::from_secs(10),
+                )
+                .unwrap();
+            let source = Arc::new(Source {
+                presentation: Some(display),
+                context: Arc::new(Origin::Service(context)),
+                owner: Mutex::new(owner),
+                manifest,
+                pipeline,
+                holder,
+                socket,
+                not_after,
+                normal_consumed: AtomicBool::new(false),
+                closed: AtomicBool::new(false),
+            });
+            let (mut mutation, resources) = Mutation::new(source.clone(), &input);
+            if closed_stdio {
+                fs::write(f.0.join("program-close-stdio"), b"closed").unwrap();
+            }
+            let inherited = resources.descendants.clone();
+            let mut loan = Some(resources.clone());
+            let weak = Arc::downgrade(&resources);
+            let _release = Release(f.0.clone());
+            let inv = Invocation {
+                args: Vec::new(),
+                stdin: None,
+                timeout: Duration::from_secs(5),
+                request_id: None,
+            };
+            // The actual runner, not a Boolean/read receipt, owns these references.
+            let result = run::run_accounted_frozen(
+                &f.0.join("mutator"),
+                &inv,
+                source.context.environment(),
+                1024,
+                &AtomicBool::new(false),
+                resources,
+                move |command| {
+                    inherited.inherit(command)?;
+                    command.spawn()
+                },
+            )
+            .unwrap();
+            assert!(matches!(result, Exit::Code { code: 0, .. }));
+            assert!(!mutation.try_retire().unwrap());
+            assert_eq!(
+                fs::read_to_string(f.0.join("program-controls")).unwrap(),
+                "arm\n"
+            );
+            if closed_stdio {
+                eventually(
+                    "the original child and all stdio readers have actually ended",
+                    || weak.strong_count() == 1,
+                )
+                .await;
+                drop(loan.take());
+                assert!(
+                    !mutation.try_retire().unwrap(),
+                    "the detached original descendant still holds the phase despite closed stdio"
+                );
+                assert_eq!(
+                    fs::read_to_string(f.0.join("program-controls")).unwrap(),
+                    "arm\n"
+                );
+            }
+            fs::write(f.0.join("program-release"), b"release").unwrap();
+            if !closed_stdio {
+                eventually(
+                    "actual mutator readers joined, only the original loan remains",
+                    || weak.strong_count() == 1,
+                )
+                .await;
+                assert!(
+                    !mutation.try_retire().unwrap(),
+                    "a mutator-owned loan also prevents Force admission"
+                );
+            }
+            drop(loan.take());
+            {
+                let observed = std::cell::RefCell::new(&mut mutation);
+                eventually(
+                    "the independent original descendant custody has physically settled",
+                    || observed.borrow_mut().try_retire().unwrap(),
+                )
+                .await;
+            }
+            assert!(
+                mutation.try_retire().unwrap(),
+                "retirement is idempotent, never a new phase"
+            );
+            assert_eq!(
+                fs::read_to_string(f.0.join("program-controls")).unwrap(),
+                "arm\njoined\n"
+            );
+            assert!(
+                actions.begin(key.clone(), &Action::Terminate).is_none(),
+                "the identified read-only source remains charged"
+            );
+            source.close().unwrap();
+            assert!(
+                !source.current(),
+                "closed original custody cannot become current again"
+            );
+            super::super::pipeline::assert_presentation_views(
+                source.clone(),
+                hold,
+                input,
+                mutation,
+            );
+            drop(source);
+            assert!(actions.begin(key, &Action::Terminate).is_some());
+            service.join().await.unwrap();
+        }
+    });
+}

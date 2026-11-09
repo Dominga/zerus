@@ -29,12 +29,33 @@ fixture = importlib.util.module_from_spec(_fixture_spec)
 _fixture_spec.loader.exec_module(fixture)
 
 
+def host_process(pid, end=None):
+    """Read a birth identity and state; unreadable is not an exited host."""
+    if sys.platform == 'linux':
+        try:
+            state, _, _, birth = fixture.process_stat(pid, end)
+        except (FileNotFoundError, ProcessLookupError):
+            return None
+        return state, birth
+    fixture.before(end)
+    timeout = 3 if end is None else min(3, end-time.monotonic())
+    result = subprocess.run(['ps', '-p', str(pid), '-o', 'stat=', '-o', 'lstart='],
+                            env={**os.environ, 'LC_ALL': 'C', 'TZ': 'UTC'},
+                            capture_output=True, text=True, timeout=timeout)
+    if result.returncode == 1 and not result.stdout.strip() and not result.stderr.strip():
+        return None
+    if result.returncode != 0:
+        raise RuntimeError('Cannot read the isolated host process: ' + result.stderr)
+    state, birth = result.stdout.strip().split(None, 1)
+    return state[0], birth
+
+
 @unittest.skipUnless(fixture.required() or DSH and HGS.exists(), 'official dsh and built hgs required')
 class NativeHarness(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         fixture.admit_fixture(DSH, HGS)
-        cls.temp = tempfile.TemporaryDirectory(prefix='hgs-dsh-', dir='/tmp')
+        cls.temp = tempfile.TemporaryDirectory(prefix='hgs-dsh-', dir=os.environ.get('ZERUS_TEST_SHORT_TMPDIR', '/tmp'))
         cls.root = Path(cls.temp.name)
         cls.home = cls.root / 'native'
         cls.state = cls.root / 's'
@@ -118,7 +139,7 @@ class NativeHarness(unittest.TestCase):
         sid = 'session-' + str(uuid.uuid4())
         name = 'dsh/test/' + str(uuid.uuid4())[:8]
         self.rpc('create', {'sessionId': sid, 'cwd': str(self.workspace), 'title': name, **native})
-        binding = {'backend': 'dsh', 'name': name, 'conversation_id': sid, 'run_id': str(uuid.uuid4()),
+        binding = {'backend': 'dsh', 'name': name, 'session_id': str(uuid.uuid4()), 'conversation_id': sid, 'run_id': str(uuid.uuid4()),
                    'agent_home': str(self.home), 'cwd': str(self.workspace), 'created': time.time()}
         directory = self.state / 'dsh/bindings'; directory.mkdir(exist_ok=True)
         (directory / (hashlib.sha256(name.encode()).hexdigest() + '.json')).write_text(json.dumps(binding))
@@ -734,7 +755,7 @@ class NativeHarness(unittest.TestCase):
                 'content': [{'type': 'text', 'text': 'wrong parent'}]})
 
     def test_real_cli_startup_and_native_browser_authentication(self):
-        with tempfile.TemporaryDirectory(prefix='hgs-dsh-launch-', dir='/tmp') as directory:
+        with tempfile.TemporaryDirectory(prefix='hgs-dsh-launch-', dir=os.environ.get('ZERUS_TEST_SHORT_TMPDIR', '/tmp')) as directory:
             root=Path(directory); home=root/'user';home.mkdir();workspace=root/'project';workspace.mkdir()
             env={**self.env,'HOME':str(home),'DSH_HOME':str(root/'native'),'HGS_STATE_DIR':str(root/'state'),'HGS_CONFIG_DIR':str(root/'config')}
             # Match a desktop service, which does not source the user's shell rc.
@@ -785,14 +806,24 @@ class NativeHarness(unittest.TestCase):
                 # A cold restart reuses the native profile rather than trying
                 # to create it a second time with --from-default-profile.
                 pidfile=next((root/'state/dsh/hosts').glob('*/host.pid'))
-                os.kill(int(pidfile.read_text()),signal.SIGTERM)
+                pid=int(pidfile.read_text())
+                original=host_process(pid)
+                self.assertIsNotNone(original)
+                self.assertNotIn(original[0], ('Z', 'X'))
+                os.kill(pid,signal.SIGTERM)
                 sock=pidfile.parent/'host.sock'
-                for _ in range(100):
+                deadline=time.monotonic()+5
+                while time.monotonic()<deadline:
                     try:
                         with socket.socket(socket.AF_UNIX) as probe: probe.connect(str(sock))
-                    except OSError: break
+                    except OSError:
+                        # Socket teardown can precede exit. A reused PID is an
+                        # exited original, never a reason to signal that PID.
+                        current=host_process(pid, deadline)
+                        if current is None or current[1]!=original[1] or current[0] in ('Z', 'X'):
+                            break
                     time.sleep(.05)
-                else: self.fail('Isolated native host did not stop')
+                else: self.fail('Isolated native host did not exit')
                 run('resume','dsh/project/startup')
                 restarted=json.loads(run('inspect','dsh/project/startup'))
                 self.assertEqual(restarted['conversation_id'],inspection['conversation_id'])
@@ -918,6 +949,33 @@ class NativeHarness(unittest.TestCase):
             'request_id': str(uuid.uuid4()), 'name': record['name'], 'expected_run_id': record['run_id'],
             'expected_conversation_id': record['conversation_id'], 'expected_machine_id': node})['current_project_id']
 
+    def test_native_id_twins_fork_their_own_original_conversations(self):
+        first, second = self.create(), self.create()
+        shared = first['name']
+        for record in (first, second):
+            (self.state / 'dsh/bindings' / (hashlib.sha256(record['name'].encode()).hexdigest() + '.json')).unlink()
+            record.update(name=shared, layout='id', journal_name=record['session_id'])
+            folder = self.state / 'dsh/sessions'
+            folder.mkdir(exist_ok=True)
+            (folder / (record['session_id'] + '.json')).write_text(json.dumps(record))
+        children = []
+        for index, record in enumerate((first, second)):
+            sent = self.hgs('send', shared, '--session-id', record['session_id'], '--json',
+                            request=self.payload(record, text='FORK_SOURCE_MARKER', attachments=[]))
+            self.assertEqual(sent.returncode, 0, sent.stderr)
+            self.wait(lambda: self.rpc('inspect', {'sessionId': record['conversation_id']}).get('forkReady'))
+            tag = 'id-fork-' + uuid.uuid4().hex[:8]
+            forked = self.hgs('fork', shared, '--session-id', record['session_id'], '-n', tag, '-d')
+            self.assertEqual(forked.returncode, 0, forked.stderr)
+            name = shared.rsplit('/', 1)[0] + '/' + tag
+            child = self.bindings()[name]
+            self.assertEqual(child['fork_parent_id'], record['conversation_id'])
+            self.assertNotEqual(child['conversation_id'], record['conversation_id'])
+            children.append(child['conversation_id'])
+            original = json.loads((self.state / 'dsh/sessions' / (record['session_id'] + '.json')).read_text())
+            self.assertEqual(original, record)
+        self.assertNotEqual(children[0], children[1])
+
     def test_native_fork_binds_the_exact_new_session_and_keeps_the_source(self):
         source = self.create()
         tag = 'fork-' + uuid.uuid4().hex[:8]
@@ -955,10 +1013,9 @@ class NativeHarness(unittest.TestCase):
         for key in ('agent_home', 'cwd'):
             self.assertEqual(fork[key], source[key])
         self.assertEqual((fork['fork_parent_id'], fork['fork_source_name']), (source['conversation_id'], source['name']))
-        # zerus-ucck P1: the fork is a new session with its own durable ID; the
-        # source, written as an older hgs did, gains one only when next written.
+        # Both bindings carry durable IDs; the fork never borrows the source's.
         self.assertEqual(str(uuid.UUID(fork['session_id'])), fork['session_id'])
-        self.assertNotIn('session_id', source)
+        self.assertNotEqual(fork['session_id'], source['session_id'])
         self.assertEqual(self.cli('inspect', fork).get('session_id'), fork['session_id'])
         self.assertEqual(self.project_of(fork, node), 'work')
         self.assertFalse(list((self.state / 'dsh/forks').glob('*.json')))

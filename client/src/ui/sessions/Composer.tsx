@@ -1,4 +1,6 @@
-import { Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
+import { replaceText } from "../lib/text-edit";
+import { TextArea } from "../lib/TextField";
+import { Show, Suspense, createEffect, createMemo, createSignal, lazy, on, onCleanup, onMount } from "solid-js";
 import { createVoice, voicePort } from "../../store/voice";
 import { VoiceToolbar, VoicePreview } from "./VoiceControls";
 import { pageHidden } from "../../store/visibility";
@@ -10,25 +12,31 @@ import { suggestions, suggestedInput } from "../../store/suggestions";
 import { contentScale, selected } from "../../store/ui";
 import { computerFresh, computerOffline } from "../../store/catalog";
 import { copyReference, detailsFor, followedFor } from "../../store/actions";
-import { onCommand } from "../../store/shortcuts";
+import { onCommand, platform } from "../../store/shortcuts";
+import { clipboardFiles } from "../../bridge";
+import { pasteNative, pasteRoute, samePaste, type PasteBinding } from "./paste-files";
 import { openInspectorCard } from "../../store/inspector";
 import { ironRuleCounts, ironRulesChip } from "../../store/ironRuleCounts";
 import { groupOf, INBOX } from "../../store/organization";
-import { FileReferenceDialog, type ReferenceTarget } from "./FileReferenceDialog";
-import { insertReference } from "./file-reference";
 import { actionEntries } from "./ActionDialogs";
 import { snapshotOf } from "./actions-ui";
 import { markReadChip, runMarkRead } from "./mark-entries";
 import { ModelSettingsButton } from "./ModelSettings";
 import { AccountSwitchChip } from "./AccountSwitchChip";
+import { DeliveryHistoryHint } from "./DeliveryHistoryHint";
 import { AttachmentsChip } from "./Attachments";
 import { RecoveryChip } from "./RecoveryChip";
 import { SessionUsageChip, UsageLimitChip } from "./UsageChips";
 import { allowRetryShown, moveFocusOff } from "./composer-ui";
-import { focusTranscript, following, jumpToLatest, unseen } from "./Activity";
+import { focusTranscript, following, jumpToLatest, shownSearchPreview, unseen } from "./Activity";
+import { jumpButton } from "./search-hit";
 import type { ChipTone } from "../../types";
 import { tr } from "../../i18n";
+import { CacheChip } from "./CacheChip";
 import { trText } from "../../text";
+import { machineCards } from "../../store/machines";
+import type { ReferenceTarget } from "./FileReferenceDialog";
+import { sameDraft, styleOfPlatform, withReference, type DraftBinding } from "./file-reference";
 
 // The message composer (Qt MessageComposer, 300-366), after the mockup's
 // structure: an edge grip, the 34 px toolbar, the editor (76-720 px) and the
@@ -44,6 +52,8 @@ import { trText } from "../../text";
 const EDITOR = { initial: 76, min: 76, max: 720 };
 const HEIGHT_KEY = "zerus-client-editor-height";
 const savedHeight = (() => { try { return Number(localStorage.getItem(HEIGHT_KEY)) || 0; } catch { return 0; } })();
+// Reference an existing file loads with its first use (zerus-5wmh.13.5).
+const FileReferenceDialog = lazy(() => import("./FileReferenceDialog").then((m) => ({ default: m.FileReferenceDialog })));
 const [editorHeight, setEditorHeightRaw] = createSignal(savedHeight >= EDITOR.min ? Math.min(EDITOR.max, savedHeight) : EDITOR.initial);
 const setEditorHeight = (h: number) => {
   const v = Math.round(Math.max(EDITOR.min, Math.min(EDITOR.max, h)));
@@ -60,12 +70,9 @@ const resetEditorHeight = () => {
 const COMPACT_WIDTH = 600;
 
 const USUAL_STOP = () => tr("Interrupt the current turn, like Escape in Terminal. The session stays open; queued messages follow the agent's native behavior.");
-const USUAL_CACHE_CLEAR = () => tr("Clear this agent’s conversation, like /clear in Terminal. Your unsent message stays here.");
 const CANCEL_SEND = () => tr("Cancel the pending send and unlock the message for editing. Compaction or startup continues; use Stop to interrupt the agent.");
 const CANCEL_LOCKED = () => tr("The desktop service is finishing this send; it can't be cancelled here.");
 const ATTACH = () => tr("Attach files, paste an image, or drop files onto this session");
-
-const toneClass = (tone: ChipTone) => (tone === "danger" ? "danger" : tone === "warning" ? "warn" : tone === "success" ? "ok" : "");
 
 /**
  * ComposerResizeHandle: the free space between the leading and trailing chips
@@ -112,60 +119,35 @@ function ResizeHandle(props: { edge?: boolean; hidden?: boolean }) {
   );
 }
 
-/** The cache chip and its popover (SessionsWindow.cpp 987-1002, 3789-3795; CacheStatus::Chip). */
-function CacheChip(props: { compact: boolean }) {
-  const v = () => composer.view()!;
-  const [open, setOpen] = createSignal(false);
-  const [pos, setPos] = createSignal({ left: 0, bottom: 0 });
-  let chip!: HTMLButtonElement;
-  let pop: HTMLDivElement | undefined;
-  const close = (returnFocus = false) => { setOpen(false); if (returnFocus) chip.focus(); };
-  const outside = (e: PointerEvent) => { if (open() && !pop?.contains(e.target as Node) && !chip.contains(e.target as Node)) close(); };
-  onMount(() => addEventListener("pointerdown", outside, true));
-  onCleanup(() => removeEventListener("pointerdown", outside, true));
-  // The chip goes (a session without a cache): so does its popover.
-  createEffect(() => { if (!v().cache.visible) setOpen(false); });
-  const detail = () => (v().cache_warning ? `${v().cache_warning}\n` : "") + v().cache_details;
-  return (
-    <Show when={v().cache.visible}>
-      <span class="att-anchor">
-        <button ref={chip} type="button" class={`tchip ${toneClass(v().cache.tone)}`} classList={{ on: open() }} aria-haspopup="dialog" aria-expanded={open()}
-          aria-label={v().cache.label} title={detail()}
-          onClick={(e) => {
-            const r = chip.getBoundingClientRect();
-            setPos({ left: Math.max(8, Math.min(r.left, innerWidth - 368)), bottom: innerHeight - r.top + 6 });
-            setOpen(!open());
-            if (open()) queueMicrotask(() => (e.detail === 0 ? pop?.querySelector<HTMLElement>("button:not(:disabled)") ?? pop : pop)?.focus({ preventScroll: true }));
-          }}>
-          <Icon name={v().cache.tone === "success" ? "timer" : "context-warning"} size={13} />
-          {props.compact ? v().cache.short_label : v().cache.label}
-        </button>
-        <Show when={open()}>
-          <div class="att-pop cache-pop" ref={pop} tabindex="-1" role="dialog" aria-label={tr("Prompt cache")} data-shortcut-context="none"
-            style={{ left: `${pos().left}px`, bottom: `${pos().bottom}px` }}
-            onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(true); } }}>
-            <Show when={v().cache_warning}><p class="cache-warning">{v().cache_warning}</p></Show>
-            <p class="cache-detail">{v().cache_details}</p>
-            <div class="cache-actions">
-              {/* Shown with a warning only (3793); enabled by the cache rule, not Clear session's (3794). */}
-              <Show when={v().cache_warning}>
-                <button type="button" class="btn small" disabled={!v().clear.cache_enabled} title={v().clear.cache_reason || USUAL_CACHE_CLEAR()}
-                  onClick={() => { close(); composer.openClear(); }}>{tr("Clear context")}</button>
-              </Show>
-            </div>
-          </div>
-        </Show>
-      </span>
-    </Show>
-  );
-}
-
 export function Composer() {
   const s = () => selected()!;
   const v = () => composer.view();
   const voice = createVoice(voicePort);
   onCleanup(() => { void voice.close(); });
   const child = () => !!v()?.subagent;
+  // Reference an existing file (zerus-5wmh.13.5): bound to the draft it opened on, for the main composer only.
+  const [reference, setReference] = createSignal<DraftBinding & { target: ReferenceTarget }>();
+  const openReference = () => {
+    const view = v(), session = s();
+    if (!view || child() || composer.locked()) return;
+    const card = machineCards[session.computer];
+    setReference({ handle: view.handle, key: view.key, epoch: view.text_epoch, target: {
+      local: session.computer === "", machine: session.machine, host: session.computer, style: styleOfPlatform(card?.platform) } });
+  };
+  /**
+   * The sentence goes in as an ordinary edit, only into the draft the dialog
+   * opened on: the same composer and text, and no send, attach or remove
+   * under way. Otherwise nothing is inserted, as Qt's current() check.
+   */
+  const insertReference = (bound: DraftBinding, sentence: string): string | undefined => {
+    if (!sameDraft(composer.view(), bound, composer.locked())) return undefined;
+    const selection = composer.selection();
+    const placed = withReference(composer.text(), selection.start, selection.end, sentence);
+    if (!placed) return tr("Message exceeds 64 KiB.");
+    composer.input(placed.text, placed.cursor, placed.cursor);
+    requestAnimationFrame(() => { if (!editor.isConnected) return; editor.focus(); editor.setSelectionRange(placed.cursor, placed.cursor); });
+    return undefined;
+  };
   const online = () => !computerOffline(s().computer);
   const details = createMemo(() => detailsFor(s(), online(), followedFor(s().key)));
   createEffect(() => {
@@ -200,25 +182,6 @@ export function Composer() {
   }));
   // Qt parity (I5c): Copy session reference, while online with a run.
   const referable = () => !child() && online() && !!(details()?.run_id || s().runId);
-  // Qt parity (I5a): Reference file, for the main composer only.
-  const [referencing, setReferencing] = createSignal<ReferenceTarget>();
-  const referenceMachine = () => s().computer === "" ? tr("this computer") : s().machine || s().computer;
-  const openReference = () => {
-    const view = v();
-    if (!view || child() || composer.locked()) return;
-    setReferencing({ handle: view.handle, local: s().computer === "", machine: referenceMachine(), host: s().computer });
-  };
-  /** Puts the reference where the cursor or selection is; "" when done, else why not. */
-  const referenced = (path: string) => {
-    const target = referencing(), view = v();
-    if (!target || !view || view.handle !== target.handle || composer.locked()) return "";
-    const selection = composer.selection();
-    const result = insertReference(composer.text(), selection.start, selection.end, path);
-    if ("error" in result) return result.error;
-    composer.input(result.text, result.caret, result.caret);
-    queueMicrotask(() => { editor.focus(); try { editor.setSelectionRange(result.caret, result.caret); } catch { /* not rendered */ } });
-    return "";
-  };
   const [compact, setCompact] = createSignal(false);
   let root!: HTMLDivElement;
   let editor!: HTMLTextAreaElement;
@@ -232,7 +195,6 @@ export function Composer() {
   const handedBack = createMemo(() => `${v()?.handle ?? ""}:${v()?.text_epoch ?? ""}`);
   createEffect(on(handedBack, () => {
     const sel = composer.selection();
-    if (editor.value !== composer.text()) editor.value = composer.text();
     const start = Math.min(sel.start, sel.end), end = Math.max(sel.start, sel.end);
     try { editor.setSelectionRange(start, end, sel.start <= sel.end ? "forward" : "backward"); } catch { /* not rendered */ }
   }));
@@ -241,18 +203,18 @@ export function Composer() {
     if (child()) return false;
     const stop = act().stop;
     if (!stop.shown || stop.disabled) return false;
-    void composer.interrupted().then(() => stop.action());
+    // A refused interrupt keeps its turn's prompt with the turn (Qt 1204), bound to this Stop.
+    void composer.interrupted().then((stopped) => stop.interrupt().then((out) => { if (out && out.outcome !== "done") void composer.interruptFailed(stopped); }));
     return true;
   };
   const onKey = (e: KeyboardEvent) => {
     if (e.isComposing || e.keyCode === 229) return;
     if (e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
       const next = suggestedInput(composer.text(), suggestion() ?? "", composer.locked());
-      if (next) {
+      if (next && replaceText(editor, next)) {
         e.preventDefault();
-        editor.value = next;
         editor.setSelectionRange(next.length, next.length);
-        composer.input(next, next.length, next.length);
+        composer.select(next.length, next.length);
       }
       return;
     }
@@ -260,13 +222,30 @@ export function Composer() {
     // Like Escape in Terminal: stop a working turn, otherwise leave the field (ComposeEdit::keyPressEvent).
     if (e.key === "Escape") { e.preventDefault(); if (!stopTurn()) editor.blur(); }
   };
+  /**
+   * Qt's insertFromMimeData (MessageComposer.cpp 186-196): copied local files
+   * are attached, otherwise an image is pasted, otherwise the text. A paste
+   * without files stays the webview's own. Files without their paths ask the
+   * native clipboard (bounded, off the UI thread); its answer applies only to
+   * the draft the paste was made in.
+   */
   const onPaste = (e: ClipboardEvent) => {
-    const items = [...(e.clipboardData?.items ?? [])];
-    const file = items.find((i) => i.kind === "file" && i.type.startsWith("image/"))?.getAsFile()
-      ?? [...(e.clipboardData?.files ?? [])].find((f) => f.type.startsWith("image/"));
-    if (!file) return;
+    if (!e.clipboardData) return;
+    const route = pasteRoute(e.clipboardData, platform === "windows");
+    if (route.kind === "text") return;
     e.preventDefault();
-    void composer.pasteImage(file);
+    if (route.kind === "paths") { void composer.attachPasted(route.paths); return; }
+    const view = v();
+    if (!view) return;
+    const at = composer.selection();
+    const bound: PasteBinding = { handle: view.handle, key: view.key, epoch: view.text_epoch, text: composer.text(), start: at.start, end: at.end };
+    void pasteNative(route, {
+      native: clipboardFiles,
+      current: () => samePaste(composer.view(), bound, composer.locked(), composer.text(), composer.selection()),
+      attach: (paths) => { void composer.attachPasted(paths); },
+      image: (file) => { void composer.pasteImage(file); },
+      text: (text) => { if (document.activeElement === editor) document.execCommand("insertText", false, text); },
+    });
   };
 
   onMount(() => {
@@ -280,7 +259,7 @@ export function Composer() {
     addEventListener("keydown", stopVoice, true); addEventListener("blur", blurVoice);
     onCleanup(() => { removeEventListener("keydown", stopVoice, true); removeEventListener("blur", blurVoice); });
     // Composer chords go through the window router (store/shortcuts.ts) while the focus is in the field.
-    const stops = [onCommand("message.send", () => { void composer.send(); }, editor)];
+    const stops = [onCommand("message.send", () => { void composer.send(); }, () => editor)];
     const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(() => setCompact(root.clientWidth < COMPACT_WIDTH * contentScale()));
     observer?.observe(root);
     onCleanup(() => { for (const stop of stops) stop(); observer?.disconnect(); void composer.flush(); });
@@ -288,7 +267,7 @@ export function Composer() {
   createEffect(() => {
     if (!composer.pushEnabled()) return;
     // Remove the action when disabled, so Cut keeps its keys (Qt 841-853).
-    const stop = onCommand("message.push", () => { void composer.push(); }, editor);
+    const stop = onCommand("message.push", () => { void composer.push(); }, () => editor);
     onCleanup(stop);
   });
 
@@ -297,7 +276,9 @@ export function Composer() {
     const text = status().text, session = v()?.session_status ?? "";
     return session && session !== text ? `${text}\n${session}` : text;
   };
-  const jumpCaption = () => (unseen() > 0 ? tr("Jump to latest activity (%1 new)", unseen()) : tr("Jump to latest activity"));
+  // While a search hit shows, the button stays and goes back to the latest activity (ActivityView.cpp:1631-1636).
+  const jump = () => jumpButton({ following: following(), unseen: unseen(), searchShown: !!shownSearchPreview() });
+  const jumpCaption = () => jump().caption;
   const editorTip = () => v()?.waiting ?? (v()?.session_blocks_input ? v()!.session_status : undefined);
   // A required question card stands in for the editor, its grip and the action row; the toolbar stays (setInputVisible, 1126-1131).
   // They stay mounted and only hide, as Qt's setVisible: the editor's command, observer and flush need it.
@@ -318,7 +299,7 @@ export function Composer() {
             <Icon name="check-check" size={13} /><Show when={!compact()}>{tr("Mark as read")}</Show>
           </button>
         </Show>
-        <Show when={!following()}>
+        <Show when={jump().visible}>
           <button type="button" class="tchip icon" title={jumpCaption()} aria-label={jumpCaption()}
             onClick={(e) => { if (document.activeElement === e.currentTarget) moveFocusOff(focusTranscript, editor); jumpToLatest(); }}><Icon name="chevrons-down" size={14} /></button>
         </Show>
@@ -344,27 +325,30 @@ export function Composer() {
         </Show>
       </div>
       <VoicePreview voice={voice} />
-      <textarea ref={editor} class="cmp-editor" hidden={!input()} style={{ height: `${editorHeight() * contentScale()}px` }} aria-label={tr("Message to selected agent")}
+      <TextArea ref={editor} historyKey={handedBack()} class="cmp-editor" hidden={!input()} style={{ height: `${editorHeight() * contentScale()}px` }} aria-label={tr("Message to selected agent")}
         placeholder={suggestion() || tr("Message this agent…")} readOnly={composer.locked()} disabled={!v()} value={composer.text()} title={editorTip()}
         onInput={(e) => { const c = caret(); composer.input(e.currentTarget.value, c.anchor, c.position); }}
         onSelect={remember} onKeyUp={remember} onMouseUp={remember}
         onBlur={() => { void composer.flush(); }} onKeyDown={onKey} onPaste={onPaste} />
       <Show when={input() && composer.hint()}><div class="cmp-hint" role="status">{composer.hint()}</div></Show>
+      <DeliveryHistoryHint view={v()} text={composer.text()} shown={input()} />
       <div class="cmp-actions" hidden={!input()}>
         <span class="cmp-files">
           <button type="button" class="icon-btn cmp-attach" disabled={!v() || composer.locked() || !v()!.attachments_available} aria-label={tr("Attach files to message")}
             title={v()?.attachments_available === false ? v()!.attachments_reason : ATTACH()}
             onClick={() => { void composer.attachFiles(); }}><Icon name="paperclip" size={17} /></button>
           <Show when={!child()}>
-            <button type="button" class="icon-btn cmp-attach" disabled={!v() || composer.locked()} aria-label={tr("Reference an existing file")}
-              title={s().computer === "" ? tr("Reference an existing file on this computer without uploading it") : tr("Reference an existing file on %1 without uploading it", referenceMachine())}
-              onClick={openReference}><Icon name="file-text" size={16} /></button>
+            <button type="button" class="icon-btn cmp-attach cmp-reference" disabled={!v() || composer.locked()} aria-label={tr("Reference an existing file")}
+              title={tr("Reference an existing file")} onClick={openReference}><Icon name="file-text" size={16} /></button>
           </Show>
           <Show when={rulesChip()}>
             <button type="button" class="tchip cmp-rules" aria-label={rulesChip()} title={tr("Iron rules apply at session start and each team task; adapters without startup delivery also receive them with messages")}
               onClick={() => openInspectorCard({ id: "details-rules" }, { id: "sec-rules", folded: true })}><Icon name="shield-check" size={12} />{rulesChip()}</button>
           </Show>
         </span>
+        <Show when={reference()} keyed>{(bound) => (
+          <Suspense><FileReferenceDialog target={bound.target} insert={(sentence) => insertReference(bound, sentence)} close={() => setReference(undefined)} /></Suspense>
+        )}</Show>
         <Show when={status().text}>
           <span class="cmp-status ell" classList={{ error: status().error, waiting: !status().error && !!v()?.waiting }} title={statusDetail()} aria-label={status().text}>{status().text}</span>
         </Show>
@@ -386,7 +370,6 @@ export function Composer() {
         <button type="button" class="btn primary" aria-label={tr("Send")} disabled={!composer.sendEnabled()} title={v()?.waiting ?? undefined}
           onClick={() => { void composer.send(); }}>{v() ? trText(v()!.send_label) : tr("Send")}<Icon name="arrow-up" size={13} /></button>
       </div>
-      <Show when={referencing()}>{(target) => <FileReferenceDialog target={target()} insert={referenced} onClose={() => setReferencing(undefined)} />}</Show>
     </div>
   );
 }

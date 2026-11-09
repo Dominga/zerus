@@ -10,14 +10,14 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|spawn|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|brief|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|phase-mode|lead-changes|revert-lead-change|seen-lead-changes|seen|keep|integrate-build|full-tests|test|run|templates|safe-action|reports-to|sub-lead|deferred|answer-deferred|defer-session|disk|test-config --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|spawn|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|archive-phases|status|inbox|brief|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|phase-mode|lead-changes|revert-lead-change|seen-lead-changes|seen|keep|integrate-build|full-tests|test|run|templates|safe-action|reports-to|sub-lead|deferred|answer-deferred|defer-session|disk|test-config --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "move-task", "add-to-phase", "spawn", "approve-phase", "discard-phase", "return-to-draft", "reject-phase", "undo-reject-phase",
     // U63 (owner, 2026-10-31): a phase's pause and the owner's acceptance.
     "pause-phase", "unpause-phase", "phase-acceptance", "accept-phase", "send-back-phase",
     "rework-phase", "reports-to", "sub-lead", "finish", "approve", "commit", "discard", "pause", "resume", "stop",
-    "archive", "report", "ask", "reply", "hold", "release", "accept", "reject", "skip-stage", "send-back", "reassign", "take-over", "cancel",
+    "archive", "archive-phases", "report", "ask", "reply", "hold", "release", "accept", "reject", "skip-stage", "send-back", "reassign", "take-over", "cancel",
     "retry", "check", "expect", "swap-member", "use-last-reply", "relaunch", "add-member", "scale", "drain", "pause-member", "resume-member", "remove-member", "settings", "finding",
     "draft", "propose", "close-phase", "integrate-build", "start-ahead", "full-tests",
     // Task #58: the owner switches one phase between free and standard planning.
@@ -31,6 +31,12 @@ const MUTATIONS: &[&str] = &[
     // Task 162: the owner reverts the lead's plan change or marks the digest seen.
     "revert-lead-change", "seen-lead-changes", "seen", "keep",
 ];
+
+/// Task #346: whether an operation changes a team, so a scratch lead's call for
+/// its own scratch team can be named in scope.
+pub(crate) fn is_mutation(op: &str) -> bool {
+    MUTATIONS.contains(&op)
+}
 
 /// Task 162: the operations the lead once did on the owner's typed word and
 /// that have a card now: the typed word is no longer taken for them.
@@ -760,6 +766,11 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
         let ready: BTreeSet<u32> = plan::ready(team).into_iter().collect();
         let now = super::super::now();
         for (task, value) in team.tasks.iter().zip(tasks) {
+            if let Some(archived) = &task.archived {
+                *value = super::model::task_stub(task);
+                value["timing"] = archived.timing.clone();
+                continue;
+            }
             // U37: the task's working time and its waits, one number for every
             // client.
             value["timing"] = super::timing::timing(team, task, now);
@@ -1169,7 +1180,13 @@ pub(crate) fn summary_for_test(team: &Team) -> Value {
 }
 
 fn summary(team: &Team, include_cancelled: bool) -> Value {
-    let count = |status: TaskStatus| team.tasks.iter().filter(|task| task.status == status).count();
+    let count = |status: TaskStatus| {
+        let live = team.tasks.iter().filter(|task| task.archived.is_none() && task.status == status).count();
+        live + match status {
+            TaskStatus::Accepted => team.archive_totals.accepted, TaskStatus::Rejected => team.archive_totals.rejected,
+            TaskStatus::Cancelled => team.archive_totals.cancelled, _ => 0,
+        }
+    };
     // U58: the dashboard hides cancelled tasks and the phases whose tasks are
     // all cancelled, unless it asks for them.
     let cancelled: BTreeSet<u32> = team
@@ -1221,7 +1238,7 @@ fn summary(team: &Team, include_cancelled: bool) -> Value {
         .filter(|p| include_cancelled || !cancelled.contains(&p.n))
         .map(|p| json!({"n":p.n,"order":p.order,"title":p.title,"barrier":p.barrier,
             "state":if cancelled.contains(&p.n) { json!("cancelled") } else { json!(p.state) },"tasks":p.tasks,
-            "note":p.note,"rejection":p.rejection,
+            "note":p.note,"rejection":p.rejection,"archived":p.archived,
             // U63: the phase's pause and who accepts it.
             "pause":p.pause,"acceptance":p.acceptance,
             // Task #58: the mode the phase plans in.
@@ -2039,7 +2056,10 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
         Ok(Value::Null)
     })?;
     let member = team.proposals[at]["member"].clone();
-    let change = team.proposals[at]["change"].clone();
+    let mut change = team.proposals[at]["change"].clone();
+    if kind == "approve-phase" {
+        change["input"]["approve_anyway"] = json!(input["approve_anyway"].as_bool() == Some(true));
+    }
     let goal = team.proposals[at]["goal"].as_str().unwrap_or_default().to_owned();
     // N3: the change runs under one request id stored with the proposal, so an
     // interrupted or retried decision replays it instead of applying it twice.
@@ -2606,6 +2626,17 @@ fn scratch_creator() -> anyhow::Result<Option<(Team, Member)>> {
 }
 
 fn create(input: &Value) -> anyhow::Result<Value> {
+    create_inner(input, None)
+}
+
+/// Task #346: the team worker applies a sandboxed member's scratch-team create
+/// with the member and its team already proven, so no caller identity is read
+/// here; the profile and the owner's standing rule are checked again.
+pub(crate) fn create_for_member(parent: &Team, member: &Member, input: &Value) -> anyhow::Result<Value> {
+    create_inner(input, Some((parent.clone(), member.clone())))
+}
+
+fn create_inner(input: &Value, scratch: Option<(Team, Member)>) -> anyhow::Result<Value> {
     let request = text(input, "request_id");
     ensure!(canonical_uuid(request), "A canonical request_id is required");
     // A replay returns the first receipt; a parent link is repaired first
@@ -2623,7 +2654,14 @@ fn create(input: &Value) -> anyhow::Result<Value> {
     // its session, inside the team's scratch root; every other create keeps
     // the sub-team or the lead/owner path below. A sub-team create (a parent
     // object) is never a scratch team.
-    let scratch = if input["parent"].is_object() { None } else { scratch_creator()? };
+    let scratch = if input["parent"].is_object() {
+        None
+    } else {
+        match scratch {
+            Some(found) => Some(found),
+            None => scratch_creator()?,
+        }
+    };
     let parent_link = if scratch.is_none() { parent_create(input, &mut filled)? } else { None };
     if let Some((parent, member)) = &scratch {
         filled = super::scratch::prepare(parent, member, input)?;
@@ -2783,6 +2821,32 @@ fn create(input: &Value) -> anyhow::Result<Value> {
         }
     }
     Ok(receipt)
+}
+
+/// Task #346 (owner, 2026-11-08): the worker applies the queued team call of a
+/// sandboxed member: the create of its scratch team, or an operation for the
+/// scratch team it leads. The member, its profile and the owner's standing rule
+/// are checked again on the current records, so a revoked right or rule refuses
+/// the queued call instead of applying it.
+pub(crate) fn apply_team_outbox(store: &mut Store, parent: &Team, member: &Member, request: &Value) -> anyhow::Result<Value> {
+    let op = request["command"].as_str().unwrap_or_default();
+    let input = &request["input"];
+    anyhow::ensure!(!op.is_empty() && (is_mutation(op) || op == "create"), "Unknown queued team call {op}");
+    if op == "create" {
+        super::sandbox_scope::scratch_create(parent, member, input)
+            .context("The queued scratch-team create is outside the member's own scope")?;
+        return create_for_member(parent, member, input);
+    }
+    let target = request["target"].as_str().unwrap_or_default();
+    let child = store.load(target)?.context("Unknown team")?;
+    super::sandbox_scope::scratch_child(parent, member, &child, op)
+        .context("The queued team call is outside the member's own scratch scope")?;
+    let request_id = request["request_id"].as_str().unwrap_or_default();
+    let actor = Actor::Member(member.id.clone());
+    let value = store.mutate(Some((request_id, input)), &child.id, None, |team, events| {
+        ops::apply(team, op, input, &actor, &BTreeSet::new(), events)
+    })?;
+    Ok(value)
 }
 
 /// The lead (or you) answers a member's question or permission request in the
@@ -3390,7 +3454,7 @@ fn test_command(input: &Value) -> anyhow::Result<Value> {
             if reused.is_none() && action == "force" {
                 let queued = database.queued(&team_id)?;
                 let chosen = test_queue::schedule(&queued, &classes, &load);
-                records = test_queue::run_due(&database, &project, &chosen, now, &policy)?;
+                records = test_queue::run_due(&database, &project, &chosen, now, &policy, team.settings.tests.as_ref())?;
             }
             let estimate = super::test_results::full_estimate(&project, &loaded.config);
             if !records.is_empty() || size.is_some() {
@@ -4275,19 +4339,67 @@ fn queue_write(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
     let Actor::Member(member_id) = actor(&team, op, input)? else {
         bail!("Only a member queues this request; a sandbox does not block the lead");
     };
-    let request_id = text(input, "request_id").to_owned();
     let member = team.member(&member_id).context("Unknown member")?;
     let folder = member_outbox_folder(&team, member)?;
-    let request = json!({"op":op, "request_id":request_id, "team":team.id, "member":member_id,
+    let request = json!({"op":op, "request_id":text(input, "request_id"), "team":team.id, "member":member_id,
         "attempt":text(input, "attempt"), "input":input});
+    queue_request(&folder, request, wait)
+}
+
+/// Task #346 (owner, 2026-11-08): a sandboxed member's own-scope team call - a
+/// scratch team's create under the owner's standing rule, or an operation for
+/// the scratch team it leads - waits in its folder exactly as a report does;
+/// the worker applies it with the same identity, profile and rule checks. None
+/// when the call is outside that scope: the caller keeps the sandbox's own
+/// error, so the member asks the lead.
+fn queue_team_call(op: &str, input: &Value, wait: bool) -> anyhow::Result<Option<Value>> {
+    let store = Store::open(false)?;
+    let (parent, member, target) = if op == "create" {
+        let Some((parent, member)) = scratch_creator()? else { return Ok(None) };
+        if super::sandbox_scope::scratch_create(&parent, &member, input).is_none() {
+            return Ok(None);
+        }
+        (parent, member, String::new())
+    } else {
+        let id = text(input, "team");
+        let Some(child) = store.load(id)?.filter(|child| child.scratch_parent.is_some()) else { return Ok(None) };
+        let link = child.scratch_parent.clone().expect("checked");
+        let Some(parent) = store.load(&link.team)? else { return Ok(None) };
+        let Some(member) = parent.member(&link.member).cloned() else { return Ok(None) };
+        // The caller the CLI proved must be that member; another member's tool
+        // never queues here.
+        let Ok(Actor::Member(caller)) = actor(&child, op, input) else { return Ok(None) };
+        if caller != member.id || super::sandbox_scope::scratch_child(&parent, &member, &child, op).is_none() {
+            return Ok(None);
+        }
+        (parent, member, child.id.clone())
+    };
+    let folder = member_outbox_folder(&parent, &member)?;
+    let request = json!({"op":"team", "request_id":text(input, "request_id"), "team":parent.id, "member":member.id,
+        "attempt":text(input, "attempt"), "command":op, "target":target, "input":input});
+    queue_request(&folder, request, wait).map(Some)
+}
+
+/// A refused store write: queue the call when it is the member's own work, else
+/// keep the sandbox's error so only requests outside the scope ask the lead.
+fn queue_or_blocked(error: anyhow::Error, op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
+    match queue_team_call(op, input, wait) {
+        Ok(Some(value)) => Ok(value),
+        _ => Err(super::store::write_error(error)),
+    }
+}
+
+/// The queued request's own file and answer, shared by a report and a team call.
+fn queue_request(folder: &std::path::Path, request: Value, wait: bool) -> anyhow::Result<Value> {
+    let request_id = request["request_id"].as_str().unwrap_or_default().to_owned();
     // U42: a request already applied answers its outcome, and one still queued
-    // answers its state (or waits, with `--wait`); a different request under the
-    // same id is refused, so a placeholder can never replace the whole text that
-    // was queued first.
-    if let Some(result) = super::outbox::result(&folder, &request_id) {
+    // answers its state (or waits, with `--wait`); a different request under
+    // the same id is refused, so a placeholder can never replace the whole text
+    // that was queued first.
+    if let Some(result) = super::outbox::result(folder, &request_id) {
         return Ok(result);
     }
-    let existing = super::outbox::request(&folder, &request_id);
+    let existing = super::outbox::request(folder, &request_id);
     if let Some(queued) = &existing {
         ensure!(
             queued["op"] == request["op"] && queued["input"] == request["input"],
@@ -4295,10 +4407,10 @@ fn queue_write(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         );
     }
     let path = match &existing {
-        Some(_) => super::outbox::request_path(&folder, &request_id),
-        None => super::outbox::push(&folder, &request)?,
+        Some(_) => super::outbox::request_path(folder, &request_id),
+        None => super::outbox::push(folder, &request)?,
     };
-    let result = super::outbox::result_path(&folder, &request_id);
+    let result = super::outbox::result_path(folder, &request_id);
     // Task #275: the caller is told where the outcome is and that a refusal or
     // failure also comes as a team message, not only to a file nobody reads.
     let delivery = format!(
@@ -4317,7 +4429,7 @@ fn queue_write(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
     if !wait {
         return Ok(queued);
     }
-    Ok(super::outbox::wait(&folder, &request_id, 30.0).unwrap_or_else(|| json!({
+    Ok(super::outbox::wait(folder, &request_id, 30.0).unwrap_or_else(|| json!({
         "status":"queued", "request_id":request_id, "path":path.to_string_lossy(), "result":result.to_string_lossy(),
         "delivery": delivery,
         "note":"The team worker has not applied it in 30 s; it stays queued in the member's folder and the worker will apply it. Its result stays at the path in `result`, and a refusal or failure also reaches you as a team message."
@@ -4631,6 +4743,19 @@ fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::
     }
 }
 
+/// Task 353 (owner, 2026-11-08): the agents of the standing rule a scratch team
+/// was created under, when this team is such a scratch team; None for a normal
+/// team (its lead stays carded).
+fn scratch_roster_agents(store: &Store, team: &Team) -> anyhow::Result<Option<Vec<String>>> {
+    let (Some(link), false) = (&team.scratch_parent, team.scratch_rule.is_empty()) else {
+        return Ok(None);
+    };
+    let Some(parent) = store.load(&link.team)? else {
+        return Ok(None);
+    };
+    Ok(super::scratch::standing(&parent).map(|rule| rule.agents))
+}
+
 /// U26: fills the verified roster word for a lead caller, or refuses. The
 /// verifier is a parameter so a test can use a fixture events database.
 fn check_roster_word(
@@ -4639,10 +4764,31 @@ fn check_roster_word(
     input: &Value,
     filled: &mut Value,
     caller: &Actor,
+    rule_agents: Option<&[String]>,
     verify: impl Fn(&Team, &Value, &super::owner_word::WordRule, f64) -> anyhow::Result<super::model::OwnerWord>,
 ) -> anyhow::Result<()> {
     if !matches!(caller, Actor::Member(id) if *id == team.lead) {
         return Ok(());
+    }
+    // Task 353 (owner, 2026-11-08): a scratch team created under the standing
+    // rule already runs without the owner's per-plan approval; its lead
+    // relaunches, adds and removes its own members within the rule's agents
+    // without a card. Anything outside the rule, and every normal team, still
+    // asks: the flag below stands for the verified word the card would give.
+    if let Some(agents) = rule_agents {
+        let inside = match op {
+            "relaunch" | "remove-member" => team
+                .member(text(filled, "member"))
+                .is_some_and(|member| agents.iter().any(|agent| *agent == member.agent)),
+            "add-member" => agents.iter().any(|agent| *agent == text(&filled["member"], "agent")),
+            _ => false,
+        };
+        if inside {
+            if let Some(object) = filled.as_object_mut() {
+                object.insert("roster_word".into(), Value::Bool(true));
+            }
+            return Ok(());
+        }
     }
     let rule = roster_word_rule(team, op, filled);
     if !rule.needed() {
@@ -5397,7 +5543,12 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         return test_config(input);
     }
     match op {
-        "create" => create(input),
+        // Task #346: a sandboxed member's scratch-team create waits in its own
+        // folder when the store refuses the write; anything else keeps the error.
+        "create" => match create(input) {
+            Err(error) if read_only(&error) => queue_or_blocked(error, "create", input, wait),
+            result => result,
+        },
         // Task 159: the owner's scratch-team rule, and its list and revoke.
         "scratch-rule" => scratch_rule(input),
         "scratch-rules" => scratch_rules(input),
@@ -5480,6 +5631,19 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         }
         "status" => {
             let store = Store::open(false)?;
+            if input["archived_phases"].as_bool() == Some(true) {
+                let cursor = input["cursor"].as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(0);
+                return store.archived_phases(text(input,"team"), cursor, input["limit"].as_i64().unwrap_or(PAGE));
+            }
+            if let Some(phase) = input.get("archived_phase") {
+                let phase = phase.as_u64().and_then(|n| u32::try_from(n).ok()).context("A phase number is required")?;
+                let cursor = input["cursor"].as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(0);
+                return store.archived_tasks(text(input,"team"), phase, cursor, input["limit"].as_i64().unwrap_or(PAGE));
+            }
+            if let Some(task) = input.get("task") {
+                let task = task.as_u64().and_then(|task| u32::try_from(task).ok()).filter(|task| *task > 0).context("A positive task id is required")?;
+                return store.task(text(input, "team"), task);
+            }
             let mut team = store.load(text(input, "team"))?.context("Unknown team")?;
             // Task 128 (docs/lore.md 5): the plain memory digest, at most 6 KiB.
             if input["digest"] == true {
@@ -5631,6 +5795,9 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 Err(error) if queues_instead(op) && read_only(&error) => {
                     return queue_write(op, input, wait)
                 }
+                // Task #346: a call for the member's own scratch team queues too;
+                // a call outside that scope keeps the sandbox's error.
+                Err(error) if read_only(&error) => return queue_or_blocked(error, op, input, wait),
                 // U20: a write the sandbox blocked says what to do, not a bare
                 // SQLite error.
                 Err(error) => return Err(super::store::write_error(error)),
@@ -5815,7 +5982,8 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             if matches!(op, "add-member" | "scale" | "drain" | "swap-member" | "remove-member" | "relaunch" | "settings") {
                 let team = store.load(team_id)?.context("Unknown team")?;
                 let caller = actor(&team, op, &filled)?;
-                check_roster_word(&team, op, input, &mut filled, &caller, |team, input, rule, now| {
+                let rule_agents = scratch_roster_agents(&store, &team)?;
+                check_roster_word(&team, op, input, &mut filled, &caller, rule_agents.as_deref(), |team, input, rule, now| {
                     super::owner_word::verify_roster(team, input, rule, now)
                 })?;
             }
@@ -5869,6 +6037,9 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 Err(error) if queues_instead(op) && read_only(&error) => {
                     return queue_write(op, input, wait)
                 }
+                // Task #346: a call for the member's own scratch team queues too;
+                // a call outside that scope keeps the sandbox's error.
+                Err(error) if read_only(&error) => return queue_or_blocked(error, op, input, wait),
                 Err(error) => return Err(super::store::write_error(error)),
             };
             // N7: discarding a draft stops the lead's session when the owner
@@ -6111,6 +6282,10 @@ mod commands_tools;
 #[cfg(test)]
 #[path = "tests/commands_scratch.rs"]
 mod commands_scratch;
+
+#[cfg(test)]
+#[path = "tests/commands_sandbox.rs"]
+mod commands_sandbox;
 
 #[cfg(test)]
 #[path = "tests/commands_waiting.rs"]

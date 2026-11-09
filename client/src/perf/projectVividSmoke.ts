@@ -1,3 +1,4 @@
+import { chooseDropdown } from "./dropdown";
 /** Private built-app walk of the approved Project color popup. */
 import { invoke } from "@tauri-apps/api/core";
 import { setPage } from "../store/ui";
@@ -11,8 +12,8 @@ export async function projectVividSmoke(allowed: boolean, restored: boolean) {
   if (!allowed) return;
   const log = (line: string) => invoke("perf_log", { line: "project-vivid-smoke: " + line });
   const button = (root: string, text: string) => [...document.querySelectorAll<HTMLButtonElement>(root + " button")].find((b) => b.textContent?.trim() === text);
-  const style = () => document.querySelector<HTMLSelectElement>("#pc-style")!;
-  const choose = (value: string) => { style().value = value; style().dispatchEvent(new Event("change", { bubbles: true })); };
+  const style = () => document.querySelector<HTMLButtonElement>("#pc-style")!;
+  const choose = (value: string) => { chooseDropdown(style(), value); };
   const open = async () => { button(".proj-right", "Edit color…")!.click(); await until(() => document.querySelector("dialog.project-color[open]"), "color popup missing"); };
   try {
     await settingsReady; setPage("projects");

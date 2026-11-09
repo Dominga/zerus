@@ -1,7 +1,7 @@
 import { For, Show, createSignal } from "solid-js";
 import type { JSX } from "solid-js";
 import { tr } from "../../i18n";
-import type { TeamBuildItem, TeamBuildsView, TeamProfileView, TeamTestsView } from "../../types";
+import type { TeamBuildItem, TeamBuildsView, TeamProfileView, TeamTestsView, TeamView } from "../../types";
 import type { PlacedNode } from "./plan";
 import { KIND_STYLES, keyName, lossKey, styleOf, swatchBackground } from "./profile-palette";
 import { taskHeat, type TaskHeat } from "./heat";
@@ -337,9 +337,21 @@ export function ProfileSummary(props: { profile?: TeamProfileView | null; team?:
  * as Qt's losses column follows the timeline card; the legend itself moved to
  * the Time section, directly under the lanes it explains.
  */
-export function ProfileDetails(props: { profile?: TeamProfileView | null }): JSX.Element {
+export function ProfileDetails(props: { profile?: TeamProfileView | null; team?: TeamView; onOpenReport?: (id: number) => void }): JSX.Element {
   return (
     <div class="pm-profile pm-profile-details">
+      <Show when={props.team?.tasks.some((task) => task.archived)}>
+        <h3>{tr("Archived tasks in this window")}</h3>
+        <For each={props.team?.tasks.filter((task) => task.archived)}>{(task) => (
+          <div class="pm-role-row">
+            <button class="btn small" onClick={() => props.onOpenReport?.(task.id)}>{`#${task.id} ${task.title}`}</button>
+            <span>{tr("Phase %1", task.phase)}</span>
+            <span>{task.status}</span>
+            <span class="grow" />
+            <span>{task.worked_s == null ? tr("Time unknown") : formatSeconds(task.worked_s)}</span>
+          </div>
+        )}</For>
+      </Show>
       <Show when={props.profile}>
         {(profile) => (
           <>

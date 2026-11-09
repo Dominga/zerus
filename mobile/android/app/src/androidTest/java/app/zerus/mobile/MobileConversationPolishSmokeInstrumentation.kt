@@ -231,7 +231,12 @@ class MobileConversationPolishSmokeInstrumentation : Instrumentation() {
             File(targetContext.getExternalFilesDir(null), "conversation-polish-results.json").writeText(
                 JSONObject().put("synthetic_send_posts", sends.get()).put("inspections", inspections.get())
                     .put("geometry", measured).put("empty_composer", true).toString(2))
-            main { model.back() }
+            main { model.back(); model.refresh(explicit = true) }
+            await("settled main catalog") {
+                main { !model.catalogBusy && !model.catalogRefresh.running && model.catalogRefresh.workspaces.isNotEmpty() }
+            }
+            noPermanentBanner()
+            screenshot("conversation-polish-main-settled.png")
             accountMarks(activity, 1f, false)
             accountMarks(activity, 1.8f, true)
         } finally {
@@ -260,10 +265,18 @@ class MobileConversationPolishSmokeInstrumentation : Instrumentation() {
                 }
             }
         }
-        await("account marks at $scale") { listOf("Default", "User").all { name ->
+        await("account marks at $scale") { text("Production account marks / font scale $scale") != null && listOf("Default", "User").all { name ->
             find(uiAutomation.rootInActiveWindow) { it.contentDescription?.toString() == "Account: $name synthetic account" }
                 ?.let { !bounds(it).isEmpty } == true } }
         uiAutomation.waitForIdle(200, 2_000)
+        // Accessibility can publish the new tree before its pixels are committed.
+        // Wait for this layout's draw before capturing a different font scale.
+        val committed = CountDownLatch(1)
+        main {
+            activity.window.decorView.viewTreeObserver.registerFrameCommitCallback { committed.countDown() }
+            activity.window.decorView.invalidate()
+        }
+        check(committed.await(5, TimeUnit.SECONDS)) { "Account mark frame was not committed at $scale" }
         screenshot(if (narrow) "conversation-polish-account-marks-large-narrow.png" else "conversation-polish-account-marks-default.png")
     }
 }

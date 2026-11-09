@@ -7,6 +7,9 @@ use std::{
     process::{Command, Stdio},
 };
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod helper;
+
 fn control(case: &str) {
     let private = tempfile::tempdir().unwrap();
     let output = tempfile::tempfile().unwrap();
@@ -275,6 +278,11 @@ fn fixture() {
     }
     let (kind, case) = case.split_once(':').unwrap();
     let (writer, mut current) = setup(kind);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(case) = case.strip_prefix("helper:") {
+        helper::fixture(writer, current, case);
+        return;
+    }
     if case == "empty" {
         current["conversation_id"] = json!("");
         save(&current);

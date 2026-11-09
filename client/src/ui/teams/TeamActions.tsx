@@ -626,7 +626,7 @@ export function TaskActions(props: { computer: ComputerId; team: ActTeam; task: 
             </Show>
           </div>
           <Show when={reply()} fallback={<p class="pm-empty">{tr("No reply was kept for this attempt")}</p>}>
-            <p class="team-no-report-text" classList={{ open: replyOpen() }}>{reply()}</p>
+            <p class={replyOpen() ? "team-no-report-text open" : "team-no-report-text"}>{reply()}</p>
           </Show>
           <div class="team-no-report-actions">
             <button type="button" class="btn small primary" data-action="use-last-reply" disabled={read().busy || !props.task.attempt_id}

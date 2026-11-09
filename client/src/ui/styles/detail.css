@@ -333,17 +333,16 @@
   .composer { border: 1px solid var(--z-color-border); border-radius: var(--z-radius-xl); background: var(--z-color-field); transition: border-color var(--z-motion-fast), box-shadow var(--z-motion-fast); }
   .composer:focus-within { border-color: var(--z-color-accent-muted); box-shadow: var(--z-shadow-focus-ring); }
   .composer.disabled { opacity: .8; }
-  /* Height handle, in the toolbar row: the gap between the left and right chips
-     is the drag area and holds a centred 40×4 grip, which shrinks away when the
-     composer is narrow. An invisible 6 px strip on the top border stays
-     draggable at any width. The grip takes the accent on hover, focus and drag. */
+  /* Height handle (task 422): only the composer's top border is draggable -
+     an invisible 6 px strip with a thin grip drawn on the border line. The
+     grip shows on hover, focus and drag, in the accent; the toolbar row keeps
+     no grip and no gap, so its chips lay out as before. */
   .composer { position: relative; }
   .cmp-resize { cursor: ns-resize; touch-action: none; outline: none; }
-  .cmp-resize.gap { flex: 1 1 0; min-width: 0; align-self: stretch; display: grid; place-items: center; overflow: hidden; border-radius: 6px; }
-  .cmp-resize.edge { position: absolute; z-index: 1; left: 12px; right: 12px; top: -3px; height: 6px; }
-  .cmp-grip { width: min(40px, calc(100% - 12px)); height: 4px; border-radius: 2px; background: var(--z-color-grip); transition: background var(--z-motion-fast), width var(--z-motion-fast); }
-  .cmp-resize.gap:hover .cmp-grip, .cmp-resize.gap:focus-visible .cmp-grip, .composer:has(.cmp-resize.edge:hover) .cmp-grip { width: min(52px, calc(100% - 12px)); background: var(--z-color-accent); }
-  .cmp-resize.dragging .cmp-grip, .composer:has(.cmp-resize.dragging) .cmp-grip { width: min(52px, calc(100% - 12px)); background: var(--z-color-accent); transition: none; }
+  .cmp-resize.edge { position: absolute; z-index: 1; left: 12px; right: 12px; top: -3px; height: 6px; display: grid; place-items: center; }
+  .cmp-grip { width: min(40px, calc(100% - 12px)); height: 3px; border-radius: 2px; background: var(--z-color-accent); opacity: 0; pointer-events: none;
+    transition: opacity var(--z-motion-fast), width var(--z-motion-fast); }
+  .cmp-resize.edge:hover .cmp-grip, .cmp-resize.edge:focus-visible .cmp-grip, .cmp-resize.dragging .cmp-grip { width: min(52px, calc(100% - 12px)); opacity: 1; }
   .tchip:disabled { opacity: .45; cursor: default; }
   .tchip[hidden] { display: none; }
   .tchip.on { color: var(--z-color-text); background: var(--z-color-segment-on); }

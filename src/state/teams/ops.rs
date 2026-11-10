@@ -4069,30 +4069,46 @@ fn discard_empty_draft(team: &mut Team, phase: u32, by: &str) {
 
 /// Task #289 (owner, 2026-11-08): the lead marks notices seen; one stays out of
 /// its inbox until its content changes, and a restart keeps that (the signature
-/// is stored with the team). A decision is answered, never marked seen.
+/// is stored with the team). Task #29 (team ede724c4, owner 2026-11-10): every
+/// informational item closes this way, by its key (`hgs team inbox --json`
+/// lists it). A decision is answered, never marked seen.
 fn seen(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you mark the inbox seen");
     let keys: Vec<String> = input["items"]
         .as_array()
-        .context("Name the notice keys to mark seen: {\"items\":[\"proposal:p77\"]}")?
+        .context("Name the item keys to close (each item's \"key\" in hgs team inbox --json): {\"items\":[\"proposal:p77\"]}")?
         .iter()
         .filter_map(Value::as_str)
         .map(str::to_owned)
         .take(200)
         .collect();
-    ensure!(!keys.is_empty(), "Name at least one notice to mark seen");
-    let notices: Vec<super::inbox::Item> = super::inbox::all_items(team).into_iter().filter(|item| super::inbox::notice(item.kind)).collect();
+    ensure!(!keys.is_empty(), "Name at least one item to close");
+    let all = super::inbox::all_items(team);
     let at = now();
     let mut marked = Vec::new();
     let mut unknown = Vec::new();
+    let mut decisions = Vec::new();
     for key in keys {
-        let Some(item) = notices.iter().find(|item| item.key == key) else {
+        // Task #29: one key may name several items (the playbook's rule (a)
+        // names a missing mode and settings that disagree): each one's
+        // content is stored, so closing the key closes all of them.
+        let named: Vec<&super::inbox::Item> = all.iter().filter(|item| item.key == key).collect();
+        let Some(item) = named.first().copied() else {
             unknown.push(key);
             continue;
         };
-        let signature = super::inbox::signature(item);
+        if !named.iter().all(|item| super::inbox::closable(item)) {
+            // Task #29: named, with what settles it, so the refusal is not
+            // a bare "unknown" (owner's rule d2).
+            decisions.push(json!({"key":key,"kind":item.kind,
+                "why":"a decision is answered, never closed: it clears once it is decided","command":item.command}));
+            unknown.push(key);
+            continue;
+        }
         team.seen_notices.retain(|seen| seen.key != key);
-        team.seen_notices.push(SeenNotice { key: key.clone(), signature, at });
+        for item in &named {
+            team.seen_notices.push(SeenNotice { key: key.clone(), signature: super::inbox::signature(item), at });
+        }
         marked.push(key);
     }
     team.seen_notices.sort_by(|a, b| a.at.total_cmp(&b.at));
@@ -4100,7 +4116,11 @@ fn seen(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
     team.seen_notices.drain(0..extra);
     let by = actor.label(team);
     events.push(Event::new("notices_seen", json!({"by":by,"items":marked})));
-    Ok(json!({"status":"seen","seen":marked,"unknown":unknown}))
+    let mut answer = json!({"status":"seen","seen":marked,"unknown":unknown});
+    if !decisions.is_empty() {
+        answer["decisions"] = json!(decisions);
+    }
+    Ok(answer)
 }
 
 /// Task #289: the lead keeps a task after its dependency was cancelled - it does

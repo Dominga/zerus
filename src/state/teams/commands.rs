@@ -6694,6 +6694,9 @@ mod commands_waiting;
 #[cfg(test)]
 #[path = "tests/inbox_notices.rs"]
 mod inbox_notices;
+#[cfg(test)]
+#[path = "tests/inbox_close.rs"]
+mod inbox_close;
 
 #[cfg(test)]
 #[path = "tests/commands_standing_rules.rs"]

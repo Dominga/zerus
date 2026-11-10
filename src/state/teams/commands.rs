@@ -4465,19 +4465,47 @@ const LISTING_REUSE: f64 = 30.0;
 /// status` writes besides a slow-calls line: this cache, at most once per
 /// LISTING_REUSE, because a spawn of hgs ls per poll costs more.
 fn recent_sessions() -> anyhow::Result<Vec<super::dispatcher::Seen>> {
-    let path = root().join("teams/left-running-listing.json");
-    let now = super::super::now();
-    if let Some(cached) = std::fs::read(&path).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()) {
+    recent_sessions_with(&root().join("teams/left-running-listing.json"), super::super::now(), || {
+        let output = super::dispatcher::hgs("", &["ls", "--json", "--no-archives"], None, std::time::Duration::from_secs(15))?;
+        ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
+        serde_json::from_slice(&output.stdout).context("invalid hgs ls output")
+    })
+}
+
+/// Task #47 (team ede724c4): how old a listing a finished team's status may
+/// still show when a fresh one fails or times out.
+const LISTING_STALE_MAX: f64 = 600.0;
+
+/// `recent_sessions` with its cache file, clock and listing. Task #47: a
+/// listing that failed (`hgs ls` ran past its 15 s while the DeepSeek host was
+/// slow) left the cache unwritten, so every status of a finished team listed
+/// again and waited 15 s. Now the last listing (at most `LISTING_STALE_MAX`
+/// old) stands, and the failed attempt counts as the cache's time, so the next
+/// polls inside `LISTING_REUSE` reuse it instead of waiting again.
+fn recent_sessions_with(path: &std::path::Path, now: f64, list: impl FnOnce() -> anyhow::Result<Value>) -> anyhow::Result<Vec<super::dispatcher::Seen>> {
+    let cached = std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    if let Some(cached) = &cached {
         if cached["at"].as_f64().is_some_and(|at| at <= now && now - at < LISTING_REUSE) {
             return Ok(super::dispatcher::seen(&cached["listing"]));
         }
     }
-    let output = super::dispatcher::hgs("", &["ls", "--json", "--no-archives"], None, std::time::Duration::from_secs(15))?;
-    ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
-    let listing: Value = serde_json::from_slice(&output.stdout).context("invalid hgs ls output")?;
-    // Best effort: a failed write only means the next poll lists again.
-    let _ = std::fs::write(&path, serde_json::to_vec(&json!({"at":now,"listing":listing})).unwrap_or_default());
-    Ok(super::dispatcher::seen(&listing))
+    match list() {
+        Ok(listing) => {
+            // Best effort: a failed write only means the next poll lists again.
+            let _ = std::fs::write(path, serde_json::to_vec(&json!({"at":now,"listed_at":now,"listing":listing})).unwrap_or_default());
+            Ok(super::dispatcher::seen(&listing))
+        }
+        Err(error) => {
+            let Some(cached) = cached else { return Err(error) };
+            let listed = cached["listed_at"].as_f64().or_else(|| cached["at"].as_f64()).unwrap_or(0.0);
+            if !(listed <= now && now - listed < LISTING_STALE_MAX) || !cached["listing"].is_object() {
+                return Err(error);
+            }
+            let kept = json!({"at":now,"listed_at":listed,"listing":cached["listing"],"failed":format!("{error:#}")});
+            let _ = std::fs::write(path, serde_json::to_vec(&kept).unwrap_or_default());
+            Ok(super::dispatcher::seen(&cached["listing"]))
+        }
+    }
 }
 
 /// Where a member works when it adopts an existing session (F8): the session's
@@ -6745,6 +6773,45 @@ mod inbox_close;
 #[cfg(test)]
 #[path = "tests/low_folders.rs"]
 mod low_folders;
+
+/// Task #47 (team ede724c4): a finished team's status read `hgs ls` for 15 s
+/// on every poll while the DeepSeek host was slow, because a failed listing
+/// left the cache unwritten. The last listing stands, and the failure counts
+/// as the cache's time.
+#[cfg(test)]
+#[test]
+fn a_failed_listing_keeps_the_last_one_and_is_not_retried_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("left-running-listing.json");
+    let listing = json!({"sessions":[{"name":"codex/x/dev","run_id":"r1","live":true}]});
+    let calls = std::cell::Cell::new(0);
+    let ok = || {
+        calls.set(calls.get() + 1);
+        Ok(listing.clone())
+    };
+    let fail = || {
+        calls.set(calls.get() + 1);
+        Err(anyhow::anyhow!("hgs ls timed out after 15 s"))
+    };
+    // Nothing cached and the listing fails: the error stands.
+    assert!(recent_sessions_with(&path, 1000.0, fail).is_err());
+    recent_sessions_with(&path, 1000.0, ok).unwrap();
+    // Inside LISTING_REUSE: no listing at all.
+    recent_sessions_with(&path, 1000.0 + LISTING_REUSE - 1.0, fail).unwrap();
+    assert_eq!(calls.get(), 2);
+    // Past it the listing fails: the last one stands, and the next poll
+    // inside LISTING_REUSE of the failure lists nothing.
+    let later = 1000.0 + LISTING_REUSE + 1.0;
+    let kept = recent_sessions_with(&path, later, fail).unwrap();
+    assert_eq!(kept.len(), super::dispatcher::seen(&listing).len());
+    recent_sessions_with(&path, later + LISTING_REUSE - 1.0, fail).unwrap();
+    assert_eq!(calls.get(), 3, "the failure was not retried at once");
+    let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!((saved["listed_at"].as_f64(), saved["at"].as_f64()), (Some(1000.0), Some(later)));
+    assert!(saved["failed"].as_str().unwrap_or_default().contains("timed out"), "{saved}");
+    // A listing older than LISTING_STALE_MAX is not shown.
+    assert!(recent_sessions_with(&path, 1000.0 + LISTING_STALE_MAX + 1.0, fail).is_err());
+}
 
 #[cfg(test)]
 #[path = "tests/commands_standing_rules.rs"]

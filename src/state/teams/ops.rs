@@ -3663,30 +3663,64 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
         .filter(|phase| *phase > 0)
         .context("A phase number is required")?;
     let mut proposed = team.clone();
-    let at = editable_phase(&proposed, n)?;
-    if !proposed.phases[at].state.is_draft() {
+    // Task #36 (team ede724c4, 2026-11-10): the phase its tasks name is
+    // editable with or without a record (an implicit phase 1 has none), and a
+    // phase that has started still takes updates of its unstarted tasks (each
+    // is checked below); its title, barrier, target and task list change only
+    // while it is untouched. It answered "Unknown phase 1" to the lead's update
+    // of tasks 26 and 27.
+    let record = proposed.phases.iter().position(|phase| phase.n == n);
+    ensure!(record.is_some() || proposed.tasks.iter().any(|task| task.phase == n), "Unknown phase {n}");
+    let phase_fields = ["target_hours", "title", "barrier"].iter().any(|key| input.get(*key).is_some());
+    let removes = input["tasks_remove"].as_array().is_some_and(|list| !list.is_empty());
+    match record {
+        Some(at) => {
+            let phase = &proposed.phases[at];
+            ensure!(phase.state != PhaseState::Discarded, "Phase {n} is discarded");
+            if (phase_fields || removes) && !phase.state.is_draft() {
+                ensure!(
+                    phase_untouched(&proposed, phase),
+                    "Phase {n} has started; only a phase with no delivered attempt can change"
+                );
+            }
+        }
+        None => {
+            ensure!(!phase_fields, "Phase {n} has no phase record of its own (its tasks name it), so it has no title, barrier or target to change; its tasks take tasks_update");
+            ensure!(
+                !removes || proposed.tasks.iter().filter(|task| task.phase == n).all(|task| !task_started(task)),
+                "Phase {n} has started; only a phase with no delivered attempt changes its task list. Its unstarted tasks still take tasks_update"
+            );
+        }
+    }
+    // A phase without a record is the approved plan's work (phase 1).
+    if record.is_none_or(|at| !proposed.phases[at].state.is_draft()) {
         if !super::lead_plan::lead_plans(team, actor) {
             ensure_owner_or_word(team, actor, input, n, "edits an accepted phase")?;
         }
     }
+    let in_phase = |team: &Team, id: u32| match record {
+        Some(at) => team.phases[at].tasks.contains(&id),
+        None => team.task(id).is_some_and(|task| task.phase == n),
+    };
     let by = actor.label(team);
     let mut diff = json!({"updated":[],"removed":[]});
     let mut changes: Vec<Value> = Vec::new();
-    if input.get("target_hours").is_some() {
+    // The phase's own fields need its record (checked above).
+    if let (Some(at), true) = (record, input.get("target_hours").is_some()) {
         let target = target_hours(input)?;
         if proposed.phases[at].target_hours != target {
             changes.push(json!({"kind":"changed","field":"target_hours","from":proposed.phases[at].target_hours,"to":target}));
             proposed.phases[at].target_hours = target;
         }
     }
-    if let Some(value) = input.get("title") {
+    if let (Some(at), Some(value)) = (record, input.get("title")) {
         let title = clean(value.as_str().unwrap_or_default().trim(), 120, "A phase title")?;
         if proposed.phases[at].title != title {
             diff["title"] = json!({"from":proposed.phases[at].title,"to":title});
             proposed.phases[at].title = title;
         }
     }
-    if let Some(value) = input.get("barrier") {
+    if let (Some(at), Some(value)) = (record, input.get("barrier")) {
         let barrier = value.as_bool().context("barrier is true or false")?;
         if proposed.phases[at].barrier != barrier {
             diff["barrier"] = json!({"from":proposed.phases[at].barrier,"to":barrier});
@@ -3695,7 +3729,7 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
     }
     for value in input["tasks_update"].as_array().into_iter().flatten() {
         let id = value["id"].as_u64().and_then(|id| u32::try_from(id).ok()).filter(|id| *id > 0).context("A task id is required")?;
-        ensure!(proposed.phases[at].tasks.contains(&id), "Task #{id} is not in phase {n}");
+        ensure!(in_phase(&proposed, id), "Task #{id} is not in phase {n}");
         let assignee = match value.get("assignee") {
             None => None,
             Some(value) => Some(member_id(value.as_str().unwrap_or_default())?),
@@ -3891,7 +3925,7 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
     let mut removed: Vec<u32> = Vec::new();
     for value in input["tasks_remove"].as_array().into_iter().flatten() {
         let id = value.as_u64().and_then(|id| u32::try_from(id).ok()).filter(|id| *id > 0).context("A task id is required")?;
-        ensure!(proposed.phases[at].tasks.contains(&id), "Task #{id} is not in phase {n}");
+        ensure!(in_phase(&proposed, id), "Task #{id} is not in phase {n}");
         ensure!(
             proposed.task(id).is_some_and(|task| matches!(task.status, TaskStatus::Draft | TaskStatus::Pending) && !task_started(task)),
             "Task #{id} is not a draft or waiting in an unstarted phase"
@@ -3909,9 +3943,11 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
         .filter_map(|id| proposed.task(*id).map(|task| json!({"kind":"removed","task":id,"title":task.title})))
         .collect();
     proposed.tasks.retain(|task| !removed.contains(&task.id));
-    proposed.phases[at].tasks.retain(|id| !removed.contains(id));
-    for change in changes.into_iter().chain(removed_changes) {
-        record_change(&mut proposed.phases[at], change);
+    if let Some(at) = record {
+        proposed.phases[at].tasks.retain(|id| !removed.contains(id));
+        for change in changes.into_iter().chain(removed_changes) {
+            record_change(&mut proposed.phases[at], change);
+        }
     }
     diff["removed"] = json!(removed);
     let validation = plan::validate(&proposed, offline);

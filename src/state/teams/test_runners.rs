@@ -241,21 +241,38 @@ fn run_on(remote: &dyn Remote, runner: &Runner, project: &Path, request: &Reques
 }
 
 fn git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
-    let output = Command::new("git").args(args).current_dir(dir).stdin(Stdio::null()).output()?;
+    let mut command = Command::new("git");
+    command.args(args).current_dir(dir).stdin(Stdio::null());
+    #[cfg(test)]
+    INHERITED_GIT_CONFIG.with(|inherited| {
+        if let Some(value) = inherited.borrow().as_deref() {
+            command.env("GIT_CONFIG_PARAMETERS", value);
+        }
+    });
+    let output = command.output()?;
     anyhow::ensure!(output.status.success(), "git {} failed: {}", args.join(" "), String::from_utf8_lossy(&output.stderr).trim());
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-/// Task #23 (team ede724c4): git in the runner's bare mirror names it with
-/// `--git-dir`. Git refuses to discover a bare repository from its folder when
-/// `safe.bareRepository` is `explicit` (a setting Git recommends, and one an
-/// agent's environment carries), and every runner request failed with "cannot
-/// use bare repository".
-fn bare(mirror: &Path, args: &[&str]) -> anyhow::Result<String> {
-    let dir = format!("--git-dir={}", mirror.display());
-    let mut full = vec![dir.as_str()];
-    full.extend_from_slice(args);
-    git(mirror, &full)
+#[cfg(test)]
+thread_local! {
+    /// The `GIT_CONFIG_PARAMETERS` this thread's runner git commands inherit,
+    /// as from an agent session's shell, without changing the process's
+    /// environment under other tests.
+    pub(super) static INHERITED_GIT_CONFIG: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Git in the runner's bare mirror, named with `--git-dir`. Task #38 (team
+/// ede724c4, 2026-11-10): run from inside `mirror.git`, git found the bare
+/// repository implicitly, which an inherited `safe.bareRepository=explicit`
+/// (agent sessions carry it in `GIT_CONFIG_PARAMETERS`) refuses: "cannot use
+/// bare repository ... (safe.bareRepository is 'explicit')". An explicit
+/// `--git-dir` is allowed under every setting.
+fn mirror_git(mirror: &Path, args: &[&str]) -> anyhow::Result<String> {
+    let git_dir = format!("--git-dir={}", mirror.display());
+    let mut all = vec![git_dir.as_str()];
+    all.extend_from_slice(args);
+    git(mirror.parent().unwrap_or(mirror), &all)
 }
 
 /// The exact commit as a base64 git bundle of what the runner lacks (empty
@@ -317,11 +334,11 @@ fn serve_inner(input: &Value, person: &Person) -> anyhow::Result<Value> {
     let mirror = root.join("mirror.git");
     if !mirror.join("HEAD").is_file() {
         std::fs::create_dir_all(&mirror)?;
-        git(&mirror, &["init", "-q", "--bare"])?;
+        git(&root, &["init", "-q", "--bare", &mirror.to_string_lossy()])?;
     }
     match input["action"].as_str().unwrap_or_default() {
         "have" => {
-            let listed = bare(&mirror, &["for-each-ref", "--sort=-committerdate", "--count=50", "--format=%(objectname)", "refs/zerus-runner"]).unwrap_or_default();
+            let listed = mirror_git(&mirror, &["for-each-ref", "--sort=-committerdate", "--count=50", "--format=%(objectname)", "refs/zerus-runner"]).unwrap_or_default();
             Ok(json!({"tips":listed.lines().collect::<Vec<_>>()}))
         }
         "run" => {
@@ -332,11 +349,11 @@ fn serve_inner(input: &Value, person: &Person) -> anyhow::Result<Value> {
                 let bytes = base64::engine::general_purpose::STANDARD.decode(bundle)?;
                 let file = root.join("incoming.bundle");
                 std::fs::write(&file, bytes)?;
-                let fetched = bare(&mirror, &["fetch", "-q", &file.to_string_lossy(), "+refs/zerus-runner/*:refs/zerus-runner/*"]);
+                let fetched = mirror_git(&mirror, &["fetch", "-q", &file.to_string_lossy(), "+refs/zerus-runner/*:refs/zerus-runner/*"]);
                 let _ = std::fs::remove_file(&file);
                 fetched?;
             }
-            bare(&mirror, &["cat-file", "-e", &format!("{commit}^{{commit}}")]).map_err(|_| anyhow::anyhow!("the runner lacks commit {commit}"))?;
+            mirror_git(&mirror, &["cat-file", "-e", &format!("{commit}^{{commit}}")]).map_err(|_| anyhow::anyhow!("the runner lacks commit {commit}"))?;
             let id: String = input["request"].as_str().unwrap_or("run").chars().filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-').take(60).collect();
             let folder = root.join("runs").join(if id.is_empty() { "run".to_owned() } else { id });
             let _ = std::fs::remove_dir_all(&folder);

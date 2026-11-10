@@ -1398,10 +1398,49 @@ fn an_approved_phase_with_nothing_started_edits_like_a_draft() {
         .unwrap_err()
         .to_string();
     assert_eq!(error, "Phase 2 has started; only a phase with no delivered attempt can change");
+    // Task #36: a started task is refused as such; the phase's unstarted
+    // tasks still take updates.
     let error = apply(&mut team, "edit-draft", &json!({"phase":2,"tasks_update":[{"id":3,"title":"D3"}]}), &Actor::Member("lead".into()), &none, &mut events)
         .unwrap_err()
         .to_string();
-    assert_eq!(error, "Phase 2 has started; only a phase with no delivered attempt can change");
+    assert_eq!(error, "Task #3 is not a draft or waiting in an unstarted phase");
+}
+
+/// Task #36 (team ede724c4, 2026-11-10): the lead's edit-draft of tasks 26 and
+/// 27 answered "Unknown phase 1": the plan had tasks in phase 1 and no phase
+/// record. A phase its tasks name is editable without a record, and a phase
+/// that has started still takes updates of its unstarted tasks; its own
+/// fields need a record, and its task list an untouched phase.
+#[test]
+fn edit_draft_updates_an_unstarted_task_of_an_implicit_phase_one() {
+    let mut team = running_team();
+    let none = BTreeSet::new();
+    let mut events = Vec::new();
+    team.phases.retain(|phase| phase.n != 1);
+    assert!(team.phases.iter().all(|phase| phase.n != 1), "phase 1 is implicit: its tasks name it");
+    // Task #1 has started; #2 waits.
+    team.task_mut(1).unwrap().attempts.push(Attempt { member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+    let edited = apply(&mut team, "edit-draft", &json!({"phase":1,"tasks_update":[{"id":2,"description":"Cover the new endpoint too"}]}),
+        &Actor::Member("lead".into()), &none, &mut events).unwrap();
+    assert_eq!(edited["status"], "draft_edited", "{edited}");
+    assert_eq!(team.task(2).unwrap().description, "Cover the new endpoint too");
+    // The started task, a task of another phase, a phase nothing names.
+    let error = apply(&mut team, "edit-draft", &json!({"phase":1,"tasks_update":[{"id":1,"title":"x"}]}), &Actor::Member("lead".into()), &none, &mut events)
+        .unwrap_err().to_string();
+    assert_eq!(error, "Task #1 is not a draft or waiting in an unstarted phase");
+    let error = apply(&mut team, "edit-draft", &json!({"phase":1,"tasks_update":[{"id":99,"title":"x"}]}), &Actor::Member("lead".into()), &none, &mut events)
+        .unwrap_err().to_string();
+    assert_eq!(error, "Task #99 is not in phase 1");
+    let error = apply(&mut team, "edit-draft", &json!({"phase":9,"tasks_update":[{"id":2,"title":"x"}]}), &Actor::Member("lead".into()), &none, &mut events)
+        .unwrap_err().to_string();
+    assert_eq!(error, "Unknown phase 9");
+    // No record: no title to change; a started phase keeps its task list.
+    let error = apply(&mut team, "edit-draft", &json!({"phase":1,"title":"Renamed"}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+    assert!(error.contains("has no phase record of its own"), "{error}");
+    let error = apply(&mut team, "edit-draft", &json!({"phase":1,"tasks_remove":[2]}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+    assert!(error.contains("Phase 1 has started"), "{error}");
+    // A member never edits the plan.
+    assert!(apply(&mut team, "edit-draft", &json!({"phase":1,"tasks_update":[{"id":2,"title":"x"}]}), &Actor::Member("dev".into()), &none, &mut events).is_err());
 }
 
 #[test]

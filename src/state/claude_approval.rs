@@ -1756,7 +1756,7 @@ pub(super) fn reconcile(record:Value)->Value {
         assert_eq!(q["screen_only_request"],true);
         assert!(snapshot(&r,screen).is_some());
         // The same panel with the waiting hook keeps the existing answerable card.
-        let hooked=record("Read",json!({"file_path":r"C:\Users\whitl\.local\state\hgs\sessions\attachments\message-40hhyN\01-Screenshot_2.png"}));
+        let hooked=record("Read",json!({"file_path":r"C:\Users\example\.local\state\hgs\sessions\attachments\message-40hhyN\01-Screenshot_2.png"}));
         let hooked=card(&hooked,screen);
         assert_eq!((hooked["source"].clone(),hooked["can_answer"].clone()),(json!("claude_tool_approval"),json!(true)));
         assert!(hooked.get("screen_only_request").is_none());

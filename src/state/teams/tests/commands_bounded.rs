@@ -62,14 +62,19 @@ fn the_polled_status_clips_reports_runs_and_pages() {
 
 /// Task #393: the acceptance measurement on a copy of this machine's live
 /// store: one status and one lead inbox, their time and the status's size.
-/// It skips where the store (or the team) is absent, as on CI.
+/// It runs only when `ZERUS_LIVE_TEAMS_DIR` names a live teams folder (the
+/// `sessions/teams` folder of a Zerus state) and skips otherwise, as on CI.
+/// No machine's own path is written here (the source privacy guard).
 #[test]
 fn a_copy_of_the_live_store_reads_bounded_and_fast() {
     const TEAM: &str = "33fbafeb-8291-4eda-a00c-6e1448ec6f20";
-    let live = std::path::Path::new("C:/Users/whitl/.local/state/hgs/sessions/teams");
+    let Some(live) = std::env::var_os("ZERUS_LIVE_TEAMS_DIR").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: ZERUS_LIVE_TEAMS_DIR names no live teams folder");
+        return;
+    };
     let source = live.join("teams.sqlite3");
     if !source.is_file() {
-        eprintln!("skipped: no live store on this machine");
+        eprintln!("skipped: no live store in ZERUS_LIVE_TEAMS_DIR");
         return;
     }
     let dir = tempfile::tempdir().unwrap();

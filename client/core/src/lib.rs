@@ -60,6 +60,7 @@ pub mod menubar;
 pub mod migration;
 pub mod mobile;
 pub mod native_notice;
+pub mod next_source;
 pub mod notification_preferences;
 pub mod operation_recovery;
 pub mod optional_questions;

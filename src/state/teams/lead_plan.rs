@@ -37,8 +37,10 @@ pub(crate) fn lead_relaunches(team: &Team, member_id: &str) -> bool {
     if member.state == MemberState::Removed {
         return false;
     }
-    let not_started = member.state == MemberState::NotCreated && (!member.error.trim().is_empty() || member.session.is_none());
-    not_started || !member.error.trim().is_empty() || member.stuck.is_some()
+    // A planned member that simply has not been started yet is Zerus's to
+    // start, not a relaunch: only a recorded start failure (task #13's
+    // Member::failed_to_start) or Zerus's stuck mark counts.
+    member.failed_to_start() || member.stuck.is_some()
 }
 
 /// The lead's card for planning inside the approved goal is refused at the

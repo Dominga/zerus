@@ -1015,6 +1015,54 @@ pub(crate) fn guard_directory(directory: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The adoption files a lock-free organization reader follows.
+pub(crate) fn followed_files(directory: &Path) -> [PathBuf; 2] {
+    [directory.join(GUARD_FILE), registry_path(directory)]
+}
+
+/// Read-only disclosure for lock-free organization reads and watches: `None`
+/// (field absent, output unchanged) without a guard or an active request.
+/// Otherwise the state, whether ordinary writes are admitted (the exact
+/// `guard_directory` decision) and the bounded original identity. It never
+/// repairs, clears or authorizes anything; main-only reads stay available.
+pub(crate) fn availability(directory: &Path) -> Option<Value> {
+    let guard = read_guard(directory);
+    let registry = load_registry(directory);
+    if matches!(guard, Ok(None)) && registry.as_ref().is_ok_and(|r| r.active.is_none()) {
+        return None;
+    }
+    let ordinary_writes = guard_directory(directory).is_ok();
+    let (request_id, role, phase) = match (&guard, &registry) {
+        (Ok(Some(guard)), _) => (
+            Some(guard.request_id.clone()),
+            Some(Role::Destination),
+            Some(guard.phase),
+        ),
+        (_, Ok(registry)) => registry
+            .active
+            .as_ref()
+            .and_then(|id| registry.entries.get(id).map(|entry| (id, entry)))
+            .map_or((None, None, None), |(id, entry)| {
+                (Some(id.clone()), Some(entry.role), Some(entry.phase))
+            }),
+        _ => (None, None, None),
+    };
+    let state = if guard.is_err() || registry.is_err() {
+        "unknown"
+    } else if !ordinary_writes {
+        "partial"
+    } else {
+        "pending"
+    };
+    Some(json!({
+        "state": state,
+        "ordinary_writes": ordinary_writes,
+        "request_id": request_id,
+        "role": role,
+        "phase": phase,
+    }))
+}
+
 fn read_guard(directory: &Path) -> Result<Option<Guard>> {
     match super::read_regular(&directory.join(GUARD_FILE), GUARD_BYTES) {
         Ok(bytes) => {
@@ -2763,6 +2811,74 @@ mod tests {
         )
         .unwrap();
         assert!(load_registry(temp.path()).is_err());
+    }
+
+    #[test]
+    fn organization_reads_disclose_partial_adoption_and_follow_its_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            home: temp.path().to_str().unwrap().into(),
+            dir: temp.path().join("config"),
+            state: temp.path().join("state"),
+            selves: vec!["local".into()],
+            peers: vec![],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: BTreeMap::new(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        {
+            let mut store = super::super::store::LockedStore::load(&config).unwrap();
+            store
+                .data
+                .initialize(&json!({"projects": [{"id": "work", "name": "Work",
+                    "color": "#123456", "folders": [], "sessions": []}]}))
+                .unwrap();
+            store.save().unwrap();
+        }
+        let directory = config.dir.join("swarm");
+        let read = || super::super::organization(&config, false).unwrap();
+        // No adoption state: the projection is unchanged.
+        let plain = read();
+        assert_eq!(plain["initialized"], true);
+        assert!(plain.get("adoption").is_none(), "{plain}");
+        // The lock-free reader follows the guard and the registry.
+        let files = super::super::organization_files(&config);
+        assert!(files.contains(&directory.join(GUARD_FILE)));
+        assert!(files.contains(&registry_path(&directory)));
+        // A destination request expected active without its guard: ordinary
+        // writes are refused and the read says so, beside the main catalog.
+        let request = catalog::new_id();
+        let registry = Registry {
+            schema: 1,
+            active: Some(request.clone()),
+            entries: BTreeMap::from([(
+                request.clone(),
+                RegistryEntry {
+                    role: Role::Destination,
+                    phase: Phase::GuardClearing,
+                    request_sha256: "a".repeat(64),
+                    binding_sha256: "b".repeat(64),
+                    lease_id: catalog::new_id(),
+                },
+            )]),
+        };
+        write_registry(&directory, &registry).unwrap();
+        let partial = read();
+        assert_eq!(partial["initialized"], true);
+        assert_eq!(partial["organization"], plain["organization"]);
+        assert_eq!(
+            partial["adoption"],
+            json!({"state": "partial", "ordinary_writes": false,
+                "request_id": request, "role": "destination", "phase": "guard_clearing"})
+        );
+        // An unreadable guard (the EIO-after-unlink shape) is unknown.
+        fs::create_dir(directory.join(GUARD_FILE)).unwrap();
+        let unknown = read();
+        assert_eq!(unknown["adoption"]["state"], "unknown");
+        assert_eq!(unknown["adoption"]["ordinary_writes"], false);
+        assert_eq!(unknown["organization"], plain["organization"]);
     }
 
     #[test]

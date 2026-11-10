@@ -403,11 +403,16 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         }
         eprintln!("hgs: tracking needs trusted hooks (review /hooks if prompted)");
     }
+    let mut theme = claude_theme::Ticket::new(&agent, &session_id, &token);
     if !first.is_empty() {
         let started = Instant::now();
-        let mut child = spawn_agent(&first, &name, &token)?;
-        let child_id = child.id();
-        let status = kimi_launch::wait(&mut child, &name, &token, launch_prompt.as_mut())?;
+        let mut spawned = spawn_agent(&first, &name, &token)?;
+        let child_id = spawned.child.id();
+        let status = if let Some(ticket) = theme.as_mut() {
+            claude_theme::wait(&mut spawned, ticket)?
+        } else {
+            kimi_launch::wait(&mut spawned.child, &name, &token, launch_prompt.as_mut())?
+        };
         let confirmed = {
             let _guard = lock(None)?;
             let current =
@@ -444,11 +449,15 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             write(&mut current)?;
         }
     }
-    let mut child = spawn_agent(&base, &name, &token)?;
-    let child_id = child.id();
+    let mut spawned = spawn_agent(&base, &name, &token)?;
+    let child_id = spawned.child.id();
     // The same in-memory ticket survives a definite early resume failure. Once
     // a submission is attempted, even a refusal can never authorize a replay.
-    let status = kimi_launch::wait(&mut child, &name, &token, launch_prompt.as_mut())?;
+    let status = if let Some(ticket) = theme.as_mut() {
+            claude_theme::wait(&mut spawned, ticket)?
+        } else {
+            kimi_launch::wait(&mut spawned.child, &name, &token, launch_prompt.as_mut())?
+        };
     supervisor::finish(&name, &token, child_id, status)?;
     Ok(ExitInfo::of(status).exit_code())
 }
@@ -460,7 +469,7 @@ fn nonempty_value(record: &Value, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn spawn_agent(argv: &[String], name: &str, run_id: &str) -> Result<std::process::Child> {
+fn spawn_agent(argv: &[String], name: &str, run_id: &str) -> Result<supervisor::Spawned> {
     match supervisor::spawn(argv, name, run_id) {
         Ok(child) => Ok(child),
         Err(error) => {

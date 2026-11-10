@@ -160,7 +160,7 @@ fn format(fields: &[PaneField]) -> String {
         .join("\t")
 }
 
-fn pane_info_args(target: Target, fields: &[PaneField]) -> Vec<String> {
+pub(in crate::state) fn pane_info_args(target: Target, fields: &[PaneField]) -> Vec<String> {
     vec![
         "display-message".into(),
         "-p".into(),
@@ -258,6 +258,81 @@ impl Tmux {
             false
         }
     }
+}
+
+/// The unchanged native input check with explicit fixed read callbacks.
+/// A scoped owner can retain its exact helper Children without changing the
+/// process-wide backend or installing a persistent routing flag.
+pub(in crate::state) fn input_state_using(
+    claim: &InputClaim,
+    pane_info: impl FnOnce(&[PaneField]) -> Result<PaneInfo>,
+    process: impl FnOnce(&[String]) -> Result<Output>,
+) -> Result<InputState> {
+    let info = pane_info(
+        &[
+            PaneField::Tty,
+            PaneField::CursorX,
+            PaneField::CursorY,
+            PaneField::InMode,
+            PaneField::CurrentCommand,
+            PaneField::Dead,
+            PaneField::RunMarker,
+            PaneField::SessionName,
+            PaneField::BracketedPaste,
+        ],
+    )?;
+    let fields = info.fields();
+    if fields.len() != 9
+        || fields[3] != "0"
+        || fields[5] != "0"
+        || fields[6] != claim.run_id
+        || fields[7] != claim.name
+        || fields[8] != "1"
+    {
+        return Err("terminal is not in the expected agent input mode; open Terminal".into());
+    }
+    let tty = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+        .open(fields[0])
+        .map_err(|e| e.to_string())?;
+    let pid = claim.pid.ok_or("missing agent process")? as i32;
+    let mut attributes: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(tty.as_raw_fd(), &mut attributes) } != 0
+        || attributes.c_lflag & (libc::ICANON | libc::ECHO) != 0
+    {
+        return Err("agent does not own an interactive input terminal; open Terminal".into());
+    }
+    // Ensure the pinned process is attached to this tty, not just a PID sharing a group.
+    let tty_output = process(&owned(&[
+        "-p",
+        &pid.to_string(),
+        "-o",
+        "tty=,pgid=,tpgid=,comm=",
+    ]))?;
+    let tty_text = String::from_utf8_lossy(&tty_output.stdout);
+    let process_fields: Vec<_> = tty_text.split_whitespace().collect();
+    if process_fields.len() < 4
+        || process_fields[0] != fields[0].trim_start_matches("/dev/")
+        || process_fields[1] != process_fields[2]
+        || !process_fields[2].parse::<i32>().is_ok_and(|id| id > 0)
+    {
+        return Err("tracked agent is not attached to the selected terminal".into());
+    }
+    if SHELLS.contains(&fields[4])
+        && !(claim.agent == "kimi"
+            && Path::new(process_fields[3])
+                .file_name()
+                .is_some_and(|name| name == "kimi"))
+    {
+        return Err("terminal is not in the expected agent input mode; open Terminal".into());
+    }
+    Ok(InputState {
+        cursor_x: fields[1].into(),
+        cursor_y: fields[2].into(),
+    })
+
 }
 
 impl TerminalBackend for Tmux {
@@ -468,71 +543,7 @@ impl TerminalBackend for Tmux {
     }
 
     fn input_state(&self, claim: &InputClaim) -> Result<InputState> {
-        let info = self.pane_info(
-            Target::Pane(claim.pane),
-            &[
-                PaneField::Tty,
-                PaneField::CursorX,
-                PaneField::CursorY,
-                PaneField::InMode,
-                PaneField::CurrentCommand,
-                PaneField::Dead,
-                PaneField::RunMarker,
-                PaneField::SessionName,
-                PaneField::BracketedPaste,
-            ],
-        )?;
-        let fields = info.fields();
-        if fields.len() != 9
-            || fields[3] != "0"
-            || fields[5] != "0"
-            || fields[6] != claim.run_id
-            || fields[7] != claim.name
-            || fields[8] != "1"
-        {
-            return Err("terminal is not in the expected agent input mode; open Terminal".into());
-        }
-        let tty = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
-            .open(fields[0])
-            .map_err(|e| e.to_string())?;
-        let pid = claim.pid.ok_or("missing agent process")? as i32;
-        let mut attributes: libc::termios = unsafe { std::mem::zeroed() };
-        if unsafe { libc::tcgetattr(tty.as_raw_fd(), &mut attributes) } != 0
-            || attributes.c_lflag & (libc::ICANON | libc::ECHO) != 0
-        {
-            return Err("agent does not own an interactive input terminal; open Terminal".into());
-        }
-        // Ensure the pinned process is attached to this tty, not just a PID sharing a group.
-        let tty_output = picker_ps(&owned(&[
-            "-p",
-            &pid.to_string(),
-            "-o",
-            "tty=,pgid=,tpgid=,comm=",
-        ]))?;
-        let tty_text = String::from_utf8_lossy(&tty_output.stdout);
-        let process_fields: Vec<_> = tty_text.split_whitespace().collect();
-        if process_fields.len() < 4
-            || process_fields[0] != fields[0].trim_start_matches("/dev/")
-            || process_fields[1] != process_fields[2]
-            || !process_fields[2].parse::<i32>().is_ok_and(|id| id > 0)
-        {
-            return Err("tracked agent is not attached to the selected terminal".into());
-        }
-        if SHELLS.contains(&fields[4])
-            && !(claim.agent == "kimi"
-                && Path::new(process_fields[3])
-                    .file_name()
-                    .is_some_and(|name| name == "kimi"))
-        {
-            return Err("terminal is not in the expected agent input mode; open Terminal".into());
-        }
-        Ok(InputState {
-            cursor_x: fields[1].into(),
-            cursor_y: fields[2].into(),
-        })
+        input_state_using(claim, |fields| self.pane_info(Target::Pane(claim.pane), fields), picker_ps)
     }
     fn on_terminal(&self, pid: &str, tty: &str) -> Result<bool> {
         let output = picker_ps(&owned(&["-p", pid, "-o", "tty="]))?;

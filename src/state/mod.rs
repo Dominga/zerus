@@ -117,6 +117,7 @@ pub(crate) use session_action::{
 };
 mod shown_path;
 mod startup_choice;
+mod claude_theme;
 mod terminal;
 mod conversation_history;
 mod usage;

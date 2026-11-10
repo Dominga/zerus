@@ -868,7 +868,13 @@ class AgentCompatibility(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 marker = next(line for line in result.stdout.splitlines() if line.startswith('ZERUS_NATIVE_RESULT='))
                 counts = json.loads(marker.removeprefix('ZERUS_NATIVE_RESULT='))
-                self.assertEqual(counts['skipped'], counts['tests'])
+                if suites:
+                    # Native modules may also contain ordinary policy controls.
+                    # Even a mixed passing/skipped suite must fail this gate.
+                    self.assertGreater(counts['skipped'], 0)
+                    self.assertLessEqual(counts['skipped'], counts['tests'])
+                else:
+                    self.assertEqual(counts, {'tests': 0, 'skipped': 0})
 
     def test_fixture_environment_does_not_inherit_live_accounts_or_session_selection(self):
         import os

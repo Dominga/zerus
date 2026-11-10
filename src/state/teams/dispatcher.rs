@@ -10095,12 +10095,39 @@ pub(crate) fn starved_actions(team: &Team, members: &[String]) -> Vec<String> {
             }
         }
     }
-    for phase in team.phases.iter().filter(|phase| phase.state.is_draft()) {
-        let open = team.tasks.iter().filter(|task| task.phase == phase.n && !task.status.finished()).count();
-        if open > 0 && phase.state == PhaseState::Draft {
+    // Owner, 2026-11-11: an approval starts nothing behind a barrier, so the
+    // digest never offers one for a barrier phase (the owner approved phase 2
+    // on this advice and nothing changed); it names the barrier and how it
+    // goes. With Auto-accept drafts on, Auto takes a draft and no card is due.
+    let mut phases: Vec<&Phase> = team.phases.iter().filter(|phase| matches!(phase.state, PhaseState::Draft | PhaseState::Approved)).collect();
+    phases.sort_by_key(|phase| (phase.order(), phase.n));
+    for phase in phases {
+        let n = phase.n;
+        let open = team.tasks.iter().filter(|task| task.phase == n && !task.status.finished()).count();
+        if open == 0 {
+            continue;
+        }
+        let held = plan::phase_barrier_blockers(team, n).len();
+        if phase.state == PhaseState::Approved {
+            if held > 0 {
+                lines.push(format!(
+                    "Phase {n} ({open} task(s)) is approved behind its barrier: it waits for {held} open task(s) of the phases before it. \
+                     If it may run alongside them, propose removing the barrier: \
+                     {{\"kind\":\"edit-draft\",\"phase\":{n},\"barrier\":false,\"reason\":\"...\"}} | hgs team propose --json"
+                ));
+            }
+        } else if held > 0 {
             lines.push(format!(
-                "Phase {} ({open} task(s)) can run alongside once it is approved: ask the owner with a card (hgs team propose)",
-                phase.n
+                "Phase {n} ({open} task(s)) is a draft behind its barrier: approved or not, it waits for {held} open task(s) of the phases before it. \
+                 If it may run alongside them, remove the barrier: {{\"phase\":{n},\"barrier\":false}} | hgs team edit-draft --json"
+            ));
+        } else if team.settings.auto_accept {
+            if let Some(blocker) = super::ops::auto_accept_blocker(team, n) {
+                lines.push(format!("Phase {n} ({open} task(s)) is a draft Auto cannot accept yet: {blocker}"));
+            }
+        } else {
+            lines.push(format!(
+                "Phase {n} ({open} task(s)) can run alongside once it is approved: ask the owner with a card (hgs team propose)"
             ));
         }
     }

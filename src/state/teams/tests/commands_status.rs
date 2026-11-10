@@ -553,11 +553,17 @@ fn status_shows_the_owners_phase_states_and_the_stuck_scope() {
     assert_eq!(value["attention"][0]["summary"], "Phase 3 \u{b7} Polish \u{2014} draft waits for your Accept");
     // Even with the report reminder off, and the team list carries it too.
     team.settings.remind_owner_minutes = 0;
-    team.settings.auto_accept = true;
     let listed = summary(&team, true);
     let expected = view_with(&team, &[], None)["attention"].as_array().unwrap().len();
     assert!(expected >= 1);
     assert_eq!(listed["attention_count"], expected);
+    // Owner, 2026-11-11: with Auto-accept drafts on, Auto takes the draft, so
+    // nothing waits for the owner's Accept; the list carries the switch.
+    team.settings.auto_accept = true;
+    let listed = summary(&team, true);
+    let attention = view_with(&team, &[], None)["attention"].clone();
+    assert!(!attention.as_array().unwrap().iter().any(|item| item["kind"] == "phase_draft"), "{attention}");
+    assert_eq!(listed["attention_count"], attention.as_array().unwrap().len());
     assert_eq!((listed["stuck_scope"].clone(), listed["auto_accept"].clone()), (json!([2]), json!(true)));
     // While planning every phase is in the plan.
     team.status = TeamStatus::Planning;

@@ -161,6 +161,41 @@ fn one_team_digest_an_hour_names_every_member_due_and_concrete_actions() {
     assert_eq!(digest(&steps(&team, &idle_dev, LATE + 61.0 * 60.0)), Some(vec!["dev".to_owned()]));
 }
 
+/// Owner, 2026-11-11 (team 86821caa): the digest told the lead that a barrier
+/// draft "can run alongside once it is approved"; the owner approved it on a
+/// card and nothing started. A barrier phase names its barrier and how it
+/// goes; with Auto-accept drafts on no card is offered for a draft at all.
+#[test]
+fn the_digest_never_offers_an_approval_for_a_barrier_phase() {
+    let none = BTreeSet::new();
+    let mut events = Vec::new();
+    let extend = |team: &mut Team, barrier: bool, events: &mut Vec<Event>| {
+        ops::apply(team, "extend", &json!({"phase_title":"Docs","barrier":barrier,"tasks":[{"id":4,"title":"Guide","assignee":"dev"}]}),
+            &Actor::Human, &BTreeSet::new(), events).unwrap();
+    };
+    let phase_line = |team: &Team| starved_actions(team, &[]).into_iter().find(|line| line.starts_with("Phase 2"));
+    let mut auto = team();
+    let mut team = team();
+    extend(&mut team, true, &mut events);
+    let line = phase_line(&team).expect("the barrier draft is named");
+    assert!(line.contains("is a draft behind its barrier") && line.contains("approved or not"), "{line}");
+    assert!(line.contains("{\"phase\":2,\"barrier\":false} | hgs team edit-draft --json"), "{line}");
+    assert!(!line.contains("once it is approved"), "{line}");
+    // Approved, it still waits: the lead proposes removing the barrier.
+    ops::apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
+    let line = phase_line(&team).expect("the approved barrier phase is named");
+    assert!(line.contains("is approved behind its barrier"), "{line}");
+    assert!(line.contains("{\"kind\":\"edit-draft\",\"phase\":2,\"barrier\":false,\"reason\":\"...\"} | hgs team propose --json"), "{line}");
+    // Without the barrier the approved phase runs and needs no line.
+    ops::apply(&mut team, "edit-draft", &json!({"phase":2,"barrier":false}), &Actor::Human, &none, &mut events).unwrap();
+    assert!(phase_line(&team).is_none());
+    // Auto-accept drafts on: Auto takes a clean draft, so no card is due.
+    extend(&mut auto, false, &mut events);
+    assert!(phase_line(&auto).unwrap().contains("once it is approved"));
+    auto.settings.auto_accept = true;
+    assert!(phase_line(&auto).is_none(), "{:?}", phase_line(&auto));
+}
+
 #[test]
 fn a_digest_is_sent_once_with_one_event_and_nothing_without_an_action() {
     let dir = tempfile::tempdir().unwrap();

@@ -261,7 +261,13 @@ pub(crate) fn acceptance_block(team: &Team, n: u32) -> Option<u32> {
 /// (owner, 2026-11-07): only a phase marked barrier waits so; any other
 /// approved phase runs alongside the phases before it.
 pub(crate) fn barrier_blockers(team: &Team, task: &Task) -> Vec<u32> {
-    let Some(phase) = team.phases.iter().find(|phase| phase.n == task.phase) else { return Vec::new() };
+    phase_barrier_blockers(team, task.phase)
+}
+
+/// The open tasks of the phases before barrier phase `n`, which hold all of
+/// its tasks; empty for a phase that is no barrier.
+pub(crate) fn phase_barrier_blockers(team: &Team, n: u32) -> Vec<u32> {
+    let Some(phase) = team.phases.iter().find(|phase| phase.n == n) else { return Vec::new() };
     if !phase.barrier {
         return Vec::new();
     }
@@ -270,11 +276,48 @@ pub(crate) fn barrier_blockers(team: &Team, task: &Task) -> Vec<u32> {
     let mut blockers: Vec<u32> = team
         .tasks
         .iter()
-        .filter(|other| other.phase != task.phase && order_of(other.phase) < target && !other.status.finished())
+        .filter(|other| other.phase != n && order_of(other.phase) < target && !other.status.finished())
         .map(|other| other.id)
         .collect();
     blockers.sort_unstable();
     blockers
+}
+
+/// Owner, 2026-11-11: why an accepted phase with open work hands nothing out,
+/// in one line with the way out, or None when it runs. The phase summary
+/// reads the same three holds (a barrier, a pause, the owner's acceptance of
+/// a phase before it), so the approval receipt, the feed and the summary name
+/// one state.
+pub(crate) fn accepted_wait(team: &Team, n: u32) -> Option<String> {
+    let record = team.phases.iter().find(|phase| phase.n == n)?;
+    if !team.tasks.iter().any(|task| task.phase == n && !task.status.finished()) {
+        return None;
+    }
+    let blockers = phase_barrier_blockers(team, n);
+    if !blockers.is_empty() {
+        let shown: Vec<String> = blockers.iter().take(8).map(|id| format!("#{id}")).collect();
+        let more = if blockers.len() > shown.len() { format!(" and {} more", blockers.len() - shown.len()) } else { String::new() };
+        return Some(format!(
+            "Phase {n} is a barrier phase: it starts when every task of the phases before it is finished (open: {}{more}). \
+             Remove the barrier to run it alongside them: the owner in the phase menu, the lead with \
+             {{\"kind\":\"edit-draft\",\"phase\":{n},\"barrier\":false,\"reason\":\"...\"}} | hgs team propose --json",
+            shown.join(", ")
+        ));
+    }
+    if let Some(pause) = &record.pause {
+        let reason = if pause.reason.trim().is_empty() { String::new() } else { format!(": {}", pause.reason.trim()) };
+        return Some(format!("Phase {n} is paused by {}{reason}; it starts when the pause is removed (hgs team unpause-phase)", pause.by));
+    }
+    if awaits_acceptance(team, record) {
+        return None;
+    }
+    acceptance_block(team, n).map(|before| format!("Phase {n} starts after the owner accepts phase {before}"))
+}
+
+/// The state an accepted phase with open work has in the phase summary:
+/// `queued` while something holds it (`accepted_wait`), else `running`.
+pub(crate) fn accepted_state(team: &Team, n: u32) -> &'static str {
+    if accepted_wait(team, n).is_some() { "queued" } else { "running" }
 }
 
 /// A barrier phase's tasks wait until every task of a lower phase is finished:
@@ -841,8 +884,9 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
             let open = tasks.iter().filter(|task| !task.status.finished()).count();
             let total = record.and_then(|phase| phase.archived.as_ref()).map_or(tasks.len(), |phase| phase.tasks);
             let done = total - open;
-            let blocked = record.is_some_and(|phase| phase.barrier)
-                && team.tasks.iter().any(|task| task.phase < n && !task.status.finished());
+            // The barrier follows the display order, as the hand-out does
+            // (barrier_blockers): a moved phase reads the state it runs in.
+            let blocked = !phase_barrier_blockers(team, n).is_empty();
             // U63 (owner, 2026-10-31): a paused phase, and a phase behind one
             // that waits for the owner's acceptance, wait as queued.
             let pause = record.and_then(|phase| phase.pause.clone());
@@ -912,8 +956,15 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
                 "done": done,
                 "total": total,
                 "barrier": record.is_some_and(|phase| phase.barrier),
-                // U61: a draft that Auto accepts once its plan has no blocker.
-                "auto": record.is_some_and(|phase| phase.approval == super::model::Approval::Auto),
+                // U61: a draft that Auto accepts once its plan has no blocker
+                // (owner, 2026-11-11: every plain draft while Auto-accept
+                // drafts is on); for an accepted phase, the approval it was
+                // added with.
+                "auto": record.is_some_and(|phase| match phase.state {
+                    PhaseState::Draft => team.settings.auto_accept,
+                    PhaseState::Rejected => false,
+                    _ => phase.approval == super::model::Approval::Auto,
+                }),
                 // U63: the phase's pause and who accepts it.
                 "pause": pause,
                 "acceptance": record.map_or(PhaseAcceptance::Lead, |phase| phase.acceptance),

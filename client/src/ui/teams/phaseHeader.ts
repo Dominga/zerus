@@ -22,7 +22,7 @@ export interface HeaderTeam {
 }
 
 export type PhaseButton = "reject" | "accept" | "undo" | "send_back" | "accept_phase" | "add_task";
-export type PhaseMenuId = "edit" | "move_earlier" | "move_later" | "pause" | "unpause" | "owner_acceptance" | "return_to_draft" | "discard";
+export type PhaseMenuId = "edit" | "move_earlier" | "move_later" | "pause" | "unpause" | "barrier" | "owner_acceptance" | "return_to_draft" | "discard";
 export interface PhaseMenuItem { id: PhaseMenuId; enabled: boolean; checked?: boolean }
 export interface PhaseNote { id: string; text: string; tone: "dim" | "warn" | "accent"; tip?: string }
 export interface PhaseHeader {
@@ -103,6 +103,10 @@ export function phaseHeader(team: HeaderTeam, phase: HeaderPhase): PhaseHeader {
     { id: "move_later", enabled: at >= 0 && at + 1 < movable.length },
   ];
   const acceptance: PhaseMenuItem = { id: "owner_acceptance", enabled: n > 1, checked: !!phase.owner_accepts };
+  // Owner, 2026-11-11: the barrier decides whether an approved phase starts
+  // beside the phases before it, so the owner sees it and can remove it (the
+  // lead set it and the owner had no control over it at all).
+  const barrier: PhaseMenuItem = { id: "barrier", enabled: n > 1, checked: !!phase.barrier };
   // U61: started ahead, or accepted by Auto.
   if (state === "draft" && phase.auto && phase.start_ahead) notes.push({ id: "start_ahead", text: tr("started ahead by the lead"), tone: "accent" });
   else if (!freeOpen && phase.accepted_by_auto) notes.push({ id: "by_auto", text: tr("accepted by Auto"), tone: "dim", tip: tr("Auto accepted this phase when its first task started") });
@@ -120,7 +124,7 @@ export function phaseHeader(team: HeaderTeam, phase: HeaderPhase): PhaseHeader {
   }
   if (state === "draft" && !planning) {
     buttons.push("reject", "accept");
-    menu.push(...moves(), acceptance, { id: "discard", enabled: true });
+    menu.push(...moves(), barrier, acceptance, { id: "discard", enabled: true });
   } else if (state === "rejected") {
     notes.push({ id: "sent_back", text: tr("Sent back: “%1”", phase.rejection ?? ""), tone: "warn", tip: phase.rejection });
     if (!phase.reworked) buttons.push("undo");
@@ -135,7 +139,7 @@ export function phaseHeader(team: HeaderTeam, phase: HeaderPhase): PhaseHeader {
     const unstarted = acceptedUnstarted(team, n);
     menu.push({ id: "edit", enabled: unstarted }, ...moves());
     menu.push(phase.paused ? { id: "unpause", enabled: true } : { id: "pause", enabled: unstarted });
-    menu.push(acceptance, { id: "return_to_draft", enabled: unstarted }, { id: "discard", enabled: unstarted });
+    menu.push(barrier, acceptance, { id: "return_to_draft", enabled: unstarted }, { id: "discard", enabled: unstarted });
   }
   const summary = tasks.map((task) => `#${task.id} ${task.title}`).join(", ");
   return { state, buttons, menu, notes, summary, done, total: owed.length };
@@ -149,6 +153,7 @@ export function menuText(id: PhaseMenuId): string {
     case "move_later": return tr("Move later");
     case "pause": return tr("Pause phase…");
     case "unpause": return tr("Remove pause");
+    case "barrier": return tr("Waits for earlier phases (barrier)");
     case "owner_acceptance": return tr("Requires owner acceptance");
     case "return_to_draft": return tr("Return to draft…");
     case "discard": return tr("Discard phase…");
@@ -159,7 +164,7 @@ export function menuText(id: PhaseMenuId): string {
 export function buttonText(id: PhaseButton): { text: string; tip: string } {
   switch (id) {
     case "reject": return { text: tr("Reject…"), tip: tr("Send the draft back to the lead with what should change") };
-    case "accept": return { text: tr("Accept"), tip: tr("Hand the phase's tasks out (it waits if an earlier phase is still running)") };
+    case "accept": return { text: tr("Accept"), tip: tr("Hand the phase's tasks out; a barrier phase waits for the phases before it") };
     case "undo": return { text: tr("Undo"), tip: tr("Take the send-back back; the draft waits for you again") };
     case "send_back": return { text: tr("Send back…"), tip: tr("The lead reworks the phase with your comment") };
     case "accept_phase": return { text: tr("Accept phase"), tip: tr("Accept the phase's result; it becomes Done") };

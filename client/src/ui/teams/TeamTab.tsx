@@ -87,6 +87,17 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
   };
   // Task 197 (P6): only the switch's own field; the server merges it.
   const setAutoAccept = async (on: boolean) => {
+    // U39 (owner, 2026-10-28): the switch is team-wide, so turning it on names
+    // the drafts Auto will approve and asks first. Owner, 2026-11-11: Auto
+    // takes every plain draft, whatever approval the phase was planned with.
+    const drafts = on ? props.team.phases.filter((phase) => phase.state === "draft") : [];
+    if (drafts.length > 0) {
+      const names = drafts.map((phase) => (phase.title ? `${tr("Phase %1", phase.n)}: ${phase.title}` : tr("Phase %1", phase.n))).join("; ");
+      const yes = await windowPort.confirm({ name: "teamAutoAcceptConfirm", title: tr("Turn Auto-accept drafts on?"),
+        text: tr("Auto will approve these drafts without asking you, each once its plan has no blocker (a barrier phase when the phases before it are done): %1", names),
+        action: tr("Turn on") });
+      if (!yes) return;
+    }
     try {
       const outcome = await teamAction({ computer: props.computer, team: props.team.id, team_name: props.team.name,
         action: { kind: "settings", settings: { auto_accept: on } } as TeamCall["action"] });

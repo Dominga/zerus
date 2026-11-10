@@ -901,7 +901,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
                 </Show>
                 <Show when={props.onAutoAccept}>
                   <button type="button" class="pm-toggle" classList={{ on: autoAccept() }} aria-pressed={autoAccept()} data-toggle="auto-accept"
-                    title={autoAccept() ? tr("Auto accepts a draft phase at its first hand-out") : tr("A draft phase waits for your approval")}
+                    title={autoAccept() ? tr("Auto approves every draft phase once its plan has no blocker; a barrier phase when the phases before it are done") : tr("A draft phase waits for your approval")}
                     onClick={() => props.onAutoAccept?.(!autoAccept())}>
                     <Icon name="sparkles" size={12} />{tr("Auto-accept drafts")}
                   </button>

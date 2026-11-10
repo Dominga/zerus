@@ -2845,23 +2845,44 @@ display, acceptance and the owner's acceptance gate, not for scheduling. An
 approved phase therefore runs alongside the phases before it: approving a phase
 while earlier work is open no longer queues it, and the receipt's
 `phase_state` is `running` (`"alongside":true` changes nothing any more and is
-only echoed). A task still waits for:
+only echoed). The receipt, the `phase_approved` and `phase_auto_accepted`
+events and the phase summary name one state: a phase approved behind a
+barrier, a pause or a phase awaiting the owner's acceptance is `queued`, and
+the receipt's `waiting` says what holds it and how it goes. A task still waits
+for:
 
 - its dependencies (`hard` until accepted, `soft` until reported);
 - the outputs an open task holds (task 155): a task whose `output` overlaps an
   open, unchained task's is refused at planning (`outputs`, chain them with a
   hard dependency) and held at the hand-out, also across phases;
 - a barrier: only a phase marked `barrier` waits until every task of a lower
-  phase is finished;
+  phase is finished. The lead sets it when it plans; the owner sees it on the
+  phase header and switches it in the phase menu (**Waits for earlier phases
+  (barrier)**), also once the phase has started. Either sends
+  `{"phase":N,"barrier":false}` to `edit-draft`; the lead changes the barrier
+  of a draft directly and of an accepted phase with an `edit-draft` card;
 - a pause on its phase (U63), or a phase before it that waits for the owner's
   acceptance (U63).
 
 A draft runs nothing: its tasks are `draft` until the phase is approved, by
-the owner or, for an `auto` draft with Auto-accept drafts on
-(`settings.auto_accept`), by Auto (`phase_auto_accepted`) as soon as its plan
-has no blocker and no earlier phase is a draft. Until then the lead edits it
-freely (`extend`, `edit-draft`, `move-task`, `cancel`). Status carries each
-phase's `state` and `auto`.
+the owner or, with Auto-accept drafts on (`settings.auto_accept`), by Auto
+(`phase_auto_accepted`) as soon as its plan has no blocker and no earlier phase
+is a draft; a barrier draft is taken when the phases before it are done.
+Auto-accept drafts is the owner's switch and takes every plain draft, whatever
+approval (`review` or `auto`) the phase was added with; a draft the owner sent
+back is never Auto's. Turning the switch on in the desktop names the drafts it
+will approve and asks first. Until then the lead edits the draft freely
+(`extend`, `edit-draft`, `move-task`, `cancel`). Status carries each phase's
+`state` and `auto`: for a draft, whether Auto will take it; for an accepted
+phase, the approval it was added with. With the switch on, no draft waits for
+the owner's Accept in `attention`.
+
+`edit-draft` takes `phase`, `revision`, `title`, `barrier`, `target_hours`,
+`tasks_update` (a list of `{"id":N,...}` with the task fields to change) and
+`tasks_remove` (a list of task numbers). A request naming any other field, a
+`tasks_update` entry naming an unknown task field, or a request naming nothing
+to change is refused with the fields it takes and an example; nothing is
+dropped in silence.
 
 This replaces start-ahead (U61) and work-ahead (U31) and the queued phase of
 U25. A record stored before reads a phase's `queued` state as approved, and
@@ -2885,7 +2906,10 @@ work of the team could start; the lead hears of it only when it can act (task
 - after 20 minutes the lead gets one team-level digest (`plan_starved`, with
   `members`, `idle` and `actions`), at most once an hour (`starved_digest_at`).
   It names who is idle and the concrete actions: a ready task to reassign, a
-  draft that can run alongside once approved (an owner card), and what each
+  draft that can run alongside once approved (an owner card; with Auto-accept
+  drafts on, only what keeps Auto from taking it), a phase held by its barrier
+  with the request that removes the barrier (never an approval, which starts
+  nothing behind a barrier), and what each
   startable task waits for (accept, start, release, retry, answer). It never
   says "give it work"; with no action to name, nothing is sent and the
   episode is marked told. A member that becomes due within the hour waits for

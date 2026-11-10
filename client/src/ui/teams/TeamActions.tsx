@@ -221,6 +221,7 @@ export function PhaseActions(props: { computer: ComputerId; team: ActTeam & { ph
       case "unpause": return void model.unpausePhase(props.phase);
       case "move_earlier": return void model.movePhase(props.phase, false);
       case "move_later": return void model.movePhase(props.phase, true);
+      case "barrier": return void model.phaseBarrier(props.phase, !record()?.barrier);
       case "owner_acceptance": return void model.phaseAcceptance(props.phase, !record()?.owner_accepts);
       case "return_to_draft": return void model.returnToDraft(props.phase);
       case "discard": return void model.discardPhase(props.phase);

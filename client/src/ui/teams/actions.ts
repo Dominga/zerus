@@ -856,6 +856,14 @@ export class TeamActions {
   pausePhase(phase: number, reason: string) { return this.run(`pause-phase:${phase}`, { kind: "pause_phase", phase, reason: reason.trim() }); }
   unpausePhase(phase: number) { return this.run(`unpause-phase:${phase}`, { kind: "unpause_phase", phase }); }
   phaseAcceptance(phase: number, owner: boolean) { return this.run(`phase-acceptance:${phase}`, { kind: "phase_acceptance", phase, owner }); }
+  /**
+   * Owner, 2026-11-11: the phase's barrier, set or removed from its menu. A
+   * barrier phase waits for every task of the phases before it; without it an
+   * approved phase runs alongside them.
+   */
+  phaseBarrier(phase: number, barrier: boolean) {
+    return this.run(`edit-draft:${phase}:barrier`, { kind: "edit_draft", phase, revision: this.where().team.revision, barrier });
+  }
   /** Edit phase: only what changed is sent, at the revision the team was read at. */
   editPhase(phase: number, title: string | undefined, updates: { id: number; title?: string; description?: string; criteria?: string[]; assignee?: string; deps?: unknown[] }[]) {
     if (title === undefined && updates.length === 0) return Promise.resolve(undefined);

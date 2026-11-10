@@ -1204,7 +1204,7 @@ fn a_stale_draft_revision_is_refused_until_status_is_read_again() {
     team.phase_numbers_revision = team.revision + 1;
     for op in ["edit-draft", "move-phase"] {
         let input = if op == "edit-draft" {
-            json!({"phase":2,"task":3,"title":"Changed","revision":read})
+            json!({"phase":2,"title":"Changed","revision":read})
         } else {
             json!({"phase":2,"to":"after","revision":read})
         };
@@ -1217,15 +1217,15 @@ fn a_stale_draft_revision_is_refused_until_status_is_read_again() {
     assert_eq!(error, format!("Draft numbers changed after revision {read}; read status again"));
     // The revision the change produced works, and no revision works as before.
     let current = team.phase_numbers_revision;
-    apply(&mut team, "edit-draft", &json!({"phase":2,"task":3,"title":"Changed","revision":current}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
-    apply(&mut team, "edit-draft", &json!({"phase":2,"task":3,"title":"Again"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    apply(&mut team, "edit-draft", &json!({"phase":2,"title":"Changed","revision":current}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    apply(&mut team, "edit-draft", &json!({"phase":2,"title":"Again"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
     // A real discard moves the marker and refuses the revision it read.
     let mut fresh = running_team();
     extend(&mut fresh, &json!({"phase_title":"A","tasks":[{"id":3,"title":"A","assignee":"dev"}]}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
     let before = fresh.revision;
     apply(&mut fresh, "discard-phase", &json!({"phase":2}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
     assert_eq!(fresh.phase_numbers_revision, before + 1);
-    let error = apply(&mut fresh, "edit-draft", &json!({"phase":2,"task":3,"title":"X","revision":before}), &Actor::Human, &BTreeSet::new(), &mut events)
+    let error = apply(&mut fresh, "edit-draft", &json!({"phase":2,"title":"X","revision":before}), &Actor::Human, &BTreeSet::new(), &mut events)
         .unwrap_err()
         .to_string();
     assert!(error.contains("Draft numbers changed"), "{error}");

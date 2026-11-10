@@ -475,6 +475,14 @@ describe("Task 196: the phase header's actions", () => {
     ]);
   });
 
+  // Owner, 2026-11-11: the owner switches a phase's barrier from its menu.
+  it("The barrier switch sends only the barrier, at the revision read", async () => {
+    const f = fake();
+    const model = actionsOf(f, phased());
+    await model.phaseBarrier(2, false);
+    expect(f.sent.map((call) => call.action)).toEqual([{ kind: "edit_draft", phase: 2, revision: 7, barrier: false }]);
+  });
+
   it("Add task asks after hgs's warning and confirms or declines the pending addition", async () => {
     for (const yes of [true, false]) {
       const f = fake();

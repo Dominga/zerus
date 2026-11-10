@@ -2187,9 +2187,12 @@ pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
     // whatever the report reminder says; a draft behind it waits for it.
     let mut drafts: Vec<&Phase> = team.phases.iter().filter(|phase| phase.state.is_draft()).collect();
     drafts.sort_by_key(|phase| (phase.order(), phase.n));
+    // Owner, 2026-11-11: with Auto-accept drafts on, Auto takes the draft (a
+    // barrier draft when the phases before it are done); nothing waits for
+    // the owner's Accept.
     let phase_items: Vec<Value> = drafts
         .first()
-        .filter(|phase| phase.state == PhaseState::Draft)
+        .filter(|phase| phase.state == PhaseState::Draft && !team.settings.auto_accept)
         .map(|phase| {
             json!({"kind":"phase_draft","phase":phase.n,"since":phase.added_at,
                 "summary":format!("{} \u{2014} draft waits for your Accept", phase_name(phase))})

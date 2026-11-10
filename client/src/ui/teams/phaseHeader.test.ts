@@ -19,7 +19,7 @@ describe("phase header", () => {
     const view = team([phase(1, "running"), phase(2, "draft", { added_by: "Lead", added_at: 1700000000 }), phase(3, "draft")], [task(1, 1, "running", 1), task(2, 2), task(3, 3)]);
     const head = phaseHeader(view, view.phases[1]);
     expect(head.buttons).toEqual(["reject", "accept"]);
-    expect(ids(head.menu)).toEqual(["move_earlier", "move_later", "owner_acceptance", "discard"]);
+    expect(ids(head.menu)).toEqual(["move_earlier", "move_later", "barrier", "owner_acceptance", "discard"]);
     expect(head.menu.find((item) => item.id === "move_earlier")!.enabled).toBe(false);
     expect(head.menu.find((item) => item.id === "move_later")!.enabled).toBe(true);
     expect(head.menu.find((item) => item.id === "owner_acceptance")!.checked).toBe(false);
@@ -54,9 +54,10 @@ describe("phase header", () => {
     expect(head.notes.find((note) => note.id === "health")!.text).toBe("Healthy 1/2");
     expect(head.notes.find((note) => note.id === "health")!.tone).toBe("warn");
     expect(head.notes.find((note) => note.id === "by_auto")!.text).toBe("accepted by Auto");
-    expect(ids(head.menu)).toEqual(["edit", "move_earlier", "move_later", "pause", "owner_acceptance", "return_to_draft", "discard"]);
-    // Its work started: Edit, Pause, Return to draft and Discard are off.
-    expect(head.menu.filter((item) => item.enabled).map((item) => item.id)).toEqual(["owner_acceptance"]);
+    expect(ids(head.menu)).toEqual(["edit", "move_earlier", "move_later", "pause", "barrier", "owner_acceptance", "return_to_draft", "discard"]);
+    // Its work started: Edit, Pause, Return to draft and Discard are off; the
+    // barrier is scheduling, so it stays the owner's to change.
+    expect(head.menu.filter((item) => item.enabled).map((item) => item.id)).toEqual(["barrier", "owner_acceptance"]);
     // P10: a cancelled task is not owed.
     expect([head.done, head.total]).toEqual([0, 2]);
   });
@@ -67,7 +68,7 @@ describe("phase header", () => {
     [task(1, 1, "running", 1), task(2, 2), task(3, 3)]);
     const second = phaseHeader(view, view.phases[1]);
     expect(second.notes.find((note) => note.id === "queued")!.text).toBe("Starts after phase 1 is accepted");
-    expect(second.menu.filter((item) => item.enabled).map((item) => item.id)).toEqual(["edit", "move_later", "pause", "owner_acceptance", "return_to_draft", "discard"]);
+    expect(second.menu.filter((item) => item.enabled).map((item) => item.id)).toEqual(["edit", "move_later", "pause", "barrier", "owner_acceptance", "return_to_draft", "discard"]);
     const third = phaseHeader(view, view.phases[2]);
     expect(third.notes.find((note) => note.id === "queued")!.text).toBe("Starts after phase 2");
     expect(third.notes.find((note) => note.id === "paused")!.text).toBe("Paused by you: after the release");
@@ -105,6 +106,19 @@ describe("phase header", () => {
     expect(buttonText("add_task").text).toBe("Add task\u2026");
     expect(menuText("return_to_draft")).toBe("Return to draft\u2026");
     expect(menuText("owner_acceptance")).toBe("Requires owner acceptance");
+    expect(menuText("barrier")).toBe("Waits for earlier phases (barrier)");
+  });
+
+  // Owner, 2026-11-11: the lead set a barrier the owner could neither see in
+  // the menu nor remove; an approved phase stayed queued behind it.
+  it("shows the barrier as a checked menu item the owner can switch, in a draft and in an accepted phase", () => {
+    const view = team([phase(1, "running"), phase(2, "queued", { barrier: true }), phase(3, "draft", { barrier: true }), phase(4, "draft")],
+      [task(1, 1, "running", 1), task(2, 2), task(3, 3), task(4, 4)]);
+    for (const at of [1, 2]) {
+      const item = phaseHeader(view, view.phases[at]).menu.find((found) => found.id === "barrier")!;
+      expect([item.enabled, item.checked]).toEqual([true, true]);
+    }
+    expect(phaseHeader(view, view.phases[3]).menu.find((found) => found.id === "barrier")!.checked).toBe(false);
   });
 });
 

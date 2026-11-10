@@ -2598,7 +2598,13 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
             "phase_approved",
             json!({"by":label,"phase":n,"tasks":count,"owner_word":owner_word,"state":state,"alongside":alongside,"approve_anyway":input["approve_anyway"].as_bool() == Some(true)}),
         ));
-        Ok(json!({"status":"phase_approved","phase":n,"tasks":ids,"owner_word":owner_word,"phase_state":state,"alongside":alongside}))
+        let mut receipt = json!({"status":"phase_approved","phase":n,"tasks":ids,"owner_word":owner_word,"phase_state":state,"alongside":alongside});
+        // Owner, 2026-11-11: an approval that starts nothing says what holds
+        // the phase and how to let it go.
+        if let Some(waiting) = plan::accepted_wait(team, n) {
+            receipt["waiting"] = json!(waiting);
+        }
+        Ok(receipt)
     } else {
         // F285: a discarded draft leaves no trace in the numbering. The record
         // goes, its Draft tasks go, and the later drafts close the gaps; the
@@ -2663,7 +2669,9 @@ fn accept_blockers(team: &Team, at: usize, offline: &BTreeSet<String>) -> anyhow
 /// it - there is no queue behind them (U25) any more; its tasks wait only for
 /// their dependencies, the outputs an open task holds (task 155), a barrier
 /// and an owner-acceptance gate (U63). Returns the state the receipt and the
-/// feed name.
+/// feed name: the phase summary's own (`running`, or `queued` behind a
+/// barrier, a pause or an acceptance gate). It said `running` for a barrier
+/// phase the summary showed as `queued` (owner, 2026-11-11).
 fn accept_phase(team: &mut Team, at: usize, label: &str) -> &'static str {
     let wanted: BTreeSet<u32> = team.phases[at].tasks.iter().copied().collect();
     for task in &mut team.tasks {
@@ -2675,7 +2683,8 @@ fn accept_phase(team: &mut Team, at: usize, label: &str) -> &'static str {
     record.state = PhaseState::Approved;
     record.decided_by = label.to_owned();
     record.decided_at = Some(now());
-    "running"
+    let n = record.n;
+    plan::accepted_state(team, n)
 }
 
 /// U39: the tasks of an accepted phase whose work started or was decided.
@@ -3105,17 +3114,22 @@ fn auto_accept(team: &mut Team, offline: &BTreeSet<String>, events: &mut Vec<Eve
     }
 }
 
-/// U61: the auto drafts whose plan has no blocker (and, for a barrier phase,
+/// U61: the drafts whose plan has no blocker (and, for a barrier phase,
 /// whose phases ahead are done): the dispatcher accepts them by Auto, and the
 /// ordinary ready path then hands out (launch, rebalance, role routing),
 /// alongside the phases before them (task 158).
+/// Owner, 2026-11-11: Auto-accept drafts is the owner's switch and takes every
+/// plain draft, whatever approval the phase was added with. It took only the
+/// drafts recorded as `auto`, so in a team planned under `review` (the
+/// default) the switch accepted nothing and every phase waited for a manual
+/// Accept. A draft the owner sent back is never Auto's.
 pub(crate) fn drafts_ready_to_auto_accept(team: &Team, offline: &BTreeSet<String>) -> Vec<u32> {
     if !team.settings.auto_accept || !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
         return Vec::new();
     }
     team.phases
         .iter()
-        .filter(|phase| phase.state.is_draft() && phase.approval == Approval::Auto)
+        .filter(|phase| phase.state == PhaseState::Draft)
         .filter(|phase| {
             let ahead_done = team
                 .tasks
@@ -3132,7 +3146,14 @@ pub(crate) fn drafts_ready_to_auto_accept(team: &Team, offline: &BTreeSet<String
         .collect()
 }
 
-/// U61: accepts one auto draft by Auto in its own change; false when it is no
+/// Why Auto cannot accept draft `n` now (a draft before it, a plan error), for
+/// the lead's starved digest; None when it can, or `n` is no plain draft.
+pub(crate) fn auto_accept_blocker(team: &Team, n: u32) -> Option<String> {
+    let at = team.phases.iter().position(|phase| phase.n == n && phase.state == PhaseState::Draft)?;
+    accept_blockers(team, at, &BTreeSet::new()).err().map(|error| error.to_string())
+}
+
+/// U61: accepts one draft by Auto in its own change; false when it is no
 /// longer a draft or its plan has a blocker.
 pub(crate) fn accept_auto_draft(team: &mut Team, phase: u32, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> bool {
     if !team.settings.auto_accept {
@@ -3141,7 +3162,7 @@ pub(crate) fn accept_auto_draft(team: &mut Team, phase: u32, offline: &BTreeSet<
     let Some(at) = team
         .phases
         .iter()
-        .position(|found| found.n == phase && found.state.is_draft() && found.approval == Approval::Auto)
+        .position(|found| found.n == phase && found.state == PhaseState::Draft)
     else {
         return false;
     };
@@ -3169,7 +3190,7 @@ pub(crate) fn accept_phase_on_hand_out(team: &mut Team, task_id: u32, events: &m
     let Some(at) = team
         .phases
         .iter()
-        .position(|phase| phase.n == task.phase && phase.state.is_draft() && phase.approval == Approval::Auto)
+        .position(|phase| phase.n == task.phase && phase.state == PhaseState::Draft)
     else {
         return;
     };
@@ -3647,11 +3668,49 @@ fn editable_phase(team: &Team, n: u32) -> anyhow::Result<usize> {
     Ok(at)
 }
 
+/// The fields an edit-draft request takes besides the request envelope.
+const EDIT_DRAFT_FIELDS: [&str; 9] =
+    ["team", "request_id", "phase", "revision", "title", "barrier", "target_hours", "tasks_update", "tasks_remove"];
+/// The fields one `tasks_update` entry takes.
+const EDIT_TASK_FIELDS: [&str; 15] = [
+    "id", "title", "description", "criteria", "output", "deps", "origin", "assignee", "pinned", "requires", "estimate_minutes",
+    "pipeline", "models", "role", "lane",
+];
+const EDIT_DRAFT_EXAMPLE: &str =
+    r#"{"team":"ID","phase":2,"barrier":false,"tasks_update":[{"id":7,"description":"..."}],"tasks_remove":[9]}"#;
+
+/// Owner, 2026-11-11: an edit-draft request that names a field the operation
+/// does not take, or nothing to change, is refused with the fields it takes.
+/// It answered `draft_edited` with an empty diff to `tasks`, `update`,
+/// `updated`, `edits` and any unknown field, and the lead's edit was lost.
+fn check_edit_draft(input: &Value) -> anyhow::Result<()> {
+    let mut given = input.as_object().cloned().unwrap_or_default();
+    given.retain(|key, _| !CARD_RESERVED.contains(&key.as_str()) || EDIT_DRAFT_FIELDS.contains(&key.as_str()));
+    super::strict::check_keys(&Value::Object(given), &EDIT_DRAFT_FIELDS, "An edit-draft request", EDIT_DRAFT_EXAMPLE)?;
+    for key in ["tasks_update", "tasks_remove"] {
+        ensure!(
+            input.get(key).is_none_or(|value| value.is_null() || value.is_array()),
+            "An edit-draft request's \"{key}\" is a list. Example: {EDIT_DRAFT_EXAMPLE}"
+        );
+    }
+    for update in input["tasks_update"].as_array().into_iter().flatten() {
+        super::strict::check_keys(update, &EDIT_TASK_FIELDS, "A task update", r#"{"id":7,"description":"...","assignee":"dev"}"#)?;
+    }
+    let named = ["title", "barrier", "target_hours"].iter().any(|key| input.get(*key).is_some())
+        || ["tasks_update", "tasks_remove"].iter().any(|key| input[*key].as_array().is_some_and(|list| !list.is_empty()));
+    ensure!(
+        named,
+        "An edit-draft request names what it changes: title, barrier, target_hours, tasks_update or tasks_remove. Example: {EDIT_DRAFT_EXAMPLE}"
+    );
+    Ok(())
+}
+
 /// F10: edits a draft phase until the owner approves it - its title, its
 /// barrier, fields of its draft tasks by id, and task removals. The event
 /// carries the diff the owner sees.
 fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you edit a draft");
+    check_edit_draft(input)?;
     ensure!(
         matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
         "Only a planning, running or paused team edits a draft"
@@ -3666,18 +3725,22 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
     // Task #36 (team ede724c4, 2026-11-10): the phase its tasks name is
     // editable with or without a record (an implicit phase 1 has none), and a
     // phase that has started still takes updates of its unstarted tasks (each
-    // is checked below); its title, barrier, target and task list change only
-    // while it is untouched. It answered "Unknown phase 1" to the lead's update
-    // of tasks 26 and 27.
+    // is checked below); its title, target and task list change only while it
+    // is untouched. It answered "Unknown phase 1" to the lead's update of
+    // tasks 26 and 27.
+    // Owner, 2026-11-11: the barrier is how the phase is scheduled, not what
+    // it holds, so it changes in a phase that has started as well (the owner
+    // sees it and can remove it; the lead on a card).
     let record = proposed.phases.iter().position(|phase| phase.n == n);
     ensure!(record.is_some() || proposed.tasks.iter().any(|task| task.phase == n), "Unknown phase {n}");
     let phase_fields = ["target_hours", "title", "barrier"].iter().any(|key| input.get(*key).is_some());
+    let content_fields = ["target_hours", "title"].iter().any(|key| input.get(*key).is_some());
     let removes = input["tasks_remove"].as_array().is_some_and(|list| !list.is_empty());
     match record {
         Some(at) => {
             let phase = &proposed.phases[at];
             ensure!(phase.state != PhaseState::Discarded, "Phase {n} is discarded");
-            if (phase_fields || removes) && !phase.state.is_draft() {
+            if (content_fields || removes) && !phase.state.is_draft() {
                 ensure!(
                     phase_untouched(&proposed, phase),
                     "Phase {n} has started; only a phase with no delivered attempt can change"
@@ -6938,6 +7001,12 @@ fn describe_owner_op(team: &Team, op: &str, input: &Value) -> (String, Vec<Strin
         "approve-phase" => format!("Approve {}", phase(n)),
         "return-to-draft" => format!("Return {} to a draft", phase(n)),
         "edit-draft" => {
+            // Owner, 2026-11-11: the card names a barrier change in words.
+            match input["barrier"].as_bool() {
+                Some(false) => lines.push("Remove the barrier: its tasks run alongside the phases before it".to_owned()),
+                Some(true) => lines.push("Add a barrier: it starts when the phases before it are finished".to_owned()),
+                None => {}
+            }
             let changed = input["tasks_update"].as_array().map(Vec::len).unwrap_or_default();
             if changed > 0 {
                 lines.push(format!("{changed} task changes"));
@@ -8287,6 +8356,10 @@ mod ops_phases;
 #[cfg(test)]
 #[path = "tests/ops_phase_control.rs"]
 mod ops_phase_control;
+
+#[cfg(test)]
+#[path = "tests/ops_auto_barrier.rs"]
+mod ops_auto_barrier;
 
 #[cfg(test)]
 #[path = "tests/ops_phase_modes.rs"]

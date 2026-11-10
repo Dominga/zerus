@@ -132,7 +132,7 @@ fn all_pages(store: &ProjectStore, stage: Stage, limit: usize) -> Vec<Value> {
 
 #[test]
 fn pages_hold_the_documents_rows_in_each_stage_s_order() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = project(temp.path());
     let (tasks, damaged) = store.listing().unwrap();
     assert_eq!(damaged.len(), 1);
@@ -171,7 +171,7 @@ fn pages_hold_the_documents_rows_in_each_stage_s_order() {
 
 #[test]
 fn pages_go_back_and_a_cursor_holds_its_place_as_tasks_arrive() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = project(temp.path());
     let project = store.project_id().to_owned();
     let mut index = Index::open(&store).unwrap();
@@ -222,7 +222,7 @@ fn pages_go_back_and_a_cursor_holds_its_place_as_tasks_arrive() {
     let one = index.page(Stage::Review, 2, &Anchor::After("z".into(), ids::new_uuid())).unwrap();
     assert!(one.rows.len() == 1 && one.next.is_none() && one.previous.is_none());
     drop(index);
-    let empty = tempfile::tempdir().unwrap();
+    let empty = crate::host::staging::private_tempdir();
     let empty = ProjectStore::open(empty.path(), "empty").unwrap();
     let mut index = Index::open(&empty).unwrap();
     let none = index.page(Stage::Todo, 2, &Anchor::After("V".into(), ids::new_uuid())).unwrap();
@@ -232,7 +232,7 @@ fn pages_go_back_and_a_cursor_holds_its_place_as_tasks_arrive() {
 
 #[test]
 fn reads_decode_only_what_changed() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     let mut tasks: Vec<TaskDoc> = (0..300)
         .map(|n| new_task(&store, &format!("T-{n:06}"), Stage::Todo, "V", "Plain"))
@@ -290,7 +290,7 @@ fn reads_decode_only_what_changed() {
 /// can keep its stamp. A task the journal names is indexed again anyway.
 #[test]
 fn a_task_the_journal_names_is_indexed_again_even_with_an_unchanged_stamp() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     let mut task = new_task(&store, "T-aaaaaa", Stage::Todo, "V", "Plain");
     aged_save(&store, &mut task);
@@ -322,7 +322,7 @@ fn a_task_the_journal_names_is_indexed_again_even_with_an_unchanged_stamp() {
 /// and each read reads a bounded batch of them again.
 #[test]
 fn an_unknown_journal_makes_every_earlier_row_suspect() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     let mut tasks: Vec<TaskDoc> = (0..300)
         .map(|n| new_task(&store, &format!("T-{n:06}"), Stage::Todo, "V", "Plain"))
@@ -375,7 +375,7 @@ fn an_unknown_journal_makes_every_earlier_row_suspect() {
 /// serves it, whatever its stamps; one that reads the same keeps the revision.
 #[test]
 fn rows_past_the_maximum_age_are_read_again() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     let tasks: Vec<TaskDoc> = (0..20u8)
         .map(|n| new_task(&store, &format!("T-{n:06}"), Stage::Todo, "V", "Plain"))
@@ -413,7 +413,7 @@ fn rows_past_the_maximum_age_are_read_again() {
 /// tick: its row stays suspect and is read again.
 #[test]
 fn an_unsettled_row_is_read_again() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     let mut task = new_task(&store, "T-aaaaaa", Stage::Todo, "V", "Plain");
     store.save(&mut task).unwrap();
@@ -432,7 +432,7 @@ fn an_unsettled_row_is_read_again() {
 /// were checked against their files.
 #[test]
 fn an_unchanged_revision_is_only_answered_after_the_page_check() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     let mut tasks: Vec<TaskDoc> = (0..5)
         .map(|n| new_task(&store, &format!("T-{n:06}"), Stage::Todo, "V", "Plain"))
@@ -472,7 +472,7 @@ fn a_cursor_with_a_non_hex_rank_is_refused_without_panicking() {
 /// recent. Reads dated after now are suspect, and so is a suspect mark.
 #[test]
 fn a_clock_set_back_leaves_no_row_trusted_by_its_future_date() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     let tasks: Vec<TaskDoc> = (0..20u8)
         .map(|n| new_task(&store, &format!("T-{n:06}"), Stage::Todo, "V", "Plain"))
@@ -512,7 +512,7 @@ fn the_index_size_limit_is_in_bytes_whatever_its_page_size() {
     assert_eq!(budget(8192, 40_000), None, "over the budget");
     assert_eq!(budget(0, 1), None);
     assert_eq!(budget(-4096, 1), None);
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = project(temp.path());
     drop(Index::open(&store).unwrap());
     {
@@ -533,7 +533,7 @@ fn the_index_size_limit_is_in_bytes_whatever_its_page_size() {
 /// is reached, and its stage count and membership become right.
 #[test]
 fn permanently_unsettled_rows_cannot_starve_an_expired_row() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     let mut tasks: Vec<TaskDoc> = (0..300)
         .map(|n| new_task(&store, &format!("T-{n:06}"), Stage::Backlog, "V", "Plain"))
@@ -582,7 +582,7 @@ fn permanently_unsettled_rows_cannot_starve_an_expired_row() {
 /// wrote for that task is a damaged index, never served or labelled.
 #[test]
 fn a_cached_row_of_another_shape_is_damage() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = project(temp.path());
     // Settled files: the page serves its cached rows without reading them again.
     for uuid in store.uuids().unwrap() {
@@ -635,7 +635,7 @@ fn a_cached_row_of_another_shape_is_damage() {
 /// even when its files kept their stamps.
 #[test]
 fn a_changed_task_s_history_is_read_again_even_with_an_unchanged_stamp() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     let mut task = new_task(&store, "T-aaaaaa", Stage::Todo, "V", "Plain");
     aged_save(&store, &mut task);
@@ -662,7 +662,7 @@ fn a_changed_task_s_history_is_read_again_even_with_an_unchanged_stamp() {
 #[test]
 fn a_requested_history_is_revalidated_like_a_page_row() {
     for future in [false, true] {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::host::staging::private_tempdir();
         let store = ProjectStore::open(temp.path(), "example").unwrap();
         let mut tasks: Vec<TaskDoc> = (0..300)
             .map(|n| new_task(&store, &format!("T-{n:06}"), Stage::Todo, "V", "Plain"))
@@ -702,7 +702,7 @@ fn a_requested_history_is_revalidated_like_a_page_row() {
 #[test]
 fn a_window_is_the_first_page_of_every_stage_from_the_index_or_the_documents() {
     use std::os::unix::fs::PermissionsExt;
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = project(temp.path());
     let indexed = super::super::window_pages(&store, 2).unwrap();
     assert_eq!(indexed.len(), 5);
@@ -726,7 +726,7 @@ fn a_window_is_the_first_page_of_every_stage_from_the_index_or_the_documents() {
 
 #[test]
 fn a_window_keeps_a_task_a_later_page_moves_to_an_earlier_stage() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     let mut task = new_task(&store, "T-aaaaaa", Stage::Todo, "V", "Plain");
     aged_save(&store, &mut task);
@@ -774,7 +774,7 @@ fn a_window_is_read_again_until_its_pages_share_one_revision() {
 
 #[test]
 fn a_damaged_foreign_or_shared_index_is_built_again() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = project(temp.path());
     let path = store.dir().join(FILE);
     let expected = |store: &ProjectStore| {
@@ -821,7 +821,7 @@ fn a_damaged_foreign_or_shared_index_is_built_again() {
 
 #[test]
 fn queries_use_their_indexes() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = project(temp.path());
     let index = Index::open(&store).unwrap();
     let plan = |sql: &str| -> String {
@@ -852,7 +852,7 @@ fn queries_use_their_indexes() {
 #[cfg(unix)]
 #[test]
 fn opening_the_index_again_keeps_a_live_index_s_locks() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = project(temp.path());
     let path = store.dir().join(FILE);
     let live = Index::open(&store).unwrap();
@@ -884,7 +884,7 @@ fn scaled(temp: &Path, count: usize) -> ProjectStore {
 
 #[test]
 fn a_large_project_pages_and_polls_with_bounded_work() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = scaled(temp.path(), 5_000);
     let (_, decoded, _) = counted(|| Index::open(&store).unwrap());
     assert_eq!(decoded, 5_000);
@@ -909,7 +909,7 @@ fn a_large_project_pages_and_polls_with_bounded_work() {
 #[test]
 #[ignore = "scale smoke; run explicitly in release"]
 fn twenty_thousand_tasks_scale_smoke() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let started = Instant::now();
     let store = scaled(temp.path(), 20_000);
     let fixture = started.elapsed();
@@ -964,7 +964,7 @@ fn twenty_thousand_tasks_scale_smoke() {
 #[test]
 fn a_mark_only_change_reaches_the_warm_listing() {
     use std::os::unix::fs::PermissionsExt;
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     let mut task = new_task(&store, "T-aaaaaa", Stage::Todo, "V", "Plain");
     assert!(task.floor().unwrap());
@@ -994,7 +994,7 @@ fn a_mark_only_change_reaches_the_warm_listing() {
 /// is still found: the task's stamps include its mark.
 #[test]
 fn a_mark_changed_outside_the_journal_is_found_by_its_stamp() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     let mut task = new_task(&store, "T-aaaaaa", Stage::Todo, "V", "Plain");
     assert!(task.floor().unwrap());
@@ -1034,7 +1034,7 @@ fn a_mark_changed_outside_the_journal_is_found_by_its_stamp() {
 /// stays listed as damaged.
 #[test]
 fn a_removed_task_drops_its_cache_row_and_a_mark_alone_stays_damaged() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     let mut plain = new_task(&store, "T-aaaaaa", Stage::Todo, "V", "Plain");
     aged_save(&store, &mut plain);
@@ -1064,7 +1064,7 @@ fn a_removed_task_drops_its_cache_row_and_a_mark_alone_stays_damaged() {
 /// and the task is listed as damaged; the unsealed mark is left as it was.
 #[test]
 fn an_index_from_before_the_seal_is_built_again() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     let mut task = new_task(&store, "T-aaaaaa", Stage::Todo, "V", "Floored");
     assert!(task.floor().unwrap());
@@ -1141,7 +1141,7 @@ fn scoped_pages(store: &ProjectStore, stage: Stage, limit: usize, scope: &Scope)
 
 #[test]
 fn a_session_reads_exactly_its_own_tasks_even_past_the_first_page() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     let mine = session("computer-a", "codex/example/same", "launch_id:mine");
     // Another session with the same name on the same computer stays separate.
@@ -1185,7 +1185,7 @@ fn a_session_reads_exactly_its_own_tasks_even_past_the_first_page() {
 
 #[test]
 fn a_session_cursor_holds_its_place_as_tasks_arrive() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     let mine = session("computer-a", "codex/example/worker", "launch_id:mine");
     for n in 0..4 {
@@ -1215,7 +1215,7 @@ fn a_session_cursor_holds_its_place_as_tasks_arrive() {
 
 #[test]
 fn scoped_queries_use_their_indexes() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = project(temp.path());
     let index = Index::open(&store).unwrap();
     let plan = |sql: &str| -> String {
@@ -1239,7 +1239,7 @@ fn an_older_hgs_index_is_never_touched() {
     // An older hgs keeps its own task-index-v1.sqlite3 (ROWS 4) and rebuilds
     // any index not of its schema. This index lives in another file, so the
     // two never rebuild each other's while both binaries are in use.
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = project(temp.path());
     let old = store.dir().join("task-index-v1.sqlite3");
     fs::write(&old, b"an older hgs's index").unwrap();
@@ -1284,7 +1284,7 @@ fn assert_holds_the_inventory(store: &ProjectStore, index: &Index) {
 
 #[test]
 fn the_index_holds_the_inventory_of_every_loaded_task_and_the_project() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = project(temp.path());
     let index = Index::open(&store).unwrap();
     // Before the project document was ever saved its version is empty.
@@ -1333,7 +1333,7 @@ fn the_index_holds_the_inventory_of_every_loaded_task_and_the_project() {
 
 #[test]
 fn the_phone_s_inventories_come_from_the_index_without_reading_every_task() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = project(temp.path());
     for uuid in store.uuids().unwrap() {
         age(&store, &uuid);
@@ -1385,7 +1385,7 @@ fn unrepaired_ranked(store: &ProjectStore, id: &str, rank: &str) -> TaskDoc {
 
 #[test]
 fn the_index_repairs_a_task_before_it_holds_its_version() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     let stale = unrepaired(&store);
     let index = Index::open(&store).unwrap();
@@ -1403,7 +1403,7 @@ fn the_index_repairs_a_task_before_it_holds_its_version() {
 
 #[test]
 fn rows_an_older_build_held_are_read_again_with_the_repair() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     let stale = unrepaired(&store);
     // A warm index of the build before this rule (#1724): rows read
@@ -1424,7 +1424,7 @@ fn a_row_an_older_build_writes_later_is_read_again_with_the_repair() {
     // review-win-e R2 on #1736: this build's index is current, then an older
     // build sharing the file reads a task without the repair and stores its
     // row; the next read here must not serve that row.
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     drop(Index::open(&store).unwrap());
     let stale = unrepaired(&store);
@@ -1451,7 +1451,7 @@ fn rows_an_older_build_stored_on_both_sides_of_the_last_read_here_are_all_read_a
     // clock was set back and then caught up stores unrepaired rows dated
     // before and after this build's last write. No clock may decide which
     // are read again: the index's inventory is not used until every row was.
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     drop(Index::open(&store).unwrap());
     let (early, late) = (unrepaired_as(&store, "T-early1"), unrepaired_as(&store, "T-late01"));
@@ -1480,7 +1480,7 @@ fn rows_an_older_build_stored_on_both_sides_of_the_last_read_here_are_all_read_a
 
 #[test]
 fn after_another_build_s_write_the_index_answers_only_once_every_row_was_read_again() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     for n in 0..600 {
         write_plain(&store, &new_task(&store, &format!("T-{n:06}"), Stage::Todo, "V", "Plain"));
@@ -1505,7 +1505,7 @@ fn an_older_build_reading_an_unrepaired_row_again_never_vouches_for_it() {
     // review-win-e on #1748: an older build's read of the same row again
     // (only its stamps and read time change, so no new revision) must not
     // count as this build's repaired read of it.
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     for n in 0..600 {
         write_plain(&store, &new_task(&store, &format!("T-{n:06}"), Stage::Todo, "V", "Plain"));
@@ -1548,7 +1548,7 @@ fn an_older_build_reading_an_unrepaired_row_again_never_vouches_for_it() {
 
 #[test]
 fn an_index_from_before_the_repair_epoch_gains_it_in_place_and_reads_every_row_again() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     for n in 0..300 {
         write_plain(&store, &new_task(&store, &format!("T-{n:06}"), Stage::Todo, "V", "Plain"));
@@ -1583,7 +1583,7 @@ fn an_older_repair_build_cannot_mask_an_unrepaired_row_from_the_epoch() {
     // review-win-d on #1753: a #1736/#1748 build repairs some rows itself and
     // marks "derived_revision" current, after an older build stored
     // unrepaired rows; that must not hide them from this build's epoch.
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     for n in 0..1000 {
         write_plain(&store, &new_task(&store, &format!("T-{n:06}"), Stage::Todo, "V", "Plain"));
@@ -1637,7 +1637,7 @@ fn add_placed(store: &ProjectStore, position: &Position) -> TaskDoc {
 
 #[test]
 fn the_index_places_a_task_as_the_documents_do_reading_only_its_neighbours() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     for n in 0..60 {
         write_plain(&store, &new_task(&store, &format!("T-{n:06}"), Stage::Todo, &format!("V{}", n % 7 + 1), "Plain"));
@@ -1665,7 +1665,7 @@ fn the_index_places_a_task_as_the_documents_do_reading_only_its_neighbours() {
 fn a_short_id_an_older_build_took_without_the_journal_is_never_reused() {
     // design-tima2's control for zerus-cg5h.24: an older build adds a task
     // without the journal; the next add must not draw its short ID again.
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     write_plain(&store, &new_task(&store, "T-000001", Stage::Todo, "V", "Plain"));
     drop(Index::open(&store).unwrap());
@@ -1690,7 +1690,7 @@ fn a_short_id_an_older_build_took_without_the_journal_is_never_reused() {
 
 #[test]
 fn an_uncertified_or_damaged_index_leaves_the_whole_write_to_the_documents() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     for n in 0..20 {
         write_plain(&store, &new_task(&store, &format!("T-{n:06}"), Stage::Todo, "V", "Plain"));
@@ -1720,7 +1720,7 @@ fn an_older_journalless_move_never_places_from_a_stale_stage() {
     // review-win-d on #1767 (zerus-j0os4): an older writer moves an existing
     // task without the journal while a save here keeps the journal busy;
     // the next add must still go after the actual last task.
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     let a = new_task(&store, "T-000001", Stage::Todo, "V", "A");
     let mut b = new_task(&store, "T-000002", Stage::Todo, "U", "B");
@@ -1747,7 +1747,7 @@ fn task_file_checks_never_postpone_a_due_project_version_refresh() {
     // review-win-d on #1767 (zerus-k2388): checking only task files before a
     // placement must not count as the periodic check, which also reads the
     // project document again.
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     let mut doc = store.project().unwrap();
     doc.set_settings(&zerus_replica::Settings { agent_limit: 3, ..doc.settings() }).unwrap();
@@ -1776,7 +1776,7 @@ fn accepted(store: &ProjectStore, id: &str, session: &SessionKey, at: i64) -> Ta
 
 #[test]
 fn the_phone_s_done_page_comes_from_the_index_as_from_the_documents() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     let api = SessionKey { machine: "m1".into(), session: "codex/api".into(), session_id: "launch_id:api".into() };
     let web = SessionKey { machine: "m1".into(), session: "codex/web".into(), session_id: "launch_id:web".into() };
@@ -1823,7 +1823,7 @@ fn the_phone_s_done_page_comes_from_the_index_as_from_the_documents() {
 fn a_done_row_without_session_metadata_declines_instead_of_hiding_the_task() {
     // review-win-d on #1780 (zerus-7w9zj): a cached row without its session
     // property is not a task sent to no session; the index declines.
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     let session = SessionKey { machine: "m1".into(), session: "codex/api".into(), session_id: "launch_id:api".into() };
     let task = accepted(&store, "T-d00001", &session, 1_000);
@@ -1854,7 +1854,7 @@ fn a_done_row_without_session_metadata_declines_instead_of_hiding_the_task() {
 /// task and a mark alone.
 #[test]
 fn a_full_stamp_check_looks_up_only_listed_files_and_still_finds_journalless_changes() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     let tasks: Vec<TaskDoc> = (0..20u8)
         .map(|n| {
@@ -1907,7 +1907,7 @@ fn a_full_stamp_check_looks_up_only_listed_files_and_still_finds_journalless_cha
 /// snapshot that is a link (stamped as what it links to) or a dangling one.
 #[test]
 fn listed_stamps_are_the_stamps_of_a_lookup() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::host::staging::private_tempdir();
     let store = project(temp.path());
     let mut floored = new_task(&store, "T-floor1", Stage::Todo, "W", "Floored");
     assert!(floored.floor().unwrap());

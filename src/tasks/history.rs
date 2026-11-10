@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn pages_preserve_canonical_order() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::host::staging::private_tempdir();
         let root = temp.path().join("replica");
         crate::platform::owner_only_dir(&root).unwrap();
         let store = ProjectStore::open(&root, "example").unwrap();
@@ -277,7 +277,7 @@ mod tests {
 
     #[test]
     fn cursor_survives_append_compaction_and_eviction() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::host::staging::private_tempdir();
         let root = temp.path().join("replica");
         crate::platform::owner_only_dir(&root).unwrap();
         let store = ProjectStore::open(&root, "example").unwrap();
@@ -318,7 +318,7 @@ mod tests {
     /// between tasks without reading either document again.
     #[test]
     fn alternating_tasks_keep_their_histories() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::host::staging::private_tempdir();
         let store = ProjectStore::open(temp.path(), "example").unwrap();
         let (mut a, mut b) = (task(), task());
         store.save(&mut a).unwrap();
@@ -343,7 +343,7 @@ mod tests {
     fn a_new_store_and_history_index_inherit_only_the_owner() {
         use crate::platform;
         use std::fs;
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::host::staging::private_tempdir();
         let state = temp.path().join("state");
         fs::create_dir(&state).unwrap();
         assert!(std::process::Command::new("icacls").arg(&state)
@@ -371,7 +371,7 @@ mod tests {
 
     #[test]
     fn summary_pages_name_files_and_entries() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::host::staging::private_tempdir();
         let store = ProjectStore::open(temp.path(), "example").unwrap();
         let mut a = task();
         a.set_attachments(&[file("spec.txt", "the spec")], &Actor::Person, 101).unwrap();
@@ -408,7 +408,7 @@ mod tests {
     fn the_document_gives_the_same_pages_as_the_index() {
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::host::staging::private_tempdir();
         let store = ProjectStore::open(temp.path(), "example").unwrap();
         let mut a = task();
         a.set_attachments(&[file("spec.txt", "the spec")], &Actor::Person, 101).unwrap();
@@ -440,7 +440,7 @@ mod tests {
         use zerus_replica::{Settlement, TaskDelivery};
         const SEND: &str = "11111111-1111-4111-8111-111111111111";
         const REOPEN: &str = "22222222-2222-4222-8222-222222222222";
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::host::staging::private_tempdir();
         let store = ProjectStore::open(temp.path(), "example").unwrap();
         let to = SessionKey {
             machine: "m1".into(),
@@ -544,7 +544,7 @@ mod tests {
     /// from the document instead.
     #[test]
     fn a_cached_history_of_another_shape_is_never_served() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::host::staging::private_tempdir();
         let store = ProjectStore::open(temp.path(), "example").unwrap();
         let mut a = task();
         a.comment("note", &Actor::Person, 101).unwrap();
@@ -596,7 +596,7 @@ mod tests {
         assert!(limit(&["--attachments".into(), "metadata".into()]).is_err());
         assert!(summary(&["--attachments".into(), "files".into()]).is_err());
         assert!(summary(&["--attachments".into(), "metadata".into()]).unwrap());
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::host::staging::private_tempdir();
         let store = ProjectStore::open(temp.path(), "example").unwrap();
         let (mut a, mut b) = (task(), task());
         a.comment("note", &Actor::Person, 101).unwrap();

@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn an_actual_fresh_reply_is_required_and_a_saved_reply_never_reopens_it() {
         let (_dir, config) = fixture();
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::host::staging::private_tempdir();
         crate::platform::restrict_dir(directory.path()).unwrap();
         let path = directory.path().join("connector.json");
         std::fs::write(&path, b"{}").unwrap();

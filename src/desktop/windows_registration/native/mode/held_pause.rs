@@ -93,7 +93,9 @@ mod tests {
 
     #[test]
     fn the_held_pause_only_waits_for_its_exact_private_release_within_its_bound() {
-        let folder = tempfile::tempdir().unwrap();
+        // Task #23 (team ede724c4): `hold` waits only in a private folder; a
+        // TEMP that inherits Authenticated Users Modify is not one.
+        let folder = crate::host::staging::private_tempdir();
         let folder = zerus_desktop_migration::canonical(folder.path()).unwrap();
         let request = uuid::Uuid::new_v4().to_string();
         let other = uuid::Uuid::new_v4().to_string();

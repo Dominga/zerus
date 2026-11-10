@@ -313,7 +313,7 @@ mod tests {
 
     #[test]
     fn cooldown_keeps_sample_age_across_refresh_restart_and_account_selection() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::host::staging::private_tempdir();
         let first = get(dir.path(), "a", &Value::Null, || 100, usage).unwrap();
         assert_eq!(first["checked_at"], 100);
         assert_eq!(
@@ -360,7 +360,7 @@ mod tests {
 
     #[test]
     fn concurrent_inspectors_coalesce_and_first_429_keeps_the_old_profile_sample() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::host::staging::private_tempdir();
         let count = Arc::new(AtomicUsize::new(0));
         std::thread::scope(|scope| {
             for _ in 0..8 {
@@ -425,7 +425,7 @@ mod tests {
 
     #[test]
     fn bounded_cache_never_evicts_an_active_cooldown_and_projects_no_private_fields() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::host::staging::private_tempdir();
         let cache = dir.path().join("account-status");
         private_dir(&cache).unwrap();
         let mut entries = serde_json::Map::new();
@@ -459,8 +459,8 @@ mod tests {
 
     #[test]
     fn same_verified_native_account_shares_a_key_but_other_accounts_do_not() {
-        let a = tempfile::tempdir().unwrap();
-        let b = tempfile::tempdir().unwrap();
+        let a = crate::host::staging::private_tempdir();
+        let b = crate::host::staging::private_tempdir();
         let account = json!({"oauthAccount":{"accountUuid":"00000000-0000-4000-8000-000000000001","emailAddress":"person@example.test"}});
         for dir in [&a, &b] {
             fs::write(dir.path().join(".claude.json"), account.to_string()).unwrap();
@@ -487,7 +487,7 @@ mod tests {
 
     #[test]
     fn observed_identity_and_public_credential_metadata_bind_even_without_uuid() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::host::staging::private_tempdir();
         let alpha = json!({"email":"alpha@example.test","organization":"First","plan":"Max","auth_method":"claude.ai"});
         let auth = json!({"claudeAiOauth":{"accessToken":"synthetic-alpha","refreshToken":"synthetic-refresh","expiresAt":1,"subscriptionType":"max","rateLimitTier":"tier1","scopes":["usage","profile"]}});
         let first = key(dir.path(), &alpha, &auth, true);

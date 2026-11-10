@@ -646,9 +646,11 @@ pending; they create no ad-hoc scheduled task or claim active background duties.
 `hgs desktop registration --json` previews the shared definition/readiness interface.
 
 The job uploads the zip, installer and logs in `windows-x86_64-<commit>` for seven
-days (three for schedules). Stable/nightly assembly continues to use the tested
-zip unchanged; publishing the installer is separate work (.66.7.4). Windows Dev
-builds remain absent.
+days (three for schedules). Stable/nightly assembly includes the tested zip
+unchanged and its paired per-user installer; both are present in the published
+0.48.0 release. The installer stays on GitHub, outside the v1 feed and mirror
+downloads, and winget keeps the portable zip layout. Windows Dev builds remain
+absent.
 
 #### The bundled ConPTY pair
 

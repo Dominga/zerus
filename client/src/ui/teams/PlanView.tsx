@@ -250,19 +250,8 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     return !(hideFinished() && phaseFinished(phase.tasks));
   }), undefined, { equals: sameItems });
   const finishedCount = createMemo(() => allPhases().filter((phase) => phaseFinished(phase.tasks)).length);
-  // Task 316 (F6): the open free phase folds its accepted tasks into one row
-  // (Qt's freeAcceptedFold), so the graph draws only the work still open.
-  const [unfoldedAccepted, setUnfoldedAccepted] = createSignal<Set<string>>(new Set());
-  const acceptedKey = (n: number) => `${props.team.id}/${n}`;
-  const acceptedTasks = (phase: PlanPhase) => phase.tasks.filter((task) => visibleTask(task) && task.status === "accepted");
-  const acceptedFolded = (phase: PlanPhase) => props.team.free_phase === phase.n && !unfoldedAccepted().has(acceptedKey(phase.n));
-  const toggleAccepted = (n: number) => {
-    const key = acceptedKey(n);
-    const next = new Set(unfoldedAccepted());
-    if (next.has(key)) next.delete(key);
-    else next.add(key);
-    setUnfoldedAccepted(next);
-  };
+  // Owner, 2026-11-10: accepted tasks hide only with the toolbar's Hide
+  // finished; the open free phase's own fold (task 316 F6) is gone.
   // Task #16: a phase's layout is kept while its visible nodes and links are
   // the same; a status change that hides or folds no card keeps it.
   type LayoutEntry = { layout: PhaseLayout; routes: Route[]; originRoutes: Route[]; edges: PlanPhase["edges"] };
@@ -271,8 +260,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
   const layouts = createMemo(() => {
     const next = new Map<number, KeptLayout>();
     const shown = new Map(phases().map((phase) => {
-      const folded = acceptedFolded(phase);
-      const nodes = phase.nodes.filter((placed) => visibleTask(placed.task) && !(folded && placed.task?.status === "accepted"));
+      const nodes = phase.nodes.filter((placed) => visibleTask(placed.task));
       const origins = nodes
         .map((placed) => ({ from: spawnedFrom(placed.node, placed.task) ?? 0, to: placed.node.id }))
         .filter((link) => link.from > 0 && link.from !== link.to);
@@ -335,8 +323,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
   const phaseHeight = (phase: PlanPhase) => {
     if (isCollapsed(phase.n)) return COLLAPSED_H + 8;
     const layout = layouts().get(phase.n)?.layout;
-    const fold = acceptedTasks(phase).length > 0 && props.team.free_phase === phase.n ? 26 : 0;
-    return HEADER_H + fold + (layout ? Math.ceil(layout.height * zoom()) + SCROLLBAR : 0) + 8;
+    return HEADER_H + (layout ? Math.ceil(layout.height * zoom()) + SCROLLBAR : 0) + 8;
   };
   const virtualizer = createVirtualizer({
     get count() {
@@ -988,15 +975,6 @@ export function PlanView(props: PlanViewProps): JSX.Element {
                         <div class="pt-row" style={{ top: `${item().start}px` }} data-phase={shown().n}>
                           {header(shown(), true, actions)}
                           <Show when={!isCollapsed(shown().n) && entry()}>
-                            <Show when={acceptedTasks(shown()).length > 0 && props.team.free_phase === shown().n}>
-                              <div class="pt-free-accepted" data-accepted-fold={acceptedTasks(shown()).length}>
-                                <Icon name="check" size={12} />
-                                <b>{tr("%1 accepted", acceptedTasks(shown()).length)}</b>
-                                <span class="pt-free-accepted-ids">{acceptedTasks(shown()).slice(0, 12).map((task) => `#${task.id}`).join(" ")}{acceptedTasks(shown()).length > 12 ? ` ${tr("and %1 more", acceptedTasks(shown()).length - 12)}` : ""}</span>
-                                <button type="button" class="btn ghost small" data-accepted-toggle={acceptedFolded(shown()) ? "folded" : "open"}
-                                  onClick={() => toggleAccepted(shown().n)}>{acceptedFolded(shown()) ? tr("Show") : tr("Hide")}</button>
-                              </div>
-                            </Show>
                             {graphBody(shown(), entry()!.layout, entry()!.routes, entry()!.originRoutes)}
                           </Show>
                         </div>

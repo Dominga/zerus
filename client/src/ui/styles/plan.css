@@ -512,25 +512,21 @@
 .pm-board-card.minor, .pm-layer-row.minor { border-style: dashed; }
 .pt-phase[data-phase-kind="minor"] .pt-phase-title { color: var(--z-color-text-2); }
 
-/* Task 316 (F4, F6): a readable phase title and the open phase's accepted fold. */
+/* Task 316 (F4): a readable phase title. */
 .pt-phase-title { flex: 1 1 220px; min-width: 120px; white-space: nowrap; }
-.pt-free-accepted { display: flex; align-items: center; gap: 8px; padding: 4px 12px 6px 42px; font-size: var(--fs-sm); }
-.pt-free-accepted b { white-space: nowrap; }
-.pt-free-accepted-ids { color: var(--z-color-muted); font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Task 332: one even border with four round corners. A folded card carries
    pt-phase-closed (PlanView), so it closes its bottom; content wider than the
    card is clipped inside its padding, so a cut progress strip or button never
    runs into the right border and doubles it. */
 .pt-phase { overflow: clip; overflow-clip-margin: content-box; }
-/* An open card is the header, the free phase's accepted fold and the body:
+/* An open card is the header and the body:
    they share the header's state colour and style, so the frame reads as one. */
-.pt-row > .pt-free-accepted { border: 1px solid var(--z-color-card-border); border-top: 0; border-bottom: 0; background: var(--z-color-card); }
-.pt-row:has(> .pt-phase-done) > :is(.pt-free-accepted, .pt-phase-body) { border-color: color-mix(in srgb, var(--z-color-status-ready) 35%, var(--z-color-card-border)); }
-.pt-row:has(> .pt-phase-running) > :is(.pt-free-accepted, .pt-phase-body) { border-color: color-mix(in srgb, var(--z-color-accent) 45%, var(--z-color-card-border)); }
-.pt-row:has(> .pt-phase-draft) > :is(.pt-free-accepted, .pt-phase-body) { border-style: dashed; border-color: color-mix(in srgb, var(--z-color-warn) 50%, var(--z-color-card-border)); }
-.pt-row:has(> .pt-phase-rejected) > :is(.pt-free-accepted, .pt-phase-body) { border-color: color-mix(in srgb, var(--z-color-danger) 45%, var(--z-color-card-border)); }
-.pt-row:has(> .pt-phase-awaiting) > :is(.pt-free-accepted, .pt-phase-body) { border-color: color-mix(in srgb, var(--z-color-warn) 55%, var(--z-color-card-border)); }
+.pt-row:has(> .pt-phase-done) > .pt-phase-body { border-color: color-mix(in srgb, var(--z-color-status-ready) 35%, var(--z-color-card-border)); }
+.pt-row:has(> .pt-phase-running) > .pt-phase-body { border-color: color-mix(in srgb, var(--z-color-accent) 45%, var(--z-color-card-border)); }
+.pt-row:has(> .pt-phase-draft) > .pt-phase-body { border-style: dashed; border-color: color-mix(in srgb, var(--z-color-warn) 50%, var(--z-color-card-border)); }
+.pt-row:has(> .pt-phase-rejected) > .pt-phase-body { border-color: color-mix(in srgb, var(--z-color-danger) 45%, var(--z-color-card-border)); }
+.pt-row:has(> .pt-phase-awaiting) > .pt-phase-body { border-color: color-mix(in srgb, var(--z-color-warn) 55%, var(--z-color-card-border)); }
 
 
 

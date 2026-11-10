@@ -255,25 +255,24 @@ describe("the plan's Graph, Board and Layers (task 197)", () => {
     expect(css).toContain(".pt-phase.pt-phase-closed { border-bottom: 1px solid var(--z-color-card-border); border-radius: 10px; }");
     // Wider content is clipped inside the padding, never against the right border.
     expect(css).toContain(".pt-phase { overflow: clip; overflow-clip-margin: content-box; }");
-    // The open card's fold and body take the header's state border.
+    // The open card's body takes the header's state border.
     for (const state of ["done", "running", "draft", "rejected", "awaiting"]) {
-      expect(css).toContain(`.pt-row:has(> .pt-phase-${state}) > :is(.pt-free-accepted, .pt-phase-body)`);
+      expect(css).toContain(`.pt-row:has(> .pt-phase-${state}) > .pt-phase-body`);
     }
-    expect(css).toMatch(/\.pt-row > \.pt-free-accepted \{ border: 1px solid var\(--z-color-card-border\); border-top: 0; border-bottom: 0;/);
   });
 
-  it("folds the open free phase's accepted tasks into one row (task 316 F6)", () => {
+  it("hides a free phase's accepted tasks only with the global Hide finished (owner, 2026-11-10)", () => {
     const { team, graph } = fixture();
     team.free_phase = 1;
     team.phases[0].state = "running";
-    const html = render({ team, graph, problems, now });
-    expect(html).toContain('data-accepted-fold="1"');
-    expect(plain(html)).toContain("1 accepted");
-    expect(plain(html)).toContain("#1");
-    expect(plain(html)).toContain("Show");
-    // The accepted card is folded away; the open ones stay.
-    expect(html).not.toContain('data-task="1"');
-    expect(html).toContain('data-task="2"');
+    const shown = render({ team, graph, problems, now });
+    // No fold of its own inside the phase: the accepted card stays.
+    expect(shown).not.toContain("data-accepted-fold");
+    expect(shown).toContain('data-task="1"');
+    expect(shown).toContain('data-task="2"');
+    const hidden = render({ team, graph, problems, now, initialHideFinished: true });
+    expect(hidden).not.toContain('data-task="1"');
+    expect(hidden).toContain('data-task="2"');
   });
 
   it("shows the Board inside each phase with Qt's columns, so assigned and draft tasks stay", () => {

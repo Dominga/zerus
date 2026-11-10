@@ -2786,7 +2786,6 @@
   "agent home": "домашняя папка агента",
   "an alias from your SSH configuration": "псевдоним из вашей конфигурации SSH",
   "an estimate is missing": "не хватает оценки",
-  "and %1 more": "и ещё %1",
   "another session": "другой сессии",
   "attempt %1, %2": "попытка %1, %2",
   "attempt recovered": "попытка восстановлена",

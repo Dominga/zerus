@@ -158,7 +158,33 @@ fn main() {
         // into every executable: rfd also imports TaskDialogIndirect in tests.
         let attributes = tauri_build::Attributes::new()
             .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest());
-        tauri_build::try_build(attributes).expect("Tauri Windows resources");
+        tauri_build::try_build(attributes).unwrap_or_else(|error| {
+            // Task #21: tauri-build writes the ACL manifests and capability
+            // schemas to gen/schemas in the package folder, outside OUT_DIR.
+            // A build script built in a folder that carries Windows' Low
+            // integrity label (task 18) runs at Low and may not write an
+            // ordinary checkout, and its io error names no file.
+            let denied = error.chain().any(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
+            });
+            let hint = if denied {
+                let schemas = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
+                    .join("gen")
+                    .join("schemas");
+                format!(
+                    "\ntauri-build writes {} beside the package, not in OUT_DIR. \
+                     A build script whose target folder carries a Low integrity label \
+                     runs at Low and is refused in an ordinary checkout: build with a \
+                     target folder that has no Low label.",
+                    schemas.display()
+                )
+            } else {
+                String::new()
+            };
+            panic!("Tauri Windows resources: {error:#}{hint}")
+        });
         println!("cargo:rerun-if-changed=windows-controls.manifest");
         let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
             .join("windows-controls.manifest");

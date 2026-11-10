@@ -9,6 +9,7 @@ let server: ViteDevServer | undefined;
 let planMode: (props: Record<string, unknown>) => string;
 let howTo: (props: Record<string, unknown>) => string;
 let offers: (props: Record<string, unknown>) => string;
+let intro: () => string;
 const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as { readFileSync(path: URL, encoding: "utf8"): string };
 
 beforeAll(async () => {
@@ -20,7 +21,8 @@ beforeAll(async () => {
   });
   const { renderToString } = await server.ssrLoadModule("solid-js/web");
   const { createComponent } = await server.ssrLoadModule("solid-js");
-  const { PlanModeField, NewTeamHowTo, SettingOffers } = await server.ssrLoadModule("/src/ui/teams/NewTeamGuide.tsx");
+  const { PlanModeField, NewTeamHowTo, SettingOffers, NewTeamIntroSteps, NewTeamIntroHint } = await server.ssrLoadModule("/src/ui/teams/NewTeamGuide.tsx");
+  intro = () => renderToString(() => createComponent(NewTeamIntroSteps, {})) + renderToString(() => createComponent(NewTeamIntroHint, {}));
   offers = (props) => renderToString(() => createComponent(SettingOffers, { onApply: () => {}, ...props }));
   planMode = (props) => renderToString(() => createComponent(PlanModeField, { onChoose: () => {}, ...props }));
   howTo = (props) => renderToString(() => createComponent(NewTeamHowTo, { onToggle: () => {}, ...props }));
@@ -74,13 +76,14 @@ describe("New team plan mode (task #8)", () => {
 });
 
 describe("New team how-to (task #8)", () => {
-  it("lists every step when open", () => {
+  it("lists what the intro does not say when open", () => {
     const html = howTo({ open: true });
     expect(html).toContain('data-howto="open"');
     expect(html).toContain('aria-expanded="true"');
-    for (const step of ["Fill in the folder and the goal.", "Start planning starts only the lead, in the team folder.",
-      "Talk to the lead in its chat to shape the plan.", "Fields the lead changed are marked ● until you look at them.",
-      "Create team starts the members and their worktrees; nothing runs before that."]) expect(html).toContain(step);
+    for (const step of ["Fields the lead changed are marked ● until you look at them.", "Create team starts the members and their worktrees."]) {
+      expect(html).toContain(step);
+    }
+    expect(html.match(/<li[\s>]/g)?.length).toBe(2);
   });
 
   it("keeps only its title when collapsed", () => {
@@ -88,7 +91,7 @@ describe("New team how-to (task #8)", () => {
     expect(html).toContain('data-howto="closed"');
     expect(html).toContain('aria-expanded="false"');
     expect(html).toContain("How it works");
-    expect(html).not.toContain("Fill in the folder");
+    expect(html).not.toContain("Fields the lead changed");
   });
 
   it("sits first in the form, its collapse kept in a remembered setting, and the plan mode is always editable", () => {
@@ -101,7 +104,44 @@ describe("New team how-to (task #8)", () => {
     // The plan mode is outside every draft-only branch: before and after Start planning.
     expect(form).toMatch(/<PlanModeField mode=\{fields\(\)\.plan_mode\}/);
     const defaults = JSON.parse(fs.readFileSync(new URL("../../store/settings-defaults.json", import.meta.url), "utf8")) as Record<string, unknown>;
-    expect(defaults["client/newTeamHowToClosed"]).toBe(false);
+    // Task #31: collapsed by default once a draft exists.
+    expect(defaults["client/newTeamHowToClosed"]).toBe(true);
+  });
+});
+
+// Task #31 (team ede724c4): one guide. The intro before a draft and the
+// form's how-to after Start planning never tell the same step twice.
+describe("New team guide is told once (task #31)", () => {
+  const text = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  const STEPS: [string, RegExp][] = [
+    ["the folder and the goal", /fill in the folder|the folder and the goal/gi],
+    ["the lead starts", /start(s|ing)? (planning|only the lead|the lead)/gi],
+    ["talking to the lead", /talk to the lead|asks you what it needs/gi],
+    ["nothing runs before", /nothing runs/gi],
+    ["the marked fields", /are marked/gi],
+    ["Create team starts the members", /create (the )?team|members, folders and tasks come/gi],
+  ];
+
+  it("tells each step at most once across the intro and the form's how-to", () => {
+    const before = text(intro());
+    const after = text(howTo({ open: true }));
+    expect(before).toContain("How a team works");
+    expect(before).toContain("This creates a draft and starts the lead in the team folder.");
+    for (const [step, pattern] of STEPS) {
+      const told = (before.match(pattern)?.length ?? 0) + (after.match(pattern)?.length ?? 0);
+      expect(told, `${step}: ${before} | ${after}`).toBeLessThanOrEqual(1);
+    }
+    // What the form adds is not in the intro, and the intro's steps are not in the form.
+    expect(before).not.toMatch(/are marked|starts the members/i);
+    expect(after).not.toMatch(/nothing runs|starts the lead|How a team works/i);
+  });
+
+  it("draws the intro from the guide, before a draft", () => {
+    const form = fs.readFileSync(new URL("./NewTeam.tsx", import.meta.url), "utf8");
+    const start = form.indexOf('data-new-team-intro');
+    expect(form.indexOf("<NewTeamIntroSteps />", start)).toBeGreaterThan(start);
+    expect(form.indexOf("<NewTeamIntroHint />", start)).toBeGreaterThan(start);
+    expect(form).not.toContain("members, folders and tasks come only when you create the team");
   });
 });
 

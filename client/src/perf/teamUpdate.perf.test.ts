@@ -28,4 +28,15 @@ describe("a 465-task team's update (task #9)", () => {
     expect(before.kept).toBe(0);
     expect(after.median_ms).toBeLessThan(before.median_ms);
   }, 60_000);
+
+  // Task #16: one task's status change keeps every other card in each view
+  // (the phase objects and layouts stay by key; only the changed card is
+  // rebuilt). The browser smoke measures the time with real layout.
+  it.each(["graph", "board", "layers"] as const)("keeps the other task cards when one task's status changes (%s)", (mode) => {
+    const host = document.createElement("div"); document.body.append(host);
+    const after = measureTeamUpdates(host, "reconcile", "task", mode, 6);
+    console.log("team-update-task", mode, JSON.stringify(after));
+    expect(after.cards).toBe(465);
+    expect(after.kept).toBeGreaterThanOrEqual(460);
+  }, 60_000);
 });

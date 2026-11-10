@@ -668,7 +668,7 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
     } else {
         let folder = std::path::PathBuf::from(text(input, "folder"));
         match super::working_mode::propose(&folder) {
-            Some(proposal) => {
+            Ok(proposal) => {
                 let preset = if mode == "auto" { proposal.preset.clone() } else { mode.clone() };
                 ensure!(
                     super::working_mode::PRESETS.contains(&preset.as_str()),
@@ -683,8 +683,17 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
                 cached["checked_at"] = json!(now());
                 Some(cached)
             }
-            None if mode == "auto" => Some(json!({"preset":""})),
-            None => bail!("The working mode needs a Git repository to profile: {}", folder.display()),
+            // Task #32 (team ede724c4): Git too slow to read the project never
+            // blocks the team: auto profiles it again soon; a mode named
+            // explicitly asks to try again.
+            Err(error @ super::working_mode::ProfileError::Slow { .. }) if mode == "auto" => {
+                Some(super::working_mode::slow_cache(&error, now()))
+            }
+            Err(error @ super::working_mode::ProfileError::Slow { .. }) => {
+                bail!("The working mode {mode} needs the project's profile: {error}. Try again in a moment, or choose auto.")
+            }
+            Err(_) if mode == "auto" => Some(json!({"preset":""})),
+            Err(error) => bail!("The working mode needs a Git repository to profile: {} ({error})", folder.display()),
         }
     };
     validate_settings(&settings)?;
@@ -2484,6 +2493,11 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
     // word, and only while none of its work has started, so nothing done is
     // erased. Only a plain draft waits for approval.
     let draft = team.phases.iter().any(|phase| phase.n == n && phase.state.is_draft());
+    // Owner, 2026-11-10: approving a phase that is already approved, running
+    // or done is what the owner wanted anyway; it answers so, never an error.
+    if approve && team.phases.iter().any(|phase| phase.n == n && phase.state.is_accepted()) {
+        return Ok(json!({"status":"approved","phase":n,"already":true}));
+    }
     let accepted = !approve && team.phases.iter().any(|phase| phase.n == n && phase.state.is_accepted());
     // U56: an accepted phase left with no tasks (they were moved out, U58) is
     // not done: it stays yours to discard, or the lead's on your word. An empty
@@ -2546,7 +2560,7 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
     if approve {
         accept_blockers(team, at, offline)?;
         if run_checks {
-            let checks = plan::phase_checks(team, &team.phases[at], std::time::Instant::now() + plan::PHASE_CHECK_TIMEOUT);
+            let checks = plan::phase_checks(team, &team.phases[at], std::time::Instant::now() + plan::phase_check_timeout());
             ensure!(checks.unresolved.is_empty() || input["approve_anyway"].as_bool() == Some(true),
                 "Unresolved prerequisites: {}. Choose Approve anyway to override this check", checks.unresolved.join("; "));
             if team.settings.phase_checks.critical_path_target || team.settings.phase_checks.unresolved_prerequisites {
@@ -4073,30 +4087,46 @@ fn discard_empty_draft(team: &mut Team, phase: u32, by: &str) {
 
 /// Task #289 (owner, 2026-11-08): the lead marks notices seen; one stays out of
 /// its inbox until its content changes, and a restart keeps that (the signature
-/// is stored with the team). A decision is answered, never marked seen.
+/// is stored with the team). Task #29 (team ede724c4, owner 2026-11-10): every
+/// informational item closes this way, by its key (`hgs team inbox --json`
+/// lists it). A decision is answered, never marked seen.
 fn seen(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you mark the inbox seen");
     let keys: Vec<String> = input["items"]
         .as_array()
-        .context("Name the notice keys to mark seen: {\"items\":[\"proposal:p77\"]}")?
+        .context("Name the item keys to close (each item's \"key\" in hgs team inbox --json): {\"items\":[\"proposal:p77\"]}")?
         .iter()
         .filter_map(Value::as_str)
         .map(str::to_owned)
         .take(200)
         .collect();
-    ensure!(!keys.is_empty(), "Name at least one notice to mark seen");
-    let notices: Vec<super::inbox::Item> = super::inbox::all_items(team).into_iter().filter(|item| super::inbox::notice(item.kind)).collect();
+    ensure!(!keys.is_empty(), "Name at least one item to close");
+    let all = super::inbox::all_items(team);
     let at = now();
     let mut marked = Vec::new();
     let mut unknown = Vec::new();
+    let mut decisions = Vec::new();
     for key in keys {
-        let Some(item) = notices.iter().find(|item| item.key == key) else {
+        // Task #29: one key may name several items (the playbook's rule (a)
+        // names a missing mode and settings that disagree): each one's
+        // content is stored, so closing the key closes all of them.
+        let named: Vec<&super::inbox::Item> = all.iter().filter(|item| item.key == key).collect();
+        let Some(item) = named.first().copied() else {
             unknown.push(key);
             continue;
         };
-        let signature = super::inbox::signature(item);
+        if !named.iter().all(|item| super::inbox::closable(item)) {
+            // Task #29: named, with what settles it, so the refusal is not
+            // a bare "unknown" (owner's rule d2).
+            decisions.push(json!({"key":key,"kind":item.kind,
+                "why":"a decision is answered, never closed: it clears once it is decided","command":item.command}));
+            unknown.push(key);
+            continue;
+        }
         team.seen_notices.retain(|seen| seen.key != key);
-        team.seen_notices.push(SeenNotice { key: key.clone(), signature, at });
+        for item in &named {
+            team.seen_notices.push(SeenNotice { key: key.clone(), signature: super::inbox::signature(item), at });
+        }
         marked.push(key);
     }
     team.seen_notices.sort_by(|a, b| a.at.total_cmp(&b.at));
@@ -4104,7 +4134,11 @@ fn seen(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
     team.seen_notices.drain(0..extra);
     let by = actor.label(team);
     events.push(Event::new("notices_seen", json!({"by":by,"items":marked})));
-    Ok(json!({"status":"seen","seen":marked,"unknown":unknown}))
+    let mut answer = json!({"status":"seen","seen":marked,"unknown":unknown});
+    if !decisions.is_empty() {
+        answer["decisions"] = json!(decisions);
+    }
+    Ok(answer)
 }
 
 /// Task #289: the lead keeps a task after its dependency was cancelled - it does
@@ -5793,10 +5827,15 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                         // Feedback 2026-11-04 (6): an object changes only the
                         // members it names ({"dev":{"model":"opus"}}, null removes
                         // one, a new id adds it); a list replaces them all.
+                        // Owner, 2026-11-09: a desktop save that arrives with its
+                        // members encoded as JSON text is read as that list; any
+                        // other shape names what it got, never a bare refusal.
+                        let decoded = value.as_str().and_then(|text| serde_json::from_str::<Value>(text).ok());
+                        let value = decoded.as_ref().unwrap_or(value);
                         let value = &match value {
                             Value::Object(patches) => patch_members(team, patches)?,
                             Value::Array(_) => value.clone(),
-                            _ => bail!("Members are a list of members, or an object of changes by member id such as {{\"dev\":{{\"model\":\"opus\"}}}}"),
+                            other => bail!("Members are a list of members, or an object of changes by member id such as {{\"dev\":{{\"model\":\"opus\"}}}}; this update sent {}", match other { Value::Null => "null", Value::Bool(_) => "true/false", Value::Number(_) => "a number", Value::String(_) => "text", _ => "something else" }),
                         };
                         let mut members: Vec<Member> = value
                             .as_array()
@@ -5936,7 +5975,7 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
             // at Create team.
             let folder = std::path::PathBuf::from(team.folder.trim());
             match super::working_mode::propose(&folder) {
-                Some(proposal) => {
+                Ok(proposal) => {
                     let mut cached = proposal.value();
                     cached["checked_at"] = json!(now());
                     team.mode_proposal = Some(cached);
@@ -5960,7 +5999,13 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                         team.working_mode.clear();
                     }
                 }
-                None => team.mode_proposal = Some(json!({"preset":""})),
+                // Task #32: Git too slow to read the project never blocks Create
+                // team; the dispatcher profiles it again soon.
+                Err(error @ super::working_mode::ProfileError::Slow { .. }) => {
+                    team.mode_proposal = Some(super::working_mode::slow_cache(&error, now()));
+                    events.push(Event::new("working_mode_slow", json!({"reason":error.to_string()})));
+                }
+                Err(_) => team.mode_proposal = Some(json!({"preset":""})),
             }
             // Task 271: the playbook is stored with a team that has a mode.
             if !team.working_mode.is_empty() {
@@ -6226,7 +6271,7 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
             );
             let folder = std::path::PathBuf::from(team.folder.trim());
             let proposal = super::working_mode::propose(&folder)
-                .context("The project cannot be profiled: its folder is not a Git repository")?;
+                .map_err(|error| anyhow::anyhow!("The project cannot be profiled: {error}"))?;
             let preset = if requested.is_empty() || requested == "auto" { proposal.preset.clone() } else { requested };
             // #451: a stale lead step (a preset the project no longer profiles
             // to) is refused with the mode the project selects now, not turned
@@ -7782,7 +7827,10 @@ fn apply_with_checks(team: &mut Team, op: &str, input: &Value, actor: &Actor, of
             ensure!(
                 matches!(actor, Actor::Human)
                     || (actor.is_lead(team)
-                        && (input["roster_word"].as_bool() == Some(true) || failed || (team.settings.lead_restarts_stuck && stuck))),
+                        && (input["roster_word"].as_bool() == Some(true)
+                            || failed
+                            || (team.settings.lead_restarts_stuck && stuck)
+                            || super::lead_plan::lead_relaunches(team, &member_id))),
                 "Only you relaunch a member; the lead proposes {{\"kind\":\"relaunch\",\"member\":\"ID\"}} as a card (hgs guide team-propose); the owner allows it with a click, or the owner's setting lead_restarts_stuck for a stuck member (hgs team settings with {{\"lead_restarts_stuck\":true}})"
             );
             let id = member_id;
@@ -8142,7 +8190,7 @@ fn apply_with_checks(team: &mut Team, op: &str, input: &Value, actor: &Actor, of
     }
     if run_checks && checks_phases(op) && op != "approve-phase" {
         let enabled = team.settings.phase_checks.critical_path_target || team.settings.phase_checks.unresolved_prerequisites;
-        let deadline = std::time::Instant::now() + plan::PHASE_CHECK_TIMEOUT;
+        let deadline = std::time::Instant::now() + plan::phase_check_timeout();
         let checks: Vec<_> = team.phases.iter().map(|phase| {
             (enabled && phase.state.is_draft()).then(|| plan::phase_checks(team, phase, deadline))
         }).collect();

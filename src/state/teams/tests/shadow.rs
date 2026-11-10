@@ -29,16 +29,41 @@ fn a_lead_message_binds_to_the_handed_attempt_or_is_refused() {
     let team = team();
     let dev = team.member("dev").unwrap();
     let qa = team.member("qa").unwrap();
-    assert_eq!(check_lead_message(&team, dev, "On #1: keep the old field").unwrap(),
-        vec![Binding { team: "t".into(), task: 1, attempt: "a1".into(), member: "dev".into() }]);
-    assert!(check_lead_message(&team, qa, "Please check the logs and reply").unwrap().is_empty(), "free-form: nothing to bind");
-    let error = check_lead_message(&team, qa, "Lead, for 145: build, test and measure it").unwrap_err().to_string();
+    let a1 = Binding { team: "t".into(), task: 1, attempt: "a1".into(), member: "dev".into() };
+    assert_eq!(check_lead_message(&team, dev, "On #1: keep the old field", None).unwrap(), LeadCheck { bindings: vec![a1.clone()], references: vec![] });
+    assert_eq!(check_lead_message(&team, qa, "Please check the logs and reply", None).unwrap(), LeadCheck::default(), "free-form: nothing to bind");
+    // Task #30 (team ede724c4): a message whose "task" names a task the
+    // member does not hold is refused, naming the hand-out.
+    let error = check_lead_message(&team, qa, "Build, test and measure it", Some(145)).unwrap_err().to_string();
     assert!(error.starts_with("Task #145 is not handed to qa: it has no open attempt"), "{error}");
     assert!(error.contains("hgs team retry --json") && error.contains("hgs team reassign --json"), "{error}");
-    let error = check_lead_message(&team, qa, "For #1 please review").unwrap_err().to_string();
-    assert!(error.contains("it is handed to dev"), "{error}");
-    let error = check_lead_message(&team, dev, "Then start #2 as well").unwrap_err().to_string();
-    assert!(error.contains("Task #2 is not handed to dev"), "{error}");
+    let error = check_lead_message(&team, qa, "please review", Some(1)).unwrap_err().to_string();
+    assert!(error.contains("it is handed to dev") && error.contains("hgs team reassign --json"), "{error}");
+    assert!(check_lead_message(&team, qa, "x", Some(77)).unwrap_err().to_string().contains("Unknown task #77"));
+    // Its own task in "task": bound, and the tasks the text mentions besides
+    // are references.
+    assert_eq!(check_lead_message(&team, dev, "Like #145 did, and #2 later", Some(1)).unwrap(),
+        LeadCheck { bindings: vec![a1.clone()], references: vec![145, 2] });
+    assert_eq!(reference_note(&[145, 2]).unwrap(), "#145, #2 are mentioned for reference only: the member does not hold them, so the message carries no work for them.");
+    assert_eq!(reference_note(&[]), None);
+}
+
+/// Task #30 (team ede724c4, 2026-11-10): the lead's message to dev3 about its
+/// task #3 was refused because it mentioned #1 for context. A mention of an
+/// accepted task, another member's or a not handed one is a reference: the
+/// message goes, bound to the member's own task when the text names it.
+#[test]
+fn a_lead_message_about_its_own_task_may_mention_any_task() {
+    let mut team = team();
+    team.tasks.push(Task { id: 9, title: "Done before".into(), assignee: "qa".into(), status: TaskStatus::Accepted, ..Default::default() });
+    let dev = team.member("dev").unwrap();
+    let qa = team.member("qa").unwrap();
+    let a1 = Binding { team: "t".into(), task: 1, attempt: "a1".into(), member: "dev".into() };
+    // Its own #1 with #9 (accepted), #145 (qa's) and #2 (dev's, not handed) for context.
+    assert_eq!(check_lead_message(&team, dev, "On #1: reuse what #9 did; #145 and #2 will follow", None).unwrap(),
+        LeadCheck { bindings: vec![a1], references: vec![9, 145, 2] });
+    // A mention alone never refuses: it binds nothing and names the references.
+    assert_eq!(check_lead_message(&team, qa, "Lead, for 145: see #1 first", None).unwrap(), LeadCheck { bindings: vec![], references: vec![145, 1] });
     // The binding is kept on the attempt, bounded, with an event.
     let mut stored = team.clone();
     let mut events = Vec::new();

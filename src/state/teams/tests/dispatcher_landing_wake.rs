@@ -138,7 +138,8 @@ fn the_starved_digest_names_accepted_work_waiting_for_a_landing() {
         .into_iter()
         .find(|item| item.kind == "waiting_to_land")
         .expect("the lead's line");
-    assert_eq!(item.value()["notice"], json!(false), "a notice, never a decision");
+    // Task #29: information, never a decision: it carries its key and closes.
+    assert_eq!((item.value()["notice"].clone(), item.value()["key"].clone()), (json!(true), json!("waiting_to_land")), "information the lead may close");
     assert!(item.summary.contains("accepted, waiting to land: #1"), "{}", item.summary);
     assert!(item.command.contains("hgs team landed --json"), "{}", item.command);
 }

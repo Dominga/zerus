@@ -652,18 +652,22 @@ pub(crate) fn timeout_in(id: &str, folder: &Path) -> u64 {
 /// Every template a member may name: the built-ins (when the switch is on) and
 /// the owner's additions, marked so the owner sees only the additions.
 pub(crate) fn listed() -> Value {
+    // Task #5 (team ede724c4): the settings file is read once per listing
+    // (it was read three times on every status poll).
+    let settings = read_settings();
+    let enabled = settings["enabled"].as_bool().unwrap_or(true);
     let mut items: Vec<Value> = Vec::new();
-    if enabled() {
+    if enabled {
         for template in BUILTIN {
             items.push(described(template, "builtin"));
         }
     }
-    for template in additions() {
+    for template in settings["templates"].as_array().into_iter().flatten() {
         let mut item = template.clone();
         item["source"] = json!("owner");
         items.push(item);
     }
-    json!({"enabled":enabled(), "items":items})
+    json!({"enabled":enabled, "items":items})
 }
 
 fn described(template: &Template, source: &str) -> Value {
@@ -1381,7 +1385,12 @@ pub(crate) fn msbuild_path() -> String {
 fn web_test(template: &Template, args: &Value, folder: &Path) -> anyhow::Result<Plan> {
     let project = one(template, args, "project", folder)?
         .map(|project| project.replace('\\', "/").trim_end_matches('/').to_owned())
-        .filter(|project| project != ".");
+        .filter(|project| project != ".")
+        // Task #16 (team ede724c4): the default the template's summary names:
+        // a folder without its own package.json runs `client/` when that is
+        // the web project (this repository). It refused "The web project has
+        // no package.json (<folder>)" instead.
+        .or_else(|| (!folder.join("package.json").is_file() && folder.join("client").join("package.json").is_file()).then(|| "client".to_owned()));
     let dir = project.as_ref().map_or_else(|| folder.to_path_buf(), |project| folder.join(project));
     if let Some(project) = &project {
         let real = std::fs::canonicalize(&dir).with_context(|| format!("The template's project {project} is not a folder in your folder"))?;
@@ -1768,12 +1777,15 @@ fn qt6_from_cache(path: &Path) -> Option<String> {
 
 /// The checkout a worktree belongs to: the parent of Git's common folder.
 fn main_checkout(folder: &Path) -> Option<PathBuf> {
-    let output = Command::new("git")
-        .args(["-C", &folder.display().to_string(), "rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+    let mut command = Command::new("git");
+    command.args(["-C", &folder.display().to_string(), "rev-parse", "--path-format=absolute", "--git-common-dir"]);
+    // ZERUS/T-x8rhb6: a test's folder is under the temporary folder, which a
+    // Zerus template run puts inside the member's worktree
+    // (<folder>/.zerus-team/tmp); git then found that worktree's main
+    // checkout and its real Qt. A test never looks at or above it.
+    #[cfg(test)]
+    command.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
+    let output = command.stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -2304,6 +2316,21 @@ pub(crate) fn execute_as(plan: &Plan, folder: &Path, timeout: Duration, env: &[(
             outcome.failures = read.failing(20);
         }
         outcome.report = Some(read);
+    }
+    // Task #18: a run refused because its programs started at Low integrity
+    // (a Low-labeled build folder, an ordinary TEMP) says so once, with the
+    // owner's step.
+    if outcome.exit != Some(0) && !outcome.timed_out {
+        let run_temp = isolated
+            .as_ref()
+            .map_or_else(|| temp.clone(), |run| super::environment::run_temp(&run.env));
+        let cwd = plan.cwd.as_ref().map_or_else(|| folder.to_path_buf(), |cwd| folder.join(cwd));
+        let text = format!("{}\n{}\n{}", outcome.tail, outcome.excerpt, outcome.error);
+        let folders = super::environment::build_folders(&cwd, &plan.argv.join(" "), &text);
+        if let Some(message) = super::environment::diagnose(&text, &folders, Some(&run_temp)) {
+            outcome.tail = last_chars(&format!("{}\n{message}", outcome.tail), TAIL_BYTES);
+            outcome.error = message;
+        }
     }
     outcome
 }
@@ -3209,6 +3236,10 @@ console.log(' FAIL  src/app.test.ts > fails');
         .unwrap();
         let first = plan("web-test", &json!({"project":"client","paths":["client/src/app.test.ts"]}), dir.path()).unwrap();
         assert_eq!((first.program.as_str(), first.cwd.as_deref()), ("node", Some("client")), "{first:?}");
+        // Task #16 (team ede724c4): without a project the template runs the
+        // folder's client/ web project, as its summary says.
+        let default = plan("web-test", &json!({"paths":["client/src/app.test.ts"]}), dir.path()).unwrap();
+        assert_eq!((default.program.as_str(), default.cwd.as_deref()), ("node", Some("client")), "{default:?}");
         let report = dir.path().join(".zerus-team").join("results").join("vitest.xml");
         assert!(first.argv.iter().any(|arg| arg == "--reporter=junit"), "{first:?}");
         assert!(first.argv.iter().any(|arg| *arg == format!("--outputFile.junit={}", report.display())), "{first:?}");

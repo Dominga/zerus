@@ -25,7 +25,7 @@ fn fixture(name: &str) -> Value {
 #[test]
 fn every_followed_view_arrives_from_an_hgs_answering_like_this_computer() {
     let fake = FakeHgs::new("team_reads_like_this_computer", json!({"": {}}));
-    for (op, file) in [("list", "team-list.json"), ("waiting", "team-waiting.json"), ("status", "team-status.json"),
+    for (op, file) in [("list", "team-list-summary.json"), ("waiting", "team-waiting.json"), ("status", "team-status.json"),
                        ("inbox", "team-inbox.json"), ("events", "team-events.json")] {
         std::fs::write(fake.dir.join(format!("team-{op}-local.json")), json!({"stdout": fixture(file)}).to_string()).unwrap();
     }

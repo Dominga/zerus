@@ -125,11 +125,16 @@ fn cherry_landed(team: &Team, commit: &str) -> bool {
 
 /// Task #370: the commits of rejected attempts of every task in the team: a
 /// merge whose range carries one would land rejected code.
+///
+/// Owner's team, 2026-11-10: an attempt the pipeline returned (its review or
+/// test round) is not the lead's rejection. Its member fixes it with commits
+/// on top, so it is the base of the accepted work; a cherry-pick of the last
+/// fix alone would drop it.
 fn rejected_commits(team: &Team) -> Vec<String> {
     team.tasks
         .iter()
         .flat_map(|task| task.attempts.iter())
-        .filter(|attempt| attempt.state == AttemptState::Rejected && !attempt.folder_head.is_empty())
+        .filter(|attempt| attempt.state == AttemptState::Rejected && !attempt.pipeline_return && !attempt.folder_head.is_empty())
         .map(|attempt| attempt.folder_head.clone())
         .collect()
 }
@@ -533,8 +538,20 @@ pub(crate) fn enabled(team: &Team) -> bool {
     if team.integration_folder().is_empty() || manual(team) {
         return false;
     }
-    crate::test_discipline::config::load_project(Path::new(team.integration_folder()), team.settings.tests.as_ref())
-        .is_ok_and(|loaded| loaded.active() && loaded.config.merge_queue.enabled)
+    let root = Path::new(team.integration_folder());
+    let overrides = team.settings.tests.as_ref();
+    let Ok(loaded) = crate::test_discipline::config::load_project(root, overrides) else { return false };
+    if loaded.active() && loaded.config.merge_queue.enabled {
+        return true;
+    }
+    // Owner, 2026-11-09: when neither the project nor the team says, a team
+    // whose members work in their own clones or worktrees has the queue on:
+    // their accepted branches live there, so nothing else lands them.
+    let said = overrides.is_some_and(|fields| fields.get("merge_queue").is_some())
+        || std::fs::read_to_string(root.join(crate::test_discipline::config::FILE)).is_ok_and(|text| text.contains("merge_queue"));
+    !said && team.members.iter().any(|member| {
+        member.id != team.lead && matches!(member.folder, super::model::MemberFolder::Worktree | super::model::MemberFolder::Clone)
+    })
 }
 
 /// The queue entry an accept of task `id` makes, or None when the accept
@@ -1092,7 +1109,12 @@ where
                     "The merge queue's tests could not start: an environment failure, not this work's. {rolled} The landing stays queued; the task is not reopened. Fix the dependency or toolchain and retry (hgs team merge --json with retry).\n{}",
                     environment
                         .iter()
-                        .map(|record| format!("{}: {}", record.suite, record.excerpt.lines().last().unwrap_or_default()))
+                        // Task #18: an environment failure Zerus named keeps its
+                        // whole text, the owner's step included.
+                        .map(|record| match record.excerpt.find(super::environment::MARKER) {
+                            Some(at) => format!("{}: {}", record.suite, &record.excerpt[at..]),
+                            None => format!("{}: {}", record.suite, record.excerpt.lines().last().unwrap_or_default()),
+                        })
                         .collect::<Vec<_>>()
                         .join("\n")
                 );
@@ -1313,6 +1335,9 @@ where
 /// its module, its toolchain or its test tool was missing - so the result says
 /// nothing about the merged work and must not reopen the task.
 fn environment_excerpt(excerpt: &str) -> bool {
+    if excerpt.contains(super::environment::MARKER) {
+        return true;
+    }
     let text = excerpt.to_lowercase();
     [
         "err_module_not_found",

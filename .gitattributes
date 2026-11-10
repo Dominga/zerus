@@ -24,6 +24,8 @@ tests/fixtures/*.txt -text -whitespace
 tests/fixtures/*.patch -text -whitespace
 # SessionStart serialization has a byte-exact UTF-8/LF contract on every host.
 tests/fixtures/session-start-context.json -text
+# Task #20: compared byte for byte by details_contract; a Windows checkout kept CRLF.
+client/core/tests/fixtures/inspect-details.json text eol=lf
 src/state/data/*.txt -text -whitespace
 
 # Keep vendored libvterm byte-for-byte identical to the documented upstream.

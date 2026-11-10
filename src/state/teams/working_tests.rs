@@ -100,16 +100,19 @@ fn the_doorbell_is_one_line_with_the_id_and_never_the_text() {
     // Task 186 (docs/lore.md 11.11): who, normal or URGENT, the id, the count,
     // at most 200 characters.
     let one = vec![message("w-message-1", 1.0, "normal")];
-    let bell = doorbell("[Zerus team \u{b7} from: Lead \u{b7} task: #7 \u{b7} attempt: 2]", &one);
+    let bell = doorbell("[Zerus team \u{b7} from: Lead \u{b7} task: #7 \u{b7} attempt: 2]", &one, false);
     assert_eq!(bell, "[Zerus team \u{b7} from: Lead \u{b7} task: #7 \u{b7} attempt: 2 \u{b7} normal \u{b7} w-message-1] read it with hgs team inbox");
     let three = vec![message("w-message-1", 1.0, "normal"), message("w-message-2", 2.0, "urgent"), message("w-message-3", 3.0, "normal")];
     assert_eq!(
-        doorbell("", &three),
+        doorbell("", &three, true),
         "[Zerus team \u{b7} message \u{b7} from zerus \u{b7} URGENT \u{b7} w-message-3 \u{b7} 3 messages] read it with hgs team inbox"
     );
+    // Task #24 (team ede724c4): an older urgent message still unread does not
+    // make a normal doorbell URGENT; the caller says what this one rings for.
+    assert!(doorbell("", &three, false).contains("\u{b7} normal \u{b7} w-message-3 \u{b7} 3 messages]"));
     assert_eq!(header_of("[Zerus team \u{b7} from: Zerus \u{b7} starved]\nBackend has had no task"), "[Zerus team \u{b7} from: Zerus \u{b7} starved]");
     assert_eq!(header_of("Plain text"), "");
-    let long = doorbell(&"[Zerus team ".repeat(80), &one);
+    let long = doorbell(&"[Zerus team ".repeat(80), &one, false);
     assert!(!long.contains('\n') && !long.contains("Rebase"));
     assert_eq!(long.chars().count(), DOORBELL_CHARS, "the header is shortened, the id and the command stay");
     assert!(long.ends_with("\u{b7} normal \u{b7} w-message-1] read it with hgs team inbox"), "{long}");

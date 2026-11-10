@@ -1753,6 +1753,27 @@ debug-record message, or `cannot execute ... c1.dll`), the result says so in
 `error` and carries `"compiler_cannot_start": true` instead of leaving only a
 tail to read.
 
+Task #18 (owner, 2026-11-10): Windows starts an executable whose file carries
+the Low mandatory label at Low integrity, whatever its parent's level, and a
+Low process may not create anything in an ordinary (Medium) folder. A DeepSeek
+session's sandbox labels its working folder Low, inheritable by everything
+below it, so every test program cargo builds there fails at its first
+temporary folder with `Access is denied. (os error 5)` when the run's TEMP is
+an ordinary folder. (A member template's isolated TEMP sits inside the
+member's own folder and is Low as well, so a DeepSeek member's own runs pass.)
+The merge queue checks a suite's folder, its `target` and a named target
+folder before it runs: a Low build folder with an ordinary TEMP is one result
+with status `failed`, flag `environment` and an excerpt starting
+`Environment failure:`, which names the folder that carries the label and the
+owner's step (`icacls "<folder>" /setintegritylevel (OI)(CI)M /T /C /Q`, no
+administrator needed, and DeepSeek sessions in their own worktree); nothing
+runs, nothing is retried, and the landing stays queued without reopening the
+task. A failed `hgs run`, member template or queued suite whose output was
+refused this way, from programs built in such a folder (its folder, a
+`CARGO_TARGET_DIR` or `--target-dir` it names, or the programs cargo says it
+ran), carries the same text in `error` (`hgs run` adds `"environment": true`).
+Zerus only reads labels; it never changes them.
+
 On Windows a Git Bash wrapper (`bash -c`, `env`, `nohup`, `timeout`, `xargs`,
 `sh -c`, `npx -c`) ends a Windows process between the session and hgs, so the
 process ancestry stops at a process that no longer exists. hgs then asks the
@@ -3042,11 +3063,14 @@ belongs to the attempt (or stage run) handed to it.
 - A lead's message to a member that names a task (`#N`, `task N`, `for N:`
   for one of the team's tasks) is bound to that task's attempt when the task is
   handed to that member (the attempt's `lead_messages`, at most 20, with a
-  `lead_message` event); otherwise it is refused, naming the task's state and
-  the hand-out to use (`hgs team retry`, `hgs team reassign`). This holds for
-  `hgs send` from the lead's own session to a member's session and for the
-  lead's `hgs team message` (a broadcast naming a task is refused). A message
-  naming no task goes through; it carries no work. Answers and decisions keep
+  `lead_message` event). Task #30 (2026-11-10): a task the text only mentions
+  and the member does not hold is a reference: the message goes, its answer
+  names it (`references`, `reference_note`). Only a message whose `"task"`
+  field names a task the member does not hold is refused, naming the task's
+  state and the hand-out to use (`hgs team retry`, `hgs team reassign`). This
+  holds for `hgs send` from the lead's own session to a member's session and
+  for the lead's `hgs team message`. A message naming no task goes through; it
+  carries no work. Answers and decisions keep
   their own commands (`hgs team reply`, `accept`, `reject`, `hold`); the
   owner's messages and Zerus's own sends are never checked.
 - A team member's `hgs run` needs its open attempt or stage run; it may name
@@ -3537,6 +3561,26 @@ decision note, another cancelled dependency, another unread count, a newer
 digest); a decision is never marked seen - it is answered. Unknown or
 decision keys come back in `unknown` and mark nothing.
 
+Task 29 (owner, 2026-11-10): every item in `hgs team inbox --json` carries its
+`key`, and every informational item closes the same way and carries the `seen`
+command (`"notice": true`): the notices above, test results (`test_result`),
+playbook items (`playbook`), records lore cannot write yet (`lore_missing`),
+accepted work waiting to land (`waiting_to_land`), refused queued calls
+(`refused_queued_call`), idle notices (`idle_with_ready_work`), recovered
+attempts (`attempt_recovered`) and any item whose command starts with "no
+action". A decision (a report, question, permission, a card or anything else
+that waits for an accept, reject or answer) is never closed and clears only by
+being decided; `seen` lists such keys in `unknown` and names each in
+`decisions` with its command. The signature leaves out times: an item that
+only grew older (a playbook item dated now, "#1 (26 min)") stays closed.
+
+Informational items also clear by themselves: a task's test results once it
+is accepted and landed, and every test result after 12 hours; a playbook item
+as soon as its rule no longer breaks; a `lore_missing` record once its task
+has a commit (a member's own commit counts: the accepted attempt's reported
+folder head, the commit the merge queue lands); `waiting_to_land` once the
+work landed.
+
 `dependency_cancelled` offers `keep` next to hold and cancel:
 `{"request_id":"UUID","team":"ID","task":N} | hgs team keep --json` (or
 `"deps":[ids]` for some of them) records that the task does not need the
@@ -3698,6 +3742,45 @@ whole record (`layout` 1). An older hgs cannot read a migrated team. Its
 shared fields hold `"tasks"` as a sentence, not a list, so the older hgs
 answers "Invalid team record" and never writes the team back without its
 tasks. Every hgs and desktop on the computer is updated together.
+
+### The polled team list and inbox are small
+
+The desktop follows `hgs team list` of every computer, peers over SSH
+included, and reads it again whenever a team's revision moves. Since task #6
+(team ede724c4) each item carries only what the session list's cards and strips
+show. Tasks, phase records, attention items, proposals and each member's
+queue, services, jobs and question are in `hgs team status`. Each item has:
+
+- `id`, `name`, `status`, `project`, `folder`, `lead`, `revision`, `updated`;
+- `plan_mode` and `phase_modes` (every phase's mode, phase 1 included);
+- `members`: each one's `id`, `role`, `agent`, `state`, `session` (`host`,
+  `name`, `run_id`, `conversation_id`), `session_state` and `state_reason`;
+- `task_count`: the tasks the request covers (cancelled ones only with
+  `include_cancelled`, as the desktop asks);
+- `progress`: the phase strip over those tasks. `phase` is the lowest phase
+  with an unfinished task (accepted and cancelled count as finished), else the
+  last; `phase_done` and `phase_total` count its tasks; `phases_done` and
+  `phases_total` count the phases. A team with no task has all five at 0;
+- `accepted` (archived phases included), `submitted`, `in_review`, `in_test`;
+- `attention_count` (the owner's attention items) and `open_proposals` (the
+  lead's open proposals);
+- `waiting_for_lead`, `pending_phase`, `stuck_scope`, `auto_accept` and
+  `parent` (`team` and `task` of a sub-team, else null).
+
+On the store copy of 2026-11-10 (21 teams), the list fell from 352 KB to 44 KB.
+A desktop that follows a peer with an older hgs still reads that peer's
+`tasks`, `attention` and `proposals` arrays and counts them itself. An older
+desktop reading this hgs's list shows 0 tasks, attention items and proposals
+until it is updated.
+
+`hgs team inbox` resolves its caller once. A member's own call (`{}`) finds
+its team through the members projection (`team_rule_members`), so only teams
+whose member list names the session are read. Only when the projection names
+none are all running teams read, as before. On Windows the ancestry check that
+proves the session reads one process table for the whole walk, not one per
+ancestor; each ancestor is still verified. The owner's read of a named team
+(`{"team"}`) has no session identity to prove. Proposals are settled and
+items are built only for the lead, a sub-lead or the owner.
 
 ### A stalled lead tells the owner
 

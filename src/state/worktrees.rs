@@ -82,6 +82,20 @@ fn branch_taken(read: &dyn Fn(&[&str]) -> Result<String>, reference: &str) -> Re
     Ok(false)
 }
 
+/// Task #32 (team ede724c4): how long one Git read may take: `seconds` here; in
+/// tests at least a minute, which a machine busy with parallel builds and test
+/// threads fits, so a test never depends on how fast the machine is. A read
+/// that still runs out says so (`GitError::state` "timeout").
+pub(crate) fn read_window(seconds: u64) -> Duration {
+    #[cfg(test)]
+    let seconds = seconds.max(60);
+    Duration::from_secs(seconds)
+}
+
+/// Task #32: the window of a desktop worktree creation's reads before the
+/// clone (a phone keeps its short one inside its 25 s operation).
+const CREATE_READ_SECONDS: u64 = 60;
+
 pub(super) fn git(cwd: &Path, args: &[&str], deadline: Instant) -> std::result::Result<Vec<u8>, GitError> {
     git_holding(cwd, args, deadline, None)
 }
@@ -947,13 +961,16 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
         None => None,
     };
     let read = |args: &[&str]| -> Result<String> {
-        // Each read keeps its own window within the operation deadline.
-        let deadline = total_deadline.min(Instant::now() + Duration::from_secs(5));
+        // Each read keeps its own window within the operation deadline. Task
+        // #32: a desktop read gets a minute (its 5 s ran out under load: "git
+        // for-each-ref timed out or was cancelled"); a phone keeps 5 s.
+        let window = if mobile { Duration::from_secs(5) } else { read_window(CREATE_READ_SECONDS) };
+        let deadline = total_deadline.min(Instant::now() + window);
         #[cfg(test)]
         if let Some(delay) = BEFORE_CREATE_READ.with(std::cell::Cell::get) { delay(); }
         #[cfg(unix)]
         let bytes = match &owned {
-            Some(owned) => owned.git(&owned.source, args, 5)?,
+            Some(owned) => owned.git(&owned.source, args, window.as_secs())?,
             None => git(&source, args, deadline).map_err(|e| e.detail)?,
         };
         #[cfg(not(unix))]

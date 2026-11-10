@@ -64,19 +64,42 @@ export function PlanModeField(props: PlanModeFieldProps): JSX.Element {
   );
 }
 
+// Task #31 (team ede724c4): one guide. Before a draft the intro tells how a
+// team works and what Start working with a team does; the form's how-to
+// (after it) adds only what the intro does not say.
+
+/** The intro's steps, before a draft (owner, 2026-11-09). */
+export function NewTeamIntroSteps(): JSX.Element {
+  return (
+    <div class="nt-intro-guide" data-intro-steps>
+      <h3>{tr("How a team works")}</h3>
+      <ol>
+        <li>{tr("A lead plans the work: it reads your goal, drafts the members, their roles and the tasks, and asks you what it needs.")}</li>
+        <li>{tr("You decide: nothing runs until you approve the team and its plan.")}</li>
+        <li>{tr("Members work in their own folders or branches; reviewers check their work and mergers land it.")}</li>
+        <li>{tr("You follow it in the Team tab: progress, questions waiting for you, reports and the plan.")}</li>
+        <li>{tr("Everything stays editable: members, tasks and settings can change while the team works.")}</li>
+      </ol>
+    </div>
+  );
+}
+
+/** What Start working with a team does, under its button. */
+export function NewTeamIntroHint(): JSX.Element {
+  return <p class="nt-hint" data-intro-hint>{tr("This creates a draft and starts the lead in the team folder.")}</p>;
+}
+
 export interface NewTeamHowToProps {
   open: boolean;
   onToggle: (open: boolean) => void;
 }
 
-/** What happens at each step of New team; collapsible, the form remembers it. */
+/** What the draft's form adds to the intro; collapsible, closed by default,
+ * the form remembers it. */
 export function NewTeamHowTo(props: NewTeamHowToProps): JSX.Element {
   const steps = () => [
-    tr("Fill in the folder and the goal."),
-    tr("Start planning starts only the lead, in the team folder."),
-    tr("Talk to the lead in its chat to shape the plan."),
     tr("Fields the lead changed are marked ● until you look at them."),
-    tr("Create team starts the members and their worktrees; nothing runs before that."),
+    tr("Create team starts the members and their worktrees."),
   ];
   return (
     <section class="nt-howto" data-howto={props.open ? "open" : "closed"}>

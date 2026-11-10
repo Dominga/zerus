@@ -1560,7 +1560,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     let lead_working = !lead_ready && mid_turn && lead.is_some_and(|found| found.live && !found.asking && found.activity == "busy");
     if lead_ready || lead_working {
         let items = inbox::items(team);
-        let new = items.iter().filter(|item| !team.inbox.told.contains(&item.key)).count();
+        let new = items.iter().filter(|item| !team.inbox.knows(&item.key, now)).count();
         // A permission or question the free lead left unanswered is told once
         // more (owner, 2026-11-05).
         let again = if lead_ready { inbox::overdue(&items, &team.inbox.told, now).len() } else { 0 };
@@ -1575,7 +1575,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     // draft team starts its lead alone.
     if active {
         for sub in team.members.iter().filter(|member| member.sub && may_start(member)) {
-            let untold = inbox::items_for(team, &sub.id).iter().any(|item| !sub.inbox.told.contains(&item.key));
+            let untold = inbox::items_for(team, &sub.id).iter().any(|item| !sub.inbox.knows(&item.key, now));
             if untold && launching.insert(sub.id.clone()) {
                 steps.push(Step::Launch { member: sub.id.clone() });
             }
@@ -1592,7 +1592,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         if !session_of(sub, seen).is_some_and(can_take_a_message) {
             continue;
         }
-        let new = inbox::items_for(team, &sub.id).into_iter().filter(|item| !sub.inbox.told.contains(&item.key)).count();
+        let new = inbox::items_for(team, &sub.id).into_iter().filter(|item| !sub.inbox.knows(&item.key, now)).count();
         let interval = team.settings.inbox_interval_seconds as f64;
         if new > 0 && (sub.inbox.told_at == 0.0 || now - sub.inbox.told_at >= interval) {
             steps.push(Step::SubInbox { member: sub.id.clone() });
@@ -1977,6 +1977,19 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     // member's ready task, and once it can start the later task's work holds
     // it back instead (plan::output_holders).
     let mut claimed: Vec<&Task> = Vec::new();
+    // Owner, 2026-11-09 ("приоритет выдачи поправь"): a member first takes the
+    // ready tasks the plan gave it; it takes another member's task only when
+    // none of its own is ready. Without this, an earlier task in the order
+    // pulled a free member away and its own task went to yet another member,
+    // across roles (records' #5 to export, export's #10 to core).
+    let own_ready: BTreeSet<String> = ready
+        .iter()
+        .filter_map(|id| team.task(*id))
+        .filter(|task| task.waits.is_none() && !task.assignee.is_empty())
+        .filter_map(|task| team.member(&task.assignee))
+        .filter(|member| member.session.is_some() && available(member, &busy, None))
+        .map(|member| member.id.clone())
+        .collect();
     for id in ready {
         let Some(task) = team.task(id) else { continue };
         // Spec 0: a refused or unconfirmed step waits for the lead or you.
@@ -2130,7 +2143,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                     task,
                     member,
                     member.session.is_some(),
-                    &|other| available(other, &busy, Some(id)),
+                    &|other| available(other, &busy, Some(id)) && !own_ready.contains(&other.id),
                     &outputs,
                 );
                 if let Some(peer) = peer {
@@ -2138,6 +2151,25 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                     claim_outputs(&mut claimed, task);
                     steps.push(Step::Rebalance { task: id, from: member.id.clone(), to: peer.id.clone() });
                     continue;
+                }
+                // Owner, 2026-11-09 (B1 waited 27 minutes for a busy assignee
+                // while a member of its role was never started): when the
+                // started assignee is busy and no started member can take the
+                // task, the first unstarted member of the same role (then of a
+                // related one) is started; a later tick hands the task over.
+                if member.session.is_some() {
+                    let role = team.role_of(&member.id);
+                    let unstarted = |other: &&Member| other.id != member.id && other.id != team.lead
+                        && other.session.is_none() && other.launch_id.is_empty() && other.error.is_empty()
+                        && !matches!(other.state, MemberState::Removed | MemberState::Paused)
+                        && !launching.contains(&other.id)
+                        && super::rights::missing(task, other).is_empty();
+                    let spare = team.members.iter().filter(unstarted).find(|other| team.role_of(&other.id) == role)
+                        .or_else(|| team.members.iter().filter(unstarted).find(|other| super::model::related_roles(&role, &team.role_of(&other.id))));
+                    if let Some(spare) = spare {
+                        launching.insert(spare.id.clone());
+                        steps.push(Step::Launch { member: spare.id.clone() });
+                    }
                 }
             }
         }
@@ -2982,6 +3014,24 @@ pub(crate) fn hand_off_text_with(
     hand_off_text_rules(team, task, attempt, report_host, member_host, extra, &rules)
 }
 
+/// Task #25: whether `folder` has CodeLore's code map: a lore.toml whose
+/// `[atlas]` table turns it on. A folder on another computer reads as none.
+pub(crate) fn code_map_in(folder: &str) -> bool {
+    if folder.is_empty() {
+        return false;
+    }
+    let Ok(text) = std::fs::read_to_string(Path::new(folder).join("lore.toml")) else { return false };
+    let mut in_atlas = false;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_atlas = line == "[atlas]";
+        } else if in_atlas && line.replace(' ', "").starts_with("enabled=true") {
+            return true;
+        }
+    }
+    false
+}
+
 fn hand_off_text_rules(
     team: &Team,
     task: &Task,
@@ -3151,6 +3201,16 @@ fn hand_off_text_rules(
             run = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"attempt":attempt.id,"template":"cargo-test","args":{}})
         );
     }
+    // Task #25: a member whose folder has CodeLore's code map is told to search
+    // the code and the docs through it, and the team's memory through Zerus.
+    let folder = team
+        .member(&attempt.member)
+        .map(|member| if member.directory.is_empty() { team.folder.clone() } else { member.directory.clone() })
+        .unwrap_or_default();
+    if code_map_in(&folder) {
+        text += "\nSearch the code and the docs with lore atlas search \"what it does\" in your folder, and the team's \
+                 memory with hgs team lore find, before opening files by guesswork (hgs guide code).\n";
+    }
     // U30: a build Zerus runs is work; a job left in the member's own shell is a service.
     text += "\nStart builds and long tests through Zerus (hgs team run, or hgs run: hgs guide run) so your session shows \
              as Building and your reply waits for them; a job you leave in your own shell after your turn counts as a \
@@ -3275,20 +3335,26 @@ fn git_continuation(folder: &str, since: f64) -> String {
     // C13: the bounded Git path - a deadline, bounded output, no optional
     // locks, no fsmonitor and no hooks - so a member's repository can neither
     // run code here nor hold the dispatcher.
-    let deadline = Instant::now() + Duration::from_secs(20);
+    // Task #32 (team ede724c4): each read has its own window (they shared one
+    // 20 s deadline, which a busy computer ran out of).
     let run = |args: &[&str]| -> Option<String> {
         let mut hardened = vec!["-c", "core.hooksPath="];
         hardened.extend_from_slice(args);
+        let deadline = Instant::now() + super::super::worktrees::read_window(20);
         super::super::worktrees::git(Path::new(folder), &hardened, deadline)
             .ok()
             .map(|out| String::from_utf8_lossy(&out).into_owned())
     };
     // A filter, include, hook path or fsmonitor of the repository's own config
-    // could still run code: such a folder is not read (as `commit_in`).
-    if let Some(listing) = run(&["config", "--list", "--show-scope"]) {
-        if let Some(reason) = refused_repository_config(&listing) {
-            return format!("\nCommits and working tree: not read here, this repository {reason}.\n");
+    // could still run code: such a folder is not read (as `commit_in`). Task
+    // #32: a config that could not be read is not read past either.
+    match run(&["config", "--list", "--show-scope"]) {
+        Some(listing) => {
+            if let Some(reason) = refused_repository_config(&listing) {
+                return format!("\nCommits and working tree: not read here, this repository {reason}.\n");
+            }
         }
+        None => return "\nCommits and working tree: not read here, Git could not read its config (not a repository, or Git did not answer in time).\n".to_owned(),
     }
     // A missing or zero start time is no date filter: git 2.55 reads
     // `--since @0` as "now" and would hide every commit.
@@ -4277,11 +4343,18 @@ fn tell_lead(store: &mut Store, team: &Team, kind: &str, text: &str) {
 /// working-mode proposal on the team, so later ticks only compare settings.
 fn check_working_mode(store: &mut Store, team: &Team) -> anyhow::Result<()> {
     let folder = std::path::PathBuf::from(team.folder.trim());
-    let mut proposal = super::working_mode::propose(&folder)
-        .map(|proposal| proposal.value())
-        .unwrap_or_else(|| json!({"preset":""}));
-    // Task #451: when the profile was read, so a stale block is refreshed.
-    proposal["checked_at"] = json!(crate::state::now());
+    // Task #32 (team ede724c4): Git too slow to read the project is cached as
+    // such and read again in two minutes, never as "not a repository".
+    let proposal = match super::working_mode::propose(&folder) {
+        Ok(proposal) => {
+            let mut value = proposal.value();
+            // Task #451: when the profile was read, so a stale block is refreshed.
+            value["checked_at"] = json!(crate::state::now());
+            value
+        }
+        Err(error @ super::working_mode::ProfileError::Slow { .. }) => super::working_mode::slow_cache(&error, crate::state::now()),
+        Err(_) => json!({"preset":"","checked_at":crate::state::now()}),
+    };
     change(store, &team.id, |team, _events| {
         team.mode_proposal = Some(proposal);
         Ok(())
@@ -4300,8 +4373,11 @@ fn propose_working_mode(store: &mut Store, team: &Team, preset: &str, title: &st
     // Task #451: the card follows the project as it is now. When the profile
     // moved since the step was computed, nothing is proposed here: the tick
     // re-reads the cache (ModeCheck) and offers the new mode on a later tick.
-    if super::working_mode::propose(&std::path::PathBuf::from(team.folder.trim())).is_some_and(|proposal| proposal.preset != preset) {
-        return Ok(());
+    // Task #32: a project Git was too slow to read proposes nothing now either.
+    match super::working_mode::propose(&std::path::PathBuf::from(team.folder.trim())) {
+        Ok(proposal) if proposal.preset != preset => return Ok(()),
+        Err(super::working_mode::ProfileError::Slow { .. }) => return Ok(()),
+        _ => {}
     }
     let reason = format!(
         "The project's profile selects {title}: {}. Switch the team to it at this safe point (no attempt is open).",
@@ -4984,7 +5060,13 @@ pub(crate) fn folder_problem(folder: &str, source: &str, branch: Option<&str>) -
 /// commit.
 fn clone_of(folder: &str, source: &str) -> bool {
     let canonical = |path: &str| crate::platform::canonical(Path::new(path)).ok();
-    if let Some(origin) = git_at(folder, &["config", "--get", "remote.origin.url"]) {
+    // Task #5 (team ede724c4): the origin from the clone's config file when it
+    // names it plainly, without a git process.
+    #[cfg(test)]
+    let from_files = if old_status() { None } else { origin_url_from_files(folder) };
+    #[cfg(not(test))]
+    let from_files = origin_url_from_files(folder);
+    if let Some(origin) = from_files.or_else(|| git_at(folder, &["config", "--get", "remote.origin.url"])) {
         let origin = origin.strip_prefix("file://").unwrap_or(&origin);
         if canonical(origin).is_some_and(|origin| Some(origin) == canonical(source)) {
             return true;
@@ -5042,6 +5124,16 @@ pub(crate) fn folder_facts(folder: &str) -> (String, String) {
     if folder.is_empty() {
         return (String::new(), String::new());
     }
+    // Task #5 (team ede724c4): the repository's own files answer without a
+    // git process (one cost 100-400 ms on Windows, once per member folder of
+    // every status poll); git answers what they do not.
+    #[cfg(test)]
+    let fast = !old_status();
+    #[cfg(not(test))]
+    let fast = true;
+    if let Some(facts) = fast.then(|| folder_facts_from_files(folder)).flatten() {
+        return facts;
+    }
     // N37: one `rev-parse` prints the common dir and the branch together, so a
     // status call with several members in one folder spawns one git, not 2-4
     // per member.
@@ -5065,9 +5157,159 @@ pub(crate) fn folder_facts(folder: &str) -> (String, String) {
     (project, branch)
 }
 
+/// Task #5 (team ede724c4): what `git rev-parse --path-format=absolute
+/// --git-common-dir --abbrev-ref HEAD` prints for `folder`, read from the
+/// repository's files: the folder of the common git dir (forward slashes, as
+/// git prints it) and the branch, or `HEAD` when detached. None for anything
+/// this reader does not know for certain (a git environment override, a
+/// reftable store, an unborn or ambiguous branch, a ref outside refs/heads,
+/// an unusual `.git`), which git then answers as before.
+pub(crate) fn folder_facts_from_files(folder: &str) -> Option<(String, String)> {
+    let (git_dir, common) = git_dirs_from_files(folder)?;
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    let branch = if let Some(reference) = head.strip_prefix("ref:") {
+        let reference = reference.trim();
+        let name = reference.strip_prefix("refs/heads/")?;
+        let packed = std::fs::read_to_string(common.join("packed-refs")).unwrap_or_default();
+        let exists = |full: &str| common.join(full).is_file() || packed.lines().any(|line| line.split_once(' ').is_some_and(|(_, at)| at == full));
+        // An unborn branch has no commit to abbreviate; a tag or remote of
+        // the same name makes git print a longer name.
+        if name.is_empty() || !exists(reference) || exists(&format!("refs/tags/{name}")) || exists(&format!("refs/remotes/{name}")) || exists(&format!("refs/{name}")) || exists(name) {
+            return None;
+        }
+        name.to_owned()
+    } else if head.len() >= 40 && head.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        "HEAD".to_owned()
+    } else {
+        return None;
+    };
+    let project = common.parent()?.to_str()?;
+    #[cfg(windows)]
+    let project = {
+        // A verbatim path (\\?\D:\x) as git prints it (D:/x); a share is
+        // left to git.
+        let plain = project.strip_prefix(r"\\?\").unwrap_or(project);
+        if plain.starts_with(r"\\") || plain.starts_with("UNC") {
+            return None;
+        }
+        plain.replace('\\', "/")
+    };
+    #[cfg(not(windows))]
+    let project = project.to_owned();
+    Some((project, branch))
+}
+
+/// Task #5 (team ede724c4): `git config --get remote.origin.url` in `folder`,
+/// read from the repository's own config file when it names the origin
+/// plainly; None for anything else (an include, a worktree config, quoting or
+/// escapes beyond a doubled backslash, no origin there), which git answers.
+pub(crate) fn origin_url_from_files(folder: &str) -> Option<String> {
+    let (git_dir, common) = git_dirs_from_files(folder)?;
+    if git_dir.join("config.worktree").exists() || common.join("config.worktree").exists() {
+        return None;
+    }
+    let text = std::fs::read_to_string(common.join("config")).ok()?;
+    let mut in_origin = false;
+    let mut url = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            let header = line.to_ascii_lowercase();
+            if header.starts_with("[include") {
+                return None;
+            }
+            in_origin = header.starts_with(r#"[remote "origin""#);
+            if in_origin && line != r#"[remote "origin"]"# {
+                return None;
+            }
+            continue;
+        }
+        if !in_origin {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else { continue };
+        if !key.trim().eq_ignore_ascii_case("url") {
+            continue;
+        }
+        let value = value.trim();
+        if value.contains(['"', ';', '#']) || value.replace(r"\\", "").contains('\\') {
+            return None;
+        }
+        url = Some(value.replace(r"\\", "\\"));
+    }
+    url.filter(|url| !url.is_empty())
+}
+
+/// The git dir and the common git dir of the repository `folder` is in, as
+/// git would find them, from the files alone; None for anything unusual.
+fn git_dirs_from_files(folder: &str) -> Option<(PathBuf, PathBuf)> {
+    if ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM"]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+    {
+        return None;
+    }
+    let start = std::fs::canonicalize(folder).ok()?;
+    // A test's git ceiling, as its git reads get it: never looked at or above.
+    #[cfg(test)]
+    let ceiling = GIT_CEILING.with(|ceiling| ceiling.borrow().clone()).and_then(|ceiling| std::fs::canonicalize(ceiling).ok());
+    #[cfg(not(test))]
+    let ceiling: Option<PathBuf> = None;
+    let mut dir = start.as_path();
+    let dot_git = loop {
+        if ceiling.as_deref() == Some(dir) {
+            return None;
+        }
+        let candidate = dir.join(".git");
+        if candidate.symlink_metadata().is_ok() {
+            break candidate;
+        }
+        dir = dir.parent()?;
+    };
+    let meta = dot_git.symlink_metadata().ok()?;
+    let (git_dir, common) = if meta.is_dir() {
+        if dot_git.join("commondir").exists() {
+            return None;
+        }
+        (dot_git.clone(), dot_git.clone())
+    } else if meta.is_file() {
+        // A linked worktree: `gitdir: <its git dir>`, whose `commondir` names
+        // the repository's own git dir.
+        let text = std::fs::read_to_string(&dot_git).ok()?;
+        let target = text.lines().next()?.strip_prefix("gitdir:")?.trim();
+        let git_dir = std::fs::canonicalize(dir.join(target)).ok()?;
+        let common = match std::fs::read_to_string(git_dir.join("commondir")) {
+            Ok(text) => std::fs::canonicalize(git_dir.join(text.lines().next()?.trim())).ok()?,
+            Err(_) => git_dir.clone(),
+        };
+        (git_dir, common)
+    } else {
+        return None;
+    };
+    if !common.join("objects").is_dir() || !common.join("refs").is_dir() || common.join("reftable").exists() {
+        return None;
+    }
+    Some((git_dir, common))
+}
+
 #[cfg(test)]
 thread_local! {
     static FOLDER_FACTS_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Task #5 (team ede724c4): this test thread's status reads as before
+    /// (git for every folder fact, an estimate per task over the whole
+    /// history), to compare the old and the new view.
+    static OLD_STATUS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_old_status(on: bool) {
+    OLD_STATUS.with(|old| old.set(on));
+}
+
+#[cfg(test)]
+pub(crate) fn old_status() -> bool {
+    OLD_STATUS.with(std::cell::Cell::get)
 }
 
 /// N37: how many folder-fact reads this test thread made, so a status call's
@@ -5492,22 +5734,44 @@ fn apply_model(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Resul
 /// under Saved; nothing is killed) and renamed to `<name>-replaced`, so the new
 /// session starts under the member's name. A remote one is left to its own
 /// computer. The note says what happened; an error names the old session.
-fn set_aside_replaced(member: &Member) -> anyhow::Result<Option<String>> {
+/// Task #17 (team ede724c4): what setting a replaced session aside gave.
+#[derive(Debug, PartialEq)]
+pub(crate) enum SetAside {
+    /// Nothing runs in the member's folder any more (none was replaced, it
+    /// had stopped, or it was paused and renamed): the new session starts.
+    Done(Option<String>),
+    /// The replaced session still works or waits on a dialog: it is neither
+    /// renamed nor left beside a new one. It keeps the member's name and its
+    /// open attempt; the start waits for a later tick.
+    Busy(String),
+}
+
+/// Feedback 14: a swap's (or relaunch's) old session is set aside first, so
+/// the new one can take the member's name. Task #17 (team ede724c4): a
+/// replaced session that still works is never renamed and left running beside
+/// the new one in the same folder (dev1-replaced worked on task #1 for twenty
+/// minutes next to the new dev1): it is paused once its turn ends, and only
+/// then does the new session start.
+fn set_aside_replaced(member: &Member) -> anyhow::Result<SetAside> {
     let Some(old) = member.replaced.as_ref().filter(|old| old.host.is_empty() && !old.name.is_empty()) else {
-        return Ok(None);
+        return Ok(SetAside::Done(None));
     };
     #[cfg(test)]
     if let Some(stand_in) = test_set_aside() {
         return stand_in(&old.name);
     }
     let Ok(record) = crate::state::storage::read(&old.name) else {
-        return Ok(None);
+        return Ok(SetAside::Done(None));
     };
     // A different run under the old name is not the session the swap replaced.
     if !old.run_id.is_empty() && record["run_id"].as_str().is_some_and(|run| !run.is_empty() && run != old.run_id) {
-        return Ok(None);
+        return Ok(SetAside::Done(None));
     }
-    let paused = crate::state::lifecycle::pause_one_quiet(&record, None, true).is_ok();
+    let alive = crate::state::storage::process_alive(&record);
+    let paused = alive && crate::state::lifecycle::pause_one_quiet(&record, None, true).is_ok();
+    if alive && !paused {
+        return Ok(SetAside::Busy(old.name.clone()));
+    }
     let target = (1..=9)
         .map(|n| if n == 1 { format!("{}-replaced", old.name) } else { format!("{}-replaced-{n}", old.name) })
         .find(|name| crate::state::storage::read(name).is_err())
@@ -5515,25 +5779,25 @@ fn set_aside_replaced(member: &Member) -> anyhow::Result<Option<String>> {
     crate::state::rename::dispatch(&[old.name.clone(), target.clone()], false).map_err(|error| {
         anyhow::anyhow!("the old session {} still holds the member's name and could not be renamed ({error}); close or rename it in Sessions, then hgs team relaunch", old.name)
     })?;
-    Ok(Some(if paused {
+    Ok(SetAside::Done(Some(if paused {
         format!("the replaced session was paused and saved as {target}")
     } else {
-        format!("the replaced session was busy or waiting on a dialog, so it was renamed to {target} and still runs; close it in Sessions when it is no longer needed")
-    }))
+        format!("the replaced session had stopped and was saved as {target}")
+    })))
 }
 
 #[cfg(test)]
-type SetAside = fn(&str) -> anyhow::Result<Option<String>>;
+type SetAsideStandIn = fn(&str) -> anyhow::Result<SetAside>;
 #[cfg(test)]
 thread_local! {
-    static TEST_SET_ASIDE: std::cell::Cell<Option<SetAside>> = const { std::cell::Cell::new(None) };
+    static TEST_SET_ASIDE: std::cell::Cell<Option<SetAsideStandIn>> = const { std::cell::Cell::new(None) };
 }
 #[cfg(test)]
-fn test_set_aside() -> Option<SetAside> {
+fn test_set_aside() -> Option<SetAsideStandIn> {
     TEST_SET_ASIDE.with(std::cell::Cell::get)
 }
 #[cfg(test)]
-pub(crate) fn set_test_set_aside(stand_in: Option<SetAside>) {
+pub(crate) fn set_test_set_aside(stand_in: Option<SetAsideStandIn>) {
     TEST_SET_ASIDE.with(|cell| cell.set(stand_in));
 }
 
@@ -5543,13 +5807,13 @@ mod set_aside_tests {
 
     #[test]
     fn only_a_local_replaced_session_is_set_aside() {
-        set_test_set_aside(Some(|name| Ok(Some(format!("set aside {name}")))));
+        set_test_set_aside(Some(|name| Ok(SetAside::Done(Some(format!("set aside {name}"))))));
         let mut member = Member { id: "dev".into(), ..Default::default() };
-        assert_eq!(set_aside_replaced(&member).unwrap(), None, "nothing was replaced");
+        assert_eq!(set_aside_replaced(&member).unwrap(), SetAside::Done(None), "nothing was replaced");
         member.replaced = Some(SessionRef { host: "mac".into(), name: "codex/x/dev".into(), ..Default::default() });
-        assert_eq!(set_aside_replaced(&member).unwrap(), None, "a remote session is its computer's");
+        assert_eq!(set_aside_replaced(&member).unwrap(), SetAside::Done(None), "a remote session is its computer's");
         member.replaced = Some(SessionRef { name: "codex/x/dev".into(), ..Default::default() });
-        assert_eq!(set_aside_replaced(&member).unwrap().as_deref(), Some("set aside codex/x/dev"));
+        assert_eq!(set_aside_replaced(&member).unwrap(), SetAside::Done(Some("set aside codex/x/dev".into())));
         set_test_set_aside(None);
     }
 }
@@ -5584,6 +5848,21 @@ fn launch(team: &Team, member: &Member) -> anyhow::Result<()> {
                         eprintln!("hgs team worker: {}: trusting {folder} for {}: {error}", team.name, member.id);
                     }
                 }
+            }
+        }
+    }
+    // Owner, 2026-11-09 ("вот это должно быть в режиме auto apply"): a team
+    // member's own checkout (a worktree or clone Zerus made of the team's
+    // folder) is trusted for its agent before the launch, so Claude's folder
+    // trust question never stops a team. Only Zerus-made checkouts on this
+    // computer: the shared folder and other people's folders keep asking.
+    if member.computer.is_empty()
+        && matches!(member.folder, super::model::MemberFolder::Worktree | super::model::MemberFolder::Clone)
+        && folder.trim() != team.folder.trim()
+    {
+        if let Ok(config) = crate::config::Config::load() {
+            if let Err(error) = crate::accounts::trust_folder_for(&config, &member.agent, &member.account, &folder) {
+                eprintln!("hgs team worker: {}: trusting {folder} for {}: {error}", team.name, member.id);
             }
         }
     }
@@ -9362,7 +9641,9 @@ fn tell_lead_inbox(store: &mut Store, team: &Team, ring: bool) -> anyhow::Result
     let team = &fresh;
     let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
     let items = inbox::items(team);
-    let new: Vec<inbox::Item> = items.iter().filter(|item| !team.inbox.told.contains(&item.key)).cloned().collect();
+    // Task #24 (team ede724c4): an item told before that closed and opened
+    // again unchanged is not new.
+    let new: Vec<inbox::Item> = items.iter().filter(|item| !team.inbox.knows(&item.key, now())).cloned().collect();
     let again = inbox::overdue(&items, &team.inbox.told, now());
     // Task 112: what the tick saw may have been decided since (a report
     // accepted, a member back from its limit): nothing new now, nothing told.
@@ -9400,7 +9681,7 @@ fn tell_lead_inbox(store: &mut Store, team: &Team, ring: bool) -> anyhow::Result
         for item in &again {
             team.inbox.told.push(format!("remind:{}", item.key));
         }
-        inbox::mark_told(&mut team.inbox.told, &new, &open);
+        inbox::mark_told_inbox(&mut team.inbox, &new, &open, now());
         team.inbox.told_at = now();
         events.push(Event::new("inbox_told", json!({"items":named})));
         Ok(())
@@ -9413,7 +9694,7 @@ fn tell_sub_inbox(store: &mut Store, team: &Team, member: &str) -> anyhow::Resul
     let sub = team.member(member).filter(|found| found.sub).context("not a sub-lead")?;
     let session = sub.session.clone().context("the sub-lead has no session")?;
     let new: Vec<inbox::Item> =
-        inbox::items_for(team, member).into_iter().filter(|item| !sub.inbox.told.contains(&item.key)).collect();
+        inbox::items_for(team, member).into_iter().filter(|item| !sub.inbox.knows(&item.key, now())).collect();
     anyhow::ensure!(!new.is_empty(), "no new inbox items");
     let outcome = super::doorbell::post_and_ring(store, &team.id, member, &session, &uuid::Uuid::new_v4().to_string(), "inbox", "zerus",
         inbox::urgency(new.iter()), &inbox::text(team, &new, now()));
@@ -9425,7 +9706,7 @@ fn tell_sub_inbox(store: &mut Store, team: &Team, member: &str) -> anyhow::Resul
         let open: BTreeSet<String> = inbox::items_for(team, &member).into_iter().map(|item| item.key).collect();
         let role = team.role_of(&member);
         let Some(sub) = team.members.iter_mut().find(|found| found.id == member) else { return Ok(()) };
-        inbox::mark_told(&mut sub.inbox.told, &new, &open);
+        inbox::mark_told_inbox(&mut sub.inbox, &new, &open, now());
         sub.inbox.told_at = now();
         events.push(Event::new("inbox_told", json!({"items":new.len(),"member":role})));
         Ok(())
@@ -10837,105 +11118,9 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             Ok(())
         }
         Step::Launch { member } => {
-            let launch_id = uuid::Uuid::new_v4().to_string();
-            let mut planned = None;
-            change(store, &team.id, |team, _| {
-                let found = team.members.iter_mut().find(|m| m.id == *member).context("unknown member")?;
-                anyhow::ensure!(found.session.is_none() && found.launch_id.is_empty(), "already started");
-                found.launch_id = launch_id.clone();
-                let found = found.clone();
-                planned = Some((team.clone(), found));
-                Ok(())
-            })?;
-            let (team, found) = planned.unwrap();
-            let swapped = found.launch_after_swap;
-            let prepared = prepare_member_branch(&team, &found);
-            let launched = match prepared {
-                Ok(note) => {
-                    if let Some(note) = note {
-                        change(store, &team.id, |team, events| {
-                            events.push(Event::new(
-                                "folder_checked_out",
-                                json!({"member":team.role_of(&found.id),"note":note}),
-                            ));
-                            Ok(())
-                        })?;
-                    }
-                    // Feedback 14: a swap's old session is set aside first, so
-                    // the new one can take the member's name.
-                    match set_aside_replaced(&found) {
-                        Ok(note) => {
-                            if note.is_some() || found.replaced.is_some() {
-                                change(store, &team.id, |team, events| {
-                                    if let Some(note) = &note {
-                                        events.push(Event::new("member_retired", json!({"member":team.role_of(member),"note":note})));
-                                    }
-                                    if let Some(record) = team.members.iter_mut().find(|m| m.id == *member) {
-                                        record.replaced = None;
-                                    }
-                                    Ok(())
-                                })?;
-                            }
-                            launch(&team, &found)
-                        }
-                        Err(error) => Err(error),
-                    }
-                }
-                Err(error) => Err(error),
-            };
-            if let Err(error) = launched {
-                let error = error.to_string();
-                // Task 22: a host that is still starting is waited for: the
-                // member is started again on a later tick (a new launch id;
-                // nothing was saved for this one), with no error and no inbox
-                // item, until HOST_WAITS such starts have failed.
-                let waits = found.host_waits;
-                if host_still_starting(&error) && waits < HOST_WAITS {
-                    change(store, &team.id, |team, events| {
-                        let role = team.role_of(member);
-                        if let Some(record) = team.members.iter_mut().find(|m| m.id == *member && m.session.is_none()) {
-                            record.launch_id.clear();
-                            record.host_waits = waits + 1;
-                        }
-                        events.push(Event::new(
-                            "launch_waiting",
-                            json!({"member":role,"reason":error,"wait":waits + 1,"of":HOST_WAITS}),
-                        ));
-                        Ok(())
-                    })?;
-                    return Ok(());
-                }
-                let error = if host_still_starting(&error) {
-                    format!("{error} (started {} times while the DeepSeek host was starting; it did not answer)", waits + 1)
-                } else {
-                    error
-                };
-                // U54: a failed post-swap launch keeps `launch_after_swap`, so a
-                // relaunch starts it at once; the error names its fix.
-                let error = if swapped {
-                    format!("{error}; fix the folder or the old session, then hgs team relaunch starts it at once")
-                } else {
-                    error
-                };
-                change(store, &team.id, |team, events| {
-                    if let Some(found) = team.members.iter_mut().find(|m| m.id == *member && m.session.is_none()) {
-                        found.error = error.clone();
-                        found.launch_after_swap = swapped;
-                        found.host_waits = 0;
-                    }
-                    events.push(Event::new("launch_failed", json!({"member":team.role_of(member),"error":error})));
-                    Ok(())
-                })?;
-            } else {
-                change(store, &team.id, |team, _| {
-                    if let Some(found) = team.members.iter_mut().find(|m| m.id == *member && m.session.is_none()) {
-                        found.launch_after_swap = false;
-                        found.host_waits = 0;
-                    }
-                    Ok(())
-                })?;
-            }
-            Ok(())
+            let (team, found) = reserve_launch(store, team, member)?;
+            let outcome = start_member(&team, &found);
+            finish_launch(store, &team, member, &found, outcome)
         }
         Step::HandOut { task, member } => {
             if *member == team.lead {
@@ -11488,6 +11673,177 @@ pub(crate) fn pass_steps(steps: Vec<Step>, pass: Pass) -> Vec<Step> {
     steps.into_iter().filter(|step| urgent(step) == (pass == Pass::Urgent)).collect()
 }
 
+/// Owner, 2026-11-09 ("скоряй первый старт"): a member's start in three parts,
+/// so a tick starts all its members at once: the launch id is reserved in the
+/// store, the folder and the session are made without it (in parallel), and
+/// the outcome is recorded in the store again.
+fn reserve_launch(store: &mut Store, team: &Team, member: &str) -> anyhow::Result<(Team, Member)> {
+        let launch_id = uuid::Uuid::new_v4().to_string();
+        let mut planned = None;
+        change(store, &team.id, |team, _| {
+            let found = team.members.iter_mut().find(|m| m.id == member).context("unknown member")?;
+            anyhow::ensure!(found.session.is_none() && found.launch_id.is_empty(), "already started");
+            found.launch_id = launch_id.clone();
+            let found = found.clone();
+            planned = Some((team.clone(), found));
+            Ok(())
+        })?;
+        Ok(planned.unwrap())
+}
+
+struct LaunchOutcome {
+    checked_out: Option<String>,
+    retired: Option<Option<String>>,
+    /// Task #17: the replaced session still works in the member's folder:
+    /// nothing was launched, the start is tried again on a later tick.
+    busy: Option<String>,
+    result: anyhow::Result<()>,
+}
+
+fn start_member(team: &Team, found: &Member) -> LaunchOutcome {
+    let mut checked_out = None;
+    let mut retired = None;
+    let mut busy = None;
+    let result = (|| -> anyhow::Result<()> {
+        checked_out = prepare_member_branch(team, found)?;
+        // Feedback 14: a swap's old session is set aside first, so the new
+        // one can take the member's name. Task #17: one that still works is
+        // waited for, never left beside the new one.
+        match set_aside_replaced(found)? {
+            SetAside::Busy(old) => {
+                busy = Some(old);
+                Ok(())
+            }
+            SetAside::Done(note) => {
+                retired = Some(note);
+                launch(team, found)
+            }
+        }
+    })();
+    LaunchOutcome { checked_out, retired, busy, result }
+}
+
+fn finish_launch(store: &mut Store, team: &Team, member: &str, found: &Member, outcome: LaunchOutcome) -> anyhow::Result<()> {
+    let swapped = found.launch_after_swap;
+    if let Some(note) = outcome.checked_out {
+        change(store, &team.id, |team, events| {
+            events.push(Event::new("folder_checked_out", json!({"member":team.role_of(&found.id),"note":note})));
+            Ok(())
+        })?;
+    }
+    if let Some(old) = outcome.busy {
+        // Task #17: no launch; the start is tried again each tick, said once.
+        change(store, &team.id, |team, events| {
+            let role = team.role_of(member);
+            if let Some(record) = team.members.iter_mut().find(|m| m.id == member && m.session.is_none()) {
+                record.launch_id.clear();
+                if !record.replaced_busy {
+                    record.replaced_busy = true;
+                    events.push(Event::new(
+                        "launch_waiting",
+                        json!({"member":role,"reason":format!(
+                            "the replaced session {old} still works in the member's folder; it keeps its task and is paused when its turn ends, then the new session starts (stop or answer it in Sessions to start sooner)"
+                        )}),
+                    ));
+                }
+            }
+            Ok(())
+        })?;
+        return Ok(());
+    }
+    if let Some(note) = outcome.retired {
+        if note.is_some() || found.replaced.is_some() || found.replaced_busy {
+            change(store, &team.id, |team, events| {
+                if let Some(note) = &note {
+                    events.push(Event::new("member_retired", json!({"member":team.role_of(member),"note":note})));
+                }
+                if let Some(record) = team.members.iter_mut().find(|m| m.id == member) {
+                    record.replaced = None;
+                    record.replaced_busy = false;
+                }
+                Ok(())
+            })?;
+        }
+    }
+    let launched = outcome.result;
+        if let Err(error) = launched {
+            let error = error.to_string();
+            // Task 22: a host that is still starting is waited for: the
+            // member is started again on a later tick (a new launch id;
+            // nothing was saved for this one), with no error and no inbox
+            // item, until HOST_WAITS such starts have failed.
+            let waits = found.host_waits;
+            if host_still_starting(&error) && waits < HOST_WAITS {
+                change(store, &team.id, |team, events| {
+                    let role = team.role_of(member);
+                    if let Some(record) = team.members.iter_mut().find(|m| m.id == member && m.session.is_none()) {
+                        record.launch_id.clear();
+                        record.host_waits = waits + 1;
+                    }
+                    events.push(Event::new(
+                        "launch_waiting",
+                        json!({"member":role,"reason":error,"wait":waits + 1,"of":HOST_WAITS}),
+                    ));
+                    Ok(())
+                })?;
+                return Ok(());
+            }
+            let error = if host_still_starting(&error) {
+                format!("{error} (started {} times while the DeepSeek host was starting; it did not answer)", waits + 1)
+            } else {
+                error
+            };
+            // U54: a failed post-swap launch keeps `launch_after_swap`, so a
+            // relaunch starts it at once; the error names its fix.
+            let error = if swapped {
+                format!("{error}; fix the folder or the old session, then hgs team relaunch starts it at once")
+            } else {
+                error
+            };
+            change(store, &team.id, |team, events| {
+                if let Some(found) = team.members.iter_mut().find(|m| m.id == member && m.session.is_none()) {
+                    found.error = error.clone();
+                    found.launch_after_swap = swapped;
+                    found.host_waits = 0;
+                }
+                events.push(Event::new("launch_failed", json!({"member":team.role_of(member),"error":error})));
+                Ok(())
+            })?;
+        } else {
+            change(store, &team.id, |team, _| {
+                if let Some(found) = team.members.iter_mut().find(|m| m.id == member && m.session.is_none()) {
+                    found.launch_after_swap = false;
+                    found.host_waits = 0;
+                }
+                Ok(())
+            })?;
+        }
+        Ok(())
+}
+
+/// Owner, 2026-11-09: the tick's member starts run side by side (each clone
+/// and launch took 15-35 s, one after another).
+fn run_launches(store: &mut Store, team: &Team, members: &[String]) {
+    let mut reserved = Vec::new();
+    for member in members {
+        match reserve_launch(store, team, member) {
+            Ok(pair) => reserved.push((member.clone(), pair)),
+            Err(error) => eprintln!("hgs team worker: {}: Launch {{ member: {member:?} }}: {error}", team.name),
+        }
+    }
+    let outcomes: Vec<LaunchOutcome> = std::thread::scope(|scope| {
+        let handles: Vec<_> = reserved.iter().map(|(_, (team, found))| scope.spawn(move || start_member(team, found))).collect();
+        handles.into_iter().map(|handle| handle.join().unwrap_or_else(|_| LaunchOutcome {
+            checked_out: None, retired: None, busy: None, result: Err(anyhow::anyhow!("the member's start panicked")),
+        })).collect()
+    });
+    for ((member, (fresh, found)), outcome) in reserved.iter().zip(outcomes) {
+        if let Err(error) = finish_launch(store, fresh, member, found, outcome) {
+            eprintln!("hgs team worker: {}: Launch {{ member: {member:?} }}: {error}", team.name);
+        }
+    }
+}
+
 /// The step's kind, for the tick's measurement.
 fn step_kind(step: &Step) -> String {
     let text = format!("{step:?}");
@@ -11513,6 +11869,16 @@ fn run_team_steps(store: &mut Store, team: &Team, sessions: &[Seen], listed: &BT
     let team = fresh.as_ref().unwrap_or(team);
     let started = Instant::now();
     let steps = pass_steps(steps_with(team, sessions, now(), Some(listed)), pass);
+    // Owner, 2026-11-09: two or more member starts of this tick run together.
+    let launches: Vec<String> = steps.iter().filter_map(|step| match step { Step::Launch { member } => Some(member.clone()), _ => None }).collect();
+    let steps = if launches.len() > 1 && super::super::iron_rules::project_identity(team).is_ok() {
+        let at = Instant::now();
+        run_launches(store, team, &launches);
+        super::tick_clock::note(&format!("{}: Launch x{}", team.name, launches.len()), at.elapsed());
+        steps.into_iter().filter(|step| !matches!(step, Step::Launch { .. })).collect()
+    } else {
+        steps
+    };
     let total = steps.len();
     for (index, step) in steps.into_iter().enumerate() {
         // Task #406: the rest of a team's steps wait for the next tick once

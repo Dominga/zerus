@@ -1325,6 +1325,69 @@ pub fn owned_by_another_user(path: &Path) -> bool {
     }
 }
 
+/// Task #18: the integrity level a file or folder's mandatory label names (its
+/// RID: 0x1000 Low, 0x2000 Medium), or None when it carries no label, which
+/// Windows reads as Medium. An inherit-only entry labels children, not `path`.
+/// Windows starts an executable whose file is labeled Low at Low integrity,
+/// whatever its parent's level, and a Low process may not create anything in
+/// an ordinary (Medium) folder. Reading the label needs only READ_CONTROL.
+pub fn integrity_label(path: &Path) -> io::Result<Option<u32>> {
+    use windows_sys::Win32::Security::LABEL_SECURITY_INFORMATION;
+    const SYSTEM_MANDATORY_LABEL_ACE_TYPE: u8 = 0x11;
+    let wide = wide_path(path);
+    let mut sacl: *mut ACL = std::ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `wide` is NUL-terminated; the out pointers are locals; the
+    // descriptor is freed by `Descriptor` and `sacl` points into it.
+    let code = unsafe {
+        GetNamedSecurityInfoW(
+            wide.as_ptr(),
+            SE_FILE_OBJECT,
+            LABEL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut sacl,
+            &mut descriptor,
+        )
+    };
+    if code != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(code as i32));
+    }
+    let _descriptor = Descriptor(descriptor);
+    if sacl.is_null() {
+        return Ok(None);
+    }
+    // SAFETY: `sacl` is a valid ACL inside the live descriptor.
+    let count = unsafe { (*sacl).AceCount };
+    for index in 0..u32::from(count) {
+        let mut ace: *mut std::ffi::c_void = std::ptr::null_mut();
+        // SAFETY: index < AceCount of the valid ACL; `ace` points into it.
+        if unsafe { GetAce(sacl, index, &mut ace) } == 0 || ace.is_null() {
+            continue;
+        }
+        // SAFETY: every ACE starts with an ACE_HEADER.
+        let header = unsafe { &*(ace as *const ACE_HEADER) };
+        if header.AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE || u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0 {
+            continue;
+        }
+        // A label ACE is the header, a mask and the label SID: revision, a
+        // subauthority count, a 6-byte authority, then the subauthorities;
+        // the level is the last one.
+        let size = usize::from(header.AceSize);
+        // SAFETY: the ACE is `AceSize` bytes long inside the ACL.
+        let bytes = unsafe { std::slice::from_raw_parts(ace as *const u8, size) };
+        let sid = bytes.get(8..).unwrap_or_default();
+        let subs = usize::from(sid.get(1).copied().unwrap_or(0));
+        let at = 8 + subs.saturating_sub(1) * 4;
+        if subs == 0 || sid.len() < at + 4 {
+            continue;
+        }
+        return Ok(Some(u32::from_le_bytes([sid[at], sid[at + 1], sid[at + 2], sid[at + 3]])));
+    }
+    Ok(None)
+}
+
 struct Descriptor(PSECURITY_DESCRIPTOR);
 impl Drop for Descriptor {
     fn drop(&mut self) {

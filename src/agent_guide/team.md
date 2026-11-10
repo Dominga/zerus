@@ -3,8 +3,8 @@ Work in an agent team (hgs guide team)
 A lead plans tasks and Zerus hands each ready task to a free member, on any agent and
 computer. Requests are JSON on stdin with a lowercase UUID "request_id"; reuse one to retry.
 A doorbell in your terminal means unread messages: {} | hgs team inbox --json.
-Work only on what hgs team current shows, else ask the lead. A message naming a task you
-do not hold is refused.
+Work only on what hgs team current shows, else ask the lead. A #N in a lead message
+for a task you do not hold is a reference, not work.
 
 Report once, when the task is done:
   {"request_id":"UUID","team":"ID","task":N,"attempt":"ATTEMPT","text":"..."} |
@@ -24,8 +24,8 @@ A task that can go on only after CI, an install or a card: never poll or sleep, 
 expect --json. Your pulse for the lead, each part at most 500 characters:
   {"attempt":"ATTEMPT","done":"...","next":"...","blocked":"..."} | hgs team note --json
 
-First: hgs team lore find. Builds and tests: hgs guide team-run and team-tests. Codex on
-Windows: team-run too. Leading a team: hgs guide team-lead.
+First: hgs team lore find; code and docs: hgs guide code. Builds and tests: hgs guide
+team-run, team-tests (Codex on Windows: team-run too). Leading a team: hgs guide team-lead.
 
 Scratch teams (the QA right). With the operate profile you run live checks in your own
 scratch teams: hgs team create --json from your session with a folder under the team's

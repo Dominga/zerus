@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn the_block_defaults_on_and_round_trips() {
-        let _guard = crate::state::ENV_LOCK.lock().unwrap();
+        let _guard = crate::state::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let old = std::env::var("HGS_STATE_DIR").ok();
         std::env::set_var("HGS_STATE_DIR", dir.path());

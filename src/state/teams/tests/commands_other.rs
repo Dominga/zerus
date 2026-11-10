@@ -1345,7 +1345,7 @@ fn a_queued_report_keeps_its_whole_text_and_a_budget_queues_too() {
     // whole report. One request id keeps the first whole text; a later
     // request under it is refused, never queued in its place. A budget
     // from the sandbox queues like a report.
-    let _env = crate::state::ENV_LOCK.lock().unwrap();
+    let _env = crate::state::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let dir = tempfile::tempdir().unwrap();
     crate::state::with_test_state_root(dir.path(), || {
         let _worker = hold_worker_lock();

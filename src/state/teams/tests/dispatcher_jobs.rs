@@ -113,7 +113,7 @@ fn jobs_are_recorded_with_their_start_and_end_for_the_lead() {
     assert_eq!((rows[0]["member"].as_str(), rows[0]["command"].as_str(), rows[0]["started_at"].as_f64()), (Some("dev"), Some("cargo test"), Some(1_000.0)));
     assert!(rows[0]["ended_at"].is_null(), "it still runs");
     // Status shows what the member waits on.
-    let status = crate::state::teams::commands::summary_for_test(&saved);
+    let status = crate::state::teams::commands::view_with(&saved, &[], None);
     let member = status["members"].as_array().unwrap().iter().find(|member| member["id"] == "dev").unwrap().clone();
     assert!(member["waiting_for"].as_str().unwrap().starts_with("its background job `cargo test`"), "{member}");
     // It ended: the row keeps its end; the member waits on nothing.

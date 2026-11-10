@@ -104,6 +104,139 @@ fn status_reads_each_members_own_folder_once_and_flags_another_repository() {
     });
 }
 
+/// Task #5 (team ede724c4): the cheap status answers as before. On a fixture
+/// team in real repositories (a shared member, a worktree member, a detached
+/// worktree, another repository) with an estimate history, the status reads
+/// the folder facts from the repositories' files and estimates from one
+/// grouped history, and its answer equals the old way's (git for every folder,
+/// an estimate per task over the whole history). It never writes the estimate
+/// history; a write that accepts a task records it. A status slower than the
+/// threshold leaves one slow-calls line naming its phases.
+#[test]
+fn the_cheap_status_answers_as_before_and_writes_no_history() {
+    use crate::state::teams::dispatcher;
+    use crate::state::teams::model::{Attempt, Member, MemberFolder, Report, Task, Team, TeamStatus};
+    let dir = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let base = std::path::PathBuf::from(base.to_string_lossy().trim_start_matches(r"\\?\").to_owned());
+    dispatcher::set_git_ceiling(&base.display().to_string());
+    let git = |path: &std::path::Path, args: &[&str]| {
+        assert!(std::process::Command::new("git").arg("-C").arg(path).args(args).status().unwrap().success(), "git {args:?}");
+    };
+    let make_repo = |path: &std::path::Path, name: &str| {
+        std::fs::create_dir(path).unwrap();
+        git(path, &["init", "-q"]);
+        git(path, &["config", "user.email", "t@example.com"]);
+        git(path, &["config", "user.name", "T"]);
+        std::fs::write(path.join(format!("{name}.txt")), name).unwrap();
+        git(path, &["add", "."]);
+        git(path, &["commit", "-qm", name]);
+    };
+    let repo = base.join("project");
+    make_repo(&repo, "project");
+    let foreign = base.join("sibling");
+    make_repo(&foreign, "sibling");
+    let detached = base.join("detached");
+    git(&repo, &["worktree", "add", "--quiet", "--detach", &detached.display().to_string(), "HEAD"]);
+    // A clone of the team's repository (its origin is the team folder).
+    let clone = base.join("clone");
+    git(&base, &["clone", "-q", &repo.display().to_string(), &clone.display().to_string()]);
+    let origin = String::from_utf8(std::process::Command::new("git").arg("-C").arg(&clone).args(["config", "--get", "remote.origin.url"]).output().unwrap().stdout).unwrap();
+    assert_eq!(dispatcher::origin_url_from_files(&clone.display().to_string()).as_deref(), Some(origin.trim()), "the clone's origin from its config file");
+    assert_eq!(dispatcher::origin_url_from_files(&foreign.display().to_string()), None, "no origin: git answers");
+    let mut team = Team {
+        id: "abcdef12-0000-4000-8000-000000000005".into(),
+        name: "T".into(),
+        lead: "lead".into(),
+        status: TeamStatus::Running,
+        folder: repo.display().to_string(),
+        ..Default::default()
+    };
+    team.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() });
+    team.members.push(Member { id: "dev".into(), role: "Backend".into(), agent: "codex".into(), effort: "high".into(), folder: MemberFolder::Worktree, ..Default::default() });
+    team.members.push(Member { id: "qa".into(), role: "QA".into(), agent: "codex".into(), directory: detached.display().to_string(), ..Default::default() });
+    team.members.push(Member { id: "out".into(), role: "Ops".into(), agent: "kimi".into(), directory: foreign.display().to_string(), ..Default::default() });
+    team.members.push(Member { id: "cl".into(), role: "Ops".into(), agent: "kimi".into(), directory: clone.display().to_string(), ..Default::default() });
+    let worktree = dispatcher::member_folder_path(&team, team.member("dev").unwrap()).unwrap();
+    git(&repo, &["worktree", "add", "--quiet", "-b", "team/abcdef12/dev", &worktree, "HEAD"]);
+    let reported = |member: &str, at: f64| Attempt {
+        n: 1,
+        id: format!("00000000-0000-4000-8000-{:012}", at as u64),
+        member: member.into(),
+        sent_at: at - 600.0,
+        delivered_at: Some(at - 600.0),
+        report: Some(Report { text: "done".into(), at, ..Default::default() }),
+        ..Default::default()
+    };
+    team.tasks = vec![
+        Task { id: 1, title: "Save endpoint".into(), assignee: "dev".into(), status: TaskStatus::Accepted, attempts: vec![reported("dev", 1000.0)], ..Default::default() },
+        Task { id: 2, title: "Tests pass".into(), assignee: "qa".into(), status: TaskStatus::InProgress, attempts: vec![reported("qa", 2000.0)], ..Default::default() },
+        Task { id: 3, title: "Deploy".into(), assignee: "out".into(), ..Default::default() },
+        Task { id: 4, title: "Docs".into(), role: "Writer".into(), ..Default::default() },
+    ];
+    // Every member folder: the files answer what git answers.
+    for folder in [repo.display().to_string(), worktree.clone(), detached.display().to_string(), foreign.display().to_string()] {
+        let fast = dispatcher::folder_facts_from_files(&folder);
+        dispatcher::set_old_status(true);
+        let by_git = dispatcher::folder_facts(&folder);
+        dispatcher::set_old_status(false);
+        assert_eq!(fast, Some(by_git), "{folder}");
+    }
+    crate::state::with_test_state_root(dir.path(), || {
+        let entries: Vec<Value> = (0..30usize)
+            .map(|n| {
+                let (role, agent, effort) = (["Backend", "QA", "backend", "Ops"][n % 4], ["codex", "CODEX", "kimi"][n % 3], ["high", "", "High"][n % 3]);
+                json!({"role":role,"agent":agent,"effort":effort,"minutes":(n * 7 % 50) + 1,"task":1000 + n,"team":"other"})
+            })
+            .collect();
+        let history = json!({"entries":entries,"imported":["other"]});
+        let path = crate::state::teams::estimates::path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, history.to_string()).unwrap();
+        let mut store = Store::open(true).unwrap();
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team.clone(), vec![]).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        let new = run("status", &json!({"team":team.id}), false).unwrap();
+        dispatcher::set_old_status(true);
+        let old = run("status", &json!({"team":team.id}), false).unwrap();
+        dispatcher::set_old_status(false);
+        assert_eq!(new, old, "the cheap status answers as before");
+        let member = |id: &str| new["members"].as_array().unwrap().iter().find(|member| member["id"] == id).cloned().unwrap();
+        assert_eq!((member("dev")["branch"].as_str(), member("qa")["branch"].as_str()), (Some("team/abcdef12/dev"), Some("HEAD")));
+        assert_eq!(member("out")["outside_project"], true);
+        assert_eq!(member("cl")["outside_project"], false, "a clone of the team's repository");
+        assert!(new["tasks"].as_array().unwrap().iter().filter(|task| task["status"] != "accepted").all(|task| task["estimate_source"].is_string()), "{}", new["tasks"]);
+        // A read writes nothing: task #1 is accepted and not in the history yet.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), written, "status never writes the estimate history");
+        // A write that accepts a task records the team's accepted tasks.
+        store
+            .mutate(None, &team.id, None, |team, _| {
+                team.task_mut(2).unwrap().status = TaskStatus::Accepted;
+                Ok(Value::Null)
+            })
+            .unwrap();
+        let recorded: crate::state::teams::estimates::History = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let ours: Vec<u32> = recorded.entries.iter().filter(|entry| entry.team == team.id).map(|entry| entry.task).collect();
+        assert_eq!(ours, vec![1, 2], "{:?}", recorded.entries.len());
+        // A status over the threshold leaves one slow-calls line naming its phases.
+        let log = crate::state::slow_calls::log_path();
+        let _ = std::fs::remove_file(&log);
+        super::set_status_slow_ms(Some(0));
+        run("status", &json!({"team":team.id}), false).unwrap();
+        super::set_status_slow_ms(None);
+        let text = std::fs::read_to_string(&log).unwrap();
+        let line: Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+        assert_eq!((line["command"].as_str(), line["subject"].as_str()), (Some("team status"), Some(team.id.as_str())));
+        for phase in ["open", "load", "view_serialize", "view_estimates", "view_folders", "bound"] {
+            assert!(line["timings_ms"][phase].is_u64(), "{phase}: {line}");
+        }
+        // Not slow: no line.
+        std::fs::remove_file(&log).unwrap();
+        run("status", &json!({"team":team.id,"timings":true}), false).map(|value| assert!(value["timings_ms"]["total"].is_u64())).unwrap();
+        assert!(!log.exists() || std::fs::read_to_string(&log).unwrap().is_empty());
+    });
+}
+
 /// U36 through `hgs team`: the implementer's report enters review, status
 /// shows the stage, its candidates and its span, the reviewer's verdict is
 /// proven by its stage id alone, and the owner's overrides are mutations.
@@ -265,24 +398,33 @@ fn status_carries_each_phases_health() {
     assert_eq!(summary[1]["status"], "draft");
 }
 
+/// Task #6 (team ede724c4): the polled list carries the counts and the phase
+/// strip, never the tasks, the phase records, attention items or proposals.
 #[test]
-fn the_list_summary_carries_task_phases_and_phase_records() {
+fn the_list_summary_carries_counts_and_the_phase_strip_not_the_tasks() {
     let mut team = crate::state::teams::model::Team::default();
-    team.tasks.push(crate::state::teams::model::Task { id: 1, phase: 1, ..Default::default() });
+    team.tasks.push(crate::state::teams::model::Task { id: 1, phase: 1, status: TaskStatus::Accepted, ..Default::default() });
     team.tasks.push(crate::state::teams::model::Task { id: 2, phase: 2, ..Default::default() });
-    team.phases.push(crate::state::teams::model::Phase { n: 2, title: "Fixes".into(), tasks: vec![2], ..Default::default() });
+    team.tasks.push(crate::state::teams::model::Task { id: 3, phase: 2, status: TaskStatus::Cancelled, ..Default::default() });
+    team.phases.push(crate::state::teams::model::Phase { n: 2, title: "Fixes".into(), tasks: vec![2, 3], ..Default::default() });
     let value = super::summary(&team, true);
-    assert_eq!(value["tasks"][1]["phase"], 2);
-    assert_eq!(value["phases"][0]["n"], 2);
-    assert_eq!(value["phases"][0]["tasks"][0], 2);
-    assert!(value["phases"][0].get("changes").is_none());
+    for absent in ["tasks", "phases", "attention", "proposals"] {
+        assert!(value.get(absent).is_none(), "{absent} is status's: {value}");
+    }
+    assert_eq!(value["task_count"], 3);
+    // Phase 1 is done; phase 2 is in work with its cancelled task finished.
+    assert_eq!(value["progress"], json!({"phase":2,"phase_done":1,"phase_total":2,"phases_done":1,"phases_total":2}));
+    // Without the cancelled ones (the dashboard's default) they are not counted.
+    let shown = super::summary(&team, false);
+    assert_eq!(shown["task_count"], 2);
+    assert_eq!(shown["progress"], json!({"phase":2,"phase_done":0,"phase_total":1,"phases_done":1,"phases_total":2}));
+    assert_eq!(super::summary(&Team::default(), true)["progress"], json!({"phase":0,"phase_done":0,"phase_total":0,"phases_done":0,"phases_total":0}));
     team.phases[0].archived = Some(super::super::model::ArchivedPhase { tasks: 50, accepted: 50, ..Default::default() });
     team.archive_totals.add(team.phases[0].archived.as_ref().unwrap());
     team.tasks[1].status = TaskStatus::Accepted;
     team.tasks[1].archived = Some(Default::default());
     let archived = super::summary(&team, true);
-    assert_eq!(archived["accepted"], 50);
-    assert_eq!(archived["phases"][0]["archived"]["tasks"], 50);
+    assert_eq!(archived["accepted"], 51);
 }
 
 #[test]
@@ -352,12 +494,11 @@ fn status_and_the_list_carry_each_phases_mode() {
     assert_eq!((value["free_phase"]["phase"].as_u64(), value["free_phase"]["running"].clone()), (Some(2), json!([2])));
     let listed = summary(&team, true);
     assert_eq!(listed["phase_modes"], json!({"1":"standard","2":"free"}));
-    assert_eq!(listed["phases"][0]["mode"], "free");
     // An old record without phase modes reads the team's mode on every phase.
     team.phase_modes.clear();
     team.plan_mode = PlanMode::Free;
     assert_eq!(view_with(&team, &[], None)["phase_modes"], json!({"1":"free","2":"free"}));
-    assert_eq!(summary(&team, true)["phases"][0]["mode"], "free");
+    assert_eq!(summary(&team, true)["phase_modes"], json!({"1":"free","2":"free"}));
 }
 
 #[test]
@@ -414,9 +555,10 @@ fn status_shows_the_owners_phase_states_and_the_stuck_scope() {
     team.settings.remind_owner_minutes = 0;
     team.settings.auto_accept = true;
     let listed = summary(&team, true);
-    assert_eq!(listed["attention"][0]["phase"], 3);
+    let expected = view_with(&team, &[], None)["attention"].as_array().unwrap().len();
+    assert!(expected >= 1);
+    assert_eq!(listed["attention_count"], expected);
     assert_eq!((listed["stuck_scope"].clone(), listed["auto_accept"].clone()), (json!([2]), json!(true)));
-    assert_eq!(listed["phases"][1]["state"], "draft");
     // While planning every phase is in the plan.
     team.status = TeamStatus::Planning;
     let planned = plan::phase_summary(&team);
@@ -739,9 +881,9 @@ fn status_shows_each_member_queue() {
     let members = value["members"].as_array().unwrap();
     assert_eq!(members.iter().find(|member| member["id"] == "dev").unwrap()["queue"], expected);
     assert_eq!(members.iter().find(|member| member["id"] == "lead").unwrap()["queue"], json!([]));
-    // The session list carries the same queue.
+    // Task #6: the polled list leaves the queue to status.
     let listed = summary(&team, true);
-    assert_eq!(listed["members"].as_array().unwrap().iter().find(|member| member["id"] == "dev").unwrap()["queue"], expected);
+    assert!(listed["members"].as_array().unwrap().iter().all(|member| member.get("queue").is_none()));
 }
 
 /// so clients need not derive the hold from inbox text.
@@ -788,7 +930,6 @@ fn status_shows_the_captured_report_that_holds_a_member() {
     let dev = |value: &Value| value["members"].as_array().unwrap().iter().find(|member| member["id"] == "dev").unwrap().clone();
     // Nothing holds dev: the field is absent, so the JSON is unchanged.
     assert!(dev(&view_with(&team, &[], None)).get("captured_hold").is_none());
-    assert!(dev(&summary(&team, true)).get("captured_hold").is_none());
     // A7: its report on #1 was captured from its last reply.
     let task = team.task_mut(1).unwrap();
     task.status = TaskStatus::Submitted;
@@ -797,7 +938,6 @@ fn status_shows_the_captured_report_that_holds_a_member() {
     attempt.report = Some(Report { text: "Queued, after FU-trees".into(), at: 20.0, captured: true, ..Default::default() });
     let expected = json!({"task":1,"text":"No new work: the captured report on #1 awaits a decision"});
     assert_eq!(dev(&view_with(&team, &[], None))["captured_hold"], expected);
-    assert_eq!(dev(&summary(&team, true))["captured_hold"], expected);
     // An explicit report holds nothing.
     team.task_mut(1).unwrap().attempts.last_mut().unwrap().report.as_mut().unwrap().captured = false;
     assert!(dev(&view_with(&team, &[], None)).get("captured_hold").is_none());
@@ -902,7 +1042,9 @@ fn the_team_list_is_stored_only() {
     let items = list_items(&[done], true);
     assert_eq!(items["items"].as_array().unwrap().len(), 1);
     assert!(items["items"][0].get("left_running").is_none());
-    assert!(items["items"][0]["members"][0]["queue"].is_array());
+    // Task #6: a listed member is who it is, its state and its session.
+    let member = items["items"][0]["members"][0].as_object().unwrap();
+    assert_eq!(member.keys().map(String::as_str).collect::<BTreeSet<_>>(), BTreeSet::from(["id", "role", "agent", "state", "session", "session_state", "state_reason"]));
 }
 
 #[test]
@@ -927,8 +1069,8 @@ fn the_inbox_and_status_name_the_leads_next_actions() {
     let value = view_with(&old, &[], None);
     assert_eq!(value["attention"][0]["kind"], "report");
     assert_eq!(value["attention"][0]["task"], 1);
-    // The polled team list names the same attention items.
-    assert_eq!(summary(&old, true)["attention"][0]["task"], 1);
+    // The polled team list counts the same attention items.
+    assert_eq!(summary(&old, true)["attention_count"], value["attention"].as_array().unwrap().len());
     old.settings.remind_owner_minutes = 0;
     assert_eq!(view_with(&old, &[], None)["attention"], json!([]));
     // The settings are optional with the spec's defaults (C2, C4, U18).
@@ -1138,4 +1280,73 @@ fn a_member_with_an_open_approval_reads_waiting_for_you_in_status() {
     let member = value["members"].as_array().unwrap().iter().find(|member| member["id"] == "integrator").unwrap();
     assert_eq!(member["session_state"], "working", "{member}");
     assert!(member["state_reason"].is_null(), "{member}");
+}
+
+/// Task #6 (team ede724c4): the polled list's size and time on a copy of a real
+/// store, as the desktop asks for it (cancelled tasks included). It runs only
+/// when HGS_TEST_STORE_COPY names the copy's teams.sqlite3; HGS_TEST_LIST_OUT,
+/// when set, receives the answer for comparing the desktop's decoding.
+#[test]
+fn measure_the_list_on_a_store_copy() {
+    let Some(path) = std::env::var_os("HGS_TEST_STORE_COPY") else { return };
+    let store = Store::open_at(std::path::Path::new(&path), false).unwrap();
+    let mut best = f64::MAX;
+    let mut answer = Value::Null;
+    for _ in 0..5 {
+        let started = std::time::Instant::now();
+        let teams = store.teams(false, 200).unwrap();
+        answer = list_items(&teams, true);
+        let text = serde_json::to_string(&answer).unwrap();
+        best = best.min(started.elapsed().as_secs_f64() * 1000.0);
+        assert!(!text.is_empty());
+    }
+    let text = serde_json::to_string(&answer).unwrap();
+    let mut sizes: Vec<(usize, String)> = answer["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| (serde_json::to_string(item).unwrap().len(), item["name"].as_str().unwrap_or_default().to_owned()))
+        .collect();
+    sizes.sort_by_key(|size| std::cmp::Reverse(size.0));
+    println!("list teams={} bytes={} min_ms={best:.1} largest={:?}", sizes.len(), text.len(), &sizes[..sizes.len().min(3)]);
+    if let Some(out) = std::env::var_os("HGS_TEST_LIST_OUT") {
+        std::fs::write(out, &text).unwrap();
+    }
+}
+
+/// Task #6 (team ede724c4): `hgs team inbox` time on a copy of a real state
+/// folder, the min of 5: the owner's read of a team (as the desktop asks) and
+/// the calling member's own (`peek`, so nothing is marked). It runs only when
+/// HGS_TEST_STATE_COPY names the copy's state folder (teams/teams.sqlite3 and
+/// the calling session's record) and HGS_TEST_INBOX_TEAM the team.
+#[test]
+fn measure_the_inbox_on_a_store_copy() {
+    let (Some(root), Ok(team)) = (std::env::var_os("HGS_TEST_STATE_COPY"), std::env::var("HGS_TEST_INBOX_TEAM")) else { return };
+    let markers: Vec<(&str, Option<std::ffi::OsString>)> =
+        ["HGS_SESSION", "HGS_RUN_ID", "DSH_SESSION_ID"].into_iter().map(|name| (name, std::env::var_os(name))).collect();
+    let best = |input: &Value| {
+        let mut best = f64::MAX;
+        let mut answer = Value::Null;
+        for _ in 0..5 {
+            let started = std::time::Instant::now();
+            answer = inbox_command(input).unwrap();
+            best = best.min(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        (best, serde_json::to_string(&answer).unwrap().len(), answer["for"].clone())
+    };
+    crate::state::with_test_state_root(std::path::Path::new(&root), || {
+        for (name, _) in &markers {
+            std::env::remove_var(name);
+        }
+        let (owner_ms, owner_bytes, owner_for) = best(&json!({"team":team}));
+        println!("inbox owner team={team} min_ms={owner_ms:.1} bytes={owner_bytes} for={owner_for}");
+        for (name, value) in &markers {
+            if let Some(value) = value {
+                std::env::set_var(name, value);
+            }
+        }
+        set_test_caller_identities(Some((None, std::env::var("HGS_SESSION").ok(), std::env::var("HGS_RUN_ID").ok())));
+        let (member_ms, member_bytes, member_for) = best(&json!({"peek":true}));
+        println!("inbox member min_ms={member_ms:.1} bytes={member_bytes} for={member_for}");
+    });
 }

@@ -66,6 +66,13 @@ Use only the returned project wing. Store short verified decisions there; never
 upload credentials, private personal data, transcripts or full prompts.
 Repository documentation owns specifications; Beads owns tasks and blockers.
 
+Search code and documentation through CodeLore (owner, 2026-11-10): `lore atlas
+search "what it does"` in a checkout finds code and Markdown by words, terms and
+symbols (the root `lore.toml` turns the map on; `hgs guide code`), and
+`hgs team lore find` searches the project's memory store, where the documentation
+is sliced into records citing `zerus:<path>#<heading>@<commit>`
+(`docs/lore-slicing.md`). Records go to that store, never into the repository.
+
 ## Compatibility and operation
 
 Treat pasted `zerus://session?...` URIs as references to another Zerus conversation.

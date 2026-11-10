@@ -1,11 +1,12 @@
 //! Task 173 (owner, 2026-11-07): no shadow work. Every piece of a member's work
 //! belongs to a handed-out attempt (or the stage run it was given).
 //!
-//! - The lead's message to a member that names a task (`#145`, `task 145`, `for
-//!   145:`) is attached to that task's attempt when the task is handed to that
-//!   member; otherwise `hgs send` and `hgs team message` refuse it and name the
-//!   hand-out (retry, reassign) to use instead. A message naming no task goes
-//!   through: free-form coordination carries no work.
+//! - The lead's message to a member is attached to the attempt of each task it
+//!   names (`#145`, `task 145`, `for 145:`) that is handed to that member.
+//!   Task #30 (team ede724c4, 2026-11-10): a task the text only mentions and
+//!   the member does not hold is a reference, never refused (it is named back
+//!   as one); only a message whose `"task"` field names a task the member does
+//!   not hold is refused, naming the hand-out (retry, reassign) to use.
 //! - A member's `hgs run` needs an open attempt (or stage run) of its own; a
 //!   run that names another attempt is refused.
 //! - A member session building, or working past a short grace, with nothing
@@ -104,18 +105,50 @@ pub(crate) fn handed(team: &Team, member: &str) -> Vec<(u32, String)> {
     work
 }
 
-/// The lead's message to `member`: bound to the attempt of each task it
-/// names, or refused with the hand-out to use. A message naming no task binds
-/// nothing and goes through.
-pub(crate) fn check_lead_message(team: &Team, member: &Member, text: &str) -> anyhow::Result<Vec<Binding>> {
-    let mut bound = Vec::new();
+/// What a lead message to a member carries: the attempts it binds to, and the
+/// tasks its text mentions for reference only (not held by the member).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct LeadCheck {
+    pub bindings: Vec<Binding>,
+    pub references: Vec<u32>,
+}
+
+/// The lead's message to `member`: bound to the attempt of each task it names
+/// that the member holds. Task #30 (team ede724c4): a task the text mentions
+/// and the member does not hold is a reference, never refused; only `task`
+/// (the message's explicit task) naming one the member does not hold is
+/// refused, with the hand-out to use.
+pub(crate) fn check_lead_message(team: &Team, member: &Member, text: &str, task: Option<u32>) -> anyhow::Result<LeadCheck> {
     let handed = handed(team, &member.id);
-    for id in task_ids(team, text) {
-        if let Some((_, attempt)) = handed.iter().find(|(task, _)| *task == id) {
-            bound.push(Binding { team: team.id.clone(), task: id, attempt: attempt.clone(), member: member.id.clone() });
-            continue;
+    let mut check = LeadCheck::default();
+    let bind = |check: &mut LeadCheck, id: u32, attempt: &str| {
+        if !check.bindings.iter().any(|found| found.task == id) {
+            check.bindings.push(Binding { team: team.id.clone(), task: id, attempt: attempt.to_owned(), member: member.id.clone() });
         }
-        let task = team.task(id).expect("task_ids names the team's tasks");
+    };
+    if let Some(id) = task {
+        match handed.iter().find(|(found, _)| *found == id) {
+            Some((_, attempt)) => bind(&mut check, id, attempt),
+            None => refuse(team, member, id)?,
+        }
+    }
+    for id in task_ids(team, text) {
+        match handed.iter().find(|(found, _)| *found == id) {
+            Some((_, attempt)) => bind(&mut check, id, attempt),
+            None => {
+                if Some(id) != task && !check.references.contains(&id) {
+                    check.references.push(id);
+                }
+            }
+        }
+    }
+    Ok(check)
+}
+
+/// The refusal of a message whose task the member does not hold.
+fn refuse(team: &Team, member: &Member, id: u32) -> anyhow::Result<()> {
+    let Some(task) = team.task(id) else { anyhow::bail!("Unknown task #{id} in team {}", team.name) };
+    {
         let state = task_state(task);
         anyhow::bail!(
             "Task #{id} is not handed to {}: it {state}. A lead message carries no work for a task the member does not hold. Hand it out instead: \
@@ -126,7 +159,16 @@ Answers and decisions go through their own commands (hgs team reply, accept, rej
             member.id
         );
     }
-    Ok(bound)
+}
+
+/// Task #30: the note a sent message carries for its references.
+pub(crate) fn reference_note(references: &[u32]) -> Option<String> {
+    if references.is_empty() {
+        return None;
+    }
+    let named: Vec<String> = references.iter().map(|id| format!("#{id}")).collect();
+    let (verb, them) = if references.len() == 1 { ("is", "it") } else { ("are", "them") };
+    Some(format!("{} {verb} mentioned for reference only: the member does not hold {them}, so the message carries no work for {them}.", named.join(", ")))
 }
 
 fn task_state(task: &Task) -> String {
@@ -140,10 +182,11 @@ fn task_state(task: &Task) -> String {
 }
 
 /// `hgs send TARGET`: when this process is a team lead's session and TARGET is
-/// a member of its team, the text is checked. Nothing else is touched.
-pub(crate) fn lead_send(target: &str, text: &str) -> anyhow::Result<Vec<Binding>> {
-    let Some(record) = super::super::session_graph::caller_record() else { return Ok(Vec::new()) };
-    let Ok(store) = Store::open(false) else { return Ok(Vec::new()) };
+/// a member of its team, the text (and its `"task"`, if any) is checked.
+/// Nothing else is touched.
+pub(crate) fn lead_send(target: &str, text: &str, task: Option<u32>) -> anyhow::Result<LeadCheck> {
+    let Some(record) = super::super::session_graph::caller_record() else { return Ok(LeadCheck::default()) };
+    let Ok(store) = Store::open(false) else { return Ok(LeadCheck::default()) };
     let teams = store.active_teams(1000).unwrap_or_default();
     let target = target.trim();
     for team in &teams {
@@ -155,9 +198,9 @@ pub(crate) fn lead_send(target: &str, text: &str) -> anyhow::Result<Vec<Binding>
         }) else {
             continue;
         };
-        return check_lead_message(team, member, text);
+        return check_lead_message(team, member, text, task);
     }
-    Ok(Vec::new())
+    Ok(LeadCheck::default())
 }
 
 /// Records each binding on its attempt (bounded) with a `lead_message` event.

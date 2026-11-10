@@ -715,6 +715,13 @@ pub(crate) struct Member {
     /// relaunch clears it.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub host_waits: u32,
+    /// Task #17 (team ede724c4): the start after a swap or relaunch waits
+    /// because the session it replaces still works in the member's folder.
+    /// The old session keeps the member's name and its open attempt until its
+    /// turn ends and it is paused; only then does the new one start. Set
+    /// while waiting, so the wait is said once.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replaced_busy: bool,
     /// The role's instructions from the catalog, given with every task.
     #[serde(default)]
     pub prompt: String,
@@ -1161,6 +1168,10 @@ pub(crate) struct TestNotice {
     /// #718: the suite's recorded seconds, to say how much slower it ran.
     #[serde(default, skip_serializing_if = "is_zero_f64")]
     pub recorded_seconds: f64,
+    /// Task #24 (team ede724c4): the task the run was for, so the lead's
+    /// inbox shows one item per task with its counts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<u32>,
 }
 
 /// #718: a test item for the lead: a flaky suite to file a task for, or a
@@ -1609,12 +1620,34 @@ pub(crate) struct Inbox {
     /// Item keys already named, oldest first, bounded.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub told: Vec<String>,
+    /// Task #24 (team ede724c4): told items that closed, with when, for
+    /// `CLOSED_MEMORY_SECONDS`: one that opens again unchanged in that time
+    /// (a member between two turns, a rework whose member is briefly idle)
+    /// is not told again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub closed: Vec<ClosedItem>,
 }
+
+/// Task #24: a told inbox item that closed, and when.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct ClosedItem {
+    pub key: String,
+    pub at: f64,
+}
+
+/// Task #24: how long a closed item is remembered as told.
+pub(crate) const CLOSED_MEMORY_SECONDS: f64 = 30.0 * 60.0;
 
 impl Inbox {
     /// An empty record adds no key to an old team's JSON.
     pub(crate) fn is_empty(&self) -> bool {
-        self.told_at == 0.0 && self.told.is_empty()
+        self.told_at == 0.0 && self.told.is_empty() && self.closed.is_empty()
+    }
+
+    /// Task #24: whether the item `key` was told: it is still listed as told,
+    /// or it closed less than `CLOSED_MEMORY_SECONDS` ago and opened again.
+    pub(crate) fn knows(&self, key: &str, now: f64) -> bool {
+        self.told.iter().any(|told| told == key) || self.closed.iter().any(|closed| closed.key == key && now - closed.at < CLOSED_MEMORY_SECONDS)
     }
 }
 
@@ -3799,10 +3832,14 @@ impl Team {
     }
 }
 
-/// Archived rows have a deliberately small wire representation.
+/// Archived rows have a deliberately small wire representation: what the plan
+/// still draws of a done phase. Its dependencies (task #469) and the task it
+/// was spawned from are among them, or the phase falls into one layer without
+/// links; its history stays in the archive's payload.
 pub(crate) fn task_stub(task: &Task) -> serde_json::Value {
     let mut stub = serde_json::json!({"id":task.id,"phase":task.phase,"title":task.title,"assignee":task.assignee,
         "status":task.status,"archived":task.archived});
+    if !task.deps.is_empty() { stub["deps"] = serde_json::to_value(&task.deps).unwrap_or_default(); }
     if let Some(origin) = task.origin { stub["origin"] = serde_json::json!(origin); }
     stub
 }

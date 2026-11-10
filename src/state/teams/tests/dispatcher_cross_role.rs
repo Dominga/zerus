@@ -117,3 +117,22 @@ fn an_idle_member_with_a_ready_task_it_could_take_is_one_lead_item() {
     unqualified.task_mut(2).unwrap().needs = Some(vec!["terminals".into()]);
     assert!(inbox::items(&unqualified).iter().all(|item| item.kind != "idle_with_ready_work"));
 }
+
+/// Task #24 (team ede724c4): the idle notice is current when it is sent. A
+/// member handed a task in this tick still has `starved_since` (only a later
+/// tick ends it); with an open attempt it is not idle, so no notice names it.
+#[test]
+fn an_idle_notice_is_not_sent_for_a_member_that_got_a_task_in_the_same_tick() {
+    let (mut team, _) = frontends();
+    team.task_mut(2).unwrap().pinned = true;
+    team.members.iter_mut().find(|member| member.id == "ui2").unwrap().starved_since = Some(crate::state::now() - 240.0);
+    assert!(inbox::items(&team).iter().any(|item| item.kind == "idle_with_ready_work"), "idle and nothing handed out: the notice");
+    // The tick hands ui2 a task of its own: #3, delivered now.
+    team.tasks.push(Task { id: 3, title: "Teams filter".into(), assignee: "ui2".into(), status: TaskStatus::InProgress, ..Default::default() });
+    team.task_mut(3).unwrap().attempts.push(Attempt { n: 1, member: "ui2".into(), state: AttemptState::Delivered, sent_at: crate::state::now(), ..Default::default() });
+    assert!(
+        inbox::items(&team).iter().all(|item| !(item.kind == "idle_with_ready_work" && item.member.contains("ui2"))),
+        "{:?}",
+        inbox::items(&team).iter().filter(|item| item.kind == "idle_with_ready_work").collect::<Vec<_>>()
+    );
+}

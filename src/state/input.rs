@@ -1099,12 +1099,19 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     // decide, never only messaged.
     // Task 173: a team lead's message to its member naming a task is bound to
     // that task's attempt, or refused with the hand-out to use instead.
-    let text = serde_json::from_slice::<Value>(&input).ok().and_then(|value| value["text"].as_str().map(str::to_owned)).unwrap_or_default();
+    let parsed = serde_json::from_slice::<Value>(&input).ok();
+    let text = parsed.as_ref().and_then(|value| value["text"].as_str().map(str::to_owned)).unwrap_or_default();
+    // Task #30 (team ede724c4): a "task" names the task the message is for;
+    // a task the text only mentions is a reference.
+    let task = parsed.as_ref().and_then(|value| value["task"].as_u64()).and_then(|id| u32::try_from(id).ok());
     super::teams::wait_loops::lead_send_check(&args[0], &text).map_err(|error| error.to_string())?;
     super::teams::decisions::lead_send_check(&args[0], &text).map_err(|error| error.to_string())?;
-    let bindings = super::teams::shadow::lead_send(&args[0], &text).map_err(|error| error.to_string())?;
+    let check = super::teams::shadow::lead_send(&args[0], &text, task).map_err(|error| error.to_string())?;
     let receipt = submit(&args[0], &input, None)?;
-    super::teams::shadow::record(&bindings, &text, "hgs send");
+    super::teams::shadow::record(&check.bindings, &text, "hgs send");
+    if let Some(note) = super::teams::shadow::reference_note(&check.references) {
+        eprintln!("hgs: {note}");
+    }
     println!("{receipt}");
     Ok(0)
 }
